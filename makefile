@@ -1,17 +1,18 @@
-.PHONY: all clean environment environment_clean environment_mkdir linux_loader_all linux_loader_clean hypervisor_all hypervisor_clean
+.PHONY: all clean environment environment_clean environment_mkdir linux_loader linux_loader_clean windows_loader windows_loader_clean hypervisor hypervisor_clean
 
 mode ?= debug
 CONFIGURATION_NAME ?= $(mode)
-TARGET_ABI := native
 MAKEFILE_DIRECTORY := $(shell dirname $(realpath $(lastword $(MAKEFILE_LIST))))
 
 include environment.config
 
-all: linux_loader_all hypervisor_all environment
+TARGET_ABI := $(SELECTED_ARCHITECTURE)
 
-clean: linux_loader_clean hypervisor_clean environment_clean
+all: $(patsubst %, %_loader, $(BUILD_DRIVERS)) hypervisor environment
 
-linux_loader_all: | hypervisor_all
+clean: linux_loader_clean windows_loader_clean hypervisor_clean environment_clean
+
+linux_loader: | hypervisor
 	@echo "Building linux loader..." ; \
 	mkdir -p out ; \
 	mkdir -p out/$(CONFIGURATION_NAME); \
@@ -25,11 +26,25 @@ linux_loader_clean:
 	rm -rf out ; \
 	echo "Cleaned."
 
-hypervisor_all:
-	@$(MAKE) -s -C hypervisor
+windows_loader: | hypervisor
+	@echo "Building windows loader..." ; \
+	$(MAKE) -s -C windows_loader ; \
+	echo "Done."
+
+windows_loader_clean:
+	@echo "Cleaning windows loader..." ; \
+	$(MAKE) -s -C windows_loader clean ; \
+	echo "Cleaned."
+
+hypervisor:
+	@echo "Building hypervisor..." ; \
+	$(MAKE) -s -C hypervisor ; \
+	echo "Done."
 
 hypervisor_clean:
-	@$(MAKE) -s -C hypervisor clean
+	@echo "Cleaning windows loader..." ; \
+	$(MAKE) -s -C hypervisor clean ; \
+	echo "Cleaned."
 
 environment_mkdir:
 	@mkdir -p environment
@@ -45,8 +60,9 @@ environment/%: environment_templates/% environment.config | environment_mkdir
 	sed -i 's/{{ssh_port}}/$(SSH_PORT)/g' $@ ; \
 	sed -i 's/{{ssh_password}}/$(SSH_PASSWORD)/g' $@ ; \
 	sed -i 's/{{gdb_server_address}}/$(GDB_SERVER_ADDRESS)/g' $@ ; \
+	sed -i 's/{{selected_architecture}}/$(SELECTED_ARCHITECTURE)/g' $@ ; \
 	echo "Built $@."
 
 environment_clean:
-	@rm -r environment
+	@rm -rf environment
 

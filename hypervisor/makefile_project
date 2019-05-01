@@ -1,7 +1,7 @@
 include ../environment.config
 OUTPUT_DIRECTORY_ROOT := ../out
 TARGET_NAME := zpp_hypervisor
-TARGET_ABIS := native
+TARGET_ABIS := $(SUPPORTED_ARCHITECTURES)
 OUTPUT_TYPE := executable
 INCLUDE_DIRECTORIES := \
 	$(shell find . -type d -name "include")
