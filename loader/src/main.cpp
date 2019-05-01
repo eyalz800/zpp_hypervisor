@@ -1,7 +1,5 @@
 #include "zpp/elf_file.h"
 #include <cstdint>
-#include <new>
-#include <type_traits>
 #include <utility>
 
 namespace zpp
@@ -9,15 +7,16 @@ namespace zpp
 extern "C" unsigned char zpp_elf_binary[];
 extern "C" std::size_t zpp_elf_binary_size;
 
-extern "C" {
-int zpp_cpp_init(std::uintptr_t (*lookup_symbol)(const char *),
-                 void * (*allocate_rwx)(std::size_t),
-                 std::uintptr_t (*physical_to_virtual)(std::uintptr_t),
-                 int (*call_on_cpu)(std::size_t, int (*)(void *), void *),
-                 std::size_t (*number_of_cpus)())
+extern "C" int
+zpp_load_elf(void * (*allocate_rwx)(std::size_t),
+             std::uintptr_t (*physical_to_virtual)(std::uintptr_t),
+             int (*call_on_cpu)(std::size_t, int (*)(void *), void *),
+             std::size_t (*number_of_cpus)(),
+             int (*adjust_launch_calling_convention)(
+                 int (*)(std::size_t, std::uintptr_t (*)(std::uintptr_t)),
+                 std::size_t,
+                 std::uintptr_t (*)(std::uintptr_t)))
 {
-    static_cast<void>(lookup_symbol);
-
     // Invoke the elf_loader.
     elf_file elf(zpp_elf_binary, zpp_elf_binary_size);
     auto base = elf.load(
@@ -47,7 +46,13 @@ int zpp_cpp_init(std::uintptr_t (*lookup_symbol)(const char *),
 
     for (std::size_t i{}; i < cpus; ++i) {
         // The launch function.
-        auto launch = [&] { return entry(i, physical_to_virtual); };
+        auto launch = [&] {
+            if (adjust_launch_calling_convention) {
+                return adjust_launch_calling_convention(
+                    entry, i, physical_to_virtual);
+            }
+            return entry(i, physical_to_virtual);
+        };
 
         // The erased launch function.
         auto erased_launch = [](void * context) {
@@ -56,7 +61,7 @@ int zpp_cpp_init(std::uintptr_t (*lookup_symbol)(const char *),
             return local_launch();
         };
 
-        // Call on specified cpu.
+        // Call on specified CPU.
         auto result =
             call_on_cpu(i,
                         static_cast<int (*)(void *)>(erased_launch),
@@ -68,12 +73,7 @@ int zpp_cpp_init(std::uintptr_t (*lookup_symbol)(const char *),
         }
     }
 
-    // Return an error so the OS unloads our module.
-    return -1;
-}
-
-void zpp_cpp_exit()
-{
-}
+    // Return success.
+    return 0;
 }
 } // namespace zpp

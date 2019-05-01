@@ -1,8 +1,10 @@
 .global zpp_elf_binary
-.hidden zpp_elf_binary
-
 .global zpp_elf_binary_size
+
+#ifndef ZPP_ELF_BINARY_NO_HIDDEN
+.hidden zpp_elf_binary
 .hidden zpp_elf_binary_size
+#endif
 
 	.align 8
 zpp_elf_binary:

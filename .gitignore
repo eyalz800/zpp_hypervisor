@@ -26,5 +26,8 @@ loader/x64
 linux_loader/Debug
 linux_loader/Release
 linux_loader/x64
+windows_loader/Debug
+windows_loader/Release
+windows_loader/x64
 *.mod.c
 environment/

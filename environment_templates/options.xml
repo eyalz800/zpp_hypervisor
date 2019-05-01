@@ -4,7 +4,7 @@
   PipeArguments="-c 'gdb --interpreter=mi -command {{project_root}}/environment/gdbcommand'"
   MiMode="gdb"
   ExePath="/bin/bash"
-  TargetArchitecture="x86_64"
+  TargetArchitecture="{{selected_architecture}}"
   PipeCwd=""
   WorkingDirectory="/"
   >

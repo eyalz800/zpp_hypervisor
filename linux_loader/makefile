@@ -1,14 +1,15 @@
 mode ?= debug
 CONFIGURATION_NAME ?= $(mode)
-TARGET_ABI ?= native
 
 .PHONY: all clean
 MAKEFILE_DIRECTORY := $(shell dirname $(realpath $(lastword $(MAKEFILE_LIST))))
 include $(MAKEFILE_DIRECTORY)/../environment.config
 
+TARGET_ABI ?= $(SELECTED_ARCHITECTURE)
+
 PWD := $(shell pwd)
 obj-m += zpp_loader.o 
-zpp_loader-objs := ./linux_src/main.o ./out/$(CONFIGURATION_NAME)/$(TARGET_ABI)/zpp_loader.o
+zpp_loader-objs := ./src/main.o ./out/$(CONFIGURATION_NAME)/$(TARGET_ABI)/zpp_loader.o
 
 all: 
 	@$(MAKE) -s -f makefile_loader ; \

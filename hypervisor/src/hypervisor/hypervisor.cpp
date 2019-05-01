@@ -1,4 +1,4 @@
-#include "zpp/hypervisor.h"
+#include "zpp/hypervisor/hypervisor.h"
 #include "zpp/elf/module_region.h"
 #include "zpp/maybe.h"
 #include "zpp/scope_guard.h"
@@ -585,7 +585,7 @@ void hypervisor::setup_vmcs(x64::context & guest_context)
     vmcs.guest_fs_selector(guest_context.fs);
     vmcs.guest_fs_limit(descriptor.limit());
     vmcs.guest_fs_access_rights(descriptor.vmx_access_rights());
-    vmcs.guest_fs_base(this->ia32_fs_base);
+    vmcs.guest_fs_base(descriptor.context_dependent_base());
     vmcs.host_fs_base(reinterpret_cast<std::uint64_t>(this->fs_data));
     vmcs.host_fs_selector(0);
 

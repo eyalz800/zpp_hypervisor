@@ -1,7 +1,8 @@
+include ../environment.config
 OUTPUT_DIRECTORY_ROOT := ./out
 OBJECT_DIRECTORY_ROOT := ./obj
 TARGET_NAME := zpp_loader.o
-TARGET_ABIS := native
+TARGET_ABIS := $(SUPPORTED_ARCHITECTURES)
 OUTPUT_TYPE := relocatable
 INCLUDE_DIRECTORIES := \
 	$(shell find . -type d -name "include") \
@@ -11,6 +12,7 @@ FLAGS := -pedantic -Wall -Wextra -Werror \
 	-Wl,--no-undefined \
 	-Wno-unused-command-line-argument \
 	-nostdlib \
+	-ffreestanding \
 	-mno-red-zone \
 	-DZPP_ELF_BINARY_PATH="\"../../out/$(CONFIGURATION_NAME)/$(TARGET_ABI)/zpp_hypervisor\""
 FLAGS_DEBUG := -g -D _DEBUG
@@ -32,7 +34,7 @@ ASFLAGS_RELEASE :=
 STATIC_LIBRARIES := 
 SHARED_LIBRARIES :=
 STRIP_FLAGS := -s
-SOURCE_DIRECTORIES := ./src
+SOURCE_DIRECTORIES := $(realpath ../loader/src)
 SOURCE_FILES :=
 
-$(OBJECT_DIRECTORY_ROOT)/$(CONFIGURATION_NAME)/$(TARGET_ABI)/./src/elf_binary.o: ../out/$(CONFIGURATION_NAME)/$(TARGET_ABI)/zpp_hypervisor
+$(OBJECT_DIRECTORY_ROOT)/$(CONFIGURATION_NAME)/$(TARGET_ABI)/$(realpath ../loader/src)/elf_binary.o: ../out/$(CONFIGURATION_NAME)/$(TARGET_ABI)/zpp_hypervisor
