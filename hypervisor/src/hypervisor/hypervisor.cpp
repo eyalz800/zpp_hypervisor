@@ -686,11 +686,26 @@ void hypervisor::vm_launch(x64::context & guest_context,
     vmcs.guest_rip(guest_context.rip);
     vmcs.guest_rsp(guest_context.rsp);
 
-    // The VM exit flag for current processor.
+    // VM exit flag which is set to false initially and switched to true
+    // later to change the flow of this code on VM exit.
     std::atomic<bool> vm_exit_flag;
 
-    // Set vm exit flag to false initially.
+    // Set VM exit flag to false, when there is a VM
+    // exit it will be already be true, following the VM exit path
+    // in this code rather than the VM launch.
     vm_exit_flag = false;
+
+    // Just to be sure the compiler does not move stuff around,
+    // we pass the vm_exit_flag address and guest_context address
+    // inside the capture context.
+    // This way the compiler cannot reason about destroying
+    // our host_context, vm_exit_flag and host_vm_launch_stack because
+    // guest_context which is last referenced in this function is sent to
+    // the restore context function and can theoretically depend on
+    // host_context, vm_exit_flag, and host_vm_launch_stack, after the
+    // capture host context.
+    host_context.rax = reinterpret_cast<std::uint64_t>(&vm_exit_flag);
+    host_context.rbx = reinterpret_cast<std::uint64_t>(&guest_context);
 
     // Capture host context.
     x64::capture_context(&host_context);
