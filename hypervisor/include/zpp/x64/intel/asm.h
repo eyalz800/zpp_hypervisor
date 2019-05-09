@@ -172,4 +172,26 @@ inline void __attribute__((naked)) wrmsr(std::uint32_t, std::uint64_t)
     )!!");
 }
 
+inline void __attribute__((naked)) xsetbv(std::uint32_t, std::uint64_t)
+{
+    asm(R"!!(
+        .intel_syntax noprefix
+        mov ecx, edi
+        mov eax, esi
+        shr rsi, 32
+        mov edx, esi
+        xsetbv
+        ret
+    )!!");
+}
+
+inline void __attribute__((naked)) invd()
+{
+    asm(R"!!(
+        .intel_syntax noprefix
+        invd
+        ret
+    )!!");
+}
+
 } // namespace zpp::x64::intel

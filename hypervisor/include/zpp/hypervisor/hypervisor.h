@@ -132,6 +132,12 @@ private:
     bool protect_module();
 
     /**
+     * Remove protection for unprotected guest memory.
+     * We mainly need to use this memory from guest on UEFI boot.
+     */
+    void unprotect_guest_memory();
+
+    /**
      * Initialize needed vmx structures.
      */
     void initialize_vmx();
@@ -272,6 +278,11 @@ private:
     std::uint16_t guest_tr{};
 
     /**
+     * The TR register of the OS.
+     */
+    std::uint16_t os_tr{};
+
+    /**
      * The host code segment selector.
      */
     std::uint16_t host_cs{};
@@ -286,12 +297,6 @@ private:
      */
     small_map<std::uint64_t, std::uint64_t, max_module_size / page_size>
         module_physical_to_virtual{};
-
-    /**
-     * The intermediate GDT to be loaded after page table switch
-     * and before VMM and guest are launched.
-     */
-    alignas(page_size) std::uint64_t intermediate_gdt[0x2000]{};
 
     /**
      * The GDT that will be used by the host VMM.
@@ -319,6 +324,47 @@ private:
      * The task segment to be used by the host VMM.
      */
     alignas(0x10) std::uint32_t host_tss[26]{};
+
+    /**
+     * Unprotected memory to be used by guest in UEFI boot.
+     * The size is a multiple of the alignment so the size is guaranteed to
+     * be a multiple of page size.
+     */
+    struct alignas(page_size) unprotected_memory
+    {
+        /**
+         * The intermediate GDT to be loaded after page table switch
+         * and before VMM and guest are launched.
+         * Also to be reused in guest in case a new TSS needs to be
+         * allocated in UEFI boot.
+         */
+        alignas(0x10) std::uint64_t intermediate_gdt[max_cpus][0x2000]{};
+
+        /**
+         * The task segment to be used by the guest in case no TSS.
+         */
+        alignas(0x10) std::uint32_t guest_tss[max_cpus][26]{};
+    } unprotected_memory;
+
+    /**
+     * Assert that unprotected memory size is multiple of page size.
+     */
+    static_assert(!(sizeof(unprotected_memory) % page_size));
+
+    /**
+     * A pointer to the guest GDT memory.
+     */
+    std::uint64_t * guest_gdt_pointer{};
+
+    /**
+     * The guest GDT limit.
+     */
+    std::size_t guest_gdt_limit{};
+
+    /**
+     * The intermediate GDT limit.
+     */
+    std::size_t intermediate_gdt_limit{};
 
     /**
      * Intel specific state.

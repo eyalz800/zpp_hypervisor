@@ -38,6 +38,11 @@ public:
      */
     const std::uint64_t & head() const;
 
+    /**
+     * Returns true if initialized, else false.
+     */
+    explicit operator bool() const;
+
 private:
     /**
      * The page table level 4 pointer.

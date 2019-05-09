@@ -8,13 +8,19 @@ os_page_table::os_page_table(
     std::uint64_t cr3,
     std::uint64_t (*physical_to_virtual)(std::uint64_t)) :
     pml4(reinterpret_cast<std::uint64_t *>(
-        physical_to_virtual(cr3 & 0xfffffffffffff000))),
+        physical_to_virtual ? physical_to_virtual(cr3 & 0xfffffffffffff000)
+                            : 0)),
     physical_to_virtual(physical_to_virtual)
 {
 }
 
 std::uint64_t os_page_table::virtual_to_physical(std::uint64_t value) const
 {
+    // If no OS page table, return the received value.
+    if (!physical_to_virtual) {
+        return value;
+    }
+
     // Parse the virtual address.
     auto address_structure = virtual_address(value);
 
@@ -64,6 +70,11 @@ std::uint64_t os_page_table::virtual_to_physical(const void * value) const
 const std::uint64_t & os_page_table::head() const
 {
     return *pml4;
+}
+
+os_page_table::operator bool() const
+{
+    return (nullptr != pml4);
 }
 
 } // namespace zpp::x64

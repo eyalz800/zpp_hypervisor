@@ -50,7 +50,7 @@ void hypervisor::initialize_registers()
 
     // Load the LDTR and TR register.
     x64::sldt(&this->guest_ldtr);
-    x64::str(&this->guest_tr);
+    x64::str(&this->os_tr);
 }
 
 void hypervisor::initialize_module_region()
@@ -160,20 +160,90 @@ void hypervisor::initialize_host_idt()
 
 void hypervisor::initialize_intermediate_gdt()
 {
-    // Copy OS GDT into intermediate GDT.
-    std::memcpy(this->intermediate_gdt,
+    // Fetch the intermediate GDT.
+    auto & intermediate_gdt =
+        this->unprotected_memory
+            .intermediate_gdt[this->next_virtual_processor - 1];
+
+    // Fetch the guest TSS.
+    auto & guest_tss = this->unprotected_memory
+                           .guest_tss[this->next_virtual_processor - 1];
+
+    // Copy OS Created GDT into our intermediate GDT.
+    std::memcpy(intermediate_gdt,
                 reinterpret_cast<const char *>(this->gdtr.base),
                 this->gdtr.limit + 1);
+
+    // If the TSS segment is present, just use the current OS GDT.
+    if (auto task_state_segment = x64::segment_descriptor::from_memory(
+            reinterpret_cast<std::uint64_t>(intermediate_gdt),
+            this->os_tr);
+        task_state_segment.present()) {
+        // Use the current gdtr base as guest GDT pointer.
+        this->guest_gdt_pointer =
+            reinterpret_cast<std::uint64_t *>(this->gdtr.base);
+
+        // Use the guest GDT as current gdtr limit.
+        this->guest_gdt_limit = this->gdtr.limit;
+
+        // Set the intermediate GDT limit as current gdtr limit.
+        this->intermediate_gdt_limit = this->gdtr.limit;
+
+        // Use the current TR as the guest TR.
+        this->guest_tr = this->os_tr;
+        return;
+    }
+
+    // Set the guest GDT pointer to the intermediate GDT.
+    this->guest_gdt_pointer =
+        this->unprotected_memory
+            .intermediate_gdt[this->next_virtual_processor - 1];
+
+    // Increase the intermediate GDT limit by one entry.
+    this->intermediate_gdt_limit =
+        this->gdtr.limit + (2 * sizeof(std::uint64_t));
+
+    // Guest GDT limit is the same as intermediate GDT limit.
+    this->guest_gdt_limit = this->intermediate_gdt_limit;
+
+    // The index of the TSS segment.
+    auto tr_index = (this->gdtr.limit + 1) / sizeof(std::uint64_t);
+
+    // Create a task state segment.
+    x64::segment_descriptor task_state_segment;
+    task_state_segment.limit(sizeof(guest_tss) - 1);
+    task_state_segment.base_extended(
+        reinterpret_cast<std::uint64_t>(guest_tss));
+    task_state_segment.type(
+        x64::segment_descriptor::segment_type::tss_available);
+    task_state_segment.system(true);
+    task_state_segment.privilege_level(0);
+    task_state_segment.present(true);
+    task_state_segment.available_for_system_use(false);
+    task_state_segment.code_64_bit(false);
+    task_state_segment.default_operation_size(false);
+    task_state_segment.granularity(false);
+
+    // Assign the task state segment.
+    intermediate_gdt[tr_index] = task_state_segment.basic_value();
+    intermediate_gdt[tr_index + 1] = task_state_segment.extended_value();
+    this->guest_tr = tr_index << 3;
 }
 
 void hypervisor::load_intermediate_gdt()
 {
     // Load the intermediate GDT.
     x64::gdt_layout lgdt_layout{};
-    lgdt_layout.base =
-        reinterpret_cast<std::uint64_t>(this->intermediate_gdt);
-    lgdt_layout.limit = this->gdtr.limit;
+    lgdt_layout.base = reinterpret_cast<std::uint64_t>(
+        this->unprotected_memory
+            .intermediate_gdt[this->next_virtual_processor - 1]);
+    lgdt_layout.limit = this->intermediate_gdt_limit;
     x64::lgdt(lgdt_layout.data());
+
+    // Load TSS segment if changed.
+    if (this->guest_tr != this->os_tr) {
+        x64::ltr(&this->guest_tr);
+    }
 }
 
 void hypervisor::load_os_gdt()
@@ -183,6 +253,11 @@ void hypervisor::load_os_gdt()
     lgdt_layout.base = reinterpret_cast<std::uint64_t>(this->gdtr.base);
     lgdt_layout.limit = this->gdtr.limit;
     x64::lgdt(lgdt_layout.data());
+
+    // Load OS TSS segment if changed.
+    if (this->guest_tr != this->os_tr) {
+        x64::ltr(&this->os_tr);
+    }
 }
 
 void hypervisor::initialize_vmx_msrs()
@@ -413,6 +488,42 @@ bool hypervisor::protect_module()
     return true;
 }
 
+void hypervisor::unprotect_guest_memory()
+{
+    auto number_of_pages = sizeof(this->unprotected_memory) / page_size;
+
+    // Iterate all pages.
+    for (std::size_t i{}; i < number_of_pages; ++i) {
+        // Calculate the address.
+        auto address =
+            reinterpret_cast<unsigned char *>(&this->unprotected_memory) +
+            (i * page_size);
+
+        // Get the physical address.
+        auto physical_address =
+            this->host_page_table.virtual_to_physical(address);
+
+        // Get the epde.
+        auto & epde = this->epd[physical_address >> 30]
+                               [(physical_address >> 21) & 0x1ff];
+
+        // The ept physical address.
+        auto ept_physical_address = epde.page_number() << 12;
+
+        // Find the virtual address of the ept.
+        auto ept = reinterpret_cast<x64::intel::epte *>(
+            this->module_physical_to_virtual.find(ept_physical_address)
+                ->second);
+
+        // Make epte accessible.
+        auto & epte = ept[(physical_address >> 12) & 0x1ff];
+        epte.read(true);
+        epte.write(true);
+        epte.execute(true);
+        epte.execute_user(true);
+    }
+}
+
 void hypervisor::initialize_vmx()
 {
     namespace msr = x64::intel::msr;
@@ -552,8 +663,9 @@ void hypervisor::setup_vmcs(x64::context & guest_context)
         x64::intel::vm_entry_controls::ia_32e_mode_guest));
 
     // Get the GDT base.
-    auto intermediate_gdt_base =
-        reinterpret_cast<std::uint64_t>(this->intermediate_gdt);
+    auto intermediate_gdt_base = reinterpret_cast<std::uint64_t>(
+        this->unprotected_memory
+            .intermediate_gdt[this->next_virtual_processor - 1]);
 
     // Write segment information.
     auto descriptor = x64::segment_descriptor::from_memory(
@@ -609,7 +721,7 @@ void hypervisor::setup_vmcs(x64::context & guest_context)
     descriptor = x64::segment_descriptor::from_memory(
         intermediate_gdt_base, this->guest_tr);
     vmcs.guest_tr_selector(this->guest_tr);
-    vmcs.guest_tr_limit(x64::load_segment_limit(this->guest_tr));
+    vmcs.guest_tr_limit(descriptor.limit());
     vmcs.guest_tr_access_rights(descriptor.vmx_access_rights());
     vmcs.guest_tr_base(descriptor.context_dependent_base());
     vmcs.host_tr_base(reinterpret_cast<std::uint64_t>(this->host_tss));
@@ -623,8 +735,9 @@ void hypervisor::setup_vmcs(x64::context & guest_context)
     vmcs.guest_ldtr_base(descriptor.context_dependent_base());
 
     // Set gdtr information.
-    vmcs.guest_gdtr_limit(this->gdtr.limit);
-    vmcs.guest_gdtr_base(this->gdtr.base);
+    vmcs.guest_gdtr_limit(this->guest_gdt_limit);
+    vmcs.guest_gdtr_base(
+        reinterpret_cast<std::uint64_t>(this->guest_gdt_pointer));
     vmcs.host_gdtr_base(reinterpret_cast<std::uint64_t>(this->host_gdt));
 
     // Set idtr information.
@@ -821,6 +934,9 @@ int hypervisor::main(x64::context & caller_context)
         if (!protect_module()) {
             return 1;
         }
+
+        // Allow guest access to unprotected memory.
+        unprotect_guest_memory();
     }
 
     // Initialize vmx.
@@ -883,6 +999,23 @@ int hypervisor::main(x64::context & caller_context)
             context.rbx = cpuid_result[1];
             context.rcx = cpuid_result[2];
             context.rdx = cpuid_result[3];
+            break;
+        }
+        case basic_reason::xsetbv: {
+            // Activate CR4 xsave bit.
+            auto cr4 = x64::cr4();
+            if (!(cr4 & (1ull << 18))) {
+                x64::cr4(cr4 | (1ull << 18));
+            }
+
+            // Execute the xsetbv instruction.
+            x64::intel::xsetbv(context.rcx,
+                               context.rax | (context.rdx << 32));
+            break;
+        }
+        case basic_reason::invd: {
+            // Execute the invd instruction.
+            x64::intel::invd();
             break;
         }
         default: {
