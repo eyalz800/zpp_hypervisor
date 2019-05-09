@@ -1,4 +1,4 @@
-.PHONY: all clean environment environment_clean environment_mkdir linux_loader linux_loader_clean windows_loader windows_loader_clean hypervisor hypervisor_clean
+.PHONY: all clean environment environment_clean environment_mkdir linux_loader linux_loader_clean windows_loader windows_loader_clean uefi_loader uefi_loader_clean hypervisor hypervisor_clean
 
 mode ?= debug
 CONFIGURATION_NAME ?= $(mode)
@@ -10,7 +10,7 @@ TARGET_ABI := $(SELECTED_ARCHITECTURE)
 
 all: $(patsubst %, %_loader, $(BUILD_DRIVERS)) hypervisor environment
 
-clean: linux_loader_clean windows_loader_clean hypervisor_clean environment_clean
+clean: linux_loader_clean windows_loader_clean uefi_loader_clean hypervisor_clean environment_clean
 
 linux_loader: | hypervisor
 	@echo "Building linux loader..." ; \
@@ -34,6 +34,16 @@ windows_loader: | hypervisor
 windows_loader_clean:
 	@echo "Cleaning windows loader..." ; \
 	$(MAKE) -s -C windows_loader clean ; \
+	echo "Cleaned."
+
+uefi_loader: | hypervisor
+	@echo "Building uefi loader..." ; \
+	$(MAKE) -s -C uefi_loader ; \
+	echo "Done."
+
+uefi_loader_clean:
+	@echo "Cleaning uefi loader..." ; \
+	$(MAKE) -s -C uefi_loader clean ; \
 	echo "Cleaned."
 
 hypervisor:

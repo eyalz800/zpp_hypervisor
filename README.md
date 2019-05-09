@@ -14,7 +14,7 @@ Create a hypervisor project such that:
 2. Really simple and fast build.
 3. OS independent except for a few wrapper functions during the load inside a driver code
 that has to be written for every OS.
-4. Can later be ported without much efforts to UEFI.
+4. Works in UEFI.
 
 Project Configuration
 ---------------------
@@ -28,12 +28,13 @@ SSH_TARGET := user@192.168.171.136
 SSH_PORT := 22
 SSH_PASSWORD := password1
 GDB_SERVER_ADDRESS := :1337
-BUILD_DRIVERS := linux windows
+BUILD_DRIVERS := linux windows uefi
 HYPERVISOR_WAIT_FOR_DEBUGGER := 0
 LINUX_KERNEL := 4.18.0-15-generic
 VISUAL_STUDIO_ROOT := /mnt/c/Program\ Files\ \(x86\)/Microsoft\ Visual\ Studio/2017/Community/VC/Tools/MSVC/14.16.27023
 WINDOWS_KITS_ROOT := /mnt/c/Program\ Files\ \(x86\)/Windows\ Kits/10
 WINDOWS_KITS_VERSION := 10.0.18362.0
+EDK2_ROOT := /mnt/c/Temp/edk2-UDK2018
 ```
 
 Project Dependencies
@@ -43,6 +44,7 @@ To compile the project, you need:
 2. Have clang++7 installed at least.
 3. The linux headers for the specific `LINUX_KERNEL` variable inside `environment.config`.
 4. Visual Studio and SDK/WDK for Windows support.
+5. EDK2 for UEFI support.
 
 To debug the project, you need:
 1. gdb with python support.
@@ -51,13 +53,15 @@ Compiling The Project
 ---------------------
 Make sure the `./environment.config` file contains your correct paths and settings in
 your environment:
-1. Adjust the `BUILD_DRIVERS` configuration to build Linux/Windows drivers or both.
+1. Adjust the `BUILD_DRIVERS` configuration to build Linux/Windows/UEFI drivers or both.
 2. Change `HYPERVISOR_WAIT_FOR_DEBUGGER` to whether or not you wish the hypervisor to 
 wait for debugging.
 3. In case you are building the Linux driver, adjust the `LINUX_KERNEL` variable to control linux headers 
 version.
 4. In case you are building the Windows driver, adjust the `VISUAL_STUDIO_ROOT`, `WINDOWS_KITS_ROOT`, and `WINDOWS_KITS_VERSION` 
 fields to the correct paths accessible from the Linux machine you are using for your build (can be WSL paths).
+5. In case you are building the UEFI driver, adjust the `EDK2_ROOT` field to the EDK2 directory.
+Also, you need to set up the Windows fields as specified in the previous point.
 
 Compiling the project is done using the `make -j` command at the project root.
 An `out` directory will be created at the project root with the built subprojects.
@@ -91,6 +95,14 @@ to the machine and load the driver using:
 Remember to turn off integrity checks beforehand.
 
 The windows driver returns an error code of `STATUS_INSUFFICIENT_POWER` when it succeeds, to unload itself.
+
+### UEFI
+I am yet to be familiar with UEFI best practices. Until now I have used a rather violant 
+mount of the EFI partition and replaced the `*.efi` image that I knew was the main boot selection.
+
+Currently the UEFI support is really experimental, there are probably many issues that are invisible to me,
+some are multi core issues that I did not handle and yet to even have the knowlege to solve.
+I am planning to learn more about those issues and solve them eventually.
 
 Debugging The Project
 ---------------------
