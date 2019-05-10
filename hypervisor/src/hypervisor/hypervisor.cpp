@@ -85,14 +85,14 @@ void hypervisor::initialize_host_page_table()
                      (this->guest_cr3 & 0xfff);
 }
 
-bool hypervisor::initialize_module_physical_to_virtual()
+zpp::error hypervisor::initialize_module_physical_to_virtual()
 {
     // The number of pages inside the module.
     auto number_of_pages = this->module_size / page_size;
 
-    // If there are more pages than possible, return false.
+    // If there are more pages than possible, return error.
     if (number_of_pages >= this->module_physical_to_virtual.capacity()) {
-        return false;
+        return error::physical_to_virtual_capacity_error;
     }
 
     // Iterate all pages and perform the virtual to physical conversion.
@@ -109,7 +109,7 @@ bool hypervisor::initialize_module_physical_to_virtual()
                                                  address);
     }
 
-    return true;
+    return error::success;
 }
 
 void hypervisor::initialize_host_gdt()
@@ -404,7 +404,7 @@ void hypervisor::initialize_ept()
     }
 }
 
-bool hypervisor::protect_module()
+zpp::error hypervisor::protect_module()
 {
     std::size_t ept_index = 0;
     auto ept_count = std::extent_v<decltype(this->ept)>;
@@ -469,9 +469,9 @@ bool hypervisor::protect_module()
         // Move to the next ept.
         ++ept_index;
 
-        // If out of ept entries, return false.
+        // If out of ept entries, return error.
         if (ept_index == ept_count) {
-            return false;
+            return error::out_of_ept_entries;
         }
 
         // Protect our module epte.
@@ -485,7 +485,7 @@ bool hypervisor::protect_module()
         ++i;
     }
 
-    return true;
+    return error::success;
 }
 
 void hypervisor::unprotect_guest_memory()
@@ -565,7 +565,7 @@ void hypervisor::initialize_vmx()
         this->cached_vmx_msr(msr::vmx::cr4_fixed_0) & 0xffffffff;
 }
 
-bool hypervisor::enter_root_mode()
+zpp::error hypervisor::enter_root_mode()
 {
     // Backup cr0 and cr4.
     auto cr0 = x64::cr0();
@@ -581,25 +581,25 @@ bool hypervisor::enter_root_mode()
 
     // Turn on vmx.
     if (x64::intel::vmxon(&this->vmx_physical)) {
-        return false;
+        return error::vmxon_failed;
     }
     scope_guard turn_off_vmx{x64::intel::vmxoff};
 
     // Clear the vmcs.
     if (x64::intel::vmclear(&this->vmcs_physical)) {
-        return false;
+        return error::vmclear_failed;
     }
 
     // Load the vmcs structure.
     if (x64::intel::vmptrld(&this->vmcs_physical)) {
-        return false;
+        return error::vmptrld_failed;
     }
 
     // Cancel all guards.
     turn_off_vmx.cancel();
     restore_cr4.cancel();
     restore_cr0.cancel();
-    return true;
+    return error::success;
 }
 
 void hypervisor::setup_vmcs(x64::context & guest_context)
@@ -861,7 +861,7 @@ void hypervisor::vm_launch(x64::context & guest_context,
     x64::restore_context(&guest_context);
 }
 
-int hypervisor::main(x64::context & caller_context)
+zpp::error hypervisor::main(x64::context & caller_context)
 {
     // Fetch parameters.
     auto cpuid = caller_context.rdi;
@@ -893,8 +893,8 @@ int hypervisor::main(x64::context & caller_context)
         initialize_host_page_table();
 
         // Initialize module physical to virtual translation.
-        if (!initialize_module_physical_to_virtual()) {
-            return 1;
+        if (auto error = initialize_module_physical_to_virtual(); !error) {
+            return error;
         }
 
         // Initialize host IDT.
@@ -931,8 +931,8 @@ int hypervisor::main(x64::context & caller_context)
         initialize_ept();
 
         // Protect module.
-        if (!protect_module()) {
-            return 1;
+        if (auto error = protect_module(); !error) {
+            return error;
         }
 
         // Allow guest access to unprotected memory.
@@ -943,8 +943,8 @@ int hypervisor::main(x64::context & caller_context)
     initialize_vmx();
 
     // Enter root mode.
-    if (!enter_root_mode()) {
-        return 1;
+    if (auto error = enter_root_mode(); !error) {
+        return error;
     }
 
     // Guard to turn off vmx.
@@ -1035,7 +1035,7 @@ int hypervisor::main(x64::context & caller_context)
         x64::restore_context(&context);
     });
 
-    return 1;
+    return error::success;
 }
 
 void hypervisor::launch_on_cpu_private_stack(hypervisor & hypervisor,
@@ -1045,7 +1045,7 @@ void hypervisor::launch_on_cpu_private_stack(hypervisor & hypervisor,
     auto result = hypervisor.main(caller_context);
 
     // Use result as return value.
-    caller_context.rax = result;
+    caller_context.rax = result.code();
 
     // Restore context to caller.
     x64::restore_context(&caller_context);

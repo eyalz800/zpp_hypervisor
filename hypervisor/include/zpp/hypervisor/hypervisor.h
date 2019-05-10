@@ -1,4 +1,5 @@
 #pragma once
+#include "zpp/maybe.h"
 #include "zpp/small_map.h"
 #include "zpp/x64/context.h"
 #include "zpp/x64/generic.h"
@@ -17,6 +18,19 @@ namespace zpp::hypervisor
 class hypervisor
 {
 public:
+    /**
+     * Hypervisor errors.
+     */
+    enum class error
+    {
+        success = 0,
+        vmxon_failed = 1,
+        vmclear_failed = 2,
+        vmptrld_failed = 3,
+        physical_to_virtual_capacity_error = 4,
+        out_of_ept_entries = 5,
+    };
+
     /**
      * Maximum number of CPUs supported.
      */
@@ -76,7 +90,7 @@ private:
     /**
      * Create physical to virtual mapping for our module.
      */
-    bool initialize_module_physical_to_virtual();
+    zpp::error initialize_module_physical_to_virtual();
 
     /**
      * Create the host GDT structures that will be used in the hypervisor.
@@ -129,7 +143,7 @@ private:
     /**
      * Prepare module protection from guest access.
      */
-    bool protect_module();
+    zpp::error protect_module();
 
     /**
      * Remove protection for unprotected guest memory.
@@ -145,7 +159,7 @@ private:
     /**
      * Enter root mode on the current CPU.
      */
-    bool enter_root_mode();
+    zpp::error enter_root_mode();
 
     /**
      * Setup the VM control structure according to the given guest context,
@@ -165,7 +179,7 @@ private:
      * on the current CPU. This function is already called with
      * the hypervisor reserved stack.
      */
-    int main(x64::context & caller_context);
+    zpp::error main(x64::context & caller_context);
 
     /**
      * Launches the main function of the hypervisor, updates the rax
@@ -456,4 +470,32 @@ private:
      * @}
      */
 };
+
+/**
+ * The hypervisor error category.
+ */
+inline const zpp::error_category & category(hypervisor::error)
+{
+    static constexpr auto error_category = zpp::make_error_category(
+        "hypervisor::error",
+        hypervisor::error::success,
+        [](auto code) -> std::string_view {
+            switch (code) {
+            case hypervisor::error::success:
+                return zpp::error::no_error;
+            case hypervisor::error::vmxon_failed:
+                return "vmxon failed";
+            case hypervisor::error::vmptrld_failed:
+                return "vmptrld failed";
+            case hypervisor::error::vmclear_failed:
+                return "vmclear failed";
+            case hypervisor::error::physical_to_virtual_capacity_error:
+                return "Physical to virtual capacity error";
+            case hypervisor::error::out_of_ept_entries:
+                return "Out of EPT entries";
+            }
+        });
+    return error_category;
+}
+
 } // namespace zpp::hypervisor
