@@ -1,0 +1,105 @@
+
+language: cpp
+
+ubuntu_settings: &ubuntu_settings
+  install:
+    - sudo add-apt-repository "deb http://apt.llvm.org/xenial/ llvm-toolchain-xenial-$CLANG_VERSION main"
+    - sudo apt update --allow-insecure-repositories
+    - sudo apt install --allow-unauthenticated -y
+        git
+        make
+        clang-$CLANG_VERSION
+        clang++-$CLANG_VERSION
+        lld-$CLANG_VERSION
+        libc++-$CLANG_VERSION-dev
+        build-essential
+        libelf-dev
+        linux-headers-$(uname -r)
+    - sudo update-alternatives --install /usr/bin/clang clang /usr/bin/clang-$CLANG_VERSION 10000
+    - sudo update-alternatives --install /usr/bin/clang++ clang++ /usr/bin/clang++-$CLANG_VERSION 10000
+
+  script:
+    - echo "SUPPORTED_ARCHITECTURES := x86_64" > environment.config
+    - echo "SELECTED_ARCHITECTURE := x86_64" >> environment.config
+    - echo "BUILD_DRIVERS := linux" >> environment.config
+    - echo "HYPERVISOR_WAIT_FOR_DEBUGGER := 0" >> environment.config
+    - echo "LINUX_KERNEL := $(uname -r)" >> environment.config
+    - make -j
+
+windows_settings: &windows_settings
+  install:
+    - mkdir -p C:/Temp
+    - curl -L -o C:/Temp/ubuntu-1804.zip https://aka.ms/wsl-ubuntu-1804
+    - powershell -NoProfile -Command "Expand-Archive -Path C:/Temp/ubuntu-1804.zip -DestinationPath C:/Temp/Ubuntu"
+    - C:/Temp/Ubuntu/ubuntu1804.exe install --root
+    - echo "#!/bin/bash" > .install.sh
+    - echo "add-apt-repository \"deb http://apt.llvm.org/xenial/ llvm-toolchain-xenial-$CLANG_VERSION main\"" >> .install.sh
+    - echo "apt update --allow-insecure-repositories" >> .install.sh
+    - echo "export LINUX_KERNEL=\$(
+        apt search linux-headers |
+        grep linux-headers |
+        grep generic |
+        grep -v linux-headers-generic |
+        tail -n 1 |
+        cut -f 1 -d / |
+        cut -c 15-
+        )" >> .install.sh
+    - echo "echo -n \$LINUX_KERNEL > .linux_kernel" >> .install.sh
+    - echo "apt install --allow-unauthenticated -y
+        git
+        make
+        clang-$CLANG_VERSION
+        clang++-$CLANG_VERSION
+        lld-$CLANG_VERSION
+        libc++-$CLANG_VERSION-dev
+        build-essential
+        libelf-dev
+        linux-headers-\$LINUX_KERNEL
+        " >> .install.sh
+    - echo "update-alternatives --install /usr/bin/clang clang /usr/bin/clang-$CLANG_VERSION 10000" >> .install.sh
+    - echo "update-alternatives --install /usr/bin/clang++ clang++ /usr/bin/clang++-$CLANG_VERSION 10000" >> .install.sh
+    - wsl chmod +x .install.sh
+    - wsl ./.install.sh
+    - export LINUX_KERNEL=$(cat .linux_kernel)
+    - wsl rm .install.sh .linux_kernel
+
+  script:
+    - echo "SUPPORTED_ARCHITECTURES := x86_64" > environment.config
+    - echo "SELECTED_ARCHITECTURE := x86_64" >> environment.config
+    - echo "BUILD_DRIVERS := linux" >> environment.config
+    - echo "HYPERVISOR_WAIT_FOR_DEBUGGER := 0" >> environment.config
+    - echo "LINUX_KERNEL := $LINUX_KERNEL" >> environment.config
+    - wsl make -j
+
+matrix:
+  include:
+    - os: linux
+      dist: xenial
+      env: 
+        - JOB=ubuntu-clang-7
+        - CLANG_VERSION=7
+
+      <<: *ubuntu_settings
+
+    - os: linux
+      dist: xenial
+      env: 
+        - JOB=ubuntu-clang-8
+        - CLANG_VERSION=8
+
+      <<: *ubuntu_settings
+
+    - os: windows
+      env:
+        - JOB=windows-wsl-clang-7
+        - CLANG_VERSION=7
+
+      <<: *windows_settings
+
+    - os: windows
+      env:
+        - JOB=windows-wsl-clang-8
+        - CLANG_VERSION=8
+
+      <<: *windows_settings
+

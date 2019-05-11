@@ -1,5 +1,9 @@
 zpp_hypervisor
 ==============
+[![Build Status](https://dev.azure.com/eyalz800/zpp_hypervisor/_apis/build/status/eyalz800.zpp_hypervisor?branchName=master)](https://dev.azure.com/eyalz800/zpp_hypervisor/_build/latest?definitionId=1&branchName=master)
+[![Build Status](https://travis-ci.org/eyalz800/zpp_hypervisor.svg?branch=master)](https://travis-ci.org/eyalz800/zpp_hypervisor)
+[![Build status](https://ci.appveyor.com/api/projects/status/wi0kttdsy3v7jd3d/branch/master?svg=true)](https://ci.appveyor.com/project/eyalz800/zpp-hypervisor/branch/master)
+
 A very simple hypervisor for learning experience.
 
 Abstract
