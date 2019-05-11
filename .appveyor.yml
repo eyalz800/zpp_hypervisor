@@ -1,0 +1,34 @@
+image: 
+- Ubuntu1804
+
+platform: x64
+
+environment:
+  matrix:
+    - CLANG_VERSION: 7
+    - CLANG_VERSION: 8
+
+install:
+- sudo add-apt-repository "deb http://apt.llvm.org/bionic/ llvm-toolchain-bionic-$CLANG_VERSION main"
+- sudo apt update --allow-insecure-repositories
+- sudo apt install --allow-unauthenticated -y
+    git
+    make
+    clang-$CLANG_VERSION
+    clang++-$CLANG_VERSION
+    lld-$CLANG_VERSION
+    libc++-$CLANG_VERSION-dev
+    build-essential
+    libelf-dev
+    linux-headers-$(uname -r)
+- sudo update-alternatives --install /usr/bin/clang clang /usr/bin/clang-$CLANG_VERSION 10000
+- sudo update-alternatives --install /usr/bin/clang++ clang++ /usr/bin/clang++-$CLANG_VERSION 10000
+
+build_script:
+- echo "SUPPORTED_ARCHITECTURES := x86_64" > environment.config
+- echo "SELECTED_ARCHITECTURE := x86_64" >> environment.config
+- echo "BUILD_DRIVERS := linux" >> environment.config
+- echo "HYPERVISOR_WAIT_FOR_DEBUGGER := 0" >> environment.config
+- echo "LINUX_KERNEL := $(uname -r)" >> environment.config
+- make -j
+

@@ -1,0 +1,56 @@
+trigger:
+- master
+- dev
+
+strategy:
+  matrix:
+    ubuntu-clang-7:
+      VM_IMAGE: 'ubuntu-16.04'
+      OS: 'linux'
+      CLANG_VERSION: 7
+      ARTIFACT_NAME: 'ubuntu-clang-7'
+    ubuntu-clang-8:
+      VM_IMAGE: 'ubuntu-16.04'
+      OS: 'linux'
+      COMPILER: 'clang-8'
+      CLANG_VERSION: 8
+      ARTIFACT_NAME: 'ubuntu-clang-8'
+
+pool:
+  vmImage: $(VM_IMAGE)
+
+steps:
+- script: |
+    sudo add-apt-repository "deb http://apt.llvm.org/xenial/ llvm-toolchain-xenial-$CLANG_VERSION main"
+    sudo apt update --allow-insecure-repositories
+    sudo apt install --allow-unauthenticated -y \
+      git \
+      make \
+      clang-$CLANG_VERSION \
+      clang++-$CLANG_VERSION \
+      lld-$CLANG_VERSION \
+      libc++-$CLANG_VERSION-dev \
+      build-essential \
+      libelf-dev \
+      linux-headers-$(uname -r)
+    sudo update-alternatives --install /usr/bin/clang clang /usr/bin/clang-$CLANG_VERSION 10000
+    sudo update-alternatives --install /usr/bin/clang++ clang++ /usr/bin/clang++-$CLANG_VERSION 10000
+  condition: eq(variables['OS'], 'linux')
+  displayName: 'linux-install'
+
+- script: |
+    echo "SUPPORTED_ARCHITECTURES := x86_64" > environment.config
+    echo "SELECTED_ARCHITECTURE := x86_64" >> environment.config
+    echo "BUILD_DRIVERS := linux" >> environment.config
+    echo "HYPERVISOR_WAIT_FOR_DEBUGGER := 0" >> environment.config
+    echo "LINUX_KERNEL := $(uname -r)" >> environment.config
+  displayName: 'linux-setup-environment'
+  condition: eq(variables['OS'], 'linux')
+
+- script: |
+    make -j
+  displayName: 'linux-build'
+  condition: eq(variables['OS'], 'linux')
+
+- upload: out
+  artifact: $(ARTIFACT_NAME)

@@ -9,6 +9,7 @@ INCLUDE_DIRECTORIES := \
 	$(shell find ../loader -type d -name "include")
 FLAGS := -pedantic -Wall -Wextra -Werror \
 	-Wno-format-security \
+	-stdlib=libc++ \
 	-Wl,--no-undefined \
 	-Wno-unused-command-line-argument \
 	-nostdlib \
