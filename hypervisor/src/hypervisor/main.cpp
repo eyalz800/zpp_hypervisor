@@ -26,15 +26,15 @@ extern "C" void __attribute__((naked)) _start()
 {
     asm(R"!!(
         .intel_syntax noprefix
-        sub rsp, 3a8h // Make space for capture context and align to 16 bytes.
+        sub rsp, 0x3a8 // Make space for capture context and align to 16 bytes.
         call zpp_x64_capture_context_into_stack // Capture the context.
         mov rax, rsp // Get a pointer to the context to change rip and rsp.
-        mov r10, [rsp+3a8h] // Fetch return address from the stack into r10.
-        mov [rax+80h], r10 // Set context->rip to the return address.
-        lea r10, [rsp+3b0h] // Compute the stack pointer at function return.
-        mov [rax+20h], r10 // Set context->rsp to the stack pointer after this call.
+        mov r10, [rsp+0x3a8] // Fetch return address from the stack into r10.
+        mov [rax+0x80], r10 // Set context->rip to the return address.
+        lea r10, [rsp+0x3b0] // Compute the stack pointer at function return.
+        mov [rax+0x20], r10 // Set context->rsp to the stack pointer after this call.
         mov rdi, rax // Send context pointer as the main function parameter. 
-        sub rsp, 8h // Align stack to expected value.
+        sub rsp, 0x8 // Align stack to expected value.
         jmp zpp_hypervisor_main // Jump to main function.
     )!!");
 }
