@@ -180,9 +180,9 @@ invoke_entry(int (*)(std::size_t, std::uintptr_t (*)(std::uintptr_t)),
         push rsi // Save rsi before use as it is non-volatile.
         mov rdi, rdx // Forward first parameter to function.
         mov rsi, r8 // Forward second parameter to function.
-        sub rsp, 8h // Align stack to 16 bytes.
+        sub rsp, 0x8 // Align stack to 16 bytes.
         call rcx // Call the function pointer.
-        add rsp, 8h // Restore stack.
+        add rsp, 0x8 // Restore stack.
         pop rsi // Restore rsi.
         pop rdi // Restore rdi.
         ret // Return.
