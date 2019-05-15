@@ -1,5 +1,10 @@
 
 language: cpp
+branches:
+  only:
+  - master
+  - dev
+
 
 ubuntu_settings: &ubuntu_settings
   install:

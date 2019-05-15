@@ -1,3 +1,8 @@
+branches:
+  only:
+  - master
+  - dev
+
 image: 
 - Ubuntu1804
 
