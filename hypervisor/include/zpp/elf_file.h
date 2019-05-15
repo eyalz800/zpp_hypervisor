@@ -212,8 +212,12 @@ public:
     }
 
     /**
-     * Loads the ELF file into memory.
+     * Loads the ELF file into memory, using an allocation strategy
+     * and a protection strategy to adjust the page protection accordingly.
      * The behavior is undefined if the ELF file is already loaded.
+     * The function will load the ELF segments into memory and
+     * perform relative relocations on it.
+     * Returns the base address of the loaded ELF.
      */
     template <typename Allocate, typename Protect>
     void * load(Allocate && allocate, Protect && protect)
@@ -226,144 +230,24 @@ public:
             return nullptr;
         }
 
-        // The base difference.
-        auto base_difference = base - m_preferred_base;
+        // The base difference, which is the new base minus the preferred
+        // base, to be used when converting ELF file addresses to point at
+        // the new relocated ELF.
+        auto base_difference =
+            reinterpret_cast<std::ptrdiff_t>(base - m_preferred_base);
 
-        // Iterate the program headers and load them.
-        for (std::size_t i{}; i < m_header->e_phnum; ++i) {
-            auto & program_header = m_program_headers[i];
-
-            // If not loadable, skip.
-            if (elf_phdr::type::load !=
-                elf_phdr::type(program_header.p_type)) {
-                continue;
-            }
-
-            // Load the segment.
-            std::copy_n(m_file_data + program_header.p_offset,
-                        program_header.p_filesz,
-                        base_difference + program_header.p_vaddr);
-
-            // Zero memory.
-            std::fill_n(base_difference + program_header.p_vaddr +
-                            program_header.p_filesz,
-                        program_header.p_memsz - program_header.p_filesz,
-                        0);
-        }
+        // Map ELF segments into memory.
+        map_segments(base_difference);
 
         // The relocations and relocations size.
-        std::variant<const elf_rela *, const elf_rel *> relocations;
-        std::size_t relocations_size{};
+        auto [relocations, relocations_size] =
+            get_relocations(base_difference);
 
-        // Parse the dynamic segment.
-        for (std::size_t i{};; ++i) {
-            auto & dynamic_entry = m_dynamic[i];
-            auto tag = elf_dyn::tag(dynamic_entry.d_tag);
+        // Relocate the ELF.
+        relocate(relocations, relocations_size, base_difference);
 
-            // If the end is reached.
-            if (elf_dyn::tag::null == tag) {
-                break;
-            }
-
-            // Parse dynamic entry.
-            switch (tag) {
-            case elf_dyn::tag::rel:
-                if (std::get_if<const elf_rela *>(&relocations)) {
-                    break;
-                }
-                relocations = reinterpret_cast<const elf_rel *>(
-                    base_difference + dynamic_entry.d_ptr);
-                break;
-            case elf_dyn::tag::rel_size:
-                if (relocations_size) {
-                    break;
-                }
-                relocations_size = dynamic_entry.d_val;
-                break;
-            case elf_dyn::tag::rela:
-                relocations = reinterpret_cast<const elf_rela *>(
-                    base_difference + dynamic_entry.d_ptr);
-                break;
-            case elf_dyn::tag::rela_size:
-                relocations_size = dynamic_entry.d_val;
-                break;
-            default:
-                break;
-            }
-        }
-
-        // Get relocation types.
-        std::uint32_t relative_relocation{};
-        switch (elf_machine(m_header->e_machine)) {
-        case elf_machine::aarch64:
-            relative_relocation = elf_relocation_type::aarch64_relative;
-            break;
-        case elf_machine::x86_64:
-            relative_relocation = elf_relocation_type::x86_64_relative;
-            break;
-        default:
-            return nullptr;
-        }
-
-        // Returns relocation type.
-        auto relocation_type = [](auto value) {
-            return value & 0xffffffff;
-        };
-
-        // Define how relocations are to be done .
-        auto relocate = [&](auto relocations) {
-            // The relocation type.
-            using relocation_kind = std::remove_pointer_t<
-                std::remove_cv_t<decltype(relocations)>>;
-
-            // Iterate rela entries.
-            for (std::size_t i{}; i < relocations_size; ++i) {
-                auto & relocation = relocations[i];
-
-                // If not relative, skip.
-                if (relocation_type(relocation.r_info) !=
-                    relative_relocation) {
-                    continue;
-                }
-
-                // Get relocation target.
-                auto & target = *reinterpret_cast<std::uintptr_t *>(
-                    base_difference + relocation.r_offset);
-
-                // If rela, use addend, else use target.
-                if constexpr (std::is_same_v<relocation_kind, elf_rela>) {
-                    // Perform the relocation by assigning base
-                    // plus addend.
-                    target =
-                        reinterpret_cast<std::uintptr_t>(base_difference) +
-                        relocation.r_addend;
-                } else {
-                    // Perform the relocation by adding base to
-                    // target.
-                    target +=
-                        reinterpret_cast<std::uintptr_t>(base_difference);
-                }
-            }
-        };
-
-        // Perform the relocations.
-        std::visit(relocate, relocations);
-
-        // Iterate the program headers and change memory protection.
-        for (std::size_t i{}; i < m_header->e_phnum; ++i) {
-            auto & program_header = m_program_headers[i];
-
-            // If not loadable, skip.
-            if (elf_phdr::type::load !=
-                elf_phdr::type(program_header.p_type)) {
-                continue;
-            }
-
-            // Protect the memory range.
-            protect(base_difference + program_header.p_vaddr,
-                    program_header.p_memsz,
-                    memory_protection(program_header.p_flags));
-        }
+        // Protect ELF segments.
+        protect_segments(std::forward<Protect>(protect), base_difference);
 
         // Return the loaded ELF base.
         return base;
@@ -434,13 +318,239 @@ public:
     }
 
 private:
+    /**
+     * Iterates the loadable segments using the program headers
+     * and maps them into memory, given the loaded ELF base difference.
+     */
+    void map_segments(std::ptrdiff_t base_difference)
+    {
+        // Iterate the program headers and load them.
+        for (std::size_t i{}; i < m_header->e_phnum; ++i) {
+            auto & program_header = m_program_headers[i];
+
+            // If not loadable, skip.
+            if (elf_phdr::type::load !=
+                elf_phdr::type(program_header.p_type)) {
+                continue;
+            }
+
+            // Load the segment.
+            std::copy_n(m_file_data + program_header.p_offset,
+                        program_header.p_filesz,
+                        reinterpret_cast<unsigned char *>(
+                            base_difference + program_header.p_vaddr));
+
+            // Zero memory.
+            std::fill_n(reinterpret_cast<unsigned char *>(
+                            base_difference + program_header.p_vaddr +
+                            program_header.p_filesz),
+                        program_header.p_memsz - program_header.p_filesz,
+                        0);
+        }
+    }
+
+    /**
+     * Returns the relocation table and its size, using
+     * the given base difference and the dynamic segment.
+     */
+    auto get_relocations(std::ptrdiff_t base_difference)
+        -> std::tuple<std::variant<const elf_rela *, const elf_rel *>,
+                      std::size_t>
+    {
+        const elf_rel * rel{};
+        std::size_t rel_size{};
+        const elf_rela * rela{};
+        std::size_t rela_size{};
+
+        // Parse the dynamic segment.
+        for (std::size_t i{};; ++i) {
+            auto & dynamic_entry = m_dynamic[i];
+            auto tag = elf_dyn::tag(dynamic_entry.d_tag);
+
+            // If the end is reached.
+            if (elf_dyn::tag::null == tag) {
+                break;
+            }
+
+            // Parse dynamic entry.
+            switch (tag) {
+            case elf_dyn::tag::rel:
+                rel = reinterpret_cast<const elf_rel *>(
+                    base_difference + dynamic_entry.d_ptr);
+                break;
+            case elf_dyn::tag::rel_size:
+                rel_size = dynamic_entry.d_val;
+                break;
+            case elf_dyn::tag::rela:
+                rela = reinterpret_cast<const elf_rela *>(
+                    base_difference + dynamic_entry.d_ptr);
+                break;
+            case elf_dyn::tag::rela_size:
+                rela_size = dynamic_entry.d_val;
+                break;
+            default:
+                break;
+            }
+        }
+
+        // The relocation table and size to be returned.
+        std::variant<const elf_rela *, const elf_rel *> relocations;
+        std::size_t relocations_size{};
+
+        // If rela relocations exist, prefer them, else use rel
+        // relocations.
+        if (rela) {
+            relocations = rela;
+            relocations_size = rela_size;
+        } else {
+            relocations = rel;
+            relocations_size = rel_size;
+        }
+
+        // Return the relocation table and size.
+        return {relocations, relocations_size};
+    }
+
+    /**
+     * Returns the relative relocation type.
+     * The behavior is undefined if the ELF machine value
+     * is not defined in the 'elf_machine' enumeration.
+     */
+    elf_relocation_type relative_relocation_value()
+    {
+        switch (elf_machine(m_header->e_machine)) {
+        case elf_machine::aarch64:
+            return elf_relocation_type::aarch64_relative;
+        case elf_machine::x86_64:
+            return elf_relocation_type::x86_64_relative;
+        }
+    }
+
+    /**
+     * Returns the relocation type given a rel/rela info.
+     */
+    static int parse_relocation_type(std::uintptr_t info)
+    {
+        return info & 0xffffffff;
+    }
+
+    /**
+     * Relocates the ELF file. Does not resolve symbols.
+     */
+    template <typename Relocations>
+    void relocate(Relocations && relocations,
+                  std::size_t relocations_size,
+                  std::ptrdiff_t base_difference)
+    {
+        // Define the relocation strategy.
+        auto relocate = [&](auto relocations) {
+            // The relocation type.
+            using relocation_kind = std::remove_pointer_t<
+                std::remove_cv_t<decltype(relocations)>>;
+
+            // Get relocation types.
+            auto relative_relocation = relative_relocation_value();
+
+            // Iterate rela entries.
+            for (std::size_t i{}; i < relocations_size; ++i) {
+                auto & relocation = relocations[i];
+
+                // If not relative, skip.
+                if (parse_relocation_type(relocation.r_info) !=
+                    relative_relocation) {
+                    continue;
+                }
+
+                // Get relocation target.
+                auto & target = *reinterpret_cast<std::uintptr_t *>(
+                    base_difference + relocation.r_offset);
+
+                // If rela, use addend, else use target.
+                if constexpr (std::is_same_v<relocation_kind, elf_rela>) {
+                    // Perform the relocation by assigning base
+                    // plus addend.
+                    target = base_difference + relocation.r_addend;
+                } else {
+                    // Perform the relocation by adding base to
+                    // target.
+                    target += base_difference;
+                }
+            }
+        };
+
+        // Perform the relocations.
+        std::visit(relocate, relocations);
+    }
+
+    /**
+     * Iterates the loadable segments and protects them using the
+     * protection function.
+     */
+    template <typename Protect>
+    void protect_segments(Protect && protect,
+                          std::ptrdiff_t base_difference)
+    {
+        // Iterate the program headers and change memory protection.
+        for (std::size_t i{}; i < m_header->e_phnum; ++i) {
+            auto & program_header = m_program_headers[i];
+
+            // If not loadable, skip.
+            if (elf_phdr::type::load !=
+                elf_phdr::type(program_header.p_type)) {
+                continue;
+            }
+
+            // Protect the memory range.
+            protect(reinterpret_cast<unsigned char *>(
+                        base_difference + program_header.p_vaddr),
+                    program_header.p_memsz,
+                    memory_protection(program_header.p_flags));
+        }
+    }
+
+private:
+    /**
+     * The ELF file data pointer. If the ELF is loaded
+     * this is also served as the base address.
+     */
     const unsigned char * m_file_data{};
+
+    /**
+     * The ELF header pointer.
+     */
     const elf_header * m_header{};
+
+    /**
+     * Points to the program header table.
+     */
     const elf_phdr * m_program_headers{};
+
+    /**
+     * The address of the loadable segment with the
+     * lowest virtual address, aligned to page size.
+     */
     std::uintptr_t m_preferred_base{};
+
+    /**
+     * The program header which points to the dynamic
+     * segment.
+     */
     const elf_phdr * m_dynamic_phdr{};
+
+    /**
+     * The dynamic segment.
+     */
     const elf_dyn * m_dynamic{};
+
+    /**
+     * The last program header which points to a loadable
+     * segment.
+     */
     const elf_phdr * m_last_load_phdr{};
+
+    /**
+     * The size in memory that the ELF requires.
+     */
     std::size_t m_memory_size{};
 };
 
