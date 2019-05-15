@@ -10,10 +10,14 @@ extern "C" {
 #include <Protocol/LoadedImage.h>
 #include <Protocol/MpService.h>
 }
+#include "zpp/scope_guard.h"
+#include "zpp/x64/asm.h"
 #include <cstddef>
 #include <cstdint>
 #include <string>
 
+namespace zpp
+{
 /**
  * The boot services.
  */
@@ -111,6 +115,11 @@ static int call_on_cpu(std::size_t cpuid,
                        void * context)
 {
     int result = -1;
+
+    // Save this GDT and restore it at function exit.
+    alignas(0x10) unsigned char gdt_layout[0x10]{};
+    x64::sgdt(gdt_layout);
+    scope_guard restore_gdt = [&] { x64::lgdt(gdt_layout); };
 
     // If this is the main CPU, just call the user function.
     if (0 == cpuid) {
@@ -383,3 +392,5 @@ extern "C" EFI_STATUS EFIAPI uefi_main(EFI_HANDLE image_handle,
     // Return success anyway, no image was found is considered ok.
     return EFI_SUCCESS;
 }
+
+} // namespace zpp
