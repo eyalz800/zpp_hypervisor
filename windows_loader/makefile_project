@@ -5,7 +5,7 @@ TARGET_ABIS := x86_64
 OUTPUT_TYPE := executable
 INCLUDE_DIRECTORIES := \
 	$(shell find . -type d -name "include") \
-	$(shell find ../loader -type d -name "include")
+	$(shell find ../hypervisor -type d -name "include")
 FLAGS := -pedantic -Wall -Wextra -Werror -DZPP_ELF_BINARY_NO_HIDDEN \
 	-Wno-format-security \
 	-Wno-unused-command-line-argument \

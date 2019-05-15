@@ -107,10 +107,10 @@
     <ClCompile Include="src\x64\vm_exit_entry.cpp" />
     <ClCompile Include="src\crt\crt.cpp" />
     <ClCompile Include="src\hypervisor\main.cpp" />
-    <ClCompile Include="src\elf\module_region.cpp" />
     <ClCompile Include="src\hypervisor\state.cpp" />
   </ItemGroup>
   <ItemGroup>
+    <ClInclude Include="include\zpp\elf_file.h" />
     <ClInclude Include="include\zpp\hypervisor\hypervisor.h" />
     <ClInclude Include="include\zpp\scope_guard.h" />
     <ClInclude Include="include\zpp\small_map.h" />
@@ -132,7 +132,7 @@
     <ClInclude Include="include\zpp\maybe.h" />
     <ClInclude Include="include\zpp\x64\intel\vmcs.h" />
     <ClInclude Include="include\zpp\x64\intel\ept_pointer.h" />
-    <ClInclude Include="include\zpp\elf\module_region.h" />
+    <ClInclude Include="include\zpp\elf_image_base.h" />
     <ClInclude Include="include\zpp\hypervisor\state.h" />
     <ClInclude Include="include\zpp\x64\intel\vmcs_fields.h" />
     <ClInclude Include="include\zpp\x64\intel\ept.h" />

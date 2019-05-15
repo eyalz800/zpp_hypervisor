@@ -69,7 +69,7 @@ public:
      * Maps an address from another page table.
      */
     template <typename PageTable>
-    void map_from(void * base_address,
+    void map_from(const void * base_address,
                   std::size_t size,
                   protection protection,
                   PageTable && other_page_table);
@@ -109,7 +109,7 @@ private:
      * object has not completed initialization.
      */
     template <typename PageTable>
-    void uninitialized_map_from(void * base_address,
+    void uninitialized_map_from(const void * base_address,
                                 std::size_t size,
                                 protection protection,
                                 PageTable && other_page_table);
