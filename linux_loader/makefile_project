@@ -6,7 +6,7 @@ TARGET_ABIS := $(SUPPORTED_ARCHITECTURES)
 OUTPUT_TYPE := relocatable
 INCLUDE_DIRECTORIES := \
 	$(shell find . -type d -name "include") \
-	$(shell find ../loader -type d -name "include")
+	$(shell find ../hypervisor -type d -name "include")
 FLAGS := -pedantic -Wall -Wextra -Werror \
 	-Wno-format-security \
 	-stdlib=libc++ \

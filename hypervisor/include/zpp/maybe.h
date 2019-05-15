@@ -271,7 +271,7 @@ private:
  *     if (!value) {
  *         return my_error::something_really_bad;
  *     }
- * 
+ *
  *     return my_error::success;
  * }
  *

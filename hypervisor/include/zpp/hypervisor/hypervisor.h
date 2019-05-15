@@ -229,7 +229,7 @@ private:
     /**
      * The base of the current module.
      */
-    std::uintptr_t module_base{};
+    const unsigned char * module_base{};
 
     /**
      * The size of the current module in bytes.
