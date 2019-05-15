@@ -19,9 +19,6 @@
     </ProjectConfiguration>
   </ItemGroup>
   <ItemGroup>
-    <ClInclude Include="include\zpp\elf_file.h" />
-  </ItemGroup>
-  <ItemGroup>
     <ClCompile Include="src\main.cpp" />
   </ItemGroup>
   <ItemGroup>
@@ -76,14 +73,14 @@
     <NMakeCleanCommandLine>C:\Windows\sysnative\bash -c "make clean"</NMakeCleanCommandLine>
     <NMakeReBuildCommandLine>C:\Windows\sysnative\bash -c "make clean &amp;&amp; make"</NMakeReBuildCommandLine>
     <NMakePreprocessorDefinitions>WIN32;_DEBUG;$(NMakePreprocessorDefinitions)</NMakePreprocessorDefinitions>
-    <NMakeIncludeSearchPath>include</NMakeIncludeSearchPath>
+    <NMakeIncludeSearchPath>../hypervisor/include;include;</NMakeIncludeSearchPath>
   </PropertyGroup>
   <PropertyGroup Condition="'$(Configuration)|$(Platform)'=='Debug|x64'">
     <NMakeBuildCommandLine>C:\Windows\sysnative\bash -c make</NMakeBuildCommandLine>
     <NMakeCleanCommandLine>C:\Windows\sysnative\bash -c "make clean"</NMakeCleanCommandLine>
     <NMakeReBuildCommandLine>C:\Windows\sysnative\bash -c "make clean &amp;&amp; make"</NMakeReBuildCommandLine>
     <NMakePreprocessorDefinitions>_DEBUG;$(NMakePreprocessorDefinitions)</NMakePreprocessorDefinitions>
-    <NMakeIncludeSearchPath>include</NMakeIncludeSearchPath>
+    <NMakeIncludeSearchPath>../hypervisor/include;include;</NMakeIncludeSearchPath>
   </PropertyGroup>
   <PropertyGroup Condition="'$(Configuration)|$(Platform)'=='Release|Win32'">
     <NMakeBuildCommandLine>C:\Windows\sysnative\bash -c "make mode=release"</NMakeBuildCommandLine>
@@ -91,7 +88,7 @@
     <NMakeCleanCommandLine>C:\Windows\sysnative\bash -c "make clean"</NMakeCleanCommandLine>
     <NMakeReBuildCommandLine>C:\Windows\sysnative\bash -c "make clean &amp;&amp; make mode=release"</NMakeReBuildCommandLine>
     <NMakePreprocessorDefinitions>WIN32;NDEBUG;$(NMakePreprocessorDefinitions)</NMakePreprocessorDefinitions>
-    <NMakeIncludeSearchPath>include;C:/Temp/include</NMakeIncludeSearchPath>
+    <NMakeIncludeSearchPath>../hypervisor/include;include;C:/Temp/include</NMakeIncludeSearchPath>
   </PropertyGroup>
   <PropertyGroup Condition="'$(Configuration)|$(Platform)'=='Release|x64'">
     <NMakeBuildCommandLine>C:\Windows\sysnative\bash -c "make mode=release"</NMakeBuildCommandLine>
@@ -99,7 +96,7 @@
     <NMakeCleanCommandLine>C:\Windows\sysnative\bash -c "make clean"</NMakeCleanCommandLine>
     <NMakeReBuildCommandLine>C:\Windows\sysnative\bash -c "make clean &amp;&amp; make mode=release"</NMakeReBuildCommandLine>
     <NMakePreprocessorDefinitions>NDEBUG;$(NMakePreprocessorDefinitions)</NMakePreprocessorDefinitions>
-    <NMakeIncludeSearchPath>include;C:/Temp/include</NMakeIncludeSearchPath>
+    <NMakeIncludeSearchPath>../hypervisor/include;include;C:/Temp/include</NMakeIncludeSearchPath>
   </PropertyGroup>
   <ItemDefinitionGroup>
   </ItemDefinitionGroup>

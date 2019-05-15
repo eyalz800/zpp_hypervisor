@@ -97,7 +97,7 @@ void page_table::map_from(std::uint64_t base_address,
 }
 
 template <typename PageTable>
-void page_table::map_from(void * base_address,
+void page_table::map_from(const void * base_address,
                           std::size_t size,
                           protection protection,
                           PageTable && other_page_table)
@@ -134,7 +134,7 @@ void page_table::uninitialized_map_from(std::uint64_t base_address,
 }
 
 template <typename PageTable>
-void page_table::uninitialized_map_from(void * base_address,
+void page_table::uninitialized_map_from(const void * base_address,
                                         std::size_t size,
                                         protection protection,
                                         PageTable && other_page_table)

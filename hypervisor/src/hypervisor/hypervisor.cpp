@@ -1,5 +1,6 @@
 #include "zpp/hypervisor/hypervisor.h"
-#include "zpp/elf/module_region.h"
+#include "zpp/elf_file.h"
+#include "zpp/elf_image_base.h"
 #include "zpp/maybe.h"
 #include "zpp/scope_guard.h"
 #include "zpp/x64/asm.h"
@@ -55,8 +56,12 @@ void hypervisor::initialize_registers()
 
 void hypervisor::initialize_module_region()
 {
-    std::tie(this->module_base, this->module_size) =
-        elf::get_module_region();
+    // Compute the module base.
+    this->module_base = elf_image_base();
+
+    // Compute the module memory size.
+    this->module_size =
+        elf_file(this->module_base, elf_file::state::loaded).memory_size();
 }
 
 void hypervisor::initialize_os_page_table()
@@ -95,10 +100,13 @@ zpp::error hypervisor::initialize_module_physical_to_virtual()
         return error::physical_to_virtual_capacity_error;
     }
 
+    // The module base.
+    auto module_base = reinterpret_cast<std::uintptr_t>(this->module_base);
+
     // Iterate all pages and perform the virtual to physical conversion.
     for (std::size_t i{}; i < number_of_pages; ++i) {
         // Calculate the virtual address.
-        auto address = this->module_base + (page_size * i);
+        auto address = module_base + (page_size * i);
 
         // Calculate the physical address.
         auto physical_address =
