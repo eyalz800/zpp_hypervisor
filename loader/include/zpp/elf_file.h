@@ -33,6 +33,15 @@ public:
     };
 
     /**
+     * Specifies whether the given ELF file is loaded or unloaded.
+     */
+    enum class state
+    {
+        unloaded,
+        loaded,
+    };
+
+    /**
      * Represents the memory protection of loadable segments.
      */
     using memory_protection = enumerations::memory_protection;
@@ -139,14 +148,11 @@ public:
     elf_file() = default;
 
     /**
-     * Constructs an ELF file from an unloaded ELF file in memory.
+     * Constructs an ELF file from an ELF file in memory.
      */
-    elf_file(const void * file_data, std::size_t size) :
+    elf_file(const void * file_data, state elf_state) :
         // The ELF file data.
         m_file_data(reinterpret_cast<const unsigned char *>(file_data)),
-
-        // The ELF file data size.
-        m_file_size(size),
 
         // The ELF header is at the beginning of the ELF file data.
         m_header(reinterpret_cast<const elf_header *>(file_data)),
@@ -154,17 +160,6 @@ public:
         // The ELF program headers.
         m_program_headers(reinterpret_cast<const elf_phdr *>(
             m_file_data + m_header->e_phoff)),
-
-        // Find the dynamic segment according to the program header type.
-        m_dynamic(reinterpret_cast<const elf_dyn *>(
-            m_file_data +
-            std::find_if(m_program_headers,
-                         m_program_headers + m_header->e_phnum,
-                         [](auto & program_header) {
-                             return elf_phdr::type::dynamic ==
-                                    elf_phdr::type(program_header.p_type);
-                         })
-                ->p_offset)),
 
         // The preferred base is the first load segment virtual address
         // rounded down to page boundary.
@@ -177,6 +172,23 @@ public:
                          })
                 ->p_vaddr &
             ~0xfff),
+
+        // Find the dynamic program header according to the program header
+        // type.
+        m_dynamic_phdr(std::find_if(m_program_headers,
+                                    m_program_headers + m_header->e_phnum,
+                                    [](auto & program_header) {
+                                        return elf_phdr::type::dynamic ==
+                                               elf_phdr::type(
+                                                   program_header.p_type);
+                                    })),
+
+        // Compute the dynamic segment address.
+        m_dynamic(reinterpret_cast<const elf_dyn *>(
+            (state::unloaded == elf_state)
+                ? m_file_data + m_dynamic_phdr->p_offset
+                : m_dynamic_phdr->p_vaddr +
+                      (m_file_data - m_preferred_base))),
 
         // Finding the last load segment program header.
         m_last_load_phdr(
@@ -197,44 +209,12 @@ public:
                        ~0xfff) -
                       m_preferred_base)
     {
-        // Parse the dynamic segment.
-        for (std::size_t i{};; ++i) {
-            auto & dynamic_entry = m_dynamic[i];
-            auto tag = elf_dyn::tag(dynamic_entry.d_tag);
-
-            // If the end is reached.
-            if (elf_dyn::tag::null == tag) {
-                break;
-            }
-
-            // Parse dynamic entry.
-            switch (tag) {
-            case elf_dyn::tag::rel:
-                if (std::get_if<const elf_rela *>(&m_relocations)) {
-                    break;
-                }
-                m_relocations = reinterpret_cast<const elf_rel *>(
-                    m_file_data + dynamic_entry.d_ptr);
-                break;
-            case elf_dyn::tag::rel_size:
-                if (m_relocations_size) {
-                    break;
-                }
-                m_relocations_size = dynamic_entry.d_val;
-                break;
-            case elf_dyn::tag::rela:
-                m_relocations = reinterpret_cast<const elf_rela *>(
-                    m_file_data + dynamic_entry.d_ptr);
-                break;
-            case elf_dyn::tag::rela_size:
-                m_relocations_size = dynamic_entry.d_val;
-                break;
-            default:
-                break;
-            }
-        }
     }
 
+    /**
+     * Loads the ELF file into memory.
+     * The behavior is undefined if the ELF file is already loaded.
+     */
     template <typename Allocate, typename Protect>
     void * load(Allocate && allocate, Protect && protect)
     {
@@ -271,6 +251,47 @@ public:
                         0);
         }
 
+        // The relocations and relocations size.
+        std::variant<const elf_rela *, const elf_rel *> relocations;
+        std::size_t relocations_size{};
+
+        // Parse the dynamic segment.
+        for (std::size_t i{};; ++i) {
+            auto & dynamic_entry = m_dynamic[i];
+            auto tag = elf_dyn::tag(dynamic_entry.d_tag);
+
+            // If the end is reached.
+            if (elf_dyn::tag::null == tag) {
+                break;
+            }
+
+            // Parse dynamic entry.
+            switch (tag) {
+            case elf_dyn::tag::rel:
+                if (std::get_if<const elf_rela *>(&relocations)) {
+                    break;
+                }
+                relocations = reinterpret_cast<const elf_rel *>(
+                    base_difference + dynamic_entry.d_ptr);
+                break;
+            case elf_dyn::tag::rel_size:
+                if (relocations_size) {
+                    break;
+                }
+                relocations_size = dynamic_entry.d_val;
+                break;
+            case elf_dyn::tag::rela:
+                relocations = reinterpret_cast<const elf_rela *>(
+                    base_difference + dynamic_entry.d_ptr);
+                break;
+            case elf_dyn::tag::rela_size:
+                relocations_size = dynamic_entry.d_val;
+                break;
+            default:
+                break;
+            }
+        }
+
         // Get relocation types.
         std::uint32_t relative_relocation{};
         switch (elf_machine(m_header->e_machine)) {
@@ -296,7 +317,7 @@ public:
                 std::remove_cv_t<decltype(relocations)>>;
 
             // Iterate rela entries.
-            for (std::size_t i{}; i < m_relocations_size; ++i) {
+            for (std::size_t i{}; i < relocations_size; ++i) {
                 auto & relocation = relocations[i];
 
                 // If not relative, skip.
@@ -326,7 +347,7 @@ public:
         };
 
         // Perform the relocations.
-        std::visit(relocate, m_relocations);
+        std::visit(relocate, relocations);
 
         // Iterate the program headers and change memory protection.
         for (std::size_t i{}; i < m_header->e_phnum; ++i) {
@@ -365,14 +386,6 @@ public:
     }
 
     /**
-     * Returns the file size.
-     */
-    std::size_t file_size() const
-    {
-        return m_file_size;
-    }
-
-    /**
      * Returns the ELF header.
      */
     const elf_header & header() const
@@ -386,6 +399,14 @@ public:
     const elf_phdr * program_headers() const
     {
         return m_program_headers;
+    }
+
+    /**
+     * Returns the ELF dynamic program header.
+     */
+    const elf_phdr & dynamic_program_header() const
+    {
+        return *m_program_headers;
     }
 
     /**
@@ -414,15 +435,13 @@ public:
 
 private:
     const unsigned char * m_file_data{};
-    std::size_t m_file_size{};
     const elf_header * m_header{};
     const elf_phdr * m_program_headers{};
-    const elf_dyn * m_dynamic{};
     std::uintptr_t m_preferred_base{};
+    const elf_phdr * m_dynamic_phdr{};
+    const elf_dyn * m_dynamic{};
     const elf_phdr * m_last_load_phdr{};
     std::size_t m_memory_size{};
-    std::variant<const elf_rel *, const elf_rela *> m_relocations{};
-    std::size_t m_relocations_size{};
 };
 
 } // namespace zpp

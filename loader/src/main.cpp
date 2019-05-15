@@ -18,7 +18,7 @@ zpp_load_elf(void * (*allocate_rwx)(std::size_t),
                  std::uintptr_t (*)(std::uintptr_t)))
 {
     // Invoke the elf_loader.
-    elf_file elf(zpp_elf_binary, zpp_elf_binary_size);
+    elf_file elf(zpp_elf_binary, elf_file::state::unloaded);
     auto base = elf.load(
         allocate_rwx,
         [](const void *, std::size_t, elf_file::memory_protection) {});
