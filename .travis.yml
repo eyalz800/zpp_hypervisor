@@ -5,7 +5,6 @@ branches:
   - master
   - dev
 
-
 ubuntu_settings: &ubuntu_settings
   install:
     - sudo add-apt-repository "deb http://apt.llvm.org/xenial/ llvm-toolchain-xenial-$CLANG_VERSION main"
@@ -67,13 +66,15 @@ windows_settings: &windows_settings
     - wsl ./.install.sh
     - export LINUX_KERNEL=$(cat .linux_kernel)
     - wsl rm .install.sh .linux_kernel
+    - git clone --branch UDK2018 https://github.com/tianocore/edk2 C:/Temp/edk2
 
   script:
     - echo "SUPPORTED_ARCHITECTURES := x86_64" > environment.config
     - echo "SELECTED_ARCHITECTURE := x86_64" >> environment.config
-    - echo "BUILD_DRIVERS := linux" >> environment.config
+    - echo "BUILD_DRIVERS := linux windows uefi" >> environment.config
     - echo "HYPERVISOR_WAIT_FOR_DEBUGGER := 0" >> environment.config
     - echo "LINUX_KERNEL := $LINUX_KERNEL" >> environment.config
+    - echo "EDK2_ROOT := C:/Temp/edk2" >> environment.config
     - wsl make -j
 
 matrix:
