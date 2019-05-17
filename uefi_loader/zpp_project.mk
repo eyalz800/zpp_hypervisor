@@ -1,7 +1,6 @@
 OUTPUT_DIRECTORY_ROOT := ../out
-OBJECT_DIRECTORY_ROOT := ./obj
-TARGET_NAME := zpp_loader.sys
-TARGET_ABIS := x86_64
+TARGET_NAME := zpp_loader.efi
+TARGET_ABIS := $(SUPPORTED_ARCHITECTURES)
 OUTPUT_TYPE := executable
 INCLUDE_DIRECTORIES := \
 	$(shell find . -type d -name "include") \
@@ -10,19 +9,16 @@ FLAGS := -pedantic -Wall -Wextra -Werror -DZPP_ELF_BINARY_NO_HIDDEN \
 	-Wno-format-security \
 	-Wno-unused-command-line-argument \
 	-DZPP_ELF_BINARY_PATH="\"../../out/$(CONFIGURATION_NAME)/$(TARGET_ABI)/zpp_hypervisor\"" \
-	-nostdlib \
 	-fno-exceptions \
 	-ffreestanding \
 	-fno-rtti \
 	-ffreestanding \
 	-mno-red-zone \
-	-Wl,-subsystem:native \
-	-Wl,/driver:wdm \
+	-Wl,-subsystem:efi_application \
 	-Wl,/dynamicbase \
 	-Wl,/nodefaultlib \
 	-Wl,/dll \
-	-Wl,ntoskrnl.lib \
-	-Wl,-entry:driver_entry
+	-Wl,-entry:uefi_main
 FLAGS_DEBUG :=
 FLAGS_RELEASE := -D NDEBUG -D _NDEBUG \
 	-Os \
@@ -43,7 +39,12 @@ ASFLAGS_RELEASE :=
 STATIC_LIBRARIES := 
 SHARED_LIBRARIES :=
 STRIP_FLAGS := -s
-SOURCE_DIRECTORIES := ./src $(realpath ../loader/src)
+SOURCE_DIRECTORIES := ./src ../loader/src
 SOURCE_FILES :=
 
-$(OBJECT_DIRECTORY_ROOT)/$(CONFIGURATION_NAME)/$(TARGET_ABI)/$(realpath ../loader/src)/elf_binary.o: ../out/$(CONFIGURATION_NAME)/$(TARGET_ABI)/zpp_hypervisor
+ifeq ($(ZPP_DEPENDENCIES), true)
+
+$(BUILD_DIRECTORY)/../loader/src/elf_binary.o: \
+	../out/$(CONFIGURATION_NAME)/$(TARGET_ABI)/zpp_hypervisor
+
+endif

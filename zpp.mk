@@ -1,6 +1,20 @@
 .SUFFIXES:
 .SECONDARY:
-.PHONY: all build _build verify_mode verify_output_type build_start_message build_mkdirs build_strip build_finished_message rebuild _rebuild clean_mode clean _clean
+.PHONY: \
+	all \
+	build \
+	_build \
+	verify_mode \
+	verify_output_type \
+	build_start_message \
+	build_mkdirs \
+	build_strip \
+	build_finished_message \
+	rebuild \
+	_rebuild \
+	clean_mode \
+	clean \
+	_clean
 
 mode ?= debug
 assembly ?= false
@@ -10,8 +24,11 @@ GENERATE_ASSEMBLY := $(assembly)
 
 all: build
 THIS_MAKEFILE := $(lastword $(MAKEFILE_LIST))
-include makefile_config
-include makefile_project
+OUTPUT_DIRECTORY_ROOT := out
+OBJECT_DIRECTORY_ROOT := obj
+
+include zpp_config.mk
+include zpp_project.mk
 
 ifeq ($(TARGET_ABIS), )
 build: _build
@@ -36,51 +53,56 @@ COMMA := ,
 EMPTY :=
 SPACE := $(EMPTY) $(EMPTY)
 
-FLAGS := $(FLAGS) $(patsubst %, -I%, $(INCLUDE_DIRECTORIES)) $(patsubst %, -l:%, $(SHARED_LIBRARIES)) $(patsubst %, -l:%, $(STATIC_LIBRARIES))
+ZPP_FLAGS := $(FLAGS) $(patsubst %, -I%, $(INCLUDE_DIRECTORIES)) $(patsubst %, -l:%, $(SHARED_LIBRARIES)) $(patsubst %, -l:%, $(STATIC_LIBRARIES))
 
 ifeq ($(CONFIGURATION_NAME), debug)
-FLAGS := $(FLAGS) $(FLAGS_DEBUG)
-CFLAGS := $(CFLAGS) $(CFLAGS_DEBUG) $(FLAGS)
-CXXFLAGS := $(CXXFLAGS) $(CXXFLAGS_DEBUG) $(FLAGS)
-ASFLAGS := $(ASFLAGS) $(ASFLAGS_DEBUG) $(FLAGS)
+ZPP_FLAGS := $(ZPP_FLAGS) $(FLAGS_DEBUG)
+ZPP_CFLAGS := $(CFLAGS) $(CFLAGS_DEBUG) $(ZPP_FLAGS)
+ZPP_CXXFLAGS := $(CXXFLAGS) $(CXXFLAGS_DEBUG) $(ZPP_FLAGS)
+ZPP_ASFLAGS := $(ASFLAGS) $(ASFLAGS_DEBUG) $(ZPP_FLAGS)
 else ifeq ($(CONFIGURATION_NAME), release)
-FLAGS := $(FLAGS) $(FLAGS_RELEASE)
-CFLAGS := $(CFLAGS) $(CFLAGS_RELEASE) $(FLAGS)
-CXXFLAGS := $(CXXFLAGS) $(CXXFLAGS_RELEASE) $(FLAGS)
-ASFLAGS := $(ASFLAGS) $(ASFLAGS_RELEASE) $(FLAGS)
+ZPP_FLAGS := $(ZPP_FLAGS) $(FLAGS_RELEASE)
+ZPP_CFLAGS := $(CFLAGS) $(CFLAGS_RELEASE) $(ZPP_FLAGS)
+ZPP_CXXFLAGS := $(CXXFLAGS) $(CXXFLAGS_RELEASE) $(ZPP_FLAGS)
+ZPP_ASFLAGS := $(ASFLAGS) $(ASFLAGS_RELEASE) $(ZPP_FLAGS)
 endif
 
-OUTPUT_DIRECTORY_ROOT ?= out
-OBJECT_DIRECTORY_ROOT ?= obj
-BUILD_DIRECTORY := $(OBJECT_DIRECTORY_ROOT)/$(CONFIGURATION_NAME)/$(TARGET_ABI)
-BINARY_DIRECTORY := $(OUTPUT_DIRECTORY_ROOT)/$(CONFIGURATION_NAME)/$(TARGET_ABI)
 ifeq ($(SOURCE_DIRECTORIES), )
-SOURCE_FILES := $(SOURCE_FILES)
+ZPP_SOURCE_FILES := $(SOURCE_FILES)
 else
-SOURCE_FILES := $(SOURCE_FILES) \
+ZPP_SOURCE_FILES := $(SOURCE_FILES) \
 	$(shell find $(SOURCE_DIRECTORIES) -type f -name "*.S") \
 	$(shell find $(SOURCE_DIRECTORIES) -type f -name "*.c") \
 	$(shell find $(SOURCE_DIRECTORIES) -type f -name "*.cc") \
 	$(shell find $(SOURCE_DIRECTORIES) -type f -name "*.cpp")
 endif
 
-ifeq ($(SOURCE_FILES), )
+ifeq ($(ZPP_SOURCE_FILES), )
 $(error No source files)
 endif
 
-ORIGINAL_SOURCE_FILES := $(SOURCE_FILES)
+BUILD_DIRECTORY := $(OBJECT_DIRECTORY_ROOT)/$(CONFIGURATION_NAME)/$(TARGET_ABI)
+BINARY_DIRECTORY := $(OUTPUT_DIRECTORY_ROOT)/$(CONFIGURATION_NAME)/$(TARGET_ABI)
 
-OBJECT_FILES := $(patsubst %.c, %.o, $(SOURCE_FILES))
-OBJECT_FILES := $(OBJECT_FILES) $(patsubst %.cpp, %.o, $(SOURCE_FILES))
-OBJECT_FILES := $(OBJECT_FILES) $(patsubst %.cc, %.o, $(SOURCE_FILES))
-OBJECT_FILES := $(OBJECT_FILES) $(patsubst %.S, %.o, $(SOURCE_FILES))
+PATH_FROM_ROOT := $(shell echo $(ZPP_SOURCE_FILES) | grep -o "\(\.\./\)*" | sort --unique | tail -n 1)
+ifneq ($(PATH_FROM_ROOT), )
+BUILD_SUBDIRECTORY := $(shell realpath . --relative-to $(PATH_FROM_ROOT))
+BUILD_DIRECTORY := $(BUILD_DIRECTORY)/$(BUILD_SUBDIRECTORY)
+endif
+
+OBJECT_FILES := $(patsubst %.c, %.o, $(ZPP_SOURCE_FILES))
+OBJECT_FILES := $(OBJECT_FILES) $(patsubst %.cpp, %.o, $(ZPP_SOURCE_FILES))
+OBJECT_FILES := $(OBJECT_FILES) $(patsubst %.cc, %.o, $(ZPP_SOURCE_FILES))
+OBJECT_FILES := $(OBJECT_FILES) $(patsubst %.S, %.o, $(ZPP_SOURCE_FILES))
 OBJECT_FILES := $(patsubst %, $(BUILD_DIRECTORY)/%, $(OBJECT_FILES))
 OBJECT_FILES := $(filter %.o, $(OBJECT_FILES))
 OBJECT_FILES_DIRECTORIES := $(dir $(OBJECT_FILES))
 
 DEPENDENCY_FILES := $(patsubst %.o, %.d, $(OBJECT_FILES))
 
-ifeq ($(OUTPUT_TYPE), executable)
+ifeq ($(OUTPUT_TYPE), default)
+	LINK_COMMAND := $(LINK) -o $(BINARY_DIRECTORY)/$(TARGET_NAME) $(OBJECT_FILES) $(FLAGS)
+else ifeq ($(OUTPUT_TYPE), executable)
 	LINK_COMMAND := $(LINK) -o $(BINARY_DIRECTORY)/$(TARGET_NAME) $(OBJECT_FILES) $(FLAGS)
 else ifeq ($(OUTPUT_TYPE), shared-lib)
 	LINK_COMMAND := $(LINK) -shared -o $(BINARY_DIRECTORY)/$(TARGET_NAME) $(OBJECT_FILES) $(FLAGS)
@@ -121,11 +143,7 @@ verify_output_type: verify_mode
 	fi
 
 build_mkdirs: build_start_message
-	@mkdir -p $(dir $(dir $(BUILD_DIRECTORY))); \
-	mkdir -p $(dir $(dir $(BINARY_DIRECTORY))); \
-	mkdir -p $(dir $(BUILD_DIRECTORY)); \
-	mkdir -p $(dir $(BINARY_DIRECTORY)); \
-	mkdir -p $(BUILD_DIRECTORY); \
+	@mkdir -p $(BUILD_DIRECTORY); \
 	mkdir -p $(BINARY_DIRECTORY); \
 	mkdir -p $(OBJECT_FILES_DIRECTORIES)
 
@@ -136,37 +154,37 @@ $(BINARY_DIRECTORY)/$(TARGET_NAME): $(OBJECT_FILES)
 ifeq ($(GENERATE_ASSEMBLY), true)
 $(BUILD_DIRECTORY)/%.S: %.c | build_mkdirs
 	@echo "Compiling $<..."; \
-	$(CC) -S $(CFLAGS) -o $@ $< -MD -Wp,-MD,`dirname $@`/`basename $@ .S`.d
+	$(CC) -S $(ZPP_CFLAGS) -o $@ $< -MD -Wp,-MD,`dirname $@`/`basename $@ .S`.d
 
 $(BUILD_DIRECTORY)/%.S: %.cpp | build_mkdirs
 	@echo "Compiling $<..."; \
-	$(CXX) -S $(CXXFLAGS) -o $@ $< -MD -Wp,-MD,`dirname $@`/`basename $@ .S`.d
+	$(CXX) -S $(ZPP_CXXFLAGS) -o $@ $< -MD -Wp,-MD,`dirname $@`/`basename $@ .S`.d
 
 $(BUILD_DIRECTORY)/%.S: %.cc | build_mkdirs
 	@echo "Compiling $<..."; \
-	$(CXX) -S $(CXXFLAGS) -o $@ $< -MD -Wp,-MD,`dirname $@`/`basename $@ .S`.d
+	$(CXX) -S $(ZPP_CXXFLAGS) -o $@ $< -MD -Wp,-MD,`dirname $@`/`basename $@ .S`.d
 	
 $(BUILD_DIRECTORY)/%.o: $(BUILD_DIRECTORY)/%.S
 	@$(CC) -s -Wno-unicode -c -o $@ $<
 else ifeq ($(GENERATE_ASSEMBLY), false)
 $(BUILD_DIRECTORY)/%.o: %.c | build_mkdirs
 	@echo "Compiling $<..."; \
-	$(CC) -c $(CFLAGS) -o $@ $< -MD -Wp,-MD,`dirname $@`/`basename $@ .o`.d
+	$(CC) -c $(ZPP_CFLAGS) -o $@ $< -MD -Wp,-MD,`dirname $@`/`basename $@ .o`.d
 
 $(BUILD_DIRECTORY)/%.o: %.cpp | build_mkdirs
 	@echo "Compiling $<..."; \
-	$(CXX) -c $(CXXFLAGS) -o $@ $< -MD -Wp,-MD,`dirname $@`/`basename $@ .o`.d
+	$(CXX) -c $(ZPP_CXXFLAGS) -o $@ $< -MD -Wp,-MD,`dirname $@`/`basename $@ .o`.d
 
 $(BUILD_DIRECTORY)/%.o: %.cc | build_mkdirs
 	@echo "Compiling $<..."; \
-	$(CXX) -c $(CXXFLAGS) -o $@ $< -MD -Wp,-MD,`dirname $@`/`basename $@ .o`.d
+	$(CXX) -c $(ZPP_CXXFLAGS) -o $@ $< -MD -Wp,-MD,`dirname $@`/`basename $@ .o`.d
 else
 $(error "GENERATE_ASSEMBLY must either be true or false.")
 endif
 
 $(BUILD_DIRECTORY)/%.o: %.S | build_mkdirs
 	@echo "Assemblying $<..."; \
-	$(AS) -c $(ASFLAGS) -o $@ $< -MD -Wp,-MD,`dirname $@`/`basename $@ .o`.d
+	$(AS) -c $(ZPP_ASFLAGS) -o $@ $< -MD -Wp,-MD,`dirname $@`/`basename $@ .o`.d
 
 -include $(DEPENDENCY_FILES)
 
@@ -196,3 +214,6 @@ clean_mode: verify_mode
 
 _rebuild: clean_mode
 	@$(MAKE) -s build
+
+ZPP_DEPENDENCIES := true
+include zpp_project.mk

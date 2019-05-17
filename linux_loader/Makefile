@@ -12,9 +12,9 @@ obj-m += zpp_loader.o
 zpp_loader-objs := ./src/main.o ./out/$(CONFIGURATION_NAME)/$(TARGET_ABI)/zpp_loader.o
 
 all: 
-	@$(MAKE) -s -f makefile_loader && \
+	@$(MAKE) -s -f ../zpp.mk && \
 	echo cmd_$(MAKEFILE_DIRECTORY)/./out/$(CONFIGURATION_NAME)/$(TARGET_ABI)/zpp_loader.o: \
-	$(MAKE) -s -C $(MAKEFILE_DIRECTORY) -f $(MAKEFILE_DIRECTORY)/makefile_loader \
+	$(MAKE) -s -C $(MAKEFILE_DIRECTORY) -f $(MAKEFILE_DIRECTORY)/../zpp.mk \
 	> $(MAKEFILE_DIRECTORY)/out/$(CONFIGURATION_NAME)/$(TARGET_ABI)/.zpp_loader.o.cmd && \
 	echo "Building linux kernel driver..." && \
 	$(MAKE) -s -C /lib/modules/$(LINUX_KERNEL)/build M=$(PWD) modules && \
@@ -22,7 +22,7 @@ all:
 	cp zpp_loader.ko ../out/$(CONFIGURATION_NAME)/$(TARGET_ABI)
 
 clean:
-	@$(MAKE) -s -f makefile_loader clean && \
+	@$(MAKE) -s -f ../zpp.mk clean && \
 	echo "Cleaning linux kernel driver..." && \
 	$(MAKE) -s -C /lib/modules/$(LINUX_KERNEL)/build M=$(PWD) clean && \
 	echo "Cleaned linux kernel driver." && \

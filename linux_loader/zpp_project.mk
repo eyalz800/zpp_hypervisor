@@ -1,6 +1,4 @@
 include ../environment.config
-OUTPUT_DIRECTORY_ROOT := ./out
-OBJECT_DIRECTORY_ROOT := ./obj
 TARGET_NAME := zpp_loader.o
 TARGET_ABIS := $(SUPPORTED_ARCHITECTURES)
 OUTPUT_TYPE := relocatable
@@ -35,7 +33,12 @@ ASFLAGS_RELEASE :=
 STATIC_LIBRARIES := 
 SHARED_LIBRARIES :=
 STRIP_FLAGS := -s
-SOURCE_DIRECTORIES := $(realpath ../loader/src)
+SOURCE_DIRECTORIES := ../loader/src
 SOURCE_FILES :=
 
-$(OBJECT_DIRECTORY_ROOT)/$(CONFIGURATION_NAME)/$(TARGET_ABI)/$(realpath ../loader/src)/elf_binary.o: ../out/$(CONFIGURATION_NAME)/$(TARGET_ABI)/zpp_hypervisor
+ifeq ($(ZPP_DEPENDENCIES), true)
+
+$(BUILD_DIRECTORY)/../loader/src/elf_binary.o: \
+	../out/$(CONFIGURATION_NAME)/$(TARGET_ABI)/zpp_hypervisor
+
+endif
