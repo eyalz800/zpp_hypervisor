@@ -1,13 +1,13 @@
 include ../environment.config
 
-CLANG_TARGET := $(TARGET_ABI)-pc-win32-msvc
+CLANG_TARGET := $(ZPP_TARGET_TYPE)-pc-win32-msvc
 
-ifeq ($(TARGET_ABI), x86_64)
+ifeq ($(ZPP_TARGET_TYPE), x86_64)
 	MICROSOFT_DEFINES := -D_MT -D_WIN32 -D_WIN64 -D_AMD64_
 	VISUAL_STUDIO_PROCESSOR := x64
 	WINDOWS_KITS_PROCESSOR := x64
 	EDK2_PROCESSOR := X64
-else ifneq ($(TARGET_ABI),)
+else
 $(error Unsupported target)
 endif
 
@@ -38,9 +38,7 @@ ENVIRONMENT_INCLUDES := $(subst +,$(SPACE),$(ENVIRONMENT_INCLUDES))
 ENVIRONMENT_FLAGS := \
 	-target $(CLANG_TARGET) \
 	-nostdinc \
-	-nostdinc++ \
 	-nostdlib \
-	-nostdlib++ \
 	-D_CRT_SECURE_NO_WARNINGS \
 	-D_CRT_SECURE_NO_DEPRECATE \
 	-D_NO_CRT_STDIO_INLINE \
@@ -49,19 +47,26 @@ ENVIRONMENT_FLAGS := \
 	-U__gnu_linux__ \
 	-U__GNUC_MINOR__ \
 	-U__GNUC_PATCHLEVEL__ \
-	-U__GNUC_STDC_INLINE__ \
+	-U__GNUC_STDC_INLINE__
+
+ENVIRONMENT_LINK_FLAGS := \
 	-fuse-ld=lld \
 	-Wl,-ignore:4217
 
-CC := clang \
+ZPP_CC := \
+	clang \
 	$(ENVIRONMENT_INCLUDES) \
 	$(ENVIRONMENT_FLAGS)
 
-CXX := clang++ \
+ZPP_CXX := \
+	clang++ \
 	$(ENVIRONMENT_INCLUDES) \
 	$(ENVIRONMENT_FLAGS)
 
-AR := ar
-AS := $(CC)
-LINK := $(CXX)
-STRIP = strip
+ZPP_AR := ar
+ZPP_AS := $(ZPP_CC)
+ZPP_LINK := \
+	clang++ \
+	-target $(CLANG_TARGET) \
+	$(ENVIRONMENT_LINK_FLAGS)
+

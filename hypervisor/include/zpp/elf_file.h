@@ -424,6 +424,8 @@ private:
         case elf_machine::x86_64:
             return elf_relocation_type::x86_64_relative;
         }
+
+        return {};
     }
 
     /**
