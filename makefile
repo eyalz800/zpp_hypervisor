@@ -1,12 +1,12 @@
 .PHONY: all clean environment environment_clean environment_mkdir linux_loader linux_loader_clean windows_loader windows_loader_clean uefi_loader uefi_loader_clean hypervisor hypervisor_clean
 
 mode ?= debug
-CONFIGURATION_NAME ?= $(mode)
+CONFIGURATION ?= $(mode)
 MAKEFILE_DIRECTORY := $(shell dirname $(realpath $(lastword $(MAKEFILE_LIST))))
 
 include environment.config
 
-TARGET_ABI := $(SELECTED_ARCHITECTURE)
+TARGET_TYPE := $(SELECTED_ARCHITECTURE)
 
 all: $(patsubst %, %_loader, $(BUILD_DRIVERS)) hypervisor environment
 
@@ -14,47 +14,32 @@ clean: linux_loader_clean windows_loader_clean uefi_loader_clean hypervisor_clea
 
 linux_loader: | hypervisor
 	@echo "Building linux loader..." && \
-	mkdir -p out && \
-	mkdir -p out/$(CONFIGURATION_NAME)&& \
-	mkdir -p out/$(CONFIGURATION_NAME)/$(TARGET_ABI) && \
-	$(MAKE) LINUX_KERNEL=$(LINUX_KERNEL) CONFIGURATION_NAME=$(CONFIGURATION_NAME) TARGET_ABI=$(TARGET_ABI) LINUX_KERNEL=$(LINUX_KERNEL) -s -C linux_loader && \
-	echo "Done."
+	$(MAKE) LINUX_KERNEL=$(LINUX_KERNEL) CONFIGURATION=$(CONFIGURATION) TARGET_TYPE=$(TARGET_TYPE) -s -C linux_loader && \
+	echo "Built linux loader."
 
 linux_loader_clean:
 	@echo "Cleaning linux loader..." && \
-	$(MAKE) LINUX_KERNEL=$(LINUX_KERNEL) CONFIGURATION_NAME=$(CONFIGURATION_NAME) TARGET_ABI=$(TARGET_ABI) LINUX_KERNEL=$(LINUX_KERNEL) -s -C linux_loader clean && \
+	$(MAKE) LINUX_KERNEL=$(LINUX_KERNEL) CONFIGURATION=$(CONFIGURATION) TARGET_TYPE=$(TARGET_TYPE) -s -C linux_loader clean && \
 	rm -rf out && \
-	echo "Cleaned."
+	echo "Cleaned linux loader."
 
 windows_loader: | hypervisor
-	@echo "Building windows loader..." && \
-	$(MAKE) -s -C windows_loader && \
-	echo "Done."
+	@$(MAKE) -s -C windows_loader
 
 windows_loader_clean:
-	@echo "Cleaning windows loader..." && \
-	$(MAKE) -s -C windows_loader clean && \
-	echo "Cleaned."
+	@$(MAKE) -s -C windows_loader clean
 
 uefi_loader: | hypervisor
-	@echo "Building uefi loader..." && \
-	$(MAKE) -s -C uefi_loader && \
-	echo "Done."
+	@$(MAKE) -s -C uefi_loader
 
 uefi_loader_clean:
-	@echo "Cleaning uefi loader..." && \
-	$(MAKE) -s -C uefi_loader clean && \
-	echo "Cleaned."
+	@$(MAKE) -s -C uefi_loader clean
 
 hypervisor:
-	@echo "Building hypervisor..." && \
-	$(MAKE) -s -C hypervisor && \
-	echo "Done."
+	@$(MAKE) -s -C hypervisor
 
 hypervisor_clean:
-	@echo "Cleaning windows loader..." && \
-	$(MAKE) -s -C hypervisor clean && \
-	echo "Cleaned."
+	@$(MAKE) -s -C hypervisor clean
 
 environment_mkdir:
 	@mkdir -p environment
