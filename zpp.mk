@@ -4,9 +4,7 @@
 	all \
 	build \
 	build_single \
-	build_start_message \
-	build_mkdirs \
-	build_finished_message \
+	build_init \
 	rebuild \
 	rebuild_single \
 	clean_mode \
@@ -127,55 +125,51 @@ else
 $(error ZPP_LINK_TYPE must either be default, ld, link, or ar)
 endif
 
-build_single: build_finished_message
+build_single: $(ZPP_OUTPUT_DIRECTORY)/$(ZPP_TARGET_NAME)
 
-build_start_message:
+build_init: 
 	@echo "Building '$(ZPP_TARGET_TYPE)/$(ZPP_TARGET_NAME)' in '$(ZPP_CONFIGURATION)' mode..."
-
-build_finished_message: $(ZPP_OUTPUT_DIRECTORY)/$(ZPP_TARGET_NAME)
-	@echo "Built '$(ZPP_TARGET_TYPE)/$(ZPP_TARGET_NAME)'."
-
-build_mkdirs: build_start_message
-	@mkdir -p $(ZPP_INTERMEDIATE_DIRECTORY); \
+	mkdir -p $(ZPP_INTERMEDIATE_DIRECTORY); \
 	mkdir -p $(ZPP_OUTPUT_DIRECTORY); \
 	mkdir -p $(ZPP_OBJECT_FILES_DIRECTORIES)
 
 $(ZPP_OUTPUT_DIRECTORY)/$(ZPP_TARGET_NAME): $(ZPP_OBJECT_FILES)
 	@echo "Linking '$(ZPP_OUTPUT_DIRECTORY)/$(ZPP_TARGET_NAME)'..."; \
-	$(ZPP_LINK_COMMAND)
+	$(ZPP_LINK_COMMAND) && \
+	echo "Built '$(ZPP_TARGET_TYPE)/$(ZPP_TARGET_NAME)'."
 
 ifeq ($(ZPP_GENERATE_ASSEMBLY), true)
-$(ZPP_INTERMEDIATE_DIRECTORY)/%.S: %.c | build_mkdirs
+$(ZPP_INTERMEDIATE_DIRECTORY)/%.S: %.c | build_init
 	@echo "Compiling '$<'..."; \
 	$(ZPP_CC) -S $(ZPP_CFLAGS) -o $@ $< -MD -Wp,-MD,`dirname $@`/`basename $@ .S`.d
 
-$(ZPP_INTERMEDIATE_DIRECTORY)/%.S: %.cpp | build_mkdirs
+$(ZPP_INTERMEDIATE_DIRECTORY)/%.S: %.cpp | build_init
 	@echo "Compiling '$<'..."; \
 	$(ZPP_CXX) -S $(ZPP_CXXFLAGS) -o $@ $< -MD -Wp,-MD,`dirname $@`/`basename $@ .S`.d
 
-$(ZPP_INTERMEDIATE_DIRECTORY)/%.S: %.cc | build_mkdirs
+$(ZPP_INTERMEDIATE_DIRECTORY)/%.S: %.cc | build_init
 	@echo "Compiling '$<'..."; \
 	$(ZPP_CXX) -S $(ZPP_CXXFLAGS) -o $@ $< -MD -Wp,-MD,`dirname $@`/`basename $@ .S`.d
 	
 $(ZPP_INTERMEDIATE_DIRECTORY)/%.o: $(ZPP_INTERMEDIATE_DIRECTORY)/%.S
 	@$(ZPP_CC) -Wno-unicode -c -o $@ $<
 else ifeq ($(ZPP_GENERATE_ASSEMBLY), false)
-$(ZPP_INTERMEDIATE_DIRECTORY)/%.o: %.c | build_mkdirs
+$(ZPP_INTERMEDIATE_DIRECTORY)/%.o: %.c | build_init
 	@echo "Compiling '$<'..."; \
 	$(ZPP_CC) -c $(ZPP_CFLAGS) -o $@ $< -MD -Wp,-MD,`dirname $@`/`basename $@ .o`.d
 
-$(ZPP_INTERMEDIATE_DIRECTORY)/%.o: %.cpp | build_mkdirs
+$(ZPP_INTERMEDIATE_DIRECTORY)/%.o: %.cpp | build_init
 	@echo "Compiling '$<'..."; \
 	$(ZPP_CXX) -c $(ZPP_CXXFLAGS) -o $@ $< -MD -Wp,-MD,`dirname $@`/`basename $@ .o`.d
 
-$(ZPP_INTERMEDIATE_DIRECTORY)/%.o: %.cc | build_mkdirs
+$(ZPP_INTERMEDIATE_DIRECTORY)/%.o: %.cc | build_init
 	@echo "Compiling '$<'..."; \
 	$(ZPP_CXX) -c $(ZPP_CXXFLAGS) -o $@ $< -MD -Wp,-MD,`dirname $@`/`basename $@ .o`.d
 else
 $(error ZPP_GENERATE_ASSEMBLY must either be true or false)
 endif
 
-$(ZPP_INTERMEDIATE_DIRECTORY)/%.o: %.S | build_mkdirs
+$(ZPP_INTERMEDIATE_DIRECTORY)/%.o: %.S | build_init
 	@echo "Assemblying '$<'..."; \
 	$(ZPP_AS) -c $(ZPP_ASFLAGS) -o $@ $< -MD -Wp,-MD,`dirname $@`/`basename $@ .o`.d
 
