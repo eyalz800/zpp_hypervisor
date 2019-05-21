@@ -58,10 +58,10 @@ ASFLAGS_RELEASE := \
 ZPP_LFLAGS := \
 	$(ZPP_FLAGS) \
 	-Wl,-subsystem:native \
-	-Wl,/driver:wdm \
-	-Wl,/dynamicbase \
-	-Wl,/nodefaultlib \
-	-Wl,/dll \
+	-Wl,-driver:wdm \
+	-Wl,-dynamicbase \
+	-Wl,-nodefaultlib \
+	-Wl,-dll \
 	-Wl,ntoskrnl.lib \
 	-Wl,-entry:driver_entry
 ZPP_LFLAGS_DEBUG := \
