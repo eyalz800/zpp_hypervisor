@@ -25,7 +25,7 @@ all:
 clean:
 	@$(MAKE) -s -f ../zpp.mk clean && \
 	echo "Cleaning linux kernel driver..." && \
-	$(MAKE) -s -C /lib/modules/$(LINUX_KERNEL)/build M=$(PWD) clean && \
+	$(MAKE) -s -C /lib/modules/$(LINUX_KERNEL)/build M=$(PWD) clean 2> /dev/null ; \
 	echo "Cleaned linux kernel driver." && \
 	rm -rf $(MAKEFILE_DIRECTORY)/../out/debug/$(TARGET_TYPE)/zpp_loader.ko && \
 	rm -rf $(MAKEFILE_DIRECTORY)/../out/release/$(TARGET_TYPE)/zpp_loader.ko && \

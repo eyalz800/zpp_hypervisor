@@ -20,55 +20,131 @@ Create a hypervisor project such that:
 that has to be written for every OS.
 4. Works in UEFI.
 
+Project Overview
+----------------
+The project consists of several parts:
+1. hypervisor.
+2. Linux loader driver.
+3. Windows loader driver.
+4. UEFI loader application.
+
+The hypervisor is a self contained ELF binary that aims to be cross platform.
+The Linux / Windows / UEFI loader drivers are there to load the hypervisor
+under Linux, Windows, and UEFI respectively.
+
 Project Configuration
 ---------------------
 The project is configured using the `environment.config` file located at the project root.
 This file configures important makefile variables for compiling and debugging environment.
 Example:
 ```make
+# The supported architectures.
 SUPPORTED_ARCHITECTURES := x86_64
+
+# Selected architecture to build.
 SELECTED_ARCHITECTURE := x86_64
+
+# For SSH deployment, the SSH target, port, and password.
 SSH_TARGET := user@192.168.171.136
 SSH_PORT := 22
 SSH_PASSWORD := password1
+
+# For GDB debugging, the GDB server address.
 GDB_SERVER_ADDRESS := :1337
+
+# The drivers to build, linux, windows, uefi and both.
 BUILD_DRIVERS := linux windows uefi
+
+# Whether the hypervisor is configured to wait for debugger.
 HYPERVISOR_WAIT_FOR_DEBUGGER := 0
+
+# The linux kernel version for the linux driver.
 LINUX_KERNEL := 4.18.0-15-generic
-VISUAL_STUDIO_ROOT := /mnt/c/Program\ Files\ \(x86\)/Microsoft\ Visual\ Studio/2017/Community/VC/Tools/MSVC/14.16.27023
-WINDOWS_KITS_ROOT := /mnt/c/Program\ Files\ \(x86\)/Windows\ Kits/10
+
+# Windows build dependencies can be referenced from either
+# the windows side, WSL, or an arbitrary linux machine with
+# access to the needed resources below.
+ROOT :=
+ifeq ($(OS), Windows_NT)
+ROOT := C:
+else
+ROOT := /mnt/c
+endif
+
+# Windows build dependencies.
+VISUAL_STUDIO_ROOT := $(ROOT)/Program\ Files\ \(x86\)/Microsoft\ Visual\ Studio/2017/Community/VC/Tools/MSVC/14.16.27023
+WINDOWS_KITS_ROOT := $(ROOT)/Program\ Files\ \(x86\)/Windows\ Kits/10
 WINDOWS_KITS_VERSION := 10.0.18362.0
-EDK2_ROOT := /mnt/c/Temp/edk2-UDK2018
+EDK2_ROOT := $(ROOT)/Temp/edk2-UDK2018
+ANDROID_NDK_ROOT := $(ROOT)/CustomPrograms/android-ndk-r19b
+LLVM_ROOT := $(ROOT)/Program\ Files/LLVM
 ```
-
-Project Dependencies
---------------------
-To compile the project, you need:
-1. Intel 64 bit Linux environment or Linux subsystem for Windows.
-2. Have clang++7 installed at least.
-3. The linux headers for the specific `LINUX_KERNEL` variable inside `environment.config`.
-4. Visual Studio and SDK/WDK for Windows support.
-5. EDK2 for UEFI support.
-
-To debug the project, you need:
-1. gdb with python support.
 
 Compiling The Project
 ---------------------
+This section describes what is needed to compile the project
+and its subprojects.
+
+The list of requirements varies between the host system that is used for
+the build and the loader drivers that are participating in the build.
+
+### Windows non-WSL:
+Download / Install:
+1. [Android NDK](https://developer.android.com/ndk/downloads) to build the Hypervisor.
+2. [LLVM Releases](http://releases.llvm.org/download.html) to build the Windows and UEFI drivers.
+3. [Windows SDK](https://developer.microsoft.com/en-us/windows/downloads/windows-10-sdk) to build the Windows and UEFI drivers.
+4. [Windows WDK](https://docs.microsoft.com/en-us/windows-hardware/drivers/download-the-wdk) to build the Windows and UEFI drivers.
+5. [Tianocore EDK2](https://github.com/tianocore/edk2) - to build UEFI driver.
+6. [Visual Studio Community](https://visualstudio.microsoft.com/vs/community) - for C/C++ headers use in Windows and UEFI drivers.
+7. [Git](https://git-scm.com/downloads) - for use of Linux commands located in the `/usr/bin` subfolder.
+
+- Make sure the WDK and SDK versions are the same.
+- Use `$(ANDROID_NDK_ROOT)/prebuilt/windows-x86_64/bin/make.exe` for compilation.
+- Prior to the build, set the PATH environment variable to have `C:/Program Files/Git/usr/bin` as first directory.
+- After finishing, proceed to the environment settings part below.
+
+### Linux / Windows WSL
+Download / Install:
+1. Following packages:
+    * git
+    * make
+    * clang-7 or higher
+    * clang++-7 or higher
+    * lld-7 or higher
+    * libc++-7-dev or higher
+    * build-essential
+    * libelf-dev
+    * linux-headers-$(LINUX_KERNEL) where $(LINUX_KERNEL) is whatever version we want to build the Linux driver for,
+    typically $(uname -r) for non Windows machines.
+2. [Windows SDK](https://developer.microsoft.com/en-us/windows/downloads/windows-10-sdk) to build the Windows and UEFI drivers.
+3. [Windows WDK](https://docs.microsoft.com/en-us/windows-hardware/drivers/download-the-wdk) to build the Windows and UEFI drivers.
+5. [Tianocore EDK2](https://github.com/tianocore/edk2) - to build UEFI driver.
+5. [Visual Studio Community](https://visualstudio.microsoft.com/vs/community) - for C/C++ headers use in Windows and UEFI drivers.
+
+Notes:
+- Make sure clang and clang++ point to the correct clang and clang++ versions.
+- Installing the Windows SDK, WDK as well as Visual Studio is meant to be done
+in a windows machine. The intention is to either copy the Visual Studio headers and the SDK,
+WDK to the Linux machine or use a shared folder.
+- After finishing, proceed to the environment settings part below.
+
+### Environment Settings (Shared)
 Make sure the `./environment.config` file contains your correct paths and settings in
 your environment:
 1. Adjust the `BUILD_DRIVERS` configuration to build Linux/Windows/UEFI drivers or both.
 2. Change `HYPERVISOR_WAIT_FOR_DEBUGGER` to whether or not you wish the hypervisor to 
 wait for debugging.
-3. In case you are building the Linux driver, adjust the `LINUX_KERNEL` variable to control linux headers 
-version.
-4. In case you are building the Windows driver, adjust the `VISUAL_STUDIO_ROOT`, `WINDOWS_KITS_ROOT`, and `WINDOWS_KITS_VERSION` 
-fields to the correct paths accessible from the Linux machine you are using for your build (can be WSL paths).
-5. In case you are building the UEFI driver, adjust the `EDK2_ROOT` field to the EDK2 directory.
-Also, you need to set up the Windows fields as specified in the previous point.
-
-Compiling the project is done using the `make -j` command at the project root.
-An `out` directory will be created at the project root with the built subprojects.
+3. For Linux driver build:
+    * Adjust the `LINUX_KERNEL` variable to control linux headers version.
+    * Note: under Windows this must use WSL.
+4. For Windows driver build:
+    * Adjust the `VISUAL_STUDIO_ROOT`, `WINDOWS_KITS_ROOT`, and `WINDOWS_KITS_VERSION` accordingly.
+    * Note: Supports Linux machines as well as WSL, as long as those paths are accessible.
+5. For UEFI driver build:
+    * In case you are building the UEFI driver, adjust the `EDK2_ROOT` field to the EDK2 directory.
+    * Make sure all requirements for Windows driver build are met.
+6. For Windows non-WSL build, adjust the `LLVM_ROOT` and `ANDROID_NDK_ROOT` to the LLVM installation
+folder and `ANDROID_NDK_ROOT` folder respectively.
 
 To compile just the hypervisor, you may use `make -j` inside the hypervisor folder.
 

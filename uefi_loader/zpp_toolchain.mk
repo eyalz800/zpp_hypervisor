@@ -36,7 +36,6 @@ ENVIRONMENT_INCLUDES := $(patsubst %, -isystem %, $(ENVIRONMENT_INCLUDES))
 ENVIRONMENT_INCLUDES := $(subst +,$(SPACE),$(ENVIRONMENT_INCLUDES))
 
 ENVIRONMENT_FLAGS := \
-	-target $(CLANG_TARGET) \
 	-nostdinc \
 	-nostdlib \
 	-D_CRT_SECURE_NO_WARNINGS \
@@ -53,20 +52,27 @@ ENVIRONMENT_LINK_FLAGS := \
 	-fuse-ld=lld \
 	-Wl,-ignore:4217
 
+ifeq ($(OS), Windows_NT)
+CLANG := $(LLVM_ROOT)/bin/clang -target $(CLANG_TARGET)
+CLANGXX := $(LLVM_ROOT)/bin/clang++ -target $(CLANG_TARGET)
+else
+CLANG := clang -target $(CLANG_TARGET)
+CLANGXX := clang++ -target $(CLANG_TARGET)
+endif
+
 ZPP_CC := \
-	clang \
+	$(CLANG) \
 	$(ENVIRONMENT_INCLUDES) \
 	$(ENVIRONMENT_FLAGS)
 
 ZPP_CXX := \
-	clang++ \
+	$(CLANGXX) \
 	$(ENVIRONMENT_INCLUDES) \
 	$(ENVIRONMENT_FLAGS)
 
 ZPP_AR := ar
 ZPP_AS := $(ZPP_CC)
 ZPP_LINK := \
-	clang++ \
-	-target $(CLANG_TARGET) \
+	$(CLANGXX) \
 	$(ENVIRONMENT_LINK_FLAGS)
 
