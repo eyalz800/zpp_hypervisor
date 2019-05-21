@@ -1,4 +1,17 @@
-.PHONY: all clean environment environment_clean environment_mkdir linux_loader linux_loader_clean windows_loader windows_loader_clean uefi_loader uefi_loader_clean hypervisor hypervisor_clean
+.PHONY: \
+	all \
+	clean \
+	environment \
+	environment_clean \
+	environment_mkdir \
+	linux_loader \
+	linux_loader_clean \
+	windows_loader \
+	windows_loader_clean \
+	uefi_loader \
+	uefi_loader_clean \
+	hypervisor \
+	hypervisor_clean
 
 mode ?= debug
 CONFIGURATION ?= $(mode)
@@ -44,7 +57,7 @@ hypervisor_clean:
 environment_mkdir:
 	@mkdir -p environment
 
-environment: $(patsubst environment_templates/%, environment/%, $(shell find environment_templates -type f)) 
+environment: $(patsubst environment_templates/%, environment/%, $(shell find "environment_templates" -type f))
 
 environment/%: environment_templates/% environment.config | environment_mkdir
 	@rm -f $@ && \
