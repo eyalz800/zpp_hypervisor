@@ -126,17 +126,17 @@ $(error ZPP_LINK_TYPE must either be default, ld, link, or ar)
 endif
 
 build_single: $(ZPP_OUTPUT_DIRECTORY)/$(ZPP_TARGET_NAME)
+	@echo "Built '$(ZPP_TARGET_TYPE)/$(ZPP_TARGET_NAME)'."
 
 build_init: 
-	@echo "Building '$(ZPP_TARGET_TYPE)/$(ZPP_TARGET_NAME)' in '$(ZPP_CONFIGURATION)' mode..."
+	@echo "Building '$(ZPP_TARGET_TYPE)/$(ZPP_TARGET_NAME)' in '$(ZPP_CONFIGURATION)' mode..."; \
 	mkdir -p $(ZPP_INTERMEDIATE_DIRECTORY); \
 	mkdir -p $(ZPP_OUTPUT_DIRECTORY); \
 	mkdir -p $(ZPP_OBJECT_FILES_DIRECTORIES)
 
 $(ZPP_OUTPUT_DIRECTORY)/$(ZPP_TARGET_NAME): $(ZPP_OBJECT_FILES)
 	@echo "Linking '$(ZPP_OUTPUT_DIRECTORY)/$(ZPP_TARGET_NAME)'..."; \
-	$(ZPP_LINK_COMMAND) && \
-	echo "Built '$(ZPP_TARGET_TYPE)/$(ZPP_TARGET_NAME)'."
+	$(ZPP_LINK_COMMAND)
 
 ifeq ($(ZPP_GENERATE_ASSEMBLY), true)
 $(ZPP_INTERMEDIATE_DIRECTORY)/%.S: %.c | build_init

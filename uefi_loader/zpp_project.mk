@@ -58,9 +58,9 @@ ZPP_ASFLAGS_RELEASE := \
 ZPP_LFLAGS := \
 	$(ZPP_FLAGS) \
 	-Wl,-subsystem:efi_application \
-	-Wl,/dynamicbase \
-	-Wl,/nodefaultlib \
-	-Wl,/dll \
+	-Wl,-dynamicbase \
+	-Wl,-nodefaultlib \
+	-Wl,-dll \
 	-Wl,-entry:uefi_main
 ZPP_LFLAGS_DEBUG := \
 	$(ZPP_FLAGS_DEBUG)
