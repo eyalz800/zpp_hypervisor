@@ -103,7 +103,7 @@ Download / Install:
 - Prior to the build, set the PATH environment variable to have `C:/Program Files/Git/usr/bin` as first directory.
 - After finishing, proceed to the environment settings part below.
 
-### Windows WSL
+### Linux / Windows WSL
 Download / Install:
 1. Following packages:
     * git
@@ -115,36 +115,18 @@ Download / Install:
     * build-essential
     * libelf-dev
     * linux-headers-$(LINUX_KERNEL) where $(LINUX_KERNEL) is whatever version we want to build the Linux driver for,
-    typically $(uname -r) only this is WSL environment so make sure to run it in a true Linux machine.
+    typically $(uname -r) for non Windows machines.
 2. [Windows SDK](https://developer.microsoft.com/en-us/windows/downloads/windows-10-sdk) to build the Windows and UEFI drivers.
 3. [Windows WDK](https://docs.microsoft.com/en-us/windows-hardware/drivers/download-the-wdk) to build the Windows and UEFI drivers.
 4. [Tianocore EDK2](https://github.com/tianocore/edk2) for use of the `usr/bin` binaries there.
 5. [Visual Studio Community](https://visualstudio.microsoft.com/vs/community) - for C/C++ headers use in Windows and UEFI drivers.
 
 Notes:
-- Make sure clang and clang++ are pointing to the correct clang and clang++ versions.
-- After finishing, proceed to the environment settings part below.
-
-### Linux
-Download / Install:
-1. Following packages:
-    * git
-    * make
-    * clang-7 or higher
-    * clang++-7 or higher
-    * lld-7 or higher
-    * libc++-7-dev or higher
-    * build-essential
-    * libelf-dev
-    * linux-headers-$(LINUX_KERNEL) where $(LINUX_KERNEL) is whatever version we want to build the Linux driver for,
-    typically $(uname -r)
-2. [Windows SDK](https://developer.microsoft.com/en-us/windows/downloads/windows-10-sdk) to build the Windows and UEFI drivers.
-3. [Windows WDK](https://docs.microsoft.com/en-us/windows-hardware/drivers/download-the-wdk) to build the Windows and UEFI drivers.
-4. [Tianocore EDK2](https://github.com/tianocore/edk2) for use of the `usr/bin` binaries there.
-
-Notes:
+- Make sure clang and clang++ point to the correct clang and clang++ versions.
 - Installing the Windows SDK, WDK as well as Visual Studio is meant to be done
-in a windows machine. The intention is to copy the Visual Studio headers and the SDK, WDK to the linux machine.
+in a windows machine. The intention is to either copy the Visual Studio headers and the SDK,
+WDK to the Linux machine or use a shared folder.
+- After finishing, proceed to the environment settings part below.
 
 ### Environment Settings (Shared)
 Make sure the `./environment.config` file contains your correct paths and settings in
