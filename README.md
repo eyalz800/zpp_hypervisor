@@ -96,7 +96,7 @@ Download / Install:
 4. [Windows WDK](https://docs.microsoft.com/en-us/windows-hardware/drivers/download-the-wdk) to build the Windows and UEFI drivers.
 5. [Tianocore EDK2](https://github.com/tianocore/edk2) - to build UEFI driver.
 6. [Visual Studio Community](https://visualstudio.microsoft.com/vs/community) - for C/C++ headers use in Windows and UEFI drivers.
-7. [Git](https://git-scm.com/downloads) - for use of the `usr/bin` binaries there.
+7. [Git](https://git-scm.com/downloads) - for use of Linux commands located in the `/usr/bin` subfolder.
 
 - Make sure the WDK and SDK versions are the same.
 - Use `$(ANDROID_NDK_ROOT)/prebuilt/windows-x86_64/bin/make.exe` for compilation.
@@ -118,7 +118,7 @@ Download / Install:
     typically $(uname -r) for non Windows machines.
 2. [Windows SDK](https://developer.microsoft.com/en-us/windows/downloads/windows-10-sdk) to build the Windows and UEFI drivers.
 3. [Windows WDK](https://docs.microsoft.com/en-us/windows-hardware/drivers/download-the-wdk) to build the Windows and UEFI drivers.
-4. [Tianocore EDK2](https://github.com/tianocore/edk2) for use of the `usr/bin` binaries there.
+5. [Tianocore EDK2](https://github.com/tianocore/edk2) - to build UEFI driver.
 5. [Visual Studio Community](https://visualstudio.microsoft.com/vs/community) - for C/C++ headers use in Windows and UEFI drivers.
 
 Notes:
