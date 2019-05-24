@@ -132,6 +132,7 @@ WDK to the Linux machine or use a shared folder.
 Make sure the `./environment.config` file contains your correct paths and settings in
 your environment:
 1. Adjust the `BUILD_DRIVERS` configuration to build Linux/Windows/UEFI drivers or both.
+To compile just the hypervisor, leave `BUILD_DRIVERS` empty.
 2. Change `HYPERVISOR_WAIT_FOR_DEBUGGER` to whether or not you wish the hypervisor to 
 wait for debugging.
 3. For Linux driver build:
@@ -146,7 +147,6 @@ wait for debugging.
 6. For Windows non-WSL build, adjust the `LLVM_ROOT` and `ANDROID_NDK_ROOT` to the LLVM installation
 folder and `ANDROID_NDK_ROOT` folder respectively.
 
-To compile just the hypervisor, you may use `make -j` inside the hypervisor folder.
 
 Loading The Hypervisor
 ----------------------
