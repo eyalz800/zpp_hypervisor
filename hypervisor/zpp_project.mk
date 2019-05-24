@@ -76,18 +76,17 @@ endif
 ifeq ($(ZPP_TOOLCHAIN_SETTINGS), true)
 
 ifeq ($(OS), Windows_NT)
-ZPP_CXX = $(ANDROID_NDK_ROOT)/toolchains/llvm/prebuilt/windows-x86_64/bin/clang++ \
+ZPP_CXX := $(ANDROID_NDK_ROOT)/toolchains/llvm/prebuilt/windows-x86_64/bin/clang++ \
 	-target $(ZPP_TARGET_TYPE)-linux-android28
-ZPP_CC = $(ANDROID_NDK_ROOT)/toolchains/llvm/prebuilt/windows-x86_64/bin/clang \
+ZPP_CC := $(ANDROID_NDK_ROOT)/toolchains/llvm/prebuilt/windows-x86_64/bin/clang \
 	-target $(ZPP_TARGET_TYPE)-linux-android28
 else
 ZPP_CC := clang
 ZPP_CXX := clang++
 endif
+
 ZPP_AS := $(ZPP_CC)
 ZPP_LINK := $(ZPP_CXX)
-
--include zpp_toolchain.mk
 
 endif
 
