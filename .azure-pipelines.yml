@@ -74,7 +74,7 @@ steps:
     mkdir .android-ndk
     powershell -NoProfile -Command "Start-BitsTransfer -Source https://dl.google.com/android/repository/android-ndk-$(ANDROID_NDK_VERSION)-windows-x86_64.zip -Destination .android-ndk/android-ndk.zip"
     powershell -NoProfile -Command "Expand-Archive -Path .android-ndk/android-ndk.zip -Destination .android-ndk"
-    git clone --branch UDK2018 https://github.com/tianocore/edk2 .edk2
+    git clone --branch UDK2018 https://github.com/tianocore/edk2 .edk2 2>&1
   displayName: 'windows-install'
   condition: eq(variables['OPERATING_SYSTEM'], 'windows')
 
