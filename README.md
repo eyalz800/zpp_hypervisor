@@ -147,6 +147,11 @@ wait for debugging.
 6. For Windows non-WSL build, adjust the `LLVM_ROOT` and `ANDROID_NDK_ROOT` to the LLVM installation
 folder and `ANDROID_NDK_ROOT` folder respectively.
 
+### Compilation Command
+After completing the above steps, just run `make -j` or `make -j mode=release` for to build the
+project for debug or release configuration respectively.
+
+The build output will be located at the `./out` folder.
 
 Loading The Hypervisor
 ----------------------
