@@ -28,7 +28,6 @@ ZPP_FLAGS_DEBUG := \
 	-DZPP_HYPERVISOR_WAIT_FOR_DEBUGGER=$(HYPERVISOR_WAIT_FOR_DEBUGGER)
 ZPP_FLAGS_RELEASE := \
 	-O2 \
-	-flto \
 	-ffunction-sections \
 	-fdata-sections \
 	-fvisibility=hidden
@@ -66,7 +65,6 @@ ZPP_LFLAGS_DEBUG := \
 ZPP_LFLAGS_RELEASE := \
 	$(ZPP_FLAGS_RELEASE) \
 	-Wl,--strip-all \
-	-Wl,-flto \
 	-Wl,--gc-sections
 endif
 

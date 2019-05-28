@@ -26,9 +26,7 @@ ZPP_FLAGS := \
 ZPP_FLAGS_DEBUG := \
 	-g
 ZPP_FLAGS_RELEASE := \
-	-O2 \
-	-ffunction-sections \
-	-fdata-sections \
+	-O0 \
 	-fvisibility=hidden
 ZPP_CFLAGS := \
 	$(ZPP_FLAGS) \
@@ -62,9 +60,7 @@ ZPP_LFLAGS := \
 ZPP_LFLAGS_DEBUG := \
 	$(ZPP_FLAGS_DEBUG)
 ZPP_LFLAGS_RELEASE := \
-	$(ZPP_FLAGS_RELEASE) \
-	-Wl,--strip-all \
-	-Wl,--gc-sections 
+	$(ZPP_FLAGS_RELEASE)
 endif
 
 ifeq ($(ZPP_PROJECT_RULES), true)
