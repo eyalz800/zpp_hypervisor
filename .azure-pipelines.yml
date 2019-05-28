@@ -63,6 +63,7 @@ steps:
 
 - script: |
     make -j
+    make -j mode=release
   displayName: 'linux-build'
   condition: eq(variables['OPERATING_SYSTEM'], 'linux')
 
@@ -95,6 +96,7 @@ steps:
     @echo on
     set PATH=C:/Program Files/Git/usr/bin;%PATH%
     .android-ndk\android-ndk-$(ANDROID_NDK_VERSION)\prebuilt\windows-x86_64\bin\make -j
+    .android-ndk\android-ndk-$(ANDROID_NDK_VERSION)\prebuilt\windows-x86_64\bin\make -j mode=release
   displayName: 'windows-build'
   condition: eq(variables['OPERATING_SYSTEM'], 'windows')
 

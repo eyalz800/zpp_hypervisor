@@ -30,6 +30,7 @@ ubuntu_settings: &ubuntu_settings
     - echo "HYPERVISOR_WAIT_FOR_DEBUGGER := 0" >> environment.config
     - echo "LINUX_KERNEL := $(uname -r)" >> environment.config
     - make -j
+    - make -j mode=release
 
 windows_settings: &windows_settings
   install:
@@ -75,6 +76,7 @@ windows_settings: &windows_settings
     - echo "HYPERVISOR_WAIT_FOR_DEBUGGER := 0" >> environment.config
     - echo "LINUX_KERNEL := $LINUX_KERNEL" >> environment.config
     - wsl make -j
+    - wsl make -j mode=release
 
 matrix:
   include:

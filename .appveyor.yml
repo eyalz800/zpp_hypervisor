@@ -36,4 +36,5 @@ build_script:
 - echo "HYPERVISOR_WAIT_FOR_DEBUGGER := 0" >> environment.config
 - echo "LINUX_KERNEL := $(uname -r)" >> environment.config
 - make -j
+- make -j mode=release
 
