@@ -96,23 +96,23 @@ private:
 
     /**
      * Maps an address from another page table while the
-     * object has not completed initialization.
+     * object has not completed initialization for self mapping.
      */
     template <typename PageTable>
-    void uninitialized_map_from(std::uint64_t base_address,
-                                std::size_t size,
-                                protection protection,
-                                PageTable && other_page_table);
+    void self_map_from(std::uint64_t base_address,
+                       std::size_t size,
+                       protection protection,
+                       PageTable && other_page_table);
 
     /**
      * Maps an address from another page table while the
-     * object has not completed initialization.
+     * object has not completed initialization for self mapping.
      */
     template <typename PageTable>
-    void uninitialized_map_from(const void * base_address,
-                                std::size_t size,
-                                protection protection,
-                                PageTable && other_page_table);
+    void self_map_from(const void * base_address,
+                       std::size_t size,
+                       protection protection,
+                       PageTable && other_page_table);
 
 private:
     /**
