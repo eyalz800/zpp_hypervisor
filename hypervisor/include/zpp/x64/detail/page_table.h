@@ -110,10 +110,10 @@ void page_table::map_from(const void * base_address,
 }
 
 template <typename PageTable>
-void page_table::uninitialized_map_from(std::uint64_t base_address,
-                                        std::size_t size,
-                                        protection protection,
-                                        PageTable && other_page_table)
+void page_table::self_map_from(std::uint64_t base_address,
+                               std::size_t size,
+                               protection protection,
+                               PageTable && other_page_table)
 {
     // Calculate the number of pages.
     auto number_of_pages = (size + (page_size - 1)) / page_size;
@@ -134,45 +134,44 @@ void page_table::uninitialized_map_from(std::uint64_t base_address,
 }
 
 template <typename PageTable>
-void page_table::uninitialized_map_from(const void * base_address,
-                                        std::size_t size,
-                                        protection protection,
-                                        PageTable && other_page_table)
+void page_table::self_map_from(const void * base_address,
+                               std::size_t size,
+                               protection protection,
+                               PageTable && other_page_table)
 {
     // Convert the address pointer to integral type.
-    return uninitialized_map_from(
-        reinterpret_cast<std::uint64_t>(base_address),
-        size,
-        protection,
-        std::forward<PageTable>(other_page_table));
+    return self_map_from(reinterpret_cast<std::uint64_t>(base_address),
+                         size,
+                         protection,
+                         std::forward<PageTable>(other_page_table));
 }
 
 template <typename PageTable>
 void page_table::map_self(PageTable && other_page_table)
 {
     // Map the pml4 from other page table.
-    uninitialized_map_from(pml4,
-                           sizeof(pml4),
-                           protection::read | protection::write,
-                           std::forward<PageTable>(other_page_table));
+    self_map_from(pml4,
+                  sizeof(pml4),
+                  protection::read | protection::write,
+                  std::forward<PageTable>(other_page_table));
 
     // Map the pdpt from other page table.
-    uninitialized_map_from(pdpt,
-                           sizeof(pdpt),
-                           protection::read | protection::write,
-                           std::forward<PageTable>(other_page_table));
+    self_map_from(pdpt,
+                  sizeof(pdpt),
+                  protection::read | protection::write,
+                  std::forward<PageTable>(other_page_table));
 
     // Map the pd from other page table.
-    uninitialized_map_from(pds,
-                           sizeof(pds),
-                           protection::read | protection::write,
-                           std::forward<PageTable>(other_page_table));
+    self_map_from(pds,
+                  sizeof(pds),
+                  protection::read | protection::write,
+                  std::forward<PageTable>(other_page_table));
 
     // Map the pt from other page table.
-    uninitialized_map_from(pts,
-                           sizeof(pts),
-                           protection::read | protection::write,
-                           std::forward<PageTable>(other_page_table));
+    self_map_from(pts,
+                  sizeof(pts),
+                  protection::read | protection::write,
+                  std::forward<PageTable>(other_page_table));
 }
 
 } // namespace zpp::x64
