@@ -16,11 +16,12 @@ environment:
 install:
 - sudo add-apt-repository "deb http://apt.llvm.org/bionic/ llvm-toolchain-bionic-$CLANG_VERSION main"
 - sudo apt update --allow-insecure-repositories
+- sudo apt purge -y --allow-change-held-packages mssql-server
+- sudo apt autoremove -y --allow-change-held-packages
 - sudo apt install --allow-unauthenticated -y
     git
     make
     clang-$CLANG_VERSION
-    clang++-$CLANG_VERSION
     lld-$CLANG_VERSION
     libc++-$CLANG_VERSION-dev
     build-essential
