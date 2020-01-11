@@ -19,14 +19,14 @@ strategy:
       VM_IMAGE: 'windows-2019'
       OPERATING_SYSTEM: 'windows'
       COMPILER: 'clang-8'
-      CLANG_VERSION: 8.0.0
+      CLANG_INSTALLER_URL: 'https://github.com/llvm/llvm-project/releases/download/llvmorg-8.0.1/LLVM-8.0.1-win64.exe'
       ANDROID_NDK_VERSION: r19c
       ARTIFACT_NAME: 'windows-2019-clang-8'
     vs2017-win2016-clang-8:
       VM_IMAGE: 'vs2017-win2016'
       OPERATING_SYSTEM: 'windows'
       COMPILER: 'clang-8'
-      CLANG_VERSION: 8.0.0
+      CLANG_INSTALLER_URL: 'https://github.com/llvm/llvm-project/releases/download/llvmorg-8.0.1/LLVM-8.0.1-win64.exe'
       ANDROID_NDK_VERSION: r19c
       ARTIFACT_NAME: 'vs2017-win2016-clang-8'
 
@@ -70,7 +70,7 @@ steps:
 - script: |
     @echo on
     mkdir .llvm
-    powershell -NoProfile -Command "Start-BitsTransfer -Source http://releases.llvm.org/$(CLANG_VERSION)/LLVM-$(CLANG_VERSION)-win64.exe -Destination .llvm/llvm.exe"
+    bitsadmin /transfer download /download /dynamic /priority foreground $(CLANG_INSTALLER_URL) %cd%\.llvm\llvm.exe
     .llvm\llvm.exe /S
     mkdir .android-ndk
     powershell -NoProfile -Command "Start-BitsTransfer -Source https://dl.google.com/android/repository/android-ndk-$(ANDROID_NDK_VERSION)-windows-x86_64.zip -Destination .android-ndk/android-ndk.zip"
