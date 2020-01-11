@@ -5,7 +5,6 @@ branches:
   - master
   - dev
 
-
 ubuntu_settings: &ubuntu_settings
   install:
     - sudo add-apt-repository "deb http://apt.llvm.org/xenial/ llvm-toolchain-xenial-$CLANG_VERSION main"
@@ -39,6 +38,7 @@ windows_settings: &windows_settings
     - powershell -NoProfile -Command "Expand-Archive -Path C:/Temp/ubuntu-1804.zip -DestinationPath C:/Temp/Ubuntu"
     - C:/Temp/Ubuntu/ubuntu1804.exe install --root
     - echo "#!/bin/bash" > .install.sh
+    - echo "export DEBIAN_FRONTEND=noninteractive" >> .install.sh
     - echo "add-apt-repository \"deb http://apt.llvm.org/xenial/ llvm-toolchain-xenial-$CLANG_VERSION main\"" >> .install.sh
     - echo "apt update --allow-insecure-repositories" >> .install.sh
     - echo "export LINUX_KERNEL=\$(

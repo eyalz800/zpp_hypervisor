@@ -2,7 +2,7 @@ set disassembly-flavor intel
 
 define zstartw
   source {{project_root}}/environment/load-symbols
-	directory {{project_root}}/zpp_hypervisor
+	directory {{project_root}}/hypervisor
 	set substitute-path /mnt/c C:
 	set substitute-path /mnt/d D:
 	set substitute-path /mnt/e E:
@@ -12,7 +12,7 @@ end
 
 define zstartl
   source {{project_root}}/environment/load-symbols
-	directory {{project_root}}/zpp_hypervisor
+	directory {{project_root}}/hypervisor
 	load-symbols $rip "{{project_root}}/out/debug/{{selected_architecture}}/zpp_hypervisor"
 	set *(char *)&gdb_attached = 1
 end
