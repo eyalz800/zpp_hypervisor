@@ -96,8 +96,6 @@
   </ItemDefinitionGroup>
   <ItemGroup>
     <None Include="makefile" />
-    <None Include="makefile_config" />
-    <None Include="makefile_project" />
   </ItemGroup>
   <ItemGroup>
     <ClCompile Include="src\hypervisor\hypervisor.cpp" />
