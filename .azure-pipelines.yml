@@ -41,7 +41,6 @@ steps:
       git \
       make \
       clang-$CLANG_VERSION \
-      clang++-$CLANG_VERSION \
       lld-$CLANG_VERSION \
       libc++-$CLANG_VERSION-dev \
       build-essential \

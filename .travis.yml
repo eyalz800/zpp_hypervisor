@@ -13,7 +13,6 @@ ubuntu_settings: &ubuntu_settings
         git
         make
         clang-$CLANG_VERSION
-        clang++-$CLANG_VERSION
         lld-$CLANG_VERSION
         libc++-$CLANG_VERSION-dev
         build-essential
@@ -55,7 +54,6 @@ windows_settings: &windows_settings
         git
         make
         clang-$CLANG_VERSION
-        clang++-$CLANG_VERSION
         lld-$CLANG_VERSION
         libc++-$CLANG_VERSION-dev
         build-essential
