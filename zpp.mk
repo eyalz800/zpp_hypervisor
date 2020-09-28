@@ -119,7 +119,7 @@ else ifeq ($(ZPP_LINK_TYPE), ld)
 	ZPP_LINK_COMMAND := $(ZPP_LINK) -o $(ZPP_OUTPUT_DIRECTORY)/$(ZPP_TARGET_NAME) $(ZPP_OBJECT_FILES) $(ZPP_LFLAGS)
 else ifeq ($(ZPP_LINK_TYPE), link)
 	ZPP_LINK_COMMAND := $(ZPP_LINK) $(ZPP_LFLAGS) /out:$(ZPP_OUTPUT_DIRECTORY)/$(ZPP_TARGET_NAME) $(ZPP_OBJECT_FILES)
-else ifeq ($(ZPP_LINK_TYPE), ar) 
+else ifeq ($(ZPP_LINK_TYPE), ar)
 	ZPP_LINK_COMMAND := $(ZPP_AR) rcs $(ZPP_OUTPUT_DIRECTORY)/$(ZPP_TARGET_NAME) $(ZPP_OBJECT_FILES)
 else
 $(error ZPP_LINK_TYPE must either be default, ld, link, or ar)
@@ -128,7 +128,7 @@ endif
 build_single: $(ZPP_OUTPUT_DIRECTORY)/$(ZPP_TARGET_NAME)
 	@echo "Built '$(ZPP_TARGET_TYPE)/$(ZPP_TARGET_NAME)'."
 
-build_init: 
+build_init:
 	@echo "Building '$(ZPP_TARGET_TYPE)/$(ZPP_TARGET_NAME)' in '$(ZPP_CONFIGURATION)' mode..."; \
 	mkdir -p $(ZPP_INTERMEDIATE_DIRECTORY); \
 	mkdir -p $(ZPP_OUTPUT_DIRECTORY); \
@@ -150,7 +150,7 @@ $(ZPP_INTERMEDIATE_DIRECTORY)/%.S: %.cpp | build_init
 $(ZPP_INTERMEDIATE_DIRECTORY)/%.S: %.cc | build_init
 	@echo "Compiling '$<'..."; \
 	$(ZPP_CXX) -S $(ZPP_CXXFLAGS) -o $@ $< -MD -Wp,-MD,`dirname $@`/`basename $@ .S`.d
-	
+
 $(ZPP_INTERMEDIATE_DIRECTORY)/%.o: $(ZPP_INTERMEDIATE_DIRECTORY)/%.S
 	@$(ZPP_CC) -Wno-unicode -c -o $@ $<
 else ifeq ($(ZPP_GENERATE_ASSEMBLY), false)
@@ -185,7 +185,7 @@ clean_single:
 	find $(ZPP_OUTPUT_DIRECTORY_ROOT) -type d -empty -delete 2> /dev/null; \
 	echo "Cleaned '$(ZPP_TARGET_TYPE)/$(ZPP_TARGET_NAME)'."
 
-clean_mode: 
+clean_mode:
 	@rm -rf $(ZPP_INTERMEDIATE_DIRECTORY); \
 	rm -rf $(ZPP_OUTPUT_DIRECTORY)/$(ZPP_TARGET_NAME)
 
