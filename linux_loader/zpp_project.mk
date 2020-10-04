@@ -8,6 +8,8 @@ ZPP_LINK_TYPE := default
 ZPP_SOURCE_DIRECTORIES := \
 	../loader/src
 ZPP_SOURCE_FILES :=
+ZPP_INCLUDE_PROJECTS :=
+ZPP_COMPILE_COMMANDS_JSON := ../loader/compile_commands.json
 
 endif
 
@@ -77,6 +79,7 @@ ZPP_CXX := clang++
 ZPP_AS := $(ZPP_CC)
 ZPP_LINK := $(ZPP_CXX)
 ZPP_AR := ar
+ZPP_PYTHON := python
 
 -include zpp_toolchain.mk
 

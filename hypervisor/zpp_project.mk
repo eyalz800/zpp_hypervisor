@@ -9,6 +9,8 @@ ZPP_OUTPUT_DIRECTORY_ROOT := ../out
 ZPP_SOURCE_DIRECTORIES := \
 	./src
 ZPP_SOURCE_FILES :=
+ZPP_INCLUDE_PROJECTS :=
+ZPP_COMPILE_COMMANDS_JSON := compile_commands.json
 
 endif
 
@@ -85,6 +87,7 @@ endif
 
 ZPP_AS := $(ZPP_CC)
 ZPP_LINK := $(ZPP_CXX)
+ZPP_PYTHON := python
 
 endif
 
