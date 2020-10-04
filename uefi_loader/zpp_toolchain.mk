@@ -11,7 +11,7 @@ else
 $(error Unsupported target)
 endif
 
-EMPTY := 
+EMPTY :=
 SPACE := $(EMPTY) $(EMPTY)
 
 VISUAL_STUDIO_ROOT := $(subst $(SPACE),+,$(VISUAL_STUDIO_ROOT))

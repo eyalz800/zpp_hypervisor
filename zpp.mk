@@ -1,3 +1,4 @@
+#!/usr/bin/make -f
 .SUFFIXES:
 .SECONDARY:
 .PHONY: \
@@ -14,6 +15,7 @@
 mode ?= debug
 assembly ?= false
 target_type ?=
+projects ?=
 
 ifeq ($(filter $(mode), debug release), )
 $(error Mode must either be debug or release)
@@ -28,10 +30,34 @@ ZPP_THIS_MAKEFILE := $(lastword $(MAKEFILE_LIST))
 ZPP_OUTPUT_DIRECTORY_ROOT := out
 ZPP_INTERMEDIATE_DIRECTORY_ROOT := obj
 
+ifeq ($(projects), )
 ZPP_PROJECT_SETTINGS := true
 include zpp_project.mk
 ZPP_PROJECT_SETTINGS := false
+endif
 
+ifeq ($(ZPP_INCLUDE_PROJECTS), )
+ZPP_INCLUDE_PROJECTS := $(projects)
+endif
+
+ifneq ($(ZPP_INCLUDE_PROJECTS), )
+ZPP_PROJECTS_DIRECTORIES := $(ZPP_INCLUDE_PROJECTS)
+ZPP_INCLUDE_PROJECTS :=
+
+build:
+	@for project in $(ZPP_PROJECTS_DIRECTORIES); do \
+		$(MAKE) projects= -s -f `realpath $(ZPP_THIS_MAKEFILE) --relative-to $$project` -C $$project; \
+	done
+clean:
+	@for project in $(ZPP_PROJECTS_DIRECTORIES); do \
+		$(MAKE) projects= -s -f `realpath $(ZPP_THIS_MAKEFILE) --relative-to $$project` -C $$project clean; \
+	done
+rebuild:
+	@for project in $(ZPP_PROJECTS_DIRECTORIES); do \
+		$(MAKE) projects= -s -f `realpath $(ZPP_THIS_MAKEFILE) --relative-to $$project` -C $$project rebuild; \
+	done
+
+else # ifneq ($(ZPP_INCLUDE_PROJECTS), )
 ifeq ($(ZPP_TARGET_TYPE), )
 build:
 	@for target_type in $(ZPP_TARGET_TYPES); do \
@@ -70,11 +96,16 @@ endif
 
 ZPP_INTERMEDIATE_DIRECTORY := $(ZPP_INTERMEDIATE_DIRECTORY_ROOT)/$(ZPP_CONFIGURATION)/$(ZPP_TARGET_TYPE)
 ZPP_OUTPUT_DIRECTORY := $(ZPP_OUTPUT_DIRECTORY_ROOT)/$(ZPP_CONFIGURATION)/$(ZPP_TARGET_TYPE)
+ZPP_COMPILE_COMMANDS_PATHS := $(ZPP_INTERMEDIATE_DIRECTORY)
 
 ZPP_PATH_FROM_ROOT := $(shell echo $(ZPP_SOURCE_FILES) | grep -o "\(\.\./\)*" | sort --unique | tail -n 1)
 ifneq ($(ZPP_PATH_FROM_ROOT), )
 ZPP_INTERMEDIATE_SUBDIRECTORY := $(shell realpath . --relative-to $(ZPP_PATH_FROM_ROOT))
 ZPP_INTERMEDIATE_DIRECTORY := $(ZPP_INTERMEDIATE_DIRECTORY)/$(ZPP_INTERMEDIATE_SUBDIRECTORY)
+endif
+
+ifeq ($(ZPP_COMPILE_COMMANDS_JSON), intermediate)
+ZPP_COMPILE_COMMANDS_JSON := $(ZPP_INTERMEDIATE_DIRECTORY)/compile_commands.json
 endif
 
 ZPP_TOOLCHAIN_SETTINGS := true
@@ -125,8 +156,41 @@ else
 $(error ZPP_LINK_TYPE must either be default, ld, link, or ar)
 endif
 
+define GENERATE_COMPILE_COMMANDS_SCRIPT
+import os
+import json
+compile_commands = []
+for root, _, files in os.walk('$(ZPP_COMPILE_COMMANDS_PATHS)'):
+	for file in files:
+		if not file.endswith('.zppcmd'):
+			continue
+		full_file = os.path.join(root, file)
+		with open(full_file, 'r') as f:
+			command, source_file = f.read().split('\n')[:2]
+		compile_commands.append(
+			{
+				'directory': os.path.abspath('.'),
+				'file': os.path.abspath(source_file),
+				'command': command,
+			}
+		)
+	with open('$(ZPP_COMPILE_COMMANDS_JSON)', 'w') as f:
+		json.dump(compile_commands, f, indent=2, sort_keys=True)
+endef
+export GENERATE_COMPILE_COMMANDS_SCRIPT
+CALL_GENERATE_COMPILE_COMMANDS_SCRIPT := $(ZPP_PYTHON) -c "$$GENERATE_COMPILE_COMMANDS_SCRIPT"
+
+ifeq ($(ZPP_COMPILE_COMMANDS_JSON), )
 build_single: $(ZPP_OUTPUT_DIRECTORY)/$(ZPP_TARGET_NAME)
 	@echo "Built '$(ZPP_TARGET_TYPE)/$(ZPP_TARGET_NAME)'."
+else
+build_single: $(ZPP_COMPILE_COMMANDS_JSON)
+	@echo "Built '$(ZPP_TARGET_TYPE)/$(ZPP_TARGET_NAME)'."
+
+$(ZPP_COMPILE_COMMANDS_JSON): $(ZPP_OUTPUT_DIRECTORY)/$(ZPP_TARGET_NAME)
+	@echo "Building '$@'..."; \
+	$(CALL_GENERATE_COMPILE_COMMANDS_SCRIPT)
+endif
 
 build_init:
 	@echo "Building '$(ZPP_TARGET_TYPE)/$(ZPP_TARGET_NAME)' in '$(ZPP_CONFIGURATION)' mode..."; \
@@ -141,37 +205,51 @@ $(ZPP_OUTPUT_DIRECTORY)/$(ZPP_TARGET_NAME): $(ZPP_OBJECT_FILES)
 ifeq ($(ZPP_GENERATE_ASSEMBLY), true)
 $(ZPP_INTERMEDIATE_DIRECTORY)/%.S: %.c | build_init
 	@echo "Compiling '$<'..."; \
-	$(ZPP_CC) -S $(ZPP_CFLAGS) -o $@ $< -MD -Wp,-MD,`dirname $@`/`basename $@ .S`.d
+	$(ZPP_CC) -S $(ZPP_CFLAGS) -o $@ $< -MD -Wp,-MD,`dirname $@`/`basename $@ .S`.d; \
+	echo '$(ZPP_CC) -c $(ZPP_CFLAGS) -o $@ $< -MD -Wp,-MD,'`dirname $@`/`basename $@ .o`.d > $@.zppcmd; \
+	echo $< >> $@.zppcmd
 
 $(ZPP_INTERMEDIATE_DIRECTORY)/%.S: %.cpp | build_init
 	@echo "Compiling '$<'..."; \
-	$(ZPP_CXX) -S $(ZPP_CXXFLAGS) -o $@ $< -MD -Wp,-MD,`dirname $@`/`basename $@ .S`.d
+	$(ZPP_CXX) -S $(ZPP_CXXFLAGS) -o $@ $< -MD -Wp,-MD,`dirname $@`/`basename $@ .S`.d; \
+	echo '$(ZPP_CXX) -c $(ZPP_CXXFLAGS) -o $@ $< -MD -Wp,-MD,'`dirname $@`/`basename $@ .o`.d > $@.zppcmd; \
+	echo $< >> $@.zppcmd
 
 $(ZPP_INTERMEDIATE_DIRECTORY)/%.S: %.cc | build_init
 	@echo "Compiling '$<'..."; \
-	$(ZPP_CXX) -S $(ZPP_CXXFLAGS) -o $@ $< -MD -Wp,-MD,`dirname $@`/`basename $@ .S`.d
+	$(ZPP_CXX) -S $(ZPP_CXXFLAGS) -o $@ $< -MD -Wp,-MD,`dirname $@`/`basename $@ .S`.d; \
+	echo '$(ZPP_CXX) -c $(ZPP_CXXFLAGS) -o $@ $< -MD -Wp,-MD,'dirname $@`/`basename $@ .o`.d > $@.zppcmd; \
+	echo $< >> $@.zppcmd
 
 $(ZPP_INTERMEDIATE_DIRECTORY)/%.o: $(ZPP_INTERMEDIATE_DIRECTORY)/%.S
 	@$(ZPP_CC) -Wno-unicode -c -o $@ $<
 else ifeq ($(ZPP_GENERATE_ASSEMBLY), false)
 $(ZPP_INTERMEDIATE_DIRECTORY)/%.o: %.c | build_init
 	@echo "Compiling '$<'..."; \
-	$(ZPP_CC) -c $(ZPP_CFLAGS) -o $@ $< -MD -Wp,-MD,`dirname $@`/`basename $@ .o`.d
+	$(ZPP_CC) -c $(ZPP_CFLAGS) -o $@ $< -MD -Wp,-MD,`dirname $@`/`basename $@ .o`.d; \
+	echo '$(ZPP_CC) -c $(ZPP_CFLAGS) -o $@ $< -MD -Wp,-MD,'dirname $@`/`basename $@ .o`.d > $@.zppcmd; \
+	echo $< >> $@.zppcmd
 
 $(ZPP_INTERMEDIATE_DIRECTORY)/%.o: %.cpp | build_init
 	@echo "Compiling '$<'..."; \
-	$(ZPP_CXX) -c $(ZPP_CXXFLAGS) -o $@ $< -MD -Wp,-MD,`dirname $@`/`basename $@ .o`.d
+	$(ZPP_CXX) -c $(ZPP_CXXFLAGS) -o $@ $< -MD -Wp,-MD,`dirname $@`/`basename $@ .o`.d; \
+	echo '$(ZPP_CXX) -c $(ZPP_CXXFLAGS) -o $@ $< -MD -Wp,-MD,'`dirname $@`/`basename $@ .o`.d > $@.zppcmd; \
+	echo $< >> $@.zppcmd
 
 $(ZPP_INTERMEDIATE_DIRECTORY)/%.o: %.cc | build_init
 	@echo "Compiling '$<'..."; \
-	$(ZPP_CXX) -c $(ZPP_CXXFLAGS) -o $@ $< -MD -Wp,-MD,`dirname $@`/`basename $@ .o`.d
+	$(ZPP_CXX) -c $(ZPP_CXXFLAGS) -o $@ $< -MD -Wp,-MD,`dirname $@`/`basename $@ .o`.d; \
+	echo '$(ZPP_CXX) -c $(ZPP_CXXFLAGS) -o $@ $< -MD -Wp,-MD,'`dirname $@`/`basename $@ .o`.d > $@.zppcmd; \
+	echo $< >> $@.zppcmd
 else
 $(error ZPP_GENERATE_ASSEMBLY must either be true or false)
 endif
 
 $(ZPP_INTERMEDIATE_DIRECTORY)/%.o: %.S | build_init
 	@echo "Assemblying '$<'..."; \
-	$(ZPP_AS) -c $(ZPP_ASFLAGS) -o $@ $< -MD -Wp,-MD,`dirname $@`/`basename $@ .o`.d
+	$(ZPP_AS) -c $(ZPP_ASFLAGS) -o $@ $< -MD -Wp,-MD,`dirname $@`/`basename $@ .o`.d; \
+	echo '$(ZPP_AS) -c $(ZPP_ASFLAGS) -o $@ $< -MD -Wp,-MD,'`dirname $@`/`basename $@ .o`.d > $@.zppcmd; \
+	echo $< >> $@.zppcmd
 
 -include $(ZPP_DEPENDENCY_FILES)
 
@@ -181,6 +259,7 @@ clean_single:
 	rm -rf $(ZPP_INTERMEDIATE_DIRECTORY_ROOT)/release/$(ZPP_TARGET_TYPE); \
 	rm -f $(ZPP_OUTPUT_DIRECTORY_ROOT)/debug/$(ZPP_TARGET_TYPE)/$(ZPP_TARGET_NAME); \
 	rm -f $(ZPP_OUTPUT_DIRECTORY_ROOT)/release/$(ZPP_TARGET_TYPE)/$(ZPP_TARGET_NAME); \
+	rm -f $(ZPP_COMPILE_COMMANDS_JSON); \
 	find $(ZPP_INTERMEDIATE_DIRECTORY_ROOT) -type d -empty -delete 2> /dev/null; \
 	find $(ZPP_OUTPUT_DIRECTORY_ROOT) -type d -empty -delete 2> /dev/null; \
 	echo "Cleaned '$(ZPP_TARGET_TYPE)/$(ZPP_TARGET_NAME)'."
@@ -196,5 +275,5 @@ ZPP_PROJECT_RULES := true
 include zpp_project.mk
 ZPP_PROJECT_RULES := false
 
-endif
-
+endif # ifeq ($(ZPP_TARGET_TYPE), )
+endif # ifneq ($(ZPP_INCLUDE_PROJECTS), )

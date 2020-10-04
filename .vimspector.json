@@ -1,0 +1,22 @@
+{
+    "configurations": {
+        "Launch": {
+            "adapter": "vscode-cpptools",
+            "configuration": {
+                "request": "launch",
+                "program": "./out/debug/x86_64/zpp_hypervisor",
+                "type": "cppdbg",
+                "setupCommands": [
+                    { "text": "set disassembly-flavor intel", "description": "", "ignoreFailures": false },
+                    { "text": "-enable-pretty-printing", "description": "", "ignoreFailures": false },
+                    { "text": "source ${workspaceRoot}/environment/gdbcommand", "description": "", "ignoreFailures": false }
+                ],
+                "miDebuggerServerAddress": "localhost:1337",
+                "externalConsole": true,
+                "stopAtEntry": true,
+                "miDebuggerPath": "gdb",
+                "MIMode": "gdb"
+            }
+        }
+    }
+}
