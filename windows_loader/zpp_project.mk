@@ -10,6 +10,8 @@ ZPP_SOURCE_DIRECTORIES := \
 	./src \
 	../loader/src
 ZPP_SOURCE_FILES :=
+ZPP_INCLUDE_PROJECTS :=
+ZPP_COMPILE_COMMANDS_JSON := compile_commands.json
 
 endif
 
@@ -78,5 +80,6 @@ $(ZPP_INTERMEDIATE_DIRECTORY)/../loader/src/elf_binary.o: \
 endif
 
 ifeq ($(ZPP_TOOLCHAIN_SETTINGS), true)
+	ZPP_PYTHON := python
 	include zpp_toolchain.mk
 endif

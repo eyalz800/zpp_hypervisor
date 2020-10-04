@@ -34,3 +34,8 @@ uefi_loader/Release
 uefi_loader/x64
 *.mod.c
 environment/
+compile_commands.json
+.opengrok/
+*.vim
+.files
+.cache/

@@ -34,6 +34,13 @@ pool:
   vmImage: $(VM_IMAGE)
 
 steps:
+
+- task: UsePythonVersion@0
+  inputs:
+    versionSpec: '3.x'
+    addToPath: true
+    architecture: 'x64'
+
 - script: |
     sudo add-apt-repository "deb http://apt.llvm.org/xenial/ llvm-toolchain-xenial-$CLANG_VERSION main"
     sudo apt update --allow-insecure-repositories
