@@ -18,6 +18,7 @@ ubuntu_settings: &ubuntu_settings
         build-essential
         libelf-dev
         linux-headers-$(uname -r)
+        python
     - sudo update-alternatives --install /usr/bin/clang clang /usr/bin/clang-$CLANG_VERSION 10000
     - sudo update-alternatives --install /usr/bin/clang++ clang++ /usr/bin/clang++-$CLANG_VERSION 10000
 
@@ -59,6 +60,7 @@ windows_settings: &windows_settings
         build-essential
         libelf-dev
         linux-headers-\$LINUX_KERNEL
+        python
         " >> .install.sh
     - echo "update-alternatives --install /usr/bin/clang clang /usr/bin/clang-$CLANG_VERSION 10000" >> .install.sh
     - echo "update-alternatives --install /usr/bin/clang++ clang++ /usr/bin/clang++-$CLANG_VERSION 10000" >> .install.sh
@@ -80,7 +82,7 @@ matrix:
   include:
     - os: linux
       dist: xenial
-      env: 
+      env:
         - JOB=ubuntu-clang-7
         - CLANG_VERSION=7
 
@@ -88,7 +90,7 @@ matrix:
 
     - os: linux
       dist: xenial
-      env: 
+      env:
         - JOB=ubuntu-clang-8
         - CLANG_VERSION=8
 
