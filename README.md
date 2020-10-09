@@ -115,7 +115,8 @@ Download / Install:
     * build-essential
     * libelf-dev
     * linux-headers-$(LINUX_KERNEL) where $(LINUX_KERNEL) is whatever version we want to build the Linux driver for,
-    typically $(uname -r) for non Windows machines.
+      typically $(uname -r) for non Windows machines.
+    * python, for generation of compile commands
 2. [Windows SDK](https://developer.microsoft.com/en-us/windows/downloads/windows-10-sdk) to build the Windows and UEFI drivers.
 3. [Windows WDK](https://docs.microsoft.com/en-us/windows-hardware/drivers/download-the-wdk) to build the Windows and UEFI drivers.
 5. [Tianocore EDK2](https://github.com/tianocore/edk2) - to build UEFI driver.
@@ -133,7 +134,7 @@ Make sure the `./environment.config` file contains your correct paths and settin
 your environment:
 1. Adjust the `BUILD_DRIVERS` configuration to build Linux/Windows/UEFI drivers or both.
 To compile just the hypervisor, leave `BUILD_DRIVERS` empty.
-2. Change `HYPERVISOR_WAIT_FOR_DEBUGGER` to whether or not you wish the hypervisor to 
+2. Change `HYPERVISOR_WAIT_FOR_DEBUGGER` to whether or not you wish the hypervisor to
 wait for debugging.
 3. For Linux driver build:
     * Adjust the `LINUX_KERNEL` variable to control linux headers version.
@@ -182,7 +183,7 @@ Remember to turn off integrity checks beforehand.
 The windows driver returns an error code of `STATUS_INSUFFICIENT_POWER` when it succeeds, to unload itself.
 
 ### UEFI
-I am yet to be familiar with UEFI best practices. Until now I have used a rather violant 
+I am yet to be familiar with UEFI best practices. Until now I have used a rather violant
 mount of the EFI partition and replaced the `*.efi` image that I knew was the main boot selection.
 
 Currently the UEFI support is really experimental, there are probably many issues that are invisible to me,
@@ -198,7 +199,7 @@ A friendly reminder for `Visual Studio` users in Windows, is that it supports co
 pretty much the same debugging experience as any other application compiled in `Visual Studio`.
 
 The hypervisor can be configured using the `environment.config` file to perform a busy loop until
-a debugger is attached and changes the loop variable `gdb_attached`, make sure to enable this and compile the 
+a debugger is attached and changes the loop variable `gdb_attached`, make sure to enable this and compile the
 `./hypervisor/src/hypervisor/main.cpp` file again to enjoy the refreshed setting.
 
 While the hypervisor is inside the busy loop, we typically have the instruction pointer within our module
@@ -219,7 +220,7 @@ which makes gdb uses hardware breakpoints instead of patching the code which has
 This configurtion however limits the amount of breakpoints to four, use wisely.
 In addition, I recommend using the `debugOnStartGuest64` configuration listed above as well as it waits for you to attach to the VM before starting
 to use it.
-When you build the project, a directory named `environment` will be created according to this configuration with 
+When you build the project, a directory named `environment` will be created according to this configuration with
 useful environmental scripts.
 
 ### Configuring Qemu-KVM for Debugging
