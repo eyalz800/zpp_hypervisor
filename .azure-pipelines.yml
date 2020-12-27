@@ -15,13 +15,13 @@ strategy:
       COMPILER: 'clang-8'
       CLANG_VERSION: 8
       ARTIFACT_NAME: 'ubuntu-clang-8'
-    windows-2019-clang-10:
-      VM_IMAGE: 'windows-2019'
+    vs2017-win2016-clang-11:
+      VM_IMAGE: 'vs2017-win2016'
       OPERATING_SYSTEM: 'windows'
-      COMPILER: 'clang-10'
-      CLANG_INSTALLER_URL: 'https://github.com/llvm/llvm-project/releases/download/llvmorg-10.0.0/LLVM-10.0.0-win64.exe'
+      COMPILER: 'clang-11'
+      CLANG_INSTALLER_URL: 'https://github.com/llvm/llvm-project/releases/download/llvmorg-11.0.0/LLVM-11.0.0-win64.exe'
       ANDROID_NDK_VERSION: r19c
-      ARTIFACT_NAME: 'windows-2019-clang-10'
+      ARTIFACT_NAME: 'vs2017-win2016-clang-11'
     vs2017-win2016-clang-8:
       VM_IMAGE: 'vs2017-win2016'
       OPERATING_SYSTEM: 'windows'
