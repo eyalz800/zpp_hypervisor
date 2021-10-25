@@ -5,12 +5,12 @@ trigger:
 strategy:
   matrix:
     ubuntu-clang-7:
-      VM_IMAGE: 'ubuntu-16.04'
+      VM_IMAGE: 'ubuntu-18.04'
       OPERATING_SYSTEM: 'linux'
       CLANG_VERSION: 7
       ARTIFACT_NAME: 'ubuntu-clang-7'
     ubuntu-clang-8:
-      VM_IMAGE: 'ubuntu-16.04'
+      VM_IMAGE: 'ubuntu-18.04'
       OPERATING_SYSTEM: 'linux'
       COMPILER: 'clang-8'
       CLANG_VERSION: 8
