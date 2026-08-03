@@ -4,7 +4,6 @@
 #include <asm/pgtable.h>
 #include <linux/cpumask.h>
 #include <linux/gfp.h>
-#include <linux/kallsyms.h>
 #include <linux/mm.h>
 #include <linux/module.h>
 #include <linux/printk.h>
@@ -12,17 +11,14 @@
 #include <linux/slab.h>
 #include <linux/types.h>
 #include <linux/vmalloc.h>
+#include <linux/workqueue.h>
 
-typedef long (*sched_getaffinity_t)(pid_t pid, struct cpumask * mask);
-typedef long (*sched_setaffinity_t)(pid_t pid,
-                                    const struct cpumask * new_mask);
-
-static struct driver_state
+// Threaded through work_on_cpu, which passes a single void argument.
+struct call_on_cpu_arguments
 {
-    cpumask_t previous_mask;
-    sched_getaffinity_t sched_getaffinity;
-    sched_setaffinity_t sched_setaffinity;
-} g_state;
+    int (*function)(void *);
+    void * context;
+};
 
 static size_t number_of_cpus(void)
 {
@@ -34,30 +30,30 @@ static size_t number_of_cpus(void)
     return result;
 }
 
+static long call_on_cpu_trampoline(void * argument)
+{
+    struct call_on_cpu_arguments * arguments = argument;
+    return arguments->function(arguments->context);
+}
+
 static int call_on_cpu(size_t cpuid,
                        int (*function)(void *),
                        void * context)
 {
-    int result = -1;
+    struct call_on_cpu_arguments arguments = {
+        .function = function,
+        .context = context,
+    };
 
-    // Save previous affinity.
-    if (g_state.sched_getaffinity(current->pid, &g_state.previous_mask)) {
-        return -1;
-    }
-
-    // Set new affinity to only given cpuid.
-    if (g_state.sched_setaffinity(current->pid, cpumask_of(cpuid))) {
-        return -1;
-    }
-
-    // Call user function.
-    result = function(context);
-
-    // Restore previous affinity.
-    if (g_state.sched_setaffinity(current->pid, &g_state.previous_mask)) {
-        return -1;
-    }
-    return result;
+    // work_on_cpu runs this in a worker bound to the target CPU and waits
+    // for it, so the hypervisor is genuinely entered on that CPU and
+    // cannot be migrated off it. The previous approach called
+    // sched_setaffinity, which only expressed a preference - the calling
+    // task carried on running on whichever CPU it was already on until it
+    // next scheduled - and relied on kallsyms_lookup_name, unexported
+    // since 5.7.
+    return (int)work_on_cpu(
+        (int)cpuid, call_on_cpu_trampoline, &arguments);
 }
 
 static void * allocate_rwx(size_t size)
@@ -110,12 +106,6 @@ static void * allocate_rwx(size_t size)
 static int zpp_init(void)
 {
     int result = 0;
-
-    // Lookup the get/set affinity functions.
-    g_state.sched_getaffinity =
-        (sched_getaffinity_t)kallsyms_lookup_name("sched_getaffinity");
-    g_state.sched_setaffinity =
-        (sched_setaffinity_t)kallsyms_lookup_name("sched_setaffinity");
 
     // Load the ELF.
     const struct zpp_loader_parameters parameters = {
