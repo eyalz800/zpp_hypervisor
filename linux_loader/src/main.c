@@ -9,15 +9,17 @@
 #include <linux/printk.h>
 #include <linux/sched.h>
 #include <linux/slab.h>
+#include <linux/smp.h>
 #include <linux/types.h>
 #include <linux/vmalloc.h>
-#include <linux/workqueue.h>
 
-// Threaded through work_on_cpu, which passes a single void argument.
+// Threaded through smp_call_function_single, which passes a single void
+// argument and cannot return a value of its own.
 struct call_on_cpu_arguments
 {
     int (*function)(void *);
     void * context;
+    int result;
 };
 
 static size_t number_of_cpus(void)
@@ -30,10 +32,10 @@ static size_t number_of_cpus(void)
     return result;
 }
 
-static long call_on_cpu_trampoline(void * argument)
+static void call_on_cpu_trampoline(void * argument)
 {
     struct call_on_cpu_arguments * arguments = argument;
-    return arguments->function(arguments->context);
+    arguments->result = arguments->function(arguments->context);
 }
 
 static int call_on_cpu(size_t cpuid,
@@ -43,17 +45,25 @@ static int call_on_cpu(size_t cpuid,
     struct call_on_cpu_arguments arguments = {
         .function = function,
         .context = context,
+        .result = -1,
     };
 
-    // work_on_cpu runs this in a worker bound to the target CPU and waits
-    // for it, so the hypervisor is genuinely entered on that CPU and
-    // cannot be migrated off it. The previous approach called
-    // sched_setaffinity, which only expressed a preference - the calling
-    // task carried on running on whichever CPU it was already on until it
-    // next scheduled - and relied on kallsyms_lookup_name, unexported
-    // since 5.7.
-    return (int)work_on_cpu(
-        (int)cpuid, call_on_cpu_trampoline, &arguments);
+    // A plain EXPORT_SYMBOL, unlike work_on_cpu and set_cpus_allowed_ptr,
+    // so it is usable from this MIT licensed module. Sends an IPI and,
+    // with wait set, blocks until the target CPU has finished, which is
+    // what launch_on_cpu requires of its caller.
+    //
+    // The function therefore runs in interrupt context with interrupts
+    // already disabled. It must not sleep or allocate, and note that the
+    // hypervisor's failure path currently enables interrupts
+    // unconditionally rather than restoring them, which is wrong in this
+    // context.
+    if (smp_call_function_single(
+            (int)cpuid, call_on_cpu_trampoline, &arguments, 1)) {
+        return -1;
+    }
+
+    return arguments.result;
 }
 
 static void * allocate_rwx(size_t size)

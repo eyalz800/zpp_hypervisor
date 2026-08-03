@@ -887,11 +887,20 @@ hypervisor::main(x64::context & caller_context)
         reinterpret_cast<std::uint64_t (*)(std::uint64_t)>(
             caller_context.rsi);
 
-    // Disable interrupts.
+    // Save the interrupt flag rather than assuming it was set: the Linux
+    // loader enters through an IPI handler, where interrupts are already
+    // disabled and enabling them would be enabling interrupts inside an
+    // interrupt handler.
+    auto interrupts_were_enabled = (x64::flags() & (1ull << 9)) != 0;
+
     x64::disable_interrupts();
 
-    // Guard to enable interrupts.
-    scope_exit restore_interrupts{x64::enable_interrupts};
+    // Guard to restore interrupts to how they were found.
+    scope_exit restore_interrupts{[interrupts_were_enabled] {
+        if (interrupts_were_enabled) {
+            x64::enable_interrupts();
+        }
+    }};
 
     // Initialize page table operations.
     this->physical_to_virtual = physical_to_virtual;
