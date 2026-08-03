@@ -1,5 +1,6 @@
-#include "zpp/crt/init.h"
+#include "zpp/crt.h"
 #include "zpp/hypervisor/state.h"
+#include "zpp/spin_lock.h"
 #include "zpp/x64/context.h"
 
 namespace zpp::hypervisor
@@ -12,12 +13,12 @@ extern "C" void zpp_hypervisor_main(x64::context & caller_context)
 {
 #if ZPP_HYPERVISOR_WAIT_FOR_DEBUGGER
     while (!gdb_attached) {
-        asm("pause");
+        zpp::spin_hint();
     }
 #endif
 
     // Initialize the C runtime before anything can use a global.
-    crt::init();
+    crt::init::run();
 
     // Create the state once.
     state::create_once();

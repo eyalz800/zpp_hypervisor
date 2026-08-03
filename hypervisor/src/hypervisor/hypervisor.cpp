@@ -1,5 +1,5 @@
 #include "zpp/hypervisor/hypervisor.h"
-#include "zpp/crt/init.h"
+#include "zpp/crt.h"
 #include "zpp/elf_file.h"
 #include "zpp/elf_image_base.h"
 #include "zpp/error.h"
@@ -1063,7 +1063,7 @@ void hypervisor::launch_on_cpu_private_stack(hypervisor & hypervisor,
     // On success the hypervisor stays resident and its globals must
     // outlive every guest, so only tear them down when it does not.
     if (!result) {
-        zpp::crt::fini();
+        zpp::crt::init::teardown();
     }
 
     // Restore context to caller.

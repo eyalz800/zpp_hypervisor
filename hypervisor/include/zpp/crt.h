@@ -2,17 +2,11 @@
 
 namespace zpp::crt
 {
-namespace detail
-{
 /**
- * Prepares the global heap from the storage owned by crt/heap.cpp.
- * Called by init() before any global constructor runs, so that
- * global_heap() itself can stay a plain accessor with no initialization
- * check on the allocation path. Not intended for general use.
+ * Startup and teardown of the C runtime.
  */
-void initialize_heap();
-} // namespace detail
-
+namespace init
+{
 /**
  * Initializes the C runtime: prepares the global heap, then runs the
  * preinit and init arrays, that is the constructors of objects with static
@@ -23,7 +17,7 @@ void initialize_heap();
  * The heap is ready before the first constructor runs, so a constructor is
  * free to allocate. Allocating before this point traps.
  */
-void init();
+void run();
 
 /**
  * Tears the C runtime down: runs destructors registered through
@@ -34,6 +28,7 @@ void init();
  * staying resident - once the hypervisor is live its globals must outlive
  * every guest, so the successful path deliberately never runs destructors.
  */
-void fini();
+void teardown();
 
+} // namespace init
 } // namespace zpp::crt
