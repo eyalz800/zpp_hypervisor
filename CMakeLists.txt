@@ -83,3 +83,27 @@ add_custom_target(linux_loader_ko
     DEPENDS linux_loader
     COMMENT "Building linux kernel module (.ko) via Podman kbuild"
 )
+
+# Copy each sub-build's compile_commands.json into the corresponding source
+# directory after build so clangd picks up the correct flags automatically.
+# Copies survive a build directory clean.
+set(_COMPDB_COPIES
+    "hypervisor:hypervisor"
+    "windows-loader:windows_loader"
+    "uefi-loader:uefi_loader"
+    "linux-loader:linux_loader"
+    "linux-loader:loader"
+)
+foreach(_pair ${_COMPDB_COPIES})
+    string(REPLACE ":" ";" _parts "${_pair}")
+    list(GET _parts 0 _build)
+    list(GET _parts 1 _src)
+    list(GET _parts 0 _target)
+    string(REPLACE "-" "_" _target "${_target}")
+    add_custom_command(TARGET ${_target} POST_BUILD
+        COMMAND ${CMAKE_COMMAND} -E copy_if_different
+            "${CMAKE_BINARY_DIR}/${_build}/compile_commands.json"
+            "${ZPP_SOURCE_DIR}/${_src}/compile_commands.json"
+        COMMENT "Copying compile_commands.json to ${_src}/"
+    )
+endforeach()
