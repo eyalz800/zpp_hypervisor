@@ -29,7 +29,7 @@ struct registered_destructor
 // Fixed capacity on purpose: registering a destructor happens from inside
 // a constructor and must not itself allocate, and the table has to stay
 // usable while the heap is being torn down.
-constexpr std::size_t max_registered_destructors = 256;
+constexpr std::size_t max_registered_destructors = 2048;
 
 constinit registered_destructor
     g_registered_destructors[max_registered_destructors]{};
@@ -38,9 +38,15 @@ constinit std::size_t g_registered_destructor_count{};
 constinit bool g_constructed{};
 constinit bool g_destroyed{};
 
+// Guard support for function local statics. The build passes
+// -fno-threadsafe-statics, so the compiler does not currently emit calls
+// to these - they exist so the ABI is complete if that flag is ever
+// dropped. Note they need no threads or mutexes: the lock is a spin on a
+// byte of the guard object, the same technique as the heap lock.
+//
 // The Itanium ABI gives each guard variable eight bytes. Byte zero
-// records that initialization completed; byte one is used here as a spin
-// lock, matching what the hosted runtimes do.
+// records that initialization completed; byte one is used here as the
+// spin lock, matching what the hosted runtimes do.
 constexpr std::size_t guard_done_byte = 0;
 constexpr std::size_t guard_lock_byte = 1;
 
