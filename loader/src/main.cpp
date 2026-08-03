@@ -1,26 +1,34 @@
+#include "zpp/loader.h"
+
 #include "zpp/elf_file.h"
 #include <cstdint>
 #include <utility>
 
 namespace zpp
 {
+// The hypervisor ELF, embedded by elf_binary.cpp. It lives on this side of
+// the ABI rather than in each platform loader because linux_loader is
+// built by kbuild with gcc, which cannot do #embed.
 extern const unsigned char elf_binary[];
 extern const std::size_t elf_binary_size;
+} // namespace zpp
 
 extern "C" int
-zpp_load_elf(void * (*allocate_rwx)(std::size_t),
-             std::uintptr_t (*physical_to_virtual)(std::uintptr_t),
-             int (*call_on_cpu)(std::size_t, int (*)(void *), void *),
-             std::size_t (*number_of_cpus)(),
-             int (*adjust_launch_calling_convention)(
-                 int (*)(std::size_t, std::uintptr_t (*)(std::uintptr_t)),
-                 std::size_t,
-                 std::uintptr_t (*)(std::uintptr_t)))
+zpp_load_elf(const struct zpp_loader_parameters * parameters)
 {
+    using namespace zpp;
+
+    // A caller that supplies neither a way to allocate nor a CPU count
+    // cannot be served.
+    if (!parameters || !parameters->allocate_rwx ||
+        !parameters->call_on_cpu || !parameters->number_of_cpus) {
+        return -1;
+    }
+
     // Invoke the elf_loader.
     elf_file elf(elf_binary, elf_file::state::unloaded);
     auto base = elf.load(
-        allocate_rwx,
+        parameters->allocate_rwx,
         [](const void *, std::size_t, elf_file::memory_protection) {});
     if (!base) {
         return -1;
@@ -33,11 +41,11 @@ zpp_load_elf(void * (*allocate_rwx)(std::size_t),
     // Convert ELF entry to function pointer.
     auto entry = reinterpret_cast<int (*)(
         std::size_t cpuid,
-        std::uintptr_t(*physical_to_virtual)(std::uintptr_t))>(
+        std::uintptr_t (*physical_to_virtual)(std::uintptr_t))>(
         entry_point_address);
 
     // Call entry point on all cpus.
-    auto cpus = number_of_cpus();
+    auto cpus = parameters->number_of_cpus();
 
     // If failed, return failure.
     if (!cpus) {
@@ -47,11 +55,11 @@ zpp_load_elf(void * (*allocate_rwx)(std::size_t),
     for (std::size_t i{}; i < cpus; ++i) {
         // The launch function.
         auto launch = [&] {
-            if (adjust_launch_calling_convention) {
-                return adjust_launch_calling_convention(
-                    entry, i, physical_to_virtual);
+            if (parameters->adjust_launch_calling_convention) {
+                return parameters->adjust_launch_calling_convention(
+                    entry, i, parameters->physical_to_virtual);
             }
-            return entry(i, physical_to_virtual);
+            return entry(i, parameters->physical_to_virtual);
         };
 
         // The erased launch function.
@@ -62,10 +70,10 @@ zpp_load_elf(void * (*allocate_rwx)(std::size_t),
         };
 
         // Call on specified CPU.
-        auto result =
-            call_on_cpu(i,
-                        static_cast<int (*)(void *)>(erased_launch),
-                        std::addressof(launch));
+        auto result = parameters->call_on_cpu(
+            i,
+            static_cast<int (*)(void *)>(erased_launch),
+            std::addressof(launch));
 
         // If failed, return failure.
         if (result) {
@@ -76,4 +84,3 @@ zpp_load_elf(void * (*allocate_rwx)(std::size_t),
     // Return success.
     return 0;
 }
-} // namespace zpp

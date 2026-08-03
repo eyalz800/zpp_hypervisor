@@ -16,14 +16,7 @@ static struct driver_state
     sched_setaffinity_t sched_setaffinity;
 } g_state;
 
-int zpp_load_elf(void * (*allocate_rwx)(size_t),
-                 void * (*physical_to_virtual)(unsigned long long),
-                 int (*call_on_cpu)(size_t, int (*)(void *), void *),
-                 size_t (*number_of_cpus)(void),
-                 int (*adjust_launch_calling_convention)(
-                     int (*)(size_t, uintptr_t (*)(uintptr_t)),
-                     size_t,
-                     uintptr_t (*)(uintptr_t)));
+#include "zpp/loader.h"
 
 static size_t number_of_cpus(void)
 {
@@ -77,8 +70,17 @@ static int zpp_init(void)
         (sched_setaffinity_t)kallsyms_lookup_name("sched_setaffinity");
 
     // Load the ELF.
-    result = zpp_load_elf(
-        &allocate_rwx, &phys_to_virt, &call_on_cpu, &number_of_cpus, 0);
+    const struct zpp_loader_parameters parameters = {
+        .allocate_rwx = &allocate_rwx,
+        // phys_to_virt returns void *, which is pointer sized here.
+        .physical_to_virtual = (uintptr_t(*)(uintptr_t)) & phys_to_virt,
+        .call_on_cpu = &call_on_cpu,
+        .number_of_cpus = &number_of_cpus,
+        // The kernel already uses the SysV convention the hypervisor wants.
+        .adjust_launch_calling_convention = NULL,
+    };
+
+    result = zpp_load_elf(&parameters);
 
     // If we failed, return an arbitrary failure.
     if (result) {

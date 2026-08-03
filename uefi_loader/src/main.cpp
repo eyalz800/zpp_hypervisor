@@ -10,6 +10,7 @@ extern "C" {
 #include <Protocol/LoadedImage.h>
 #include <Protocol/MpService.h>
 }
+#include "zpp/loader.h"
 #include <cstddef>
 #include <cstdint>
 #include <string>
@@ -60,16 +61,6 @@ static EFI_GUID g_efi_mp_service_protocol_guid = {
 /**
  * @}
  */
-
-extern "C" int
-zpp_load_elf(void * (*allocate_rwx)(std::size_t),
-             std::uintptr_t (*physical_to_virtual)(std::uintptr_t),
-             int (*call_on_cpu)(std::size_t, int (*)(void *), void *),
-             std::size_t (*number_of_cpus)(void),
-             int (*adjust_launch_calling_convention)(
-                 int (*)(std::size_t, std::uintptr_t (*)(std::uintptr_t)),
-                 std::size_t,
-                 std::uintptr_t (*)(std::uintptr_t)));
 
 static void * allocate_rwx(std::size_t size)
 {
@@ -298,8 +289,15 @@ extern "C" EFI_STATUS EFIAPI uefi_main(EFI_HANDLE image_handle,
     }
 
     // Load the ELF.
-    auto result = zpp_load_elf(
-        allocate_rwx, nullptr, call_on_cpu, number_of_cpus, invoke_entry);
+    const zpp_loader_parameters parameters{
+        .allocate_rwx = allocate_rwx,
+        .physical_to_virtual = nullptr,
+        .call_on_cpu = call_on_cpu,
+        .number_of_cpus = number_of_cpus,
+        .adjust_launch_calling_convention = invoke_entry,
+    };
+
+    auto result = zpp_load_elf(&parameters);
 
     // If we failed, return an arbitrary failure.
     if (result) {

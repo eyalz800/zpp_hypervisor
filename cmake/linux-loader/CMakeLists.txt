@@ -53,6 +53,7 @@ endif()
 
 # Project headers
 target_include_directories(zpp_loader_obj PRIVATE
+    "${ZPP_SOURCE_DIR}/loader/include"
     "${ZPP_SOURCE_DIR}/hypervisor/include"
 )
 

@@ -72,6 +72,7 @@ endif()
 # ---- Include directories -----------------------------------------------
 # Project headers first (non-system), then system includes.
 target_include_directories(zpp_loader_efi PRIVATE
+    "${ZPP_SOURCE_DIR}/loader/include"
     "${ZPP_SOURCE_DIR}/hypervisor/include"
 )
 target_include_directories(zpp_loader_efi SYSTEM PRIVATE

@@ -89,6 +89,7 @@ endif()
 # ---- Include directories -----------------------------------------------
 # Project headers first (non-system), then WDK/SDK as system includes.
 target_include_directories(zpp_loader_sys PRIVATE
+    "${ZPP_SOURCE_DIR}/loader/include"
     "${ZPP_SOURCE_DIR}/windows_loader/include"
     "${ZPP_SOURCE_DIR}/hypervisor/include"
 )
