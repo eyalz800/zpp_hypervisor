@@ -32,8 +32,7 @@ jobs:
 
       - name: Configure
         run: |
-          cmake --preset ${{ matrix.config }} \
-            -DLLVM_PREFIX="/usr/lib/llvm-$LLVM_VERSION"
+          cmake --preset ${{ matrix.config }}
 
       - name: Build
         run: cmake --build --preset ${{ matrix.config }}
@@ -78,7 +77,7 @@ jobs:
           echo "/usr/lib/llvm-$LLVM_VERSION/bin" >> "$GITHUB_PATH"
       - name: Build zpp_loader.o
         run: |
-          cmake --preset debug -DLLVM_PREFIX="/usr/lib/llvm-$LLVM_VERSION"
+          cmake --preset debug
           cmake --build --preset debug --target linux_loader
       - name: Build zpp_loader.ko
         run: cmake --build --preset debug --target linux_loader_ko

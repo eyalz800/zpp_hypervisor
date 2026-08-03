@@ -39,6 +39,10 @@ Requirements
 - Podman (optional, for Linux kernel module build)
 - Bochs, mtools, x86_64-elf-gdb (optional, for debugging under emulated VT-x)
 
+LLVM is located automatically: an explicit `LLVM_PREFIX`, then `llvm-config` or
+`clang` on `PATH`, then the usual layouts for Homebrew, MacPorts, Debian,
+Ubuntu, Fedora and RHEL. Pass `-DLLVM_PREFIX=<prefix>` only to override.
+
 Compiling The Project
 ---------------------
 The project uses CMake with presets. The build cross-compiles from the host to x86_64 targets.

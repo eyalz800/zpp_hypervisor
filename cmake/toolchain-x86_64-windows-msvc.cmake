@@ -4,7 +4,8 @@
 set(CMAKE_SYSTEM_NAME Windows)
 set(CMAKE_SYSTEM_PROCESSOR x86_64)
 
-set(LLVM_PREFIX "/opt/homebrew/opt/llvm" CACHE PATH "Homebrew LLVM prefix")
+# Find LLVM. Detected per platform rather than assumed - see find-llvm.cmake.
+include("${CMAKE_CURRENT_LIST_DIR}/find-llvm.cmake")
 
 set(CMAKE_C_COMPILER "${LLVM_PREFIX}/bin/clang")
 set(CMAKE_CXX_COMPILER "${LLVM_PREFIX}/bin/clang++")

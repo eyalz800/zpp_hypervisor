@@ -1,11 +1,11 @@
 # Toolchain for freestanding x86_64 ELF binaries (hypervisor, linux loader object)
-# Cross-compiles from macOS ARM64 to x86_64 using Homebrew LLVM.
+# Cross-compiles to x86_64 using an LLVM located at configure time.
 
 set(CMAKE_SYSTEM_NAME Linux)
 set(CMAKE_SYSTEM_PROCESSOR x86_64)
 
-# Find Homebrew LLVM
-set(LLVM_PREFIX "/opt/homebrew/opt/llvm" CACHE PATH "Homebrew LLVM prefix")
+# Find LLVM. Detected per platform rather than assumed - see find-llvm.cmake.
+include("${CMAKE_CURRENT_LIST_DIR}/find-llvm.cmake")
 
 set(CMAKE_C_COMPILER "${LLVM_PREFIX}/bin/clang")
 set(CMAKE_CXX_COMPILER "${LLVM_PREFIX}/bin/clang++")
