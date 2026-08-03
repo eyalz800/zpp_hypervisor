@@ -1,8 +1,5 @@
 zpp_hypervisor
 ==============
-[![Build Status](https://dev.azure.com/eyalz800/zpp_hypervisor/_apis/build/status/eyalz800.zpp_hypervisor?branchName=master)](https://dev.azure.com/eyalz800/zpp_hypervisor/_build/latest?definitionId=1&branchName=master)
-[![Build Status](https://travis-ci.org/eyalz800/zpp_hypervisor.svg?branch=master)](https://travis-ci.org/eyalz800/zpp_hypervisor)
-[![Build status](https://ci.appveyor.com/api/projects/status/wi0kttdsy3v7jd3d/branch/master?svg=true)](https://ci.appveyor.com/project/eyalz800/zpp-hypervisor/branch/master)
 
 A very simple hypervisor for learning experience.
 
@@ -32,125 +29,36 @@ The hypervisor is a self contained ELF binary that aims to be cross platform.
 The Linux / Windows / UEFI loader drivers are there to load the hypervisor
 under Linux, Windows, and UEFI respectively.
 
-Project Configuration
----------------------
-The project is configured using the `environment.config` file located at the project root.
-This file configures important makefile variables for compiling and debugging environment.
-Example:
-```make
-# The supported architectures.
-SUPPORTED_ARCHITECTURES := x86_64
+Requirements
+------------
+- CMake 3.25+
+- Ninja
+- LLVM/Clang 18+ (with libc++ headers)
+- Podman (optional, for Linux kernel module build)
 
-# Selected architecture to build.
-SELECTED_ARCHITECTURE := x86_64
-
-# For SSH deployment, the SSH target, port, and password.
-SSH_TARGET := user@192.168.171.136
-SSH_PORT := 22
-SSH_PASSWORD := password1
-
-# For GDB debugging, the GDB server address.
-GDB_SERVER_ADDRESS := :1337
-
-# The drivers to build, linux, windows, uefi and both.
-BUILD_DRIVERS := linux windows uefi
-
-# Whether the hypervisor is configured to wait for debugger.
-HYPERVISOR_WAIT_FOR_DEBUGGER := 0
-
-# The linux kernel version for the linux driver.
-LINUX_KERNEL := 4.18.0-15-generic
-
-# Windows build dependencies can be referenced from either
-# the windows side, WSL, or an arbitrary linux machine with
-# access to the needed resources below.
-ROOT :=
-ifeq ($(OS), Windows_NT)
-ROOT := C:
-else
-ROOT := /mnt/c
-endif
-
-# Windows build dependencies.
-VISUAL_STUDIO_ROOT := $(ROOT)/Program\ Files\ \(x86\)/Microsoft\ Visual\ Studio/2017/Community/VC/Tools/MSVC/14.16.27023
-WINDOWS_KITS_ROOT := $(ROOT)/Program\ Files\ \(x86\)/Windows\ Kits/10
-WINDOWS_KITS_VERSION := 10.0.18362.0
-EDK2_ROOT := $(ROOT)/Temp/edk2-UDK2018
-ANDROID_NDK_ROOT := $(ROOT)/CustomPrograms/android-ndk-r19b
-LLVM_ROOT := $(ROOT)/Program\ Files/LLVM
-```
+See [clang.md](clang.md) for detailed toolchain setup.
 
 Compiling The Project
 ---------------------
-This section describes what is needed to compile the project
-and its subprojects.
+The project uses CMake with presets. The build cross-compiles from the host to x86_64 targets.
 
-The list of requirements varies between the host system that is used for
-the build and the loader drivers that are participating in the build.
+### Debug
+```sh
+cmake --preset debug
+cmake --build --preset debug
+```
 
-### Windows non-WSL:
-Download / Install:
-1. [Android NDK](https://developer.android.com/ndk/downloads) to build the Hypervisor.
-2. [LLVM Releases](http://releases.llvm.org/download.html) to build the Windows and UEFI drivers.
-3. [Windows SDK](https://developer.microsoft.com/en-us/windows/downloads/windows-10-sdk) to build the Windows and UEFI drivers.
-4. [Windows WDK](https://docs.microsoft.com/en-us/windows-hardware/drivers/download-the-wdk) to build the Windows and UEFI drivers.
-5. [Tianocore EDK2](https://github.com/tianocore/edk2) - to build UEFI driver.
-6. [Visual Studio Community](https://visualstudio.microsoft.com/vs/community) - for C/C++ headers use in Windows and UEFI drivers.
-7. [Git](https://git-scm.com/downloads) - for use of Linux commands located in the `/usr/bin` subfolder.
+### Release
+```sh
+cmake --preset release
+cmake --build --preset release
+```
 
-- Make sure the WDK and SDK versions are the same.
-- Use `$(ANDROID_NDK_ROOT)/prebuilt/windows-x86_64/bin/make.exe` for compilation.
-- Prior to the build, set the PATH environment variable to have `C:/Program Files/Git/usr/bin` as first directory.
-- After finishing, proceed to the environment settings part below.
-
-### Linux / Windows WSL
-Download / Install:
-1. Following packages:
-    * git
-    * make
-    * clang-7 or higher
-    * clang++-7 or higher
-    * lld-7 or higher
-    * libc++-7-dev or higher
-    * build-essential
-    * libelf-dev
-    * linux-headers-$(LINUX_KERNEL) where $(LINUX_KERNEL) is whatever version we want to build the Linux driver for,
-      typically $(uname -r) for non Windows machines.
-    * python, for generation of compile commands
-2. [Windows SDK](https://developer.microsoft.com/en-us/windows/downloads/windows-10-sdk) to build the Windows and UEFI drivers.
-3. [Windows WDK](https://docs.microsoft.com/en-us/windows-hardware/drivers/download-the-wdk) to build the Windows and UEFI drivers.
-5. [Tianocore EDK2](https://github.com/tianocore/edk2) - to build UEFI driver.
-5. [Visual Studio Community](https://visualstudio.microsoft.com/vs/community) - for C/C++ headers use in Windows and UEFI drivers.
-
-Notes:
-- Make sure clang and clang++ point to the correct clang and clang++ versions.
-- Installing the Windows SDK, WDK as well as Visual Studio is meant to be done
-in a windows machine. The intention is to either copy the Visual Studio headers and the SDK,
-WDK to the Linux machine or use a shared folder.
-- After finishing, proceed to the environment settings part below.
-
-### Environment Settings (Shared)
-Make sure the `./environment.config` file contains your correct paths and settings in
-your environment:
-1. Adjust the `BUILD_DRIVERS` configuration to build Linux/Windows/UEFI drivers or both.
-To compile just the hypervisor, leave `BUILD_DRIVERS` empty.
-2. Change `HYPERVISOR_WAIT_FOR_DEBUGGER` to whether or not you wish the hypervisor to
-wait for debugging.
-3. For Linux driver build:
-    * Adjust the `LINUX_KERNEL` variable to control linux headers version.
-    * Note: under Windows this must use WSL.
-4. For Windows driver build:
-    * Adjust the `VISUAL_STUDIO_ROOT`, `WINDOWS_KITS_ROOT`, and `WINDOWS_KITS_VERSION` accordingly.
-    * Note: Supports Linux machines as well as WSL, as long as those paths are accessible.
-5. For UEFI driver build:
-    * In case you are building the UEFI driver, adjust the `EDK2_ROOT` field to the EDK2 directory.
-    * Make sure all requirements for Windows driver build are met.
-6. For Windows non-WSL build, adjust the `LLVM_ROOT` and `ANDROID_NDK_ROOT` to the LLVM installation
-folder and `ANDROID_NDK_ROOT` folder respectively.
-
-### Compilation Command
-After completing the above steps, just run `make -j` or `make -j mode=release` for to build the
-project for debug or release configuration respectively.
+### Linux Kernel Module (optional)
+Requires Podman. Build the linux loader first, then:
+```sh
+cmake --build --preset debug --target linux_loader_ko
+```
 
 The build output will be located at the `./out` folder.
 
@@ -168,9 +76,6 @@ Note: The `./environment/linux_load.sh` script requires `sshpass` to avoid havin
 therefore it needs to be installed.
 
 ### Windows
-There is currently no script that automatically loads the hypervisor for Windows, thus, we have
-to load the driver manually.
-
 To load the hypervisor on a Windows machine, move the driver located at `./out/debug/x86_64/zpp_loader.sys`
 to the machine and load the driver using:
 ```sh
@@ -198,7 +103,7 @@ to allow nested virtualization and expose a `gdb stub`.
 A friendly reminder for `Visual Studio` users in Windows, is that it supports connecting to a `gdb stub` allowing
 pretty much the same debugging experience as any other application compiled in `Visual Studio`.
 
-The hypervisor can be configured using the `environment.config` file to perform a busy loop until
+The hypervisor can be configured to perform a busy loop until
 a debugger is attached and changes the loop variable `gdb_attached`, make sure to enable this and compile the
 `./hypervisor/src/hypervisor/main.cpp` file again to enjoy the refreshed setting.
 
@@ -268,4 +173,3 @@ in the command window:
 Final Words
 -----------
 I hope that you enjoy using this project and feel free to report any issues.
-
