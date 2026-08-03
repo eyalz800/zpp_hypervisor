@@ -1,6 +1,8 @@
 zpp_hypervisor
 ==============
 
+[![ci](https://github.com/eyalz800/zpp_hypervisor/actions/workflows/ci.yml/badge.svg)](https://github.com/eyalz800/zpp_hypervisor/actions/workflows/ci.yml)
+
 A very simple hypervisor for learning experience.
 
 Abstract
