@@ -1,8 +1,11 @@
 name: ci
 
 on:
+  # Only master on push. Branch pushes are covered by their pull request, and
+  # listing develop here as well meant every commit ran the whole workflow
+  # twice.
   push:
-    branches: [master, develop]
+    branches: [master]
   pull_request:
   workflow_dispatch:
 
