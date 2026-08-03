@@ -132,8 +132,8 @@ jobs:
 
       - name: Build boot medium
         run: |
-          # Debian ships a combined OVMF.fd, so no need to join split halves.
-          QEMU_SHARE=/usr/share/OVMF ./scripts/bochs/setup.sh debug
+          # setup.sh searches the standard firmware locations itself.
+          ./scripts/bochs/setup.sh debug
 
       - name: Boot under emulated VT-x
         run: ./scripts/ci/bochs-smoke.sh
