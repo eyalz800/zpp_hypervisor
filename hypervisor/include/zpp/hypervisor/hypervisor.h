@@ -49,6 +49,17 @@ public:
         100 * 1024 * 1024; // 100 MB.
 
     /**
+     * The hypervisor instance.
+     *
+     * A static member of its own type rather than a free global, so the
+     * class owns its single instance. It cannot be constant initialized -
+     * constant evaluating the EPT tables alone exceeds the compiler's
+     * constexpr step budget - so it is constructed from the init array,
+     * which zpp::crt::init::run() walks before anything touches it.
+     */
+    static hypervisor instance;
+
+    /**
      * Launch the hypervisor on a the current CPU, caller must make
      * sure the context switch to another CPU cannot occur.
      * The caller context parameter must contain a context where the OS can

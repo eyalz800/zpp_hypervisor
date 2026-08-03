@@ -52,8 +52,13 @@ The hypervisor has no OS, no libc, no C++ runtime library. It uses:
 - `-D_LIBCPP_VERBOSE_ABORT(...)=__builtin_trap()` for `<expected>` support
 - `std::expected<T, zpp::error>` (replaced custom `zpp::maybe<T>`)
 - `zpp::scope_exit` (matches P0052 `std::scope_exit` API — not in libc++ until C++29)
-- `zpp::allocator<T>` + `zpp/containers.h` aliases (`zpp::vector`, `zpp::map`, `zpp::string`, …)
-  route all container allocation through the global heap
+- `zpp::allocator<T>` (`zpp/allocator.h`) + `zpp/containers.h` aliases (`zpp::vector`,
+  `zpp::map`, `zpp::string`, …) route all container allocation through the global heap
+
+Header layering, deliberately one-directional:
+`heap.h` (the `heap` type only) → `crt.h` (declares `zpp::global_heap()`, since `crt.cpp`
+owns the instance and its storage) → `allocator.h` → `containers.h`. Do not move
+`global_heap()` back into `heap.h`: the declaration belongs with the definition's owner.
 
 ### Heap lifecycle
 
@@ -78,36 +83,38 @@ cannot be thrown.
 The Windows loader deliberately does **not** define `mem*`/`strlen` — `ntoskrnl.lib`
 provides them, and defining them made the link order-sensitive.
 
-### Constant initialization (critical)
+### Global initialization
 
-No `.init` sections execute — there is no C runtime startup. All globals must be
-**constant-initialized** (value determined at compile time, baked into the binary).
-Use `constinit` to enforce this at compile time. Types used as globals must have
-`constexpr` constructors. For complex types that can't be constant-initialized,
-use raw byte storage in BSS + placement new at runtime (see `state.cpp` pattern):
+There is no OS-provided C runtime startup, so the CRT does it itself. Prefer
+**constant initialization** — `constinit` enforces it at compile time and costs nothing at
+runtime — but it is no longer a hard requirement, because `crt/crt.cpp` walks the init
+array. Two valid shapes:
 
 ```cpp
-alignas(T) static std::byte storage[sizeof(T)];
-T & ref = *reinterpret_cast<T *>(&storage);
-// construct via placement new at first use
+constinit foo g_foo{};   // preferred: baked into the binary, zero startup cost
+bar g_bar;               // fine: compiler emits an .init_array entry, crt::init::run() runs it
 ```
 
+The raw-storage-plus-placement-new dance that `state.cpp` used to do is **gone** — deleting
+it was the point of adding init array support. `hypervisor::instance` is a plain static data
+member of its own type, constructed from the init array (constant-evaluating the EPT tables
+alone blows the compiler's constexpr step budget, so `constinit` is not an option there).
+
 Consequences worth remembering:
-- **Containers can never be globals.** `zpp::allocator`'s default constructor calls
-  `global_heap()`, so it is not `constexpr`; a `zpp::vector` at namespace scope would
-  require dynamic initialization. Use them as locals or as members of an object that is
-  itself placement-new'd.
-- Placement-new the global state with `new (&g) state` (default-init), **not**
-  `state{}` (value-init) — value-init memsets the whole object, which for a 20 MB
-  `heap_storage` member means redundantly zeroing BSS the loader already cleared.
-- Verify the invariant on the built ELF, not by inspection:
-  `llvm-readelf -S out/release/x86_64/zpp_hypervisor | grep init_array` must be empty,
-  and `llvm-nm -u` must report no undefined symbols.
+- **A container as a global costs you an init array entry.** `zpp::allocator`'s default
+  constructor calls `global_heap()`, so it is not `constexpr`. That is legal now, just not
+  free — prefer locals or members.
+- Anything allocating from a constructor is fine: `crt::init::run()` brings the heap up
+  before walking the arrays.
+- Verify on the built ELF rather than by inspection. `llvm-nm -u` must report **no undefined
+  symbols**. `.init_array` is expected to be non-empty now, and every entry must be
+  deliberate — `llvm-readelf -S … | grep init_array` showing 8 bytes means exactly one
+  dynamically initialized global (currently `hypervisor::instance`). A jump in that size is
+  a signal someone added dynamic initialization by accident.
 
-### Dynamic initialization (the escape hatch)
+### The init array machinery
 
-`constinit` is still the default discipline, but `crt/crt.cpp` now supports
-globals that genuinely cannot be constant-initialized:
+`crt/crt.cpp` provides:
 
 - `zpp::crt::init::run()` brings up the global heap, then walks `.preinit_array` and
   `.init_array`. Called from `zpp_hypervisor_main` before anything touches a global, so a

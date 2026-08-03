@@ -1,5 +1,5 @@
 #include "zpp/crt.h"
-#include "zpp/hypervisor/state.h"
+#include "zpp/hypervisor/hypervisor.h"
 #include "zpp/spin_lock.h"
 #include "zpp/x64/context.h"
 
@@ -20,11 +20,8 @@ extern "C" void zpp_hypervisor_main(x64::context & caller_context)
     // Initialize the C runtime before anything can use a global.
     crt::init::run();
 
-    // Create the state once.
-    state::create_once();
-
     // Launch hypervisor on CPU, does not return.
-    g_state.hypervisor.launch_on_cpu(caller_context);
+    hypervisor::instance.launch_on_cpu(caller_context);
 }
 
 extern "C" void __attribute__((naked)) _start()
