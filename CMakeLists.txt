@@ -40,6 +40,13 @@ ExternalProject_Add(windows_loader
     DEPENDS hypervisor
 )
 
+# Testing only: makes the UEFI loader ask the hypervisor to identify itself
+# through CPUID leaf 0x40000000 once it has launched. Used by CI, not by
+# anything deployed.
+option(ZPP_CI_VERIFY_HYPERVISOR
+    "Compile the CPUID self check that asserts the hypervisor reached root mode"
+    OFF)
+
 ExternalProject_Add(uefi_loader
     SOURCE_DIR "${CMAKE_CURRENT_SOURCE_DIR}/cmake/uefi-loader"
     BINARY_DIR "${CMAKE_BINARY_DIR}/uefi-loader"
@@ -50,6 +57,7 @@ ExternalProject_Add(uefi_loader
         -DZPP_SOURCE_DIR=${ZPP_SOURCE_DIR}
         -DZPP_OUTPUT_DIR=${ZPP_OUTPUT_DIR}
         -DFETCHCONTENT_BASE_DIR=${CMAKE_BINARY_DIR}/_deps
+        -DZPP_CI_VERIFY_HYPERVISOR=${ZPP_CI_VERIFY_HYPERVISOR}
     INSTALL_COMMAND ""
     BUILD_ALWAYS ON
     DEPENDS hypervisor
