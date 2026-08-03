@@ -1,7 +1,7 @@
 cmake_minimum_required(VERSION 3.25)
 project(zpp_hypervisor LANGUAGES CXX ASM)
 
-set(CMAKE_CXX_STANDARD 17)
+set(CMAKE_CXX_STANDARD 26)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_CXX_EXTENSIONS OFF)
 
@@ -29,33 +29,26 @@ target_include_directories(zpp_hypervisor PRIVATE
     "${ZPP_SOURCE_DIR}/hypervisor/include"
 )
 
-# libc++ freestanding headers — LLVM_LIBCXX_INCLUDE and LLVM_CLANG_INCLUDE are
-# set by the toolchain file.  MACOS_SDK_INCLUDE (also set by the toolchain) is
-# the macOS SDK usr/include directory, which provides the C standard library
-# declarations that libc++'s #include_next machinery expects.  These are placed
-# after the libc++ headers so that libc++'s own <string.h> / <wchar.h> wrappers
-# are found first and the macOS SDK headers satisfy the subsequent include_next.
+# Freestanding include order (critical for #include_next chains):
+# 1. Config override (__config_site for freestanding: no threads, no locale, etc.)
+# 2. libc++ headers (cstdint, type_traits, etc. — use #include_next for C headers)
+# 3. Freestanding C stubs (string.h, wchar.h — satisfy libc++'s #include_next)
+# 4. Clang builtins (stddef.h, stdint.h — satisfy the stubs' #includes)
 target_include_directories(zpp_hypervisor SYSTEM PRIVATE
+    "${ZPP_SOURCE_DIR}/cmake/freestanding-config"
     "${LLVM_LIBCXX_INCLUDE}"
-    "${MACOS_SDK_INCLUDE}"
+    "${ZPP_SOURCE_DIR}/cmake/freestanding-libc"
+    "${LLVM_CLANG_INCLUDE}"
 )
 
-# Freestanding compile flags (all languages)
+# Freestanding compile flags
 target_compile_options(zpp_hypervisor PRIVATE
     -pedantic -Wall -Wextra -Werror
     -fPIE -nostdlib -ffreestanding -mno-red-zone
     -stdlib=libc++ -fno-rtti -fno-threadsafe-statics -fno-exceptions
-    # Homebrew libc++ sets _LIBCPP_HAS_VENDOR_AVAILABILITY_ANNOTATIONS=1 in
-    # __config_site for macOS builds.  When targeting a bare-metal x86_64-elf
-    # the deployment-target macros that the vendor block expects are absent,
-    # which triggers a hard #error.  -D_LIBCPP_DISABLE_AVAILABILITY is the
-    # documented escape hatch (see __configuration/availability.h).
     -D_LIBCPP_DISABLE_AVAILABILITY
-    # libc++ v22 headers include transitive headers (locale, thread support, etc.)
-    # that are macOS-specific and fail for an x86_64-linux-elf cross target.
-    # Removing transitive includes makes each TU responsible for its own headers,
-    # which is correct behaviour — the one missing include was added to small_map.h.
-    -D_LIBCPP_REMOVE_TRANSITIVE_INCLUDES
+    # C++26 deprecates aligned_storage_t used in small_map.h
+    -Wno-deprecated-declarations
     $<$<COMPILE_LANGUAGE:ASM>:-x$<SEMICOLON>assembler-with-cpp>
 )
 

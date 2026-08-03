@@ -38,22 +38,18 @@ string(REGEX MATCH "version ([0-9]+)" _CLANG_VER_MATCH "${_CLANG_VERSION_OUTPUT}
 set(LLVM_CLANG_MAJOR "${CMAKE_MATCH_1}")
 
 # libc++ headers for freestanding C++ (cstdint, type_traits, etc.)
-set(LLVM_LIBCXX_INCLUDE "${LLVM_PREFIX}/include/c++/v1")
-set(LLVM_CLANG_INCLUDE "${LLVM_PREFIX}/lib/clang/${LLVM_CLANG_MAJOR}/include")
+# These must be CACHE variables so they survive into the project's CMakeLists.txt
+# (toolchain set() without CACHE is only visible during toolchain processing).
+set(LLVM_LIBCXX_INCLUDE "${LLVM_PREFIX}/include/c++/v1" CACHE PATH "libc++ headers")
+set(LLVM_CLANG_INCLUDE "${LLVM_PREFIX}/lib/clang/${LLVM_CLANG_MAJOR}/include" CACHE PATH "Clang builtin headers")
 
-# macOS SDK C headers — used as the underlying C stdlib for freestanding builds.
-# The Homebrew libc++ headers expect `#include_next <string.h>` etc. to find real
-# C declarations; the macOS SDK headers satisfy this without introducing a Linux
-# sysroot dependency. Only applicable on macOS hosts.
-if(CMAKE_HOST_APPLE)
-    execute_process(
-        COMMAND xcrun --show-sdk-path
-        OUTPUT_VARIABLE MACOS_SDK_PATH
-        OUTPUT_STRIP_TRAILING_WHITESPACE
-        ERROR_QUIET
-    )
-    set(MACOS_SDK_INCLUDE "${MACOS_SDK_PATH}/usr/include")
-endif()
+# For freestanding builds we do NOT use the macOS SDK C headers — they conflict
+# with C++26 (size_t scoping changes). Instead we use:
+#   1. Clang builtins: stddef.h, stdint.h, stdbool.h, stdarg.h, etc.
+#   2. Minimal freestanding C stubs: string.h, wchar.h, etc. (just type decls)
+# These satisfy libc++'s #include_next without pulling in a full C library.
+# ZPP_SOURCE_DIR must be passed to the sub-build so we can find the stubs.
+# It's set as a cache variable by the ExternalProject_Add -D argument.
 
 set(CMAKE_FIND_ROOT_PATH_MODE_PROGRAM NEVER)
 set(CMAKE_FIND_ROOT_PATH_MODE_LIBRARY ONLY)
