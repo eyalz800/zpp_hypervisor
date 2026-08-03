@@ -1,9 +1,17 @@
+#include "zpp/loader.h"
+
+#include <asm/io.h>
+#include <asm/pgtable.h>
 #include <linux/cpumask.h>
+#include <linux/gfp.h>
 #include <linux/kallsyms.h>
+#include <linux/mm.h>
 #include <linux/module.h>
 #include <linux/printk.h>
 #include <linux/sched.h>
+#include <linux/slab.h>
 #include <linux/types.h>
+#include <linux/vmalloc.h>
 
 typedef long (*sched_getaffinity_t)(pid_t pid, struct cpumask * mask);
 typedef long (*sched_setaffinity_t)(pid_t pid,
@@ -15,8 +23,6 @@ static struct driver_state
     sched_getaffinity_t sched_getaffinity;
     sched_setaffinity_t sched_setaffinity;
 } g_state;
-
-#include "zpp/loader.h"
 
 static size_t number_of_cpus(void)
 {
@@ -56,7 +62,49 @@ static int call_on_cpu(size_t cpuid,
 
 static void * allocate_rwx(size_t size)
 {
-    return __vmalloc(size, GFP_KERNEL, PAGE_KERNEL_EXEC);
+    size_t page_count = (size + PAGE_SIZE - 1) / PAGE_SIZE;
+    struct page ** pages;
+    void * address;
+    size_t index;
+
+    // __vmalloc lost its pgprot parameter in 5.8, and vmalloc_exec was
+    // removed with it, so executable memory can no longer be asked for
+    // directly.
+    // __vmalloc_node_range and module_alloc can do it but are not exported
+    // to modules. vmap is exported and still takes a protection, so
+    // allocate the pages and map them executable explicitly.
+    pages = kmalloc_array(page_count, sizeof(*pages), GFP_KERNEL);
+    if (!pages) {
+        return NULL;
+    }
+
+    for (index = 0; index < page_count; ++index) {
+        pages[index] = alloc_page(GFP_KERNEL);
+        if (!pages[index]) {
+            while (index--) {
+                __free_page(pages[index]);
+            }
+            kfree(pages);
+            return NULL;
+        }
+    }
+
+    address = vmap(pages, page_count, VM_MAP, PAGE_KERNEL_EXEC);
+    if (!address) {
+        for (index = 0; index < page_count; ++index) {
+            __free_page(pages[index]);
+        }
+        kfree(pages);
+        return NULL;
+    }
+
+    // vmap does not retain the array itself, only the mappings, so the
+    // temporary array goes now. The pages are deliberately never released:
+    // this module reports failure so that it gets unloaded, while the
+    // hypervisor it just launched stays resident in this allocation.
+    kfree(pages);
+
+    return address;
 }
 
 static int zpp_init(void)
