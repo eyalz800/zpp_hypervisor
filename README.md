@@ -66,14 +66,14 @@ Loading The Hypervisor
 ----------------------
 
 ### Linux
-To load the hypervisor on a remote Linux machine, use the `./environment/linux_load.sh` script that will
-push the loader driver which has the hypervisor binary within and run it.
+Copy the loader driver to the target machine and load it:
+```sh
+scp out/debug/x86_64/zpp_loader.ko user@target:/tmp
+ssh user@target 'sudo insmod /tmp/zpp_loader.ko'
+```
 
 The loader driver will load the hypervisor and exit immediately afterwards, due to an intentional
 error code return to the Linux kernel, the error code is EPERM.
-
-Note: The `./environment/linux_load.sh` script requires `sshpass` to avoid having to type the password in SSH,
-therefore it needs to be installed.
 
 ### Windows
 To load the hypervisor on a Windows machine, move the driver located at `./out/debug/x86_64/zpp_loader.sys`
@@ -125,49 +125,22 @@ which makes gdb uses hardware breakpoints instead of patching the code which has
 This configurtion however limits the amount of breakpoints to four, use wisely.
 In addition, I recommend using the `debugOnStartGuest64` configuration listed above as well as it waits for you to attach to the VM before starting
 to use it.
-When you build the project, a directory named `environment` will be created according to this configuration with
-useful environmental scripts.
-
 ### Configuring Qemu-KVM for Debugging
 This is fairly simple, just add the following option to the qemu-kvm launch command line:
 ```sh
 -gdb tcp::1337
 ```
 
-### Configuring regular Linux GDB for Debugging
-Once having the debug machine ready and waiting for connection, run the following command from the root
-directory of the project:
+### Configuring GDB for Debugging
+Once having the debug machine ready and waiting for connection, connect with GDB:
 ```sh
-gdb --command=./environment/gdbcommand
+gdb out/debug/x86_64/zpp_hypervisor
+(gdb) target remote :1337
 ```
 
-Once inside gdb, once your instruction pointer is within the hypervisor, use the `zstartl` command that was added
-to gdb in the command file given to it. This command will look for the ELF header of the hypervisor and load symbols.
-
-### Configuring Windows Visual Studio for Debugging
-Once having the debug machine ready and waiting for connection, launch the command window of Visual Studio
-using the Ctrl+Alt+A shortcut, and define the following alias:
-```
->alias d Debug.MIDebugLaunch /Executable:C:/ /OptionsFile:C:/Projects/git/zpp_hypervisor/environment/options.xml
-```
-This alias will be used to attach to the target machine `gdb` interface.
-Notice that the executable switch to the command is not used so it is safe to leave it as `C:/`, as for the `OptionsFile`, remember
-to provide a full path to the `options.xml` file inside the `environment/options.xml` located at the project root.
-
-Also, I recommend defining the following alias to easily execue `gdb` commands within `Visual Studio`:
-```
->alias e Debug.MIDebugExec
-```
-
-Now, to attach to the target machine, execute the following command within the command window:
-```
->d
-```
-
-To load symbols once the instruction pointer is within the hypervisor, execute the following command
-in the command window:
-```
->e zstartw
+Once your instruction pointer is within the hypervisor, load symbols and resume:
+```gdb
+set *(char *)&gdb_attached = 1
 ```
 
 Final Words
