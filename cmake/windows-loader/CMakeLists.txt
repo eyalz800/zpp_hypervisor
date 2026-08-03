@@ -149,10 +149,6 @@ target_link_options(zpp_loader_sys PRIVATE
     "LINKER:ntoskrnl.lib"
     -Wl,-entry:driver_entry
     -Wl,-ignore:4217
-    # ntoskrnl.lib re-exports memset/memcpy/memcmp which our crt.cpp also
-    # provides.  /FORCE:MULTIPLE lets lld-link pick the first definition
-    # (our .obj wins because it comes before the .lib on the command line).
-    -Wl,-force:multiple
 )
 
 # Add WDK/SDK library search paths so lld-link can find ntoskrnl.lib etc.

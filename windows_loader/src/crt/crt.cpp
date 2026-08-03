@@ -22,16 +22,6 @@ void * memmove(void * dest, const void * src, std::size_t count)
     return dest;
 }
 
-void * memset(void * dest, int value, std::size_t count)
-{
-    for (std::size_t i{}; i < count; ++i) {
-        *(static_cast<unsigned char *>(dest) + i) =
-            static_cast<unsigned char>(value);
-    }
-
-    return dest;
-}
-
 int memcmp(const void * dest, const void * src, std::size_t count)
 {
     for (std::size_t i{}; i < count; ++i) {

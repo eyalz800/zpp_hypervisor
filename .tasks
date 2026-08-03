@@ -1,14 +1,11 @@
 [project-build]
 command=cmake --preset debug && cmake --build --preset debug
 cwd=$(VIM_ROOT)
-output=terminal
 
 [project-build-release]
 command=cmake --preset release && cmake --build --preset release
 cwd=$(VIM_ROOT)
-output=terminal
 
 [project-clean]
 command=rm -rf build/
 cwd=$(VIM_ROOT)
-output=terminal
