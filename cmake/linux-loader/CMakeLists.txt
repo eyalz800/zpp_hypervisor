@@ -75,6 +75,10 @@ target_compile_options(zpp_loader_obj PRIVATE
     -nostdlib -ffreestanding -mno-red-zone
     -stdlib=libc++ -fno-rtti -fno-threadsafe-statics -fno-exceptions
     -D_LIBCPP_DISABLE_AVAILABILITY
+    # As in the other three targets: without this, libc++ emits calls to
+    # std::__libcpp_verbose_abort, which lives in the libc++ shared library and
+    # cannot be resolved in a kernel module. modpost reports it as undefined.
+    "-D_LIBCPP_VERBOSE_ABORT(...)=__builtin_trap()"
     -Wno-deprecated-declarations
     -Wno-c23-extensions
     $<$<CONFIG:Debug>:-g>
