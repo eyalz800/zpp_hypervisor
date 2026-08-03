@@ -174,6 +174,14 @@ QEMU only exposes VMX through KVM nested virtualization, which requires the host
 CPU to have hardware VT-x. On a Linux x86 host QEMU is the better choice by a
 wide margin; Bochs is what works everywhere else, at roughly 10-50 MIPS.
 
+This is also why VT-x cannot be tested in GitHub Actions. The hosted runners
+report `svm`, not `vmx` - they are AMD, and are themselves Hyper-V guests - so
+there is no VMX to expose to a nested guest no matter how QEMU is configured.
+The `probe-virtualization` job in `.github/workflows/ci.yml` measures this and
+can be re-run manually if that ever changes. Testing VMX in CI needs an Intel
+host, which means either a self-hosted runner or a provider that lets you pick
+Intel machine types with nested virtualization.
+
 ### Building Bochs with the gdb stub
 
 Bochs' gdb stub and its internal debugger are mutually exclusive at compile

@@ -88,56 +88,6 @@ jobs:
       - name: Build zpp_loader.ko
         run: cmake --build --preset debug --target linux_loader_ko
 
-  # Tier 3: boot the UEFI loader under emulated VT-x and assert the hypervisor
-  # reaches root mode. Bochs emulates VMX in software, so this needs no
-  # hardware virtualization and runs on a stock runner.
-  bochs-smoke:
-    name: bochs vmx smoke test
-    runs-on: ubuntu-latest
-    needs: build
-    steps:
-      - uses: actions/checkout@v4
-
-      - name: Cache Bochs
-        id: bochs-cache
-        uses: actions/cache@v4
-        with:
-          path: ~/.local/bochs-gdb
-          key: bochs-3.0-gdbstub-vmx2-${{ runner.os }}
-
-      - name: Build Bochs with the gdb stub and VMX
-        if: steps.bochs-cache.outputs.cache-hit != 'true'
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y --no-install-recommends build-essential
-          curl -sLO https://downloads.sourceforge.net/project/bochs/bochs/3.0/bochs-3.0.tar.gz
-          tar xzf bochs-3.0.tar.gz && cd bochs-3.0
-          # Neither --enable-all-optimizations (handlers-chaining) nor
-          # --enable-smp may be combined with the gdb stub.
-          ./configure --prefix="$HOME/.local/bochs-gdb" \
-            --enable-gdb-stub --enable-vmx=2 --enable-x86-64 \
-            --enable-cpu-level=6 --enable-avx --enable-evex --enable-pci \
-            --enable-a20-pin --enable-fpu --enable-long-phy-address \
-            --enable-large-ramfile --enable-logging --enable-show-ips \
-            --with-nogui
-          make -j"$(nproc)" && make install
-
-      - name: Install boot medium tooling
-        run: sudo apt-get install -y --no-install-recommends mtools ovmf
-
-      - uses: actions/download-artifact@v4
-        with:
-          name: binaries-debug
-          path: out/debug/x86_64/
-
-      - name: Build boot medium
-        run: |
-          # setup.sh searches the standard firmware locations itself.
-          ./scripts/bochs/setup.sh debug
-
-      - name: Boot under emulated VT-x
-        run: ./scripts/ci/bochs-smoke.sh
-
   # The highest value test - Windows actually booting while the hypervisor
   # holds root mode - cannot run on a GitHub hosted runner. It needs a real
   # VT-x host, so this job only runs where a self-hosted Windows runner with
@@ -202,6 +152,11 @@ jobs:
   # first and then passed through by KVM. Cheap to measure, so measure it.
   probe-virtualization:
     name: probe virtualization (${{ matrix.os }})
+    # Manual only. It has already answered its question - the hosted runners are
+    # AMD, so there is no VMX to expose and this project cannot be tested on
+    # them at all - but it is kept so the answer can be rechecked if GitHub ever
+    # changes hardware.
+    if: ${{ github.event_name == 'workflow_dispatch' }}
     runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
