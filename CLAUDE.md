@@ -57,17 +57,24 @@ The hypervisor has no OS, no libc, no C++ runtime library. It uses:
 
 ### Heap lifecycle
 
-`zpp::global_heap()` **self-initializes on first use** from storage the CRT owns
-(`crt/heap.cpp`), not the hypervisor. That deliberately breaks a bootstrap cycle: static
-constructors may allocate, so the heap has to be usable before any hypervisor object exists.
-The size lives in `heap.cpp`, not `heap.h` — it is a property of the global heap, not of the
-`heap` type. `operator new` traps via `__builtin_trap()` on allocation failure, since
-`-fno-exceptions` means `bad_alloc` cannot be thrown.
+Storage and size live in `crt/heap.cpp`, owned by the CRT rather than the hypervisor. That
+deliberately breaks a bootstrap cycle: static constructors may allocate, so the heap has to
+be usable before any hypervisor object exists. The size stays out of `heap.h` — it is a
+property of the global heap, not of the `heap` type.
 
-Because the storage is now a standalone global rather than a `state` member, release
-`--gc-sections` drops the whole heap (~20 MB of BSS) while nothing allocates, and pulls it
-back in as soon as anything calls `operator new`. Debug keeps it. A ~20 MB `.bss` difference
-between debug and release is therefore expected, not a bug.
+`zpp::crt::init()` calls `detail::initialize_heap()` **before running any constructor**, so
+`zpp::global_heap()` is a plain accessor with **no initialization check on the allocation
+path**. Do not reintroduce one. Consequences:
+
+- Allocating before `crt::init()` traps — the heap has an empty free list, `allocate`
+  returns `nullptr`, and `operator new` calls `__builtin_trap()`. Loud, not silent.
+- Initialization happens exactly once at a defined point, so there is no concurrent-init
+  race on the allocation path.
+- The 20 MB arena is always retained in release, since `crt::init()` references it
+  unconditionally. It is a fixed arena, so this is intended.
+
+`operator new` also traps on allocation failure, since `-fno-exceptions` means `bad_alloc`
+cannot be thrown.
 The Windows loader deliberately does **not** define `mem*`/`strlen` — `ntoskrnl.lib`
 provides them, and defining them made the link order-sensitive.
 
@@ -102,9 +109,9 @@ Consequences worth remembering:
 `constinit` is still the default discipline, but `crt/init.cpp` now supports
 globals that genuinely cannot be constant-initialized:
 
-- `zpp::crt::init()` walks `.preinit_array` and `.init_array`. Called from
-  `zpp_hypervisor_main` before anything touches a global. No ordering needed — the heap
-  self-initializes, so a constructor may allocate.
+- `zpp::crt::init()` brings up the global heap, then walks `.preinit_array` and
+  `.init_array`. Called from `zpp_hypervisor_main` before anything touches a global, so a
+  constructor is free to allocate.
 - `zpp::crt::fini()` runs `__cxa_atexit`-registered destructors in reverse registration
   order, then `.fini_array` in reverse. Called only when the hypervisor fails to go
   resident — on success its globals must outlive every guest, so destructors deliberately

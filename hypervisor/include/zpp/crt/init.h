@@ -2,14 +2,26 @@
 
 namespace zpp::crt
 {
+namespace detail
+{
 /**
- * Initializes the C runtime: runs the preinit and init arrays, that is the
- * constructors of objects with static storage duration whose initializers
- * are not constant, plus anything marked with the constructor attribute.
+ * Prepares the global heap from the storage owned by crt/heap.cpp.
+ * Called by init() before any global constructor runs, so that
+ * global_heap() itself can stay a plain accessor with no initialization
+ * check on the allocation path. Not intended for general use.
+ */
+void initialize_heap();
+} // namespace detail
+
+/**
+ * Initializes the C runtime: prepares the global heap, then runs the
+ * preinit and init arrays, that is the constructors of objects with static
+ * storage duration whose initializers are not constant, plus anything
+ * marked with the constructor attribute.
  *
  * Only the first call has an effect, so every CPU may call this freely.
- * The global heap self initializes, so nothing needs to be ordered ahead
- * of this - a constructor is free to allocate.
+ * The heap is ready before the first constructor runs, so a constructor is
+ * free to allocate. Allocating before this point traps.
  */
 void init();
 
