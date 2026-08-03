@@ -62,10 +62,7 @@ target_include_directories(zpp_hypervisor SYSTEM PRIVATE
 target_compile_options(zpp_hypervisor PRIVATE
     -pedantic -Wall -Wextra -Werror
     -fPIE -nostdlib -ffreestanding -mno-red-zone
-    # Thread safe statics are enabled: crt/static_objects.cpp provides the
-    # __cxa_guard_* trio, and VM exits run concurrently across CPUs, so a
-    # function local static without a guard would be a real race.
-    -stdlib=libc++ -fno-rtti -fno-exceptions
+    -stdlib=libc++ -fno-rtti -fno-threadsafe-statics -fno-exceptions
     -D_LIBCPP_DISABLE_AVAILABILITY
     "-D_LIBCPP_VERBOSE_ABORT(...)=__builtin_trap()"
     $<$<COMPILE_LANGUAGE:ASM>:-x$<SEMICOLON>assembler-with-cpp>

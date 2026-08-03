@@ -106,9 +106,12 @@ globals that genuinely cannot be constant-initialized:
   last one; `-nostdlib` does not pull it in), and `__cxa_guard_acquire/release/abort`.
   The destructor registry is a fixed 256-entry table on purpose: registration happens from
   inside constructors and must not allocate. It traps rather than silently dropping.
-- Because the guards exist, the hypervisor build **does not** pass `-fno-threadsafe-statics`
-  — VM exits run concurrently, so an unguarded function-local static would be a real race.
-  The loader builds keep the flag, since their CRTs have no guard implementation.
+- All builds keep `-fno-threadsafe-statics` (no threads, no mutexes in this codebase), so the
+  compiler does not emit guard calls and `__cxa_guard_*` are currently inert. They exist to
+  keep the ABI complete if the flag is ever dropped. **Consequence:** a function-local static
+  with a non-constant initializer gets no guard, so two CPUs reaching it concurrently would
+  both initialize it. Prefer namespace-scope `constinit` state over function-local statics
+  in anything reachable from a VM exit.
 
 Note `.fini_array` usually stays empty: destructors of globals are registered at runtime via
 `__cxa_atexit`, and `.fini_array` only receives `__attribute__((destructor))` functions.
