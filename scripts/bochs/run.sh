@@ -15,5 +15,5 @@ bochs="${BOCHS:-$HOME/.local/bochs-gdb/bin/bochs}"
 }
 
 cp "$(dirname "$0")/bochsrc.txt" "$work/bochsrc.txt"
-echo "Bochs waiting for gdb on :1234 (attach with scripts/bochs/debug.sh)"
+echo "Bochs waiting for gdb on :1337 (attach with scripts/bochs/debug.sh)"
 cd "$work" && exec "$bochs" -q -f bochsrc.txt
