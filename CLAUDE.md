@@ -57,10 +57,17 @@ The hypervisor has no OS, no libc, no C++ runtime library. It uses:
 
 ### Heap lifecycle
 
-`zpp::global_heap()` returns a `constinit` global that is **inert until initialized**.
-`hypervisor::main` calls `global_heap().init(heap_storage, sizeof(heap_storage))` on CPU 0
-only; allocating before that returns `nullptr`. `operator new` traps via `__builtin_trap()`
-on allocation failure, since `-fno-exceptions` means `bad_alloc` cannot be thrown.
+`zpp::global_heap()` **self-initializes on first use** from storage the CRT owns
+(`crt/heap.cpp`), not the hypervisor. That deliberately breaks a bootstrap cycle: static
+constructors may allocate, so the heap has to be usable before any hypervisor object exists.
+The size lives in `heap.cpp`, not `heap.h` — it is a property of the global heap, not of the
+`heap` type. `operator new` traps via `__builtin_trap()` on allocation failure, since
+`-fno-exceptions` means `bad_alloc` cannot be thrown.
+
+Because the storage is now a standalone global rather than a `state` member, release
+`--gc-sections` drops the whole heap (~20 MB of BSS) while nothing allocates, and pulls it
+back in as soon as anything calls `operator new`. Debug keeps it. A ~20 MB `.bss` difference
+between debug and release is therefore expected, not a bug.
 The Windows loader deliberately does **not** define `mem*`/`strlen` — `ntoskrnl.lib`
 provides them, and defining them made the link order-sensitive.
 
@@ -92,19 +99,19 @@ Consequences worth remembering:
 
 ### Dynamic initialization (the escape hatch)
 
-`constinit` is still the default discipline, but `crt/static_objects.cpp` now supports
+`constinit` is still the default discipline, but `crt/init.cpp` now supports
 globals that genuinely cannot be constant-initialized:
 
-- `zpp::crt::construct_static_objects()` walks `.preinit_array` and `.init_array`. Called
-  once on CPU 0 from `hypervisor::main`, **after** `global_heap().init()`, so a constructor
-  may allocate.
-- `zpp::crt::destroy_static_objects()` runs `__cxa_atexit`-registered destructors in reverse
-  registration order, then `.fini_array` in reverse. Called only when the hypervisor fails
-  to go resident — on success its globals must outlive every guest, so destructors
-  deliberately never run.
+- `zpp::crt::init()` walks `.preinit_array` and `.init_array`. Called from
+  `zpp_hypervisor_main` before anything touches a global. No ordering needed — the heap
+  self-initializes, so a constructor may allocate.
+- `zpp::crt::fini()` runs `__cxa_atexit`-registered destructors in reverse registration
+  order, then `.fini_array` in reverse. Called only when the hypervisor fails to go
+  resident — on success its globals must outlive every guest, so destructors deliberately
+  never run.
 - Provides `__cxa_atexit`, `__cxa_finalize`, `__dso_handle` (crtbegin normally supplies the
   last one; `-nostdlib` does not pull it in), and `__cxa_guard_acquire/release/abort`.
-  The destructor registry is a fixed 256-entry table on purpose: registration happens from
+  The destructor registry is a fixed 2048-entry table on purpose: registration happens from
   inside constructors and must not allocate. It traps rather than silently dropping.
 - All builds keep `-fno-threadsafe-statics` (no threads, no mutexes in this codebase), so the
   compiler does not emit guard calls and `__cxa_guard_*` are currently inert. They exist to

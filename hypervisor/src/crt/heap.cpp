@@ -2,10 +2,30 @@
 
 namespace zpp
 {
-constinit static heap g_heap{};
+namespace
+{
+// Backing storage for the global heap, owned by the CRT rather than by the
+// hypervisor. Keeping it here is what lets the heap be usable before any
+// hypervisor object exists, which in turn lets constructors of objects
+// with static storage duration allocate.
+//
+// Deliberately not part of heap.h: the size is an implementation detail of
+// the global heap, not of the heap type.
+constexpr std::size_t global_heap_size = 20 * 1024 * 1024; // 20 MB.
+constexpr std::size_t storage_alignment = 0x1000;
+
+alignas(storage_alignment) constinit std::byte
+    g_heap_storage[global_heap_size]{};
+
+constinit heap g_heap{};
+} // namespace
 
 heap & global_heap()
 {
+    // Self initializing, so there is no bootstrap ordering to get wrong:
+    // the very first allocation works, wherever it comes from. init() is
+    // a single guarded check once the heap is up.
+    g_heap.init(g_heap_storage, sizeof(g_heap_storage));
     return g_heap;
 }
 

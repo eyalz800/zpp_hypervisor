@@ -1,4 +1,4 @@
-#include "zpp/crt/static_objects.h"
+#include "zpp/crt/init.h"
 #include <cstddef>
 #include <cstdint>
 
@@ -72,7 +72,7 @@ int __cxa_atexit(void (*function)(void *), void * argument, void *)
 
 void __cxa_finalize(void *)
 {
-    // Nothing to do - destructors are run by destroy_static_objects so
+    // Nothing to do - destructors are run by zpp::crt::fini so
     // that their ordering relative to the fini array stays explicit.
 }
 
@@ -125,7 +125,7 @@ void __cxa_guard_abort(std::int64_t * guard_object)
 
 namespace zpp::crt
 {
-void construct_static_objects()
+void init()
 {
     if (g_constructed) {
         return;
@@ -144,7 +144,7 @@ void construct_static_objects()
     }
 }
 
-void destroy_static_objects()
+void fini()
 {
     if (g_destroyed || !g_constructed) {
         return;
