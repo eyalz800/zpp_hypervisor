@@ -31,10 +31,11 @@ under Linux, Windows, and UEFI respectively.
 
 Requirements
 ------------
-- CMake 3.25+
+- CMake 3.28+ (C++ module file sets)
 - Ninja
 - LLVM/Clang 18+ (with libc++ headers)
 - Podman (optional, for Linux kernel module build)
+- Bochs, mtools, x86_64-elf-gdb (optional, for debugging under emulated VT-x)
 
 Compiling The Project
 ---------------------
@@ -150,3 +151,83 @@ then loads debug symbols at the correct relocated addresses.
 Final Words
 -----------
 I hope that you enjoy using this project and feel free to report any issues.
+
+
+Debugging Under Emulated VT-x
+-----------------------------
+The hypervisor can be run and debugged on a machine that has no VT-x of its own
+(an Apple Silicon Mac, for instance) because Bochs emulates VMX in software.
+
+QEMU cannot do this. Its x86 TCG interpreter has no VMX implementation at all
+and silently drops the feature bit:
+
+    qemu-system-x86_64: warning: TCG doesn't support requested feature:
+                        CPUID.01H:ECX.vmx [bit 5]
+
+QEMU only exposes VMX through KVM nested virtualization, which requires the host
+CPU to have hardware VT-x. On a Linux x86 host QEMU is the better choice by a
+wide margin; Bochs is what works everywhere else, at roughly 10-50 MIPS.
+
+### Building Bochs with the gdb stub
+
+Bochs' gdb stub and its internal debugger are mutually exclusive at compile
+time, and the Homebrew bottle is built with the internal debugger, so it reports
+"Bochs is not compiled with gdbstub support". A source build is required:
+
+    curl -LO https://downloads.sourceforge.net/project/bochs/bochs/3.0/bochs-3.0.tar.gz
+    tar xzf bochs-3.0.tar.gz && cd bochs-3.0
+
+    # On macOS, gui/keymap.cc uses basename() without including <libgen.h>,
+    # which newer SDKs no longer provide transitively.
+    sed -i '' 's|#include "param_names.h"|#include <libgen.h>\n#include "param_names.h"|' \
+        gui/keymap.cc
+
+    ./configure --prefix="$HOME/.local/bochs-gdb" \
+        --enable-gdb-stub --enable-vmx=2 --enable-x86-64 --enable-cpu-level=6 \
+        --enable-avx --enable-evex --enable-pci --enable-a20-pin --enable-fpu \
+        --enable-long-phy-address --enable-large-ramfile --enable-logging \
+        --enable-show-ips --enable-cdrom --enable-clgd54xx --enable-usb \
+        --with-nogui --with-sdl2
+    make -j"$(sysctl -n hw.ncpu)" && make install
+
+Do not pass `--enable-all-optimizations`: it implies handlers-chaining, which
+the gdb stub does not support. Verify the result with:
+
+    grep -E 'BX_GDBSTUB|BX_SUPPORT_VMX|BX_DEBUGGER ' config.h
+    # want BX_GDBSTUB 1, BX_SUPPORT_VMX 2, BX_DEBUGGER 0
+
+Keeping the Homebrew build alongside is useful - it has the internal debugger,
+whose `vmexitbp` breakpoint halts on VMEXIT.
+
+### Other dependencies
+
+    brew install mtools x86_64-elf-gdb
+
+`mtools` writes the FAT boot image without mounting it. `x86_64-elf-gdb` is the
+cross debugger; the plain `gdb` formula targets the host and is not usable for an
+x86-64 guest on an ARM Mac.
+
+### Running
+
+    cmake --build --preset debug
+    ./scripts/bochs/setup.sh debug     # builds build/bochs/{OVMF.fd,esp.img}
+    ./scripts/bochs/run.sh             # halts, waiting for gdb on :1234
+    ./scripts/bochs/debug.sh debug     # in another terminal
+
+`setup.sh` concatenates QEMU's split edk2 halves into one 4 MB flash image,
+because Bochs loads exactly one ROM, and writes `zpp_loader.efi` to the ESP as
+`EFI/BOOT/BOOTX64.EFI`. On attach the guest is halted at the reset vector
+(`CS:IP = F000:FFF0`).
+
+Hypervisor symbols only become meaningful once the loader has mapped the ELF, so
+load them at that point with the bundled gdb command:
+
+    load-symbols $rip out/debug/x86_64/zpp_hypervisor
+
+To stop the hypervisor before it runs, build with
+`-DZPP_HYPERVISOR_WAIT_FOR_DEBUGGER=1`; it then spins until you release it:
+
+    set var zpp::hypervisor::gdb_attached = 1
+
+OVMF's console goes to `build/bochs/serial.out`, and Bochs' own log to
+`build/bochs/bochs.log`.
