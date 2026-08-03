@@ -1,7 +1,12 @@
 #include "zpp/crt.h"
 #include "zpp/hypervisor/hypervisor.h"
-#include "zpp/spin_lock.h"
 #include "zpp/x64/context.h"
+
+#if ZPP_HYPERVISOR_WAIT_FOR_DEBUGGER
+// Only the debugger wait loop below spins, and it is compiled out by
+// default.
+#include "zpp/spin_lock.h"
+#endif
 
 namespace zpp::hypervisor
 {
@@ -21,7 +26,7 @@ extern "C" void zpp_hypervisor_main(x64::context & caller_context)
     crt::init::main();
 
     // Launch hypervisor on CPU, does not return.
-    hypervisor::instance.launch_on_cpu(caller_context);
+    hypervisor::instance().launch_on_cpu(caller_context);
 }
 
 extern "C" void __attribute__((naked)) _start()
