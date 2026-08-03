@@ -83,3 +83,13 @@ add_custom_target(linux_loader_ko
     DEPENDS linux_loader
     COMMENT "Building linux kernel module (.ko) via Podman kbuild"
 )
+
+# Merge all sub-build compile_commands.json into the project root for clangd.
+add_custom_target(compile_commands ALL
+    COMMAND ${CMAKE_COMMAND}
+        -DBINARY_DIR=${CMAKE_BINARY_DIR}
+        -DSOURCE_DIR=${CMAKE_SOURCE_DIR}
+        -P ${CMAKE_CURRENT_SOURCE_DIR}/cmake/merge-compile-commands.cmake
+    DEPENDS hypervisor windows_loader uefi_loader linux_loader
+    COMMENT "Merging compile_commands.json for clangd"
+)
