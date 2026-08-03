@@ -1,0 +1,38 @@
+// libc++ config for Windows kernel driver (freestanding-like, no runtime).
+// Overrides libc++'s default __config_site so that we can use libc++ headers
+// with -nostdinc without pulling in MSVC vcruntime headers.
+//
+// Key differences from the default:
+//  - _LIBCPP_ABI_FORCE_ITANIUM: prevents libc++ from including vcruntime_new.h
+//    (which is not present in the NuGet WDK/SDK packages).  For a kernel driver
+//    built with -fno-exceptions/-fno-rtti this is safe.
+//  - All threading/locale/filesystem/etc. disabled (freestanding context).
+
+#ifndef _LIBCPP___CONFIG_SITE
+#define _LIBCPP___CONFIG_SITE
+
+#define _LIBCPP_ABI_VERSION 1
+#define _LIBCPP_ABI_NAMESPACE __1
+#define _LIBCPP_ABI_FORCE_ITANIUM 1
+#define _LIBCPP_ABI_FORCE_MICROSOFT 0
+#define _LIBCPP_HAS_THREADS 0
+#define _LIBCPP_HAS_MONOTONIC_CLOCK 0
+#define _LIBCPP_HAS_TERMINAL 0
+#define _LIBCPP_HAS_MUSL_LIBC 0
+#define _LIBCPP_HAS_THREAD_API_PTHREAD 0
+#define _LIBCPP_HAS_THREAD_API_EXTERNAL 0
+#define _LIBCPP_HAS_THREAD_API_WIN32 0
+#define _LIBCPP_HAS_THREAD_API_C11 0
+#define _LIBCPP_HAS_FILESYSTEM 0
+#define _LIBCPP_HAS_RANDOM_DEVICE 0
+#define _LIBCPP_HAS_LOCALIZATION 0
+#define _LIBCPP_HAS_UNICODE 0
+#define _LIBCPP_HAS_WIDE_CHARACTERS 0
+#define _LIBCPP_HAS_TIME_ZONE_DATABASE 0
+#define _LIBCPP_INSTRUMENTED_WITH_ASAN 0
+#define _LIBCPP_HARDENING_MODE_DEFAULT 2
+#define _LIBCPP_ASSERTION_SEMANTIC_DEFAULT 2
+#define _LIBCPP_LIBC_PICOLIBC 0
+#define _LIBCPP_LIBC_NEWLIB 0
+
+#endif

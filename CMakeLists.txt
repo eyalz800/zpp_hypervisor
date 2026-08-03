@@ -21,3 +21,19 @@ ExternalProject_Add(hypervisor
     INSTALL_COMMAND ""
     BUILD_ALWAYS ON
 )
+
+set(WINDOWS_MSVC_TOOLCHAIN "${CMAKE_CURRENT_SOURCE_DIR}/cmake/toolchain-x86_64-windows-msvc.cmake")
+
+ExternalProject_Add(windows_loader
+    SOURCE_DIR "${CMAKE_CURRENT_SOURCE_DIR}/cmake/windows-loader"
+    BINARY_DIR "${CMAKE_BINARY_DIR}/windows-loader"
+    CMAKE_ARGS
+        -DCMAKE_TOOLCHAIN_FILE=${WINDOWS_MSVC_TOOLCHAIN}
+        -DCMAKE_BUILD_TYPE=${CMAKE_BUILD_TYPE}
+        -DZPP_SOURCE_DIR=${ZPP_SOURCE_DIR}
+        -DZPP_OUTPUT_DIR=${ZPP_OUTPUT_DIR}
+        -DFETCHCONTENT_BASE_DIR=${CMAKE_BINARY_DIR}/_deps
+    INSTALL_COMMAND ""
+    BUILD_ALWAYS ON
+    DEPENDS hypervisor
+)
