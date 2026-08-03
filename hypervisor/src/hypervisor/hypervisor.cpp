@@ -3,7 +3,7 @@
 #include "zpp/elf_image_base.h"
 #include "zpp/error.h"
 #include "zpp/heap.h"
-#include "zpp/scope_guard.h"
+#include "zpp/scope_exit.h"
 #include "zpp/x64/asm.h"
 #include "zpp/x64/generic.h"
 #include "zpp/x64/intel/asm.h"
@@ -582,17 +582,17 @@ zpp::error hypervisor::enter_root_mode()
 
     // Change cr0.
     x64::cr0(this->host_cr0);
-    scope_guard restore_cr0 = [&] { x64::cr0(cr0); };
+    scope_exit restore_cr0{[&] { x64::cr0(cr0); }};
 
     // Change cr4.
     x64::cr4(this->host_cr4);
-    scope_guard restore_cr4 = [&] { x64::cr4(cr4); };
+    scope_exit restore_cr4{[&] { x64::cr4(cr4); }};
 
     // Turn on vmx.
     if (x64::intel::vmxon(&this->vmx_physical)) {
         return error::vmxon_failed;
     }
-    scope_guard turn_off_vmx{x64::intel::vmxoff};
+    scope_exit turn_off_vmx{x64::intel::vmxoff};
 
     // Clear the vmcs.
     if (x64::intel::vmclear(&this->vmcs_physical)) {
@@ -605,9 +605,9 @@ zpp::error hypervisor::enter_root_mode()
     }
 
     // Cancel all guards.
-    turn_off_vmx.cancel();
-    restore_cr4.cancel();
-    restore_cr0.cancel();
+    turn_off_vmx.release();
+    restore_cr4.release();
+    restore_cr0.release();
     return error::success;
 }
 
@@ -882,7 +882,7 @@ zpp::error hypervisor::main(x64::context & caller_context)
     x64::disable_interrupts();
 
     // Guard to enable interrupts.
-    scope_guard restore_interrupts{x64::enable_interrupts};
+    scope_exit restore_interrupts{x64::enable_interrupts};
 
     // Initialize heap on first CPU.
     if (0 == cpuid) {
@@ -925,13 +925,13 @@ zpp::error hypervisor::main(x64::context & caller_context)
     load_intermediate_gdt();
 
     // Guard to restore GDT.
-    scope_guard restore_gdt = [&] { load_os_gdt(); };
+    scope_exit restore_gdt{[&] { load_os_gdt(); }};
 
     // Switch page tables.
     x64::cr3(this->host_cr3);
 
     // Guard to restore cr3.
-    scope_guard restore_cr3 = [&] { x64::cr3(this->guest_cr3); };
+    scope_exit restore_cr3{[&] { x64::cr3(this->guest_cr3); }};
 
     // Perform only on first CPU load.
     if (0 == cpuid) {
@@ -962,7 +962,7 @@ zpp::error hypervisor::main(x64::context & caller_context)
     }
 
     // Guard to turn off vmx.
-    scope_guard turn_off_vmx{x64::intel::vmxoff};
+    scope_exit turn_off_vmx{x64::intel::vmxoff};
 
     // Setup vmcs.
     setup_vmcs(caller_context);
