@@ -44,6 +44,20 @@ The hypervisor has no OS, no libc, no C++ runtime library. It uses:
 - `std::expected<T, zpp::error>` (replaced custom `zpp::maybe<T>`)
 - `zpp::scope_exit` (matches P0052 `std::scope_exit` API — not in libc++ until C++29)
 
+### Constant initialization (critical)
+
+No `.init` sections execute — there is no C runtime startup. All globals must be
+**constant-initialized** (value determined at compile time, baked into the binary).
+Use `constinit` to enforce this at compile time. Types used as globals must have
+`constexpr` constructors. For complex types that can't be constant-initialized,
+use raw byte storage in BSS + placement new at runtime (see `state.cpp` pattern):
+
+```cpp
+alignas(T) static std::byte storage[sizeof(T)];
+T & ref = *reinterpret_cast<T *>(&storage);
+// construct via placement new at first use
+```
+
 ### Include order (critical for freestanding)
 
 1. `cmake/freestanding-config/` — `__config_site` overrides
