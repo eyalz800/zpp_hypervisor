@@ -1,0 +1,92 @@
+# Cirrus CI is used for one thing GitHub Actions structurally cannot do: run
+# real Intel VT-x.
+#
+# GitHub's hosted runners are AMD and are themselves Hyper-V guests, so they
+# report svm and never vmx - see the probe-virtualization job in
+# .github/workflows/ci.yml. This hypervisor is Intel only, so no amount of
+# nesting helps there.
+#
+# GCE's nested virtualization injects Intel VT-x into the VM itself, which is
+# all that is needed: the hypervisor virtualizes the OS it is loaded into, so
+# there is no nested guest involved. One level of nesting, the supported case.
+#
+# Requires a linked GCP project; nested virtualization needs a minimum CPU
+# platform of Intel Haswell and an image with the nested virtualization licence.
+
+task:
+  name: linux vmxon (real VT-x)
+  compute_engine_instance:
+    image_project: ubuntu-os-cloud
+    image: family/ubuntu-2404-lts-amd64
+    platform: linux
+    cpu: 4
+    memory: 8G
+    nested_virtualization: true
+    # Nested virtualization is Intel only.
+    min_cpu_platform: "Intel Haswell"
+
+  env:
+    LLVM_VERSION: "22"
+    DEBIAN_FRONTEND: noninteractive
+
+  confirm_vmx_script: |
+    # Fail early and loudly if VT-x did not actually arrive, rather than
+    # reporting a pass for a test that never exercised VMX.
+    echo "== CPU virtualization flags"
+    grep -om1 vmx /proc/cpuinfo || {
+        echo "no vmx present - nested virtualization did not take effect" >&2
+        exit 1
+    }
+    grep -om1 hypervisor /proc/cpuinfo || true
+
+  setup_script: |
+    apt-get update
+    apt-get install -y --no-install-recommends \
+        wget gnupg lsb-release software-properties-common \
+        cmake ninja-build git make bc flex bison libelf-dev libssl-dev \
+        linux-headers-$(uname -r) kmod
+    wget -qO- https://apt.llvm.org/llvm.sh | bash -s -- "$LLVM_VERSION"
+    apt-get install -y --no-install-recommends \
+        "libc++-$LLVM_VERSION-dev" "libc++abi-$LLVM_VERSION-dev" "lld-$LLVM_VERSION"
+
+  build_script: |
+    export PATH="/usr/lib/llvm-$LLVM_VERSION/bin:$PATH"
+    cmake --preset debug
+    cmake --build --preset debug --target linux_loader
+
+  # Build the module against this machine's running kernel rather than through
+  # the Podman container, since the module has to be insmod'able here.
+  module_script: |
+    mkdir -p /tmp/km && cd /tmp/km
+    cp "$CIRRUS_WORKING_DIR/linux_loader/src/main.c" main.c
+    cp "$CIRRUS_WORKING_DIR/out/debug/x86_64/zpp_loader.o" zpp_loader_prebuilt.o
+    # kbuild wants a .cmd sidecar beside every object it links.
+    touch .zpp_loader_prebuilt.o.cmd
+    mkdir -p include && cp -r "$CIRRUS_WORKING_DIR/loader/include/." include/
+    cat > Makefile <<'MK'
+    obj-m += zpp_module.o
+    zpp_module-objs := main.o zpp_loader_prebuilt.o
+    ccflags-y += -I$(src)/include
+    MK
+    make -C "/lib/modules/$(uname -r)/build" M=/tmp/km modules
+
+  # The module reports failure on purpose so that it unloads, leaving the
+  # hypervisor resident - so insmod returning EPERM is the success case, and
+  # any other outcome, or a dead machine, is a failure.
+  vmxon_script: |
+    cd /tmp/km
+    dmesg -C
+    set +e
+    insmod zpp_module.ko
+    status=$?
+    set -e
+    echo "insmod exit status: $status"
+    dmesg | tail -40
+    if [ "$status" -eq 1 ]; then
+        echo "FAIL: zpp_load_elf reported failure (EFAULT)" >&2
+        exit 1
+    fi
+    echo "ok: still alive after entering root mode on every CPU"
+    # Prove the machine is functional afterwards rather than merely unhung.
+    nproc && cat /proc/loadavg && dd if=/dev/urandom of=/tmp/probe bs=1M count=64 2>&1 | tail -1
+    echo "ok: guest healthy under load with the hypervisor resident"
