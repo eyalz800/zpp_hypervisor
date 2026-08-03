@@ -62,6 +62,11 @@ mkdir -p /build/linux_loader
 cp /src/linux_loader/src/main.c /build/linux_loader/main.c
 cp /output/zpp_loader.o /build/linux_loader/zpp_loader_prebuilt.o
 
+# kbuild expects a .cmd sidecar for every object it links, and modpost fails
+# without one. A prebuilt object dropped in from outside has none, so provide
+# an empty one.
+touch /build/linux_loader/.zpp_loader_prebuilt.o.cmd
+
 # main.c includes zpp/loader.h for the zpp_load_elf parameter struct, so the
 # shared loader headers have to come along and be on the include path.
 mkdir -p /build/linux_loader/include
