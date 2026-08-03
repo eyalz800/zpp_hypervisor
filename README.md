@@ -190,8 +190,19 @@ time, and the Homebrew bottle is built with the internal debugger, so it reports
         --with-nogui --with-sdl2
     make -j"$(sysctl -n hw.ncpu)" && make install
 
-Do not pass `--enable-all-optimizations`: it implies handlers-chaining, which
-the gdb stub does not support. Verify the result with:
+Two flags must be left out. `--enable-all-optimizations` implies
+handlers-chaining, which the gdb stub does not support. `--enable-smp` is
+rejected outright - `bochs.h` has a hard `#error` reading "GDB stub was
+written for single processor support", because the stub has no way to say
+which CPU gdb is asking about. So a gdbstub build is **single CPU only**.
+
+That matters for this project: `zpp_load_elf` loops over every CPU, and the
+argument that `hypervisor::instance()` is safe without a guard rests on CPUs
+being launched one at a time. Neither can be exercised under gdb. To test the
+multi-CPU paths, build a second Bochs with `--enable-smp --enable-debugger`
+(no gdb stub) and drive it from Bochs' own debugger instead.
+
+Verify the result with:
 
     grep -E 'BX_GDBSTUB|BX_SUPPORT_VMX|BX_DEBUGGER ' config.h
     # want BX_GDBSTUB 1, BX_SUPPORT_VMX 2, BX_DEBUGGER 0
