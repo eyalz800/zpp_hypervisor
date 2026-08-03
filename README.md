@@ -178,9 +178,27 @@ This is also why VT-x cannot be tested in GitHub Actions. The hosted runners
 report `svm`, not `vmx` - they are AMD, and are themselves Hyper-V guests - so
 there is no VMX to expose to a nested guest no matter how QEMU is configured.
 The `probe-virtualization` job in `.github/workflows/ci.yml` measures this and
-can be re-run manually if that ever changes. Testing VMX in CI needs an Intel
-host, which means either a self-hosted runner or a provider that lets you pick
-Intel machine types with nested virtualization.
+can be re-run manually if that ever changes.
+
+`.cirrus.yml` covers the gap. Cirrus CI can run on GCE with
+`nested_virtualization: true`, which injects Intel VT-x into the VM itself.
+That is all this project needs, and it is worth being clear why: the hypervisor
+virtualizes the OS it is loaded into, so there is no nested guest involved and
+only one level of nesting is required - the ordinary supported case, not the
+two levels that a VM-inside-the-runner approach would need. The task builds the
+module against the running kernel, insmods it, and checks the machine is still
+healthy under load with the hypervisor resident.
+
+Requires a linked GCP project. Nested virtualization is Intel only and needs a
+minimum CPU platform of Intel Haswell.
+
+For the Windows driver the same trick applies, but the machine has to persist:
+the unsigned `.sys` needs `bcdedit /set testsigning on` and a reboot, which a
+throwaway CI VM cannot survive. Create a GCE Windows instance with
+`--enable-nested-virtualization`, turn off Hyper-V and VBS, enable test
+signing, reboot, and register it as a self-hosted runner labelled `vtx`. The
+`windows-root-mode` job then runs there and refuses to proceed unless Hyper-V
+and VBS are actually off.
 
 ### Building Bochs with the gdb stub
 
