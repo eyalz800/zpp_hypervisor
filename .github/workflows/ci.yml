@@ -88,6 +88,69 @@ jobs:
       - name: Build zpp_loader.ko
         run: cmake --build --preset debug --target linux_loader_ko
 
+  # Boots the UEFI loader under Bochs' software emulated VMX and asserts the
+  # hypervisor identifies itself through CPUID leaf 0x40000000. Bochs needs no
+  # hardware virtualization, which is what makes this possible at all: the
+  # hosted runners are AMD and expose no vmx, so this is the only way to
+  # exercise vmxon, vmlaunch and the exit handler in CI.
+  bochs-vmx:
+    name: bochs vmx (emulated VT-x)
+    runs-on: ubuntu-latest
+    needs: build
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Cache Bochs
+        id: bochs-cache
+        uses: actions/cache@v4
+        with:
+          path: ~/.local/bochs-gdb
+          key: bochs-3.0-gdbstub-vmx2-${{ runner.os }}
+
+      - name: Build Bochs with VMX emulation
+        if: steps.bochs-cache.outputs.cache-hit != 'true'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends build-essential
+          curl -sLO https://downloads.sourceforge.net/project/bochs/bochs/3.0/bochs-3.0.tar.gz
+          tar xzf bochs-3.0.tar.gz && cd bochs-3.0
+          # basename without <libgen.h> breaks on some toolchains.
+          sed -i 's|#include "param_names.h"|#include <libgen.h>\n#include "param_names.h"|' \
+              gui/keymap.cc
+          # Neither --enable-all-optimizations (handlers-chaining) nor
+          # --enable-smp may be combined with the gdb stub.
+          ./configure --prefix="$HOME/.local/bochs-gdb" \
+            --enable-gdb-stub --enable-vmx=2 --enable-x86-64 \
+            --enable-cpu-level=6 --enable-avx --enable-evex --enable-pci \
+            --enable-a20-pin --enable-fpu --enable-long-phy-address \
+            --enable-large-ramfile --enable-logging --enable-show-ips \
+            --with-nogui
+          make -j"$(nproc)" && make install
+
+      - name: Install boot medium tooling
+        run: sudo apt-get install -y --no-install-recommends mtools ovmf
+
+      - name: Install LLVM ${{ env.LLVM_VERSION }}
+        run: |
+          wget -qO- https://apt.llvm.org/llvm.sh | sudo bash -s -- "$LLVM_VERSION"
+          sudo apt-get install -y --no-install-recommends \
+            "libc++-$LLVM_VERSION-dev" "libc++abi-$LLVM_VERSION-dev" \
+            "lld-$LLVM_VERSION" ninja-build
+          echo "/usr/lib/llvm-$LLVM_VERSION/bin" >> "$GITHUB_PATH"
+
+      # Built here rather than reusing the artifact, because the self check is
+      # compiled in only when asked for and the normal build leaves it out.
+      - name: Build with the hypervisor self check enabled
+        run: |
+          cmake --preset debug -DZPP_CI_VERIFY_HYPERVISOR=ON
+          cmake --build --preset debug
+
+      - name: Build boot medium
+        run: ./scripts/bochs/setup.sh debug
+
+      - name: Assert the hypervisor reaches root mode
+        run: ./scripts/ci/bochs-smoke.sh
+
   # The highest value test - Windows actually booting while the hypervisor
   # holds root mode - cannot run on a GitHub hosted runner. It needs a real
   # VT-x host, so this job only runs where a self-hosted Windows runner with

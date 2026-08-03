@@ -11,6 +11,7 @@ extern "C" {
 #include <Protocol/MpService.h>
 }
 #include "zpp/loader.h"
+#include "zpp/x64/asm.h"
 #include <cstddef>
 #include <cstdint>
 #include <string>
@@ -271,6 +272,68 @@ free_file_path_device_path:
     return device_path;
 }
 
+#if ZPP_CI_VERIFY_HYPERVISOR
+/**
+ * Asks the hypervisor to identify itself, from whichever CPU this runs on.
+ *
+ * The vmexit handler answers CPUID leaf 0x40000000 with the signature
+ * ZppZppZppZpp and sets the hypervisor present bit in leaf 1. Neither can
+ * happen unless vmxon, the VMCS setup, vmlaunch, the exit handler and
+ * vmresume all worked on this CPU, so one check covers the whole path end
+ * to end.
+ */
+static int verify_hypervisor_on_cpu(void *)
+{
+    std::uint32_t registers[4]{};
+
+    // Leaf 1, bit 31 of ecx: a hypervisor is present.
+    zpp::x64::cpuid(1, 0, registers);
+    if (!(registers[2] & (1u << 31))) {
+        return -1;
+    }
+
+    // Leaf 0x40000000: the vendor signature, in ebx, ecx then edx.
+    zpp::x64::cpuid(1u << 30, 0, registers);
+    if ((registers[1] != 0x5a70705a) || (registers[2] != 0x705a7070) ||
+        (registers[3] != 0x70705a70)) {
+        return -2;
+    }
+
+    return 0;
+}
+
+/**
+ * Runs the check on every CPU, since the hypervisor is launched per CPU
+ * and a failure on one is just as bad as a failure on all. Reports through
+ * the UEFI console, which OVMF mirrors to the serial port, so the result
+ * lands where automated testing can assert on it.
+ */
+static bool verify_hypervisor_present(EFI_SYSTEM_TABLE * system_table)
+{
+    auto * out = system_table->ConOut;
+
+    auto cpus = number_of_cpus();
+    if (!cpus) {
+        out->OutputString(
+            out, (CHAR16 *)L"zpp: ZPP_HYPERVISOR_FAILED no cpus\r\n");
+        return false;
+    }
+
+    for (std::size_t i{}; i < cpus; ++i) {
+        if (call_on_cpu(i, verify_hypervisor_on_cpu, nullptr)) {
+            out->OutputString(out,
+                              (CHAR16 *)L"zpp: ZPP_HYPERVISOR_FAILED on "
+                                        L"at least one cpu\r\n");
+            return false;
+        }
+    }
+
+    out->OutputString(
+        out, (CHAR16 *)L"zpp: ZPP_HYPERVISOR_ACTIVE on every cpu\r\n");
+    return true;
+}
+#endif
+
 extern "C" EFI_STATUS EFIAPI uefi_main(EFI_HANDLE image_handle,
                                        EFI_SYSTEM_TABLE * system_table)
 {
@@ -303,6 +366,15 @@ extern "C" EFI_STATUS EFIAPI uefi_main(EFI_HANDLE image_handle,
     if (result) {
         return EFI_LOAD_ERROR;
     }
+
+#if ZPP_CI_VERIFY_HYPERVISOR
+    // Ask the hypervisor to identify itself now that it should be live.
+    // Built only for automated testing, so a normal loader does not carry
+    // it.
+    if (!verify_hypervisor_present(system_table)) {
+        return EFI_LOAD_ERROR;
+    }
+#endif
 
     // Continue to the OS.
 

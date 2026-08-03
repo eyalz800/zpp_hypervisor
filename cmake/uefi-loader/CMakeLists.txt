@@ -18,6 +18,10 @@ if(NOT DEFINED ZPP_OUTPUT_DIR)
     message(FATAL_ERROR "ZPP_OUTPUT_DIR must be set (path to the output directory)")
 endif()
 
+option(ZPP_CI_VERIFY_HYPERVISOR
+    "Compile the CPUID self check that asserts the hypervisor reached root mode"
+    OFF)
+
 # Download dependencies (Windows SDK for ucrt/shared headers; EDK2 for UEFI headers)
 include("${ZPP_SOURCE_DIR}/cmake/dependencies.cmake")
 download_windows_sdk(WINDOWS_SDK_ROOT)
@@ -110,6 +114,10 @@ target_compile_definitions(zpp_loader_efi PRIVATE
     _NO_CRT_STDIO_INLINE
     # Point #embed at the built hypervisor ELF binary.
     "ZPP_ELF_BINARY_PATH=\"${ZPP_OUTPUT_DIR}/zpp_hypervisor\""
+    # Compiles the CPUID self check that asserts the hypervisor reached root
+    # mode. Off by default: it exists for automated testing and has no place in
+    # a loader that is actually being deployed.
+    "ZPP_CI_VERIFY_HYPERVISOR=$<BOOL:${ZPP_CI_VERIFY_HYPERVISOR}>"
     # libc++ availability annotations rely on OS version macros we don't have
     # in a freestanding / UEFI context.
     _LIBCPP_DISABLE_AVAILABILITY
