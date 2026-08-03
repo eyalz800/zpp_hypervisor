@@ -138,10 +138,16 @@ gdb out/debug/x86_64/zpp_hypervisor
 (gdb) target remote :1337
 ```
 
-Once your instruction pointer is within the hypervisor, load symbols and resume:
+Once your instruction pointer is within the hypervisor, load symbols using the
+`load-symbols` GDB Python script:
 ```gdb
+source scripts/load-symbols
+load-symbols $rip "out/debug/x86_64/zpp_hypervisor"
 set *(char *)&gdb_attached = 1
 ```
+
+The script scans backward from the given address to find the ELF header,
+then loads debug symbols at the correct relocated addresses.
 
 Final Words
 -----------
