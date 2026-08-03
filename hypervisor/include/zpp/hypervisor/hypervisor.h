@@ -49,15 +49,19 @@ public:
         100 * 1024 * 1024; // 100 MB.
 
     /**
-     * The hypervisor instance.
+     * Returns the single hypervisor instance, constructing it on the first
+     * call.
      *
-     * A static member of its own type rather than a free global, so the
-     * class owns its single instance. It cannot be constant initialized -
-     * constant evaluating the EPT tables alone exceeds the compiler's
-     * constexpr step budget - so it is constructed from the init array,
-     * which zpp::crt::init::main() walks before anything touches it.
+     * It cannot be constant initialized - constant evaluating the EPT
+     * tables alone exceeds the compiler's constexpr step budget - so it is
+     * built lazily instead. The heap is already up by the time anything
+     * can reach this, so construction may allocate.
+     *
+     * The build uses -fno-threadsafe-statics, so the first call must not
+     * race. It does not: the loader launches CPUs strictly one at a time,
+     * so the boot CPU constructs this before any other CPU exists.
      */
-    static hypervisor instance;
+    static hypervisor & instance();
 
     /**
      * Launch the hypervisor on a the current CPU, caller must make

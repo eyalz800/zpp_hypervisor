@@ -98,9 +98,17 @@ bar g_bar;               // fine: compiler emits an .init_array entry, crt::init
 ```
 
 The raw-storage-plus-placement-new dance that `state.cpp` used to do is **gone** — deleting
-it was the point of adding init array support. `hypervisor::instance` is a plain static data
-member of its own type, constructed from the init array (constant-evaluating the EPT tables
-alone blows the compiler's constexpr step budget, so `constinit` is not an option there).
+it was the point of adding init array support. `hypervisor::instance()` is now a lazy
+function-local static (`static hypervisor instance; return instance;`). `constinit` is not an
+option there: constant-evaluating the EPT tables alone blows the compiler's constexpr step
+budget.
+
+Two things follow from it being a *local* static rather than a namespace-scope global, both
+verified in the disassembly: construction is lazy, so it produces **no** `.init_array` entry;
+and because the build uses `-fno-threadsafe-statics` the compiler emits a plain
+`cmpb`/`movb` on the guard byte with **no** `__cxa_guard_acquire` call. The first call must
+therefore not race — it does not, because the loader launches CPUs strictly one at a time. It
+does emit a `__cxa_atexit` registration for the destructor, so that path is live.
 
 Consequences worth remembering:
 - **A container as a global costs you an init array entry.** `zpp::allocator`'s default
@@ -109,10 +117,9 @@ Consequences worth remembering:
 - Anything allocating from a constructor is fine: `crt::init::main()` brings the heap up
   before walking the arrays.
 - Verify on the built ELF rather than by inspection. `llvm-nm -u` must report **no undefined
-  symbols**. `.init_array` is expected to be non-empty now, and every entry must be
-  deliberate — `llvm-readelf -S … | grep init_array` showing 8 bytes means exactly one
-  dynamically initialized global (currently `hypervisor::instance`). A jump in that size is
-  a signal someone added dynamic initialization by accident.
+  symbols**, and `llvm-readelf -S … | grep init_array` is currently **empty** — nothing in
+  the tree needs dynamic initialization today. An `.init_array` appearing is not a failure,
+  but it should be a deliberate choice rather than a surprise.
 
 ### The init array machinery
 

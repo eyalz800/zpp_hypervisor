@@ -22,10 +22,11 @@
 
 namespace zpp::hypervisor
 {
-// Constructed from the init array, which zpp::crt::init::main() walks
-// before anything below can be reached. See the declaration for why this
-// cannot be constant initialized.
-hypervisor hypervisor::instance;
+hypervisor & hypervisor::instance()
+{
+    static hypervisor instance;
+    return instance;
+}
 
 void hypervisor::initialize_registers()
 {
