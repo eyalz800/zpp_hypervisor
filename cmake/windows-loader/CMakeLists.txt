@@ -97,7 +97,6 @@ target_compile_definitions(zpp_loader_sys PRIVATE
     _CRT_SECURE_NO_WARNINGS
     _CRT_SECURE_NO_DEPRECATE
     _NO_CRT_STDIO_INLINE
-    ZPP_ELF_BINARY_NO_HIDDEN
     # Point #embed at the built hypervisor ELF binary.
     "ZPP_ELF_BINARY_PATH=\"${ZPP_OUTPUT_DIR}/zpp_hypervisor\""
     # libc++ availability annotations rely on OS version macros we don't have

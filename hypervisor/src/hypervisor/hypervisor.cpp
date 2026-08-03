@@ -1,7 +1,8 @@
 #include "zpp/hypervisor/hypervisor.h"
 #include "zpp/elf_file.h"
 #include "zpp/elf_image_base.h"
-#include "zpp/maybe.h"
+#include "zpp/error.h"
+#include "zpp/heap.h"
 #include "zpp/scope_guard.h"
 #include "zpp/x64/asm.h"
 #include "zpp/x64/generic.h"
@@ -882,6 +883,11 @@ zpp::error hypervisor::main(x64::context & caller_context)
 
     // Guard to enable interrupts.
     scope_guard restore_interrupts{x64::enable_interrupts};
+
+    // Initialize heap on first CPU.
+    if (0 == cpuid) {
+        zpp::global_heap().init();
+    }
 
     // Initialize page table operations.
     this->physical_to_virtual = physical_to_virtual;

@@ -47,8 +47,7 @@ target_compile_options(zpp_hypervisor PRIVATE
     -fPIE -nostdlib -ffreestanding -mno-red-zone
     -stdlib=libc++ -fno-rtti -fno-threadsafe-statics -fno-exceptions
     -D_LIBCPP_DISABLE_AVAILABILITY
-    # C++26 deprecates aligned_storage_t used in small_map.h
-    -Wno-deprecated-declarations
+    "-D_LIBCPP_VERBOSE_ABORT(...)=__builtin_trap()"
     $<$<COMPILE_LANGUAGE:ASM>:-x$<SEMICOLON>assembler-with-cpp>
 )
 

@@ -1,8 +1,9 @@
 #pragma once
-#include "zpp/maybe.h"
+#include "zpp/error.h"
 #include "zpp/x64/intel/asm.h"
 #include "zpp/x64/intel/vmcs_fields.h"
 #include <cstdint>
+#include <expected>
 
 namespace zpp::x64::intel
 {
@@ -70,11 +71,11 @@ public:
     /**
      * Read a specific VMCS field.
      */
-    zpp::maybe<std::uint64_t> read(field field) const
+    std::expected<std::uint64_t, zpp::error> read(field field) const
     {
         std::uint64_t value{};
         if (0 != vmread(field, &value)) {
-            return error::fail;
+            return std::unexpected(zpp::error{error::fail});
         }
         return value;
     }
@@ -84,7 +85,7 @@ public:
      * @{
      */
 
-    zpp::maybe<std::uint64_t> vpid() const
+    std::expected<std::uint64_t, zpp::error> vpid() const
     {
         return read(field::vpid);
     }
@@ -94,7 +95,7 @@ public:
         return write(field::vpid, value);
     }
 
-    zpp::maybe<std::uint64_t> posted_interrupt_notification_vector() const
+    std::expected<std::uint64_t, zpp::error> posted_interrupt_notification_vector() const
     {
         return read(field::posted_interrupt_notification_vector);
     }
@@ -105,7 +106,7 @@ public:
         return write(field::posted_interrupt_notification_vector, value);
     }
 
-    zpp::maybe<std::uint64_t> eptp_index() const
+    std::expected<std::uint64_t, zpp::error> eptp_index() const
     {
         return read(field::eptp_index);
     }
@@ -115,7 +116,7 @@ public:
         return write(field::eptp_index, value);
     }
 
-    zpp::maybe<std::uint64_t> guest_es_selector() const
+    std::expected<std::uint64_t, zpp::error> guest_es_selector() const
     {
         return read(field::guest_es_selector);
     }
@@ -125,7 +126,7 @@ public:
         return write(field::guest_es_selector, value);
     }
 
-    zpp::maybe<std::uint64_t> guest_cs_selector() const
+    std::expected<std::uint64_t, zpp::error> guest_cs_selector() const
     {
         return read(field::guest_cs_selector);
     }
@@ -135,7 +136,7 @@ public:
         return write(field::guest_cs_selector, value);
     }
 
-    zpp::maybe<std::uint64_t> guest_ss_selector() const
+    std::expected<std::uint64_t, zpp::error> guest_ss_selector() const
     {
         return read(field::guest_ss_selector);
     }
@@ -145,7 +146,7 @@ public:
         return write(field::guest_ss_selector, value);
     }
 
-    zpp::maybe<std::uint64_t> guest_ds_selector() const
+    std::expected<std::uint64_t, zpp::error> guest_ds_selector() const
     {
         return read(field::guest_ds_selector);
     }
@@ -155,7 +156,7 @@ public:
         return write(field::guest_ds_selector, value);
     }
 
-    zpp::maybe<std::uint64_t> guest_fs_selector() const
+    std::expected<std::uint64_t, zpp::error> guest_fs_selector() const
     {
         return read(field::guest_fs_selector);
     }
@@ -165,7 +166,7 @@ public:
         return write(field::guest_fs_selector, value);
     }
 
-    zpp::maybe<std::uint64_t> guest_gs_selector() const
+    std::expected<std::uint64_t, zpp::error> guest_gs_selector() const
     {
         return read(field::guest_gs_selector);
     }
@@ -175,7 +176,7 @@ public:
         return write(field::guest_gs_selector, value);
     }
 
-    zpp::maybe<std::uint64_t> guest_ldtr_selector() const
+    std::expected<std::uint64_t, zpp::error> guest_ldtr_selector() const
     {
         return read(field::guest_ldtr_selector);
     }
@@ -185,7 +186,7 @@ public:
         return write(field::guest_ldtr_selector, value);
     }
 
-    zpp::maybe<std::uint64_t> guest_tr_selector() const
+    std::expected<std::uint64_t, zpp::error> guest_tr_selector() const
     {
         return read(field::guest_tr_selector);
     }
@@ -195,7 +196,7 @@ public:
         return write(field::guest_tr_selector, value);
     }
 
-    zpp::maybe<std::uint64_t> guest_interrupt_status() const
+    std::expected<std::uint64_t, zpp::error> guest_interrupt_status() const
     {
         return read(field::guest_interrupt_status);
     }
@@ -205,7 +206,7 @@ public:
         return write(field::guest_interrupt_status, value);
     }
 
-    zpp::maybe<std::uint64_t> pml_index() const
+    std::expected<std::uint64_t, zpp::error> pml_index() const
     {
         return read(field::pml_index);
     }
@@ -215,7 +216,7 @@ public:
         return write(field::pml_index, value);
     }
 
-    zpp::maybe<std::uint64_t> host_es_selector() const
+    std::expected<std::uint64_t, zpp::error> host_es_selector() const
     {
         return read(field::host_es_selector);
     }
@@ -225,7 +226,7 @@ public:
         return write(field::host_es_selector, value);
     }
 
-    zpp::maybe<std::uint64_t> host_cs_selector() const
+    std::expected<std::uint64_t, zpp::error> host_cs_selector() const
     {
         return read(field::host_cs_selector);
     }
@@ -235,7 +236,7 @@ public:
         return write(field::host_cs_selector, value);
     }
 
-    zpp::maybe<std::uint64_t> host_ss_selector() const
+    std::expected<std::uint64_t, zpp::error> host_ss_selector() const
     {
         return read(field::host_ss_selector);
     }
@@ -245,7 +246,7 @@ public:
         return write(field::host_ss_selector, value);
     }
 
-    zpp::maybe<std::uint64_t> host_ds_selector() const
+    std::expected<std::uint64_t, zpp::error> host_ds_selector() const
     {
         return read(field::host_ds_selector);
     }
@@ -255,7 +256,7 @@ public:
         return write(field::host_ds_selector, value);
     }
 
-    zpp::maybe<std::uint64_t> host_fs_selector() const
+    std::expected<std::uint64_t, zpp::error> host_fs_selector() const
     {
         return read(field::host_fs_selector);
     }
@@ -265,7 +266,7 @@ public:
         return write(field::host_fs_selector, value);
     }
 
-    zpp::maybe<std::uint64_t> host_gs_selector() const
+    std::expected<std::uint64_t, zpp::error> host_gs_selector() const
     {
         return read(field::host_gs_selector);
     }
@@ -275,7 +276,7 @@ public:
         return write(field::host_gs_selector, value);
     }
 
-    zpp::maybe<std::uint64_t> host_tr_selector() const
+    std::expected<std::uint64_t, zpp::error> host_tr_selector() const
     {
         return read(field::host_tr_selector);
     }
@@ -285,7 +286,7 @@ public:
         return write(field::host_tr_selector, value);
     }
 
-    zpp::maybe<std::uint64_t> io_bitmap_a() const
+    std::expected<std::uint64_t, zpp::error> io_bitmap_a() const
     {
         return read(field::io_bitmap_a);
     }
@@ -295,7 +296,7 @@ public:
         return write(field::io_bitmap_a, value);
     }
 
-    zpp::maybe<std::uint64_t> io_bitmap_b() const
+    std::expected<std::uint64_t, zpp::error> io_bitmap_b() const
     {
         return read(field::io_bitmap_b);
     }
@@ -305,7 +306,7 @@ public:
         return write(field::io_bitmap_b, value);
     }
 
-    zpp::maybe<std::uint64_t> msr_bitmap() const
+    std::expected<std::uint64_t, zpp::error> msr_bitmap() const
     {
         return read(field::msr_bitmap);
     }
@@ -315,7 +316,7 @@ public:
         return write(field::msr_bitmap, value);
     }
 
-    zpp::maybe<std::uint64_t> vm_exit_msr_store_address() const
+    std::expected<std::uint64_t, zpp::error> vm_exit_msr_store_address() const
     {
         return read(field::vm_exit_msr_store_address);
     }
@@ -325,7 +326,7 @@ public:
         return write(field::vm_exit_msr_store_address, value);
     }
 
-    zpp::maybe<std::uint64_t> vm_exit_msr_load_address() const
+    std::expected<std::uint64_t, zpp::error> vm_exit_msr_load_address() const
     {
         return read(field::vm_exit_msr_load_address);
     }
@@ -335,7 +336,7 @@ public:
         return write(field::vm_exit_msr_load_address, value);
     }
 
-    zpp::maybe<std::uint64_t> vm_entry_msr_load_address() const
+    std::expected<std::uint64_t, zpp::error> vm_entry_msr_load_address() const
     {
         return read(field::vm_entry_msr_load_address);
     }
@@ -345,7 +346,7 @@ public:
         return write(field::vm_entry_msr_load_address, value);
     }
 
-    zpp::maybe<std::uint64_t> excecutive_vmcs_pointer() const
+    std::expected<std::uint64_t, zpp::error> excecutive_vmcs_pointer() const
     {
         return read(field::excecutive_vmcs_pointer);
     }
@@ -355,7 +356,7 @@ public:
         return write(field::excecutive_vmcs_pointer, value);
     }
 
-    zpp::maybe<std::uint64_t> pml_address() const
+    std::expected<std::uint64_t, zpp::error> pml_address() const
     {
         return read(field::pml_address);
     }
@@ -365,7 +366,7 @@ public:
         return write(field::pml_address, value);
     }
 
-    zpp::maybe<std::uint64_t> tsc_offset() const
+    std::expected<std::uint64_t, zpp::error> tsc_offset() const
     {
         return read(field::tsc_offset);
     }
@@ -375,7 +376,7 @@ public:
         return write(field::tsc_offset, value);
     }
 
-    zpp::maybe<std::uint64_t> virtual_apic_address() const
+    std::expected<std::uint64_t, zpp::error> virtual_apic_address() const
     {
         return read(field::virtual_apic_address);
     }
@@ -385,7 +386,7 @@ public:
         return write(field::virtual_apic_address, value);
     }
 
-    zpp::maybe<std::uint64_t> apic_access_address() const
+    std::expected<std::uint64_t, zpp::error> apic_access_address() const
     {
         return read(field::apic_access_address);
     }
@@ -395,7 +396,7 @@ public:
         return write(field::apic_access_address, value);
     }
 
-    zpp::maybe<std::uint64_t> posted_interrupt_descriptor_address() const
+    std::expected<std::uint64_t, zpp::error> posted_interrupt_descriptor_address() const
     {
         return read(field::posted_interrupt_descriptor_address);
     }
@@ -406,7 +407,7 @@ public:
         return write(field::posted_interrupt_descriptor_address, value);
     }
 
-    zpp::maybe<std::uint64_t> vm_function_controls() const
+    std::expected<std::uint64_t, zpp::error> vm_function_controls() const
     {
         return read(field::vm_function_controls);
     }
@@ -416,7 +417,7 @@ public:
         return write(field::vm_function_controls, value);
     }
 
-    zpp::maybe<std::uint64_t> ept_pointer() const
+    std::expected<std::uint64_t, zpp::error> ept_pointer() const
     {
         return read(field::ept_pointer);
     }
@@ -426,7 +427,7 @@ public:
         return write(field::ept_pointer, value);
     }
 
-    zpp::maybe<std::uint64_t> eio_exit_bitmap_0() const
+    std::expected<std::uint64_t, zpp::error> eio_exit_bitmap_0() const
     {
         return read(field::eio_exit_bitmap_0);
     }
@@ -436,7 +437,7 @@ public:
         return write(field::eio_exit_bitmap_0, value);
     }
 
-    zpp::maybe<std::uint64_t> eio_exit_bitmap_1() const
+    std::expected<std::uint64_t, zpp::error> eio_exit_bitmap_1() const
     {
         return read(field::eio_exit_bitmap_1);
     }
@@ -446,7 +447,7 @@ public:
         return write(field::eio_exit_bitmap_1, value);
     }
 
-    zpp::maybe<std::uint64_t> eio_exit_bitmap_2() const
+    std::expected<std::uint64_t, zpp::error> eio_exit_bitmap_2() const
     {
         return read(field::eio_exit_bitmap_2);
     }
@@ -456,7 +457,7 @@ public:
         return write(field::eio_exit_bitmap_2, value);
     }
 
-    zpp::maybe<std::uint64_t> eio_exit_bitmap_3() const
+    std::expected<std::uint64_t, zpp::error> eio_exit_bitmap_3() const
     {
         return read(field::eio_exit_bitmap_3);
     }
@@ -466,7 +467,7 @@ public:
         return write(field::eio_exit_bitmap_3, value);
     }
 
-    zpp::maybe<std::uint64_t> eptp_list_address() const
+    std::expected<std::uint64_t, zpp::error> eptp_list_address() const
     {
         return read(field::eptp_list_address);
     }
@@ -476,7 +477,7 @@ public:
         return write(field::eptp_list_address, value);
     }
 
-    zpp::maybe<std::uint64_t> vmread_bitmap_address() const
+    std::expected<std::uint64_t, zpp::error> vmread_bitmap_address() const
     {
         return read(field::vmread_bitmap_address);
     }
@@ -486,7 +487,7 @@ public:
         return write(field::vmread_bitmap_address, value);
     }
 
-    zpp::maybe<std::uint64_t> vmwrite_bitmap_address() const
+    std::expected<std::uint64_t, zpp::error> vmwrite_bitmap_address() const
     {
         return read(field::vmwrite_bitmap_address);
     }
@@ -496,7 +497,7 @@ public:
         return write(field::vmwrite_bitmap_address, value);
     }
 
-    zpp::maybe<std::uint64_t>
+    std::expected<std::uint64_t, zpp::error>
     virtualization_exception_information_address() const
     {
         return read(field::virtualization_exception_information_address);
@@ -509,7 +510,7 @@ public:
                      value);
     }
 
-    zpp::maybe<std::uint64_t> xss_exiting_bitmap() const
+    std::expected<std::uint64_t, zpp::error> xss_exiting_bitmap() const
     {
         return read(field::xss_exiting_bitmap);
     }
@@ -519,7 +520,7 @@ public:
         return write(field::xss_exiting_bitmap, value);
     }
 
-    zpp::maybe<std::uint64_t> encls_exiting_bitmap() const
+    std::expected<std::uint64_t, zpp::error> encls_exiting_bitmap() const
     {
         return read(field::encls_exiting_bitmap);
     }
@@ -529,7 +530,7 @@ public:
         return write(field::encls_exiting_bitmap, value);
     }
 
-    zpp::maybe<std::uint64_t> sub_page_permission_table_pointer() const
+    std::expected<std::uint64_t, zpp::error> sub_page_permission_table_pointer() const
     {
         return read(field::sub_page_permission_table_pointer);
     }
@@ -539,7 +540,7 @@ public:
         return write(field::sub_page_permission_table_pointer, value);
     }
 
-    zpp::maybe<std::uint64_t> tsc_multiplier() const
+    std::expected<std::uint64_t, zpp::error> tsc_multiplier() const
     {
         return read(field::tsc_multiplier);
     }
@@ -549,7 +550,7 @@ public:
         return write(field::tsc_multiplier, value);
     }
 
-    zpp::maybe<std::uint64_t> guest_physical_address() const
+    std::expected<std::uint64_t, zpp::error> guest_physical_address() const
     {
         return read(field::guest_physical_address);
     }
@@ -559,7 +560,7 @@ public:
         return write(field::guest_physical_address, value);
     }
 
-    zpp::maybe<std::uint64_t> vmcs_link_pointer() const
+    std::expected<std::uint64_t, zpp::error> vmcs_link_pointer() const
     {
         return read(field::vmcs_link_pointer);
     }
@@ -569,7 +570,7 @@ public:
         return write(field::vmcs_link_pointer, value);
     }
 
-    zpp::maybe<std::uint64_t> guest_ia32_debugctl() const
+    std::expected<std::uint64_t, zpp::error> guest_ia32_debugctl() const
     {
         return read(field::guest_ia32_debugctl);
     }
@@ -579,7 +580,7 @@ public:
         return write(field::guest_ia32_debugctl, value);
     }
 
-    zpp::maybe<std::uint64_t> guest_ia32_pat() const
+    std::expected<std::uint64_t, zpp::error> guest_ia32_pat() const
     {
         return read(field::guest_ia32_pat);
     }
@@ -589,7 +590,7 @@ public:
         return write(field::guest_ia32_pat, value);
     }
 
-    zpp::maybe<std::uint64_t> guest_ia32_efer() const
+    std::expected<std::uint64_t, zpp::error> guest_ia32_efer() const
     {
         return read(field::guest_ia32_efer);
     }
@@ -599,7 +600,7 @@ public:
         return write(field::guest_ia32_efer, value);
     }
 
-    zpp::maybe<std::uint64_t> guest_ia32_perf_global_ctrl() const
+    std::expected<std::uint64_t, zpp::error> guest_ia32_perf_global_ctrl() const
     {
         return read(field::guest_ia32_perf_global_ctrl);
     }
@@ -609,7 +610,7 @@ public:
         return write(field::guest_ia32_perf_global_ctrl, value);
     }
 
-    zpp::maybe<std::uint64_t> guest_pdpte_0() const
+    std::expected<std::uint64_t, zpp::error> guest_pdpte_0() const
     {
         return read(field::guest_pdpte_0);
     }
@@ -619,7 +620,7 @@ public:
         return write(field::guest_pdpte_0, value);
     }
 
-    zpp::maybe<std::uint64_t> guest_pdpte_1() const
+    std::expected<std::uint64_t, zpp::error> guest_pdpte_1() const
     {
         return read(field::guest_pdpte_1);
     }
@@ -629,7 +630,7 @@ public:
         return write(field::guest_pdpte_1, value);
     }
 
-    zpp::maybe<std::uint64_t> guest_pdpte_2() const
+    std::expected<std::uint64_t, zpp::error> guest_pdpte_2() const
     {
         return read(field::guest_pdpte_2);
     }
@@ -639,7 +640,7 @@ public:
         return write(field::guest_pdpte_2, value);
     }
 
-    zpp::maybe<std::uint64_t> guest_pdpte_3() const
+    std::expected<std::uint64_t, zpp::error> guest_pdpte_3() const
     {
         return read(field::guest_pdpte_3);
     }
@@ -649,7 +650,7 @@ public:
         return write(field::guest_pdpte_3, value);
     }
 
-    zpp::maybe<std::uint64_t> guest_ia32_bndcfgs() const
+    std::expected<std::uint64_t, zpp::error> guest_ia32_bndcfgs() const
     {
         return read(field::guest_ia32_bndcfgs);
     }
@@ -659,7 +660,7 @@ public:
         return write(field::guest_ia32_bndcfgs, value);
     }
 
-    zpp::maybe<std::uint64_t> host_ia32_pat() const
+    std::expected<std::uint64_t, zpp::error> host_ia32_pat() const
     {
         return read(field::host_ia32_pat);
     }
@@ -669,7 +670,7 @@ public:
         return write(field::host_ia32_pat, value);
     }
 
-    zpp::maybe<std::uint64_t> host_ia32_efer() const
+    std::expected<std::uint64_t, zpp::error> host_ia32_efer() const
     {
         return read(field::host_ia32_efer);
     }
@@ -679,7 +680,7 @@ public:
         return write(field::host_ia32_efer, value);
     }
 
-    zpp::maybe<std::uint64_t> host_ia32_perf_global_ctrl() const
+    std::expected<std::uint64_t, zpp::error> host_ia32_perf_global_ctrl() const
     {
         return read(field::host_ia32_perf_global_ctrl);
     }
@@ -689,7 +690,7 @@ public:
         return write(field::host_ia32_perf_global_ctrl, value);
     }
 
-    zpp::maybe<std::uint64_t> pin_based_vm_execution_controls() const
+    std::expected<std::uint64_t, zpp::error> pin_based_vm_execution_controls() const
     {
         return read(field::pin_based_vm_execution_controls);
     }
@@ -699,7 +700,7 @@ public:
         return write(field::pin_based_vm_execution_controls, value);
     }
 
-    zpp::maybe<std::uint64_t>
+    std::expected<std::uint64_t, zpp::error>
     primary_processor_based_vm_execution_controls() const
     {
         return read(field::primary_processor_based_vm_execution_controls);
@@ -712,7 +713,7 @@ public:
                      value);
     }
 
-    zpp::maybe<std::uint64_t> exception_bitmap() const
+    std::expected<std::uint64_t, zpp::error> exception_bitmap() const
     {
         return read(field::exception_bitmap);
     }
@@ -722,7 +723,7 @@ public:
         return write(field::exception_bitmap, value);
     }
 
-    zpp::maybe<std::uint64_t> page_fault_error_code_mask() const
+    std::expected<std::uint64_t, zpp::error> page_fault_error_code_mask() const
     {
         return read(field::page_fault_error_code_mask);
     }
@@ -732,7 +733,7 @@ public:
         return write(field::page_fault_error_code_mask, value);
     }
 
-    zpp::maybe<std::uint64_t> page_fault_error_code_match() const
+    std::expected<std::uint64_t, zpp::error> page_fault_error_code_match() const
     {
         return read(field::page_fault_error_code_match);
     }
@@ -742,7 +743,7 @@ public:
         return write(field::page_fault_error_code_match, value);
     }
 
-    zpp::maybe<std::uint64_t> cr3_target_count() const
+    std::expected<std::uint64_t, zpp::error> cr3_target_count() const
     {
         return read(field::cr3_target_count);
     }
@@ -752,7 +753,7 @@ public:
         return write(field::cr3_target_count, value);
     }
 
-    zpp::maybe<std::uint64_t> vm_exit_controls() const
+    std::expected<std::uint64_t, zpp::error> vm_exit_controls() const
     {
         return read(field::vm_exit_controls);
     }
@@ -762,7 +763,7 @@ public:
         return write(field::vm_exit_controls, value);
     }
 
-    zpp::maybe<std::uint64_t> vm_exit_msr_store_count() const
+    std::expected<std::uint64_t, zpp::error> vm_exit_msr_store_count() const
     {
         return read(field::vm_exit_msr_store_count);
     }
@@ -772,7 +773,7 @@ public:
         return write(field::vm_exit_msr_store_count, value);
     }
 
-    zpp::maybe<std::uint64_t> vm_exit_msr_load_count() const
+    std::expected<std::uint64_t, zpp::error> vm_exit_msr_load_count() const
     {
         return read(field::vm_exit_msr_load_count);
     }
@@ -782,7 +783,7 @@ public:
         return write(field::vm_exit_msr_load_count, value);
     }
 
-    zpp::maybe<std::uint64_t> vm_entry_controls() const
+    std::expected<std::uint64_t, zpp::error> vm_entry_controls() const
     {
         return read(field::vm_entry_controls);
     }
@@ -792,7 +793,7 @@ public:
         return write(field::vm_entry_controls, value);
     }
 
-    zpp::maybe<std::uint64_t> vm_entry_msr_load_count() const
+    std::expected<std::uint64_t, zpp::error> vm_entry_msr_load_count() const
     {
         return read(field::vm_entry_msr_load_count);
     }
@@ -802,7 +803,7 @@ public:
         return write(field::vm_entry_msr_load_count, value);
     }
 
-    zpp::maybe<std::uint64_t>
+    std::expected<std::uint64_t, zpp::error>
     vm_entry_interruption_information_field() const
     {
         return read(field::vm_entry_interruption_information_field);
@@ -815,7 +816,7 @@ public:
                      value);
     }
 
-    zpp::maybe<std::uint64_t> vm_entry_exception_error_code() const
+    std::expected<std::uint64_t, zpp::error> vm_entry_exception_error_code() const
     {
         return read(field::vm_entry_exception_error_code);
     }
@@ -825,7 +826,7 @@ public:
         return write(field::vm_entry_exception_error_code, value);
     }
 
-    zpp::maybe<std::uint64_t> vm_entry_instruction_length() const
+    std::expected<std::uint64_t, zpp::error> vm_entry_instruction_length() const
     {
         return read(field::vm_entry_instruction_length);
     }
@@ -835,7 +836,7 @@ public:
         return write(field::vm_entry_instruction_length, value);
     }
 
-    zpp::maybe<std::uint64_t> trr_threshold() const
+    std::expected<std::uint64_t, zpp::error> trr_threshold() const
     {
         return read(field::trr_threshold);
     }
@@ -845,7 +846,7 @@ public:
         return write(field::trr_threshold, value);
     }
 
-    zpp::maybe<std::uint64_t>
+    std::expected<std::uint64_t, zpp::error>
     secondary_processor_based_vm_execution_controls() const
     {
         return read(
@@ -859,7 +860,7 @@ public:
             field::secondary_processor_based_vm_execution_controls, value);
     }
 
-    zpp::maybe<std::uint64_t> ple_gap() const
+    std::expected<std::uint64_t, zpp::error> ple_gap() const
     {
         return read(field::ple_gap);
     }
@@ -869,7 +870,7 @@ public:
         return write(field::ple_gap, value);
     }
 
-    zpp::maybe<std::uint64_t> ple_window() const
+    std::expected<std::uint64_t, zpp::error> ple_window() const
     {
         return read(field::ple_window);
     }
@@ -879,7 +880,7 @@ public:
         return write(field::ple_window, value);
     }
 
-    zpp::maybe<std::uint64_t> vm_instruction_error() const
+    std::expected<std::uint64_t, zpp::error> vm_instruction_error() const
     {
         return read(field::vm_instruction_error);
     }
@@ -889,7 +890,7 @@ public:
         return write(field::vm_instruction_error, value);
     }
 
-    zpp::maybe<std::uint64_t> exit_reason() const
+    std::expected<std::uint64_t, zpp::error> exit_reason() const
     {
         return read(field::exit_reason);
     }
@@ -899,7 +900,7 @@ public:
         return write(field::exit_reason, value);
     }
 
-    zpp::maybe<std::uint64_t> vm_exit_interruption_information() const
+    std::expected<std::uint64_t, zpp::error> vm_exit_interruption_information() const
     {
         return read(field::vm_exit_interruption_information);
     }
@@ -909,7 +910,7 @@ public:
         return write(field::vm_exit_interruption_information, value);
     }
 
-    zpp::maybe<std::uint64_t> vm_exit_interruption_error_code() const
+    std::expected<std::uint64_t, zpp::error> vm_exit_interruption_error_code() const
     {
         return read(field::vm_exit_interruption_error_code);
     }
@@ -919,7 +920,7 @@ public:
         return write(field::vm_exit_interruption_error_code, value);
     }
 
-    zpp::maybe<std::uint64_t> idt_vectoring_information_field() const
+    std::expected<std::uint64_t, zpp::error> idt_vectoring_information_field() const
     {
         return read(field::idt_vectoring_information_field);
     }
@@ -929,7 +930,7 @@ public:
         return write(field::idt_vectoring_information_field, value);
     }
 
-    zpp::maybe<std::uint64_t> idt_vectoring_error_code() const
+    std::expected<std::uint64_t, zpp::error> idt_vectoring_error_code() const
     {
         return read(field::idt_vectoring_error_code);
     }
@@ -939,7 +940,7 @@ public:
         return write(field::idt_vectoring_error_code, value);
     }
 
-    zpp::maybe<std::uint64_t> vm_exit_instruction_length() const
+    std::expected<std::uint64_t, zpp::error> vm_exit_instruction_length() const
     {
         return read(field::vm_exit_instruction_length);
     }
@@ -949,7 +950,7 @@ public:
         return write(field::vm_exit_instruction_length, value);
     }
 
-    zpp::maybe<std::uint64_t> vm_exit_instruction_information() const
+    std::expected<std::uint64_t, zpp::error> vm_exit_instruction_information() const
     {
         return read(field::vm_exit_instruction_information);
     }
@@ -959,7 +960,7 @@ public:
         return write(field::vm_exit_instruction_information, value);
     }
 
-    zpp::maybe<std::uint64_t> guest_es_limit() const
+    std::expected<std::uint64_t, zpp::error> guest_es_limit() const
     {
         return read(field::guest_es_limit);
     }
@@ -969,7 +970,7 @@ public:
         return write(field::guest_es_limit, value);
     }
 
-    zpp::maybe<std::uint64_t> guest_cs_limit() const
+    std::expected<std::uint64_t, zpp::error> guest_cs_limit() const
     {
         return read(field::guest_cs_limit);
     }
@@ -979,7 +980,7 @@ public:
         return write(field::guest_cs_limit, value);
     }
 
-    zpp::maybe<std::uint64_t> guest_ss_limit() const
+    std::expected<std::uint64_t, zpp::error> guest_ss_limit() const
     {
         return read(field::guest_ss_limit);
     }
@@ -989,7 +990,7 @@ public:
         return write(field::guest_ss_limit, value);
     }
 
-    zpp::maybe<std::uint64_t> guest_ds_limit() const
+    std::expected<std::uint64_t, zpp::error> guest_ds_limit() const
     {
         return read(field::guest_ds_limit);
     }
@@ -999,7 +1000,7 @@ public:
         return write(field::guest_ds_limit, value);
     }
 
-    zpp::maybe<std::uint64_t> guest_fs_limit() const
+    std::expected<std::uint64_t, zpp::error> guest_fs_limit() const
     {
         return read(field::guest_fs_limit);
     }
@@ -1009,7 +1010,7 @@ public:
         return write(field::guest_fs_limit, value);
     }
 
-    zpp::maybe<std::uint64_t> guest_gs_limit() const
+    std::expected<std::uint64_t, zpp::error> guest_gs_limit() const
     {
         return read(field::guest_gs_limit);
     }
@@ -1019,7 +1020,7 @@ public:
         return write(field::guest_gs_limit, value);
     }
 
-    zpp::maybe<std::uint64_t> guest_ldtr_limit() const
+    std::expected<std::uint64_t, zpp::error> guest_ldtr_limit() const
     {
         return read(field::guest_ldtr_limit);
     }
@@ -1029,7 +1030,7 @@ public:
         return write(field::guest_ldtr_limit, value);
     }
 
-    zpp::maybe<std::uint64_t> guest_tr_limit() const
+    std::expected<std::uint64_t, zpp::error> guest_tr_limit() const
     {
         return read(field::guest_tr_limit);
     }
@@ -1039,7 +1040,7 @@ public:
         return write(field::guest_tr_limit, value);
     }
 
-    zpp::maybe<std::uint64_t> guest_gdtr_limit() const
+    std::expected<std::uint64_t, zpp::error> guest_gdtr_limit() const
     {
         return read(field::guest_gdtr_limit);
     }
@@ -1049,7 +1050,7 @@ public:
         return write(field::guest_gdtr_limit, value);
     }
 
-    zpp::maybe<std::uint64_t> guest_idtr_limit() const
+    std::expected<std::uint64_t, zpp::error> guest_idtr_limit() const
     {
         return read(field::guest_idtr_limit);
     }
@@ -1059,7 +1060,7 @@ public:
         return write(field::guest_idtr_limit, value);
     }
 
-    zpp::maybe<std::uint64_t> guest_es_access_rights() const
+    std::expected<std::uint64_t, zpp::error> guest_es_access_rights() const
     {
         return read(field::guest_es_access_rights);
     }
@@ -1069,7 +1070,7 @@ public:
         return write(field::guest_es_access_rights, value);
     }
 
-    zpp::maybe<std::uint64_t> guest_cs_access_rights() const
+    std::expected<std::uint64_t, zpp::error> guest_cs_access_rights() const
     {
         return read(field::guest_cs_access_rights);
     }
@@ -1079,7 +1080,7 @@ public:
         return write(field::guest_cs_access_rights, value);
     }
 
-    zpp::maybe<std::uint64_t> guest_ss_access_rights() const
+    std::expected<std::uint64_t, zpp::error> guest_ss_access_rights() const
     {
         return read(field::guest_ss_access_rights);
     }
@@ -1089,7 +1090,7 @@ public:
         return write(field::guest_ss_access_rights, value);
     }
 
-    zpp::maybe<std::uint64_t> guest_ds_access_rights() const
+    std::expected<std::uint64_t, zpp::error> guest_ds_access_rights() const
     {
         return read(field::guest_ds_access_rights);
     }
@@ -1099,7 +1100,7 @@ public:
         return write(field::guest_ds_access_rights, value);
     }
 
-    zpp::maybe<std::uint64_t> guest_fs_access_rights() const
+    std::expected<std::uint64_t, zpp::error> guest_fs_access_rights() const
     {
         return read(field::guest_fs_access_rights);
     }
@@ -1109,7 +1110,7 @@ public:
         return write(field::guest_fs_access_rights, value);
     }
 
-    zpp::maybe<std::uint64_t> guest_gs_access_rights() const
+    std::expected<std::uint64_t, zpp::error> guest_gs_access_rights() const
     {
         return read(field::guest_gs_access_rights);
     }
@@ -1119,7 +1120,7 @@ public:
         return write(field::guest_gs_access_rights, value);
     }
 
-    zpp::maybe<std::uint64_t> guest_ldtr_access_rights() const
+    std::expected<std::uint64_t, zpp::error> guest_ldtr_access_rights() const
     {
         return read(field::guest_ldtr_access_rights);
     }
@@ -1129,7 +1130,7 @@ public:
         return write(field::guest_ldtr_access_rights, value);
     }
 
-    zpp::maybe<std::uint64_t> guest_tr_access_rights() const
+    std::expected<std::uint64_t, zpp::error> guest_tr_access_rights() const
     {
         return read(field::guest_tr_access_rights);
     }
@@ -1139,7 +1140,7 @@ public:
         return write(field::guest_tr_access_rights, value);
     }
 
-    zpp::maybe<std::uint64_t> guest_interruptibility_state() const
+    std::expected<std::uint64_t, zpp::error> guest_interruptibility_state() const
     {
         return read(field::guest_interruptibility_state);
     }
@@ -1149,7 +1150,7 @@ public:
         return write(field::guest_interruptibility_state, value);
     }
 
-    zpp::maybe<std::uint64_t> guest_activity_state() const
+    std::expected<std::uint64_t, zpp::error> guest_activity_state() const
     {
         return read(field::guest_activity_state);
     }
@@ -1159,7 +1160,7 @@ public:
         return write(field::guest_activity_state, value);
     }
 
-    zpp::maybe<std::uint64_t> guest_smbase() const
+    std::expected<std::uint64_t, zpp::error> guest_smbase() const
     {
         return read(field::guest_smbase);
     }
@@ -1169,7 +1170,7 @@ public:
         return write(field::guest_smbase, value);
     }
 
-    zpp::maybe<std::uint64_t> guest_ia32_sysenter_cs() const
+    std::expected<std::uint64_t, zpp::error> guest_ia32_sysenter_cs() const
     {
         return read(field::guest_ia32_sysenter_cs);
     }
@@ -1179,7 +1180,7 @@ public:
         return write(field::guest_ia32_sysenter_cs, value);
     }
 
-    zpp::maybe<std::uint64_t> vmx_preemption_timer_value() const
+    std::expected<std::uint64_t, zpp::error> vmx_preemption_timer_value() const
     {
         return read(field::vmx_preemption_timer_value);
     }
@@ -1189,7 +1190,7 @@ public:
         return write(field::vmx_preemption_timer_value, value);
     }
 
-    zpp::maybe<std::uint64_t> host_ia32_sysenter_cs() const
+    std::expected<std::uint64_t, zpp::error> host_ia32_sysenter_cs() const
     {
         return read(field::host_ia32_sysenter_cs);
     }
@@ -1199,7 +1200,7 @@ public:
         return write(field::host_ia32_sysenter_cs, value);
     }
 
-    zpp::maybe<std::uint64_t> cr0_guest_host_mask() const
+    std::expected<std::uint64_t, zpp::error> cr0_guest_host_mask() const
     {
         return read(field::cr0_guest_host_mask);
     }
@@ -1209,7 +1210,7 @@ public:
         return write(field::cr0_guest_host_mask, value);
     }
 
-    zpp::maybe<std::uint64_t> cr4_guest_host_mask() const
+    std::expected<std::uint64_t, zpp::error> cr4_guest_host_mask() const
     {
         return read(field::cr4_guest_host_mask);
     }
@@ -1219,7 +1220,7 @@ public:
         return write(field::cr4_guest_host_mask, value);
     }
 
-    zpp::maybe<std::uint64_t> cr0_read_shadow() const
+    std::expected<std::uint64_t, zpp::error> cr0_read_shadow() const
     {
         return read(field::cr0_read_shadow);
     }
@@ -1229,7 +1230,7 @@ public:
         return write(field::cr0_read_shadow, value);
     }
 
-    zpp::maybe<std::uint64_t> cr4_read_shadow() const
+    std::expected<std::uint64_t, zpp::error> cr4_read_shadow() const
     {
         return read(field::cr4_read_shadow);
     }
@@ -1239,7 +1240,7 @@ public:
         return write(field::cr4_read_shadow, value);
     }
 
-    zpp::maybe<std::uint64_t> cr3_target_value_0() const
+    std::expected<std::uint64_t, zpp::error> cr3_target_value_0() const
     {
         return read(field::cr3_target_value_0);
     }
@@ -1249,7 +1250,7 @@ public:
         return write(field::cr3_target_value_0, value);
     }
 
-    zpp::maybe<std::uint64_t> cr3_target_value_1() const
+    std::expected<std::uint64_t, zpp::error> cr3_target_value_1() const
     {
         return read(field::cr3_target_value_1);
     }
@@ -1259,7 +1260,7 @@ public:
         return write(field::cr3_target_value_1, value);
     }
 
-    zpp::maybe<std::uint64_t> cr3_target_value_2() const
+    std::expected<std::uint64_t, zpp::error> cr3_target_value_2() const
     {
         return read(field::cr3_target_value_2);
     }
@@ -1269,7 +1270,7 @@ public:
         return write(field::cr3_target_value_2, value);
     }
 
-    zpp::maybe<std::uint64_t> cr3_target_value_3() const
+    std::expected<std::uint64_t, zpp::error> cr3_target_value_3() const
     {
         return read(field::cr3_target_value_3);
     }
@@ -1279,7 +1280,7 @@ public:
         return write(field::cr3_target_value_3, value);
     }
 
-    zpp::maybe<std::uint64_t> guest_cr0() const
+    std::expected<std::uint64_t, zpp::error> guest_cr0() const
     {
         return read(field::guest_cr0);
     }
@@ -1289,7 +1290,7 @@ public:
         return write(field::guest_cr0, value);
     }
 
-    zpp::maybe<std::uint64_t> guest_cr3() const
+    std::expected<std::uint64_t, zpp::error> guest_cr3() const
     {
         return read(field::guest_cr3);
     }
@@ -1299,7 +1300,7 @@ public:
         return write(field::guest_cr3, value);
     }
 
-    zpp::maybe<std::uint64_t> guest_cr4() const
+    std::expected<std::uint64_t, zpp::error> guest_cr4() const
     {
         return read(field::guest_cr4);
     }
@@ -1309,7 +1310,7 @@ public:
         return write(field::guest_cr4, value);
     }
 
-    zpp::maybe<std::uint64_t> guest_es_base() const
+    std::expected<std::uint64_t, zpp::error> guest_es_base() const
     {
         return read(field::guest_es_base);
     }
@@ -1319,7 +1320,7 @@ public:
         return write(field::guest_es_base, value);
     }
 
-    zpp::maybe<std::uint64_t> guest_cs_base() const
+    std::expected<std::uint64_t, zpp::error> guest_cs_base() const
     {
         return read(field::guest_cs_base);
     }
@@ -1329,7 +1330,7 @@ public:
         return write(field::guest_cs_base, value);
     }
 
-    zpp::maybe<std::uint64_t> guest_ss_base() const
+    std::expected<std::uint64_t, zpp::error> guest_ss_base() const
     {
         return read(field::guest_ss_base);
     }
@@ -1339,7 +1340,7 @@ public:
         return write(field::guest_ss_base, value);
     }
 
-    zpp::maybe<std::uint64_t> guest_ds_base() const
+    std::expected<std::uint64_t, zpp::error> guest_ds_base() const
     {
         return read(field::guest_ds_base);
     }
@@ -1349,7 +1350,7 @@ public:
         return write(field::guest_ds_base, value);
     }
 
-    zpp::maybe<std::uint64_t> guest_fs_base() const
+    std::expected<std::uint64_t, zpp::error> guest_fs_base() const
     {
         return read(field::guest_fs_base);
     }
@@ -1359,7 +1360,7 @@ public:
         return write(field::guest_fs_base, value);
     }
 
-    zpp::maybe<std::uint64_t> guest_gs_base() const
+    std::expected<std::uint64_t, zpp::error> guest_gs_base() const
     {
         return read(field::guest_gs_base);
     }
@@ -1369,7 +1370,7 @@ public:
         return write(field::guest_gs_base, value);
     }
 
-    zpp::maybe<std::uint64_t> guest_ldtr_base() const
+    std::expected<std::uint64_t, zpp::error> guest_ldtr_base() const
     {
         return read(field::guest_ldtr_base);
     }
@@ -1379,7 +1380,7 @@ public:
         return write(field::guest_ldtr_base, value);
     }
 
-    zpp::maybe<std::uint64_t> guest_tr_base() const
+    std::expected<std::uint64_t, zpp::error> guest_tr_base() const
     {
         return read(field::guest_tr_base);
     }
@@ -1389,7 +1390,7 @@ public:
         return write(field::guest_tr_base, value);
     }
 
-    zpp::maybe<std::uint64_t> guest_gdtr_base() const
+    std::expected<std::uint64_t, zpp::error> guest_gdtr_base() const
     {
         return read(field::guest_gdtr_base);
     }
@@ -1399,7 +1400,7 @@ public:
         return write(field::guest_gdtr_base, value);
     }
 
-    zpp::maybe<std::uint64_t> guest_idtr_base() const
+    std::expected<std::uint64_t, zpp::error> guest_idtr_base() const
     {
         return read(field::guest_idtr_base);
     }
@@ -1409,7 +1410,7 @@ public:
         return write(field::guest_idtr_base, value);
     }
 
-    zpp::maybe<std::uint64_t> guest_dr7() const
+    std::expected<std::uint64_t, zpp::error> guest_dr7() const
     {
         return read(field::guest_dr7);
     }
@@ -1419,7 +1420,7 @@ public:
         return write(field::guest_dr7, value);
     }
 
-    zpp::maybe<std::uint64_t> guest_rsp() const
+    std::expected<std::uint64_t, zpp::error> guest_rsp() const
     {
         return read(field::guest_rsp);
     }
@@ -1429,7 +1430,7 @@ public:
         return write(field::guest_rsp, value);
     }
 
-    zpp::maybe<std::uint64_t> guest_rip() const
+    std::expected<std::uint64_t, zpp::error> guest_rip() const
     {
         return read(field::guest_rip);
     }
@@ -1439,7 +1440,7 @@ public:
         return write(field::guest_rip, value);
     }
 
-    zpp::maybe<std::uint64_t> guest_rflags() const
+    std::expected<std::uint64_t, zpp::error> guest_rflags() const
     {
         return read(field::guest_rflags);
     }
@@ -1449,7 +1450,7 @@ public:
         return write(field::guest_rflags, value);
     }
 
-    zpp::maybe<std::uint64_t> guest_pending_debug_exceptions() const
+    std::expected<std::uint64_t, zpp::error> guest_pending_debug_exceptions() const
     {
         return read(field::guest_pending_debug_exceptions);
     }
@@ -1459,7 +1460,7 @@ public:
         return write(field::guest_pending_debug_exceptions, value);
     }
 
-    zpp::maybe<std::uint64_t> guest_ia32_sysenter_esp() const
+    std::expected<std::uint64_t, zpp::error> guest_ia32_sysenter_esp() const
     {
         return read(field::guest_ia32_sysenter_esp);
     }
@@ -1469,7 +1470,7 @@ public:
         return write(field::guest_ia32_sysenter_esp, value);
     }
 
-    zpp::maybe<std::uint64_t> guest_ia32_sysenter_eip() const
+    std::expected<std::uint64_t, zpp::error> guest_ia32_sysenter_eip() const
     {
         return read(field::guest_ia32_sysenter_eip);
     }
@@ -1479,7 +1480,7 @@ public:
         return write(field::guest_ia32_sysenter_eip, value);
     }
 
-    zpp::maybe<std::uint64_t> host_cr0() const
+    std::expected<std::uint64_t, zpp::error> host_cr0() const
     {
         return read(field::host_cr0);
     }
@@ -1489,7 +1490,7 @@ public:
         return write(field::host_cr0, value);
     }
 
-    zpp::maybe<std::uint64_t> host_cr3() const
+    std::expected<std::uint64_t, zpp::error> host_cr3() const
     {
         return read(field::host_cr3);
     }
@@ -1499,7 +1500,7 @@ public:
         return write(field::host_cr3, value);
     }
 
-    zpp::maybe<std::uint64_t> host_cr4() const
+    std::expected<std::uint64_t, zpp::error> host_cr4() const
     {
         return read(field::host_cr4);
     }
@@ -1509,7 +1510,7 @@ public:
         return write(field::host_cr4, value);
     }
 
-    zpp::maybe<std::uint64_t> host_fs_base() const
+    std::expected<std::uint64_t, zpp::error> host_fs_base() const
     {
         return read(field::host_fs_base);
     }
@@ -1519,7 +1520,7 @@ public:
         return write(field::host_fs_base, value);
     }
 
-    zpp::maybe<std::uint64_t> host_gs_base() const
+    std::expected<std::uint64_t, zpp::error> host_gs_base() const
     {
         return read(field::host_gs_base);
     }
@@ -1529,7 +1530,7 @@ public:
         return write(field::host_gs_base, value);
     }
 
-    zpp::maybe<std::uint64_t> host_tr_base() const
+    std::expected<std::uint64_t, zpp::error> host_tr_base() const
     {
         return read(field::host_tr_base);
     }
@@ -1539,7 +1540,7 @@ public:
         return write(field::host_tr_base, value);
     }
 
-    zpp::maybe<std::uint64_t> host_gdtr_base() const
+    std::expected<std::uint64_t, zpp::error> host_gdtr_base() const
     {
         return read(field::host_gdtr_base);
     }
@@ -1549,7 +1550,7 @@ public:
         return write(field::host_gdtr_base, value);
     }
 
-    zpp::maybe<std::uint64_t> host_idtr_base() const
+    std::expected<std::uint64_t, zpp::error> host_idtr_base() const
     {
         return read(field::host_idtr_base);
     }
@@ -1559,7 +1560,7 @@ public:
         return write(field::host_idtr_base, value);
     }
 
-    zpp::maybe<std::uint64_t> host_ia32_sysenter_esp() const
+    std::expected<std::uint64_t, zpp::error> host_ia32_sysenter_esp() const
     {
         return read(field::host_ia32_sysenter_esp);
     }
@@ -1569,7 +1570,7 @@ public:
         return write(field::host_ia32_sysenter_esp, value);
     }
 
-    zpp::maybe<std::uint64_t> host_ia32_sysenter_eip() const
+    std::expected<std::uint64_t, zpp::error> host_ia32_sysenter_eip() const
     {
         return read(field::host_ia32_sysenter_eip);
     }
@@ -1579,7 +1580,7 @@ public:
         return write(field::host_ia32_sysenter_eip, value);
     }
 
-    zpp::maybe<std::uint64_t> host_rsp() const
+    std::expected<std::uint64_t, zpp::error> host_rsp() const
     {
         return read(field::host_rsp);
     }
@@ -1589,7 +1590,7 @@ public:
         return write(field::host_rsp, value);
     }
 
-    zpp::maybe<std::uint64_t> host_rip() const
+    std::expected<std::uint64_t, zpp::error> host_rip() const
     {
         return read(field::host_rip);
     }
