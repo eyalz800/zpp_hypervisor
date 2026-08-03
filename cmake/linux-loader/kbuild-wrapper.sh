@@ -62,9 +62,15 @@ mkdir -p /build/linux_loader
 cp /src/linux_loader/src/main.c /build/linux_loader/main.c
 cp /output/zpp_loader.o /build/linux_loader/zpp_loader_prebuilt.o
 
+# main.c includes zpp/loader.h for the zpp_load_elf parameter struct, so the
+# shared loader headers have to come along and be on the include path.
+mkdir -p /build/linux_loader/include
+cp -r /src/loader/include/. /build/linux_loader/include/
+
 cat > /build/linux_loader/Makefile << 'MKEOF'
 obj-m += zpp_module.o
 zpp_module-objs := main.o zpp_loader_prebuilt.o
+ccflags-y += -I\$(src)/include
 MKEOF
 
 make -C /lib/modules/\${KERNEL_VERSION}/build M=/build/linux_loader modules
