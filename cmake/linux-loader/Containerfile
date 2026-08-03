@@ -1,0 +1,13 @@
+FROM docker.io/library/alpine:3.20
+RUN apk add --no-cache \
+    linux-headers \
+    musl-dev \
+    gcc \
+    make \
+    bc \
+    flex \
+    bison \
+    elfutils-dev \
+    perl \
+    bash
+WORKDIR /build
