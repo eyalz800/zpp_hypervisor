@@ -886,7 +886,7 @@ zpp::error hypervisor::main(x64::context & caller_context)
 
     // Initialize heap on first CPU.
     if (0 == cpuid) {
-        zpp::global_heap().init();
+        zpp::global_heap().init(this->heap_storage, sizeof(this->heap_storage));
     }
 
     // Initialize page table operations.

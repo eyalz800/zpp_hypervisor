@@ -13,7 +13,7 @@ public:
     /**
      * Constructs an empty segment descriptor.
      */
-    segment_descriptor() = default;
+    constexpr segment_descriptor() = default;
 
     /**
      * Segment types.

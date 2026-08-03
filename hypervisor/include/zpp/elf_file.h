@@ -256,7 +256,7 @@ public:
     /**
      * Returns the entry relative to file to be mapped in memory.
      */
-    std::uintptr_t entry() const
+    constexpr std::uintptr_t entry() const
     {
         return m_header->e_entry - m_preferred_base;
     }
@@ -264,7 +264,7 @@ public:
     /**
      * Returns the file data.
      */
-    const unsigned char * file_data() const
+    constexpr const unsigned char * file_data() const
     {
         return m_file_data;
     }
@@ -272,7 +272,7 @@ public:
     /**
      * Returns the ELF header.
      */
-    const elf_header & header() const
+    constexpr const elf_header & header() const
     {
         return *m_header;
     }
@@ -280,7 +280,7 @@ public:
     /**
      * Returns the ELF program headers.
      */
-    const elf_phdr * program_headers() const
+    constexpr const elf_phdr * program_headers() const
     {
         return m_program_headers;
     }
@@ -288,7 +288,7 @@ public:
     /**
      * Returns the ELF dynamic program header.
      */
-    const elf_phdr & dynamic_program_header() const
+    constexpr const elf_phdr & dynamic_program_header() const
     {
         return *m_program_headers;
     }
@@ -296,7 +296,7 @@ public:
     /**
      * Returns the ELF dynamic segment.
      */
-    const elf_dyn * dynamic() const
+    constexpr const elf_dyn * dynamic() const
     {
         return m_dynamic;
     }
@@ -304,7 +304,7 @@ public:
     /**
      * Returns the ELF preferred base.
      */
-    std::uintptr_t preferred_base() const
+    constexpr std::uintptr_t preferred_base() const
     {
         return m_preferred_base;
     }
@@ -312,7 +312,7 @@ public:
     /**
      * Returns the size ELF requires in memory.
      */
-    std::size_t memory_size() const
+    constexpr std::size_t memory_size() const
     {
         return m_memory_size;
     }
@@ -431,7 +431,7 @@ private:
     /**
      * Returns the relocation type given a rel/rela info.
      */
-    static int parse_relocation_type(std::uintptr_t info)
+    static constexpr int parse_relocation_type(std::uintptr_t info)
     {
         return info & 0xffffffff;
     }

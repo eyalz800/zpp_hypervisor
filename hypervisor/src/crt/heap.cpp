@@ -1,6 +1,4 @@
 #include "zpp/heap.h"
-#include <cstring>
-#include <new>
 
 namespace zpp
 {
@@ -11,24 +9,24 @@ heap & global_heap()
     return g_heap;
 }
 
-void heap::init()
+void heap::init(std::byte * storage, std::size_t storage_size)
 {
     if (m_initialized) {
         return;
     }
 
-    auto * initial = reinterpret_cast<block_header *>(m_storage);
-    initial->size = size - header_size;
+    auto * initial = reinterpret_cast<block_header *>(storage);
+    initial->size = storage_size - header_size;
     initial->free = true;
     initial->next = nullptr;
     m_free_list = initial;
+    m_size = storage_size;
     m_initialized = true;
 }
 
 void heap::lock()
 {
     while (m_lock.test_and_set(std::memory_order_acquire)) {
-        // Spin with pause hint for x86.
         asm volatile("pause");
     }
 }
@@ -52,7 +50,7 @@ heap::block_header * heap::find_free_block(std::size_t bytes)
 
 void heap::split_block(block_header * block, std::size_t bytes)
 {
-    if (block->size >= bytes + header_size + alignment) {
+    if (block->size >= bytes + header_size + default_alignment) {
         auto * new_block = reinterpret_cast<block_header *>(
             reinterpret_cast<std::byte *>(block) + header_size + bytes);
         new_block->size = block->size - bytes - header_size;
@@ -82,7 +80,7 @@ void * heap::allocate(std::size_t bytes)
         return nullptr;
     }
 
-    bytes = (bytes + alignment - 1) & ~(alignment - 1);
+    bytes = (bytes + default_alignment - 1) & ~(default_alignment - 1);
 
     lock();
 
@@ -120,33 +118,3 @@ void heap::deallocate(void * ptr)
 }
 
 } // namespace zpp
-
-void * operator new(std::size_t size)
-{
-    return zpp::global_heap().allocate(size);
-}
-
-void * operator new[](std::size_t size)
-{
-    return zpp::global_heap().allocate(size);
-}
-
-void operator delete(void * ptr) noexcept
-{
-    zpp::global_heap().deallocate(ptr);
-}
-
-void operator delete[](void * ptr) noexcept
-{
-    zpp::global_heap().deallocate(ptr);
-}
-
-void operator delete(void * ptr, std::size_t) noexcept
-{
-    zpp::global_heap().deallocate(ptr);
-}
-
-void operator delete[](void * ptr, std::size_t) noexcept
-{
-    zpp::global_heap().deallocate(ptr);
-}

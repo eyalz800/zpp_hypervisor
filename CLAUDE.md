@@ -57,6 +57,7 @@ The hypervisor has no OS, no libc, no C++ runtime library. It uses:
 - No exceptions, no RTTI (`-fno-exceptions -fno-rtti`)
 - Headers use `#pragma once`
 - Project namespace: `zpp`
+- `constexpr` everything that can be — all getters, constructors, destructors, operators
 - Error handling: `std::expected<T, zpp::error>` or `zpp::error` return
 - Loader entry points use `extern "C"` (called from C code in linux_loader)
 - `compile_commands.json` is auto-copied to each source directory after build (for clangd)
