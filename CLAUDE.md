@@ -90,6 +90,30 @@ Consequences worth remembering:
   `llvm-readelf -S out/release/x86_64/zpp_hypervisor | grep init_array` must be empty,
   and `llvm-nm -u` must report no undefined symbols.
 
+### Dynamic initialization (the escape hatch)
+
+`constinit` is still the default discipline, but `crt/static_objects.cpp` now supports
+globals that genuinely cannot be constant-initialized:
+
+- `zpp::crt::construct_static_objects()` walks `.preinit_array` and `.init_array`. Called
+  once on CPU 0 from `hypervisor::main`, **after** `global_heap().init()`, so a constructor
+  may allocate.
+- `zpp::crt::destroy_static_objects()` runs `__cxa_atexit`-registered destructors in reverse
+  registration order, then `.fini_array` in reverse. Called only when the hypervisor fails
+  to go resident — on success its globals must outlive every guest, so destructors
+  deliberately never run.
+- Provides `__cxa_atexit`, `__cxa_finalize`, `__dso_handle` (crtbegin normally supplies the
+  last one; `-nostdlib` does not pull it in), and `__cxa_guard_acquire/release/abort`.
+  The destructor registry is a fixed 256-entry table on purpose: registration happens from
+  inside constructors and must not allocate. It traps rather than silently dropping.
+- Because the guards exist, the hypervisor build **does not** pass `-fno-threadsafe-statics`
+  — VM exits run concurrently, so an unguarded function-local static would be a real race.
+  The loader builds keep the flag, since their CRTs have no guard implementation.
+
+Note `.fini_array` usually stays empty: destructors of globals are registered at runtime via
+`__cxa_atexit`, and `.fini_array` only receives `__attribute__((destructor))` functions.
+Both paths are handled. Verified to survive `--gc-sections --strip-all`.
+
 ### Include order (critical for freestanding)
 
 1. `cmake/freestanding-config/` — `__config_site` overrides
