@@ -1,0 +1,50 @@
+# Bochs configuration for booting Windows under emulated VT-x.
+#
+# Values follow the Bochs manual's Windows 10 guest page, which matters more
+# than it looks:
+#   - ips must be at least 325000000. Below that Windows bugchecks during boot
+#     and asks to reboot. The value used for the UEFI loader is far too low.
+#   - corei7_sandy_bridge_2600k is the model the manual prescribes. Newer
+#     models have historically crashed Windows during boot, and Sandy Bridge
+#     still provides VT-x with EPT, which is what this project needs.
+#   - ignore_bad_msrs and cpuid_limit_winnt=0 are both required.
+#   - Windows 8 and later will not boot unless performance monitoring is
+#     reported, which the prescribed model does.
+#
+# The manual also recommends installing Windows in another emulator and booting
+# the resulting disk here, rather than installing under Bochs. Use QEMU for
+# that, onto a raw IDE disk, since IDE is the only controller Bochs offers.
+plugin_ctrl: unmapped=1, biosdev=1, speaker=1, extfpuirq=1, parallel=1, serial=1
+config_interface: textconfig
+display_library: sdl2
+
+romimage: file=OVMF.fd, address=0xffc00000, options=fastboot
+memory: guest=2048, host=2048
+
+cpu: model=corei7_sandy_bridge_2600k
+cpu: count=1, ips=325000000, reset_on_triple_fault=1, ignore_bad_msrs=1
+cpu: cpuid_limit_winnt=0
+
+vga: extension=cirrus, update_freq=5
+pci: enabled=1, chipset=i440fx, slot1=cirrus
+
+# Windows lives on the IDE disk prepared under QEMU. Bochs has no AHCI, so the
+# install must have been done on IDE or Windows will not find its boot device.
+ata0: enabled=1, ioaddr1=0x1f0, ioaddr2=0x3f0, irq=14
+ata0-master: type=disk, mode=flat, path="windows.img"
+boot: disk
+
+com1: enabled=1, mode=file, dev=serial.out
+
+log: bochs.log
+logprefix: %t%e%d
+panic: action=fatal
+error: action=report
+info: action=ignore
+debug: action=ignore
+
+# Booting Windows here takes hours. Save the state once the desktop is up
+# (Bochs supports save/restore) and restore it for each test instead of
+# repeating the boot:
+#   restore: /path/to/saved-state
+gdbstub: enabled=1, port=1337, text_base=0, data_base=0, bss_base=0
