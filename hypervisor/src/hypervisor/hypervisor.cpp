@@ -22,7 +22,7 @@
 
 namespace zpp::hypervisor
 {
-// Constructed from the init array, which zpp::crt::init::run() walks
+// Constructed from the init array, which zpp::crt::init::main() walks
 // before anything below can be reached. See the declaration for why this
 // cannot be constant initialized.
 hypervisor hypervisor::instance;
@@ -1068,7 +1068,7 @@ void hypervisor::launch_on_cpu_private_stack(hypervisor & hypervisor,
     // On success the hypervisor stays resident and its globals must
     // outlive every guest, so only tear them down when it does not.
     if (!result) {
-        zpp::crt::init::teardown();
+        zpp::crt::init::cleanup();
     }
 
     // Restore context to caller.

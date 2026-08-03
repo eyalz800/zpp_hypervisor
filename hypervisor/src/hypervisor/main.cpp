@@ -18,7 +18,7 @@ extern "C" void zpp_hypervisor_main(x64::context & caller_context)
 #endif
 
     // Initialize the C runtime before anything can use a global.
-    crt::init::run();
+    crt::init::main();
 
     // Launch hypervisor on CPU, does not return.
     hypervisor::instance.launch_on_cpu(caller_context);

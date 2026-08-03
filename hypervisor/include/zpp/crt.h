@@ -8,7 +8,7 @@ namespace zpp
  *
  * Declared here rather than in heap.h because the CRT owns the instance
  * and its backing storage - heap.h only describes the type. This is a
- * plain accessor: zpp::crt::init::run() brings the heap up before any
+ * plain accessor: zpp::crt::init::main() brings the heap up before any
  * global constructor can allocate, so there is no initialization check on
  * the allocation path. Allocating before that point traps.
  */
@@ -19,7 +19,7 @@ heap & global_heap();
 namespace zpp::crt
 {
 /**
- * Startup and teardown of the C runtime.
+ * Startup and cleanup of the C runtime.
  */
 namespace init
 {
@@ -33,10 +33,10 @@ namespace init
  * The heap is ready before the first constructor runs, so a constructor is
  * free to allocate. Allocating before this point traps.
  */
-void run();
+void main();
 
 /**
- * Tears the C runtime down: runs destructors registered through
+ * Cleans the C runtime up: runs destructors registered through
  * __cxa_atexit, followed by the fini array, both in reverse order of
  * registration.
  *
@@ -44,7 +44,7 @@ void run();
  * staying resident - once the hypervisor is live its globals must outlive
  * every guest, so the successful path deliberately never runs destructors.
  */
-void teardown();
+void cleanup();
 
 } // namespace init
 } // namespace zpp::crt
