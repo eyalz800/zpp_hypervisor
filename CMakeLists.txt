@@ -37,3 +37,17 @@ ExternalProject_Add(windows_loader
     BUILD_ALWAYS ON
     DEPENDS hypervisor
 )
+
+ExternalProject_Add(uefi_loader
+    SOURCE_DIR "${CMAKE_CURRENT_SOURCE_DIR}/cmake/uefi-loader"
+    BINARY_DIR "${CMAKE_BINARY_DIR}/uefi-loader"
+    CMAKE_ARGS
+        -DCMAKE_TOOLCHAIN_FILE=${WINDOWS_MSVC_TOOLCHAIN}
+        -DCMAKE_BUILD_TYPE=${CMAKE_BUILD_TYPE}
+        -DZPP_SOURCE_DIR=${ZPP_SOURCE_DIR}
+        -DZPP_OUTPUT_DIR=${ZPP_OUTPUT_DIR}
+        -DFETCHCONTENT_BASE_DIR=${CMAKE_BINARY_DIR}/_deps
+    INSTALL_COMMAND ""
+    BUILD_ALWAYS ON
+    DEPENDS hypervisor
+)
