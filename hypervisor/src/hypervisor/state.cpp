@@ -1,11 +1,9 @@
 #include "zpp/hypervisor/state.h"
 #include "zpp/x64/asm.h"
-#include <type_traits>
 
 namespace zpp::hypervisor
 {
-static std::aligned_storage_t<sizeof(state), alignof(state)>
-    g_state_storage;
+alignas(state) static std::byte g_state_storage[sizeof(state)];
 state & g_state = *reinterpret_cast<state *>(&g_state_storage);
 
 void state::create_once()

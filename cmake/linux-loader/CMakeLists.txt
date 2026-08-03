@@ -65,9 +65,6 @@ target_compile_options(zpp_loader_obj PRIVATE
 target_compile_definitions(zpp_loader_obj PRIVATE
     # Tell elf_binary.cpp where to find the built hypervisor ELF.
     "ZPP_ELF_BINARY_PATH=\"${ZPP_OUTPUT_DIR}/zpp_hypervisor\""
-    # Suppress 'hidden' visibility on extern "C" symbols so that the kernel
-    # module glue (main.c) can call zpp_load_elf from a separate TU.
-    ZPP_ELF_BINARY_NO_HIDDEN
 )
 
 # --- Link into a single relocatable object ---

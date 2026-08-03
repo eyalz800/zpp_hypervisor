@@ -563,8 +563,7 @@ private:
     /**
      * Storage for the values.
      */
-    std::aligned_storage_t<sizeof(value_type), alignof(value_type)>
-        m_storage[Size];
+    alignas(value_type) std::byte m_storage[Size][sizeof(value_type)];
 
     /**
      * Size of the map.
