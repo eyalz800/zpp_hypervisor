@@ -76,7 +76,15 @@ class error
 public:
     error() = delete;
 
+    /**
+     * Constructs an error from an error code enumeration.
+     * Constrained to enumerations on purpose - an unconstrained
+     * constructor template would make this type constructible from
+     * anything, which drives the constraints of wrappers such as
+     * std::expected<T, error> into infinite recursion.
+     */
     template <typename ErrorCode>
+        requires std::is_enum_v<ErrorCode>
     constexpr error(ErrorCode error_code) :
         m_category(std::addressof(zpp::category<ErrorCode>())),
         m_code(std::underlying_type_t<ErrorCode>(error_code))
@@ -84,7 +92,9 @@ public:
     }
 
     template <typename ErrorCode>
-    constexpr error(ErrorCode error_code, const error_category & category) :
+        requires std::is_enum_v<ErrorCode>
+    constexpr error(ErrorCode error_code,
+                    const error_category & category) :
         m_category(std::addressof(category)),
         m_code(std::underlying_type_t<ErrorCode>(error_code))
     {

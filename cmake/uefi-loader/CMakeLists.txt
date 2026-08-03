@@ -1,4 +1,4 @@
-cmake_minimum_required(VERSION 3.25)
+cmake_minimum_required(VERSION 3.28)
 project(zpp_uefi_loader LANGUAGES CXX ASM)
 
 set(CMAKE_CXX_STANDARD 26)
@@ -39,15 +39,35 @@ set(SDK_INCLUDES
 )
 
 # ---- Source files -------------------------------------------------------
-set(LOADER_SOURCES
-    "${ZPP_SOURCE_DIR}/uefi_loader/src/main.cpp"
-    "${ZPP_SOURCE_DIR}/uefi_loader/src/crt/crt.cpp"
-    "${ZPP_SOURCE_DIR}/uefi_loader/src/undefined_symbols.S"
-    "${ZPP_SOURCE_DIR}/loader/src/elf_binary.cpp"
-    "${ZPP_SOURCE_DIR}/loader/src/main.cpp"
+# Globbed recursively so new sources never have to be listed by hand.
+# CONFIGURE_DEPENDS makes the generator re-check the glob on each build,
+# so adding a file does not require re-running cmake manually.
+file(GLOB_RECURSE LOADER_SOURCES CONFIGURE_DEPENDS
+    "${ZPP_SOURCE_DIR}/uefi_loader/src/*.cpp"
+    "${ZPP_SOURCE_DIR}/uefi_loader/src/*.S"
+    "${ZPP_SOURCE_DIR}/loader/src/*.cpp"
 )
 
+# Module interface units are added through a CXX_MODULES file set rather
+# than as plain sources, so CMake scans and builds them as C++ modules.
+file(GLOB_RECURSE LOADER_MODULES CONFIGURE_DEPENDS
+    "${ZPP_SOURCE_DIR}/uefi_loader/src/*.cppm"
+    "${ZPP_SOURCE_DIR}/loader/src/*.cppm"
+)
+
+if(NOT LOADER_SOURCES AND NOT LOADER_MODULES)
+    message(FATAL_ERROR "No UEFI loader source files found under ${ZPP_SOURCE_DIR}/uefi_loader/src/")
+endif()
+
 add_executable(zpp_loader_efi ${LOADER_SOURCES})
+
+if(LOADER_MODULES)
+    target_sources(zpp_loader_efi PRIVATE
+        FILE_SET CXX_MODULES
+        BASE_DIRS "${ZPP_SOURCE_DIR}"
+        FILES ${LOADER_MODULES}
+    )
+endif()
 
 # ---- Include directories -----------------------------------------------
 # Project headers first (non-system), then system includes.

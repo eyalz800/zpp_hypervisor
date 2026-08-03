@@ -12,6 +12,7 @@
 #include "zpp/x64/page_table.h"
 #include <cstddef>
 #include <cstdint>
+#include <expected>
 
 namespace zpp::hypervisor
 {
@@ -95,7 +96,8 @@ private:
     /**
      * Create physical to virtual mapping for our module.
      */
-    zpp::error initialize_module_physical_to_virtual();
+    std::expected<void, zpp::error>
+    initialize_module_physical_to_virtual();
 
     /**
      * Create the host GDT structures that will be used in the hypervisor.
@@ -148,7 +150,7 @@ private:
     /**
      * Prepare module protection from guest access.
      */
-    zpp::error protect_module();
+    std::expected<void, zpp::error> protect_module();
 
     /**
      * Remove protection for unprotected guest memory.
@@ -164,7 +166,7 @@ private:
     /**
      * Enter root mode on the current CPU.
      */
-    zpp::error enter_root_mode();
+    std::expected<void, zpp::error> enter_root_mode();
 
     /**
      * Setup the VM control structure according to the given guest context,
@@ -184,7 +186,7 @@ private:
      * on the current CPU. This function is already called with
      * the hypervisor reserved stack.
      */
-    zpp::error main(x64::context & caller_context);
+    std::expected<void, zpp::error> main(x64::context & caller_context);
 
     /**
      * Launches the main function of the hypervisor, updates the rax
@@ -453,9 +455,11 @@ private:
     alignas(page_size) std::uint8_t msr_bitmap[page_size]{};
 
     /**
-     * Heap storage.
+     * Heap storage. Deliberately left uninitialized - the loader already
+     * zeroes BSS, and value initializing 20 MB here would memset it a
+     * second time during state construction.
      */
-    alignas(page_size) std::byte heap_storage[heap_size]{};
+    alignas(page_size) std::byte heap_storage[heap_size];
 
     /**
      * The physical address of the current VMX region to be assigned.

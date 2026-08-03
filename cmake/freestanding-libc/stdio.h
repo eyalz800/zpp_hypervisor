@@ -12,8 +12,8 @@ extern "C" {
 
 /* Required so that <cstdio>'s `using ::remove` resolves to a concrete
    C function and doesn't conflict with std::remove from <algorithm>. */
-int remove(const char *__filename);
-int rename(const char *__old, const char *__new);
+int remove(const char * __filename);
+int rename(const char * __old, const char * __new);
 
 #ifdef __cplusplus
 }

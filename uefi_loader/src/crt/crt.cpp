@@ -14,9 +14,22 @@ void * memcpy(void * dest, const void * src, std::size_t count)
 
 void * memmove(void * dest, const void * src, std::size_t count)
 {
+    auto * to = static_cast<unsigned char *>(dest);
+    auto * from = static_cast<const unsigned char *>(src);
+
+    // When the ranges overlap with the destination above the source, a
+    // forward copy would clobber source bytes before reading them, so
+    // copy backwards instead.
+    if (to > from && to < from + count) {
+        for (auto i = count; i--;) {
+            to[i] = from[i];
+        }
+
+        return dest;
+    }
+
     for (std::size_t i{}; i < count; ++i) {
-        *(static_cast<unsigned char *>(dest) + i) =
-            *(static_cast<const unsigned char *>(src) + i);
+        to[i] = from[i];
     }
 
     return dest;
