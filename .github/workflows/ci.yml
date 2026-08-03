@@ -7,7 +7,7 @@ on:
   workflow_dispatch:
 
 env:
-  LLVM_VERSION: "20"
+  LLVM_VERSION: "22"
   CLANG_FORMAT_VERSION: "20.1.7"
 
 jobs:
