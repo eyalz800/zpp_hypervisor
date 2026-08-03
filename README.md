@@ -36,8 +36,6 @@ Requirements
 - LLVM/Clang 18+ (with libc++ headers)
 - Podman (optional, for Linux kernel module build)
 
-See [clang.md](clang.md) for detailed toolchain setup.
-
 Compiling The Project
 ---------------------
 The project uses CMake with presets. The build cross-compiles from the host to x86_64 targets.
