@@ -8,6 +8,10 @@
 #include <cstddef>
 #include <cstdint>
 extern "C" {
+#elif defined(__KERNEL__)
+// Kernel modules build with -nostdinc, so the C library headers do not exist.
+// linux/types.h is where size_t and uintptr_t come from there.
+#include <linux/types.h>
 #else
 #include <stddef.h>
 #include <stdint.h>
