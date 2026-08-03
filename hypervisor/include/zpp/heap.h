@@ -48,6 +48,7 @@ class allocator
 public:
     using value_type = T;
 
+    allocator() noexcept : m_heap(&global_heap()) {}
     constexpr explicit allocator(heap & h) noexcept : m_heap(&h) {}
 
     template <typename U>
