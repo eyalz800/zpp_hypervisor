@@ -66,7 +66,9 @@ echo "firmware: $found"
 
 # ESP holding the loader at the removable-media default path.
 rm -f "$work/esp.img"
-dd if=/dev/zero of="$work/esp.img" bs=1m count=64 2>/dev/null
+# 1M rather than 1m: GNU dd rejects the lowercase suffix that BSD dd accepts.
+# stderr is deliberately not suppressed - hiding it here cost a CI cycle.
+dd if=/dev/zero of="$work/esp.img" bs=1M count=64 status=none
 export MTOOLS_SKIP_CHECK=1
 mformat -i "$work/esp.img" -F -v ZPPESP ::
 mmd -i "$work/esp.img" ::/EFI ::/EFI/BOOT
