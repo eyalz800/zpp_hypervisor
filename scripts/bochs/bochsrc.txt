@@ -1,0 +1,30 @@
+# Bochs configuration for debugging zpp_hypervisor under emulated VT-x.
+# Paths are relative, so run Bochs from build/bochs.
+plugin_ctrl: unmapped=1, biosdev=1, speaker=1, extfpuirq=1, parallel=1, serial=1
+config_interface: textconfig
+display_library: nogui
+
+# OVMF is a 4 MB flash image, so it maps at 4 GB - 4 MB.
+romimage: file=OVMF.fd, address=0xffc00000, options=fastboot
+memory: guest=1024, host=1024
+
+# A model that reports VMX. Bochs 3.0 removed the legacy 'cpuid:' option,
+# so CPU features come from the model alone - pick one with VT-x.
+cpu: model=corei7_icelake_u, count=1, ips=50000000, reset_on_triple_fault=1
+
+ata0: enabled=1, ioaddr1=0x1f0, ioaddr2=0x3f0, irq=14
+ata0-master: type=disk, mode=flat, path="esp.img"
+boot: disk
+
+# OVMF writes its console to the serial port.
+com1: enabled=1, mode=file, dev=serial.out
+
+log: bochs.log
+logprefix: %t%e%d
+panic: action=fatal
+error: action=report
+info: action=ignore
+debug: action=ignore
+
+# Bochs halts at reset and waits for gdb to connect on this port.
+gdbstub: enabled=1, port=1234, text_base=0, data_base=0, bss_base=0

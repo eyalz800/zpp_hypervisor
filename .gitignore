@@ -42,3 +42,4 @@ build/
 CMakeUserPresets.json
 .superpowers/
 .DS_Store
+build/
