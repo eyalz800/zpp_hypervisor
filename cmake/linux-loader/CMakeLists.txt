@@ -1,4 +1,4 @@
-cmake_minimum_required(VERSION 3.25)
+cmake_minimum_required(VERSION 3.28)
 project(zpp_linux_loader LANGUAGES CXX ASM)
 
 set(CMAKE_CXX_STANDARD 26)
@@ -23,12 +23,33 @@ file(MAKE_DIRECTORY "${ZPP_OUTPUT_DIR}")
 # headers and must be compiled inside the Podman container via kbuild.
 # See cmake/linux-loader/kbuild-wrapper.sh for the .ko build step.
 
-set(LOADER_SOURCES
-    "${ZPP_SOURCE_DIR}/loader/src/elf_binary.cpp"
-    "${ZPP_SOURCE_DIR}/loader/src/main.cpp"
+# Globbed recursively so new sources never have to be listed by hand.
+# CONFIGURE_DEPENDS makes the generator re-check the glob on each build,
+# so adding a file does not require re-running cmake manually.
+# Note: linux_loader/src/main.c is compiled by kbuild, not here.
+file(GLOB_RECURSE LOADER_SOURCES CONFIGURE_DEPENDS
+    "${ZPP_SOURCE_DIR}/loader/src/*.cpp"
 )
 
+# Module interface units are added through a CXX_MODULES file set rather
+# than as plain sources, so CMake scans and builds them as C++ modules.
+file(GLOB_RECURSE LOADER_MODULES CONFIGURE_DEPENDS
+    "${ZPP_SOURCE_DIR}/loader/src/*.cppm"
+)
+
+if(NOT LOADER_SOURCES AND NOT LOADER_MODULES)
+    message(FATAL_ERROR "No loader source files found under ${ZPP_SOURCE_DIR}/loader/src/")
+endif()
+
 add_library(zpp_loader_obj OBJECT ${LOADER_SOURCES})
+
+if(LOADER_MODULES)
+    target_sources(zpp_loader_obj PRIVATE
+        FILE_SET CXX_MODULES
+        BASE_DIRS "${ZPP_SOURCE_DIR}"
+        FILES ${LOADER_MODULES}
+    )
+endif()
 
 # Project headers
 target_include_directories(zpp_loader_obj PRIVATE

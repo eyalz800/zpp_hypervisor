@@ -80,6 +80,12 @@ void * heap::allocate(std::size_t bytes)
         return nullptr;
     }
 
+    // Reject sizes that would wrap while rounding up, otherwise a huge
+    // request would round down to a small successful allocation.
+    if (bytes > (~std::size_t{} - default_alignment + 1)) {
+        return nullptr;
+    }
+
     bytes = (bytes + default_alignment - 1) & ~(default_alignment - 1);
 
     lock();
@@ -114,6 +120,10 @@ void heap::deallocate(void * ptr)
 
     lock();
     block->free = true;
+
+    // Merge adjacent free blocks right away, so fragmentation does not
+    // build up until an allocation has already failed.
+    coalesce();
     unlock();
 }
 

@@ -15,7 +15,10 @@ public:
     void init(std::byte * storage, std::size_t storage_size);
     void * allocate(std::size_t bytes);
     void deallocate(void * ptr);
-    constexpr std::size_t capacity() const { return m_size; }
+    constexpr std::size_t capacity() const
+    {
+        return m_size;
+    }
 
 private:
     struct block_header
@@ -50,11 +53,18 @@ class allocator
 public:
     using value_type = T;
 
-    allocator() noexcept : m_heap(&global_heap()) {}
-    constexpr explicit allocator(heap & h) noexcept : m_heap(&h) {}
+    allocator() noexcept : m_heap(&global_heap())
+    {
+    }
+    constexpr explicit allocator(heap & h) noexcept : m_heap(&h)
+    {
+    }
 
     template <typename U>
-    constexpr allocator(const allocator<U> & other) noexcept : m_heap(other.m_heap) {}
+    constexpr allocator(const allocator<U> & other) noexcept :
+        m_heap(other.m_heap)
+    {
+    }
 
     T * allocate(std::size_t n)
     {

@@ -290,7 +290,7 @@ public:
      */
     constexpr const elf_phdr & dynamic_program_header() const
     {
-        return *m_program_headers;
+        return *m_dynamic_phdr;
     }
 
     /**
@@ -453,8 +453,13 @@ private:
             // Get relocation types.
             auto relative_relocation = relative_relocation_value();
 
+            // The relocation size is expressed in bytes, convert it to
+            // an entry count before iterating.
+            auto relocations_count =
+                relocations_size / sizeof(relocation_kind);
+
             // Iterate rela entries.
-            for (std::size_t i{}; i < relocations_size; ++i) {
+            for (std::size_t i{}; i < relocations_count; ++i) {
                 auto & relocation = relocations[i];
 
                 // If not relative, skip.

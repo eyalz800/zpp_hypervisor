@@ -34,16 +34,12 @@ template <typename Key, typename Compare = std::less<Key>>
 using multiset = std::multiset<Key, Compare, allocator<Key>>;
 
 template <typename Key, typename Value, typename Compare = std::less<Key>>
-using map = std::map<Key,
-                     Value,
-                     Compare,
-                     allocator<std::pair<const Key, Value>>>;
+using map =
+    std::map<Key, Value, Compare, allocator<std::pair<const Key, Value>>>;
 
 template <typename Key, typename Value, typename Compare = std::less<Key>>
-using multimap = std::multimap<Key,
-                               Value,
-                               Compare,
-                               allocator<std::pair<const Key, Value>>>;
+using multimap = std::
+    multimap<Key, Value, Compare, allocator<std::pair<const Key, Value>>>;
 
 template <typename Key,
           typename Hash = std::hash<Key>,

@@ -1,4 +1,4 @@
-cmake_minimum_required(VERSION 3.25)
+cmake_minimum_required(VERSION 3.28)
 project(zpp_hypervisor LANGUAGES CXX ASM)
 
 set(CMAKE_CXX_STANDARD 26)
@@ -13,16 +13,33 @@ if(NOT DEFINED ZPP_OUTPUT_DIR)
     message(FATAL_ERROR "ZPP_OUTPUT_DIR must be set (path to the output directory)")
 endif()
 
-# Source files — all .cpp files under hypervisor/src/ recursively
-file(GLOB_RECURSE HYPERVISOR_SOURCES
+# Source files — all .cpp/.cppm files under hypervisor/src/ recursively.
+# CONFIGURE_DEPENDS makes the generator re-check the glob on each build,
+# so adding a file does not require re-running cmake manually.
+file(GLOB_RECURSE HYPERVISOR_SOURCES CONFIGURE_DEPENDS
     "${ZPP_SOURCE_DIR}/hypervisor/src/*.cpp"
+    "${ZPP_SOURCE_DIR}/hypervisor/src/*.S"
 )
 
-if(NOT HYPERVISOR_SOURCES)
+# Module interface units are added through a CXX_MODULES file set rather
+# than as plain sources, so CMake scans and builds them as C++ modules.
+file(GLOB_RECURSE HYPERVISOR_MODULES CONFIGURE_DEPENDS
+    "${ZPP_SOURCE_DIR}/hypervisor/src/*.cppm"
+)
+
+if(NOT HYPERVISOR_SOURCES AND NOT HYPERVISOR_MODULES)
     message(FATAL_ERROR "No hypervisor source files found under ${ZPP_SOURCE_DIR}/hypervisor/src/")
 endif()
 
 add_executable(zpp_hypervisor ${HYPERVISOR_SOURCES})
+
+if(HYPERVISOR_MODULES)
+    target_sources(zpp_hypervisor PRIVATE
+        FILE_SET CXX_MODULES
+        BASE_DIRS "${ZPP_SOURCE_DIR}/hypervisor/src"
+        FILES ${HYPERVISOR_MODULES}
+    )
+endif()
 
 # Project include directories
 target_include_directories(zpp_hypervisor PRIVATE
