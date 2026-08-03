@@ -1,7 +1,8 @@
 #pragma once
-#include <atomic>
+#include "zpp/spin_lock.h"
 #include <cstddef>
 #include <cstdint>
+#include <span>
 
 namespace zpp
 {
@@ -12,7 +13,7 @@ public:
 
     constexpr heap() = default;
 
-    void init(std::byte * storage, std::size_t storage_size);
+    void init(std::span<std::byte> storage);
     void * allocate(std::size_t bytes);
     void deallocate(void * ptr);
     constexpr std::size_t capacity() const
@@ -36,12 +37,9 @@ private:
     void split_block(block_header * block, std::size_t bytes);
     void coalesce();
 
-    void lock();
-    void unlock();
-
     block_header * m_free_list{};
     std::size_t m_size{};
-    std::atomic_flag m_lock{};
+    spin_lock m_lock{};
     bool m_initialized{};
 };
 

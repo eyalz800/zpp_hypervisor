@@ -46,9 +46,9 @@ modules — this is why `cmake_minimum_required` is 3.28.
 
 The hypervisor has no OS, no libc, no C++ runtime library. It uses:
 - libc++ **headers only** (no linking) with custom `__config_site` (no threads/locale/filesystem)
-- Custom CRT: `crt.cpp` (memcpy/memmove/memset/memcmp/strlen, `__cxa_pure_virtual`, and
-  every `operator new`/`operator delete` overload — plain, `nothrow`, and `align_val_t`),
-  `heap.cpp` (spinlock block-list allocator)
+- Custom CRT: `crt.cpp` (memcpy/memmove/memset/memcmp/strlen, the `__cxa_*` ABI, every
+  `operator new`/`operator delete` overload — plain, `nothrow`, `align_val_t` — plus the
+  global heap instance and `zpp::crt::init`), `heap.cpp` (the `heap` type only)
 - `-D_LIBCPP_VERBOSE_ABORT(...)=__builtin_trap()` for `<expected>` support
 - `std::expected<T, zpp::error>` (replaced custom `zpp::maybe<T>`)
 - `zpp::scope_exit` (matches P0052 `std::scope_exit` API — not in libc++ until C++29)
@@ -57,20 +57,20 @@ The hypervisor has no OS, no libc, no C++ runtime library. It uses:
 
 ### Heap lifecycle
 
-Storage and size live in `crt/heap.cpp`, owned by the CRT rather than the hypervisor. That
+Storage and size live in `crt/crt.cpp`, owned by the CRT rather than the hypervisor. That
 deliberately breaks a bootstrap cycle: static constructors may allocate, so the heap has to
 be usable before any hypervisor object exists. The size stays out of `heap.h` — it is a
 property of the global heap, not of the `heap` type.
 
-`zpp::crt::init()` calls `detail::initialize_heap()` **before running any constructor**, so
+`zpp::crt::init::run()` initializes the heap **before running any constructor**, so
 `zpp::global_heap()` is a plain accessor with **no initialization check on the allocation
 path**. Do not reintroduce one. Consequences:
 
-- Allocating before `crt::init()` traps — the heap has an empty free list, `allocate`
+- Allocating before `crt::init::run()` traps — the heap has an empty free list, `allocate`
   returns `nullptr`, and `operator new` calls `__builtin_trap()`. Loud, not silent.
 - Initialization happens exactly once at a defined point, so there is no concurrent-init
   race on the allocation path.
-- The 20 MB arena is always retained in release, since `crt::init()` references it
+- The 20 MB arena is always retained in release, since `crt::init::run()` references it
   unconditionally. It is a fixed arena, so this is intended.
 
 `operator new` also traps on allocation failure, since `-fno-exceptions` means `bad_alloc`
@@ -106,13 +106,13 @@ Consequences worth remembering:
 
 ### Dynamic initialization (the escape hatch)
 
-`constinit` is still the default discipline, but `crt/init.cpp` now supports
+`constinit` is still the default discipline, but `crt/crt.cpp` now supports
 globals that genuinely cannot be constant-initialized:
 
-- `zpp::crt::init()` brings up the global heap, then walks `.preinit_array` and
+- `zpp::crt::init::run()` brings up the global heap, then walks `.preinit_array` and
   `.init_array`. Called from `zpp_hypervisor_main` before anything touches a global, so a
   constructor is free to allocate.
-- `zpp::crt::fini()` runs `__cxa_atexit`-registered destructors in reverse registration
+- `zpp::crt::init::teardown()` runs `__cxa_atexit`-registered destructors in reverse registration
   order, then `.fini_array` in reverse. Called only when the hypervisor fails to go
   resident — on success its globals must outlive every guest, so destructors deliberately
   never run.
@@ -147,6 +147,16 @@ Both paths are handled. Verified to survive `--gc-sections --strip-all`.
 - `constexpr` everything that can be — all getters, constructors, destructors, operators
 - Formatted with `.clang-format` (75 column limit). Not enforced by the build — run
   `clang-format -i` on what you touch.
+- **Buffers are `std::span`, never `(pointer, size)` pairs.** Any API taking a contiguous
+  range takes `std::span<T>` / `std::span<const std::byte>`. Applies to new APIs too.
+  The one deliberate exception is address-range APIs like `page_table::map_from` and the
+  ELF `protect` callback: those exist in a `std::uint64_t` address form as well, the pointer
+  overload just forwards to it, and the range is never read through — wrapping in
+  `as_bytes(span{...})` only to immediately decay back to an integer adds noise, not safety.
+- **No inline assembly outside `x64/`.** Generic code uses an abstraction — spin loops call
+  `zpp::spin_hint()` from `zpp/spin_lock.h`, which selects `__builtin_ia32_pause()` on x86
+  and `__builtin_arm_yield()` on aarch64. `zpp::spin_lock` is the only lock shape available;
+  there is no scheduler to block against, and it is **not recursive**.
 - Error handling: always `std::expected<T, zpp::error>`, and `std::expected<void, zpp::error>`
   for fallible functions with no value (never a bare `zpp::error` return). `return {}` on
   success, `return std::unexpected(zpp::error{error::whatever})` on failure, and
