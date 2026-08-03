@@ -39,3 +39,7 @@ compile_commands.json
 *.vim
 .files
 .cache/
+build/
+CMakeUserPresets.json
+.superpowers/
+.DS_Store
