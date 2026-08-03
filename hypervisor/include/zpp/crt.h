@@ -1,4 +1,20 @@
 #pragma once
+#include "zpp/heap.h"
+
+namespace zpp
+{
+/**
+ * The heap that backs operator new and zpp::allocator.
+ *
+ * Declared here rather than in heap.h because the CRT owns the instance
+ * and its backing storage - heap.h only describes the type. This is a
+ * plain accessor: zpp::crt::init::run() brings the heap up before any
+ * global constructor can allocate, so there is no initialization check on
+ * the allocation path. Allocating before that point traps.
+ */
+heap & global_heap();
+
+} // namespace zpp
 
 namespace zpp::crt
 {
