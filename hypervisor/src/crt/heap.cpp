@@ -2,7 +2,7 @@
 
 namespace zpp
 {
-static heap g_heap;
+constinit static heap g_heap{};
 
 heap & global_heap()
 {

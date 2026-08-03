@@ -10,6 +10,8 @@ class heap
 public:
     static constexpr std::size_t default_alignment = 16;
 
+    constexpr heap() = default;
+
     void init(std::byte * storage, std::size_t storage_size);
     void * allocate(std::size_t bytes);
     void deallocate(void * ptr);
