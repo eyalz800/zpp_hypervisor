@@ -236,6 +236,35 @@ Verify the result with:
 Keeping the Homebrew build alongside is useful - it has the internal debugger,
 whose `vmexitbp` breakpoint halts on VMEXIT.
 
+### Booting Windows under emulated VT-x
+
+`scripts/bochs/bochsrc-windows.txt` follows the Bochs manual's Windows 10 guest
+page. Two of its settings are load bearing: `ips` must be at least 325000000 or
+Windows bugchecks mid-boot, and the CPU model must be
+`corei7_sandy_bridge_2600k`, since newer models have historically crashed
+Windows while still providing the VT-x and EPT this project needs.
+
+The manual recommends installing Windows in another emulator and booting the
+resulting disk under Bochs, rather than installing under Bochs. So:
+
+1. Install Windows in QEMU on this machine. It is a JIT rather than an
+   interpreter, so this takes hours rather than days. Install onto a **raw IDE**
+   disk - Bochs has no AHCI, and Windows will not find a boot device it has no
+   driver loaded for.
+2. Inside the guest, `bcdedit /set testsigning on` and reboot, while it can
+   still boot quickly. The `.sys` is unsigned.
+3. Windows 10 Enterprise Evaluation is the easier target: it is a free 90 day
+   ISO and has no TPM requirement. Windows 11 also works but needs its setup
+   checks bypassed via `HKLM\SYSTEM\Setup\LabConfig` (`BypassTPMCheck`,
+   `BypassSecureBootCheck`, `BypassRAMCheck`), since Bochs emulates no TPM.
+4. Boot `windows.img` under Bochs. This takes hours. Once the desktop is up,
+   **save the Bochs state** and restore it for each subsequent test rather than
+   booting again - this is what makes iterating feasible at all.
+5. Load the driver and attach gdb on port 1337 as usual.
+
+Expect minutes per interaction even at the desktop. It is workable for
+`sc start` and a breakpoint, not for using the machine.
+
 ### Other dependencies
 
     brew install mtools x86_64-elf-gdb
