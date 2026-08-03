@@ -1,3 +1,4 @@
+#include "zpp/crt/init.h"
 #include "zpp/hypervisor/state.h"
 #include "zpp/x64/context.h"
 
@@ -14,6 +15,9 @@ extern "C" void zpp_hypervisor_main(x64::context & caller_context)
         asm("pause");
     }
 #endif
+
+    // Initialize the C runtime before anything can use a global.
+    crt::init();
 
     // Create the state once.
     state::create_once();

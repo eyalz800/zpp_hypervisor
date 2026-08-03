@@ -1,9 +1,8 @@
 #include "zpp/hypervisor/hypervisor.h"
-#include "zpp/crt/static_objects.h"
+#include "zpp/crt/init.h"
 #include "zpp/elf_file.h"
 #include "zpp/elf_image_base.h"
 #include "zpp/error.h"
-#include "zpp/heap.h"
 #include "zpp/scope_exit.h"
 #include "zpp/x64/asm.h"
 #include "zpp/x64/generic.h"
@@ -888,14 +887,6 @@ hypervisor::main(x64::context & caller_context)
     // Guard to enable interrupts.
     scope_exit restore_interrupts{x64::enable_interrupts};
 
-    // Initialize heap and construct static objects on first CPU. The heap
-    // must come first, since a constructor may allocate.
-    if (0 == cpuid) {
-        zpp::global_heap().init(this->heap_storage,
-                                sizeof(this->heap_storage));
-        zpp::crt::construct_static_objects();
-    }
-
     // Initialize page table operations.
     this->physical_to_virtual = physical_to_virtual;
 
@@ -1072,7 +1063,7 @@ void hypervisor::launch_on_cpu_private_stack(hypervisor & hypervisor,
     // On success the hypervisor stays resident and its globals must
     // outlive every guest, so only tear them down when it does not.
     if (!result) {
-        zpp::crt::destroy_static_objects();
+        zpp::crt::fini();
     }
 
     // Restore context to caller.

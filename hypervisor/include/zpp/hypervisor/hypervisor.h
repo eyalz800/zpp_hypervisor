@@ -49,11 +49,6 @@ public:
         100 * 1024 * 1024; // 100 MB.
 
     /**
-     * Heap size in bytes.
-     */
-    static constexpr std::size_t heap_size = 20 * 1024 * 1024; // 20 MB.
-
-    /**
      * Launch the hypervisor on a the current CPU, caller must make
      * sure the context switch to another CPU cannot occur.
      * The caller context parameter must contain a context where the OS can
@@ -453,13 +448,6 @@ private:
      * The MSR bitmap of the VM control structure.
      */
     alignas(page_size) std::uint8_t msr_bitmap[page_size]{};
-
-    /**
-     * Heap storage. Deliberately left uninitialized - the loader already
-     * zeroes BSS, and value initializing 20 MB here would memset it a
-     * second time during state construction.
-     */
-    alignas(page_size) std::byte heap_storage[heap_size];
 
     /**
      * The physical address of the current VMX region to be assigned.
