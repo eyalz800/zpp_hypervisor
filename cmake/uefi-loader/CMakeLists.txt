@@ -67,6 +67,13 @@ if(LOADER_MODULES)
         BASE_DIRS "${ZPP_SOURCE_DIR}"
         FILES ${LOADER_MODULES}
     )
+else()
+    # With no module interface units there is nothing to scan, and the scan is
+    # actively harmful here: clang-scan-deps preprocesses more eagerly than the
+    # compiler and walks into the SDK's ucrt/corecrt.h, which includes a
+    # vcruntime.h that the NuGet package does not ship. The compile itself
+    # never takes that path. Re-enabled automatically by adding a .cppm.
+    set_target_properties(zpp_loader_efi PROPERTIES CXX_SCAN_FOR_MODULES OFF)
 endif()
 
 # ---- Include directories -----------------------------------------------

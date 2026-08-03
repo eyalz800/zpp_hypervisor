@@ -233,8 +233,9 @@ inline void __attribute__((naked)) enable_interrupts()
     )!!");
 }
 
-inline void __attribute__((naked))
-cpuid(std::uint32_t, std::uint32_t, std::uint32_t *)
+inline void __attribute__((naked)) cpuid(std::uint32_t,
+                                         std::uint32_t,
+                                         std::uint32_t *)
 {
     asm(R"!!(
         .intel_syntax noprefix

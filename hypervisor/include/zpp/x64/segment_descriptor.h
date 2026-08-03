@@ -45,8 +45,7 @@ public:
      */
     constexpr explicit segment_descriptor(std::uint64_t entry,
                                           std::uint64_t extended = {}) :
-        m_entry(entry),
-        m_extended(extended)
+        m_entry(entry), m_extended(extended)
     {
     }
 

@@ -73,10 +73,11 @@ static int zpp_init(void)
     const struct zpp_loader_parameters parameters = {
         .allocate_rwx = &allocate_rwx,
         // phys_to_virt returns void *, which is pointer sized here.
-        .physical_to_virtual = (uintptr_t(*)(uintptr_t)) & phys_to_virt,
+        .physical_to_virtual = (uintptr_t (*)(uintptr_t))&phys_to_virt,
         .call_on_cpu = &call_on_cpu,
         .number_of_cpus = &number_of_cpus,
-        // The kernel already uses the SysV convention the hypervisor wants.
+        // The kernel already uses the SysV convention the hypervisor
+        // wants.
         .adjust_launch_calling_convention = NULL,
     };
 
