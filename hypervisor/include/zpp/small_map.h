@@ -337,7 +337,7 @@ public:
     /**
      * Returns the size of the map.
      */
-    size_type size() const
+    constexpr size_type size() const
     {
         return m_size;
     }
@@ -353,7 +353,7 @@ public:
     /**
      * Returns true if map is empty, else false.
      */
-    bool empty() const
+    constexpr bool empty() const
     {
         return !m_size;
     }

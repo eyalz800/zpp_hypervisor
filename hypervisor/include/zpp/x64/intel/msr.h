@@ -80,7 +80,7 @@ enum type : std::size_t
 /**
  * Consults a value with a specified MSR and returns the adjusted value.
  */
-inline std::uint64_t adjust_msr(std::uint64_t msr, std::uint64_t value)
+constexpr std::uint64_t adjust_msr(std::uint64_t msr, std::uint64_t value)
 {
     value &= ((0xffffffff00000000 & msr) >> 32);
     value |= 0xffffffff & msr;

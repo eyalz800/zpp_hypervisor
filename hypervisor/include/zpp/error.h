@@ -17,7 +17,7 @@ public:
     virtual std::string_view name() const noexcept = 0;
     virtual std::string_view message(int code) const noexcept = 0;
 
-    bool success(int code) const
+    constexpr bool success(int code) const
     {
         return code == m_success_code;
     }
@@ -77,35 +77,35 @@ public:
     error() = delete;
 
     template <typename ErrorCode>
-    error(ErrorCode error_code) :
+    constexpr error(ErrorCode error_code) :
         m_category(std::addressof(zpp::category<ErrorCode>())),
         m_code(std::underlying_type_t<ErrorCode>(error_code))
     {
     }
 
     template <typename ErrorCode>
-    error(ErrorCode error_code, const error_category & category) :
+    constexpr error(ErrorCode error_code, const error_category & category) :
         m_category(std::addressof(category)),
         m_code(std::underlying_type_t<ErrorCode>(error_code))
     {
     }
 
-    const error_category & category() const
+    constexpr const error_category & category() const
     {
         return *m_category;
     }
 
-    int code() const
+    constexpr int code() const
     {
         return m_code;
     }
 
-    std::string_view message() const
+    constexpr std::string_view message() const
     {
         return m_category->message(m_code);
     }
 
-    explicit operator bool() const
+    constexpr explicit operator bool() const
     {
         return m_category->success(m_code);
     }

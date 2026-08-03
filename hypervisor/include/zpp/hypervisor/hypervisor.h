@@ -45,7 +45,12 @@ public:
      * Maximum module size in bytes.
      */
     static constexpr std::size_t max_module_size =
-        50 * 1024 * 1024; // 50 MB.
+        100 * 1024 * 1024; // 100 MB.
+
+    /**
+     * Heap size in bytes.
+     */
+    static constexpr std::size_t heap_size = 20 * 1024 * 1024; // 20 MB.
 
     /**
      * Launch the hypervisor on a the current CPU, caller must make
@@ -446,6 +451,11 @@ private:
      * The MSR bitmap of the VM control structure.
      */
     alignas(page_size) std::uint8_t msr_bitmap[page_size]{};
+
+    /**
+     * Heap storage.
+     */
+    alignas(page_size) std::byte heap_storage[heap_size]{};
 
     /**
      * The physical address of the current VMX region to be assigned.

@@ -1,4 +1,6 @@
 #include <cstddef>
+#include <new>
+#include "zpp/heap.h"
 
 extern "C" {
 void * memcpy(void * dest, const void * src, std::size_t count)
@@ -56,4 +58,34 @@ size_t strlen(const char * string)
 void __cxa_pure_virtual()
 {
 }
+}
+
+void * operator new(std::size_t size)
+{
+    return zpp::global_heap().allocate(size);
+}
+
+void * operator new[](std::size_t size)
+{
+    return zpp::global_heap().allocate(size);
+}
+
+void operator delete(void * ptr) noexcept
+{
+    zpp::global_heap().deallocate(ptr);
+}
+
+void operator delete[](void * ptr) noexcept
+{
+    zpp::global_heap().deallocate(ptr);
+}
+
+void operator delete(void * ptr, std::size_t) noexcept
+{
+    zpp::global_heap().deallocate(ptr);
+}
+
+void operator delete[](void * ptr, std::size_t) noexcept
+{
+    zpp::global_heap().deallocate(ptr);
 }
