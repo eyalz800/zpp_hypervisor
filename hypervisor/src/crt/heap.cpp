@@ -1,3 +1,4 @@
+#include "zpp/crt/init.h"
 #include "zpp/heap.h"
 
 namespace zpp
@@ -22,12 +23,19 @@ constinit heap g_heap{};
 
 heap & global_heap()
 {
-    // Self initializing, so there is no bootstrap ordering to get wrong:
-    // the very first allocation works, wherever it comes from. init() is
-    // a single guarded check once the heap is up.
-    g_heap.init(g_heap_storage, sizeof(g_heap_storage));
+    // Deliberately just an accessor - no initialization check on the hot
+    // path. zpp::crt::init() prepares the heap once, before any global
+    // constructor can allocate.
     return g_heap;
 }
+
+namespace crt::detail
+{
+void initialize_heap()
+{
+    g_heap.init(g_heap_storage, sizeof(g_heap_storage));
+}
+} // namespace crt::detail
 
 void heap::init(std::byte * storage, std::size_t storage_size)
 {

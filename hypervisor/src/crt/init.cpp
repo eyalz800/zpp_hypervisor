@@ -132,6 +132,10 @@ void init()
     }
     g_constructed = true;
 
+    // The heap comes up before any constructor, since a constructor is
+    // allowed to allocate.
+    detail::initialize_heap();
+
     for (auto * entry = __preinit_array_start;
          entry != __preinit_array_end;
          ++entry) {
