@@ -374,6 +374,13 @@ extern "C" EFI_STATUS EFIAPI uefi_main(EFI_HANDLE image_handle,
     if (!verify_hypervisor_present(system_table)) {
         return EFI_LOAD_ERROR;
     }
+
+    // Stop here rather than continuing to the OS. Under test the boot
+    // medium holds only this loader, so there is nothing to chain to and
+    // that path could only fail - and a failure there would discard a
+    // result that has already been established, making the test look like
+    // a hypervisor problem when it is not.
+    return EFI_SUCCESS;
 #endif
 
     // Continue to the OS.
