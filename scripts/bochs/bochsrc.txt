@@ -27,4 +27,4 @@ info: action=ignore
 debug: action=ignore
 
 # Bochs halts at reset and waits for gdb to connect on this port.
-gdbstub: enabled=1, port=1234, text_base=0, data_base=0, bss_base=0
+gdbstub: enabled=1, port=1337, text_base=0, data_base=0, bss_base=0

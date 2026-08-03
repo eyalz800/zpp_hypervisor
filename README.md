@@ -211,7 +211,7 @@ x86-64 guest on an ARM Mac.
 
     cmake --build --preset debug
     ./scripts/bochs/setup.sh debug     # builds build/bochs/{OVMF.fd,esp.img}
-    ./scripts/bochs/run.sh             # halts, waiting for gdb on :1234
+    ./scripts/bochs/run.sh             # halts, waiting for gdb on :1337
     ./scripts/bochs/debug.sh debug     # in another terminal
 
 `setup.sh` concatenates QEMU's split edk2 halves into one 4 MB flash image,
