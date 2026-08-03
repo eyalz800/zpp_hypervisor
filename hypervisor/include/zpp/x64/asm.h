@@ -233,6 +233,20 @@ inline void __attribute__((naked)) enable_interrupts()
     )!!");
 }
 
+/**
+ * Returns RFLAGS, so the interrupt flag can be saved before disabling
+ * interrupts and put back as it was rather than blindly enabled.
+ */
+inline std::uint64_t __attribute__((naked)) flags()
+{
+    asm(R"!!(
+        .intel_syntax noprefix
+        pushfq
+        pop rax
+        ret
+    )!!");
+}
+
 inline void __attribute__((naked)) cpuid(std::uint32_t,
                                          std::uint32_t,
                                          std::uint32_t *)
