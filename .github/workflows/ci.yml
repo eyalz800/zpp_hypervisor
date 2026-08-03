@@ -1,0 +1,190 @@
+name: ci
+
+on:
+  push:
+    branches: [master, develop]
+  pull_request:
+  workflow_dispatch:
+
+env:
+  LLVM_VERSION: "20"
+
+jobs:
+  # Tier 1 + 2: cross build every target, then assert the ELF invariants that
+  # this codebase depends on and that nothing else enforces.
+  build:
+    name: build ${{ matrix.config }}
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        config: [debug, release]
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install LLVM ${{ env.LLVM_VERSION }}
+        run: |
+          wget -qO- https://apt.llvm.org/llvm.sh | sudo bash -s -- "$LLVM_VERSION"
+          sudo apt-get install -y --no-install-recommends \
+            "libc++-$LLVM_VERSION-dev" "libc++abi-$LLVM_VERSION-dev" \
+            "lld-$LLVM_VERSION" ninja-build
+          echo "/usr/lib/llvm-$LLVM_VERSION/bin" >> "$GITHUB_PATH"
+
+      - name: Configure
+        run: |
+          cmake --preset ${{ matrix.config }} \
+            -DLLVM_PREFIX="/usr/lib/llvm-$LLVM_VERSION"
+
+      - name: Build
+        run: cmake --build --preset ${{ matrix.config }}
+
+      - name: Verify ELF invariants
+        run: ./scripts/ci/check-invariants.sh ${{ matrix.config }}
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: binaries-${{ matrix.config }}
+          path: out/${{ matrix.config }}/x86_64/
+
+  # The 75 column limit in .clang-format is not enforced by the build.
+  format:
+    name: format
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install clang-format
+        run: |
+          wget -qO- https://apt.llvm.org/llvm.sh | sudo bash -s -- "$LLVM_VERSION"
+          echo "/usr/lib/llvm-$LLVM_VERSION/bin" >> "$GITHUB_PATH"
+      - name: Check formatting
+        run: |
+          git ls-files '*.h' '*.cpp' '*.c' \
+            | grep -v '^cmake/freestanding-libc/' \
+            | xargs clang-format --dry-run -Werror
+
+  # Compiles linux_loader/src/main.c, which the CMake build never touches -
+  # it is the only place the kernel module glue gets type checked.
+  linux-module:
+    name: linux .ko
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install LLVM ${{ env.LLVM_VERSION }}
+        run: |
+          wget -qO- https://apt.llvm.org/llvm.sh | sudo bash -s -- "$LLVM_VERSION"
+          sudo apt-get install -y --no-install-recommends \
+            "libc++-$LLVM_VERSION-dev" "libc++abi-$LLVM_VERSION-dev" \
+            "lld-$LLVM_VERSION" ninja-build podman
+          echo "/usr/lib/llvm-$LLVM_VERSION/bin" >> "$GITHUB_PATH"
+      - name: Build zpp_loader.o
+        run: |
+          cmake --preset debug -DLLVM_PREFIX="/usr/lib/llvm-$LLVM_VERSION"
+          cmake --build --preset debug --target linux_loader
+      - name: Build zpp_loader.ko
+        run: cmake --build --preset debug --target linux_loader_ko
+
+  # Tier 3: boot the UEFI loader under emulated VT-x and assert the hypervisor
+  # reaches root mode. Bochs emulates VMX in software, so this needs no
+  # hardware virtualization and runs on a stock runner.
+  bochs-smoke:
+    name: bochs vmx smoke test
+    runs-on: ubuntu-latest
+    needs: build
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Cache Bochs
+        id: bochs-cache
+        uses: actions/cache@v4
+        with:
+          path: ~/.local/bochs-gdb
+          key: bochs-3.0-gdbstub-vmx2-${{ runner.os }}
+
+      - name: Build Bochs with the gdb stub and VMX
+        if: steps.bochs-cache.outputs.cache-hit != 'true'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends build-essential
+          curl -sLO https://downloads.sourceforge.net/project/bochs/bochs/3.0/bochs-3.0.tar.gz
+          tar xzf bochs-3.0.tar.gz && cd bochs-3.0
+          # Neither --enable-all-optimizations (handlers-chaining) nor
+          # --enable-smp may be combined with the gdb stub.
+          ./configure --prefix="$HOME/.local/bochs-gdb" \
+            --enable-gdb-stub --enable-vmx=2 --enable-x86-64 \
+            --enable-cpu-level=6 --enable-avx --enable-evex --enable-pci \
+            --enable-a20-pin --enable-fpu --enable-long-phy-address \
+            --enable-large-ramfile --enable-logging --enable-show-ips \
+            --with-nogui
+          make -j"$(nproc)" && make install
+
+      - name: Install boot medium tooling
+        run: sudo apt-get install -y --no-install-recommends mtools ovmf
+
+      - uses: actions/download-artifact@v4
+        with:
+          name: binaries-debug
+          path: out/debug/x86_64/
+
+      - name: Build boot medium
+        run: |
+          # Debian ships a combined OVMF.fd, so no need to join split halves.
+          QEMU_SHARE=/usr/share/OVMF ./scripts/bochs/setup.sh debug
+
+      - name: Boot under emulated VT-x
+        run: ./scripts/ci/bochs-smoke.sh
+
+  # The highest value test - Windows actually booting while the hypervisor
+  # holds root mode - cannot run on a GitHub hosted runner. It needs a real
+  # VT-x host, so this job only runs where a self-hosted Windows runner with
+  # nested virtualization has been registered with the 'vtx' label.
+  #
+  # Hyper-V must be OFF. If it is running, Windows is already the root
+  # partition of another hypervisor, VMX belongs to Hyper-V, and vmxon here
+  # fails - this project does not support being nested yet. Note Windows 11
+  # enables VBS/HVCI (which turns Hyper-V on) by default on many installs.
+  windows-root-mode:
+    name: windows boots in root mode
+    runs-on: [self-hosted, windows, vtx]
+    if: ${{ github.event_name == 'workflow_dispatch' }}
+    needs: build
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/download-artifact@v4
+        with:
+          name: binaries-debug
+          path: out/debug/x86_64/
+
+      - name: Assert Hyper-V and VBS are disabled
+        shell: pwsh
+        run: |
+          $launch = (bcdedit /enum '{current}' | Select-String 'hypervisorlaunchtype')
+          if ($launch -match 'Auto|On') {
+            Write-Error "Hyper-V is enabled. Disable it, this project cannot run nested yet:`n" +
+              "  bcdedit /set hypervisorlaunchtype off`n" +
+              "  Disable-WindowsOptionalFeature -Online -FeatureName Microsoft-Hyper-V-All`n" +
+              "  Disable-WindowsOptionalFeature -Online -FeatureName VirtualMachinePlatform`n" +
+              "  then clear Memory Integrity / Credential Guard and reboot"
+          }
+          $dg = Get-CimInstance -ClassName Win32_DeviceGuard `
+              -Namespace root\Microsoft\Windows\DeviceGuard -ErrorAction SilentlyContinue
+          if ($dg -and $dg.SecurityServicesRunning -contains 1) {
+            Write-Error "Credential Guard is running, which implies Hyper-V. Disable VBS and reboot."
+          }
+          if (-not (Get-CimInstance Win32_Processor).VirtualizationFirmwareEnabled) {
+            Write-Error "VT-x is not available to this machine."
+          }
+          Write-Host "ok: VT-x available, Hyper-V and VBS are off"
+
+      - name: Load the driver and confirm the OS survives root mode
+        shell: pwsh
+        run: |
+          # The driver is unsigned, so the machine must already be in test
+          # signing mode (bcdedit /set testsigning on) and rebooted.
+          sc.exe create zpp_loader type= kernel binPath= "$pwd\out\debug\x86_64\zpp_loader.sys"
+          sc.exe start zpp_loader
+          # Surviving this far means the guest kept running after vmxon and
+          # vmlaunch, which is the property under test.
+          Start-Sleep -Seconds 5
+          Get-Service zpp_loader
+          Write-Host "ok: windows still running with the hypervisor in root mode"

@@ -19,11 +19,16 @@ qemu_share="${QEMU_SHARE:-/opt/homebrew/share/qemu}"
 
 mkdir -p "$work"
 
-# Combined firmware. The vars half must come first: vars (0x84000) plus
-# code (0x37C000) is exactly 0x400000, which is what OVMF expects to be
-# mapped as a single flash device.
-cat "$qemu_share/edk2-i386-vars.fd" "$qemu_share/edk2-x86_64-code.fd" \
-    > "$work/OVMF.fd"
+# Firmware. Debian's ovmf package ships a single combined OVMF.fd; QEMU on
+# macOS ships it split into code and vars halves, and Bochs loads exactly one
+# ROM image, so those have to be joined. The vars half comes first: vars
+# (0x84000) plus code (0x37C000) is exactly the 0x400000 OVMF expects.
+if [ -f "$qemu_share/OVMF.fd" ]; then
+    cp "$qemu_share/OVMF.fd" "$work/OVMF.fd"
+else
+    cat "$qemu_share/edk2-i386-vars.fd" "$qemu_share/edk2-x86_64-code.fd" \
+        > "$work/OVMF.fd"
+fi
 
 size=$(wc -c < "$work/OVMF.fd" | tr -d ' ')
 [ "$size" = "4194304" ] || {
