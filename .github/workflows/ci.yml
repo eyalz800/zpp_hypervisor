@@ -8,6 +8,7 @@ on:
 
 env:
   LLVM_VERSION: "20"
+  CLANG_FORMAT_VERSION: "20.1.7"
 
 jobs:
   # Tier 1 + 2: cross build every target, then assert the ELF invariants that
@@ -51,10 +52,12 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+      # Pinned through PyPI rather than taken from an LLVM install: clang-format
+      # majors disagree on formatting, so CI and developers must share an exact
+      # version or this job flaps. Keep in step with CLANG_FORMAT_VERSION below
+      # and the value documented in CLAUDE.md.
       - name: Install clang-format
-        run: |
-          wget -qO- https://apt.llvm.org/llvm.sh | sudo bash -s -- "$LLVM_VERSION"
-          echo "/usr/lib/llvm-$LLVM_VERSION/bin" >> "$GITHUB_PATH"
+        run: pipx install "clang-format==$CLANG_FORMAT_VERSION"
       - name: Check formatting
         run: |
           git ls-files '*.h' '*.cpp' '*.c' \

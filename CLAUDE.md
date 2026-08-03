@@ -161,8 +161,11 @@ Both paths are handled. Verified to survive `--gc-sections --strip-all`.
 - Headers use `#pragma once`
 - Project namespace: `zpp`
 - `constexpr` everything that can be — all getters, constructors, destructors, operators
-- Formatted with `.clang-format` (75 column limit). Not enforced by the build — run
-  `clang-format -i` on what you touch.
+- Formatted with `.clang-format` (75 column limit). Not enforced by the build, but CI checks
+  it. Use **clang-format 20.1.7 exactly** — majors disagree on formatting, so a different
+  version will fight CI. Install it pinned rather than using whatever LLVM ships:
+  `pipx install clang-format==20.1.7`. Keep the version in step with
+  `CLANG_FORMAT_VERSION` in `.github/workflows/ci.yml`.
 - **Buffers are `std::span`, never `(pointer, size)` pairs.** Any API taking a contiguous
   range takes `std::span<T>` / `std::span<const std::byte>`. Applies to new APIs too.
   The one deliberate exception is address-range APIs like `page_table::map_from` and the
