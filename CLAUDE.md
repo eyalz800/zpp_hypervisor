@@ -56,9 +56,11 @@ The hypervisor has no OS, no libc, no C++ runtime library. It uses:
   `zpp::map`, `zpp::string`, …) route all container allocation through the global heap
 
 Header layering, deliberately one-directional:
-`heap.h` (the `heap` type only) → `crt.h` (declares `zpp::global_heap()`, since `crt.cpp`
-owns the instance and its storage) → `allocator.h` → `containers.h`. Do not move
-`global_heap()` back into `heap.h`: the declaration belongs with the definition's owner.
+`heap.h` (the `heap` type only) → `crt.h` (declares `zpp::crt::heap()`, since `crt.cpp` owns
+the instance and its storage) → `allocator.h` → `containers.h`. Do not move `crt::heap()`
+back into `heap.h`: the declaration belongs with the definition's owner. Note that inside
+`namespace zpp::crt` the name `heap` resolves to the accessor, not the type, so the type is
+spelled `zpp::heap` there.
 
 ### Heap lifecycle
 
@@ -68,7 +70,7 @@ be usable before any hypervisor object exists. The size stays out of `heap.h` �
 property of the global heap, not of the `heap` type.
 
 `zpp::crt::init::main()` initializes the heap **before running any constructor**, so
-`zpp::global_heap()` is a plain accessor with **no initialization check on the allocation
+`zpp::crt::heap()` is a plain accessor with **no initialization check on the allocation
 path**. Do not reintroduce one. Consequences:
 
 - Allocating before `crt::init::main()` traps — the heap has an empty free list, `allocate`
@@ -102,7 +104,7 @@ alone blows the compiler's constexpr step budget, so `constinit` is not an optio
 
 Consequences worth remembering:
 - **A container as a global costs you an init array entry.** `zpp::allocator`'s default
-  constructor calls `global_heap()`, so it is not `constexpr`. That is legal now, just not
+  constructor calls `crt::heap()`, so it is not `constexpr`. That is legal now, just not
   free — prefer locals or members.
 - Anything allocating from a constructor is fine: `crt::init::main()` brings the heap up
   before walking the arrays.

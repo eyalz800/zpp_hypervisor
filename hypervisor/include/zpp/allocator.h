@@ -18,7 +18,7 @@ class allocator
 public:
     using value_type = T;
 
-    allocator() noexcept : m_heap(&global_heap())
+    allocator() noexcept : m_heap(&crt::heap())
     {
     }
 

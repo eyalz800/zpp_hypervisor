@@ -1,23 +1,22 @@
 #pragma once
 #include "zpp/heap.h"
 
-namespace zpp
+namespace zpp::crt
 {
 /**
  * The heap that backs operator new and zpp::allocator.
  *
- * Declared here rather than in heap.h because the CRT owns the instance
- * and its backing storage - heap.h only describes the type. This is a
- * plain accessor: zpp::crt::init::main() brings the heap up before any
- * global constructor can allocate, so there is no initialization check on
- * the allocation path. Allocating before that point traps.
+ * Belongs to the CRT rather than to heap.h because the CRT owns the
+ * instance and its backing storage - heap.h only describes the type. This
+ * is a plain accessor: zpp::crt::init::main() brings the heap up before
+ * any global constructor can allocate, so there is no initialization check
+ * on the allocation path. Allocating before that point traps.
+ *
+ * The return type is written qualified because within this namespace the
+ * name 'heap' resolves to this function, not to the type.
  */
-heap & global_heap();
+zpp::heap & heap();
 
-} // namespace zpp
-
-namespace zpp::crt
-{
 /**
  * Startup and cleanup of the C runtime.
  */

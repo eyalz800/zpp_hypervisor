@@ -220,7 +220,7 @@ namespace
 void * allocate_or_trap(std::size_t size)
 {
     // A zero sized allocation must still yield a unique pointer.
-    auto * pointer = zpp::global_heap().allocate(size ? size : 1);
+    auto * pointer = zpp::crt::heap().allocate(size ? size : 1);
     if (!pointer) {
         __builtin_trap();
     }
@@ -260,11 +260,11 @@ void deallocate_aligned(void * pointer, std::size_t alignment) noexcept
     }
 
     if (alignment <= zpp::heap::default_alignment) {
-        zpp::global_heap().deallocate(pointer);
+        zpp::crt::heap().deallocate(pointer);
         return;
     }
 
-    zpp::global_heap().deallocate(static_cast<void **>(pointer)[-1]);
+    zpp::crt::heap().deallocate(static_cast<void **>(pointer)[-1]);
 }
 } // namespace
 
@@ -280,12 +280,12 @@ void * operator new[](std::size_t size)
 
 void * operator new(std::size_t size, const std::nothrow_t &) noexcept
 {
-    return zpp::global_heap().allocate(size ? size : 1);
+    return zpp::crt::heap().allocate(size ? size : 1);
 }
 
 void * operator new[](std::size_t size, const std::nothrow_t &) noexcept
 {
-    return zpp::global_heap().allocate(size ? size : 1);
+    return zpp::crt::heap().allocate(size ? size : 1);
 }
 
 void * operator new(std::size_t size, std::align_val_t alignment)
@@ -318,32 +318,32 @@ void * operator new[](std::size_t size,
 
 void operator delete(void * ptr) noexcept
 {
-    zpp::global_heap().deallocate(ptr);
+    zpp::crt::heap().deallocate(ptr);
 }
 
 void operator delete[](void * ptr) noexcept
 {
-    zpp::global_heap().deallocate(ptr);
+    zpp::crt::heap().deallocate(ptr);
 }
 
 void operator delete(void * ptr, std::size_t) noexcept
 {
-    zpp::global_heap().deallocate(ptr);
+    zpp::crt::heap().deallocate(ptr);
 }
 
 void operator delete[](void * ptr, std::size_t) noexcept
 {
-    zpp::global_heap().deallocate(ptr);
+    zpp::crt::heap().deallocate(ptr);
 }
 
 void operator delete(void * ptr, const std::nothrow_t &) noexcept
 {
-    zpp::global_heap().deallocate(ptr);
+    zpp::crt::heap().deallocate(ptr);
 }
 
 void operator delete[](void * ptr, const std::nothrow_t &) noexcept
 {
-    zpp::global_heap().deallocate(ptr);
+    zpp::crt::heap().deallocate(ptr);
 }
 
 void operator delete(void * ptr, std::align_val_t alignment) noexcept
@@ -384,16 +384,16 @@ void operator delete[](void * ptr,
     deallocate_aligned(ptr, static_cast<std::size_t>(alignment));
 }
 
-namespace zpp
+namespace zpp::crt
 {
-heap & global_heap()
+zpp::heap & heap()
 {
     // Deliberately just an accessor - no initialization check on the
     // allocation path. zpp::crt::init::main() brings the heap up once,
     // before any global constructor can allocate.
     return g_heap;
 }
-} // namespace zpp
+} // namespace zpp::crt
 
 namespace zpp::crt::init
 {
