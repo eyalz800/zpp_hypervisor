@@ -193,3 +193,51 @@ jobs:
           Start-Sleep -Seconds 5
           Get-Service zpp_loader
           Write-Host "ok: windows still running with the hypervisor in root mode"
+
+  # Measures what virtualization the hosted runners actually expose, to decide
+  # whether a nested guest can be given VMX. Booting a prepared Windows image
+  # under QEMU/KVM would sidestep driver signature enforcement - the image can
+  # have test signing enabled already, so no reboot is needed inside the job -
+  # but only if VMX reaches the guest, which needs it present on the runner
+  # first and then passed through by KVM. Cheap to measure, so measure it.
+  probe-virtualization:
+    name: probe virtualization (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+    steps:
+      - name: Linux capability report
+        if: runner.os == 'Linux'
+        run: |
+          echo "== CPU virtualization flags (want vmx; svm is AMD and unusable here)"
+          grep -om1 'vmx' /proc/cpuinfo || echo "  no vmx"
+          grep -om1 'svm' /proc/cpuinfo || true
+          echo "== is the runner itself a guest"
+          grep -om1 hypervisor /proc/cpuinfo || echo "  bare metal"
+          systemd-detect-virt || true
+          echo "== /dev/kvm"
+          ls -l /dev/kvm 2>&1 || echo "  absent"
+          echo "== nested setting on the kvm intel module"
+          cat /sys/module/kvm_intel/parameters/nested 2>&1 || echo "  kvm_intel not loaded"
+          echo "== can qemu actually give a guest vmx"
+          sudo apt-get update -qq && sudo apt-get install -qq -y qemu-system-x86 >/dev/null
+          qemu-system-x86_64 -accel kvm -cpu host,+vmx -nographic -display none \
+              -S -monitor none -serial none -m 256 &
+          qemu_pid=$!
+          sleep 5
+          kill $qemu_pid 2>/dev/null || true
+          echo "(a TCG warning above means vmx was dropped and this route is dead)"
+      - name: Windows capability report
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $cpu = Get-CimInstance Win32_Processor
+          "VirtualizationFirmwareEnabled : $($cpu.VirtualizationFirmwareEnabled)"
+          "VMMonitorModeExtensions       : $($cpu.VMMonitorModeExtensions)"
+          "HypervisorPresent             : $((Get-CimInstance Win32_ComputerSystem).HypervisorPresent)"
+          $dg = Get-CimInstance Win32_DeviceGuard `
+              -Namespace root\Microsoft\Windows\DeviceGuard -ErrorAction SilentlyContinue
+          "DeviceGuard services running  : $($dg.SecurityServicesRunning -join ',')"
+          "Hyper-V feature state         : $((Get-WindowsOptionalFeature -Online -FeatureName Microsoft-Hyper-V-All -ErrorAction SilentlyContinue).State)"
