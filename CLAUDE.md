@@ -67,15 +67,15 @@ deliberately breaks a bootstrap cycle: static constructors may allocate, so the 
 be usable before any hypervisor object exists. The size stays out of `heap.h` — it is a
 property of the global heap, not of the `heap` type.
 
-`zpp::crt::init::run()` initializes the heap **before running any constructor**, so
+`zpp::crt::init::main()` initializes the heap **before running any constructor**, so
 `zpp::global_heap()` is a plain accessor with **no initialization check on the allocation
 path**. Do not reintroduce one. Consequences:
 
-- Allocating before `crt::init::run()` traps — the heap has an empty free list, `allocate`
+- Allocating before `crt::init::main()` traps — the heap has an empty free list, `allocate`
   returns `nullptr`, and `operator new` calls `__builtin_trap()`. Loud, not silent.
 - Initialization happens exactly once at a defined point, so there is no concurrent-init
   race on the allocation path.
-- The 20 MB arena is always retained in release, since `crt::init::run()` references it
+- The 20 MB arena is always retained in release, since `crt::init::main()` references it
   unconditionally. It is a fixed arena, so this is intended.
 
 `operator new` also traps on allocation failure, since `-fno-exceptions` means `bad_alloc`
@@ -92,7 +92,7 @@ array. Two valid shapes:
 
 ```cpp
 constinit foo g_foo{};   // preferred: baked into the binary, zero startup cost
-bar g_bar;               // fine: compiler emits an .init_array entry, crt::init::run() runs it
+bar g_bar;               // fine: compiler emits an .init_array entry, crt::init::main() runs it
 ```
 
 The raw-storage-plus-placement-new dance that `state.cpp` used to do is **gone** — deleting
@@ -104,7 +104,7 @@ Consequences worth remembering:
 - **A container as a global costs you an init array entry.** `zpp::allocator`'s default
   constructor calls `global_heap()`, so it is not `constexpr`. That is legal now, just not
   free — prefer locals or members.
-- Anything allocating from a constructor is fine: `crt::init::run()` brings the heap up
+- Anything allocating from a constructor is fine: `crt::init::main()` brings the heap up
   before walking the arrays.
 - Verify on the built ELF rather than by inspection. `llvm-nm -u` must report **no undefined
   symbols**. `.init_array` is expected to be non-empty now, and every entry must be
@@ -116,10 +116,10 @@ Consequences worth remembering:
 
 `crt/crt.cpp` provides:
 
-- `zpp::crt::init::run()` brings up the global heap, then walks `.preinit_array` and
+- `zpp::crt::init::main()` brings up the global heap, then walks `.preinit_array` and
   `.init_array`. Called from `zpp_hypervisor_main` before anything touches a global, so a
   constructor is free to allocate.
-- `zpp::crt::init::teardown()` runs `__cxa_atexit`-registered destructors in reverse registration
+- `zpp::crt::init::cleanup()` runs `__cxa_atexit`-registered destructors in reverse registration
   order, then `.fini_array` in reverse. Called only when the hypervisor fails to go
   resident — on success its globals must outlive every guest, so destructors deliberately
   never run.

@@ -159,7 +159,7 @@ int __cxa_atexit(void (*function)(void *), void * argument, void *)
 
 void __cxa_finalize(void *)
 {
-    // Nothing to do - destructors are run by zpp::crt::init::teardown so
+    // Nothing to do - destructors are run by zpp::crt::init::cleanup so
     // that their ordering relative to the fini array stays explicit.
 }
 
@@ -389,7 +389,7 @@ namespace zpp
 heap & global_heap()
 {
     // Deliberately just an accessor - no initialization check on the
-    // allocation path. zpp::crt::init::run() brings the heap up once,
+    // allocation path. zpp::crt::init::main() brings the heap up once,
     // before any global constructor can allocate.
     return g_heap;
 }
@@ -397,7 +397,7 @@ heap & global_heap()
 
 namespace zpp::crt::init
 {
-void run()
+void main()
 {
     if (g_initialized) {
         return;
@@ -420,7 +420,7 @@ void run()
     }
 }
 
-void teardown()
+void cleanup()
 {
     if (g_torn_down || !g_initialized) {
         return;

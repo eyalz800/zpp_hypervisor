@@ -55,7 +55,7 @@ public:
      * class owns its single instance. It cannot be constant initialized -
      * constant evaluating the EPT tables alone exceeds the compiler's
      * constexpr step budget - so it is constructed from the init array,
-     * which zpp::crt::init::run() walks before anything touches it.
+     * which zpp::crt::init::main() walks before anything touches it.
      */
     static hypervisor instance;
 
