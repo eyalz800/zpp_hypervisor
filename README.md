@@ -187,12 +187,22 @@ you select Intel machine types with nested virtualization enabled.
 Bochs needs none of that, since it emulates VMX in software and so runs
 anywhere, including on those AMD runners - it is simply slow.
 
-For the Windows driver on real hardware, the machine has to persist: the
-unsigned `.sys` needs `bcdedit /set testsigning on` and a reboot, which a
-throwaway CI VM cannot survive. Turn off Hyper-V and VBS, enable test signing,
-reboot, and register the machine as a self-hosted runner labelled `vtx`. The
-`windows-root-mode` job then runs there and refuses to proceed unless Hyper-V
-and VBS are actually off.
+Testing the Windows driver on real hardware needs a persistent machine, since
+the unsigned `.sys` requires `bcdedit /set testsigning on` and a reboot. Hyper-V
+and VBS must be off as well: with Hyper-V running, Windows is already another
+hypervisor's root partition, VMX belongs to Hyper-V, and `vmxon` cannot succeed
+because this project does not support being nested. Note Windows 11 enables
+VBS, and therefore Hyper-V, by default on many installs.
+
+    bcdedit /set hypervisorlaunchtype off
+    Disable-WindowsOptionalFeature -Online -FeatureName Microsoft-Hyper-V-All
+    Disable-WindowsOptionalFeature -Online -FeatureName VirtualMachinePlatform
+    bcdedit /set testsigning on
+    # then clear Memory Integrity / Credential Guard and reboot
+    (Get-CimInstance Win32_Processor).VirtualizationFirmwareEnabled  # must be True
+
+There is no CI job for this - it would need a self-hosted runner on an x86
+machine with VT-x.
 
 ### Building Bochs with the gdb stub
 
