@@ -364,6 +364,29 @@ tmux attach -t zpp-debug
 Bound every wait on the emulator to something short (30–60s) and then report state. A long
 blocking wait is indistinguishable from a hang.
 
+### Never single-step the guest through QEMU's gdbstub
+
+`stepi` on a guest thread under QEMU/KVM does not just fail, it **destroys what
+you were measuring**. KVM implements `KVM_GUESTDBG_SINGLESTEP` by ORing
+`X86_EFLAGS_TF` into the guest RFLAGS; with pending-debug-exceptions `BS` still
+clear that combination fails KVM's nested guest-state check, so the next
+`vmresume` takes an entry-failure exit. Measured: `vm_entry_failure` recorded
+`reason=0x80000021` with `guest_rflags=0x102`, TF set where nothing in this tree
+writes it, and the CPU then sat in `on_vm_entry_failure`'s halt loop. The stub
+also never returns a stop reply for the stepped thread.
+
+Use the QEMU **monitor** instead — `info registers -a`, `xp` — which reads state
+without perturbing it. Or arm the Monitor Trap Flag from inside the VMM, which
+forces an exit after one retired instruction and answers "is it executing?"
+without a debugger at all.
+
+### The bare-metal target has no ftrace
+
+The development target runs a TinyCore kernel with **no tracefs, no
+`/sys/kernel/debug/kvm`, and no `/proc/<tid>/stack`**. KVM tracepoints and the
+per-vCPU debugfs stats are simply unavailable there, so any plan that depends on
+them needs a different kernel. Check before designing around them.
+
 ### Use hardware breakpoints only
 
 **Always `hbreak`, never `break`.** This is not a preference, it is a correctness
