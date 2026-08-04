@@ -746,25 +746,30 @@ static bool acpi_timer_advancing(EFI_SYSTEM_TABLE * system_table)
 
 static std::size_t number_of_cpus()
 {
-    // Without a working timer, MP services would hang rather than fail, so
-    // report the boot processor alone and let the hypervisor come up on
-    // it.
-    if (!g_timed_waits_usable) {
-        return 1;
-    }
-
-    trace::line("ZPP_TRACE number_of_cpus enter");
-    std::size_t cpu_count{};
-    std::size_t enabled_cpu_count{};
-
-    // Get the number of processors.
-    auto status = g_mp_services->GetNumberOfProcessors(
-        g_mp_services, &cpu_count, &enabled_cpu_count);
-    if (EFI_ERROR(status)) {
-        return 0;
-    }
-
-    return cpu_count;
+    // The boot processor alone, deliberately, and this is the whole of the
+    // decision that used to be made by asking MP services.
+    //
+    // An application processor is not idle here - it is parked by the
+    // firmware, waiting to be woken by the INIT-SIPI-SIPI its operating
+    // system will eventually send. Borrowing it to run vmxon leaves it in
+    // VMX root mode when that sequence arrives, and that is the one state
+    // in which a start-up IPI is architecturally allowed to go missing:
+    // SDM 28.2 has a start-up IPI discarded rather than queued unless the
+    // target is already in the wait-for-SIPI activity state, and a layer
+    // virtualizing this machine will hold the IPI back for as long as this
+    // VMM is in root mode, by design.
+    //
+    // So the loader does not touch them. Each one is left exactly as the
+    // firmware parked it, receives its operating system's INIT-SIPI-SIPI
+    // through the ordinary hardware path that has always worked, and is
+    // brought under the hypervisor by the hypervisor itself - which sees
+    // that sequence, because the processor sending it is a guest.
+    //
+    // This also removes the loader's dependence on MP services being
+    // usable at all, which was never a comfortable thing to require: the
+    // firmware's own AP wakeup blocked indefinitely once a processor had
+    // been used and given back.
+    return 1;
 }
 
 static int call_on_cpu(std::size_t cpuid,
@@ -814,11 +819,12 @@ static int call_on_cpu(std::size_t cpuid,
 
     // Startup the relevant CPU, and wait for it under our own deadline.
     //
-    // The non-blocking form, with the deadline enforced here rather than by
-    // the firmware. Passing a timeout to the blocking form was tried first
-    // and does not work: this firmware waits indefinitely regardless, so a
-    // processor that never runs the function hung the loader forever, which
-    // reports nothing and leaves the firmware on screen looking wedged.
+    // The non-blocking form, with the deadline enforced here rather than
+    // by the firmware. Passing a timeout to the blocking form was tried
+    // first and does not work: this firmware waits indefinitely
+    // regardless, so a processor that never runs the function hung the
+    // loader forever, which reports nothing and leaves the firmware on
+    // screen looking wedged.
     //
     // Polling CheckEvent with a Stall between tries is the way to keep the
     // deadline ours. The event is signalled by MP services when the
@@ -852,9 +858,9 @@ static int call_on_cpu(std::size_t cpuid,
         g_boot_services->Stall(start_up_poll_microseconds);
     }
     if (EFI_ERROR(status)) {
-        // Left as the failure the caller reports. result keeps whatever the
-        // function managed to store, which for a processor that never ran
-        // is the -1 it started as.
+        // Left as the failure the caller reports. result keeps whatever
+        // the function managed to store, which for a processor that never
+        // ran is the -1 it started as.
         goto close_event;
     }
 
