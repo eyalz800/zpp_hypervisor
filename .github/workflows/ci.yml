@@ -94,9 +94,19 @@ jobs:
   # hosted runners are AMD and expose no vmx, so this is the only way to
   # exercise vmxon, vmlaunch and the exit handler in CI.
   bochs-vmx:
-    name: bochs vmx (emulated VT-x)
+    name: bochs vmx ${{ matrix.config }} (emulated VT-x)
     runs-on: ubuntu-latest
     needs: build
+    # Both configurations, because this is the only job that runs the code
+    # rather than just building it, and the two differ in ways that can break
+    # exactly this path: the recovery point the host IDT unwinds to is a
+    # capture_context/restore_context pair the optimizer knows nothing about,
+    # and the entry stub table depends on the assembler laying naked functions
+    # out as written. A release-only failure here is entirely possible.
+    strategy:
+      fail-fast: false
+      matrix:
+        config: [debug, release]
     steps:
       - uses: actions/checkout@v4
 
@@ -142,11 +152,11 @@ jobs:
       # compiled in only when asked for and the normal build leaves it out.
       - name: Build with the hypervisor self check enabled
         run: |
-          cmake --preset debug -DZPP_CI_VERIFY_HYPERVISOR=ON
-          cmake --build --preset debug
+          cmake --preset ${{ matrix.config }} -DZPP_CI_VERIFY_HYPERVISOR=ON
+          cmake --build --preset ${{ matrix.config }}
 
       - name: Build boot medium
-        run: ./scripts/bochs/setup.sh debug
+        run: ./scripts/bochs/setup.sh ${{ matrix.config }}
 
       - name: Assert the hypervisor reaches root mode
         run: ./scripts/ci/bochs-smoke.sh
