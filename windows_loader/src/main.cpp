@@ -58,13 +58,11 @@ invoke_physical_to_virtual(std::uintptr_t)
     )!!");
 }
 
-static int __attribute__((naked))
-invoke_entry(int (*)(std::size_t,
-                     std::uintptr_t (*)(std::uintptr_t),
-                     void *),
-             std::size_t,
-             std::uintptr_t (*)(std::uintptr_t),
-             void *)
+static int __attribute__((naked)) invoke_entry(
+    int (*)(std::size_t, std::uintptr_t (*)(std::uintptr_t), void *),
+    std::size_t,
+    std::uintptr_t (*)(std::uintptr_t),
+    void *)
 {
     asm(R"!!(
         .intel_syntax noprefix

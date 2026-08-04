@@ -209,8 +209,7 @@ struct verify
     static constexpr bool signature_matches(const std::uint32_t * words)
     {
         return (signature_ebx == words[1]) &&
-               (signature_ecx == words[2]) &&
-               (signature_edx == words[3]);
+               (signature_ecx == words[2]) && (signature_edx == words[3]);
     }
 
     /**
@@ -317,8 +316,8 @@ struct verify
                                        std::uint32_t command)
     {
         asm volatile("mfence; lfence" : : : "memory");
-        auto destination_field =
-            static_cast<std::uint64_t>(destination) << 32;
+        auto destination_field = static_cast<std::uint64_t>(destination)
+                                 << 32;
         write_msr(ia32_x2apic_icr, destination_field | command);
     }
 
@@ -434,19 +433,18 @@ struct verify
     static_assert(sizeof(trampoline_code) <= slot_area_offset);
     static constexpr std::size_t marker_immediate_offset =
         sizeof(trampoline_code) - 8;
-    static_assert(
-        completion_marker ==
-        (static_cast<std::uint32_t>(
-             trampoline_code[marker_immediate_offset]) |
-         (static_cast<std::uint32_t>(
-              trampoline_code[marker_immediate_offset + 1])
-          << 8) |
-         (static_cast<std::uint32_t>(
-              trampoline_code[marker_immediate_offset + 2])
-          << 16) |
-         (static_cast<std::uint32_t>(
-              trampoline_code[marker_immediate_offset + 3])
-          << 24)));
+    static_assert(completion_marker ==
+                  (static_cast<std::uint32_t>(
+                       trampoline_code[marker_immediate_offset]) |
+                   (static_cast<std::uint32_t>(
+                        trampoline_code[marker_immediate_offset + 1])
+                    << 8) |
+                   (static_cast<std::uint32_t>(
+                        trampoline_code[marker_immediate_offset + 2])
+                    << 16) |
+                   (static_cast<std::uint32_t>(
+                        trampoline_code[marker_immediate_offset + 3])
+                    << 24)));
     /**
      * @}
      */
@@ -462,7 +460,7 @@ struct verify
                                    std::size_t offset)
     {
         return *reinterpret_cast<volatile std::uint32_t *>(page.data() +
-                                                          offset);
+                                                           offset);
     }
 
     /**
@@ -580,9 +578,8 @@ struct verify
         auto entries =
             (xsdt_length - xsdt_entry_offset) / sizeof(std::uint64_t);
         for (std::size_t i{}; i < entries; ++i) {
-            auto table_address =
-                read_quad(xsdt + xsdt_entry_offset +
-                          (i * sizeof(std::uint64_t)));
+            auto table_address = read_quad(xsdt + xsdt_entry_offset +
+                                           (i * sizeof(std::uint64_t)));
             if (!table_address) {
                 continue;
             }
@@ -660,9 +657,8 @@ struct verify
      * ID", and PROCESSOR_ENABLED_BIT in StatusFlag says the processor is
      * usable on this boot.
      */
-    static discovery
-    discover_processors_from_mp_services(EFI_SYSTEM_TABLE * system_table,
-                                         std::span<std::uint32_t> apic_ids)
+    static discovery discover_processors_from_mp_services(
+        EFI_SYSTEM_TABLE * system_table, std::span<std::uint32_t> apic_ids)
     {
         discovery result{};
 
@@ -820,8 +816,8 @@ struct verify
         // In x2APIC mode the local APIC id is a 32-bit MSR rather than the
         // eight bits leaf 1 reports, and it is what the other processors
         // are matched against, so take it again from there.
-        boot_apic_id = static_cast<std::uint32_t>(
-            read_msr(ia32_x2apic_apic_id));
+        boot_apic_id =
+            static_cast<std::uint32_t>(read_msr(ia32_x2apic_apic_id));
 
         // Step three: a page for the code the started processors run. It
         // has to be below 1 MiB and page aligned, because a start-up IPI
@@ -852,8 +848,7 @@ struct verify
             page[i] = static_cast<std::byte>(trampoline_code[i]);
         }
 
-        auto vector = static_cast<std::uint32_t>(trampoline_address >>
-                                                 12);
+        auto vector = static_cast<std::uint32_t>(trampoline_address >> 12);
         {
             char line[line_capacity]{};
             auto end = trace::append_text(line, "zpp: trampoline at ");

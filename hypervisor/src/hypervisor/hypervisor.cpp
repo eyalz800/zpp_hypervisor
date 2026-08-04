@@ -1048,9 +1048,9 @@ void hypervisor::initialize_start_up_memory(std::uint64_t memory)
 {
     // How much of the blob there is to copy. Its own page has to hold it,
     // because the pages after it are the temporary page table.
-    auto blob_size = static_cast<std::size_t>(
-        arch::x86_64::zpp_ap_start_up_end -
-        arch::x86_64::zpp_ap_start_up_begin);
+    auto blob_size =
+        static_cast<std::size_t>(arch::x86_64::zpp_ap_start_up_end -
+                                 arch::x86_64::zpp_ap_start_up_begin);
     if (blob_size > page_size) {
         log("the start-up trampoline is {} bytes, too big for its page",
             blob_size);
@@ -1137,8 +1137,8 @@ void hypervisor::initialize_start_up_memory(std::uint64_t memory)
     area.host_gdtr.base = reinterpret_cast<std::uint64_t>(this->host_gdt);
     area.host_gdtr.limit = sizeof(this->host_gdt) - 1;
     area.host_idtr.base = this->host_idtr.base;
-    area.host_idtr.limit = static_cast<std::uint16_t>(
-        this->host_idtr.limit);
+    area.host_idtr.limit =
+        static_cast<std::uint16_t>(this->host_idtr.limit);
     area.host_cs = this->host_cs;
 
     this->start_up_memory = memory;
@@ -1195,12 +1195,12 @@ bool hypervisor::start_application_processor(std::size_t slot,
     // Measured: with three processors to start, the firmware bootlooped
     // and printed no per-processor result at all, because the check starts
     // every target before polling any of them.
-    std::memcpy(area.assembly_owned,
-                arch::x86_64::zpp_ap_start_up_begin +
-                    arch::x86_64::ap_start_up_area_offset +
-                    offsetof(arch::x86_64::ap_start_up_area,
-                             assembly_owned),
-                sizeof(area.assembly_owned));
+    std::memcpy(
+        area.assembly_owned,
+        arch::x86_64::zpp_ap_start_up_begin +
+            arch::x86_64::ap_start_up_area_offset +
+            offsetof(arch::x86_64::ap_start_up_area, assembly_owned),
+        sizeof(area.assembly_owned));
 
     area.argument = slot;
     area.stack_top =
@@ -2331,23 +2331,25 @@ hypervisor::main(arch::x86_64::context & caller_context)
                     if (cpu < max_cpus) {
                         auto count = this->exit_trace_count[cpu];
                         auto & newest =
-                            this->exit_trace[cpu]
-                                            [(count - 1) %
-                                             exit_trace_capacity];
+                            this->exit_trace[cpu][(count - 1) %
+                                                  exit_trace_capacity];
 
                         cpuid_result[0] =
                             static_cast<std::uint32_t>(count);
-                        cpuid_result[1] = count ? static_cast<std::uint32_t>(
-                                                      newest.reason)
-                                                : 0;
-                        cpuid_result[2] = count ? static_cast<std::uint32_t>(
-                                                      newest.qualification)
-                                                : 0;
+                        cpuid_result[1] =
+                            count
+                                ? static_cast<std::uint32_t>(newest.reason)
+                                : 0;
+                        cpuid_result[2] = count
+                                              ? static_cast<std::uint32_t>(
+                                                    newest.qualification)
+                                              : 0;
 
                         // Everything that says "this processor stopped and
                         // why", packed so one leaf answers the question.
                         cpuid_result[3] =
-                            (this->unhandled_exit.occurred ? (1u << 0) : 0) |
+                            (this->unhandled_exit.occurred ? (1u << 0)
+                                                           : 0) |
                             (this->vm_entry_failure.occurred ? (1u << 1)
                                                              : 0) |
                             (this->started_by_start_up_ipi[cpu] ? (1u << 2)
@@ -2407,8 +2409,8 @@ hypervisor::main(arch::x86_64::context & caller_context)
                 // start-up IPI is precisely what hands a processor over
                 // unvirtualized.
                 if (auto issue = on_interrupt_command(command)) {
-                    arch::x86_64::wrmsr(
-                        arch::x86_64::msr::ia32_x2apic_icr, *issue);
+                    arch::x86_64::wrmsr(arch::x86_64::msr::ia32_x2apic_icr,
+                                        *issue);
                 }
                 break;
             }
