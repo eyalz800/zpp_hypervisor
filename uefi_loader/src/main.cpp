@@ -11,7 +11,6 @@ extern "C" {
 #include <Protocol/MpService.h>
 }
 #include "zpp/loader.h"
-#include "zpp/x64/asm.h"
 #include <cstddef>
 #include <cstdint>
 #include <string>
@@ -274,6 +273,52 @@ free_file_path_device_path:
 
 #if ZPP_CI_VERIFY_HYPERVISOR
 /**
+ * cpuid and port output written with register constraints rather than
+ * reused from zpp/x64/asm.h. Those are naked functions that read their
+ * arguments from the System V registers, while this loader is built for
+ * the Microsoft ABI, where the third argument arrives in r8 rather than
+ * rdx - reusing them here would store the results through the second
+ * argument's value instead of a pointer. Letting the compiler allocate
+ * registers avoids the question.
+ * @{
+ */
+static void query_cpuid(std::uint32_t leaf, std::uint32_t (&out)[4])
+{
+    std::uint32_t a{};
+    std::uint32_t b{};
+    std::uint32_t c{};
+    std::uint32_t d{};
+
+    asm volatile("cpuid"
+                 : "=a"(a), "=b"(b), "=c"(c), "=d"(d)
+                 : "a"(leaf), "c"(0u));
+
+    out[0] = a;
+    out[1] = b;
+    out[2] = c;
+    out[3] = d;
+}
+
+/**
+ * Writes a string straight to the first serial port, bypassing UEFI
+ * console services. OVMF does not necessarily route ConOut to serial, and
+ * with no video device there may be nowhere else for it to go, so this is
+ * the channel that can be relied on to reach Bochs' serial capture.
+ */
+static void serial_write(const char * text)
+{
+    for (auto * character = text; *character; ++character) {
+        asm volatile("outb %0, %1"
+                     :
+                     : "a"(static_cast<std::uint8_t>(*character)),
+                       "Nd"(static_cast<std::uint16_t>(0x3f8)));
+    }
+}
+/**
+ * @}
+ */
+
+/**
  * Asks the hypervisor to identify itself, from whichever CPU this runs on.
  *
  * The vmexit handler answers CPUID leaf 0x40000000 with the signature
@@ -287,13 +332,13 @@ static int verify_hypervisor_on_cpu(void *)
     std::uint32_t registers[4]{};
 
     // Leaf 1, bit 31 of ecx: a hypervisor is present.
-    zpp::x64::cpuid(1, 0, registers);
+    query_cpuid(1, registers);
     if (!(registers[2] & (1u << 31))) {
         return -1;
     }
 
     // Leaf 0x40000000: the vendor signature, in ebx, ecx then edx.
-    zpp::x64::cpuid(1u << 30, 0, registers);
+    query_cpuid(1u << 30, registers);
     if ((registers[1] != 0x5a70705a) || (registers[2] != 0x705a7070) ||
         (registers[3] != 0x70705a70)) {
         return -2;
@@ -304,32 +349,40 @@ static int verify_hypervisor_on_cpu(void *)
 
 /**
  * Runs the check on every CPU, since the hypervisor is launched per CPU
- * and a failure on one is just as bad as a failure on all. Reports through
- * the UEFI console, which OVMF mirrors to the serial port, so the result
- * lands where automated testing can assert on it.
+ * and a failure on one is just as bad as a failure on all. Reports over
+ * serial, and also through the UEFI console when one is present.
  */
 static bool verify_hypervisor_present(EFI_SYSTEM_TABLE * system_table)
 {
-    auto * out = system_table->ConOut;
+    // wchar_t rather than CHAR16 in the parameter: a L"" literal is
+    // wchar_t here, and EDK2's CHAR16 is unsigned short, so they need a
+    // cast between them even though both are 16 bit on this target.
+    auto report = [&](const char * ascii, const wchar_t * wide) {
+        serial_write(ascii);
+        if (system_table->ConOut) {
+            system_table->ConOut->OutputString(
+                system_table->ConOut,
+                reinterpret_cast<CHAR16 *>(const_cast<wchar_t *>(wide)));
+        }
+    };
 
     auto cpus = number_of_cpus();
     if (!cpus) {
-        out->OutputString(
-            out, (CHAR16 *)L"zpp: ZPP_HYPERVISOR_FAILED no cpus\r\n");
+        report("zpp: ZPP_HYPERVISOR_FAILED no cpus\r\n",
+               L"zpp: ZPP_HYPERVISOR_FAILED no cpus\r\n");
         return false;
     }
 
     for (std::size_t i{}; i < cpus; ++i) {
         if (call_on_cpu(i, verify_hypervisor_on_cpu, nullptr)) {
-            out->OutputString(out,
-                              (CHAR16 *)L"zpp: ZPP_HYPERVISOR_FAILED on "
-                                        L"at least one cpu\r\n");
+            report("zpp: ZPP_HYPERVISOR_FAILED on at least one cpu\r\n",
+                   L"zpp: ZPP_HYPERVISOR_FAILED on at least one cpu\r\n");
             return false;
         }
     }
 
-    out->OutputString(
-        out, (CHAR16 *)L"zpp: ZPP_HYPERVISOR_ACTIVE on every cpu\r\n");
+    report("zpp: ZPP_HYPERVISOR_ACTIVE on every cpu\r\n",
+           L"zpp: ZPP_HYPERVISOR_ACTIVE on every cpu\r\n");
     return true;
 }
 #endif
