@@ -1,5 +1,6 @@
 #pragma once
 extern "C" {
+#include <Protocol/MpService.h>
 #include <Uefi.h>
 }
 #include "zpp/loader.h"
@@ -23,12 +24,17 @@ namespace zpp
  * send the INIT-SIPI-SIPI that starts them.
  *
  * So this check stops being a passenger and becomes the operating system:
- * it enables x2APIC, finds the other processors in the ACPI MADT, sends
- * each a real INIT-SIPI-SIPI through the interrupt command register, and
- * has the code they start in answer CPUID leaf 0x40000000 for itself. A
- * processor that comes up under the hypervisor spells ZppZppZppZpp; one
- * that came up on bare metal beside it does not, and that difference is
- * the whole test.
+ * it enables x2APIC, finds the other processors, sends each one a real
+ * INIT-SIPI-SIPI through the interrupt command register, and has the code
+ * they start in answer CPUID leaf 0x40000000 for itself. A processor that
+ * comes up under the hypervisor spells ZppZppZppZpp; one that came up on
+ * bare metal beside it does not, and that difference is the whole test.
+ *
+ * Each IPI names one processor. That is a requirement rather than a style
+ * choice: this VMM redirects a start-up IPI by substituting its own
+ * trampoline's vector for the one the guest asked for, which it can only
+ * do for a command it can attribute to a processor - so a broadcast is
+ * passed through untouched and the processors it starts are never adopted.
  *
  * It is destructive, deliberately. Every application processor the
  * firmware had parked is taken away from it and left halted in real mode,
@@ -319,8 +325,12 @@ struct verify
     /**
      * The interrupt command fields this check builds by hand. SDM Figure
      * 13-28, "Interrupt Command Register (ICR) in x2APIC Mode": vector in
-     * bits 7:0, delivery mode in 10:8, level in 14, destination shorthand
-     * in 19:18.
+     * bits 7:0, delivery mode in 10:8, level in 14.
+     *
+     * The destination shorthand in bits 19:18 is deliberately absent. It
+     * is left zero on every command sent here, which is what makes the
+     * destination field in the upper half name the target - and a command
+     * whose target can be named is the only kind this VMM can redirect.
      *
      * Level is set for both, which is what firmware and every operating
      * system send - an INIT level de-assert is a delivery mode of its own
@@ -333,7 +343,6 @@ struct verify
     static constexpr std::uint32_t delivery_init = 5u << 8;
     static constexpr std::uint32_t delivery_start_up = 6u << 8;
     static constexpr std::uint32_t level_assert = 1u << 14;
-    static constexpr std::uint32_t all_excluding_self = 3u << 18;
     /**
      * @}
      */
@@ -465,13 +474,26 @@ struct verify
     }
 
     /**
-     * The processors the ACPI MADT lists, and whether the table was there
-     * at all. The two are different answers: no table means nothing was
-     * asked, an empty list means the machine says it has one processor.
+     * Which of the two enumeration sources named the processors that were
+     * started. Reported, because a run that fell back is a run whose
+     * premise is worth seeing rather than inferring.
+     */
+    enum class processor_source
+    {
+        none,
+        madt,
+        mp_services,
+    };
+
+    /**
+     * The processors an enumeration listed, and where the list came from.
+     * The source is a separate answer from the count: no table means
+     * nothing was asked, an empty list means the machine says it has one
+     * processor.
      */
     struct discovery
     {
-        bool madt_found{};
+        processor_source source{processor_source::none};
         std::size_t count{};
     };
 
@@ -572,8 +594,6 @@ struct verify
                 continue;
             }
 
-            result.madt_found = true;
-
             // Walked by each structure's own length field, bounded by the
             // table's own length. A zero length would loop forever and a
             // long one would walk off the table, so both stop the walk
@@ -606,9 +626,80 @@ struct verify
                 offset += length;
             }
 
+            if (result.count) {
+                result.source = processor_source::madt;
+            }
             return result;
         }
 
+        return result;
+    }
+
+    /**
+     * The same list, from the firmware's own enumeration, for machines
+     * whose firmware publishes no ACPI tables at all - which the CI
+     * machine is, and its loader probe reports as "no rsdp".
+     *
+     * This is a change of *source* only, and that is the whole reason it
+     * is acceptable here. What is under test is whether this hypervisor
+     * sees a guest start a processor and adopts it on the way through, so
+     * the INIT-SIPI-SIPI below is still ours; only the question "which
+     * processors exist, and by what APIC id" is answered by the firmware.
+     * EFI_MP_SERVICES_PROTOCOL is not asked to start anything, which is
+     * the part that would have tested the firmware instead of this code.
+     *
+     * What it replaced was a start-up broadcast, and that could never have
+     * passed: a broadcast names no destination, so this VMM cannot
+     * redirect it one processor at a time and passes it through - handing
+     * every processor to the guest unvirtualized. A fallback that is
+     * guaranteed to fail is worse than none, because it reports a working
+     * hypervisor as broken.
+     *
+     * UEFI 2.10, EFI_MP_SERVICES_PROTOCOL.GetProcessorInfo():
+     * "For IA32 and X64, the processor ID is the same as the Local APIC
+     * ID", and PROCESSOR_ENABLED_BIT in StatusFlag says the processor is
+     * usable on this boot.
+     */
+    static discovery
+    discover_processors_from_mp_services(EFI_SYSTEM_TABLE * system_table,
+                                         std::span<std::uint32_t> apic_ids)
+    {
+        discovery result{};
+
+        EFI_GUID guid = EFI_MP_SERVICES_PROTOCOL_GUID;
+        EFI_MP_SERVICES_PROTOCOL * mp_services{};
+        if (EFI_ERROR(system_table->BootServices->LocateProtocol(
+                &guid,
+                nullptr,
+                reinterpret_cast<void **>(&mp_services)))) {
+            return result;
+        }
+
+        UINTN processors{};
+        UINTN enabled{};
+        if (EFI_ERROR(mp_services->GetNumberOfProcessors(
+                mp_services, &processors, &enabled))) {
+            return result;
+        }
+
+        for (UINTN i{};
+             (i < processors) && (result.count < apic_ids.size());
+             ++i) {
+            EFI_PROCESSOR_INFORMATION information{};
+            if (EFI_ERROR(mp_services->GetProcessorInfo(
+                    mp_services, i, &information))) {
+                continue;
+            }
+            if (!(information.StatusFlag & PROCESSOR_ENABLED_BIT)) {
+                continue;
+            }
+            apic_ids[result.count++] =
+                static_cast<std::uint32_t>(information.ProcessorId);
+        }
+
+        if (result.count) {
+            result.source = processor_source::mp_services;
+        }
         return result;
     }
 
@@ -775,9 +866,17 @@ struct verify
         }
 
         // Step four: find the other processors. The MADT is the operating
-        // system's own source for this, and it is what a guest would use.
+        // system's own source for this, and it is what a guest would use,
+        // so it is asked first. Where there is no ACPI table at all the
+        // firmware's own enumeration answers the same question - see
+        // discover_processors_from_mp_services for why substituting it
+        // leaves what is under test alone.
         std::uint32_t discovered[slot_count]{};
         auto listed = discover_processors(system_table, discovered);
+        if (!listed.count) {
+            listed = discover_processors_from_mp_services(system_table,
+                                                          discovered);
+        }
 
         std::uint32_t targets[slot_count]{};
         std::size_t target_count{};
@@ -790,20 +889,33 @@ struct verify
 
         {
             char line[line_capacity]{};
-            auto end = trace::append_text(line, "zpp: madt ");
-            end = trace::append_text(
-                end,
-                listed.madt_found ? "found, processors=" : "absent, ");
-            if (listed.madt_found) {
-                end = trace::append_decimal(end, listed.count);
-                end = trace::append_text(end, " targets=");
-                end = trace::append_decimal(end, target_count);
-            } else {
-                end = trace::append_text(end, "starting all others");
+            auto end = trace::append_text(line, "zpp: processors from ");
+            switch (listed.source) {
+            case processor_source::madt:
+                end = trace::append_text(end, "the acpi madt");
+                break;
+            case processor_source::mp_services:
+                end = trace::append_text(end, "mp services");
+                break;
+            case processor_source::none:
+                end = trace::append_text(end, "nowhere");
+                break;
             }
+            end = trace::append_text(end, ", listed=");
+            end = trace::append_decimal(end, listed.count);
+            end = trace::append_text(end, " targets=");
+            end = trace::append_decimal(end, target_count);
             end = trace::append_text(end, "\r\n");
             *end = 0;
             report_line(line);
+        }
+
+        // Nothing to start means nothing to test, and it is a failure of
+        // the check rather than of the hypervisor - so it says which,
+        // instead of reporting a hypervisor that was never asked anything.
+        if (!target_count) {
+            return fail("zpp: ZPP_HYPERVISOR_FAILED no cpu to start\r\n",
+                        u"zpp: ZPP_HYPERVISOR_FAILED no cpu to start\r\n");
         }
 
         // Both delays are the ones an operating system uses, and both come
@@ -815,26 +927,21 @@ struct verify
         constexpr std::size_t init_delay_microseconds = 10000;
         constexpr std::size_t start_up_delay_microseconds = 200;
 
-        // No MADT means no way to name the processors, and the machine
-        // this runs on in CI is exactly that machine: the firmware there
-        // publishes no ACPI tables at all, which the loader's own probe
-        // reports as "no rsdp". A start-up broadcast to all processors
-        // except this one needs no table, and each processor still reports
-        // separately because it picks its own slot - so the check keeps
-        // working where discovery cannot.
-        auto broadcast = !target_count;
-        auto shorthand = broadcast ? all_excluding_self : 0u;
+        // One processor at a time, by name. A destination shorthand is
+        // deliberately not used even where it would be shorter: this VMM
+        // can only redirect a start-up IPI it can attribute to a
+        // processor, so a broadcast is passed through and the processors
+        // it starts are never adopted. Naming each one is also what an
+        // operating system does.
         auto send_sequence = [&](std::uint32_t destination) {
-            send_interrupt_command(
-                destination, shorthand | level_assert | delivery_init);
+            send_interrupt_command(destination,
+                                   level_assert | delivery_init);
             boot_services->Stall(init_delay_microseconds);
-            send_interrupt_command(destination,
-                                   shorthand | level_assert |
-                                       delivery_start_up | vector);
+            send_interrupt_command(
+                destination, level_assert | delivery_start_up | vector);
             boot_services->Stall(start_up_delay_microseconds);
-            send_interrupt_command(destination,
-                                   shorthand | level_assert |
-                                       delivery_start_up | vector);
+            send_interrupt_command(
+                destination, level_assert | delivery_start_up | vector);
         };
 
         // The hypervisor's own account of the sequence, sampled either
@@ -855,12 +962,8 @@ struct verify
         std::uint32_t after[4]{};
         query_cpuid_ecx(diagnostic_leaf, 0, before);
 
-        if (broadcast) {
-            send_sequence(0);
-        } else {
-            for (std::size_t i{}; i < target_count; ++i) {
-                send_sequence(targets[i]);
-            }
+        for (std::size_t i{}; i < target_count; ++i) {
+            send_sequence(targets[i]);
         }
 
         query_cpuid_ecx(diagnostic_leaf, 0, after);
@@ -881,29 +984,10 @@ struct verify
                     ++answered;
                 }
             }
-            if (target_count && (answered == target_count)) {
+            if (answered == target_count) {
                 break;
             }
             boot_services->Stall(answer_poll_microseconds);
-        }
-
-        // A broadcast has nothing to wait for by name, so its targets are
-        // whatever turned up. The boot processor's own slot is skipped: it
-        // is running this loop rather than the trampoline, so anything in
-        // that slot is not it.
-        if (broadcast) {
-            for (std::size_t slot{}; slot < slot_count; ++slot) {
-                auto base = slot_area_offset + (slot * slot_size);
-                if (completion_marker !=
-                    page_word(page, base + slot_marker_offset)) {
-                    continue;
-                }
-                auto apic_id = page_word(page, base + slot_apic_id_offset);
-                if (apic_id == boot_apic_id) {
-                    continue;
-                }
-                targets[target_count++] = apic_id;
-            }
         }
 
         // Both samples, printed here rather than where they were taken:
@@ -926,12 +1010,6 @@ struct verify
             end = trace::append_text(end, "\r\n");
             *end = 0;
             report_line(line);
-        }
-
-        if (!target_count) {
-            return fail(
-                "zpp: ZPP_HYPERVISOR_FAILED no other cpu answered\r\n",
-                u"zpp: ZPP_HYPERVISOR_FAILED no other cpu answered\r\n");
         }
 
         // Step six: report each of them, and judge only after every one
@@ -975,6 +1053,48 @@ struct verify
             end = trace::append_text(end, "\"\r\n");
             *end = 0;
             report_line(line);
+
+            // And what the hypervisor itself recorded under that index,
+            // which is a second and independent question: the signature
+            // above says a processor is virtualized, this says the VMM's
+            // own per-processor state for it is where the check thinks it
+            // is. Those are not the same index by construction - the VMM
+            // indexes by its virtual processor id less one, while this
+            // check counts the order it started them in - so they agree
+            // only if allocation followed the same order, and that is
+            // worth measuring rather than assuming.
+            //
+            // A nonzero exit count with the started-by-start-up-IPI flag
+            // set is what agreement looks like: bit 2 of the flags word is
+            // that flag, and it is per processor. Bits 0 and 1 are not -
+            // they say *some* processor stopped on an unhandled exit or a
+            // failed VM entry - which is still a failure of this run, so
+            // they are judged here rather than only printed.
+            std::uint32_t recorded[4]{};
+            query_cpuid_ecx(diagnostic_leaf,
+                            static_cast<std::uint32_t>(i + 1),
+                            recorded);
+
+            end = trace::append_text(line, "zpp: cpu ");
+            end = trace::append_decimal(end, i + 1);
+            end = trace::append_text(end, " vmm exits ");
+            end = trace::append_hex(end, recorded[0], 8);
+            end = trace::append_text(end, " last_reason ");
+            end = trace::append_hex(end, recorded[1], 8);
+            end = trace::append_text(end, " qual=");
+            end = trace::append_hex(end, recorded[2], 8);
+            end = trace::append_text(end, " flags=");
+            end = trace::append_hex(end, recorded[3], 8);
+            end = trace::append_text(end, "\r\n");
+            *end = 0;
+            report_line(line);
+
+            constexpr std::uint32_t stopped_flags = 0x3;
+            constexpr std::uint32_t started_by_start_up_ipi = (1u << 2);
+            if (!recorded[0] || !(recorded[3] & started_by_start_up_ipi) ||
+                (recorded[3] & stopped_flags)) {
+                all_answered = false;
+            }
 
             if ((completion_marker != marker) || (owner != targets[i]) ||
                 !signature_matches(answer.signature)) {
