@@ -20,6 +20,7 @@ extern "C" {
 #include <cstdint>
 #include <cstring>
 #include <iterator>
+#include <span>
 #include <string>
 
 /**
@@ -1169,6 +1170,22 @@ extern "C" EFI_STATUS EFIAPI uefi_main(EFI_HANDLE image_handle,
         const char16_t * companion;
     };
 
+    // Whether to chain only to Windows Boot Manager, refusing the
+    // removable media fallback below it.
+    //
+    // On by default because that fallback is a hazard on the machine this
+    // is booted from by hand. It names \EFI\BOOT\bootx64.efi, and on an
+    // ESP with a boot manager of its own installed there, that file is the
+    // boot manager which chainloaded this loader - so taking the fallback
+    // starts the thing that started us, and the machine loops with no menu
+    // to escape through. Requiring the BCD beside bootmgfw.efi already
+    // makes the fallback unreachable whenever Windows is present, so this
+    // costs nothing there and removes the loop everywhere else.
+    //
+    // Turn it off to get the previous behaviour, which is what a machine
+    // that boots something other than Windows needs.
+    static constexpr bool chain_to_windows_only = true;
+
     // The boot managers to chain to, in order of preference. Windows is
     // named explicitly rather than relying on the removable media
     // fallback, because on a machine that has any boot manager
@@ -1179,6 +1196,11 @@ extern "C" EFI_STATUS EFIAPI uefi_main(EFI_HANDLE image_handle,
          u"\\EFI\\Microsoft\\Boot\\BCD"},
         {u"\\EFI\\BOOT\\bootx64.efi", true, nullptr},
     };
+
+    // How many of them to actually consider. Windows Boot Manager is
+    // first, so restricting the count to one is what drops the fallback.
+    static constexpr std::size_t considered_boot_managers =
+        chain_to_windows_only ? 1 : std::size(boot_managers);
 
     // Drive every controller before looking for a boot manager. Firmware
     // connects only as much as it needs to reach the boot option it was
@@ -1226,7 +1248,7 @@ extern "C" EFI_STATUS EFIAPI uefi_main(EFI_HANDLE image_handle,
     // that a preferred boot manager anywhere wins over a fallback on
     // whichever device happens to enumerate first.
     for (auto [boot_manager, avoid_our_own_device, companion] :
-         boot_managers) {
+         std::span{boot_managers}.first(considered_boot_managers)) {
         for (std::size_t i{}; i < number_of_file_system_handles; ++i) {
             // Skip the device this loader came from, for the entries
             // that would loop back into it.
