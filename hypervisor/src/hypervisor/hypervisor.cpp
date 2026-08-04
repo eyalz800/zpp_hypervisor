@@ -270,7 +270,7 @@ void hypervisor::on_host_exception(const x64::exception_frame & frame)
     x64::restore_context(&this->host_exception_recovery);
 
     // restore_context does not return.
-    __builtin_unreachable();
+    std::unreachable();
 }
 
 void hypervisor::initialize_intermediate_gdt()

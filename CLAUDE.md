@@ -219,6 +219,10 @@ as C++ and destroy the file.
 
 - C++26 standard, `-pedantic -Wall -Wextra -Werror`
 - No exceptions, no RTTI (`-fno-exceptions -fno-rtti`)
+- Prefer the standard spelling over a compiler builtin where one exists —
+  `std::unreachable()` rather than `__builtin_unreachable()`. It lowers to the same
+  intrinsic, so it costs nothing here and needs no runtime (verified: `llvm-nm -u` stays
+  empty). `__builtin_trap()` has no standard equivalent and stays as it is.
 - Headers use `#pragma once`
 - Project namespace: `zpp`
 - `constexpr` everything that can be — all getters, constructors, destructors, operators
