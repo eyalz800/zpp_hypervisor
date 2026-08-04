@@ -624,14 +624,71 @@ static bool acpi_timer_advancing(EFI_SYSTEM_TABLE * system_table)
             break;
         }
     }
-    if (!rsdp) {
+    // Under Bochs the firmware publishes
+    // no ACPI tables at all, so there is no FADT to read the timer block
+    // from - but the PIIX4 power management function is there and OVMF's
+    // own AcpiTimerLib finds it the same way this does, straight out of
+    // PCI config space at 00:01.3 offset 0x40. Without this the loader
+    // reports a single cpu and never touches MP services, so the AP path
+    // under test is never exercised.
+    auto piix4_pm_timer_advancing = [&] {
+        constexpr std::uint16_t config_address_port = 0xcf8;
+        constexpr std::uint16_t config_data_port = 0xcfc;
+        constexpr std::uint32_t piix4_pm_function =
+            0x80000000u | (0u << 16) | (1u << 11) | (3u << 8);
+        constexpr std::uint32_t pmba_offset = 0x40;
+        constexpr std::uint16_t pm_timer_offset = 8;
+        constexpr std::uint32_t piix4_pm_identity = 0x71138086;
+
+        auto read_config = [&](std::uint32_t offset) {
+            asm volatile("outl %0, %1" ::"a"(piix4_pm_function | offset),
+                         "Nd"(config_address_port));
+            std::uint32_t value{};
+            asm volatile("inl %1, %0"
+                         : "=a"(value)
+                         : "Nd"(config_data_port));
+            return value;
+        };
+
+        // Only ever touch a function that identifies itself as the PIIX4
+        // power management one. Without this the probe would read offset
+        // 0x40 of whatever happens to sit at 00:01.3 and then hammer a
+        // port derived from it, which on a modern chipset is not a timer.
+        auto identity = read_config(0);
+        if (piix4_pm_identity != identity) {
+            return false;
+        }
+
+        auto pmba = read_config(pmba_offset);
+        auto base = static_cast<std::uint16_t>(pmba & 0xfffcu);
+        if (!base || (0xfffcu == base)) {
+            return false;
+        }
+
+        auto port = static_cast<std::uint16_t>(base + pm_timer_offset);
+        auto first = read_port(port);
+        if (0xffffffffu == first) {
+            return false;
+        }
+        for (std::uint32_t attempt{}; attempt < 1000000u; ++attempt) {
+            if (read_port(port) != first) {
+                trace::line("ZPP_TRACE piix4 pm timer advances");
+                return true;
+            }
+        }
         return false;
+    };
+
+    if (!rsdp) {
+        trace::line("ZPP_TRACE acpi probe: no rsdp");
+        return piix4_pm_timer_advancing();
     }
 
     // XSDT address lives at offset 24 of the root pointer.
     std::uint64_t xsdt_address{};
     std::memcpy(&xsdt_address, rsdp + 24, sizeof(xsdt_address));
     if (!xsdt_address) {
+        trace::line("ZPP_TRACE acpi probe: no xsdt");
         return false;
     }
 
@@ -639,6 +696,7 @@ static bool acpi_timer_advancing(EFI_SYSTEM_TABLE * system_table)
     std::uint32_t xsdt_length{};
     std::memcpy(&xsdt_length, xsdt + 4, sizeof(xsdt_length));
     if (xsdt_length <= 36) {
+        trace::line("ZPP_TRACE acpi probe: short xsdt");
         return false;
     }
 
@@ -682,6 +740,7 @@ static bool acpi_timer_advancing(EFI_SYSTEM_TABLE * system_table)
         return false;
     }
 
+    trace::line("ZPP_TRACE acpi probe: no facp");
     return false;
 }
 

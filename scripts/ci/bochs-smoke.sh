@@ -15,16 +15,21 @@ root="$(cd "$(dirname "$0")/../.." && pwd)"
 work="$root/build/bochs"
 bochs="${BOCHS:-$HOME/.local/bochs-gdb/bin/bochs}"
 timeout_seconds="${TIMEOUT:-300}"
+cpus="${CPUS:-1}"
 
 [ -x "$bochs" ] || { echo "no bochs at $bochs" >&2; exit 1; }
 [ -f "$work/esp.img" ] || { echo "run scripts/bochs/setup.sh first" >&2; exit 1; }
 
 # Unattended, so no gdb stub - Bochs would otherwise wait for a connection.
+# Deleted rather than set to enabled=0: a Bochs built without the stub panics
+# on the option being mentioned at all, and an SMP build cannot have the stub -
+# bochs.h refuses to compile that combination.
 # Also report info messages rather than ignoring them: the interactive config
 # suppresses everything after startup, which leaves no way to tell a slow boot
 # from a wedged one. show_ips was compiled in, so this also gives a heartbeat.
-sed -e 's/^gdbstub:.*/gdbstub: enabled=0/' \
+sed -e '/^gdbstub:/d' \
     -e 's/^info:.*/info: action=report/' \
+    -e "s/count=1/count=$cpus/" \
     "$root/scripts/bochs/bochsrc.txt" > "$work/bochsrc-ci.txt"
 
 cd "$work"
