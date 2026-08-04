@@ -18,13 +18,13 @@ if(NOT DEFINED ZPP_OUTPUT_DIR)
     message(FATAL_ERROR "ZPP_OUTPUT_DIR must be set (path to the output directory)")
 endif()
 
-option(ZPP_CI_VERIFY_HYPERVISOR
+option(ZPP_VERIFY_HYPERVISOR
     "Compile the CPUID self check that asserts the hypervisor reached root mode"
     OFF)
 
 option(ZPP_TRACE
     "Compile the serial trace output in the loaders"
-    ${ZPP_CI_VERIFY_HYPERVISOR})
+    ${ZPP_VERIFY_HYPERVISOR})
 
 # Download dependencies (Windows SDK for ucrt/shared headers; EDK2 for UEFI headers)
 include("${ZPP_SOURCE_DIR}/cmake/dependencies.cmake")
@@ -120,9 +120,9 @@ target_compile_definitions(zpp_loader_efi PRIVATE
     # Point #embed at the built hypervisor ELF binary.
     "ZPP_ELF_BINARY_PATH=\"${ZPP_OUTPUT_DIR}/zpp_hypervisor\""
     # Compiles the CPUID self check that asserts the hypervisor reached root
-    # mode. Off by default: it exists for automated testing and has no place in
-    # a loader that is actually being deployed.
-    "ZPP_CI_VERIFY_HYPERVISOR=$<BOOL:${ZPP_CI_VERIFY_HYPERVISOR}>"
+    # mode. Off by default: it is a test facility, whether run locally or in
+    # CI, and has no place in a loader that is actually being deployed.
+    "ZPP_VERIFY_HYPERVISOR=$<BOOL:${ZPP_VERIFY_HYPERVISOR}>"
     # Serial tracing, controlled on its own so it can be enabled or disabled
     # independently of the check above. Defaults to the same value.
     "ZPP_TRACE=$<BOOL:${ZPP_TRACE}>"

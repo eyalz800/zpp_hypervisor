@@ -14,14 +14,14 @@ namespace zpp
  * The hypervisor self check. Same struct-instead-of-free-functions reason
  * as trace above.
  */
-struct ci_verify
+struct verify
 {
     /**
      * Whether this build carries the self check. Off by default: it exists
-     * for automated testing and has no place in a loader that is actually
-     * being deployed.
+     * a test facility, whether run locally or in CI, and has no place in a
+     * loader that is actually being deployed.
      */
-    static constexpr bool enabled = ZPP_CI_VERIFY_HYPERVISOR;
+    static constexpr bool enabled = ZPP_VERIFY_HYPERVISOR;
 
     /**
      * cpuid and port output written with register constraints rather than

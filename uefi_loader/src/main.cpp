@@ -10,9 +10,9 @@ extern "C" {
 #include <Protocol/LoadedImage.h>
 #include <Protocol/MpService.h>
 }
-#include "zpp/ci_verify.h"
 #include "zpp/loader.h"
 #include "zpp/trace.h"
+#include "zpp/verify.h"
 
 #include <cstddef>
 #include <cstdint>
@@ -77,8 +77,8 @@ static bool g_timed_waits_usable = true;
  * everything below be ordinary code under `if constexpr`.
  */
 // Unqualified, so the many call sites below stay readable.
-using zpp::ci_verify;
 using zpp::trace;
+using zpp::verify;
 
 static void * allocate_rwx(std::size_t size)
 {
@@ -470,8 +470,8 @@ extern "C" EFI_STATUS EFIAPI uefi_main(EFI_HANDLE image_handle,
     // it - which is what the constant is for, since everything under here
     // is discarded when it is false and the chainload below becomes the
     // only path out.
-    if constexpr (ci_verify::enabled) {
-        if (!ci_verify::present(system_table, parameters)) {
+    if constexpr (verify::enabled) {
+        if (!verify::present(system_table, parameters)) {
             return EFI_LOAD_ERROR;
         }
 
