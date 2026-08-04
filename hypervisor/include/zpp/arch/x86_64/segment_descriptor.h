@@ -23,6 +23,7 @@ public:
         data_read_only = 0,
         data_read_only_accessed = 1,
         data_read_write = 2,
+        ldt = 2,
         data_read_write_accessed = 3,
         data_read_only_expand_down = 4,
         data_read_only_expand_down_accessed = 5,

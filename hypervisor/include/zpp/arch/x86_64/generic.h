@@ -6,6 +6,31 @@
 namespace zpp::arch::x86_64
 {
 /**
+ * Control register bits, named where this codebase depends on them.
+ *
+ * Spelled cr0_bits rather than cr0 because the accessor for the register
+ * itself already owns that name in this namespace.
+ */
+namespace cr0_bits
+{
+enum type : std::uint64_t
+{
+    protection_enable = (1ull << 0),
+    numeric_error = (1ull << 5),
+    paging = (1ull << 31),
+};
+} // namespace cr0_bits
+
+namespace cr4_bits
+{
+enum type : std::uint64_t
+{
+    os_xsave = (1ull << 18),
+    vmx_enable = (1ull << 13),
+};
+} // namespace cr4_bits
+
+/**
  * Represents the GDT layout for SGDT/LGDT instructions.
  */
 struct gdt_layout
