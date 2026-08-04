@@ -47,6 +47,14 @@ option(ZPP_CI_VERIFY_HYPERVISOR
     "Compile the CPUID self check that asserts the hypervisor reached root mode"
     OFF)
 
+# Serial tracing. Separate from the self check so it can be turned on while
+# chasing something without also compiling the check, and off while running the
+# check. Defaults to whatever the self check is set to, because that is what CI
+# wants and because tracing has no place in a deployed loader either.
+option(ZPP_TRACE
+    "Compile the serial trace output in the loaders"
+    ${ZPP_CI_VERIFY_HYPERVISOR})
+
 ExternalProject_Add(uefi_loader
     SOURCE_DIR "${CMAKE_CURRENT_SOURCE_DIR}/cmake/uefi-loader"
     BINARY_DIR "${CMAKE_BINARY_DIR}/uefi-loader"
@@ -58,6 +66,7 @@ ExternalProject_Add(uefi_loader
         -DZPP_OUTPUT_DIR=${ZPP_OUTPUT_DIR}
         -DFETCHCONTENT_BASE_DIR=${CMAKE_BINARY_DIR}/_deps
         -DZPP_CI_VERIFY_HYPERVISOR=${ZPP_CI_VERIFY_HYPERVISOR}
+        -DZPP_TRACE=${ZPP_TRACE}
     INSTALL_COMMAND ""
     BUILD_ALWAYS ON
     DEPENDS hypervisor
