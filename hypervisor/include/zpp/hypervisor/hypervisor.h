@@ -255,6 +255,12 @@ private:
     void on_interrupt_command(std::uint64_t command);
 
     /**
+     * Whether the local APIC is in x2APIC mode, and therefore whether its
+     * registers are MSRs at all. Reading one when it is not raises #GP.
+     */
+    static bool x2apic_enabled();
+
+    /**
      * Intercept writes to the x2APIC interrupt command register.
      */
     void intercept_interrupt_command(bool intercept);

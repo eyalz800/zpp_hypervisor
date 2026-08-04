@@ -790,9 +790,7 @@ void hypervisor::emulate_init_signal(arch::x86_64::context & context)
     // which it is only in x2APIC mode. In xAPIC mode it is a location on
     // the APIC page and the MSR bitmap never sees it, so waiting would
     // burn the whole timeout before falling back for nothing.
-    constexpr std::uint64_t apic_base_x2apic_enabled = (1ull << 10);
-    auto x2apic = (arch::x86_64::rdmsr(arch::x86_64::msr::ia32_apic_base) &
-                   apic_base_x2apic_enabled) != 0;
+    auto x2apic = x2apic_enabled();
 
     // And only worth waiting for when the hardware path cannot be
     // trusted, which is precisely when something is virtualizing *us*.
@@ -848,6 +846,16 @@ void hypervisor::emulate_start_up_ipi(arch::x86_64::context & context,
     // this VMM is in root mode, the INIT handler has already applied this
     // from the vector the sender handed us directly.
     apply_start_up(context, vector);
+}
+
+bool hypervisor::x2apic_enabled()
+{
+    // IA32_APIC_BASE.EXTD. With it clear the local APIC is in xAPIC mode,
+    // its registers live on the APIC page rather than in MSR space, and
+    // touching an x2APIC MSR raises #GP. SDM 13.12.1.
+    constexpr std::uint64_t apic_base_x2apic_enabled = (1ull << 10);
+    return 0 != (arch::x86_64::rdmsr(arch::x86_64::msr::ia32_apic_base) &
+                 apic_base_x2apic_enabled);
 }
 
 void hypervisor::intercept_interrupt_command(bool intercept)
@@ -1577,7 +1585,20 @@ hypervisor::main(arch::x86_64::context & caller_context)
     // Record this processor's x2APIC id, so that an intercepted interrupt
     // command register write naming it as the destination can be matched
     // back to an index here.
-    if (cpuid < max_cpus) {
+    //
+    // Only when the local APIC is actually in x2APIC mode. The x2APIC
+    // registers are MSRs *only* in that mode: with IA32_APIC_BASE.EXTD
+    // clear they do not exist, and reading one raises #GP. Reading it
+    // unconditionally took the boot down here - the firmware still has the
+    // APIC in xAPIC mode, so this faulted on the very first processor, and
+    // because a VMM's host IDTR is the one it inherited, the fault
+    // surfaced through the firmware's own exception handler rather than
+    // anywhere obviously ours.
+    //
+    // SDM 13.12.1, "Detecting and Enabling x2APIC Mode": "The local APIC
+    // registers can be accessed via the MSR interface only when the local
+    // APIC has been switched to the x2APIC mode."
+    if ((cpuid < max_cpus) && x2apic_enabled()) {
         this->apic_id[cpuid] =
             arch::x86_64::rdmsr(arch::x86_64::msr::ia32_x2apic_apic_id);
     }
