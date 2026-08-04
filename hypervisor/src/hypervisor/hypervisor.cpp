@@ -1758,6 +1758,25 @@ hypervisor::main(arch::x86_64::context & caller_context)
             // The vector is the low byte of the exit qualification.
             constexpr std::uint64_t sipi_vector_mask = 0xff;
             auto vector = vmcs.exit_qualification() & sipi_vector_mask;
+
+            // Everything that could stop the resume that follows, read
+            // before anything is touched. This is the exit the processor
+            // dies on - it is delivered, this handler runs, its writes
+            // read back correctly, and then nothing executes - so these
+            // are the fields nobody has looked at yet at the moment that
+            // matters. A pending event here would be delivered by the very
+            // next VM entry, through the descriptor tables the reset below
+            // is about to zero.
+            log("sipi cpu {} entry_intr {} idt_vectoring {}",
+                vmcs.vpid(),
+                vmcs.read(arch::x86_64::vmx::vmcs::field::
+                              vm_entry_interruption_information_field),
+                vmcs.read(arch::x86_64::vmx::vmcs::field::
+                              idt_vectoring_information_field));
+            log("sipi cpu {} interruptibility {} pending_dbg {}",
+                vmcs.vpid(),
+                vmcs.guest_interruptibility_state(),
+                vmcs.guest_pending_debug_exceptions());
             emulate_start_up_ipi(context, vector);
             advance_rip = false;
             break;
