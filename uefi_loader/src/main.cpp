@@ -11,8 +11,10 @@ extern "C" {
 #include <Protocol/MpService.h>
 }
 #include "zpp/loader.h"
+
 #include <cstddef>
 #include <cstdint>
+#include <cstring>
 #include <string>
 
 /**
@@ -62,8 +64,50 @@ static EFI_GUID g_efi_mp_service_protocol_guid = {
  * @}
  */
 
+// False when the firmware's timed waits cannot be trusted, which makes MP
+// services unusable - see acpi_timer_advancing.
+static bool g_timed_waits_usable = true;
+
+#if ZPP_CI_VERIFY_HYPERVISOR
+/**
+ * Writes a string straight to the first serial port, bypassing UEFI
+ * console services. OVMF does not necessarily route ConOut to serial, and
+ * with no video device there may be nowhere else for it to go, so this is
+ * the channel that can be relied on to reach Bochs' serial capture.
+ */
+static void serial_write(const char * text)
+{
+    constexpr std::uint16_t port = 0x3f8;
+    constexpr std::uint16_t line_status = port + 5;
+    constexpr std::uint8_t transmitter_empty = 1u << 5;
+
+    for (auto * character = text; *character; ++character) {
+        // Wait for the transmit holding register to drain. Without this
+        // only the first sixteen characters ever appear - that is the
+        // 16550's FIFO depth, and anything written past a full FIFO is
+        // dropped. Bounded, so a machine with no working UART cannot wedge
+        // the loader here.
+        for (std::uint32_t attempt{}; attempt < 100000u; ++attempt) {
+            std::uint8_t status{};
+            asm volatile("inb %1, %0" : "=a"(status) : "Nd"(line_status));
+            if (status & transmitter_empty) {
+                break;
+            }
+        }
+
+        asm volatile("outb %0, %1"
+                     :
+                     : "a"(static_cast<std::uint8_t>(*character)),
+                       "Nd"(port));
+    }
+}
+#endif
+
 static void * allocate_rwx(std::size_t size)
 {
+#if ZPP_CI_VERIFY_HYPERVISOR
+    serial_write("zpp: ZPP_TRACE allocate_rwx enter\r\n");
+#endif
     EFI_PHYSICAL_ADDRESS physical_address{};
 
     // Allocate pages just enough for 'size' bytes.
@@ -78,12 +122,122 @@ static void * allocate_rwx(std::size_t size)
         return nullptr;
     }
 
+#if ZPP_CI_VERIFY_HYPERVISOR
+    serial_write("zpp: ZPP_TRACE allocate_rwx done\r\n");
+#endif
+
     // Return the result address.
     return reinterpret_cast<void *>(physical_address);
 }
 
+/**
+ * Returns true when the ACPI power management timer is present and
+ * advancing.
+ *
+ * This matters because UEFI's microsecond delay is built on that timer,
+ * and MP services uses timed waits to enumerate and start application
+ * processors. On a machine where the timer never advances, those waits do
+ * not fail - they spin forever, so GetNumberOfProcessors simply never
+ * returns and the loader hangs with no diagnostic. Bochs is exactly such a
+ * machine: it provides no PIIX4 power management function, so the firmware
+ * ends up polling a port that always reads back all ones.
+ *
+ * The address comes from the FADT rather than from a fixed chipset
+ * location, so this stays correct on real hardware regardless of chipset.
+ */
+static bool acpi_timer_advancing(EFI_SYSTEM_TABLE * system_table)
+{
+    constexpr std::uint64_t acpi_20_guid_data1 = 0x8868e871;
+    constexpr std::size_t fadt_pm_timer_block_offset = 76;
+
+    auto read_port = [](std::uint16_t port) {
+        std::uint32_t value{};
+        asm volatile("inl %1, %0" : "=a"(value) : "Nd"(port));
+        return value;
+    };
+
+    // Locate the ACPI 2.0 root pointer among the configuration tables.
+    const unsigned char * rsdp{};
+    for (std::size_t i{}; i < system_table->NumberOfTableEntries; ++i) {
+        auto & entry = system_table->ConfigurationTable[i];
+        if (entry.VendorGuid.Data1 == acpi_20_guid_data1) {
+            rsdp = static_cast<const unsigned char *>(entry.VendorTable);
+            break;
+        }
+    }
+    if (!rsdp) {
+        return false;
+    }
+
+    // XSDT address lives at offset 24 of the root pointer.
+    std::uint64_t xsdt_address{};
+    std::memcpy(&xsdt_address, rsdp + 24, sizeof(xsdt_address));
+    if (!xsdt_address) {
+        return false;
+    }
+
+    auto * xsdt = reinterpret_cast<const unsigned char *>(xsdt_address);
+    std::uint32_t xsdt_length{};
+    std::memcpy(&xsdt_length, xsdt + 4, sizeof(xsdt_length));
+    if (xsdt_length <= 36) {
+        return false;
+    }
+
+    // Walk the XSDT entries looking for the fixed ACPI description table.
+    auto entries = (xsdt_length - 36) / sizeof(std::uint64_t);
+    for (std::size_t i{}; i < entries; ++i) {
+        std::uint64_t table_address{};
+        std::memcpy(&table_address,
+                    xsdt + 36 + (i * sizeof(std::uint64_t)),
+                    sizeof(table_address));
+        if (!table_address) {
+            continue;
+        }
+
+        auto * table =
+            reinterpret_cast<const unsigned char *>(table_address);
+        if (std::memcmp(table, "FACP", 4)) {
+            continue;
+        }
+
+        std::uint32_t timer_block{};
+        std::memcpy(&timer_block,
+                    table + fadt_pm_timer_block_offset,
+                    sizeof(timer_block));
+        if (!timer_block || (0xffffffffu == timer_block)) {
+            return false;
+        }
+
+        // Present is not the same as working, so require it to actually
+        // move.
+        auto port = static_cast<std::uint16_t>(timer_block);
+        auto first = read_port(port);
+        if (0xffffffffu == first) {
+            return false;
+        }
+        for (std::uint32_t attempt{}; attempt < 1000000u; ++attempt) {
+            if (read_port(port) != first) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    return false;
+}
+
 static std::size_t number_of_cpus()
 {
+    // Without a working timer, MP services would hang rather than fail, so
+    // report the boot processor alone and let the hypervisor come up on
+    // it.
+    if (!g_timed_waits_usable) {
+        return 1;
+    }
+
+#if ZPP_CI_VERIFY_HYPERVISOR
+    serial_write("zpp: ZPP_TRACE number_of_cpus enter\r\n");
+#endif
     std::size_t cpu_count{};
     std::size_t enabled_cpu_count{};
 
@@ -106,6 +260,12 @@ static int call_on_cpu(std::size_t cpuid,
     // If this is the main CPU, just call the user function.
     if (0 == cpuid) {
         return function(context);
+    }
+
+    // Any other CPU needs MP services, which cannot be used without
+    // working timed waits. Refuse rather than hang.
+    if (!g_timed_waits_usable) {
+        return -1;
     }
 
     // The event we will wait for to join the new started AP.
@@ -300,38 +460,6 @@ static void query_cpuid(std::uint32_t leaf, std::uint32_t (&out)[4])
 }
 
 /**
- * Writes a string straight to the first serial port, bypassing UEFI
- * console services. OVMF does not necessarily route ConOut to serial, and
- * with no video device there may be nowhere else for it to go, so this is
- * the channel that can be relied on to reach Bochs' serial capture.
- */
-static void serial_write(const char * text)
-{
-    constexpr std::uint16_t port = 0x3f8;
-    constexpr std::uint16_t line_status = port + 5;
-    constexpr std::uint8_t transmitter_empty = 1u << 5;
-
-    for (auto * character = text; *character; ++character) {
-        // Wait for the transmit holding register to drain. Without this
-        // only the first sixteen characters ever appear - that is the
-        // 16550's FIFO depth, and anything written past a full FIFO is
-        // dropped. Bounded, so a machine with no working UART cannot wedge
-        // the loader here.
-        for (std::uint32_t attempt{}; attempt < 100000u; ++attempt) {
-            std::uint8_t status{};
-            asm volatile("inb %1, %0" : "=a"(status) : "Nd"(line_status));
-            if (status & transmitter_empty) {
-                break;
-            }
-        }
-
-        asm volatile("outb %0, %1"
-                     :
-                     : "a"(static_cast<std::uint8_t>(*character)),
-                       "Nd"(port));
-    }
-}
-/**
  * @}
  */
 
@@ -414,6 +542,16 @@ extern "C" EFI_STATUS EFIAPI uefi_main(EFI_HANDLE image_handle,
 
 #if ZPP_CI_VERIFY_HYPERVISOR
     serial_write("zpp: ZPP_TRACE entry\r\n");
+#endif
+
+    // Establish whether timed waits work before touching MP services,
+    // since a dead timer makes them hang rather than return an error.
+    g_timed_waits_usable = acpi_timer_advancing(system_table);
+#if ZPP_CI_VERIFY_HYPERVISOR
+    serial_write(
+        g_timed_waits_usable
+            ? "zpp: ZPP_TRACE timed waits usable\r\n"
+            : "zpp: ZPP_TRACE timed waits unusable, single cpu\r\n");
 #endif
 
     // Load the MP Services.
