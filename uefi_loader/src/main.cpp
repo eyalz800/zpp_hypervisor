@@ -498,6 +498,102 @@ static bool file_exists(EFI_HANDLE device, const char16_t * path)
  * saved would be worse than booting without one.
  */
 /**
+ * Traces which boot option started this loader, and what the firmware
+ * thinks each of its processors is doing.
+ *
+ * Both exist because of a failure that looked intermittent for hours and
+ * was not. Launched from the firmware's boot order the chainload works;
+ * launched by the setup menu's boot override the same build stops dead
+ * after the chainload line. Nothing in the log distinguished the two, so
+ * every hypothesis was tested against a baseline that was moving for a
+ * reason nobody had recorded.
+ *
+ * BootCurrent is the firmware's own statement of which option it is
+ * running. An absent one is itself the answer: the firmware is starting
+ * this image outside the boot order, which is what a boot override is.
+ *
+ * The processor states test the obvious suspicion about why that would
+ * matter - that the setup environment has woken the application
+ * processors, leaving them somewhere other than the wait-for-SIPI state
+ * this VMM's whole adoption path assumes them to be parked in. MP
+ * services is the only thing here that can see them, it is already
+ * located, and asking costs nothing. Reading only: waking or borrowing
+ * one is exactly what was removed from this loader.
+ */
+static void trace_launch_context()
+{
+    if constexpr (!trace::enabled) {
+        return;
+    }
+
+    if (std::uint16_t current{}; g_runtime_services) {
+        auto name = u"BootCurrent";
+        std::size_t size = sizeof(current);
+        if (EFI_ERROR(g_runtime_services->GetVariable(
+                reinterpret_cast<CHAR16 *>(const_cast<char16_t *>(name)),
+                &g_efi_global_variable_guid,
+                nullptr,
+                &size,
+                &current))) {
+            trace::line("ZPP_TRACE no BootCurrent, started outside the "
+                        "boot order");
+        } else {
+            trace::hex_line("ZPP_TRACE started as boot option ", current);
+        }
+    }
+
+    if (!g_mp_services) {
+        return;
+    }
+
+    std::size_t total{};
+    std::size_t enabled{};
+    if (EFI_ERROR(g_mp_services->GetNumberOfProcessors(
+            g_mp_services, &total, &enabled))) {
+        trace::line("ZPP_TRACE processor count unavailable");
+        return;
+    }
+
+    char buffer[trace::line_capacity]{};
+    auto end = trace::append_text(buffer, "processors ");
+    end = trace::append_decimal(end, total);
+    end = trace::append_text(end, ", enabled ");
+    end = trace::append_decimal(end, enabled);
+    *end = 0;
+    trace::line(buffer);
+
+    // The status flags say whether the firmware considers a processor the
+    // boot processor, enabled, and healthy. They do not name an activity
+    // state - nothing outside the processor itself can - so a difference
+    // between two launches is evidence rather than a diagnosis.
+    for (std::size_t i{}; i < total; ++i) {
+        EFI_PROCESSOR_INFORMATION information{};
+        if (EFI_ERROR(g_mp_services->GetProcessorInfo(
+                g_mp_services, i, &information))) {
+            continue;
+        }
+
+        char line[trace::line_capacity]{};
+        auto at = trace::append_text(line, "cpu ");
+        at = trace::append_decimal(at, i);
+        at = trace::append_text(at, " apic ");
+        at = trace::append_hex(
+            at, static_cast<std::uint64_t>(information.ProcessorId), 4);
+        at = trace::append_text(at, " flags ");
+        at = trace::append_hex(at, information.StatusFlag, 8);
+        at = trace::append_text(at, information.StatusFlag & 0x1
+                                        ? " bsp"
+                                        : " application");
+        at = trace::append_text(
+            at, information.StatusFlag & 0x2 ? " enabled" : " disabled");
+        at = trace::append_text(
+            at, information.StatusFlag & 0x4 ? " healthy" : " unhealthy");
+        *at = 0;
+        trace::line(line);
+    }
+}
+
+/**
  * The vendor GUID the trace variable lives under. Anything but the global
  * one, so nothing here can collide with a firmware variable.
  */
@@ -1150,6 +1246,10 @@ extern "C" EFI_STATUS EFIAPI uefi_main(EFI_HANDLE image_handle,
 
     trace::line("ZPP_TRACE mp services located");
 
+    // Before this loader has done anything, so it describes the machine
+    // the firmware handed over rather than the one we made.
+    trace_launch_context();
+
     // Load the ELF.
     const zpp_loader_parameters parameters{
         .allocate_rwx = allocate_rwx,
@@ -1498,6 +1598,12 @@ extern "C" EFI_STATUS EFIAPI uefi_main(EFI_HANDLE image_handle,
             } else {
                 trace::line("ZPP_TRACE no load options for boot manager");
             }
+
+            // Again, immediately before handing over: the comparison
+            // against the same lines above is what would show this loader
+            // having changed a processor's state, and the state at the
+            // handoff is the one the boot manager actually inherits.
+            trace_launch_context();
 
             // Name what is being started, on the line that says it is
             // being started. The candidate paths traced above are traced

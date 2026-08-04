@@ -15,6 +15,45 @@ The convention for closing an entry: state what was observed afterwards, not
 that the code changed. "Guest now reads `cr4=0x0668`" closes one of these;
 "masked CR4" does not.
 
+## How this is launched changes whether it works
+
+Read this before investigating a hang at the chainload, because it cost a
+day once.
+
+Launched from the firmware's **boot order**, the loader chainloads Windows
+Boot Manager and Windows boots. Launched by the firmware setup's **boot
+override**, it stops after the `chainloading` trace line with nothing
+further drawn: no Windows output, no bugcheck, no crash dump. Confirmed
+both ways on the same build, back to back.
+
+The failure looked intermittent for hours and was not. It is deterministic
+in the launch method, and the launch method was the one variable nobody had
+written down - so hypotheses about hibernation, about a swallowed start-up
+IPI and about the state of the application processors were each tested
+against a baseline that was moving for an unrelated reason. Two of the
+fixes that came out of that are right on their own evidence and neither was
+the cause.
+
+Not yet established: whether a boot override of Windows Boot Manager
+*without* this loader also hangs. Until that is run, whether this is our
+defect or the firmware's is unknown. It is the cheapest test available and
+it should be the next one.
+
+What differs about a boot override, as candidates rather than findings: it
+runs from inside setup, so the firmware has already connected every
+controller, allocated for its own user interface, and selected a graphics
+mode. The module's address is not the difference - `0x89162000` against
+`0x89164000` across two builds is this loader's own binary growing.
+
+A second thing that produces this symptom exactly, with a fully known
+cause, is worth keeping beside it: a `ZPP_VERIFY_HYPERVISOR` build. That
+one halts every application processor in real mode and leaves the boot
+processor's APIC in x2APIC mode where the firmware's xAPIC accesses cannot
+see it, and the result is the same silent stop after `chainloading`. So
+that symptom is what "the application processors are not in the state the
+operating system expects" looks like here. It is a reference failure, not
+an explanation of the one above.
+
 ## Measured
 
 These were observed in real state. They are not inferences.
