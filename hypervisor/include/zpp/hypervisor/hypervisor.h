@@ -688,6 +688,18 @@ private:
     alignas(page_size) std::uint8_t start_up_stack[0x4000]{};
 
     /**
+     * The error each processor's launch failed with, or zero.
+     *
+     * A processor this VMM started cannot report its own failure: it was
+     * reached by an inter-processor interrupt rather than called, so there
+     * is nothing to return an error to and nothing left to do with it but
+     * stop. The code is recorded here on the way past instead, and read
+     * back through the diagnostic CPUID leaf by a processor that is still
+     * running.
+     */
+    std::uint64_t launch_error[max_cpus]{};
+
+    /**
      * Set by a processor being started once it is running the guest, so
      * that the processor that started it knows it succeeded.
      */

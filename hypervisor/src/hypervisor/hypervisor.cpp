@@ -2360,6 +2360,10 @@ hypervisor::main(arch::x86_64::context & caller_context)
                             // reported here because a processor that never
                             // arrived cannot report anything itself.
                             (start_up_trampoline_stage() << 8) |
+                            // What its launch failed with, in bits 19:16,
+                            // for the same reason.
+                            static_cast<std::uint32_t>(
+                                (this->launch_error[cpu] & 0xf) << 16) |
                             (static_cast<std::uint32_t>(
                                  newest.activity_state & 0x3)
                              << 3);
