@@ -159,6 +159,94 @@ Both paths are handled. Verified to survive `--gc-sections --strip-all`.
 3. `cmake/freestanding-libc/` — minimal C stubs for `#include_next`
 4. Clang builtins — `stddef.h`, `stdint.h`
 
+## What the guest is told
+
+Everything this VMM presents to its guest lives in the exit handler in
+`hypervisor/src/hypervisor/hypervisor.cpp`. Every case in it is required for
+Windows to boot, and each was found by Windows failing in a way that pointed
+somewhere else entirely.
+
+- **VMX is hidden** — CPUID leaf 1, ECX bit 5 cleared. Hyper-V launches ahead
+  of Windows whenever VBS is on, and would `#GP` on its own `vmxon`. Reporting
+  no VMX makes it stand down. Remove once nesting exists.
+- **The whole hypervisor CPUID range is answered**, `0x40000000`–`0x4fffffff`,
+  not just the leaf holding the signature. Unanswered leaves fall through to
+  whatever is underneath, and underneath is not nothing: the QEMU test rig runs
+  `-cpu host,...,hv-passthrough`, which exposes a full set of Hyper-V
+  enlightenments. A guest that reads vendor `ZppZppZppZpp` from one leaf and a
+  Hyper-V interface from the next acts on the more specific claim, and starts
+  using synthetic MSRs that do not exist here.
+- **Unimplemented MSRs fault.** An access outside the two ranges the MSR bitmap
+  covers, `0`–`0x1fff` and `0xc0000000`–`0xc0001fff`, exits *unconditionally* —
+  no bitmap can stop it, which is why an all-zeroes bitmap does not. Nothing
+  real lives outside those ranges, so the answer is the one bare hardware
+  gives: `#GP`, with RIP left at the faulting instruction.
+- **Unhandled exits stop the CPU.** They are not resumed from, because the
+  resume path advances RIP by the faulting instruction's length, so the guest
+  silently skips it and continues as though it had worked.
+
+The recurring mistake in all of these is the same: answering *part* of an
+interface, or resuming as though an unhandled instruction had succeeded. Both
+produce a guest that has been lied to, and it fails later somewhere unrelated.
+Windows reported `0xc000000d`, `STATUS_INVALID_PARAMETER`, on a screen blaming
+its own boot configuration data; the boot configuration was fine, and the cause
+was a skipped `rdmsr` of `0x40000022`. **When adding a case, answer the whole of
+whatever it is, or fault.**
+
+### Chainloading a boot manager
+
+`uefi_loader/src/main.cpp` has to do more than load a file:
+
+- **Connect every controller first.** Firmware connects only as much as it needs
+  to reach its own boot option, so a disk nothing has booted from carries no
+  block IO handle at all — the passed-through NVMe was enumerated as a PCI
+  device and invisible as a file system until driven. This is also why the EFI
+  shell shows no `fs1:` there until `connect -r`.
+- **Require the boot manager's configuration beside it.** Picking whichever file
+  system `LoadImage` first accepts is too weak: a recovery or vendor partition
+  can carry its own `bootmgfw.efi`, and starting that copy fails because the
+  `BCD` is not there. Agreeing with the firmware's own boot option is *not*
+  evidence of a correct choice either — firmware generates options by scanning
+  for bootable files, by the same weak test.
+- **Forward the boot option's optional data** as the started image's load
+  options, which is what the firmware's own boot path does. Auto-generated
+  options carry none, so an empty result is normal.
+- `BootOrder` is not a complete list of options. Firmware regenerates and
+  reorders it as devices come and go, so an option can be present in NVRAM and
+  absent from `BootOrder`.
+
+### Reading hypervisor state from a debugger
+
+Once the guest is running there is no other channel: there is no console, the
+serial port belongs to the guest, and a debugger attached from outside sees
+guest state only — the VMCS fields that decide whether a CPU runs at all cannot
+be read without being on that CPU with that VMCS current. So the interesting
+state is recorded into members as it happens:
+
+- `exit_trace` / `exit_trace_count` — a ring of the most recent exits per CPU,
+  sampled after handling, so it shows what the guest was about to be resumed
+  with. Newest entry is at `(count - 1) % capacity`.
+- `unhandled_exit`, `vm_entry_failure` — filled in immediately before the CPU
+  stops. Check `occurred` first; the rest is meaningless until it is set.
+
+Build with `-DZPP_HYPERVISOR_WAIT_FOR_DEBUGGER=ON` and the hypervisor spins at
+its entry point until released with `set var gdb_attached = 1`. Use it. Racing a
+gdb attach against the guest does not work when the failure being chased kills
+the guest: symbols cannot be loaded until the loader has mapped the module, and
+by then it is over.
+
+Two things that cost time:
+
+- `load-symbols` needs an address inside the module, and gdb resolves *types*
+  relative to the selected frame — so `(zpp::hypervisor::hypervisor *)` fails
+  with "No type ... in namespace" whenever no CPU happens to be inside our code.
+  Either select a thread that is, or read the members as raw memory at
+  `symbol + offset`, taking offsets from
+  `llvm-dwarfdump --name=<member> --show-children` and the singleton's address
+  from `llvm-nm`.
+- The module load address is printed on serial (`allocate_rwx done at …`) and is
+  **not** stable across configurations, so read it per run rather than reusing it.
+
 ## Debugging
 
 Run Bochs and gdb **inside a named tmux session**, never as a detached one-shot command, so
