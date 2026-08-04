@@ -10,7 +10,10 @@ memory: guest=1024, host=1024
 
 # A model that reports VMX. Bochs 3.0 removed the legacy 'cpuid:' option,
 # so CPU features come from the model alone - pick one with VT-x.
-cpu: model=corei7_icelake_u, count=1, ips=50000000, reset_on_triple_fault=1
+# ips is Bochs' estimate of how fast it can simulate, and it drives the guest's
+# sense of time rather than actual speed. Too low a value makes firmware and
+# guests hit their own internal timeouts, so keep it realistic.
+cpu: model=corei7_icelake_u, count=1, ips=250000000, reset_on_triple_fault=1
 
 ata0: enabled=1, ioaddr1=0x1f0, ioaddr2=0x3f0, irq=14
 ata0-master: type=disk, mode=flat, path="esp.img"
