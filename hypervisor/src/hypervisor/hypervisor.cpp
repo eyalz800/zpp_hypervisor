@@ -894,6 +894,32 @@ void hypervisor::emulate_init_signal(arch::x86_64::context & context)
     vmcs.guest_interruptibility_state(0);
     vmcs.guest_pending_debug_exceptions(0);
 
+    // SDM 12.1: during an INIT "the TLBs and BTB are invalidated as with
+    // a hardware reset", and the same paragraph describes INIT as the
+    // method for "switching from protected to real-address mode" - which
+    // is exactly the transition just made above. With VPID enabled the
+    // processor tags its cached translations and they survive that
+    // transition, so they have to be invalidated by hand. Paging is off
+    // now, making linear addresses equal guest-physical ones, and a stale
+    // entry from the long mode context would translate them anyway.
+    //
+    // Single-context, which invalidates the linear and combined mappings
+    // tagged with this VPID and leaves other processors alone.
+    constexpr std::uint64_t invvpid_single_context = 1;
+
+    struct alignas(0x10) invvpid_descriptor
+    {
+        std::uint64_t vpid{};
+        std::uint64_t linear_address{};
+    };
+
+    invvpid_descriptor descriptor{vmcs.vpid(), 0};
+    if (arch::x86_64::vmx::invvpid(
+            reinterpret_cast<void *>(invvpid_single_context),
+            &descriptor)) {
+        log("invvpid failed on cpu {}", vmcs.vpid());
+    }
+
     // And now wait for the start-up IPI. This is the whole point: it is
     // what makes the processor startable again.
     vmcs.guest_activity_state(
