@@ -1,4 +1,8 @@
 #pragma once
+extern "C" {
+#include <Uefi.h>
+}
+
 #include <cstddef>
 #include <cstdint>
 #include <source_location>
@@ -180,6 +184,12 @@ struct trace
     static constexpr std::uint16_t port = 0x3f8;
 
     /**
+     * The firmware console, once there is one, or null before boot
+     * services have been reached and after they are gone. Set by efi_main.
+     */
+    static inline EFI_SIMPLE_TEXT_OUTPUT_PROTOCOL * console{};
+
+    /**
      * Writes a string straight to the first serial port, bypassing UEFI
      * console services, and keeps a copy in log_buffer.
      *
@@ -201,6 +211,48 @@ struct trace
         for (auto * character = text; *character; ++character) {
             if (log_used < (log_capacity - 1)) {
                 log_buffer[log_used++] = *character;
+            }
+        }
+
+        // And to the screen, which on a machine with no serial port is the
+        // only channel that reports as it goes.
+        //
+        // The disk copy is written once, just before the boot manager is
+        // started, so it says nothing at all about a hang before that -
+        // which is exactly the failure this was added for: a bare metal
+        // boot that showed a black screen and left no log. This one
+        // appears a line at a time, so whatever is last on the screen is
+        // where it stopped.
+        //
+        // char16_t and a cast at the call, for the reason verify.h gives:
+        // CHAR16 is a distinct type of the same size, so the conversion is
+        // confined to the one call that crosses into the firmware. Folded
+        // byte by byte because everything traced here is ASCII by
+        // construction, and flushed in chunks so a long line needs no
+        // allocation.
+        if (console) {
+            constexpr std::size_t chunk = 96;
+            char16_t wide[chunk + 1]{};
+            std::size_t used{};
+            for (auto * character = text; *character; ++character) {
+                // The firmware console wants a carriage return of its own;
+                // without one each line restarts under the last.
+                if ('\n' == *character) {
+                    wide[used++] = u'\r';
+                }
+                wide[used++] = static_cast<char16_t>(
+                    static_cast<unsigned char>(*character));
+                if (used >= chunk) {
+                    wide[used] = 0;
+                    console->OutputString(
+                        console, reinterpret_cast<CHAR16 *>(wide));
+                    used = 0;
+                }
+            }
+            if (used) {
+                wide[used] = 0;
+                console->OutputString(console,
+                                      reinterpret_cast<CHAR16 *>(wide));
             }
         }
 

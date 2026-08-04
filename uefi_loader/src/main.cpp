@@ -1036,6 +1036,13 @@ extern "C" EFI_STATUS EFIAPI uefi_main(EFI_HANDLE image_handle,
 
     // Copy the boot services.
     g_boot_services = system_table->BootServices;
+
+    // Point the trace channel at the screen before anything can fail, so
+    // that a failure has somewhere to appear. On a machine with no serial
+    // port this is the only channel that reports as it goes - the disk
+    // copy is written once, at the chainload, and says nothing about a
+    // hang before it.
+    trace::console = system_table->ConOut;
     g_runtime_services = system_table->RuntimeServices;
 
     trace::line("ZPP_TRACE entry");
