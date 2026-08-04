@@ -726,6 +726,164 @@ std::expected<void, zpp::error> hypervisor::enable_vmx_in_feature_control()
     return {};
 }
 
+void hypervisor::emulate_init_signal()
+{
+    auto & vmcs = this->vmcs;
+
+    using segment_descriptor = arch::x86_64::segment_descriptor;
+
+    // The state a processor holds after an INIT, from the SDM's table of
+    // processor state following power-up, reset or INIT.
+    constexpr std::uint64_t rflags_after_init = 0x2;
+    constexpr std::uint64_t rip_after_init = 0xfff0;
+    constexpr std::uint64_t dr7_after_init = 0x400;
+    constexpr std::uint64_t cr0_after_init = 0x60000010;
+    constexpr std::uint64_t cr4_after_init = 0;
+    constexpr std::uint64_t code_selector_after_init = 0xf000;
+    constexpr std::uint64_t code_base_after_init = 0xffff0000;
+    constexpr std::uint64_t real_mode_segment_limit = 0xffff;
+    constexpr std::uint64_t descriptor_table_limit_after_init = 0xffff;
+
+    // The two bits VMX will not let a guest clear: CR0.NE and CR4.VMXE
+    // are required to be set by IA32_VMX_CR0_FIXED0 and
+    // IA32_VMX_CR4_FIXED0, and unrestricted guest exempts only PE and PG
+    // - so a literally architectural CR0 and CR4 would fail VM entry.
+    // The architectural values go into the read shadows, which is where a
+    // guest would look once those bits are owned by the host.
+    constexpr std::uint64_t cr0_never_clear =
+        arch::x86_64::cr0_bits::numeric_error;
+    constexpr std::uint64_t cr4_never_clear =
+        arch::x86_64::cr4_bits::vmx_enable;
+
+    // A real mode segment: sixteen bit, byte granular, limit 0xffff. The
+    // access rights the VMCS wants are the descriptor's, so they are
+    // built out of a descriptor rather than written as a number.
+    auto real_mode_segment = [](segment_descriptor::segment_type type,
+                                bool system) {
+        segment_descriptor descriptor;
+        descriptor.limit(real_mode_segment_limit);
+        descriptor.base(0);
+        descriptor.type(type);
+        descriptor.system(system);
+        descriptor.privilege_level(0);
+        descriptor.present(true);
+        descriptor.available_for_system_use(false);
+        descriptor.code_64_bit(false);
+        descriptor.default_operation_size(false);
+        descriptor.granularity(false);
+        return descriptor.vmx_access_rights();
+    };
+
+    auto code_access_rights = real_mode_segment(
+        segment_descriptor::segment_type::code_execute_read_accessed,
+        false);
+    auto data_access_rights = real_mode_segment(
+        segment_descriptor::segment_type::data_read_write_accessed, false);
+    auto ldtr_access_rights =
+        real_mode_segment(segment_descriptor::segment_type::ldt, true);
+    auto tr_access_rights = real_mode_segment(
+        segment_descriptor::segment_type::tss_busy, true);
+
+    // Real mode, based at the reset vector. An application processor
+    // never runs an instruction here - the start-up IPI that follows
+    // redirects it - but the firmware is entitled to see this state.
+    vmcs.guest_cr0(cr0_after_init | cr0_never_clear);
+    vmcs.cr0_read_shadow(cr0_after_init);
+    vmcs.guest_cr3(0);
+    vmcs.guest_cr4(cr4_after_init | cr4_never_clear);
+    vmcs.cr4_read_shadow(cr4_after_init);
+
+    // Long mode is gone with CR0.PG, and the entry control has to agree
+    // or VM entry fails its consistency checks.
+    vmcs.guest_ia32_efer(0);
+    vmcs.vm_entry_controls(
+        vmcs.vm_entry_controls() &
+        ~arch::x86_64::vmx::vm_entry_controls::ia_32e_mode_guest);
+
+    vmcs.guest_rflags(rflags_after_init);
+    vmcs.guest_rip(rip_after_init);
+    vmcs.guest_rsp(0);
+    vmcs.guest_dr7(dr7_after_init);
+
+    vmcs.guest_cs_selector(code_selector_after_init);
+    vmcs.guest_cs_base(code_base_after_init);
+    vmcs.guest_cs_limit(real_mode_segment_limit);
+    vmcs.guest_cs_access_rights(code_access_rights);
+
+    // Every data segment is sixteen bit, based at zero, selector zero.
+    vmcs.guest_ss_selector(0);
+    vmcs.guest_ss_base(0);
+    vmcs.guest_ss_limit(real_mode_segment_limit);
+    vmcs.guest_ss_access_rights(data_access_rights);
+
+    vmcs.guest_ds_selector(0);
+    vmcs.guest_ds_base(0);
+    vmcs.guest_ds_limit(real_mode_segment_limit);
+    vmcs.guest_ds_access_rights(data_access_rights);
+
+    vmcs.guest_es_selector(0);
+    vmcs.guest_es_base(0);
+    vmcs.guest_es_limit(real_mode_segment_limit);
+    vmcs.guest_es_access_rights(data_access_rights);
+
+    vmcs.guest_fs_selector(0);
+    vmcs.guest_fs_base(0);
+    vmcs.guest_fs_limit(real_mode_segment_limit);
+    vmcs.guest_fs_access_rights(data_access_rights);
+
+    vmcs.guest_gs_selector(0);
+    vmcs.guest_gs_base(0);
+    vmcs.guest_gs_limit(real_mode_segment_limit);
+    vmcs.guest_gs_access_rights(data_access_rights);
+
+    vmcs.guest_ldtr_selector(0);
+    vmcs.guest_ldtr_base(0);
+    vmcs.guest_ldtr_limit(real_mode_segment_limit);
+    vmcs.guest_ldtr_access_rights(ldtr_access_rights);
+
+    vmcs.guest_tr_selector(0);
+    vmcs.guest_tr_base(0);
+    vmcs.guest_tr_limit(real_mode_segment_limit);
+    vmcs.guest_tr_access_rights(tr_access_rights);
+
+    vmcs.guest_gdtr_base(0);
+    vmcs.guest_gdtr_limit(descriptor_table_limit_after_init);
+    vmcs.guest_idtr_base(0);
+    vmcs.guest_idtr_limit(descriptor_table_limit_after_init);
+
+    // Nothing is blocked or pending across an INIT.
+    vmcs.guest_interruptibility_state(0);
+    vmcs.guest_pending_debug_exceptions(0);
+
+    // And now wait for the start-up IPI. This is the whole point: it is
+    // what makes the processor startable again.
+    vmcs.guest_activity_state(
+        arch::x86_64::vmx::activity_state::wait_for_start_up_ipi);
+}
+
+void hypervisor::emulate_start_up_ipi(std::uint64_t vector)
+{
+    auto & vmcs = this->vmcs;
+
+    constexpr std::uint64_t real_mode_segment_limit = 0xffff;
+
+    // Shifts that turn the vector into a segment. The vector is a page
+    // number, so the segment is the vector scaled by a page, and the
+    // selector is the segment base shifted down by the four bits real
+    // mode already implies.
+    constexpr std::uint64_t vector_to_selector_shift = 8;
+    constexpr std::uint64_t vector_to_base_shift = 12;
+
+    // Execution begins at the start of that page, in real mode.
+    vmcs.guest_cs_selector(vector << vector_to_selector_shift);
+    vmcs.guest_cs_base(vector << vector_to_base_shift);
+    vmcs.guest_cs_limit(real_mode_segment_limit);
+    vmcs.guest_rip(0);
+
+    // Runnable again.
+    vmcs.guest_activity_state(arch::x86_64::vmx::activity_state::active);
+}
+
 std::expected<void, zpp::error> hypervisor::enter_root_mode()
 {
     // Backup cr0 and cr4.
@@ -802,6 +960,8 @@ void hypervisor::setup_vmcs(arch::x86_64::context & guest_context)
                     enable_ept |
                 arch::x86_64::vmx::vm_execution_controls::secondary::
                     enable_vpid |
+                arch::x86_64::vmx::vm_execution_controls::secondary::
+                    unrestricted_guest |
                 arch::x86_64::vmx::vm_execution_controls::secondary::
                     enable_rdtscp |
                 arch::x86_64::vmx::vm_execution_controls::secondary::
@@ -1177,22 +1337,25 @@ hypervisor::main(arch::x86_64::context & caller_context)
         auto & vmcs = this->vmcs;
 
         // Virtual processor id.
-        auto vpid = vmcs.vpid().value();
+        auto vpid = vmcs.vpid();
         static_cast<void>(vpid);
 
         // The basic exit reason.
         basic_reason reason{};
 
-        // Get the exit reason.
-        if (auto exit_reason = vmcs.exit_reason(); !exit_reason) {
-            return;
-        } else {
-            reason = arch::x86_64::vmx::exit_reason(exit_reason.value())
-                         .basic();
-        }
+        // Get the exit reason. No failure to handle: reading it cannot
+        // fail while a VMCS is current, and it traps if it ever does -
+        // which beats what used to happen here, a bare return that left
+        // the guest un-resumed and said nothing about why.
+        reason =
+            arch::x86_64::vmx::exit_reason(vmcs.exit_reason()).basic();
 
         // Get the guest RIP.
-        context.rip = vmcs.guest_rip().value();
+        context.rip = vmcs.guest_rip();
+
+        // Whether the exit was caused by an instruction the guest should
+        // be resumed past. Cleared by the handlers for which it is not.
+        bool advance_rip = true;
 
         // Check the exit reason.
         switch (reason) {
@@ -1206,6 +1369,14 @@ hypervisor::main(arch::x86_64::context & caller_context)
             if (1 == context.rax) {
                 // Set hypervisor present bit.
                 cpuid_result[2] |= (1 << 31);
+
+                // Hide VMX. We hold VMX root mode and do not support
+                // nesting, so a guest hypervisor would #GP on its own
+                // vmxon and take the boot down with it. Reporting no VMX
+                // makes it stand down instead: Hyper-V, which launches
+                // ahead of Windows whenever VBS is on, hands straight
+                // off to the OS. Remove this once nesting exists.
+                cpuid_result[2] &= ~(1u << 5);
             } else if ((1 << 30) == context.rax) {
                 // HyperVisor Name: ZppZppZppZpp.
                 cpuid_result[1] = 0x5a70705a;
@@ -1223,8 +1394,8 @@ hypervisor::main(arch::x86_64::context & caller_context)
         case basic_reason::xsetbv: {
             // Activate CR4 xsave bit.
             auto cr4 = arch::x86_64::cr4();
-            if (!(cr4 & (1ull << 18))) {
-                arch::x86_64::cr4(cr4 | (1ull << 18));
+            if (!(cr4 & arch::x86_64::cr4_bits::os_xsave)) {
+                arch::x86_64::cr4(cr4 | arch::x86_64::cr4_bits::os_xsave);
             }
 
             // Execute the xsetbv instruction.
@@ -1237,14 +1408,36 @@ hypervisor::main(arch::x86_64::context & caller_context)
             arch::x86_64::invd();
             break;
         }
+        case basic_reason::init_signal: {
+            // The hardware does not act on the INIT, it just tells us
+            // about it, so this is the only thing standing between an
+            // application processor and never waking again.
+            emulate_init_signal();
+            advance_rip = false;
+            break;
+        }
+        case basic_reason::start_up_ipi: {
+            // The vector is the low byte of the exit qualification.
+            constexpr std::uint64_t sipi_vector_mask = 0xff;
+            emulate_start_up_ipi(vmcs.exit_qualification() &
+                                 sipi_vector_mask);
+            advance_rip = false;
+            break;
+        }
         default: {
             break;
         }
         }
 
-        // Update RIP.
-        context.rip += vmcs.vm_exit_instruction_length().value();
-        vmcs.guest_rip(context.rip);
+        // Update RIP, unless nothing was executed. For an INIT signal or
+        // a start-up IPI the instruction length field holds nothing
+        // meaningful, and both handlers have already put RIP where the
+        // processor is meant to resume - adding to it would land the
+        // guest a few bytes into its own entry point.
+        if (advance_rip) {
+            context.rip += vmcs.vm_exit_instruction_length();
+            vmcs.guest_rip(context.rip);
+        }
 
         // Resume the VM.
         context.rip =

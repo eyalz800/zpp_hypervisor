@@ -216,6 +216,27 @@ private:
     std::expected<void, zpp::error> enter_root_mode();
 
     /**
+     * Emulate an INIT signal, which in VMX non-root operation causes a VM
+     * exit instead of resetting the processor.
+     *
+     * Nothing else can do it: the hardware hands us the signal and takes
+     * no further action, so unless the guest state is reset here and the
+     * activity state left waiting for a start-up IPI, the INIT is simply
+     * lost. That is what used to happen, and it is why an application
+     * processor could be started exactly once - the firmware parks its
+     * APs in a hlt loop and wakes them with INIT-SIPI-SIPI, so every
+     * wake after the first went nowhere and the caller spun forever.
+     */
+    void emulate_init_signal();
+
+    /**
+     * Emulate a start-up IPI: leave the wait-for-SIPI state and begin
+     * execution in real mode at the vector the IPI carries, which is the
+     * page number of the entry point.
+     */
+    void emulate_start_up_ipi(std::uint64_t vector);
+
+    /**
      * Setup the VM control structure according to the given guest context,
      * and configured host fields.
      */
