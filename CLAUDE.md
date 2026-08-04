@@ -37,8 +37,13 @@ modules — this is why `cmake_minimum_required` is 3.28.
 ### Key directories
 
 - `cmake/` — toolchain files, sub-build CMakeLists, freestanding libc stubs, dependency fetching
-- `hypervisor/include/zpp/` — hypervisor headers (error types, VMX, EPT, page tables, heap)
-- `hypervisor/src/` — hypervisor implementation (main, hypervisor, CRT, x64 arch code)
+- `hypervisor/include/zpp/` — hypervisor headers (error types, page tables, heap)
+- `hypervisor/include/zpp/arch/x86_64/` — the architecture layer: instruction wrappers,
+  descriptors, page tables, MSRs, MTRRs. Anything true of x86-64 regardless of vendor
+- `hypervisor/include/zpp/arch/x86_64/vmx/` — VT-x only: VMCS, EPT, the VMX instructions and
+  the VMX capability MSRs. An AMD-V layer would sit beside it as `svm/`, and another
+  architecture as `zpp/arch/aarch64/`
+- `hypervisor/src/` — hypervisor implementation (main, hypervisor, CRT, `arch/x86_64/`)
 - `loader/src/` — shared loader code (elf_binary.cpp with `#embed`, main.cpp with `zpp_load_elf`)
 - `{windows,uefi,linux}_loader/` — platform-specific loader glue + CRT stubs
 
@@ -185,7 +190,7 @@ requirement here:
   raw address before symbols exist.
 
 Also avoid gdb **inferior calls** (`print somefunc()`) on this target. Everything in
-`zpp/x64/asm.h` is `__attribute__((naked))`, so calling one from gdb faults and leaves the
+`zpp/arch/x86_64/asm.h` is `__attribute__((naked))`, so calling one from gdb faults and leaves the
 session in a broken called-frame state.
 
 ### Session recipe
@@ -224,7 +229,12 @@ as C++ and destroy the file.
   intrinsic, so it costs nothing here and needs no runtime (verified: `llvm-nm -u` stays
   empty). `__builtin_trap()` has no standard equivalent and stays as it is.
 - Headers use `#pragma once`
-- Project namespace: `zpp`
+- Project namespace: `zpp`. Architecture-specific code lives in `zpp::arch::x86_64`, and
+  virtualization-extension code one level further in `zpp::arch::x86_64::vmx`. The split is
+  by *what it is true of*, not by vendor: `rdmsr`, `mtrr` and the segment descriptors are
+  architectural and stay out of `vmx`, so an AMD-V layer can use them. Spelled out in full
+  at call sites rather than aliased — `arch::x86_64::cr3()` — so there is one spelling
+  everywhere. `x64` was the old name; do not reintroduce it, it is MSVC's spelling
 - `constexpr` everything that can be — all getters, constructors, destructors, operators
 - Formatted with `.clang-format` (75 column limit). Not enforced by the build, but CI checks
   it. Use **clang-format 20.1.7 exactly** — majors disagree on formatting, so a different

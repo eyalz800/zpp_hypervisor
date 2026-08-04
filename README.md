@@ -299,7 +299,7 @@ through the gdb stub with the hypervisor's runtime load address reported over
 serial, and Bochs configured with `reset_on_triple_fault=0` so it panics with a
 register dump instead of silently rebooting:
 
-    RIP=0000000039636b30   -> zpp::x64::intel::vmxon, asm.h:8
+    RIP=0000000039636b30   -> zpp::arch::x86_64::vmxon, asm.h:8
     RDI=000000003bdfb000   -> the pointer handed to vmxon
     CR3=000000003b24a000   -> the host page table, already switched
     CR2=000000003f1a3098   -> the address that finally faulted
