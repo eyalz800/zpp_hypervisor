@@ -6,6 +6,7 @@ extern "C" {
 }
 extern "C" {
 #include <Protocol/BlockIo.h>
+#include <Protocol/DevicePathToText.h>
 #include <Protocol/DevicePathUtilities.h>
 #include <Protocol/LoadedImage.h>
 #include <Protocol/MpService.h>
@@ -17,12 +18,19 @@ extern "C" {
 #include <cstddef>
 #include <cstdint>
 #include <cstring>
+#include <iterator>
 #include <string>
 
 /**
  * The boot services.
  */
 static EFI_BOOT_SERVICES * g_boot_services{};
+
+/**
+ * The runtime services, needed for the variable services that hold the
+ * firmware's boot options.
+ */
+static EFI_RUNTIME_SERVICES * g_runtime_services{};
 
 /**
  * The MP services.
@@ -57,6 +65,18 @@ static EFI_GUID g_efi_device_path_utilities_protocol_guid = {
     0x437D,
     {0xB0, 0x37, 0xED, 0xB8, 0x2F, 0xB7, 0x72, 0xA4}};
 
+static EFI_GUID g_efi_global_variable_guid = {
+    0x8BE4DF61,
+    0x93CA,
+    0x11D2,
+    {0xAA, 0x0D, 0x00, 0xE0, 0x98, 0x03, 0x2B, 0x8C}};
+
+static EFI_GUID g_efi_device_path_to_text_protocol_guid = {
+    0x8B843E20,
+    0x8132,
+    0x4852,
+    {0x90, 0xCC, 0x55, 0x1A, 0x4E, 0x4A, 0x7F, 0x1C}};
+
 static EFI_GUID g_efi_mp_service_protocol_guid = {
     0x3fdda605,
     0xa76e,
@@ -79,6 +99,344 @@ static bool g_timed_waits_usable = true;
 // Unqualified, so the many call sites below stay readable.
 using zpp::trace;
 using zpp::verify;
+
+/**
+ * Traces a device path in the same text form the firmware's own boot
+ * messages use, so what this loader hands to LoadImage can be compared
+ * against the boot option the firmware would have used.
+ *
+ * Worth having permanently: a device path is the one parameter of the
+ * chainload that cannot be checked by reading the code, because it is
+ * assembled at runtime out of whatever the firmware enumerated.
+ */
+static void trace_device_path(const char * prefix, EFI_DEVICE_PATH * path)
+{
+    if constexpr (!trace::enabled) {
+        static_cast<void>(prefix);
+        static_cast<void>(path);
+        return;
+    }
+
+    EFI_DEVICE_PATH_TO_TEXT_PROTOCOL * to_text{};
+    if (EFI_ERROR(g_boot_services->LocateProtocol(
+            &g_efi_device_path_to_text_protocol_guid,
+            nullptr,
+            reinterpret_cast<void **>(&to_text)))) {
+        trace::line("ZPP_TRACE no device path to text protocol");
+        return;
+    }
+
+    auto text = to_text->ConvertDevicePathToText(path, false, false);
+    if (!text) {
+        trace::line("ZPP_TRACE device path to text failed");
+        return;
+    }
+
+    // Device path text is UTF-16 and the trace channel takes bytes. Every
+    // character a device path uses is ASCII, so fold rather than encode,
+    // and mark anything unexpected instead of dropping it silently. Sized
+    // well under trace::line_capacity, since line() adds its own location
+    // stamp to whatever it is given.
+    char buffer[112]{};
+    auto end = trace::append_text(buffer, prefix);
+    auto limit = std::end(buffer) - 1;
+    for (auto character = text; *character && (end < limit); ++character) {
+        *end++ = (*character < 0x80) ? static_cast<char>(*character) : '?';
+    }
+    *end = 0;
+    trace::line(buffer);
+
+    g_boot_services->FreePool(text);
+}
+
+/**
+ * Traces a UTF-16 string on the byte oriented trace channel, folding to
+ * ASCII the same way trace_device_path does.
+ */
+static void trace_utf16(const char * prefix, const char16_t * text)
+{
+    if constexpr (!trace::enabled) {
+        static_cast<void>(prefix);
+        static_cast<void>(text);
+        return;
+    }
+
+    char buffer[112]{};
+    auto end = trace::append_text(buffer, prefix);
+    auto limit = std::end(buffer) - 1;
+    for (auto character = text; *character && (end < limit); ++character) {
+        *end++ = (*character < 0x80) ? static_cast<char>(*character) : '?';
+    }
+    *end = 0;
+    trace::line(buffer);
+}
+
+/**
+ * The load options a boot manager has to be started with, borrowed from
+ * the firmware's own boot option for it.
+ *
+ * Chainloading a boot manager is not only loading the file: the firmware's
+ * boot option can carry optional data that it passes on as the started
+ * image's load options. For Windows Boot Manager that data names the BCD
+ * object the boot manager is to use for itself, as
+ * BCDOBJECT={9dea862c-5cdd-4e70-acc1-f32b344d4795}.
+ *
+ * Forwarded verbatim rather than synthesized, because it is the platform's
+ * own description of how that boot manager is meant to be started, and
+ * nothing here needs to understand it in order to hand it back.
+ *
+ * Note that an option the firmware generated itself by scanning a file
+ * system carries none of this - its description is just the file name -
+ * so an empty result is the common case rather than a problem.
+ */
+struct boot_option_load_options
+{
+    void * data{};
+    std::uint32_t size{};
+};
+
+/**
+ * Returns just the file name out of a path.
+ */
+static const char16_t * path_file_name(const char16_t * path)
+{
+    auto name = path;
+    for (auto character = path; *character; ++character) {
+        if ((u'\\' == *character) || (u'/' == *character)) {
+            name = character + 1;
+        }
+    }
+    return name;
+}
+
+/**
+ * Whether a UTF-16 path ends with the given file name, ignoring case.
+ * Firmware and Windows disagree on the case of these paths, so a case
+ * sensitive compare would never match.
+ */
+static bool path_ends_with(const char16_t * path, const char16_t * suffix)
+{
+    auto lower = [](char16_t value) -> char16_t {
+        return ((value >= u'A') && (value <= u'Z'))
+                   ? static_cast<char16_t>(value - u'A' + u'a')
+                   : value;
+    };
+
+    auto path_length = std::char_traits<char16_t>::length(path);
+    auto suffix_length = std::char_traits<char16_t>::length(suffix);
+    if (path_length < suffix_length) {
+        return false;
+    }
+
+    auto tail = path + (path_length - suffix_length);
+    for (std::size_t i{}; i < suffix_length; ++i) {
+        if (lower(tail[i]) != lower(suffix[i])) {
+            return false;
+        }
+    }
+    return true;
+}
+
+/**
+ * Reads one Boot#### option and, if it names the given boot manager,
+ * returns the load options it carries.
+ *
+ * The allocation holding them is deliberately not freed on success: the
+ * returned pointer points into it, and it has to stay live for as long as
+ * the image that gets started, which never returns.
+ */
+static boot_option_load_options
+read_boot_option(std::uint16_t number, const char16_t * boot_manager)
+{
+    // An option has no fixed layout, so it is parsed by walking it:
+    //   UINT32 Attributes
+    //   UINT16 FilePathListLength
+    //   CHAR16 Description[]              (null terminated)
+    //   EFI_DEVICE_PATH FilePathList[]    (FilePathListLength bytes)
+    //   UINT8 OptionalData[]              (whatever is left)
+    constexpr std::size_t attributes_size = sizeof(std::uint32_t);
+    constexpr std::size_t file_path_list_length_size =
+        sizeof(std::uint16_t);
+    constexpr std::size_t description_offset =
+        attributes_size + file_path_list_length_size;
+
+    // Boot#### where #### is the option number in upper case hex.
+    char16_t name[]{u"Boot0000"};
+    for (std::size_t nibble{}; nibble < 4; ++nibble) {
+        auto value = (number >> ((3 - nibble) * 4)) & 0xf;
+        name[4 + nibble] = static_cast<char16_t>(
+            value < 10 ? (u'0' + value) : (u'A' + value - 10));
+    }
+
+    // Options carry a description and a device path, so the size is not
+    // known in advance. Ask for it, then allocate.
+    std::size_t option_size{};
+    if (EFI_BUFFER_TOO_SMALL !=
+        g_runtime_services->GetVariable(reinterpret_cast<CHAR16 *>(name),
+                                        &g_efi_global_variable_guid,
+                                        nullptr,
+                                        &option_size,
+                                        nullptr)) {
+        return {};
+    }
+
+    void * option{};
+    if (EFI_ERROR(g_boot_services->AllocatePool(
+            EfiLoaderData, option_size, &option))) {
+        return {};
+    }
+
+    auto bytes = static_cast<unsigned char *>(option);
+    auto keep = false;
+    boot_option_load_options result{};
+
+    if (!EFI_ERROR(g_runtime_services->GetVariable(
+            reinterpret_cast<CHAR16 *>(name),
+            &g_efi_global_variable_guid,
+            nullptr,
+            &option_size,
+            option)) &&
+        (option_size > description_offset)) {
+        std::uint16_t file_path_list_length{};
+        std::memcpy(&file_path_list_length,
+                    bytes + attributes_size,
+                    sizeof(file_path_list_length));
+
+        // Walk the description to its terminator to find where the device
+        // path begins.
+        auto description =
+            reinterpret_cast<const char16_t *>(bytes + description_offset);
+        auto description_length =
+            std::char_traits<char16_t>::length(description);
+        auto device_path_offset =
+            description_offset +
+            ((description_length + 1) * sizeof(char16_t));
+        auto optional_data_offset =
+            device_path_offset + file_path_list_length;
+
+        // A truncated or inconsistent option is skipped rather than
+        // trusted - these are attacker reachable NVRAM contents.
+        if ((device_path_offset < option_size) &&
+            (optional_data_offset <= option_size)) {
+            trace_utf16("ZPP_TRACE boot option ", description);
+
+            // Find the file path node naming the boot manager. It is not
+            // necessarily the last node, so walk to the end. The walk is
+            // bounded by the option's own declared device path length
+            // rather than by the end marker, so a malformed path cannot
+            // walk off the allocation.
+            auto matches = false;
+            std::size_t node_offset{};
+            while ((node_offset + sizeof(EFI_DEVICE_PATH)) <=
+                   file_path_list_length) {
+                auto node = reinterpret_cast<EFI_DEVICE_PATH *>(
+                    bytes + device_path_offset + node_offset);
+
+                // The node length is a two byte field rather than an
+                // aligned integer, so it is assembled by hand.
+                std::size_t node_length =
+                    node->Length[0] |
+                    (static_cast<std::size_t>(node->Length[1]) << 8);
+                if ((node_length < sizeof(EFI_DEVICE_PATH)) ||
+                    ((node_offset + node_length) >
+                     file_path_list_length)) {
+                    break;
+                }
+                if (END_DEVICE_PATH_TYPE == node->Type) {
+                    break;
+                }
+
+                if ((MEDIA_DEVICE_PATH == node->Type) &&
+                    (MEDIA_FILEPATH_DP == node->SubType)) {
+                    auto file_name = reinterpret_cast<const char16_t *>(
+                        bytes + device_path_offset + node_offset +
+                        sizeof(EFI_DEVICE_PATH));
+                    trace_utf16("ZPP_TRACE   file path ", file_name);
+                    if (path_ends_with(file_name,
+                                       path_file_name(boot_manager))) {
+                        matches = true;
+                        break;
+                    }
+                }
+
+                node_offset += node_length;
+            }
+
+            if (matches && (optional_data_offset < option_size)) {
+                result.data = bytes + optional_data_offset;
+                result.size = static_cast<std::uint32_t>(
+                    option_size - optional_data_offset);
+                keep = true;
+                trace::hex_line("ZPP_TRACE matched, load options bytes ",
+                                result.size);
+            }
+        }
+    }
+
+    if (!keep) {
+        g_boot_services->FreePool(option);
+        return {};
+    }
+
+    return result;
+}
+
+/**
+ * Finds the firmware's own boot option for the named boot manager and
+ * returns the load options it would have started it with.
+ *
+ * Tries the options named in BootOrder first, so a machine with more than
+ * one boot manager is chained to in the firmware's own order of
+ * preference, then sweeps the low option numbers. BootOrder is not a
+ * complete list: firmware regenerates and reorders it as devices come and
+ * go, so an option can be present in NVRAM while absent from BootOrder -
+ * which is exactly the state the Windows option was found in here.
+ */
+static boot_option_load_options
+find_boot_option_load_options(const char16_t * boot_manager)
+{
+    if (!g_runtime_services) {
+        return {};
+    }
+
+    std::uint16_t boot_order[128]{};
+    std::size_t boot_order_size = sizeof(boot_order);
+    if (EFI_ERROR(g_runtime_services->GetVariable(
+            reinterpret_cast<CHAR16 *>(
+                const_cast<char16_t *>(u"BootOrder")),
+            &g_efi_global_variable_guid,
+            nullptr,
+            &boot_order_size,
+            boot_order))) {
+        trace::line("ZPP_TRACE no BootOrder variable");
+        boot_order_size = 0;
+    }
+
+    for (std::size_t i{}; i < (boot_order_size / sizeof(std::uint16_t));
+         ++i) {
+        if (auto result = read_boot_option(boot_order[i], boot_manager);
+            result.data) {
+            return result;
+        }
+    }
+
+    // Not in BootOrder, so sweep the low option numbers. Every option
+    // number is possible in principle, but each probe is a variable store
+    // lookup and sweeping all of them costs a noticeable part of the boot,
+    // so this stops where real firmware and real installers stop.
+    constexpr std::uint32_t highest_swept_option = 0xff;
+    trace::line("ZPP_TRACE not in BootOrder, sweeping low options");
+    for (std::uint32_t number{}; number <= highest_swept_option;
+         ++number) {
+        if (auto result = read_boot_option(
+                static_cast<std::uint16_t>(number), boot_manager);
+            result.data) {
+            return result;
+        }
+    }
+
+    return {};
+}
 
 static void * allocate_rwx(std::size_t size)
 {
@@ -424,6 +782,7 @@ extern "C" EFI_STATUS EFIAPI uefi_main(EFI_HANDLE image_handle,
 
     // Copy the boot services.
     g_boot_services = system_table->BootServices;
+    g_runtime_services = system_table->RuntimeServices;
 
     trace::line("ZPP_TRACE entry");
 
@@ -590,6 +949,8 @@ extern "C" EFI_STATUS EFIAPI uefi_main(EFI_HANDLE image_handle,
                 continue;
             }
 
+            trace_device_path("ZPP_TRACE candidate ", file_path);
+
             // Load the image from the specified path.
             EFI_HANDLE current_image_handle{};
             status = g_boot_services->LoadImage(false,
@@ -598,6 +959,13 @@ extern "C" EFI_STATUS EFIAPI uefi_main(EFI_HANDLE image_handle,
                                                 nullptr,
                                                 0,
                                                 &current_image_handle);
+
+            // Say which candidate the firmware accepted. Several devices
+            // can carry a file at the same path, so knowing one was found
+            // is not the same as knowing the right one was.
+            if (!EFI_ERROR(status)) {
+                trace_device_path("ZPP_TRACE loaded from ", file_path);
+            }
 
             // Free the file path.
             g_boot_services->FreePool(file_path);
@@ -619,6 +987,20 @@ extern "C" EFI_STATUS EFIAPI uefi_main(EFI_HANDLE image_handle,
             if (EFI_ERROR(status) ||
                 image_info->ImageCodeType != EfiLoaderCode) {
                 continue;
+            }
+
+            // Hand over the load options the firmware's own boot option
+            // for this boot manager carries, if it has any. LoadImage
+            // takes no such parameter - the firmware's own boot path sets
+            // them on the loaded image between LoadImage and StartImage,
+            // and so does this.
+            if (auto load_options =
+                    find_boot_option_load_options(boot_manager);
+                load_options.data) {
+                image_info->LoadOptions = load_options.data;
+                image_info->LoadOptionsSize = load_options.size;
+            } else {
+                trace::line("ZPP_TRACE no load options for boot manager");
             }
 
             trace::line("ZPP_TRACE chainloading");
