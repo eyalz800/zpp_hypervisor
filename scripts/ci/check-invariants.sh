@@ -25,9 +25,10 @@ else
     echo "ok: no undefined symbols"
 fi
 
-# 2. Dynamic initialization. Every global is currently constant initialized,
-#    so there should be no init array at all. This is the check that catches
-#    someone accidentally introducing a global needing a runtime constructor.
+# 2. Dynamic initialization. Supported - zpp::crt::init::main walks the array -
+#    but not free, so report it rather than letting one appear unnoticed. The
+#    hypervisor log's line list is the one global that needs a constructor
+#    today, so the warning below is expected.
 init_array=$("$readelf" -S "$elf" | grep -c 'INIT_ARRAY' || true)
 if [ "$init_array" != "0" ]; then
     echo "WARN: .init_array present - dynamic initialization is in use." >&2

@@ -180,28 +180,29 @@ public:
     }
 
 private:
-    /**
-     * The lines, constructed on first use.
-     *
-     * Deliberately not a namespace scope container. zpp::allocator's
-     * default constructor calls crt::heap(), so such a container cannot be
-     * constant initialized and would need an entry in .init_array - and
-     * this was the first thing in the tree to ask for one, which is
-     * exactly how the boot broke: the array walking in crt.cpp had only
-     * ever run on an empty array.
-     *
-     * A function local static instead, for the same reason and with the
-     * same safety argument as hypervisor::instance(): the build uses
-     * -fno-threadsafe-statics, so there is no guard and the first call
-     * must not race - and it does not, because the loader launches CPUs
-     * strictly one at a time, and the boot CPU logs before any other CPU
-     * exists.
-     */
     static line_list & storage()
     {
-        static line_list lines;
-        return lines;
+        return m_lines;
     }
+
+    /**
+     * The lines.
+     *
+     * zpp::allocator's default constructor calls crt::heap(), so this
+     * cannot be constant initialized and needs an entry in .init_array.
+     * That is deliberate rather than merely tolerated: it is the entry
+     * crt::init::main() runs on the boot CPU before anything else, so by
+     * the time a second CPU exists the list is already built. A function
+     * local static would instead be initialized by whichever CPU logged
+     * first, and with -fno-threadsafe-statics there is no guard to make
+     * that safe if two ever race - and log() is reachable from every VM
+     * exit handler.
+     *
+     * This was also the tree's first .init_array entry, and it is what
+     * exposed the relocation bug in elf_file::relocate that made dynamic
+     * initialization look unusable. See the notes there.
+     */
+    static inline line_list m_lines{};
 
     /**
      * Guards the list. Not recursive, and never held across anything that

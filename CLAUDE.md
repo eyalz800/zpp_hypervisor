@@ -122,29 +122,49 @@ Consequences worth remembering:
 - Anything allocating from a constructor is fine: `crt::init::main()` brings the heap up
   before walking the arrays.
 - Verify on the built ELF rather than by inspection. `llvm-nm -u` must report **no undefined
-  symbols**, and `llvm-readelf -S … | grep init_array` is **empty** — nothing in the tree
-  needs dynamic initialization. Keep it that way for now, because:
+  symbols**. `llvm-readelf -S … | grep init_array` is no longer empty — the hypervisor log's
+  line list is a namespace-scope `zpp::list<zpp::string>` and needs a constructor — so
+  `check-invariants.sh` reports that as a WARN, not a failure. An entry appearing should
+  still be a deliberate choice rather than a surprise.
 
-**Dynamic initialization does not currently work.** This is measured, not suspected. Putting
-a `zpp::list<zpp::string>` at namespace scope — the hypervisor log's first shape — produced
-the one `.init_array` entry this tree has ever had, and the hypervisor then hung on the boot
-CPU inside `crt::init::main()`: the loader's last trace is `number_of_cpus enter` and
-`loaded` never arrives. Making the same container a function-local static, so nothing needs
-dynamic initialization, fixed it with no other change.
+**Dynamic initialization works, and the reason it once did not was the ELF loader.** Worth
+keeping, because the false lead cost a lot: the first `.init_array` entry the tree ever had
+hung the boot CPU inside `crt::init::main()`, and every plausible suspect — the `list`
+constructor, `zpp::allocator`'s call to `crt::heap()`, the `__cxa_atexit` registration, the
+array bounds, the ordering against `g_heap.init` — was innocent. So was the *shape* of
+`elf_file::relocate`, which is why reading it proved nothing.
 
-What has been ruled out, so nobody re-checks it:
+The bug was one trait spelling in `elf_file::relocate`:
 
-- The relocation is correct. The entry gets an `R_X86_64_RELATIVE` with addend `0xa580`, the
-  section contents are `0`, and `elf_file::relocate` correctly uses `base + r_addend` for
-  RELA rather than `*target += base`. It resolves to `__cxx_global_var_init`.
-- The bounds are correct and PC-relative, so they survive being loaded at any base:
-  `__init_array_start`/`__init_array_end` differ by exactly the one entry.
-- Ordering is correct: `g_heap.init` runs before the walk, so a constructor may allocate.
+```cpp
+using relocation_kind = std::remove_pointer_t<std::remove_cv_t<decltype(relocations)>>;
+```
 
-What is left, and where to look next: the constructor path itself — the `list` constructor,
-`zpp::allocator`'s call to `crt::heap()`, or the `__cxa_atexit` registration that follows it.
-Build with `-DZPP_HYPERVISOR_WAIT_FOR_DEBUGGER=ON` and put a hardware breakpoint on
-`__cxx_global_var_init`; that is exactly the situation the flag exists for.
+The variant holds `const elf_rela *`. `remove_cv_t` strips *top level* cv, and the top level
+there is the pointer, which is not const — so it did nothing, and stripping the pointer
+afterwards left `const elf_rela`. That is not `elf_rela`, so
+`if constexpr (std::is_same_v<relocation_kind, elf_rela>)` was **false for RELA files** and
+every relative relocation went down the REL branch, `*target += base`. `sizeof` is the same
+either way, so the stride, the entry count and every `r_offset` were right — only the value
+written was wrong, and since a RELA file leaves the target word `0`, every relocated slot
+came out as **exactly the module base**. The fix is to strip the pointer first and the cv
+second.
+
+That was silent for as long as it was, because nothing ever *read* a relocated slot: the
+targets were a vtable and its pointers in `.data.rel.ro` that no live code touches, plus
+`__dso_handle`, whose address is taken and whose value is never used. `.init_array` was the
+first slot ever dereferenced, so the boot CPU called the module base, executed the ELF header
+as code and took a `#UD` at `base + 0x40`, inside the program header table. The clue that
+identifies this instantly if it ever recurs: **a fault at a tiny offset from the module base**.
+
+Lessons that generalize past this bug:
+
+- A `constinit`-only codebase never exercises its own loader. The relocation writes had never
+  been checked against memory, only against the source. Read the *result*: break at the entry
+  point and compare `x/gx base+<r_offset>` against `base + r_addend` from `llvm-readelf -r`.
+- `std::remove_cv_t` on a pointer-to-const is a no-op. Prefer
+  `std::remove_cvref_t<decltype(*p)>` when what you want is the pointee.
+- `#UD` on this target means `__builtin_trap()` *or* executed data. Do not assume the former.
 
 One latent trap found while looking: `__preinit_array_start` and `__preinit_array_end` are
 both link-time address `0`, which PC-relative addressing turns into *the module base* at
@@ -176,6 +196,14 @@ today — but it would walk from the module base if they ever differed.
 Note `.fini_array` usually stays empty: destructors of globals are registered at runtime via
 `__cxa_atexit`, and `.fini_array` only receives `__attribute__((destructor))` functions.
 Both paths are handled. Verified to survive `--gc-sections --strip-all`.
+
+Both teardown paths have now been run under Bochs, not merely read. The probe was a temporary
+namespace-scope object with a destructor plus an `__attribute__((destructor))` function, each
+recording the order it ran in, reported out through the error code the loader prints — the
+hypervisor has no other channel. Result: the `__cxa_atexit` registrations ran first and in
+reverse registration order, `.fini_array` ran after them, and the log list's own destructor
+freed its nodes. Note `.fini_array` slots are `R_X86_64_RELATIVE` too, so the relocation bug
+above broke that path identically; it was just even further from ever being reached.
 
 ### Include order (critical for freestanding)
 
