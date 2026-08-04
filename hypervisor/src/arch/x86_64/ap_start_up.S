@@ -142,16 +142,27 @@ zpp_ap_start_up_begin:
 
     .code32
 ap_code32:
-    mov byte ptr [ebx + ap_stage_offset], ap_stage_protected_mode
-
-    // A flat data segment everywhere. Nothing here pushes, so SS is set
-    // only because leaving it holding a real mode value is worse.
+    // A flat data segment everywhere, and this has to come first.
+    //
+    // Entering protected mode does not touch the segment registers: DS
+    // still holds the descriptor real mode gave it, base 0x9c000 with
+    // limit 0xffff, until it is reloaded. Every reference below is
+    // ebx-relative, so its offset is the blob's linear address - past that
+    // limit, and a #GP the null interrupt descriptor table turns into a
+    // triple fault. SDM 12.9.1 step 9 says to reload DS, SS, ES, FS and GS
+    // immediately after the far jump, and it means immediately: a progress
+    // marker written above these five instructions is what found this.
+    //
+    // Nothing here pushes, so SS is set only because leaving it holding a
+    // real mode value is worse.
     mov ax, ap_data_selector
     mov ds, ax
     mov es, ax
     mov ss, ax
     mov fs, ax
     mov gs, ax
+
+    mov byte ptr [ebx + ap_stage_offset], ap_stage_protected_mode
 
     // Physical address extension, without which long mode cannot be
     // entered at all.
