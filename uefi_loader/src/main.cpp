@@ -1598,7 +1598,13 @@ extern "C" EFI_STATUS EFIAPI uefi_main(EFI_HANDLE image_handle,
                 trace::line("ZPP_TRACE no load options for boot manager");
             }
 
-            trace::line("ZPP_TRACE chainloading");
+            // Name what is being started, on the line that says it is
+            // being started. The candidate paths traced above are traced
+            // for every file system considered, so the last one printed
+            // is not necessarily the one chosen - and this is the only
+            // line that is reached exactly once, for the winner.
+            trace_device_path("ZPP_TRACE chainloading ",
+                              image_info->FilePath);
 
             // Save the log before handing over, because a boot manager
             // that boots successfully never comes back and would take
