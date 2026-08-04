@@ -10,6 +10,7 @@
 #include "zpp/arch/x86_64/vmx/msr.h"
 #include "zpp/arch/x86_64/vmx/vmcs.h"
 #include "zpp/arch/x86_64/vmx/vmx.h"
+#include "zpp/arch/x86_64/vmx/vmx_exit_reason.h"
 #include "zpp/error.h"
 #include "zpp/small_map.h"
 #include <atomic>
@@ -237,6 +238,23 @@ private:
     void emulate_start_up_ipi(std::uint64_t vector);
 
     /**
+     * Append the exit that is about to be resumed from to this CPU's ring
+     * in exit_trace.
+     */
+    void record_exit(arch::x86_64::vmx::exit_reason reason);
+
+    /**
+     * Record a VM entry failure into vm_entry_failure and stop this CPU.
+     *
+     * Does not return, and deliberately so. The guest never ran, so there
+     * is nothing to resume and no RIP to advance; resuming would re-run
+     * the identical entry and fail identically, which is the silent
+     * infinite loop this replaces.
+     */
+    [[noreturn]] void
+    on_vm_entry_failure(arch::x86_64::vmx::exit_reason reason);
+
+    /**
      * Setup the VM control structure according to the given guest context,
      * and configured host fields.
      */
@@ -423,6 +441,104 @@ private:
      * vector is a page fault.
      */
     std::uint64_t host_exception_cr2{};
+
+    /**
+     * One recorded VM exit. Sampled after the exit was handled, so the
+     * fields show the state the guest is about to be resumed with rather
+     * than the state it exited in.
+     */
+    struct exit_trace_entry
+    {
+        std::uint64_t reason{};
+        std::uint64_t qualification{};
+        std::uint64_t activity_state{};
+        std::uint64_t cs_selector{};
+        std::uint64_t rip{};
+    };
+
+    /**
+     * How many exits are kept per CPU. A ring, so this is a window on the
+     * most recent exits rather than a limit on how many may happen.
+     */
+    static constexpr std::size_t exit_trace_capacity = 32;
+
+    /**
+     * A ring of the most recent VM exits on each CPU, for a debugger to
+     * read.
+     *
+     * Once the guest is running there is no other way to see what the VMM
+     * did: there is no console, the serial port belongs to the guest, and
+     * a debugger attached from outside sees guest state only - the VMCS
+     * fields that decide whether a CPU runs at all cannot be read without
+     * being on that CPU with that VMCS current. So they are recorded here
+     * as each exit is handled.
+     */
+    exit_trace_entry exit_trace[max_cpus][exit_trace_capacity]{};
+
+    /**
+     * Total exits recorded per CPU. Not reduced modulo the capacity, so it
+     * also says how many exits happened in total and where the ring wraps
+     * - the newest entry is at (count - 1) % capacity.
+     */
+    std::uint64_t exit_trace_count[max_cpus]{};
+
+    /**
+     * Everything known about a VM entry that failed, filled in by
+     * on_vm_entry_failure just before it stops the CPU.
+     *
+     * This exists to be read by a debugger. A failed entry cannot be
+     * reported through a return value - the frame that could have returned
+     * one is gone by the time the guest is running - and none of it can be
+     * recovered afterwards either, because reading a VMCS field needs the
+     * VMCS to still be current on this CPU. So it is captured at the one
+     * moment it is all available.
+     */
+    struct
+    {
+        /**
+         * Non-zero once a failure has been recorded. Checked first: every
+         * other field is meaningless until this is set.
+         */
+        std::uint64_t occurred{};
+
+        /**
+         * The full exit reason, bit 31 included, whose low bits say which
+         * class of failure it was - invalid guest state, MSR loading, or a
+         * machine check during entry.
+         */
+        std::uint64_t reason{};
+
+        /**
+         * The exit qualification, which for an invalid guest state names
+         * the specific offender for a few cases the processor can be
+         * precise about.
+         */
+        std::uint64_t qualification{};
+
+        /**
+         * The VM instruction error. Set when an entry instruction fails
+         * outright rather than exiting, so usually stale here - kept
+         * because the two failure paths are easy to confuse and seeing
+         * both values distinguishes them.
+         */
+        std::uint64_t instruction_error{};
+
+        /**
+         * The guest state that was rejected. These are the fields a
+         * real-mode entry gets wrong, and the only way to see them is to
+         * read them out while the VMCS is still current.
+         */
+        std::uint64_t activity_state{};
+        std::uint64_t interruptibility_state{};
+        std::uint64_t entry_controls{};
+        std::uint64_t guest_cr0{};
+        std::uint64_t guest_cr4{};
+        std::uint64_t guest_rflags{};
+        std::uint64_t guest_rip{};
+        std::uint64_t guest_cs_selector{};
+        std::uint64_t guest_cs_base{};
+        std::uint64_t guest_cs_access_rights{};
+    } vm_entry_failure{};
 
     /**
      * The context to unwind to when the host IDT catches an exception,

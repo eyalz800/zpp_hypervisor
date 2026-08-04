@@ -35,6 +35,21 @@ public:
     }
 
     /**
+     * Whether this is a VM entry failure rather than an ordinary VM exit.
+     *
+     * VM entry can fail in two different ways, and only one of them leaves
+     * the failure at the entry instruction. A guest state or MSR loading
+     * problem is discovered after host state has already been restored, so
+     * it arrives at the host RIP looking exactly like a VM exit - with
+     * this bit set to say the guest never actually ran. Nothing may be
+     * resumed in that state: the same entry would fail again, forever.
+     */
+    constexpr bool entry_failure() const
+    {
+        return 0 != (m_value & (1ull << 31));
+    }
+
+    /**
      * Converts the exit reason to integral representation.
      */
     constexpr operator std::uint64_t() const

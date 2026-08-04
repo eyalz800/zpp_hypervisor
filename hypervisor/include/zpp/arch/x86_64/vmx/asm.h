@@ -22,7 +22,16 @@ inline void __attribute__((naked)) vmlaunch()
     asm(R"!!(
         .intel_syntax noprefix
         vmlaunch
-        ret
+        // Only reached when VM entry failed the checks on the VM execution
+        // controls or the host state, which leaves the flags set and
+        // execution right here. There is no caller to return to: this is
+        // entered by loading it into RIP with restore_context, so RSP is
+        // the guest stack and a ret would jump wherever that happens to
+        // point. Park instead, so a debugger finds the CPU stopped at a
+        // named symbol rather than somewhere unrecoverable.
+    1:  cli
+        hlt
+        jmp 1b
     )!!");
 }
 
@@ -143,7 +152,12 @@ inline void __attribute__((naked)) vmresume()
     asm(R"!!(
         .intel_syntax noprefix
         vmresume
-        ret
+        // Same as vmlaunch above: reaching this means VM entry failed on
+        // the controls or the host state, and there is no caller to
+        // return to.
+    1:  cli
+        hlt
+        jmp 1b
     )!!");
 }
 
