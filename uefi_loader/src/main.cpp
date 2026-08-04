@@ -1186,6 +1186,20 @@ extern "C" EFI_STATUS EFIAPI uefi_main(EFI_HANDLE image_handle,
     // that boots something other than Windows needs.
     static constexpr bool chain_to_windows_only = true;
 
+    // Whether to look for the boot manager only on the device this loader
+    // was itself loaded from, skipping the enumeration of everything else.
+    //
+    // On by default, and it is the difference between working and hanging
+    // on a machine booted by hand. Enumerating means driving every
+    // controller the firmware has not bothered with yet, and on real
+    // hardware that is a long walk through drivers this loader has no
+    // business starting - a black screen with no output was the result.
+    // The passed-through disk in the emulated rig needed it, because
+    // nothing had booted from it and it carried no file system handle at
+    // all; a machine that just chainloaded us through its own ESP does
+    // not, because the boot manager is on that same ESP.
+    static constexpr bool chain_to_our_own_device_only = true;
+
     // The boot managers to chain to, in order of preference. Windows is
     // named explicitly rather than relying on the removable media
     // fallback, because on a machine that has any boot manager
@@ -1210,7 +1224,8 @@ extern "C" EFI_STATUS EFIAPI uefi_main(EFI_HANDLE image_handle,
     // device and invisible as a file system.
     EFI_HANDLE * all_handles{};
     std::size_t number_of_all_handles{};
-    if (!EFI_ERROR(
+    if (!chain_to_our_own_device_only &&
+        !EFI_ERROR(
             g_boot_services->LocateHandleBuffer(AllHandles,
                                                 nullptr,
                                                 nullptr,
@@ -1230,15 +1245,29 @@ extern "C" EFI_STATUS EFIAPI uefi_main(EFI_HANDLE image_handle,
     // Locate file system handles.
     EFI_HANDLE * file_system_handles{};
     std::size_t number_of_file_system_handles{};
-    status =
-        g_boot_services->LocateHandleBuffer(ByProtocol,
-                                            &g_efi_block_io_protocol_guid,
-                                            nullptr,
-                                            &number_of_file_system_handles,
-                                            &file_system_handles);
-    if (EFI_ERROR(status)) {
-        trace::line("ZPP_TRACE no block io handles");
-        return EFI_LOAD_ERROR;
+
+    // Not pool memory, so it is never freed - and nothing here frees the
+    // enumerated buffer either, so the two cases stay interchangeable.
+    EFI_HANDLE our_device_only[]{our_device};
+
+    if constexpr (chain_to_our_own_device_only) {
+        if (!our_device) {
+            trace::line("ZPP_TRACE no device for this image");
+            return EFI_LOAD_ERROR;
+        }
+        file_system_handles = our_device_only;
+        number_of_file_system_handles = 1;
+    } else {
+        status = g_boot_services->LocateHandleBuffer(
+            ByProtocol,
+            &g_efi_block_io_protocol_guid,
+            nullptr,
+            &number_of_file_system_handles,
+            &file_system_handles);
+        if (EFI_ERROR(status)) {
+            trace::line("ZPP_TRACE no block io handles");
+            return EFI_LOAD_ERROR;
+        }
     }
 
     trace::hex_line("ZPP_TRACE block io handles",
