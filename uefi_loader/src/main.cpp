@@ -323,12 +323,18 @@ static EFI_DEVICE_PATH * file_device_path(EFI_HANDLE device,
         nullptr,
         reinterpret_cast<void **>(&device_path_utilities));
     if (EFI_ERROR(status)) {
+        trace::line("ZPP_TRACE no device path utilities");
         return nullptr;
     }
 
-    // Compute the file name size.
+    // Compute the file name size. The terminating null is part of the
+    // node: a FILEPATH_DEVICE_PATH holds a null terminated string, and
+    // leaving it out both truncates the name and understates the node
+    // length by two bytes, which is enough for AppendDevicePath to
+    // reject the whole path.
     std::size_t file_name_size =
-        std::char_traits<char16_t>::length(file_name) * sizeof(char16_t);
+        (std::char_traits<char16_t>::length(file_name) + 1) *
+        sizeof(char16_t);
 
     // Compute the file path device path size.
     std::size_t file_path_device_path_size = file_name_size +
@@ -380,20 +386,29 @@ static EFI_DEVICE_PATH * file_device_path(EFI_HANDLE device,
         return device_path;
     }
 
-    // Convert device handle to path.
-    EFI_DEVICE_PATH device_path_from_handle{};
+    // Convert device handle to path. HandleProtocol hands back a pointer
+    // to the protocol, so this has to be a pointer - taking the address
+    // of an EFI_DEVICE_PATH and passing that on made AppendDevicePath
+    // read a device path whose first bytes were the pointer itself, and
+    // it answered null. Nothing caught it because the chainload only
+    // runs on a real machine.
+    EFI_DEVICE_PATH * device_path_from_handle{};
     status = g_boot_services->HandleProtocol(
         device,
         &g_efi_device_path_protocol_guid,
         reinterpret_cast<void **>(&device_path_from_handle));
     if (EFI_ERROR(status)) {
+        trace::line("ZPP_TRACE handle has no device path");
         device_path = nullptr;
         goto free_file_path_device_path;
     }
 
     // Build the full path from device and path.
     device_path = device_path_utilities->AppendDevicePath(
-        &device_path_from_handle, device_path);
+        device_path_from_handle, device_path);
+    if (!device_path) {
+        trace::line("ZPP_TRACE append device path failed");
+    }
 
 free_file_path_device_path:
     // Free file path device path.
@@ -474,16 +489,58 @@ extern "C" EFI_STATUS EFIAPI uefi_main(EFI_HANDLE image_handle,
         if (!verify::present(system_table, parameters)) {
             return EFI_LOAD_ERROR;
         }
-
-        // Stop here rather than continuing to the OS. Under test the boot
-        // medium holds only this loader, so there is nothing to chain to
-        // and that path could only fail - and a failure there would
-        // discard a result that has already been established, making the
-        // test look like a hypervisor problem when it is not.
-        return EFI_SUCCESS;
     }
 
     // Continue to the OS.
+
+    // The device this loader came from, so the search below can skip it.
+    // On a real machine the removable media fallback is whatever boot
+    // manager is installed - Limine on the development target - which is
+    // the thing that chainloaded us, so chaining back to it would loop.
+    // Under test our own image is the only thing on the medium, and
+    // skipping it is what keeps the chainload from running at all.
+    EFI_HANDLE our_device{};
+    if (EFI_LOADED_IMAGE_PROTOCOL * our_image{};
+        !EFI_ERROR(g_boot_services->HandleProtocol(
+            image_handle,
+            &g_efi_loaded_image_protocol_guid,
+            reinterpret_cast<void **>(&our_image)))) {
+        our_device = our_image->DeviceHandle;
+    }
+
+    // The boot managers to chain to, in order of preference. Windows is
+    // named explicitly rather than relying on the removable media
+    // fallback, because on a machine that has any boot manager
+    // installed that fallback is the boot manager, not the OS.
+    static constexpr const char16_t * boot_managers[]{
+        u"\\EFI\\Microsoft\\Boot\\bootmgfw.efi",
+        u"\\EFI\\BOOT\\bootx64.efi",
+    };
+
+    // Drive every controller before looking for a boot manager. Firmware
+    // connects only as much as it needs to reach the boot option it was
+    // told to start, so a disk nothing has booted from yet carries no
+    // block io handle at all - which is exactly the state the passed
+    // through NVMe holding Windows was found in, enumerated as a PCI
+    // device and invisible as a file system.
+    EFI_HANDLE * all_handles{};
+    std::size_t number_of_all_handles{};
+    if (!EFI_ERROR(
+            g_boot_services->LocateHandleBuffer(AllHandles,
+                                                nullptr,
+                                                nullptr,
+                                                &number_of_all_handles,
+                                                &all_handles))) {
+        for (std::size_t i{}; i < number_of_all_handles; ++i) {
+            // Failure is normal and uninteresting: most handles are not
+            // controllers, and the ones that are may already be driven.
+            g_boot_services->ConnectController(
+                all_handles[i], nullptr, nullptr, true);
+        }
+        g_boot_services->FreePool(all_handles);
+        trace::hex_line("ZPP_TRACE connected controllers",
+                        number_of_all_handles);
+    }
 
     // Locate file system handles.
     EFI_HANDLE * file_system_handles{};
@@ -495,67 +552,87 @@ extern "C" EFI_STATUS EFIAPI uefi_main(EFI_HANDLE image_handle,
                                             &number_of_file_system_handles,
                                             &file_system_handles);
     if (EFI_ERROR(status)) {
+        trace::line("ZPP_TRACE no block io handles");
         return EFI_LOAD_ERROR;
     }
 
-    // Iterate all file systems.
-    for (std::size_t i{}; i < number_of_file_system_handles; ++i) {
-        // Find the block IO from the handle.
-        EFI_BLOCK_IO * block_io{};
-        status = g_boot_services->HandleProtocol(
-            file_system_handles[i],
-            &g_efi_block_io_protocol_guid,
-            reinterpret_cast<void **>(&block_io));
-        if (EFI_ERROR(status)) {
-            continue;
+    trace::hex_line("ZPP_TRACE block io handles",
+                    number_of_file_system_handles);
+
+    // Iterate the boot managers, and every file system for each one, so
+    // that a preferred boot manager anywhere wins over a fallback on
+    // whichever device happens to enumerate first.
+    for (auto boot_manager : boot_managers) {
+        for (std::size_t i{}; i < number_of_file_system_handles; ++i) {
+            // Skip the device this loader came from.
+            if (file_system_handles[i] == our_device) {
+                continue;
+            }
+
+            // Find the block IO from the handle.
+            EFI_BLOCK_IO * block_io{};
+            status = g_boot_services->HandleProtocol(
+                file_system_handles[i],
+                &g_efi_block_io_protocol_guid,
+                reinterpret_cast<void **>(&block_io));
+            if (EFI_ERROR(status)) {
+                continue;
+            }
+
+            // Get the full path to the boot manager inside the
+            // specified file system.
+            auto file_path =
+                file_device_path(file_system_handles[i], boot_manager);
+            // One handle that cannot produce a path is not a reason to
+            // abandon the search - the next one may well be the OS.
+            if (!file_path) {
+                trace::line("ZPP_TRACE file device path failed");
+                continue;
+            }
+
+            // Load the image from the specified path.
+            EFI_HANDLE current_image_handle{};
+            status = g_boot_services->LoadImage(false,
+                                                image_handle,
+                                                file_path,
+                                                nullptr,
+                                                0,
+                                                &current_image_handle);
+
+            // Free the file path.
+            g_boot_services->FreePool(file_path);
+
+            // If failed, continue to another file system.
+            if (EFI_ERROR(status)) {
+                continue;
+            }
+
+            // Get loaded image info.
+            EFI_LOADED_IMAGE_PROTOCOL * image_info{};
+            status = g_boot_services->HandleProtocol(
+                current_image_handle,
+                &g_efi_loaded_image_protocol_guid,
+                reinterpret_cast<void **>(&image_info));
+
+            // If we had an error, or the image is not an EFI loader
+            // code, continue.
+            if (EFI_ERROR(status) ||
+                image_info->ImageCodeType != EfiLoaderCode) {
+                continue;
+            }
+
+            trace::line("ZPP_TRACE chainloading");
+
+            // Start the image.
+            status = g_boot_services->StartImage(
+                current_image_handle, nullptr, nullptr);
+
+            // Return the start image status.
+            return status;
         }
-
-        // Get the full path to 'bootx64.efi' inside the specified file
-        // system.
-        auto file_path = file_device_path(file_system_handles[i],
-                                          u"\\EFI\\BOOT\\bootx64.efi");
-        if (!file_path) {
-            return EFI_LOAD_ERROR;
-        }
-
-        // Load the image from the specified path.
-        EFI_HANDLE current_image_handle{};
-        status = g_boot_services->LoadImage(false,
-                                            image_handle,
-                                            file_path,
-                                            nullptr,
-                                            0,
-                                            &current_image_handle);
-
-        // Free the file path.
-        g_boot_services->FreePool(file_path);
-
-        // If failed, continue to another file system.
-        if (EFI_ERROR(status)) {
-            continue;
-        }
-
-        // Get loaded image info.
-        EFI_LOADED_IMAGE_PROTOCOL * image_info{};
-        status = g_boot_services->HandleProtocol(
-            current_image_handle,
-            &g_efi_loaded_image_protocol_guid,
-            reinterpret_cast<void **>(&image_info));
-
-        // If we had an error, or the image is not an EFI loader code,
-        // continue.
-        if (EFI_ERROR(status) ||
-            image_info->ImageCodeType != EfiLoaderCode) {
-            continue;
-        }
-
-        // Start the image.
-        status = g_boot_services->StartImage(
-            current_image_handle, nullptr, nullptr);
-
-        // Return the start image status.
-        return status;
     }
+
+    trace::line("ZPP_TRACE no boot manager found");
 
     // Return success anyway, no image was found is considered ok.
     return EFI_SUCCESS;
