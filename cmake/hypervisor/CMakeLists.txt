@@ -58,11 +58,14 @@ target_include_directories(zpp_hypervisor SYSTEM PRIVATE
     "${LLVM_CLANG_INCLUDE}"
 )
 
-# Freestanding compile flags
+# Freestanding compile flags. -stdlib is scoped to C++ rather than applied
+# to everything: the assembler has no use for it, and an ignored argument
+# is an error under -Werror.
 target_compile_options(zpp_hypervisor PRIVATE
     -pedantic -Wall -Wextra -Werror
     -fPIE -nostdlib -ffreestanding -mno-red-zone
-    -stdlib=libc++ -fno-rtti -fno-threadsafe-statics -fno-exceptions
+    $<$<COMPILE_LANGUAGE:CXX>:-stdlib=libc++>
+    -fno-rtti -fno-threadsafe-statics -fno-exceptions
     -D_LIBCPP_DISABLE_AVAILABILITY
     "-D_LIBCPP_VERBOSE_ABORT(...)=__builtin_trap()"
     $<$<COMPILE_LANGUAGE:ASM>:-x$<SEMICOLON>assembler-with-cpp>

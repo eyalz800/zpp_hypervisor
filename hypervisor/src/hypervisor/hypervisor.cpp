@@ -846,6 +846,58 @@ void hypervisor::emulate_start_up_ipi(arch::x86_64::context & context,
     apply_start_up(context, vector);
 }
 
+std::uint64_t hypervisor::local_apic_id()
+{
+    // Read out of CPUID rather than out of the local APIC, and that is the
+    // whole point of this function.
+    //
+    // The APIC's own identifier register is only an MSR in x2APIC mode,
+    // and this VMM launches long before any of that is settled: the
+    // firmware is in xAPIC mode, so reading the MSR raises #GP, and an
+    // INIT puts a processor back into xAPIC mode anyway. CPUID answers in
+    // every mode and needs no APIC state at all.
+    //
+    // Getting this wrong was silent. The identifier used to be recorded
+    // only when x2APIC happened to be enabled, which on this firmware is
+    // never, so the whole table stayed zero and a start-up IPI's
+    // destination matched the boot processor's slot by accident.
+    constexpr std::uint32_t extended_topology_leaf = 0x1f;
+    constexpr std::uint32_t topology_leaf = 0x0b;
+
+    std::uint32_t registers[4]{};
+
+    // The highest leaf this processor answers, so an unsupported one is
+    // not asked for - CPUID returns whatever the highest leaf holds
+    // instead of failing, which would silently be somebody else's data.
+    arch::x86_64::cpuid(0, 0, registers);
+    auto highest_leaf = registers[0];
+
+    // SDM Vol. 2A, CPUID: leaf 1FH EDX and leaf 0BH EDX both give "x2APIC
+    // ID the current logical processor". The full thirty-two bits, which
+    // is what an x2APIC interrupt command register carries as its
+    // destination. Leaf 1FH is the newer of the two and is reported as
+    // unsupported by a zero in EBX.
+    if (highest_leaf >= extended_topology_leaf) {
+        arch::x86_64::cpuid(extended_topology_leaf, 0, registers);
+        if (registers[1]) {
+            return registers[3];
+        }
+    }
+
+    if (highest_leaf >= topology_leaf) {
+        arch::x86_64::cpuid(topology_leaf, 0, registers);
+        if (registers[1]) {
+            return registers[3];
+        }
+    }
+
+    // Neither topology leaf, so the initial APIC id out of leaf 1. Eight
+    // bits, which is all a processor without x2APIC has.
+    constexpr std::uint32_t initial_apic_id_shift = 24;
+    arch::x86_64::cpuid(1, 0, registers);
+    return registers[1] >> initial_apic_id_shift;
+}
+
 bool hypervisor::x2apic_enabled()
 {
     // IA32_APIC_BASE.EXTD. With it clear the local APIC is in xAPIC mode,
@@ -874,7 +926,27 @@ void hypervisor::intercept_interrupt_command(bool intercept)
     }
 }
 
-void hypervisor::on_interrupt_command(std::uint64_t command)
+std::optional<std::size_t>
+hypervisor::processor_slot(std::uint64_t apic_id)
+{
+    for (std::size_t slot{}; slot < this->number_of_known_processors;
+         ++slot) {
+        if (this->apic_id[slot] == apic_id) {
+            return slot;
+        }
+    }
+
+    if (this->number_of_known_processors >= max_cpus) {
+        return {};
+    }
+
+    auto slot = this->number_of_known_processors++;
+    this->apic_id[slot] = apic_id;
+    return slot;
+}
+
+std::optional<std::uint64_t>
+hypervisor::on_interrupt_command(std::uint64_t command)
 {
     // The interrupt command register, x2APIC form: vector in the low
     // eight bits, delivery mode in bits 10:8, and the destination APIC id
@@ -885,24 +957,259 @@ void hypervisor::on_interrupt_command(std::uint64_t command)
     constexpr std::uint64_t delivery_mode_start_up = 6;
     constexpr std::uint64_t destination_shift = 32;
 
+    // The destination shorthand, in bits 19:18. Zero means the destination
+    // field names the target; anything else is a broadcast and the
+    // destination field means nothing at all.
+    constexpr std::uint64_t shorthand_shift = 18;
+    constexpr std::uint64_t shorthand_mask = 0x3;
+    constexpr std::uint64_t shorthand_none = 0;
+
     auto delivery_mode =
         (command >> delivery_mode_shift) & delivery_mode_mask;
     if (delivery_mode_start_up != delivery_mode) {
-        return;
+        // Everything else goes out as the guest wrote it, INIT included -
+        // and INIT especially, because it is what leaves the target
+        // waiting for a start-up IPI, which is the state the rest of this
+        // needs it in. There is nothing here that improves on it.
+        return command;
+    }
+
+    // A broadcast start-up IPI cannot be redirected one processor at a
+    // time, and this VMM has no other way to enumerate what it would be
+    // broadcasting to - it learns a processor exists by being told to
+    // start it. So it is passed through, which hands those processors to
+    // the guest unvirtualized, and said out loud rather than left to be
+    // discovered.
+    //
+    // Decoded rather than ignored, which is what used to happen. Reading
+    // bits 63:32 of a shorthand command yields whatever the guest left
+    // there - zero, in practice - and matching that against the table of
+    // known processors credited the boot processor with a start-up IPI
+    // nobody had sent it.
+    auto shorthand = (command >> shorthand_shift) & shorthand_mask;
+    if (shorthand_none != shorthand) {
+        log("broadcast start-up ipi, shorthand {}, not adopted",
+            shorthand);
+        return command;
     }
 
     auto destination = command >> destination_shift;
     auto vector = command & vector_mask;
 
-    // Hand the vector to the target through memory, which is the entire
-    // reason this write is intercepted. Stored plus one so that zero can
-    // mean "nothing pending" without excluding vector zero.
-    for (std::size_t cpu{}; cpu < max_cpus; ++cpu) {
-        if (this->apic_id[cpu] == destination) {
-            this->start_up_vector[cpu].store(vector + 1);
-            return;
+    auto slot = processor_slot(destination);
+    if (!slot) {
+        log("no room to track the processor with apic id {}", destination);
+        return command;
+    }
+
+    if (this->processor_virtualized[*slot]) {
+        // Already started since its last INIT. A guest sends two start-up
+        // IPIs and the second must not be acted on: sending a processor
+        // that is already running back to its entry point wedges it in a
+        // way indistinguishable from never having started.
+        if (this->started_by_start_up_ipi[*slot]) {
+            return {};
+        }
+
+        // Under the hypervisor and waiting in the INIT handler for a
+        // vector to be handed to it through memory. Hand it over and
+        // swallow the write - letting the hardware see it would be asking
+        // whatever is below this VMM to deliver a start-up IPI to a
+        // processor in VMX root mode, which is the one case it is allowed
+        // to discard. Stored plus one so that zero can mean nothing
+        // pending without excluding vector zero.
+        this->start_up_vector[*slot].store(vector + 1);
+        return {};
+    }
+
+    // Never seen before, so this is the guest starting it for the first
+    // time. Nothing has virtualized it and nothing can, from here - a
+    // processor cannot be put into VMX operation by another one. So it is
+    // started in this VMM's own trampoline instead, which brings it up
+    // under the hypervisor and only then lets it run from the vector the
+    // guest asked for.
+    if (!this->start_up_memory) {
+        log("no start-up memory, cpu {} will run unvirtualized", *slot);
+        return command;
+    }
+
+    if (start_application_processor(*slot, vector)) {
+        return {};
+    }
+
+    // It did not come up. Passing the guest's own start-up IPI through is
+    // the least bad thing left: the processor is still waiting for one, so
+    // the guest gets a processor it can use, unvirtualized. Losing it
+    // outright would usually take the guest down with it.
+    return command;
+}
+
+void hypervisor::initialize_start_up_memory(std::uint64_t memory)
+{
+    // How much of the blob there is to copy. Its own page has to hold it,
+    // because the pages after it are the temporary page table.
+    auto blob_size = static_cast<std::size_t>(
+        arch::x86_64::zpp_ap_start_up_end -
+        arch::x86_64::zpp_ap_start_up_begin);
+    if (blob_size > page_size) {
+        log("the start-up trampoline is {} bytes, too big for its page",
+            blob_size);
+        return;
+    }
+
+    // A start-up IPI names its entry point by page number, in eight bits,
+    // so anything not page aligned or not below one megabyte cannot be
+    // started from at all. Checked rather than assumed: this address comes
+    // from the loader, and a platform that got it wrong would otherwise
+    // send processors to an address nobody chose.
+    constexpr std::uint64_t highest_start_up_page = 0xff;
+    if (memory & (page_size - 1)) {
+        log("start-up memory at {} is not page aligned", memory);
+        return;
+    }
+    if ((memory >> 12) > highest_start_up_page) {
+        log("start-up memory at {} is not below one megabyte", memory);
+        return;
+    }
+
+    // Mapped into the host page table, because the trampoline is still
+    // executing out of it at the moment it loads the host page table root
+    // - the instruction after that load is fetched through this mapping.
+    this->host_page_table.map_from(
+        memory,
+        arch::x86_64::ap_start_up_pages * page_size,
+        arch::x86_64::page_table::protection::read |
+            arch::x86_64::page_table::protection::write |
+            arch::x86_64::page_table::protection::execute,
+        this->os_page_table);
+
+    std::memcpy(reinterpret_cast<void *>(memory),
+                arch::x86_64::zpp_ap_start_up_begin,
+                blob_size);
+
+    // The temporary page table, identity mapping the first gigabyte with
+    // large pages. Only the trampoline's own few pages are ever touched
+    // through it, but a gigabyte costs one page directory and removes the
+    // question of what is reachable while it is live.
+    constexpr std::uint64_t present_writable = 0x3;
+    constexpr std::uint64_t large_page = 0x80;
+    constexpr std::uint64_t large_page_size = 0x200000;
+    constexpr std::size_t entries_per_table =
+        page_size / sizeof(std::uint64_t);
+
+    auto level4 = memory + page_size;
+    auto level3 = memory + (2 * page_size);
+    auto level2 = memory + (3 * page_size);
+
+    auto table = [](std::uint64_t address) {
+        return reinterpret_cast<std::uint64_t *>(address);
+    };
+
+    for (std::size_t entry{}; entry < entries_per_table; ++entry) {
+        table(level4)[entry] = 0;
+        table(level3)[entry] = 0;
+        table(level2)[entry] =
+            (entry * large_page_size) | present_writable | large_page;
+    }
+
+    table(level4)[0] = level3 | present_writable;
+    table(level3)[0] = level2 | present_writable;
+
+    // Everything the trampoline cannot work out for itself. The stack and
+    // the argument are per processor and filled in as each one is started.
+    auto & area = *reinterpret_cast<arch::x86_64::ap_start_up_area *>(
+        memory + arch::x86_64::ap_start_up_area_offset);
+    area.host_cr3 = this->host_cr3;
+    area.host_cr0 = this->host_cr0;
+    area.host_cr4 = this->host_cr4;
+    area.temporary_cr3 = level4;
+    area.entry = reinterpret_cast<std::uint64_t>(zpp_ap_start_up_main);
+
+    this->start_up_memory = memory;
+    log("start-up memory ready at {}, vector {}", memory, memory >> 12);
+}
+
+bool hypervisor::start_application_processor(std::size_t slot,
+                                             std::uint64_t guest_vector)
+{
+    if (!this->start_up_memory || (slot >= max_cpus)) {
+        return false;
+    }
+
+    // One processor at a time, which is what makes a single trampoline,
+    // and the single stack below, enough. It also serializes the shared
+    // state a launch walks through - the stack index, the virtual
+    // processor counter and the VMX region pointers - none of which is
+    // correct for two processors at once.
+    this->start_up_lock.lock();
+    scope_exit unlock{[&] { this->start_up_lock.unlock(); }};
+
+    this->guest_start_up_vector[slot] = guest_vector;
+    this->started_by_trampoline[slot] = true;
+    this->start_up_launched[slot] = false;
+
+    auto & area = *reinterpret_cast<arch::x86_64::ap_start_up_area *>(
+        this->start_up_memory + arch::x86_64::ap_start_up_area_offset);
+    area.argument = slot;
+    area.stack_top =
+        reinterpret_cast<std::uint64_t>(std::end(this->start_up_stack));
+
+    // The vector is the trampoline page's page number, which is the whole
+    // reason that page had to be below one megabyte.
+    constexpr std::uint64_t delivery_mode_start_up = (6ull << 8);
+    constexpr std::uint64_t destination_shift = 32;
+    arch::x86_64::wrmsr(arch::x86_64::msr::ia32_x2apic_icr,
+                        (this->start_up_memory >> 12) |
+                            delivery_mode_start_up |
+                            (this->apic_id[slot] << destination_shift));
+
+    // Bounded, so that a processor which never arrives costs a delay
+    // rather than the machine. Everything it has to do between the IPI and
+    // reporting in is a few thousand instructions, so this is generous by
+    // orders of magnitude.
+    constexpr std::uint32_t launch_wait_attempts = 2000000;
+    for (std::uint32_t attempt{}; attempt < launch_wait_attempts;
+         ++attempt) {
+        if (this->start_up_launched[slot]) {
+            return true;
+        }
+        zpp::spin_hint();
+    }
+
+    log("cpu {} did not come up after its start-up ipi", slot);
+    this->started_by_trampoline[slot] = false;
+    return false;
+}
+
+void hypervisor::start_up_on_this_processor(std::uint64_t slot)
+{
+    // Twice returning, the same trick the launch and VM exit paths here
+    // use: the first arrival goes on to launch, and a second one is that
+    // launch having failed and come back. There is nowhere on this
+    // processor to return to - it was started by an IPI, not called - so
+    // the only thing left to do with it is stop it.
+    std::atomic<bool> launch_returned;
+    launch_returned = false;
+
+    arch::x86_64::context context{};
+    arch::x86_64::capture_context(&context);
+
+    if (launch_returned) {
+        log("cpu {} failed to launch", slot);
+        for (;;) {
+            arch::x86_64::halt();
         }
     }
+    launch_returned = true;
+
+    // What main reads out of the context: which processor this is, and no
+    // physical to virtual translation, which only the boot processor's
+    // once per boot setup ever calls.
+    context.rdi = slot;
+    context.rsi = 0;
+    context.rdx = 0;
+
+    launch_on_cpu(context);
 }
 
 void hypervisor::apply_start_up(arch::x86_64::context & context,
@@ -1065,6 +1372,14 @@ void hypervisor::apply_start_up(arch::x86_64::context & context,
     context.rbx = 0;
     context.rcx = 0;
     context.rdx = identification[0];
+
+    // Zeroed for the same reason as the rest, and load bearing on the
+    // launch path: vm_launch takes the guest's RIP and RSP from this
+    // context rather than from the VMCS, so leaving either holding where
+    // this VMM happened to be would start the guest there instead of at
+    // its entry point. On the VM exit path both are overwritten again
+    // before the resume, so this costs nothing there.
+    context.rip = 0;
     context.rsp = 0;
     context.rbp = 0;
     context.rsi = 0;
@@ -1557,6 +1872,15 @@ hypervisor::main(arch::x86_64::context & caller_context)
     auto physical_to_virtual =
         reinterpret_cast<std::uint64_t (*)(std::uint64_t)>(
             caller_context.rsi);
+    auto start_up_memory = caller_context.rdx;
+
+    // Whether this processor was started by this VMM rather than launched
+    // by the loader, which changes three things below: there is no state
+    // of its own worth capturing, there is no OS descriptor table to build
+    // an intermediate copy of, and its guest begins at the vector a
+    // start-up IPI named rather than where a caller was.
+    auto from_trampoline =
+        (cpuid < max_cpus) && this->started_by_trampoline[cpuid];
 
     // Save the interrupt flag rather than assuming it was set: the Linux
     // loader enters through an IPI handler, where interrupts are already
@@ -1578,27 +1902,36 @@ hypervisor::main(arch::x86_64::context & caller_context)
     this->physical_to_virtual = physical_to_virtual;
 
     // Initialize special registers.
-    initialize_registers();
-
-    // Record this processor's x2APIC id, so that an intercepted interrupt
-    // command register write naming it as the destination can be matched
-    // back to an index here.
     //
-    // Only when the local APIC is actually in x2APIC mode. The x2APIC
-    // registers are MSRs *only* in that mode: with IA32_APIC_BASE.EXTD
-    // clear they do not exist, and reading one raises #GP. Reading it
-    // unconditionally took the boot down here - the firmware still has the
-    // APIC in xAPIC mode, so this faulted on the very first processor, and
-    // because a VMM's host IDTR is the one it inherited, the fault
-    // surfaced through the firmware's own exception handler rather than
-    // anywhere obviously ours.
+    // Not on a processor this VMM started. What it holds is what an INIT
+    // and this VMM's own trampoline left behind - the host page table root
+    // in CR3, a descriptor table belonging to the trampoline - and none of
+    // it describes an operating system. Capturing it would overwrite the
+    // boot processor's record of the guest with values that are not the
+    // guest's, and every one of these is shared rather than per processor.
+    if (!from_trampoline) {
+        initialize_registers();
+    }
+
+    // Record this processor's local APIC id, so that an intercepted
+    // interrupt command register write naming it as the destination can be
+    // matched back to an index here.
+    //
+    // From CPUID, unconditionally. Reading the APIC's own identifier
+    // register instead does not work here and cannot be made to: it is an
+    // MSR only in x2APIC mode, and this firmware is in xAPIC mode when the
+    // hypervisor launches, so an unconditional read raised #GP and took
+    // the boot down. Guarding that read on x2APIC being enabled stopped
+    // the fault but recorded nothing at all - the table stayed zero, and a
+    // start-up IPI's destination then matched the boot processor's slot by
+    // accident. Guests enable x2APIC after this VMM is already resident,
+    // so there is no ordering in which the MSR would have worked.
     //
     // SDM 13.12.1, "Detecting and Enabling x2APIC Mode": "The local APIC
     // registers can be accessed via the MSR interface only when the local
     // APIC has been switched to the x2APIC mode."
-    if ((cpuid < max_cpus) && x2apic_enabled()) {
-        this->apic_id[cpuid] =
-            arch::x86_64::rdmsr(arch::x86_64::msr::ia32_x2apic_apic_id);
+    if (cpuid < max_cpus) {
+        this->apic_id[cpuid] = local_apic_id();
     }
 
     // Perform only on first CPU load.
@@ -1630,20 +1963,40 @@ hypervisor::main(arch::x86_64::context & caller_context)
         intercept_interrupt_command(true);
     }
 
-    // Initialize intermediate GDT.
-    initialize_intermediate_gdt();
+    // Initialize and load the intermediate GDT, which is a copy of the
+    // OS one taken while the OS page tables are still live.
+    //
+    // Skipped on a processor this VMM started, for the reason it cannot be
+    // done there: the copy is read from the OS descriptor table, which the
+    // host page table does not map, and this processor is already running
+    // on the host page table. It does not need one either - the
+    // intermediate GDT exists to stay valid across the page table switch
+    // below, and this processor has no switch to make.
+    if (!from_trampoline) {
+        initialize_intermediate_gdt();
+        load_intermediate_gdt();
+    }
 
-    // Load intermediate GDT.
-    load_intermediate_gdt();
+    // Guard to restore GDT, on the processors that had one to replace.
+    scope_exit restore_gdt{[&] {
+        if (!from_trampoline) {
+            load_os_gdt();
+        }
+    }};
 
-    // Guard to restore GDT.
-    scope_exit restore_gdt{[&] { load_os_gdt(); }};
-
-    // Switch page tables.
+    // Switch page tables. Already the case on a processor this VMM
+    // started - its trampoline loaded the host page table to get here -
+    // and writing the same value again is harmless.
     arch::x86_64::cr3(this->host_cr3);
 
-    // Guard to restore cr3.
-    scope_exit restore_cr3{[&] { arch::x86_64::cr3(this->guest_cr3); }};
+    // Guard to restore cr3, on the processors that had one to replace. A
+    // processor this VMM started has never been on the OS page table and
+    // has no business being put there.
+    scope_exit restore_cr3{[&] {
+        if (!from_trampoline) {
+            arch::x86_64::cr3(this->guest_cr3);
+        }
+    }};
 
     // The OS IDT lives in memory the host page table does not map, so with
     // the switch above done IDTR names pages that are no longer there.
@@ -1652,8 +2005,14 @@ hypervisor::main(arch::x86_64::context & caller_context)
     // the host IDT, which is inside the module and therefore mapped.
     load_host_idt();
 
-    // Guard to restore the OS IDT.
-    scope_exit restore_os_idt{[&] { load_os_idt(); }};
+    // Guard to restore the OS IDT, on the processors that had one. The OS
+    // IDT is not mapped in the host page table, so loading it on a
+    // processor this VMM started would arm an IDTR pointing at nothing.
+    scope_exit restore_os_idt{[&] {
+        if (!from_trampoline) {
+            load_os_idt();
+        }
+    }};
 
     // Arm the recovery point the host IDT handler unwinds to, using the
     // same trick as the VM exit path in vm_launch: capture_context returns
@@ -1694,6 +2053,17 @@ hypervisor::main(arch::x86_64::context & caller_context)
     // Initialize vmx.
     initialize_vmx();
 
+    // Lay out the memory a processor this VMM starts begins executing in.
+    //
+    // Here rather than with the rest of the once per boot setup above,
+    // because it needs the host control registers, and initialize_vmx is
+    // what works those out. Failure is not fatal and does not return an
+    // error: it means processors cannot be started by this VMM, which
+    // matters only where the loader is not launching it on them.
+    if ((0 == cpuid) && start_up_memory) {
+        initialize_start_up_memory(start_up_memory);
+    }
+
     // Enter root mode.
     if (auto result = enter_root_mode(); !result) {
         return result;
@@ -1704,6 +2074,29 @@ hypervisor::main(arch::x86_64::context & caller_context)
 
     // Setup vmcs.
     setup_vmcs(caller_context);
+
+    // On a processor this VMM started, replace the guest state just built
+    // with the state a processor holds after an INIT followed by a
+    // start-up IPI, at the vector the guest asked for.
+    //
+    // This is the point of the whole exercise. The guest asked for this
+    // processor to begin in real mode at its own trampoline; it gets
+    // exactly that, and it is virtualized before the first of those
+    // instructions runs. Everything setup_vmcs just wrote into the guest
+    // fields described the boot processor's firmware state and is
+    // overwritten here - it was only ever a starting point.
+    if (from_trampoline && (cpuid < max_cpus)) {
+        apply_start_up(caller_context, this->guest_start_up_vector[cpuid]);
+    }
+
+    // Recorded before the launch rather than after it, because the launch
+    // does not return. From here this processor either runs the guest or
+    // has stopped, and both are states the processor that started it needs
+    // to be able to tell apart from still waiting.
+    if (cpuid < max_cpus) {
+        this->processor_virtualized[cpuid] = true;
+        this->start_up_launched[cpuid] = true;
+    }
 
     // Disarm the recovery point. It is only good while this frame is live,
     // and the launch below does not return - the guest resumes on the
@@ -1947,15 +2340,18 @@ hypervisor::main(arch::x86_64::context & caller_context)
                 static_cast<std::uint32_t>(context.rcx)) {
                 auto command =
                     (context.rax & 0xffffffff) | (context.rdx << 32);
-                on_interrupt_command(command);
 
-                // Passed through, so the interrupt is still delivered.
-                // The INIT half of INIT-SIPI-SIPI is delivered reliably as
-                // a VM exit and is what puts the target in the handler
-                // above; only the start-up half can be discarded, and that
-                // one has already been recorded.
-                arch::x86_64::wrmsr(arch::x86_64::msr::ia32_x2apic_icr,
-                                    command);
+                // What actually goes out is the handler's decision, not
+                // the guest's. Most commands are passed through unchanged,
+                // a start-up IPI is either replaced with one naming this
+                // VMM's own trampoline or swallowed entirely, and there is
+                // no correct default here - issuing the guest's own
+                // start-up IPI is precisely what hands a processor over
+                // unvirtualized.
+                if (auto issue = on_interrupt_command(command)) {
+                    arch::x86_64::wrmsr(
+                        arch::x86_64::msr::ia32_x2apic_icr, *issue);
+                }
                 break;
             }
             [[fallthrough]];
@@ -2170,4 +2566,14 @@ extern "C" void
 zpp_x86_64_exception(zpp::arch::x86_64::exception_frame * frame)
 {
     zpp::hypervisor::hypervisor::instance().on_host_exception(*frame);
+}
+
+/**
+ * Where a processor started by this VMM arrives, declared by
+ * zpp/arch/x86_64/ap_start_up.h and reached from the trampoline there.
+ */
+extern "C" void zpp_ap_start_up_main(std::uint64_t processor)
+{
+    zpp::hypervisor::hypervisor::instance().start_up_on_this_processor(
+        processor);
 }

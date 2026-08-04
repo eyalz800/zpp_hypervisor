@@ -18,6 +18,18 @@ extern "C" {
 #endif
 
 /**
+ * How much memory below one megabyte to reserve for the hypervisor to
+ * start a processor with.
+ *
+ * A macro rather than a constant because this header has to stay valid C.
+ * The hypervisor's own requirement is stated by ap_start_up_pages in
+ * zpp/arch/x86_64/ap_start_up.h, which the two builds do not share a view
+ * of - so this has to be at least that, and the hypervisor checks what it
+ * was given rather than assuming.
+ */
+#define ZPP_START_UP_MEMORY_SIZE (4 * 4096)
+
+/**
  * The platform services zpp_load_elf needs from its caller.
  *
  * Grouped into a struct rather than passed positionally so that call sites
@@ -52,14 +64,32 @@ struct zpp_loader_parameters
     size_t (*number_of_cpus)(void);
 
     /**
+     * Allocates size bytes of page aligned memory strictly below one
+     * megabyte, and returns null on failure.
+     *
+     * That is not an arbitrary bound. A processor the hypervisor starts
+     * itself is started with a start-up IPI, whose vector is the page
+     * number of the entry point - eight bits of page number, so nothing
+     * above one megabyte can be named at all.
+     *
+     * May itself be null, on platforms where the loader launches the
+     * hypervisor on every processor and it therefore never has to start
+     * one. The hypervisor treats that as the feature being unavailable
+     * rather than as an error.
+     */
+    void * (*allocate_below_one_megabyte)(size_t size);
+
+    /**
      * Adjusts the calling convention before entering the hypervisor. May
      * be null when the platform's convention already matches.
      */
     int (*adjust_launch_calling_convention)(
         int (*entry)(size_t cpu,
-                     uintptr_t (*physical_to_virtual)(uintptr_t)),
+                     uintptr_t (*physical_to_virtual)(uintptr_t),
+                     void * start_up_memory),
         size_t cpu,
-        uintptr_t (*physical_to_virtual)(uintptr_t));
+        uintptr_t (*physical_to_virtual)(uintptr_t),
+        void * start_up_memory);
 };
 
 /**

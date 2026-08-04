@@ -1,4 +1,5 @@
 #pragma once
+#include "zpp/arch/x86_64/ap_start_up.h"
 #include "zpp/arch/x86_64/context.h"
 #include "zpp/arch/x86_64/exception_entry.h"
 #include "zpp/arch/x86_64/generic.h"
@@ -14,10 +15,12 @@
 #include "zpp/error.h"
 #include "zpp/hypervisor/log.h"
 #include "zpp/small_map.h"
+#include "zpp/spin_lock.h"
 #include <atomic>
 #include <cstddef>
 #include <cstdint>
 #include <expected>
+#include <optional>
 
 namespace zpp::hypervisor
 {
@@ -100,6 +103,18 @@ public:
      */
     [[noreturn]] void
     on_host_exception(const arch::x86_64::exception_frame & frame);
+
+    /**
+     * What the start-up trampoline jumps to, once the processor it is
+     * running on has reached long mode on the host page table. Does not
+     * return: this processor either ends up running the guest or stops.
+     *
+     * Public only because zpp_ap_start_up_main reaches it from outside the
+     * class, in the same way the exception entry stubs reach
+     * on_host_exception above. It is not part of the interface a caller of
+     * this class should use.
+     */
+    void start_up_on_this_processor(std::uint64_t slot);
 
 private:
     /**
@@ -247,12 +262,47 @@ private:
                         std::uint64_t vector);
 
     /**
-     * Records an intercepted write to the x2APIC interrupt command
-     * register, so that a start-up IPI reaches its target through memory
-     * we control rather than through a hardware path that may discard it.
-     * Returns false if the write was not one we care about.
+     * Handles an intercepted write to the x2APIC interrupt command
+     * register, and returns the command to actually issue - or nothing,
+     * when the write must be swallowed instead of passed on.
+     *
+     * This is where a guest starting a processor is caught. An INIT is
+     * passed straight through, because it is what leaves the target
+     * waiting for a start-up IPI and nothing here improves on it. A
+     * start-up IPI is not: its vector is replaced with the hypervisor's
+     * own, so the processor begins in code that virtualizes it before
+     * running a single instruction the guest wrote.
      */
-    void on_interrupt_command(std::uint64_t command);
+    std::optional<std::uint64_t>
+    on_interrupt_command(std::uint64_t command);
+
+    /**
+     * Returns the index this VMM tracks the processor with the given local
+     * APIC id under, allocating one if this is the first time it has been
+     * named. Returns nothing when there is no room left.
+     */
+    std::optional<std::size_t> processor_slot(std::uint64_t apic_id);
+
+    /**
+     * Lays out the memory the loader reserved below one megabyte: the
+     * start-up trampoline, and the temporary page table it needs to reach
+     * long mode. Done once, on the boot processor.
+     */
+    void initialize_start_up_memory(std::uint64_t memory);
+
+    /**
+     * Starts the processor tracked under the given index, which is
+     * expected to be waiting for a start-up IPI, and waits for it to come
+     * up under the hypervisor. Returns false if it did not.
+     */
+    bool start_application_processor(std::size_t slot,
+                                     std::uint64_t guest_vector);
+
+    /**
+     * This processor's local APIC id, read out of CPUID so that it is
+     * answerable whatever mode the local APIC is in.
+     */
+    static std::uint64_t local_apic_id();
 
     /**
      * Whether the local APIC is in x2APIC mode, and therefore whether its
@@ -576,6 +626,74 @@ private:
      * no more processors are going to start.
      */
     std::atomic<bool> all_processors_started{};
+
+    /**
+     * The memory the loader reserved below one megabyte, or zero when it
+     * supplied none. Zero means this VMM cannot start a processor itself,
+     * which is the normal state on the platforms where the loader launches
+     * it on all of them.
+     */
+    std::uint64_t start_up_memory{};
+
+    /**
+     * How many entries of the per processor arrays above are in use. Index
+     * zero is the boot processor, which exists before anything else does,
+     * so this counts from one.
+     */
+    std::size_t number_of_known_processors = 1;
+
+    /**
+     * Whether the processor at each index is running under this
+     * hypervisor.
+     *
+     * This is what decides how a start-up IPI for it is handled. One that
+     * is already virtualized is sitting in the INIT handler waiting for a
+     * vector to be handed to it through memory; one that is not has to be
+     * started from scratch, in the trampoline, and virtualized on the way.
+     */
+    bool processor_virtualized[max_cpus]{};
+
+    /**
+     * The vector the guest asked each processor to begin at, kept for the
+     * moment its own launch is ready to apply it. Not the vector actually
+     * sent, which is the trampoline's.
+     */
+    std::uint64_t guest_start_up_vector[max_cpus]{};
+
+    /**
+     * Whether the processor at each index was started by this VMM's own
+     * trampoline rather than launched by the loader.
+     *
+     * It changes what that processor's launch has to do. There is no
+     * state of its own worth capturing - it came out of an INIT, so what
+     * it holds is the architectural reset value and not an operating
+     * system's - and its guest has to begin where the start-up IPI said
+     * rather than where a caller was.
+     */
+    bool started_by_trampoline[max_cpus]{};
+
+    /**
+     * The first stack a processor started by the trampoline has, used only
+     * until its launch switches to the one reserved for its index.
+     *
+     * One is enough, and shared on purpose: only one processor is ever
+     * being started at a time, which start_up_lock is what guarantees.
+     */
+    alignas(page_size) std::uint8_t start_up_stack[0x4000]{};
+
+    /**
+     * Set by a processor being started once it is running the guest, so
+     * that the processor that started it knows it succeeded.
+     */
+    std::atomic<bool> start_up_launched[max_cpus]{};
+
+    /**
+     * Serializes starting a processor, because bringing one up walks
+     * through shared state - the stack index, the virtual processor
+     * counter, and the VMX region pointers - that is only correct for one
+     * processor at a time.
+     */
+    spin_lock start_up_lock{};
 
     /**
      * The exit nothing knew how to handle, filled in by

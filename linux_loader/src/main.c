@@ -124,6 +124,11 @@ static int zpp_init(void)
         .physical_to_virtual = (uintptr_t (*)(uintptr_t))&phys_to_virt,
         .call_on_cpu = &call_on_cpu,
         .number_of_cpus = &number_of_cpus,
+        // Not supplied, because nothing here needs it: the hypervisor is
+        // launched on every processor from this loader, all of them
+        // already running under the kernel, so it never has to start one
+        // itself.
+        .allocate_below_one_megabyte = NULL,
         // The kernel already uses the SysV convention the hypervisor
         // wants.
         .adjust_launch_calling_convention = NULL,

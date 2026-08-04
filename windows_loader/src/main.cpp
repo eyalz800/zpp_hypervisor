@@ -59,9 +59,12 @@ invoke_physical_to_virtual(std::uintptr_t)
 }
 
 static int __attribute__((naked))
-invoke_entry(int (*)(std::size_t, std::uintptr_t (*)(std::uintptr_t)),
+invoke_entry(int (*)(std::size_t,
+                     std::uintptr_t (*)(std::uintptr_t),
+                     void *),
              std::size_t,
-             std::uintptr_t (*)(std::uintptr_t))
+             std::uintptr_t (*)(std::uintptr_t),
+             void *)
 {
     asm(R"!!(
         .intel_syntax noprefix
@@ -69,6 +72,7 @@ invoke_entry(int (*)(std::size_t, std::uintptr_t (*)(std::uintptr_t)),
         push rsi // Save rsi before use as it is non-volatile.
         mov rdi, rdx // Forward first parameter to function.
         mov rsi, r8 // Forward second parameter to function.
+        mov rdx, r9 // Forward third parameter, after rdx has been read.
         sub rsp, 0x8 // Align stack to 16 bytes.
         call rcx // Call the function pointer.
         add rsp, 0x8 // Restore stack.
@@ -89,6 +93,11 @@ extern "C" NTAPI NTSTATUS driver_entry(PDRIVER_OBJECT driver_object,
         .physical_to_virtual = invoke_physical_to_virtual,
         .call_on_cpu = call_on_cpu,
         .number_of_cpus = number_of_cpus,
+        // Not supplied, because nothing here needs it: the hypervisor is
+        // launched on every processor from this loader, all of them
+        // already running under the operating system, so it never has to
+        // start one itself.
+        .allocate_below_one_megabyte = nullptr,
         .adjust_launch_calling_convention = invoke_entry,
     };
 

@@ -589,6 +589,35 @@ static void * allocate_rwx(std::size_t size)
     return reinterpret_cast<void *>(physical_address);
 }
 
+static void * allocate_below_one_megabyte(std::size_t size)
+{
+    // One below a megabyte, not the megabyte itself: this is an inclusive
+    // upper bound on the last byte allocated, so naming the boundary would
+    // permit a page starting at it - and a page number of 0x100 does not
+    // fit in the eight bits a start-up IPI carries.
+    constexpr EFI_PHYSICAL_ADDRESS highest_usable_address = 0x100000 - 1;
+
+    EFI_PHYSICAL_ADDRESS physical_address = highest_usable_address;
+
+    // Reserved rather than loader owned, because this has to outlive the
+    // loader by the whole life of the machine. A processor may be started
+    // long after the operating system has taken over, and when it is, it
+    // begins executing here - so this must be memory no operating system
+    // believes it may reuse.
+    auto status = g_boot_services->AllocatePages(
+        AllocateMaxAddress,
+        EfiReservedMemoryType,
+        (size + EFI_PAGE_SIZE - 1) / EFI_PAGE_SIZE,
+        &physical_address);
+    if (EFI_ERROR(status)) {
+        trace::line("ZPP_TRACE no memory below one megabyte");
+        return nullptr;
+    }
+
+    trace::hex_line("ZPP_TRACE start up memory at ", physical_address);
+    return reinterpret_cast<void *>(physical_address);
+}
+
 /**
  * Returns true when the ACPI power management timer is present and
  * advancing.
@@ -872,9 +901,12 @@ close_event:
 }
 
 static int __attribute__((naked))
-invoke_entry(int (*)(std::size_t, std::uintptr_t (*)(std::uintptr_t)),
+invoke_entry(int (*)(std::size_t,
+                     std::uintptr_t (*)(std::uintptr_t),
+                     void *),
              std::size_t,
-             std::uintptr_t (*)(std::uintptr_t))
+             std::uintptr_t (*)(std::uintptr_t),
+             void *)
 {
     asm(R"!!(
         .intel_syntax noprefix
@@ -882,6 +914,7 @@ invoke_entry(int (*)(std::size_t, std::uintptr_t (*)(std::uintptr_t)),
         push rsi // Save rsi before use as it is non-volatile.
         mov rdi, rdx // Forward first parameter to function.
         mov rsi, r8 // Forward second parameter to function.
+        mov rdx, r9 // Forward third parameter, after rdx has been read.
         sub rsp, 0x8 // Align stack to 16 bytes.
         call rcx // Call the function pointer.
         add rsp, 0x8 // Restore stack.
@@ -1033,6 +1066,11 @@ extern "C" EFI_STATUS EFIAPI uefi_main(EFI_HANDLE image_handle,
         .physical_to_virtual = nullptr,
         .call_on_cpu = call_on_cpu,
         .number_of_cpus = number_of_cpus,
+        // The one platform that needs this. Only the boot processor is
+        // launched from here, so every other one is started by the
+        // hypervisor, and a processor being started begins in real mode
+        // below one megabyte.
+        .allocate_below_one_megabyte = allocate_below_one_megabyte,
         .adjust_launch_calling_convention = invoke_entry,
     };
 

@@ -41,8 +41,8 @@ zpp_load_elf(const struct zpp_loader_parameters * parameters)
     // Convert ELF entry to function pointer.
     auto entry = reinterpret_cast<int (*)(
         std::size_t cpuid,
-        std::uintptr_t (*physical_to_virtual)(std::uintptr_t))>(
-        entry_point_address);
+        std::uintptr_t (*physical_to_virtual)(std::uintptr_t),
+        void * start_up_memory)>(entry_point_address);
 
     // Call entry point on all cpus.
     auto cpus = parameters->number_of_cpus();
@@ -52,14 +52,32 @@ zpp_load_elf(const struct zpp_loader_parameters * parameters)
         return -1;
     }
 
+    // Memory below one megabyte, for the hypervisor to start processors
+    // the loader is not launching it on. Reserved here, once, rather than
+    // per processor: there is only ever one processor being started at a
+    // time, so one reservation is reused for all of them.
+    //
+    // A platform that cannot supply it, or a reservation that fails, is
+    // not an error - it means the hypervisor cannot start a processor
+    // itself, which only matters on platforms that need it to.
+    void * start_up_memory{};
+    if (parameters->allocate_below_one_megabyte) {
+        start_up_memory = parameters->allocate_below_one_megabyte(
+            ZPP_START_UP_MEMORY_SIZE);
+    }
+
     for (std::size_t i{}; i < cpus; ++i) {
         // The launch function.
         auto launch = [&] {
             if (parameters->adjust_launch_calling_convention) {
                 return parameters->adjust_launch_calling_convention(
-                    entry, i, parameters->physical_to_virtual);
+                    entry,
+                    i,
+                    parameters->physical_to_virtual,
+                    start_up_memory);
             }
-            return entry(i, parameters->physical_to_virtual);
+            return entry(
+                i, parameters->physical_to_virtual, start_up_memory);
         };
 
         // The erased launch function.
