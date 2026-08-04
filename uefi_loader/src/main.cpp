@@ -10,6 +10,7 @@ extern "C" {
 #include <Protocol/DevicePathUtilities.h>
 #include <Protocol/LoadedImage.h>
 #include <Protocol/MpService.h>
+#include <Protocol/SimpleFileSystem.h>
 }
 #include "zpp/loader.h"
 #include "zpp/trace.h"
@@ -64,6 +65,12 @@ static EFI_GUID g_efi_device_path_utilities_protocol_guid = {
     0xD706,
     0x437D,
     {0xB0, 0x37, 0xED, 0xB8, 0x2F, 0xB7, 0x72, 0xA4}};
+
+static EFI_GUID g_efi_simple_file_system_protocol_guid = {
+    0x964E5B22,
+    0x6459,
+    0x11D2,
+    {0x8E, 0x39, 0x00, 0xA0, 0xC9, 0x69, 0x72, 0x3B}};
 
 static EFI_GUID g_efi_global_variable_guid = {
     0x8BE4DF61,
@@ -436,6 +443,44 @@ find_boot_option_load_options(const char16_t * boot_manager)
     }
 
     return {};
+}
+
+/**
+ * Whether a file exists on the file system of the given device handle.
+ *
+ * Used to tell a real boot partition from one that merely happens to
+ * carry a copy of a boot manager. A boot manager needs the rest of its
+ * installation beside it, so the presence of the executable alone is not
+ * evidence that starting it will work.
+ */
+static bool file_exists(EFI_HANDLE device, const char16_t * path)
+{
+    EFI_SIMPLE_FILE_SYSTEM_PROTOCOL * file_system{};
+    if (EFI_ERROR(g_boot_services->HandleProtocol(
+            device,
+            &g_efi_simple_file_system_protocol_guid,
+            reinterpret_cast<void **>(&file_system)))) {
+        return false;
+    }
+
+    EFI_FILE_PROTOCOL * volume{};
+    if (EFI_ERROR(file_system->OpenVolume(file_system, &volume))) {
+        return false;
+    }
+
+    EFI_FILE_PROTOCOL * file{};
+    auto status = volume->Open(
+        volume,
+        &file,
+        reinterpret_cast<CHAR16 *>(const_cast<char16_t *>(path)),
+        EFI_FILE_MODE_READ,
+        0);
+    if (!EFI_ERROR(status)) {
+        file->Close(file);
+    }
+    volume->Close(volume);
+
+    return !EFI_ERROR(status);
 }
 
 static void * allocate_rwx(std::size_t size)
@@ -871,9 +916,37 @@ extern "C" EFI_STATUS EFIAPI uefi_main(EFI_HANDLE image_handle,
     // named explicitly rather than relying on the removable media
     // fallback, because on a machine that has any boot manager
     // installed that fallback is the boot manager, not the OS.
-    static constexpr const char16_t * boot_managers[]{
-        u"\\EFI\\Microsoft\\Boot\\bootmgfw.efi",
-        u"\\EFI\\BOOT\\bootx64.efi",
+    struct boot_manager
+    {
+        /**
+         * The boot manager to load.
+         */
+        const char16_t * path;
+
+        /**
+         * A file that has to sit beside it for starting it to be able to
+         * work, or null when there is nothing to require.
+         *
+         * This is what separates the boot partition from any other
+         * partition carrying a copy of the same executable. A recovery or
+         * vendor partition can hold its own bootmgfw.efi, and firmware
+         * that generates boot options by scanning file systems will
+         * happily create an option for it, so agreeing with the
+         * firmware's own option is not evidence of having found the right
+         * one either. Windows Boot Manager reads its configuration from
+         * the BCD beside it, and without one it stops with 0xc000000d.
+         */
+        const char16_t * companion;
+    };
+
+    // The boot managers to chain to, in order of preference. Windows is
+    // named explicitly rather than relying on the removable media
+    // fallback, because on a machine that has any boot manager
+    // installed that fallback is the boot manager, not the OS.
+    static constexpr boot_manager boot_managers[]{
+        {u"\\EFI\\Microsoft\\Boot\\bootmgfw.efi",
+         u"\\EFI\\Microsoft\\Boot\\BCD"},
+        {u"\\EFI\\BOOT\\bootx64.efi", nullptr},
     };
 
     // Drive every controller before looking for a boot manager. Firmware
@@ -921,7 +994,7 @@ extern "C" EFI_STATUS EFIAPI uefi_main(EFI_HANDLE image_handle,
     // Iterate the boot managers, and every file system for each one, so
     // that a preferred boot manager anywhere wins over a fallback on
     // whichever device happens to enumerate first.
-    for (auto boot_manager : boot_managers) {
+    for (auto [boot_manager, companion] : boot_managers) {
         for (std::size_t i{}; i < number_of_file_system_handles; ++i) {
             // Skip the device this loader came from.
             if (file_system_handles[i] == our_device) {
@@ -936,6 +1009,32 @@ extern "C" EFI_STATUS EFIAPI uefi_main(EFI_HANDLE image_handle,
                 reinterpret_cast<void **>(&block_io));
             if (EFI_ERROR(status)) {
                 continue;
+            }
+
+            // Require the rest of the installation to be present before
+            // treating this file system as the one to boot. Reported
+            // either way, since which partitions carry what is the first
+            // thing worth knowing when a chainload goes wrong.
+            if (companion) {
+                auto has_boot_manager =
+                    file_exists(file_system_handles[i], boot_manager);
+                auto has_companion =
+                    file_exists(file_system_handles[i], companion);
+                if (has_boot_manager || has_companion) {
+                    trace::hex_line(
+                        has_boot_manager
+                            ? (has_companion
+                                   ? "ZPP_TRACE fs has boot manager and "
+                                     "companion, index "
+                                   : "ZPP_TRACE fs has boot manager but "
+                                     "no "
+                                     "companion, index ")
+                            : "ZPP_TRACE fs has companion only, index ",
+                        i);
+                }
+                if (!has_boot_manager || !has_companion) {
+                    continue;
+                }
             }
 
             // Get the full path to the boot manager inside the
@@ -988,6 +1087,25 @@ extern "C" EFI_STATUS EFIAPI uefi_main(EFI_HANDLE image_handle,
                 image_info->ImageCodeType != EfiLoaderCode) {
                 continue;
             }
+
+            // What the started image will treat as its own device and
+            // path. Windows Boot Manager finds its BCD, its OS loader and
+            // its resources relative to these rather than relative to the
+            // path it was asked for, so the right file reached through the
+            // wrong device handle fails exactly like a missing boot
+            // configuration - which is what 0xc000000d reports.
+            if (EFI_DEVICE_PATH * image_device_path{};
+                !EFI_ERROR(g_boot_services->HandleProtocol(
+                    image_info->DeviceHandle,
+                    &g_efi_device_path_protocol_guid,
+                    reinterpret_cast<void **>(&image_device_path)))) {
+                trace_device_path("ZPP_TRACE image device ",
+                                  image_device_path);
+            } else {
+                trace::line("ZPP_TRACE image has no device handle path");
+            }
+            trace_device_path("ZPP_TRACE image file path ",
+                              image_info->FilePath);
 
             // Hand over the load options the firmware's own boot option
             // for this boot manager carries, if it has any. LoadImage
