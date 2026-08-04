@@ -12,7 +12,6 @@ extern "C" {
 #include <Protocol/MpService.h>
 #include <Protocol/SimpleFileSystem.h>
 }
-#include "zpp/crash_log.h"
 #include "zpp/loader.h"
 #include "zpp/trace.h"
 #include "zpp/verify.h"
@@ -486,26 +485,27 @@ static bool file_exists(EFI_HANDLE device, const char16_t * path)
 }
 
 /**
- * Writes up to two runs of text to a file on the given device, replacing
- * whatever was there.
+ * Writes everything traced so far to a file on the given device.
  *
- * Two runs rather than one because the crash log region below is a ring:
- * once it has wrapped, its contents in order are the tail of the buffer
- * followed by its head, and writing them as two sequential writes avoids
- * needing a buffer to join them in. A caller with one run passes an empty
- * second.
+ * This is the only diagnosis channel that survives on the development
+ * target: it has no serial port, no debugger, and the screen belongs to
+ * whatever gets booted next. Without this, a bare metal attempt that fails
+ * leaves a blank screen and no reason.
  *
- * Failure is reported but never fatal to the caller. These files are
- * diagnostics, and refusing to boot because one could not be saved would
- * be worse than booting without it.
+ * Called before handing control away and on the paths that give up, so the
+ * log describes the attempt either way. Failure to write is ignored - it
+ * is a diagnostic, and refusing to boot because the log could not be
+ * saved would be worse than booting without one.
  */
-static bool write_log_file(EFI_HANDLE device,
-                           const char16_t * file_path,
-                           std::span<const char> first,
-                           std::span<const char> second)
+static void write_trace_log(EFI_HANDLE device)
 {
-    if (!device) {
-        return false;
+    if constexpr (!trace::enabled) {
+        static_cast<void>(device);
+        return;
+    }
+
+    if (!device || trace::log().empty()) {
+        return;
     }
 
     EFI_SIMPLE_FILE_SYSTEM_PROTOCOL * file_system{};
@@ -513,12 +513,12 @@ static bool write_log_file(EFI_HANDLE device,
             device,
             &g_efi_simple_file_system_protocol_guid,
             reinterpret_cast<void **>(&file_system)))) {
-        return false;
+        return;
     }
 
     EFI_FILE_PROTOCOL * volume{};
     if (EFI_ERROR(file_system->OpenVolume(file_system, &volume))) {
-        return false;
+        return;
     }
 
     // The directory has to exist before a file can be created in it, and
@@ -538,44 +538,26 @@ static bool write_log_file(EFI_HANDLE device,
         directory->Close(directory);
     }
 
-    auto path =
-        reinterpret_cast<CHAR16 *>(const_cast<char16_t *>(file_path));
-
-    // Remove any previous copy before writing, so that the file describes
-    // this boot rather than this boot laid over the last one. There is no
-    // truncating open in UEFI - CREATE finds an existing file and
-    // positions at its start - so a shorter log than the previous one
-    // would leave the tail of that one behind it, which reads as though
-    // the machine got further than it did. Delete closes the handle as
-    // well, and invalidates it whether or not it succeeded, so nothing
-    // here uses it afterwards.
-    if (EFI_FILE_PROTOCOL * previous{};
-        !EFI_ERROR(volume->Open(volume,
-                                &previous,
-                                path,
-                                EFI_FILE_MODE_READ | EFI_FILE_MODE_WRITE,
-                                0))) {
-        previous->Delete(previous);
-    }
-
     EFI_FILE_PROTOCOL * file{};
-    if (EFI_ERROR(volume->Open(volume,
-                               &file,
-                               path,
-                               EFI_FILE_MODE_READ | EFI_FILE_MODE_WRITE |
-                                   EFI_FILE_MODE_CREATE,
-                               0))) {
+    auto file_path = u"\\EFI\\zpp\\zpp_trace.log";
+    if (EFI_ERROR(volume->Open(
+            volume,
+            &file,
+            reinterpret_cast<CHAR16 *>(const_cast<char16_t *>(file_path)),
+            EFI_FILE_MODE_READ | EFI_FILE_MODE_WRITE |
+                EFI_FILE_MODE_CREATE,
+            0))) {
         volume->Close(volume);
-        return false;
+        return;
     }
 
-    for (auto run : {first, second}) {
-        if (run.empty()) {
-            continue;
-        }
-        std::size_t size = run.size();
-        file->Write(file, &size, const_cast<char *>(run.data()));
-    }
+    // Truncate, so the file describes this boot rather than this boot
+    // appended to every previous one.
+    file->SetPosition(file, 0);
+
+    auto log = trace::log();
+    std::size_t size = log.size();
+    file->Write(file, &size, const_cast<char *>(log.data()));
 
     // Flush before closing: the firmware's FAT driver caches, and a
     // machine that is about to hand over to an OS - or to hang - may never
@@ -583,147 +565,6 @@ static bool write_log_file(EFI_HANDLE device,
     file->Flush(file);
     file->Close(file);
     volume->Close(volume);
-    return true;
-}
-
-/**
- * Writes everything traced so far to a file on the given device.
- *
- * This is the only diagnosis channel that survives on the development
- * target: it has no serial port, no debugger, and the screen belongs to
- * whatever gets booted next. Without this, a bare metal attempt that fails
- * leaves a blank screen and no reason.
- *
- * Called before handing control away and on the paths that give up, so the
- * log describes the attempt either way. Note what it cannot say anything
- * about: it is written before the boot manager is started, so it always
- * ends at the same line whether the machine went on to boot or to hang.
- * That is what the crash log region below is for.
- */
-static void write_trace_log(EFI_HANDLE device)
-{
-    if constexpr (!trace::enabled) {
-        static_cast<void>(device);
-        return;
-    }
-
-    if (trace::log().empty()) {
-        return;
-    }
-
-    write_log_file(device, u"\\EFI\\zpp\\zpp_trace.log", trace::log(), {});
-}
-
-/**
- * The crash log region, once claimed, or an unattached log.
- *
- * File scope because two things need it and neither can hand it to the
- * other: uefi_main claims it at the very start of the boot, and the
- * parameters handed to zpp_load_elf carry it on to the hypervisor much
- * later.
- */
-static zpp::crash_log g_crash_log{};
-
-/**
- * Claims the crash log region and writes out whatever the last boot left
- * in it.
- *
- * Everything about this runs at the start of the boot, before anything
- * else can fail, because the previous boot's log is the most interesting
- * thing this loader has to say on a machine that hung - and a boot that
- * goes on to hang in the same place would otherwise take it down with it.
- *
- * The order is reserve, then read, and that way round for a reason.
- * Reading first looks safer, and is not: it means dereferencing a fixed
- * physical address that nothing has vouched for, which on a machine with
- * less memory than that - or firmware that maps less of it - is a page
- * fault in the one place a diagnostic must not fault. AllocatePages
- * against the firmware's own memory map is the check, and it is a better
- * one than anything this code could do for itself: it answers whether the
- * address is real, free, conventional memory in a single call.
- *
- * What that costs is a dependency on the firmware not clearing pages it
- * hands out. Nothing requires it either way, and firmware that does clear
- * them makes this feature silently useless - which is exactly what the
- * boot count reports, since it would then never read back as more than
- * one. Losing the log to a cautious firmware is a much better failure than
- * faulting on a machine that is already being investigated.
- */
-static void claim_crash_log(EFI_HANDLE device)
-{
-    using zpp::crash_log;
-
-    // Exactly this address, and no fallback. A region the firmware placed
-    // somewhere of its own choosing would be unfindable on the next boot,
-    // which is the only boot that ever reads it - so a fallback would make
-    // this look like it worked while quietly removing the whole point.
-    EFI_PHYSICAL_ADDRESS address = crash_log::region_address;
-
-    // Reserved rather than loader owned, and that is what makes it usable.
-    // EfiReservedMemoryType comes through in the memory map handed to
-    // whatever is booted next, so both Windows and Linux leave it alone;
-    // anything owned by the loader is memory an operating system is
-    // entitled to reuse the moment it takes over.
-    auto status = g_boot_services->AllocatePages(AllocateAddress,
-                                                 EfiReservedMemoryType,
-                                                 crash_log::region_size /
-                                                     EFI_PAGE_SIZE,
-                                                 &address);
-    if (EFI_ERROR(status)) {
-        // Loud, and on the channel that survives tracing being off. A
-        // refused reservation is not a boot failure, but it means this
-        // boot will leave no evidence if it hangs - which is worth knowing
-        // before the hang rather than after it.
-        char buffer[trace::line_capacity]{};
-        auto end = trace::append_text(buffer,
-                                      "zpp: crash log region refused at ");
-        end = trace::append_hex(end, crash_log::region_address, 16);
-        end = trace::append_text(end, ", status ");
-        end = trace::append_hex(end, status, 16);
-        end = trace::append_text(end, "\r\n");
-        *end = 0;
-        trace::raw(buffer);
-        return;
-    }
-
-    g_crash_log = crash_log{std::span<std::byte>{
-        reinterpret_cast<std::byte *>(crash_log::region_address),
-        crash_log::region_size}};
-
-    // What the last boot left, if it left anything this build can read.
-    // Written before the header is restamped below, because restamping is
-    // what discards it.
-    std::uint64_t boots = 0;
-    if (g_crash_log.valid()) {
-        boots = g_crash_log.boot_count();
-
-        auto contents = g_crash_log.ordered();
-        if (!contents.first.empty() || !contents.second.empty()) {
-            auto written = write_log_file(device,
-                                          u"\\EFI\\zpp\\zpp_hyper.log",
-                                          contents.first,
-                                          contents.second);
-            trace::hex_line(
-                written ? "ZPP_TRACE wrote previous hypervisor log, "
-                          "bytes "
-                        : "ZPP_TRACE could not write previous "
-                          "hypervisor log, bytes ",
-                g_crash_log.written());
-        } else {
-            trace::line("ZPP_TRACE crash log region empty");
-        }
-    } else {
-        trace::line("ZPP_TRACE crash log region holds nothing readable");
-    }
-
-    // Claimed for this boot, and the count is the measurement that says
-    // whether any of this works on this machine. Memory keeping its
-    // contents across a restart is an assumption about the hardware, not a
-    // guarantee; a second boot that reads back two has just proved it, and
-    // one that keeps reading back one has just disproved it.
-    g_crash_log.initialize(boots + 1);
-    trace::hex_line("ZPP_TRACE crash log claimed, boot count ",
-                    g_crash_log.boot_count());
 }
 
 static void * allocate_rwx(std::size_t size)
@@ -1061,26 +902,20 @@ close_event:
 }
 
 static int __attribute__((naked)) invoke_entry(
-    int (*)(
-        std::size_t, std::uintptr_t (*)(std::uintptr_t), void *, void *),
+    int (*)(std::size_t, std::uintptr_t (*)(std::uintptr_t), void *),
     std::size_t,
     std::uintptr_t (*)(std::uintptr_t),
-    void *,
     void *)
 {
     asm(R"!!(
         .intel_syntax noprefix
         push rdi // Save rdi before use as it is non-volatile.
         push rsi // Save rsi before use as it is non-volatile.
-        mov r10, rcx // Keep the function pointer, rcx is a parameter now.
         mov rdi, rdx // Forward first parameter to function.
         mov rsi, r8 // Forward second parameter to function.
         mov rdx, r9 // Forward third parameter, after rdx has been read.
-        mov rcx, [rsp+0x38] // Fourth parameter, the fifth argument here:
-        // eight bytes of return address plus thirty two of register spill
-        // area, past the two pushes above.
         sub rsp, 0x8 // Align stack to 16 bytes.
-        call r10 // Call the function pointer.
+        call rcx // Call the function pointer.
         add rsp, 0x8 // Restore stack.
         pop rsi // Restore rsi.
         pop rdi // Restore rdi.
@@ -1212,26 +1047,6 @@ extern "C" EFI_STATUS EFIAPI uefi_main(EFI_HANDLE image_handle,
 
     trace::line("ZPP_TRACE entry");
 
-    // The device this loader came from, which is where both logs are
-    // written. Needed here, at the top, rather than only for the chainload
-    // further down: the previous boot's hypervisor log is written out
-    // before anything else runs, so that a boot which fails the same way
-    // the last one did still reports what the last one left behind.
-    EFI_HANDLE our_device{};
-    if (EFI_LOADED_IMAGE_PROTOCOL * our_image{};
-        !EFI_ERROR(g_boot_services->HandleProtocol(
-            image_handle,
-            &g_efi_loaded_image_protocol_guid,
-            reinterpret_cast<void **>(&our_image)))) {
-        our_device = our_image->DeviceHandle;
-    }
-
-    // Claim the region the hypervisor keeps its log in, and write out
-    // whatever the last boot left there. First, because everything below
-    // can fail and the last boot's log is the most useful thing this
-    // loader has to say when it does.
-    claim_crash_log(our_device);
-
     // Establish whether timed waits work before touching MP services,
     // since a dead timer makes them hang rather than return an error.
     g_timed_waits_usable = acpi_timer_advancing(system_table);
@@ -1262,14 +1077,6 @@ extern "C" EFI_STATUS EFIAPI uefi_main(EFI_HANDLE image_handle,
         // hypervisor, and a processor being started begins in real mode
         // below one megabyte.
         .allocate_below_one_megabyte = allocate_below_one_megabyte,
-        // Whatever claim_crash_log managed, which is either the one fixed
-        // address or nothing at all. Nothing at all is the honest answer
-        // when the reservation was refused: the hypervisor must not write
-        // to an address this boot does not own.
-        .crash_log_memory =
-            g_crash_log.attached()
-                ? reinterpret_cast<void *>(zpp::crash_log::region_address)
-                : nullptr,
         .adjust_launch_calling_convention = invoke_entry,
     };
 
@@ -1310,13 +1117,21 @@ extern "C" EFI_STATUS EFIAPI uefi_main(EFI_HANDLE image_handle,
     }
 
     // Continue to the OS.
-    //
-    // our_device, found at the top, is also what the search below skips
-    // over. On a real machine the removable media fallback is whatever
-    // boot manager is installed - Limine on the development target - which
-    // is the thing that chainloaded us, so chaining back to it would loop.
+
+    // The device this loader came from, so the search below can skip it.
+    // On a real machine the removable media fallback is whatever boot
+    // manager is installed - Limine on the development target - which is
+    // the thing that chainloaded us, so chaining back to it would loop.
     // Under test our own image is the only thing on the medium, and
     // skipping it is what keeps the chainload from running at all.
+    EFI_HANDLE our_device{};
+    if (EFI_LOADED_IMAGE_PROTOCOL * our_image{};
+        !EFI_ERROR(g_boot_services->HandleProtocol(
+            image_handle,
+            &g_efi_loaded_image_protocol_guid,
+            reinterpret_cast<void **>(&our_image)))) {
+        our_device = our_image->DeviceHandle;
+    }
 
     // The boot managers to chain to, in order of preference. Windows is
     // named explicitly rather than relying on the removable media

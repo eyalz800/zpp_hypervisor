@@ -42,8 +42,7 @@ zpp_load_elf(const struct zpp_loader_parameters * parameters)
     auto entry = reinterpret_cast<int (*)(
         std::size_t cpuid,
         std::uintptr_t (*physical_to_virtual)(std::uintptr_t),
-        void * start_up_memory,
-        void * crash_log_memory)>(entry_point_address);
+        void * start_up_memory)>(entry_point_address);
 
     // Call entry point on all cpus.
     auto cpus = parameters->number_of_cpus();
@@ -67,23 +66,6 @@ zpp_load_elf(const struct zpp_loader_parameters * parameters)
             ZPP_START_UP_MEMORY_SIZE);
     }
 
-    // The region the hypervisor writes its log through to, so that a
-    // failure with no channel to report through still leaves something for
-    // the next boot to read. Already claimed by the platform loader, or
-    // null where it could not be.
-    //
-    // Forwarded rather than left to the hypervisor to find, even though
-    // the address is a constant both ends already know. What crosses here
-    // is not where the region is - it is whether this boot's loader
-    // actually succeeded in claiming it. That distinction is the whole
-    // safety property: the region is at a fixed address, so a hypervisor
-    // that assumed it was reserved would write into whatever owns that
-    // address on a machine where the reservation was refused. Nothing
-    // found inside the region can answer the question either, since
-    // anything left there survives a restart exactly as well as the log
-    // does and may predate the memory map this boot is running under.
-    auto crash_log_memory = parameters->crash_log_memory;
-
     for (std::size_t i{}; i < cpus; ++i) {
         // The launch function.
         auto launch = [&] {
@@ -92,13 +74,10 @@ zpp_load_elf(const struct zpp_loader_parameters * parameters)
                     entry,
                     i,
                     parameters->physical_to_virtual,
-                    start_up_memory,
-                    crash_log_memory);
+                    start_up_memory);
             }
-            return entry(i,
-                         parameters->physical_to_virtual,
-                         start_up_memory,
-                         crash_log_memory);
+            return entry(
+                i, parameters->physical_to_virtual, start_up_memory);
         };
 
         // The erased launch function.

@@ -10,7 +10,6 @@
 #include "zpp/arch/x86_64/vmx/ept_pointer.h"
 #include "zpp/arch/x86_64/vmx/vmcs.h"
 #include "zpp/arch/x86_64/vmx/vmx_exit_reason.h"
-#include "zpp/crash_log.h"
 #include "zpp/crt.h"
 #include "zpp/elf_file.h"
 #include "zpp/elf_image_base.h"
@@ -1160,88 +1159,6 @@ void hypervisor::initialize_start_up_memory(std::uint64_t memory)
     log("start-up memory ready at {}, vector {}", memory, memory >> 12);
 }
 
-void hypervisor::initialize_crash_log(std::uint64_t memory)
-{
-    if (!memory) {
-        // No region, so the log stays in memory only. Not worth a line of
-        // its own: it is the normal state on every platform whose loader
-        // does not reserve one, and the loader that does say so already.
-        return;
-    }
-
-    // The address is fixed and known to both ends, so a value that is not
-    // it did not come from a loader that agrees with this build. Refused
-    // rather than used, because writing the log through to an address
-    // nobody claimed is worse than not having a crash log at all.
-    if (crash_log::region_address != memory) {
-        log("crash log region at {} is not the agreed {}",
-            memory,
-            crash_log::region_address);
-        return;
-    }
-
-    // Mapped into the host page table, because that is the page table this
-    // VMM is on for every line it will ever write. Until the switch to it
-    // a few steps below, writes reach the region through the firmware's
-    // own identity mapping; afterwards they reach it through this, and a
-    // line logged from a VM exit handler with no mapping here would fault
-    // inside the host with nowhere left to unwind to.
-    //
-    // Read and write, and deliberately not execute: nothing is ever
-    // fetched from a log.
-    this->host_page_table.map_from(
-        memory,
-        crash_log::region_size,
-        arch::x86_64::page_table::protection::read |
-            arch::x86_64::page_table::protection::write,
-        this->os_page_table);
-
-    // Nothing is done to the EPT for it, and that is a decision rather
-    // than an omission. EPT translates guest-physical addresses, so it has
-    // no bearing on the writes this VMM makes for itself - SDM 31.3.1,
-    // "EPT Overview": "It translates the guest-physical addresses used in
-    // VMX non-root operation and those used by VM entry for event
-    // injection." The host page table above is the whole of what those
-    // writes go through.
-    //
-    // What it does mean is that the guest can see the region, and write to
-    // it, since the EPT identity maps everything read-write-execute except
-    // the pages protect_module hides. Left that way on purpose:
-    //
-    // - Nothing legitimate will touch it. It is EfiReservedMemoryType in
-    //   the memory map handed to whatever boots next, which is the same
-    //   promise the start-up trampoline's page relies on.
-    // - It is useful. A guest that is still running can read the
-    //   hypervisor's log straight out of physical memory at a known fixed
-    //   address, which is a second diagnosis channel on a machine with no
-    //   serial port and one that needs no restart.
-    // - The cost of a guest scribbling on it is corrupted text, not a
-    //   corrupted reader: the header carries a checksum, so a damaged
-    //   header is discarded rather than decoded.
-    //
-    // Hiding it would be one more call beside protect_module, and this is
-    // the note to change if a guest is ever found writing there.
-    //
-    // Nothing here keeps the address in a member of its own. log_storage
-    // holds the region from this point on, and a debugger looking for it
-    // wants that static rather than an offset into this class - the two
-    // could only ever disagree.
-    auto region = crash_log{std::span<std::byte>{
-        reinterpret_cast<std::byte *>(memory), crash_log::region_size}};
-
-    // The loader stamps a fresh header before launching, so a region that
-    // does not validate here means the two builds disagree about the
-    // format or something overwrote it in between. Either way it is
-    // reinitialized rather than appended to, since appending to a header
-    // that cannot be trusted produces a log nothing can read.
-    if (!region.valid()) {
-        region.initialize(1);
-    }
-
-    log_storage::attach(region);
-    log("crash log attached at {}, boot {}", memory, region.boot_count());
-}
-
 std::uint32_t hypervisor::start_up_trampoline_stage() const
 {
     // Zero when there is no trampoline at all, which is a different answer
@@ -1357,11 +1274,6 @@ void hypervisor::start_up_on_this_processor(std::uint64_t slot)
     context.rdi = slot;
     context.rsi = 0;
     context.rdx = 0;
-
-    // No crash log region either. The boot processor attached it once, on
-    // the way through, and the log it points at is shared - so a processor
-    // arriving here is already writing through to it.
-    context.rcx = 0;
 
     launch_on_cpu(context);
 }
@@ -2048,7 +1960,6 @@ hypervisor::main(arch::x86_64::context & caller_context)
         reinterpret_cast<std::uint64_t (*)(std::uint64_t)>(
             caller_context.rsi);
     auto start_up_memory = caller_context.rdx;
-    auto crash_log_memory = caller_context.rcx;
 
     // Whether this processor was started by this VMM rather than launched
     // by the loader, which changes three things below: there is no state
@@ -2120,13 +2031,6 @@ hypervisor::main(arch::x86_64::context & caller_context)
 
         // Initialize host page table.
         initialize_host_page_table();
-
-        // Point the log at memory that outlives this boot, as early as the
-        // host page table allows - it has to exist before the region can
-        // be mapped into it, and every line logged after this point
-        // survives a restart. Nothing above here logs, so nothing is lost
-        // to the ordering.
-        initialize_crash_log(crash_log_memory);
 
         // Initialize module physical to virtual translation.
         if (auto result = initialize_module_physical_to_virtual();

@@ -129,12 +129,6 @@ static int zpp_init(void)
         // already running under the kernel, so it never has to start one
         // itself.
         .allocate_below_one_megabyte = NULL,
-        // None either. This runs with the kernel already up, which has its
-        // own means of keeping a log across a restart - pstore over a
-        // reserved region is exactly this idea, done by the party that
-        // owns the memory map - and claiming a fixed physical address
-        // behind its back is not one of them.
-        .crash_log_memory = NULL,
         // The kernel already uses the SysV convention the hypervisor
         // wants.
         .adjust_launch_calling_convention = NULL,

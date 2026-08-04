@@ -337,32 +337,6 @@ gdb attach against the guest does not work when the failure being chased kills
 the guest: symbols cannot be loaded until the loader has mapped the module, and
 by then it is over.
 
-### Reading the log after a bare metal hang
-
-The hypervisor's log is also written through, line by line, to a reserved
-region at a fixed physical address, which the *next* boot's UEFI loader reads
-back to `\EFI\zpp\zpp_hyper.log` on the ESP. So the procedure after a hang is
-restart, mount the ESP, read that file. `zpp_trace.log` cannot cover it —
-that one is written just before `StartImage`, so it ends at the same line
-whether the machine went on to boot or to hang.
-
-`zpp::crash_log` in `hypervisor/include/zpp/crash_log.h` is the whole
-contract and carries the reasoning for the address, the ring layout and the
-write path. Two things worth knowing before touching it:
-
-- **The region surviving a restart is an assumption that has NOT been
-  validated on any machine yet.** `boot_count` in the header is the
-  measurement — the loader increments and traces it every boot, so a second
-  boot reading back two proves it and a value stuck at one disproves it. The
-  attempt to validate under Bochs failed for an unrelated reason: neither
-  `ResetSystem(EfiResetWarm)` (which writes the `0xcf9` reset control
-  register) nor a keyboard-controller reset produced a second boot there.
-- **The guest can see and write the region**, deliberately — EPT is left
-  alone, since SDM 31.3.1 has it translating guest-physical addresses only
-  and it therefore has no bearing on what the VMM writes for itself. That
-  makes the log readable from a running guest at a known address, with no
-  restart. Hiding it would be one call beside `protect_module`.
-
 Two things that cost time:
 
 - `load-symbols` needs an address inside the module, and gdb resolves *types*

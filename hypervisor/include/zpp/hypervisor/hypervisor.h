@@ -291,13 +291,6 @@ private:
     void initialize_start_up_memory(std::uint64_t memory);
 
     /**
-     * Points the log at the region the loader reserved for it, so that
-     * everything logged from here on outlives this boot. Does nothing when
-     * the loader reserved none. Done once, on the boot processor.
-     */
-    void initialize_crash_log(std::uint64_t memory);
-
-    /**
      * How far the start-up trampoline got on the processor that used it
      * last, as an ap_start_up_stage. Zero when none was ever prepared.
      */

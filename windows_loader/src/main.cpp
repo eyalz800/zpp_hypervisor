@@ -59,26 +59,20 @@ invoke_physical_to_virtual(std::uintptr_t)
 }
 
 static int __attribute__((naked)) invoke_entry(
-    int (*)(
-        std::size_t, std::uintptr_t (*)(std::uintptr_t), void *, void *),
+    int (*)(std::size_t, std::uintptr_t (*)(std::uintptr_t), void *),
     std::size_t,
     std::uintptr_t (*)(std::uintptr_t),
-    void *,
     void *)
 {
     asm(R"!!(
         .intel_syntax noprefix
         push rdi // Save rdi before use as it is non-volatile.
         push rsi // Save rsi before use as it is non-volatile.
-        mov r10, rcx // Keep the function pointer, rcx is a parameter now.
         mov rdi, rdx // Forward first parameter to function.
         mov rsi, r8 // Forward second parameter to function.
         mov rdx, r9 // Forward third parameter, after rdx has been read.
-        mov rcx, [rsp+0x38] // Fourth parameter, the fifth argument here:
-        // eight bytes of return address plus thirty two of register spill
-        // area, past the two pushes above.
         sub rsp, 0x8 // Align stack to 16 bytes.
-        call r10 // Call the function pointer.
+        call rcx // Call the function pointer.
         add rsp, 0x8 // Restore stack.
         pop rsi // Restore rsi.
         pop rdi // Restore rdi.
@@ -102,11 +96,6 @@ extern "C" NTAPI NTSTATUS driver_entry(PDRIVER_OBJECT driver_object,
         // already running under the operating system, so it never has to
         // start one itself.
         .allocate_below_one_megabyte = nullptr,
-        // None either. This runs with an operating system already up,
-        // which has its own means of keeping a log across a restart, and
-        // claiming a fixed physical address behind its back is not one of
-        // them.
-        .crash_log_memory = nullptr,
         .adjust_launch_calling_convention = invoke_entry,
     };
 
