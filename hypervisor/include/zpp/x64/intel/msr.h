@@ -12,6 +12,7 @@ namespace msr
 enum type : std::size_t
 {
     ia32_extended_feature_enable = 0xc0000080,
+    ia32_feature_control = 0x3a,
     ia32_mtrr_capability = 0xfe,
     ia32_debug_control = 0x1d9,
     ia32_fs_base = 0xC0000100,

@@ -616,7 +616,13 @@ extern "C" EFI_STATUS EFIAPI uefi_main(EFI_HANDLE image_handle,
     // If we failed, return an arbitrary failure.
     if (result) {
 #if ZPP_CI_VERIFY_HYPERVISOR
-        serial_write("zpp: ZPP_HYPERVISOR_FAILED zpp_load_elf failed\r\n");
+        // The code is the hypervisor's own error enumeration, so print it
+        // - it is the only thing that says which step failed, and a
+        // debugger is not always available where this runs.
+        serial_write(
+            "zpp: ZPP_HYPERVISOR_FAILED zpp_load_elf failed, code ");
+        serial_write_hex(static_cast<std::uint64_t>(result));
+        serial_write("\r\n");
 #endif
         return EFI_LOAD_ERROR;
     }

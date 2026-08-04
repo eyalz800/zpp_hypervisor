@@ -154,6 +154,67 @@ Both paths are handled. Verified to survive `--gc-sections --strip-all`.
 3. `cmake/freestanding-libc/` — minimal C stubs for `#include_next`
 4. Clang builtins — `stddef.h`, `stdint.h`
 
+## Debugging
+
+Run Bochs and gdb **inside a named tmux session**, never as a detached one-shot command, so
+the session can be watched live and reattached to across turns instead of restarting the
+emulator to look at something again. One window for the emulator, one for gdb:
+
+```sh
+tmux new-session -d -s zpp-debug -n bochs
+tmux new-window  -t zpp-debug    -n gdb
+tmux attach -t zpp-debug
+```
+
+Bound every wait on the emulator to something short (30–60s) and then report state. A long
+blocking wait is indistinguishable from a hang.
+
+### Use hardware breakpoints only
+
+**Always `hbreak`, never `break`.** This is not a preference, it is a correctness
+requirement here:
+
+- A software breakpoint works by writing `0xCC` and caching the byte it replaced. Bochs
+  halts at reset, which is long before the loader has copied the hypervisor ELF into memory,
+  so the byte gdb caches at insert time is pre-load garbage. When gdb later removes the
+  breakpoint it writes that garbage back **over real instructions**, corrupting the code.
+- Observed symptom: a corrupted `ltr` turned into a bogus `#GP`, and a corrupted stub
+  reported the wrong exception vector. Hours can go into chasing a fault the debugger
+  created.
+- `hbreak` uses the debug registers and touches no memory, so it is safe to set at reset by
+  raw address before symbols exist.
+
+Also avoid gdb **inferior calls** (`print somefunc()`) on this target. Everything in
+`zpp/x64/asm.h` is `__attribute__((naked))`, so calling one from gdb faults and leaves the
+session in a broken called-frame state.
+
+### Session recipe
+
+```sh
+cmake --preset debug -DZPP_CI_VERIFY_HYPERVISOR=ON   # adds the serial tracing
+cmake --build --preset debug
+./scripts/bochs/setup.sh debug                       # builds OVMF.fd + esp.img
+./scripts/bochs/run.sh                               # gdbstub on :1337
+./scripts/bochs/debug.sh                             # attaches x86_64-elf-gdb
+```
+
+Notes that cost time when forgotten:
+
+- Set `reset_on_triple_fault=0` in the bochsrc when chasing a fault, so Bochs panics with a
+  register dump instead of silently rebooting.
+- Bochs leaves an `esp.img.lock` behind after a hard kill; the next run dies with
+  `image locked`. Remove it.
+- The module load address is printed on serial (`ZPP_TRACE allocate_rwx done at …`) and is
+  stable for a given build. `load-symbols <addr> out/debug/x86_64/zpp_hypervisor` needs the
+  module to already be in memory, so it cannot run at reset — break first, load symbols
+  after.
+- Serial output lands in `build/bochs/serial.out`.
+- On failure the UEFI loader prints the hypervisor's own error code, which `zpp_load_elf`
+  passes through unflattened. That is usually enough to skip gdb entirely.
+
+Never pass `CLAUDE.md` (or any other Markdown) to `clang-format` — it will happily reflow it
+as C++ and destroy the file.
+
 ## Conventions
 
 - C++26 standard, `-pedantic -Wall -Wextra -Werror`

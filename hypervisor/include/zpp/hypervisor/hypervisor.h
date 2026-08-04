@@ -2,6 +2,7 @@
 #include "zpp/error.h"
 #include "zpp/small_map.h"
 #include "zpp/x64/context.h"
+#include "zpp/x64/exception_entry.h"
 #include "zpp/x64/generic.h"
 #include "zpp/x64/intel/ept.h"
 #include "zpp/x64/intel/msr.h"
@@ -10,6 +11,7 @@
 #include "zpp/x64/intel/vmx.h"
 #include "zpp/x64/os_page_table.h"
 #include "zpp/x64/page_table.h"
+#include <atomic>
 #include <cstddef>
 #include <cstdint>
 #include <expected>
@@ -30,6 +32,8 @@ public:
         vmptrld_failed = 3,
         physical_to_virtual_capacity_error = 4,
         out_of_ept_entries = 5,
+        host_exception = 6,
+        vmx_disabled_by_firmware = 7,
     };
 
     /**
@@ -80,6 +84,20 @@ public:
      */
     void launch_on_cpu(x64::context & caller_context);
 
+    /**
+     * Records an exception the host IDT caught and unwinds to the recovery
+     * point main established, so the launch fails with an error instead of
+     * escalating to a triple fault. Public only because the entry stubs in
+     * the exception entry table reach it through zpp_x64_exception - it is
+     * not part of the interface a caller of this class should use.
+     *
+     * Halts if there is no recovery point, which is the case once the
+     * guest is running: the VMCS points the host IDTR here, but main's
+     * frame is gone by then and there is nowhere to unwind to.
+     */
+    [[noreturn]] void
+    on_host_exception(const x64::exception_frame & frame);
+
 private:
     /**
      * Capture important registers for later use of the hypervisor.
@@ -115,9 +133,21 @@ private:
     void initialize_host_gdt();
 
     /**
-     * Create the IDT entries for our hypervisor.
+     * Create the IDT entries for our hypervisor. Depends on the host GDT
+     * having been built already, because the gates need the host code
+     * segment selector.
      */
     void initialize_host_idt();
+
+    /**
+     * Load the host IDT.
+     */
+    void load_host_idt();
+
+    /**
+     * Load the OS IDT.
+     */
+    void load_os_idt();
 
     /**
      * Initialize an intermediate copy of the OS GDT to be used
@@ -172,6 +202,12 @@ private:
      * Initialize needed vmx structures.
      */
     void initialize_vmx();
+
+    /**
+     * Permit VMXON in IA32_FEATURE_CONTROL, which vmxon requires before it
+     * will run at all. Per logical processor.
+     */
+    std::expected<void, zpp::error> enable_vmx_in_feature_control();
 
     /**
      * Enter root mode on the current CPU.
@@ -294,6 +330,11 @@ private:
     x64::idtr idtr{};
 
     /**
+     * The IDTR value describing the host IDT.
+     */
+    x64::idtr host_idtr{};
+
+    /**
      * The GDTR register.
      */
     x64::gdtr gdtr{};
@@ -335,9 +376,42 @@ private:
     alignas(page_size) std::uint64_t host_gdt[0x2000]{};
 
     /**
-     * The IDT that will be used by the host VMM.
+     * The IDT that will be used by the host VMM. Two quadwords per gate.
      */
     alignas(page_size) std::uint64_t host_idt[0x2000]{};
+
+    /**
+     * Assert the host IDT can hold a gate for every vector.
+     */
+    static_assert(sizeof(host_idt) >= x64::number_of_exception_vectors *
+                                          2 * sizeof(std::uint64_t));
+
+    /**
+     * The exception the host IDT caught last, as the entry stub found it.
+     * Kept for a debugger to read: the launch fails with a
+     * host_exception error, which says what happened but not where.
+     */
+    x64::exception_frame host_exception{};
+
+    /**
+     * CR2 as of that exception, which is the address that faulted when the
+     * vector is a page fault.
+     */
+    std::uint64_t host_exception_cr2{};
+
+    /**
+     * The context to unwind to when the host IDT catches an exception,
+     * captured by main once the host page table is live.
+     */
+    x64::context host_exception_recovery{};
+
+    /**
+     * The flag in main's frame that says the recovery context above was
+     * used, or null while there is no recovery point to unwind to. Only
+     * one CPU can be inside that window at a time, because the loader
+     * launches CPUs strictly one after another.
+     */
+    std::atomic<bool> * host_exception_recovery_flag{};
 
     /**
      * The data pointed to by the FS register to be used by
@@ -510,6 +584,10 @@ inline const zpp::error_category & category(hypervisor::error)
                 return "Physical to virtual capacity error";
             case hypervisor::error::out_of_ept_entries:
                 return "Out of EPT entries";
+            case hypervisor::error::host_exception:
+                return "Host exception caught by the host IDT";
+            case hypervisor::error::vmx_disabled_by_firmware:
+                return "VMX locked off in IA32_FEATURE_CONTROL";
             }
         });
     return error_category;

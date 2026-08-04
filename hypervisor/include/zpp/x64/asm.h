@@ -13,6 +13,19 @@ inline std::uint64_t __attribute__((naked)) cr0()
     )!!");
 }
 
+/**
+ * Returns CR2, the linear address of the last page fault. Only meaningful
+ * inside a page fault handler, before the next page fault overwrites it.
+ */
+inline std::uint64_t __attribute__((naked)) cr2()
+{
+    asm(R"!!(
+        .intel_syntax noprefix
+        mov rax, cr2
+        ret
+    )!!");
+}
+
 inline std::uint64_t __attribute__((naked)) cr3()
 {
     asm(R"!!(
@@ -229,6 +242,15 @@ inline void __attribute__((naked)) enable_interrupts()
     asm(R"!!(
         .intel_syntax noprefix
         sti
+        ret
+    )!!");
+}
+
+inline void __attribute__((naked)) halt()
+{
+    asm(R"!!(
+        .intel_syntax noprefix
+        hlt
         ret
     )!!");
 }
