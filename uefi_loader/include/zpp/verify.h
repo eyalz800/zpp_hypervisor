@@ -51,6 +51,30 @@ struct verify
     }
 
     /**
+     * The same, for a leaf that takes a subleaf in ecx. The diagnostic
+     * leaf uses it to select which processor is being asked about, so this
+     * cannot go through the version above, which forces ecx to zero.
+     */
+    static void query_cpuid_ecx(std::uint32_t leaf,
+                                std::uint32_t subleaf,
+                                std::uint32_t (&out)[4])
+    {
+        std::uint32_t a{};
+        std::uint32_t b{};
+        std::uint32_t c{};
+        std::uint32_t d{};
+
+        asm volatile("cpuid"
+                     : "=a"(a), "=b"(b), "=c"(c), "=d"(d)
+                     : "a"(leaf), "c"(subleaf));
+
+        out[0] = a;
+        out[1] = b;
+        out[2] = c;
+        out[3] = d;
+    }
+
+    /**
      * @}
      */
 
@@ -191,6 +215,34 @@ struct verify
         for (std::size_t i{}; i < cpus; ++i) {
             hypervisor_signature found{};
             auto result = platform.call_on_cpu(i, on_cpu, &found);
+
+            // A processor that never ran the function cannot report
+            // anything itself, so ask the hypervisor about it from here.
+            // This is the only channel: it is not executing, and a
+            // debugger cannot be used because QEMU's KVM_GET_MP_STATE
+            // discards a pending start-up IPI and so can cause the very
+            // failure being diagnosed.
+            if (0 != result) {
+                std::uint32_t diagnostic[4]{};
+                query_cpuid_ecx(0x40000001, static_cast<std::uint32_t>(i),
+                                diagnostic);
+
+                char report_buffer[line_capacity]{};
+                auto tail =
+                    trace::append_text(report_buffer, "zpp: cpu ");
+                tail = trace::append_decimal(tail, i);
+                tail = trace::append_text(tail, " did not run: exits=");
+                tail = trace::append_hex(tail, diagnostic[0], 8);
+                tail = trace::append_text(tail, " last_reason=");
+                tail = trace::append_hex(tail, diagnostic[1], 8);
+                tail = trace::append_text(tail, " qual=");
+                tail = trace::append_hex(tail, diagnostic[2], 8);
+                tail = trace::append_text(tail, " flags=");
+                tail = trace::append_hex(tail, diagnostic[3], 8);
+                tail = trace::append_text(tail, "\r\n");
+                *tail = 0;
+                report_line(report_buffer);
+            }
 
             // Print what CPUID actually answered, pass or fail. The point
             // is to be able to read the signature rather than trust a

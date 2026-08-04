@@ -1796,6 +1796,11 @@ hypervisor::main(arch::x86_64::context & caller_context)
             constexpr std::uint32_t hypervisor_leaf_first = 0x40000000;
             constexpr std::uint32_t hypervisor_leaf_last = 0x4fffffff;
 
+            // Reports a given processor's most recent exit, selected by
+            // ecx. Inside the range this VMM already owns, so it costs no
+            // new interface and nothing underneath can answer it instead.
+            constexpr std::uint32_t diagnostic_leaf = 0x40000001;
+
             // If needs to set hypervisor present bit.
             if (1 == leaf) {
                 // Set hypervisor present bit.
@@ -1850,15 +1855,64 @@ hypervisor::main(arch::x86_64::context & caller_context)
                 // It then uses the Hyper-V synthetic MSRs, which this
                 // implements no more than it implements the interface.
                 if (hypervisor_leaf_first == leaf) {
-                    // The highest leaf answered here. Just this one:
-                    // there is a signature to report and no interface
-                    // behind it.
-                    cpuid_result[0] = hypervisor_leaf_first;
+                    // The highest leaf answered here, which now includes
+                    // the diagnostic leaf below.
+                    cpuid_result[0] = diagnostic_leaf;
 
                     // HyperVisor Name: ZppZppZppZpp.
                     cpuid_result[1] = 0x5a70705a;
                     cpuid_result[2] = 0x705a7070;
                     cpuid_result[3] = 0x70705a70;
+                } else if (diagnostic_leaf == leaf) {
+                    // Reports another processor's most recent exit.
+                    //
+                    // This exists because there is otherwise no way to ask
+                    // a stopped processor anything. The records live in
+                    // members and were readable only from a debugger, and
+                    // a debugger is the one tool that cannot be used here:
+                    // QEMU's KVM_GET_MP_STATE calls
+                    // kvm_apic_accept_events(), which discards a pending
+                    // start-up IPI, so attaching gdb can *cause* the
+                    // failure being investigated.
+                    //
+                    // Answering for an arbitrary processor rather than the
+                    // caller is the whole point: the processor with
+                    // something to say is by definition not executing.
+                    //
+                    // Deliberately flat scalars rather than a pointer to a
+                    // structure. A pointer would make the loader depend on
+                    // this class's layout across two separate builds with
+                    // different ABIs, and that coupling would break
+                    // silently.
+                    auto cpu = context.rcx & 0xff;
+                    if (cpu < max_cpus) {
+                        auto count = this->exit_trace_count[cpu];
+                        auto & newest =
+                            this->exit_trace[cpu]
+                                            [(count - 1) %
+                                             exit_trace_capacity];
+
+                        cpuid_result[0] =
+                            static_cast<std::uint32_t>(count);
+                        cpuid_result[1] = count ? static_cast<std::uint32_t>(
+                                                      newest.reason)
+                                                : 0;
+                        cpuid_result[2] = count ? static_cast<std::uint32_t>(
+                                                      newest.qualification)
+                                                : 0;
+
+                        // Everything that says "this processor stopped and
+                        // why", packed so one leaf answers the question.
+                        cpuid_result[3] =
+                            (this->unhandled_exit.occurred ? (1u << 0) : 0) |
+                            (this->vm_entry_failure.occurred ? (1u << 1)
+                                                             : 0) |
+                            (this->started_by_start_up_ipi[cpu] ? (1u << 2)
+                                                                : 0) |
+                            (static_cast<std::uint32_t>(
+                                 newest.activity_state & 0x3)
+                             << 3);
+                    }
                 } else {
                     // No interface, no features, nothing to enlighten
                     // anyone about.
