@@ -248,6 +248,28 @@ ap_code64:
 
 ap_host_code:
     lidt [rbx + ap_host_idtr_offset]
+
+    // Null the data segments, now that the GDT they referred to is gone.
+    //
+    // They still hold the trampoline GDT's flat data selector, which in the
+    // host GDT is not a data descriptor at all - that table puts the task
+    // segment where this one put data. Leaving a stale selector there is
+    // not harmless: the first iretq that reloads SS from it faults with the
+    // segment not writable, which the host IDT then catches and stops the
+    // processor on. Measured under Bochs as
+    // "iret64: SS AR byte not writable or code segment".
+    //
+    // Null rather than some host descriptor, because that is what this VMM
+    // runs its host side with everywhere else - vm_launch sets the same
+    // selectors to zero after a VM exit - and in sixty-four bit mode a null
+    // data segment is usable at privilege zero.
+    xor eax, eax
+    mov ds, ax
+    mov es, ax
+    mov ss, ax
+    mov fs, ax
+    mov gs, ax
+
     mov byte ptr [rbx + ap_stage_offset], ap_stage_host_tables
 
     mov rdi, [rbx + ap_argument_offset]
