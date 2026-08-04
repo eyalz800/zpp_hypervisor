@@ -13,6 +13,12 @@ memory: guest=1024, host=1024
 # ips is Bochs' estimate of how fast it can simulate, and it drives the guest's
 # sense of time rather than actual speed. Too low a value makes firmware and
 # guests hit their own internal timeouts, so keep it realistic.
+#
+# One processor, because this file is the one run.sh uses and that build has
+# the gdb stub: bochs.h refuses to compile the stub together with SMP. The
+# multiprocessor part of the self check therefore has nothing to send a
+# start-up IPI to under run.sh, and is exercised by scripts/ci/bochs-smoke.sh
+# instead, which rewrites this line to $CPUS against an SMP build.
 cpu: model=corei7_icelake_u, count=1, ips=250000000, reset_on_triple_fault=1
 
 ata0: enabled=1, ioaddr1=0x1f0, ioaddr2=0x3f0, irq=14

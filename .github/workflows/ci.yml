@@ -89,10 +89,12 @@ jobs:
         run: cmake --build --preset debug --target linux_loader_ko
 
   # Boots the UEFI loader under Bochs' software emulated VMX and asserts the
-  # hypervisor identifies itself through CPUID leaf 0x40000000. Bochs needs no
-  # hardware virtualization, which is what makes this possible at all: the
-  # hosted runners are AMD and expose no vmx, so this is the only way to
-  # exercise vmxon, vmlaunch and the exit handler in CI.
+  # hypervisor identifies itself through CPUID leaf 0x40000000, on the boot
+  # processor and on every processor it has to take over from a guest's own
+  # INIT-SIPI-SIPI. Bochs needs no hardware virtualization, which is what
+  # makes this possible at all: the hosted runners are AMD and expose no vmx,
+  # so this is the only way to exercise vmxon, vmlaunch and the exit handler
+  # in CI.
   bochs-vmx:
     name: bochs vmx ${{ matrix.config }} (emulated VT-x)
     runs-on: ubuntu-latest
@@ -130,8 +132,8 @@ jobs:
           # SMP rather than the gdb stub. bochs.h refuses to compile the
           # two together ("GDB stub was written for single processor
           # support"), and the smoke test needs several processors far more
-          # than it needs a debugger: with one processor it never starts an
-          # application processor, so it cannot exercise the INIT-SIPI-SIPI
+          # than it needs a debugger: with one processor there is nothing to
+          # send a start-up IPI to, so it cannot exercise the INIT-SIPI-SIPI
           # path at all - which is how a broken one reached real hardware.
           # Interactive debugging still uses a gdbstub build locally; see
           # scripts/bochs/run.sh, which honours $BOCHS.
@@ -164,10 +166,14 @@ jobs:
       - name: Build boot medium
         run: ./scripts/bochs/setup.sh ${{ matrix.config }}
 
-      # Four processors, so the application processor path is covered:
-      # the loader launches the hypervisor on every one and then verifies
-      # each through MP services, which is INIT-SIPI-SIPI to a processor
-      # that is already a VMX guest.
+      # Four processors, because the check is now a multiprocessor one and
+      # with a single processor half of it does not run at all. The loader
+      # launches the hypervisor on the boot processor alone and then does
+      # what an operating system does: enables x2APIC, so the interrupt
+      # command register is the MSR the hypervisor intercepts, and sends
+      # each other processor a real INIT-SIPI-SIPI. What answers CPUID leaf
+      # 0x40000000 on those processors is the whole result - it says whether
+      # the hypervisor adopted them on the way through.
       - name: Assert the hypervisor reaches root mode on every cpu
         env:
           CPUS: 4
