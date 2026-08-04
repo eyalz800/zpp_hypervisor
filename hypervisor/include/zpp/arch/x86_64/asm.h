@@ -135,6 +135,29 @@ inline void __attribute__((naked)) ltr(void *)
     )!!");
 }
 
+inline std::uint64_t __attribute__((naked)) dr6()
+{
+    asm(R"!!(
+        .intel_syntax noprefix
+        mov rax, dr6
+        ret
+    )!!");
+}
+
+/**
+ * Sets DR6. Needed because DR6 is not a VMCS guest field - the guest and
+ * the host share the register - so giving a guest its architectural DR6
+ * means writing the real one while running on that processor.
+ */
+inline void __attribute__((naked)) dr6(std::uint64_t)
+{
+    asm(R"!!(
+        .intel_syntax noprefix
+        mov dr6, rdi
+        ret
+    )!!");
+}
+
 inline std::uint64_t __attribute__((naked)) dr7()
 {
     asm(R"!!(
