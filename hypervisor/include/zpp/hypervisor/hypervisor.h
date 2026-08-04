@@ -291,6 +291,12 @@ private:
     void initialize_start_up_memory(std::uint64_t memory);
 
     /**
+     * How far the start-up trampoline got on the processor that used it
+     * last, as an ap_start_up_stage. Zero when none was ever prepared.
+     */
+    std::uint32_t start_up_trampoline_stage() const;
+
+    /**
      * Starts the processor tracked under the given index, which is
      * expected to be waiting for a start-up IPI, and waits for it to come
      * up under the hypervisor. Returns false if it did not.

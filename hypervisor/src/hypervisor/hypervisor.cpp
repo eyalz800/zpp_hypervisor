@@ -1145,6 +1145,20 @@ void hypervisor::initialize_start_up_memory(std::uint64_t memory)
     log("start-up memory ready at {}, vector {}", memory, memory >> 12);
 }
 
+std::uint32_t hypervisor::start_up_trampoline_stage() const
+{
+    // Zero when there is no trampoline at all, which is a different answer
+    // from a trampoline that never ran and has to stay distinguishable.
+    if (!this->start_up_memory) {
+        return 0;
+    }
+
+    using arch::x86_64::ap_start_up_area;
+    auto & area = *reinterpret_cast<const ap_start_up_area *>(
+        this->start_up_memory + arch::x86_64::ap_start_up_area_offset);
+    return area.stage;
+}
+
 bool hypervisor::start_application_processor(std::size_t slot,
                                              std::uint64_t guest_vector)
 {
@@ -1166,6 +1180,28 @@ bool hypervisor::start_application_processor(std::size_t slot,
 
     auto & area = *reinterpret_cast<arch::x86_64::ap_start_up_area *>(
         this->start_up_memory + arch::x86_64::ap_start_up_area_offset);
+
+    // Put the trampoline's own working area back the way the assembler
+    // left it, before every start and not just the first.
+    //
+    // The trampoline relocates three addresses by adding the page's base
+    // to them in place, which is correct exactly once. A second processor
+    // started from the same blob would add its base to values that already
+    // hold one, producing a descriptor table base pointing at nothing -
+    // and it faults on the far jump that follows, before it has any
+    // interrupt descriptor table, so the machine resets rather than
+    // reporting.
+    //
+    // Measured: with three processors to start, the firmware bootlooped
+    // and printed no per-processor result at all, because the check starts
+    // every target before polling any of them.
+    std::memcpy(area.assembly_owned,
+                arch::x86_64::zpp_ap_start_up_begin +
+                    arch::x86_64::ap_start_up_area_offset +
+                    offsetof(arch::x86_64::ap_start_up_area,
+                             assembly_owned),
+                sizeof(area.assembly_owned));
+
     area.argument = slot;
     area.stack_top =
         reinterpret_cast<std::uint64_t>(std::end(this->start_up_stack));
@@ -2316,6 +2352,12 @@ hypervisor::main(arch::x86_64::context & caller_context)
                                                              : 0) |
                             (this->started_by_start_up_ipi[cpu] ? (1u << 2)
                                                                 : 0) |
+                            // How far the start-up trampoline got, in bits
+                            // 11:8. The only account of a failure before
+                            // the host descriptor tables are live, and
+                            // reported here because a processor that never
+                            // arrived cannot report anything itself.
+                            (start_up_trampoline_stage() << 8) |
                             (static_cast<std::uint32_t>(
                                  newest.activity_state & 0x3)
                              << 3);
