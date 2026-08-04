@@ -229,14 +229,15 @@ private:
      * APs in a hlt loop and wakes them with INIT-SIPI-SIPI, so every
      * wake after the first went nowhere and the caller spun forever.
      */
-    void emulate_init_signal(arch::x86_64::context & context);
+    void emulate_init_signal();
 
     /**
      * Emulate a start-up IPI: leave the wait-for-SIPI state and begin
      * execution in real mode at the vector the IPI carries, which is the
      * page number of the entry point.
      */
-    void emulate_start_up_ipi(std::uint64_t vector);
+    void emulate_start_up_ipi(arch::x86_64::context & context,
+                              std::uint64_t vector);
 
     /**
      * Append the exit that is about to be resumed from to this CPU's ring

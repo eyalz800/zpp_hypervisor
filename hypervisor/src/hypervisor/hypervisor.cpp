@@ -726,51 +726,108 @@ std::expected<void, zpp::error> hypervisor::enable_vmx_in_feature_control()
     return {};
 }
 
-void hypervisor::emulate_init_signal(arch::x86_64::context & context)
+void hypervisor::emulate_init_signal()
+{
+    auto & vmcs = this->vmcs;
+
+    // This handler must do as little as possible, and that is not a style
+    // preference - it is the difference between working and not.
+    //
+    // A start-up IPI arriving while this processor is not yet in the
+    // wait-for-SIPI activity state is discarded rather than queued (SDM
+    // 28.2). Under nested virtualization the layer below discards it for
+    // the whole time this VMM is in VMX root mode, deliberately - KVM's
+    // vmx_apic_init_signal_blocked() is `nested.vmxon && !is_guest_mode`,
+    // and the maintainers' position is that it is software's job not to be
+    // in root mode when a SIPI arrives. So every instruction between the
+    // INIT exit and the resume is a chance to lose the IPI that was
+    // supposed to start this processor, and each VMCS write can itself be
+    // an exit to the layer below.
+    //
+    // Windows allows about 210 microseconds between the INIT and the first
+    // start-up IPI; the second follows 200 microseconds later. That is the
+    // entire budget. So the architectural reset that used to be here now
+    // lives in emulate_start_up_ipi, which may take as long as it likes -
+    // by the time it runs, the IPI has already been received. another implementation,
+    // another implementation, another implementation and another implementation all arrived at this same split
+    // independently, and the rule to keep is
+    // simply "do not add any code to this routine".
+    //
+    // What remains is the activity state and the two things that state
+    // requires to be clear. Wait-for-SIPI does not permit a pending event:
+    // real hardware fails VM entry on a valid VM-entry interruption
+    // information field combined with this activity state, even though the
+    // nested implementations do not check it.
+    vmcs.vm_entry_interruption_information_field(0);
+    vmcs.vm_entry_exception_error_code(0);
+    vmcs.guest_interruptibility_state(0);
+
+    vmcs.guest_activity_state(
+        arch::x86_64::vmx::activity_state::wait_for_start_up_ipi);
+
+    // No longer a processor that a start-up IPI has started.
+    if (auto cpu = vmcs.vpid() - 1; cpu < max_cpus) {
+        this->started_by_start_up_ipi[cpu] = false;
+    }
+}
+
+void hypervisor::emulate_start_up_ipi(arch::x86_64::context & context,
+                                      std::uint64_t vector)
 {
     auto & vmcs = this->vmcs;
 
     using segment_descriptor = arch::x86_64::segment_descriptor;
 
-    // The state a processor holds after an INIT. SDM Table 12-1, "IA-32
-    // and Intel 64 Processor States Following Power-up, Reset, or INIT",
-    // INIT column.
+    // A second start-up IPI for a processor already started is ignored.
+    // INIT-SIPI-SIPI sends two, and the second would otherwise send a
+    // processor that is already running back to its entry point - which
+    // wedges it in a way indistinguishable from never having started.
+    // Guarded here because the hardware does not
+    // reliably discard the second one either.
+    if (auto cpu = vmcs.vpid() - 1; cpu < max_cpus) {
+        if (this->started_by_start_up_ipi[cpu]) {
+            return;
+        }
+        this->started_by_start_up_ipi[cpu] = true;
+    }
+
+    // Everything below is the state an INIT leaves behind, applied here
+    // rather than in the INIT handler because here there is time. SDM
+    // Table 12-1, "IA-32 and Intel 64 Processor States Following Power-up,
+    // Reset, or INIT", INIT column.
     constexpr std::uint64_t rflags_after_init = 0x2;
-    constexpr std::uint64_t rip_after_init = 0xfff0;
+    constexpr std::uint64_t dr6_after_init = 0xffff0ff0;
     constexpr std::uint64_t dr7_after_init = 0x400;
+    constexpr std::uint64_t cr4_after_init = 0;
+    constexpr std::uint64_t real_mode_segment_limit = 0xffff;
+    constexpr std::uint64_t descriptor_table_limit_after_init = 0xffff;
+
     // SDM Table 12-1 gives 0x60000010 in the CR0 row's INIT column, but
     // footnote 2 on that row qualifies it: "The CD and NW flags are
     // unchanged, bit 4 is set to 1, all other bits are cleared." The
-    // 0x60000010 in the table is the power-up value, where CD and NW
-    // happen to be set - taking it literally for an INIT would disable
-    // this processor's caches for the rest of its life. Read from the VMCS
-    // rather than from a constant, since which of the two bits are set is
-    // the guest's business.
+    // 0x60000010 is the power-up value, where CD and NW happen to be set -
+    // taking it literally for an INIT would disable this processor's
+    // caches for the rest of its life.
     constexpr std::uint64_t preserved_across_init =
         arch::x86_64::cr0_bits::cache_disable |
         arch::x86_64::cr0_bits::not_write_through;
     auto cr0_after_init = arch::x86_64::cr0_bits::extension_type |
                           (vmcs.guest_cr0() & preserved_across_init);
-    constexpr std::uint64_t cr4_after_init = 0;
-    constexpr std::uint64_t code_selector_after_init = 0xf000;
-    constexpr std::uint64_t code_base_after_init = 0xffff0000;
-    constexpr std::uint64_t real_mode_segment_limit = 0xffff;
-    constexpr std::uint64_t descriptor_table_limit_after_init = 0xffff;
 
-    // The two bits VMX will not let a guest clear: CR0.NE and CR4.VMXE
-    // are required to be set by IA32_VMX_CR0_FIXED0 and
-    // IA32_VMX_CR4_FIXED0, and unrestricted guest exempts only PE and PG
-    // - so a literally architectural CR0 and CR4 would fail VM entry.
-    // The architectural values go into the read shadows, which is where a
-    // guest would look once those bits are owned by the host.
+    // The two bits VMX will not let a guest clear: CR0.NE and CR4.VMXE are
+    // required to be set by IA32_VMX_CR0_FIXED0 and IA32_VMX_CR4_FIXED0
+    // (SDM A.7 and A.8), and unrestricted guest exempts only PE and PG -
+    // so a literally architectural CR0 and CR4 would fail VM entry. The
+    // architectural values go into the read shadows, which is where a
+    // guest looks once those bits are owned by the host.
     constexpr std::uint64_t cr0_never_clear =
         arch::x86_64::cr0_bits::numeric_error;
     constexpr std::uint64_t cr4_never_clear =
         arch::x86_64::cr4_bits::vmx_enable;
 
     // A real mode segment: sixteen bit, byte granular, limit 0xffff. The
-    // access rights the VMCS wants are the descriptor's, so they are
-    // built out of a descriptor rather than written as a number.
+    // access rights the VMCS wants are the descriptor's, so they are built
+    // out of a descriptor rather than written as a number.
     auto real_mode_segment = [](segment_descriptor::segment_type type,
                                 bool system) {
         segment_descriptor descriptor;
@@ -797,49 +854,28 @@ void hypervisor::emulate_init_signal(arch::x86_64::context & context)
     auto tr_access_rights = real_mode_segment(
         segment_descriptor::segment_type::tss_busy, true);
 
-    // Wait for the start-up IPI, written first rather than last. This is
-    // the state that makes the processor startable again, and a start-up
-    // IPI arriving before it is set is discarded rather than queued - so
-    // the window between the INIT exit and this write is a window in which
-    // the IPI that was supposed to start this processor is lost. Nothing
-    // below it can fail, but the shorter that window the better.
-    vmcs.guest_activity_state(
-        arch::x86_64::vmx::activity_state::wait_for_start_up_ipi);
-
-    // Real mode, based at the reset vector. An application processor
-    // never runs an instruction here - the start-up IPI that follows
-    // redirects it - but the firmware is entitled to see this state.
     vmcs.guest_cr0(cr0_after_init | cr0_never_clear);
     vmcs.cr0_read_shadow(cr0_after_init);
     vmcs.guest_cr3(0);
     vmcs.guest_cr4(cr4_after_init | cr4_never_clear);
     vmcs.cr4_read_shadow(cr4_after_init);
 
-    // Long mode is gone with CR0.PG, and the entry control has to agree
-    // or VM entry fails its consistency checks.
+    // Long mode is gone with CR0.PG, and the entry control has to agree or
+    // VM entry fails its consistency checks.
     //
     // The guest IA32_EFER field is deliberately not written. Without the
     // "load IA32_EFER" VM-entry control - which this VMCS does not set -
     // the field is ignored, and VM entry instead loads EFER.LMA from the
     // control cleared below and leaves LME alone when CR0.PG is being
     // loaded as zero, which it is here. Writing the field would look like
-    // it cleared EFER when it does nothing at all. Setting the control is
-    // not the answer either: the guest can then change EFER with a WRMSR
-    // that the all-zero MSR bitmap does not intercept, leaving the field
-    // stale and the next entry loading the wrong value.
+    // it cleared EFER when it does nothing at all.
     vmcs.vm_entry_controls(
         vmcs.vm_entry_controls() &
         ~arch::x86_64::vmx::vm_entry_controls::ia_32e_mode_guest);
 
     vmcs.guest_rflags(rflags_after_init);
-    vmcs.guest_rip(rip_after_init);
     vmcs.guest_rsp(0);
     vmcs.guest_dr7(dr7_after_init);
-
-    vmcs.guest_cs_selector(code_selector_after_init);
-    vmcs.guest_cs_base(code_base_after_init);
-    vmcs.guest_cs_limit(real_mode_segment_limit);
-    vmcs.guest_cs_access_rights(code_access_rights);
 
     // Every data segment is sixteen bit, based at zero, selector zero.
     vmcs.guest_ss_selector(0);
@@ -882,12 +918,12 @@ void hypervisor::emulate_init_signal(arch::x86_64::context & context)
     vmcs.guest_idtr_base(0);
     vmcs.guest_idtr_limit(descriptor_table_limit_after_init);
 
+    vmcs.guest_pending_debug_exceptions(0);
+
     // The general purpose registers are architecturally defined after an
-    // INIT too - same table - and they are not in the VMCS - they live in
-    // the context this VMM saved on the way in and restores on the way
-    // out, so rewriting only the VMCS left the processor holding whatever
-    // the firmware had in them. The same table gives EAX zero, EDX the
-    // family, model and stepping, and the rest zero.
+    // INIT too, and they are not in the VMCS - they live in the context
+    // this VMM saved on the way in and restores on the way out. Same
+    // table: EAX zero, EDX the family, model and stepping, the rest zero.
     std::uint32_t identification[4]{};
     arch::x86_64::cpuid(1, 0, identification);
 
@@ -908,45 +944,17 @@ void hypervisor::emulate_init_signal(arch::x86_64::context & context)
     context.r14 = 0;
     context.r15 = 0;
 
-    // Nothing is blocked or pending across an INIT.
-    //
-    // The event injection fields matter as much as the blocking ones and
-    // are easy to miss, because they are how *this* VMM asks for an event
-    // rather than how the guest reports one - inject_general_protection_
-    // fault below writes them. Left set, the next VM entry would deliver
-    // that vector through the descriptor tables just reset above: in real
-    // mode, the interrupt vector table at physical address zero. The guest
-    // would leave for somewhere arbitrary during VM entry, after every
-    // piece of state a debugger can see. another implementation zeroes the same fields as
-    // part of its idea of a clean VMCS.
-    vmcs.vm_entry_interruption_information_field(0);
-    vmcs.vm_entry_exception_error_code(0);
-    vmcs.guest_interruptibility_state(0);
-    vmcs.guest_pending_debug_exceptions(0);
-
     // DR6 is not a VMCS guest field - the guest and host share the
-    // register - so the architectural post-INIT value has to be written to
-    // the real one while running on this processor, the same way the
-    // general purpose registers do.
-    constexpr std::uint64_t dr6_after_init = 0xffff0ff0;
+    // register - so the architectural value has to be written to the real
+    // one while running on this processor.
     arch::x86_64::dr6(dr6_after_init);
 
-    // This processor is no longer one that a start-up IPI has started.
-    if (auto cpu = vmcs.vpid() - 1; cpu < max_cpus) {
-        this->started_by_start_up_ipi[cpu] = false;
-    }
-
-    // SDM 12.1: during an INIT "the TLBs and BTB are invalidated as with
-    // a hardware reset", and the same paragraph describes INIT as the
-    // method for "switching from protected to real-address mode" - which
-    // is exactly the transition just made above. With VPID enabled the
-    // processor tags its cached translations and they survive that
-    // transition, so they have to be invalidated by hand. Paging is off
-    // now, making linear addresses equal guest-physical ones, and a stale
-    // entry from the long mode context would translate them anyway.
-    //
-    // Single-context, which invalidates the linear and combined mappings
-    // tagged with this VPID and leaves other processors alone.
+    // SDM 12.1: during an INIT "the TLBs and BTB are invalidated as with a
+    // hardware reset", and the same paragraph describes INIT as the method
+    // for "switching from protected to real-address mode" - exactly the
+    // transition just made. With VPID enabled the processor tags its
+    // cached translations, so they survive it and must be invalidated by
+    // hand. Single-context, so other processors are left alone.
     constexpr std::uint64_t invvpid_single_context = 1;
 
     struct alignas(0x10) invvpid_descriptor
@@ -961,42 +969,20 @@ void hypervisor::emulate_init_signal(arch::x86_64::context & context)
             &descriptor)) {
         log("invvpid failed on cpu {}", vmcs.vpid());
     }
-}
 
-void hypervisor::emulate_start_up_ipi(std::uint64_t vector)
-{
-    // SDM 28.2: "Start-up IPIs (SIPIs). SIPIs cause VM exits. If a logical
-    // processor is not in the wait-for-SIPI activity state" the SIPI is
-    // discarded - so getting this exit at all means the processor was
-    // waiting, and leaving that state is the VMM's job rather than the
-    // hardware's. Matches KVM's kvm_vcpu_deliver_sipi_vector(), which sets
-    // the same three fields and nothing else.
-    auto & vmcs = this->vmcs;
-
-    constexpr std::uint64_t real_mode_segment_limit = 0xffff;
-
-    // Shifts that turn the vector into a segment. The vector is a page
-    // number, so the segment is the vector scaled by a page, and the
-    // selector is the segment base shifted down by the four bits real
-    // mode already implies.
+    // And now where the start-up IPI says to begin. Shifts that turn the
+    // vector into a segment: the vector is a page number, so the segment
+    // is the vector scaled by a page, and the selector is that base
+    // shifted down by the four bits real mode already implies. Matches
+    // KVM's kvm_vcpu_deliver_sipi_vector(), which sets the same three
+    // fields and nothing else.
     constexpr std::uint64_t vector_to_selector_shift = 8;
     constexpr std::uint64_t vector_to_base_shift = 12;
 
-    // A second start-up IPI for a processor already started is ignored.
-    // INIT-SIPI-SIPI sends two, and the second would otherwise send a
-    // processor that is already running back to its entry point.
-    auto cpu = vmcs.vpid() - 1;
-    if (cpu < max_cpus) {
-        if (this->started_by_start_up_ipi[cpu]) {
-            return;
-        }
-        this->started_by_start_up_ipi[cpu] = true;
-    }
-
-    // Execution begins at the start of that page, in real mode.
     vmcs.guest_cs_selector(vector << vector_to_selector_shift);
     vmcs.guest_cs_base(vector << vector_to_base_shift);
     vmcs.guest_cs_limit(real_mode_segment_limit);
+    vmcs.guest_cs_access_rights(code_access_rights);
     vmcs.guest_rip(0);
 
     // Runnable again.
@@ -1764,7 +1750,7 @@ hypervisor::main(arch::x86_64::context & caller_context)
             // for this processor is discarded rather than queued, and
             // logging allocates and takes a lock. record_exit below
             // captures the exit anyway.
-            emulate_init_signal(context);
+            emulate_init_signal();
             advance_rip = false;
             break;
         }
@@ -1772,7 +1758,7 @@ hypervisor::main(arch::x86_64::context & caller_context)
             // The vector is the low byte of the exit qualification.
             constexpr std::uint64_t sipi_vector_mask = 0xff;
             auto vector = vmcs.exit_qualification() & sipi_vector_mask;
-            emulate_start_up_ipi(vector);
+            emulate_start_up_ipi(context, vector);
             advance_rip = false;
             break;
         }
