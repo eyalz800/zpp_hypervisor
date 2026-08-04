@@ -152,7 +152,7 @@ jobs:
       # compiled in only when asked for and the normal build leaves it out.
       - name: Build with the hypervisor self check enabled
         run: |
-          cmake --preset ${{ matrix.config }} -DZPP_CI_VERIFY_HYPERVISOR=ON
+          cmake --preset ${{ matrix.config }} -DZPP_VERIFY_HYPERVISOR=ON
           cmake --build --preset ${{ matrix.config }}
 
       - name: Build boot medium

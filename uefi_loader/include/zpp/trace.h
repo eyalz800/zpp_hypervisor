@@ -95,7 +95,7 @@ struct trace
 
     /**
      * Buffer size for one emitted line. Shared rather than function local
-     * because both emitters below and the per-CPU reporting in ci_verify
+     * because both emitters below and the per-CPU reporting in verify
      * build into one of these, and they have to agree.
      */
     static constexpr std::size_t line_capacity = 192;
@@ -144,7 +144,7 @@ struct trace
      * trick: source_location::current() in a default argument is evaluated
      * at the call site, so this reports the caller rather than itself.
      *
-     * Anything that forwards to this - the report helpers in ci_verify -
+     * Anything that forwards to this - the report helpers in verify -
      * has to take a location of its own and pass it on explicitly, or
      * every line would blame the forwarding function.
      */

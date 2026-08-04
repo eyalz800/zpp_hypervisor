@@ -41,19 +41,21 @@ ExternalProject_Add(windows_loader
 )
 
 # Testing only: makes the UEFI loader ask the hypervisor to identify itself
-# through CPUID leaf 0x40000000 once it has launched. Used by CI, not by
-# anything deployed.
-option(ZPP_CI_VERIFY_HYPERVISOR
+# through CPUID leaf 0x40000000 once it has launched. Not for anything
+# deployed, but equally useful locally as in CI - scripts/ci/bochs-smoke.sh
+# runs the same check on a developer machine.
+option(ZPP_VERIFY_HYPERVISOR
     "Compile the CPUID self check that asserts the hypervisor reached root mode"
     OFF)
 
 # Serial tracing. Separate from the self check so it can be turned on while
 # chasing something without also compiling the check, and off while running the
-# check. Defaults to whatever the self check is set to, because that is what CI
-# wants and because tracing has no place in a deployed loader either.
+# check. Defaults to whatever the self check is set to, since the two are
+# usually wanted together, and tracing has no place in a deployed loader
+# either.
 option(ZPP_TRACE
     "Compile the serial trace output in the loaders"
-    ${ZPP_CI_VERIFY_HYPERVISOR})
+    ${ZPP_VERIFY_HYPERVISOR})
 
 ExternalProject_Add(uefi_loader
     SOURCE_DIR "${CMAKE_CURRENT_SOURCE_DIR}/cmake/uefi-loader"
@@ -65,7 +67,7 @@ ExternalProject_Add(uefi_loader
         -DZPP_SOURCE_DIR=${ZPP_SOURCE_DIR}
         -DZPP_OUTPUT_DIR=${ZPP_OUTPUT_DIR}
         -DFETCHCONTENT_BASE_DIR=${CMAKE_BINARY_DIR}/_deps
-        -DZPP_CI_VERIFY_HYPERVISOR=${ZPP_CI_VERIFY_HYPERVISOR}
+        -DZPP_VERIFY_HYPERVISOR=${ZPP_VERIFY_HYPERVISOR}
         -DZPP_TRACE=${ZPP_TRACE}
     INSTALL_COMMAND ""
     BUILD_ALWAYS ON

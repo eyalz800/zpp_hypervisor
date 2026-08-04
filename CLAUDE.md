@@ -191,7 +191,7 @@ session in a broken called-frame state.
 ### Session recipe
 
 ```sh
-cmake --preset debug -DZPP_CI_VERIFY_HYPERVISOR=ON   # adds the serial tracing
+cmake --preset debug -DZPP_VERIFY_HYPERVISOR=ON   # adds the serial tracing
 cmake --build --preset debug
 ./scripts/bochs/setup.sh debug                       # builds OVMF.fd + esp.img
 ./scripts/bochs/run.sh                               # gdbstub on :1337
