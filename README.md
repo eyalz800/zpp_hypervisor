@@ -275,6 +275,34 @@ resulting disk under Bochs, rather than installing under Bochs. So:
 Expect minutes per interaction even at the desktop. It is workable for
 `sc start` and a breakpoint, not for using the machine.
 
+### Why the UEFI loader cannot be tested under Bochs
+
+Established by running it locally rather than through CI. OVMF boots fine under
+Bochs and does reach the loader:
+
+    BdsDxe: starting Boot0001 "UEFI Generic 1234 BXHD00011 "
+            from PciRoot(0x0)/Pci(0x1,0x1)/Ata(Primary,Master,0x0)
+
+It then hangs inside `zpp_load_elf`, and Bochs' log says why - an endless tight
+loop of:
+
+    read from port 0x0008 with len 4 returns 0xffffffff
+
+That port is OVMF's ACPI power management timer. Bochs' i440fx does not provide
+the PIIX4 power management function, so OVMF's PCI configuration read yields
+nothing usable, computes a PM base of zero, and places the timer at base plus
+eight. Every `MicroSecondDelay` in the firmware therefore polls a port that
+always reads back all ones and never advances.
+
+The consequence is structural rather than a tuning problem: **any UEFI service
+that waits on time hangs forever under Bochs**, so the UEFI path cannot be used
+for automated testing there no matter how long the timeout is.
+
+The way forward is Bochs' legacy BIOS path with a Linux guest, which needs no
+OVMF and no ACPI timer, and is what Bochs is actually good at. A small kernel
+plus an initramfs containing `zpp_loader.ko` can check the same CPUID signature
+from inside the guest. The `linux .ko` CI job already produces a working module.
+
 ### Other dependencies
 
     brew install mtools x86_64-elf-gdb
