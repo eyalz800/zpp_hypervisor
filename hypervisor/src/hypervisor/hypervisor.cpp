@@ -726,18 +726,31 @@ std::expected<void, zpp::error> hypervisor::enable_vmx_in_feature_control()
     return {};
 }
 
-void hypervisor::emulate_init_signal()
+void hypervisor::emulate_init_signal(arch::x86_64::context & context)
 {
     auto & vmcs = this->vmcs;
 
     using segment_descriptor = arch::x86_64::segment_descriptor;
 
-    // The state a processor holds after an INIT, from the SDM's table of
-    // processor state following power-up, reset or INIT.
+    // The state a processor holds after an INIT. SDM Table 12-1, "IA-32
+    // and Intel 64 Processor States Following Power-up, Reset, or INIT",
+    // INIT column.
     constexpr std::uint64_t rflags_after_init = 0x2;
     constexpr std::uint64_t rip_after_init = 0xfff0;
     constexpr std::uint64_t dr7_after_init = 0x400;
-    constexpr std::uint64_t cr0_after_init = 0x60000010;
+    // SDM Table 12-1 gives 0x60000010 in the CR0 row's INIT column, but
+    // footnote 2 on that row qualifies it: "The CD and NW flags are
+    // unchanged, bit 4 is set to 1, all other bits are cleared." The
+    // 0x60000010 in the table is the power-up value, where CD and NW
+    // happen to be set - taking it literally for an INIT would disable
+    // this processor's caches for the rest of its life. Read from the VMCS
+    // rather than from a constant, since which of the two bits are set is
+    // the guest's business.
+    constexpr std::uint64_t preserved_across_init =
+        arch::x86_64::cr0_bits::cache_disable |
+        arch::x86_64::cr0_bits::not_write_through;
+    auto cr0_after_init = arch::x86_64::cr0_bits::extension_type |
+                          (vmcs.guest_cr0() & preserved_across_init);
     constexpr std::uint64_t cr4_after_init = 0;
     constexpr std::uint64_t code_selector_after_init = 0xf000;
     constexpr std::uint64_t code_base_after_init = 0xffff0000;
@@ -851,6 +864,32 @@ void hypervisor::emulate_init_signal()
     vmcs.guest_idtr_base(0);
     vmcs.guest_idtr_limit(descriptor_table_limit_after_init);
 
+    // The general purpose registers are architecturally defined after an
+    // INIT too - same table - and they are not in the VMCS - they live in
+    // the context this VMM saved on the way in and restores on the way
+    // out, so rewriting only the VMCS left the processor holding whatever
+    // the firmware had in them. The same table gives EAX zero, EDX the
+    // family, model and stepping, and the rest zero.
+    std::uint32_t identification[4]{};
+    arch::x86_64::cpuid(1, 0, identification);
+
+    context.rax = 0;
+    context.rbx = 0;
+    context.rcx = 0;
+    context.rdx = identification[0];
+    context.rsp = 0;
+    context.rbp = 0;
+    context.rsi = 0;
+    context.rdi = 0;
+    context.r8 = 0;
+    context.r9 = 0;
+    context.r10 = 0;
+    context.r11 = 0;
+    context.r12 = 0;
+    context.r13 = 0;
+    context.r14 = 0;
+    context.r15 = 0;
+
     // Nothing is blocked or pending across an INIT.
     vmcs.guest_interruptibility_state(0);
     vmcs.guest_pending_debug_exceptions(0);
@@ -863,6 +902,12 @@ void hypervisor::emulate_init_signal()
 
 void hypervisor::emulate_start_up_ipi(std::uint64_t vector)
 {
+    // SDM 28.2: "Start-up IPIs (SIPIs). SIPIs cause VM exits. If a logical
+    // processor is not in the wait-for-SIPI activity state" the SIPI is
+    // discarded - so getting this exit at all means the processor was
+    // waiting, and leaving that state is the VMM's job rather than the
+    // hardware's. Matches KVM's kvm_vcpu_deliver_sipi_vector(), which sets
+    // the same three fields and nothing else.
     auto & vmcs = this->vmcs;
 
     constexpr std::uint64_t real_mode_segment_limit = 0xffff;
@@ -1586,12 +1631,12 @@ hypervisor::main(arch::x86_64::context & caller_context)
         }
         case basic_reason::rdmsr:
         case basic_reason::wrmsr: {
-            // Reaching here means the MSR is outside the two ranges the
-            // MSR bitmap covers, 0 to 0x1fff and 0xc0000000 to
-            // 0xc0001fff. Accesses inside those ranges are governed by the
-            // bitmap, which is all zeroes, so they never exit. Outside
-            // them the access exits unconditionally and no bitmap can stop
-            // it.
+            // SDM 28.1.3 lists, among the reasons RDMSR causes a VM exit,
+            // that "the MSR address is not in the ranges 00000000H -
+            // 00001FFFH and C0000000H - C0001FFFH". Accesses inside those
+            // ranges are governed by the bitmap, which is all zeroes, so
+            // they never exit. Outside them the access exits
+            // unconditionally and no bitmap can stop it.
             //
             // Nothing outside those ranges is a real MSR on this
             // architecture. What lives there is the synthetic MSR space a
@@ -1627,10 +1672,12 @@ hypervisor::main(arch::x86_64::context & caller_context)
             break;
         }
         case basic_reason::init_signal: {
-            // The hardware does not act on the INIT, it just tells us
-            // about it, so this is the only thing standing between an
-            // application processor and never waking again.
-            emulate_init_signal();
+            // SDM 28.2: "INIT signals cause VM exits. A logical
+            // processor performs none of the operations normally
+            // associated with these events." So the hardware tells us and
+            // does nothing else - this is the only thing standing between
+            // an application processor and never waking again.
+            emulate_init_signal(context);
             log("init signal on cpu {}", vmcs.vpid());
             advance_rip = false;
             break;

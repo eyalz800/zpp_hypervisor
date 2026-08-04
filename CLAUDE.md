@@ -184,6 +184,45 @@ Both paths are handled. Verified to survive `--gc-sections --strip-all`.
 3. `cmake/freestanding-libc/` — minimal C stubs for `#include_next`
 4. Clang builtins — `stddef.h`, `stdint.h`
 
+## Checking architectural claims
+
+Recalled knowledge of the SDM is a good way to form a hypothesis and a bad way
+to settle one. Every architectural claim this project acts on gets checked
+against **both** references before it goes in, and the check is cited in the code:
+
+```sh
+./scripts/fetch-references.sh      # into .references/, git ignored
+grep -n "wait-for-SIPI activity state" .references/sdm.txt
+grep -n "kvm_vcpu_reset" .references/kvm/x86.c
+```
+
+- `.references/sdm.txt` — the Intel SDM, all four volumes, as text with
+  `[[PAGE n]]` markers so a hit can be cited.
+- `.references/kvm/` — KVM's x86 sources, pinned to a tag, as the reference
+  implementation. Read how it *implements* a behaviour, not only how it handles
+  ours from underneath.
+
+Cite the section, table or function in the comment, and **only cite what was
+actually looked up** — an unverified section number is worse than none, because
+it stops the next person checking.
+
+The two references disagree sometimes, and the disagreement is the interesting
+part. Worked example, which is why this section exists:
+
+- SDM Table 12-1 gives CR0 = `60000010H` in the INIT column. Taken literally
+  that sets CD and NW, disabling the processor's caches for the rest of its
+  life.
+- KVM writes `X86_CR0_ET` plus CD/NW *preserved*, with a comment saying the SDM
+  contradicts itself.
+- Footnote 2 on that very row settles it: "The CD and NW flags are unchanged,
+  bit 4 is set to 1, all other bits are cleared." KVM is right and the column
+  is the power-up value.
+
+Three positions were held on that question in one afternoon, two of them wrong,
+and only the footnote ended it. The same exercise found that our INIT emulation
+never reset the guest's general purpose registers, which both references agree
+it must.
+
 ## What the guest is told
 
 Everything this VMM presents to its guest lives in the exit handler in
