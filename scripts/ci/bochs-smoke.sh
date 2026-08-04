@@ -29,11 +29,39 @@ sed -e 's/^gdbstub:.*/gdbstub: enabled=0/' \
 
 cd "$work"
 : > serial.out
+rm -f esp.img.lock
+
+# Bochs never exits on its own: the firmware drops into its shell once the
+# loader returns and sits there. Waiting for the timeout would spend the whole
+# budget on every run, including successful ones, so poll the serial log and
+# stop as soon as there is a verdict either way. The timeout stays as the
+# backstop for a guest that never reports at all.
+#
 # stdin from /dev/null: the text config interface reads the console, and CI has
-# no tty, so any prompt Bochs decides to raise would block until the timeout
-# rather than failing. SIGKILL after the grace period in case it ignores TERM.
-timeout --kill-after=30s "$timeout_seconds" \
-    "$bochs" -q -f bochsrc-ci.txt < /dev/null || true
+# no tty, so any prompt Bochs decides to raise would block rather than failing.
+"$bochs" -q -f bochsrc-ci.txt < /dev/null > bochs.stdout 2>&1 &
+bochs_pid=$!
+
+waited=0
+while kill -0 "$bochs_pid" 2>/dev/null; do
+    if grep -q 'ZPP_HYPERVISOR_ACTIVE on every cpu\|ZPP_HYPERVISOR_FAILED' \
+        serial.out 2>/dev/null; then
+        break
+    fi
+    if [ "$waited" -ge "$timeout_seconds" ]; then
+        echo "timed out after ${timeout_seconds}s with no verdict" >&2
+        break
+    fi
+    sleep 2
+    waited=$((waited + 2))
+done
+
+# TERM then KILL, in case it ignores the first.
+kill "$bochs_pid" 2>/dev/null || true
+sleep 1
+kill -9 "$bochs_pid" 2>/dev/null || true
+wait "$bochs_pid" 2>/dev/null || true
+echo "bochs ran for ${waited}s"
 
 echo "=== serial output ($(wc -c < serial.out) bytes) ==="
 cat serial.out || true

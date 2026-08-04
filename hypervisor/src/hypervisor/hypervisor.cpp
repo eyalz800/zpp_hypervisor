@@ -833,7 +833,7 @@ void hypervisor::setup_vmcs(x64::context & guest_context)
     auto descriptor = x64::segment_descriptor::from_memory(
         intermediate_gdt_base, guest_context.cs);
     vmcs.guest_cs_selector(guest_context.cs);
-    vmcs.guest_cs_limit(descriptor.limit());
+    vmcs.guest_cs_limit(descriptor.effective_limit());
     vmcs.guest_cs_access_rights(descriptor.vmx_access_rights());
     vmcs.guest_cs_base(descriptor.context_dependent_base());
     vmcs.host_cs_selector(this->host_cs);
@@ -841,7 +841,7 @@ void hypervisor::setup_vmcs(x64::context & guest_context)
     descriptor = x64::segment_descriptor::from_memory(
         intermediate_gdt_base, guest_context.ds);
     vmcs.guest_ds_selector(guest_context.ds);
-    vmcs.guest_ds_limit(descriptor.limit());
+    vmcs.guest_ds_limit(descriptor.effective_limit());
     vmcs.guest_ds_access_rights(descriptor.vmx_access_rights());
     vmcs.guest_ds_base(descriptor.context_dependent_base());
     vmcs.host_ds_selector(0);
@@ -849,7 +849,7 @@ void hypervisor::setup_vmcs(x64::context & guest_context)
     descriptor = x64::segment_descriptor::from_memory(
         intermediate_gdt_base, guest_context.es);
     vmcs.guest_es_selector(guest_context.es);
-    vmcs.guest_es_limit(descriptor.limit());
+    vmcs.guest_es_limit(descriptor.effective_limit());
     vmcs.guest_es_access_rights(descriptor.vmx_access_rights());
     vmcs.guest_es_base(descriptor.context_dependent_base());
     vmcs.host_es_selector(0);
@@ -857,7 +857,7 @@ void hypervisor::setup_vmcs(x64::context & guest_context)
     descriptor = x64::segment_descriptor::from_memory(
         intermediate_gdt_base, guest_context.fs);
     vmcs.guest_fs_selector(guest_context.fs);
-    vmcs.guest_fs_limit(descriptor.limit());
+    vmcs.guest_fs_limit(descriptor.effective_limit());
     vmcs.guest_fs_access_rights(descriptor.vmx_access_rights());
     vmcs.guest_fs_base(descriptor.context_dependent_base());
     vmcs.host_fs_base(reinterpret_cast<std::uint64_t>(this->fs_data));
@@ -866,7 +866,7 @@ void hypervisor::setup_vmcs(x64::context & guest_context)
     descriptor = x64::segment_descriptor::from_memory(
         intermediate_gdt_base, guest_context.gs);
     vmcs.guest_gs_selector(guest_context.gs);
-    vmcs.guest_gs_limit(descriptor.limit());
+    vmcs.guest_gs_limit(descriptor.effective_limit());
     vmcs.guest_gs_access_rights(descriptor.vmx_access_rights());
     vmcs.guest_gs_base(this->ia32_gs_base);
     vmcs.host_gs_base(reinterpret_cast<std::uint64_t>(this->gs_data));
@@ -875,7 +875,7 @@ void hypervisor::setup_vmcs(x64::context & guest_context)
     descriptor = x64::segment_descriptor::from_memory(
         intermediate_gdt_base, guest_context.ss);
     vmcs.guest_ss_selector(guest_context.ss);
-    vmcs.guest_ss_limit(descriptor.limit());
+    vmcs.guest_ss_limit(descriptor.effective_limit());
     vmcs.guest_ss_access_rights(descriptor.vmx_access_rights());
     vmcs.guest_ss_base(descriptor.context_dependent_base());
     vmcs.host_ss_selector(0);
@@ -883,7 +883,7 @@ void hypervisor::setup_vmcs(x64::context & guest_context)
     descriptor = x64::segment_descriptor::from_memory(
         intermediate_gdt_base, this->guest_tr);
     vmcs.guest_tr_selector(this->guest_tr);
-    vmcs.guest_tr_limit(descriptor.limit());
+    vmcs.guest_tr_limit(descriptor.effective_limit());
     vmcs.guest_tr_access_rights(descriptor.vmx_access_rights());
     vmcs.guest_tr_base(descriptor.context_dependent_base());
     vmcs.host_tr_base(reinterpret_cast<std::uint64_t>(this->host_tss));
@@ -892,7 +892,7 @@ void hypervisor::setup_vmcs(x64::context & guest_context)
     descriptor = x64::segment_descriptor::from_memory(
         intermediate_gdt_base, this->guest_ldtr);
     vmcs.guest_ldtr_selector(this->guest_ldtr);
-    vmcs.guest_ldtr_limit(descriptor.limit());
+    vmcs.guest_ldtr_limit(descriptor.effective_limit());
     vmcs.guest_ldtr_access_rights(descriptor.vmx_access_rights());
     vmcs.guest_ldtr_base(descriptor.context_dependent_base());
 

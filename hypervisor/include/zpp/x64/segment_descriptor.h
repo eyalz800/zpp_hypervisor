@@ -95,6 +95,18 @@ public:
     }
 
     /**
+     * Returns the limit in bytes, which is the limit field scaled by the
+     * granularity bit. The raw field counts 4 KB pages when granularity is
+     * set, so it has to be scaled before it means anything - and this is
+     * the form VMX wants in the guest segment limit fields, which is why
+     * the checks it applies to them talk about bits above 19.
+     */
+    constexpr std::uint64_t effective_limit() const
+    {
+        return granularity() ? ((limit() << 12) | 0xfff) : limit();
+    }
+
+    /**
      * Returns the base field of the segment descriptor.
      */
     constexpr std::uint64_t base() const
@@ -292,10 +304,16 @@ public:
     /**
      * Returns the vmx-specific access rights field of the segment
      * descriptor.
+     *
+     * Descriptor bits 55:40 line up with the VMX layout for everything
+     * that matters - type, S, DPL and P at 7:0, then AVL, L, D/B and G at
+     * 15:12 - but bits 11:8 of the descriptor's second half are
+     * limit[19:16], while VMX reserves 11:8 and requires them to be zero.
+     * Leaving them in makes VM entry reject the segment, so mask them out.
      */
     constexpr std::uint32_t vmx_access_rights() const
     {
-        return ((m_entry >> 40) & 0xffff) | (!present() << 16);
+        return ((m_entry >> 40) & 0xf0ff) | (!present() << 16);
     }
 
     /**
