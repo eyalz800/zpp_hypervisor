@@ -14,13 +14,17 @@ set -e
 root="$(cd "$(dirname "$0")/../.." && pwd)"
 work="$root/build/bochs"
 bochs="${BOCHS:-$HOME/.local/bochs-gdb/bin/bochs}"
-timeout_seconds="${TIMEOUT:-600}"
+timeout_seconds="${TIMEOUT:-300}"
 
 [ -x "$bochs" ] || { echo "no bochs at $bochs" >&2; exit 1; }
 [ -f "$work/esp.img" ] || { echo "run scripts/bochs/setup.sh first" >&2; exit 1; }
 
 # Unattended, so no gdb stub - Bochs would otherwise wait for a connection.
-sed 's/^gdbstub:.*/gdbstub: enabled=0/' \
+# Also report info messages rather than ignoring them: the interactive config
+# suppresses everything after startup, which leaves no way to tell a slow boot
+# from a wedged one. show_ips was compiled in, so this also gives a heartbeat.
+sed -e 's/^gdbstub:.*/gdbstub: enabled=0/' \
+    -e 's/^info:.*/info: action=report/' \
     "$root/scripts/bochs/bochsrc.txt" > "$work/bochsrc-ci.txt"
 
 cd "$work"
@@ -34,6 +38,11 @@ timeout --kill-after=30s "$timeout_seconds" \
 echo "=== serial output ($(wc -c < serial.out) bytes) ==="
 cat serial.out || true
 
+# Always shown, not only on failure: if the guest made no progress this is the
+# only place that says why.
+echo "=== bochs log (last 60 lines of $(wc -l < bochs.log 2>/dev/null || echo 0)) ==="
+tail -60 bochs.log 2>/dev/null || echo "  no bochs.log"
+
 if grep -q "ZPP_HYPERVISOR_ACTIVE on every cpu" serial.out 2>/dev/null; then
     echo "ok: every cpu answered CPUID 0x40000000 with the zpp signature"
     exit 0
@@ -46,6 +55,4 @@ if grep -q 'ZPP_HYPERVISOR_FAILED' serial.out 2>/dev/null; then
 fi
 
 echo "FAIL: loader never reported - it did not reach the check" >&2
-echo "=== bochs log tail ===" >&2
-tail -40 bochs.log >&2 || true
 exit 1
