@@ -8,6 +8,11 @@ namespace zpp::arch::x86_64
 /**
  * Control register bits, named where this codebase depends on them.
  *
+ * Which of these a guest is not permitted to clear while in VMX operation
+ * comes from IA32_VMX_CR0_FIXED0 and IA32_VMX_CR4_FIXED0 - SDM A.7,
+ * "VMX-Fixed Bits in CR0", and A.8, "VMX-Fixed Bits in CR4" - rather than
+ * from anything here.
+ *
  * Spelled cr0_bits rather than cr0 because the accessor for the register
  * itself already owns that name in this namespace.
  */
@@ -16,7 +21,10 @@ namespace cr0_bits
 enum type : std::uint64_t
 {
     protection_enable = (1ull << 0),
+    extension_type = (1ull << 4),
     numeric_error = (1ull << 5),
+    not_write_through = (1ull << 29),
+    cache_disable = (1ull << 30),
     paging = (1ull << 31),
 };
 } // namespace cr0_bits

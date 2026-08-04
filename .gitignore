@@ -44,3 +44,7 @@ CMakeUserPresets.json
 .superpowers/
 .DS_Store
 build/
+
+# Reference material for checking architectural claims, fetched by
+# scripts/fetch-references.sh. Large and redistributable only from Intel.
+.references/

@@ -229,7 +229,7 @@ private:
      * APs in a hlt loop and wakes them with INIT-SIPI-SIPI, so every
      * wake after the first went nowhere and the caller spun forever.
      */
-    void emulate_init_signal();
+    void emulate_init_signal(arch::x86_64::context & context);
 
     /**
      * Emulate a start-up IPI: leave the wait-for-SIPI state and begin

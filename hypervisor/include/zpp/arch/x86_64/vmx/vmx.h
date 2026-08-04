@@ -58,6 +58,9 @@ enum type : std::uint64_t
 
 /**
  * Guest activity states, as held in the guest activity state field.
+ * SDM 27.4.2, "Guest Non-Register State". Which of these a processor
+ * supports is reported by IA32_VMX_MISC - see SDM A.6 - and writing an
+ * unsupported one fails VM entry.
  *
  * wait_for_start_up_ipi is the one that matters here: it is the state an
  * application processor is left in after an INIT, and the only state from
