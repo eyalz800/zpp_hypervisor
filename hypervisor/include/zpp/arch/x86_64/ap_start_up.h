@@ -62,9 +62,10 @@ struct ap_start_up_area
 
     /**
      * Passed to the entry point, and used to tell this processor which one
-     * it is. It cannot find that out for itself: an INIT has reset its
-     * local APIC out of x2APIC mode, so its own identifier is no longer
-     * readable where this VMM reads identifiers from.
+     * it is, rather than leaving it to work that out from its own local
+     * APIC. Its identifier is readable from CPUID in any APIC mode, but
+     * being told costs nothing and keeps the trampoline free of any
+     * assumption about what mode the APIC is in.
      */
     std::uint64_t argument;
 

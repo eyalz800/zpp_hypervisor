@@ -852,10 +852,17 @@ std::uint64_t hypervisor::local_apic_id()
     // whole point of this function.
     //
     // The APIC's own identifier register is only an MSR in x2APIC mode,
-    // and this VMM launches long before any of that is settled: the
-    // firmware is in xAPIC mode, so reading the MSR raises #GP, and an
-    // INIT puts a processor back into xAPIC mode anyway. CPUID answers in
-    // every mode and needs no APIC state at all.
+    // and this VMM launches before any of that is settled: the firmware is
+    // in xAPIC mode, so reading the MSR raises #GP. CPUID answers in every
+    // mode and needs no APIC state at all.
+    //
+    // Not because an INIT returns the APIC to xAPIC mode - it does not,
+    // and a comment here used to say so. SDM 13.12.5: "An INIT in this
+    // state keeps the x2APIC in the x2APIC mode. The state of the local
+    // APIC ID register is preserved (all 32 bits)." Only a reset does
+    // that. The consequence to keep is that emulating an INIT must leave
+    // IA32_APIC_BASE alone, which apply_start_up does - hardware preserves
+    // it and nothing here should be "fixed" to clear it.
     //
     // Getting this wrong was silent. The identifier used to be recorded
     // only when x2APIC happened to be enabled, which on this firmware is
