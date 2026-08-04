@@ -25,9 +25,13 @@ sed 's/^gdbstub:.*/gdbstub: enabled=0/' \
 
 cd "$work"
 : > serial.out
-timeout "$timeout_seconds" "$bochs" -q -f bochsrc-ci.txt || true
+# stdin from /dev/null: the text config interface reads the console, and CI has
+# no tty, so any prompt Bochs decides to raise would block until the timeout
+# rather than failing. SIGKILL after the grace period in case it ignores TERM.
+timeout --kill-after=30s "$timeout_seconds" \
+    "$bochs" -q -f bochsrc-ci.txt < /dev/null || true
 
-echo "=== serial output ==="
+echo "=== serial output ($(wc -c < serial.out) bytes) ==="
 cat serial.out || true
 
 if grep -q "ZPP_HYPERVISOR_ACTIVE on every cpu" serial.out 2>/dev/null; then
