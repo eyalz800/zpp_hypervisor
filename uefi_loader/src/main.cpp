@@ -103,6 +103,27 @@ static void serial_write(const char * text)
 }
 #endif
 
+#if ZPP_CI_VERIFY_HYPERVISOR
+/**
+ * Writes a value as hex over serial. The hypervisor is loaded at a runtime
+ * chosen address, so this is how a debugger is told where to place its
+ * symbols.
+ */
+static void serial_write_hex(std::uint64_t value)
+{
+    char text[19]{};
+    text[0] = '0';
+    text[1] = 'x';
+    for (std::size_t i{}; i < 16; ++i) {
+        auto nibble =
+            static_cast<std::uint8_t>((value >> ((15 - i) * 4)) & 0xf);
+        text[2 + i] = static_cast<char>(
+            nibble < 10 ? ('0' + nibble) : ('a' + (nibble - 10)));
+    }
+    serial_write(text);
+}
+#endif
+
 static void * allocate_rwx(std::size_t size)
 {
 #if ZPP_CI_VERIFY_HYPERVISOR
@@ -123,7 +144,9 @@ static void * allocate_rwx(std::size_t size)
     }
 
 #if ZPP_CI_VERIFY_HYPERVISOR
-    serial_write("zpp: ZPP_TRACE allocate_rwx done\r\n");
+    serial_write("zpp: ZPP_TRACE allocate_rwx done at ");
+    serial_write_hex(physical_address);
+    serial_write("\r\n");
 #endif
 
     // Return the result address.
