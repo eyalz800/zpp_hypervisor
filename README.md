@@ -294,17 +294,39 @@ probes that timer through the FADT before touching MP services and reports a
 single processor when it is not advancing, so it degrades instead of hanging.
 That is a robustness fix for real hardware too, not a test hook.
 
-**Hypervisor page fault (open).** Past that point the hypervisor triple faults:
+**Hypervisor triple fault (open).** Past that point the hypervisor dies. Debugged
+through the gdb stub with the hypervisor's runtime load address reported over
+serial, and Bochs configured with `reset_on_triple_fault=0` so it panics with a
+register dump instead of silently rebooting:
 
-    exception(): 3rd (14) exception with no resolution, shutdown status is 00h
-    cpu hardware reset
+    RIP=0000000039636b30   -> zpp::x64::intel::vmxon, asm.h:8
+    RDI=000000003bdfb000   -> the pointer handed to vmxon
+    CR3=000000003b24a000   -> the host page table, already switched
+    CR2=000000003f1a3098   -> the address that finally faulted
+    >>PANIC<< exception(): 3rd (14) exception with no resolution
 
-Exception 14 is a page fault. It happens after `allocate_rwx` returns, so
-somewhere in the launch itself - host page table construction, EPT setup, or the
-module region walk. Not yet diagnosed, and not yet known whether it is a genuine
-bug or a limit of what Bochs emulates. `os_page_table` was checked and is not
-the cause: it handles a null `physical_to_virtual`, which is what the UEFI
-loader passes, by treating addresses as identity mapped.
+With the module loaded at `0x3962e000` and an ELF memory size of `0x27cf000`,
+RDI lands two pages inside the image, so the argument itself is sound.
+
+The message says *3rd* exception, and that is the important part. A first fault
+occurs, the CPU tries to deliver it, and delivery faults too - because
+`initialize_host_idt` does nothing at all:
+
+    void hypervisor::initialize_host_idt()
+    {
+        // Do nothing for now.
+    }
+
+So after CR3 is switched to the host page table there is no host IDT, and IDTR
+still points into the OS's tables at `0x3f1a3098`, which the host page table does
+not map. Any exception at that point is therefore unrecoverable, which is exactly
+what CR2 shows. That converts whatever the original fault was into an immediate
+triple fault and hides it.
+
+Two things follow. The missing host IDT is a real gap rather than a Bochs
+artifact - it makes any exception after the CR3 switch fatal on real hardware
+too. And the first fault cannot be identified until an IDT exists to catch it, so
+that is the order the work has to happen in.
 
 The gdb stub harness in `scripts/bochs` is the tool for this - attach, break on
 the fault, and see which access is at fault. Being single CPU is no longer a
