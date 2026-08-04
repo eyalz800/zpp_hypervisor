@@ -446,9 +446,20 @@ private:
     {
         // Define the relocation strategy.
         auto relocate = [&](auto relocations) {
-            // The relocation type.
-            using relocation_kind = std::remove_pointer_t<
-                std::remove_cv_t<decltype(relocations)>>;
+            // The relocation type. Strip the pointer first and the cv
+            // second, never the other way around: the variant holds
+            // 'const elf_rela *', whose top level is the pointer and not
+            // const, so removing cv first is a no-op and leaves
+            // 'const elf_rela' after the pointer goes. That compares
+            // unequal to 'elf_rela' below, which silently sent every RELA
+            // relocation down the REL branch - it added the base to a
+            // target that holds zero in a RELA file, so every relocated
+            // slot became the module base instead of base plus addend.
+            // Nothing dereferenced one until .init_array gained an entry,
+            // and the boot CPU then called the module base and executed
+            // the ELF header.
+            using relocation_kind = std::remove_cv_t<
+                std::remove_pointer_t<decltype(relocations)>>;
 
             // Get relocation types.
             auto relative_relocation = relative_relocation_value();
