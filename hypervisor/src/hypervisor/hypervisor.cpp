@@ -1476,8 +1476,18 @@ hypervisor::main(arch::x86_64::context & caller_context)
             // Execute the cpuid instruction.
             arch::x86_64::cpuid(context.rax, context.rcx, cpuid_result);
 
+            // The leaf, which is EAX. The high half of RAX is not part
+            // of it and real CPUID ignores it.
+            auto leaf = static_cast<std::uint32_t>(context.rax);
+
+            // The range reserved for hypervisor use. Nothing physical
+            // answers here, so whatever a guest reads is whatever the
+            // layer above it chose to say.
+            constexpr std::uint32_t hypervisor_leaf_first = 0x40000000;
+            constexpr std::uint32_t hypervisor_leaf_last = 0x4fffffff;
+
             // If needs to set hypervisor present bit.
-            if (1 == context.rax) {
+            if (1 == leaf) {
                 // Set hypervisor present bit.
                 cpuid_result[2] |= (1 << 31);
 
@@ -1488,11 +1498,40 @@ hypervisor::main(arch::x86_64::context & caller_context)
                 // ahead of Windows whenever VBS is on, hands straight
                 // off to the OS. Remove this once nesting exists.
                 cpuid_result[2] &= ~(1u << 5);
-            } else if ((1 << 30) == context.rax) {
-                // HyperVisor Name: ZppZppZppZpp.
-                cpuid_result[1] = 0x5a70705a;
-                cpuid_result[2] = 0x705a7070;
-                cpuid_result[3] = 0x70705a70;
+            } else if ((leaf >= hypervisor_leaf_first) &&
+                       (leaf <= hypervisor_leaf_last)) {
+                // Answer the whole hypervisor range, not just the leaf
+                // carrying the signature. Anything left unanswered falls
+                // through to whatever is underneath, and underneath is
+                // not nothing: a guest of another hypervisor sees that
+                // one's leaves, and this test rig runs QEMU with
+                // hv-passthrough, which exposes a full set of Hyper-V
+                // enlightenments.
+                //
+                // Answering one leaf out of that range produces a guest
+                // that believes contradictory things - the vendor below
+                // said Zpp, the interface and feature leaves above said
+                // Hyper-V - and Windows acts on the more specific claim.
+                // It then uses the Hyper-V synthetic MSRs, which this
+                // implements no more than it implements the interface.
+                if (hypervisor_leaf_first == leaf) {
+                    // The highest leaf answered here. Just this one:
+                    // there is a signature to report and no interface
+                    // behind it.
+                    cpuid_result[0] = hypervisor_leaf_first;
+
+                    // HyperVisor Name: ZppZppZppZpp.
+                    cpuid_result[1] = 0x5a70705a;
+                    cpuid_result[2] = 0x705a7070;
+                    cpuid_result[3] = 0x70705a70;
+                } else {
+                    // No interface, no features, nothing to enlighten
+                    // anyone about.
+                    cpuid_result[0] = 0;
+                    cpuid_result[1] = 0;
+                    cpuid_result[2] = 0;
+                    cpuid_result[3] = 0;
+                }
             }
 
             // Place the cpuid result into the context.
