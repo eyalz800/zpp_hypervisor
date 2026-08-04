@@ -229,7 +229,7 @@ private:
      * APs in a hlt loop and wakes them with INIT-SIPI-SIPI, so every
      * wake after the first went nowhere and the caller spun forever.
      */
-    void emulate_init_signal();
+    void emulate_init_signal(arch::x86_64::context & context);
 
     /**
      * Emulate a start-up IPI: leave the wait-for-SIPI state and begin
@@ -238,6 +238,26 @@ private:
      */
     void emulate_start_up_ipi(arch::x86_64::context & context,
                               std::uint64_t vector);
+
+    /**
+     * Applies the state a processor holds after an INIT followed by a
+     * start-up IPI, and leaves it runnable at the vector.
+     */
+    void apply_start_up(arch::x86_64::context & context,
+                        std::uint64_t vector);
+
+    /**
+     * Records an intercepted write to the x2APIC interrupt command
+     * register, so that a start-up IPI reaches its target through memory
+     * we control rather than through a hardware path that may discard it.
+     * Returns false if the write was not one we care about.
+     */
+    void on_interrupt_command(std::uint64_t command);
+
+    /**
+     * Intercept writes to the x2APIC interrupt command register.
+     */
+    void intercept_interrupt_command(bool intercept);
 
     /**
      * Append the exit that is about to be resumed from to this CPU's ring
@@ -520,6 +540,34 @@ private:
      * same case with its is_initialised flag.
      */
     bool started_by_start_up_ipi[max_cpus]{};
+
+    /**
+     * Each processor's x2APIC id, recorded by that processor as it comes
+     * up, so an intercepted interrupt command register write naming a
+     * destination can be turned back into an index here.
+     */
+    std::uint64_t apic_id[max_cpus]{};
+
+    /**
+     * The start-up vector another processor has been told to begin at,
+     * plus one so that zero means "nothing pending".
+     *
+     * This is the whole point of intercepting the interrupt command
+     * register: a start-up IPI is delivered to us here, by the processor
+     * that sent it, instead of being entrusted to the hardware path where
+     * a layer below can discard it. Atomic because the sender writes it
+     * and the target reads it, on different processors, with no lock
+     * between them.
+     */
+    std::atomic<std::uint64_t> start_up_vector[max_cpus]{};
+
+    /**
+     * Set once every processor has been started, after which the
+     * interception is switched off - inter-processor interrupts are hot on
+     * a running system and there is no reason to keep paying for them once
+     * no more processors are going to start.
+     */
+    std::atomic<bool> all_processors_started{};
 
     /**
      * The exit nothing knew how to handle, filled in by
