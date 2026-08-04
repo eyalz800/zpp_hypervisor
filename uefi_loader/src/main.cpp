@@ -483,6 +483,89 @@ static bool file_exists(EFI_HANDLE device, const char16_t * path)
     return !EFI_ERROR(status);
 }
 
+/**
+ * Writes everything traced so far to a file on the given device.
+ *
+ * This is the only diagnosis channel that survives on the development
+ * target: it has no serial port, no debugger, and the screen belongs to
+ * whatever gets booted next. Without this, a bare metal attempt that fails
+ * leaves a blank screen and no reason.
+ *
+ * Called before handing control away and on the paths that give up, so the
+ * log describes the attempt either way. Failure to write is ignored - it
+ * is a diagnostic, and refusing to boot because the log could not be
+ * saved would be worse than booting without one.
+ */
+static void write_trace_log(EFI_HANDLE device)
+{
+    if constexpr (!trace::enabled) {
+        static_cast<void>(device);
+        return;
+    }
+
+    if (!device || trace::log().empty()) {
+        return;
+    }
+
+    EFI_SIMPLE_FILE_SYSTEM_PROTOCOL * file_system{};
+    if (EFI_ERROR(g_boot_services->HandleProtocol(
+            device,
+            &g_efi_simple_file_system_protocol_guid,
+            reinterpret_cast<void **>(&file_system)))) {
+        return;
+    }
+
+    EFI_FILE_PROTOCOL * volume{};
+    if (EFI_ERROR(file_system->OpenVolume(file_system, &volume))) {
+        return;
+    }
+
+    // The directory has to exist before a file can be created in it, and
+    // on a freshly prepared EFI system partition it does not. Opening it
+    // as a directory with CREATE makes one if needed and finds the
+    // existing one otherwise.
+    EFI_FILE_PROTOCOL * directory{};
+    auto directory_path = u"\\EFI\\zpp";
+    if (!EFI_ERROR(
+            volume->Open(volume,
+                         &directory,
+                         reinterpret_cast<CHAR16 *>(
+                             const_cast<char16_t *>(directory_path)),
+                         EFI_FILE_MODE_READ | EFI_FILE_MODE_WRITE |
+                             EFI_FILE_MODE_CREATE,
+                         EFI_FILE_DIRECTORY))) {
+        directory->Close(directory);
+    }
+
+    EFI_FILE_PROTOCOL * file{};
+    auto file_path = u"\\EFI\\zpp\\zpp_trace.log";
+    if (EFI_ERROR(volume->Open(
+            volume,
+            &file,
+            reinterpret_cast<CHAR16 *>(const_cast<char16_t *>(file_path)),
+            EFI_FILE_MODE_READ | EFI_FILE_MODE_WRITE |
+                EFI_FILE_MODE_CREATE,
+            0))) {
+        volume->Close(volume);
+        return;
+    }
+
+    // Truncate, so the file describes this boot rather than this boot
+    // appended to every previous one.
+    file->SetPosition(file, 0);
+
+    auto log = trace::log();
+    std::size_t size = log.size();
+    file->Write(file, &size, const_cast<char *>(log.data()));
+
+    // Flush before closing: the firmware's FAT driver caches, and a
+    // machine that is about to hand over to an OS - or to hang - may never
+    // get another chance to write this out.
+    file->Flush(file);
+    file->Close(file);
+    volume->Close(volume);
+}
+
 static void * allocate_rwx(std::size_t size)
 {
     trace::line("ZPP_TRACE allocate_rwx enter");
@@ -1144,6 +1227,10 @@ extern "C" EFI_STATUS EFIAPI uefi_main(EFI_HANDLE image_handle,
 
             trace::line("ZPP_TRACE chainloading");
 
+            // Save the log before handing over. Nothing after this point
+            // returns here, so this is the last chance to write it.
+            write_trace_log(our_device);
+
             // Start the image.
             status = g_boot_services->StartImage(
                 current_image_handle, nullptr, nullptr);
@@ -1154,6 +1241,7 @@ extern "C" EFI_STATUS EFIAPI uefi_main(EFI_HANDLE image_handle,
     }
 
     trace::line("ZPP_TRACE no boot manager found");
+    write_trace_log(our_device);
 
     // Return success anyway, no image was found is considered ok.
     return EFI_SUCCESS;
