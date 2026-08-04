@@ -12,7 +12,6 @@ tags
 *.symvers
 *.swp
 **/.tmp_versions/**
-bareflank.mod.c
 **/out/**
 **/obj/**
 **/.vs/**
