@@ -704,9 +704,32 @@ static void write_trace_log(EFI_HANDLE device)
         return;
     }
 
-    // Truncate, so the file describes this boot rather than this boot
-    // appended to every previous one.
-    file->SetPosition(file, 0);
+    // Delete and recreate, rather than rewinding to the start. There is
+    // no truncating open here, so writing a shorter log over a longer one
+    // leaves the tail of the longer one in place - and the result reads as
+    // one boot, because nothing in the text marks where this boot stopped
+    // and the older one resumes.
+    //
+    // That cost real time. A log was read as a single boot that had
+    // chainloaded twice and sampled its processor states twice, and the
+    // only clue it was two boots spliced together was one line beginning
+    // mid-word: "9] ZPP_TRACE boot option zpp", the tail of an earlier
+    // "[main.cpp:179]".
+    //
+    // Delete closes the handle whether or not it succeeds, so reopen
+    // unconditionally and give up if that fails.
+    file->Delete(file);
+    file = nullptr;
+    if (EFI_ERROR(volume->Open(
+            volume,
+            &file,
+            reinterpret_cast<CHAR16 *>(const_cast<char16_t *>(file_path)),
+            EFI_FILE_MODE_READ | EFI_FILE_MODE_WRITE |
+                EFI_FILE_MODE_CREATE,
+            0))) {
+        volume->Close(volume);
+        return;
+    }
 
     auto log = trace::log();
     std::size_t size = log.size();
