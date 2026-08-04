@@ -408,9 +408,16 @@ void hypervisor::initialize_mtrrs()
     this->mtrr_capabilities = arch::x86_64::mtrr_capabilities(
         arch::x86_64::rdmsr(arch::x86_64::msr::ia32_mtrr_capability));
 
-    // The MTRR variable count.
-    auto variable_count =
-        this->mtrr_capabilities.variable_range_register_count();
+    // The MTRR variable count, bounded by the array it fills. The bound is
+    // defensive rather than expected: the array is sized to the field's
+    // architectural maximum, so a processor cannot report more than fits.
+    // It stays because the alternative, if that ever stopped being true,
+    // is silently writing over whatever follows the array - which is
+    // exactly what happened when this was sized at 8 and the processor
+    // said 10.
+    auto variable_count = std::min<std::size_t>(
+        std::size(this->mtrrs),
+        this->mtrr_capabilities.variable_range_register_count());
 
     // Iterate all MTRR registers, and read them.
     for (std::size_t i{}; i < variable_count; ++i) {
@@ -2304,30 +2311,14 @@ hypervisor::main(arch::x86_64::context & caller_context)
                 // off to the OS. Remove this once nesting exists.
                 cpuid_result[2] &= ~(1u << 5);
 
-                // Hide MONITOR/MWAIT. Those instructions are intercepted
-                // and emulated as no-ops, because SDM 29.3.3 and 30.5.6
-                // clear address-range monitoring on every VM entry and
-                // every VM exit - so a monitor a guest arms cannot survive
-                // long enough to be waited on. Advertising a feature whose
-                // whole purpose is to wait, and then refusing to wait, is
-                // the mistake this file's other cases keep making: answer
-                // the whole of something or do not claim it.
-                //
-                // Not merely tidiness. The firmware picks an MWAIT idle
-                // loop for application processors when this bit is set,
-                // and wakes them with a store to the monitored line
-                // rather than with INIT-SIPI-SIPI. That store is never
-                // noticed once the monitor has been cleared, so every AP
-                // hung. Clearing the bit sends the firmware down the
-                // INIT-SIPI-SIPI path,
-                // which is emulated. Measured directly: the guest saw
-                // ecx=0xf7fab20b and hung, and 0xf7fab203 - the same value
-                // with this bit clear - brought up all eight processors.
-                //
-                // SDM Vol. 2A, CPUID, "CPUID.01H:ECX Feature
-                // Information": ECX[3] MONITOR, "If 1, supports the
-                // MONITOR/MWAIT and CPUID.05H".
-                cpuid_result[2] &= ~(1u << 3);
+                // MONITOR/MWAIT, ECX[3], is deliberately left as the
+                // hardware reports it. Both instructions execute in the
+                // guest and neither is intercepted, so there is nothing
+                // to conceal - and concealing it is what produced the
+                // 0x139 bugcheck described where those controls are
+                // declared. Leaf 5, which the same bit governs, is
+                // likewise passed through untouched, so the guest sees
+                // one consistent answer across both leaves.
             } else if ((leaf >= hypervisor_leaf_first) &&
                        (leaf <= hypervisor_leaf_last)) {
                 // Answer the whole hypervisor range, not just the leaf
@@ -2503,30 +2494,81 @@ hypervisor::main(arch::x86_64::context & caller_context)
             break;
         }
         case basic_reason::invd: {
-            // Execute the invd instruction.
-            arch::x86_64::invd();
+            // Deliberately not executed, and not passed through either.
+            //
+            // INVD discards every modified line in the cache hierarchy
+            // without writing any of it back. Running it here on behalf of
+            // a guest throws away whatever the host had dirty at that
+            // moment as well - this VMM's own log, its page tables, its
+            // EPT - and whatever the guest had dirty, and anything a
+            // device had not yet observed. There is no way to scope it to
+            // the caller, because there is one cache hierarchy.
+            //
+            // SDM Vol. 2A, INVD: "Data held in internal caches is not
+            // written back to main memory ... Use this instruction with
+            // care. Data cached internally and not written back to main
+            // memory will be lost", and it goes on to say software should
+            // use WBINVD instead.
+            //
+            // So the choice is between losing data and not invalidating.
+            // Nothing here relies on a guest's INVD having any effect -
+            // the EPT is built once before any guest runs and is never
+            // touched again - so treating it as a no-op costs nothing this
+            // VMM depends on, while executing it can corrupt both sides of
+            // the boundary. RIP advances below as for any completed
+            // instruction. KVM makes the same call
+            // (kvm_emulate_invd: "Treat an INVD instruction as a NOP").
+            //
+            // This becomes a real decision the day EPT memory types are
+            // re-derived at runtime from guest MTRR writes, because that
+            // needs a deliberate cache and TLB sequence of its own. A
+            // no-op is the right answer until then, not forever.
             break;
         }
         case basic_reason::monitor:
         case basic_reason::mwait: {
             // Both are emulated as no-ops: the exit is taken purely to
             // stop them executing, and RIP advances below as it would for
-            // any completed instruction.
+            // any completed instruction. A guest that cannot wait polls
+            // instead, which is wasteful and correct.
             //
-            // A no-op is the honest answer rather than a shortcut. SDM
-            // 29.3.3 and 30.5.6 have every VM entry and every VM exit
-            // clear address-range monitoring, so a guest inside a VM can
-            // never keep a monitor armed across one - there is no
-            // behaviour here to preserve, only a wait to refuse. Turning
-            // MWAIT into a no-op turns a guest's idle loop into a poll,
-            // which is correct and merely wasteful; letting it wait is
-            // incorrect and hangs the processor, which is what happened to
-            // every application processor before this existed.
+            // What must not go with this is hiding the feature from CPUID.
+            // Leaf 1 ECX[3] stays as the hardware reports it, because
+            // clearing it is what produced a 0x139 bugcheck on real
+            // firmware - the measurement is with those controls, in
+            // vmx.h. A guest told the monitor exists and refused the wait
+            // loses nothing but power; a guest told it does not exist
+            // builds an idle path with a hole in it.
             //
-            // Deliberately not logged. Idle loops execute these
-            // continuously, so a line each would push everything else out
-            // of a 512 line log. KVM makes the same call and warns exactly
-            // once (kvm_emulate_monitor_mwait).
+            // Logged once per processor, never per execution. Idle loops
+            // run these continuously, so a line each would push everything
+            // else out of a 512 line log - which is why this was silent
+            // before, and why being silent cost so much. Every question
+            // about the idle path so far has been argued rather than
+            // measured: whether the guest reaches MWAIT at all, on which
+            // processor, from where, and whether its monitor arms under
+            // this VMM's EPT. One line per processor answers all four and
+            // costs nothing after the first.
+            //
+            // The armed bit is the interesting half. SDM 28.2.1, Table
+            // 28-3: for MWAIT the exit qualification "is set either to 0
+            // (if address-range monitoring hardware is not armed) or to 1
+            // (if ... armed)". A monitor that never arms means MONITOR is
+            // not doing what the guest thinks, and the SDM makes an
+            // unarmed MWAIT a no-op rather than a wait - so this
+            // distinguishes a guest that is idling from one that is
+            // spinning. KVM logs once for the same reason
+            // (kvm_emulate_monitor_mwait).
+            if (auto cpu = this->vmcs.vpid() - 1;
+                (cpu < max_cpus) && !this->monitor_logged[cpu]) {
+                this->monitor_logged[cpu] = true;
+                log("cpu {} {} rip {} cs {} armed {}",
+                    cpu,
+                    (basic_reason::mwait == reason) ? "mwait" : "monitor",
+                    this->vmcs.guest_rip(),
+                    this->vmcs.guest_cs_selector(),
+                    this->vmcs.exit_qualification());
+            }
             break;
         }
         case basic_reason::init_signal: {

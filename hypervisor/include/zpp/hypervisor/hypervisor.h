@@ -679,6 +679,15 @@ private:
     bool started_by_trampoline[max_cpus]{};
 
     /**
+     * Whether this processor has already had a MONITOR or MWAIT exit
+     * recorded in the log. An idle loop executes those continuously, so
+     * they are reported once each and then never again - enough to say
+     * that the guest reached them, from where, and whether its monitor
+     * armed, without burying every other line.
+     */
+    bool monitor_logged[max_cpus]{};
+
+    /**
      * The first stack a processor started by the trampoline has, used only
      * until its launch switches to the one reserved for its index.
      *
@@ -913,9 +922,30 @@ private:
     arch::x86_64::vmx::vmcs vmcs{};
 
     /**
-     * The MTRR registers values.
+     * How many variable range MTRRs there can be. IA32_MTRRCAP.VCNT is an
+     * eight bit field, so this is the architectural maximum rather than a
+     * guess at what a machine will report.
+     *
+     * It was 8, which is what QEMU reports and is why nothing caught it:
+     * real Intel client parts commonly report 10, and the fill loop below
+     * ran to VCNT without a bound. The two entries past the end landed on
+     * mtrr_capabilities, which sits immediately after this array - so the
+     * capabilities were corrupted by the very loop that had just read
+     * them, and the last two MTRRs were dropped from the EPT derivation.
+     * Measured from the debug info: mtrrs at 0xd9a0c8 and
+     * mtrr_capabilities at 0xd9a188, exactly 8 * sizeof(mtrr) apart.
+     *
+     * SDM Vol. 4, Table 2-2, IA32_MTRRCAP: "VCNT (Variable Range
+     * Registers Count) field, bits 7:0".
      */
-    arch::x86_64::mtrr mtrrs[8];
+    static constexpr std::size_t maximum_variable_mtrrs = 255;
+
+    /**
+     * The MTRR registers values. Entries past the count the processor
+     * reports are left with valid clear, which is what the EPT derivation
+     * already tests before looking at one.
+     */
+    arch::x86_64::mtrr mtrrs[maximum_variable_mtrrs];
 
     /**
      * The MTRR capabilities values.

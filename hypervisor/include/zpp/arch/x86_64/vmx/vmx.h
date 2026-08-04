@@ -20,33 +20,42 @@ namespace vm_execution_controls::primary
 {
 enum type : std::uint64_t
 {
-    // MONITOR and MWAIT must both be intercepted, and this is a
-    // correctness requirement rather than a policy choice: a virtualized
-    // guest cannot use the address-range monitor at all.
+    // MONITOR and MWAIT are both intercepted and emulated as no-ops, so a
+    // guest that would wait polls instead. That costs power and nothing
+    // else, because SDM 29.3.3, "Clearing Address-Range Monitoring", and
+    // SDM 30.5.6 clear address-range monitoring on every VM entry and
+    // every VM exit - a monitor armed inside a guest cannot survive long
+    // enough to be waited on, so there is no behaviour here to preserve.
     //
-    // SDM 29.3.3, "Clearing Address-Range Monitoring": "VM entries clear
-    // any address-range monitoring that may be in effect." SDM 30.5.6 says
-    // the same of VM exits. So every entry and every exit disarms the
-    // monitor a guest armed with MONITOR, and the MWAIT that was supposed
-    // to wait on it waits for something that can no longer arrive.
+    // What must not accompany this is hiding the feature from CPUID, and
+    // that pairing is the subtle part. Leaf 1 ECX[3] is left exactly as
+    // the hardware reports it. Clearing it looks like the honest answer -
+    // refuse the wait, so stop advertising the wait - and it bugchecks
+    // Windows on real firmware. Windows builds an idle state for every
+    // ACPI FFH C-state the firmware reports, and FFH means MWAIT, so with
+    // the monitor hidden its platform layer installs no handler for that
+    // state. PpmIdleExecuteTransition calls the handler anyway: the
+    // pointer beside it is null-checked and this one is not. Kernel CFG
+    // catches the indirect call through null and reports
+    // KERNEL_SECURITY_CHECK_FAILURE, 0x139, parameter 1 = 0x0a,
+    // FAST_FAIL_GUARD_ICALL_CHECK_FAILURE.
     //
-    // This is what kept application processors from ever starting. The
-    // firmware parks an AP in an MWAIT idle loop when CPUID reports
-    // MONITOR support, and wakes it by storing to the monitored line
-    // rather than by INIT-SIPI-SIPI. Once the AP is virtualized, the first
-    // VM exit clears its monitor, the store is never noticed, and the AP
-    // waits forever - which looks exactly like a processor that never
-    // received its start-up IPI. Measured: with the monitor advertised the
-    // loader hangs in StartupThisAP; with it hidden all eight processors
-    // answer. See also the CPUID leaf 1 handling, which stops advertising
-    // it for the same reason.
+    // Measured from the crash dump rather than reasoned about, which is
+    // the only reason it was found: stack KiIdleLoop -> PoIdle ->
+    // PpmIdleExecuteTransition -> _guard_dispatch_icall, target register
+    // zero, and parameter 4 zero because _guard_icall_bugcheck passes the
+    // rejected target through. Two dumps agreed to the byte modulo the
+    // kernel's load address. Only real firmware reaches it - an emulator
+    // reporting no FFH C-states never builds that idle state - so every
+    // test rig missed it and the machine bugchecked the moment it first
+    // went idle.
     //
-    // Measured rather than assumed: whatever is virtualizing this machine
-    // during development intercepts both by default and emulates each as a
-    // no-op, and stops intercepting them only when explicitly asked to.
-    // QEMU's -overcommit cpu-pm=on asks for exactly that, which is how
-    // this was exposed - with it on the guest sees the monitor advertised
-    // and application processors hang; with it off they do not.
+    // So the two halves answer different questions and both answers are
+    // deliberate: the guest is told the monitor exists, and is quietly
+    // refused the wait. Advertising a feature and then declining it is
+    // usually this codebase's cardinal sin; here declining it costs a poll
+    // and concealing it costs a null function pointer in the guest's
+    // kernel, which is worse.
     //
     // SDM Table 25-6, "Definitions of Primary Processor-Based
     // VM-Execution Controls", bits 10 and 29.
