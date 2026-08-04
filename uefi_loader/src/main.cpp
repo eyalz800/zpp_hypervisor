@@ -307,11 +307,28 @@ static void query_cpuid(std::uint32_t leaf, std::uint32_t (&out)[4])
  */
 static void serial_write(const char * text)
 {
+    constexpr std::uint16_t port = 0x3f8;
+    constexpr std::uint16_t line_status = port + 5;
+    constexpr std::uint8_t transmitter_empty = 1u << 5;
+
     for (auto * character = text; *character; ++character) {
+        // Wait for the transmit holding register to drain. Without this
+        // only the first sixteen characters ever appear - that is the
+        // 16550's FIFO depth, and anything written past a full FIFO is
+        // dropped. Bounded, so a machine with no working UART cannot wedge
+        // the loader here.
+        for (std::uint32_t attempt{}; attempt < 100000u; ++attempt) {
+            std::uint8_t status{};
+            asm volatile("inb %1, %0" : "=a"(status) : "Nd"(line_status));
+            if (status & transmitter_empty) {
+                break;
+            }
+        }
+
         asm volatile("outb %0, %1"
                      :
                      : "a"(static_cast<std::uint8_t>(*character)),
-                       "Nd"(static_cast<std::uint16_t>(0x3f8)));
+                       "Nd"(port));
     }
 }
 /**
@@ -395,14 +412,26 @@ extern "C" EFI_STATUS EFIAPI uefi_main(EFI_HANDLE image_handle,
     // Copy the boot services.
     g_boot_services = system_table->BootServices;
 
+#if ZPP_CI_VERIFY_HYPERVISOR
+    serial_write("zpp: ZPP_TRACE entry\r\n");
+#endif
+
     // Load the MP Services.
     status = g_boot_services->LocateProtocol(
         &g_efi_mp_service_protocol_guid,
         nullptr,
         reinterpret_cast<void **>(&g_mp_services));
     if (EFI_ERROR(status)) {
+#if ZPP_CI_VERIFY_HYPERVISOR
+        serial_write(
+            "zpp: ZPP_HYPERVISOR_FAILED no EFI_MP_SERVICES_PROTOCOL\r\n");
+#endif
         return EFI_LOAD_ERROR;
     }
+
+#if ZPP_CI_VERIFY_HYPERVISOR
+    serial_write("zpp: ZPP_TRACE mp services located\r\n");
+#endif
 
     // Load the ELF.
     const zpp_loader_parameters parameters{
@@ -413,10 +442,21 @@ extern "C" EFI_STATUS EFIAPI uefi_main(EFI_HANDLE image_handle,
         .adjust_launch_calling_convention = invoke_entry,
     };
 
+#if ZPP_CI_VERIFY_HYPERVISOR
+    serial_write("zpp: ZPP_TRACE loading\r\n");
+#endif
+
     auto result = zpp_load_elf(&parameters);
+
+#if ZPP_CI_VERIFY_HYPERVISOR
+    serial_write("zpp: ZPP_TRACE loaded\r\n");
+#endif
 
     // If we failed, return an arbitrary failure.
     if (result) {
+#if ZPP_CI_VERIFY_HYPERVISOR
+        serial_write("zpp: ZPP_HYPERVISOR_FAILED zpp_load_elf failed\r\n");
+#endif
         return EFI_LOAD_ERROR;
     }
 
