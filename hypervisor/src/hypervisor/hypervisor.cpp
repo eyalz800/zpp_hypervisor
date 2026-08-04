@@ -2253,8 +2253,48 @@ hypervisor::main(arch::x86_64::context & caller_context)
 
             // If needs to set hypervisor present bit.
             if (1 == leaf) {
-                // Set hypervisor present bit.
-                cpuid_result[2] |= (1 << 31);
+                // Do not tell the guest it is virtualized. The nesting
+                // check in launch_on_this_processor already describes this
+                // bit as cleared here, and it has to be: that check asks
+                // whether a hypervisor is under *us*, so announcing
+                // ourselves to our own guest would make an adopted
+                // application processor read its own VMM's answer and
+                // conclude it was nested.
+                //
+                // Setting it also costs the guest its processor power
+                // management, which is how this was found. Windows builds
+                // an idle state for every ACPI FFH C-state the platform
+                // reports, and FFH means MWAIT; a guest that knows it is
+                // virtualized is told the host owns idle states, so its
+                // platform layer registers an idle state block with the
+                // handler at offset 0x50 left null.
+                // PpmInstallNewIdleStates copies that block field for
+                // field with no validation, and PpmIdleExecuteTransition
+                // then calls the copy at 0x270 without a null check,
+                // unlike the pointer beside it at 0x268. Kernel control
+                // flow guard catches the call through null:
+                // KERNEL_SECURITY_CHECK_FAILURE, 0x139, parameter 1 =
+                // 0x0a, FAST_FAIL_GUARD_ICALL_CHECK_FAILURE.
+                //
+                // Read out of three crash dumps rather than reasoned
+                // about, which is the only reason it was found. They
+                // agreed to the register modulo the kernel's load address:
+                // KiIdleLoop -> PoIdle -> PpmIdleExecuteTransition ->
+                // _guard_dispatch_icall, target register zero, and
+                // parameter 4 zero because _guard_icall_bugcheck passes
+                // the rejected target through.
+                //
+                // Only real firmware reaches it, which is why no test rig
+                // caught it: that idle state exists because the platform
+                // reports ACPI FFH C-states, and an emulated platform
+                // reports none.
+                //
+                // SDM Vol. 2A, CPUID, "CPUID.01H:ECX Feature
+                // Information": bit 31 is reserved and returns 0 on real
+                // hardware, which is why it is the conventional way to
+                // announce a hypervisor - and why leaving it clear is
+                // indistinguishable from bare metal.
+                cpuid_result[2] &= ~(1u << 31);
 
                 // Hide VMX. We hold VMX root mode and do not support
                 // nesting, so a guest hypervisor would #GP on its own
