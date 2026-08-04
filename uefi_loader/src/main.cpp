@@ -786,14 +786,16 @@ static int call_on_cpu(std::size_t cpuid,
 
     // The event we will wait for to join the new started AP.
     EFI_EVENT join_event{};
-    std::size_t event_index{};
 
     // The launch function.
     auto launch = [&] {
         // Call the user function and save the result.
         result = function(context);
 
-        // Signal the event.
+        // Signalled here as well as by MP services, which signals it when
+        // this procedure returns. Redundant on purpose: a double signal is
+        // harmless, and this way the wait still ends if the firmware ever
+        // fails to signal it.
         g_boot_services->SignalEvent(join_event);
     };
 
@@ -810,34 +812,49 @@ static int call_on_cpu(std::size_t cpuid,
         return result;
     }
 
-    // Startup the relevant CPU.
+    // Startup the relevant CPU, and wait for it under our own deadline.
     //
-    // Bounded rather than indefinite. WaitEvent is null, so this is the
-    // blocking form and the timeout is the only thing that can end it: a
-    // processor that never runs the function used to hang the loader here
-    // forever, which reports nothing and leaves the firmware on screen
-    // looking wedged. A timeout turns that into EFI_TIMEOUT, so the caller
-    // can say which processor failed and go on to ask the hypervisor why.
+    // The non-blocking form, with the deadline enforced here rather than by
+    // the firmware. Passing a timeout to the blocking form was tried first
+    // and does not work: this firmware waits indefinitely regardless, so a
+    // processor that never runs the function hung the loader forever, which
+    // reports nothing and leaves the firmware on screen looking wedged.
+    //
+    // Polling CheckEvent with a Stall between tries is the way to keep the
+    // deadline ours. The event is signalled by MP services when the
+    // procedure returns, so nothing in the launch function has to.
     //
     // Generous, because this is not a latency budget. Starting a processor
-    // takes an INIT, 10ms, a start-up IPI, 200us and another; anything
-    // still absent after seconds is not late, it is not coming.
-    constexpr std::size_t start_up_timeout_microseconds = 5000000;
+    // takes an INIT, ten milliseconds, a start-up IPI, two hundred
+    // microseconds and another; anything still absent after seconds is not
+    // late, it is not coming.
+    constexpr std::size_t start_up_poll_microseconds = 1000;
+    constexpr std::size_t start_up_polls = 5000;
     status = g_mp_services->StartupThisAP(
         g_mp_services,
         static_cast<void (*)(void *)>(erased_launch),
         cpuid,
-        nullptr,
-        start_up_timeout_microseconds,
+        join_event,
+        0,
         &launch,
         nullptr);
     if (EFI_ERROR(status)) {
         goto close_event;
     }
 
-    // Wait for the join event.
-    status = g_boot_services->WaitForEvent(1, &join_event, &event_index);
+    // Wait for the join event, bounded.
+    status = EFI_TIMEOUT;
+    for (std::size_t poll{}; poll < start_up_polls; ++poll) {
+        if (!EFI_ERROR(g_boot_services->CheckEvent(join_event))) {
+            status = EFI_SUCCESS;
+            break;
+        }
+        g_boot_services->Stall(start_up_poll_microseconds);
+    }
     if (EFI_ERROR(status)) {
+        // Left as the failure the caller reports. result keeps whatever the
+        // function managed to store, which for a processor that never ran
+        // is the -1 it started as.
         goto close_event;
     }
 
