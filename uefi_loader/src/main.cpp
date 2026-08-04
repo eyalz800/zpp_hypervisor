@@ -924,6 +924,23 @@ extern "C" EFI_STATUS EFIAPI uefi_main(EFI_HANDLE image_handle,
         const char16_t * path;
 
         /**
+         * Whether this entry must not be looked for on the device this
+         * loader was itself loaded from.
+         *
+         * Only the removable media fallback needs it. On a machine that
+         * has any boot manager installed, that path *is* that boot
+         * manager - Limine on the development target - and it is the thing
+         * that chainloaded us, so chaining back to it would loop forever.
+         *
+         * A boot manager named explicitly needs the opposite. Booted from
+         * a Limine entry on bare metal, this loader sits in /EFI/zpp on
+         * the very same EFI system partition as Windows, so refusing to
+         * look at our own device would refuse to look at the only place
+         * Windows is.
+         */
+        bool avoid_our_own_device;
+
+        /**
          * A file that has to sit beside it for starting it to be able to
          * work, or null when there is nothing to require.
          *
@@ -945,8 +962,9 @@ extern "C" EFI_STATUS EFIAPI uefi_main(EFI_HANDLE image_handle,
     // installed that fallback is the boot manager, not the OS.
     static constexpr boot_manager boot_managers[]{
         {u"\\EFI\\Microsoft\\Boot\\bootmgfw.efi",
+         false,
          u"\\EFI\\Microsoft\\Boot\\BCD"},
-        {u"\\EFI\\BOOT\\bootx64.efi", nullptr},
+        {u"\\EFI\\BOOT\\bootx64.efi", true, nullptr},
     };
 
     // Drive every controller before looking for a boot manager. Firmware
@@ -994,10 +1012,13 @@ extern "C" EFI_STATUS EFIAPI uefi_main(EFI_HANDLE image_handle,
     // Iterate the boot managers, and every file system for each one, so
     // that a preferred boot manager anywhere wins over a fallback on
     // whichever device happens to enumerate first.
-    for (auto [boot_manager, companion] : boot_managers) {
+    for (auto [boot_manager, avoid_our_own_device, companion] :
+         boot_managers) {
         for (std::size_t i{}; i < number_of_file_system_handles; ++i) {
-            // Skip the device this loader came from.
-            if (file_system_handles[i] == our_device) {
+            // Skip the device this loader came from, for the entries
+            // that would loop back into it.
+            if (avoid_our_own_device &&
+                (file_system_handles[i] == our_device)) {
                 continue;
             }
 
