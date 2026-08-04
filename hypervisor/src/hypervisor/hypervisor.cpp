@@ -748,10 +748,8 @@ void hypervisor::emulate_init_signal(arch::x86_64::context & context)
     // start-up IPI; the second follows 200 microseconds later. That is the
     // entire budget. So the architectural reset that used to be here now
     // lives in emulate_start_up_ipi, which may take as long as it likes -
-    // by the time it runs, the IPI has already been received. another implementation,
-    // another implementation, another implementation and another implementation all arrived at this same split
-    // independently, and the rule to keep is
-    // simply "do not add any code to this routine".
+    // by the time it runs, the IPI has already been received. The rule to
+    // keep is blunt: do not add code to this function.
     //
     // What remains is the activity state and the two things that state
     // requires to be clear. Wait-for-SIPI does not permit a pending event:
@@ -918,8 +916,8 @@ void hypervisor::apply_start_up(arch::x86_64::context & context,
     // INIT-SIPI-SIPI sends two, and the second would otherwise send a
     // processor that is already running back to its entry point - which
     // wedges it in a way indistinguishable from never having started.
-    // Guarded here because the hardware does not
-    // reliably discard the second one either.
+    // Guarded here rather than relying on the hardware to discard the
+    // second one, which it does not do reliably.
     if (auto cpu = vmcs.vpid() - 1; cpu < max_cpus) {
         if (this->started_by_start_up_ipi[cpu]) {
             return;
