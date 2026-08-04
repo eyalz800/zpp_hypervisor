@@ -1415,13 +1415,28 @@ extern "C" EFI_STATUS EFIAPI uefi_main(EFI_HANDLE image_handle,
 
             trace::line("ZPP_TRACE chainloading");
 
-            // Save the log before handing over. Nothing after this point
-            // returns here, so this is the last chance to write it.
+            // Save the log before handing over, because a boot manager
+            // that boots successfully never comes back and would take
+            // the log with it.
             write_trace_log(our_device);
 
             // Start the image.
             status = g_boot_services->StartImage(
                 current_image_handle, nullptr, nullptr);
+
+            // Reaching here means the boot manager returned instead of
+            // booting. That is a different failure from hanging inside
+            // it, and the two used to be indistinguishable: the log was
+            // written above and never again, so a successful boot, a
+            // hang and a refused StartImage all left a log ending at the
+            // line above. Record the status and write the log a second
+            // time, so the next occurrence says which one happened.
+            //
+            // The screen is no help either way. On this path control
+            // returns to the firmware with our own output still the last
+            // thing on it, which looks exactly like a hang.
+            trace::hex_line("ZPP_TRACE start image returned ", status);
+            write_trace_log(our_device);
 
             // Return the start image status.
             return status;
