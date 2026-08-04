@@ -48,6 +48,7 @@
     .set ap_far_pointer32_offset, ap_data_offset + 0x48
     .set ap_far_pointer64_offset, ap_data_offset + 0x50
     .set ap_gdt_offset, ap_data_offset + 0x58
+    .set ap_null_idt_offset, ap_data_offset + 0x38
     .set ap_far_host_offset, ap_data_offset + 0x78
     .set ap_host_gdtr_offset, ap_data_offset + 0x86
     .set ap_host_idtr_offset, ap_data_offset + 0x96
@@ -111,13 +112,31 @@ zpp_ap_start_up_begin:
 
     mov byte ptr [ap_stage_offset], ap_stage_real_mode
 
+    // Both loads in their thirty-two bit form, which is what the operand
+    // size prefix buys: the sixteen bit form of lgdt and lidt loads only a
+    // twenty-four bit base. This blob always lives below one megabyte so a
+    // truncated base would still be correct, but the wide form is the one
+    // that is documented to load what is written here.
+    //
+    // The interrupt descriptor table is loaded null, and deliberately. It
+    // cannot be a useful one - the host IDT's gates name a code segment
+    // that does not exist yet - but an IDTR left holding whatever was at
+    // linear zero is worse than one that is empty by construction.
+    .byte 0x66
+    lidt [ap_null_idt_offset]
+    .byte 0x66
     lgdt [ap_gdt_pointer_offset]
 
     // Protected mode, then a far jump to make the new code segment take
     // effect. Indirect through memory because the offset is thirty-two bit
     // and was only just computed.
-    mov eax, cr0
-    or eax, 1
+    //
+    // CR0 is written as an absolute value rather than read, modified and
+    // written back. Preserving what an INIT left in it is not wanted here:
+    // the only bit that has to be set is protection enable, and the fewer
+    // bits this transition changes at once the fewer of them can be
+    // implicated when it does not survive.
+    mov eax, 1
     mov cr0, eax
     jmp fword ptr [ap_far_pointer32_offset]
 
@@ -148,11 +167,18 @@ ap_code32:
     mov eax, [ebx + ap_temporary_cr3_offset]
     mov cr3, eax
 
-    // IA32_EFER.LME. Long mode becomes active when paging is enabled with
-    // this set.
+    // IA32_EFER.LME, and NXE with it. Long mode becomes active when
+    // paging is enabled with LME set.
+    //
+    // NXE is not optional here even though nothing on this path executes
+    // from a no-execute mapping. The host page table sets the execute
+    // disable bit, and SDM 5.5.4 makes bit 63 of a paging entry reserved
+    // while NXE is clear - a reserved bit set makes the entry fault (5.7).
+    // Measured on a processor started this way: EFER 0x500 against the boot
+    // processor's 0xd00.
     mov ecx, 0xc0000080
     rdmsr
-    or eax, (1 << 8)
+    or eax, (1 << 8) | (1 << 11)
     wrmsr
 
     mov eax, cr0
@@ -216,6 +242,16 @@ ap_host_code:
     mov rdi, [rbx + ap_argument_offset]
     mov rax, [rbx + ap_entry_offset]
     mov byte ptr [rbx + ap_stage_offset], ap_stage_entering_cpp
+
+    // Leave the stack as a call would have. The entry point is ordinary
+    // C++ compiled for the SysV convention, which expects RSP eight past
+    // sixteen byte alignment on entry - the return address a call would
+    // have pushed. Jumping to it with RSP aligned puts every local eight
+    // out, and the first aligned SSE store to one of them faults.
+    // Measured: capture_context faulting on movdqa with its context
+    // argument eight past alignment. Same reason launch_on_cpu simulates a
+    // call when it builds a stack.
+    sub rsp, 8
     jmp rax
 
     // The code must not reach into the data area.
