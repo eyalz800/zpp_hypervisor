@@ -275,33 +275,41 @@ resulting disk under Bochs, rather than installing under Bochs. So:
 Expect minutes per interaction even at the desktop. It is workable for
 `sc start` and a breakpoint, not for using the machine.
 
-### Why the UEFI loader cannot be tested under Bochs
+### Status of testing the UEFI loader under Bochs
 
-Established by running it locally rather than through CI. OVMF boots fine under
-Bochs and does reach the loader:
+Traced locally rather than through CI, which was far quicker. Two blockers were
+found; the first is fixed, the second is not.
 
-    BdsDxe: starting Boot0001 "UEFI Generic 1234 BXHD00011 "
-            from PciRoot(0x0)/Pci(0x1,0x1)/Ata(Primary,Master,0x0)
+**Firmware timed waits (fixed).** OVMF boots under Bochs and reaches the loader,
+but `zpp_load_elf` hung inside MP services:
 
-It then hangs inside `zpp_load_elf`, and Bochs' log says why - an endless tight
-loop of:
+    zpp: ZPP_TRACE allocate_rwx done
+    zpp: ZPP_TRACE number_of_cpus enter     <- never returned
 
-    read from port 0x0008 with len 4 returns 0xffffffff
+UEFI's microsecond delay is built on the ACPI power management timer, and MP
+services enumerates processors using timed waits. Bochs provides no PIIX4 power
+management function, so the firmware polls a port that always reads back all
+ones and the wait never elapses - it hangs rather than failing. The loader now
+probes that timer through the FADT before touching MP services and reports a
+single processor when it is not advancing, so it degrades instead of hanging.
+That is a robustness fix for real hardware too, not a test hook.
 
-That port is OVMF's ACPI power management timer. Bochs' i440fx does not provide
-the PIIX4 power management function, so OVMF's PCI configuration read yields
-nothing usable, computes a PM base of zero, and places the timer at base plus
-eight. Every `MicroSecondDelay` in the firmware therefore polls a port that
-always reads back all ones and never advances.
+**Hypervisor page fault (open).** Past that point the hypervisor triple faults:
 
-The consequence is structural rather than a tuning problem: **any UEFI service
-that waits on time hangs forever under Bochs**, so the UEFI path cannot be used
-for automated testing there no matter how long the timeout is.
+    exception(): 3rd (14) exception with no resolution, shutdown status is 00h
+    cpu hardware reset
 
-The way forward is Bochs' legacy BIOS path with a Linux guest, which needs no
-OVMF and no ACPI timer, and is what Bochs is actually good at. A small kernel
-plus an initramfs containing `zpp_loader.ko` can check the same CPUID signature
-from inside the guest. The `linux .ko` CI job already produces a working module.
+Exception 14 is a page fault. It happens after `allocate_rwx` returns, so
+somewhere in the launch itself - host page table construction, EPT setup, or the
+module region walk. Not yet diagnosed, and not yet known whether it is a genuine
+bug or a limit of what Bochs emulates. `os_page_table` was checked and is not
+the cause: it handles a null `physical_to_virtual`, which is what the UEFI
+loader passes, by treating addresses as identity mapped.
+
+The gdb stub harness in `scripts/bochs` is the tool for this - attach, break on
+the fault, and see which access is at fault. Being single CPU is no longer a
+limitation for that, since the timer fallback above already reduces this path to
+one processor.
 
 ### Other dependencies
 
