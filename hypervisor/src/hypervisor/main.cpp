@@ -1,6 +1,6 @@
+#include "zpp/arch/x86_64/context.h"
 #include "zpp/crt.h"
 #include "zpp/hypervisor/hypervisor.h"
-#include "zpp/x64/context.h"
 
 #if ZPP_HYPERVISOR_WAIT_FOR_DEBUGGER
 // Only the debugger wait loop below spins, and it is compiled out by
@@ -14,7 +14,7 @@ namespace zpp::hypervisor
 extern "C" bool gdb_attached = false;
 #endif
 
-extern "C" void zpp_hypervisor_main(x64::context & caller_context)
+extern "C" void zpp_hypervisor_main(arch::x86_64::context & caller_context)
 {
 #if ZPP_HYPERVISOR_WAIT_FOR_DEBUGGER
     while (!gdb_attached) {
@@ -34,7 +34,7 @@ extern "C" void __attribute__((naked)) _start()
     asm(R"!!(
         .intel_syntax noprefix
         sub rsp, 0x3a8 // Make space for capture context and align to 16 bytes.
-        call zpp_x64_capture_context_into_stack // Capture the context.
+        call zpp_x86_64_capture_context_into_stack // Capture the context.
         mov rax, rsp // Get a pointer to the context to change rip and rsp.
         mov r10, [rsp+0x3a8] // Fetch return address from the stack into r10.
         mov [rax+0x80], r10 // Set context->rip to the return address.

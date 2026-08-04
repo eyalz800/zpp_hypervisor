@@ -1,20 +1,20 @@
 #include "zpp/hypervisor/hypervisor.h"
+#include "zpp/arch/x86_64/asm.h"
+#include "zpp/arch/x86_64/exception_entry.h"
+#include "zpp/arch/x86_64/generic.h"
+#include "zpp/arch/x86_64/interrupt_gate.h"
+#include "zpp/arch/x86_64/page_table.h"
+#include "zpp/arch/x86_64/segment_descriptor.h"
+#include "zpp/arch/x86_64/vm_exit_entry.h"
+#include "zpp/arch/x86_64/vmx/asm.h"
+#include "zpp/arch/x86_64/vmx/ept_pointer.h"
+#include "zpp/arch/x86_64/vmx/vmcs.h"
+#include "zpp/arch/x86_64/vmx/vmx_exit_reason.h"
 #include "zpp/crt.h"
 #include "zpp/elf_file.h"
 #include "zpp/elf_image_base.h"
 #include "zpp/error.h"
 #include "zpp/scope_exit.h"
-#include "zpp/x64/asm.h"
-#include "zpp/x64/exception_entry.h"
-#include "zpp/x64/generic.h"
-#include "zpp/x64/intel/asm.h"
-#include "zpp/x64/intel/ept_pointer.h"
-#include "zpp/x64/intel/vmcs.h"
-#include "zpp/x64/intel/vmx_exit_reason.h"
-#include "zpp/x64/interrupt_gate.h"
-#include "zpp/x64/page_table.h"
-#include "zpp/x64/segment_descriptor.h"
-#include "zpp/x64/vm_exit_entry.h"
 #include <algorithm>
 #include <atomic>
 #include <cstdint>
@@ -33,34 +33,36 @@ hypervisor & hypervisor::instance()
 void hypervisor::initialize_registers()
 {
     // Load control registers.
-    this->guest_cr0 = x64::cr0();
-    this->guest_cr3 = x64::cr3();
-    this->guest_cr4 = x64::cr4();
-    this->guest_dr7 = x64::dr7();
+    this->guest_cr0 = arch::x86_64::cr0();
+    this->guest_cr3 = arch::x86_64::cr3();
+    this->guest_cr4 = arch::x86_64::cr4();
+    this->guest_dr7 = arch::x86_64::dr7();
 
     // Load debug control register.
     this->ia32_debug_control =
-        x64::intel::rdmsr(x64::intel::msr::ia32_debug_control);
+        arch::x86_64::rdmsr(arch::x86_64::msr::ia32_debug_control);
 
     // Get the FS and GS base.
-    this->ia32_fs_base = x64::intel::rdmsr(x64::intel::msr::ia32_fs_base);
-    this->ia32_gs_base = x64::intel::rdmsr(x64::intel::msr::ia32_gs_base);
+    this->ia32_fs_base =
+        arch::x86_64::rdmsr(arch::x86_64::msr::ia32_fs_base);
+    this->ia32_gs_base =
+        arch::x86_64::rdmsr(arch::x86_64::msr::ia32_gs_base);
 
     // Fetch the GDT register.
-    x64::gdt_layout sgdt_layout{};
-    x64::sgdt(sgdt_layout.data());
+    arch::x86_64::gdt_layout sgdt_layout{};
+    arch::x86_64::sgdt(sgdt_layout.data());
     this->gdtr.limit = sgdt_layout.limit;
     this->gdtr.base = sgdt_layout.base;
 
     // Fetch the IDT register.
-    x64::idt_layout sidt_layout{};
-    x64::sidt(sidt_layout.data());
+    arch::x86_64::idt_layout sidt_layout{};
+    arch::x86_64::sidt(sidt_layout.data());
     this->idtr.limit = sidt_layout.limit;
     this->idtr.base = sidt_layout.base;
 
     // Load the LDTR and TR register.
-    x64::sldt(&this->guest_ldtr);
-    x64::str(&this->os_tr);
+    arch::x86_64::sldt(&this->guest_ldtr);
+    arch::x86_64::str(&this->os_tr);
 }
 
 void hypervisor::initialize_module_region()
@@ -75,8 +77,8 @@ void hypervisor::initialize_module_region()
 
 void hypervisor::initialize_os_page_table()
 {
-    this->os_page_table =
-        x64::os_page_table(this->guest_cr3, this->physical_to_virtual);
+    this->os_page_table = arch::x86_64::os_page_table(
+        this->guest_cr3, this->physical_to_virtual);
 }
 
 void hypervisor::initialize_host_page_table()
@@ -88,9 +90,9 @@ void hypervisor::initialize_host_page_table()
     this->host_page_table.map_from(
         this->module_base,
         this->module_size,
-        x64::page_table::protection::read |
-            x64::page_table::protection::write |
-            x64::page_table::protection::execute,
+        arch::x86_64::page_table::protection::read |
+            arch::x86_64::page_table::protection::write |
+            arch::x86_64::page_table::protection::execute,
         this->os_page_table);
 
     // Assign the host cr3.
@@ -136,7 +138,7 @@ void hypervisor::initialize_host_gdt()
     // The index the OS keeps its own code segment at. The host IDT gates
     // have to name it, for the reason spelled out at the alias below, so
     // our own descriptors have to keep clear of it.
-    auto os_cs_index = x64::cs() >> 3;
+    auto os_cs_index = arch::x86_64::cs() >> 3;
 
     // Set the cs and tr indices. The code segment takes one entry and the
     // task segment two, so the pair occupies three consecutive entries.
@@ -146,11 +148,11 @@ void hypervisor::initialize_host_gdt()
     auto tr_index = cs_index + 1;
 
     // Initialize the code segment.
-    x64::segment_descriptor code_segment;
+    arch::x86_64::segment_descriptor code_segment;
     code_segment.limit(0xfffff);
     code_segment.base(0);
     code_segment.type(
-        x64::segment_descriptor::segment_type::code_execute_read);
+        arch::x86_64::segment_descriptor::segment_type::code_execute_read);
     code_segment.system(false);
     code_segment.privilege_level(0);
     code_segment.present(true);
@@ -171,12 +173,12 @@ void hypervisor::initialize_host_gdt()
     this->host_gdt[os_cs_index] = code_segment.basic_value();
 
     // Initialize the task state segment.
-    x64::segment_descriptor task_state_segment;
+    arch::x86_64::segment_descriptor task_state_segment;
     task_state_segment.limit(sizeof(this->host_tss) - 1);
     task_state_segment.base_extended(
         reinterpret_cast<std::uint64_t>(this->host_tss));
     task_state_segment.type(
-        x64::segment_descriptor::segment_type::tss_available);
+        arch::x86_64::segment_descriptor::segment_type::tss_available);
     task_state_segment.system(true);
     task_state_segment.privilege_level(0);
     task_state_segment.present(true);
@@ -195,20 +197,21 @@ void hypervisor::initialize_host_idt()
     // the intermediate GDT is active as well, where our own descriptors do
     // not exist, so the gates go through the OS code selector, which
     // initialize_host_gdt aliased into the host GDT for this.
-    auto selector = x64::cs();
+    auto selector = arch::x86_64::cs();
 
     // One 64 bit interrupt gate per vector, each pointing at the stub for
     // that vector. Interrupt rather than trap gates, so a handler cannot
     // be interrupted, and no interrupt stack table entry, so a handler
     // runs on the stack that was already in use - which is the hypervisor
     // stack, and is where the faulting frame is.
-    for (std::size_t vector{}; vector < x64::number_of_exception_vectors;
+    for (std::size_t vector{};
+         vector < arch::x86_64::number_of_exception_vectors;
          ++vector) {
-        x64::interrupt_gate gate;
-        gate.offset(x64::exception_entry(vector));
+        arch::x86_64::interrupt_gate gate;
+        gate.offset(arch::x86_64::exception_entry(vector));
         gate.selector(selector);
         gate.interrupt_stack_table(0);
-        gate.type(x64::interrupt_gate::gate_type::interrupt);
+        gate.type(arch::x86_64::interrupt_gate::gate_type::interrupt);
         gate.privilege_level(0);
         gate.present(true);
 
@@ -217,32 +220,34 @@ void hypervisor::initialize_host_idt()
     }
 
     this->host_idtr.base = reinterpret_cast<std::uint64_t>(this->host_idt);
-    this->host_idtr.limit =
-        (x64::number_of_exception_vectors * 2 * sizeof(std::uint64_t)) - 1;
+    this->host_idtr.limit = (arch::x86_64::number_of_exception_vectors *
+                             2 * sizeof(std::uint64_t)) -
+                            1;
 }
 
 void hypervisor::load_host_idt()
 {
-    x64::idt_layout lidt_layout{};
+    arch::x86_64::idt_layout lidt_layout{};
     lidt_layout.base = this->host_idtr.base;
     lidt_layout.limit = this->host_idtr.limit;
-    x64::lidt(lidt_layout.data());
+    arch::x86_64::lidt(lidt_layout.data());
 }
 
 void hypervisor::load_os_idt()
 {
-    x64::idt_layout lidt_layout{};
+    arch::x86_64::idt_layout lidt_layout{};
     lidt_layout.base = this->idtr.base;
     lidt_layout.limit = this->idtr.limit;
-    x64::lidt(lidt_layout.data());
+    arch::x86_64::lidt(lidt_layout.data());
 }
 
-void hypervisor::on_host_exception(const x64::exception_frame & frame)
+void hypervisor::on_host_exception(
+    const arch::x86_64::exception_frame & frame)
 {
     // Record before touching anything that could fault again, so there is
     // something to read even if this handler does not survive.
     this->host_exception = frame;
-    this->host_exception_cr2 = x64::cr2();
+    this->host_exception_cr2 = arch::x86_64::cr2();
 
     // Take the recovery point, if there is one, and consume it - unwinding
     // to it twice would land on a frame that has already returned.
@@ -256,8 +261,8 @@ void hypervisor::on_host_exception(const x64::exception_frame & frame)
     // eventually.
     if (!recovery_flag) {
         for (;;) {
-            x64::disable_interrupts();
-            x64::halt();
+            arch::x86_64::disable_interrupts();
+            arch::x86_64::halt();
         }
     }
 
@@ -267,7 +272,7 @@ void hypervisor::on_host_exception(const x64::exception_frame & frame)
     // but main's frame itself is intact, and that is where the guards that
     // put the machine back the way it was found live.
     *recovery_flag = true;
-    x64::restore_context(&this->host_exception_recovery);
+    arch::x86_64::restore_context(&this->host_exception_recovery);
 
     // restore_context does not return.
     std::unreachable();
@@ -290,9 +295,10 @@ void hypervisor::initialize_intermediate_gdt()
                 this->gdtr.limit + 1);
 
     // If the TSS segment is present, just use the current OS GDT.
-    if (auto task_state_segment = x64::segment_descriptor::from_memory(
-            reinterpret_cast<std::uint64_t>(intermediate_gdt),
-            this->os_tr);
+    if (auto task_state_segment =
+            arch::x86_64::segment_descriptor::from_memory(
+                reinterpret_cast<std::uint64_t>(intermediate_gdt),
+                this->os_tr);
         task_state_segment.present()) {
         // Use the current gdtr base as guest GDT pointer.
         this->guest_gdt_pointer =
@@ -325,12 +331,12 @@ void hypervisor::initialize_intermediate_gdt()
     auto tr_index = (this->gdtr.limit + 1) / sizeof(std::uint64_t);
 
     // Create a task state segment.
-    x64::segment_descriptor task_state_segment;
+    arch::x86_64::segment_descriptor task_state_segment;
     task_state_segment.limit(sizeof(guest_tss) - 1);
     task_state_segment.base_extended(
         reinterpret_cast<std::uint64_t>(guest_tss));
     task_state_segment.type(
-        x64::segment_descriptor::segment_type::tss_available);
+        arch::x86_64::segment_descriptor::segment_type::tss_available);
     task_state_segment.system(true);
     task_state_segment.privilege_level(0);
     task_state_segment.present(true);
@@ -348,26 +354,26 @@ void hypervisor::initialize_intermediate_gdt()
 void hypervisor::load_intermediate_gdt()
 {
     // Load the intermediate GDT.
-    x64::gdt_layout lgdt_layout{};
+    arch::x86_64::gdt_layout lgdt_layout{};
     lgdt_layout.base = reinterpret_cast<std::uint64_t>(
         this->unprotected_memory
             .intermediate_gdt[this->next_virtual_processor - 1]);
     lgdt_layout.limit = this->intermediate_gdt_limit;
-    x64::lgdt(lgdt_layout.data());
+    arch::x86_64::lgdt(lgdt_layout.data());
 
     // Load TSS segment if changed.
     if (this->guest_tr != this->os_tr) {
-        x64::ltr(&this->guest_tr);
+        arch::x86_64::ltr(&this->guest_tr);
     }
 }
 
 void hypervisor::load_os_gdt()
 {
     // Load the OS GDT.
-    x64::gdt_layout lgdt_layout{};
+    arch::x86_64::gdt_layout lgdt_layout{};
     lgdt_layout.base = reinterpret_cast<std::uint64_t>(this->gdtr.base);
     lgdt_layout.limit = this->gdtr.limit;
-    x64::lgdt(lgdt_layout.data());
+    arch::x86_64::lgdt(lgdt_layout.data());
 
     // Load OS TSS segment if changed. Skipped when the OS had no task
     // segment at all, which is the UEFI case that
@@ -378,29 +384,29 @@ void hypervisor::load_os_gdt()
     // harmless, because it lives in unprotected memory that outlives this
     // module either way.
     if (this->os_tr && this->guest_tr != this->os_tr) {
-        x64::ltr(&this->os_tr);
+        arch::x86_64::ltr(&this->os_tr);
     }
 }
 
 void hypervisor::initialize_vmx_msrs()
 {
-    for (auto msr = x64::intel::msr::vmx::begin;
-         msr < x64::intel::msr::vmx::end;
+    for (auto msr = arch::x86_64::vmx::msr::begin;
+         msr < arch::x86_64::vmx::msr::end;
          ++msr) {
-        this->cached_vmx_msr(msr) = x64::intel::rdmsr(msr);
+        this->cached_vmx_msr(msr) = arch::x86_64::rdmsr(msr);
     }
 }
 
 std::uint64_t & hypervisor::cached_vmx_msr(std::size_t msr)
 {
-    return this->vmx_msrs[msr - x64::intel::msr::vmx::begin];
+    return this->vmx_msrs[msr - arch::x86_64::vmx::msr::begin];
 }
 
 void hypervisor::initialize_mtrrs()
 {
     // Read the MTRR capabilities MSR.
-    this->mtrr_capabilities = x64::intel::mtrr_capabilities(
-        x64::intel::rdmsr(x64::intel::msr::ia32_mtrr_capability));
+    this->mtrr_capabilities = arch::x86_64::mtrr_capabilities(
+        arch::x86_64::rdmsr(arch::x86_64::msr::ia32_mtrr_capability));
 
     // The MTRR variable count.
     auto variable_count =
@@ -409,12 +415,14 @@ void hypervisor::initialize_mtrrs()
     // Iterate all MTRR registers, and read them.
     for (std::size_t i{}; i < variable_count; ++i) {
         // Read the base value.
-        auto mtrr_base = x64::intel::mtrr_variable_base(
-            x64::intel::rdmsr(x64::intel::msr::mtrr::physbase_0 + i * 2));
+        auto mtrr_base =
+            arch::x86_64::mtrr_variable_base(arch::x86_64::rdmsr(
+                arch::x86_64::msr::mtrr::physbase_0 + i * 2));
 
         // Read the mask value.
-        auto mtrr_mask = x64::intel::mtrr_variable_mask(
-            x64::intel::rdmsr(x64::intel::msr::mtrr::physmask_0 + i * 2));
+        auto mtrr_mask =
+            arch::x86_64::mtrr_variable_mask(arch::x86_64::rdmsr(
+                arch::x86_64::msr::mtrr::physmask_0 + i * 2));
 
         // Initialize the MTRR object.
         auto & mtrr = this->mtrrs[i];
@@ -451,7 +459,7 @@ void hypervisor::initialize_ept()
         this->host_page_table.virtual_to_physical(&this->epdpt) >> 12);
 
     // Fill a temporary RWX pdpte.
-    x64::intel::epte rwx_pdpte;
+    arch::x86_64::vmx::epte rwx_pdpte;
     rwx_pdpte.read(true);
     rwx_pdpte.write(true);
     rwx_pdpte.execute(true);
@@ -465,7 +473,7 @@ void hypervisor::initialize_ept()
     }
 
     // Fill a temporary RWX pde.
-    x64::intel::epte rwx_pde;
+    arch::x86_64::vmx::epte rwx_pde;
     rwx_pde.read(true);
     rwx_pde.write(true);
     rwx_pde.execute(true);
@@ -516,7 +524,7 @@ void hypervisor::initialize_ept()
 
             // If MTRR not found, set to write back.
             if (std::end(this->mtrrs) == mtrr) {
-                epde.type(x64::memory_type::write_back);
+                epde.type(arch::x86_64::memory_type::write_back);
                 continue;
             }
 
@@ -552,7 +560,7 @@ std::expected<void, zpp::error> hypervisor::protect_module()
             auto ept_physical_address = epde.page_number() << 12;
 
             // Find the virtual address of the ept.
-            auto ept = reinterpret_cast<x64::intel::epte *>(
+            auto ept = reinterpret_cast<arch::x86_64::vmx::epte *>(
                 this->module_physical_to_virtual
                     .find(ept_physical_address)
                     ->second);
@@ -633,7 +641,7 @@ void hypervisor::unprotect_guest_memory()
         auto ept_physical_address = epde.page_number() << 12;
 
         // Find the virtual address of the ept.
-        auto ept = reinterpret_cast<x64::intel::epte *>(
+        auto ept = reinterpret_cast<arch::x86_64::vmx::epte *>(
             this->module_physical_to_virtual.find(ept_physical_address)
                 ->second);
 
@@ -648,14 +656,14 @@ void hypervisor::unprotect_guest_memory()
 
 void hypervisor::initialize_vmx()
 {
-    namespace msr = x64::intel::msr;
+    namespace vmx_msr = arch::x86_64::vmx::msr;
 
     // The VMX and VMCS regions.
     auto & vmx = this->vmx[this->next_virtual_processor - 1];
     auto & vmx_vmcs = this->vmx_vmcs[this->next_virtual_processor - 1];
 
     // Get the value of the basic VMX msr.
-    const auto & basic_msr = this->cached_vmx_msr(msr::vmx::basic);
+    const auto & basic_msr = this->cached_vmx_msr(vmx_msr::basic);
 
     // Convert virtual addresses to physical addresses for VMX state.
     this->vmx_physical = this->host_page_table.virtual_to_physical(&vmx);
@@ -676,15 +684,15 @@ void hypervisor::initialize_vmx()
 
     // Adjust the cr0 according to the MSR restrictions.
     this->host_cr0 &=
-        this->cached_vmx_msr(msr::vmx::cr0_fixed_1) & 0xffffffff;
+        this->cached_vmx_msr(vmx_msr::cr0_fixed_1) & 0xffffffff;
     this->host_cr0 |=
-        this->cached_vmx_msr(msr::vmx::cr0_fixed_0) & 0xffffffff;
+        this->cached_vmx_msr(vmx_msr::cr0_fixed_0) & 0xffffffff;
 
     // Adjust the cr4 according to the MSR restrictions.
     this->host_cr4 &=
-        this->cached_vmx_msr(msr::vmx::cr4_fixed_1) & 0xffffffff;
+        this->cached_vmx_msr(vmx_msr::cr4_fixed_1) & 0xffffffff;
     this->host_cr4 |=
-        this->cached_vmx_msr(msr::vmx::cr4_fixed_0) & 0xffffffff;
+        this->cached_vmx_msr(vmx_msr::cr4_fixed_0) & 0xffffffff;
 }
 
 std::expected<void, zpp::error> hypervisor::enable_vmx_in_feature_control()
@@ -696,14 +704,14 @@ std::expected<void, zpp::error> hypervisor::enable_vmx_in_feature_control()
     constexpr std::uint64_t vmxon_outside_smx = 1ull << 2;
 
     auto feature_control =
-        x64::intel::rdmsr(x64::intel::msr::ia32_feature_control);
+        arch::x86_64::rdmsr(arch::x86_64::msr::ia32_feature_control);
 
     // Already unlocked by the firmware, so set both bits ourselves.
     // Writing the lock bit is required: leaving it clear keeps vmxon
     // faulting.
     if (!(feature_control & lock)) {
-        x64::intel::wrmsr(x64::intel::msr::ia32_feature_control,
-                          feature_control | lock | vmxon_outside_smx);
+        arch::x86_64::wrmsr(arch::x86_64::msr::ia32_feature_control,
+                            feature_control | lock | vmxon_outside_smx);
         return {};
     }
 
@@ -721,16 +729,16 @@ std::expected<void, zpp::error> hypervisor::enable_vmx_in_feature_control()
 std::expected<void, zpp::error> hypervisor::enter_root_mode()
 {
     // Backup cr0 and cr4.
-    auto cr0 = x64::cr0();
-    auto cr4 = x64::cr4();
+    auto cr0 = arch::x86_64::cr0();
+    auto cr4 = arch::x86_64::cr4();
 
     // Change cr0.
-    x64::cr0(this->host_cr0);
-    scope_exit restore_cr0{[&] { x64::cr0(cr0); }};
+    arch::x86_64::cr0(this->host_cr0);
+    scope_exit restore_cr0{[&] { arch::x86_64::cr0(cr0); }};
 
     // Change cr4.
-    x64::cr4(this->host_cr4);
-    scope_exit restore_cr4{[&] { x64::cr4(cr4); }};
+    arch::x86_64::cr4(this->host_cr4);
+    scope_exit restore_cr4{[&] { arch::x86_64::cr4(cr4); }};
 
     // Let VMXON through in IA32_FEATURE_CONTROL. Without this vmxon raises
     // a general protection fault rather than failing with the carry flag,
@@ -742,18 +750,18 @@ std::expected<void, zpp::error> hypervisor::enter_root_mode()
     }
 
     // Turn on vmx.
-    if (x64::intel::vmxon(&this->vmx_physical)) {
+    if (arch::x86_64::vmx::vmxon(&this->vmx_physical)) {
         return std::unexpected(zpp::error{error::vmxon_failed});
     }
-    scope_exit turn_off_vmx{x64::intel::vmxoff};
+    scope_exit turn_off_vmx{arch::x86_64::vmx::vmxoff};
 
     // Clear the vmcs.
-    if (x64::intel::vmclear(&this->vmcs_physical)) {
+    if (arch::x86_64::vmx::vmclear(&this->vmcs_physical)) {
         return std::unexpected(zpp::error{error::vmclear_failed});
     }
 
     // Load the vmcs structure.
-    if (x64::intel::vmptrld(&this->vmcs_physical)) {
+    if (arch::x86_64::vmx::vmptrld(&this->vmcs_physical)) {
         return std::unexpected(zpp::error{error::vmptrld_failed});
     }
 
@@ -764,9 +772,9 @@ std::expected<void, zpp::error> hypervisor::enter_root_mode()
     return {};
 }
 
-void hypervisor::setup_vmcs(x64::context & guest_context)
+void hypervisor::setup_vmcs(arch::x86_64::context & guest_context)
 {
-    namespace msr = x64::intel::msr;
+    namespace vmx_msr = arch::x86_64::vmx::msr;
 
     auto & vmcs = this->vmcs;
 
@@ -777,8 +785,8 @@ void hypervisor::setup_vmcs(x64::context & guest_context)
     vmcs.vpid(this->next_virtual_processor);
 
     // Setup the EPT pointer.
-    x64::intel::ept_pointer eptp;
-    eptp.memory_type(x64::memory_type::write_back);
+    arch::x86_64::vmx::ept_pointer eptp;
+    eptp.memory_type(arch::x86_64::memory_type::write_back);
     eptp.page_walk_length(4);
     eptp.page_number(this->epml4_physical >> 12);
     vmcs.ept_pointer(eptp);
@@ -788,41 +796,43 @@ void hypervisor::setup_vmcs(x64::context & guest_context)
 
     // Secondary execution control.
     vmcs.secondary_processor_based_vm_execution_controls(
-        x64::intel::adjust_msr(
-            this->cached_vmx_msr(msr::vmx::processor_based_contorls_2),
-            x64::intel::vm_execution_controls::secondary::enable_ept |
-                x64::intel::vm_execution_controls::secondary::enable_vpid |
-                x64::intel::vm_execution_controls::secondary::
+        arch::x86_64::vmx::adjust_msr(
+            this->cached_vmx_msr(vmx_msr::processor_based_contorls_2),
+            arch::x86_64::vmx::vm_execution_controls::secondary::
+                    enable_ept |
+                arch::x86_64::vmx::vm_execution_controls::secondary::
+                    enable_vpid |
+                arch::x86_64::vmx::vm_execution_controls::secondary::
                     enable_rdtscp |
-                x64::intel::vm_execution_controls::secondary::
+                arch::x86_64::vmx::vm_execution_controls::secondary::
                     enable_invpcid |
-                x64::intel::vm_execution_controls::secondary::
+                arch::x86_64::vmx::vm_execution_controls::secondary::
                     enable_xsaves_xrstors |
-                x64::intel::vm_execution_controls::secondary::
+                arch::x86_64::vmx::vm_execution_controls::secondary::
                     mode_based_execute_control));
 
     // Pin based execution controls.
-    vmcs.pin_based_vm_execution_controls(x64::intel::adjust_msr(
-        this->cached_vmx_msr(msr::vmx::true_pin_based_controls), 0));
+    vmcs.pin_based_vm_execution_controls(arch::x86_64::vmx::adjust_msr(
+        this->cached_vmx_msr(vmx_msr::true_pin_based_controls), 0));
 
     // Primary execution controls.
     vmcs.primary_processor_based_vm_execution_controls(
-        x64::intel::adjust_msr(
-            this->cached_vmx_msr(msr::vmx::true_processor_based_controls),
-            x64::intel::vm_execution_controls::primary::
+        arch::x86_64::vmx::adjust_msr(
+            this->cached_vmx_msr(vmx_msr::true_processor_based_controls),
+            arch::x86_64::vmx::vm_execution_controls::primary::
                     enable_secondary_controls |
-                x64::intel::vm_execution_controls::primary::
+                arch::x86_64::vmx::vm_execution_controls::primary::
                     enable_msr_bitmaps));
 
     // VM exit in 64 bit address space.
-    vmcs.vm_exit_controls(x64::intel::adjust_msr(
-        this->cached_vmx_msr(msr::vmx::true_exit_controls),
-        x64::intel::vm_exit_controls::host_address_space_size));
+    vmcs.vm_exit_controls(arch::x86_64::vmx::adjust_msr(
+        this->cached_vmx_msr(vmx_msr::true_exit_controls),
+        arch::x86_64::vmx::vm_exit_controls::host_address_space_size));
 
     // VM entry in 64 bit address space.
-    vmcs.vm_entry_controls(x64::intel::adjust_msr(
-        this->cached_vmx_msr(msr::vmx::true_entry_controls),
-        x64::intel::vm_entry_controls::ia_32e_mode_guest));
+    vmcs.vm_entry_controls(arch::x86_64::vmx::adjust_msr(
+        this->cached_vmx_msr(vmx_msr::true_entry_controls),
+        arch::x86_64::vmx::vm_entry_controls::ia_32e_mode_guest));
 
     // Get the GDT base.
     auto intermediate_gdt_base = reinterpret_cast<std::uint64_t>(
@@ -830,7 +840,7 @@ void hypervisor::setup_vmcs(x64::context & guest_context)
             .intermediate_gdt[this->next_virtual_processor - 1]);
 
     // Write segment information.
-    auto descriptor = x64::segment_descriptor::from_memory(
+    auto descriptor = arch::x86_64::segment_descriptor::from_memory(
         intermediate_gdt_base, guest_context.cs);
     vmcs.guest_cs_selector(guest_context.cs);
     vmcs.guest_cs_limit(descriptor.effective_limit());
@@ -838,7 +848,7 @@ void hypervisor::setup_vmcs(x64::context & guest_context)
     vmcs.guest_cs_base(descriptor.context_dependent_base());
     vmcs.host_cs_selector(this->host_cs);
 
-    descriptor = x64::segment_descriptor::from_memory(
+    descriptor = arch::x86_64::segment_descriptor::from_memory(
         intermediate_gdt_base, guest_context.ds);
     vmcs.guest_ds_selector(guest_context.ds);
     vmcs.guest_ds_limit(descriptor.effective_limit());
@@ -846,7 +856,7 @@ void hypervisor::setup_vmcs(x64::context & guest_context)
     vmcs.guest_ds_base(descriptor.context_dependent_base());
     vmcs.host_ds_selector(0);
 
-    descriptor = x64::segment_descriptor::from_memory(
+    descriptor = arch::x86_64::segment_descriptor::from_memory(
         intermediate_gdt_base, guest_context.es);
     vmcs.guest_es_selector(guest_context.es);
     vmcs.guest_es_limit(descriptor.effective_limit());
@@ -854,7 +864,7 @@ void hypervisor::setup_vmcs(x64::context & guest_context)
     vmcs.guest_es_base(descriptor.context_dependent_base());
     vmcs.host_es_selector(0);
 
-    descriptor = x64::segment_descriptor::from_memory(
+    descriptor = arch::x86_64::segment_descriptor::from_memory(
         intermediate_gdt_base, guest_context.fs);
     vmcs.guest_fs_selector(guest_context.fs);
     vmcs.guest_fs_limit(descriptor.effective_limit());
@@ -863,7 +873,7 @@ void hypervisor::setup_vmcs(x64::context & guest_context)
     vmcs.host_fs_base(reinterpret_cast<std::uint64_t>(this->fs_data));
     vmcs.host_fs_selector(0);
 
-    descriptor = x64::segment_descriptor::from_memory(
+    descriptor = arch::x86_64::segment_descriptor::from_memory(
         intermediate_gdt_base, guest_context.gs);
     vmcs.guest_gs_selector(guest_context.gs);
     vmcs.guest_gs_limit(descriptor.effective_limit());
@@ -872,7 +882,7 @@ void hypervisor::setup_vmcs(x64::context & guest_context)
     vmcs.host_gs_base(reinterpret_cast<std::uint64_t>(this->gs_data));
     vmcs.host_gs_selector(0);
 
-    descriptor = x64::segment_descriptor::from_memory(
+    descriptor = arch::x86_64::segment_descriptor::from_memory(
         intermediate_gdt_base, guest_context.ss);
     vmcs.guest_ss_selector(guest_context.ss);
     vmcs.guest_ss_limit(descriptor.effective_limit());
@@ -880,7 +890,7 @@ void hypervisor::setup_vmcs(x64::context & guest_context)
     vmcs.guest_ss_base(descriptor.context_dependent_base());
     vmcs.host_ss_selector(0);
 
-    descriptor = x64::segment_descriptor::from_memory(
+    descriptor = arch::x86_64::segment_descriptor::from_memory(
         intermediate_gdt_base, this->guest_tr);
     vmcs.guest_tr_selector(this->guest_tr);
     vmcs.guest_tr_limit(descriptor.effective_limit());
@@ -889,7 +899,7 @@ void hypervisor::setup_vmcs(x64::context & guest_context)
     vmcs.host_tr_base(reinterpret_cast<std::uint64_t>(this->host_tss));
     vmcs.host_tr_selector(this->host_tr);
 
-    descriptor = x64::segment_descriptor::from_memory(
+    descriptor = arch::x86_64::segment_descriptor::from_memory(
         intermediate_gdt_base, this->guest_ldtr);
     vmcs.guest_ldtr_selector(this->guest_ldtr);
     vmcs.guest_ldtr_limit(descriptor.effective_limit());
@@ -930,7 +940,7 @@ void hypervisor::setup_vmcs(x64::context & guest_context)
 }
 
 template <typename VmmCode>
-void hypervisor::vm_launch(x64::context & guest_context,
+void hypervisor::vm_launch(arch::x86_64::context & guest_context,
                            VmmCode && vmm_code)
 {
     auto & vmcs = this->vmcs;
@@ -940,19 +950,20 @@ void hypervisor::vm_launch(x64::context & guest_context,
 
     // The host VM exit rsp.
     auto host_rsp = reinterpret_cast<std::uint64_t>(
-        std::end(host_vm_launch_stack) - (2 * sizeof(x64::context)));
+        std::end(host_vm_launch_stack) -
+        (2 * sizeof(arch::x86_64::context)));
 
     // Construct the guest context on the host stack.
     auto & local_guest_context =
-        *::new (reinterpret_cast<void *>(host_rsp)) x64::context;
+        *::new (reinterpret_cast<void *>(host_rsp)) arch::x86_64::context;
 
     // Construct the host context on the host stack.
-    auto & host_context =
-        *::new (reinterpret_cast<void *>(host_rsp + sizeof(x64::context)))
-            x64::context;
+    auto & host_context = *::new (reinterpret_cast<void *>(
+        host_rsp + sizeof(arch::x86_64::context))) arch::x86_64::context;
 
     // Write host rip.
-    vmcs.host_rip(reinterpret_cast<std::uint64_t>(x64::vm_exit_entry));
+    vmcs.host_rip(
+        reinterpret_cast<std::uint64_t>(arch::x86_64::vm_exit_entry));
 
     // Write host rsp.
     vmcs.host_rsp(host_rsp);
@@ -983,7 +994,7 @@ void hypervisor::vm_launch(x64::context & guest_context,
     host_context.rbx = reinterpret_cast<std::uint64_t>(&guest_context);
 
     // Capture host context.
-    x64::capture_context(&host_context);
+    arch::x86_64::capture_context(&host_context);
 
     // If VM exit, call the VMM code.
     if (vm_exit_flag) {
@@ -1011,7 +1022,7 @@ void hypervisor::vm_launch(x64::context & guest_context,
 
     // Start executing the guest at vmlaunch.
     guest_context.rip =
-        reinterpret_cast<std::uint64_t>(x64::intel::vmlaunch);
+        reinterpret_cast<std::uint64_t>(arch::x86_64::vmx::vmlaunch);
 
     // Set rflags to host rflags, to leave interrupts disabled.
     guest_context.rflags = host_context.rflags;
@@ -1020,11 +1031,11 @@ void hypervisor::vm_launch(x64::context & guest_context,
     guest_context.rax = 0;
 
     // Launch the VM.
-    x64::restore_context(&guest_context);
+    arch::x86_64::restore_context(&guest_context);
 }
 
 std::expected<void, zpp::error>
-hypervisor::main(x64::context & caller_context)
+hypervisor::main(arch::x86_64::context & caller_context)
 {
     // Fetch parameters.
     auto cpuid = caller_context.rdi;
@@ -1036,14 +1047,15 @@ hypervisor::main(x64::context & caller_context)
     // loader enters through an IPI handler, where interrupts are already
     // disabled and enabling them would be enabling interrupts inside an
     // interrupt handler.
-    auto interrupts_were_enabled = (x64::flags() & (1ull << 9)) != 0;
+    auto interrupts_were_enabled =
+        (arch::x86_64::flags() & (1ull << 9)) != 0;
 
-    x64::disable_interrupts();
+    arch::x86_64::disable_interrupts();
 
     // Guard to restore interrupts to how they were found.
     scope_exit restore_interrupts{[interrupts_were_enabled] {
         if (interrupts_were_enabled) {
-            x64::enable_interrupts();
+            arch::x86_64::enable_interrupts();
         }
     }};
 
@@ -1087,10 +1099,10 @@ hypervisor::main(x64::context & caller_context)
     scope_exit restore_gdt{[&] { load_os_gdt(); }};
 
     // Switch page tables.
-    x64::cr3(this->host_cr3);
+    arch::x86_64::cr3(this->host_cr3);
 
     // Guard to restore cr3.
-    scope_exit restore_cr3{[&] { x64::cr3(this->guest_cr3); }};
+    scope_exit restore_cr3{[&] { arch::x86_64::cr3(this->guest_cr3); }};
 
     // The OS IDT lives in memory the host page table does not map, so with
     // the switch above done IDTR names pages that are no longer there.
@@ -1109,7 +1121,7 @@ hypervisor::main(x64::context & caller_context)
     std::atomic<bool> host_exception_occurred;
     host_exception_occurred = false;
     this->host_exception_recovery_flag = &host_exception_occurred;
-    x64::capture_context(&this->host_exception_recovery);
+    arch::x86_64::capture_context(&this->host_exception_recovery);
 
     // Arriving from an exception rather than from the capture. The details
     // are in host_exception and host_exception_cr2 for a debugger to read;
@@ -1147,7 +1159,7 @@ hypervisor::main(x64::context & caller_context)
     }
 
     // Guard to turn off vmx.
-    scope_exit turn_off_vmx{x64::intel::vmxoff};
+    scope_exit turn_off_vmx{arch::x86_64::vmx::vmxoff};
 
     // Setup vmcs.
     setup_vmcs(caller_context);
@@ -1161,7 +1173,7 @@ hypervisor::main(x64::context & caller_context)
 
     // Launch VM.
     vm_launch(caller_context, [&](auto & context) {
-        using basic_reason = x64::intel::exit_reason::basic_reason;
+        using basic_reason = arch::x86_64::vmx::exit_reason::basic_reason;
         auto & vmcs = this->vmcs;
 
         // Virtual processor id.
@@ -1175,7 +1187,8 @@ hypervisor::main(x64::context & caller_context)
         if (auto exit_reason = vmcs.exit_reason(); !exit_reason) {
             return;
         } else {
-            reason = x64::intel::exit_reason(exit_reason.value()).basic();
+            reason = arch::x86_64::vmx::exit_reason(exit_reason.value())
+                         .basic();
         }
 
         // Get the guest RIP.
@@ -1187,7 +1200,7 @@ hypervisor::main(x64::context & caller_context)
             std::uint32_t cpuid_result[4]{};
 
             // Execute the cpuid instruction.
-            x64::cpuid(context.rax, context.rcx, cpuid_result);
+            arch::x86_64::cpuid(context.rax, context.rcx, cpuid_result);
 
             // If needs to set hypervisor present bit.
             if (1 == context.rax) {
@@ -1209,19 +1222,19 @@ hypervisor::main(x64::context & caller_context)
         }
         case basic_reason::xsetbv: {
             // Activate CR4 xsave bit.
-            auto cr4 = x64::cr4();
+            auto cr4 = arch::x86_64::cr4();
             if (!(cr4 & (1ull << 18))) {
-                x64::cr4(cr4 | (1ull << 18));
+                arch::x86_64::cr4(cr4 | (1ull << 18));
             }
 
             // Execute the xsetbv instruction.
-            x64::intel::xsetbv(context.rcx,
-                               context.rax | (context.rdx << 32));
+            arch::x86_64::xsetbv(context.rcx,
+                                 context.rax | (context.rdx << 32));
             break;
         }
         case basic_reason::invd: {
             // Execute the invd instruction.
-            x64::intel::invd();
+            arch::x86_64::invd();
             break;
         }
         default: {
@@ -1235,17 +1248,17 @@ hypervisor::main(x64::context & caller_context)
 
         // Resume the VM.
         context.rip =
-            reinterpret_cast<std::uint64_t>(x64::intel::vmresume);
+            reinterpret_cast<std::uint64_t>(arch::x86_64::vmx::vmresume);
 
         // Restore VM.
-        x64::restore_context(&context);
+        arch::x86_64::restore_context(&context);
     });
 
     return {};
 }
 
-void hypervisor::launch_on_cpu_private_stack(hypervisor & hypervisor,
-                                             x64::context & caller_context)
+void hypervisor::launch_on_cpu_private_stack(
+    hypervisor & hypervisor, arch::x86_64::context & caller_context)
 {
     // Invoke the main function.
     auto result = hypervisor.main(caller_context);
@@ -1260,20 +1273,20 @@ void hypervisor::launch_on_cpu_private_stack(hypervisor & hypervisor,
     }
 
     // Restore context to caller.
-    x64::restore_context(&caller_context);
+    arch::x86_64::restore_context(&caller_context);
 }
 
-void hypervisor::launch_on_cpu(x64::context & caller_context)
+void hypervisor::launch_on_cpu(arch::x86_64::context & caller_context)
 {
     // Fetch the stack the hypervisor will launch with.
     auto & stack = this->stack[this->available_stack_index];
 
     // Compute the stack top.
-    auto stack_top = stack + sizeof(stack) - sizeof(x64::context);
+    auto stack_top = stack + sizeof(stack) - sizeof(arch::x86_64::context);
 
     // Copy construct caller context into the new stack top.
     auto copied_caller_context =
-        ::new (stack_top) x64::context(caller_context);
+        ::new (stack_top) arch::x86_64::context(caller_context);
 
     // Use the caller context as launch context.
     auto & launch_context = caller_context;
@@ -1299,17 +1312,18 @@ void hypervisor::launch_on_cpu(x64::context & caller_context)
     ++this->available_stack_index;
 
     // Restore context to launch context.
-    x64::restore_context(&launch_context);
+    arch::x86_64::restore_context(&launch_context);
 }
 
 } // namespace zpp::hypervisor
 
 /**
  * The handler every host IDT entry stub funnels into. Declared by
- * zpp/x64/exception_entry.h, which the x64 layer uses without knowing what
- * implements it.
+ * zpp/arch/x86_64/exception_entry.h, which the x64 layer uses without
+ * knowing what implements it.
  */
-extern "C" void zpp_x64_exception(zpp::x64::exception_frame * frame)
+extern "C" void
+zpp_x86_64_exception(zpp::arch::x86_64::exception_frame * frame)
 {
     zpp::hypervisor::hypervisor::instance().on_host_exception(*frame);
 }

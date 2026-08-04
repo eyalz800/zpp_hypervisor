@@ -25,12 +25,12 @@ struct verify
 
     /**
      * cpuid and port output written with register constraints rather than
-     * reused from zpp/x64/asm.h. Those are naked functions that read their
-     * arguments from the System V registers, while this loader is built
-     * for the Microsoft ABI, where the third argument arrives in r8 rather
-     * than rdx - reusing them here would store the results through the
-     * second argument's value instead of a pointer. Letting the compiler
-     * allocate registers avoids the question.
+     * reused from zpp/arch/x86_64/asm.h. Those are naked functions that
+     * read their arguments from the System V registers, while this loader
+     * is built for the Microsoft ABI, where the third argument arrives in
+     * r8 rather than rdx - reusing them here would store the results
+     * through the second argument's value instead of a pointer. Letting
+     * the compiler allocate registers avoids the question.
      * @{
      */
     static void query_cpuid(std::uint32_t leaf, std::uint32_t (&out)[4])

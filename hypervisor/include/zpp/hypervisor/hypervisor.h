@@ -1,16 +1,17 @@
 #pragma once
+#include "zpp/arch/x86_64/context.h"
+#include "zpp/arch/x86_64/exception_entry.h"
+#include "zpp/arch/x86_64/generic.h"
+#include "zpp/arch/x86_64/msr.h"
+#include "zpp/arch/x86_64/mtrr.h"
+#include "zpp/arch/x86_64/os_page_table.h"
+#include "zpp/arch/x86_64/page_table.h"
+#include "zpp/arch/x86_64/vmx/ept.h"
+#include "zpp/arch/x86_64/vmx/msr.h"
+#include "zpp/arch/x86_64/vmx/vmcs.h"
+#include "zpp/arch/x86_64/vmx/vmx.h"
 #include "zpp/error.h"
 #include "zpp/small_map.h"
-#include "zpp/x64/context.h"
-#include "zpp/x64/exception_entry.h"
-#include "zpp/x64/generic.h"
-#include "zpp/x64/intel/ept.h"
-#include "zpp/x64/intel/msr.h"
-#include "zpp/x64/intel/mtrr.h"
-#include "zpp/x64/intel/vmcs.h"
-#include "zpp/x64/intel/vmx.h"
-#include "zpp/x64/os_page_table.h"
-#include "zpp/x64/page_table.h"
 #include <atomic>
 #include <cstddef>
 #include <cstdint>
@@ -82,21 +83,21 @@ public:
      * On failure this function will restore the context with an error code
      * at caller_context.rax.
      */
-    void launch_on_cpu(x64::context & caller_context);
+    void launch_on_cpu(arch::x86_64::context & caller_context);
 
     /**
      * Records an exception the host IDT caught and unwinds to the recovery
      * point main established, so the launch fails with an error instead of
      * escalating to a triple fault. Public only because the entry stubs in
-     * the exception entry table reach it through zpp_x64_exception - it is
-     * not part of the interface a caller of this class should use.
+     * the exception entry table reach it through zpp_x86_64_exception - it
+     * is not part of the interface a caller of this class should use.
      *
      * Halts if there is no recovery point, which is the case once the
      * guest is running: the VMCS points the host IDTR here, but main's
      * frame is gone by then and there is nowhere to unwind to.
      */
     [[noreturn]] void
-    on_host_exception(const x64::exception_frame & frame);
+    on_host_exception(const arch::x86_64::exception_frame & frame);
 
 private:
     /**
@@ -218,29 +219,31 @@ private:
      * Setup the VM control structure according to the given guest context,
      * and configured host fields.
      */
-    void setup_vmcs(x64::context & guest_context);
+    void setup_vmcs(arch::x86_64::context & guest_context);
 
     /**
      * Configure the RIP and RSP fields of the VM control structure and
      * launch the VM.
      */
     template <typename VmmCode>
-    void vm_launch(x64::context & guest_context, VmmCode && vmm_code);
+    void vm_launch(arch::x86_64::context & guest_context,
+                   VmmCode && vmm_code);
 
     /**
      * The main function of the hypervisor that will launch it
      * on the current CPU. This function is already called with
      * the hypervisor reserved stack.
      */
-    std::expected<void, zpp::error> main(x64::context & caller_context);
+    std::expected<void, zpp::error>
+    main(arch::x86_64::context & caller_context);
 
     /**
      * Launches the main function of the hypervisor, updates the rax
      * context value to the returned value from the main function, and
      * restores the context to the caller context..
      */
-    static void launch_on_cpu_private_stack(hypervisor & hypervisor,
-                                            x64::context & caller_context);
+    static void launch_on_cpu_private_stack(
+        hypervisor & hypervisor, arch::x86_64::context & caller_context);
 
     /**
      * The current index of an available stack.
@@ -263,14 +266,14 @@ private:
      * physical addresses of the OS.
      * Must be used only during initialization phase.
      */
-    x64::os_page_table os_page_table{};
+    arch::x86_64::os_page_table os_page_table{};
 
     /**
      * The host page tables object, which is assigned to the CPU in
      * hypervisor mode. Also allows translating virtual addresses
      * to physical addresses of the hypervisor module.
      */
-    x64::page_table host_page_table{};
+    arch::x86_64::page_table host_page_table{};
 
     /**
      * The next virtual processor id that will be assigned
@@ -327,17 +330,17 @@ private:
     /**
      * The IDTR register.
      */
-    x64::idtr idtr{};
+    arch::x86_64::idtr idtr{};
 
     /**
      * The IDTR value describing the host IDT.
      */
-    x64::idtr host_idtr{};
+    arch::x86_64::idtr host_idtr{};
 
     /**
      * The GDTR register.
      */
-    x64::gdtr gdtr{};
+    arch::x86_64::gdtr gdtr{};
 
     /**
      * The LDTR register of the guest.
@@ -383,15 +386,16 @@ private:
     /**
      * Assert the host IDT can hold a gate for every vector.
      */
-    static_assert(sizeof(host_idt) >= x64::number_of_exception_vectors *
-                                          2 * sizeof(std::uint64_t));
+    static_assert(sizeof(host_idt) >=
+                  arch::x86_64::number_of_exception_vectors * 2 *
+                      sizeof(std::uint64_t));
 
     /**
      * The exception the host IDT caught last, as the entry stub found it.
      * Kept for a debugger to read: the launch fails with a
      * host_exception error, which says what happened but not where.
      */
-    x64::exception_frame host_exception{};
+    arch::x86_64::exception_frame host_exception{};
 
     /**
      * CR2 as of that exception, which is the address that faulted when the
@@ -403,7 +407,7 @@ private:
      * The context to unwind to when the host IDT catches an exception,
      * captured by main once the host page table is live.
      */
-    x64::context host_exception_recovery{};
+    arch::x86_64::context host_exception_recovery{};
 
     /**
      * The flag in main's frame that says the recovery context above was
@@ -494,31 +498,31 @@ private:
     /**
      * Cache needed VMX MSRs.
      */
-    std::uint64_t vmx_msrs[x64::intel::msr::vmx::size]{};
+    std::uint64_t vmx_msrs[arch::x86_64::vmx::msr::size]{};
 
     /**
      * An object managing the currently assigned CPU VMCS.
      */
-    x64::intel::vmcs vmcs{};
+    arch::x86_64::vmx::vmcs vmcs{};
 
     /**
      * The MTRR registers values.
      */
-    x64::intel::mtrr mtrrs[8];
+    arch::x86_64::mtrr mtrrs[8];
 
     /**
      * The MTRR capabilities values.
      */
-    x64::intel::mtrr_capabilities mtrr_capabilities;
+    arch::x86_64::mtrr_capabilities mtrr_capabilities;
 
     /**
      * The hardware page table structures.
      * @{
      */
-    alignas(page_size) x64::intel::epte epml4[512];
-    alignas(page_size) x64::intel::epte epdpt[512];
-    alignas(page_size) x64::intel::epte epd[512][512];
-    alignas(page_size) x64::intel::epte ept[1024][512];
+    alignas(page_size) arch::x86_64::vmx::epte epml4[512];
+    alignas(page_size) arch::x86_64::vmx::epte epdpt[512];
+    alignas(page_size) arch::x86_64::vmx::epte epd[512][512];
+    alignas(page_size) arch::x86_64::vmx::epte ept[1024][512];
     /**
      * @}
      */
@@ -526,12 +530,12 @@ private:
     /**
      * The VMX regions for every CPU.
      */
-    alignas(page_size) x64::intel::vmx_vmcs vmx[max_cpus];
+    alignas(page_size) arch::x86_64::vmx::vmx_vmcs vmx[max_cpus];
 
     /**
      * The VMCS regions for every CPU.
      */
-    alignas(page_size) x64::intel::vmx_vmcs vmx_vmcs[max_cpus];
+    alignas(page_size) arch::x86_64::vmx::vmx_vmcs vmx_vmcs[max_cpus];
 
     /**
      * The MSR bitmap of the VM control structure.
