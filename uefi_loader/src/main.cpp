@@ -68,67 +68,90 @@ static EFI_GUID g_efi_mp_service_protocol_guid = {
 // services unusable - see acpi_timer_advancing.
 static bool g_timed_waits_usable = true;
 
-#if ZPP_CI_VERIFY_HYPERVISOR
 /**
- * Writes a string straight to the first serial port, bypassing UEFI
- * console services. OVMF does not necessarily route ConOut to serial, and
- * with no video device there may be nowhere else for it to go, so this is
- * the channel that can be relied on to reach Bochs' serial capture.
+ * Whether this build carries the hypervisor self check. The build system
+ * always defines the macro, to 0 or 1, so this needs no preprocessor
+ * fallback - and having it as a constant rather than a macro is what lets
+ * everything below be ordinary code under `if constexpr`.
  */
-static void serial_write(const char * text)
-{
-    constexpr std::uint16_t port = 0x3f8;
-    constexpr std::uint16_t line_status = port + 5;
-    constexpr std::uint8_t transmitter_empty = 1u << 5;
+constexpr bool ci_verify_enabled = ZPP_CI_VERIFY_HYPERVISOR;
 
-    for (auto * character = text; *character; ++character) {
-        // Wait for the transmit holding register to drain. Without this
-        // only the first sixteen characters ever appear - that is the
-        // 16550's FIFO depth, and anything written past a full FIFO is
-        // dropped. Bounded, so a machine with no working UART cannot wedge
-        // the loader here.
-        for (std::uint32_t attempt{}; attempt < 100000u; ++attempt) {
-            std::uint8_t status{};
-            asm volatile("inb %1, %0" : "=a"(status) : "Nd"(line_status));
-            if (status & transmitter_empty) {
-                break;
+/**
+ * The self check's serial channel.
+ *
+ * Grouped into a struct rather than left as free functions because of how
+ * `if constexpr` discards: the branch is dropped from codegen, but the
+ * names in it are still looked up, so the functions have to exist. An
+ * uncalled static free function draws -Wunused-function, which -Werror
+ * turns into a build failure; an uncalled static member function does not.
+ */
+struct ci_trace
+{
+    /**
+     * Writes a string straight to the first serial port, bypassing UEFI
+     * console services. OVMF does not necessarily route ConOut to serial,
+     * and with no video device there may be nowhere else for it to go, so
+     * this is the channel that can be relied on to reach Bochs' serial
+     * capture.
+     */
+    static void write(const char * text)
+    {
+        if constexpr (!ci_verify_enabled) {
+            static_cast<void>(text);
+            return;
+        } else {
+            constexpr std::uint16_t port = 0x3f8;
+            constexpr std::uint16_t line_status = port + 5;
+            constexpr std::uint8_t transmitter_empty = 1u << 5;
+
+            for (auto * character = text; *character; ++character) {
+                // Wait for the transmit holding register to drain. Without
+                // this only the first sixteen characters ever appear -
+                // that is the 16550's FIFO depth, and anything written
+                // past a full FIFO is dropped. Bounded, so a machine with
+                // no working UART cannot wedge the loader here.
+                for (std::uint32_t attempt{}; attempt < 100000u;
+                     ++attempt) {
+                    std::uint8_t status{};
+                    asm volatile("inb %1, %0"
+                                 : "=a"(status)
+                                 : "Nd"(line_status));
+                    if (status & transmitter_empty) {
+                        break;
+                    }
+                }
+
+                asm volatile("outb %0, %1"
+                             :
+                             : "a"(static_cast<std::uint8_t>(*character)),
+                               "Nd"(port));
             }
         }
-
-        asm volatile("outb %0, %1"
-                     :
-                     : "a"(static_cast<std::uint8_t>(*character)),
-                       "Nd"(port));
     }
-}
-#endif
 
-#if ZPP_CI_VERIFY_HYPERVISOR
-/**
- * Writes a value as hex over serial. The hypervisor is loaded at a runtime
- * chosen address, so this is how a debugger is told where to place its
- * symbols.
- */
-static void serial_write_hex(std::uint64_t value)
-{
-    char text[19]{};
-    text[0] = '0';
-    text[1] = 'x';
-    for (std::size_t i{}; i < 16; ++i) {
-        auto nibble =
-            static_cast<std::uint8_t>((value >> ((15 - i) * 4)) & 0xf);
-        text[2 + i] = static_cast<char>(
-            nibble < 10 ? ('0' + nibble) : ('a' + (nibble - 10)));
+    /**
+     * Writes a value as hex over serial. The hypervisor is loaded at a
+     * runtime chosen address, so this is how a debugger is told where to
+     * place its symbols.
+     */
+    static void hex(std::uint64_t value)
+    {
+        char text[19]{};
+        text[0] = '0';
+        text[1] = 'x';
+        for (std::size_t i{}; i < 16; ++i) {
+            auto nibble =
+                static_cast<std::uint8_t>((value >> ((15 - i) * 4)) & 0xf);
+            text[2 + i] = static_cast<char>(
+                nibble < 10 ? ('0' + nibble) : ('a' + (nibble - 10)));
+        }
+        write(text);
     }
-    serial_write(text);
-}
-#endif
+};
 
 static void * allocate_rwx(std::size_t size)
 {
-#if ZPP_CI_VERIFY_HYPERVISOR
-    serial_write("zpp: ZPP_TRACE allocate_rwx enter\r\n");
-#endif
+    ci_trace::write("zpp: ZPP_TRACE allocate_rwx enter\r\n");
     EFI_PHYSICAL_ADDRESS physical_address{};
 
     // Allocate pages just enough for 'size' bytes.
@@ -143,11 +166,9 @@ static void * allocate_rwx(std::size_t size)
         return nullptr;
     }
 
-#if ZPP_CI_VERIFY_HYPERVISOR
-    serial_write("zpp: ZPP_TRACE allocate_rwx done at ");
-    serial_write_hex(physical_address);
-    serial_write("\r\n");
-#endif
+    ci_trace::write("zpp: ZPP_TRACE allocate_rwx done at ");
+    ci_trace::hex(physical_address);
+    ci_trace::write("\r\n");
 
     // Return the result address.
     return reinterpret_cast<void *>(physical_address);
@@ -258,9 +279,7 @@ static std::size_t number_of_cpus()
         return 1;
     }
 
-#if ZPP_CI_VERIFY_HYPERVISOR
-    serial_write("zpp: ZPP_TRACE number_of_cpus enter\r\n");
-#endif
+    ci_trace::write("zpp: ZPP_TRACE number_of_cpus enter\r\n");
     std::size_t cpu_count{};
     std::size_t enabled_cpu_count{};
 
@@ -454,106 +473,266 @@ free_file_path_device_path:
     return device_path;
 }
 
-#if ZPP_CI_VERIFY_HYPERVISOR
 /**
- * cpuid and port output written with register constraints rather than
- * reused from zpp/x64/asm.h. Those are naked functions that read their
- * arguments from the System V registers, while this loader is built for
- * the Microsoft ABI, where the third argument arrives in r8 rather than
- * rdx - reusing them here would store the results through the second
- * argument's value instead of a pointer. Letting the compiler allocate
- * registers avoids the question.
- * @{
+ * The hypervisor self check. Same struct-instead-of-free-functions reason
+ * as ci_trace above.
  */
-static void query_cpuid(std::uint32_t leaf, std::uint32_t (&out)[4])
+struct ci_verify
 {
-    std::uint32_t a{};
-    std::uint32_t b{};
-    std::uint32_t c{};
-    std::uint32_t d{};
+    /**
+     * cpuid and port output written with register constraints rather than
+     * reused from zpp/x64/asm.h. Those are naked functions that read their
+     * arguments from the System V registers, while this loader is built
+     * for the Microsoft ABI, where the third argument arrives in r8 rather
+     * than rdx - reusing them here would store the results through the
+     * second argument's value instead of a pointer. Letting the compiler
+     * allocate registers avoids the question.
+     * @{
+     */
+    static void query_cpuid(std::uint32_t leaf, std::uint32_t (&out)[4])
+    {
+        std::uint32_t a{};
+        std::uint32_t b{};
+        std::uint32_t c{};
+        std::uint32_t d{};
 
-    asm volatile("cpuid"
-                 : "=a"(a), "=b"(b), "=c"(c), "=d"(d)
-                 : "a"(leaf), "c"(0u));
+        asm volatile("cpuid"
+                     : "=a"(a), "=b"(b), "=c"(c), "=d"(d)
+                     : "a"(leaf), "c"(0u));
 
-    out[0] = a;
-    out[1] = b;
-    out[2] = c;
-    out[3] = d;
-}
-
-/**
- * @}
- */
-
-/**
- * Asks the hypervisor to identify itself, from whichever CPU this runs on.
- *
- * The vmexit handler answers CPUID leaf 0x40000000 with the signature
- * ZppZppZppZpp and sets the hypervisor present bit in leaf 1. Neither can
- * happen unless vmxon, the VMCS setup, vmlaunch, the exit handler and
- * vmresume all worked on this CPU, so one check covers the whole path end
- * to end.
- */
-static int verify_hypervisor_on_cpu(void *)
-{
-    std::uint32_t registers[4]{};
-
-    // Leaf 1, bit 31 of ecx: a hypervisor is present.
-    query_cpuid(1, registers);
-    if (!(registers[2] & (1u << 31))) {
-        return -1;
+        out[0] = a;
+        out[1] = b;
+        out[2] = c;
+        out[3] = d;
     }
 
-    // Leaf 0x40000000: the vendor signature, in ebx, ecx then edx.
-    query_cpuid(1u << 30, registers);
-    if ((registers[1] != 0x5a70705a) || (registers[2] != 0x705a7070) ||
-        (registers[3] != 0x70705a70)) {
-        return -2;
-    }
+    /**
+     * @}
+     */
 
-    return 0;
-}
-
-/**
- * Runs the check on every CPU, since the hypervisor is launched per CPU
- * and a failure on one is just as bad as a failure on all. Reports over
- * serial, and also through the UEFI console when one is present.
- */
-static bool verify_hypervisor_present(EFI_SYSTEM_TABLE * system_table)
-{
-    // wchar_t rather than CHAR16 in the parameter: a L"" literal is
-    // wchar_t here, and EDK2's CHAR16 is unsigned short, so they need a
-    // cast between them even though both are 16 bit on this target.
-    auto report = [&](const char * ascii, const wchar_t * wide) {
-        serial_write(ascii);
-        if (system_table->ConOut) {
-            system_table->ConOut->OutputString(
-                system_table->ConOut,
-                reinterpret_cast<CHAR16 *>(const_cast<wchar_t *>(wide)));
-        }
+    /**
+     * Asks the hypervisor to identify itself, from whichever CPU this runs
+     * on.
+     *
+     * The vmexit handler answers CPUID leaf 0x40000000 with the signature
+     * ZppZppZppZpp and sets the hypervisor present bit in leaf 1. Neither
+     * can happen unless vmxon, the VMCS setup, vmlaunch, the exit handler
+     * and vmresume all worked on this CPU, so one check covers the whole
+     * path end to end.
+     */
+    /**
+     * What the CPUID checks saw, so the caller can print the answer
+     * instead of only whether it matched. Filled on the CPU under test and
+     * read back by the boot CPU afterwards, which is why the reporting is
+     * not done here: this runs on an application processor, where touching
+     * the UEFI console is not allowed.
+     */
+    struct hypervisor_signature
+    {
+        std::uint32_t leaf_1_ecx;
+        std::uint32_t signature[4];
     };
 
-    auto cpus = number_of_cpus();
-    if (!cpus) {
-        report("zpp: ZPP_HYPERVISOR_FAILED no cpus\r\n",
-               L"zpp: ZPP_HYPERVISOR_FAILED no cpus\r\n");
-        return false;
+    static int on_cpu(void * context)
+    {
+        auto & result = *static_cast<hypervisor_signature *>(context);
+        std::uint32_t registers[4]{};
+
+        // Leaf 1, bit 31 of ecx: a hypervisor is present.
+        query_cpuid(1, registers);
+        result.leaf_1_ecx = registers[2];
+
+        // Leaf 0x40000000: the vendor signature, in ebx, ecx then edx.
+        // Read before the present bit is judged, so a failure still has
+        // something to show.
+        query_cpuid(1u << 30, registers);
+        result.signature[0] = registers[0];
+        result.signature[1] = registers[1];
+        result.signature[2] = registers[2];
+        result.signature[3] = registers[3];
+
+        if (!(result.leaf_1_ecx & (1u << 31))) {
+            return -1;
+        }
+
+        if ((registers[1] != 0x5a70705a) || (registers[2] != 0x705a7070) ||
+            (registers[3] != 0x70705a70)) {
+            return -2;
+        }
+
+        return 0;
     }
 
-    for (std::size_t i{}; i < cpus; ++i) {
-        if (call_on_cpu(i, verify_hypervisor_on_cpu, nullptr)) {
-            report("zpp: ZPP_HYPERVISOR_FAILED on at least one cpu\r\n",
-                   L"zpp: ZPP_HYPERVISOR_FAILED on at least one cpu\r\n");
+    /**
+     * Appends a string, returning the new end. No bounds checking: every
+     * caller below writes into a buffer sized for the fixed longest line
+     * it can produce.
+     */
+    static char * append_text(char * out, const char * text)
+    {
+        while (*text) {
+            *out++ = *text++;
+        }
+        return out;
+    }
+
+    /**
+     * Appends a value as 0x-prefixed hex with a fixed number of digits.
+     */
+    static char * append_hex(char * out,
+                             std::uint64_t value,
+                             std::size_t digits)
+    {
+        out = append_text(out, "0x");
+        for (auto i = digits; i-- > 0;) {
+            auto nibble =
+                static_cast<std::uint8_t>((value >> (i * 4)) & 0xf);
+            *out++ = static_cast<char>(nibble < 10 ? ('0' + nibble)
+                                                   : ('a' + nibble - 10));
+        }
+        return out;
+    }
+
+    /**
+     * Appends a small unsigned value in decimal.
+     */
+    static char * append_decimal(char * out, std::size_t value)
+    {
+        char digits[20]{};
+        std::size_t count{};
+        do {
+            digits[count++] = static_cast<char>('0' + (value % 10));
+            value /= 10;
+        } while (value);
+        while (count--) {
+            *out++ = digits[count];
+        }
+        return out;
+    }
+
+    /**
+     * Appends the twelve signature bytes as the text they are meant to
+     * spell, which for this hypervisor is ZppZppZppZpp.
+     *
+     * Non printable bytes are replaced. The bytes come from whatever is
+     * answering CPUID, which on a machine running somebody else's
+     * hypervisor is arbitrary data, and it must not be able to put control
+     * characters into the log.
+     */
+    static char * append_signature_text(char * out,
+                                        const std::uint32_t * signature)
+    {
+        // ebx, then ecx, then edx - the order a CPUID vendor string is
+        // assembled in - each little endian.
+        for (std::size_t word = 1; word <= 3; ++word) {
+            for (std::size_t byte{}; byte < 4; ++byte) {
+                auto character = static_cast<char>(
+                    (signature[word] >> (byte * 8)) & 0xff);
+                *out++ = (character >= 0x20 && character < 0x7f)
+                             ? character
+                             : '.';
+            }
+        }
+        return out;
+    }
+
+    /**
+     * Runs the check on every CPU, since the hypervisor is launched per
+     * CPU and a failure on one is just as bad as a failure on all. Reports
+     * over serial, and also through the UEFI console when one is present.
+     */
+    static bool present(EFI_SYSTEM_TABLE * system_table)
+    {
+        // Buffer size for one reported line. The longest this function
+        // builds is the leaf 0x40000000 line, at 94 characters including
+        // the terminator, so this has room to spare and the append helpers
+        // need no bounds checking.
+        constexpr std::size_t line_capacity = 128;
+
+        // wchar_t rather than CHAR16 in the parameter: a L"" literal is
+        // wchar_t here, and EDK2's CHAR16 is unsigned short, so they need
+        // a cast between them even though both are 16 bit on this target.
+        auto report = [&](const char * ascii, const wchar_t * wide) {
+            ci_trace::write(ascii);
+            if (system_table->ConOut) {
+                system_table->ConOut->OutputString(
+                    system_table->ConOut,
+                    reinterpret_cast<CHAR16 *>(
+                        const_cast<wchar_t *>(wide)));
+            }
+        };
+
+        // Same two channels, for a line built at runtime. Widening byte by
+        // byte is enough because everything printed here is ASCII by
+        // construction.
+        auto report_line = [&](const char * ascii) {
+            ci_trace::write(ascii);
+            if (!system_table->ConOut) {
+                return;
+            }
+            CHAR16 wide[line_capacity]{};
+            std::size_t i{};
+            for (; ascii[i] && (i < (line_capacity - 1)); ++i) {
+                wide[i] = static_cast<CHAR16>(
+                    static_cast<unsigned char>(ascii[i]));
+            }
+            system_table->ConOut->OutputString(system_table->ConOut, wide);
+        };
+
+        auto cpus = number_of_cpus();
+        if (!cpus) {
+            report("zpp: ZPP_HYPERVISOR_FAILED no cpus\r\n",
+                   L"zpp: ZPP_HYPERVISOR_FAILED no cpus\r\n");
             return false;
         }
-    }
 
-    report("zpp: ZPP_HYPERVISOR_ACTIVE on every cpu\r\n",
-           L"zpp: ZPP_HYPERVISOR_ACTIVE on every cpu\r\n");
-    return true;
-}
-#endif
+        for (std::size_t i{}; i < cpus; ++i) {
+            hypervisor_signature found{};
+            auto result = call_on_cpu(i, on_cpu, &found);
+
+            // Print what CPUID actually answered, pass or fail. The point
+            // is to be able to read the signature rather than trust a
+            // return value, and a mismatch is exactly the case where the
+            // bytes matter most.
+            char line[line_capacity]{};
+            auto end = append_text(line, "zpp: cpu ");
+            end = append_decimal(end, i);
+            end = append_text(end, " leaf 1 ecx=");
+            end = append_hex(end, found.leaf_1_ecx, 8);
+            end = append_text(end, " hypervisor_bit=");
+            end = append_text(end,
+                              (found.leaf_1_ecx & (1u << 31)) ? "1" : "0");
+            end = append_text(end, "\r\n");
+            *end = 0;
+            report_line(line);
+
+            end = append_text(line, "zpp: cpu ");
+            end = append_decimal(end, i);
+            end = append_text(end, " leaf 0x40000000 ebx=");
+            end = append_hex(end, found.signature[1], 8);
+            end = append_text(end, " ecx=");
+            end = append_hex(end, found.signature[2], 8);
+            end = append_text(end, " edx=");
+            end = append_hex(end, found.signature[3], 8);
+            end = append_text(end, " text=\"");
+            end = append_signature_text(end, found.signature);
+            end = append_text(end, "\"\r\n");
+            *end = 0;
+            report_line(line);
+
+            if (result) {
+                report(
+                    "zpp: ZPP_HYPERVISOR_FAILED on at least one cpu\r\n",
+                    L"zpp: ZPP_HYPERVISOR_FAILED on at least one cpu\r\n");
+                return false;
+            }
+        }
+
+        report("zpp: ZPP_HYPERVISOR_ACTIVE on every cpu\r\n",
+               L"zpp: ZPP_HYPERVISOR_ACTIVE on every cpu\r\n");
+        return true;
+    }
+};
 
 extern "C" EFI_STATUS EFIAPI uefi_main(EFI_HANDLE image_handle,
                                        EFI_SYSTEM_TABLE * system_table)
@@ -563,19 +742,15 @@ extern "C" EFI_STATUS EFIAPI uefi_main(EFI_HANDLE image_handle,
     // Copy the boot services.
     g_boot_services = system_table->BootServices;
 
-#if ZPP_CI_VERIFY_HYPERVISOR
-    serial_write("zpp: ZPP_TRACE entry\r\n");
-#endif
+    ci_trace::write("zpp: ZPP_TRACE entry\r\n");
 
     // Establish whether timed waits work before touching MP services,
     // since a dead timer makes them hang rather than return an error.
     g_timed_waits_usable = acpi_timer_advancing(system_table);
-#if ZPP_CI_VERIFY_HYPERVISOR
-    serial_write(
+    ci_trace::write(
         g_timed_waits_usable
             ? "zpp: ZPP_TRACE timed waits usable\r\n"
             : "zpp: ZPP_TRACE timed waits unusable, single cpu\r\n");
-#endif
 
     // Load the MP Services.
     status = g_boot_services->LocateProtocol(
@@ -583,16 +758,12 @@ extern "C" EFI_STATUS EFIAPI uefi_main(EFI_HANDLE image_handle,
         nullptr,
         reinterpret_cast<void **>(&g_mp_services));
     if (EFI_ERROR(status)) {
-#if ZPP_CI_VERIFY_HYPERVISOR
-        serial_write(
+        ci_trace::write(
             "zpp: ZPP_HYPERVISOR_FAILED no EFI_MP_SERVICES_PROTOCOL\r\n");
-#endif
         return EFI_LOAD_ERROR;
     }
 
-#if ZPP_CI_VERIFY_HYPERVISOR
-    serial_write("zpp: ZPP_TRACE mp services located\r\n");
-#endif
+    ci_trace::write("zpp: ZPP_TRACE mp services located\r\n");
 
     // Load the ELF.
     const zpp_loader_parameters parameters{
@@ -603,45 +774,41 @@ extern "C" EFI_STATUS EFIAPI uefi_main(EFI_HANDLE image_handle,
         .adjust_launch_calling_convention = invoke_entry,
     };
 
-#if ZPP_CI_VERIFY_HYPERVISOR
-    serial_write("zpp: ZPP_TRACE loading\r\n");
-#endif
+    ci_trace::write("zpp: ZPP_TRACE loading\r\n");
 
     auto result = zpp_load_elf(&parameters);
 
-#if ZPP_CI_VERIFY_HYPERVISOR
-    serial_write("zpp: ZPP_TRACE loaded\r\n");
-#endif
+    ci_trace::write("zpp: ZPP_TRACE loaded\r\n");
 
     // If we failed, return an arbitrary failure.
     if (result) {
-#if ZPP_CI_VERIFY_HYPERVISOR
         // The code is the hypervisor's own error enumeration, so print it
         // - it is the only thing that says which step failed, and a
         // debugger is not always available where this runs.
-        serial_write(
+        ci_trace::write(
             "zpp: ZPP_HYPERVISOR_FAILED zpp_load_elf failed, code ");
-        serial_write_hex(static_cast<std::uint64_t>(result));
-        serial_write("\r\n");
-#endif
+        ci_trace::hex(static_cast<std::uint64_t>(result));
+        ci_trace::write("\r\n");
         return EFI_LOAD_ERROR;
     }
 
-#if ZPP_CI_VERIFY_HYPERVISOR
     // Ask the hypervisor to identify itself now that it should be live.
     // Built only for automated testing, so a normal loader does not carry
-    // it.
-    if (!verify_hypervisor_present(system_table)) {
-        return EFI_LOAD_ERROR;
-    }
+    // it - which is what the constant is for, since everything under here
+    // is discarded when it is false and the chainload below becomes the
+    // only path out.
+    if constexpr (ci_verify_enabled) {
+        if (!ci_verify::present(system_table)) {
+            return EFI_LOAD_ERROR;
+        }
 
-    // Stop here rather than continuing to the OS. Under test the boot
-    // medium holds only this loader, so there is nothing to chain to and
-    // that path could only fail - and a failure there would discard a
-    // result that has already been established, making the test look like
-    // a hypervisor problem when it is not.
-    return EFI_SUCCESS;
-#endif
+        // Stop here rather than continuing to the OS. Under test the boot
+        // medium holds only this loader, so there is nothing to chain to
+        // and that path could only fail - and a failure there would
+        // discard a result that has already been established, making the
+        // test look like a hypervisor problem when it is not.
+        return EFI_SUCCESS;
+    }
 
     // Continue to the OS.
 
