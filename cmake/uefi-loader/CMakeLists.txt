@@ -22,6 +22,10 @@ option(ZPP_CI_VERIFY_HYPERVISOR
     "Compile the CPUID self check that asserts the hypervisor reached root mode"
     OFF)
 
+option(ZPP_TRACE
+    "Compile the serial trace output in the loaders"
+    ${ZPP_CI_VERIFY_HYPERVISOR})
+
 # Download dependencies (Windows SDK for ucrt/shared headers; EDK2 for UEFI headers)
 include("${ZPP_SOURCE_DIR}/cmake/dependencies.cmake")
 download_windows_sdk(WINDOWS_SDK_ROOT)
@@ -83,6 +87,7 @@ endif()
 # ---- Include directories -----------------------------------------------
 # Project headers first (non-system), then system includes.
 target_include_directories(zpp_loader_efi PRIVATE
+    "${ZPP_SOURCE_DIR}/uefi_loader/include"
     "${ZPP_SOURCE_DIR}/loader/include"
     "${ZPP_SOURCE_DIR}/hypervisor/include"
 )
@@ -118,6 +123,9 @@ target_compile_definitions(zpp_loader_efi PRIVATE
     # mode. Off by default: it exists for automated testing and has no place in
     # a loader that is actually being deployed.
     "ZPP_CI_VERIFY_HYPERVISOR=$<BOOL:${ZPP_CI_VERIFY_HYPERVISOR}>"
+    # Serial tracing, controlled on its own so it can be enabled or disabled
+    # independently of the check above. Defaults to the same value.
+    "ZPP_TRACE=$<BOOL:${ZPP_TRACE}>"
     # libc++ availability annotations rely on OS version macros we don't have
     # in a freestanding / UEFI context.
     _LIBCPP_DISABLE_AVAILABILITY
