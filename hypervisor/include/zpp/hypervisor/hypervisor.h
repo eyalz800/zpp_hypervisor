@@ -243,6 +243,11 @@ private:
      * processor could be started exactly once - the firmware parks its
      * APs in a hlt loop and wakes them with INIT-SIPI-SIPI, so every
      * wake after the first went nowhere and the caller spun forever.
+     *
+     * Also where this processor chooses which of the two start-up
+     * hand-offs its next start-up IPI is to arrive through, and publishes
+     * the choice in start_up_handoff for the sender to obey. See
+     * start_up_handoff_state.
      */
     void emulate_init_signal(arch::x86_64::context & context);
 
@@ -272,6 +277,13 @@ private:
      * start-up IPI is not: its vector is replaced with the hypervisor's
      * own, so the processor begins in code that virtualizes it before
      * running a single instruction the guest wrote.
+     *
+     * For a processor already under the hypervisor the write may be
+     * swallowed instead and the vector handed over directly, but only
+     * while the target says it is waiting for one that way - see
+     * start_up_handoff_state. Swallowing it on any weaker test loses the
+     * IPI outright, because the target may be waiting on hardware and
+     * only hardware can wake it there.
      */
     std::optional<std::uint64_t>
     on_interrupt_command(std::uint64_t command);
@@ -613,17 +625,90 @@ private:
     std::uint64_t apic_id[max_cpus]{};
 
     /**
-     * The start-up vector another processor has been told to begin at,
-     * plus one so that zero means "nothing pending".
+     * The states a processor's start-up hand-off takes, held in
+     * start_up_handoff below.
      *
-     * This is the whole point of intercepting the interrupt command
-     * register: a start-up IPI is delivered to us here, by the processor
-     * that sent it, instead of being entrusted to the hardware path where
-     * a layer below can discard it. Atomic because the sender writes it
-     * and the target reads it, on different processors, with no lock
-     * between them.
+     * There are two ways a start-up IPI can reach a processor coming out
+     * of an INIT, and they are mutually exclusive: the architectural one,
+     * where the processor parks in the wait-for-SIPI activity state and
+     * the hardware delivers the IPI as a VM exit, and this VMM's own,
+     * where the sending processor hands the vector over through memory
+     * because a layer below would discard the hardware one.
+     *
+     * Which one is in use has to be one fact rather than two opinions.
+     * The target chooses, publishes the choice here, and the sender obeys
+     * it - and because the target can stop waiting at any moment, the
+     * sender's hand-over is a compare-exchange out of software_wait
+     * rather than a store. That is what makes it impossible for the
+     * sender to consume an IPI the target is expecting from hardware,
+     * which is precisely how one used to be lost.
      */
-    std::atomic<std::uint64_t> start_up_vector[max_cpus]{};
+    struct start_up_handoff_state
+    {
+        /**
+         * No hand-off in progress. Either this processor has never taken
+         * an INIT exit, or its last start-up has already been applied. A
+         * sender must let the hardware deliver.
+         */
+        static constexpr std::uint64_t none = 0;
+
+        /**
+         * The target is spinning in its INIT handler, in VMX root mode,
+         * waiting for a vector to be handed to it. Only in this state may
+         * a sender swallow the guest's write to the interrupt command
+         * register.
+         */
+        static constexpr std::uint64_t software_wait = 1;
+
+        /**
+         * The target is parked in the wait-for-SIPI activity state and is
+         * waiting on hardware. A sender must issue the guest's start-up
+         * IPI, because nothing this VMM does will wake it.
+         */
+        static constexpr std::uint64_t hardware_wait = 2;
+
+        /**
+         * A vector has been handed over. The state is this plus the
+         * vector, so that vector zero is still distinguishable from no
+         * hand-off at all.
+         */
+        static constexpr std::uint64_t delivered = 3;
+
+        /**
+         * The state that carries the given start-up vector.
+         */
+        static constexpr std::uint64_t deliver(std::uint64_t vector)
+        {
+            return delivered + vector;
+        }
+
+        /**
+         * Whether the given state carries a vector.
+         */
+        static constexpr bool is_delivered(std::uint64_t state)
+        {
+            return state >= delivered;
+        }
+
+        /**
+         * The vector such a state carries.
+         */
+        static constexpr std::uint64_t vector(std::uint64_t state)
+        {
+            return state - delivered;
+        }
+    };
+
+    /**
+     * Which hand-off each processor's next start-up IPI is to arrive
+     * through, and the vector once one has been handed over.
+     *
+     * Atomic because the target writes it and the sender reads and
+     * modifies it, on different processors, with no lock between them -
+     * and because the transition out of the software wait has to be
+     * indivisible from observing a vector delivered into it.
+     */
+    std::atomic<std::uint64_t> start_up_handoff[max_cpus]{};
 
     /**
      * Set once every processor has been started, after which the

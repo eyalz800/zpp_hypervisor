@@ -758,6 +758,17 @@ void hypervisor::emulate_init_signal(arch::x86_64::context & context)
     // by the time it runs, the IPI has already been received. The rule to
     // keep is blunt: do not add code to this function.
     //
+    // The one read added to that budget on purpose, because the whole
+    // adoption design rests on an assumption about it that nothing else
+    // records: the activity state this processor was in when the INIT
+    // arrived. Everything below sets that field, and record_exit samples
+    // it after the fact, so without this the state we *found* is the one
+    // thing about an INIT that is unrecoverable afterwards. It answers
+    // whether the guest INITed a processor that was running, halted, or
+    // already parked waiting for a start-up IPI - and a hang whose cause
+    // is the last of those looks like nothing else in the log.
+    auto activity_state_found = vmcs.guest_activity_state();
+
     // What remains is the activity state and the two things that state
     // requires to be clear. Wait-for-SIPI does not permit a pending event:
     // real hardware fails VM entry on a valid VM-entry interruption
@@ -767,17 +778,30 @@ void hypervisor::emulate_init_signal(arch::x86_64::context & context)
     vmcs.vm_entry_exception_error_code(0);
     vmcs.guest_interruptibility_state(0);
 
-    // Deliberately *not* the wait-for-SIPI activity state.
+    // There are two ways the start-up IPI that follows this INIT can
+    // arrive, and the rest of this function is about choosing one of them
+    // and saying so.
     //
-    // That state is the architectural way to do this, and it is what the
-    // hardware start-up IPI path needs - but it means parking the
-    // processor across a VM entry and trusting the layer below to deliver
-    // the IPI that wakes it. Under nested virtualization that trust is
-    // misplaced: the IPI is discarded for as long as this VMM is in root
-    // mode, by design. So the sender hands us the vector through memory
-    // instead, from its intercepted write to the interrupt command
-    // register, and this processor waits for it here in root mode where
-    // nothing can be lost.
+    // The architectural way is the wait-for-SIPI activity state: park the
+    // processor across a VM entry and let the hardware deliver the IPI as
+    // a VM exit. SDM 28.2 is what makes that work and also what makes it
+    // fragile - "If a logical processor is not in the wait-for-SIPI
+    // activity state when a SIPI arrives, no VM exit occurs and the SIPI
+    // is discarded" - so it requires trusting whatever is below this VMM
+    // to deliver it. Under nested virtualization that trust is misplaced
+    // by design: the IPI is discarded for as long as this VMM is in root
+    // mode. So the other way is for the sender to hand the vector over
+    // through memory, from its intercepted write to the interrupt command
+    // register, and for this processor to wait for it here in root mode
+    // where nothing can be lost.
+    //
+    // The choice is published in start_up_handoff before either wait
+    // begins, because the sender reads it to decide whether it may
+    // swallow the guest's write. Both sides guessing independently is how
+    // a start-up IPI was lost: this processor would park in wait-for-SIPI
+    // while the sender, seeing only that the processor was virtualized,
+    // handed the vector to a mailbox nobody was reading any more and
+    // swallowed the write that would have woken it.
     //
     // Bounded, because a processor spinning forever on an INIT whose
     // start-up IPI never comes is worse than one that gives up: it would
@@ -822,34 +846,94 @@ void hypervisor::emulate_init_signal(arch::x86_64::context & context)
     arch::x86_64::cpuid(1, 0, identification);
     auto nested = 0 != (identification[2] & hypervisor_present_bit);
 
-    // Bounded so a processor cannot spin forever on an INIT whose start-up
-    // IPI never arrives. The senders in practice follow within tens of
-    // microseconds to ten milliseconds, so this is generous.
-    constexpr std::uint32_t start_up_wait_attempts = 2000000;
-    for (std::uint32_t attempt{};
-         x2apic && nested && (attempt < start_up_wait_attempts);
-         ++attempt) {
-        if (auto pending = this->start_up_vector[cpu].exchange(0);
-            pending) {
-            apply_start_up(context, pending - 1);
+    auto & handoff = this->start_up_handoff[cpu];
+
+    // Whether the software wait was taken at all, which is the one thing
+    // worth saying about this on the way out: it is what a sender's
+    // decision has to have agreed with.
+    auto waited = x2apic && nested;
+
+    if (waited) {
+        // Published before the first attempt, so a sender that arrives
+        // during the wait finds this processor listening.
+        handoff.store(start_up_handoff_state::software_wait);
+
+        // Bounded so a processor cannot spin forever on an INIT whose
+        // start-up IPI never arrives. The senders in practice follow
+        // within tens of microseconds to ten milliseconds, so this is
+        // generous.
+        constexpr std::uint32_t start_up_wait_attempts = 2000000;
+        for (std::uint32_t attempt{}; attempt < start_up_wait_attempts;
+             ++attempt) {
+            if (auto state = handoff.load();
+                start_up_handoff_state::is_delivered(state)) {
+                apply_start_up(context,
+                               start_up_handoff_state::vector(state));
+                return;
+            }
+            zpp::spin_hint();
+        }
+
+        // Giving up, which is the moment the two sides could disagree.
+        // A compare-exchange rather than a store because a sender may be
+        // handing a vector over at exactly this instant: either this wins
+        // and the sender then sees a processor that is no longer
+        // listening and issues the IPI to hardware, or the sender wins
+        // and the vector is applied here instead. Exactly one of the two
+        // happens, which is the whole point - a plain store here would
+        // discard a vector that had already been swallowed on the
+        // sender's side, and nothing would ever start this processor.
+        //
+        // The state the exchange found is checked rather than assumed to
+        // carry a vector. Nothing else writes it while this processor is
+        // listening, so anything else is impossible - and starting a
+        // processor at a vector computed from an impossible value would
+        // send it to an address nobody chose, which is a worse way to
+        // fail than falling through to the architectural wait.
+        auto expected = start_up_handoff_state::software_wait;
+        if (!handoff.compare_exchange_strong(
+                expected, start_up_handoff_state::hardware_wait) &&
+            start_up_handoff_state::is_delivered(expected)) {
+            apply_start_up(context,
+                           start_up_handoff_state::vector(expected));
             return;
         }
-        zpp::spin_hint();
+    } else {
+        // Waiting on hardware from the start, which is the case on bare
+        // metal and under Bochs. Said out loud here rather than left
+        // implied, because a sender that assumed otherwise is what used
+        // to swallow the IPI this processor is now waiting for.
+        handoff.store(start_up_handoff_state::hardware_wait);
     }
 
-    log("no start-up ipi for cpu {}, waiting for the hardware one",
-        vmcs.vpid());
     vmcs.guest_activity_state(
         arch::x86_64::vmx::activity_state::wait_for_start_up_ipi);
+
+    // One log line, and the placement is deliberate: the activity state is
+    // written first, so nothing about the diagnostic delays the write the
+    // resume depends on. A processor that is never started again is left
+    // with this as its last word, next to a recorded exit of INIT with
+    // activity state 3 - and the sender's own line, in
+    // on_interrupt_command, says which mechanism it then used. The two
+    // together are what identifies a swallowed start-up IPI without
+    // repeating the investigation: this line says which hand-off this
+    // processor is waiting on, that one says which the sender used, and
+    // they have to agree.
+    log("cpu {} init: found activity {}, waiting for the hardware "
+        "start-up ipi, software wait {}",
+        vmcs.vpid(),
+        activity_state_found,
+        waited);
 }
 
 void hypervisor::emulate_start_up_ipi(arch::x86_64::context & context,
                                       std::uint64_t vector)
 {
-    // Only reachable where the hardware start-up IPI path works, which is
-    // to say on real hardware. Under a layer that discards the IPI while
-    // this VMM is in root mode, the INIT handler has already applied this
-    // from the vector the sender handed us directly.
+    // Reached whenever this processor's INIT left it waiting on hardware,
+    // which is every INIT on bare metal and under Bochs. Under a layer
+    // that discards the IPI while this VMM is in root mode the INIT
+    // handler waits for the vector in root mode instead and has already
+    // applied it by now, so this exit never arrives there.
     apply_start_up(context, vector);
 }
 
@@ -978,13 +1062,34 @@ hypervisor::on_interrupt_command(std::uint64_t command)
     constexpr std::uint64_t shorthand_mask = 0x3;
     constexpr std::uint64_t shorthand_none = 0;
 
+    // INIT, which is logged and otherwise left alone. Logged because it is
+    // the first half of the only sequence that starts a processor, and
+    // because a hang in that sequence is otherwise invisible: the log then
+    // shows what the guest sent, to which destination, and in what order,
+    // next to what each target did about it. Cheap - a guest sends INIT
+    // only to start or reset a processor, never on a hot path, unlike
+    // every other delivery mode reaching this function.
+    //
+    // Their absence says something too, and it is the first thing to check
+    // when a processor never starts: only the x2APIC interrupt command
+    // register is an MSR, so a guest still in xAPIC mode writes its
+    // command to the APIC page and reaches none of this. No line here at
+    // all means the sequence was never seen, not that it was never sent.
+    constexpr std::uint64_t delivery_mode_init = 5;
+
     auto delivery_mode =
         (command >> delivery_mode_shift) & delivery_mode_mask;
+    if (delivery_mode_init == delivery_mode) {
+        log("guest init ipi, command {}", command);
+        return command;
+    }
+
     if (delivery_mode_start_up != delivery_mode) {
-        // Everything else goes out as the guest wrote it, INIT included -
-        // and INIT especially, because it is what leaves the target
-        // waiting for a start-up IPI, which is the state the rest of this
-        // needs it in. There is nothing here that improves on it.
+        // Everything else goes out as the guest wrote it. That includes
+        // the INIT handled above, and it especially includes INIT: it is
+        // what leaves the target waiting for a start-up IPI, which is the
+        // state the rest of this needs it in. There is nothing here that
+        // improves on any of them.
         return command;
     }
 
@@ -1020,20 +1125,77 @@ hypervisor::on_interrupt_command(std::uint64_t command)
         // Already started since its last INIT. A guest sends two start-up
         // IPIs and the second must not be acted on: sending a processor
         // that is already running back to its entry point wedges it in a
-        // way indistinguishable from never having started.
+        // way indistinguishable from never having started. Swallowed
+        // rather than passed on, which is also what the hardware would do
+        // with it - SDM 29.7.2: "The active state blocks start-up IPIs
+        // (SIPIs). SIPIs that arrive while a logical processor is in the
+        // active state and in VMX non-root operation are discarded and do
+        // not cause VM exits."
         if (this->started_by_start_up_ipi[*slot]) {
+            log("guest start-up ipi for cpu {}, already started, ignored",
+                *slot);
             return {};
         }
 
-        // Under the hypervisor and waiting in the INIT handler for a
-        // vector to be handed to it through memory. Hand it over and
-        // swallow the write - letting the hardware see it would be asking
-        // whatever is below this VMM to deliver a start-up IPI to a
-        // processor in VMX root mode, which is the one case it is allowed
-        // to discard. Stored plus one so that zero can mean nothing
-        // pending without excluding vector zero.
-        this->start_up_vector[*slot].store(vector + 1);
-        return {};
+        // Under the hypervisor and out of an INIT, so the target chose
+        // which hand-off it is waiting on and published it. Follow that
+        // choice rather than assuming one.
+        //
+        // A compare-exchange, not a store, and that is the whole fix: the
+        // target leaves the software wait on its own timeout, and a store
+        // would put the vector into a mailbox nobody reads again while
+        // swallowing the write that would have woken it. Then nothing
+        // starts that processor and the guest waits for it forever. Bare
+        // metal never takes the software wait at all, so before this the
+        // swallow was unconditional and the loss certain the moment a
+        // guest re-started a processor this VMM had already adopted.
+        auto expected = start_up_handoff_state::software_wait;
+        if (this->start_up_handoff[*slot].compare_exchange_strong(
+                expected, start_up_handoff_state::deliver(vector))) {
+            log("guest start-up ipi for cpu {}, vector {}, handed over",
+                *slot,
+                vector);
+            return {};
+        }
+
+        // Not listening, so the hardware path is the only one that can
+        // start it and the guest's own write has to go out. This keeps the
+        // processor virtualized rather than handing it over: it is in VMX
+        // non-root operation parked in the wait-for-SIPI activity state,
+        // so SDM 28.2 turns the delivery into a VM exit on it rather than
+        // letting it execute the guest's real-mode entry point directly.
+        //
+        // Correct on bare metal, with one window left that is the
+        // architecture's rather than ours: between the target publishing
+        // hardware_wait and its VM entry actually reaching that activity
+        // state it is still in root mode, and an IPI arriving in that
+        // instant is discarded. That window is what the second start-up
+        // IPI of the conventional sequence covers - SDM Table 11-1 sends
+        // two, 200 microseconds apart, and Vol. 3A's description of
+        // delivery mode 110 says outright that a SIPI is not retried by
+        // hardware and that reissuing it is software's job.
+        //
+        // Not futile under a layer either, which is the other half of why
+        // this is the right thing to issue. KVM drops a pending start-up
+        // IPI only while this VMM is in root mode - lapic.c's
+        // kvm_apic_accept_events() clears KVM_APIC_SIPI when
+        // kvm_apic_init_sipi_allowed() is false - and that is precisely
+        // the window the software hand-off above covers. Once this VMM has
+        // entered with an activity state of wait-for-SIPI, KVM's
+        // nested_vmx_enter_non_root_mode() records
+        // KVM_MP_STATE_INIT_RECEIVED for it, and vmx_check_nested_events()
+        // then delivers the IPI as an EXIT_REASON_SIPI_SIGNAL exit. So the
+        // two states this VMM publishes line up exactly with the two
+        // KVM distinguishes, and each is issued the mechanism that works.
+        //
+        // The pair of log lines says which was used rather than leaving it
+        // to be deduced.
+        log("guest start-up ipi for cpu {}, vector {}, to hardware, "
+            "target hand-off {}",
+            *slot,
+            vector,
+            expected);
+        return command;
     }
 
     // Never seen before, so this is the guest starting it for the first
@@ -1237,12 +1399,35 @@ bool hypervisor::start_application_processor(std::size_t slot,
     for (std::uint32_t attempt{}; attempt < launch_wait_attempts;
          ++attempt) {
         if (this->start_up_launched[slot]) {
+            log("cpu {} came up on the trampoline after {} attempts, "
+                "guest vector {}",
+                slot,
+                attempt,
+                guest_vector);
             return true;
         }
         zpp::spin_hint();
     }
 
-    log("cpu {} did not come up after its start-up ipi", slot);
+    // The stage is what makes this diagnosable, and it separates the two
+    // failures that look identical from here. Zero means the trampoline
+    // never ran a single instruction, so the start-up IPI above was never
+    // acted on, and the question is then what state the target was in
+    // rather than anything about this VMM's own code. That is the whole
+    // assumption this path rests on and never checks: SDM 11.4.2 has an
+    // application processor "enter a wait-for-SIPI state" on any INIT
+    // after the MP protocol has completed, and the sequence in Table 11-1
+    // starts one from there. A target somewhere else is not startable this
+    // way and nothing here can tell that it is, because an activity state
+    // can only be read on the processor holding it.
+    //
+    // Anything but zero means it did run and died on the climb, at a stage
+    // that says where.
+    log("cpu {} did not come up after its start-up ipi, apic id {}, "
+        "trampoline stage {}",
+        slot,
+        this->apic_id[slot],
+        start_up_trampoline_stage());
     this->started_by_trampoline[slot] = false;
     return false;
 }
@@ -1296,6 +1481,12 @@ void hypervisor::apply_start_up(arch::x86_64::context & context,
             return;
         }
         this->started_by_start_up_ipi[cpu] = true;
+
+        // The hand-off is over, however it arrived. Cleared here because
+        // this is the one place both paths end up, and leaving a delivered
+        // vector behind would let the next INIT find a start-up nobody
+        // sent this time.
+        this->start_up_handoff[cpu].store(start_up_handoff_state::none);
     }
 
     // Everything below is the state an INIT leaves behind, applied here
@@ -2423,6 +2614,16 @@ hypervisor::main(arch::x86_64::context & caller_context)
                             // for the same reason.
                             static_cast<std::uint32_t>(
                                 (this->launch_error[cpu] & 0xf) << 16) |
+                            // Which start-up hand-off it is waiting on, in
+                            // bits 23:20. A processor that never restarted
+                            // is by definition not able to say so itself,
+                            // and this is the difference between one
+                            // parked waiting on hardware and one still
+                            // listening in software - which is the whole
+                            // question when a start-up IPI goes missing.
+                            static_cast<std::uint32_t>(
+                                (this->start_up_handoff[cpu].load() & 0xf)
+                                << 20) |
                             (static_cast<std::uint32_t>(
                                  newest.activity_state & 0x3)
                              << 3);
