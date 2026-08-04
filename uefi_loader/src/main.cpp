@@ -811,12 +811,24 @@ static int call_on_cpu(std::size_t cpuid,
     }
 
     // Startup the relevant CPU.
+    //
+    // Bounded rather than indefinite. WaitEvent is null, so this is the
+    // blocking form and the timeout is the only thing that can end it: a
+    // processor that never runs the function used to hang the loader here
+    // forever, which reports nothing and leaves the firmware on screen
+    // looking wedged. A timeout turns that into EFI_TIMEOUT, so the caller
+    // can say which processor failed and go on to ask the hypervisor why.
+    //
+    // Generous, because this is not a latency budget. Starting a processor
+    // takes an INIT, 10ms, a start-up IPI, 200us and another; anything
+    // still absent after seconds is not late, it is not coming.
+    constexpr std::size_t start_up_timeout_microseconds = 5000000;
     status = g_mp_services->StartupThisAP(
         g_mp_services,
         static_cast<void (*)(void *)>(erased_launch),
         cpuid,
         nullptr,
-        0,
+        start_up_timeout_microseconds,
         &launch,
         nullptr);
     if (EFI_ERROR(status)) {
