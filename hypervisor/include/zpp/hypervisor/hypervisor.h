@@ -509,6 +509,18 @@ private:
     std::uint64_t exit_trace_count[max_cpus]{};
 
     /**
+     * Whether a start-up IPI has already started each processor, cleared
+     * again by an INIT.
+     *
+     * INIT-SIPI-SIPI sends two start-up IPIs, so a processor that started
+     * on the first would be sent back to its entry point by the second -
+     * and re-applying RIP zero to a processor already executing wedges it
+     * in a way indistinguishable from never having started. another implementation guards the
+     * same case with its is_initialised flag.
+     */
+    bool started_by_start_up_ipi[max_cpus]{};
+
+    /**
      * The exit nothing knew how to handle, filled in by
      * on_unhandled_exit just before it stops the CPU. For a debugger, and
      * for the same reason as vm_entry_failure below: none of it can be

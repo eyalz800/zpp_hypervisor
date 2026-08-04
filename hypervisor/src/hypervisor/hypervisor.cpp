@@ -797,6 +797,15 @@ void hypervisor::emulate_init_signal(arch::x86_64::context & context)
     auto tr_access_rights = real_mode_segment(
         segment_descriptor::segment_type::tss_busy, true);
 
+    // Wait for the start-up IPI, written first rather than last. This is
+    // the state that makes the processor startable again, and a start-up
+    // IPI arriving before it is set is discarded rather than queued - so
+    // the window between the INIT exit and this write is a window in which
+    // the IPI that was supposed to start this processor is lost. Nothing
+    // below it can fail, but the shorter that window the better.
+    vmcs.guest_activity_state(
+        arch::x86_64::vmx::activity_state::wait_for_start_up_ipi);
+
     // Real mode, based at the reset vector. An application processor
     // never runs an instruction here - the start-up IPI that follows
     // redirects it - but the firmware is entitled to see this state.
@@ -808,7 +817,16 @@ void hypervisor::emulate_init_signal(arch::x86_64::context & context)
 
     // Long mode is gone with CR0.PG, and the entry control has to agree
     // or VM entry fails its consistency checks.
-    vmcs.guest_ia32_efer(0);
+    //
+    // The guest IA32_EFER field is deliberately not written. Without the
+    // "load IA32_EFER" VM-entry control - which this VMCS does not set -
+    // the field is ignored, and VM entry instead loads EFER.LMA from the
+    // control cleared below and leaves LME alone when CR0.PG is being
+    // loaded as zero, which it is here. Writing the field would look like
+    // it cleared EFER when it does nothing at all. Setting the control is
+    // not the answer either: the guest can then change EFER with a WRMSR
+    // that the all-zero MSR bitmap does not intercept, leaving the field
+    // stale and the next entry loading the wrong value.
     vmcs.vm_entry_controls(
         vmcs.vm_entry_controls() &
         ~arch::x86_64::vmx::vm_entry_controls::ia_32e_mode_guest);
@@ -891,8 +909,32 @@ void hypervisor::emulate_init_signal(arch::x86_64::context & context)
     context.r15 = 0;
 
     // Nothing is blocked or pending across an INIT.
+    //
+    // The event injection fields matter as much as the blocking ones and
+    // are easy to miss, because they are how *this* VMM asks for an event
+    // rather than how the guest reports one - inject_general_protection_
+    // fault below writes them. Left set, the next VM entry would deliver
+    // that vector through the descriptor tables just reset above: in real
+    // mode, the interrupt vector table at physical address zero. The guest
+    // would leave for somewhere arbitrary during VM entry, after every
+    // piece of state a debugger can see. another implementation zeroes the same fields as
+    // part of its idea of a clean VMCS.
+    vmcs.vm_entry_interruption_information_field(0);
+    vmcs.vm_entry_exception_error_code(0);
     vmcs.guest_interruptibility_state(0);
     vmcs.guest_pending_debug_exceptions(0);
+
+    // DR6 is not a VMCS guest field - the guest and host share the
+    // register - so the architectural post-INIT value has to be written to
+    // the real one while running on this processor, the same way the
+    // general purpose registers do.
+    constexpr std::uint64_t dr6_after_init = 0xffff0ff0;
+    arch::x86_64::dr6(dr6_after_init);
+
+    // This processor is no longer one that a start-up IPI has started.
+    if (auto cpu = vmcs.vpid() - 1; cpu < max_cpus) {
+        this->started_by_start_up_ipi[cpu] = false;
+    }
 
     // SDM 12.1: during an INIT "the TLBs and BTB are invalidated as with
     // a hardware reset", and the same paragraph describes INIT as the
@@ -919,11 +961,6 @@ void hypervisor::emulate_init_signal(arch::x86_64::context & context)
             &descriptor)) {
         log("invvpid failed on cpu {}", vmcs.vpid());
     }
-
-    // And now wait for the start-up IPI. This is the whole point: it is
-    // what makes the processor startable again.
-    vmcs.guest_activity_state(
-        arch::x86_64::vmx::activity_state::wait_for_start_up_ipi);
 }
 
 void hypervisor::emulate_start_up_ipi(std::uint64_t vector)
@@ -944,6 +981,17 @@ void hypervisor::emulate_start_up_ipi(std::uint64_t vector)
     // mode already implies.
     constexpr std::uint64_t vector_to_selector_shift = 8;
     constexpr std::uint64_t vector_to_base_shift = 12;
+
+    // A second start-up IPI for a processor already started is ignored.
+    // INIT-SIPI-SIPI sends two, and the second would otherwise send a
+    // processor that is already running back to its entry point.
+    auto cpu = vmcs.vpid() - 1;
+    if (cpu < max_cpus) {
+        if (this->started_by_start_up_ipi[cpu]) {
+            return;
+        }
+        this->started_by_start_up_ipi[cpu] = true;
+    }
 
     // Execution begins at the start of that page, in real mode.
     vmcs.guest_cs_selector(vector << vector_to_selector_shift);
@@ -1110,6 +1158,14 @@ void hypervisor::setup_vmcs(arch::x86_64::context & guest_context)
     namespace vmx_msr = arch::x86_64::vmx::msr;
 
     auto & vmcs = this->vmcs;
+
+    // Zero the VMX abort indicator, as the SDM recommends for any VMCS
+    // this VMM uses. A VMX abort is a failure during a VM *exit*: it puts
+    // the processor into a shutdown state that only RESET leaves, and it
+    // is not a VM entry failure, so nothing else here would notice one.
+    // The indicator names the cause - but only if it was known to be zero
+    // beforehand, which is what this is for.
+    this->vmx_vmcs[this->next_virtual_processor - 1].abort_indicator = 0;
 
     // Set invalid link pointer.
     vmcs.vmcs_link_pointer(0xffffffffffffffffull);
@@ -1703,8 +1759,12 @@ hypervisor::main(arch::x86_64::context & caller_context)
             // associated with these events." So the hardware tells us and
             // does nothing else - this is the only thing standing between
             // an application processor and never waking again.
+            // Deliberately not logged. This runs in the window between
+            // the INIT exit and the resume, during which a start-up IPI
+            // for this processor is discarded rather than queued, and
+            // logging allocates and takes a lock. record_exit below
+            // captures the exit anyway.
             emulate_init_signal(context);
-            log("init signal on cpu {}", vmcs.vpid());
             advance_rip = false;
             break;
         }
@@ -1713,7 +1773,6 @@ hypervisor::main(arch::x86_64::context & caller_context)
             constexpr std::uint64_t sipi_vector_mask = 0xff;
             auto vector = vmcs.exit_qualification() & sipi_vector_mask;
             emulate_start_up_ipi(vector);
-            log("start-up ipi on cpu {}, vector {}", vmcs.vpid(), vector);
             advance_rip = false;
             break;
         }
