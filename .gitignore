@@ -12,7 +12,6 @@ tags
 *.symvers
 *.swp
 **/.tmp_versions/**
-legacy.mod.c
 **/out/**
 **/obj/**
 **/.vs/**
