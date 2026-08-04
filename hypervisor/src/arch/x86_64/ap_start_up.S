@@ -48,6 +48,25 @@
     .set ap_far_pointer32_offset, ap_data_offset + 0x48
     .set ap_far_pointer64_offset, ap_data_offset + 0x50
     .set ap_gdt_offset, ap_data_offset + 0x58
+    .set ap_far_host_offset, ap_data_offset + 0x78
+    .set ap_host_gdtr_offset, ap_data_offset + 0x86
+    .set ap_host_idtr_offset, ap_data_offset + 0x96
+    .set ap_host_cs_offset, ap_data_offset + 0xa0
+    .set ap_stage_offset, ap_data_offset + 0xa2
+
+    // How far the climb got, written as each step completes.
+    //
+    // This is the only account of a failure before the host IDT is loaded
+    // below. Until then a fault has no handler to reach and escalates to a
+    // reset, which takes the evidence with it - so the evidence is written
+    // down in advance instead. Mirrored by ap_start_up_stage in the
+    // header.
+    .set ap_stage_real_mode, 1
+    .set ap_stage_protected_mode, 2
+    .set ap_stage_long_mode, 3
+    .set ap_stage_host_page_table, 4
+    .set ap_stage_host_tables, 5
+    .set ap_stage_entering_cpp, 6
 
     .section .text.ap_start_up, "ax", @progbits
     .globl zpp_ap_start_up_begin
@@ -86,6 +105,11 @@ zpp_ap_start_up_begin:
     mov eax, [ap_far_pointer64_offset]
     add eax, ebx
     mov [ap_far_pointer64_offset], eax
+    mov eax, [ap_far_host_offset]
+    add eax, ebx
+    mov [ap_far_host_offset], eax
+
+    mov byte ptr [ap_stage_offset], ap_stage_real_mode
 
     lgdt [ap_gdt_pointer_offset]
 
@@ -99,6 +123,8 @@ zpp_ap_start_up_begin:
 
     .code32
 ap_code32:
+    mov byte ptr [ebx + ap_stage_offset], ap_stage_protected_mode
+
     // A flat data segment everywhere. Nothing here pushes, so SS is set
     // only because leaving it holding a real mode value is worse.
     mov ax, ap_data_selector
@@ -139,6 +165,12 @@ ap_code32:
 
     .code64
 ap_code64:
+    mov byte ptr [rbx + ap_stage_offset], ap_stage_long_mode
+
+    // A stack, before anything that needs one. The trampoline above never
+    // pushed; the descriptor table switch below does.
+    mov rsp, [rbx + ap_stack_top_offset]
+
     // The host's own control registers, so the C++ below runs in the same
     // environment every other processor's host side does. CR4 first,
     // because CR3 has to be loaded with the extension bits already as the
@@ -152,12 +184,38 @@ ap_code64:
     mov cr4, rax
     mov rax, [rbx + ap_host_cr3_offset]
     mov cr3, rax
+    mov byte ptr [rbx + ap_stage_offset], ap_stage_host_page_table
     mov rax, [rbx + ap_host_cr0_offset]
     mov cr0, rax
 
-    mov rsp, [rbx + ap_stack_top_offset]
+    // The host descriptor tables, and this is what makes a fault from here
+    // on survivable rather than fatal.
+    //
+    // Until now this processor has had no usable interrupt descriptor
+    // table: the one at linear zero belongs to nobody, so any fault
+    // escalated to a triple fault and reset the machine, taking the
+    // evidence with it. Loading the host IDT is not enough on its own,
+    // because its gates name the host code segment - a selector that does
+    // not exist in the small GDT this trampoline climbed with, so
+    // delivering the fault would itself fault. The host GDT has to come
+    // first, and CS has to be reloaded out of it, which is what the far
+    // return below is for. Every other processor reaches this same state
+    // on its first VM exit; this one just gets there before running any
+    // C++.
+    lgdt [rbx + ap_host_gdtr_offset]
+    movzx rax, word ptr [rbx + ap_host_cs_offset]
+    push rax
+    mov eax, [rbx + ap_far_host_offset]
+    push rax
+    retfq
+
+ap_host_code:
+    lidt [rbx + ap_host_idtr_offset]
+    mov byte ptr [rbx + ap_stage_offset], ap_stage_host_tables
+
     mov rdi, [rbx + ap_argument_offset]
     mov rax, [rbx + ap_entry_offset]
+    mov byte ptr [rbx + ap_stage_offset], ap_stage_entering_cpp
     jmp rax
 
     // The code must not reach into the data area.
@@ -208,5 +266,27 @@ ap_gdt:
     .quad 0x00cf92000000ffff
     .quad 0x00af9a000000ffff
 ap_gdt_end:
+
+    // Where the far return lands once the host GDT is loaded. Stored as an
+    // offset and relocated with the others.
+    .space (ap_far_host_offset - (. - zpp_ap_start_up_begin))
+    .long (ap_host_code - zpp_ap_start_up_begin)
+
+    // The host descriptor table pointers and code selector, written before
+    // this blob is used. Ten bytes each, a limit then a base, which is the
+    // form lgdt and lidt take in long mode.
+    .space (ap_host_gdtr_offset - (. - zpp_ap_start_up_begin))
+    .word 0
+    .quad 0
+
+    .space (ap_host_idtr_offset - (. - zpp_ap_start_up_begin))
+    .word 0
+    .quad 0
+
+    .space (ap_host_cs_offset - (. - zpp_ap_start_up_begin))
+    .word 0
+
+    .space (ap_stage_offset - (. - zpp_ap_start_up_begin))
+    .byte 0
 
 zpp_ap_start_up_end:

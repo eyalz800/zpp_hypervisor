@@ -1,4 +1,6 @@
 #pragma once
+#include "zpp/arch/x86_64/generic.h"
+
 #include <cstddef>
 #include <cstdint>
 
@@ -78,7 +80,97 @@ struct ap_start_up_area
      * deliberately low.
      */
     std::uint64_t temporary_cr3;
+
+    /**
+     * The assembly's own working area: the descriptor table pointer it
+     * relocates, the three far pointers, and the small GDT it climbs with.
+     * Nothing here writes to any of it.
+     */
+    std::uint8_t assembly_owned[0x80 - 0x38];
+
+    /**
+     * The host descriptor tables, loaded before the entry point above is
+     * reached.
+     *
+     * Both are needed and in this order. The IDT's gates name the host
+     * code segment, which does not exist in the GDT the trampoline climbs
+     * with, so an IDT loaded without the GDT would make a fault worse
+     * rather than better - the delivery would fault too. With both loaded
+     * a fault reaches the ordinary host handler, which records it; before
+     * them it escalated to a triple fault and reset the machine.
+     *
+     * idt_layout rather than a type of this header's own, because it
+     * already solves the awkward part: an lgdt or lidt operand is a two
+     * byte limit immediately followed by an eight byte base, which no
+     * naturally aligned struct lays out by itself. It places six bytes of
+     * padding first, so that the limit lands six bytes in and the base
+     * eight, adjacent and each on its own alignment - and data() hands
+     * back the ten bytes starting at the limit. The assembly addresses
+     * those ten bytes directly, so its offsets are six greater than these
+     * members'.
+     * @{
+     */
+    idt_layout host_gdtr;
+    idt_layout host_idtr;
+    /**
+     * @}
+     */
+
+    /**
+     * The host code segment selector, which CS is reloaded to out of the
+     * host GDT once it is live.
+     */
+    std::uint16_t host_cs;
+
+    /**
+     * How far the climb got, one of ap_start_up_stage. Written as each
+     * step completes, and the only account of a failure that happens
+     * before the tables above are loaded.
+     */
+    std::uint8_t stage;
 };
+
+/**
+ * The steps the trampoline records in stage, in the order it reaches them.
+ * Mirrors the ap_stage_ constants in ap_start_up.S.
+ */
+enum class ap_start_up_stage : std::uint8_t
+{
+    not_started = 0,
+    real_mode = 1,
+    protected_mode = 2,
+    long_mode = 3,
+    host_page_table = 4,
+    host_tables = 5,
+    entering_cpp = 6,
+};
+
+/**
+ * The layout above describes memory the assembly also addresses, by fixed
+ * offsets it declares for itself, so the two are pinned against each other
+ * rather than trusted to stay in step.
+ * @{
+ */
+static_assert(offsetof(ap_start_up_area, host_cr3) == 0x00);
+static_assert(offsetof(ap_start_up_area, host_cr0) == 0x08);
+static_assert(offsetof(ap_start_up_area, host_cr4) == 0x10);
+static_assert(offsetof(ap_start_up_area, entry) == 0x18);
+static_assert(offsetof(ap_start_up_area, stack_top) == 0x20);
+static_assert(offsetof(ap_start_up_area, argument) == 0x28);
+static_assert(offsetof(ap_start_up_area, temporary_cr3) == 0x30);
+static_assert(offsetof(ap_start_up_area, host_gdtr) == 0x80);
+static_assert(offsetof(ap_start_up_area, host_idtr) == 0x90);
+
+// The assembly's lgdt and lidt operands are the ten bytes starting at each
+// limit, which is six into the layout above - so it names 0x86 and 0x96.
+static_assert(offsetof(idt_layout, limit) == 6);
+static_assert(offsetof(idt_layout, base) == 8);
+static_assert(sizeof(idt_layout) == 0x10);
+static_assert(offsetof(ap_start_up_area, host_cs) == 0xa0);
+static_assert(offsetof(ap_start_up_area, stage) == 0xa2);
+/**
+ * @}
+ */
 
 /**
  * Where that area sits inside the blob, matching the offset ap_start_up.S

@@ -1125,6 +1125,22 @@ void hypervisor::initialize_start_up_memory(std::uint64_t memory)
     area.temporary_cr3 = level4;
     area.entry = reinterpret_cast<std::uint64_t>(zpp_ap_start_up_main);
 
+    // The host descriptor tables, so the processor is running on them
+    // before it reaches any of this VMM's C++ rather than after its first
+    // VM exit. Without them a fault during the climb had no handler to
+    // reach and escalated to a triple fault, which on a virtual machine
+    // resets it - the failure this was written to stop being invisible.
+    //
+    // The GDT limit is the whole table, which is also what a VM exit
+    // loads, so a fault before the first exit and one after it see the
+    // same descriptors.
+    area.host_gdtr.base = reinterpret_cast<std::uint64_t>(this->host_gdt);
+    area.host_gdtr.limit = sizeof(this->host_gdt) - 1;
+    area.host_idtr.base = this->host_idtr.base;
+    area.host_idtr.limit = static_cast<std::uint16_t>(
+        this->host_idtr.limit);
+    area.host_cs = this->host_cs;
+
     this->start_up_memory = memory;
     log("start-up memory ready at {}, vector {}", memory, memory >> 12);
 }
