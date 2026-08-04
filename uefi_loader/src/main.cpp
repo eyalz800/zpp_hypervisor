@@ -497,6 +497,63 @@ static bool file_exists(EFI_HANDLE device, const char16_t * path)
  * is a diagnostic, and refusing to boot because the log could not be
  * saved would be worse than booting without one.
  */
+/**
+ * The vendor GUID the trace variable lives under. Anything but the global
+ * one, so nothing here can collide with a firmware variable.
+ */
+static EFI_GUID g_zpp_variable_guid = {
+    0x7a1c9e42,
+    0x3b8d,
+    0x4f16,
+    {0x9c, 0x5e, 0x11, 0x2d, 0x7f, 0x63, 0xa8, 0x04}};
+
+/**
+ * Saves the trace log into a non-volatile firmware variable.
+ *
+ * The file on the EFI system partition is the better copy - larger, and
+ * readable without knowing anything about variables - but it needs a file
+ * system, a directory, an open, a write and a flush, so it is written at
+ * exactly one point in the boot. Every other way out of this loader
+ * returned without writing anything at all, which is how a boot that
+ * failed before the chainload came to leave no evidence whatsoever.
+ *
+ * A variable has neither problem. It needs no file system, so it can be
+ * written from any failure path, and it survives a firmware that refuses
+ * to give us memory or a disk we cannot reach.
+ *
+ * Runtime access deliberately included: that is what puts it under
+ * efivarfs, so the log can be read from an operating system on the same
+ * machine rather than only from here.
+ *
+ * Deliberately not called on a boot that succeeds without incident -
+ * variable storage is finite and wears, so this is for the paths worth
+ * recording.
+ */
+static void write_trace_variable()
+{
+    if constexpr (!trace::enabled) {
+        return;
+    }
+
+    if (!g_runtime_services) {
+        return;
+    }
+
+    auto log = trace::log();
+    if (log.empty()) {
+        return;
+    }
+
+    auto name = u"ZppTrace";
+    g_runtime_services->SetVariable(
+        reinterpret_cast<CHAR16 *>(const_cast<char16_t *>(name)),
+        &g_zpp_variable_guid,
+        EFI_VARIABLE_NON_VOLATILE | EFI_VARIABLE_BOOTSERVICE_ACCESS |
+            EFI_VARIABLE_RUNTIME_ACCESS,
+        log.size(),
+        const_cast<char *>(log.data()));
+}
+
 static void write_trace_log(EFI_HANDLE device)
 {
     if constexpr (!trace::enabled) {
@@ -1061,6 +1118,7 @@ extern "C" EFI_STATUS EFIAPI uefi_main(EFI_HANDLE image_handle,
         reinterpret_cast<void **>(&g_mp_services));
     if (EFI_ERROR(status)) {
         trace::line("ZPP_HYPERVISOR_FAILED no EFI_MP_SERVICES_PROTOCOL");
+        write_trace_variable();
         return EFI_LOAD_ERROR;
     }
 
@@ -1102,6 +1160,7 @@ extern "C" EFI_STATUS EFIAPI uefi_main(EFI_HANDLE image_handle,
         end = trace::append_text(end, "\r\n");
         *end = 0;
         trace::raw(buffer);
+        write_trace_variable();
         return EFI_LOAD_ERROR;
     }
 
@@ -1112,6 +1171,7 @@ extern "C" EFI_STATUS EFIAPI uefi_main(EFI_HANDLE image_handle,
     // only path out.
     if constexpr (verify::enabled) {
         if (!verify::present(system_table, parameters)) {
+            write_trace_variable();
             return EFI_LOAD_ERROR;
         }
     }
@@ -1443,6 +1503,7 @@ extern "C" EFI_STATUS EFIAPI uefi_main(EFI_HANDLE image_handle,
             // thing on it, which looks exactly like a hang.
             trace::hex_line("ZPP_TRACE start image returned ", status);
             write_trace_log(our_device);
+            write_trace_variable();
 
             // Return the start image status.
             return status;
@@ -1451,6 +1512,7 @@ extern "C" EFI_STATUS EFIAPI uefi_main(EFI_HANDLE image_handle,
 
     trace::line("ZPP_TRACE no boot manager found");
     write_trace_log(our_device);
+    write_trace_variable();
 
     // Return success anyway, no image was found is considered ok.
     return EFI_SUCCESS;
