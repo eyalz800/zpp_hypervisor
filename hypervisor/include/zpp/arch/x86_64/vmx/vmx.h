@@ -75,6 +75,34 @@ enum type : std::uint64_t
 } // namespace activity_state
 
 /**
+ * The VM entry interruption information field, which is how the VMM asks
+ * the processor to deliver an event to the guest on the next entry.
+ */
+namespace vm_entry_interruption
+{
+enum type : std::uint64_t
+{
+    /**
+     * The event type, in bits 10:8. Hardware exception is the kind a
+     * faulting instruction would have raised on its own.
+     */
+    hardware_exception = (3ull << 8),
+
+    /**
+     * Set when the vector pushes an error code, which the processor takes
+     * from the VM entry exception error code field.
+     */
+    deliver_error_code = (1ull << 11),
+
+    /**
+     * Set to make the field mean anything at all. Cleared by the processor
+     * once the event has been delivered.
+     */
+    valid = (1ull << 31),
+};
+} // namespace vm_entry_interruption
+
+/**
  * The VM entry controls.
  */
 namespace vm_entry_controls

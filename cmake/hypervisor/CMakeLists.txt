@@ -71,7 +71,7 @@ target_compile_options(zpp_hypervisor PRIVATE
 # Config-specific compile flags
 target_compile_options(zpp_hypervisor PRIVATE
     $<$<CONFIG:Debug>:-g>
-    $<$<CONFIG:Debug>:-DZPP_HYPERVISOR_WAIT_FOR_DEBUGGER=0>
+    $<$<CONFIG:Debug>:-DZPP_HYPERVISOR_WAIT_FOR_DEBUGGER=$<BOOL:${ZPP_HYPERVISOR_WAIT_FOR_DEBUGGER}>>
     $<$<CONFIG:Release>:-O2>
     $<$<CONFIG:Release>:-ffunction-sections>
     $<$<CONFIG:Release>:-fdata-sections>
