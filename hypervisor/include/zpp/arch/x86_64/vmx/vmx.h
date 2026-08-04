@@ -20,7 +20,38 @@ namespace vm_execution_controls::primary
 {
 enum type : std::uint64_t
 {
+    // MONITOR and MWAIT must both be intercepted, and this is a
+    // correctness requirement rather than a policy choice: a virtualized
+    // guest cannot use the address-range monitor at all.
+    //
+    // SDM 29.3.3, "Clearing Address-Range Monitoring": "VM entries clear
+    // any address-range monitoring that may be in effect." SDM 30.5.6 says
+    // the same of VM exits. So every entry and every exit disarms the
+    // monitor a guest armed with MONITOR, and the MWAIT that was supposed
+    // to wait on it waits for something that can no longer arrive.
+    //
+    // This is what kept application processors from ever starting. The
+    // firmware parks an AP in an MWAIT idle loop when CPUID reports
+    // MONITOR support, and wakes it by storing to the monitored line
+    // rather than by INIT-SIPI-SIPI. Once the AP is virtualized, the first
+    // VM exit clears its monitor, the store is never noticed, and the AP
+    // waits forever - which looks exactly like a processor that never
+    // received its start-up IPI. Measured: with the monitor advertised the
+    // loader hangs in StartupThisAP; with it hidden all eight processors
+    // answer. See also the CPUID leaf 1 handling, which stops advertising
+    // it for the same reason.
+    //
+    // KVM reaches the same conclusion. Both bits are in its
+    // KVM_REQUIRED_VMX_CPU_BASED_VM_EXEC_CONTROL, and it emulates each as
+    // a no-op (kvm_emulate_monitor_mwait, arch/x86/kvm/x86.c) - clearing
+    // them only when userspace explicitly asks, which is what QEMU's
+    // -overcommit cpu-pm=on does and why that flag exposed this.
+    //
+    // SDM Table 25-6, "Definitions of Primary Processor-Based
+    // VM-Execution Controls", bits 10 and 29.
+    mwait_exiting = (1ull << 10),
     enable_msr_bitmaps = (1ull << 28),
+    monitor_exiting = (1ull << 29),
     enable_secondary_controls = (1ull << 31),
 };
 } // namespace vm_execution_controls::primary

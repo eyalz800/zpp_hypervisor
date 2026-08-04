@@ -1199,7 +1199,11 @@ void hypervisor::setup_vmcs(arch::x86_64::context & guest_context)
             arch::x86_64::vmx::vm_execution_controls::primary::
                     enable_secondary_controls |
                 arch::x86_64::vmx::vm_execution_controls::primary::
-                    enable_msr_bitmaps));
+                    enable_msr_bitmaps |
+                arch::x86_64::vmx::vm_execution_controls::primary::
+                    mwait_exiting |
+                arch::x86_64::vmx::vm_execution_controls::primary::
+                    monitor_exiting));
 
     // VM exit in 64 bit address space.
     vmcs.vm_exit_controls(arch::x86_64::vmx::adjust_msr(
@@ -1642,6 +1646,31 @@ hypervisor::main(arch::x86_64::context & caller_context)
                 // ahead of Windows whenever VBS is on, hands straight
                 // off to the OS. Remove this once nesting exists.
                 cpuid_result[2] &= ~(1u << 5);
+
+                // Hide MONITOR/MWAIT. Those instructions are intercepted
+                // and emulated as no-ops, because SDM 29.3.3 and 30.5.6
+                // clear address-range monitoring on every VM entry and
+                // every VM exit - so a monitor a guest arms cannot survive
+                // long enough to be waited on. Advertising a feature whose
+                // whole purpose is to wait, and then refusing to wait, is
+                // the mistake this file's other cases keep making: answer
+                // the whole of something or do not claim it.
+                //
+                // Not merely tidiness. The firmware picks an MWAIT idle
+                // loop for application processors when this bit is set,
+                // and wakes them with a store to the monitored line
+                // rather than with INIT-SIPI-SIPI. That store is never
+                // noticed once the monitor has been cleared, so every AP
+                // hung. Clearing the bit sends the firmware down the
+                // INIT-SIPI-SIPI path,
+                // which is emulated. Measured directly: the guest saw
+                // ecx=0xf7fab20b and hung, and 0xf7fab203 - the same value
+                // with this bit clear - brought up all eight processors.
+                //
+                // SDM Vol. 2A, CPUID, "CPUID.01H:ECX Feature
+                // Information": ECX[3] MONITOR, "If 1, supports the
+                // MONITOR/MWAIT and CPUID.05H".
+                cpuid_result[2] &= ~(1u << 3);
             } else if ((leaf >= hypervisor_leaf_first) &&
                        (leaf <= hypervisor_leaf_last)) {
                 // Answer the whole hypervisor range, not just the leaf
@@ -1737,6 +1766,28 @@ hypervisor::main(arch::x86_64::context & caller_context)
         case basic_reason::invd: {
             // Execute the invd instruction.
             arch::x86_64::invd();
+            break;
+        }
+        case basic_reason::monitor:
+        case basic_reason::mwait: {
+            // Both are emulated as no-ops: the exit is taken purely to
+            // stop them executing, and RIP advances below as it would for
+            // any completed instruction.
+            //
+            // A no-op is the honest answer rather than a shortcut. SDM
+            // 29.3.3 and 30.5.6 have every VM entry and every VM exit
+            // clear address-range monitoring, so a guest inside a VM can
+            // never keep a monitor armed across one - there is no
+            // behaviour here to preserve, only a wait to refuse. Turning
+            // MWAIT into a no-op turns a guest's idle loop into a poll,
+            // which is correct and merely wasteful; letting it wait is
+            // incorrect and hangs the processor, which is what happened to
+            // every application processor before this existed.
+            //
+            // Deliberately not logged. Idle loops execute these
+            // continuously, so a line each would push everything else out
+            // of a 512 line log. KVM makes the same call and warns exactly
+            // once (kvm_emulate_monitor_mwait).
             break;
         }
         case basic_reason::init_signal: {
