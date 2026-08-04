@@ -358,10 +358,19 @@ load them at that point with the bundled gdb command:
 
     load-symbols $rip out/debug/x86_64/zpp_hypervisor
 
-To stop the hypervisor before it runs, build with
-`-DZPP_HYPERVISOR_WAIT_FOR_DEBUGGER=1`; it then spins until you release it:
+To stop the hypervisor before it runs, configure with
+`-DZPP_HYPERVISOR_WAIT_FOR_DEBUGGER=ON`; it then spins at its entry point until
+you release it:
 
-    set var zpp::hypervisor::gdb_attached = 1
+    cmake --preset debug -DZPP_HYPERVISOR_WAIT_FOR_DEBUGGER=ON
+    ...
+    set var gdb_attached = 1
+
+This is the only reliable way to debug something that kills the guest. Symbols
+cannot be loaded until the loader has mapped the module, so attaching afterwards
+is a race that is lost whenever the failure takes the guest down with it - the
+spin gives an attach point with the mapping already in place and nothing running
+yet.
 
 OVMF's console goes to `build/bochs/serial.out`, and Bochs' own log to
 `build/bochs/bochs.log`.

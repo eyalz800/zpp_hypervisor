@@ -1468,7 +1468,31 @@ hypervisor::main(arch::x86_64::context & caller_context)
         // be resumed past. Cleared by the handlers for which it is not.
         bool advance_rip = true;
 
-        // Check the exit reason.
+        // What follows is the whole of what this VMM presents to its
+        // guest, and every case in it is load bearing for booting
+        // Windows. Each was found by Windows failing in a way that named
+        // something else, so the reasoning is kept at each case rather
+        // than left to be rediscovered:
+        //
+        // - cpuid hides VMX, or Hyper-V launches ahead of Windows and
+        //   faults on its own vmxon.
+        // - cpuid answers the entire hypervisor leaf range, not just the
+        //   leaf holding the signature. Unanswered leaves fall through to
+        //   whatever is underneath, which told Windows that Hyper-V was
+        //   present.
+        // - rdmsr and wrmsr fault rather than being skipped, so a guest
+        //   is never handed a value it did not read.
+        // - anything else stops the CPU instead of being resumed from,
+        //   because resuming advances RIP past an instruction that never
+        //   took effect.
+        //
+        // The shape of the mistake was the same every time: answering
+        // part of an interface, or resuming as though an unhandled
+        // instruction had worked. Both leave a guest that has been lied
+        // to, and it fails later somewhere unrelated - the first of these
+        // cost a long hunt through the boot chain for a boot
+        // configuration problem that did not exist. When adding a case,
+        // answer the whole of whatever it is, or fault.
         switch (reason) {
         case basic_reason::cpuid: {
             std::uint32_t cpuid_result[4]{};
