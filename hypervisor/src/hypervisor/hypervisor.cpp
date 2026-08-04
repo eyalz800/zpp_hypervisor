@@ -726,7 +726,7 @@ std::expected<void, zpp::error> hypervisor::enable_vmx_in_feature_control()
     return {};
 }
 
-void hypervisor::emulate_init_signal()
+void hypervisor::emulate_init_signal(arch::x86_64::context & context)
 {
     auto & vmcs = this->vmcs;
 
@@ -762,17 +762,145 @@ void hypervisor::emulate_init_signal()
     vmcs.vm_entry_exception_error_code(0);
     vmcs.guest_interruptibility_state(0);
 
+    // Deliberately *not* the wait-for-SIPI activity state.
+    //
+    // That state is the architectural way to do this, and it is what the
+    // hardware start-up IPI path needs - but it means parking the
+    // processor across a VM entry and trusting the layer below to deliver
+    // the IPI that wakes it. Under nested virtualization that trust is
+    // misplaced: the IPI is discarded for as long as this VMM is in root
+    // mode, by design. So the sender hands us the vector through memory
+    // instead, from its intercepted write to the interrupt command
+    // register, and this processor waits for it here in root mode where
+    // nothing can be lost.
+    //
+    // Bounded, because a processor spinning forever on an INIT whose
+    // start-up IPI never comes is worse than one that gives up: it would
+    // take the machine down with no diagnosis. On timeout fall back to the
+    // architectural path, which is correct on real hardware and no worse
+    // than what came before anywhere else.
+    auto cpu = vmcs.vpid() - 1;
+    if (cpu >= max_cpus) {
+        return;
+    }
+
+    this->started_by_start_up_ipi[cpu] = false;
+
+    // Only worth waiting for if the interrupt command register is an MSR,
+    // which it is only in x2APIC mode. In xAPIC mode it is a location on
+    // the APIC page and the MSR bitmap never sees it, so waiting would
+    // burn the whole timeout before falling back for nothing.
+    constexpr std::uint64_t apic_base_x2apic_enabled = (1ull << 10);
+    auto x2apic = (arch::x86_64::rdmsr(arch::x86_64::msr::ia32_apic_base) &
+                   apic_base_x2apic_enabled) != 0;
+
+    // And only worth waiting for when the hardware path cannot be
+    // trusted, which is precisely when something is virtualizing *us*.
+    //
+    // The architectural wait-for-SIPI path below is correct, cheaper and
+    // better tested: it is what real hardware implements and what the
+    // Bochs CI exercises on four processors. It fails in exactly one
+    // situation - a layer below that discards the start-up IPI while this
+    // VMM is in VMX root mode - so the software path is taken in exactly
+    // that situation and nowhere else. Bare metal and Bochs never spin.
+    //
+    // The test is our own CPUID rather than the guest's: this executes in
+    // root mode, so it reports what is underneath this VMM. On bare metal
+    // the bit is clear. Note the exit handler clears this same bit out of
+    // the guest's view of leaf 1, so the two must not be confused - the
+    // guest is told there is no hypervisor under it, while we ask whether
+    // there is one under us.
+    //
+    // SDM Vol. 2A, CPUID, "CPUID.01H:ECX Feature Information": bit 31 is
+    // reserved and always returns 0 on real hardware, which is why it is
+    // the conventional way for a hypervisor to announce itself.
+    constexpr std::uint32_t hypervisor_present_bit = (1u << 31);
+    std::uint32_t identification[4]{};
+    arch::x86_64::cpuid(1, 0, identification);
+    auto nested = 0 != (identification[2] & hypervisor_present_bit);
+
+    // Bounded so a processor cannot spin forever on an INIT whose start-up
+    // IPI never arrives. The senders in practice follow within tens of
+    // microseconds to ten milliseconds, so this is generous.
+    constexpr std::uint32_t start_up_wait_attempts = 2000000;
+    for (std::uint32_t attempt{};
+         x2apic && nested && (attempt < start_up_wait_attempts);
+         ++attempt) {
+        if (auto pending = this->start_up_vector[cpu].exchange(0);
+            pending) {
+            apply_start_up(context, pending - 1);
+            return;
+        }
+        zpp::spin_hint();
+    }
+
+    log("no start-up ipi for cpu {}, waiting for the hardware one",
+        vmcs.vpid());
     vmcs.guest_activity_state(
         arch::x86_64::vmx::activity_state::wait_for_start_up_ipi);
-
-    // No longer a processor that a start-up IPI has started.
-    if (auto cpu = vmcs.vpid() - 1; cpu < max_cpus) {
-        this->started_by_start_up_ipi[cpu] = false;
-    }
 }
 
 void hypervisor::emulate_start_up_ipi(arch::x86_64::context & context,
                                       std::uint64_t vector)
+{
+    // Only reachable where the hardware start-up IPI path works, which is
+    // to say on real hardware. Under a layer that discards the IPI while
+    // this VMM is in root mode, the INIT handler has already applied this
+    // from the vector the sender handed us directly.
+    apply_start_up(context, vector);
+}
+
+void hypervisor::intercept_interrupt_command(bool intercept)
+{
+    // The MSR bitmap is four 1024 byte bitmaps: reads of the low range,
+    // reads of the high range, writes of the low range, writes of the high
+    // range. The interrupt command register is in the low range.
+    constexpr std::size_t write_low_range = 0x800;
+
+    auto bit = arch::x86_64::msr::ia32_x2apic_icr;
+    auto & byte = this->msr_bitmap[write_low_range + (bit / 8)];
+    auto mask = static_cast<std::uint8_t>(1u << (bit % 8));
+
+    if (intercept) {
+        byte |= mask;
+    } else {
+        byte &= static_cast<std::uint8_t>(~mask);
+    }
+}
+
+void hypervisor::on_interrupt_command(std::uint64_t command)
+{
+    // The interrupt command register, x2APIC form: vector in the low
+    // eight bits, delivery mode in bits 10:8, and the destination APIC id
+    // in the upper half rather than in a second register.
+    constexpr std::uint64_t vector_mask = 0xff;
+    constexpr std::uint64_t delivery_mode_shift = 8;
+    constexpr std::uint64_t delivery_mode_mask = 0x7;
+    constexpr std::uint64_t delivery_mode_start_up = 6;
+    constexpr std::uint64_t destination_shift = 32;
+
+    auto delivery_mode =
+        (command >> delivery_mode_shift) & delivery_mode_mask;
+    if (delivery_mode_start_up != delivery_mode) {
+        return;
+    }
+
+    auto destination = command >> destination_shift;
+    auto vector = command & vector_mask;
+
+    // Hand the vector to the target through memory, which is the entire
+    // reason this write is intercepted. Stored plus one so that zero can
+    // mean "nothing pending" without excluding vector zero.
+    for (std::size_t cpu{}; cpu < max_cpus; ++cpu) {
+        if (this->apic_id[cpu] == destination) {
+            this->start_up_vector[cpu].store(vector + 1);
+            return;
+        }
+    }
+}
+
+void hypervisor::apply_start_up(arch::x86_64::context & context,
+                                std::uint64_t vector)
 {
     auto & vmcs = this->vmcs;
 
@@ -1446,6 +1574,14 @@ hypervisor::main(arch::x86_64::context & caller_context)
     // Initialize special registers.
     initialize_registers();
 
+    // Record this processor's x2APIC id, so that an intercepted interrupt
+    // command register write naming it as the destination can be matched
+    // back to an index here.
+    if (cpuid < max_cpus) {
+        this->apic_id[cpuid] =
+            arch::x86_64::rdmsr(arch::x86_64::msr::ia32_x2apic_apic_id);
+    }
+
     // Perform only on first CPU load.
     if (0 == cpuid) {
         // Initialize memory region.
@@ -1468,6 +1604,11 @@ hypervisor::main(arch::x86_64::context & caller_context)
 
         // Initialize host IDT, which needs the GDT above to exist.
         initialize_host_idt();
+
+        // Start intercepting the interrupt command register, before any
+        // other processor is launched. The MSR bitmap is shared by every
+        // VMCS, so this is done once.
+        intercept_interrupt_command(true);
     }
 
     // Initialize intermediate GDT.
@@ -1726,8 +1867,26 @@ hypervisor::main(arch::x86_64::context & caller_context)
                                  context.rax | (context.rdx << 32));
             break;
         }
-        case basic_reason::rdmsr:
-        case basic_reason::wrmsr: {
+        case basic_reason::wrmsr:
+            // The one MSR this VMM asks to see. It is inside the range the
+            // bitmap covers, so it exits only because the bitmap says so.
+            if (arch::x86_64::msr::ia32_x2apic_icr ==
+                static_cast<std::uint32_t>(context.rcx)) {
+                auto command =
+                    (context.rax & 0xffffffff) | (context.rdx << 32);
+                on_interrupt_command(command);
+
+                // Passed through, so the interrupt is still delivered.
+                // The INIT half of INIT-SIPI-SIPI is delivered reliably as
+                // a VM exit and is what puts the target in the handler
+                // above; only the start-up half can be discarded, and that
+                // one has already been recorded.
+                arch::x86_64::wrmsr(arch::x86_64::msr::ia32_x2apic_icr,
+                                    command);
+                break;
+            }
+            [[fallthrough]];
+        case basic_reason::rdmsr: {
             // SDM 28.1.3 lists, among the reasons RDMSR causes a VM exit,
             // that "the MSR address is not in the ranges 00000000H -
             // 00001FFFH and C0000000H - C0001FFFH". Accesses inside those
@@ -1801,7 +1960,7 @@ hypervisor::main(arch::x86_64::context & caller_context)
             // for this processor is discarded rather than queued, and
             // logging allocates and takes a lock. record_exit below
             // captures the exit anyway.
-            emulate_init_signal();
+            emulate_init_signal(context);
             advance_rip = false;
             break;
         }
