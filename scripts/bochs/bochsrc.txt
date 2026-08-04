@@ -14,11 +14,18 @@ memory: guest=1024, host=1024
 # sense of time rather than actual speed. Too low a value makes firmware and
 # guests hit their own internal timeouts, so keep it realistic.
 #
-# One processor, because this file is the one run.sh uses and that build has
-# the gdb stub: bochs.h refuses to compile the stub together with SMP. The
-# multiprocessor part of the self check therefore has nothing to send a
-# start-up IPI to under run.sh, and is exercised by scripts/ci/bochs-smoke.sh
-# instead, which rewrites this line to $CPUS against an SMP build.
+# One processor is a default here, not a restriction. Raise it when the
+# multiprocessor paths are what is being debugged - the start-up IPI half of
+# the self check has nothing to send an IPI to at count=1.
+#
+# It used to say the stub and SMP could not coexist, on the strength of the
+# #error in bochs.h. That #error is real but is only a guard: its own comment
+# says the problem is knowing which CPU gdb refers to, and pinning the stub to
+# processor 0 answers that. Built and run with both enabled, four processors
+# reach ZPP_HYPERVISOR_ACTIVE with gdb attached. The surviving limitation is
+# the one the guard was about - gdb only ever sees processor 0.
+#
+# scripts/ci/bochs-smoke.sh rewrites this line to $CPUS regardless.
 cpu: model=corei7_icelake_u, count=1, ips=250000000, reset_on_triple_fault=1
 
 ata0: enabled=1, ioaddr1=0x1f0, ioaddr2=0x3f0, irq=14

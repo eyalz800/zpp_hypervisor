@@ -190,10 +190,13 @@ struct verify
         result.signature[2] = registers[2];
         result.signature[3] = registers[3];
 
-        if (!(result.leaf_1_ecx & (1u << 31))) {
-            return -1;
-        }
-
+        // The present bit is recorded and reported, but deliberately not
+        // required. This VMM leaves it clear so its guest does not know it
+        // is virtualized - see the CPUID leaf 1 handling for why - so
+        // demanding it here would fail a working hypervisor. The signature
+        // below is the real evidence anyway: nothing but this VMM answers
+        // leaf 0x40000000 with it, and answering at all proves vmxon, the
+        // VMCS, vmlaunch, the exit handler and vmresume all worked.
         if (!signature_matches(result.signature)) {
             return -2;
         }

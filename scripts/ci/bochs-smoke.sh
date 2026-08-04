@@ -32,8 +32,23 @@ cpus="${CPUS:-4}"
 
 # Unattended, so no gdb stub - Bochs would otherwise wait for a connection.
 # Deleted rather than set to enabled=0: a Bochs built without the stub panics
-# on the option being mentioned at all, and an SMP build cannot have the stub -
-# bochs.h refuses to compile that combination.
+# on the option being mentioned at all.
+#
+# This used to say that an SMP build cannot have the stub, because bochs.h
+# refuses to compile the combination. The #error is real, but reading it as a
+# limitation was wrong: nothing behind it is broken, and a Bochs 3.0 built
+# with both was measured booting all four processors to
+# ZPP_HYPERVISOR_ACTIVE with gdb attached. Removing the #error leaves three
+# mechanical problems, all in gdbstub.cc: its free functions use
+# BX_CPU_THIS_PTR, which is "this->" under SMP; it calls the
+# uniprocessor-only global bx_cpu; and it advances the guest with cpu_loop(),
+# which under SMP neither ticks the clock nor yields, so the first processor
+# to spin would hold the machine forever. Pinning the shortcuts to processor
+# 0 and running the same round-robin scheduler main.cc uses for SMP answers
+# all three. What survives is a functional limit rather than a compile-time
+# one, and it is what the #error's own comment was really about: gdb is only
+# ever shown processor 0. So the line is deleted here because this script
+# runs unattended, not because the two cannot coexist.
 # Also report info messages rather than ignoring them: the interactive config
 # suppresses everything after startup, which leaves no way to tell a slow boot
 # from a wedged one. show_ips was compiled in, so this also gives a heartbeat.

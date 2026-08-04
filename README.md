@@ -226,17 +226,28 @@ time, and the Homebrew bottle is built with the internal debugger, so it reports
         --with-nogui --with-sdl2
     make -j"$(sysctl -n hw.ncpu)" && make install
 
-Two flags must be left out. `--enable-all-optimizations` implies
-handlers-chaining, which the gdb stub does not support. `--enable-smp` is
-rejected outright - `bochs.h` has a hard `#error` reading "GDB stub was
-written for single processor support", because the stub has no way to say
-which CPU gdb is asking about. So a gdbstub build is **single CPU only**.
+One flag must be left out: `--enable-all-optimizations` implies
+handlers-chaining, which the gdb stub does not support.
 
-That matters for this project: `zpp_load_elf` loops over every CPU, and the
-argument that `hypervisor::instance()` is safe without a guard rests on CPUs
-being launched one at a time. Neither can be exercised under gdb. To test the
-multi-CPU paths, build a second Bochs with `--enable-smp --enable-debugger`
-(no gdb stub) and drive it from Bochs' own debugger instead.
+`--enable-smp` **can** be combined with `--enable-gdb-stub`, despite the hard
+`#error` in `bochs.h` reading "GDB stub was written for single processor
+support". That `#error` is a conservative guard rather than a limitation - its
+own comment explains the problem is knowing which CPU gdb refers to, and
+pinning the stub to processor 0 settles it. Three mechanical things need
+fixing alongside it: `BX_CPU_THIS_PTR` expands to `this->` under SMP and every
+use in `gdbstub.cc` is in a free function, the `bx_cpu` global only exists
+when SMP is off, and `cpu_loop()` neither ticks the clock nor yields under SMP
+so the stub must round-robin the processors the way `main.cc` does.
+
+This was built and run rather than reasoned about: four processors reach
+`ZPP_HYPERVISOR_ACTIVE on every cpu` with gdb attached, and `count=1` behaves
+exactly as the old single-processor build did. The surviving limitation is the
+one the guard was written about - **gdb only ever sees processor 0**.
+
+That matters for this project, which is why it was worth doing: `zpp_load_elf`
+loops over every CPU, and the argument that `hypervisor::instance()` is safe
+without a guard rests on CPUs being launched one at a time. Both are now
+observable under a debugger.
 
 Verify the result with:
 

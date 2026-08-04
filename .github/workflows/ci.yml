@@ -129,14 +129,20 @@ jobs:
           # basename without <libgen.h> breaks on some toolchains.
           sed -i 's|#include "param_names.h"|#include <libgen.h>\n#include "param_names.h"|' \
               gui/keymap.cc
-          # SMP rather than the gdb stub. bochs.h refuses to compile the
-          # two together ("GDB stub was written for single processor
-          # support"), and the smoke test needs several processors far more
-          # than it needs a debugger: with one processor there is nothing to
-          # send a start-up IPI to, so it cannot exercise the INIT-SIPI-SIPI
-          # path at all - which is how a broken one reached real hardware.
-          # Interactive debugging still uses a gdbstub build locally; see
-          # scripts/bochs/run.sh, which honours $BOCHS.
+          # SMP without the gdb stub, because CI never attaches a debugger
+          # and the smoke test needs several processors: with one there is
+          # nothing to send a start-up IPI to, so it cannot exercise the
+          # INIT-SIPI-SIPI path at all - which is how a broken one reached
+          # real hardware.
+          #
+          # Not because the two cannot coexist. bochs.h has an #error
+          # saying the stub was written for one processor, but it is a
+          # guard rather than a limit and the combination has been built
+          # and run locally with four processors and gdb attached, at the
+          # cost of pinning the stub to processor 0. It is left out here
+          # only because it would buy CI nothing. Interactive debugging
+          # uses a local build; see scripts/bochs/run.sh, which honours
+          # $BOCHS.
           ./configure --prefix="$HOME/.local/bochs-smp" \
             --enable-smp --enable-vmx=2 --enable-x86-64 \
             --enable-cpu-level=6 --enable-avx --enable-evex --enable-pci \
