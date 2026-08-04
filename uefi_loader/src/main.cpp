@@ -629,10 +629,36 @@ static void * allocate_rwx(std::size_t size)
     trace::line("ZPP_TRACE allocate_rwx enter");
     EFI_PHYSICAL_ADDRESS physical_address{};
 
-    // Allocate pages just enough for 'size' bytes.
+    // Reserved, not runtime services code, and the difference decides
+    // whether this machine can resume from hibernation.
+    //
+    // Microsoft's UEFI firmware requirements state, for the S4 transition:
+    // "firmware runtime memory must be consistent across S4 sleep state
+    // transitions, in both size and location", where runtime memory is
+    // whatever the memory map reports with EFI_MEMORY_RUNTIME - which
+    // EfiRuntimeServicesCode carries. A hibernation image captured without
+    // this loader present, resumed with it present, therefore sees runtime
+    // memory that differs in both size and location from the image.
+    //
+    // The same document excludes AddressRangeReserved from both that rule
+    // and the matching one for operating system physical memory, so
+    // reserved memory is the one kind an image neither contains nor
+    // expects. That is exactly what this allocation wants to be: memory no
+    // operating system may account for, reuse, or restore over.
+    //
+    // Runtime services code was also the wrong description on its own
+    // terms. It means code the firmware calls through the runtime services
+    // after ExitBootServices, at a virtual address the operating system
+    // assigns with SetVirtualAddressMap. Nothing calls into this module
+    // that way, and having a virtual mapping made for it is not wanted.
+    //
+    // What matters for a resume is compounded by the module being hidden:
+    // protect_module clears every EPT permission on these pages, so a
+    // restore writing over them does not merely corrupt the module, it
+    // takes an EPT violation on a processor whose only response is to stop.
     auto status = g_boot_services->AllocatePages(
         AllocateAnyPages,
-        EfiRuntimeServicesCode,
+        EfiReservedMemoryType,
         (size + EFI_PAGE_SIZE - 1) / EFI_PAGE_SIZE,
         &physical_address);
 
