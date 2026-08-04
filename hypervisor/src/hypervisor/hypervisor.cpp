@@ -908,6 +908,49 @@ void hypervisor::record_exit(arch::x86_64::vmx::exit_reason reason)
     ++count;
 }
 
+void hypervisor::inject_general_protection_fault()
+{
+    constexpr std::uint64_t general_protection_vector = 13;
+
+    // A fault, so the guest resumes at the instruction that caused it
+    // rather than past it - which is why the exit handler must not advance
+    // RIP when this is used.
+    this->vmcs.vm_entry_interruption_information_field(
+        general_protection_vector |
+        arch::x86_64::vmx::vm_entry_interruption::hardware_exception |
+        arch::x86_64::vmx::vm_entry_interruption::deliver_error_code |
+        arch::x86_64::vmx::vm_entry_interruption::valid);
+
+    // Zero, which is what a general protection fault that is not a
+    // segment violation pushes.
+    this->vmcs.vm_entry_exception_error_code(0);
+}
+
+void hypervisor::on_unhandled_exit(arch::x86_64::vmx::exit_reason reason)
+{
+    auto & vmcs = this->vmcs;
+    auto & record = this->unhandled_exit;
+
+    // Capture while the VMCS is still current on this CPU.
+    record.reason = reason.value();
+    record.qualification = vmcs.exit_qualification();
+    record.guest_linear_address = vmcs.guest_linear_address();
+    record.guest_rip = vmcs.guest_rip();
+    record.guest_cs_selector = vmcs.guest_cs_selector();
+
+    // Written last, so a debugger that finds this set knows the rest of
+    // the record is complete rather than half filled in.
+    record.occurred = 1;
+
+    // The exit ring already holds the run up to this, and it stays
+    // readable because this CPU stops here rather than letting the guest
+    // proceed on corrupted state and take the machine down elsewhere.
+    for (;;) {
+        arch::x86_64::disable_interrupts();
+        arch::x86_64::halt();
+    }
+}
+
 void hypervisor::on_vm_entry_failure(arch::x86_64::vmx::exit_reason reason)
 {
     auto & vmcs = this->vmcs;
@@ -1471,6 +1514,35 @@ hypervisor::main(arch::x86_64::context & caller_context)
                                  context.rax | (context.rdx << 32));
             break;
         }
+        case basic_reason::rdmsr:
+        case basic_reason::wrmsr: {
+            // Reaching here means the MSR is outside the two ranges the
+            // MSR bitmap covers, 0 to 0x1fff and 0xc0000000 to
+            // 0xc0001fff. Accesses inside those ranges are governed by the
+            // bitmap, which is all zeroes, so they never exit. Outside
+            // them the access exits unconditionally and no bitmap can stop
+            // it.
+            //
+            // Nothing outside those ranges is a real MSR on this
+            // architecture. What lives there is the synthetic MSR space a
+            // paravirtual interface would implement - Windows reads
+            // 0x40000022, the Hyper-V timer frequency, having been told by
+            // CPUID that some hypervisor is present. This one implements
+            // no such interface, so the honest answer is the one bare
+            // hardware gives for an MSR that does not exist: a general
+            // protection fault.
+            //
+            // Getting this wrong is expensive and quiet. Resuming past the
+            // instruction instead leaves the guest believing it read a
+            // value, and Windows fails a long way from here with
+            // 0xc000000d, blaming its own boot configuration.
+            inject_general_protection_fault();
+
+            // The fault is reported at the faulting instruction, so RIP
+            // stays where it is.
+            advance_rip = false;
+            break;
+        }
         case basic_reason::invd: {
             // Execute the invd instruction.
             arch::x86_64::invd();
@@ -1493,7 +1565,14 @@ hypervisor::main(arch::x86_64::context & caller_context)
             break;
         }
         default: {
-            break;
+            // Everything reaching here exits unconditionally - there is
+            // no VM execution control that turns it off - so arriving
+            // means this VMM was asked something it does not implement.
+            // Recorded and stopped on rather than resumed from, because
+            // the resume below would advance RIP past an instruction that
+            // never took effect.
+            record_exit(full_reason);
+            on_unhandled_exit(full_reason);
         }
         }
 

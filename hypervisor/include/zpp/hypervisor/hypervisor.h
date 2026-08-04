@@ -244,6 +244,31 @@ private:
     void record_exit(arch::x86_64::vmx::exit_reason reason);
 
     /**
+     * Ask the processor to deliver a general protection fault to the guest
+     * on the next VM entry.
+     *
+     * This is how the VMM says "that instruction would have faulted on
+     * real hardware" - the alternative, resuming as though it had
+     * succeeded, hands the guest a result it never computed.
+     */
+    void inject_general_protection_fault();
+
+    /**
+     * Record an exit nothing here knows how to handle, and stop this CPU.
+     *
+     * Does not return. Resuming from an unhandled exit is not a neutral
+     * act: the resume path advances RIP by the length of the instruction
+     * that caused the exit, so the guest silently skips it and carries on
+     * with whatever the instruction was supposed to have produced left
+     * undone. For an EPT violation there is no instruction to skip at all.
+     * Either way the guest is quietly corrupted, and the eventual failure
+     * shows up somewhere unrelated - so this stops instead, where the
+     * cause is still visible.
+     */
+    [[noreturn]] void
+    on_unhandled_exit(arch::x86_64::vmx::exit_reason reason);
+
+    /**
      * Record a VM entry failure into vm_entry_failure and stop this CPU.
      *
      * Does not return, and deliberately so. The guest never ran, so there
@@ -481,6 +506,45 @@ private:
      * - the newest entry is at (count - 1) % capacity.
      */
     std::uint64_t exit_trace_count[max_cpus]{};
+
+    /**
+     * The exit nothing knew how to handle, filled in by
+     * on_unhandled_exit just before it stops the CPU. For a debugger, and
+     * for the same reason as vm_entry_failure below: none of it can be
+     * recovered afterwards, because reading a VMCS field needs the VMCS
+     * to still be current on this CPU.
+     */
+    struct
+    {
+        /**
+         * Non-zero once an unhandled exit has been recorded. Checked
+         * first: every other field is meaningless until this is set.
+         */
+        std::uint64_t occurred{};
+
+        /**
+         * The exit reason. Its low bits name which exit it was.
+         */
+        std::uint64_t reason{};
+
+        /**
+         * The exit qualification, whose meaning depends on the reason -
+         * for an EPT violation it says what kind of access faulted.
+         */
+        std::uint64_t qualification{};
+
+        /**
+         * The guest linear address, meaningful for the exits that report
+         * one, which is what an EPT violation needs to be understood.
+         */
+        std::uint64_t guest_linear_address{};
+
+        /**
+         * Where the guest was, so the offending instruction can be found.
+         */
+        std::uint64_t guest_rip{};
+        std::uint64_t guest_cs_selector{};
+    } unhandled_exit{};
 
     /**
      * Everything known about a VM entry that failed, filled in by

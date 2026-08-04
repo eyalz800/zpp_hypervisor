@@ -9,6 +9,17 @@ set(ZPP_OUTPUT_DIR "${ZPP_SOURCE_DIR}/out/${ZPP_CONFIG_LOWER}/x86_64")
 
 set(FREESTANDING_TOOLCHAIN "${CMAKE_CURRENT_SOURCE_DIR}/cmake/toolchain-x86_64-freestanding.cmake")
 
+# Debugging only: makes the hypervisor spin at its entry point until a
+# debugger releases it with `set var zpp::hypervisor::gdb_attached = 1`.
+#
+# The alternative is racing the guest with a gdb attach, which does not work
+# once the thing being chased kills the guest: symbols cannot be loaded until
+# the loader has mapped the module, and by then the failure has happened. This
+# stops the module before anything runs, with the mapping already in place.
+option(ZPP_HYPERVISOR_WAIT_FOR_DEBUGGER
+    "Spin at the hypervisor entry point until a debugger releases it"
+    OFF)
+
 # === Hypervisor (freestanding x86_64 PIE ELF) ===
 ExternalProject_Add(hypervisor
     SOURCE_DIR "${CMAKE_CURRENT_SOURCE_DIR}/cmake/hypervisor"
@@ -19,6 +30,7 @@ ExternalProject_Add(hypervisor
         -DCMAKE_EXPORT_COMPILE_COMMANDS=ON
         -DZPP_SOURCE_DIR=${ZPP_SOURCE_DIR}
         -DZPP_OUTPUT_DIR=${ZPP_OUTPUT_DIR}
+        -DZPP_HYPERVISOR_WAIT_FOR_DEBUGGER=${ZPP_HYPERVISOR_WAIT_FOR_DEBUGGER}
     INSTALL_COMMAND ""
     BUILD_ALWAYS ON
 )
