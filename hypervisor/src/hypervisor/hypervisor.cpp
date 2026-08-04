@@ -942,6 +942,8 @@ void hypervisor::on_unhandled_exit(arch::x86_64::vmx::exit_reason reason)
     // the record is complete rather than half filled in.
     record.occurred = 1;
 
+    log("stopping, unhandled exit reason {}", reason.value());
+
     // The exit ring already holds the run up to this, and it stays
     // readable because this CPU stops here rather than letting the guest
     // proceed on corrupted state and take the machine down elsewhere.
@@ -975,6 +977,8 @@ void hypervisor::on_vm_entry_failure(arch::x86_64::vmx::exit_reason reason)
     // Written last, so a debugger that finds this set knows the rest of
     // the record is complete rather than half filled in.
     record.occurred = 1;
+
+    log("stopping, vm entry failed, reason {}", reason.value());
 
     // Stop. This CPU is not going to run a guest again, and pretending
     // otherwise is what made this failure invisible before.
@@ -1431,6 +1435,9 @@ hypervisor::main(arch::x86_64::context & caller_context)
     // jumping into a dead frame.
     this->host_exception_recovery_flag = nullptr;
 
+    log("launching guest on virtual processor {}",
+        this->next_virtual_processor);
+
     // Launch VM.
     vm_launch(caller_context, [&](auto & context) {
         using basic_reason = arch::x86_64::vmx::exit_reason::basic_reason;
@@ -1601,6 +1608,14 @@ hypervisor::main(arch::x86_64::context & caller_context)
             // 0xc000000d, blaming its own boot configuration.
             inject_general_protection_fault();
 
+            // The MSR index, which is the one thing needed to tell an
+            // absent architectural MSR from a synthetic one a guest was
+            // invited to ask for. Finding this out the first time took a
+            // debugger and a breakpoint.
+            log("general protection fault on {} of msr {}",
+                (basic_reason::rdmsr == reason) ? "rdmsr" : "wrmsr",
+                context.rcx);
+
             // The fault is reported at the faulting instruction, so RIP
             // stays where it is.
             advance_rip = false;
@@ -1616,14 +1631,16 @@ hypervisor::main(arch::x86_64::context & caller_context)
             // about it, so this is the only thing standing between an
             // application processor and never waking again.
             emulate_init_signal();
+            log("init signal on cpu {}", vmcs.vpid());
             advance_rip = false;
             break;
         }
         case basic_reason::start_up_ipi: {
             // The vector is the low byte of the exit qualification.
             constexpr std::uint64_t sipi_vector_mask = 0xff;
-            emulate_start_up_ipi(vmcs.exit_qualification() &
-                                 sipi_vector_mask);
+            auto vector = vmcs.exit_qualification() & sipi_vector_mask;
+            emulate_start_up_ipi(vector);
+            log("start-up ipi on cpu {}, vector {}", vmcs.vpid(), vector);
             advance_rip = false;
             break;
         }

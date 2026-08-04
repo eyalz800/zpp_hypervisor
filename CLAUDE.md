@@ -122,9 +122,34 @@ Consequences worth remembering:
 - Anything allocating from a constructor is fine: `crt::init::main()` brings the heap up
   before walking the arrays.
 - Verify on the built ELF rather than by inspection. `llvm-nm -u` must report **no undefined
-  symbols**, and `llvm-readelf -S … | grep init_array` is currently **empty** — nothing in
-  the tree needs dynamic initialization today. An `.init_array` appearing is not a failure,
-  but it should be a deliberate choice rather than a surprise.
+  symbols**, and `llvm-readelf -S … | grep init_array` is **empty** — nothing in the tree
+  needs dynamic initialization. Keep it that way for now, because:
+
+**Dynamic initialization does not currently work.** This is measured, not suspected. Putting
+a `zpp::list<zpp::string>` at namespace scope — the hypervisor log's first shape — produced
+the one `.init_array` entry this tree has ever had, and the hypervisor then hung on the boot
+CPU inside `crt::init::main()`: the loader's last trace is `number_of_cpus enter` and
+`loaded` never arrives. Making the same container a function-local static, so nothing needs
+dynamic initialization, fixed it with no other change.
+
+What has been ruled out, so nobody re-checks it:
+
+- The relocation is correct. The entry gets an `R_X86_64_RELATIVE` with addend `0xa580`, the
+  section contents are `0`, and `elf_file::relocate` correctly uses `base + r_addend` for
+  RELA rather than `*target += base`. It resolves to `__cxx_global_var_init`.
+- The bounds are correct and PC-relative, so they survive being loaded at any base:
+  `__init_array_start`/`__init_array_end` differ by exactly the one entry.
+- Ordering is correct: `g_heap.init` runs before the walk, so a constructor may allocate.
+
+What is left, and where to look next: the constructor path itself — the `list` constructor,
+`zpp::allocator`'s call to `crt::heap()`, or the `__cxa_atexit` registration that follows it.
+Build with `-DZPP_HYPERVISOR_WAIT_FOR_DEBUGGER=ON` and put a hardware breakpoint on
+`__cxx_global_var_init`; that is exactly the situation the flag exists for.
+
+One latent trap found while looking: `__preinit_array_start` and `__preinit_array_end` are
+both link-time address `0`, which PC-relative addressing turns into *the module base* at
+runtime rather than `0`. They are equal, so the preinit loop is a no-op and this is harmless
+today — but it would walk from the module base if they ever differed.
 
 ### The init array machinery
 
@@ -228,6 +253,16 @@ state is recorded into members as it happens:
   with. Newest entry is at `(count - 1) % capacity`.
 - `unhandled_exit`, `vm_entry_failure` — filled in immediately before the CPU
   stops. Check `occurred` first; the rest is meaningless until it is set.
+- `zpp::hypervisor::log_storage::lines()` — the hypervisor's own log as text,
+  oldest first, written with `log("...{}", value)` from
+  `zpp/hypervisor/log.h`. The records above say what the state *was*; this says
+  what *happened*, in order, across CPUs. A record only describes the last of
+  its kind, and a boot failure is usually a sequence — the `rdmsr` of
+  `0x40000022` that cost an afternoon is one `log` line now.
+
+  Where its memory comes from is settled in `log_storage` alone, behind the
+  `line` and `line_list` aliases, so moving the log to a per-CPU heap is a
+  change to that class and to nothing else.
 
 Build with `-DZPP_HYPERVISOR_WAIT_FOR_DEBUGGER=ON` and the hypervisor spins at
 its entry point until released with `set var gdb_attached = 1`. Use it. Racing a
