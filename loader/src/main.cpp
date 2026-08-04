@@ -75,9 +75,12 @@ zpp_load_elf(const struct zpp_loader_parameters * parameters)
             static_cast<int (*)(void *)>(erased_launch),
             std::addressof(launch));
 
-        // If failed, return failure.
+        // If failed, hand the hypervisor's own error code back rather than
+        // flattening it to -1. Its codes are positive, so they stay
+        // distinguishable from the -1 this function returns for failures
+        // of its own, and the caller gets to say which step went wrong.
         if (result) {
-            return -1;
+            return result;
         }
     }
 

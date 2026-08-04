@@ -5,11 +5,13 @@
 #include "zpp/error.h"
 #include "zpp/scope_exit.h"
 #include "zpp/x64/asm.h"
+#include "zpp/x64/exception_entry.h"
 #include "zpp/x64/generic.h"
 #include "zpp/x64/intel/asm.h"
 #include "zpp/x64/intel/ept_pointer.h"
 #include "zpp/x64/intel/vmcs.h"
 #include "zpp/x64/intel/vmx_exit_reason.h"
+#include "zpp/x64/interrupt_gate.h"
 #include "zpp/x64/page_table.h"
 #include "zpp/x64/segment_descriptor.h"
 #include "zpp/x64/vm_exit_entry.h"
@@ -131,9 +133,17 @@ hypervisor::initialize_module_physical_to_virtual()
 
 void hypervisor::initialize_host_gdt()
 {
-    // Set the cs and tr indices.
-    auto cs_index = 1;
-    auto tr_index = 2;
+    // The index the OS keeps its own code segment at. The host IDT gates
+    // have to name it, for the reason spelled out at the alias below, so
+    // our own descriptors have to keep clear of it.
+    auto os_cs_index = x64::cs() >> 3;
+
+    // Set the cs and tr indices. The code segment takes one entry and the
+    // task segment two, so the pair occupies three consecutive entries.
+    // Placing them at one or at four means whichever pair is chosen cannot
+    // contain the OS code selector index.
+    auto cs_index = (os_cs_index <= 3) ? 4 : 1;
+    auto tr_index = cs_index + 1;
 
     // Initialize the code segment.
     x64::segment_descriptor code_segment;
@@ -150,6 +160,15 @@ void hypervisor::initialize_host_gdt()
     code_segment.granularity(true);
     this->host_gdt[cs_index] = code_segment.basic_value();
     this->host_cs = cs_index << 3;
+
+    // Alias the same code segment at the OS code selector index. The host
+    // IDT is loaded under two different GDTs - the intermediate GDT before
+    // the VM is launched, and the host GDT after a VM exit - and its gates
+    // carry a single selector, which therefore has to name a 64 bit code
+    // segment in both. The intermediate GDT is a copy of the OS GDT, so
+    // that selector has to be the OS code selector, and this alias is what
+    // makes it resolve here as well. See initialize_host_idt.
+    this->host_gdt[os_cs_index] = code_segment.basic_value();
 
     // Initialize the task state segment.
     x64::segment_descriptor task_state_segment;
@@ -172,7 +191,86 @@ void hypervisor::initialize_host_gdt()
 
 void hypervisor::initialize_host_idt()
 {
-    // Do nothing for now.
+    // The selector the gates name. Not host_cs: the IDT is loaded while
+    // the intermediate GDT is active as well, where our own descriptors do
+    // not exist, so the gates go through the OS code selector, which
+    // initialize_host_gdt aliased into the host GDT for this.
+    auto selector = x64::cs();
+
+    // One 64 bit interrupt gate per vector, each pointing at the stub for
+    // that vector. Interrupt rather than trap gates, so a handler cannot
+    // be interrupted, and no interrupt stack table entry, so a handler
+    // runs on the stack that was already in use - which is the hypervisor
+    // stack, and is where the faulting frame is.
+    for (std::size_t vector{}; vector < x64::number_of_exception_vectors;
+         ++vector) {
+        x64::interrupt_gate gate;
+        gate.offset(x64::exception_entry(vector));
+        gate.selector(selector);
+        gate.interrupt_stack_table(0);
+        gate.type(x64::interrupt_gate::gate_type::interrupt);
+        gate.privilege_level(0);
+        gate.present(true);
+
+        this->host_idt[vector * 2] = gate.basic_value();
+        this->host_idt[(vector * 2) + 1] = gate.extended_value();
+    }
+
+    this->host_idtr.base = reinterpret_cast<std::uint64_t>(this->host_idt);
+    this->host_idtr.limit =
+        (x64::number_of_exception_vectors * 2 * sizeof(std::uint64_t)) - 1;
+}
+
+void hypervisor::load_host_idt()
+{
+    x64::idt_layout lidt_layout{};
+    lidt_layout.base = this->host_idtr.base;
+    lidt_layout.limit = this->host_idtr.limit;
+    x64::lidt(lidt_layout.data());
+}
+
+void hypervisor::load_os_idt()
+{
+    x64::idt_layout lidt_layout{};
+    lidt_layout.base = this->idtr.base;
+    lidt_layout.limit = this->idtr.limit;
+    x64::lidt(lidt_layout.data());
+}
+
+void hypervisor::on_host_exception(const x64::exception_frame & frame)
+{
+    // Record before touching anything that could fault again, so there is
+    // something to read even if this handler does not survive.
+    this->host_exception = frame;
+    this->host_exception_cr2 = x64::cr2();
+
+    // Take the recovery point, if there is one, and consume it - unwinding
+    // to it twice would land on a frame that has already returned.
+    auto recovery_flag = this->host_exception_recovery_flag;
+    this->host_exception_recovery_flag = nullptr;
+
+    // No recovery point. This is the state once the guest is running: the
+    // VMCS points the host IDTR at our IDT, so an exception in the VMM
+    // arrives here, but main's frame is long gone by then. Stop instead of
+    // unwinding into it. A real VMM exception handler is what this wants
+    // eventually.
+    if (!recovery_flag) {
+        for (;;) {
+            x64::disable_interrupts();
+            x64::halt();
+        }
+    }
+
+    // Tell main it is arriving from an exception rather than from the
+    // capture, then unwind. This is a longjmp, not an unwind of the C++
+    // stack, so everything between the fault and main's frame is dropped -
+    // but main's frame itself is intact, and that is where the guards that
+    // put the machine back the way it was found live.
+    *recovery_flag = true;
+    x64::restore_context(&this->host_exception_recovery);
+
+    // restore_context does not return.
+    __builtin_unreachable();
 }
 
 void hypervisor::initialize_intermediate_gdt()
@@ -271,8 +369,15 @@ void hypervisor::load_os_gdt()
     lgdt_layout.limit = this->gdtr.limit;
     x64::lgdt(lgdt_layout.data());
 
-    // Load OS TSS segment if changed.
-    if (this->guest_tr != this->os_tr) {
+    // Load OS TSS segment if changed. Skipped when the OS had no task
+    // segment at all, which is the UEFI case that
+    // initialize_intermediate_gdt synthesizes one for: the selector to put
+    // back would be null, and ltr rejects a null selector with a general
+    // protection fault. There is no instruction that unloads the task
+    // register, so the synthesized segment stays loaded - which is
+    // harmless, because it lives in unprotected memory that outlives this
+    // module either way.
+    if (this->os_tr && this->guest_tr != this->os_tr) {
         x64::ltr(&this->os_tr);
     }
 }
@@ -582,6 +687,37 @@ void hypervisor::initialize_vmx()
         this->cached_vmx_msr(msr::vmx::cr4_fixed_0) & 0xffffffff;
 }
 
+std::expected<void, zpp::error> hypervisor::enable_vmx_in_feature_control()
+{
+    // Bit 0 locks the register, and bit 2 is what actually permits VMXON
+    // outside SMX. VMXON raises a general protection fault unless the lock
+    // bit is set and bit 2 with it.
+    constexpr std::uint64_t lock = 1ull << 0;
+    constexpr std::uint64_t vmxon_outside_smx = 1ull << 2;
+
+    auto feature_control =
+        x64::intel::rdmsr(x64::intel::msr::ia32_feature_control);
+
+    // Already unlocked by the firmware, so set both bits ourselves.
+    // Writing the lock bit is required: leaving it clear keeps vmxon
+    // faulting.
+    if (!(feature_control & lock)) {
+        x64::intel::wrmsr(x64::intel::msr::ia32_feature_control,
+                          feature_control | lock | vmxon_outside_smx);
+        return {};
+    }
+
+    // Locked with VMXON disallowed. The register is write-once per reset,
+    // so nothing here can change it - the firmware has turned
+    // virtualization off and only the firmware can turn it back on.
+    if (!(feature_control & vmxon_outside_smx)) {
+        return std::unexpected(
+            zpp::error{error::vmx_disabled_by_firmware});
+    }
+
+    return {};
+}
+
 std::expected<void, zpp::error> hypervisor::enter_root_mode()
 {
     // Backup cr0 and cr4.
@@ -595,6 +731,15 @@ std::expected<void, zpp::error> hypervisor::enter_root_mode()
     // Change cr4.
     x64::cr4(this->host_cr4);
     scope_exit restore_cr4{[&] { x64::cr4(cr4); }};
+
+    // Let VMXON through in IA32_FEATURE_CONTROL. Without this vmxon raises
+    // a general protection fault rather than failing with the carry flag,
+    // which is how the missing host IDT used to turn into a triple fault.
+    // The MSR is per logical processor, so this belongs here rather than
+    // in the once-per-boot setup.
+    if (auto result = enable_vmx_in_feature_control(); !result) {
+        return result;
+    }
 
     // Turn on vmx.
     if (x64::intel::vmxon(&this->vmx_physical)) {
@@ -925,11 +1070,11 @@ hypervisor::main(x64::context & caller_context)
             return result;
         }
 
-        // Initialize host IDT.
-        initialize_host_idt();
-
         // Initialize host GDT.
         initialize_host_gdt();
+
+        // Initialize host IDT, which needs the GDT above to exist.
+        initialize_host_idt();
     }
 
     // Initialize intermediate GDT.
@@ -946,6 +1091,32 @@ hypervisor::main(x64::context & caller_context)
 
     // Guard to restore cr3.
     scope_exit restore_cr3{[&] { x64::cr3(this->guest_cr3); }};
+
+    // The OS IDT lives in memory the host page table does not map, so with
+    // the switch above done IDTR names pages that are no longer there.
+    // Every exception would fault again while being delivered and escalate
+    // to a triple fault, taking the machine down with no diagnosis. Load
+    // the host IDT, which is inside the module and therefore mapped.
+    load_host_idt();
+
+    // Guard to restore the OS IDT.
+    scope_exit restore_os_idt{[&] { load_os_idt(); }};
+
+    // Arm the recovery point the host IDT handler unwinds to, using the
+    // same trick as the VM exit path in vm_launch: capture_context returns
+    // twice, and the second return is the exception. Atomic so the flag is
+    // read from memory rather than from a register the unwind restored.
+    std::atomic<bool> host_exception_occurred;
+    host_exception_occurred = false;
+    this->host_exception_recovery_flag = &host_exception_occurred;
+    x64::capture_context(&this->host_exception_recovery);
+
+    // Arriving from an exception rather than from the capture. The details
+    // are in host_exception and host_exception_cr2 for a debugger to read;
+    // the caller only learns that a host exception happened.
+    if (host_exception_occurred) {
+        return std::unexpected(zpp::error{error::host_exception});
+    }
 
     // Perform only on first CPU load.
     if (0 == cpuid) {
@@ -980,6 +1151,13 @@ hypervisor::main(x64::context & caller_context)
 
     // Setup vmcs.
     setup_vmcs(caller_context);
+
+    // Disarm the recovery point. It is only good while this frame is live,
+    // and the launch below does not return - the guest resumes on the
+    // caller's stack instead - so from here on a host exception has
+    // nothing to unwind to and the handler stops the CPU rather than
+    // jumping into a dead frame.
+    this->host_exception_recovery_flag = nullptr;
 
     // Launch VM.
     vm_launch(caller_context, [&](auto & context) {
@@ -1125,3 +1303,13 @@ void hypervisor::launch_on_cpu(x64::context & caller_context)
 }
 
 } // namespace zpp::hypervisor
+
+/**
+ * The handler every host IDT entry stub funnels into. Declared by
+ * zpp/x64/exception_entry.h, which the x64 layer uses without knowing what
+ * implements it.
+ */
+extern "C" void zpp_x64_exception(zpp::x64::exception_frame * frame)
+{
+    zpp::hypervisor::hypervisor::instance().on_host_exception(*frame);
+}
