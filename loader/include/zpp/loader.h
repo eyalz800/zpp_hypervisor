@@ -80,16 +80,43 @@ struct zpp_loader_parameters
     void * (*allocate_below_one_megabyte)(size_t size);
 
     /**
+     * The crash log region the platform has already reserved, at the one
+     * fixed physical address the next boot will look for it at, or null
+     * where the platform refused that address or does not do this at all.
+     *
+     * Data rather than a service, unlike the reservation above, because
+     * the ordering is not this function's to choose. The region has to be
+     * claimed at the very start of the platform loader: the previous
+     * boot's log is read out of it and written to disk there, before
+     * anything else has had a chance to fail, so that a boot which never
+     * reaches zpp_load_elf still reports what the last one left behind. By
+     * the time this struct is filled in, it is done.
+     *
+     * The address is not carried here either - it is a constant both ends
+     * already agree on, zpp::crash_log::region_address. What crosses this
+     * boundary is only whether this boot's loader succeeded in claiming
+     * it, which is a question nothing else can answer: the region survives
+     * restarts by design, so anything found inside it may have been left
+     * by a boot whose memory map was not this one's.
+     *
+     * Null on the platforms where an operating system is already running
+     * and has its own means of keeping a log across a restart.
+     */
+    void * crash_log_memory;
+
+    /**
      * Adjusts the calling convention before entering the hypervisor. May
      * be null when the platform's convention already matches.
      */
     int (*adjust_launch_calling_convention)(
         int (*entry)(size_t cpu,
                      uintptr_t (*physical_to_virtual)(uintptr_t),
-                     void * start_up_memory),
+                     void * start_up_memory,
+                     void * crash_log_memory),
         size_t cpu,
         uintptr_t (*physical_to_virtual)(uintptr_t),
-        void * start_up_memory);
+        void * start_up_memory,
+        void * crash_log_memory);
 };
 
 /**

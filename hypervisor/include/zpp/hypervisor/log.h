@@ -1,5 +1,6 @@
 #pragma once
 #include "zpp/containers.h"
+#include "zpp/crash_log.h"
 #include "zpp/spin_lock.h"
 #include <cstddef>
 #include <cstdint>
@@ -55,10 +56,52 @@ public:
         auto & lines = storage();
 
         m_lock.lock();
+
+        // Through to memory that outlives this boot, before the line is
+        // moved into the list and its bytes stop being ours to read.
+        //
+        // Write-through rather than flushed on demand, and that is the
+        // only strategy that survives the failure this exists for. A flush
+        // needs a moment to happen at, and the failures with no other
+        // diagnosis channel are precisely the ones that provide no such
+        // moment: a guest that hangs runs no more of our code, a processor
+        // stopped in on_unhandled_exit's halt loop has already stopped,
+        // and a triple fault resets the machine without asking. Anything
+        // held back for a flush is lost in exactly the cases it was
+        // collected for.
+        //
+        // Affordable because of where it sits. This is inside the lock the
+        // list already needs, so it introduces no second lock and no way
+        // to deadlock - which matters, because zpp::spin_lock is not
+        // recursive and this path is reachable from every VM exit handler.
+        // The work itself is two memcpy calls and a header update,
+        // allocates nothing, and cannot fail.
+        m_crash_log.append_line(
+            std::span<const char>{text.data(), text.size()});
+
         lines.push_back(std::move(text));
         if (lines.size() > max_lines) {
             lines.pop_front();
         }
+        m_lock.unlock();
+    }
+
+    /**
+     * Points the log at memory that outlives the boot, or at nothing.
+     *
+     * Here rather than anywhere else for the reason the aliases above
+     * give: where this log's memory comes from is settled in this class
+     * alone. An unattached log is the normal state on every platform whose
+     * loader does not reserve a region, and costs one comparison per line.
+     *
+     * Under the lock, because a line may be being written on another
+     * processor. In practice the boot processor calls this before any
+     * other processor exists, but the cost of being right about it is nil.
+     */
+    static void attach(zpp::crash_log log)
+    {
+        m_lock.lock();
+        m_crash_log = log;
         m_lock.unlock();
     }
 
@@ -205,8 +248,19 @@ private:
     static inline line_list m_lines{};
 
     /**
-     * Guards the list. Not recursive, and never held across anything that
-     * can fault, so a stopped CPU cannot leave it held.
+     * Memory that outlives the boot, or nothing.
+     *
+     * Constant initialized, so this costs no .init_array entry of its own
+     * - an unattached log is a pair of null span members and needs no
+     * constructor to run. Whether it is attached is decided once, by the
+     * boot processor, out of what the loader reserved.
+     */
+    static constinit inline zpp::crash_log m_crash_log{};
+
+    /**
+     * Guards the list, and the region above with it. Not recursive, and
+     * never held across anything that can fault, so a stopped CPU cannot
+     * leave it held.
      */
     static inline zpp::spin_lock m_lock{};
 };
