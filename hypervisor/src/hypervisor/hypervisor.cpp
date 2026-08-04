@@ -1650,7 +1650,17 @@ void hypervisor::on_unhandled_exit(arch::x86_64::vmx::exit_reason reason)
     // the record is complete rather than half filled in.
     record.occurred = 1;
 
-    log("stopping, unhandled exit reason {}", reason.value());
+    // Everything above went into members, which only a debugger attached
+    // to this CPU can read - and this CPU is about to stop, so on bare
+    // metal nothing ever reads them. The log is what survives a restart,
+    // so the record goes into it too rather than only into the members.
+    log("stopping, unhandled exit reason {} qualification {} rip {} "
+        "cs {} linear {}",
+        reason.value(),
+        record.qualification,
+        record.guest_rip,
+        record.guest_cs_selector,
+        record.guest_linear_address);
 
     // The exit ring already holds the run up to this, and it stays
     // readable because this CPU stops here rather than letting the guest
@@ -1686,7 +1696,18 @@ void hypervisor::on_vm_entry_failure(arch::x86_64::vmx::exit_reason reason)
     // the record is complete rather than half filled in.
     record.occurred = 1;
 
-    log("stopping, vm entry failed, reason {}", reason.value());
+    // Into the log as well as the members, for the reason given in
+    // on_unhandled_exit: the members need a debugger on a CPU that is
+    // about to stop, and the log outlives the restart.
+    log("stopping, vm entry failed, reason {} instruction error {} "
+        "activity {} rip {} cr0 {} cr4 {} rflags {}",
+        reason.value(),
+        record.instruction_error,
+        record.activity_state,
+        record.guest_rip,
+        record.guest_cr0,
+        record.guest_cr4,
+        record.guest_rflags);
 
     // Stop. This CPU is not going to run a guest again, and pretending
     // otherwise is what made this failure invisible before.
