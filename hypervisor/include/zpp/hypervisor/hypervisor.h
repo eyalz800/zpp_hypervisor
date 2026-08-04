@@ -542,8 +542,10 @@ private:
      * INIT-SIPI-SIPI sends two start-up IPIs, so a processor that started
      * on the first would be sent back to its entry point by the second -
      * and re-applying RIP zero to a processor already executing wedges it
-     * in a way indistinguishable from never having started. another implementation guards the
-     * same case with its is_initialised flag.
+     * in a way indistinguishable from never having started. The guard is
+     * a flag rather than a count because the architectural sequence is
+     * fixed at two: the question is only whether this processor has
+     * already been started, not how many times it was asked.
      */
     bool started_by_start_up_ipi[max_cpus]{};
 

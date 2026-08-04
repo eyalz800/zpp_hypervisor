@@ -41,11 +41,12 @@ enum type : std::uint64_t
     // answer. See also the CPUID leaf 1 handling, which stops advertising
     // it for the same reason.
     //
-    // KVM reaches the same conclusion. Both bits are in its
-    // KVM_REQUIRED_VMX_CPU_BASED_VM_EXEC_CONTROL, and it emulates each as
-    // a no-op (kvm_emulate_monitor_mwait, arch/x86/kvm/x86.c) - clearing
-    // them only when userspace explicitly asks, which is what QEMU's
-    // -overcommit cpu-pm=on does and why that flag exposed this.
+    // Measured rather than assumed: whatever is virtualizing this machine
+    // during development intercepts both by default and emulates each as a
+    // no-op, and stops intercepting them only when explicitly asked to.
+    // QEMU's -overcommit cpu-pm=on asks for exactly that, which is how
+    // this was exposed - with it on the guest sees the monitor advertised
+    // and application processors hang; with it off they do not.
     //
     // SDM Table 25-6, "Definitions of Primary Processor-Based
     // VM-Execution Controls", bits 10 and 29.

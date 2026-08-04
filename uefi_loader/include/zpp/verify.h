@@ -219,9 +219,9 @@ struct verify
             // A processor that never ran the function cannot report
             // anything itself, so ask the hypervisor about it from here.
             // This is the only channel: it is not executing, and a
-            // debugger cannot be used because QEMU's KVM_GET_MP_STATE
-            // discards a pending start-up IPI and so can cause the very
-            // failure being diagnosed.
+            // debugger cannot be used: reading a processor's state through
+            // the emulator discards a pending start-up IPI, so attaching
+            // one can cause the very failure being diagnosed.
             if (0 != result) {
                 std::uint32_t diagnostic[4]{};
                 query_cpuid_ecx(0x40000001, static_cast<std::uint32_t>(i),
