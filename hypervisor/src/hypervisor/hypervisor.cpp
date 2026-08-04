@@ -884,6 +884,63 @@ void hypervisor::emulate_start_up_ipi(std::uint64_t vector)
     vmcs.guest_activity_state(arch::x86_64::vmx::activity_state::active);
 }
 
+void hypervisor::record_exit(arch::x86_64::vmx::exit_reason reason)
+{
+    auto & vmcs = this->vmcs;
+
+    // The VPID was assigned as the virtual processor number, counting from
+    // one, so this is the CPU index. Guarded anyway: an out of range index
+    // here would corrupt whatever follows the ring.
+    auto cpu = vmcs.vpid() - 1;
+    if (cpu >= max_cpus) {
+        return;
+    }
+
+    auto & count = this->exit_trace_count[cpu];
+    auto & entry = this->exit_trace[cpu][count % exit_trace_capacity];
+
+    entry.reason = reason.value();
+    entry.qualification = vmcs.exit_qualification();
+    entry.activity_state = vmcs.guest_activity_state();
+    entry.cs_selector = vmcs.guest_cs_selector();
+    entry.rip = vmcs.guest_rip();
+
+    ++count;
+}
+
+void hypervisor::on_vm_entry_failure(arch::x86_64::vmx::exit_reason reason)
+{
+    auto & vmcs = this->vmcs;
+    auto & record = this->vm_entry_failure;
+
+    // Capture while the VMCS is still current on this CPU - after the halt
+    // below there is no way to read any of it.
+    record.reason = reason.value();
+    record.qualification = vmcs.exit_qualification();
+    record.instruction_error = vmcs.vm_instruction_error();
+    record.activity_state = vmcs.guest_activity_state();
+    record.interruptibility_state = vmcs.guest_interruptibility_state();
+    record.entry_controls = vmcs.vm_entry_controls();
+    record.guest_cr0 = vmcs.guest_cr0();
+    record.guest_cr4 = vmcs.guest_cr4();
+    record.guest_rflags = vmcs.guest_rflags();
+    record.guest_rip = vmcs.guest_rip();
+    record.guest_cs_selector = vmcs.guest_cs_selector();
+    record.guest_cs_base = vmcs.guest_cs_base();
+    record.guest_cs_access_rights = vmcs.guest_cs_access_rights();
+
+    // Written last, so a debugger that finds this set knows the rest of
+    // the record is complete rather than half filled in.
+    record.occurred = 1;
+
+    // Stop. This CPU is not going to run a guest again, and pretending
+    // otherwise is what made this failure invisible before.
+    for (;;) {
+        arch::x86_64::disable_interrupts();
+        arch::x86_64::halt();
+    }
+}
+
 std::expected<void, zpp::error> hypervisor::enter_root_mode()
 {
     // Backup cr0 and cr4.
@@ -1347,8 +1404,19 @@ hypervisor::main(arch::x86_64::context & caller_context)
         // fail while a VMCS is current, and it traps if it ever does -
         // which beats what used to happen here, a bare return that left
         // the guest un-resumed and said nothing about why.
-        reason =
-            arch::x86_64::vmx::exit_reason(vmcs.exit_reason()).basic();
+        auto full_reason =
+            arch::x86_64::vmx::exit_reason(vmcs.exit_reason());
+
+        // A failed VM entry arrives here looking like an exit, so it has
+        // to be separated out before anything treats it as one. Nothing
+        // below applies to it: the guest did not run, the instruction
+        // length field describes no instruction, and resuming would fail
+        // the same way again.
+        if (full_reason.entry_failure()) {
+            on_vm_entry_failure(full_reason);
+        }
+
+        reason = full_reason.basic();
 
         // Get the guest RIP.
         context.rip = vmcs.guest_rip();
@@ -1438,6 +1506,10 @@ hypervisor::main(arch::x86_64::context & caller_context)
             context.rip += vmcs.vm_exit_instruction_length();
             vmcs.guest_rip(context.rip);
         }
+
+        // Record what is about to be resumed, now that the handlers have
+        // had their say.
+        record_exit(full_reason);
 
         // Resume the VM.
         context.rip =
