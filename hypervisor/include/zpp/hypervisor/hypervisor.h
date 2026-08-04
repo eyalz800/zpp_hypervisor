@@ -12,6 +12,7 @@
 #include "zpp/arch/x86_64/vmx/vmx.h"
 #include "zpp/arch/x86_64/vmx/vmx_exit_reason.h"
 #include "zpp/error.h"
+#include "zpp/hypervisor/log.h"
 #include "zpp/small_map.h"
 #include <atomic>
 #include <cstddef>
