@@ -217,8 +217,67 @@ being safe on the function-local static in `hypervisor::instance()`. Either
 the serialisation has to be restored or the justification has to be
 replaced with a real one.
 
+## Closed
+
+### 13. EPT gave device memory a write-back type — CLOSED
+
+**What was observed afterwards:** the `0xc0000001` recovery screen *draws*.
+Three or four boots into the case that had reliably stopped after the
+`chainloading` line produced no reproduction; the recovery prompt rendered,
+Enter went through, and Windows booted. Before, that prompt was running and
+waiting for a keypress the whole time and simply never appeared - which is
+what made a live boot manager look like a hang for a day.
+
+The defect: under EPT, hardware ignores the guest's MTRRs -
+`.references/sdm.txt:206176`, "The MTRRs have no effect on the memory type
+used for an access to a guest-physical address" - so a VMM has to fold them
+into the EPT itself. `initialize_ept` folded in the **variable** MTRRs only
+and gave every uncovered range write-back. Firmware marks MMIO uncacheable
+*through* MTRRs while its page tables sit on the default PAT entry, which is
+also write-back, and combining the two per Table 14-7 yields write-back
+MMIO: device register writes landing in cache, reads returning stale data.
+
+Now the default type comes from `IA32_MTRR_DEF_TYPE`, the fixed-range MTRRs
+govern the first megabyte, overlaps follow the precedence rules in SDM
+14.11.4.1, and a region whose type is not uniform is split to 4 KB. MMIO
+above the top of DRAM and the legacy VGA aperture both went from WB to UC.
+
+Why it presented as it did: the recovery flow reprograms the display
+controller and the ordinary fast boot path does not, which is why a machine
+that booted Windows perfectly well could not draw a recovery prompt.
+
+Not proof - three or four boots without a reproduction is not the same as a
+demonstration, and the failure was state-dependent. But the code defect, its
+mechanism and the behaviour change all agree, which none of the earlier
+theories managed.
+
+### 14. Module memory was described as runtime services code
+
+`allocate_rwx` used `EfiRuntimeServicesCode`, which carries
+`EFI_MEMORY_RUNTIME`. Microsoft's UEFI firmware requirements say of the S4
+transition that "firmware runtime memory must be consistent across S4 sleep
+state transitions, in both size and location", and exclude
+`AddressRangeReserved` from that rule and from the matching one for
+operating system physical memory. A hibernation image captured without this
+loader and resumed with it would therefore see runtime memory differing in
+both size and location. Now `EfiReservedMemoryType`, which is also the
+honest description: nothing calls into this module through the runtime
+services at an address the operating system assigned.
+
+**Fixed but not confirmed here, and that is worth stating plainly.**
+Hibernation is disabled on the development target, so no boot of it has ever
+been a resume and this could not have been contributing to anything observed.
+It was briefly credited with an improvement that a preceding clean shutdown
+had almost certainly caused.
+
 ## Not a defect, but unlanded
 
 The hypervisor's own log does not survive a reboot, so a bare-metal failure
 that kills the machine takes its log with it. Work exists on
 `worktree-agent-a6c772e3a57c8bba2` (`hypervisor/include/zpp/crash_log.h`).
+
+Largely superseded: `feat/screen-halt-output` draws the log to the
+framebuffer from the halt paths, so it no longer has to survive a power
+cycle - it is read off the screen before the machine is powered off.
+Verified under emulation by reading the glyphs back out of framebuffer
+memory, including a line drawn by `on_unhandled_exit` itself.
