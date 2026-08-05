@@ -59,6 +59,33 @@ reaching for a new theory:
 - **Item 13 below**, which is on the one path the recovery flow takes and
   the fast path does not.
 
+**Hibernation is disabled on the development target**, measured from the
+volume itself: no `hiberfil.sys` at the root, while `pagefile.sys` and
+`swapfile.sys` are both present. So fast startup never writes an image
+there, a clean shutdown is a real shutdown rather than a resume, and no
+boot of that machine has ever been a hibernation resume.
+
+That retires a theory rather than supporting one. The S4 mechanism - a
+resume restoring a memory image over frames this VMM had taken and hidden
+in EPT - cannot have been happening on this machine, so it explains none of
+what was observed here. Item 14 remains a real defect against the
+requirement it cites, and it is worth keeping for machines where fast
+startup is on, but the improvement seen after fixing it was most likely the
+recovery state being cleared by the clean shutdown that preceded it, not
+the fix. Two variables, one boot, again.
+
+**The bugcheck has not recurred.** `\WINDOWS\Minidump` holds three dumps
+from 20:41, 20:49 and 20:51, and `MEMORY.DMP` from 20:51 - all of them
+before the build that clears the hypervisor-present bit was deployed at
+22:51. Several Windows boots between then and 00:25 produced no new dump.
+Tentative rather than settled: how long Windows was left idle on those
+boots is not recorded, and the idle path is what provoked it.
+
+With bugchecks gone and hibernation absent, the loop sustains itself
+without either: a boot that hangs is a failed boot, a failed boot arms the
+recovery flow, and the recovery flow hangs. A clean shutdown is what breaks
+it.
+
 Ruled out by measurement, so that nobody spends a boot on them again: the
 module's load address (`0x8916x000` in six logs across four builds, moving
 only by the page the loader itself grew, and `start up memory` at
