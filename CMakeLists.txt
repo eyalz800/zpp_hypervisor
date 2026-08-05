@@ -20,6 +20,19 @@ option(ZPP_HYPERVISOR_WAIT_FOR_DEBUGGER
     "Spin at the hypervisor entry point until a debugger releases it"
     OFF)
 
+# The diagnostic facility - the log, its retention ring and every sink that
+# reads out of it. See diag/include/zpp/diag/config.h, which is where what is
+# recorded and where it goes is decided; this is only the master switch.
+#
+# On by default, and forced off in release by the sub-builds regardless of what
+# is set here - deliberately, so a stale cache entry cannot put diagnostics
+# into a release binary. BACKLOG.md records what that trap costs when the
+# switch is merely defaulted: -DZPP_VERIFY_HYPERVISOR=ON persisting in a CMake
+# cache and being inherited silently by a later plain build.
+option(ZPP_DIAG
+    "Compile the diagnostic log, its ring and its sinks (debug builds only)"
+    ON)
+
 # === Hypervisor (freestanding x86_64 PIE ELF) ===
 ExternalProject_Add(hypervisor
     SOURCE_DIR "${CMAKE_CURRENT_SOURCE_DIR}/cmake/hypervisor"
@@ -31,6 +44,7 @@ ExternalProject_Add(hypervisor
         -DZPP_SOURCE_DIR=${ZPP_SOURCE_DIR}
         -DZPP_OUTPUT_DIR=${ZPP_OUTPUT_DIR}
         -DZPP_HYPERVISOR_WAIT_FOR_DEBUGGER=${ZPP_HYPERVISOR_WAIT_FOR_DEBUGGER}
+        -DZPP_DIAG=${ZPP_DIAG}
     INSTALL_COMMAND ""
     BUILD_ALWAYS ON
 )
@@ -81,6 +95,7 @@ ExternalProject_Add(uefi_loader
         -DFETCHCONTENT_BASE_DIR=${CMAKE_BINARY_DIR}/_deps
         -DZPP_VERIFY_HYPERVISOR=${ZPP_VERIFY_HYPERVISOR}
         -DZPP_TRACE=${ZPP_TRACE}
+        -DZPP_DIAG=${ZPP_DIAG}
     INSTALL_COMMAND ""
     BUILD_ALWAYS ON
     DEPENDS hypervisor

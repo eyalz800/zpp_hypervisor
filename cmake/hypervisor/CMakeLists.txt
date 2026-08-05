@@ -41,9 +41,13 @@ if(HYPERVISOR_MODULES)
     )
 endif()
 
-# Project include directories
+# Project include directories. hypervisor/include comes first so that this
+# program's own zpp/diag/sinks.h - the list of channels the resident side can
+# drive - is what pump.h finds, while everything else about the diagnostic
+# facility comes from the shared diag/include.
 target_include_directories(zpp_hypervisor PRIVATE
     "${ZPP_SOURCE_DIR}/hypervisor/include"
+    "${ZPP_SOURCE_DIR}/diag/include"
 )
 
 # Freestanding include order (critical for #include_next chains):
@@ -75,6 +79,12 @@ target_compile_options(zpp_hypervisor PRIVATE
 target_compile_options(zpp_hypervisor PRIVATE
     $<$<CONFIG:Debug>:-g>
     $<$<CONFIG:Debug>:-DZPP_HYPERVISOR_WAIT_FOR_DEBUGGER=$<BOOL:${ZPP_HYPERVISOR_WAIT_FOR_DEBUGGER}>>
+    # The diagnostic facility follows the tree's existing pattern: an always
+    # defined 0/1 macro, turned into a constexpr bool by the header, never an
+    # #ifdef. Release hardcodes 0 rather than honouring the option, so no cache
+    # entry and no command line can put diagnostics into a release binary.
+    $<$<CONFIG:Debug>:-DZPP_DIAG=$<BOOL:${ZPP_DIAG}>>
+    $<$<CONFIG:Release>:-DZPP_DIAG=0>
     $<$<CONFIG:Release>:-O2>
     $<$<CONFIG:Release>:-ffunction-sections>
     $<$<CONFIG:Release>:-fdata-sections>
