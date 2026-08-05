@@ -41,9 +41,13 @@ if(HYPERVISOR_MODULES)
     )
 endif()
 
-# Project include directories
+# Project include directories. loader/include is here for zpp/loader.h,
+# which declares what the loader hands the entry point - the framebuffer
+# description among it. Shared rather than duplicated: it is one ABI, and a
+# second declaration of it would be free to drift.
 target_include_directories(zpp_hypervisor PRIVATE
     "${ZPP_SOURCE_DIR}/hypervisor/include"
+    "${ZPP_SOURCE_DIR}/loader/include"
 )
 
 # Freestanding include order (critical for #include_next chains):

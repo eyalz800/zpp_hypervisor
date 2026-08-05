@@ -132,6 +132,12 @@ static int zpp_init(void)
         // The kernel already uses the SysV convention the hypervisor
         // wants.
         .adjust_launch_calling_convention = NULL,
+        // No framebuffer reported. The kernel owns the display by the time
+        // this module loads, and anything the hypervisor drew on it would
+        // be overwritten by the next thing that paints - the screen is
+        // only a usable channel where nothing else is using it. There is a
+        // console and a kernel log here in any case.
+        .framebuffer = {0},
     };
 
     result = zpp_load_elf(&parameters);
