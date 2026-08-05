@@ -26,6 +26,10 @@ option(ZPP_TRACE
     "Compile the serial trace output in the loaders"
     ${ZPP_VERIFY_HYPERVISOR})
 
+option(ZPP_DIAG
+    "Compile the diagnostic log, its ring and its sinks (debug builds only)"
+    ON)
+
 # Download dependencies (Windows SDK for ucrt/shared headers; EDK2 for UEFI headers)
 include("${ZPP_SOURCE_DIR}/cmake/dependencies.cmake")
 download_windows_sdk(WINDOWS_SDK_ROOT)
@@ -90,6 +94,13 @@ target_include_directories(zpp_loader_efi PRIVATE
     "${ZPP_SOURCE_DIR}/uefi_loader/include"
     "${ZPP_SOURCE_DIR}/loader/include"
     "${ZPP_SOURCE_DIR}/hypervisor/include"
+    # Shared with the hypervisor: the diagnostic configuration, the format
+    # spec, the record and the ring. Header only, constexpr, no allocation and
+    # no platform headers, so it compiles under this ABI as readily as under
+    # the freestanding one. This loader's own zpp/diag/sinks.h, in
+    # uefi_loader/include, is found first and is what says which channels exist
+    # while boot services do.
+    "${ZPP_SOURCE_DIR}/diag/include"
 )
 target_include_directories(zpp_loader_efi SYSTEM PRIVATE
     # C++ standard headers — freestanding-style include chain:
@@ -126,6 +137,11 @@ target_compile_definitions(zpp_loader_efi PRIVATE
     # Serial tracing, controlled on its own so it can be enabled or disabled
     # independently of the check above. Defaults to the same value.
     "ZPP_TRACE=$<BOOL:${ZPP_TRACE}>"
+    # The diagnostic facility, shared with the hypervisor and configured in one
+    # place - diag/include/zpp/diag/config.h. Always defined, never tested with
+    # #ifdef, and hardcoded to zero in release for the reason the option's own
+    # comment gives.
+    "ZPP_DIAG=$<IF:$<CONFIG:Release>,0,$<BOOL:${ZPP_DIAG}>>"
     # libc++ availability annotations rely on OS version macros we don't have
     # in a freestanding / UEFI context.
     _LIBCPP_DISABLE_AVAILABILITY
