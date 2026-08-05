@@ -112,8 +112,26 @@ Two things follow from it being a *local* static rather than a namespace-scope g
 verified in the disassembly: construction is lazy, so it produces **no** `.init_array` entry;
 and because the build uses `-fno-threadsafe-statics` the compiler emits a plain
 `cmpb`/`movb` on the guard byte with **no** `__cxa_guard_acquire` call. The first call must
-therefore not race — it does not, because the loader launches CPUs strictly one at a time. It
-does emit a `__cxa_atexit` registration for the destructor, so that path is live.
+therefore not race. It does emit a `__cxa_atexit` registration for the destructor, so that
+path is live.
+
+**It does not race, but not for the reason this used to give.** The old reason — "the loader
+launches CPUs strictly one at a time" — is true of the Windows and Linux loaders, which loop
+`call_on_cpu(i, …)` blocking per processor, and is *not the mechanism* under UEFI: since
+`1c8bfdd` `number_of_cpus()` returns 1 unconditionally, the boot processor is launched alone,
+and application processors are adopted much later from the guest's own start-up IPIs. So the
+serialisation the comment appealed to is absent on the platform that matters most.
+
+The real reason is structural and platform independent: `instance()` has exactly three
+callers — `zpp_hypervisor_main`, `zpp_x86_64_exception` and `zpp_ap_start_up_main` — and the
+latter two are only *reachable* once the boot processor has armed them from inside `main`. The
+host IDT is built by `initialize_host_idt` and loaded by `main`, both boot processor only; the
+trampoline page is written by `initialize_start_up_memory`, also boot processor only, and that
+is what puts `zpp_ap_start_up_main`'s address where a starting processor will find it. Both
+therefore come alive strictly after construction returned.
+
+What would break it: a fourth caller reachable before `main` has armed those two. That is the
+thing to check, and it is checkable by grep — which the old justification was not.
 
 Consequences worth remembering:
 - **A container as a global costs you an init array entry.** `zpp::allocator`'s default
