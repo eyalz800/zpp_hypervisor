@@ -704,32 +704,72 @@ static void write_trace_log(EFI_HANDLE device)
         return;
     }
 
-    // Delete and recreate, rather than rewinding to the start. There is
-    // no truncating open here, so writing a shorter log over a longer one
-    // leaves the tail of the longer one in place - and the result reads as
-    // one boot, because nothing in the text marks where this boot stopped
-    // and the older one resumes.
+    // Append, so the file keeps every boot rather than only the last one.
+    // Comparing two boots is the whole reason this file is read - a boot
+    // that works against one that does not - and overwriting threw away
+    // one half of every comparison.
     //
-    // That cost real time. A log was read as a single boot that had
-    // chainloaded twice and sampled its processor states twice, and the
-    // only clue it was two boots spliced together was one line beginning
-    // mid-word: "9] ZPP_TRACE boot option zpp", the tail of an earlier
-    // "[main.cpp:179]".
+    // What has to be avoided is not the appending, it is appending
+    // *unmarked*. Rewinding to offset zero and writing did not shorten the
+    // file, and with no truncating open here a shorter log left the tail
+    // of a longer one behind, reading as one boot because nothing said
+    // where this boot's log stopped and an older one resumed. It was read
+    // that way: a log appeared to have chainloaded twice and sampled its
+    // processor states twice, and the only clue was a line beginning
+    // mid-word - "9] ZPP_TRACE boot option zpp", the tail of an earlier
+    // "[main.cpp:179]". So each section gets a banner, and every boot's
+    // log begins with its own entry line underneath it.
     //
-    // Delete closes the handle whether or not it succeeds, so reopen
-    // unconditionally and give up if that fails.
-    file->Delete(file);
-    file = nullptr;
-    if (EFI_ERROR(volume->Open(
-            volume,
-            &file,
-            reinterpret_cast<CHAR16 *>(const_cast<char16_t *>(file_path)),
-            EFI_FILE_MODE_READ | EFI_FILE_MODE_WRITE |
-                EFI_FILE_MODE_CREATE,
-            0))) {
-        volume->Close(volume);
-        return;
+    // This function runs more than once in a boot - before handing over,
+    // and again if the hand-over returns - so the offset this boot's
+    // section starts at is remembered and rewritten from, rather than
+    // appended to twice. Within a boot the log only ever grows, so
+    // rewriting from that offset never leaves anything stale behind.
+    static std::uint64_t section_offset = ~std::uint64_t{};
+    static bool section_started = false;
+
+    if (!section_started) {
+        // Seeking to the maximum position is how the end of a file is
+        // asked for here.
+        file->SetPosition(file, ~std::uint64_t{});
+        std::uint64_t end_position{};
+        if (EFI_ERROR(file->GetPosition(file, &end_position))) {
+            end_position = 0;
+        }
+
+        // Keep it from growing without limit. Starting over loses history,
+        // which is the cost of not filling the partition; at a few
+        // kilobytes a boot this is many tens of boots.
+        constexpr std::uint64_t largest_kept = 512 * 1024;
+        if (end_position > largest_kept) {
+            file->Delete(file);
+            file = nullptr;
+            if (EFI_ERROR(volume->Open(
+                    volume,
+                    &file,
+                    reinterpret_cast<CHAR16 *>(
+                        const_cast<char16_t *>(file_path)),
+                    EFI_FILE_MODE_READ | EFI_FILE_MODE_WRITE |
+                        EFI_FILE_MODE_CREATE,
+                    0))) {
+                volume->Close(volume);
+                return;
+            }
+            end_position = 0;
+        }
+
+        auto banner = "\r\n===== zpp boot =====\r\n";
+        std::size_t banner_size = std::char_traits<char>::length(banner);
+        file->SetPosition(file, end_position);
+        file->Write(file, &banner_size, const_cast<char *>(banner));
+
+        if (EFI_ERROR(file->GetPosition(file, &section_offset))) {
+            section_offset = end_position;
+        }
+        section_started = true;
     }
+
+    file->SetPosition(file, section_offset);
 
     auto log = trace::log();
     std::size_t size = log.size();
