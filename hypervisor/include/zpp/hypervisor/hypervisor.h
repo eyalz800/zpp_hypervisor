@@ -53,6 +53,12 @@ public:
     static constexpr std::size_t page_size = 0x1000;
 
     /**
+     * Large page size, which is the granularity every EPT page directory
+     * entry maps at unless it has been split.
+     */
+    static constexpr std::size_t large_page_size = 0x200000;
+
+    /**
      * Maximum module size in bytes.
      */
     static constexpr std::size_t max_module_size =
@@ -202,8 +208,12 @@ private:
 
     /**
      * Initialize hardware page table structures.
+     *
+     * Fallible because a 2 MB region whose MTRR coverage is not of one
+     * type is split into 4 KB entries, and the pool those come from is
+     * finite.
      */
-    void initialize_ept();
+    std::expected<void, zpp::error> initialize_ept();
 
     /**
      * Prepare module protection from guest access.
@@ -1007,35 +1017,31 @@ private:
     arch::x86_64::vmx::vmcs vmcs{};
 
     /**
-     * How many variable range MTRRs there can be. IA32_MTRRCAP.VCNT is an
-     * eight bit field, so this is the architectural maximum rather than a
-     * guess at what a machine will report.
+     * The processor's whole MTRR state - IA32_MTRRCAP,
+     * IA32_MTRR_DEF_TYPE, the eleven fixed-range registers and the
+     * variable pairs - from which every EPT entry's memory type is
+     * derived. The derivation rules live with it, in
+     * zpp/arch/x86_64/mtrr.h, because they are architectural rather than
+     * anything this VMM decides.
      *
-     * It was 8, which is what QEMU reports and is why nothing caught it:
-     * real Intel client parts commonly report 10, and the fill loop below
-     * ran to VCNT without a bound. The two entries past the end landed on
-     * mtrr_capabilities, which sits immediately after this array - so the
-     * capabilities were corrupted by the very loop that had just read
-     * them, and the last two MTRRs were dropped from the EPT derivation.
-     * Measured from the debug info: mtrrs at 0xd9a0c8 and
-     * mtrr_capabilities at 0xd9a188, exactly 8 * sizeof(mtrr) apart.
-     *
-     * SDM Vol. 4, Table 2-2, IA32_MTRRCAP: "VCNT (Variable Range
-     * Registers Count) field, bits 7:0".
+     * The variable ranges alone used to be here, as mtrrs[] beside a
+     * separate mtrr_capabilities. That was the defect: without
+     * IA32_MTRR_DEF_TYPE there is no default type to give an uncovered
+     * range and no way to see either enable bit, and without the
+     * fixed-range registers the first 1 MB - the legacy VGA aperture at
+     * 0xa0000 among it - had no type of its own at all.
      */
-    static constexpr std::size_t maximum_variable_mtrrs = 255;
+    arch::x86_64::mtrr_state mtrrs{};
 
     /**
-     * The MTRR registers values. Entries past the count the processor
-     * reports are left with valid clear, which is what the EPT derivation
-     * already tests before looking at one.
+     * The next unused table in the ept pool below.
+     *
+     * Shared by initialize_ept, which splits any 2 MB page whose MTRR
+     * coverage is not of one type, and protect_module, which splits any
+     * 2 MB page holding part of this module. Both draw from the same pool,
+     * so the index cannot be local to either.
      */
-    arch::x86_64::mtrr mtrrs[maximum_variable_mtrrs];
-
-    /**
-     * The MTRR capabilities values.
-     */
-    arch::x86_64::mtrr_capabilities mtrr_capabilities;
+    std::size_t next_ept_table{};
 
     /**
      * The hardware page table structures.

@@ -59,6 +59,42 @@ enum type : std::size_t
     physmask_6,
     physbase_7,
     physmask_7,
+
+    /**
+     * The fixed-range MTRRs, which govern the first 1 MB and are the only
+     * MTRRs with sub-page-directory granularity - 64 KB, 16 KB and 4 KB.
+     * There are eleven of them, each holding eight memory types.
+     *
+     * The addresses are not contiguous with the variable pairs above and
+     * not contiguous with each other across the three groups, which is why
+     * they are named rather than derived.
+     *
+     * SDM Vol. 4, Table 2-2: "Register Address: 250H, 592
+     * IA32_MTRR_FIX64K_00000", "258H, 600 IA32_MTRR_FIX16K_80000", "259H,
+     * 601 IA32_MTRR_FIX16K_A0000", "268H, 616 IA32_MTRR_FIX4K_C0000"
+     * through "26FH, 623 IA32_MTRR_FIX4K_F8000".
+     */
+    fix64k_00000 = 0x250,
+    fix16k_80000 = 0x258,
+    fix16k_a0000 = 0x259,
+    fix4k_c0000 = 0x268,
+    fix4k_c8000 = 0x269,
+    fix4k_d0000 = 0x26a,
+    fix4k_d8000 = 0x26b,
+    fix4k_e0000 = 0x26c,
+    fix4k_e8000 = 0x26d,
+    fix4k_f0000 = 0x26e,
+    fix4k_f8000 = 0x26f,
+
+    /**
+     * IA32_MTRR_DEF_TYPE, which carries the memory type used for every
+     * range no MTRR covers, the fixed-range enable and the global MTRR
+     * enable.
+     *
+     * SDM Vol. 4, Table 2-2: "Register Address: 2FFH, 767
+     * IA32_MTRR_DEF_TYPE".
+     */
+    default_type = 0x2ff,
 };
 } // namespace msr::mtrr
 

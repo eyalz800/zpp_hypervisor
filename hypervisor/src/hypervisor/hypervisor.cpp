@@ -404,9 +404,30 @@ std::uint64_t & hypervisor::cached_vmx_msr(std::size_t msr)
 
 void hypervisor::initialize_mtrrs()
 {
+    auto & mtrrs = this->mtrrs;
+
     // Read the MTRR capabilities MSR.
-    this->mtrr_capabilities = arch::x86_64::mtrr_capabilities(
+    mtrrs.capabilities = arch::x86_64::mtrr_capabilities(
         arch::x86_64::rdmsr(arch::x86_64::msr::ia32_mtrr_capability));
+
+    // Read IA32_MTRR_DEF_TYPE, which carries three things nothing here
+    // used to see: the memory type every range no MTRR covers takes, the
+    // fixed-range enable, and the global MTRR enable. Firmware normally
+    // sets the default type to UC, so assuming write-back for an uncovered
+    // range - which is what this did before - marked the whole MMIO hole
+    // above the top of DRAM cacheable.
+    mtrrs.default_type = arch::x86_64::mtrr_default_type(
+        arch::x86_64::rdmsr(arch::x86_64::msr::mtrr::default_type));
+
+    // Read the fixed-range registers, but only where the processor says
+    // they exist: an MSR a processor does not implement raises #GP on the
+    // read, and there is no handler for one here.
+    if (mtrrs.capabilities.fixed_range_registers_supported()) {
+        for (std::size_t i{}; i < mtrrs.fixed_range_count; ++i) {
+            mtrrs.fixed[i] = arch::x86_64::rdmsr(
+                arch::x86_64::mtrr_fixed_ranges[i].msr);
+        }
+    }
 
     // The MTRR variable count, bounded by the array it fills. The bound is
     // defensive rather than expected: the array is sized to the field's
@@ -415,12 +436,12 @@ void hypervisor::initialize_mtrrs()
     // is silently writing over whatever follows the array - which is
     // exactly what happened when this was sized at 8 and the processor
     // said 10.
-    auto variable_count = std::min<std::size_t>(
-        std::size(this->mtrrs),
-        this->mtrr_capabilities.variable_range_register_count());
+    mtrrs.variable_count = std::min<std::size_t>(
+        std::size(mtrrs.variable),
+        mtrrs.capabilities.variable_range_register_count());
 
     // Iterate all MTRR registers, and read them.
-    for (std::size_t i{}; i < variable_count; ++i) {
+    for (std::size_t i{}; i < mtrrs.variable_count; ++i) {
         // Read the base value.
         auto mtrr_base =
             arch::x86_64::mtrr_variable_base(arch::x86_64::rdmsr(
@@ -431,31 +452,25 @@ void hypervisor::initialize_mtrrs()
             arch::x86_64::mtrr_variable_mask(arch::x86_64::rdmsr(
                 arch::x86_64::msr::mtrr::physmask_0 + i * 2));
 
-        // Initialize the MTRR object.
-        auto & mtrr = this->mtrrs[i];
-        mtrr.type = mtrr_base.memory_type();
-        mtrr.valid = mtrr_mask.valid();
-        mtrr.physical_base = (mtrr_base.page_number() << 12);
-
-        // If the mask is zero, continue.
-        if (!mtrr_mask.physical_mask()) {
-            mtrr.size = {};
-            continue;
-        }
-
-        // Compute the size of the MTRR according to the number of 0s at
-        // the lower bits of the physical mask. The rule is that
-        // (address_in_range & mask == mask & base). Each found zero bit
-        // multiples the size by 2, where the minimum size is a page size,
-        // until 1 is reached.
-        mtrr.size = page_size;
-        for (auto i = mtrr_mask.physical_mask(); !(i & 1); i = (i >> 1)) {
-            mtrr.size <<= 1;
-        }
+        mtrrs.variable[i] = arch::x86_64::make_mtrr(mtrr_base, mtrr_mask);
     }
+
+    // The state every EPT memory type below is derived from, recorded
+    // because there is no other way to see it once the guest is running -
+    // and because the type this VMM hands the guest is the only one it
+    // gets. Reading it back off a failed boot is how a wrong default type
+    // or a missed fixed range would be identified.
+    log("mtrr cap {}, def type {}, enabled {}, fixed in use {}, "
+        "default {}, variable {}",
+        mtrrs.capabilities.value(),
+        mtrrs.default_type.value(),
+        mtrrs.default_type.enabled(),
+        mtrrs.fixed_ranges_in_use(),
+        mtrrs.default_type.type(),
+        mtrrs.variable_count);
 }
 
-void hypervisor::initialize_ept()
+std::expected<void, zpp::error> hypervisor::initialize_ept()
 {
     // Fill the first epml4e for 512 GB of ram.
     this->epml4->read(true);
@@ -487,6 +502,18 @@ void hypervisor::initialize_ept()
     rwx_pde.execute_user(true);
     rwx_pde.large(true);
 
+    // Fill a temporary RWX 4 KB epte, for the regions a large page cannot
+    // describe.
+    arch::x86_64::vmx::epte rwx_pte;
+    rwx_pte.read(true);
+    rwx_pte.write(true);
+    rwx_pte.execute(true);
+    rwx_pte.execute_user(true);
+
+    // How many 4 KB entries one page table holds, which is also how many a
+    // large page covers.
+    constexpr std::size_t entries_per_table = 512;
+
     // Fill the page directory table entries with large pages.
     std::size_t large_page_number{};
     for (std::size_t i{}; i < std::extent_v<decltype(this->epd)>; ++i) {
@@ -505,45 +532,76 @@ void hypervisor::initialize_ept()
             // Advance to the next large page number.
             ++large_page_number;
 
-            // Find MTRR.
-            auto mtrr = std::find_if(
-                std::begin(this->mtrrs),
-                std::end(this->mtrrs),
-                [&](auto & mtrr) {
-                    // If MTRR is not valid, continue.
-                    if (!mtrr.valid) {
-                        return false;
-                    }
-
-                    // If below base, continue.
-                    if (physical_address + ((1ull << 21) - 1) <
-                        mtrr.physical_base) {
-                        return false;
-                    }
-
-                    // If above end, continue.
-                    if (physical_address >=
-                        mtrr.physical_base + mtrr.size) {
-                        return false;
-                    }
-                    return true;
-                });
-
-            // If MTRR not found, set to write back.
-            if (std::end(this->mtrrs) == mtrr) {
-                epde.type(arch::x86_64::memory_type::write_back);
+            // The memory type the MTRRs give this whole 2 MB region, when
+            // they give it one. Uncovered ranges come out as the default
+            // type from IA32_MTRR_DEF_TYPE, which is what firmware sets to
+            // UC and what makes MMIO above the top of DRAM uncacheable.
+            if (auto type = this->mtrrs.uniform_type_of(physical_address,
+                                                        large_page_size)) {
+                epde.type(*type);
                 continue;
             }
 
-            // Set the type to be the MTRR type.
-            epde.type(mtrr->type);
+            // The region straddles a change of memory type, so no single
+            // type describes it. Split it into 4 KB entries and give each
+            // its own.
+            //
+            // The alternative to splitting is one conservative type for
+            // the whole region, and the only safe conservative type is
+            // uncacheable - anything cacheable over a device range is the
+            // defect this derivation exists to fix. That would make the
+            // 2 MB containing the legacy 0xa0000 aperture uncacheable, and
+            // the first 2 MB of physical memory is real DRAM that a guest
+            // runs code out of. Splitting costs one 4 KB table per mixed
+            // region out of a pool that is statically allocated either
+            // way, so it costs nothing that is not already spent.
+            //
+            // How many mixed regions there can be is bounded, so the pool
+            // cannot be exhausted by this in practice. Each valid variable
+            // MTRR contributes at most two boundaries, each boundary makes
+            // at most one region mixed, and every fixed range lives inside
+            // the first 2 MB - so at most 2 * VCNT + 1 regions. VCNT is at
+            // most 255, giving 511, and protect_module takes at most one
+            // more per 2 MB of a module capped at max_module_size, which
+            // is
+            // 51. That is 562 of the 1024 tables the pool holds. VCNT is
+            // 10 on the machine this was written for, where one region is
+            // mixed: the first, holding the legacy 0xa0000 aperture.
+            if (this->next_ept_table >=
+                std::extent_v<decltype(this->ept)>) {
+                return std::unexpected(
+                    zpp::error{error::out_of_ept_entries});
+            }
+
+            auto & ept = this->ept[this->next_ept_table++];
+            for (std::size_t k{}; k < entries_per_table; ++k) {
+                auto & epte = ept[k];
+                epte = rwx_pte;
+                epte.page_number((physical_address >> 12) + k);
+                epte.type(this->mtrrs.type_of(physical_address +
+                                              (k * page_size)));
+            }
+
+            // Point the epde at the table. Clearing the memory type is
+            // required rather than tidy: in an entry that references a
+            // page table the field is not ignored. SDM Vol. 3C
+            // Table 31-6, "Format of an EPT Page-Directory Entry (PDE)
+            // that References an EPT Page Table", bits "6:3 Reserved (must
+            // be 0)" - and a reserved value set here is an EPT
+            // misconfiguration, not a wrong memory type.
+            epde.large(false);
+            epde.type({});
+            epde.page_number(
+                this->host_page_table.virtual_to_physical(ept) >> 12);
         }
     }
+
+    log("ept built, {} mixed regions split to 4 kb", this->next_ept_table);
+    return {};
 }
 
 std::expected<void, zpp::error> hypervisor::protect_module()
 {
-    std::size_t ept_index = 0;
     auto ept_count = std::extent_v<decltype(this->ept)>;
     auto number_of_pages = this->module_size / page_size;
     auto & host_page_table = this->host_page_table;
@@ -584,8 +642,24 @@ std::expected<void, zpp::error> hypervisor::protect_module()
             continue;
         }
 
-        // Convert large epde into ept table.
-        auto & ept = this->ept[ept_index];
+        // Convert large epde into ept table. The pool index is a member
+        // rather than a local because initialize_ept draws from the same
+        // pool for any 2 MB region whose MTRR coverage is not of one type,
+        // and it has already run by the time this does.
+        //
+        // Checked before the table is used rather than after. The old form
+        // incremented first and compared the incremented value, which
+        // reported exhaustion on the last table in the pool even though it
+        // had just been filled and installed successfully. It never wrote
+        // out of bounds, so this is a change of where the boundary is by
+        // one, not a fix - but it has to be a check before use now,
+        // because initialize_ept has already consumed part of the pool and
+        // the index no longer starts at zero.
+        if (this->next_ept_table >= ept_count) {
+            return std::unexpected(zpp::error{error::out_of_ept_entries});
+        }
+
+        auto & ept = this->ept[this->next_ept_table++];
         auto memory_type = epde.type();
         auto page_number = (epde.large_page_number() << (21 - 12));
         for (std::size_t j{}; j < 512; ++j) {
@@ -602,14 +676,6 @@ std::expected<void, zpp::error> hypervisor::protect_module()
         epde.large(false);
         epde.type({});
         epde.page_number(host_page_table.virtual_to_physical(ept) >> 12);
-
-        // Move to the next ept.
-        ++ept_index;
-
-        // If out of ept entries, return error.
-        if (ept_index == ept_count) {
-            return std::unexpected(zpp::error{error::out_of_ept_entries});
-        }
 
         // Protect our module epte.
         auto & epte = ept[(physical_address >> 12) & 0x1ff];
@@ -1269,7 +1335,6 @@ void hypervisor::initialize_start_up_memory(std::uint64_t memory)
     // question of what is reachable while it is live.
     constexpr std::uint64_t present_writable = 0x3;
     constexpr std::uint64_t large_page = 0x80;
-    constexpr std::uint64_t large_page_size = 0x200000;
     constexpr std::size_t entries_per_table =
         page_size / sizeof(std::uint64_t);
 
@@ -2317,7 +2382,9 @@ hypervisor::main(arch::x86_64::context & caller_context)
         initialize_mtrrs();
 
         // Initialize the EPT.
-        initialize_ept();
+        if (auto result = initialize_ept(); !result) {
+            return result;
+        }
 
         // Protect module.
         if (auto result = protect_module(); !result) {
