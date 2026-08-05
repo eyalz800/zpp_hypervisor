@@ -15,44 +15,58 @@ The convention for closing an entry: state what was observed afterwards, not
 that the code changed. "Guest now reads `cr4=0x0668`" closes one of these;
 "masked CR4" does not.
 
-## How this is launched changes whether it works
+## A hang after the chainload line: what it is, and what it is not
 
-Read this before investigating a hang at the chainload, because it cost a
-day once.
+Read this before investigating one, because it cost a day.
 
-Launched from the firmware's **boot order**, the loader chainloads Windows
-Boot Manager and Windows boots. Launched by the firmware setup's **boot
-override**, it stops after the `chainloading` trace line with nothing
-further drawn: no Windows output, no bugcheck, no crash dump. Confirmed
-both ways on the same build, back to back.
+**The variable is whether Windows enters its recovery flow.** After a clean
+Windows shutdown the loader chainloads and Windows boots - from the boot
+order and from the setup menu's boot override alike. Once Windows has
+recorded a failed boot, the next attempt takes the recovery path and stops
+after the `chainloading` trace line with nothing further drawn: no Windows
+output, no bugcheck, no crash dump. Enter sometimes gets through it,
+because the `0xc0000001` recovery prompt is *there and waiting for a
+keypress*; whether it is drawn is a separate matter from whether it is
+running.
 
-The failure looked intermittent for hours and was not. It is deterministic
-in the launch method, and the launch method was the one variable nobody had
-written down - so hypotheses about hibernation, about a swallowed start-up
-IPI and about the state of the application processors were each tested
-against a baseline that was moving for an unrelated reason. Two of the
-fixes that came out of that are right on their own evidence and neither was
-the cause.
+Two wrong conclusions were reached and abandoned along the way, both of
+them from too few samples of a state that alternates on Windows' own
+boot-failure record:
 
-Not yet established: whether a boot override of Windows Boot Manager
-*without* this loader also hangs. Until that is run, whether this is our
-defect or the firmware's is unknown. It is the cheapest test available and
-it should be the next one.
+- That it was intermittent. It is not; it is state-dependent.
+- That it was deterministic in the launch method - boot override broken,
+  boot order fine. It is not. Both work from a clean shutdown and both fail
+  from a recovery state. The launch method is now recorded in the trace
+  (`BootCurrent`, and its absence) so no future log can be read without
+  knowing it, which is the mistake that made this take so long.
 
-What differs about a boot override, as candidates rather than findings: it
-runs from inside setup, so the firmware has already connected every
-controller, allocated for its own user interface, and selected a graphics
-mode. The module's address is not the difference - `0x89162000` against
-`0x89164000` across two builds is this loader's own binary growing.
+Because Windows records a failed boot when it bugchecks, a live bugcheck
+keeps re-arming the recovery flow, and the recovery flow then looks like
+the defect. Check for a fresh crash dump before believing anything else.
 
-A second thing that produces this symptom exactly, with a fully known
-cause, is worth keeping beside it: a `ZPP_VERIFY_HYPERVISOR` build. That
-one halts every application processor in real mode and leaves the boot
-processor's APIC in x2APIC mode where the firmware's xAPIC accesses cannot
-see it, and the result is the same silent stop after `chainloading`. So
-that symptom is what "the application processors are not in the state the
-operating system expects" looks like here. It is a reference failure, not
-an explanation of the one above.
+Three things that produce this exact symptom, all worth eliminating before
+reaching for a new theory:
+
+- **A `ZPP_VERIFY_HYPERVISOR` build.** It halts every application processor
+  in real mode and leaves the boot processor's APIC in x2APIC mode where the
+  firmware's xAPIC accesses cannot see it. Silent stop after `chainloading`,
+  every time. It must never be deployed to a machine meant to keep booting,
+  and note the trap: `-DZPP_VERIFY_HYPERVISOR=ON` persists in the CMake
+  cache, so a later plain `cmake --build` inherits it silently. Check the
+  built binary for the self-check's strings rather than trusting the build
+  command.
+- **The recovery flow above.**
+- **Item 13 below**, which is on the one path the recovery flow takes and
+  the fast path does not.
+
+Ruled out by measurement, so that nobody spends a boot on them again: the
+module's load address (`0x8916x000` in six logs across four builds, moving
+only by the page the loader itself grew, and `start up memory` at
+`0x9b000` without exception); the firmware's own view of the processors
+(all eight `enabled healthy`, identical before this loader runs and
+immediately before the hand-over); and the zpp boot option itself
+(`LOAD_OPTION_ACTIVE`, same attribute word as Windows Boot Manager's, same
+GPT partition signature, no `LOAD_OPTION_CATEGORY_APP`).
 
 ## Measured
 
