@@ -40,12 +40,26 @@ public:
         out_of_ept_entries = 5,
         host_exception = 6,
         vmx_disabled_by_firmware = 7,
+        too_many_processors = 8,
     };
 
     /**
      * Maximum number of CPUs supported.
+     *
+     * Thirty two rather than sixteen. Sixteen was already below what
+     * current laptops ship - a mobile part with performance and
+     * efficiency cores passes it easily - and the cost of being wrong
+     * was not a refusal but a 512 KB stack written past the end of an
+     * array, since launch_on_cpu did not bound its index. That is fixed
+     * separately; this raises the ceiling to somewhere the fix is
+     * unlikely to be reached.
+     *
+     * It is not free. Every per-processor array scales with it and the
+     * stacks dominate: 512 KB each, so this member alone goes from 8 MB
+     * to 16 MB. They are zero initialized and therefore live in .bss, so
+     * the binary on disk barely moves and the loaded image does.
      */
-    static constexpr std::size_t max_cpus = 16;
+    static constexpr std::size_t max_cpus = 32;
 
     /**
      * Page size.
@@ -1253,6 +1267,8 @@ inline const zpp::error_category & category(hypervisor::error)
                 return "Host exception caught by the host IDT";
             case hypervisor::error::vmx_disabled_by_firmware:
                 return "VMX locked off in IA32_FEATURE_CONTROL";
+            case hypervisor::error::too_many_processors:
+                return "More processors than max_cpus";
             }
         });
     return error_category;

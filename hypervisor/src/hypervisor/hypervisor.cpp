@@ -3126,6 +3126,24 @@ void hypervisor::launch_on_cpu_private_stack(
 
 void hypervisor::launch_on_cpu(arch::x86_64::context & caller_context)
 {
+    // Refuse rather than run off the end of the stack array.
+    //
+    // This index is incremented once per processor launched and was not
+    // bounded. On a machine with more logical processors than max_cpus
+    // the next one indexed past the array and took a 512 KB stack with
+    // it, laying it over whatever member followed - silently, and only
+    // on the machines with the most processors, which are the least
+    // likely to be the ones being debugged.
+    //
+    // Every other per-processor array in this class is already indexed
+    // under a `< max_cpus` test. This one was not, and it is the one
+    // that writes half a megabyte.
+    if (this->available_stack_index >= max_cpus) {
+        caller_context.rax = zpp::error{error::too_many_processors}.code();
+        arch::x86_64::restore_context(&caller_context);
+        return;
+    }
+
     // Fetch the stack the hypervisor will launch with.
     auto & stack = this->stack[this->available_stack_index];
 
