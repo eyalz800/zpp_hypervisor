@@ -1472,7 +1472,7 @@ extern "C" EFI_STATUS EFIAPI uefi_main(EFI_HANDLE image_handle,
     // nothing had booted from it and it carried no file system handle at
     // all; a machine that just chainloaded us through its own ESP does
     // not, because the boot manager is on that same ESP.
-    static constexpr bool chain_to_our_own_device_only = true;
+    static constexpr bool chain_to_our_own_device_only = false;
 
     // The boot managers to chain to, in order of preference. Windows is
     // named explicitly rather than relying on the removable media

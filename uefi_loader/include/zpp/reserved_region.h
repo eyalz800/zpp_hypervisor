@@ -62,8 +62,7 @@ struct reserved_region
     /**
      * Whether this build carries it. The disk sink's own policy row.
      */
-    static constexpr bool enabled =
-        diag::policy_of(diag::sink::esp_blocks).present;
+    static constexpr bool enabled = diag::reserve_controller_window;
 
     /**
      * The window that was reserved, or a zero length one if nothing was.

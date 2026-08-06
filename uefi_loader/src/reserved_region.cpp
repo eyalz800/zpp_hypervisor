@@ -783,6 +783,32 @@ void reserved_region::execute(EFI_SYSTEM_TABLE * system_table)
                dmar_length - insert_at);
 
     store32(copy + header_length_offset, new_length);
+
+    // Ask the guest to actually use its remapping hardware.
+    //
+    // Bit 2 of the DMAR flags is DMA_CTRL_PLATFORM_OPT_IN. VT-d 4.0 8.1
+    // words it as a recommendation to firmware, and imposes no duty on
+    // the operating system - "System software **may** program DMA
+    // remapping hardware to block DMA outside of RMRR". Windows reads it
+    // as the platform's opt-in to Kernel DMA Protection, and without it
+    // an internal controller is never put in a translating domain at
+    // all.
+    //
+    // Setting it is what makes the reserved region above testable rather
+    // than merely present. Measured on the rig: with the flag clear
+    // Windows enables interrupt remapping and leaves translation off -
+    // GSTS.TES clear and RTADDR zero - so it never has occasion to
+    // honour a reserved region, and whether it would remains unknown.
+    //
+    // This is a deliberate change to what the guest is told about its
+    // own platform, so it lives behind the same switch as the region
+    // itself and is off in release along with everything else here.
+    constexpr std::uint8_t dma_control_platform_opt_in = 1u << 2;
+    auto & flags = copy[offsetof(EFI_ACPI_DMAR_HEADER, Flags)];
+    trace::hex_line("rmrr: dmar flags were ", flags);
+    flags = static_cast<std::uint8_t>(flags | dma_control_platform_opt_in);
+    trace::hex_line("rmrr: dmar flags now ", flags);
+
     fix_checksum(copy, new_length);
 
     if (!structures_parse(copy, new_length)) {

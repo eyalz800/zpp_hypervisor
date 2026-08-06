@@ -56,6 +56,18 @@ namespace zpp::diag
 inline constexpr bool enabled = ZPP_DIAG;
 
 /**
+ * Whether the loader declares a reserved memory window for the storage
+ * controller to the guest.
+ *
+ * Separate from any sink's presence on purpose. Declaring the window and
+ * borrowing the controller's admin queue are independent mechanisms with
+ * independent ways of going wrong, and a boot that changes both at once
+ * cannot say which one did anything. They shared one switch until a boot
+ * was needed that exercised exactly one of them.
+ */
+inline constexpr bool reserve_controller_window = enabled;
+
+/**
  * How much a line is worth saying. Ordered, and compared with at_least
  * below rather than with `>=` on the enumerators, so the ordering is
  * stated in one place.
@@ -295,7 +307,7 @@ constexpr policy policy_of(sink which)
                 .failures_tolerated = 1};
 
     case sink::esp_blocks:
-        return {.present = enabled,
+        return {.present = false,
                 .floor = severity::trace,
                 .categories = all_categories,
                 .shape = form::binary,
