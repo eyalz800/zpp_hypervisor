@@ -71,6 +71,26 @@ enum class translation_verdict
      * No remapping hardware was described to us at all.
      */
     no_hardware,
+
+    /**
+     * Caching Mode is set, so this is an emulated unit and installing a
+     * mapping would need an invalidation issued through a queue the
+     * guest owns. VT-d 4.0 6.1.
+     */
+    emulated,
+
+    /**
+     * The unit requires an explicit write buffer flush through the
+     * global command register. VT-d 4.0 6.8.
+     */
+    needs_write_buffer_flush,
+
+    /**
+     * Translation Table Mode is 11b, in which hardware aborts every
+     * DMA request. VT-d 4.0 3.4.4. Transient during the enable
+     * sequence, so this means ask again rather than give up.
+     */
+    abort_dma,
 };
 
 /**
@@ -121,11 +141,50 @@ public:
     static constexpr std::uint32_t translation_enabled = 1u << 31;
 
     /**
-     * Scalable mode, in the root table address register.
+     * Translation Table Mode, in the root table address register.
      *
-     *     #define DMA_RTADDR_SMT (((u64)1) << 10)
+     * Bits 11:10, not bit 10 alone. Linux's own DMA_RTADDR_SMT tests the
+     * single bit, which is enough to answer "is this scalable mode" and
+     * is not enough to answer anything else - and the value this code
+     * has to notice most is 11b, abort-DMA, in which VT-d 4.0 3.4.4 has
+     * hardware block *all* translation requests. That is a real state
+     * during the recommended enable sequence, so seeing it means the
+     * answer is "ask again later" rather than "no translation".
+     * @{
      */
-    static constexpr std::uint64_t scalable_mode_bit = 1ull << 10;
+    static constexpr std::uint64_t translation_mode_shift = 10;
+    static constexpr std::uint64_t translation_mode_mask = 0x3;
+    static constexpr std::uint64_t mode_legacy = 0;
+    static constexpr std::uint64_t mode_scalable = 1;
+    static constexpr std::uint64_t mode_abort_dma = 3;
+    /**
+     * @}
+     */
+
+    /**
+     * Caching Mode, capability register bit 7.
+     *
+     * Set means not-present entries are cached, so installing a mapping
+     * needs an explicit invalidation - and the only channel for one is a
+     * queue whose tail register the guest's operating system owns.
+     *
+     * It also means this is not real hardware. VT-d 4.0 6.1: "Hardware
+     * implementations of this architecture must support operation
+     * corresponding to CM=0. Operation corresponding to CM=1 may be
+     * supported by software implementations (emulation)."
+     */
+    static constexpr std::uint64_t caching_mode_bit = 1ull << 7;
+
+    /**
+     * Required Write-Buffer Flushing, capability register bit 4.
+     *
+     * Set means VT-d 4.0 6.8 requires an explicit write buffer flush
+     * through the global command register after modifying a not-present
+     * entry. That register is a shared one-shot whose other fields would
+     * have to be reconstructed from status, so a unit reporting this is
+     * refused rather than driven. Clear on every modern part.
+     */
+    static constexpr std::uint64_t write_buffer_flushing_bit = 1ull << 4;
 
     /**
      * Translation types in a context entry.
@@ -189,9 +248,31 @@ public:
             return translation_verdict::disabled;
         }
 
+        // Checked before anything is believed about the tables, because
+        // both of these change what installing a mapping would cost and
+        // neither is visible further down.
+        auto capability = arch::x86_64::read64(at(capability_offset));
+        if (0 != (capability & caching_mode_bit)) {
+            return translation_verdict::emulated;
+        }
+        if (0 != (capability & write_buffer_flushing_bit)) {
+            return translation_verdict::needs_write_buffer_flush;
+        }
+
         auto root_address = arch::x86_64::read64(at(root_address_offset));
-        if (0 != (root_address & scalable_mode_bit)) {
+        auto mode = (root_address >> translation_mode_shift) &
+                    translation_mode_mask;
+        if (mode_abort_dma == mode) {
+            return translation_verdict::abort_dma;
+        }
+        if (mode_scalable == mode) {
             return translation_verdict::scalable_mode;
+        }
+        if (mode_legacy != mode) {
+            // 10b is reserved. Something is either wrong or newer than
+            // this code, and both mean the walk below would be reading
+            // the wrong shape of table.
+            return translation_verdict::no_hardware;
         }
 
         // The root table is indexed by bus number with 16 byte entries,
@@ -263,6 +344,12 @@ public:
             return "blocked - refused";
         case translation_verdict::scalable_mode:
             return "scalable mode - refused";
+        case translation_verdict::emulated:
+            return "caching mode set, emulated - refused";
+        case translation_verdict::needs_write_buffer_flush:
+            return "write buffer flushing required - refused";
+        case translation_verdict::abort_dma:
+            return "abort dma mode - refused";
         case translation_verdict::no_hardware:
             return "no remapping hardware";
         }
