@@ -101,6 +101,38 @@ void hypervisor::initialize_host_page_table()
             arch::x86_64::page_table::protection::execute,
         this->os_page_table);
 
+    // Map the local APIC page.
+    //
+    // The xAPIC form of the interrupt command is a store to a page
+    // rather than a write to a model specific register, so the handler
+    // that watches it reads the command back out of that page - through
+    // its physical address, used directly as a host virtual one. That
+    // resolves only if this table maps it, and by default this table
+    // maps itself and the module and nothing else at all. Without this
+    // the read faults: #PF, error code zero, CR2 at the command
+    // register, taken in the exit handler where there is no recovery
+    // point left to unwind to, so the processor simply stops.
+    //
+    // Mapped here rather than where it is armed, because arming happens
+    // after this processor has already switched to this table, and
+    // map_from walks the OS table through the loader's callback - which
+    // is one of the outside addresses that stops resolving at that
+    // switch.
+    //
+    // Unconditional, and only one page. A guest in x2APIC mode never
+    // takes the path that reads it, but establishing the mapping costs a
+    // single entry and removes the ordering question entirely.
+    constexpr std::uint64_t apic_base_mask = 0xffffff000ull;
+    auto apic_base =
+        arch::x86_64::rdmsr(arch::x86_64::msr::ia32_apic_base) &
+        apic_base_mask;
+    this->host_page_table.map_from(
+        apic_base,
+        page_size,
+        arch::x86_64::page_table::protection::read |
+            arch::x86_64::page_table::protection::write,
+        this->os_page_table);
+
     // Assign the host cr3.
     this->host_cr3 = this->host_page_table.virtual_to_physical(
                          &this->host_page_table.head()) |
@@ -627,6 +659,29 @@ std::expected<void, zpp::error> hypervisor::initialize_ept()
  */
 void hypervisor::invalidate_ept()
 {
+    // INVEPT is only defined in VMX root operation. Outside it the
+    // instruction is not merely ineffective, it raises #UD - which is
+    // how this was found: a fault at a small offset from the module
+    // base, from the setup path, long before vmxon.
+    //
+    // Some of the callers below genuinely do run before root mode is
+    // entered: the module is protected and the local APIC page is armed
+    // while the extended page tables are still being built. Those need
+    // no invalidation at all, because the processor is not yet in VMX
+    // operation and therefore holds no cached translation for an EPTP
+    // it has never loaded. So the correct behaviour there is to do
+    // nothing, not to fault.
+    //
+    // CR4.VMXE answers "am I in VMX operation" without any new state to
+    // keep in step. The bit is required to be set to execute vmxon and
+    // may not be cleared while in VMX operation, so clear means
+    // certainly outside it. Nothing else in this tree writes the bit -
+    // the guest's view of it is a read shadow, not the register.
+    constexpr std::uint64_t cr4_vmxe = 1ull << 13;
+    if (!(arch::x86_64::cr4() & cr4_vmxe)) {
+        return;
+    }
+
     arch::x86_64::vmx::ept_pointer eptp;
     eptp.memory_type(arch::x86_64::memory_type::write_back);
     eptp.page_walk_length(4);
@@ -2718,22 +2773,49 @@ hypervisor::main(arch::x86_64::context & caller_context)
     // the loader hands over, so this grows by reading another field
     // rather than by another register and another adapter.
     auto cpuid = caller_context.rdi;
-    auto launch = reinterpret_cast<const zpp_launch_parameters *>(
-        caller_context.rsi);
 
-    // Null checked rather than dereferenced on faith: the loader always
-    // supplies one, but arriving here without it would otherwise be a
-    // fault with nothing to explain it.
-    auto physical_to_virtual =
-        launch ? launch->physical_to_virtual : nullptr;
+    // Everything the loader hands over is copied in, never referred to
+    // where it lies. Nothing outside this module is mapped into the
+    // hypervisor, so a pointer that leads out of it is only good for as
+    // long as somebody else's page table is in force - and this
+    // processor switches to the host page table part way through this
+    // function. That table maps the module and very little else, so
+    // every one of the loader's addresses stops resolving at that point.
+    //
+    // Reading a field after it faults: #PF, error code zero, CR2 in the
+    // loader's pool, from a page directory pointer entry that was never
+    // filled in. That is not hypothetical - it is what the version of
+    // this code that kept the pointer and read through it actually did.
+    //
+    // Copying the whole block rather than each field in turn is what
+    // makes that structural: a field added later is safe by
+    // construction, instead of being safe only if whoever added it
+    // noticed this. A zeroed copy also stands in for an absent block, so
+    // nothing below needs to null check.
+    zpp_launch_parameters launch{};
+    if (auto given = reinterpret_cast<const zpp_launch_parameters *>(
+            caller_context.rsi)) {
+        launch = *given;
+    }
+
+    auto physical_to_virtual = launch.physical_to_virtual;
     auto start_up_memory =
-        launch ? reinterpret_cast<std::uint64_t>(launch->start_up_memory)
-               : 0;
+        reinterpret_cast<std::uint64_t>(launch.start_up_memory);
 
-    if (launch) {
-        this->sleep_control_port = launch->sleep_control_port;
-        this->sleep_control_port_secondary =
-            launch->sleep_control_port_secondary;
+    this->sleep_control_port = launch.sleep_control_port;
+    this->sleep_control_port_secondary = launch.sleep_control_port_secondary;
+
+    // The block copied above still holds one pointer that leads out of
+    // this module, so it gets the same treatment one level down. Keeping
+    // it would move the fault described above one dereference later,
+    // into the hand-over's own fields, where it would be no easier to
+    // read.
+    nvme::channel_handover diagnostic_channel{};
+    bool diagnostic_channel_given = false;
+    if (launch.diagnostic_channel) {
+        diagnostic_channel = *static_cast<const nvme::channel_handover *>(
+            launch.diagnostic_channel);
+        diagnostic_channel_given = true;
     }
 
     // Whether this processor was started by this VMM rather than launched
@@ -2823,12 +2905,6 @@ hypervisor::main(arch::x86_64::context & caller_context)
         // other processor is launched. The MSR bitmap is shared by every
         // VMCS, so this is done once.
         intercept_interrupt_command(true);
-
-        // The same interception for a guest that is not in x2APIC mode,
-        // where the command is a store to a page rather than an MSR
-        // write and the bitmap above cannot see it. Armed only while
-        // that is actually the mode, because the page is hot.
-        watch_local_apic(!x2apic_enabled());
 
         // A suspend takes this VMM away and nothing brings it back, so
         // the least that can be done is notice. Armed only if the loader
@@ -2932,6 +3008,20 @@ hypervisor::main(arch::x86_64::context & caller_context)
         // Allow guest access to unprotected memory.
         unprotect_guest_memory();
 
+        // Interception of the interrupt command for a guest that is not
+        // in x2APIC mode, where the command is a store to a page rather
+        // than an MSR write and the bitmap set up above cannot see it.
+        // Armed only while that is actually the mode, because the page
+        // is hot.
+        //
+        // Here, and not beside the MSR bitmap it complements, because
+        // arming a watch edits an extended page table entry. Done
+        // before initialize_ept() there is no table to edit; done
+        // between it and unprotect_guest_memory() the entry is written
+        // and then overwritten, and the watch is silently lost. This is
+        // the first point at which the tables are final.
+        watch_local_apic(!x2apic_enabled());
+
         // Take the diagnostic channel the loader established, if it
         // established one.
         //
@@ -2946,9 +3036,8 @@ hypervisor::main(arch::x86_64::context & caller_context)
         // target, a missing doorbell. A hand-over that does not check
         // out leaves the sink not ready, and a sink that is not ready is
         // never offered a record.
-        if (launch && launch->diagnostic_channel) {
-            auto & handover = *static_cast<const nvme::channel_handover *>(
-                launch->diagnostic_channel);
+        if (diagnostic_channel_given) {
+            auto & handover = diagnostic_channel;
 
             // A captureless lambda, which converts to the plain
             // function pointer the sink takes. Local to its one use

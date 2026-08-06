@@ -146,10 +146,44 @@ with `-DZPP_HYPERVISOR_WAIT_FOR_DEBUGGER=ON`: the hypervisor spins at its entry
 point until released with `set var gdb_attached = 1`. Racing a gdb attach
 against a guest that dies is not a strategy.
 
-Run gdb and the emulator in **named tmux sessions**, never as detached one-shot
-commands, so a session can be reattached across turns instead of restarting
-everything to look at one value. Note the target has no `tmux` - run it on the
-Mac side, or use `nohup` there and keep the observation on the Mac.
+### Run the tmux session locally, on the Mac
+
+**The target has no `tmux` and no `screen`, and it is not supposed to.** The
+session belongs on the **Mac**, holding SSH connections *into* the target -
+not on the target itself. Looking for `tmux` there wastes a round trip and
+then invites a detached `nohup` that nobody can watch, which is the thing the
+rule exists to prevent.
+
+```sh
+tmux new-session -d -s zpp-rig -n serial \
+  "ssh -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null \
+   tc@192.168.1.199 'tail -f /home/tc/zpp/serial.out'"
+tmux new-window -t zpp-rig -n target \
+  "ssh -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null tc@192.168.1.199"
+tmux attach -t zpp-rig
+```
+
+One window follows the serial trace live, one is a shell on the target for
+starting the rig and reading state. QEMU itself is started from the target
+window with `setsid nohup`, because it must outlive the SSH connection - the
+watchability requirement is satisfied by the tmux session on this side, which
+is what can actually be reattached across turns.
+
+The same rule for gdb: run `x86_64-elf-gdb` in a window of that session on the
+Mac, pointed at the target's gdbstub.
+
+### `scp` does not work to the target
+
+TinyCore ships no `/usr/libexec/sftp-server`, so plain `scp` dies with
+`Connection closed`. Pipe through SSH instead, and verify the hash in the same
+command so a truncated copy cannot be mistaken for a deployed one:
+
+```sh
+cat out/debug/x86_64/zpp_loader.efi | ssh tc@192.168.1.199 \
+  'cat > /home/tc/zpp/esp/EFI/BOOT/BOOTX64.EFI && md5sum /home/tc/zpp/esp/EFI/BOOT/BOOTX64.EFI'
+```
+
+`scp -O` would also work, but the pipe is one command and checks itself.
 
 ## Reading the result
 
