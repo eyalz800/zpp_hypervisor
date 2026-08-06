@@ -195,6 +195,13 @@ enum class reach_verdict
     /** Translation Table Mode 10b, which is reserved. */
     reserved_mode,
 
+    /** RTADDR.SSIRWE is set, so permission - and with it the only
+     * available test for whether an entry is present at all - lives in
+     * bits 62:61 rather than bits 1:0. Refused rather than implemented,
+     * because getting it wrong is the one mistake this whole header
+     * exists to avoid. */
+    io_read_write_permissions,
+
     /** A table's physical address did not translate to anything this
      * can read. */
     unmapped_table,
@@ -328,6 +335,33 @@ public:
     /**
      * @}
      */
+
+    /**
+     * Second Stage I/O Read/Write Enable, root table address register
+     * bit 7.
+     *
+     * VT-d 5.20 11.4.5, added in this revision: "0: Hardware uses bit 0
+     * (R) and bit 1 (W) in second-stage paging entries to calculate
+     * effective permissions. 1: Hardware uses bit 61 (IR) and bit 62
+     * (IW)".
+     *
+     * This is not one more permission model to support, it is a change
+     * to the only test this header has for whether an entry is present.
+     * There is no P bit in a second-stage entry: `dma_pte_present()`
+     * reads `(pte->val & 3) != 0`, and with SSIRWE set that reads a
+     * *live* entry as empty - so the install path would overwrite a
+     * present mapping of the guest's, which is the single outcome every
+     * other rule here is written to prevent. Refused, and named.
+     *
+     * Read in both modes even though VT-d 5.20 7.2 makes it a
+     * programming error in legacy mode (fault RTA.1.4, "the SSIRWE field
+     * is set when the TTM field is programmed to legacy mode"): a unit
+     * in that state is misprogrammed, and a misprogrammed unit is not
+     * one to start writing tables for. Hardware without Second Stage
+     * I/O Read/Write Support reports the bit as Reserved(0), so this
+     * costs a machine nothing that has not deliberately turned it on.
+     */
+    static constexpr std::uint64_t io_read_write_enable_bit = 1ull << 7;
 
     /**
      * Caching Mode, capability register bit 7.
@@ -540,6 +574,30 @@ public:
      */
 
     /**
+     * The address a second-stage paging entry holds: bits 51:12, and
+     * not one bit more.
+     *
+     * Deliberately narrower than the `~0xfff` used for the root,
+     * context and PASID structure pointers, and the difference is not
+     * pedantry. Those describe their address as "bits 63:HAW are
+     * reserved (0)", so the high bits are guaranteed zero and masking
+     * off the low twelve is enough. A second-stage entry does not:
+     * VT-d 5.20 Tables 41-47 give it "(HAW-1):12 ADDR", "51:HAW R:
+     * Reserved (0)", "60:52 IGN: Ignored" and "63 IGN: Ignored" - nine
+     * bits plus one that hardware ignores and *software may therefore
+     * use*.
+     *
+     * These are the guest operating system's tables, not ours. Taking
+     * an ignored bit for the address turns a leaf that maps exactly our
+     * window into one that appears to map somewhere else, and the
+     * `mapped_elsewhere` refusal that follows is a machine written off
+     * over a flag some other software stored in a bit the architecture
+     * set aside for it. Linux's `VTD_PAGE_MASK` is the wide one, which
+     * is correct for Linux because Linux wrote every entry it reads.
+     */
+    static constexpr std::uint64_t entry_address_mask = 0x000ffffffffff000;
+
+    /**
      * Nine bits of index per paging level, as on the processor side -
      * VT-d 5.20 9.8 says the entries "are bitwise compatible with the
      * Intel 64 processor's EPT paging entry format".
@@ -674,6 +732,14 @@ public:
             return reach_verdict::window_out_of_range;
         }
 
+        // And separately, whatever MGAW says, above bit 51 there is no
+        // address field left to write it into - Tables 41 to 47 stop
+        // ADDR at 51 and call everything above it ignored. MGAW is 57
+        // on shipping parts, so this is not implied by the check above.
+        if (0 != (last & ~entry_address_mask & ~0xfffull)) {
+            return reach_verdict::window_out_of_range;
+        }
+
         auto extended =
             arch::x86_64::read64(at(extended_capability_offset));
 
@@ -685,6 +751,9 @@ public:
         }
         if ((mode_legacy != mode) && (mode_scalable != mode)) {
             return reach_verdict::reserved_mode;
+        }
+        if (0 != (root_address & io_read_write_enable_bit)) {
+            return reach_verdict::io_read_write_permissions;
         }
 
         constexpr std::uint64_t page_mask = ~0xfffull;
@@ -809,6 +878,8 @@ public:
             return "abort dma mode - ask again";
         case reach_verdict::reserved_mode:
             return "reserved translation table mode - refused";
+        case reach_verdict::io_read_write_permissions:
+            return "second stage io read/write permissions - refused";
         case reach_verdict::unmapped_table:
             return "a table did not translate - refused";
         case reach_verdict::root_not_present:
@@ -1130,7 +1201,6 @@ private:
                                     std::uint32_t levels,
                                     std::uint64_t page)
     {
-        constexpr std::uint64_t page_mask = ~0xfffull;
         auto frame = page >> 12;
 
         auto parent = table;
@@ -1147,10 +1217,23 @@ private:
                 return reach_verdict::intermediate_missing;
             }
             if (0 != (value & entry_large_page)) {
+                // Bit 7 is PS only two levels down. VT-d 5.20 Table 43
+                // is the 1 GByte page at level 3 and Table 45 the
+                // 2 MByte page at level 2; at level 4 and level 5 the
+                // same bit is "7 R: Reserved (0)" - Tables 42 and 41.
+                // Believing it there would invent a 512 GByte or
+                // 256 TByte mapping out of a bit that should not have
+                // been set, and then compare our window against its
+                // imaginary base. A unit whose tables say that is not
+                // one to write into.
+                if (level > 3) {
+                    return reach_verdict::unsupported_configuration;
+                }
+
                 // A large page already maps this. Whether it happens to
                 // map our own address or not, it is a present entry and
                 // present entries are never touched.
-                auto base = value & page_mask;
+                auto base = value & entry_address_mask;
                 auto size = 1ull << (((level - 1) * level_stride) + 12);
                 auto offset = page - (page & ~(size - 1));
                 if ((base + offset) != page) {
@@ -1161,7 +1244,7 @@ private:
                 }
                 return reach_verdict::identity_mapped;
             }
-            parent = value & page_mask;
+            parent = value & entry_address_mask;
         }
 
         auto slot = parent + ((frame & level_mask) * 8);
@@ -1171,7 +1254,7 @@ private:
         }
 
         if (0 != (leaf & entry_present)) {
-            if ((leaf & page_mask) != page) {
+            if ((leaf & entry_address_mask) != page) {
                 return reach_verdict::mapped_elsewhere;
             }
             if (entry_present != (leaf & entry_present)) {
@@ -1232,18 +1315,25 @@ private:
                                       std::uint64_t slot,
                                       std::uint64_t page)
     {
-        constexpr std::uint64_t page_mask = ~0xfffull;
-
         auto mapped = request.physical_to_virtual(slot);
         if (!mapped) {
             return reach_verdict::unmapped_table;
         }
 
-        auto value = (page & page_mask) | entry_present;
+        auto value = (page & entry_address_mask) | entry_present;
         if (0 != (extended & snoop_control_bit)) {
             value |= entry_snoop;
         }
 
+        // Every other field is left at zero deliberately. Bit 2 is IGN
+        // in all of Tables 41 to 47, so there is no execute permission
+        // to grant or withhold. EMT at 5:3 and IPAT at 6 are "ignored
+        // by hardware when Extended Memory Type Enable (EMTE) field is
+        // Clear ... or when Translation Table Mode is set to legacy
+        // mode", and a zero EMT under a domain that did enable EMTE
+        // means uncacheable for this one page - slower for a device
+        // access, and still coherent, so it is a cost rather than a
+        // correctness question and not worth a refusal.
         auto * entry = reinterpret_cast<volatile std::uint64_t *>(mapped);
         *entry = value;
 
