@@ -11,6 +11,8 @@
 #include "zpp/arch/x86_64/vmx/vmcs.h"
 #include "zpp/arch/x86_64/vmx/vmx_exit_reason.h"
 #include "zpp/crt.h"
+#include "zpp/diag/log.h"
+#include "zpp/diag/pump.h"
 #include "zpp/elf_file.h"
 #include "zpp/elf_image_base.h"
 #include "zpp/error.h"
@@ -2015,6 +2017,25 @@ void hypervisor::on_unhandled_exit(arch::x86_64::vmx::exit_reason reason)
     // the record is complete rather than half filled in.
     record.occurred = 1;
 
+    // Say it into the log as well as into the record.
+    //
+    // The record above says what the state *was* and only for the last
+    // exit of its kind; the log says what happened, in order, across
+    // processors. A boot failure is a sequence, and the record keeps
+    // only its final frame.
+    //
+    // Then empty the ring, because this processor is about to stop and
+    // anything still buffered dies with it. The trickle in the exit path
+    // is sized for a running guest; here there is no guest left to
+    // delay, so the whole ring goes.
+    diag::log<diag::severity::error>(
+        "unhandled exit {} qualification {} rip {} cs {}",
+        record.reason,
+        record.qualification,
+        record.guest_rip,
+        record.guest_cs_selector);
+    diag::pump::drain();
+
     // Everything above went into members, which only a debugger attached
     // to this CPU can read - and this CPU is about to stop, so on bare
     // metal nothing ever reads them. The log is what survives a restart,
@@ -2060,6 +2081,13 @@ void hypervisor::on_vm_entry_failure(arch::x86_64::vmx::exit_reason reason)
     // Written last, so a debugger that finds this set knows the rest of
     // the record is complete rather than half filled in.
     record.occurred = 1;
+
+    // Same reasoning as the unhandled exit path: the record keeps the
+    // last frame, the log keeps the sequence, and this processor is
+    // about to stop so nothing buffered survives unless it goes now.
+    diag::log<diag::severity::error>(
+        "vm entry failure {} rip {}", record.reason, record.guest_rip);
+    diag::pump::drain();
 
     // Into the log as well as the members, for the reason given in
     // on_unhandled_exit: the members need a debugger on a CPU that is
@@ -3138,6 +3166,21 @@ hypervisor::main(arch::x86_64::context & caller_context)
             on_unhandled_exit(full_reason);
         }
         }
+
+        // Move a few records out of the ring on the way back to the
+        // guest.
+        //
+        // Here rather than on a timer, because this is the only place
+        // that is guaranteed to run while a guest is alive and is
+        // already a context where taking microseconds is normal. The
+        // budget is four records, so this is a trickle that keeps up
+        // with a guest rather than a flush - a flush belongs in the halt
+        // paths, where there is no guest left to delay.
+        //
+        // It compiles to nothing when the facility is off: pump::run
+        // is `if constexpr (!enabled) return;` and every sink behind it
+        // folds away with it.
+        diag::pump::run();
 
         // Update RIP, unless nothing was executed. For an INIT signal or
         // a start-up IPI the instruction length field holds nothing

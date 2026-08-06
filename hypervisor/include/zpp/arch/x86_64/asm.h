@@ -221,6 +221,24 @@ inline std::uint16_t __attribute__((naked)) ss()
     )!!");
 }
 
+/**
+ * The time stamp counter.
+ *
+ * A builtin rather than a naked function, because unlike everything
+ * around it `rdtsc` returns its result in two registers - EDX:EAX - and
+ * a naked function would have to combine them by hand in assembly. The
+ * builtin lowers to the same single instruction and lets the compiler
+ * schedule around it.
+ *
+ * Deliberately not serialising. Callers here want a cheap monotonic tick
+ * to order records by, not a fence: `rdtscp` and a surrounding `lfence`
+ * both cost more than the thing being measured on a diagnostic path.
+ */
+inline std::uint64_t rdtsc()
+{
+    return __builtin_ia32_rdtsc();
+}
+
 inline std::uint64_t __attribute__((naked)) rflags()
 {
     asm(R"!!(
