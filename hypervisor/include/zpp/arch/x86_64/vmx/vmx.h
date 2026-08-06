@@ -98,6 +98,11 @@ namespace vm_exit_controls
 {
 enum type : std::uint64_t
 {
+    // SDM Table 25-13 bit 2. Saves the guest's DR7 and IA32_DEBUGCTL
+    // into the VMCS on exit. Without it they are not saved, and since
+    // SDM 28.5.1 sets DR7 to 400H on every exit regardless, whatever the
+    // guest had in it is simply gone.
+    save_debug_controls = (1ull << 2),
     host_address_space_size = (1ull << 9),
 };
 } // namespace vm_exit_controls
@@ -158,6 +163,11 @@ namespace vm_entry_controls
 {
 enum type : std::uint64_t
 {
+    // SDM Table 25-9 bit 2. Loads the guest's DR7 and IA32_DEBUGCTL from
+    // the VMCS on entry. Without it those two fields are written and
+    // never read - the guest resumes with whatever the last exit left in
+    // the registers, which for DR7 is always 400H.
+    load_debug_controls = (1ull << 2),
     ia_32e_mode_guest = (1ull << 9),
 };
 } // namespace vm_entry_controls

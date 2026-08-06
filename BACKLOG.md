@@ -207,11 +207,33 @@ path at all.
 There is no resume path, so a suspend takes the hypervisor away and the
 guest keeps running on bare hardware without being told.
 
-### 8. Debug and microcode state is unmanaged
+### 8. Debug and microcode state is unmanaged — HALF FIXED
 
-No DR7 or `IA32_DEBUGCTL` save/load controls, and MSR `0x79`
-(microcode update) is unhandled — it falls into whichever of the two MSR
-default paths covers its range rather than being answered deliberately.
+**Debug state: fixed.** `guest_dr7` and `guest_ia32_debugctl` were being
+written into the VMCS while neither the "load debug controls" VM-entry
+control nor the "save debug controls" VM-exit control was requested -
+`adjust_msr` only forces bits the capability MSR requires, and with the
+true controls those are allowed to be zero. So both fields were written
+and never read, in the same way the CR4 read shadow was inert without its
+mask.
+
+The consequence is not that the guest's debug state was stale; it is that
+it was destroyed. SDM 28.5.1 sets DR7 to 400H on every VM exit
+regardless, so a guest using hardware breakpoints had them cleared out
+from under it on the next exit. Both controls are requested now, which
+makes the two fields live.
+
+**Microcode: examined, deliberately unchanged.** MSR `0x79` is inside
+`0`-`0x1fff`, so the all-zero bitmap governs it and it does not exit at
+all - it is a genuine pass-through to hardware rather than a
+fall-through to a default path, which is what the entry supposed.
+
+Passing it through is also the right answer. A microcode load cannot be
+emulated, refusing it would break an update the guest legitimately
+applies at boot, and letting it reach hardware is exactly what would
+happen without this VMM present. The hazard worth stating is that an
+update applied while resident can change VMX behaviour underneath us,
+and nothing here would notice.
 
 ### 9. `vmxoff` without `vmclear` on one failure path — NOT REPRODUCIBLE
 

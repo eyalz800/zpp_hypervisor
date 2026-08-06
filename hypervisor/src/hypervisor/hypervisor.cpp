@@ -2424,12 +2424,14 @@ void hypervisor::setup_vmcs(arch::x86_64::context & guest_context)
     // VM exit in 64 bit address space.
     vmcs.vm_exit_controls(arch::x86_64::vmx::adjust_msr(
         this->cached_vmx_msr(vmx_msr::true_exit_controls),
-        arch::x86_64::vmx::vm_exit_controls::host_address_space_size));
+        arch::x86_64::vmx::vm_exit_controls::host_address_space_size |
+            arch::x86_64::vmx::vm_exit_controls::save_debug_controls));
 
     // VM entry in 64 bit address space.
     vmcs.vm_entry_controls(arch::x86_64::vmx::adjust_msr(
         this->cached_vmx_msr(vmx_msr::true_entry_controls),
-        arch::x86_64::vmx::vm_entry_controls::ia_32e_mode_guest));
+        arch::x86_64::vmx::vm_entry_controls::ia_32e_mode_guest |
+            arch::x86_64::vmx::vm_entry_controls::load_debug_controls));
 
     // Get the GDT base.
     auto intermediate_gdt_base = reinterpret_cast<std::uint64_t>(
