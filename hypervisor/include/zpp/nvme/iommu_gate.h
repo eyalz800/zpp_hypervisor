@@ -531,7 +531,8 @@ public:
      */
     static constexpr std::uint64_t entry_read = 1ull << 0;
     static constexpr std::uint64_t entry_write = 1ull << 1;
-    static constexpr std::uint64_t entry_present = entry_read | entry_write;
+    static constexpr std::uint64_t entry_present =
+        entry_read | entry_write;
     static constexpr std::uint64_t entry_large_page = 1ull << 7;
     static constexpr std::uint64_t entry_snoop = 1ull << 11;
     /**
@@ -687,9 +688,8 @@ public:
         }
 
         constexpr std::uint64_t page_mask = ~0xfffull;
-        auto devfn =
-            static_cast<std::uint64_t>((request.device << 3) |
-                                       request.function);
+        auto devfn = static_cast<std::uint64_t>((request.device << 3) |
+                                                request.function);
 
         // The second-stage page table root and its level, wherever the
         // mode in use happens to keep them. `why` carries the answer
@@ -933,9 +933,9 @@ private:
         constexpr std::uint64_t page_mask = ~0xfffull;
 
         std::uint64_t root_low{};
-        if (!read_table(
-                request, root_table + (std::uint64_t{request.bus} * 16),
-                root_low)) {
+        if (!read_table(request,
+                        root_table + (std::uint64_t{request.bus} * 16),
+                        root_low)) {
             why = reach_verdict::unmapped_table;
             return false;
         }
@@ -1135,8 +1135,8 @@ private:
 
         auto parent = table;
         for (auto level = levels; level > 1; --level) {
-            auto index = (frame >> ((level - 1) * level_stride)) &
-                         level_mask;
+            auto index =
+                (frame >> ((level - 1) * level_stride)) & level_mask;
             std::uint64_t value{};
             if (!read_table(request, parent + (index * 8), value)) {
                 return reach_verdict::unmapped_table;
@@ -1197,9 +1197,11 @@ private:
      *   present entry is never modified and nothing is ever unmapped.
      *   Leaving the mapping in place forever is the correct outcome;
      *   removing it is the direction that needs an invalidation.
-     * - Read and write, no execute. VT-d 5.20 Table 47 puts R at bit 0
-     *   and W at bit 1; there is no execute bit in a second-stage entry,
-     *   so "leave X clear" is satisfied by the format.
+     * - Read and write, and nothing else. VT-d 5.20 Table 47 puts R at
+     *   bit 0 and W at bit 1, and bit 2 is IGN in every second-stage
+     *   entry type - Tables 41 to 47. There is no execute permission to
+     *   grant or withhold here, and Linux's dma_pte bits agree: READ,
+     *   WRITE, LARGE_PAGE and SNP, with no EXEC.
      * - SNP at bit 11 only when ECAP.SC allows it. VT-d 5.20 Table 47:
      *   the field "is treated as reserved(0) by hardware implementations
      *   not supporting Snoop Control", and a reserved bit set in a
