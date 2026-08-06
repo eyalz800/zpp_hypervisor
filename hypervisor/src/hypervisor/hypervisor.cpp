@@ -1347,16 +1347,6 @@ void hypervisor::intercept_interrupt_command(bool intercept)
     }
 }
 
-std::uint64_t hypervisor::host_physical_of(const void * address)
-{
-    // A plain function rather than something carrying state, because the
-    // sink takes a function pointer and this VMM is a singleton anyway.
-    // The host page table is the only correct answer once resident: the
-    // identity the loader relied on stops being true the moment CR3
-    // changes.
-    return instance().host_page_table.virtual_to_physical(address);
-}
-
 void hypervisor::intercept_io_port(std::uint16_t port, bool intercept)
 {
     // One bit per port, the first bitmap covering 0x0000 to 0x7fff and
@@ -2476,7 +2466,20 @@ void hypervisor::setup_vmcs(arch::x86_64::context & guest_context)
     vmcs.guest_fs_selector(guest_context.fs);
     vmcs.guest_fs_limit(descriptor.effective_limit());
     vmcs.guest_fs_access_rights(descriptor.vmx_access_rights());
-    vmcs.guest_fs_base(descriptor.context_dependent_base());
+    // From the MSR, not the descriptor. In long mode the FS base does
+    // not live in the descriptor at all - it lives in IA32_FS_BASE, and
+    // a descriptor's base field is thirty two bits, so taking it from
+    // there truncates any base above four gigabytes to whatever the low
+    // half happens to be.
+    //
+    // GS a few lines below has always been read from its MSR. FS was
+    // not, and the asymmetry is the tell: the same mistake was found
+    // once and fixed in one of the two places.
+    //
+    // It has not bitten because 64 bit Windows keeps its per-processor
+    // block in GS and leaves FS largely unused. A guest that does use it
+    // would resume with a base silently different from the one it set.
+    vmcs.guest_fs_base(this->ia32_fs_base);
     vmcs.host_fs_base(reinterpret_cast<std::uint64_t>(this->fs_data));
     vmcs.host_fs_selector(0);
 
@@ -2898,8 +2901,20 @@ hypervisor::main(arch::x86_64::context & caller_context)
             auto & handover = *static_cast<const nvme::channel_handover *>(
                 launch->diagnostic_channel);
 
-            if (diag::esp_block_sink::configure(handover,
-                                                &host_physical_of)) {
+            // A captureless lambda, which converts to the plain
+            // function pointer the sink takes. Local to its one use
+            // rather than a member, since nothing else needs it and
+            // this VMM is a singleton anyway.
+            //
+            // The host page table is the only correct answer once
+            // resident: the identity the loader relied on stops being
+            // true the moment CR3 changes.
+            auto physical_of = [](const void * address) {
+                return instance().host_page_table.virtual_to_physical(
+                    address);
+            };
+
+            if (diag::esp_block_sink::configure(handover, physical_of)) {
                 log("disk channel live, namespace {}",
                     handover.target.namespace_id);
                 diag::log<diag::severity::info>(

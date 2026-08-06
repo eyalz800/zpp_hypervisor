@@ -442,13 +442,6 @@ private:
     void intercept_io_port(std::uint16_t port, bool intercept);
 
     /**
-     * Turns one of this VMM's own buffers into the address a device will
-     * use for it. Handed to the disk sink, which cannot assume the
-     * identity mapping the loader had.
-     */
-    static std::uint64_t host_physical_of(const void * address);
-
-    /**
      * Handles an I/O instruction that exited. Returns whether it was one
      * this VMM asked to see.
      */

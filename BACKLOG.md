@@ -137,7 +137,7 @@ Read in the code. Each is a real divergence from what the architecture
 requires, but none has been provoked yet — so the first job on each is to
 establish the trigger, and only then to fix it.
 
-### 3. `guest_fs_base` is taken from the GDT
+### 3. `guest_fs_base` is taken from the GDT — FIXED
 
 `hypervisor/src/hypervisor/hypervisor.cpp:1768` writes
 `descriptor.context_dependent_base()`. In long mode the FS base does not
@@ -160,12 +160,26 @@ this covers the calling processor only. Fixing that needs the rendezvous
 item 10 describes. It is safe in the direction that matters - a stale
 permissive entry costs a missed observation, never a wrong one.
 
-### 5. `ia_32e_mode_guest` is set once and never re-derived
+### 5. `ia_32e_mode_guest` is set once and never re-derived — NOT A DEFECT
 
-Written at `:1731` from the state at launch, cleared at `:1381` for the
-real-mode start-up path, and never revisited. A guest that changes
-`EFER.LMA` afterwards leaves the VM-entry control stale, and entry
-consistency checks tie the two together.
+Written from the state at launch, cleared for the real-mode start-up
+path, and never revisited - which looks stale, and is not, because
+hardware maintains it.
+
+SDM, `IA32_VMX_MISC` bit 5: "every VM exit stores the value of
+IA32_EFER.LMA into the 'IA-32e mode guest' VM-entry control", and "This
+bit is read as 1 on any logical processor that supports the 1-setting of
+the 'unrestricted guest' VM-execution control".
+
+This VMM enables unrestricted guest - it has to, since it starts
+application processors in real mode - so the bit is set and every exit
+re-derives the control from the guest's own EFER. Writing it once at
+launch is therefore correct, and a guest switching in and out of long
+mode is handled without this VMM doing anything.
+
+Worth keeping rather than deleting: the entry looked obviously true, and
+checking it against the specification is the only reason it was not
+"fixed" into something that does the same thing by hand.
 
 ### 6. xAPIC MMIO ICR accesses are not intercepted — FIXED, NOT YET RUN
 
