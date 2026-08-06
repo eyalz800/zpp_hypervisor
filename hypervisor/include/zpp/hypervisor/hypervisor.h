@@ -1221,6 +1221,30 @@ private:
          * The task segment to be used by the guest in case no TSS.
          */
         alignas(0x10) std::uint32_t guest_tss[max_cpus][26]{};
+
+        /**
+         * What a guest reading this module's memory is shown instead.
+         *
+         * Not-present would be the honest answer and it is not an
+         * available one: an EPT violation reports no data and no operand
+         * size, so completing the access means either an instruction
+         * decoder or letting the guest's own instruction run against
+         * *something*. This is that something - a page of zeroes that
+         * absorbs writes and reveals nothing.
+         *
+         * **It lives here, in the memory the guest is meant to reach,
+         * rather than among the protected members.** Pointing an EPT
+         * entry at a protected frame and marking it writable would work
+         * and would quietly contradict protect_module, which makes every
+         * page of this module not-present. A hole in that coverage
+         * should not be something one has to notice.
+         *
+         * Shared by every processor and every redirected page,
+         * deliberately. It is a sink, not storage: nothing in this VMM
+         * ever reads it, and a guest that reads back what it wrote into
+         * it has learned nothing it did not already know.
+         */
+        alignas(page_size) std::uint8_t decoy_page[page_size]{};
     } unprotected_memory;
 
     /**
@@ -1330,22 +1354,6 @@ private:
      */
     bool stepping_watch[max_cpus]{};
     std::uint64_t stepping_page[max_cpus]{};
-
-    /**
-     * What a guest reading this module's memory is shown instead.
-     *
-     * Not-present would be the honest answer and it is not an available
-     * one: an EPT violation reports no data and no operand size, so
-     * completing the access means either an instruction decoder or
-     * letting the guest's own instruction run against *something*. This
-     * is that something - a page of zeroes that absorbs writes and
-     * reveals nothing.
-     *
-     * Shared by every processor and every module page, deliberately. It
-     * is a sink, not storage, and a guest that reads back what it wrote
-     * into it has learned nothing it did not already know.
-     */
-    alignas(page_size) std::uint8_t decoy_page[page_size]{};
 
     /**
      * How many of this module's pages a guest has touched. One per

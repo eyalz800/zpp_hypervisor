@@ -167,6 +167,20 @@ private:
                 }
             }
 
+            // Give the sink a chance to act on time having passed
+            // rather than on a record having arrived.
+            //
+            // Optional, and detected rather than required, so a sink
+            // that has nothing to do with time does not have to say so.
+            // The disk sink uses it to bound how long a partly filled
+            // block may wait: a block is written when it fills, and a
+            // guest that has gone quiet would otherwise leave the last
+            // one unwritten indefinitely - which is precisely the case
+            // the log exists for.
+            if constexpr (requires { Sink::flush_if_due(); }) {
+                Sink::flush_if_due();
+            }
+
             gate<Sink::id>::leave();
         }
     }

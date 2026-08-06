@@ -943,7 +943,7 @@ bool hypervisor::on_ept_violation(std::size_t cpu)
         if (auto entry = epte_for(page << 12)) {
             (*entry)->page_number(
                 this->host_page_table.virtual_to_physical(
-                    this->decoy_page) >>
+                    this->unprotected_memory.decoy_page) >>
                 12);
 
             // Executable as well as readable, deliberately. If the guest
