@@ -15,6 +15,7 @@ extern "C" {
 #include "zpp/loader.h"
 #include "zpp/nvme_selftest.h"
 #include "zpp/reserved_region.h"
+#include "zpp/sleep_control.h"
 #include "zpp/trace.h"
 #include "zpp/verify.h"
 
@@ -109,6 +110,7 @@ static bool g_timed_waits_usable = true;
 // Unqualified, so the many call sites below stay readable.
 using zpp::nvme_selftest;
 using zpp::reserved_region;
+using zpp::sleep_control_finder;
 using zpp::trace;
 using zpp::verify;
 
@@ -1333,6 +1335,11 @@ extern "C" EFI_STATUS EFIAPI uefi_main(EFI_HANDLE image_handle,
     // the boot manager is started, because the guest reads the table once
     // and builds its translation domains from what it found.
     reserved_region::install(system_table);
+
+    // Where the guest writes to put the machine to sleep. Only the
+    // loader can find it, and the resident side cannot see a suspend
+    // coming without it.
+    sleep_control_finder::run(system_table);
 
     // Load the ELF.
     const zpp_loader_parameters parameters{
