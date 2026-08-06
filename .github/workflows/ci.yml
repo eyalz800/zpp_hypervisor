@@ -11,7 +11,6 @@ on:
 
 env:
   LLVM_VERSION: "22"
-  CLANG_FORMAT_VERSION: "20.1.7"
 
 jobs:
   # Tier 1 + 2: cross build every target, then assert the ELF invariants that
@@ -55,12 +54,15 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      # Pinned through PyPI rather than taken from an LLVM install: clang-format
-      # majors disagree on formatting, so CI and developers must share an exact
-      # version or this job flaps. Keep in step with CLANG_FORMAT_VERSION below
-      # and the value documented in CLAUDE.md.
+      # Deliberately unpinned. This used to name an exact version, on the
+      # grounds that clang-format majors disagree and CI would otherwise
+      # flap - but the pin cost more than the flapping did, because every
+      # machine that had a newer clang-format on it had to install a second
+      # one to touch a single line. Formatting is a tidiness check, not a
+      # correctness one, so take whatever is current and reformat the tree
+      # when a new major moves something.
       - name: Install clang-format
-        run: pipx install "clang-format==$CLANG_FORMAT_VERSION"
+        run: pipx install clang-format
       - name: Check formatting
         run: |
           git ls-files '*.h' '*.cpp' '*.c' \

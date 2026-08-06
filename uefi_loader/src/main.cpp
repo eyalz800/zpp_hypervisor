@@ -581,9 +581,8 @@ static void trace_launch_context()
             at, static_cast<std::uint64_t>(information.ProcessorId), 4);
         at = trace::append_text(at, " flags ");
         at = trace::append_hex(at, information.StatusFlag, 8);
-        at = trace::append_text(at, information.StatusFlag & 0x1
-                                        ? " bsp"
-                                        : " application");
+        at = trace::append_text(
+            at, information.StatusFlag & 0x1 ? " bsp" : " application");
         at = trace::append_text(
             at, information.StatusFlag & 0x2 ? " enabled" : " disabled");
         at = trace::append_text(
@@ -744,14 +743,14 @@ static void write_trace_log(EFI_HANDLE device)
         if (end_position > largest_kept) {
             file->Delete(file);
             file = nullptr;
-            if (EFI_ERROR(volume->Open(
-                    volume,
-                    &file,
-                    reinterpret_cast<CHAR16 *>(
-                        const_cast<char16_t *>(file_path)),
-                    EFI_FILE_MODE_READ | EFI_FILE_MODE_WRITE |
-                        EFI_FILE_MODE_CREATE,
-                    0))) {
+            if (EFI_ERROR(
+                    volume->Open(volume,
+                                 &file,
+                                 reinterpret_cast<CHAR16 *>(
+                                     const_cast<char16_t *>(file_path)),
+                                 EFI_FILE_MODE_READ | EFI_FILE_MODE_WRITE |
+                                     EFI_FILE_MODE_CREATE,
+                                 0))) {
                 volume->Close(volume);
                 return;
             }
@@ -814,7 +813,8 @@ static void * allocate_rwx(std::size_t size)
     // What matters for a resume is compounded by the module being hidden:
     // protect_module clears every EPT permission on these pages, so a
     // restore writing over them does not merely corrupt the module, it
-    // takes an EPT violation on a processor whose only response is to stop.
+    // takes an EPT violation on a processor whose only response is to
+    // stop.
     auto status = g_boot_services->AllocatePages(
         AllocateAnyPages,
         EfiReservedMemoryType,

@@ -468,10 +468,11 @@ as C++ and destroy the file.
   everywhere. `x64` was the old name; do not reintroduce it, it is MSVC's spelling
 - `constexpr` everything that can be — all getters, constructors, destructors, operators
 - Formatted with `.clang-format` (75 column limit). Not enforced by the build, but CI checks
-  it. Use **clang-format 20.1.7 exactly** — majors disagree on formatting, so a different
-  version will fight CI. Install it pinned rather than using whatever LLVM ships:
-  `pipx install clang-format==20.1.7`. Keep the version in step with
-  `CLANG_FORMAT_VERSION` in `.github/workflows/ci.yml`.
+  it. **Use whatever clang-format you have, 22 or newer** — whatever LLVM ships is fine.
+  The version is deliberately *not* pinned: majors do disagree on formatting, but the pin
+  cost more than the disagreement, since anyone with a current LLVM had to install a second
+  clang-format to touch one line. When a new major reflows something, reformat the tree in
+  its own commit rather than pinning against it.
 - **Buffers are `std::span`, never `(pointer, size)` pairs.** Any API taking a contiguous
   range takes `std::span<T>` / `std::span<const std::byte>`. Applies to new APIs too.
   The one deliberate exception is address-range APIs like `page_table::map_from` and the
