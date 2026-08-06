@@ -297,3 +297,61 @@ the hypervisor executes `vmxon` on a processor that does not implement VMX.
 This has nothing to do with this component and predates it — the same crash
 happens on a build of `develop` with none of this compiled in. Build with
 `-DZPP_CHAINLOAD_ONLY=ON` to test loader-side work under TCG.
+
+
+## The double boot, on the merged tree
+
+Repeated after the work was merged and the call site wired into
+`main.cpp`, because the agent's run predated both. A 1 GB FAT32 image,
+booted twice under QEMU, then read from the host.
+
+**Boot one - the shrink.**
+
+```
+esp reservation: backup boot sector updated at 0x6
+esp reservation: fs info invalidated at sector 0x1
+esp reservation: reserved this boot, so the channel stays off until the
+                 next one - the mounted file system still believes it
+                 owns the range
+esp reservation: no channel this boot
+```
+
+Total sectors `2097152` to `1966080`, confirmed by reading the boot
+sector **and** its backup at sector 6 directly.
+
+**Boot two - the reservation is found.**
+
+```
+esp reservation: reserved first lba 0x1e0000
+esp reservation: reserved lba count 0x20000
+esp reservation: reserved blocks of 4k 0x4000
+esp reservation: channel ready
+```
+
+**Read back from the host**, which is the part that counts:
+
+```
+first block   lba 1966080  magic ZPLOGBLK  file_id ZPPLOG01  index 0
+second block  lba 1966088  magic ZPLOGBLK  file_id ZPPLOG01  index 1
+last block    lba 2097144  magic ZPLOGBLK  file_id ZPPLOG01  index 16383
+8 sectors before the region: all zero
+```
+
+Free space fell by 67,112,960 bytes, which is the 64 MB reserved - an
+independent confirmation that the file system agrees about what it lost.
+
+**That FAT cannot reach it**, which is the whole point: 1,003,488,629
+bytes written into the volume until 114,688 bytes remained, and the
+reserved region's sha256 is unchanged -
+`0ad6babab4afb4f87aeb2e81abca873ca28ae2e55d07284f46d3cede70a72a0e`
+before and after.
+
+The boundary is exact. The data area's last sector is 1966079 and the
+reservation begins at 1966080: they abut, with no gap and no overlap.
+
+**Still unproven, and both need real hardware.** The
+`HARDDRIVE_DEVICE_PATH` branch never ran - the test medium is a bare FAT
+image with no partition table, so the partition starts at LBA 0 and the
+loader says so rather than defaulting. On a GPT disk that must come back
+non-zero, and it is one traced line to check. The disk GUID is unread
+for the same reason.
