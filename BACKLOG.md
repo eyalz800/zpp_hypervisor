@@ -262,7 +262,22 @@ worth taking seriously — see item 12.
 
 ### 10. Five unsynchronised or unbounded paths
 
-- `start_up_lock` does not cover `next_virtual_processor`.
+- `start_up_lock` does not cover `next_virtual_processor` — **the
+  overrun is closed, the race is latent**. It indexes `vmx`,
+  `vmx_vmcs`, `intermediate_gdt` and `guest_tss`, all of `max_cpus`, and
+  nothing bounded it. It is bounded now, but indirectly and worth
+  writing down: `main` is reachable only through `launch_on_cpu`, which
+  refuses once `available_stack_index` reaches `max_cpus`, and the two
+  counters advance together at one per launched processor. So the fix
+  for the stack index closed this as well.
+
+  What remains is the unsynchronised read: each processor takes its
+  index by reading the shared counter and incrementing it at the end of
+  `main`, so two launching concurrently would take the same one. That
+  cannot happen on any current loader - the Windows and Linux ones block
+  per processor, and under UEFI only the boot processor is launched -
+  which is the same coincidence item 12 documents, and it is a
+  coincidence rather than a design.
 - The trampoline timeout races the processor it is timing out.
 - The slot index and the VPID can diverge, so per-CPU state can be read
   through the wrong index.
