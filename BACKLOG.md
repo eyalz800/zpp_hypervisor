@@ -288,6 +288,24 @@ worth taking seriously — see item 12.
   machine with more processors than `max_cpus`. Bounded now, and the
   ceiling raised from 16 to 32, which current laptops exceed.
 
+### 15. Per-processor storage is sized for the ceiling, not the machine
+
+`stack[max_cpus][512 KB]` is 16 MB, `intermediate_gdt[max_cpus][0x2000]`
+is 2 MB, and both are dimensioned on `max_cpus` rather than on the
+processors a machine actually has. Raising `max_cpus` from 16 to 32
+therefore cost 8 MB on every machine, including the ones with four
+processors.
+
+The loader knows the real count - `number_of_cpus()` - and there is now
+a launch structure to pass it through, so these could be sized on it.
+
+**Not obviously worth doing.** It is a change to a working boot path for
+a gain nobody has felt: no allocation has failed, and the whole image is
+`.bss`, so the cost is address space rather than anything scarce. It
+also carries an ordering constraint, since the stacks must exist before
+any processor launches. Recorded so the trade is visible, not because it
+is queued.
+
 ## Dead and misleading
 
 These cost nothing at runtime and cost time during every future
