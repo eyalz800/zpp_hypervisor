@@ -2377,8 +2377,26 @@ void hypervisor::setup_vmcs(arch::x86_64::context & guest_context)
     vmcs.guest_cr3(this->guest_cr3);
     vmcs.host_cr3(this->host_cr3);
 
-    // Load CR4
-    vmcs.cr4_read_shadow(this->guest_cr4);
+    // Load CR4.
+    //
+    // The mask is what makes the read shadow mean anything: a shadow
+    // only answers for the bits set here, and with the mask left at its
+    // default of zero - which it was - every bit came from the real
+    // register and the shadow above was dead code.
+    //
+    // VMXE is the bit that matters. CPUID leaf 1 reports no VMX, because
+    // otherwise the guest's own hypervisor launches ahead of ours and
+    // faults on its own vmxon. A guest that then reads CR4 and finds
+    // VMXE set has been told two contradictory things, and the
+    // combination exists on no real processor. Which one it believes is
+    // its choice, and one of the choices ends in a #GP it cannot
+    // explain.
+    //
+    // So: the guest sees VMXE clear, and any attempt to write the bit
+    // exits to us rather than reaching the register we need it in.
+    constexpr std::uint64_t cr4_vmxe = 1ull << 13;
+    vmcs.cr4_guest_host_mask(cr4_vmxe);
+    vmcs.cr4_read_shadow(this->guest_cr4 & ~cr4_vmxe);
     vmcs.guest_cr4(this->host_cr4);
     vmcs.host_cr4(this->host_cr4);
 
@@ -3187,6 +3205,90 @@ hypervisor::main(arch::x86_64::context & caller_context)
                 vmcs.guest_pending_debug_exceptions());
             emulate_start_up_ipi(context, vector);
             advance_rip = false;
+            break;
+        }
+        case basic_reason::control_register_access: {
+            // Reachable only because CR4's guest/host mask is non-zero:
+            // a write to a masked bit exits instead of landing in the
+            // register. Today that is VMXE and nothing else.
+            //
+            // The guest is given what it asked for in the shadow, so a
+            // read back agrees with its own write, while the real
+            // register keeps VMXE - without which the next VM entry
+            // fails, since a processor in root mode must have it set.
+            constexpr std::uint64_t cr4_vmxe = 1ull << 13;
+
+            auto qualification = vmcs.exit_qualification();
+            auto number = qualification & 0xf;
+            auto access = (qualification >> 4) & 0x3;
+            auto gpr = (qualification >> 8) & 0xf;
+
+            // Only a MOV to CR4 can arrive here. Anything else means the
+            // mask grew without this growing with it, and guessing at
+            // it would resume the guest as though something had worked.
+            if ((4 != number) || (0 != access)) {
+                record_exit(full_reason);
+                on_unhandled_exit(full_reason);
+                break;
+            }
+
+            // The encoded register number is the architectural one,
+            // which is not the order this context happens to store them
+            // in - so it is spelled out rather than indexed.
+            std::uint64_t value{};
+            switch (gpr) {
+            case 0:
+                value = context.rax;
+                break;
+            case 1:
+                value = context.rcx;
+                break;
+            case 2:
+                value = context.rdx;
+                break;
+            case 3:
+                value = context.rbx;
+                break;
+            case 4:
+                value = context.rsp;
+                break;
+            case 5:
+                value = context.rbp;
+                break;
+            case 6:
+                value = context.rsi;
+                break;
+            case 7:
+                value = context.rdi;
+                break;
+            case 8:
+                value = context.r8;
+                break;
+            case 9:
+                value = context.r9;
+                break;
+            case 10:
+                value = context.r10;
+                break;
+            case 11:
+                value = context.r11;
+                break;
+            case 12:
+                value = context.r12;
+                break;
+            case 13:
+                value = context.r13;
+                break;
+            case 14:
+                value = context.r14;
+                break;
+            default:
+                value = context.r15;
+                break;
+            }
+
+            vmcs.cr4_read_shadow(value & ~cr4_vmxe);
+            vmcs.guest_cr4(value | cr4_vmxe);
             break;
         }
         case basic_reason::ept_violation: {

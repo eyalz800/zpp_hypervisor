@@ -99,7 +99,7 @@ GPT partition signature, no `LOAD_OPTION_CATEGORY_APP`).
 
 These were observed in real state. They are not inferences.
 
-### 1. CR4.VMXE is visible to the guest
+### 1. CR4.VMXE is visible to the guest — FIXED, NOT YET RUN
 
 The guest reads `cr4 = 0x2668`, VMXE set, while CPUID leaf 1 ECX[5] reports
 no VMX. That combination exists nowhere in hardware, and it is exactly the
@@ -107,15 +107,21 @@ kind of half-answered interface described under *What the guest is told* in
 `CLAUDE.md`: a guest that trusts CR4 over CPUID concludes VMX is available
 and takes a `#GP` on its own `vmxon`.
 
-The fix needs CR4's guest/host mask and read shadow, which means a
-control-register-access exit (reason 28) has to be handled. A validated
-implementation exists on `worktree-agent-a1728a3b15b05a6db` and was not
-merged, because it conflicts with `uefi_loader/include/zpp/verify.h` in
-three places and its version of that file still *requires* the
-hypervisor-present bit that `1d391a3` deliberately clears.
+The cause was narrower than the entry suggested. `cr4_read_shadow` was
+already being written with the guest's own CR4 - but `cr4_guest_host_mask`
+was never written at all, and a shadow only answers for the bits the mask
+selects. With the mask at its default of zero every bit came from the real
+register and the shadow was dead code.
 
-Closing this means the guest reading `0x0668`, and the self-check still
-passing with the present bit clear.
+The mask now selects VMXE, so the guest reads that bit from the shadow
+with it clear, and a write to it exits instead of reaching the register.
+Exit reason 28 is handled: the guest's value goes to the shadow, and the
+real register keeps VMXE, without which the next entry fails - VMXE is
+required to be set by `IA32_VMX_CR4_FIXED0`.
+
+**Not yet run.** It cannot be exercised locally, since the hypervisor
+needs VT-x and the local emulator has none. Closing this means observing
+the guest read `0x0668` on the rig.
 
 ### 2. A start-up IPI is swallowed, bare metal only
 
