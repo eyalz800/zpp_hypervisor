@@ -1342,6 +1342,83 @@ void hypervisor::intercept_interrupt_command(bool intercept)
     }
 }
 
+void hypervisor::watch_local_apic(bool watch)
+{
+    // Where the page is, from the guest's own view of it. The base is
+    // not architecturally fixed - IA32_APIC_BASE can relocate it - so it
+    // is read rather than assumed to be 0xfee00000.
+    constexpr std::uint64_t base_mask = 0xffffff000ull;
+    auto base =
+        arch::x86_64::rdmsr(arch::x86_64::msr::ia32_apic_base) & base_mask;
+
+    if (!watch) {
+        if (this->watched_apic_page) {
+            unwatch_guest_page(this->watched_apic_page);
+            this->watched_apic_page = 0;
+        }
+        return;
+    }
+
+    if (this->watched_apic_page == base) {
+        return;
+    }
+    if (this->watched_apic_page) {
+        unwatch_guest_page(this->watched_apic_page);
+    }
+
+    if (auto armed = watch_guest_page_writes(
+            base, &hypervisor::on_local_apic_write, this)) {
+        this->watched_apic_page = base;
+        log("watching the local apic page at {}", base);
+    } else {
+        // Refused rather than left half armed. Missing an IPI is bad;
+        // believing one is being watched when it is not is worse.
+        this->watched_apic_page = 0;
+        log("could not watch the local apic page at {}", base);
+    }
+}
+
+void hypervisor::on_local_apic_write(void * context, std::uint64_t page)
+{
+    auto & self = *static_cast<hypervisor *>(context);
+
+    // The write has already happened - the watch steps over it before
+    // saying so - which is why the command can simply be read back out
+    // of the page rather than decoded from the instruction.
+    //
+    // The xAPIC form is two dwords rather than one quadword: the low
+    // half at 0x300, and the destination in the top eight bits of the
+    // dword at 0x310. Composed here into the same shape the x2APIC path
+    // produces, so one decision function serves both.
+    constexpr std::uint64_t interrupt_command_low = 0x300;
+    constexpr std::uint64_t interrupt_command_high = 0x310;
+    constexpr std::uint64_t delivery_status_pending = 1ull << 12;
+
+    auto * bytes = reinterpret_cast<volatile std::uint8_t *>(page << 12);
+    auto low = arch::x86_64::read32(bytes + interrupt_command_low);
+    auto high = arch::x86_64::read32(bytes + interrupt_command_high);
+
+    // Every other register in this page is written far more often than
+    // the command is - the end of interrupt one on every interrupt - so
+    // a write that left no command pending was not a command at all.
+    if (0 == (low & delivery_status_pending)) {
+        return;
+    }
+
+    auto command = std::uint64_t{low} | (std::uint64_t{high >> 24} << 32);
+
+    if (auto issue = self.on_interrupt_command(command)) {
+        // Put back what the handler decided, in the form this interface
+        // takes. The high half is written first, because writing the low
+        // half is what sends it.
+        arch::x86_64::write32(
+            bytes + interrupt_command_high,
+            static_cast<std::uint32_t>((*issue >> 32) << 24));
+        arch::x86_64::write32(bytes + interrupt_command_low,
+                              static_cast<std::uint32_t>(*issue));
+    }
+}
+
 std::optional<std::size_t>
 hypervisor::processor_slot(std::uint64_t apic_id)
 {
@@ -2609,6 +2686,12 @@ hypervisor::main(arch::x86_64::context & caller_context)
         // other processor is launched. The MSR bitmap is shared by every
         // VMCS, so this is done once.
         intercept_interrupt_command(true);
+
+        // The same interception for a guest that is not in x2APIC mode,
+        // where the command is a store to a page rather than an MSR
+        // write and the bitmap above cannot see it. Armed only while
+        // that is actually the mode, because the page is hot.
+        watch_local_apic(!x2apic_enabled());
     }
 
     // Initialize and load the intermediate GDT, which is a copy of the

@@ -418,6 +418,36 @@ private:
     void monitor_trap_flag(bool value);
 
     /**
+     * Watches the memory mapped local APIC for interrupt command writes,
+     * which is the only way to see an IPI sent by a guest that is not in
+     * x2APIC mode.
+     *
+     * The MSR bitmap catches the x2APIC form and cannot catch this one:
+     * in xAPIC mode the interrupt command register is two dwords in a
+     * page of ordinary device memory, and writing them is a store, not
+     * an instruction this VMM is told about.
+     *
+     * Armed only while the guest is actually in xAPIC mode. The page is
+     * hot - the end of interrupt register lives in it and is written on
+     * every interrupt - so trapping it permanently would be a real cost
+     * for a mode a modern guest leaves within milliseconds of booting.
+     */
+    void watch_local_apic(bool watch);
+
+    /**
+     * Handles a write the local APIC page watch saw. Reads the interrupt
+     * command out of the page and, if one was issued, puts it through
+     * the same decision the x2APIC path uses.
+     */
+    static void on_local_apic_write(void * context, std::uint64_t page);
+
+    /**
+     * The guest physical page of the memory mapped local APIC, or zero
+     * while it is not being watched.
+     */
+    std::uint64_t watched_apic_page{};
+
+    /**
      * Remove protection for unprotected guest memory.
      * We mainly need to use this memory from guest on UEFI boot.
      */

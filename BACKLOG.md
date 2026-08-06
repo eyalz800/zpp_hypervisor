@@ -167,10 +167,26 @@ real-mode start-up path, and never revisited. A guest that changes
 `EFER.LMA` afterwards leaves the VM-entry control stale, and entry
 consistency checks tie the two together.
 
-### 6. xAPIC MMIO ICR accesses are not intercepted
+### 6. xAPIC MMIO ICR accesses are not intercepted — FIXED, NOT YET RUN
 
-Only the x2APIC MSR path reaches the exit handler. A guest in xAPIC mode
-writes the ICR through the APIC page and sends IPIs this VMM never sees.
+Only the x2APIC MSR path reached the exit handler. A guest in xAPIC mode
+writes the command through the APIC page, which is a store rather than an
+instruction the MSR bitmap can be told about, so those IPIs were invisible.
+
+Now caught with the page watch: the page is write protected, the guest's
+own store is stepped over, and the command is read back out of the page
+afterwards - so no instruction decoder is involved. The two dwords of the
+xAPIC form are composed into the shape the x2APIC path already produces,
+and both go through one decision.
+
+Armed only while the guest is in xAPIC mode, because the page is hot -
+the end of interrupt register is in it and is written on every interrupt.
+A write leaving no command pending is ignored, which is almost all of
+them.
+
+**Not yet run.** Needs VT-x, which the local emulator does not have, and
+it needs a guest that actually uses xAPIC to exercise the interesting
+path at all.
 
 ### 7. S3/S4 leaves the machine unvirtualized
 
