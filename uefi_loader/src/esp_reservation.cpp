@@ -695,6 +695,62 @@ void invalidate_fs_info(const volume & where, std::uint32_t sector)
 }
 
 /**
+ * Puts right a free cluster count that describes a volume this size no
+ * longer is.
+ *
+ * Called on the steady state path, and it exists because of something
+ * observed rather than imagined: the firmware's FAT driver mounted the
+ * volume before the shrink, and when it wrote a file later in that same
+ * boot it rewrote the information sector with a count computed from its
+ * stale, larger cluster map. That figure then sits on the medium
+ * describing clusters that no longer exist, and it is not self
+ * correcting - the next driver to mount believes what it finds. `mdir`
+ * reported a gigabyte partition as having more free space than the file
+ * system had clusters.
+ *
+ * Only ever set to "unknown", and only when the count is impossible.
+ * A count that merely disagrees with the FAT is not this component's
+ * business.
+ */
+void repair_fs_info(const volume & where, const fat32 & layout)
+{
+    auto sector = layout.fs_info_sector;
+    if ((0 == sector) || (0xffff == sector)) {
+        return;
+    }
+    if (!read_sectors(where, sector, 1, g_scratch)) {
+        return;
+    }
+    if ((fs_info_lead_signature !=
+         load32(g_scratch + fs_info_lead_signature_offset)) ||
+        (fs_info_struct_signature !=
+         load32(g_scratch + fs_info_struct_signature_offset)) ||
+        (fs_info_trail_signature !=
+         load32(g_scratch + fs_info_trail_signature_offset))) {
+        return;
+    }
+
+    auto free_count = load32(g_scratch + fs_info_free_count_offset);
+    if ((fs_info_unknown == free_count) &&
+        (fs_info_unknown ==
+         load32(g_scratch + fs_info_next_free_offset))) {
+        return;
+    }
+    if ((free_count <= layout.cluster_count) &&
+        (load32(g_scratch + fs_info_next_free_offset) <=
+         (layout.cluster_count + 1))) {
+        return;
+    }
+
+    trace::hex_line("esp reservation: stale free count, was ", free_count);
+    store32(g_scratch + fs_info_free_count_offset, fs_info_unknown);
+    store32(g_scratch + fs_info_next_free_offset, fs_info_unknown);
+    if (write_sectors(where, sector, 1, g_scratch)) {
+        where.block_io->FlushBlocks(where.block_io);
+    }
+}
+
+/**
  * Writes the new total into the boot sector, its backup, and invalidates
  * both file system information sectors, then reads the result back.
  *
@@ -899,6 +955,7 @@ std::expected<void, zpp::error> establish(EFI_HANDLE image_handle)
         // allocator, and the answer is the same one as last time.
         trace::hex_line("esp reservation: already reserved, gap sectors ",
                         existing_gap);
+        repair_fs_info(*where, *layout);
     } else {
         // Land the new total on a cluster boundary. A total that ends
         // part way through a cluster leaves the driver with a cluster it
