@@ -2495,13 +2495,6 @@ hypervisor::main(arch::x86_64::context & caller_context)
     const auto * launch = reinterpret_cast<const zpp_launch_parameters *>(
         caller_context.rsi);
 
-    // No cast. The launch structure spells a physical address
-    // `uintptr_t` because it is included from C, and everything below
-    // spells it `std::uint64_t` - so this line only compiles while
-    // those name the same type, which makes the compiler check at the
-    // boundary what a cast would have hidden and an assertion would
-    // only have restated.
-    //
     // Null checked rather than dereferenced on faith: the loader always
     // supplies one, but arriving here without it would otherwise be a
     // fault with nothing to explain it.
