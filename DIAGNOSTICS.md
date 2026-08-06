@@ -241,6 +241,94 @@ on top of it is the real work, and none of it needs deciding yet.
 This is the one capability that distinguishes the Debug Capability from
 storage as a channel, over and above what either does for logging.
 
+## The IOMMU: measured on the target, and it is not a problem there
+
+Read from the machine rather than reasoned about, and it retires a large
+amount of planned work.
+
+**Windows does not translate for either candidate device.** From the SYSTEM
+hive, read offline over SSH from the mounted volume:
+
+```
+xHCI VEN_8086&DEV_9DED  instance 3&11583659&1&A0  location (0,20,0)
+     Device Parameters\DMA Management : ABSENT -> per-driver value governs
+
+Services\USBXHCI\Parameters\DmaRemappingCompatible  = 2
+Services\stornvme\Parameters\DmaRemappingCompatible = 2
+Services\storahci\Parameters\DmaRemappingCompatible = 2
+Services\pci                                        = 1
+Services\Usb4HostRouter                             = 1
+```
+
+Microsoft documents `2` as opt-in only when the device is external or when
+Driver Verifier's DMA verification is on. Both candidates are internal, so
+they stay in a passthrough domain. Note `pci` and `Usb4HostRouter` opt in
+unconditionally - so a controller behind Thunderbolt or USB4 *would* be
+translated, which is why this must be detected rather than assumed.
+
+**Kernel DMA Protection is off on this platform anyway.** From the DMAR:
+
+```
+DMAR flags = 0x01   DMA_CTRL_PLATFORM_OPT_IN (bit 2) = 0
+RMRR 0x974c8000-0x974e7fff (128 KiB)  scope PCI Endpoint 00:14.0   the xHCI
+RMRR 0x9b800000-0x9fffffff  (72 MiB)  scope PCI Endpoint 00:02.0   the iGPU
+```
+
+Microsoft names that flag as the Intel-side prerequisite for Kernel DMA
+Protection. The firmware does not set it, so there is no protection to
+damage and nothing to stop reporting.
+
+**And the firmware already ships an RMRR scoped to the xHCI.** So if a
+reserved region ever is needed, it is not a novel request on this hardware -
+the vendor makes the same one, for the same device, and Windows boots with
+it. That is the classic USB legacy-emulation buffer, and the 72 MB one is
+integrated graphics.
+
+### What still has to be built, because this is machine-specific
+
+Detect it at runtime rather than assuming it, read-only, on any machine:
+`GSTS.TES` for whether translation is on, `RTADDR.TTM` for the mode, then
+the root entry for the bus and the context entry for the device, whose bits
+3:2 give the translation type - `10b` is pass-through. Four outcomes, all
+distinguishable, and if it is translating, walk the second-stage tables and
+see whether our pages are mapped. AMD's IVRS needs the equivalent.
+
+Report the verdict in the log's first lines, so no future investigation
+repeats this and so a machine where the channel cannot work says so at once.
+
+A bug not to copy from the prior art: testing `RTADDR & (1 << 11)` for an
+extended root table misparses scalable mode, which is bit 10. Test the whole
+`TTM` field.
+
+### Why this was measured rather than tried
+
+DMA outside an RMRR after `ExitBootServices` can raise bugcheck `0xE6`,
+subcode `0x26`, "IOMMU detected DMA violation" - and it does not need Driver
+Verifier to be enabled. Arming a channel to see whether its DMA lands is not
+a benign probe; it can take the machine down mid-write.
+
+### If a machine does translate, in order of preference
+
+1. **Inject an RMRR** scoped to the device and covering only the DMA pages -
+   for the debug capability that is five pages, twenty kilobytes, not the
+   whole module, which carries a twenty megabyte heap and executable code. A
+   *declared* hole the operating system records and can be queried about.
+2. **Add mappings to the guest's own second-stage tables.** Cheap in one
+   specific way: turning a not-present entry present needs no invalidation on
+   hardware reporting `CAP.CM = 0`, and the specification says real hardware
+   must support that mode. Never touch a present entry. But it is an
+   *undeclared* hole, and the guest goes on reporting protection it no longer
+   entirely has - so it must be logged loudly if it ever fires.
+3. Unlinking the DMAR wholesale removes the guest's DMA protection silently
+   and is the option of last resort.
+
+Prior art for the first two exists and is worth reading before writing
+either: a bare-metal hypervisor that installs under a running operating
+system implements both, RMRR injection and force-mapping, in one file.
+Intel's own firmware uses an RMRR for exactly this purpose, for exactly this
+device class - its USB driver reports its DMA buffer that way rather than
+bypassing translation.
+
 ## The IOMMU problem, which is common to every DMA channel
 
 VT-d translates a *device's* DMA regardless of which software programmed the
