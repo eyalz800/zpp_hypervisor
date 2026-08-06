@@ -307,6 +307,19 @@ constexpr policy policy_of(sink which)
                 .failures_tolerated = 1};
 
     case sink::esp_blocks:
+        // Off, and deliberately so rather than by omission.
+        //
+        // Turning it on does two things at once: it makes the resident
+        // side write log blocks, and it makes the loader run the self
+        // test - which borrows the controller's admin queue on whatever
+        // machine it boots. Neither should happen until the channel has
+        // a destination, and it has none yet: resolving where the blocks
+        // go is the outstanding piece.
+        //
+        // The code behind it does not rot while it is off.
+        // hypervisor/src/diag/instantiate.cpp explicitly instantiates
+        // every sink so the freestanding toolchain compiles all of it
+        // regardless, which is the trap this file warns about elsewhere.
         return {.present = false,
                 .floor = severity::trace,
                 .categories = all_categories,
