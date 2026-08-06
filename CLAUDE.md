@@ -493,6 +493,24 @@ as C++ and destroy the file.
 - Loader entry points use `extern "C"` (called from C code in linux_loader)
 - `compile_commands.json` is auto-copied to each source directory after build (for clangd)
 
+## Integrating branches
+
+**Rebase onto the target and fast-forward. Never create a merge commit.**
+
+```sh
+git switch <branch> && git rebase develop
+git switch develop && git merge --ff-only <branch>
+```
+
+The history stays linear, which matters more here than it would elsewhere:
+every commit carries the reasoning for its change, and reading them in order
+is how that reasoning is recovered months later. A merge commit adds a node
+that explains nothing and breaks the sequence.
+
+If `--ff-only` refuses, the rebase was not done or the target moved while it
+was happening. Redo the rebase - do not fall back to a merge. This applies to
+agent worktree branches too, before they are integrated.
+
 ## Dependencies (auto-fetched by CMake)
 
 - Windows SDK/WDK headers + libs: NuGet packages via `cmake/dependencies.cmake`
