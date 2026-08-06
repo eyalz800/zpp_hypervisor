@@ -1,0 +1,410 @@
+#pragma once
+#include "zpp/arch/x86_64/mmio.h"
+#include "zpp/nvme/command.h"
+#include "zpp/nvme/log_format.h"
+#include "zpp/nvme/registers.h"
+
+#include <cstddef>
+#include <cstdint>
+
+/**
+ * The private queue pair, and the only path that writes to the medium.
+ *
+ * Once the queue pair exists this is all there is: build a 64 byte
+ * command, ring our own doorbell, and poll our own completion queue. No
+ * interception, nothing shared with the guest, and no interrupt - the
+ * completion queue is created with IEN clear precisely so that it
+ * consumes none of the vectors the guest owns.
+ *
+ * Two rules here are correctness rather than economy, and both come from
+ * what a mistake would cost on a disk holding somebody's Windows:
+ *
+ * 1. **The guard read before every doorbell ring.** A queue destroyed by
+ *    a guest reset leaves a doorbell that is no longer backed by
+ *    anything, and PCIe Transport 1.0c 3.1.2.1 says "writing to a
+ *    non-existent Submission Queue Tail Doorbell has undefined results".
+ *    Worse than undefined in practice: the reference implementation
+ *    answers by posting asynchronous event 00h, Write to Invalid
+ *    Doorbell Register, **into the guest's admin completion queue**
+ *    whenever an Asynchronous Event Request is outstanding - which, for
+ *    both Linux and Windows, is always. So a stale ring surfaces as a
+ *    disk error attributed to the guest.
+ *
+ * 2. **The signature check before every write.** The destination is read
+ *    first and must carry the signature the loader placed there this
+ *    boot. That turns "the loader parsed FAT correctly" from a belief
+ *    into a measurement taken per write, and it is what makes writing
+ *    next to the Windows boot manager acceptable at all.
+ *
+ * Neither can be traded away for throughput. This is a debug channel;
+ * losing a record is free and losing the machine is not.
+ */
+namespace zpp::nvme
+{
+/**
+ * Why a write did not happen.
+ */
+enum class write_result
+{
+    ok,
+
+    /** No queue pair - never brought up, or a reset took it. */
+    no_queues,
+
+    /**
+     * The controller is not in the state we created our queues in. The
+     * guard read caught it, which is the point of the guard read.
+     */
+    epoch_changed,
+
+    /** The logical block index is past the end of the file's extents. */
+    out_of_range,
+
+    /**
+     * The destination did not carry the loader's signature. Either the
+     * extent table is wrong or something else has taken the file's
+     * blocks. Either way this is the last thing that should ever happen
+     * quietly.
+     */
+    signature_mismatch,
+
+    /** The submission queue is full. Backpressure, not an error. */
+    queue_full,
+
+    /** A submitted command did not complete inside its budget. */
+    timed_out,
+};
+
+/**
+ * The private queue pair.
+ *
+ * A class template on its capacity, which is the idiom counter.h
+ * documents and the reason it is used here: a static data member of a
+ * class template is only emitted if the specialisation is odr-used, so a
+ * build with the channel switched off carries no queues, no staging
+ * buffer and no code - not an unused copy of them.
+ *
+ * Every buffer is exactly one page, so there are **no PRP lists
+ * anywhere**. That is not a coincidence: a submission queue of 64 entries
+ * is 4096 bytes exactly, a completion queue of 64 is 1024, and one record
+ * block is 4096. PRP2 stays zero throughout, which removes an entire
+ * class of mistake from the write path.
+ *
+ * The storage lives inside the module, so `protect_module` already denies
+ * the guest every access to it. That is essential rather than tidy: the
+ * submission queue holds raw commands carrying logical block addresses,
+ * and a guest write into it would make the controller execute them. EPT
+ * does not affect DMA, so the controller still reads it.
+ */
+template <std::uint32_t Entries>
+class queue_pair
+{
+public:
+    static_assert((Entries >= 2) && (0 == (Entries & (Entries - 1))),
+                  "a queue depth has to be a power of two, at least 2");
+    static_assert(Entries * sizeof(submission_entry) <= 4096,
+                  "the submission queue has to fit one page, or it "
+                  "needs a PRP list and this design has none");
+
+    /**
+     * The queues themselves, page aligned because Create I/O Queue
+     * requires a page aligned physically contiguous buffer when PC is
+     * set, and PC is always set here.
+     * @{
+     */
+    alignas(4096) static inline submission_entry submissions[Entries]{};
+    alignas(4096) static inline completion_entry completions[Entries]{};
+    /**
+     * @}
+     */
+
+    /**
+     * One block being assembled, and one being verified. Separate
+     * buffers because the verify read of the destination must not land
+     * on top of the payload waiting to be written to it.
+     * @{
+     */
+    alignas(4096) static inline std::uint8_t staging[block_size]{};
+    alignas(4096) static inline std::uint8_t scratch[block_size]{};
+    /**
+     * @}
+     */
+
+    /**
+     * Where our doorbells are, and which identifiers the controller gave
+     * us. Filled in by the bring-up; zero means no queue pair.
+     */
+    struct binding
+    {
+        volatile void * submission_doorbell{};
+        volatile void * completion_doorbell{};
+        volatile void * status_register{};
+        volatile void * configuration_register{};
+        std::uint16_t submission_id{};
+        std::uint16_t completion_id{};
+        std::uint32_t namespace_id{};
+
+        /**
+         * Which controller epoch these belong to. Compared on every
+         * guard read, so a reset that happened between two writes
+         * cannot be missed by a stale pointer still looking valid.
+         */
+        std::uint32_t epoch{};
+
+        constexpr bool live() const
+        {
+            return (nullptr != submission_doorbell) &&
+                   (nullptr != completion_doorbell) &&
+                   (nullptr != status_register);
+        }
+    };
+
+    static inline binding bound{};
+
+    /** Our own position in our own queues. */
+    static inline std::uint32_t submission_tail{};
+    static inline std::uint32_t completion_head{};
+    static inline bool completion_phase{true};
+
+    /**
+     * Counters, all of them readable from a debugger and all of them
+     * copied into every block header so that a reader can tell a quiet
+     * channel from a dead one without a debugger at all.
+     * @{
+     */
+    static inline std::uint64_t submitted{};
+    static inline std::uint64_t completed{};
+    static inline std::uint64_t failed{};
+    static inline std::uint64_t refused_guard{};
+    static inline std::uint64_t refused_signature{};
+    static inline std::uint64_t lost_to_reset{};
+    /**
+     * @}
+     */
+
+    /**
+     * Forgets the queue pair. Called the moment a reset is observed, so
+     * that nothing rings a doorbell the controller no longer backs.
+     *
+     * The completion queue is zeroed as well as forgotten. A stale entry
+     * left from the previous epoch carries phase 1, and the next epoch
+     * starts expecting phase 1, so leaving it would make the first poll
+     * read a completion that never happened.
+     */
+    static void forget()
+    {
+        lost_to_reset += (submitted - completed);
+        bound = binding{};
+        submission_tail = 0;
+        completion_head = 0;
+        completion_phase = true;
+        submitted = 0;
+        completed = 0;
+        for (std::uint32_t i{}; i < Entries; ++i) {
+            completions[i] = completion_entry{};
+        }
+    }
+
+    /**
+     * The guard read. Everything that rings a doorbell goes through it.
+     *
+     * Reading two registers costs a pair of uncached accesses, which
+     * against a write every few milliseconds is nothing, and it reduces
+     * the window in which a doorbell could be rung into a destroyed
+     * queue from milliseconds to the few nanoseconds between this read
+     * and the store below it.
+     */
+    static bool controller_still_ours(std::uint32_t current_epoch)
+    {
+        if (!bound.live() || (bound.epoch != current_epoch)) {
+            return false;
+        }
+
+        auto status =
+            controller_status{arch::x86_64::read32(bound.status_register)};
+        if (!status.ready() || status.fatal_status()) {
+            return false;
+        }
+
+        auto configuration = controller_configuration{
+            arch::x86_64::read32(bound.configuration_register)};
+        return configuration.enable() &&
+               (shutdown_notification::none ==
+                configuration.shutdown_notification());
+    }
+
+    /**
+     * Reaps whatever has completed. Never waits: the write path is
+     * called from a VM exit handler with a guest waiting to be resumed.
+     */
+    static void reap()
+    {
+        while (completed < submitted) {
+            auto & entry = completions[completion_head];
+            if (entry.phase() != completion_phase) {
+                return;
+            }
+            arch::x86_64::order_loads();
+
+            if (0 != entry.status()) {
+                ++failed;
+            }
+            ++completed;
+
+            completion_head = (completion_head + 1) % Entries;
+            if (0 == completion_head) {
+                completion_phase = !completion_phase;
+            }
+            arch::x86_64::write32(bound.completion_doorbell,
+                                  completion_head);
+        }
+    }
+
+    /**
+     * Submits one block, without waiting for it.
+     *
+     * `target` is the loader's validated extent table and is the only
+     * way a destination can be named, so an out of range index is a
+     * refusal rather than a write somewhere else - see log_target's
+     * lba_of.
+     *
+     * `physical_of` turns one of our own buffers into the address the
+     * controller will use. Under the host page table that is a lookup;
+     * while boot services are alive it is the identity.
+     */
+    static write_result submit(const log_target & target,
+                               std::uint64_t block_index,
+                               std::uint32_t current_epoch,
+                               std::uint64_t (*physical_of)(const void *),
+                               std::uint64_t spin_budget)
+    {
+        if (!bound.live()) {
+            return write_result::no_queues;
+        }
+
+        std::uint64_t lba{};
+        auto per_block = block_size / target.block_size;
+        if (!target.lba_of(block_index * per_block, lba)) {
+            return write_result::out_of_range;
+        }
+
+        if (!controller_still_ours(current_epoch)) {
+            ++refused_guard;
+            return write_result::epoch_changed;
+        }
+
+        reap();
+        if ((submitted - completed) >= (Entries - 1)) {
+            return write_result::queue_full;
+        }
+
+        // The destination has to prove it is ours before it is
+        // overwritten. This is a synchronous read, and it is the one
+        // place the write path waits - which is affordable because it
+        // happens once per block rather than once per record, and
+        // unaffordable to skip.
+        if (auto verified = verify_destination(target,
+                                               block_index,
+                                               lba,
+                                               per_block,
+                                               current_epoch,
+                                               physical_of,
+                                               spin_budget);
+            write_result::ok != verified) {
+            return verified;
+        }
+
+        auto command = write(target.namespace_id,
+                             lba,
+                             static_cast<std::uint16_t>(per_block),
+                             physical_of(staging),
+                             true);
+        return issue(command, current_epoch);
+    }
+
+private:
+    /**
+     * Reads the destination and requires the loader's signature in it.
+     */
+    static write_result
+    verify_destination(const log_target & target,
+                       std::uint64_t block_index,
+                       std::uint64_t lba,
+                       std::uint32_t per_block,
+                       std::uint32_t current_epoch,
+                       std::uint64_t (*physical_of)(const void *),
+                       std::uint64_t spin_budget)
+    {
+        auto command = read(target.namespace_id,
+                            lba,
+                            static_cast<std::uint16_t>(per_block),
+                            physical_of(scratch));
+        if (auto issued = issue(command, current_epoch);
+            write_result::ok != issued) {
+            return issued;
+        }
+
+        auto before = completed;
+        auto spun = spin_budget;
+        while (completed == before) {
+            reap();
+            if (0 == spun--) {
+                return write_result::timed_out;
+            }
+        }
+
+        auto found = reinterpret_cast<const block_signature *>(scratch);
+        if ((block_signature::magic != found->signature_magic) ||
+            (target.file_id != found->file_id) ||
+            (block_index != found->block_index)) {
+            ++refused_signature;
+            return write_result::signature_mismatch;
+        }
+
+        for (std::size_t i{}; i < sizeof(found->partition_guid); ++i) {
+            if (found->partition_guid[i] != target.partition_guid[i]) {
+                ++refused_signature;
+                return write_result::signature_mismatch;
+            }
+        }
+
+        return write_result::ok;
+    }
+
+    /**
+     * Puts one command in the submission queue and rings the doorbell.
+     * The guard read is repeated here rather than trusted from the
+     * caller, because this is the function that does the ringing.
+     */
+    static write_result issue(submission_entry command,
+                              std::uint32_t current_epoch)
+    {
+        if ((submitted - completed) >= (Entries - 1)) {
+            return write_result::queue_full;
+        }
+
+        auto id = static_cast<std::uint16_t>(submitted & 0xffff);
+        command.command_dword0 = (command.command_dword0 & 0x0000ffffu) |
+                                 (static_cast<std::uint32_t>(id) << 16);
+
+        submissions[submission_tail] = command;
+        submission_tail = (submission_tail + 1) % Entries;
+
+        arch::x86_64::order_stores();
+
+        if (!controller_still_ours(current_epoch)) {
+            // Back the entry out rather than ring. Nothing has been
+            // handed to the controller yet, so this costs only the
+            // record that was about to go.
+            submission_tail = (submission_tail + Entries - 1) % Entries;
+            ++refused_guard;
+            return write_result::epoch_changed;
+        }
+
+        arch::x86_64::write32(bound.submission_doorbell, submission_tail);
+        ++submitted;
+        return write_result::ok;
+    }
+};
+
+} // namespace zpp::nvme
