@@ -1332,6 +1332,29 @@ private:
     std::uint64_t stepping_page[max_cpus]{};
 
     /**
+     * What a guest reading this module's memory is shown instead.
+     *
+     * Not-present would be the honest answer and it is not an available
+     * one: an EPT violation reports no data and no operand size, so
+     * completing the access means either an instruction decoder or
+     * letting the guest's own instruction run against *something*. This
+     * is that something - a page of zeroes that absorbs writes and
+     * reveals nothing.
+     *
+     * Shared by every processor and every module page, deliberately. It
+     * is a sink, not storage, and a guest that reads back what it wrote
+     * into it has learned nothing it did not already know.
+     */
+    alignas(page_size) std::uint8_t decoy_page[page_size]{};
+
+    /**
+     * How many of this module's pages a guest has touched. One per
+     * page rather than one per access, since a page is redirected
+     * permanently on the first touch and never faults again.
+     */
+    std::uint64_t module_access_count{};
+
+    /**
      * The hardware page table structures.
      * @{
      */

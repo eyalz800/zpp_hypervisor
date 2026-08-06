@@ -913,6 +913,56 @@ bool hypervisor::on_ept_violation(std::size_t cpu)
         return true;
     }
 
+    // Not a watched page. It may still be one of ours: protect_module
+    // makes every page of this module not-present to the guest, so any
+    // access to them arrives here.
+    //
+    // Stopping the processor for that would be a poor trade. A guest is
+    // entitled to walk physical memory - a memory manager building its
+    // own map does exactly that - and killing it for reading an address
+    // it has no idea is special turns a curiosity into a bug check.
+    //
+    // So the page is redirected, permanently, to a page of zeroes. The
+    // guest is resumed **without** advancing past its own instruction,
+    // which then re-executes and completes against the decoy. That needs
+    // no decoder, cannot disagree with what the instruction meant, and
+    // costs one exit per module page ever touched rather than one per
+    // access - a guest scanning memory pays once per page and then runs
+    // at full speed through a region that tells it nothing.
+    if (this->module_physical_to_virtual.find(page << 12) !=
+        this->module_physical_to_virtual.end()) {
+        ++this->module_access_count;
+
+        diag::log<diag::severity::warning>(
+            "guest touched module memory at {} from rip {}, {} pages so "
+            "far",
+            guest_physical,
+            this->vmcs.guest_rip(),
+            this->module_access_count);
+        log("guest touched module memory at {} from rip {}",
+            guest_physical,
+            this->vmcs.guest_rip());
+
+        if (auto entry = epte_for(page << 12)) {
+            (*entry)->page_number(
+                this->host_page_table.virtual_to_physical(
+                    this->decoy_page) >>
+                12);
+
+            // Executable as well as readable, deliberately. If the guest
+            // jumps into this it should run zeroes and reach whatever
+            // conclusion that leads to, rather than fault here forever
+            // on a page it is allowed to touch.
+            (*entry)->read(true);
+            (*entry)->write(true);
+            (*entry)->execute(true);
+            (*entry)->execute_user(true);
+            invalidate_ept();
+        }
+
+        return true;
+    }
+
     return false;
 }
 
