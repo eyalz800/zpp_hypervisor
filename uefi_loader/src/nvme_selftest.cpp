@@ -6,6 +6,7 @@
 
 #include "zpp/arch/x86_64/mmio.h"
 #include "zpp/arch/x86_64/pci.h"
+#include "zpp/arch/x86_64/vmd.h"
 #include "zpp/nvme/admin_borrow.h"
 #include "zpp/nvme/command.h"
 #include "zpp/nvme/iommu_gate.h"
@@ -18,6 +19,7 @@ namespace
 {
 using namespace zpp::nvme;
 using arch::x86_64::pci_config;
+using arch::x86_64::vmd;
 
 /**
  * The class code an NVM Express controller reports, in the layout the
@@ -72,7 +74,8 @@ std::uint64_t identity_of(const void * address)
 }
 
 /**
- * Finds the first NVM Express controller on any bus.
+ * Finds the first NVM Express controller on any bus of the host's own
+ * configuration space.
  *
  * Every bus, not bus zero. This scanned bus zero alone, on the
  * reasoning `pci.h` still gives for the two configuration ports - that
@@ -98,7 +101,7 @@ std::uint64_t identity_of(const void * address)
  * Functions beyond zero are probed only when the header type says the
  * device has them, which keeps the common case to one read per slot.
  */
-bool find_controller(pci_config::address & found)
+bool find_on_host(pci_config::address & found)
 {
     for (std::uint32_t bus{}; bus < pci_config::max_buses; ++bus) {
         for (std::uint32_t device{}; device < pci_config::max_devices;
@@ -142,6 +145,102 @@ bool find_controller(pci_config::address & found)
 }
 
 /**
+ * Where a controller was found, and by which of the two mechanisms.
+ *
+ * The requester id is a separate field rather than being read off the
+ * address, and that separation is the point of this type. A controller
+ * behind VMD sources every DMA and every message signalled interrupt with
+ * the VMD endpoint's requester id, not its own - see the comment on
+ * `zpp::arch::x86_64::vmd`, and pci_real_dma_dev in Linux's
+ * arch/x86/pci/common.c, which returns the VMD's pci_dev for any device
+ * on a VMD bus. Its own bus number is a number inside the VMD domain and
+ * means something else entirely in the host's configuration space, so
+ * anything that hands a bus, device and function to remapping hardware -
+ * a DMAR device scope entry, a context table lookup, an IOMMU domain -
+ * has to be handed `requester` and never `at`.
+ */
+struct location
+{
+    /**
+     * The controller's own address. Inside the VMD domain when
+     * `behind_vmd`, in the host's configuration space otherwise.
+     */
+    pci_config::address at{};
+
+    /**
+     * The address whose requester id its transactions carry, which is
+     * the same address when it is not behind anything.
+     */
+    pci_config::address requester{};
+
+    bool behind_vmd{};
+
+    /**
+     * Only meaningful when `behind_vmd`. Holds the window `at` is read
+     * through.
+     */
+    vmd::domain domain{};
+};
+
+/**
+ * The ordinary mechanism first, then VMD.
+ *
+ * That order and not the other, because the ordinary scan is what is
+ * right on every machine without VMD - which is most of them - and
+ * because a VMD decode is only ever reached on a machine where the
+ * ordinary scan already came up empty. There is no machine where both
+ * find something and the answers differ: VMD takes its root ports out of
+ * the host's configuration space, so a controller behind one is not
+ * findable by the first scan at all. That is the whole failure being
+ * fixed - a machine that had just booted from an NVMe drive reported no
+ * NVM Express controller on any bus, because there genuinely was none
+ * where the scan was looking.
+ */
+bool find_controller(location & found)
+{
+    if (find_on_host(found.at)) {
+        found.requester = found.at;
+        found.behind_vmd = false;
+        return true;
+    }
+
+    if (vmd::find(class_nvme, found.domain, found.at)) {
+        found.requester = found.domain.endpoint;
+        found.behind_vmd = true;
+        return true;
+    }
+
+    return false;
+}
+
+/**
+ * One read of the controller's configuration space, whichever mechanism
+ * reaches it.
+ *
+ * Everything below reads configuration space through this rather than
+ * through `pci_config` directly, so that the validation chain is the same
+ * chain in both cases rather than a second copy of it that could drift.
+ */
+std::uint32_t read_config(const location & where, std::uint32_t offset)
+{
+    if (where.behind_vmd) {
+        return where.domain.read32(where.at, offset);
+    }
+    return pci_config::read32(where.at, offset);
+}
+
+/**
+ * The word inside that doubleword, in the shape pci_config::read16 gives
+ * it - the command register shares its doubleword with the status
+ * register, so it cannot be read as a doubleword and used as one.
+ */
+std::uint16_t read_config16(const location & where, std::uint32_t offset)
+{
+    auto value = read_config(where, offset);
+    return static_cast<std::uint16_t>(value >> ((offset & 0x2) * 8));
+}
+
+/**
  * The BAR validation chain from NVME-LOG.md, in order, refusing rather
  * than interpreting.
  *
@@ -151,11 +250,10 @@ bool find_controller(pci_config::address & found)
  * stick accepts a base of zero. For NVMe that would put "doorbells" into
  * the real mode interrupt vector table.
  */
-bool validate_bar(const pci_config::address & at, std::uint64_t & base)
+bool validate_bar(const location & where, std::uint64_t & base)
 {
-    auto low = pci_config::read32(at, pci_config::base_address_0_offset);
-    auto high =
-        pci_config::read32(at, pci_config::base_address_0_offset + 4);
+    auto low = read_config(where, pci_config::base_address_0_offset);
+    auto high = read_config(where, pci_config::base_address_0_offset + 4);
 
     if (0 != (low & 1)) {
         trace::line("selftest: bar0 is io space, refused");
@@ -181,7 +279,7 @@ bool validate_bar(const pci_config::address & at, std::uint64_t & base)
         return false;
     }
 
-    auto command = pci_config::read16(at, pci_config::command_offset);
+    auto command = read_config16(where, pci_config::command_offset);
     if (0 == (command & pci_config::command_memory_space)) {
         trace::line("selftest: memory space disabled, refused - the "
                     "guest owns this and we do not enable it");
@@ -272,17 +370,51 @@ void nvme_selftest::execute()
 {
     trace::line("selftest: begin");
 
-    pci_config::address at{};
-    if (!find_controller(at)) {
-        trace::line("selftest: no nvme controller on any bus");
+    location controller{};
+    if (!find_controller(controller)) {
+        trace::line("selftest: no nvme controller on any bus, and none "
+                    "behind any volume management device either");
         return;
     }
-    trace::hex_line("selftest: controller at bus ", at.bus);
-    trace::hex_line("selftest: controller at device ", at.device);
-    trace::hex_line("selftest: controller at function ", at.function);
+
+    if (controller.behind_vmd) {
+        trace::line("selftest: found behind a volume management device");
+        trace::hex_line("selftest: vmd endpoint bus ",
+                        controller.domain.endpoint.bus);
+        trace::hex_line("selftest: vmd endpoint device ",
+                        controller.domain.endpoint.device);
+        trace::hex_line("selftest: vmd endpoint function ",
+                        controller.domain.endpoint.function);
+        trace::hex_line("selftest: vmd cfgbar ",
+                        controller.domain.config.base());
+        trace::hex_line("selftest: vmd first child bus ",
+                        controller.domain.bus_start);
+        trace::hex_line("selftest: vmd child buses scanned ",
+                        controller.domain.bus_count);
+    } else {
+        trace::line("selftest: found by the ordinary configuration space "
+                    "scan");
+    }
+
+    trace::hex_line("selftest: controller at bus ", controller.at.bus);
+    trace::hex_line("selftest: controller at device ",
+                    controller.at.device);
+    trace::hex_line("selftest: controller at function ",
+                    controller.at.function);
+
+    // Separately, and loudly, because it is the one that is not obvious
+    // and the one remapping hardware is programmed with. Equal to the
+    // controller's own address on an ordinary machine; the VMD
+    // endpoint's on a machine controller the controller is behind one.
+    trace::hex_line("selftest: dma requester bus ",
+                    controller.requester.bus);
+    trace::hex_line("selftest: dma requester device ",
+                    controller.requester.device);
+    trace::hex_line("selftest: dma requester function ",
+                    controller.requester.function);
 
     std::uint64_t base{};
-    if (!validate_bar(at, base)) {
+    if (!validate_bar(controller, base)) {
         return;
     }
     trace::hex_line("selftest: bar0 ", base);
@@ -336,7 +468,18 @@ void nvme_selftest::execute()
     // reports that rather than pretending to a verdict it did not reach.
     // Stated loudly because a channel whose precondition was never
     // actually checked is exactly what NVME-LOG.md forbids.
-    auto verdict = iommu_gate::verdict_for(nullptr, 0, 0, 0, nullptr);
+    //
+    // The requester id rather than the controller's own address, for the
+    // reason `location` gives: a context table is indexed by the id the
+    // transaction actually carries. It changes nothing today, since the
+    // register block is null and the gate reports that, but the wrong
+    // value here would be a wrong lookup the moment one is parsed.
+    auto verdict = iommu_gate::verdict_for(
+        nullptr,
+        static_cast<std::uint8_t>(controller.requester.bus),
+        static_cast<std::uint8_t>(controller.requester.device),
+        static_cast<std::uint8_t>(controller.requester.function),
+        nullptr);
     trace::line("selftest: iommu gate (no DMAR parsed yet)");
     trace::line(iommu_gate::describe(verdict));
 
