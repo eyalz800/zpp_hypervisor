@@ -12,6 +12,7 @@ extern "C" {
 #include <Protocol/MpService.h>
 #include <Protocol/SimpleFileSystem.h>
 }
+#include "zpp/esp_reservation.h"
 #include "zpp/loader.h"
 #include "zpp/nvme_selftest.h"
 #include "zpp/reserved_region.h"
@@ -1329,6 +1330,12 @@ extern "C" EFI_STATUS EFIAPI uefi_main(EFI_HANDLE image_handle,
     // visibly. Compiles to nothing unless the disk sink is compiled in,
     // and never fails the boot: every step is bounded and traced.
     nvme_selftest::run();
+
+    // Take a tail of the EFI system partition out of its file system, so
+    // there are blocks the guest's file system cannot reach and cannot
+    // hand to anybody else. Idempotent: a boot that finds the
+    // reservation already there writes nothing.
+    zpp::esp_reservation::establish(image_handle, system_table);
 
     // Declare the window the controller must be able to reach, while the
     // firmware's tables are still ours to edit. This has to happen before

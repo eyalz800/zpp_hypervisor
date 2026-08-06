@@ -1070,6 +1070,15 @@ std::expected<void, zpp::error> establish(EFI_HANDLE image_handle)
     // Last, so a structure that was half filled and then refused can
     // never read as usable. Everything above is either written or the
     // whole thing is left zeroed.
+    // What the file system claimed when the reservation was made. The
+    // resident side compares the BPB against this and refuses if the
+    // file system has grown back over the region - the one thing the
+    // block signature cannot catch, since a grown file system hands the
+    // clusters to a new file whose data has not been written yet, so
+    // our own signature is still sitting in them.
+    target.filesystem_total_sectors =
+        esp_reservation::filesystem_total_sectors;
+
     target.magic = nvme::log_target::valid_magic;
 
     trace::hex_line("esp reservation: reserved first lba ",

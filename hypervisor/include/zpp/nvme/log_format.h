@@ -87,6 +87,24 @@ struct log_target
     std::uint32_t block_size{};
 
     /**
+     * How many sectors the file system claimed when the reservation was
+     * made.
+     *
+     * The reservation is a tail of the partition that the file system
+     * has been shrunk out of, so it holds only while the file system
+     * still ends where it was left. A resizing tool that grows it back
+     * makes those blocks allocatable again, silently, and the block
+     * signature would not notice: the clusters would be handed to a new
+     * file whose data is written over ours, and until it is, our own
+     * signature is still sitting there.
+     *
+     * So the resident side reads the count out of the BPB and refuses
+     * the channel if it is larger than this. It is the only check that
+     * catches the file system growing back over us.
+     */
+    std::uint32_t filesystem_total_sectors{};
+
+    /**
      * Identity of the volume and the file, copied into every block's
      * signature so that a write can be checked against the medium rather
      * than against our own belief about it.
