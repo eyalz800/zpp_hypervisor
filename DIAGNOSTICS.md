@@ -212,6 +212,35 @@ framebuffer from a VM exit well after the guest has booted, and see whether
 the panel changes. Until someone runs it, this is a channel that might
 silently do nothing, which is the one thing this project will not ship.
 
+## Wanted later: breaking in on a wedged guest
+
+Not now, but do not design it away, because exactly one candidate can
+support it.
+
+The want is to interrupt out of a stuck guest on a signal from outside -
+press something on the development machine and take control, rather than
+watching a frozen screen and power cycling. Two pieces are needed.
+
+**Guaranteed control, which is the VMX preemption timer.** A wedged guest
+may take no VM exits at all: a spin loop with interrupts disabled yields
+nothing, so "the hypervisor is still alive" is an assumption rather than a
+property. The preemption timer counts down in VMX non-root operation and
+forces an exit regardless of what the guest is doing. One pin-based control
+and one VMCS field per entry buys a guaranteed periodic foothold in a guest
+that has stopped cooperating. Worth building for its own sake, since it also
+underwrites every other channel's claim to work during a freeze.
+
+**A way in, and only the Debug Capability has one.** It has two bulk
+endpoints, IN as well as OUT; every other channel considered here is write
+only. So the same cable that carries the log out is a path for the host to
+send a byte in, polled from the timer-forced exit. The port already builds
+the IN endpoint context, because the specification requires both - it simply
+never queues a transfer on it. Adding the read path is small; the protocol
+on top of it is the real work, and none of it needs deciding yet.
+
+This is the one capability that distinguishes the Debug Capability from
+storage as a channel, over and above what either does for logging.
+
 ## The IOMMU problem, which is common to every DMA channel
 
 VT-d translates a *device's* DMA regardless of which software programmed the
