@@ -139,13 +139,20 @@ live in the descriptor; it lives in `IA32_FS_BASE`, which is already read
 into a member at `:46` and then never used for this. A guest whose FS base
 does not fit in a descriptor's 32 bits gets the truncated value.
 
-### 4. `invept` is never called
+### 4. `invept` is never called — CLOSED
 
-Declared at `hypervisor/include/zpp/arch/x86_64/vmx/asm.h:122`, zero call
-sites. Any change to an EPT entry after launch leaves the old translation
-cached in the combined mappings. Today nothing modifies EPT after launch,
-which is why this has not bitten — so the fix is as much about making the
-invalidation exist for the first modification as about the present state.
+Declared with zero call sites. Any change to an EPT entry after launch
+leaves the old translation cached in the combined mappings.
+
+"Today nothing modifies EPT after launch" stopped being true when page
+watches arrived: arming one clears the write bit on a live entry, and
+holding, stepping and disarming set and clear it again. Single-context
+invalidation now follows every one of them.
+
+One limitation remains and is deliberate: INVEPT is not a broadcast, so
+this covers the calling processor only. Fixing that needs the rendezvous
+item 10 describes. It is safe in the direction that matters - a stale
+permissive entry costs a missed observation, never a wrong one.
 
 ### 5. `ia_32e_mode_guest` is set once and never re-derived
 
@@ -191,8 +198,10 @@ worth taking seriously — see item 12.
   through the wrong index.
 - The host-exception recovery slot is shared between processors, so a
   second fault overwrites the first one's record.
-- `available_stack_index++` is unbounded; nothing stops it walking past
-  the end of the stack array.
+- ~~`available_stack_index++` is unbounded~~ — **CLOSED**. It refused
+  nothing and wrote a 512 KB stack past the end of the array on any
+  machine with more processors than `max_cpus`. Bounded now, and the
+  ceiling raised from 16 to 32, which current laptops exceed.
 
 ## Dead and misleading
 
@@ -208,14 +217,26 @@ the loader prints. There is no assignment anywhere in the tree, so that
 nibble is always zero. A diagnostic that reports a constant is worse than
 one that does not exist, because it is trusted.
 
-### 12. Two comments assert a serialisation that no longer holds
+### 12. Two comments assert a serialisation that no longer holds — CLOSED
 
-`hypervisor.h:71` and `:832` both say the loader launches CPUs strictly one
-at a time. That stopped being true, and it is not merely stale prose: the
-claim at `:71` is the stated justification for `-fno-threadsafe-statics`
-being safe on the function-local static in `hypervisor::instance()`. Either
-the serialisation has to be restored or the justification has to be
-replaced with a real one.
+Both said the loader launches CPUs strictly one at a time. That stopped
+being true, and it was not merely stale prose: the first was the stated
+justification for `-fno-threadsafe-statics` being safe on the
+function-local static in `hypervisor::instance()`.
+
+Both now carry the real reason instead.
+
+For `instance()` it is structural and platform independent: the function
+has exactly three callers, and two of them are only *reachable* once the
+boot processor has armed them from inside `main` - the host IDT it loads,
+and the trampoline page that carries `zpp_ap_start_up_main`'s address.
+Unlike the claim it replaces, that one is checkable by grep.
+
+For the host exception recovery slot the conclusion held but by
+coincidence of two unrelated facts: the Windows and Linux loaders really
+do block per processor, while under UEFI `number_of_cpus()` returns 1 so
+only the boot processor is ever launched. A loader that launched
+concurrently would break it, which is item 10.
 
 ## Closed
 

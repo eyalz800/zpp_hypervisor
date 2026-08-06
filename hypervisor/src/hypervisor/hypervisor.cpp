@@ -2492,7 +2492,7 @@ hypervisor::main(arch::x86_64::context & caller_context)
     // the loader hands over, so this grows by reading another field
     // rather than by another register and another adapter.
     auto cpuid = caller_context.rdi;
-    const auto * launch = reinterpret_cast<const zpp_launch_parameters *>(
+    auto launch = reinterpret_cast<const zpp_launch_parameters *>(
         caller_context.rsi);
 
     // Null checked rather than dereferenced on faith: the loader always

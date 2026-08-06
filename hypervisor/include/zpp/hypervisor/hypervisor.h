@@ -87,9 +87,33 @@ public:
      * built lazily instead. The heap is already up by the time anything
      * can reach this, so construction may allocate.
      *
-     * The build uses -fno-threadsafe-statics, so the first call must not
-     * race. It does not: the loader launches CPUs strictly one at a time,
-     * so the boot CPU constructs this before any other CPU exists.
+     * The build uses -fno-threadsafe-statics, so the compiler emits a
+     * plain guard byte test with no __cxa_guard_acquire, and the first
+     * call must therefore not race.
+     *
+     * It does not, but **not** for the reason this comment used to give.
+     * The old one said the loader launches processors strictly one at a
+     * time. That is true of the Windows and Linux loaders, which loop
+     * `call_on_cpu(i, ...)` blocking on each, and it is not the mechanism
+     * under UEFI: `number_of_cpus()` returns 1 there, so the boot
+     * processor is launched alone and the others are adopted much later
+     * from the guest's own start-up IPIs. The serialisation being
+     * appealed to is absent on the platform that matters most.
+     *
+     * The real reason is structural and holds on every platform. This has
+     * exactly three callers - `zpp_hypervisor_main`,
+     * `zpp_x86_64_exception` and `zpp_ap_start_up_main` - and the latter
+     * two are only *reachable* once the boot processor has armed them
+     * from inside `main`. The host IDT is built by `initialize_host_idt`
+     * and loaded by `main`, both boot processor only. The trampoline page
+     * is written by `initialize_start_up_memory`, also boot processor
+     * only, and that is what puts `zpp_ap_start_up_main`'s address where
+     * a starting processor will find it. Both therefore come alive
+     * strictly after construction returned.
+     *
+     * What would break it is a fourth caller reachable before `main` has
+     * armed those two. That is the thing to check when adding one, and
+     * unlike the old justification it is checkable by grep.
      */
     static hypervisor & instance();
 
@@ -1095,9 +1119,26 @@ private:
 
     /**
      * The flag in main's frame that says the recovery context above was
-     * used, or null while there is no recovery point to unwind to. Only
-     * one CPU can be inside that window at a time, because the loader
-     * launches CPUs strictly one after another.
+     * used, or null while there is no recovery point to unwind to.
+     *
+     * Only one processor is inside that window at a time, but for a
+     * different reason on each platform, and the single reason this
+     * comment used to give was wrong on one of them:
+     *
+     * - The Windows and Linux loaders loop `call_on_cpu(i, ...)`,
+     *   blocking on each, so they genuinely launch one after another.
+     * - Under UEFI they do not, because `number_of_cpus()` returns 1 and
+     *   only the boot processor is ever launched from the loader at all.
+     *   The others are adopted later from the guest's own start-up IPIs,
+     *   which enter through `start_up_on_this_processor` rather than
+     *   through main's recovery window.
+     *
+     * So the slot being shared is safe today on both, and it is safe by
+     * coincidence of two unrelated facts rather than by design. What
+     * would break it is a loader that launches processors concurrently:
+     * a second fault would overwrite the first one's record, and the
+     * first processor would unwind to a context that is no longer its
+     * own. That is BACKLOG item 10.
      */
     std::atomic<bool> * host_exception_recovery_flag{};
 
