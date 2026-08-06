@@ -254,6 +254,76 @@ struct block_header
  * @{
  */
 inline constexpr std::size_t block_size = 4096;
+
+/**
+ * What the loader hands the resident side so the channel can carry on.
+ *
+ * The loader is the only place that can establish any of this. It has
+ * boot services, so it can walk a file system, resolve a file to logical
+ * blocks and validate them; and it runs while the controller is quiet, so
+ * it can create a queue pair without racing anybody. The hypervisor has
+ * neither of those and cannot rediscover any of it later.
+ *
+ * Deliberately plain data with no pointers into the loader's own world.
+ * Everything here is either a value or an address of something that
+ * outlives boot services - the controller's doorbells are device
+ * registers, and the queue memory is allocated as reserved rather than
+ * as boot services data. A field that pointed at something the firmware
+ * reclaims would be a use after free at the first exit.
+ *
+ * `physical_of` is deliberately **absent**. Turning a buffer into the
+ * address a controller will use is the one thing that differs between
+ * the two sides - the identity while boot services are alive, a host
+ * page table lookup once resident - so the resident side supplies its
+ * own rather than inheriting one that stops being true the moment the
+ * page tables change.
+ */
+struct channel_handover
+{
+    /**
+     * Set by the loader as the last thing it writes, and checked before
+     * anything here is believed. A zeroed structure therefore reads as
+     * "no channel" rather than as a channel pointing at LBA 0.
+     */
+    static constexpr std::uint64_t valid_magic = 0x314f444e41485a5aull;
+
+    std::uint64_t magic{};
+
+    /**
+     * Where the blocks go, already validated by the loader.
+     */
+    log_target target{};
+
+    /**
+     * The private queue pair, as device register addresses and
+     * identifiers. Mirrors queue_pair::binding rather than being it,
+     * because that type is a template and this crosses a C boundary.
+     * @{
+     */
+    volatile void * submission_doorbell{};
+    volatile void * completion_doorbell{};
+    volatile void * status_register{};
+    volatile void * configuration_register{};
+    std::uint16_t submission_id{};
+    std::uint16_t completion_id{};
+    std::uint32_t namespace_id{};
+    /**
+     * @}
+     */
+
+    /**
+     * Whether every field above was established. Checked rather than
+     * assumed, so a partially filled structure is refused.
+     */
+    constexpr bool usable() const
+    {
+        return (valid_magic == magic) && target.usable() &&
+               (nullptr != submission_doorbell) &&
+               (nullptr != completion_doorbell) &&
+               (nullptr != status_register) &&
+               (nullptr != configuration_register) && (0 != namespace_id);
+    }
+};
 inline constexpr std::size_t block_payload =
     block_size - sizeof(block_header);
 /**

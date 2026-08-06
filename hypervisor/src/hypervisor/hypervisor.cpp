@@ -13,9 +13,11 @@
 #include "zpp/crt.h"
 #include "zpp/diag/log.h"
 #include "zpp/diag/pump.h"
+#include "zpp/diag/sinks.h"
 #include "zpp/elf_file.h"
 #include "zpp/elf_image_base.h"
 #include "zpp/error.h"
+#include "zpp/loader.h"
 #include "zpp/scope_exit.h"
 #include <algorithm>
 #include <atomic>
@@ -2486,12 +2488,25 @@ void hypervisor::vm_launch(arch::x86_64::context & guest_context,
 std::expected<void, zpp::error>
 hypervisor::main(arch::x86_64::context & caller_context)
 {
-    // Fetch parameters.
+    // Fetch parameters. The second argument is a pointer to everything
+    // the loader hands over, so this grows by reading another field
+    // rather than by another register and another adapter.
     auto cpuid = caller_context.rdi;
-    auto physical_to_virtual =
-        reinterpret_cast<std::uint64_t (*)(std::uint64_t)>(
-            caller_context.rsi);
-    auto start_up_memory = caller_context.rdx;
+    const auto * launch = reinterpret_cast<const zpp_launch_parameters *>(
+        caller_context.rsi);
+
+    // uintptr_t and uint64_t are the same type on this target, so the
+    // structure's field already has the type wanted here and no cast is
+    // involved. A launch pointer of null is not expected - the loader
+    // always supplies one - but it is checked rather than dereferenced
+    // on faith, because getting here with null would otherwise be a
+    // fault with no explanation.
+    decltype(zpp_launch_parameters::physical_to_virtual)
+        physical_to_virtual =
+            launch ? launch->physical_to_virtual : nullptr;
+    auto start_up_memory =
+        launch ? reinterpret_cast<std::uint64_t>(launch->start_up_memory)
+               : 0;
 
     // Whether this processor was started by this VMM rather than launched
     // by the loader, which changes three things below: there is no state

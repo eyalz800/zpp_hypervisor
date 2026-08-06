@@ -58,19 +58,22 @@ invoke_physical_to_virtual(std::uintptr_t)
     )!!");
 }
 
-static int __attribute__((naked)) invoke_entry(
-    int (*)(std::size_t, std::uintptr_t (*)(std::uintptr_t), void *),
-    std::size_t,
-    std::uintptr_t (*)(std::uintptr_t),
-    void *)
+static int __attribute__((naked))
+invoke_entry(int (*)(std::size_t, const zpp_launch_parameters *),
+             std::size_t,
+             const zpp_launch_parameters *)
 {
+    // Two arguments now rather than three, because everything else the
+    // hypervisor is handed moved into the structure the second one
+    // points at. That is the point of the structure: this adapter is
+    // hand written assembly in two loaders, and it no longer has to
+    // change when the hypervisor needs to be told something new.
     asm(R"!!(
         .intel_syntax noprefix
         push rdi // Save rdi before use as it is non-volatile.
         push rsi // Save rsi before use as it is non-volatile.
         mov rdi, rdx // Forward first parameter to function.
         mov rsi, r8 // Forward second parameter to function.
-        mov rdx, r9 // Forward third parameter, after rdx has been read.
         sub rsp, 0x8 // Align stack to 16 bytes.
         call rcx // Call the function pointer.
         add rsp, 0x8 // Restore stack.
@@ -96,6 +99,7 @@ extern "C" NTAPI NTSTATUS driver_entry(PDRIVER_OBJECT driver_object,
         // already running under the operating system, so it never has to
         // start one itself.
         .allocate_below_one_megabyte = nullptr,
+        .diagnostic_channel = nullptr,
         .adjust_launch_calling_convention = invoke_entry,
     };
 

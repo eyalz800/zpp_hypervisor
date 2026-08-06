@@ -117,6 +117,41 @@ struct esp_blocks_for
                   "a record has to fit in a block with its header");
 
     /**
+     * Takes the loader's hand-over and makes the channel live.
+     *
+     * The three wiring points above are filled here and nowhere else:
+     * the target the loader validated, the queue pair it created, and
+     * the address translation the resident side supplies for itself.
+     *
+     * Refuses a hand-over that does not check out rather than partially
+     * applying it, so `ready()` can never become true on half a channel.
+     * Returns whether the channel is now live.
+     */
+    static bool configure(const nvme::channel_handover & handover,
+                          std::uint64_t (*translate)(const void *))
+    {
+        if (!handover.usable() || (nullptr == translate)) {
+            return false;
+        }
+
+        target = handover.target;
+        physical_of = translate;
+
+        queues::bound = typename queues::binding{
+            .submission_doorbell = handover.submission_doorbell,
+            .completion_doorbell = handover.completion_doorbell,
+            .status_register = handover.status_register,
+            .configuration_register = handover.configuration_register,
+            .submission_id = handover.submission_id,
+            .completion_id = handover.completion_id,
+            .namespace_id = handover.namespace_id,
+            .epoch = ++epoch,
+        };
+
+        return ready();
+    }
+
+    /**
      * Whether the channel can be used at all in this boot.
      *
      * Four things have to be true, and every one of them is somebody

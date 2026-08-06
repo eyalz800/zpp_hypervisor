@@ -1147,19 +1147,22 @@ close_event:
     return result;
 }
 
-static int __attribute__((naked)) invoke_entry(
-    int (*)(std::size_t, std::uintptr_t (*)(std::uintptr_t), void *),
-    std::size_t,
-    std::uintptr_t (*)(std::uintptr_t),
-    void *)
+static int __attribute__((naked))
+invoke_entry(int (*)(std::size_t, const zpp_launch_parameters *),
+             std::size_t,
+             const zpp_launch_parameters *)
 {
+    // Two arguments now rather than three, because everything else the
+    // hypervisor is handed moved into the structure the second one
+    // points at. That is the point of the structure: this adapter is
+    // hand written assembly in two loaders, and it no longer has to
+    // change when the hypervisor needs to be told something new.
     asm(R"!!(
         .intel_syntax noprefix
         push rdi // Save rdi before use as it is non-volatile.
         push rsi // Save rsi before use as it is non-volatile.
         mov rdi, rdx // Forward first parameter to function.
         mov rsi, r8 // Forward second parameter to function.
-        mov rdx, r9 // Forward third parameter, after rdx has been read.
         sub rsp, 0x8 // Align stack to 16 bytes.
         call rcx // Call the function pointer.
         add rsp, 0x8 // Restore stack.
@@ -1342,6 +1345,10 @@ extern "C" EFI_STATUS EFIAPI uefi_main(EFI_HANDLE image_handle,
         // hypervisor, and a processor being started begins in real mode
         // below one megabyte.
         .allocate_below_one_megabyte = allocate_below_one_megabyte,
+        // The diagnostic channel, once the loader has one to hand over.
+        // Null until then, which the hypervisor reads as the channel
+        // being unavailable rather than as a failure.
+        .diagnostic_channel = nullptr,
         .adjust_launch_calling_convention = invoke_entry,
     };
 

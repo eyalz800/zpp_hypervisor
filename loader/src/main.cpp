@@ -40,9 +40,8 @@ zpp_load_elf(const struct zpp_loader_parameters * parameters)
 
     // Convert ELF entry to function pointer.
     auto entry = reinterpret_cast<int (*)(
-        std::size_t cpuid,
-        std::uintptr_t (*physical_to_virtual)(std::uintptr_t),
-        void * start_up_memory)>(entry_point_address);
+        std::size_t cpuid, const zpp_launch_parameters * launch)>(
+        entry_point_address);
 
     // Call entry point on all cpus.
     auto cpus = parameters->number_of_cpus();
@@ -66,18 +65,23 @@ zpp_load_elf(const struct zpp_loader_parameters * parameters)
             ZPP_START_UP_MEMORY_SIZE);
     }
 
+    // Static rather than automatic, because the hypervisor goes resident
+    // and this frame does not - a pointer into it would dangle the
+    // moment the loader returned. Filled once and shared by every
+    // processor, since none of it varies between them.
+    static zpp_launch_parameters handover{};
+    handover.physical_to_virtual = parameters->physical_to_virtual;
+    handover.start_up_memory = start_up_memory;
+    handover.diagnostic_channel = parameters->diagnostic_channel;
+
     for (std::size_t i{}; i < cpus; ++i) {
         // The launch function.
         auto launch = [&] {
             if (parameters->adjust_launch_calling_convention) {
                 return parameters->adjust_launch_calling_convention(
-                    entry,
-                    i,
-                    parameters->physical_to_virtual,
-                    start_up_memory);
+                    entry, i, &handover);
             }
-            return entry(
-                i, parameters->physical_to_virtual, start_up_memory);
+            return entry(i, &handover);
         };
 
         // The erased launch function.

@@ -131,6 +131,10 @@ static int zpp_init(void)
         .allocate_below_one_megabyte = NULL,
         // The kernel already uses the SysV convention the hypervisor
         // wants.
+        /* No channel here: this loader has no boot services to resolve a
+         * file with, and the disk is already owned by a running kernel. */
+        .diagnostic_channel = NULL,
+        /* System V already, so no adaptation is needed. */
         .adjust_launch_calling_convention = NULL,
     };
 

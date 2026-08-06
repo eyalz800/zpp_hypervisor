@@ -48,6 +48,10 @@ endif()
 target_include_directories(zpp_hypervisor PRIVATE
     "${ZPP_SOURCE_DIR}/hypervisor/include"
     "${ZPP_SOURCE_DIR}/diag/include"
+    # The launch parameter structure the loaders hand over. Shared rather
+    # than duplicated, so the two sides of that boundary cannot drift -
+    # the header is C compatible precisely so both can include it.
+    "${ZPP_SOURCE_DIR}/loader/include"
 )
 
 # Freestanding include order (critical for #include_next chains):

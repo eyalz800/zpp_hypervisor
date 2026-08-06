@@ -35,6 +35,49 @@ extern "C" {
  * Grouped into a struct rather than passed positionally so that call sites
  * can name each one with a designated initializer.
  */
+/**
+ * Everything the hypervisor is handed at launch, other than which
+ * processor it is running on.
+ *
+ * A structure rather than a widening argument list, because the argument
+ * list had already been widened twice and every widening costs the same
+ * four places: this header, the loader's call, and a naked calling
+ * convention adapter in each of two loaders that has to be re-derived by
+ * hand. Adding a field here costs none of them.
+ *
+ * Shared by every processor and read only, so one instance serves the
+ * whole launch. It must outlive the launch on every platform - the
+ * loaders keep it in static storage rather than on the stack, since the
+ * hypervisor goes resident and the caller's frame does not.
+ */
+struct zpp_launch_parameters
+{
+    /**
+     * Translates a physical address within the OS page tables to a
+     * virtual one. Only called during initialization. May be null on
+     * platforms that identity map, such as UEFI.
+     */
+    uintptr_t (*physical_to_virtual)(uintptr_t address);
+
+    /**
+     * Page aligned memory below one megabyte for starting processors, or
+     * null where the platform could not supply it.
+     */
+    void * start_up_memory;
+
+    /**
+     * The diagnostic channel the loader established, or null.
+     *
+     * A `void *` because this header is included from C while the
+     * structure behind it is C++ - the resident side casts it to
+     * `zpp::nvme::channel_handover` and checks its magic before
+     * believing any field of it. Null means the platform established
+     * none, which the hypervisor treats as the channel being
+     * unavailable rather than as an error.
+     */
+    const void * diagnostic_channel;
+};
+
 struct zpp_loader_parameters
 {
     /**
@@ -80,16 +123,20 @@ struct zpp_loader_parameters
     void * (*allocate_below_one_megabyte)(size_t size);
 
     /**
+     * The diagnostic channel this loader established, or null. Copied
+     * into the launch parameters rather than passed separately.
+     */
+    const void * diagnostic_channel;
+
+    /**
      * Adjusts the calling convention before entering the hypervisor. May
      * be null when the platform's convention already matches.
      */
     int (*adjust_launch_calling_convention)(
         int (*entry)(size_t cpu,
-                     uintptr_t (*physical_to_virtual)(uintptr_t),
-                     void * start_up_memory),
+                     const struct zpp_launch_parameters * launch),
         size_t cpu,
-        uintptr_t (*physical_to_virtual)(uintptr_t),
-        void * start_up_memory);
+        const struct zpp_launch_parameters * launch);
 };
 
 /**
