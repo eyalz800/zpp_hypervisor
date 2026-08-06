@@ -42,8 +42,7 @@ zpp_load_elf(const struct zpp_loader_parameters * parameters)
     auto entry = reinterpret_cast<int (*)(
         std::size_t cpuid,
         std::uintptr_t (*physical_to_virtual)(std::uintptr_t),
-        void * start_up_memory,
-        const struct zpp_framebuffer * framebuffer)>(entry_point_address);
+        void * start_up_memory)>(entry_point_address);
 
     // Call entry point on all cpus.
     auto cpus = parameters->number_of_cpus();
@@ -75,13 +74,10 @@ zpp_load_elf(const struct zpp_loader_parameters * parameters)
                     entry,
                     i,
                     parameters->physical_to_virtual,
-                    start_up_memory,
-                    &parameters->framebuffer);
+                    start_up_memory);
             }
-            return entry(i,
-                         parameters->physical_to_virtual,
-                         start_up_memory,
-                         &parameters->framebuffer);
+            return entry(
+                i, parameters->physical_to_virtual, start_up_memory);
         };
 
         // The erased launch function.

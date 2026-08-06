@@ -1286,35 +1286,6 @@ hypervisor::on_interrupt_command(std::uint64_t command)
     return command;
 }
 
-void hypervisor::initialize_screen(const zpp_framebuffer * description)
-{
-    if (!description) {
-        log("no framebuffer description from the loader");
-        return;
-    }
-
-    // Logged either way, and with the geometry, because a drawing that
-    // comes out skewed or in the wrong colours is diagnosed from these
-    // numbers and there is no second chance to ask for them.
-    if (auto result =
-            this->display.initialize(*description, this->host_page_table);
-        !result) {
-        log("no screen output, code {}, format {}, base {}",
-            result.error().code(),
-            description->format,
-            description->base);
-        return;
-    }
-
-    log("screen {} by {}, stride {}, format {}, physical {} mapped at {}",
-        description->width,
-        description->height,
-        description->pixels_per_scan_line,
-        description->format,
-        description->base,
-        this->display.address());
-}
-
 void hypervisor::initialize_start_up_memory(std::uint64_t memory)
 {
     // How much of the blob there is to copy. Its own page has to hold it,
@@ -1549,14 +1520,10 @@ void hypervisor::start_up_on_this_processor(std::uint64_t slot)
 
     // What main reads out of the context: which processor this is, and no
     // physical to virtual translation, which only the boot processor's
-    // once per boot setup ever calls. No framebuffer description either -
-    // the boot processor adopted the screen already, and this context was
-    // captured rather than passed, so every one of these would otherwise
-    // hold whatever the trampoline left in the register.
+    // once per boot setup ever calls.
     context.rdi = slot;
     context.rsi = 0;
     context.rdx = 0;
-    context.rcx = 0;
 
     launch_on_cpu(context);
 }
@@ -1863,11 +1830,6 @@ void hypervisor::on_unhandled_exit(arch::x86_64::vmx::exit_reason reason)
         record.guest_cs_selector,
         record.guest_linear_address);
 
-    // Onto the screen, which is the only channel that reaches a person.
-    // The log line above carries the whole record, so what is drawn says
-    // which exit it was, where the guest was and how it got there.
-    this->display.draw(log_storage::lines());
-
     // The exit ring already holds the run up to this, and it stays
     // readable because this CPU stops here rather than letting the guest
     // proceed on corrupted state and take the machine down elsewhere.
@@ -1914,12 +1876,6 @@ void hypervisor::on_vm_entry_failure(arch::x86_64::vmx::exit_reason reason)
         record.guest_cr0,
         record.guest_cr4,
         record.guest_rflags);
-
-    // Onto the screen as well, for the reason given in on_unhandled_exit:
-    // this is the only channel that reaches a person, and on the machine
-    // this was written for it is the only one that reaches anywhere at
-    // all.
-    this->display.draw(log_storage::lines());
 
     // Stop. This CPU is not going to run a guest again, and pretending
     // otherwise is what made this failure invisible before.
@@ -2260,8 +2216,6 @@ hypervisor::main(arch::x86_64::context & caller_context)
         reinterpret_cast<std::uint64_t (*)(std::uint64_t)>(
             caller_context.rsi);
     auto start_up_memory = caller_context.rdx;
-    auto framebuffer =
-        reinterpret_cast<const zpp_framebuffer *>(caller_context.rcx);
 
     // Whether this processor was started by this VMM rather than launched
     // by the loader, which changes three things below: there is no state
@@ -2333,12 +2287,6 @@ hypervisor::main(arch::x86_64::context & caller_context)
 
         // Initialize host page table.
         initialize_host_page_table();
-
-        // Map the screen into it, if the loader found one. Here rather
-        // than later because everything after this point can stop the
-        // processor, and a halt before the screen is mapped has nowhere to
-        // report.
-        initialize_screen(framebuffer);
 
         // Initialize module physical to virtual translation.
         if (auto result = initialize_module_physical_to_virtual();

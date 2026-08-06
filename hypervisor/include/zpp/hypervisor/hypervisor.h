@@ -14,7 +14,6 @@
 #include "zpp/arch/x86_64/vmx/vmx_exit_reason.h"
 #include "zpp/error.h"
 #include "zpp/hypervisor/log.h"
-#include "zpp/hypervisor/screen.h"
 #include "zpp/small_map.h"
 #include "zpp/spin_lock.h"
 #include <atomic>
@@ -307,15 +306,6 @@ private:
     std::optional<std::size_t> processor_slot(std::uint64_t apic_id);
 
     /**
-     * Adopts the framebuffer the loader described, so that a processor
-     * stopping later has somewhere to say why. Done once, on the boot
-     * processor, and never allowed to fail the launch: the worst outcome
-     * of not having a screen is a silent halt, which is what happened
-     * before this existed.
-     */
-    void initialize_screen(const zpp_framebuffer * description);
-
-    /**
      * Lays out the memory the loader reserved below one megabyte: the
      * start-up trampoline, and the temporary page table it needs to reach
      * long mode. Done once, on the boot processor.
@@ -454,14 +444,6 @@ private:
      * to physical addresses of the hypervisor module.
      */
     arch::x86_64::page_table host_page_table{};
-
-    /**
-     * The screen, and the last channel out of a processor that stops with
-     * a guest running. Unusable unless the loader described a framebuffer
-     * - only the UEFI one does, since it is the only one that runs while
-     * nothing else owns the display.
-     */
-    screen display{};
 
     /**
      * The next virtual processor id that will be assigned

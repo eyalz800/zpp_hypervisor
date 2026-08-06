@@ -8,7 +8,6 @@ extern "C" {
 #include <Protocol/BlockIo.h>
 #include <Protocol/DevicePathToText.h>
 #include <Protocol/DevicePathUtilities.h>
-#include <Protocol/GraphicsOutput.h>
 #include <Protocol/LoadedImage.h>
 #include <Protocol/MpService.h>
 #include <Protocol/SimpleFileSystem.h>
@@ -85,12 +84,6 @@ static EFI_GUID g_efi_device_path_to_text_protocol_guid = {
     0x8132,
     0x4852,
     {0x90, 0xCC, 0x55, 0x1A, 0x4E, 0x4A, 0x7F, 0x1C}};
-
-static EFI_GUID g_efi_graphics_output_protocol_guid = {
-    0x9042A9DE,
-    0x23DC,
-    0x4A38,
-    {0x96, 0xFB, 0x7A, 0xDE, 0xD0, 0x80, 0x51, 0x6A}};
 
 static EFI_GUID g_efi_mp_service_protocol_guid = {
     0x3fdda605,
@@ -869,90 +862,6 @@ static void * allocate_below_one_megabyte(std::size_t size)
 }
 
 /**
- * Describes the linear framebuffer for the hypervisor, so that a processor
- * which stops once the guest is running can say why on the screen.
- *
- * That is the only channel left there. The machine this is for has no
- * serial port, its screen belongs to whatever was chainloaded, and the
- * hypervisor's own records need a debugger attached to the processor that
- * stopped - which is not possible on a machine that has to be powered off
- * to escape the hang.
- *
- * Everything found is traced, whether or not anything ever stops: the
- * numbers below are the ones a skewed or blank drawing would be diagnosed
- * from, and they cost nothing to have in the log of a boot that worked.
- *
- * A machine with no graphics output protocol gets an all zero description
- * and boots exactly as before. Nothing here may fail a boot - a diagnostic
- * that costs the machine its boot is worse than no diagnostic.
- */
-static zpp_framebuffer find_framebuffer()
-{
-    zpp_framebuffer framebuffer{};
-
-    EFI_GRAPHICS_OUTPUT_PROTOCOL * graphics{};
-    if (EFI_ERROR(g_boot_services->LocateProtocol(
-            &g_efi_graphics_output_protocol_guid,
-            nullptr,
-            reinterpret_cast<void **>(&graphics)))) {
-        trace::line("ZPP_TRACE no graphics output protocol");
-        return framebuffer;
-    }
-
-    if (!graphics->Mode || !graphics->Mode->Info) {
-        trace::line("ZPP_TRACE graphics output has no mode information");
-        return framebuffer;
-    }
-
-    auto & mode = *graphics->Mode;
-    auto & information = *mode.Info;
-
-    // Translated by name rather than by number. The firmware's enumeration
-    // and this one agree on nothing but the two formats that can be
-    // written to without further information, and a switch says which
-    // those are.
-    switch (information.PixelFormat) {
-    case PixelBlueGreenRedReserved8BitPerColor:
-        framebuffer.format =
-            zpp_framebuffer_format_blue_green_red_reserved;
-        break;
-    case PixelRedGreenBlueReserved8BitPerColor:
-        framebuffer.format =
-            zpp_framebuffer_format_red_green_blue_reserved;
-        break;
-    // A bit mask says where the channels are but not how wide a pixel is,
-    // and blt only means there is no linear framebuffer at all - the base
-    // address below is meaningless in that mode. Both are handed over as
-    // unsupported rather than guessed at, so the hypervisor can record
-    // that it declined to draw instead of writing 32 bit pixels into a 16
-    // bit mode.
-    case PixelBitMask:
-    case PixelBltOnly:
-    default:
-        framebuffer.format = zpp_framebuffer_format_unsupported;
-        break;
-    }
-
-    framebuffer.base = mode.FrameBufferBase;
-    framebuffer.size = mode.FrameBufferSize;
-    framebuffer.width = information.HorizontalResolution;
-    framebuffer.height = information.VerticalResolution;
-    framebuffer.pixels_per_scan_line = information.PixelsPerScanLine;
-
-    trace::hex_line("ZPP_TRACE framebuffer base ", framebuffer.base);
-    trace::hex_line("ZPP_TRACE framebuffer size ", framebuffer.size);
-    trace::hex_line("ZPP_TRACE framebuffer width ", framebuffer.width);
-    trace::hex_line("ZPP_TRACE framebuffer height ", framebuffer.height);
-    trace::hex_line("ZPP_TRACE framebuffer stride pixels ",
-                    framebuffer.pixels_per_scan_line);
-    trace::hex_line("ZPP_TRACE framebuffer efi pixel format ",
-                    static_cast<std::uint64_t>(information.PixelFormat));
-    trace::hex_line("ZPP_TRACE framebuffer format ", framebuffer.format);
-
-    return framebuffer;
-}
-
-/**
  * Returns true when the ACPI power management timer is present and
  * advancing.
  *
@@ -1234,32 +1143,21 @@ close_event:
     return result;
 }
 
-static int __attribute__((naked))
-invoke_entry(int (*)(std::size_t,
-                     std::uintptr_t (*)(std::uintptr_t),
-                     void *,
-                     const zpp_framebuffer *),
-             std::size_t,
-             std::uintptr_t (*)(std::uintptr_t),
-             void *,
-             const zpp_framebuffer *)
+static int __attribute__((naked)) invoke_entry(
+    int (*)(std::size_t, std::uintptr_t (*)(std::uintptr_t), void *),
+    std::size_t,
+    std::uintptr_t (*)(std::uintptr_t),
+    void *)
 {
-    // The fifth parameter arrives on the stack rather than in a register.
-    // Its offset is 0x28 on entry - the return address, then the shadow
-    // space the four register parameters are entitled to - and 0x10 more
-    // once the two non-volatile registers below have been pushed.
     asm(R"!!(
         .intel_syntax noprefix
         push rdi // Save rdi before use as it is non-volatile.
         push rsi // Save rsi before use as it is non-volatile.
-        mov r10, [rsp+0x38] // Fetch the fifth parameter.
-        mov r11, rcx // Save the function pointer, rcx is needed.
         mov rdi, rdx // Forward first parameter to function.
         mov rsi, r8 // Forward second parameter to function.
         mov rdx, r9 // Forward third parameter, after rdx has been read.
-        mov rcx, r10 // Forward fourth parameter, after rcx has been read.
         sub rsp, 0x8 // Align stack to 16 bytes.
-        call r11 // Call the function pointer.
+        call rcx // Call the function pointer.
         add rsp, 0x8 // Restore stack.
         pop rsi // Restore rsi.
         pop rdi // Restore rdi.
@@ -1427,10 +1325,6 @@ extern "C" EFI_STATUS EFIAPI uefi_main(EFI_HANDLE image_handle,
         // below one megabyte.
         .allocate_below_one_megabyte = allocate_below_one_megabyte,
         .adjust_launch_calling_convention = invoke_entry,
-        // The screen, so that a processor stopping after the hand-over has
-        // somewhere to say why. Absent is not a failure: the description
-        // comes back all zero and the hypervisor keeps quiet.
-        .framebuffer = find_framebuffer(),
     };
 
     trace::line("ZPP_TRACE loading");

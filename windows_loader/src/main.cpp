@@ -58,32 +58,21 @@ invoke_physical_to_virtual(std::uintptr_t)
     )!!");
 }
 
-static int __attribute__((naked))
-invoke_entry(int (*)(std::size_t,
-                     std::uintptr_t (*)(std::uintptr_t),
-                     void *,
-                     const zpp_framebuffer *),
-             std::size_t,
-             std::uintptr_t (*)(std::uintptr_t),
-             void *,
-             const zpp_framebuffer *)
+static int __attribute__((naked)) invoke_entry(
+    int (*)(std::size_t, std::uintptr_t (*)(std::uintptr_t), void *),
+    std::size_t,
+    std::uintptr_t (*)(std::uintptr_t),
+    void *)
 {
-    // The fifth parameter arrives on the stack rather than in a register.
-    // Its offset is 0x28 on entry - the return address, then the shadow
-    // space the four register parameters are entitled to - and 0x10 more
-    // once the two non-volatile registers below have been pushed.
     asm(R"!!(
         .intel_syntax noprefix
         push rdi // Save rdi before use as it is non-volatile.
         push rsi // Save rsi before use as it is non-volatile.
-        mov r10, [rsp+0x38] // Fetch the fifth parameter.
-        mov r11, rcx // Save the function pointer, rcx is needed.
         mov rdi, rdx // Forward first parameter to function.
         mov rsi, r8 // Forward second parameter to function.
         mov rdx, r9 // Forward third parameter, after rdx has been read.
-        mov rcx, r10 // Forward fourth parameter, after rcx has been read.
         sub rsp, 0x8 // Align stack to 16 bytes.
-        call r11 // Call the function pointer.
+        call rcx // Call the function pointer.
         add rsp, 0x8 // Restore stack.
         pop rsi // Restore rsi.
         pop rdi // Restore rdi.
@@ -108,12 +97,6 @@ extern "C" NTAPI NTSTATUS driver_entry(PDRIVER_OBJECT driver_object,
         // start one itself.
         .allocate_below_one_megabyte = nullptr,
         .adjust_launch_calling_convention = invoke_entry,
-        // No framebuffer reported. The operating system owns the display
-        // by the time this driver loads, and a hypervisor drawing on it
-        // would be overwritten by the next thing the desktop paints - the
-        // screen is only a usable channel where nothing else is using it.
-        // There is a debugger and an event log here in any case.
-        .framebuffer = {},
     };
 
     auto result = zpp_load_elf(&parameters);

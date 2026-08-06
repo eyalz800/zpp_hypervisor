@@ -44,14 +44,10 @@ endif()
 # Project include directories. hypervisor/include comes first so that this
 # program's own zpp/diag/sinks.h - the list of channels the resident side can
 # drive - is what pump.h finds, while everything else about the diagnostic
-# facility comes from the shared diag/include. loader/include is here for
-# zpp/loader.h, which declares what the loader hands the entry point, the
-# framebuffer description among it. Shared rather than duplicated: it is one
-# ABI, and a second declaration of it would be free to drift.
+# facility comes from the shared diag/include.
 target_include_directories(zpp_hypervisor PRIVATE
     "${ZPP_SOURCE_DIR}/hypervisor/include"
     "${ZPP_SOURCE_DIR}/diag/include"
-    "${ZPP_SOURCE_DIR}/loader/include"
 )
 
 # Freestanding include order (critical for #include_next chains):
