@@ -3460,6 +3460,24 @@ void hypervisor::launch_on_cpu_private_stack(
     // Invoke the main function.
     auto result = hypervisor.main(caller_context);
 
+    // Record the failure where a processor that is still running can
+    // read it.
+    //
+    // A processor this VMM started cannot report its own: it arrived on
+    // an interrupt rather than a call, so there is nowhere to return an
+    // error to and nothing to do afterwards but halt. The diagnostic
+    // CPUID leaf folds the low nibble of this into what it reports, and
+    // until now nothing ever assigned it - so that nibble was always
+    // zero, which is worse than absent because it is read as an answer.
+    //
+    // The processor number is the one main was given, which is the same
+    // index the leaf reads back with.
+    if (!result) {
+        if (auto cpu = caller_context.rdi; cpu < max_cpus) {
+            hypervisor.launch_error[cpu] = result.error().code();
+        }
+    }
+
     // Use result as return value.
     caller_context.rax = result ? 0 : result.error().code();
 

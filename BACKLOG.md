@@ -243,13 +243,18 @@ These cost nothing at runtime and cost time during every future
 investigation, which is the argument for fixing them first rather than
 last.
 
-### 11. `launch_error[]` is never written
+### 11. `launch_error[]` is never written — FIXED
 
-Declared at `hypervisor/include/zpp/hypervisor/hypervisor.h:709`, read at
-`hypervisor.cpp:2404` where its low nibble is folded into the error code
-the loader prints. There is no assignment anywhere in the tree, so that
-nibble is always zero. A diagnostic that reports a constant is worse than
-one that does not exist, because it is trusted.
+Read where its low nibble is folded into the diagnostic CPUID leaf, and
+assigned nowhere - so the nibble was always zero. A diagnostic that
+reports a constant is worse than one that does not exist, because it is
+trusted.
+
+Written now in `launch_on_cpu_private_stack`, which is where a failure
+and the processor it belongs to are both in scope, and which every
+processor passes through whether it was launched by the loader or
+started by this VMM. The index is the one `main` was given, so it
+matches what the leaf reads back with.
 
 ### 12. Two comments assert a serialisation that no longer holds — CLOSED
 
