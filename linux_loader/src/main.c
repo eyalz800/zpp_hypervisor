@@ -117,7 +117,11 @@ static int zpp_init(void)
 {
     int result = 0;
 
-    // Load the ELF.
+    // Everything the platform has to supply. Designated initializers
+    // throughout, so a field added to the structure shows up here as a
+    // name rather than as a shifted position - which matters more here
+    // than elsewhere, since this file is compiled by a different
+    // compiler from the header's other consumers.
     const struct zpp_loader_parameters parameters = {
         .allocate_rwx = &allocate_rwx,
         // phys_to_virt returns void *, which is pointer sized here.
@@ -129,8 +133,6 @@ static int zpp_init(void)
         // already running under the kernel, so it never has to start one
         // itself.
         .allocate_below_one_megabyte = NULL,
-        // The kernel already uses the SysV convention the hypervisor
-        // wants.
         /* No channel here: this loader has no boot services to resolve a
          * file with, and the disk is already owned by a running kernel. */
         .diagnostic_channel = NULL,
@@ -142,12 +144,18 @@ static int zpp_init(void)
 
     result = zpp_load_elf(&parameters);
 
-    // If we failed, return an arbitrary failure.
+    // Flattened, because module_init's return value has to be a negative
+    // errno and the hypervisor's own error codes are not. The UEFI loader
+    // is the one that prints them unflattened.
     if (result) {
         return -EFAULT;
     }
 
-    // Return an error so the driver gets unloaded.
+    // An error on success, deliberately: the hypervisor is resident in
+    // the vmap allocation that allocate_rwx deliberately never frees, so
+    // failing init is how this module gets unloaded again without taking
+    // the hypervisor with it. A distinct errno from the failure above so
+    // the outcome is still readable from dmesg.
     return -EPERM;
 }
 

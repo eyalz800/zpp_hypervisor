@@ -20,19 +20,18 @@ static int call_on_cpu(std::size_t cpuid,
                        int (*function)(void *),
                        void * context)
 {
-    // The previous affinity.
+    // Pinning this thread is how the hypervisor is entered on a chosen
+    // processor here: vmxon and vmlaunch act on whichever processor
+    // executes them, so the launch is worthless unless it runs on the one
+    // the caller named. Restored afterwards because the thread belongs to
+    // the operating system, not to this driver.
     KAFFINITY previous{};
-
-    // Set new affinity to only given cpuid.
     previous = KeSetSystemAffinityThreadEx(1ull << cpuid);
 
-    // Call user function.
     int result = function(context);
 
-    // Restore previous affinity.
     KeRevertToUserAffinityThreadEx(previous);
 
-    // Return the result.
     return result;
 }
 
@@ -88,7 +87,9 @@ extern "C" NTAPI NTSTATUS driver_entry(PDRIVER_OBJECT driver_object,
 {
     driver_object->DriverUnload = [](PDRIVER_OBJECT) {};
 
-    // Load the ELF.
+    // Everything the platform has to supply. Designated initializers
+    // throughout, so a field added to the structure shows up here as a
+    // name rather than as a shifted position.
     const zpp_loader_parameters parameters{
         .allocate_rwx = allocate_rwx,
         .physical_to_virtual = invoke_physical_to_virtual,
@@ -107,11 +108,16 @@ extern "C" NTAPI NTSTATUS driver_entry(PDRIVER_OBJECT driver_object,
 
     auto result = zpp_load_elf(&parameters);
 
-    // If we failed, return an arbitrary failure.
+    // Flattened, because a driver entry point's return value has to be an
+    // NTSTATUS and the hypervisor's own error codes are not. The UEFI
+    // loader is the one that prints them unflattened.
     if (result) {
         return STATUS_INTERNAL_ERROR;
     }
 
-    // Success, return a failure so the OS unloads us.
+    // A failure on success, deliberately: the hypervisor is resident in
+    // its own allocation and no longer needs this driver, so failing the
+    // load is how the driver gets unloaded again. The two failures are
+    // distinct codes so that the outcome is still readable from outside.
     return STATUS_INSUFFICIENT_POWER;
 }

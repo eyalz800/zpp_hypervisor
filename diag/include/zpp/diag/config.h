@@ -335,10 +335,25 @@ constexpr policy policy_of(sink which)
         //
         // Turning it on does two things at once: it makes the resident
         // side write log blocks, and it makes the loader run the self
-        // test - which borrows the controller's admin queue on whatever
-        // machine it boots. Neither should happen until the channel has
-        // a destination, and it has none yet: resolving where the blocks
-        // go is the outstanding piece.
+        // test - which borrows the controller's admin queue and *writes
+        // to the disk* on whatever machine it boots.
+        //
+        // The destination is no longer the missing piece: the ESP
+        // reservation resolves one, and fills in a log_target with the
+        // namespace, the block size, both GUIDs and the absolute first
+        // LBA of the reserved tail. What is missing is the join. The
+        // hand-over the loader passes across carries a target field that
+        // nothing ever fills, and the self test writes its proof block
+        // to a hard coded LBA instead - which is fine against an
+        // emulated disk and is not fine here, where that LBA lands
+        // inside the EFI system partition among real boot files rather
+        // than in the reserved tail.
+        //
+        // So this stays off until the loader runs the reservation
+        // *before* the self test, hands the resolved target to it, and
+        // the proof write goes to the reserved region like every write
+        // after it. Enabling it before that would corrupt the volume it
+        // is supposed to be logging to.
         //
         // The code behind it does not rot while it is off.
         // hypervisor/src/diag/instantiate.cpp explicitly instantiates

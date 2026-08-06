@@ -102,12 +102,6 @@ static EFI_GUID g_efi_mp_service_protocol_guid = {
 // services unusable - see acpi_timer_advancing.
 static bool g_timed_waits_usable = true;
 
-/**
- * Whether this build carries the hypervisor self check. The build system
- * always defines the macro, to 0 or 1, so this needs no preprocessor
- * fallback - and having it as a constant rather than a macro is what lets
- * everything below be ordinary code under `if constexpr`.
- */
 // Unqualified, so the many call sites below stay readable.
 using zpp::nvme_selftest;
 using zpp::reserved_region;
@@ -212,6 +206,10 @@ struct boot_option_load_options
 
 /**
  * Returns just the file name out of a path.
+ *
+ * A boot option's file path node and the path this loader is configured
+ * with need not agree on the directories leading up to the executable, so
+ * only the leaf is compared - see the caller in read_boot_option.
  */
 static const char16_t * path_file_name(const char16_t * path)
 {
@@ -492,19 +490,6 @@ static bool file_exists(EFI_HANDLE device, const char16_t * path)
 }
 
 /**
- * Writes everything traced so far to a file on the given device.
- *
- * This is the only diagnosis channel that survives on the development
- * target: it has no serial port, no debugger, and the screen belongs to
- * whatever gets booted next. Without this, a bare metal attempt that fails
- * leaves a blank screen and no reason.
- *
- * Called before handing control away and on the paths that give up, so the
- * log describes the attempt either way. Failure to write is ignored - it
- * is a diagnostic, and refusing to boot because the log could not be
- * saved would be worse than booting without one.
- */
-/**
  * Traces which boot option started this loader, and what the firmware
  * thinks each of its processors is doing.
  *
@@ -656,6 +641,19 @@ static void write_trace_variable()
         const_cast<char *>(log.data()));
 }
 
+/**
+ * Writes everything traced so far to a file on the given device.
+ *
+ * This is the only diagnosis channel that survives on the development
+ * target: it has no serial port, no debugger, and the screen belongs to
+ * whatever gets booted next. Without this, a bare metal attempt that fails
+ * leaves a blank screen and no reason.
+ *
+ * Called before handing control away and on the paths that give up, so the
+ * log describes the attempt either way. Failure to write is ignored - it
+ * is a diagnostic, and refusing to boot because the log could not be
+ * saved would be worse than booting without one.
+ */
 static void write_trace_log(EFI_HANDLE device)
 {
     if constexpr (!trace::enabled) {
@@ -828,14 +826,15 @@ static void * allocate_rwx(std::size_t size)
         (size + EFI_PAGE_SIZE - 1) / EFI_PAGE_SIZE,
         &physical_address);
 
-    // If not success, return nullptr;
     if (EFI_ERROR(status)) {
         return nullptr;
     }
 
     trace::hex_line("ZPP_TRACE allocate_rwx done at ", physical_address);
 
-    // Return the result address.
+    // A physical address used as a pointer, which is only sound because
+    // UEFI runs with paging identity mapped - which is also why this
+    // platform supplies no physical_to_virtual.
     return reinterpret_cast<void *>(physical_address);
 }
 
@@ -1057,7 +1056,10 @@ static int call_on_cpu(std::size_t cpuid,
 {
     int result = -1;
 
-    // If this is the main CPU, just call the user function.
+    // MP services cannot dispatch to the processor doing the asking:
+    // StartupThisAP answers EFI_INVALID_PARAMETER when the processor
+    // number names the boot processor. Processor zero is the one this
+    // loader is running on, so it is entered by an ordinary call.
     if (0 == cpuid) {
         return function(context);
     }
@@ -1068,12 +1070,11 @@ static int call_on_cpu(std::size_t cpuid,
         return -1;
     }
 
-    // The event we will wait for to join the new started AP.
     EFI_EVENT join_event{};
 
-    // The launch function.
+    // Runs on the target processor. The result is carried out through the
+    // capture rather than returned, because EFI_AP_PROCEDURE returns void.
     auto launch = [&] {
-        // Call the user function and save the result.
         result = function(context);
 
         // Signalled here as well as by MP services, which signals it when
@@ -1083,13 +1084,17 @@ static int call_on_cpu(std::size_t cpuid,
         g_boot_services->SignalEvent(join_event);
     };
 
-    // Erased launch function.
+    // A capturing lambda has no function pointer conversion, so the
+    // capture travels as the single void argument MP services carries and
+    // is recovered here.
     auto erased_launch = [](void * parameter) {
         auto & local_launch = *static_cast<decltype(launch) *>(parameter);
         return local_launch();
     };
 
-    // Create the join event.
+    // No type bits and no notification function, deliberately: CheckEvent
+    // rejects an EVT_NOTIFY_SIGNAL event with EFI_INVALID_PARAMETER, and
+    // polling CheckEvent is how the deadline below is kept ours.
     auto status =
         g_boot_services->CreateEvent(0, 0, nullptr, nullptr, &join_event);
     if (EFI_ERROR(status)) {
@@ -1127,7 +1132,6 @@ static int call_on_cpu(std::size_t cpuid,
         goto close_event;
     }
 
-    // Wait for the join event, bounded.
     status = EFI_TIMEOUT;
     for (std::size_t poll{}; poll < start_up_polls; ++poll) {
         if (!EFI_ERROR(g_boot_services->CheckEvent(join_event))) {
@@ -1143,9 +1147,9 @@ static int call_on_cpu(std::size_t cpuid,
         goto close_event;
     }
 
-    // Result was changed by the other core.
 close_event:
-    // Close the event, and return the result.
+    // Closed on every path including the timeout, so a processor that
+    // never ran does not leak an event for the rest of the boot.
     g_boot_services->CloseEvent(join_event);
     return result;
 }
@@ -1180,7 +1184,6 @@ static EFI_DEVICE_PATH * file_device_path(EFI_HANDLE device,
 {
     EFI_STATUS status{};
 
-    // Locate the device path utilities protocol.
     EFI_DEVICE_PATH_UTILITIES_PROTOCOL * device_path_utilities{};
     status = g_boot_services->LocateProtocol(
         &g_efi_device_path_utilities_protocol_guid,
@@ -1200,12 +1203,15 @@ static EFI_DEVICE_PATH * file_device_path(EFI_HANDLE device,
         (std::char_traits<char16_t>::length(file_name) + 1) *
         sizeof(char16_t);
 
-    // Compute the file path device path size.
+    // SIZE_OF_FILEPATH_DEVICE_PATH is the node header alone - it is the
+    // offset of PathName - so the name is added to it, and one more
+    // EFI_DEVICE_PATH on top for the end-of-path node. That terminator is
+    // not optional: AppendDevicePath is handed this as a whole device path
+    // and walks it to its end.
     std::size_t file_path_device_path_size = file_name_size +
                                              SIZE_OF_FILEPATH_DEVICE_PATH +
                                              sizeof(EFI_DEVICE_PATH);
 
-    // Allocate memory for the file path device path.
     FILEPATH_DEVICE_PATH * file_path_device_path{};
     status = g_boot_services->AllocatePool(
         EfiBootServicesData,
@@ -1215,13 +1221,17 @@ static EFI_DEVICE_PATH * file_device_path(EFI_HANDLE device,
         return nullptr;
     }
 
-    // Zero the file path device path.
+    // AllocatePool does not zero, and the node is filled field by field
+    // below rather than as a whole, so anything not written would
+    // otherwise be pool garbage inside a structure the firmware parses.
     std::memset(file_path_device_path,
                 0,
                 file_name_size + SIZE_OF_FILEPATH_DEVICE_PATH +
                     sizeof(EFI_DEVICE_PATH));
 
-    // Initialize file path device path.
+    // The length is a two byte array rather than a UINT16, because a
+    // device path node carries no alignment guarantee, so it is split by
+    // hand here and reassembled by hand below.
     file_path_device_path->Header.Type = MEDIA_DEVICE_PATH;
     file_path_device_path->Header.SubType = MEDIA_FILEPATH_DP;
     file_path_device_path->Header.Length[0] =
@@ -1231,7 +1241,9 @@ static EFI_DEVICE_PATH * file_device_path(EFI_HANDLE device,
     std::memcpy(
         file_path_device_path->PathName, file_name, file_name_size);
 
-    // Compute the device path end.
+    // The end node goes immediately after the file path node, so its
+    // position is derived from the length just written rather than
+    // computed a second time - the two cannot then disagree.
     auto * end_of_device_path = reinterpret_cast<EFI_DEVICE_PATH *>(
         reinterpret_cast<std::uintptr_t>(&file_path_device_path->Header) +
         file_path_device_path->Header.Length[0] +
@@ -1241,11 +1253,12 @@ static EFI_DEVICE_PATH * file_device_path(EFI_HANDLE device,
     end_of_device_path->Length[0] = sizeof(EFI_DEVICE_PATH);
     end_of_device_path->Length[1] = 0;
 
-    // Fetch the device path.
     auto device_path =
         reinterpret_cast<EFI_DEVICE_PATH *>(file_path_device_path);
 
-    // If device was not specified, return the device path as is.
+    // With no device to root it at, the file path node is the whole
+    // answer, and it is returned as the allocation itself rather than as a
+    // copy - which is why the free below is skipped on this path.
     if (!device) {
         return device_path;
     }
@@ -1267,7 +1280,8 @@ static EFI_DEVICE_PATH * file_device_path(EFI_HANDLE device,
         goto free_file_path_device_path;
     }
 
-    // Build the full path from device and path.
+    // AppendDevicePath allocates a new path, so the caller receives that
+    // one and the node built above becomes a temporary.
     device_path = device_path_utilities->AppendDevicePath(
         device_path_from_handle, device_path);
     if (!device_path) {
@@ -1275,7 +1289,6 @@ static EFI_DEVICE_PATH * file_device_path(EFI_HANDLE device,
     }
 
 free_file_path_device_path:
-    // Free file path device path.
     g_boot_services->FreePool(file_path_device_path);
 
     return device_path;
@@ -1286,7 +1299,8 @@ extern "C" EFI_STATUS EFIAPI uefi_main(EFI_HANDLE image_handle,
 {
     EFI_STATUS status{};
 
-    // Copy the boot services.
+    // Cached in globals because almost everything below is a free
+    // function that never sees the system table.
     g_boot_services = system_table->BootServices;
 
     // Point the trace channel at the screen before anything can fail, so
@@ -1306,7 +1320,11 @@ extern "C" EFI_STATUS EFIAPI uefi_main(EFI_HANDLE image_handle,
                     ? "ZPP_TRACE timed waits usable"
                     : "ZPP_TRACE timed waits unusable, single cpu");
 
-    // Load the MP Services.
+    // Still located although number_of_cpus now answers one
+    // unconditionally: it is the only thing here that can see the other
+    // processors at all, and trace_launch_context reports their state
+    // through it. call_on_cpu needs it too, for the processor numbers
+    // this loader no longer asks for.
     status = g_boot_services->LocateProtocol(
         &g_efi_mp_service_protocol_guid,
         nullptr,
@@ -1323,19 +1341,30 @@ extern "C" EFI_STATUS EFIAPI uefi_main(EFI_HANDLE image_handle,
     // the firmware handed over rather than the one we made.
     trace_launch_context();
 
+    // Take a tail of the EFI system partition out of its file system, so
+    // there are blocks the guest's file system cannot reach and cannot
+    // hand to anybody else. Idempotent: a boot that finds the
+    // reservation already there writes nothing.
+    //
+    // Before the self test, and that ordering is load bearing rather
+    // than tidy. The self test ends by writing a block, and the writer
+    // refuses any destination that does not already carry our signature
+    // - which is something only this call puts there. Run the other way
+    // round the self test has nowhere legal to write, and the channel it
+    // hands over has no destination in it.
+    zpp::esp_reservation::establish(image_handle, system_table);
+
     // Proves the admin queue borrow against the firmware's own NVMe
     // driver, which has already initialised the controller and created
     // its own I/O queue - and which this loader goes on to use for the
     // rest of the boot, so a borrow that broke it would break the boot
     // visibly. Compiles to nothing unless the disk sink is compiled in,
     // and never fails the boot: every step is bounded and traced.
-    nvme_selftest::run();
-
-    // Take a tail of the EFI system partition out of its file system, so
-    // there are blocks the guest's file system cannot reach and cannot
-    // hand to anybody else. Idempotent: a boot that finds the
-    // reservation already there writes nothing.
-    zpp::esp_reservation::establish(image_handle, system_table);
+    //
+    // Handed the region the reservation just signed, which is the only
+    // destination its closing write can legally land in, and the target
+    // it puts into the channel it hands across.
+    nvme_selftest::run(zpp::esp_reservation::target);
 
     // Declare the window the controller must be able to reach, while the
     // firmware's tables are still ours to edit. This has to happen before
@@ -1348,7 +1377,10 @@ extern "C" EFI_STATUS EFIAPI uefi_main(EFI_HANDLE image_handle,
     // coming without it.
     sleep_control_finder::run(system_table);
 
-    // Load the ELF.
+    // Everything the platform has to supply for the hypervisor to be
+    // launched and to keep working after this loader is gone. Designated
+    // initializers throughout, so a field added to the structure shows up
+    // here as a name rather than as a shifted position.
     const zpp_loader_parameters parameters{
         .allocate_rwx = allocate_rwx,
         .physical_to_virtual = nullptr,
@@ -1359,9 +1391,6 @@ extern "C" EFI_STATUS EFIAPI uefi_main(EFI_HANDLE image_handle,
         // hypervisor, and a processor being started begins in real mode
         // below one megabyte.
         .allocate_below_one_megabyte = allocate_below_one_megabyte,
-        // The diagnostic channel, once the loader has one to hand over.
-        // Null until then, which the hypervisor reads as the channel
-        // being unavailable rather than as a failure.
         // The channel the self test established, if it got far enough to
         // establish one. The resident side checks its magic and its
         // target before believing any of it, so handing over an
@@ -1404,7 +1433,6 @@ extern "C" EFI_STATUS EFIAPI uefi_main(EFI_HANDLE image_handle,
         trace::line("ZPP_TRACE chainload only, hypervisor not launched");
     }
 
-    // If we failed, return an arbitrary failure.
     if (result) {
         // The code is the hypervisor's own error enumeration, so print it
         // - it is the only thing that says which step failed, and a
@@ -1436,8 +1464,6 @@ extern "C" EFI_STATUS EFIAPI uefi_main(EFI_HANDLE image_handle,
         }
     }
 
-    // Continue to the OS.
-
     // The device this loader came from, so the search below can skip it.
     // On a real machine the removable media fallback is whatever boot
     // manager is installed - Limine on the development target - which is
@@ -1453,10 +1479,10 @@ extern "C" EFI_STATUS EFIAPI uefi_main(EFI_HANDLE image_handle,
         our_device = our_image->DeviceHandle;
     }
 
-    // The boot managers to chain to, in order of preference. Windows is
-    // named explicitly rather than relying on the removable media
-    // fallback, because on a machine that has any boot manager
-    // installed that fallback is the boot manager, not the OS.
+    // One candidate to chain to. The two conditions travel with the path
+    // rather than being decided at the search, because they differ per
+    // entry and getting either wrong is a boot loop or a boot manager
+    // started without its configuration - see the members.
     struct boot_manager
     {
         /**
@@ -1570,7 +1596,9 @@ extern "C" EFI_STATUS EFIAPI uefi_main(EFI_HANDLE image_handle,
                         number_of_all_handles);
     }
 
-    // Locate file system handles.
+    // The devices to search: either the one this loader was started from,
+    // or every block IO handle the firmware knows about after the connect
+    // above.
     EFI_HANDLE * file_system_handles{};
     std::size_t number_of_file_system_handles{};
 
@@ -1614,7 +1642,10 @@ extern "C" EFI_STATUS EFIAPI uefi_main(EFI_HANDLE image_handle,
                 continue;
             }
 
-            // Find the block IO from the handle.
+            // The protocol itself is never used - only its presence, as a
+            // test that the handle is a block device. That matters in the
+            // single device case, where the handle came from the loaded
+            // image rather than from an enumeration by this protocol.
             EFI_BLOCK_IO * block_io{};
             status = g_boot_services->HandleProtocol(
                 file_system_handles[i],
@@ -1650,8 +1681,9 @@ extern "C" EFI_STATUS EFIAPI uefi_main(EFI_HANDLE image_handle,
                 }
             }
 
-            // Get the full path to the boot manager inside the
-            // specified file system.
+            // Rooted at this handle rather than left as a bare file path,
+            // because that is what decides which device the started image
+            // treats as its own - see the image device path traced below.
             auto file_path =
                 file_device_path(file_system_handles[i], boot_manager);
             // One handle that cannot produce a path is not a reason to
@@ -1663,7 +1695,10 @@ extern "C" EFI_STATUS EFIAPI uefi_main(EFI_HANDLE image_handle,
 
             trace_device_path("ZPP_TRACE candidate ", file_path);
 
-            // Load the image from the specified path.
+            // Not a boot policy load: that flag says the request comes
+            // from the boot manager and permits a short-form path to be
+            // completed by the firmware. The path here is already
+            // complete, so the firmware is to use it exactly as given.
             EFI_HANDLE current_image_handle{};
             status = g_boot_services->LoadImage(false,
                                                 image_handle,
@@ -1679,23 +1714,26 @@ extern "C" EFI_STATUS EFIAPI uefi_main(EFI_HANDLE image_handle,
                 trace_device_path("ZPP_TRACE loaded from ", file_path);
             }
 
-            // Free the file path.
+            // LoadImage has copied whatever it needed out of the path, so
+            // it is freed before either branch below rather than in each.
             g_boot_services->FreePool(file_path);
 
-            // If failed, continue to another file system.
             if (EFI_ERROR(status)) {
                 continue;
             }
 
-            // Get loaded image info.
             EFI_LOADED_IMAGE_PROTOCOL * image_info{};
             status = g_boot_services->HandleProtocol(
                 current_image_handle,
                 &g_efi_loaded_image_protocol_guid,
                 reinterpret_cast<void **>(&image_info));
 
-            // If we had an error, or the image is not an EFI loader
-            // code, continue.
+            // EfiLoaderCode is the code memory type the firmware gives a
+            // UEFI application; a boot service or runtime driver is loaded
+            // as EfiBootServicesCode or EfiRuntimeServicesCode instead.
+            // Starting one of those would register a driver and return,
+            // booting nothing, so a driver sitting at the boot manager's
+            // path is rejected here rather than started.
             if (EFI_ERROR(status) ||
                 image_info->ImageCodeType != EfiLoaderCode) {
                 continue;
@@ -1753,7 +1791,6 @@ extern "C" EFI_STATUS EFIAPI uefi_main(EFI_HANDLE image_handle,
             // the log with it.
             write_trace_log(our_device);
 
-            // Start the image.
             status = g_boot_services->StartImage(
                 current_image_handle, nullptr, nullptr);
 
@@ -1772,7 +1809,10 @@ extern "C" EFI_STATUS EFIAPI uefi_main(EFI_HANDLE image_handle,
             write_trace_log(our_device);
             write_trace_variable();
 
-            // Return the start image status.
+            // The boot manager's own exit status, passed back rather than
+            // replaced: this loader has nothing to add to it, and the
+            // search is over either way - a boot manager that was found
+            // and started is the answer, whether or not it worked.
             return status;
         }
     }
@@ -1781,6 +1821,9 @@ extern "C" EFI_STATUS EFIAPI uefi_main(EFI_HANDLE image_handle,
     write_trace_log(our_device);
     write_trace_variable();
 
-    // Return success anyway, no image was found is considered ok.
+    // Success even though nothing was chained to, because by here the
+    // hypervisor is already resident, which is this image's actual job.
+    // A machine with no boot manager to hand over to is a machine this
+    // loader has finished with, not one it failed on.
     return EFI_SUCCESS;
 }

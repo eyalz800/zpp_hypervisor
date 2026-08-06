@@ -25,7 +25,9 @@ zpp_load_elf(const struct zpp_loader_parameters * parameters)
         return -1;
     }
 
-    // Invoke the elf_loader.
+    // The protect callback does nothing on purpose: every loader here
+    // allocates one readable, writable and executable region, so there
+    // are no per-segment permissions to apply afterwards.
     elf_file elf(elf_binary, elf_file::state::unloaded);
     auto base = elf.load(
         parameters->allocate_rwx,
@@ -34,19 +36,20 @@ zpp_load_elf(const struct zpp_loader_parameters * parameters)
         return -1;
     }
 
-    // The entry point address.
+    // The ELF is position independent, so its entry is an offset from
+    // wherever it was just loaded rather than an address.
     auto entry_point_address =
         reinterpret_cast<std::uintptr_t>(base) + elf.entry();
 
-    // Convert ELF entry to function pointer.
     auto entry = reinterpret_cast<int (*)(
         std::size_t cpuid, const zpp_launch_parameters * launch)>(
         entry_point_address);
 
-    // Call entry point on all cpus.
     auto cpus = parameters->number_of_cpus();
 
-    // If failed, return failure.
+    // Zero would run the loop below no times and still report success,
+    // which is a hypervisor that was never launched being reported as one
+    // that was. Treated as the platform failing to answer.
     if (!cpus) {
         return -1;
     }
@@ -78,7 +81,8 @@ zpp_load_elf(const struct zpp_loader_parameters * parameters)
         parameters->sleep_control_port_secondary;
 
     for (std::size_t i{}; i < cpus; ++i) {
-        // The launch function.
+        // Rebuilt per processor because it captures i, which is the one
+        // thing the hypervisor is told that differs between them.
         auto launch = [&] {
             if (parameters->adjust_launch_calling_convention) {
                 return parameters->adjust_launch_calling_convention(
@@ -87,14 +91,16 @@ zpp_load_elf(const struct zpp_loader_parameters * parameters)
             return entry(i, &handover);
         };
 
-        // The erased launch function.
+        // A capturing lambda has no function pointer conversion, so the
+        // capture travels as call_on_cpu's void context and is recovered
+        // here. This is what keeps the callback boundary C compatible,
+        // which linux_loader's C caller requires.
         auto erased_launch = [](void * context) {
             auto & local_launch =
                 *static_cast<decltype(launch) *>(context);
             return local_launch();
         };
 
-        // Call on specified CPU.
         auto result = parameters->call_on_cpu(
             i,
             static_cast<int (*)(void *)>(erased_launch),
@@ -109,6 +115,5 @@ zpp_load_elf(const struct zpp_loader_parameters * parameters)
         }
     }
 
-    // Return success.
     return 0;
 }

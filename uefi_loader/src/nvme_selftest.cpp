@@ -366,7 +366,7 @@ void compare_and_report(std::uint32_t submission_depth,
 
 } // namespace
 
-void nvme_selftest::execute()
+void nvme_selftest::execute(const nvme::log_target & destination)
 {
     trace::line("selftest: begin");
 
@@ -615,10 +615,12 @@ void nvme_selftest::execute()
     // only: nothing here points at memory the firmware reclaims, and
     // nothing points back into this loader.
     //
-    // The target is left as it was found. Filling it means resolving a
-    // file to logical blocks, which is a separate step - and the sink
-    // refuses a hand-over whose target is not usable, so an incomplete
-    // one is inert rather than dangerous.
+    // The target comes from the reservation, which is the only thing in
+    // a position to say where a write may land - it is what signed the
+    // region, and a write to a block carrying no signature of ours is
+    // refused. Copied in whole, so the hand-over is self contained and
+    // does not point at the reservation's own storage.
+    channel.target = destination;
     channel.submission_doorbell = test_queues::bound.submission_doorbell;
     channel.completion_doorbell = test_queues::bound.completion_doorbell;
     channel.status_register = test_queues::bound.status_register;
@@ -629,7 +631,7 @@ void nvme_selftest::execute()
     channel.namespace_id = test_queues::bound.namespace_id;
 
     // Written last, so a partially filled structure never reads as
-    // usable. It still will not be until a target is resolved into it.
+    // usable.
     channel.magic = nvme::channel_handover::valid_magic;
     trace::line("selftest: channel handover prepared");
 
@@ -645,31 +647,47 @@ void nvme_selftest::execute()
     // on purpose. submit() writes the block, reads it back and checks
     // the signature it finds against the one it intended, so a pass here
     // exercises the guard as well as the write.
-    static constexpr std::uint64_t proof_lba = 120000;
-    static constexpr std::uint64_t proof_file_id = 0x5a5050524f4f4631ull;
-
-    static log_target target{};
-    target.magic = log_target::valid_magic;
-    target.namespace_id = 1;
-    target.block_size = 512;
-    target.file_id = proof_file_id;
-    target.extent_count = 1;
-    target.extents[0].first_lba = proof_lba;
-    target.extents[0].block_count = block_size / target.block_size;
+    //
+    // Into the reserved region, and nowhere else. This used to write to
+    // a hard coded logical block, which was harmless against an emulated
+    // disk that nothing else owned and is wrong twice over on a real
+    // one. That block belongs to whatever is installed there - on this
+    // development machine LBA 120000 is forty two megabytes into the EFI
+    // system partition, among boot files. And it could never have
+    // succeeded anyway: submit() reads the destination first and refuses
+    // unless it finds our magic, our file id and the right block index,
+    // none of which anything had ever written there, so the proof could
+    // only ever have reported refused_signature.
+    //
+    // The reserved region is the one place both of those come out right,
+    // because the reservation signs every block of it as it establishes
+    // it. So the guard passing here is not a formality - it is the
+    // reservation and the writer agreeing about the same blocks.
+    auto & target = destination;
 
     if (!target.usable()) {
-        trace::line("selftest: proof target rejected itself");
+        // Not a failure of the queue. Everything above this point has
+        // already been proved; there is simply nowhere legal to write,
+        // so the write is skipped rather than aimed somewhere else.
+        trace::line("selftest: no reserved region, proof write skipped");
         return;
     }
+
+    trace::hex_line("selftest: proof write to lba ",
+                    target.extents[0].first_lba);
 
     for (auto & byte : test_queues::staging) {
         byte = 0;
     }
 
+    // The signature the guard just insisted on, put back exactly as the
+    // reservation stamped it - same file id, same block index - because
+    // this block is about to be read again by the same check on the next
+    // write, and by the resident side after that.
     auto header =
         reinterpret_cast<block_signature *>(test_queues::staging);
     header->signature_magic = block_signature::magic;
-    header->file_id = proof_file_id;
+    header->file_id = target.file_id;
     header->block_index = 0;
 
     static constexpr char marker[] = "ZPP_DISK_CHANNEL_PROOF_V1";
@@ -693,7 +711,7 @@ void nvme_selftest::execute()
     }
 
     trace::hex_line("selftest: proof written and verified at lba ",
-                    proof_lba);
+                    target.extents[0].first_lba);
     trace::line(
         "selftest: VERDICT the private queue moves data to the disk");
 

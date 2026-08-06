@@ -255,7 +255,90 @@ mount the NTFS volume read-only and read the registry - for example
 `Enum\PCI\<instance>\Device Parameters\DMA Management` to find out what
 Windows decided about DMA remapping for the controller.
 
+## Always check the machine state before saying what it is
+
+`qemu-system-x86_64` being alive says the process exists, nothing more. It is
+alive at the UEFI shell, alive with a halted boot processor, and alive with
+Windows on the desktop. **Ask the monitor** rather than asserting from the
+process list or from what the last run did:
+
+```sh
+{ printf 'info status\n'; sleep 2; printf 'info registers\n'; sleep 2; } \
+  | nc -w 6 192.168.1.199 4444
+```
+
+`info registers` settles it in one look, without perturbing anything.
+Windows is unmistakable: `RIP` and `GS` base in `fffff8xxxxxxxxxx`, `CS=0010`,
+`TR` a busy 64 bit TSS. Our own code is a module-base-relative address -
+subtract the base from the serial trace and symbolize it. The UEFI shell sits
+around `0x7exxxxxx`.
+
+This matters because the wrong assumption is expensive in both directions:
+killing a live Windows risks the installation, and treating a parked UEFI
+shell as a running guest wastes the session waiting for nothing.
+
 ## Afterwards
 
-Kill QEMU rather than leaving a guest occupying the machine's screen, and let
-the script's own restore path rebind the NVMe to the host.
+Shut the guest down, do not just kill it while Windows is live. From the
+monitor:
+
+```sh
+printf 'system_powerdown\n' | nc -w 5 192.168.1.199 4444
+```
+
+That is the ACPI power button and Windows takes it as a clean shutdown.
+**Then watch the screen, not the process.** On this rig the shutdown
+regularly does not finish - the display goes black and QEMU keeps running
+indefinitely. Once the screen is off, Windows is down and
+
+```sh
+sudo pkill -x qemu-system-x86_64
+```
+
+is the right move. `pkill -x`, never `pkill -f`. Waiting longer does not help
+and only holds the NVMe hostage.
+
+Letting the process exit lets the script's restore path rebind the NVMe to the
+host: `/dev/nvme0n1*` reappear and
+`readlink /sys/bus/pci/devices/0000:02:00.0/driver` goes back to `nvme` from
+`vfio-pci`. Nothing on the host can read the disk until that has happened.
+
+## Backing up the disk before anything writes to it
+
+Do this before any change that edits the disk in place - the ESP reservation
+in particular, which rewrites the FAT32 total sector count, the FSInfo block
+and the backup boot sector at sector 6. It needs the NVMe rebound to the host,
+so it cannot be done while the VM holds it.
+
+The layout on this machine, established by reading the boot sectors rather
+than by guessing at partition numbers:
+
+| part | size | contents |
+|------|------|----------|
+| p1 | 16 MB | zeros, reserved |
+| **p2** | **16 GiB** | **FAT - the ESP**, and what `HD(2,GPT,...)` refers to |
+| p3 | 16 MB | zeros, reserved |
+| p4 | ~460 GB | NTFS, Windows |
+| p5 | ~1.2 GB | NTFS, recovery |
+
+The ESP is **partition 2, not partition 1**, and it is 16 GiB rather than the
+usual few hundred megabytes. Identify it by its boot sector (`MSDOS5.0`),
+never by position.
+
+TinyCore's rootfs is in RAM, so a backup written there costs memory and does
+not survive a reboot. **Pull it to the Mac**, compressed - the volume is
+mostly empty so it shrinks enormously:
+
+```sh
+ssh tc@192.168.1.199 'sudo dd if=/dev/nvme0n1p2 bs=4M 2>/dev/null | gzip -1' \
+  > esp-p2.img.gz
+```
+
+Take both GPT copies too, since a partition level restore needs them: the
+primary is the first 34 sectors, the backup is the last 33
+(`cat /sys/block/nvme0n1/size` gives the total). Verify by comparing an
+`md5sum` taken on the target against one taken from the decompressed image
+here - a truncated stream otherwise looks exactly like a short partition.
+
+Reading total-sectors-32 at offset `0x20` of the ESP boot sector says whether
+the reservation has already run: equal to the partition size means untouched.

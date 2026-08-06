@@ -72,10 +72,25 @@ struct nvme_selftest
      */
     static inline nvme::channel_handover channel{};
 
-    static void run()
+    /**
+     * Runs against a destination somebody else resolved.
+     *
+     * Taken as a parameter rather than reached for, because the only
+     * place a write can legally land is a region that has already been
+     * signed - see the proof write in nvme_selftest.cpp. That makes the
+     * reservation a precondition of this rather than a neighbour of it,
+     * and a parameter is how a precondition is spelled.
+     *
+     * A destination that is not usable is not an error. It means the
+     * reservation refused, and the run goes ahead and proves everything
+     * up to the write, then stops short of it and hands over nothing.
+     */
+    static void run(const nvme::log_target & destination)
     {
         if constexpr (enabled) {
-            execute();
+            execute(destination);
+        } else {
+            static_cast<void>(destination);
         }
     }
 
@@ -84,7 +99,7 @@ private:
      * The implementation, out of line so that the header costs nothing.
      * Defined only when enabled - see nvme_selftest.cpp.
      */
-    static void execute();
+    static void execute(const nvme::log_target & destination);
 };
 
 } // namespace zpp
