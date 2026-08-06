@@ -600,14 +600,74 @@ std::expected<void, zpp::error> hypervisor::initialize_ept()
     return {};
 }
 
-std::expected<void, zpp::error> hypervisor::protect_module()
+std::expected<arch::x86_64::vmx::epte *, zpp::error>
+hypervisor::epte_for(std::uint64_t physical_address)
 {
     auto ept_count = std::extent_v<decltype(this->ept)>;
+    auto & host_page_table = this->host_page_table;
+
+    // Get the epde.
+    auto & epde = this->epd[physical_address >> 30]
+                           [(physical_address >> 21) & 0x1ff];
+
+    // Already split, so the entry exists and only has to be found.
+    if (!epde.large()) {
+        // The ept physical address.
+        auto ept_physical_address = epde.page_number() << 12;
+
+        // Find the virtual address of the ept.
+        auto ept = reinterpret_cast<arch::x86_64::vmx::epte *>(
+            this->module_physical_to_virtual.find(ept_physical_address)
+                ->second);
+
+        return &ept[(physical_address >> 12) & 0x1ff];
+    }
+
+    // Convert large epde into ept table. The pool index is a member
+    // rather than a local because initialize_ept draws from the same
+    // pool for any 2 MB region whose MTRR coverage is not of one type,
+    // and it has already run by the time this does.
+    //
+    // Checked before the table is used rather than after. The old form
+    // incremented first and compared the incremented value, which
+    // reported exhaustion on the last table in the pool even though it
+    // had just been filled and installed successfully. It never wrote
+    // out of bounds, so this is a change of where the boundary is by
+    // one, not a fix - but it has to be a check before use now,
+    // because initialize_ept has already consumed part of the pool and
+    // the index no longer starts at zero.
+    if (this->next_ept_table >= ept_count) {
+        return std::unexpected(zpp::error{error::out_of_ept_entries});
+    }
+
+    auto & ept = this->ept[this->next_ept_table++];
+    auto memory_type = epde.type();
+    auto page_number = (epde.large_page_number() << (21 - 12));
+    for (std::size_t j{}; j < 512; ++j) {
+        auto & epte = ept[j];
+        epte.read(true);
+        epte.write(true);
+        epte.execute(true);
+        epte.execute_user(true);
+        epte.page_number(page_number + j);
+        epte.type(memory_type);
+    }
+
+    // Make the epde point to ept.
+    epde.large(false);
+    epde.type({});
+    epde.page_number(host_page_table.virtual_to_physical(ept) >> 12);
+
+    return &ept[(physical_address >> 12) & 0x1ff];
+}
+
+std::expected<void, zpp::error> hypervisor::protect_module()
+{
     auto number_of_pages = this->module_size / page_size;
     auto & host_page_table = this->host_page_table;
 
     // Iterate all pages.
-    for (std::size_t i{}; i < number_of_pages;) {
+    for (std::size_t i{}; i < number_of_pages; ++i) {
         // Calculate the address.
         auto address = this->module_base + (i * page_size);
 
@@ -615,80 +675,158 @@ std::expected<void, zpp::error> hypervisor::protect_module()
         auto physical_address =
             host_page_table.virtual_to_physical(address);
 
-        // Get the epde.
-        auto & epde = this->epd[physical_address >> 30]
-                               [(physical_address >> 21) & 0x1ff];
-
-        // If the epde is not large, get the relevant epte and update it.
-        if (!epde.large()) {
-            // The ept physical address.
-            auto ept_physical_address = epde.page_number() << 12;
-
-            // Find the virtual address of the ept.
-            auto ept = reinterpret_cast<arch::x86_64::vmx::epte *>(
-                this->module_physical_to_virtual
-                    .find(ept_physical_address)
-                    ->second);
-
-            // Protect the epte.
-            auto & epte = ept[(physical_address >> 12) & 0x1ff];
-            epte.read(false);
-            epte.write(false);
-            epte.execute(false);
-            epte.execute_user(false);
-
-            // Continue to the next page.
-            ++i;
-            continue;
+        auto entry = epte_for(physical_address);
+        if (!entry) {
+            return std::unexpected(entry.error());
         }
-
-        // Convert large epde into ept table. The pool index is a member
-        // rather than a local because initialize_ept draws from the same
-        // pool for any 2 MB region whose MTRR coverage is not of one type,
-        // and it has already run by the time this does.
-        //
-        // Checked before the table is used rather than after. The old form
-        // incremented first and compared the incremented value, which
-        // reported exhaustion on the last table in the pool even though it
-        // had just been filled and installed successfully. It never wrote
-        // out of bounds, so this is a change of where the boundary is by
-        // one, not a fix - but it has to be a check before use now,
-        // because initialize_ept has already consumed part of the pool and
-        // the index no longer starts at zero.
-        if (this->next_ept_table >= ept_count) {
-            return std::unexpected(zpp::error{error::out_of_ept_entries});
-        }
-
-        auto & ept = this->ept[this->next_ept_table++];
-        auto memory_type = epde.type();
-        auto page_number = (epde.large_page_number() << (21 - 12));
-        for (std::size_t j{}; j < 512; ++j) {
-            auto & epte = ept[j];
-            epte.read(true);
-            epte.write(true);
-            epte.execute(true);
-            epte.execute_user(true);
-            epte.page_number(page_number + j);
-            epte.type(memory_type);
-        }
-
-        // Make the epde point to ept.
-        epde.large(false);
-        epde.type({});
-        epde.page_number(host_page_table.virtual_to_physical(ept) >> 12);
 
         // Protect our module epte.
-        auto & epte = ept[(physical_address >> 12) & 0x1ff];
+        auto & epte = **entry;
         epte.read(false);
         epte.write(false);
         epte.execute(false);
         epte.execute_user(false);
-
-        // Move to the next page.
-        ++i;
     }
 
     return {};
+}
+
+std::expected<void, zpp::error>
+hypervisor::watch_guest_page_writes(std::uint64_t guest_physical,
+                                    page_watch::handler on_write,
+                                    void * context)
+{
+    auto page = guest_physical >> 12;
+
+    // Re-arming the same page replaces the handler rather than taking a
+    // second slot, so a caller that cannot easily tell whether it has
+    // already armed does not silently exhaust the table.
+    page_watch * free_slot{};
+    for (auto & watch : this->watches) {
+        if (watch.armed && (watch.page == page)) {
+            watch.on_write = on_write;
+            watch.context = context;
+            return {};
+        }
+        if (!watch.armed && !free_slot) {
+            free_slot = &watch;
+        }
+    }
+
+    if (!free_slot) {
+        return std::unexpected(zpp::error{error::out_of_ept_entries});
+    }
+
+    // The EPT is an identity map, so the guest physical address is also
+    // the host physical one. Taken through the same call the module
+    // protection uses, so a 2 MB entry covering a device register page
+    // is split here rather than silently protecting two megabytes of
+    // unrelated memory.
+    auto entry = epte_for(page << 12);
+    if (!entry) {
+        return std::unexpected(entry.error());
+    }
+
+    // Reads stay permitted. A driver polls status registers far more
+    // often than it writes commands, and every permitted read is a VM
+    // exit that does not happen.
+    (*entry)->write(false);
+
+    free_slot->page = page;
+    free_slot->on_write = on_write;
+    free_slot->context = context;
+    free_slot->armed = true;
+
+    log("watching writes to guest page {}", page);
+    return {};
+}
+
+void hypervisor::unwatch_guest_page(std::uint64_t guest_physical)
+{
+    auto page = guest_physical >> 12;
+
+    for (auto & watch : this->watches) {
+        if (!watch.armed || (watch.page != page)) {
+            continue;
+        }
+
+        // The entry exists already - the page was split when the watch
+        // was armed - so this cannot fail and nothing here has to cope
+        // with it failing.
+        if (auto entry = epte_for(page << 12)) {
+            (*entry)->write(true);
+        }
+
+        watch = {};
+        log("stopped watching guest page {}", page);
+        return;
+    }
+}
+
+void hypervisor::monitor_trap_flag(bool value)
+{
+    // Bit 27 of the primary processor based controls, SDM Table 25-6.
+    constexpr std::uint64_t monitor_trap_flag_bit = 1ull << 27;
+
+    auto controls =
+        this->vmcs.primary_processor_based_vm_execution_controls();
+    this->vmcs.primary_processor_based_vm_execution_controls(
+        value ? (controls | monitor_trap_flag_bit)
+              : (controls & ~monitor_trap_flag_bit));
+}
+
+bool hypervisor::on_ept_violation(std::size_t cpu)
+{
+    auto guest_physical = this->vmcs.guest_physical_address();
+    auto page = guest_physical >> 12;
+
+    for (auto & watch : this->watches) {
+        if (!watch.armed || (watch.page != page)) {
+            continue;
+        }
+
+        // Let the guest's own instruction do the write, then look at
+        // what it did. The alternative is to decode and emulate it, and
+        // an EPT violation reports neither the data nor the operand size
+        // - SDM Table 30-7 - so that road starts with an x86 decoder.
+        if (auto entry = epte_for(page << 12)) {
+            (*entry)->write(true);
+        }
+
+        this->stepping_watch[cpu] = true;
+        this->stepping_page[cpu] = page;
+        monitor_trap_flag(true);
+        return true;
+    }
+
+    return false;
+}
+
+bool hypervisor::on_monitor_trap_flag(std::size_t cpu)
+{
+    if (!this->stepping_watch[cpu]) {
+        return false;
+    }
+
+    auto page = this->stepping_page[cpu];
+    this->stepping_watch[cpu] = false;
+    this->stepping_page[cpu] = {};
+    monitor_trap_flag(false);
+
+    // Close the page again before the handler runs, so that a handler
+    // which arms or disarms watches cannot observe a half open state.
+    if (auto entry = epte_for(page << 12)) {
+        (*entry)->write(false);
+    }
+
+    for (auto & watch : this->watches) {
+        if (watch.armed && (watch.page == page) && watch.on_write) {
+            watch.on_write(watch.context, page);
+            break;
+        }
+    }
+
+    return true;
 }
 
 void hypervisor::unprotect_guest_memory()
@@ -2899,6 +3037,34 @@ hypervisor::main(arch::x86_64::context & caller_context)
                 vmcs.guest_interruptibility_state(),
                 vmcs.guest_pending_debug_exceptions());
             emulate_start_up_ipi(context, vector);
+            advance_rip = false;
+            break;
+        }
+        case basic_reason::ept_violation: {
+            // A watched page was touched. RIP stays where it is: the
+            // guest's instruction has not run yet, and the whole point
+            // is to let it run for itself rather than emulate it.
+            if (!on_ept_violation(cpuid)) {
+                // Nothing had that page watched, so the protection was
+                // put there by something that is not going to handle the
+                // fault - which is a bug here rather than a guest error,
+                // and resuming would fault identically forever.
+                record_exit(full_reason);
+                on_unhandled_exit(full_reason);
+            }
+            advance_rip = false;
+            break;
+        }
+        case basic_reason::monitor_trap_flag: {
+            // One guest instruction has retired since the page was
+            // opened. Close it again and tell whoever was watching.
+            if (!on_monitor_trap_flag(cpuid)) {
+                // The flag is only ever armed by the watch above, so an
+                // MTF exit with no step in progress means someone else
+                // set it and there is no correct way to continue.
+                record_exit(full_reason);
+                on_unhandled_exit(full_reason);
+            }
             advance_rip = false;
             break;
         }
