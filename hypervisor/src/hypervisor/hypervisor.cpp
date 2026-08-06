@@ -38,45 +38,78 @@ hypervisor & hypervisor::instance()
 
 void hypervisor::initialize_registers()
 {
-    // Load control registers.
+    // Everything this function reads is read for the same reason: the
+    // processor is about to become a guest, and it has to come back up
+    // running exactly what it was running before. There is no other
+    // record of that state anywhere - it is only in the registers, and
+    // the VM entry is what overwrites them - so it is captured here,
+    // once, on each processor, and copied into the guest half of the
+    // VMCS later. The names say "guest" already, because that is what
+    // this state becomes.
     this->guest_cr0 = arch::x86_64::cr0();
     this->guest_cr3 = arch::x86_64::cr3();
     this->guest_cr4 = arch::x86_64::cr4();
     this->guest_dr7 = arch::x86_64::dr7();
 
-    // Load debug control register.
     this->ia32_debug_control =
         arch::x86_64::rdmsr(arch::x86_64::msr::ia32_debug_control);
 
-    // Get the FS and GS base.
+    // The segment bases that are not in the segment registers. In long
+    // mode FS and GS carry a full sixty four bit base that a selector
+    // cannot express, so it lives in these model specific registers
+    // instead - and an operating system keeps real things there, GS
+    // being where per processor state is usually reached from. Losing
+    // either one across the entry would not be subtle.
     this->ia32_fs_base =
         arch::x86_64::rdmsr(arch::x86_64::msr::ia32_fs_base);
     this->ia32_gs_base =
         arch::x86_64::rdmsr(arch::x86_64::msr::ia32_gs_base);
 
-    // Fetch the GDT register.
+    // The descriptor tables, both of which are read through the store
+    // instruction's own layout - a limit and a base packed together -
+    // and split into the two fields the VMCS wants them in.
     arch::x86_64::gdt_layout sgdt_layout{};
     arch::x86_64::sgdt(sgdt_layout.data());
     this->gdtr.limit = sgdt_layout.limit;
     this->gdtr.base = sgdt_layout.base;
 
-    // Fetch the IDT register.
     arch::x86_64::idt_layout sidt_layout{};
     arch::x86_64::sidt(sidt_layout.data());
     this->idtr.limit = sidt_layout.limit;
     this->idtr.base = sidt_layout.base;
 
-    // Load the LDTR and TR register.
+    // The two selectors that are not general segment registers. The task
+    // register in particular is needed twice over: to give back, and
+    // because entering root mode needs a task state segment of its own,
+    // so this VMM has to know whether the one it ends up loading is the
+    // one that was already there - see initialize_intermediate_gdt.
     arch::x86_64::sldt(&this->guest_ldtr);
     arch::x86_64::str(&this->os_tr);
 }
 
 void hypervisor::initialize_module_region()
 {
-    // Compute the module base.
+    // Where this module begins and how far it runs.
+    //
+    // Both are worked out from the image itself rather than supplied,
+    // because nothing outside is in a position to say: the loader chose
+    // the address, but this is position independent code and the only
+    // authority on its own extent is its own program headers.
+    //
+    // The base is found by searching for it - take the address of
+    // something known to be inside the module, round down to a page, and
+    // walk backwards a page at a time until the ELF magic appears, which
+    // it does exactly once, at the header. See elf_image_base.h, where
+    // the pad byte in front of the search key is deliberate: it leaves
+    // the key itself unaligned so the search cannot stop on it.
+    //
+    // The size is the *memory* size, not the file size. They differ by
+    // .bss, which is most of this module - the per-processor stacks
+    // alone are megabytes - and using the smaller of the two would leave
+    // the VMM's own stacks outside every range derived from here: the
+    // host mapping just below, and the protection that hides the module
+    // from the guest.
     this->module_base = elf_image_base();
-
-    // Compute the module memory size.
     this->module_size =
         elf_file(this->module_base, elf_file::state::loaded).memory_size();
 }
@@ -89,10 +122,28 @@ void hypervisor::initialize_os_page_table()
 
 void hypervisor::initialize_host_page_table()
 {
-    // Map the host page table into its own.
+    // Map the host page table into itself.
+    //
+    // A page table is walked by the processor through physical
+    // addresses, so it does not need to be mapped for paging to work.
+    // It needs to be mapped for *this VMM* to keep editing it: every
+    // change after this point - a watch armed, a page protected - is a
+    // store through a virtual address, and once this processor is on
+    // this table the only virtual addresses that exist are the ones it
+    // maps. A table that does not map itself is one that can never be
+    // changed again.
+    //
+    // Done through the OS table because that is the one still in force
+    // here, and it is what can still turn the table's own address into
+    // the physical address to install.
     this->host_page_table.map_self(this->os_page_table);
 
-    // Map module pages.
+    // Map the module.
+    //
+    // Writable and executable as well as readable, because this is the
+    // VMM's own image: it executes from here, and it writes to its own
+    // data - which lives in the same mapped region, the module being
+    // mapped as one range rather than per section.
     this->host_page_table.map_from(
         this->module_base,
         this->module_size,
@@ -133,7 +184,17 @@ void hypervisor::initialize_host_page_table()
             arch::x86_64::page_table::protection::write,
         this->os_page_table);
 
-    // Assign the host cr3.
+    // Compose the value that will be loaded into CR3.
+    //
+    // The top of it is the physical address of this table's top level,
+    // which is what the register actually selects. The low twelve bits
+    // are not part of that address and are carried over from whatever
+    // the OS was already running with, because what they mean depends on
+    // a mode this VMM does not control: with CR4.PCIDE clear they are
+    // the page level cache attributes PWT and PCD, and with it set the
+    // whole field is the process context identifier. Copying them keeps
+    // this table on the same terms as the one it replaces instead of
+    // silently choosing zero for both readings.
     this->host_cr3 = this->host_page_table.virtual_to_physical(
                          &this->host_page_table.head()) |
                      (this->guest_cr3 & 0xfff);
@@ -142,28 +203,39 @@ void hypervisor::initialize_host_page_table()
 std::expected<void, zpp::error>
 hypervisor::initialize_module_physical_to_virtual()
 {
-    // The number of pages inside the module.
+    // Build the reverse of the module's own mapping, once, up front.
+    //
+    // Going virtual to physical is a page table walk and can be done at
+    // any time. Going the other way cannot: nothing in the hardware
+    // answers "which virtual address is this physical page at", and the
+    // walk that would answer it is a search. So the answers are worked
+    // out here, while walking is still cheap and legal, and looked up
+    // afterwards.
+    //
+    // Afterwards is the reason for the up front part. The lookups happen
+    // from inside exits, where a page table walk would mean touching the
+    // guest's tables from the host, and where allocating is not an
+    // option - which is also why this is a fixed capacity that can be
+    // exceeded and is refused rather than grown.
     auto number_of_pages = this->module_size / page_size;
 
-    // If there are more pages than possible, return error.
     if (number_of_pages >= this->module_physical_to_virtual.capacity()) {
         return std::unexpected(
             zpp::error{error::physical_to_virtual_capacity_error});
     }
 
-    // The module base.
     auto module_base = reinterpret_cast<std::uintptr_t>(this->module_base);
 
-    // Iterate all pages and perform the virtual to physical conversion.
     for (std::size_t i{}; i < number_of_pages; ++i) {
-        // Calculate the virtual address.
         auto address = module_base + (page_size * i);
 
-        // Calculate the physical address.
+        // Through the host table rather than the OS one, because that is
+        // the mapping these addresses will be reached through once this
+        // processor has switched, and it is the physical page behind
+        // *that* which the reverse lookup has to name.
         auto physical_address =
             this->host_page_table.virtual_to_physical(address);
 
-        // Insert the mapping.
         this->module_physical_to_virtual.emplace(physical_address,
                                                  address);
     }

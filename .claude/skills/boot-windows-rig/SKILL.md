@@ -121,6 +121,64 @@ Add `-monitor telnet:0.0.0.0:4444,server,nowait` the same way for a channel
 that inspects state **without perturbing it** - `info registers -a`, `xp`,
 `screendump`. Reach it with `nc 192.168.1.199 4444`.
 
+### Reading the recorded state out of a stopped guest
+
+This works without symbols, without breakpoints, and without catching the
+failure as it happens - which matters, because the interesting failures are
+over before a debugger could attach. The VMM records what happened into
+members and then stops, and the module is `allocate_rwx`'d and never freed,
+so **the evidence is still in memory at the UEFI shell**. Let it fail, then
+read it.
+
+The address of any member is
+`module_base + <singleton address> + <member offset>`:
+
+```sh
+grep 'allocate_rwx done' serial.out              # module base, per run
+llvm-nm out/debug/x86_64/zpp_hypervisor | grep 'instanceEvE8instance'
+llvm-dwarfdump --name=<member> out/debug/x86_64/zpp_hypervisor \
+  | grep -E 'DW_AT_name|data_member_location|DW_AT_type'
+```
+
+Then `x/Ngx <address>` in gdb. **Sanity check the arithmetic before
+believing a result**: read `host_page_table` (its first quadword is a
+present PML4 entry, `...023`) and confirm it looks like a page table. An
+all-zero record is a real answer only once the math is known good -
+otherwise it just means the address is wrong.
+
+Worth reading, in this order:
+
+- `host_exception` - `vector`, `error_code`, `rip`, `cs`, `rflags`, `rsp`,
+  `ss` at offsets 0, 8, 0x10, 0x18, 0x20, 0x28, 0x30, then
+  `host_exception_cr2` immediately after. `cs` distinguishes *when*: the
+  loader's `0x38` means before the guest ran, the VMCS host `0x08` means
+  inside a VM exit.
+- `unhandled_exit`, `vm_entry_failure` - check `occurred` first.
+- `exit_trace` / `exit_trace_count` - newest at `(count - 1) % capacity`.
+
+`halt()` is naked, so on a stopped processor `x/gx $rsp` gives the return
+address and names *which* halt loop it is - there are four, and they mean
+different things. Symbolize any address with
+
+```sh
+llvm-symbolizer --obj=out/debug/x86_64/zpp_hypervisor \
+  --functions=linkage --demangle <rip - module_base>
+```
+
+which resolves to function *and source line* even though the shipped binary
+is stripped. This is usually faster and more certain than a breakpoint.
+
+To decide whether an address was mapped, walk the host page table by hand
+rather than assuming: PML4 index is `addr >> 39 & 0x1ff`, PDPT `addr >> 30
+& 0x1ff`. A zero entry with `#PF` `error_code = 0` is a not-present fault
+and the two agree.
+
+**A `#UD` at a small offset from the module base is not always executed
+data.** The notes name that signature for a bad relocation, and it is also
+what a VMX instruction issued outside VMX operation looks like -
+`invept`, `invvpid`, `vmread` - since those are plain `#UD` outside root
+mode. Symbolize the offset before concluding anything.
+
 Rules that are correctness requirements, not preferences:
 
 - **Never `stepi` the guest through QEMU's gdbstub.** KVM implements
