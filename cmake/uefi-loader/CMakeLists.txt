@@ -30,6 +30,40 @@ option(ZPP_DIAG
     "Compile the diagnostic log, its ring and its sinks (debug builds only)"
     ON)
 
+# Everything the loader does except launching the hypervisor: locate the boot
+# manager, connect the controllers it needs, forward the load options, chain
+# to it. The point is a control run - the same discovery, the same rewritten
+# ACPI tables, the same device path and the same guest, with only the thing
+# under test removed - so a guest failure can be attributed rather than
+# guessed at.
+#
+# Doing the control from the UEFI shell instead is not equivalent, twice over:
+# the shell connects only what it needs to reach its own boot option, so a
+# passed-through disk carries no file system handle at all; and it does none
+# of the ACPI rewriting this loader does, so the guest is handed a different
+# platform description. Reusing the loader removes both differences.
+option(ZPP_CHAINLOAD_ONLY
+    "Chainload the boot manager without launching the hypervisor"
+    OFF)
+
+# Whether to look for the boot manager on every device rather than only the
+# one this loader was started from.
+#
+# Off is right for a bare metal boot: the machine chainloaded us through its
+# own ESP and the boot manager is on that same ESP, so searching further can
+# only find a worse answer - a recovery or vendor partition carrying its own
+# copy without the configuration beside it.
+#
+# On is required whenever the loader and the boot manager are on different
+# devices, which is the case in the passthrough rig: the loader is served off
+# a virtual FAT drive and Windows is on the real disk. Firmware connects only
+# what it needs to reach its own boot option, so that disk carries no file
+# system handle until this loader connects every controller - which it only
+# does when this is on.
+option(ZPP_SEARCH_ALL_DEVICES
+    "Look for the boot manager on every device, not only our own"
+    OFF)
+
 # Download dependencies (Windows SDK for ucrt/shared headers; EDK2 for UEFI headers)
 include("${ZPP_SOURCE_DIR}/cmake/dependencies.cmake")
 download_windows_sdk(WINDOWS_SDK_ROOT)
@@ -142,6 +176,12 @@ target_compile_definitions(zpp_loader_efi PRIVATE
     # #ifdef, and hardcoded to zero in release for the reason the option's own
     # comment gives.
     "ZPP_DIAG=$<IF:$<CONFIG:Release>,0,$<BOOL:${ZPP_DIAG}>>"
+    # Skips the hypervisor launch so the same loader can produce a control
+    # run. See the option's own comment for why the UEFI shell cannot.
+    "ZPP_CHAINLOAD_ONLY=$<BOOL:${ZPP_CHAINLOAD_ONLY}>"
+    # Search every device for the boot manager. Required by the passthrough
+    # rig, wrong for a bare metal boot - see the option's own comment.
+    "ZPP_SEARCH_ALL_DEVICES=$<BOOL:${ZPP_SEARCH_ALL_DEVICES}>"
     # libc++ availability annotations rely on OS version macros we don't have
     # in a freestanding / UEFI context.
     _LIBCPP_DISABLE_AVAILABILITY

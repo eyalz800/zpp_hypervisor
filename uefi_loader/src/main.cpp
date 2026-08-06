@@ -1345,11 +1345,31 @@ extern "C" EFI_STATUS EFIAPI uefi_main(EFI_HANDLE image_handle,
         .adjust_launch_calling_convention = invoke_entry,
     };
 
-    trace::line("ZPP_TRACE loading");
+    // Everything this loader does except launching the hypervisor.
+    //
+    // A control run needs the same discovery, the same connected
+    // controllers, the same device path and the same guest, with only the
+    // thing under test removed - otherwise a guest that misbehaves cannot
+    // be attributed to the hypervisor rather than to the rig.
+    //
+    // Doing the control from the UEFI shell instead does not work, and the
+    // reason is the one this loader already handles: firmware connects
+    // only as much as it needs to reach its own boot option, so a
+    // passed-through disk carries no file system handle and its boot
+    // manager cannot be found at all. Reusing the loader is what makes the
+    // two runs comparable.
+    constexpr bool launch_hypervisor = !ZPP_CHAINLOAD_ONLY;
 
-    auto result = zpp_load_elf(&parameters);
+    std::uint64_t result{};
 
-    trace::line("ZPP_TRACE loaded");
+    if constexpr (launch_hypervisor) {
+        trace::line("ZPP_TRACE loading");
+        result = zpp_load_elf(&parameters);
+        trace::line("ZPP_TRACE loaded");
+    } else {
+        static_cast<void>(parameters);
+        trace::line("ZPP_TRACE chainload only, hypervisor not launched");
+    }
 
     // If we failed, return an arbitrary failure.
     if (result) {
@@ -1472,7 +1492,8 @@ extern "C" EFI_STATUS EFIAPI uefi_main(EFI_HANDLE image_handle,
     // nothing had booted from it and it carried no file system handle at
     // all; a machine that just chainloaded us through its own ESP does
     // not, because the boot manager is on that same ESP.
-    static constexpr bool chain_to_our_own_device_only = false;
+    static constexpr bool chain_to_our_own_device_only =
+        !ZPP_SEARCH_ALL_DEVICES;
 
     // The boot managers to chain to, in order of preference. Windows is
     // named explicitly rather than relying on the removable media

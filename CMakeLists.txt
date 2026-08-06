@@ -79,6 +79,14 @@ option(ZPP_VERIFY_HYPERVISOR
 # check. Defaults to whatever the self check is set to, since the two are
 # usually wanted together, and tracing has no place in a deployed loader
 # either.
+option(ZPP_SEARCH_ALL_DEVICES
+    "Look for the boot manager on every device, not only our own - the rig needs this"
+    OFF)
+
+option(ZPP_CHAINLOAD_ONLY
+    "Chainload the boot manager without launching the hypervisor - a control run"
+    OFF)
+
 option(ZPP_TRACE
     "Compile the serial trace output in the loaders"
     ${ZPP_VERIFY_HYPERVISOR})
@@ -95,6 +103,8 @@ ExternalProject_Add(uefi_loader
         -DFETCHCONTENT_BASE_DIR=${CMAKE_BINARY_DIR}/_deps
         -DZPP_VERIFY_HYPERVISOR=${ZPP_VERIFY_HYPERVISOR}
         -DZPP_TRACE=${ZPP_TRACE}
+        -DZPP_CHAINLOAD_ONLY=${ZPP_CHAINLOAD_ONLY}
+        -DZPP_SEARCH_ALL_DEVICES=${ZPP_SEARCH_ALL_DEVICES}
         -DZPP_DIAG=${ZPP_DIAG}
     INSTALL_COMMAND ""
     BUILD_ALWAYS ON
