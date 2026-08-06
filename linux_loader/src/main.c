@@ -134,6 +134,8 @@ static int zpp_init(void)
         /* No channel here: this loader has no boot services to resolve a
          * file with, and the disk is already owned by a running kernel. */
         .diagnostic_channel = NULL,
+        .sleep_control_port = 0,
+        .sleep_control_port_secondary = 0,
         /* System V already, so no adaptation is needed. */
         .adjust_launch_calling_convention = NULL,
     };

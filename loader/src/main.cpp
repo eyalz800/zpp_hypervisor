@@ -73,6 +73,9 @@ zpp_load_elf(const struct zpp_loader_parameters * parameters)
     handover.physical_to_virtual = parameters->physical_to_virtual;
     handover.start_up_memory = start_up_memory;
     handover.diagnostic_channel = parameters->diagnostic_channel;
+    handover.sleep_control_port = parameters->sleep_control_port;
+    handover.sleep_control_port_secondary =
+        parameters->sleep_control_port_secondary;
 
     for (std::size_t i{}; i < cpus; ++i) {
         // The launch function.

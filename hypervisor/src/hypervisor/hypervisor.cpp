@@ -998,6 +998,10 @@ void hypervisor::initialize_vmx()
         this->host_page_table.virtual_to_physical(&this->epml4);
     this->msr_bitmap_physical =
         this->host_page_table.virtual_to_physical(&this->msr_bitmap);
+    this->io_bitmap_a_physical =
+        this->host_page_table.virtual_to_physical(&this->io_bitmap_a);
+    this->io_bitmap_b_physical =
+        this->host_page_table.virtual_to_physical(&this->io_bitmap_b);
 
     // Assign the revision IDs for the VMX and VMCS regions.
     vmx.revision_id = basic_msr & 0xffffffff;
@@ -1340,6 +1344,64 @@ void hypervisor::intercept_interrupt_command(bool intercept)
     } else {
         byte &= static_cast<std::uint8_t>(~mask);
     }
+}
+
+void hypervisor::intercept_io_port(std::uint16_t port, bool intercept)
+{
+    // One bit per port, the first bitmap covering 0x0000 to 0x7fff and
+    // the second the rest.
+    auto & bitmap =
+        (port < 0x8000) ? this->io_bitmap_a : this->io_bitmap_b;
+    auto index = static_cast<std::size_t>(port & 0x7fff);
+    auto & byte = bitmap[index / 8];
+    auto mask = static_cast<std::uint8_t>(1u << (index % 8));
+
+    if (intercept) {
+        byte |= mask;
+    } else {
+        byte &= static_cast<std::uint8_t>(~mask);
+    }
+}
+
+bool hypervisor::on_io_instruction()
+{
+    // SDM Table 28-5. The port is in bits 31:16 for the forms that carry
+    // one, which is every form this VMM asks to see; direction is bit 3,
+    // with one meaning in.
+    auto qualification = this->vmcs.exit_qualification();
+    auto port = static_cast<std::uint16_t>((qualification >> 16) & 0xffff);
+    auto reading = 0 != (qualification & (1ull << 3));
+
+    if ((0 == this->sleep_control_port) ||
+        ((port != this->sleep_control_port) &&
+         (port != this->sleep_control_port_secondary))) {
+        return false;
+    }
+
+    // Only the write matters: reading the register tells the guest what
+    // it already wrote and enters nothing.
+    if (!reading) {
+        log("guest is entering a sleep state through port {}", port);
+        diag::log<diag::severity::warning>("sleep entered through port {}",
+                                           port);
+
+        // Everything this VMM is dies here and nothing brings it back:
+        // root mode does not survive S3, and there is no resume path.
+        // Said out loud, in the channel that survives, rather than
+        // discovered later by noticing the machine is unvirtualized.
+        diag::pump::drain();
+    }
+
+    // Passed through rather than emulated, by releasing the port and
+    // resuming *without* advancing past the instruction: the guest
+    // re-executes its own OUT, which now reaches hardware. That needs no
+    // decoder and cannot disagree with what the instruction meant.
+    //
+    // Releasing it also means this is seen once. A sleep is not a thing
+    // worth trapping twice, and re-arming would have to happen on a
+    // resume path that does not exist yet.
+    intercept_io_port(port, false);
+    return true;
 }
 
 void hypervisor::watch_local_apic(bool watch)
@@ -2315,6 +2377,10 @@ void hypervisor::setup_vmcs(arch::x86_64::context & guest_context)
 
     // Set msr bitmap.
     vmcs.msr_bitmap(this->msr_bitmap_physical);
+    vmcs.write(arch::x86_64::vmx::vmcs::field::io_bitmap_a,
+               this->io_bitmap_a_physical);
+    vmcs.write(arch::x86_64::vmx::vmcs::field::io_bitmap_b,
+               this->io_bitmap_b_physical);
 
     // Secondary execution control.
     vmcs.secondary_processor_based_vm_execution_controls(
@@ -2347,6 +2413,8 @@ void hypervisor::setup_vmcs(arch::x86_64::context & guest_context)
                     enable_secondary_controls |
                 arch::x86_64::vmx::vm_execution_controls::primary::
                     enable_msr_bitmaps |
+                arch::x86_64::vmx::vm_execution_controls::primary::
+                    enable_io_bitmaps |
                 arch::x86_64::vmx::vm_execution_controls::primary::
                     mwait_exiting |
                 arch::x86_64::vmx::vm_execution_controls::primary::
@@ -2599,6 +2667,12 @@ hypervisor::main(arch::x86_64::context & caller_context)
         launch ? reinterpret_cast<std::uint64_t>(launch->start_up_memory)
                : 0;
 
+    if (launch) {
+        this->sleep_control_port = launch->sleep_control_port;
+        this->sleep_control_port_secondary =
+            launch->sleep_control_port_secondary;
+    }
+
     // Whether this processor was started by this VMM rather than launched
     // by the loader, which changes three things below: there is no state
     // of its own worth capturing, there is no OS descriptor table to build
@@ -2692,6 +2766,19 @@ hypervisor::main(arch::x86_64::context & caller_context)
         // write and the bitmap above cannot see it. Armed only while
         // that is actually the mode, because the page is hot.
         watch_local_apic(!x2apic_enabled());
+
+        // A suspend takes this VMM away and nothing brings it back, so
+        // the least that can be done is notice. Armed only if the loader
+        // found the register; the guest keeps every other port.
+        if (this->sleep_control_port) {
+            intercept_io_port(this->sleep_control_port, true);
+            if (this->sleep_control_port_secondary) {
+                intercept_io_port(this->sleep_control_port_secondary,
+                                  true);
+            }
+            log("watching sleep control port {}",
+                this->sleep_control_port);
+        }
     }
 
     // Initialize and load the intermediate GDT, which is a copy of the
@@ -3287,6 +3374,21 @@ hypervisor::main(arch::x86_64::context & caller_context)
                 vmcs.guest_interruptibility_state(),
                 vmcs.guest_pending_debug_exceptions());
             emulate_start_up_ipi(context, vector);
+            advance_rip = false;
+            break;
+        }
+        case basic_reason::io_instruction: {
+            // Reachable only for a port deliberately armed in the I/O
+            // bitmaps, which today is the ACPI sleep control register
+            // and nothing else.
+            if (!on_io_instruction()) {
+                record_exit(full_reason);
+                on_unhandled_exit(full_reason);
+                break;
+            }
+            // Deliberately not advanced. The handler released the port,
+            // so re-executing the guest's own instruction is what
+            // performs it.
             advance_rip = false;
             break;
         }

@@ -1356,6 +1356,14 @@ extern "C" EFI_STATUS EFIAPI uefi_main(EFI_HANDLE image_handle,
         // Null until then, which the hypervisor reads as the channel
         // being unavailable rather than as a failure.
         .diagnostic_channel = nullptr,
+        .sleep_control_port =
+            zpp::sleep_control_finder::found.usable()
+                ? zpp::sleep_control_finder::found.pm1a_control_port
+                : std::uint16_t{},
+        .sleep_control_port_secondary =
+            zpp::sleep_control_finder::found.usable()
+                ? zpp::sleep_control_finder::found.pm1b_control_port
+                : std::uint16_t{},
         .adjust_launch_calling_convention = invoke_entry,
     };
 

@@ -76,6 +76,22 @@ struct zpp_launch_parameters
      * unavailable rather than as an error.
      */
     const void * diagnostic_channel;
+
+    /**
+     * The ACPI sleep control register, as I/O port numbers, or zero when
+     * the loader could not find it. The second is zero on the usual
+     * platform, which uses one block.
+     *
+     * Only the loader can find these - they come out of the fixed ACPI
+     * description table, and the hypervisor has no table walker. Without
+     * them a suspend is invisible to it.
+     * @{
+     */
+    uint16_t sleep_control_port;
+    uint16_t sleep_control_port_secondary;
+    /**
+     * @}
+     */
 };
 
 struct zpp_loader_parameters
@@ -127,6 +143,16 @@ struct zpp_loader_parameters
      * into the launch parameters rather than passed separately.
      */
     const void * diagnostic_channel;
+
+    /**
+     * The ACPI sleep control register, as found by this loader, or zero.
+     * @{
+     */
+    uint16_t sleep_control_port;
+    uint16_t sleep_control_port_secondary;
+    /**
+     * @}
+     */
 
     /**
      * Adjusts the calling convention before entering the hypervisor. May

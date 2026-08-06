@@ -100,6 +100,8 @@ extern "C" NTAPI NTSTATUS driver_entry(PDRIVER_OBJECT driver_object,
         // start one itself.
         .allocate_below_one_megabyte = nullptr,
         .diagnostic_channel = nullptr,
+        .sleep_control_port = 0,
+        .sleep_control_port_secondary = 0,
         .adjust_launch_calling_convention = invoke_entry,
     };
 

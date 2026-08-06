@@ -435,6 +435,19 @@ private:
     void watch_local_apic(bool watch);
 
     /**
+     * Sets or clears one port's bit in the I/O permission bitmaps, so
+     * that accesses to it exit. A port is watched only when something
+     * asks for it; everything else stays with the guest.
+     */
+    void intercept_io_port(std::uint16_t port, bool intercept);
+
+    /**
+     * Handles an I/O instruction that exited. Returns whether it was one
+     * this VMM asked to see.
+     */
+    bool on_io_instruction();
+
+    /**
      * Handles a write the local APIC page watch saw. Reads the interrupt
      * command out of the page and, if one was issued, puts it through
      * the same decision the x2APIC path uses.
@@ -1346,6 +1359,20 @@ private:
     alignas(page_size) std::uint8_t msr_bitmap[page_size]{};
 
     /**
+     * The two I/O permission bitmaps, one bit per port: the first covers
+     * ports 0x0000 to 0x7fff and the second the rest. All zero, so
+     * nothing exits until a port is deliberately armed - the guest owns
+     * every device this VMM does not, and trapping its I/O would be both
+     * ruinous and pointless.
+     * @{
+     */
+    alignas(page_size) std::uint8_t io_bitmap_a[page_size]{};
+    alignas(page_size) std::uint8_t io_bitmap_b[page_size]{};
+    /**
+     * @}
+     */
+
+    /**
      * The physical address of the current VMX region to be assigned.
      */
     std::uint64_t vmx_physical{};
@@ -1364,6 +1391,19 @@ private:
      * The physical address of the MSR bitmap.
      */
     std::uint64_t msr_bitmap_physical{};
+    std::uint64_t io_bitmap_a_physical{};
+    std::uint64_t io_bitmap_b_physical{};
+
+    /**
+     * Where the guest writes to enter a sleep state, as the loader found
+     * it, or zero when it found none.
+     * @{
+     */
+    std::uint16_t sleep_control_port{};
+    std::uint16_t sleep_control_port_secondary{};
+    /**
+     * @}
+     */
     /**
      * @}
      */

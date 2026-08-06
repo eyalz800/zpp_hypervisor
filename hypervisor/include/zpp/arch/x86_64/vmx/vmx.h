@@ -60,6 +60,11 @@ enum type : std::uint64_t
     // SDM Table 25-6, "Definitions of Primary Processor-Based
     // VM-Execution Controls", bits 10 and 29.
     mwait_exiting = (1ull << 10),
+    // SDM Table 25-6 bit 25. With it set, an I/O instruction exits only
+    // when its port's bit is set in one of the two bitmaps below - so
+    // this is how a single port is watched without paying for every
+    // other one. Bit 24, unconditional I/O exiting, would trap them all.
+    enable_io_bitmaps = (1ull << 25),
     enable_msr_bitmaps = (1ull << 28),
     monitor_exiting = (1ull << 29),
     enable_secondary_controls = (1ull << 31),
