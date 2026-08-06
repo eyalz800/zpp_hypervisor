@@ -292,10 +292,45 @@ private:
          */
         using handler = void (*)(void * context, std::uint64_t page);
 
+        /**
+         * What a violation on this page does.
+         *
+         * `notify` is the observing form: allow the write, step over it,
+         * report it afterwards.
+         *
+         * `hold` is the excluding form, and it is the more useful of the
+         * two. A processor that faults on a held page is **not resumed
+         * until the holder releases it** - it spins inside the exit. That
+         * is mutual exclusion over a structure the guest owns, obtained
+         * without the guest's cooperation and without stopping any
+         * processor that is not touching it.
+         *
+         * It exists for borrowing the controller's admin queue while the
+         * guest is live. Detecting a concurrent submission is not enough
+         * there, because by the time it is detected the damage is done;
+         * what is needed is that it cannot happen, and holding the writer
+         * at the faulting instruction is exactly that. The write has not
+         * taken effect when the fault is delivered, so the queue is
+         * unchanged for as long as the hold lasts.
+         */
+        enum class mode
+        {
+            notify,
+            hold,
+        };
+
         std::uint64_t page{};
         handler on_write{};
         void * context{};
+        mode behaviour{mode::notify};
         bool armed{};
+
+        /**
+         * Whether writers are currently being held. Atomic because it is
+         * set by whichever processor is borrowing and read by any other
+         * that faults, with no lock between them.
+         */
+        std::atomic<bool> held{};
     };
 
     /**
@@ -307,10 +342,25 @@ private:
      * builds an identity EPT - stated here rather than assumed, because
      * it stops being true the moment anything remaps a guest page.
      */
-    std::expected<void, zpp::error>
-    watch_guest_page_writes(std::uint64_t guest_physical,
-                            page_watch::handler on_write,
-                            void * context);
+    std::expected<void, zpp::error> watch_guest_page_writes(
+        std::uint64_t guest_physical,
+        page_watch::handler on_write,
+        void * context,
+        page_watch::mode behaviour = page_watch::mode::notify);
+
+    /**
+     * Starts and stops holding writers to a watched page.
+     *
+     * Between these two calls any processor that writes the page stops
+     * at the faulting instruction and does not proceed. The caller must
+     * therefore finish quickly and must not itself take anything a held
+     * processor could already own.
+     *
+     * Returns false if the page is not watched in holding mode, so a
+     * caller cannot believe it has exclusion it does not have.
+     */
+    bool hold_guest_page(std::uint64_t guest_physical);
+    void release_guest_page(std::uint64_t guest_physical);
 
     /**
      * Removes a write watch and gives the page back to the guest.

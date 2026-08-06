@@ -694,7 +694,8 @@ std::expected<void, zpp::error> hypervisor::protect_module()
 std::expected<void, zpp::error>
 hypervisor::watch_guest_page_writes(std::uint64_t guest_physical,
                                     page_watch::handler on_write,
-                                    void * context)
+                                    void * context,
+                                    page_watch::mode behaviour)
 {
     auto page = guest_physical >> 12;
 
@@ -706,6 +707,7 @@ hypervisor::watch_guest_page_writes(std::uint64_t guest_physical,
         if (watch.armed && (watch.page == page)) {
             watch.on_write = on_write;
             watch.context = context;
+            watch.behaviour = behaviour;
             return {};
         }
         if (!watch.armed && !free_slot) {
@@ -735,6 +737,8 @@ hypervisor::watch_guest_page_writes(std::uint64_t guest_physical,
     free_slot->page = page;
     free_slot->on_write = on_write;
     free_slot->context = context;
+    free_slot->behaviour = behaviour;
+    free_slot->held.store(false, std::memory_order_relaxed);
     free_slot->armed = true;
 
     log("watching writes to guest page {}", page);
@@ -757,9 +761,46 @@ void hypervisor::unwatch_guest_page(std::uint64_t guest_physical)
             (*entry)->write(true);
         }
 
-        watch = {};
+        watch.page = {};
+        watch.on_write = {};
+        watch.context = {};
+        watch.behaviour = page_watch::mode::notify;
+        watch.held.store(false, std::memory_order_relaxed);
+        watch.armed = false;
         log("stopped watching guest page {}", page);
         return;
+    }
+}
+
+bool hypervisor::hold_guest_page(std::uint64_t guest_physical)
+{
+    auto page = guest_physical >> 12;
+
+    for (auto & watch : this->watches) {
+        if (!watch.armed || (watch.page != page)) {
+            continue;
+        }
+        if (page_watch::mode::hold != watch.behaviour) {
+            // Refused rather than silently doing nothing, so that a
+            // caller cannot go on believing it has exclusion it was
+            // never given.
+            return false;
+        }
+        watch.held.store(true, std::memory_order_release);
+        return true;
+    }
+    return false;
+}
+
+void hypervisor::release_guest_page(std::uint64_t guest_physical)
+{
+    auto page = guest_physical >> 12;
+
+    for (auto & watch : this->watches) {
+        if (watch.armed && (watch.page == page)) {
+            watch.held.store(false, std::memory_order_release);
+            return;
+        }
     }
 }
 
@@ -783,6 +824,24 @@ bool hypervisor::on_ept_violation(std::size_t cpu)
     for (auto & watch : this->watches) {
         if (!watch.armed || (watch.page != page)) {
             continue;
+        }
+
+        // A held page stops the writer here, at the faulting
+        // instruction, until whoever is holding it lets go.
+        //
+        // This is the whole of the exclusion. The write has not taken
+        // effect when the violation is delivered, so the page is
+        // unchanged for as long as the spin lasts, and a borrower can
+        // work on a structure the guest owns without the guest being
+        // able to touch it. No cooperation is required and no processor
+        // that is not writing this page is delayed at all.
+        //
+        // Spinning inside the exit is deliberate. The alternative -
+        // resuming and re-faulting - burns exits for the same wait and
+        // gives the guest a window between the resume and the next
+        // fault, which is the window this exists to close.
+        while (watch.held.load(std::memory_order_acquire)) {
+            zpp::spin_hint();
         }
 
         // Let the guest's own instruction do the write, then look at
