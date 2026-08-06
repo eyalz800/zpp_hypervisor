@@ -1355,7 +1355,11 @@ extern "C" EFI_STATUS EFIAPI uefi_main(EFI_HANDLE image_handle,
         // The diagnostic channel, once the loader has one to hand over.
         // Null until then, which the hypervisor reads as the channel
         // being unavailable rather than as a failure.
-        .diagnostic_channel = nullptr,
+        // The channel the self test established, if it got far enough to
+        // establish one. The resident side checks its magic and its
+        // target before believing any of it, so handing over an
+        // incomplete one is inert rather than dangerous.
+        .diagnostic_channel = &nvme_selftest::channel,
         .sleep_control_port =
             zpp::sleep_control_finder::found.usable()
                 ? zpp::sleep_control_finder::found.pm1a_control_port

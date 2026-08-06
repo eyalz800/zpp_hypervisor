@@ -1,5 +1,6 @@
 #pragma once
 #include "zpp/diag/config.h"
+#include "zpp/nvme/log_format.h"
 
 /**
  * Proving the admin queue borrow against a real driver, at boot.
@@ -57,6 +58,20 @@ struct nvme_selftest
      * off has no call and no code, in the shape zpp::trace and
      * zpp::verify already use.
      */
+    /**
+     * The channel this run established, for the loader to hand across to
+     * the resident side. Unusable until every step below has passed, so
+     * a failed or absent self test hands over nothing rather than
+     * something half built.
+     *
+     * It lives here because this is where the queue pair is created and
+     * proved. Creating a second one somewhere else, to avoid the word
+     * "selftest" appearing on the path that matters, would mean two
+     * pieces of code that have to agree about a controller and only one
+     * of them tested.
+     */
+    static inline nvme::channel_handover channel{};
+
     static void run()
     {
         if constexpr (enabled) {

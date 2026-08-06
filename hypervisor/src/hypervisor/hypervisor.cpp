@@ -14,6 +14,7 @@
 #include "zpp/diag/log.h"
 #include "zpp/diag/pump.h"
 #include "zpp/diag/sinks.h"
+#include "zpp/diag/sinks/esp_blocks.h"
 #include "zpp/elf_file.h"
 #include "zpp/elf_image_base.h"
 #include "zpp/error.h"
@@ -1344,6 +1345,16 @@ void hypervisor::intercept_interrupt_command(bool intercept)
     } else {
         byte &= static_cast<std::uint8_t>(~mask);
     }
+}
+
+std::uint64_t hypervisor::host_physical_of(const void * address)
+{
+    // A plain function rather than something carrying state, because the
+    // sink takes a function pointer and this VMM is a singleton anyway.
+    // The host page table is the only correct answer once resident: the
+    // identity the loader relied on stops being true the moment CR3
+    // changes.
+    return instance().host_page_table.virtual_to_physical(address);
 }
 
 void hypervisor::intercept_io_port(std::uint16_t port, bool intercept)
@@ -2868,6 +2879,36 @@ hypervisor::main(arch::x86_64::context & caller_context)
 
         // Allow guest access to unprotected memory.
         unprotect_guest_memory();
+
+        // Take the diagnostic channel the loader established, if it
+        // established one.
+        //
+        // Here rather than earlier because the sink needs a way to turn
+        // one of its own buffers into the address a controller will use,
+        // and that is the host page table - which only exists by this
+        // point. Before it, the identity the loader was relying on has
+        // stopped being true and nothing has replaced it yet.
+        //
+        // Everything about the channel is checked on the other side of
+        // this call: a null pointer, a wrong magic, an unresolved
+        // target, a missing doorbell. A hand-over that does not check
+        // out leaves the sink not ready, and a sink that is not ready is
+        // never offered a record.
+        if (launch && launch->diagnostic_channel) {
+            auto & handover = *static_cast<const nvme::channel_handover *>(
+                launch->diagnostic_channel);
+
+            if (diag::esp_block_sink::configure(handover,
+                                                &host_physical_of)) {
+                log("disk channel live, namespace {}",
+                    handover.target.namespace_id);
+                diag::log<diag::severity::info>(
+                    "disk channel live on namespace {}",
+                    handover.target.namespace_id);
+            } else {
+                log("disk channel refused the loader's hand-over");
+            }
+        }
     }
 
     // Initialize vmx.

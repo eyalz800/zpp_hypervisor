@@ -610,6 +610,29 @@ void nvme_selftest::execute()
     }
     trace::line("selftest: guard read accepts the bound queues");
 
+    // Everything the resident side needs to keep using this queue, in a
+    // structure it can read. Device register addresses and identifiers
+    // only: nothing here points at memory the firmware reclaims, and
+    // nothing points back into this loader.
+    //
+    // The target is left as it was found. Filling it means resolving a
+    // file to logical blocks, which is a separate step - and the sink
+    // refuses a hand-over whose target is not usable, so an incomplete
+    // one is inert rather than dangerous.
+    channel.submission_doorbell = test_queues::bound.submission_doorbell;
+    channel.completion_doorbell = test_queues::bound.completion_doorbell;
+    channel.status_register = test_queues::bound.status_register;
+    channel.configuration_register =
+        test_queues::bound.configuration_register;
+    channel.submission_id = test_queues::bound.submission_id;
+    channel.completion_id = test_queues::bound.completion_id;
+    channel.namespace_id = test_queues::bound.namespace_id;
+
+    // Written last, so a partially filled structure never reads as
+    // usable. It still will not be until a target is resolved into it.
+    channel.magic = nvme::channel_handover::valid_magic;
+    trace::line("selftest: channel handover prepared");
+
     // The end of the chain: put bytes on the disk through the private
     // queue, using the same submit path the resident side will use.
     //
