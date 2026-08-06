@@ -13,6 +13,7 @@ extern "C" {
 #include <Protocol/SimpleFileSystem.h>
 }
 #include "zpp/loader.h"
+#include "zpp/nvme_selftest.h"
 #include "zpp/trace.h"
 #include "zpp/verify.h"
 
@@ -105,6 +106,7 @@ static bool g_timed_waits_usable = true;
  * everything below be ordinary code under `if constexpr`.
  */
 // Unqualified, so the many call sites below stay readable.
+using zpp::nvme_selftest;
 using zpp::trace;
 using zpp::verify;
 
@@ -581,9 +583,8 @@ static void trace_launch_context()
             at, static_cast<std::uint64_t>(information.ProcessorId), 4);
         at = trace::append_text(at, " flags ");
         at = trace::append_hex(at, information.StatusFlag, 8);
-        at = trace::append_text(at, information.StatusFlag & 0x1
-                                        ? " bsp"
-                                        : " application");
+        at = trace::append_text(
+            at, information.StatusFlag & 0x1 ? " bsp" : " application");
         at = trace::append_text(
             at, information.StatusFlag & 0x2 ? " enabled" : " disabled");
         at = trace::append_text(
@@ -744,14 +745,14 @@ static void write_trace_log(EFI_HANDLE device)
         if (end_position > largest_kept) {
             file->Delete(file);
             file = nullptr;
-            if (EFI_ERROR(volume->Open(
-                    volume,
-                    &file,
-                    reinterpret_cast<CHAR16 *>(
-                        const_cast<char16_t *>(file_path)),
-                    EFI_FILE_MODE_READ | EFI_FILE_MODE_WRITE |
-                        EFI_FILE_MODE_CREATE,
-                    0))) {
+            if (EFI_ERROR(
+                    volume->Open(volume,
+                                 &file,
+                                 reinterpret_cast<CHAR16 *>(
+                                     const_cast<char16_t *>(file_path)),
+                                 EFI_FILE_MODE_READ | EFI_FILE_MODE_WRITE |
+                                     EFI_FILE_MODE_CREATE,
+                                 0))) {
                 volume->Close(volume);
                 return;
             }
@@ -814,7 +815,8 @@ static void * allocate_rwx(std::size_t size)
     // What matters for a resume is compounded by the module being hidden:
     // protect_module clears every EPT permission on these pages, so a
     // restore writing over them does not merely corrupt the module, it
-    // takes an EPT violation on a processor whose only response is to stop.
+    // takes an EPT violation on a processor whose only response is to
+    // stop.
     auto status = g_boot_services->AllocatePages(
         AllocateAnyPages,
         EfiReservedMemoryType,
@@ -1312,6 +1314,14 @@ extern "C" EFI_STATUS EFIAPI uefi_main(EFI_HANDLE image_handle,
     // Before this loader has done anything, so it describes the machine
     // the firmware handed over rather than the one we made.
     trace_launch_context();
+
+    // Proves the admin queue borrow against the firmware's own NVMe
+    // driver, which has already initialised the controller and created
+    // its own I/O queue - and which this loader goes on to use for the
+    // rest of the boot, so a borrow that broke it would break the boot
+    // visibly. Compiles to nothing unless the disk sink is compiled in,
+    // and never fails the boot: every step is bounded and traced.
+    nvme_selftest::run();
 
     // Load the ELF.
     const zpp_loader_parameters parameters{

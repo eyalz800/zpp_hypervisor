@@ -295,7 +295,7 @@ constexpr policy policy_of(sink which)
                 .failures_tolerated = 1};
 
     case sink::esp_blocks:
-        return {.present = false,
+        return {.present = enabled,
                 .floor = severity::trace,
                 .categories = all_categories,
                 .shape = form::binary,

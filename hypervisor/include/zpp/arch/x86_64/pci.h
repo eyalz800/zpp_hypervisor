@@ -3,59 +3,60 @@
 
 namespace zpp::arch::x86_64
 {
+/*
+ * The four port accessors below are written with operand constraints
+ * rather than as `naked` functions, unlike everything in `asm.h`. That
+ * is deliberate and it is not a style preference.
+ *
+ * A naked function has to name the register its argument arrived in, so
+ * it bakes in one calling convention. `asm.h` gets away with that
+ * because only the hypervisor includes it, and the hypervisor is the
+ * freestanding ELF target - System V, first argument in `rdi`. This
+ * header is also included by the UEFI loader, which is built
+ * `--target=x86_64-pc-windows-msvc`, where the first argument arrives in
+ * `rcx` instead. The System V spelling read `di` there, so every
+ * configuration space access went to whatever port the low half of an
+ * unrelated register happened to hold, and the NVMe controller the
+ * firmware had just booted us from was reported absent.
+ *
+ * Letting the compiler place the operands is the fix that cannot rot:
+ * it is correct under both conventions and needs no per-target spelling.
+ */
+
 /**
  * Reads a byte from an IO port.
  */
-inline std::uint8_t __attribute__((naked)) in8(std::uint16_t)
+inline std::uint8_t in8(std::uint16_t port)
 {
-    asm(R"!!(
-        .intel_syntax noprefix
-        mov dx, di
-        xor eax, eax
-        in al, dx
-        ret
-    )!!");
+    std::uint8_t value;
+    asm volatile("inb %1, %0" : "=a"(value) : "Nd"(port));
+    return value;
 }
 
 /**
  * Reads a doubleword from an IO port.
  */
-inline std::uint32_t __attribute__((naked)) in32(std::uint16_t)
+inline std::uint32_t in32(std::uint16_t port)
 {
-    asm(R"!!(
-        .intel_syntax noprefix
-        mov dx, di
-        in eax, dx
-        ret
-    )!!");
+    std::uint32_t value;
+    asm volatile("inl %1, %0" : "=a"(value) : "Nd"(port));
+    return value;
 }
 
 /**
  * Writes a byte to an IO port.
  */
-inline void __attribute__((naked)) out8(std::uint16_t, std::uint8_t)
+inline void out8(std::uint16_t port, std::uint8_t value)
 {
-    asm(R"!!(
-        .intel_syntax noprefix
-        mov dx, di
-        mov eax, esi
-        out dx, al
-        ret
-    )!!");
+    asm volatile("outb %0, %1" : : "a"(value), "Nd"(port));
 }
 
 /**
  * Writes a doubleword to an IO port.
  */
-inline void __attribute__((naked)) out32(std::uint16_t, std::uint32_t)
+inline void out32(std::uint16_t port, std::uint32_t value)
 {
-    asm(R"!!(
-        .intel_syntax noprefix
-        mov dx, di
-        mov eax, esi
-        out dx, eax
-        ret
-    )!!");
+    asm volatile("outl %0, %1" : : "a"(value), "Nd"(port));
 }
 
 /**
