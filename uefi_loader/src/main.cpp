@@ -14,6 +14,7 @@ extern "C" {
 }
 #include "zpp/loader.h"
 #include "zpp/nvme_selftest.h"
+#include "zpp/reserved_region.h"
 #include "zpp/trace.h"
 #include "zpp/verify.h"
 
@@ -107,6 +108,7 @@ static bool g_timed_waits_usable = true;
  */
 // Unqualified, so the many call sites below stay readable.
 using zpp::nvme_selftest;
+using zpp::reserved_region;
 using zpp::trace;
 using zpp::verify;
 
@@ -1322,6 +1324,12 @@ extern "C" EFI_STATUS EFIAPI uefi_main(EFI_HANDLE image_handle,
     // visibly. Compiles to nothing unless the disk sink is compiled in,
     // and never fails the boot: every step is bounded and traced.
     nvme_selftest::run();
+
+    // Declare the window the controller must be able to reach, while the
+    // firmware's tables are still ours to edit. This has to happen before
+    // the boot manager is started, because the guest reads the table once
+    // and builds its translation domains from what it found.
+    reserved_region::install(system_table);
 
     // Load the ELF.
     const zpp_loader_parameters parameters{

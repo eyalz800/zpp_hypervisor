@@ -467,6 +467,70 @@ void nvme_selftest::execute()
     }
     trace::line("selftest: guard read accepts the bound queues");
 
+    // The end of the chain: put bytes on the disk through the private
+    // queue, using the same submit path the resident side will use.
+    //
+    // Everything before this proves the queue exists. Only this proves
+    // the queue *moves data*, and it proves it the way the channel will
+    // actually be read - by something outside the machine searching the
+    // raw device for a marker, with no file system involved.
+    //
+    // Routed through submit() rather than through a hand built command
+    // on purpose. submit() writes the block, reads it back and checks
+    // the signature it finds against the one it intended, so a pass here
+    // exercises the guard as well as the write.
+    static constexpr std::uint64_t proof_lba = 120000;
+    static constexpr std::uint64_t proof_file_id = 0x5a5050524f4f4631ull;
+
+    static log_target target{};
+    target.magic = log_target::valid_magic;
+    target.namespace_id = 1;
+    target.block_size = 512;
+    target.file_id = proof_file_id;
+    target.extent_count = 1;
+    target.extents[0].first_lba = proof_lba;
+    target.extents[0].block_count = block_size / target.block_size;
+
+    if (!target.usable()) {
+        trace::line("selftest: proof target rejected itself");
+        return;
+    }
+
+    for (auto & byte : test_queues::staging) {
+        byte = 0;
+    }
+
+    auto header =
+        reinterpret_cast<block_signature *>(test_queues::staging);
+    header->signature_magic = block_signature::magic;
+    header->file_id = proof_file_id;
+    header->block_index = 0;
+
+    static constexpr char marker[] = "ZPP_DISK_CHANNEL_PROOF_V1";
+    for (std::size_t i{}; i < (sizeof(marker) - 1); ++i) {
+        test_queues::staging[sizeof(block_signature) + i] =
+            static_cast<std::uint8_t>(marker[i]);
+    }
+
+    auto written = test_queues::submit(target, 0, 1, identity_of, 1000000);
+    if (write_result::ok != written) {
+        trace::hex_line("selftest: proof write did not land, result ",
+                        static_cast<std::uint64_t>(written));
+        trace::hex_line("selftest: submitted ", test_queues::submitted);
+        trace::hex_line("selftest: completed ", test_queues::completed);
+        trace::hex_line("selftest: failed ", test_queues::failed);
+        trace::hex_line("selftest: refused_guard ",
+                        test_queues::refused_guard);
+        trace::hex_line("selftest: refused_signature ",
+                        test_queues::refused_signature);
+        return;
+    }
+
+    trace::hex_line("selftest: proof written and verified at lba ",
+                    proof_lba);
+    trace::line(
+        "selftest: VERDICT the private queue moves data to the disk");
+
     trace::line("selftest: end");
 }
 
