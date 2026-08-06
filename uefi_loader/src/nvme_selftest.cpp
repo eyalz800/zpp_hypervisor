@@ -72,27 +72,69 @@ std::uint64_t identity_of(const void * address)
 }
 
 /**
- * Finds the first NVM Express controller on bus zero.
+ * Finds the first NVM Express controller on any bus.
+ *
+ * Every bus, not bus zero. This scanned bus zero alone, on the
+ * reasoning `pci.h` still gives for the two configuration ports - that
+ * bus zero "is where a host controller integrated into the chipset
+ * lives". That is true of the xHCI, which sits at 00:14.0 on every
+ * Intel client platform. It is not true of NVMe, which is an ordinary
+ * endpoint behind a PCI Express root port: on the development target
+ * the root port is 00:1d.4 and the controller is at **02:00.0**, so
+ * the scan found nothing and reported no controller on a machine that
+ * had just booted from one.
+ *
+ * The reason that went unnoticed is worth keeping. It was tested under
+ * QEMU, where the emulated controller lands at 00:03.0 - on bus zero -
+ * so the test passed for a reason that does not hold on any real
+ * machine. A pass on emulated hardware says nothing about topology
+ * unless the topology was the thing being emulated.
+ *
+ * A brute force walk rather than a recursive bridge enumeration: it
+ * needs no bridge configuration to be read or trusted, it finds a
+ * controller behind any depth of bridging, and it cannot be confused
+ * by a bridge whose subordinate bus numbers firmware has not yet
+ * programmed. Absent buses read back all ones and cost only the read.
+ * Functions beyond zero are probed only when the header type says the
+ * device has them, which keeps the common case to one read per slot.
  */
 bool find_controller(pci_config::address & found)
 {
-    for (std::uint32_t device{}; device < pci_config::max_devices;
-         ++device) {
-        for (std::uint32_t function{};
-             function < pci_config::max_functions;
-             ++function) {
-            pci_config::address at{0, device, function};
-            auto vendor =
-                pci_config::read32(at, pci_config::vendor_id_offset);
-            if ((0xffffffffu == vendor) || (0 == (vendor & 0xffff))) {
-                continue;
-            }
+    for (std::uint32_t bus{}; bus < pci_config::max_buses; ++bus) {
+        for (std::uint32_t device{}; device < pci_config::max_devices;
+             ++device) {
+            auto functions = pci_config::max_functions;
 
-            auto classes =
-                pci_config::read32(at, pci_config::class_revision_offset);
-            if (class_nvme == (classes >> 8)) {
-                found = at;
-                return true;
+            for (std::uint32_t function{}; function < functions;
+                 ++function) {
+                pci_config::address at{bus, device, function};
+                auto vendor =
+                    pci_config::read32(at, pci_config::vendor_id_offset);
+                if ((0xffffffffu == vendor) || (0 == (vendor & 0xffff))) {
+                    // Function zero absent means the slot is empty, so
+                    // there is nothing to probe the other seven for.
+                    if (0 == function) {
+                        break;
+                    }
+                    continue;
+                }
+
+                if (0 == function) {
+                    auto header = static_cast<std::uint8_t>(
+                        pci_config::read32(
+                            at, pci_config::header_type_offset & ~0x3u) >>
+                        (8 * (pci_config::header_type_offset & 0x3)));
+                    if (0 == (header & pci_config::multi_function_bit)) {
+                        functions = 1;
+                    }
+                }
+
+                auto classes = pci_config::read32(
+                    at, pci_config::class_revision_offset);
+                if (class_nvme == (classes >> 8)) {
+                    found = at;
+                    return true;
+                }
             }
         }
     }
@@ -232,9 +274,10 @@ void nvme_selftest::execute()
 
     pci_config::address at{};
     if (!find_controller(at)) {
-        trace::line("selftest: no nvme controller on bus zero");
+        trace::line("selftest: no nvme controller on any bus");
         return;
     }
+    trace::hex_line("selftest: controller at bus ", at.bus);
     trace::hex_line("selftest: controller at device ", at.device);
     trace::hex_line("selftest: controller at function ", at.function);
 

@@ -179,6 +179,14 @@ public:
     static constexpr std::uint32_t device_id_offset = 0x02;
     static constexpr std::uint32_t command_offset = 0x04;
     static constexpr std::uint32_t class_revision_offset = 0x08;
+
+    /**
+     * The header type byte. Bit 7 set means the device has functions
+     * beyond function zero, which is what makes it worth probing them.
+     */
+    static constexpr std::uint32_t header_type_offset = 0x0e;
+    static constexpr std::uint8_t multi_function_bit = 0x80;
+
     static constexpr std::uint32_t base_address_0_offset = 0x10;
 
     /**
