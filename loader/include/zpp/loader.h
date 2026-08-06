@@ -30,6 +30,94 @@ extern "C" {
 #define ZPP_START_UP_MEMORY_SIZE (4 * 4096)
 
 /**
+ * How a pixel is laid out in the framebuffer below.
+ *
+ * Named here rather than reusing the firmware's enumeration, because the
+ * hypervisor is not a UEFI program and has no view of it - and because the
+ * two formats this describes are the two that can be written to without
+ * further information. The loader translates.
+ */
+enum zpp_framebuffer_format
+{
+    /**
+     * There is no framebuffer, or nothing is known about it. Nothing may
+     * be drawn.
+     */
+    zpp_framebuffer_format_none = 0,
+
+    /**
+     * Four bytes per pixel, byte zero blue, byte one green, byte two red,
+     * byte three reserved.
+     */
+    zpp_framebuffer_format_blue_green_red_reserved = 1,
+
+    /**
+     * Four bytes per pixel, byte zero red, byte one green, byte two blue,
+     * byte three reserved.
+     */
+    zpp_framebuffer_format_red_green_blue_reserved = 2,
+
+    /**
+     * A format that exists but says nothing about how wide a pixel is or
+     * where its channels are - a bit mask, or a mode with no linear
+     * framebuffer at all. Reported rather than dropped, so that a machine
+     * which draws nothing can be told apart from one that was never asked
+     * to.
+     */
+    zpp_framebuffer_format_unsupported = 3
+};
+
+/**
+ * The linear framebuffer, as the loader found it.
+ *
+ * This is the hypervisor's only output channel once a guest is running: it
+ * has no console, the serial port belongs to the guest, and the members it
+ * records state in need a debugger attached to the very processor that
+ * stopped. Handed over so that a processor which stops can say why on the
+ * screen.
+ *
+ * All zero when the platform has no framebuffer to report, which is not an
+ * error - it means the hypervisor keeps quiet.
+ */
+struct zpp_framebuffer
+{
+    /**
+     * The physical address of the first pixel, or zero when there is none.
+     */
+    uint64_t base;
+
+    /**
+     * How many bytes the framebuffer occupies.
+     */
+    uint64_t size;
+
+    /**
+     * The visible width in pixels.
+     */
+    uint32_t width;
+
+    /**
+     * The visible height in pixels.
+     */
+    uint32_t height;
+
+    /**
+     * How many pixels one line of video memory holds, which is not the
+     * width: real adapters pad the line, and using the width as the stride
+     * skews the image by the difference on every row.
+     */
+    uint32_t pixels_per_scan_line;
+
+    /**
+     * One of the zpp_framebuffer_format values. A plain integer rather
+     * than the enumeration, because an enumeration's underlying type is up
+     * to the implementation and this structure crosses between two
+     * compilers.
+     */
+    uint32_t format;
+};
+
+/**
  * The platform services zpp_load_elf needs from its caller.
  *
  * Grouped into a struct rather than passed positionally so that call sites
@@ -86,10 +174,26 @@ struct zpp_loader_parameters
     int (*adjust_launch_calling_convention)(
         int (*entry)(size_t cpu,
                      uintptr_t (*physical_to_virtual)(uintptr_t),
-                     void * start_up_memory),
+                     void * start_up_memory,
+                     const struct zpp_framebuffer * framebuffer),
         size_t cpu,
         uintptr_t (*physical_to_virtual)(uintptr_t),
-        void * start_up_memory);
+        void * start_up_memory,
+        const struct zpp_framebuffer * framebuffer);
+
+    /**
+     * The screen the hypervisor may draw a diagnosis on, all zero on a
+     * platform that has none.
+     *
+     * Read only while zpp_load_elf is running: the hypervisor copies what
+     * it needs out of it during its launch, in the same window
+     * physical_to_virtual above is callable in.
+     *
+     * Last, and by value, so that extending this description again is an
+     * addition here and nothing more - a platform loader that says nothing
+     * about a framebuffer still compiles and still reports none.
+     */
+    struct zpp_framebuffer framebuffer;
 };
 
 /**
