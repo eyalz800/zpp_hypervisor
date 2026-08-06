@@ -3,6 +3,7 @@
 #include "zpp/arch/x86_64/msr.h"
 #include <cstddef>
 #include <cstdint>
+#include <iterator>
 #include <optional>
 #include <type_traits>
 
@@ -606,8 +607,7 @@ struct mtrr_state
      */
     static constexpr std::uint64_t no_boundary = ~std::uint64_t{};
 
-    static_assert(fixed_range_count ==
-                  std::extent_v<decltype(mtrr_fixed_ranges)>);
+    static_assert(fixed_range_count == std::size(mtrr_fixed_ranges));
 
     /**
      * IA32_MTRRCAP.

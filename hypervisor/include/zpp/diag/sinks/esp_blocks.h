@@ -90,6 +90,28 @@ struct esp_blocks_for
      * @{
      */
     static inline std::uint32_t staged_records{};
+
+    /**
+     * When the block being filled stops being allowed to wait, as a time
+     * stamp counter reading. Zero while no block is being filled.
+     *
+     * A block is written when it fills, and a partial one would
+     * otherwise sit unwritten for as long as the guest stayed quiet -
+     * which is exactly backwards, since a guest that has gone quiet is
+     * the case the log exists for. This is the bound on that wait.
+     */
+    static inline std::uint64_t staged_deadline{};
+
+    /**
+     * How long a partial block may wait, in time stamp counter ticks.
+     *
+     * A count rather than a duration, because nothing here knows the
+     * counter's frequency and there is no clock a VM exit handler may
+     * ask. Ten million ticks is a few milliseconds on any processor this
+     * runs on - the requirement is "every few milliseconds", and being
+     * wrong by a factor of two in either direction costs nothing.
+     */
+    static constexpr std::uint64_t staged_deadline_ticks = 10'000'000;
     static inline std::uint64_t next_block_index{};
     static inline std::uint64_t sequence{};
     static inline std::uint64_t boot_id{};
@@ -191,7 +213,9 @@ struct esp_blocks_for
         for (std::size_t i{}; i < ring.record_size; ++i) {
             slot[i] = source[i];
         }
-        ++staged_records;
+        if (1 == ++staged_records) {
+            staged_deadline = timestamp() + staged_deadline_ticks;
+        }
 
         if (staged_records >= records_per_block()) {
             flush();
@@ -208,6 +232,29 @@ struct esp_blocks_for
      * exit path once a deadline has passed. That deadline is the fourth
      * wiring point.
      */
+    /**
+     * Writes the block being filled if it has waited long enough.
+     *
+     * Called from the exit path on every pass, so the cost in the common
+     * case is one time stamp read and a comparison. That is deliberate:
+     * the alternative is a periodic exit of our own, which would cost
+     * the guest something on every machine to serve a facility that is
+     * off in release.
+     *
+     * It does mean the bound is only honoured while the guest is taking
+     * exits at all. A guest that has stopped entirely stops flushing -
+     * but a guest that has stopped entirely is also one whose last
+     * records are about to be drained by a halt path, which empties the
+     * ring regardless.
+     */
+    static void flush_if_due()
+    {
+        if ((0 != staged_records) && (0 != staged_deadline) &&
+            (timestamp() >= staged_deadline)) {
+            flush();
+        }
+    }
+
     static void flush()
     {
         if (0 == staged_records) {
@@ -222,6 +269,7 @@ struct esp_blocks_for
         header->epoch = epoch;
         header->sequence = sequence;
         header->block_index = next_block_index;
+        staged_deadline = 0;
         header->record_count = staged_records;
         header->record_size = ring.record_size;
 

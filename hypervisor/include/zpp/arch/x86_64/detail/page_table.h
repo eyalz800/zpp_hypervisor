@@ -1,5 +1,6 @@
 #pragma once
 #include "../page_table.h"
+#include <iterator>
 
 namespace zpp::arch::x86_64
 {
@@ -43,8 +44,7 @@ void page_table::map_page_from(std::uint64_t address,
     // Fetch the page directory according to how many page directories we
     // have.
     auto pd_index =
-        address_structure.pdpte() /
-        (std::extent_v<decltype(pdpt)> / std::extent_v<decltype(pds)>);
+        address_structure.pdpte() / (std::size(pdpt) / std::size(pds));
     auto & pd = pds[pd_index];
 
     // Map to the page directory, make present and writable.

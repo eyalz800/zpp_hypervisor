@@ -1,5 +1,6 @@
 #include "zpp/arch/x86_64/page_table.h"
 #include "zpp/arch/x86_64/virtual_address.h"
+#include <iterator>
 #include <type_traits>
 
 namespace zpp::arch::x86_64
@@ -29,8 +30,7 @@ std::uint64_t page_table::virtual_to_physical(std::uint64_t value) const
     // Fetch the page directory according to how many page directories we
     // have.
     auto pd_index =
-        address_structure.pdpte() /
-        (std::extent_v<decltype(pdpt)> / std::extent_v<decltype(pds)>);
+        address_structure.pdpte() / (std::size(pdpt) / std::size(pds));
     auto pd = pds[pd_index];
 
     // Fetch the page directory entry.
@@ -76,8 +76,7 @@ arch::x86_64::pte & page_table::page_table_entry(std::uint64_t address)
     // Fetch the page directory according to how many page directories we
     // have.
     auto pd_index =
-        address_structure.pdpte() /
-        (std::extent_v<decltype(pdpt)> / std::extent_v<decltype(pds)>);
+        address_structure.pdpte() / (std::size(pdpt) / std::size(pds));
     auto pd = pds[pd_index];
 
     // Fetch the page directory entry.

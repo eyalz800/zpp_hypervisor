@@ -24,6 +24,7 @@
 #include <atomic>
 #include <cstdint>
 #include <cstring>
+#include <iterator>
 #include <type_traits>
 #include <utility>
 
@@ -493,7 +494,7 @@ std::expected<void, zpp::error> hypervisor::initialize_ept()
     rwx_pdpte.execute_user(true);
 
     // Map every epdpt entry to a unique epd.
-    for (std::size_t i{}; i < std::extent_v<decltype(this->epdpt)>; ++i) {
+    for (std::size_t i{}; i < std::size(this->epdpt); ++i) {
         this->epdpt[i] = rwx_pdpte;
         this->epdpt[i].page_number(
             this->host_page_table.virtual_to_physical(this->epd[i]) >> 12);
@@ -521,11 +522,8 @@ std::expected<void, zpp::error> hypervisor::initialize_ept()
 
     // Fill the page directory table entries with large pages.
     std::size_t large_page_number{};
-    for (std::size_t i{}; i < std::extent_v<decltype(this->epd)>; ++i) {
-        for (std::size_t j{};
-             j <
-             std::extent_v<std::remove_reference_t<decltype(*this->epd)>>;
-             ++j) {
+    for (std::size_t i{}; i < std::size(this->epd); ++i) {
+        for (std::size_t j{}; j < std::size(*this->epd); ++j) {
             // Calculate the physical address from the large page number.
             auto physical_address = (large_page_number << 21);
 
@@ -572,8 +570,7 @@ std::expected<void, zpp::error> hypervisor::initialize_ept()
             // 51. That is 562 of the 1024 tables the pool holds. VCNT is
             // 10 on the machine this was written for, where one region is
             // mixed: the first, holding the legacy 0xa0000 aperture.
-            if (this->next_ept_table >=
-                std::extent_v<decltype(this->ept)>) {
+            if (this->next_ept_table >= std::size(this->ept)) {
                 return std::unexpected(
                     zpp::error{error::out_of_ept_entries});
             }
@@ -655,7 +652,7 @@ void hypervisor::invalidate_ept()
 std::expected<arch::x86_64::vmx::epte *, zpp::error>
 hypervisor::epte_for(std::uint64_t physical_address)
 {
-    auto ept_count = std::extent_v<decltype(this->ept)>;
+    auto ept_count = std::size(this->ept);
     auto & host_page_table = this->host_page_table;
 
     // Get the epde.
