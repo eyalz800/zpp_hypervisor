@@ -32,10 +32,28 @@ warning as an attack, and pass `-o StrictHostKeyChecking=no
    `~/zpp/esp/EFI/BOOT/BOOTX64.EFI` on the target. Back up whatever is there
    first, and verify the md5 matches after copying.
 
-3. **Run** `cd ~/vm && sudo ./boot-zpp.sh`. It needs `dmidecode`; if that is
-   missing QEMU refuses to start on the `-smbios type=4` line. Install it
-   persistently with `tce-load -wi dmidecode` - which only works while the
-   NVMe is still bound to the host, i.e. **not** while the VM is running.
+3. **Run** `cd ~/vm && sudo ./boot-zpp.sh`.
+
+   If it dies with `sudo: dmidecode: command not found` and QEMU then rejects
+   `-smbios type=4 ... max-speed=` as "expects a number", **do not reinstall
+   dmidecode**. It is almost certainly already there. The package installs to
+   `/usr/local/sbin/dmidecode`, and `sudo` resets `PATH` to its `secure_path`,
+   which does not include `/usr/local/sbin` - so the binary exists, is on the
+   user's `PATH`, is listed in `onboot.lst`, and is still invisible to the
+   `sudo dmidecode` calls inside the script. `tce-load` will just answer
+   "dmidecode is already installed!" and nothing improves.
+
+   The fix is a symlink into a directory `secure_path` does cover:
+
+   ```sh
+   sudo ln -sf /usr/local/sbin/dmidecode /usr/bin/dmidecode
+   ```
+
+   TinyCore runs from RAM, so make it persist: append that line to
+   `/opt/bootlocal.sh` and run `~/vm/backup.sh` (`filetool.sh -bv`). `/opt`
+   and `/home` are already in `/opt/.filetool.lst`, so both are captured.
+   Backing up needs the ESP mounted, so it cannot be done while the VM holds
+   the NVMe.
 
 4. **Read** `~/zpp/serial.out` for the loader's trace. Windows itself prints
    nothing there.
