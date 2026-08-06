@@ -523,6 +523,79 @@ exercised under either. They are first exercised on hardware, which is
 where the risk concentrates and where it should be stated rather than
 discovered.
 
+## When each command may be issued, which is not obvious
+
+The ordering rule below is the one thing in this design that turns a working
+channel into an unbootable guest, and it is easy to get wrong because the
+constraint applies to only one of the three commands involved.
+
+NVMe Base 5.2.30.1.5, verbatim:
+
+> "The host should only submit a Set Features command for this Feature during
+> initialization **prior to creation of any I/O Submission and/or I/O
+> Completion Queues**. If a Set Features command is submitted for this Feature
+> **after creation of any I/O Submission and/or I/O Completion Queues, then
+> the controller shall abort that Set Features command with status code of
+> Command Sequence Error**."
+
+and:
+
+> "After a Controller Level Reset (CLR), the **first** Set Features command
+> for this Feature that the controller completes successfully shall allocate
+> I/O queues... After that first successful Set Features command, the number
+> of I/O queues allocated **shall not change until a CLR occurs**."
+
+### What that forbids, and what it does not
+
+It constrains **Set Features** only. Creating an I/O queue is not ordered
+against anything - a Create I/O Completion Queue or Create I/O Submission
+Queue may be issued at any point after the allocation exists.
+
+So the sequence that breaks the guest is: reserve queues *and create them*
+in one borrow, hand back, and let the guest's own Set Features arrive after
+our queues exist. It is aborted with Command Sequence Error, and Linux turns
+that into zero I/O queues and no block device - `nvme_set_queue_count` sets
+`*count = 0` on any error status and `nvme_setup_io_queues` then returns
+early. An unbootable root, from a diagnostic facility.
+
+### The order to use
+
+1. The guest resets the controller when it takes over, which is a CLR: every
+   I/O queue is deleted and the allocation is cleared. **This is why the
+   `CC.EN` 0 to 1 edge is the right place** - at that moment no I/O queue
+   exists, the admin queue is empty because the controller could not have
+   accepted a submission, and the processor that would make the first one is
+   the one held inside the exit.
+2. Borrow once there, and issue **Set Features (Number of Queues) alone**,
+   asking for the maximum. Create nothing. The allocation is now frozen until
+   the next reset.
+3. The guest's own Set Features arrives later with still no I/O queues
+   created, so it completes successfully and reports the allocation we
+   reserved - which is at least what it asked for. Linux takes
+   `min(requested, allocated)` and is content.
+4. The guest creates its queues, contiguously from 1.
+5. **Our own queues are created after that**, at an identifier above the
+   guest's usage and inside the allocation. Nothing forbids this ordering;
+   only step 2 was ever constrained.
+
+### What is still open, stated precisely
+
+Step 5 needs a second borrow, and unlike step 2 it happens while the guest is
+live. That is the quiescence problem, and it is the *whole* of what remains -
+it is not a Set Features problem, which is what it looked like at first.
+
+The identifier also has to be chosen rather than assumed. Drivers allocate
+contiguously from 1, so taking a low one collides and the controller answers
+Invalid Queue Identifier. Take the highest inside the allocation.
+
+### A correction worth keeping
+
+The lap length was reported as wrong during review, on the grounds that it
+assumed `2 * depth` while the submission and completion depths are
+independent fields. It does not: `admin_borrow::length` computes
+`lcm(s, 2 * c)` with Euclid, which is the right answer and already handles
+unequal depths. The criticism was of code that was not there.
+
 ## What is built, and what is only written down
 
 Honest inventory, because the gap matters more than the code here.
