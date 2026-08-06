@@ -40,12 +40,26 @@ public:
         out_of_ept_entries = 5,
         host_exception = 6,
         vmx_disabled_by_firmware = 7,
+        too_many_processors = 8,
     };
 
     /**
      * Maximum number of CPUs supported.
+     *
+     * Thirty two rather than sixteen. Sixteen was already below what
+     * current laptops ship - a mobile part with performance and
+     * efficiency cores passes it easily - and the cost of being wrong
+     * was not a refusal but a 512 KB stack written past the end of an
+     * array, since launch_on_cpu did not bound its index. That is fixed
+     * separately; this raises the ceiling to somewhere the fix is
+     * unlikely to be reached.
+     *
+     * It is not free. Every per-processor array scales with it and the
+     * stacks dominate: 512 KB each, so this member alone goes from 8 MB
+     * to 16 MB. They are zero initialized and therefore live in .bss, so
+     * the binary on disk barely moves and the loaded image does.
      */
-    static constexpr std::size_t max_cpus = 16;
+    static constexpr std::size_t max_cpus = 32;
 
     /**
      * Page size.
@@ -216,9 +230,111 @@ private:
     std::expected<void, zpp::error> initialize_ept();
 
     /**
+     * The 4 KB EPT entry covering a host physical address, splitting the
+     * 2 MB entry that covers it if that is what it takes.
+     *
+     * This is the one primitive everything that changes guest access
+     * rights is built from. It used to be welded inside protect_module,
+     * which meant the second caller had to either copy it or grow that
+     * function a parameter - so it is a function now, and protect_module
+     * is a loop over it.
+     *
+     * Fallible for one reason: splitting consumes a table from a finite
+     * pool shared with initialize_ept.
+     */
+    std::expected<arch::x86_64::vmx::epte *, zpp::error>
+    epte_for(std::uint64_t physical_address);
+
+    /**
      * Prepare module protection from guest access.
      */
     std::expected<void, zpp::error> protect_module();
+
+    /**
+     * Watches one page of guest physical memory for writes.
+     *
+     * Deliberately a general facility rather than a hook for whatever
+     * needed it first. A caller names a page and a function; when the
+     * guest writes anywhere in that page, the write is allowed to happen
+     * and then the function is told it did. Nothing here knows what a
+     * page contains, and the handler learns what changed by reading the
+     * device or the memory itself.
+     *
+     * That last point is what keeps this small: an EPT violation reports
+     * the address and whether the access was a read, a write or a fetch,
+     * and **it does not report the data** - SDM Table 30-7, and the
+     * instruction information field of SDM 30.2.4 is not populated for
+     * this exit. Emulating the access would therefore need an x86
+     * instruction decoder. Letting the guest's own instruction run and
+     * then looking at the result needs none, and cannot disagree with
+     * hardware about what the instruction meant.
+     *
+     * The step is done with the monitor trap flag: on the violation the
+     * page is opened and MTF armed, and on the MTF exit - one retired
+     * instruction later - the page is closed again and the handler runs.
+     *
+     * **The open window is visible to every other processor.** EPT is
+     * shared by all of them through one EPTP, so while one CPU is
+     * stepping, another writing the same page is not seen. That is
+     * acceptable for a watch on something only one processor touches at
+     * a time, and it is not a general guarantee. A watch that must miss
+     * nothing needs the guest quiesced or an EPT hierarchy per CPU;
+     * neither is built, and this comment is the warning to whoever needs
+     * one.
+     */
+    struct page_watch
+    {
+        /**
+         * Called after the guest's write has retired. Given the page
+         * that was written, not the address, because the step tells us
+         * which page was opened and not which byte the instruction
+         * touched.
+         */
+        using handler = void (*)(void * context, std::uint64_t page);
+
+        std::uint64_t page{};
+        handler on_write{};
+        void * context{};
+        bool armed{};
+    };
+
+    /**
+     * Arms a write watch on the page holding a guest physical address.
+     *
+     * Guest physical rather than host physical because that is what a
+     * caller has: it is what an EPT violation reports and what a device
+     * BAR is programmed with. The two are the same in this VMM, which
+     * builds an identity EPT - stated here rather than assumed, because
+     * it stops being true the moment anything remaps a guest page.
+     */
+    std::expected<void, zpp::error>
+    watch_guest_page_writes(std::uint64_t guest_physical,
+                            page_watch::handler on_write,
+                            void * context);
+
+    /**
+     * Removes a write watch and gives the page back to the guest.
+     */
+    void unwatch_guest_page(std::uint64_t guest_physical);
+
+    /**
+     * Handles an EPT violation. Returns whether it was ours - a false
+     * means nothing had that page watched, which is a bug rather than a
+     * guest error, and the caller stops the CPU.
+     */
+    bool on_ept_violation(std::size_t cpu);
+
+    /**
+     * Handles the monitor trap flag exit that a watched write is stepped
+     * with. Returns whether a step was in progress on this CPU.
+     */
+    bool on_monitor_trap_flag(std::size_t cpu);
+
+    /**
+     * Sets or clears the monitor trap flag in the primary processor
+     * based controls of the current VMCS.
+     */
+    void monitor_trap_flag(bool value);
 
     /**
      * Remove protection for unprotected guest memory.
@@ -1044,6 +1160,37 @@ private:
     std::size_t next_ept_table{};
 
     /**
+     * How many pages may be watched at once.
+     *
+     * Small on purpose. Each armed watch costs a VM exit on every guest
+     * write to its page, so a design that wants many of them is a design
+     * that should be reading memory directly instead. Arming more than
+     * this is a programming error and is refused rather than dropped.
+     */
+    static constexpr std::size_t watch_capacity = 8;
+
+    /**
+     * The armed page watches. A fixed table rather than a container:
+     * arming happens outside a VM exit but *matching* happens inside
+     * one, and nothing on that path may allocate.
+     */
+    page_watch watches[watch_capacity]{};
+
+    /**
+     * Whether this processor is currently stepping a watched write, and
+     * the page it opened to do it.
+     *
+     * Per processor because the step is: open the page, arm the monitor
+     * trap flag, resume, take the MTF exit one instruction later, close
+     * the page. Two processors can be inside that sequence at once on
+     * different pages, and the MTF exit has to know which page *this*
+     * one opened. The page number alone cannot say whether a step is in
+     * progress, since zero is a legal page, so the flag is separate.
+     */
+    bool stepping_watch[max_cpus]{};
+    std::uint64_t stepping_page[max_cpus]{};
+
+    /**
      * The hardware page table structures.
      * @{
      */
@@ -1120,6 +1267,8 @@ inline const zpp::error_category & category(hypervisor::error)
                 return "Host exception caught by the host IDT";
             case hypervisor::error::vmx_disabled_by_firmware:
                 return "VMX locked off in IA32_FEATURE_CONTROL";
+            case hypervisor::error::too_many_processors:
+                return "More processors than max_cpus";
             }
         });
     return error_category;

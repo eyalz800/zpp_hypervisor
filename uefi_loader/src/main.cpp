@@ -13,6 +13,8 @@ extern "C" {
 #include <Protocol/SimpleFileSystem.h>
 }
 #include "zpp/loader.h"
+#include "zpp/nvme_selftest.h"
+#include "zpp/reserved_region.h"
 #include "zpp/trace.h"
 #include "zpp/verify.h"
 
@@ -105,6 +107,8 @@ static bool g_timed_waits_usable = true;
  * everything below be ordinary code under `if constexpr`.
  */
 // Unqualified, so the many call sites below stay readable.
+using zpp::nvme_selftest;
+using zpp::reserved_region;
 using zpp::trace;
 using zpp::verify;
 
@@ -1313,6 +1317,20 @@ extern "C" EFI_STATUS EFIAPI uefi_main(EFI_HANDLE image_handle,
     // the firmware handed over rather than the one we made.
     trace_launch_context();
 
+    // Proves the admin queue borrow against the firmware's own NVMe
+    // driver, which has already initialised the controller and created
+    // its own I/O queue - and which this loader goes on to use for the
+    // rest of the boot, so a borrow that broke it would break the boot
+    // visibly. Compiles to nothing unless the disk sink is compiled in,
+    // and never fails the boot: every step is bounded and traced.
+    nvme_selftest::run();
+
+    // Declare the window the controller must be able to reach, while the
+    // firmware's tables are still ours to edit. This has to happen before
+    // the boot manager is started, because the guest reads the table once
+    // and builds its translation domains from what it found.
+    reserved_region::install(system_table);
+
     // Load the ELF.
     const zpp_loader_parameters parameters{
         .allocate_rwx = allocate_rwx,
@@ -1327,11 +1345,31 @@ extern "C" EFI_STATUS EFIAPI uefi_main(EFI_HANDLE image_handle,
         .adjust_launch_calling_convention = invoke_entry,
     };
 
-    trace::line("ZPP_TRACE loading");
+    // Everything this loader does except launching the hypervisor.
+    //
+    // A control run needs the same discovery, the same connected
+    // controllers, the same device path and the same guest, with only the
+    // thing under test removed - otherwise a guest that misbehaves cannot
+    // be attributed to the hypervisor rather than to the rig.
+    //
+    // Doing the control from the UEFI shell instead does not work, and the
+    // reason is the one this loader already handles: firmware connects
+    // only as much as it needs to reach its own boot option, so a
+    // passed-through disk carries no file system handle and its boot
+    // manager cannot be found at all. Reusing the loader is what makes the
+    // two runs comparable.
+    constexpr bool launch_hypervisor = !ZPP_CHAINLOAD_ONLY;
 
-    auto result = zpp_load_elf(&parameters);
+    std::uint64_t result{};
 
-    trace::line("ZPP_TRACE loaded");
+    if constexpr (launch_hypervisor) {
+        trace::line("ZPP_TRACE loading");
+        result = zpp_load_elf(&parameters);
+        trace::line("ZPP_TRACE loaded");
+    } else {
+        static_cast<void>(parameters);
+        trace::line("ZPP_TRACE chainload only, hypervisor not launched");
+    }
 
     // If we failed, return an arbitrary failure.
     if (result) {
@@ -1454,7 +1492,8 @@ extern "C" EFI_STATUS EFIAPI uefi_main(EFI_HANDLE image_handle,
     // nothing had booted from it and it carried no file system handle at
     // all; a machine that just chainloaded us through its own ESP does
     // not, because the boot manager is on that same ESP.
-    static constexpr bool chain_to_our_own_device_only = true;
+    static constexpr bool chain_to_our_own_device_only =
+        !ZPP_SEARCH_ALL_DEVICES;
 
     // The boot managers to chain to, in order of preference. Windows is
     // named explicitly rather than relying on the removable media

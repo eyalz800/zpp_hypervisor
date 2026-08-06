@@ -1,6 +1,7 @@
 #pragma once
 #include "zpp/diag/sink.h"
 #include "zpp/diag/sinks/counter.h"
+#include "zpp/diag/sinks/esp_blocks.h"
 
 namespace zpp::diag
 {
@@ -29,6 +30,6 @@ namespace zpp::diag
  * Enabling one in zpp/diag/config.h without adding it here is a build
  * failure - see the static_assert at the bottom of pump.h.
  */
-using sinks = sink_list<counter_sink>;
+using sinks = sink_list<counter_sink, esp_block_sink>;
 
 } // namespace zpp::diag
