@@ -949,7 +949,31 @@ std::expected<void, zpp::error> establish(EFI_HANDLE image_handle)
     auto new_total = layout->total_sectors;
     auto shrank = false;
 
-    if (existing_gap >= wanted_sectors) {
+    // The most this volume could ever give, from its structure alone.
+    // Fixed across boots: the first data sector does not move when the
+    // file system shrinks, and the cluster floor is a constant, so the
+    // same volume always answers the same here.
+    //
+    // The request is clamped to it **before** asking whether the
+    // reservation already exists, and that ordering is the whole point.
+    // Comparing the gap against the raw request instead means a volume
+    // that can only ever give thirty one megabytes is asked for sixty
+    // four, reports itself unreserved on every boot, and never hands
+    // over a channel at all - having already been shrunk on the first.
+    auto floor_total = layout->first_data_sector +
+                       (esp_reservation::minimum_clusters_left *
+                        layout->sectors_per_cluster);
+    if (where->partition_sectors <= floor_total) {
+        trace::line("esp reservation: cannot take even the minimum");
+        return std::unexpected(zpp::error{code::too_few_clusters_left});
+    }
+    auto largest_sectors =
+        static_cast<std::uint32_t>(where->partition_sectors - floor_total);
+    auto target_sectors = (wanted_sectors < largest_sectors)
+                              ? wanted_sectors
+                              : largest_sectors;
+
+    if (existing_gap >= target_sectors) {
         // The steady state, and the reason this is safe to run every
         // boot: nothing is written, nothing is checked against the
         // allocator, and the answer is the same one as last time.
@@ -961,41 +985,121 @@ std::expected<void, zpp::error> establish(EFI_HANDLE image_handle)
         // part way through a cluster leaves the driver with a cluster it
         // counts and cannot fully address, and leaves us with a
         // reservation that overlaps one.
-        auto target_total = static_cast<std::uint32_t>(
-            where->partition_sectors - wanted_sectors);
-        if ((where->partition_sectors < wanted_sectors) ||
-            (target_total <= layout->first_data_sector)) {
+        // Take what the volume can give rather than only what was
+        // asked for.
+        //
+        // A partition that cannot spare the full request can usually
+        // spare something, and a smaller log is worth having - refusing
+        // outright leaves a machine with no channel at all because it
+        // could not give sixty four megabytes. So each constraint that
+        // the request violates says how much has to be handed back, and
+        // the request is reduced by that much and tried again.
+        //
+        // Bounded rather than looped until it converges. Each pass
+        // scans the FAT, and a search that cannot settle in a few
+        // attempts is one whose answer is not worth the reads.
+        constexpr int attempts = 4;
+        auto minimum_sectors = static_cast<std::uint32_t>(
+            esp_reservation::minimum_reservation_bytes /
+            where->block_size);
+
+        // The most this volume could give even in principle, from its
+        // structure alone: everything past the file system's own
+        // metadata and the fewest clusters a FAT32 volume may have.
+        //
+        // Computed rather than discovered by failing. Asking for more
+        // than the partition holds is not an error to refuse on, it is
+        // simply a request that has to come down to what is there - and
+        // a first attempt that overshoots the whole partition produces
+        // nonsense to reduce from.
+        auto reserve_sectors = target_sectors;
+        std::uint32_t kept_clusters{};
+        bool settled = false;
+
+        for (int attempt{}; attempt < attempts; ++attempt) {
+            if (reserve_sectors < minimum_sectors) {
+                break;
+            }
+
+            auto target_total = static_cast<std::uint32_t>(
+                where->partition_sectors - reserve_sectors);
+
+            kept_clusters = (target_total - layout->first_data_sector) /
+                            layout->sectors_per_cluster;
+            new_total = layout->first_data_sector +
+                        (kept_clusters * layout->sectors_per_cluster);
+
+            // A volume stops being FAT32 below a cluster count, so this
+            // is a hard floor rather than a preference. Hand back
+            // exactly the difference.
+            if (kept_clusters < esp_reservation::minimum_clusters_left) {
+                auto short_by =
+                    esp_reservation::minimum_clusters_left - kept_clusters;
+                auto give_back = short_by * layout->sectors_per_cluster;
+                if (reserve_sectors <= give_back) {
+                    break;
+                }
+                reserve_sectors -= give_back;
+                continue;
+            }
+
+            auto scan = scan_fat(*where, *layout, kept_clusters);
+            if (!scan) {
+                return std::unexpected(scan.error());
+            }
+
+            // A cluster in the region is in use, so the region has to
+            // start after it. Hand back enough to keep it inside.
+            if (0 != scan->first_in_use) {
+                trace::hex_line("esp reservation: cluster in use at ",
+                                scan->first_in_use);
+                auto must_keep = scan->first_in_use + 1;
+                if (must_keep <= kept_clusters) {
+                    break;
+                }
+                auto give_back = (must_keep - kept_clusters) *
+                                 layout->sectors_per_cluster;
+                if (reserve_sectors <= give_back) {
+                    break;
+                }
+                reserve_sectors -= give_back;
+                continue;
+            }
+
+            auto cluster_bytes =
+                static_cast<std::uint64_t>(layout->sectors_per_cluster) *
+                where->block_size;
+            auto free_bytes = static_cast<std::uint64_t>(scan->free_kept) *
+                              cluster_bytes;
+
+            if (free_bytes < esp_reservation::minimum_free_bytes) {
+                auto short_by =
+                    esp_reservation::minimum_free_bytes - free_bytes;
+                auto give_back = static_cast<std::uint32_t>(
+                    ((short_by + cluster_bytes - 1) / cluster_bytes) *
+                    layout->sectors_per_cluster);
+                if (reserve_sectors <= give_back) {
+                    break;
+                }
+                reserve_sectors -= give_back;
+                continue;
+            }
+
+            settled = true;
+            break;
+        }
+
+        if (!settled) {
+            trace::line("esp reservation: cannot take even the minimum");
             return std::unexpected(
                 zpp::error{code::too_few_clusters_left});
         }
 
-        auto kept_clusters = (target_total - layout->first_data_sector) /
-                             layout->sectors_per_cluster;
-        new_total = layout->first_data_sector +
-                    (kept_clusters * layout->sectors_per_cluster);
-
-        if (kept_clusters < esp_reservation::minimum_clusters_left) {
-            return std::unexpected(
-                zpp::error{code::too_few_clusters_left});
-        }
-
-        auto scan = scan_fat(*where, *layout, kept_clusters);
-        if (!scan) {
-            return std::unexpected(scan.error());
-        }
-
-        if (0 != scan->first_in_use) {
-            trace::hex_line("esp reservation: cluster in use at ",
-                            scan->first_in_use);
-            return std::unexpected(zpp::error{code::region_in_use});
-        }
-
-        auto free_bytes = static_cast<std::uint64_t>(scan->free_kept) *
-                          layout->sectors_per_cluster * where->block_size;
-        trace::hex_line("esp reservation: free bytes left after shrink ",
-                        free_bytes);
-        if (free_bytes < esp_reservation::minimum_free_bytes) {
-            return std::unexpected(zpp::error{code::too_little_free_left});
+        if (reserve_sectors != wanted_sectors) {
+            trace::hex_line("esp reservation: asked for sectors ",
+                            wanted_sectors);
+            trace::hex_line("esp reservation: taking sectors ",
+                            reserve_sectors);
         }
 
         trace::hex_line("esp reservation: shrinking total sectors to ",

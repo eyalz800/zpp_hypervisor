@@ -250,15 +250,27 @@ struct esp_reservation
     static constexpr bool enabled = diag::enabled;
 
     /**
-     * How much to take, in bytes.
+     * How much to take, in bytes, and the least worth taking.
      *
-     * Sixty four megabytes against the several hundred an EFI system
-     * partition normally has: enough log to be worth reading, small
-     * enough that a machine whose partition is nearly full is not pushed
-     * over by it. Named rather than spelled at the use, because this is
-     * the number a person changes.
+     * Both come from the diagnostic configuration rather than being
+     * spelled here, because that is where everything else about this
+     * facility is decided.
+     *
+     * The first is a request. A partition that cannot give it gives what
+     * it can, down to the second - a smaller log is worth having, and a
+     * machine that declines to log at all because it could not spare
+     * sixty four megabytes is worth nothing.
+     * @{
      */
-    static constexpr std::uint64_t reservation_bytes = 64ull * 1024 * 1024;
+    static constexpr std::uint64_t reservation_bytes =
+        std::uint64_t{diag::esp_reservation_megabytes} * 1024 * 1024;
+
+    static constexpr std::uint64_t minimum_reservation_bytes =
+        std::uint64_t{diag::esp_reservation_minimum_megabytes} * 1024 *
+        1024;
+    /**
+     * @}
+     */
 
     /**
      * The fewest data clusters the file system may be left with.

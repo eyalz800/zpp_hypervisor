@@ -68,6 +68,30 @@ inline constexpr bool enabled = ZPP_DIAG;
 inline constexpr bool reserve_controller_window = enabled;
 
 /**
+ * How much of the EFI system partition to take for the log, in
+ * megabytes.
+ *
+ * Taken by shrinking the file system out of a tail of the partition, so
+ * this is space no file can be allocated in and nothing can delete.
+ *
+ * It is a request rather than a demand. A partition that cannot give
+ * this much gives what it can - see `esp_reservation_minimum_megabytes`
+ * - because a smaller log is worth having and a machine refusing to log
+ * at all because it could not spare sixty four megabytes is worth
+ * nothing.
+ */
+inline constexpr std::uint32_t esp_reservation_megabytes = 64;
+
+/**
+ * The least worth taking.
+ *
+ * Below this the log holds so little that the first interesting thing
+ * would already have scrolled out of it, and the file system has been
+ * modified for no benefit. Refuse instead, and say so.
+ */
+inline constexpr std::uint32_t esp_reservation_minimum_megabytes = 1;
+
+/**
  * How much a line is worth saying. Ordered, and compared with at_least
  * below rather than with `>=` on the enumerators, so the ordering is
  * stated in one place.
