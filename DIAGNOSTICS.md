@@ -169,24 +169,48 @@ run bit never sets. **A bring-up that waits unboundedly for that bit hangs
 Bochs at boot and looks like our own defect.** Bounded polls with a reported
 verdict are therefore a correctness requirement, not a style preference.
 
-## The display: the only channel an IOMMU cannot touch
+## The requirement, stated so that a channel can be judged against it
 
-The scanout engine re-reads the framebuffer at refresh rate with no
-processor involvement, so a machine frozen in any of the three shapes above
-still shows whatever was last drawn.
+A channel is only a channel here if it satisfies all three:
 
-Linux merged a QR-code panic screen in 6.12 and Fedora ships it, with a
-decoder, and deliberately implemented only the subset of the QR
-specification it needed. That is the precedent for making this channel
-machine-readable rather than photographable.
+1. **A program can read it.** Not a person looking at a screen, not a
+   photograph. The whole point is that the records are analysed, and at
+   nested-virtualization volume a human in the loop is no loop at all.
+2. **It works while the guest is completely stuck.** That is the failure
+   being chased. Note this is not the same as the *hypervisor* being stuck:
+   a wedged guest still takes VM exits, so our code still runs and can still
+   drive a device. Only a wedged hypervisor needs the stronger property of
+   data already handed to hardware.
+3. **It cannot fail silently.** A channel that stops working and reports
+   nothing is worse than no channel, because it is trusted.
 
-**The open question, and it is one experiment:** `drm_panic` needs each
-driver to implement `get_scanout_buffer`, because only the driver knows
-which surface is currently being scanned out. That predicts that writing the
-pre-boot framebuffer may silently do nothing once the guest's display driver
-has taken over. Boot the guest, paint the framebuffer from a VM exit, and
-see whether the panel changes. Until that is run, this channel is proven
-only before the guest starts.
+That third one is what removed the display, below.
+
+## The display: removed, and why
+
+Built, verified under emulation, merged, and then **reverted**. Kept here so
+nobody re-adds it without answering the question that killed it.
+
+The attraction was real: the scanout engine re-reads the framebuffer with no
+processor involvement, so a frozen machine keeps displaying the last thing
+drawn, and it is the only candidate an IOMMU cannot touch, because we write
+it with processor stores rather than DMA. Linux merged a QR-code panic
+screen in 6.12, so machine-readability had a precedent.
+
+It fails requirement 1 outright - no program of ours can read a panel - and
+it probably fails requirement 3. `drm_panic` needs every driver to implement
+`get_scanout_buffer`, because only the driver knows which surface is
+currently being scanned out. That predicts that once the guest's display
+driver takes over, our writes to the pre-boot framebuffer go into memory
+nobody reads, and produce no error while doing it. There is a window where
+it demonstrably works - our bring-up, the boot manager, early kernel, which
+is where the recovery-screen failure lived - but that window closes exactly
+where the nested-virtualization work begins.
+
+The experiment that would settle it, if it is ever worth a boot: paint the
+framebuffer from a VM exit well after the guest has booted, and see whether
+the panel changes. Until someone runs it, this is a channel that might
+silently do nothing, which is the one thing this project will not ship.
 
 ## The IOMMU problem, which is common to every DMA channel
 
