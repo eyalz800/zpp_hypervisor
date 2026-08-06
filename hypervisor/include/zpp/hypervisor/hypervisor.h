@@ -1210,19 +1210,6 @@ private:
     struct alignas(page_size) unprotected_memory
     {
         /**
-         * The intermediate GDT to be loaded after page table switch
-         * and before VMM and guest are launched.
-         * Also to be reused in guest in case a new TSS needs to be
-         * allocated in UEFI boot.
-         */
-        alignas(0x10) std::uint64_t intermediate_gdt[max_cpus][0x2000]{};
-
-        /**
-         * The task segment to be used by the guest in case no TSS.
-         */
-        alignas(0x10) std::uint32_t guest_tss[max_cpus][26]{};
-
-        /**
          * What a guest reading this module's memory is shown instead.
          *
          * Not-present would be the honest answer and it is not an
@@ -1239,12 +1226,33 @@ private:
          * page of this module not-present. A hole in that coverage
          * should not be something one has to notice.
          *
+         * First in the structure on purpose. The structure is already
+         * page aligned, so at offset zero this page is too, and the
+         * member does not have to say so a second time - one alignment
+         * rather than two agreeing. It does not make the structure any
+         * smaller: the total is rounded up to a page either way, so the
+         * padding simply moves to the end.
+         *
          * Shared by every processor and every redirected page,
          * deliberately. It is a sink, not storage: nothing in this VMM
          * ever reads it, and a guest that reads back what it wrote into
          * it has learned nothing it did not already know.
          */
-        alignas(page_size) std::uint8_t decoy_page[page_size]{};
+        std::uint8_t decoy_page[page_size]{};
+
+        /**
+         * The intermediate GDT to be loaded after page table switch
+         * and before VMM and guest are launched.
+         * Also to be reused in guest in case a new TSS needs to be
+         * allocated in UEFI boot.
+         */
+        alignas(0x10) std::uint64_t intermediate_gdt[max_cpus][0x2000]{};
+
+        /**
+         * The task segment to be used by the guest in case no TSS.
+         */
+        alignas(0x10) std::uint32_t guest_tss[max_cpus][26]{};
+
     } unprotected_memory;
 
     /**
