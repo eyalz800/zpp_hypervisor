@@ -131,7 +131,7 @@ question to a per-range one, and `reserved_region_strategy.h` on top of it.
 right question while nothing could be done about it. `reach_verdict` answers
 "is *this range* reachable, and if not, why not", with one enumerator per
 cause. Three mean reachable, one means installed, one means would-install,
-and fifteen are named refusals.
+and sixteen are named refusals.
 
 The walk supports both translation table modes:
 
@@ -156,11 +156,87 @@ would follow a field hardware ignores. The PASID directory index is bounded
 against `2^(PDTS+7)` before it is used, because an index past the end reads
 whatever the guest keeps after the directory.
 
+### Three ways to read a second-stage entry wrong
+
+None of these are hypotheticals: each was found by writing a test that
+constructs the situation, and each made the walk answer wrongly before it was
+fixed. The first would have corrupted guest memory.
+
+**`RTADDR.SSIRWE`, bit 7, is refused.** Rev 5.20 added Second Stage I/O
+Read/Write Permissions, and the enable for it sits in the register the walk
+already reads: "0: Hardware uses bit 0 (R) and bit 1 (W) in second-stage
+paging entries to calculate effective permissions. 1: Hardware uses bit 61
+(IR) and bit 62 (IW)." That is not one more permission model to support. A
+second-stage entry has **no present bit** - `dma_pte_present()` is
+`(pte->val & 3) != 0` - so with SSIRWE set the only test this walker has for
+presence reads a live entry as empty, and the install path overwrites a
+mapping of the guest's. That is the single outcome every other rule here
+exists to prevent, so the unit is refused and named instead. It is read in
+legacy mode too, where 7.2 makes setting it a programming error (fault
+RTA.1.4): a misprogrammed unit is not one to start writing tables for.
+Hardware without the feature reports the bit `Reserved(0)`, so no existing
+machine pays for this.
+
+**The address in a second-stage entry is bits 51:12, not `~0xfff`.** The root,
+context and PASID pointers describe themselves as "bits 63:HAW are reserved
+(0)", so masking off the low twelve is enough for them. A second-stage entry
+does not: Tables 41-47 give it `(HAW-1):12 ADDR`, `51:HAW R: Reserved (0)`,
+`60:52 IGN` and `63 IGN` - ten bits hardware ignores and *software may
+therefore use*. These are the guest's tables. Taking an ignored bit for part
+of the address turns a leaf that maps exactly our window into one that appears
+to map somewhere else, and the `mapped_elsewhere` refusal that follows writes
+off a machine over a flag some other software parked in a bit the architecture
+set aside for it. Linux's `VTD_PAGE_MASK` is the wide one, which is right for
+Linux because Linux wrote every entry it reads.
+
+**Bit 7 is `PS` only two levels down.** Table 43 is the 1 GByte page at level 3
+and Table 45 the 2 MByte page at level 2. At level 4 and level 5 the same bit
+is `7 R: Reserved (0)` - Tables 42 and 41. Believing it there invents a
+512 GByte or 256 TByte mapping out of a bit that should not have been set and
+then compares the window against its imaginary base, which is a coin toss
+between a false `covered_by_superpage` and a false `identity_mapped`. A unit
+whose tables say that is refused as an unsupported configuration.
+
 ### The install, and the invalidation that is not issued
 
 Only ever 0 to present. A present entry is never modified and nothing is ever
 unmapped: leaving the mapping in place forever is the correct outcome, and
-removing it is the direction that would need an invalidation. The entry is
+removing it is the direction that would need an invalidation.
+
+Two things make that a property of the code rather than a description of the
+order it happens to do things in.
+
+**The window is answered read-only before anything is written.** A single pass
+that installs as it goes breaks the contract the moment a window is longer
+than one page: page zero gets a leaf, page one turns out to be covered by a
+superpage, and the call returns a refusal having already changed the guest's
+tables - leaving a mapping the caller was told not to use, with no owner, and
+no way to remove it, removal being the direction that needs an invalidation.
+So `reach` walks the whole window with `install` forced false first, and only
+if every page came back reachable or installable does it walk again to write.
+The second pass re-walks from the same root rather than remembering slot
+addresses, because the guest may have freed and reused an intermediate table
+in between, and a zero read out of a reused page looks exactly like an
+installable leaf.
+
+**The write is a compare-exchange against zero.** These are the guest's
+tables and the guest is running - on other processors, in a driver that knows
+nothing about us, at any moment between the read of the slot and the store to
+it. Linux writes the same word the same way, and the comment on its losing
+branch says the whole thing:
+
+```c
+tmp = 0ULL;
+if (!try_cmpxchg64(&pte->val, &tmp, pteval))
+    /* Someone else set it while we were thinking; use theirs. */
+```
+
+Losing is not an error here either: whatever the guest put there is judged
+exactly as it would have been had the read seen it, which for an identity
+mapping of our own window is success. It costs one `lock cmpxchg` on a line
+that is about to be dirtied anyway.
+
+The entry is
 `(hpa & addr_mask) | R | W`, with SNP at bit 11 **only** when `ECAP.SC` allows
 it, since Table 47 makes the field "reserved(0) by hardware implementations
 not supporting Snoop Control" and a reserved bit set in a present entry is a
@@ -192,12 +268,22 @@ non-functional on units reporting a major version of 6 or above, which report
 every request as an error rather than performing it.
 
 The gate keeps its existing refusals of `CAP.CM = 1` and `CAP.RWBF = 1`, and
-adds refusals for abort-DMA mode, the reserved mode, a window that is not
-whole 4 KB pages, a window above `CAP.MGAW` or above the domain's own AGAW,
-an absent root, context, PASID directory or PASID table entry, first-stage-
-only and nested translation, a missing intermediate level, a leaf mapping
-something else, a leaf without write permission, and a large page covering the
-window.
+adds refusals for abort-DMA mode, the reserved mode, `RTADDR.SSIRWE`, a window
+that is not whole 4 KB pages, a window above `CAP.MGAW` or above the domain's
+own AGAW or above bit 51, an absent root, context, PASID directory or PASID
+table entry, first-stage-only and nested translation, a missing intermediate
+level, a leaf mapping something else, a leaf without write permission, and a
+large page covering the window.
+
+**Sizing the walk needs both widths, not `MGAW` alone.** 11.4.2: "Guest
+addressability for a given DMA request is limited to the minimum of the value
+reported through this field and the adjusted guest address width of the
+corresponding page-table structure." `MGAW = 57` with `SAGAW` reporting 48
+only is a real part, so the AGAW from the context or PASID entry is checked
+separately against the window rather than assumed to follow from `MGAW`. The
+level count comes from that field too and is never hardcoded: real hardware
+advertises exactly one `SAGAW` bit, and the walk is exercised at three, four
+and five levels.
 
 ## What was proven, and what was not
 
@@ -237,17 +323,57 @@ answer under boot services, and it is not a null result: it means `VER_REG` at
 `fed90000` read as a real version rather than zero or all ones, so the base
 parsed out of the DRHD is a register block.
 
+### The walk itself, run against synthetic tables
+
+The paragraph above is as far as a boot gets, and the reason is structural
+rather than a missing option: under boot services no operating system has
+enabled translation yet, so `GSTS.TES` is clear and `reach` correctly answers
+before it walks anything. Relaxing the `CAP.CM = 1` refusal does not help,
+because `caching-mode=on` is not what stops the walk - `TES = 0` is. And on
+the resident side, where translation would be on, `reserved_region_strategy`
+still has no caller: hooks 2 and 3 below are not written. So there is at
+present **no configuration of this tree in which a boot executes the walk**,
+and saying so is more useful than a run that proves the early exit twice.
+
+What the walk was run against instead is a harness that builds root, context,
+PASID directory, PASID table and second-stage tables in ordinary memory and
+points `reach` at them through its own `physical_to_virtual`, with a struct
+standing in for the register block. That is not a simulation of the hardware:
+every field position, every index, every mask and the whole descent are the
+real code, and the tables are laid out from the specification independently of
+it. Sixty-one checks, all passing:
+
+- both modes; three, four and five level walks derived from the `AW` field
+- install, and the read-only probe of the same tables leaving them at zero
+- re-running after an install and getting `identity_mapped`
+- `SNP` present exactly when `ECAP.SC` is set
+- every refusal above, each constructed rather than argued: absent root,
+  context, PASID directory and PASID table entries, reserved `TT`, reserved
+  `AW`, reserved `PGTT`, a PASID directory index past `2^(PDTS+7)`, both
+  reserved translation table modes, `SSIRWE`, `CM`, `RWBF`, unaligned and
+  oversized windows, windows above `MGAW` and above a smaller domain AGAW,
+  a missing intermediate level, a leaf mapping elsewhere, a read-only leaf,
+  and a 2 MByte page mapping elsewhere
+- the scalable upper root half for `devfn >= 0x80`
+- `RID_PASID` honoured with `ECAP.RPS` and *ignored without it*, checked by
+  giving the same tables a non-zero `RID_PASID` and confirming the walk then
+  looks up PASID 0 and stops
+- the three misreadings in "Three ways to read a second-stage entry wrong",
+  each as a case that the previous revision of the header fails: it installs
+  a leaf with `SSIRWE` set, calls a leaf with ignored bits `mapped_elsewhere`,
+  and reads a stray bit 7 at level 4 as a superpage
+- a two-page window whose second page is refused, asserting the **first page
+  is still zero** afterwards
+
 **Not proven, and this is the important half of the report.**
 
 - **No guest has ever read the injected table.** Nothing here shows an
   operating system parsing the RMRR, reserving the range, or identity mapping
   it. That is the entire premise of the strategy and it is untested.
-- **The install path has never executed.** Every run so far ends at
-  `no_translation`, because nothing enabled translation. The walk down root,
-  context and second-stage tables, the leaf comparison, the CLFLUSH and the
-  store have been compiled and reasoned about, not run.
-- **The scalable-mode walk has never executed.** `x-scalable-mode` was not
-  exercised.
+- **The walk has never run against remapping hardware**, emulated or real -
+  only against tables written by a harness. A harness cannot find a field this
+  code and the harness misread the same way, which is the class of mistake the
+  citations exist to catch and the reason each one names a table.
 - **Nothing has run on hardware.**
 - **The claim that Windows re-applies reservations at every domain creation is
   argued, not measured here.** It is the load-bearing assumption behind
