@@ -366,6 +366,88 @@ Whatever is chosen must be debug-only and **loud**. Degrading a machine's
 DMA protection to chase a hang is fine; doing it silently on a build
 believed to be clean is not.
 
+## What the guest actually does with remapping hardware, measured
+
+Everything below was read out of the remapping unit's own registers with
+`xp` on the QEMU monitor while Windows ran, so it perturbs nothing and needs
+no software in the guest. It replaces several paragraphs of reasoning about
+what Windows "should" do.
+
+### How to take this measurement again
+
+Boot the rig with a monitor attached, and read the three registers that
+decide everything:
+
+```sh
+ZPP_QEMU_EXTRA='-monitor telnet:0.0.0.0:4444,server,nowait' sudo -E ./boot-zpp.sh
+```
+
+```sh
+printf "xp /1xw 0xfed9001c\nxp /1xg 0xfed90020\nxp /1xg 0xfed900b8\n" \
+  | nc 192.168.1.199 4444
+```
+
+`0xfed9001c` is GSTS, `0xfed90020` RTADDR, `0xfed900b8` IRTA. Read
+`0xfed90000` too: a VER of `0x10` confirms the unit is really being read and
+the zeroes below are answers rather than a dead window.
+
+### The results
+
+Three configurations, each with the loader's rewritten DMAR unless stated,
+read at the desktop rather than at the login screen - the values are the same
+at both, which was checked rather than assumed.
+
+| | GSTS | RTADDR | IRTA | meaning |
+|---|---|---|---|---|
+| hypervisor present | `0x07000000` | `0` | `0x16080a` | interrupt remapping on, **no DMA translation** |
+| chainload only, same tables | `0x00000000` | `0` | `0` | nothing enabled |
+| UEFI shell, firmware's own tables | `0x00000000` | `0` | `0` | nothing enabled |
+
+**In every configuration `GSTS.TES` is clear and `RTADDR` is zero.** No device
+is ever placed in a translating domain on this machine, so the physical
+addresses handed to a controller are valid device addresses, and the disk
+channel needs no IOMMU work here. That is the `translation off - reachable`
+verdict the gate already reports, now confirmed against hardware rather than
+inferred.
+
+### Two things this settles that were previously argued
+
+**The reserved region is untested, not refused.** Declaring one, and
+additionally setting `DMA_CTRL_PLATFORM_OPT_IN` in the DMAR flags - taking
+them from `0x1` to `0x5`, verified in guest memory - changed nothing about
+`TES`. Windows never enables DMA translation here, so it never has occasion
+to honour a reserved region and whether it would remains unknown. This is
+consistent with `stornvme` defaulting to `DmaRemappingCompatible = 2`, which
+opts in only for an external device or under Driver Verifier; an internal
+boot controller stays untranslated whatever the platform flag says.
+Answering the question needs a machine where translation actually comes on,
+or the per-device opt-in forced inside the guest.
+
+**Interrupt remapping differs because of the hypervisor, not the tables.**
+The first comparison was taken against a UEFI shell boot and was invalid
+twice over: the shell connects only what it needs for its own boot option, so
+the passed-through disk had no file system at all, and it does none of the
+ACPI rewriting the loader does - so the guest saw a different platform
+description. `ZPP_CHAINLOAD_ONLY` exists to remove both differences, and with
+it the comparison is clean: identical loader, identical rewritten tables,
+identical guest, hypervisor absent. Windows enables interrupt remapping only
+when the hypervisor is present.
+
+A hypothesis that fits, and is not measured: we hide VMX, so Hyper-V stands
+down and plain Windows programs the unit itself, while without us Hyper-V
+runs nested and does not program the physical unit in this configuration.
+
+### The trap that cost a boot
+
+The first control run aborted with `ZPP_HYPERVISOR_FAILED on the boot cpu`
+after printing `text="KVMKVMKVM..."`. `ZPP_VERIFY_HYPERVISOR` was stale `ON`
+in the CMake cache, so the self check looked for our signature and found the
+outer KVM's. It was reporting correctly - with `ZPP_CHAINLOAD_ONLY` there is
+no hypervisor to find - and the two options are contradictory by definition.
+The build system now forces the check off whenever the launch is skipped,
+rather than leaving it to be remembered. `BACKLOG.md` already recorded this
+option costing time once through a stale cache entry; this is the second.
+
 ## What is built
 
 `diag/include/zpp/diag/` is the facility every channel plugs into: one

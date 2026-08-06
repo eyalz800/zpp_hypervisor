@@ -167,7 +167,14 @@ target_compile_definitions(zpp_loader_efi PRIVATE
     # Compiles the CPUID self check that asserts the hypervisor reached root
     # mode. Off by default: it is a test facility, whether run locally or in
     # CI, and has no place in a loader that is actually being deployed.
-    "ZPP_VERIFY_HYPERVISOR=$<BOOL:${ZPP_VERIFY_HYPERVISOR}>"
+    # Forced off when the hypervisor is not launched, rather than merely
+    # documented as incompatible. The check asserts that our signature is in
+    # CPUID; with ZPP_CHAINLOAD_ONLY there is nothing to find, so it reports
+    # a failure that is correct and useless, and it stops the boot before the
+    # control run can produce the comparison it exists for. It cost a boot
+    # exactly once, through a stale ON in a cache - the same way
+    # BACKLOG.md records this option costing time before.
+    "ZPP_VERIFY_HYPERVISOR=$<AND:$<BOOL:${ZPP_VERIFY_HYPERVISOR}>,$<NOT:$<BOOL:${ZPP_CHAINLOAD_ONLY}>>>"
     # Serial tracing, controlled on its own so it can be enabled or disabled
     # independently of the check above. Defaults to the same value.
     "ZPP_TRACE=$<BOOL:${ZPP_TRACE}>"
