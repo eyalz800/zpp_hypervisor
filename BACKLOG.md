@@ -177,12 +177,24 @@ No DR7 or `IA32_DEBUGCTL` save/load controls, and MSR `0x79`
 (microcode update) is unhandled — it falls into whichever of the two MSR
 default paths covers its range rather than being answered deliberately.
 
-### 9. `vmxoff` without `vmclear` on one failure path
+### 9. `vmxoff` without `vmclear` on one failure path — NOT REPRODUCIBLE
 
-`hypervisor.cpp:2139` arms a `scope_exit` that runs `vmxoff` alone. The
-path at `:1638` does the same thing correctly, clearing the VMCS first.
-Leaving a VMCS current across `vmxoff` leaves it in an implementation-
-specific state.
+Re-checked against the current tree, and neither guard can fire with a
+VMCS current. Both were read rather than assumed:
+
+- The guard inside `enter_root_mode` is released the instant `vmptrld`
+  succeeds. It therefore only ever fires because `vmclear` or `vmptrld`
+  failed, and in both of those cases no VMCS is current.
+- The guard in `main` has no `return` between it and `vm_launch`, and
+  `vm_launch` does not return. With `-fno-exceptions` there is no unwind
+  path at all, so it is unreachable.
+
+Left open as a **trap rather than a defect**: the second guard is
+correct only because nothing returns past it. Adding a `return` between
+it and the launch would silently make it wrong, and the symptom -
+a VMCS left current across `vmxoff`, in an implementation specific
+state - would not point back here. Anyone adding an early return there
+should give the guard a `vmclear` first.
 
 ## Concurrency
 
