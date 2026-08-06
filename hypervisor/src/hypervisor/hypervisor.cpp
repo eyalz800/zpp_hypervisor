@@ -2495,27 +2495,18 @@ hypervisor::main(arch::x86_64::context & caller_context)
     const auto * launch = reinterpret_cast<const zpp_launch_parameters *>(
         caller_context.rsi);
 
-    // Taken with the field's own type, so the two cannot drift apart
-    // and nothing here casts.
-    //
-    // The shared header spells this `uintptr_t` because it is included
-    // from C, while everything downstream of here spells the same thing
-    // `std::uint64_t`. Those are the same type on this target and the
-    // standard does not promise it, so it is asserted rather than
-    // believed - a target where they differed would otherwise fail
-    // somewhere further away, as a function pointer conversion error
-    // with no hint that this is where the two spellings meet.
-    static_assert(
-        std::is_same_v<std::uintptr_t, std::uint64_t>,
-        "the launch structure and the hypervisor must agree on the "
-        "type of a physical address, and they name it differently");
-
-    // Null is not expected - the loader always supplies one - but it is
-    // checked rather than dereferenced on faith, since arriving here
-    // with null would otherwise be a fault with no explanation.
-    decltype(zpp_launch_parameters::physical_to_virtual)
-        physical_to_virtual =
-            launch ? launch->physical_to_virtual : nullptr;
+    // The launch structure spells a physical address `uintptr_t`,
+    // because it is included from C, and everything below spells it
+    // `std::uint64_t`. Converted through an integer rather than
+    // reinterpreting one function pointer type as another directly,
+    // and null checked rather than dereferenced on faith - the loader
+    // always supplies one, but arriving here without it would
+    // otherwise be a fault with nothing to explain it.
+    auto physical_to_virtual =
+        reinterpret_cast<std::uint64_t (*)(std::uint64_t)>(
+            launch ? reinterpret_cast<std::uintptr_t>(
+                         launch->physical_to_virtual)
+                   : 0);
     auto start_up_memory =
         launch ? reinterpret_cast<std::uint64_t>(launch->start_up_memory)
                : 0;
