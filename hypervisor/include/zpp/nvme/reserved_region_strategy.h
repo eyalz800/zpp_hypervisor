@@ -72,8 +72,17 @@ struct reserved_region_strategy
      * processors to race on - the shape CLAUDE.md asks for in anything
      * reachable from a VM exit. Written once, from the boot processor,
      * before the guest is running.
+     *
+     * Declared here and defined below the class, which is not a style
+     * choice: a default member initializer of a nested type cannot be
+     * used from inside the enclosing class's own definition, so the
+     * obvious `static inline constinit hardware unit{};` is rejected
+     * outright - "default member initializer for 'registers' needed
+     * within definition of enclosing class". Moving the initializer out
+     * is the whole fix, and it keeps both `constinit` and the member
+     * initializers that make every field's default explicit.
      */
-    static inline constinit hardware unit{};
+    static constinit hardware unit;
 
     /**
      * The last verdict `ensure_reachable` reached, in full detail.
@@ -88,8 +97,12 @@ struct reserved_region_strategy
 
     /**
      * Points this at a unit and a device.
+     *
+     * Not `constexpr`: it assigns to an object with static storage
+     * duration, so no call to it can ever be a constant expression, and
+     * the keyword would be a claim the function cannot honour.
      */
-    static constexpr void configure(const hardware & where)
+    static void configure(const hardware & where)
     {
         unit = where;
     }
@@ -184,5 +197,15 @@ struct reserved_region_strategy
         return iommu_gate::describe(cause);
     }
 };
+
+/**
+ * The one definition `unit` could not have inside the class.
+ *
+ * `inline` so every translation unit including this header agrees on
+ * one object, and `constinit` so the compiler proves the initializer is
+ * a constant rather than leaving an `.init_array` entry behind.
+ */
+inline constinit reserved_region_strategy::hardware
+    reserved_region_strategy::unit{};
 
 } // namespace zpp::nvme
