@@ -794,24 +794,38 @@ public:
             return reach_verdict::window_out_of_range;
         }
 
-        auto result = reach_verdict::identity_mapped;
-        for (std::uint64_t index{}; index < pages; ++index) {
-            auto page = request.window_physical + (index * 0x1000);
-            auto one = reach_page(request, extended, table, levels, page);
-            if (reachable_now(one)) {
-                continue;
-            }
-            if ((reach_verdict::installed == one) ||
-                (reach_verdict::would_install == one)) {
-                // An install anywhere in the window outranks the pages
-                // that were already there, since it is the answer that
-                // says state changed.
-                result = one;
-                continue;
-            }
-            return one;
+        // Two passes over the window, and the first one never writes.
+        //
+        // Not an optimisation. A single pass that installs as it goes
+        // breaks this header's own contract the moment a window is more
+        // than one page long: page zero gets a leaf, page one turns out
+        // to be covered by a superpage, and the call returns a refusal
+        // having already changed the guest's tables. The caller is then
+        // told to submit nothing, while a mapping it will never use is
+        // left behind with no owner and no way to remove it - removal
+        // being the direction that needs an invalidation.
+        //
+        // So the whole window is answered read-only first, and nothing
+        // is written unless every page of it came back either already
+        // reachable or installable. The refusal path writes nothing,
+        // for every window length, which is what the documentation
+        // above has always claimed.
+        auto answer =
+            walk_window(request, extended, table, levels, pages, false);
+        if (!request.install || (reach_verdict::would_install != answer)) {
+            return answer;
         }
-        return result;
+
+        // The second pass re-walks from the same root rather than
+        // remembering the slots the first pass found. The guest owns
+        // these tables and is running on other processors, so a
+        // remembered address could by then be a freed page reused for
+        // something else - and a zero read out of it would look exactly
+        // like an installable leaf. Re-reading the path costs a handful
+        // of loads and removes that entirely; what it cannot remove is
+        // the last word between the read and the write, which is what
+        // the compare-exchange in install_leaf is for.
+        return walk_window(request, extended, table, levels, pages, true);
     }
 
     /**
@@ -1186,6 +1200,61 @@ private:
     }
 
     /**
+     * One answer for a whole window, page by page.
+     *
+     * `install` is passed rather than taken from the request because
+     * `reach` runs this twice with two different answers to it, and the
+     * request is the caller's permission rather than this pass's job.
+     */
+    static reach_verdict walk_window(const reach_request & request,
+                                     std::uint64_t extended,
+                                     std::uint64_t table,
+                                     std::uint32_t levels,
+                                     std::uint64_t pages,
+                                     bool install)
+    {
+        auto result = reach_verdict::identity_mapped;
+        for (std::uint64_t index{}; index < pages; ++index) {
+            auto page = request.window_physical + (index * 0x1000);
+            auto one = reach_page(
+                request, extended, table, levels, page, install);
+            if (reachable_now(one)) {
+                continue;
+            }
+            if ((reach_verdict::installed == one) ||
+                (reach_verdict::would_install == one)) {
+                // An install anywhere in the window outranks the pages
+                // that were already there, since it is the answer that
+                // says state changed.
+                result = one;
+                continue;
+            }
+            return one;
+        }
+        return result;
+    }
+
+    /**
+     * Classifies a present second-stage leaf against the page it was
+     * supposed to map.
+     *
+     * Factored out because the install path needs exactly the same
+     * judgement when its compare-exchange loses - what is there now is
+     * as much an answer as what was there before.
+     */
+    static constexpr reach_verdict classify_leaf(std::uint64_t leaf,
+                                                 std::uint64_t page)
+    {
+        if ((leaf & entry_address_mask) != page) {
+            return reach_verdict::mapped_elsewhere;
+        }
+        if (entry_present != (leaf & entry_present)) {
+            return reach_verdict::mapped_read_only;
+        }
+        return reach_verdict::identity_mapped;
+    }
+
+    /**
      * Walks the second-stage tables for one 4 KB page, and installs the
      * leaf if that is the only thing missing.
      *
@@ -1199,7 +1268,8 @@ private:
                                     std::uint64_t extended,
                                     std::uint64_t table,
                                     std::uint32_t levels,
-                                    std::uint64_t page)
+                                    std::uint64_t page,
+                                    bool install)
     {
         auto frame = page >> 12;
 
@@ -1254,16 +1324,10 @@ private:
         }
 
         if (0 != (leaf & entry_present)) {
-            if ((leaf & entry_address_mask) != page) {
-                return reach_verdict::mapped_elsewhere;
-            }
-            if (entry_present != (leaf & entry_present)) {
-                return reach_verdict::mapped_read_only;
-            }
-            return reach_verdict::identity_mapped;
+            return classify_leaf(leaf, page);
         }
 
-        if (!request.install) {
+        if (!install) {
             return reach_verdict::would_install;
         }
 
@@ -1276,10 +1340,30 @@ private:
      * The only write in this header, and every constraint on it is load
      * bearing:
      *
-     * - It is only ever reached with the existing entry at zero. A
-     *   present entry is never modified and nothing is ever unmapped.
-     *   Leaving the mapping in place forever is the correct outcome;
-     *   removing it is the direction that needs an invalidation.
+     * - It is only ever reached with the existing entry at zero, and it
+     *   *checks that again as it writes*. A present entry is never
+     *   modified and nothing is ever unmapped. Leaving the mapping in
+     *   place forever is the correct outcome; removing it is the
+     *   direction that needs an invalidation.
+     *
+     *   The check has to be part of the write because the tables belong
+     *   to the guest, and the guest is running - on other processors,
+     *   in a driver that knows nothing about us, at any moment between
+     *   our read of the slot and our store to it. A plain store would
+     *   make "a present entry is never modified" a statement about the
+     *   order this function happens to do things in rather than a
+     *   property of it. A compare-exchange against zero makes it the
+     *   latter, and costs one `lock cmpxchg` on a line already dirty.
+     *   Linux writes the same word the same way, and its comment on the
+     *   losing branch says the whole thing:
+     *
+     *       tmp = 0ULL;
+     *       if (!try_cmpxchg64(&pte->val, &tmp, pteval))
+     *           // Someone else set it while we were thinking; use theirs.
+     *
+     *   Losing is not an error here either. Whatever the guest put
+     *   there is judged exactly as it would have been had the read seen
+     *   it, which for an identity mapping of our own window is success.
      * - Read and write, and nothing else. VT-d 5.20 Table 47 puts R at
      *   bit 0 and W at bit 1, and bit 2 is IGN in every second-stage
      *   entry type - Tables 41 to 47. There is no execute permission to
@@ -1334,8 +1418,27 @@ private:
         // means uncacheable for this one page - slower for a device
         // access, and still coherent, so it is a cost rather than a
         // correctness question and not worth a refusal.
-        auto * entry = reinterpret_cast<volatile std::uint64_t *>(mapped);
-        *entry = value;
+        //
+        // The builtin rather than inline assembly or std::atomic_ref:
+        // generic code outside the architecture layer does not write
+        // assembly, and <atomic> is not something this freestanding
+        // build links a library for. An eight byte object at an eight
+        // byte aligned address - `slot` is a page-aligned table plus a
+        // multiple of eight - so this lowers to `lock cmpxchg` with no
+        // libcall, which `llvm-nm -u` is the check for.
+        auto * entry = reinterpret_cast<std::uint64_t *>(mapped);
+        std::uint64_t expected{};
+        if (!__atomic_compare_exchange_n(entry,
+                                         &expected,
+                                         value,
+                                         false,
+                                         __ATOMIC_RELEASE,
+                                         __ATOMIC_RELAXED)) {
+            // Someone else set it while we were thinking; use theirs.
+            // No flush and no fence: we wrote nothing, and whoever did
+            // write it is responsible for making it visible.
+            return classify_leaf(expected, page);
+        }
 
         if (0 == (extended & page_walk_coherency_bit)) {
             // A builtin rather than inline assembly, since generic code
