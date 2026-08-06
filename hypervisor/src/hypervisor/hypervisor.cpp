@@ -602,6 +602,53 @@ std::expected<void, zpp::error> hypervisor::initialize_ept()
     return {};
 }
 
+/**
+ * Flushes cached translations after an EPT entry has been changed.
+ *
+ * Every modification below this line happens **after launch**, which is a
+ * situation this VMM did not previously have: the EPT was built once and
+ * never touched, so `invept` had no call sites at all and BACKLOG.md item
+ * 4 recorded it as harmless for exactly that reason. Arming a page watch
+ * changed that. A permission written into an entry that hardware still
+ * has cached in its combined mappings is a permission that does not take
+ * effect, so a protected page would go on being written without faulting.
+ *
+ * Single context rather than global: only this EPTP's translations are
+ * stale, and SDM 30.3 gives type 1 as the single-context form. The
+ * descriptor is the EPTP followed by a reserved zero quadword.
+ *
+ * **This invalidates on the calling processor only.** INVEPT is not a
+ * broadcast, so another processor may still hold the old translation and
+ * miss a watch that this one has just armed. That is the same limitation
+ * the watch already documents from the other direction, it needs a
+ * rendezvous to fix - BACKLOG.md item 10 - and it is safe in the
+ * direction that matters here: a stale *permissive* entry means a missed
+ * observation, never a wrong one.
+ */
+void hypervisor::invalidate_ept()
+{
+    arch::x86_64::vmx::ept_pointer eptp;
+    eptp.memory_type(arch::x86_64::memory_type::write_back);
+    eptp.page_walk_length(4);
+    eptp.page_number(this->epml4_physical >> 12);
+
+    struct alignas(16) descriptor
+    {
+        std::uint64_t eptp;
+        std::uint64_t reserved;
+    } operand{eptp.value(), 0};
+
+    constexpr std::uint64_t single_context = 1;
+    auto type = single_context;
+
+    if (0 != arch::x86_64::vmx::invept(&type, &operand)) {
+        // Nothing useful to do with a failure here - the caller has
+        // already changed the entry - but it must not pass silently,
+        // because the symptom is a watch that never fires.
+        log("invept failed after an ept change");
+    }
+}
+
 std::expected<arch::x86_64::vmx::epte *, zpp::error>
 hypervisor::epte_for(std::uint64_t physical_address)
 {
@@ -735,6 +782,7 @@ hypervisor::watch_guest_page_writes(std::uint64_t guest_physical,
     // often than it writes commands, and every permitted read is a VM
     // exit that does not happen.
     (*entry)->write(false);
+    invalidate_ept();
 
     free_slot->page = page;
     free_slot->on_write = on_write;
@@ -761,6 +809,7 @@ void hypervisor::unwatch_guest_page(std::uint64_t guest_physical)
         // with it failing.
         if (auto entry = epte_for(page << 12)) {
             (*entry)->write(true);
+            invalidate_ept();
         }
 
         watch.page = {};
@@ -852,6 +901,7 @@ bool hypervisor::on_ept_violation(std::size_t cpu)
         // - SDM Table 30-7 - so that road starts with an x86 decoder.
         if (auto entry = epte_for(page << 12)) {
             (*entry)->write(true);
+            invalidate_ept();
         }
 
         this->stepping_watch[cpu] = true;
@@ -878,6 +928,7 @@ bool hypervisor::on_monitor_trap_flag(std::size_t cpu)
     // which arms or disarms watches cannot observe a half open state.
     if (auto entry = epte_for(page << 12)) {
         (*entry)->write(false);
+        invalidate_ept();
     }
 
     for (auto & watch : this->watches) {

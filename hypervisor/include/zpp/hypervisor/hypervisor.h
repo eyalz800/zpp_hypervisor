@@ -246,6 +246,13 @@ private:
     epte_for(std::uint64_t physical_address);
 
     /**
+     * Flushes cached translations after an EPT entry has been changed.
+     * Required by every modification made after launch - see the
+     * definition for why this had no callers until page watches existed.
+     */
+    void invalidate_ept();
+
+    /**
      * Prepare module protection from guest access.
      */
     std::expected<void, zpp::error> protect_module();
