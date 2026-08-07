@@ -712,6 +712,11 @@ std::expected<void, zpp::error> hypervisor::initialize_ept()
         }
     }
 
+    // Last, so that a build which failed part way through leaves the
+    // flag clear and epte_for keeps refusing rather than handing out
+    // pointers into tables that were never finished.
+    this->ept_initialized = true;
+
     log("ept built, {} mixed regions split to 4 kb", this->next_ept_table);
     return {};
 }
@@ -789,6 +794,14 @@ void hypervisor::invalidate_ept()
 std::expected<arch::x86_64::vmx::epte *, zpp::error>
 hypervisor::epte_for(std::uint64_t physical_address)
 {
+    // Before initialize_ept there is nothing here to hand out, and
+    // handing out a pointer into unbuilt tables would let a caller
+    // "protect" a page by writing into memory the processor will never
+    // read. Refused rather than allowed to look like it worked.
+    if (!this->ept_initialized) {
+        return std::unexpected(zpp::error{error::ept_not_initialized});
+    }
+
     auto ept_count = std::size(this->ept);
     auto & host_page_table = this->host_page_table;
 

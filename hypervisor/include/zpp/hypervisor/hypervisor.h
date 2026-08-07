@@ -41,6 +41,13 @@ public:
         host_exception = 6,
         vmx_disabled_by_firmware = 7,
         too_many_processors = 8,
+
+        /**
+         * An extended page table entry was asked for before the tables
+         * that hold it were built. A programming error rather than a
+         * machine one - see the flag it comes from.
+         */
+        ept_not_initialized = 9,
     };
 
     /**
@@ -61,6 +68,25 @@ public:
      */
     static constexpr std::size_t max_cpus = 32;
 
+private:
+    /**
+     * Whether initialize_ept has run.
+     *
+     * Guards epte_for, and exists because getting this wrong is silent
+     * in both directions. An entry edited before the tables are built
+     * lands in memory nothing will ever consult, and an entry edited
+     * between that and initialize_ept is overwritten by initialize_ept.
+     * Either way the protection or the watch simply is not there, and
+     * looks exactly like one that is.
+     *
+     * Three separate changes in one evening made that mistake - the
+     * local APIC watch twice and the queue storage once - so the rule
+     * that extended page table entries may only be touched after
+     * initialize_ept is enforced rather than remembered.
+     */
+    bool ept_initialized{};
+
+public:
     /**
      * Page size.
      */
@@ -1501,6 +1527,9 @@ inline const zpp::error_category & category(hypervisor::error)
                 return "VMX locked off in IA32_FEATURE_CONTROL";
             case hypervisor::error::too_many_processors:
                 return "More processors than max_cpus";
+            case hypervisor::error::ept_not_initialized:
+                return "An EPT entry was asked for before the tables "
+                       "were built";
             }
         });
     return error_category;
