@@ -1217,6 +1217,12 @@ void hypervisor::rebuild_channel_queue()
         where.submission = submission;
         where.completion = completion;
 
+        this->rebuild_submission_depth = where.submission_depth;
+        this->rebuild_completion_depth = where.completion_depth;
+        this->rebuild_submission_base = submission_base;
+        this->rebuild_completion_base = completion_base;
+        this->rebuild_stride = this->channel_doorbell_stride;
+
         nvme::admin_borrow::locate(where);
 
         // Exclude the guest from the admin queue for the length of the
@@ -1315,6 +1321,9 @@ void hypervisor::rebuild_channel_queue()
                                     std::uint64_t{1} << 26);
 
         this->channel_rebuild_result = static_cast<std::uint64_t>(result);
+        this->rebuild_issued = nvme::admin_borrow::last_issued;
+        this->rebuild_reaped = nvme::admin_borrow::last_reaped;
+        this->rebuild_total = nvme::admin_borrow::last_total;
         this->channel_rebuild_ticks = arch::x86_64::rdtsc() - started;
 
         if (nvme::borrow_result::ok != result) {

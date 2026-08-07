@@ -130,6 +130,23 @@ public:
      * is recognisably ours by inspection.
      * @{
      */
+    /**
+     * Where the last borrow got to, for a caller that has to explain a
+     * refusal it cannot see inside.
+     *
+     * A borrow that returns timed_out has no way of saying whether it
+     * stalled on its first command or its last, and those are different
+     * faults - the first means the controller is not reading the queue at
+     * all, the second means something interfered part way through.
+     * @{
+     */
+    static inline std::uint32_t last_issued{};
+    static inline std::uint32_t last_reaped{};
+    static inline std::uint32_t last_total{};
+    /**
+     * @}
+     */
+
     static constexpr std::uint16_t first_command_id = 0xf000;
     static constexpr std::uint16_t last_command_id = 0xf7ff;
     /**
@@ -314,6 +331,10 @@ public:
         std::uint32_t issued{};
         std::uint32_t reaped{};
 
+        last_total = total;
+        last_issued = 0;
+        last_reaped = 0;
+
         while (reaped < total) {
             // Fill the submission queue, never closer than one entry to
             // full - 3.3.3.3, "one slot in each queue is not available
@@ -345,6 +366,8 @@ public:
                 auto & entry = where.completion[cq_head];
                 if (entry.phase() != cq_phase) {
                     if (0 == spun--) {
+                        last_issued = issued;
+                        last_reaped = reaped;
                         return borrow_result::timed_out;
                     }
                     continue;

@@ -436,6 +436,25 @@ private:
      * inference in the exclusion rather than an observation.
      */
     std::uint64_t unresponsive_processors{};
+
+    /**
+     * What the rebuild read out of the controller before borrowing, and
+     * how far the borrow got. Enough to tell "the queue was described
+     * wrongly" from "the queue was described correctly and the controller
+     * ignored it".
+     * @{
+     */
+    std::uint64_t rebuild_submission_depth{};
+    std::uint64_t rebuild_completion_depth{};
+    std::uint64_t rebuild_submission_base{};
+    std::uint64_t rebuild_completion_base{};
+    std::uint64_t rebuild_stride{};
+    std::uint64_t rebuild_issued{};
+    std::uint64_t rebuild_reaped{};
+    std::uint64_t rebuild_total{};
+    /**
+     * @}
+     */
     /**
      * @}
      */
