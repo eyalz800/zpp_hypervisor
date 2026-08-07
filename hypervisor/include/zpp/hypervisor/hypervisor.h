@@ -1295,6 +1295,21 @@ private:
      */
     bool controller_poll_armed{};
 
+    /**
+     * Why an acknowledgement wait gave up, for reading with `xp`.
+     *
+     * Three plausible explanations for a refused acknowledgement were
+     * wrong in a row, which is the point at which guessing should stop.
+     * @{
+     */
+    std::uint64_t ack_target{};
+    std::uint64_t ack_launched_mask{};
+    std::uint64_t ack_outstanding_cpu{};
+    std::uint64_t ack_outstanding_seen{};
+    /**
+     * @}
+     */
+
     std::uint64_t channel_register_writes{};
     std::uint64_t channel_last_configuration{};
     /**

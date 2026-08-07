@@ -159,7 +159,7 @@ inline constexpr bool restart_after_reservation = enabled;
  * That is what a VMM with an instruction decoder does, and this one does
  * not have one yet.
  */
-inline constexpr bool rebuild_channel_after_reset = enabled;
+inline constexpr bool rebuild_channel_after_reset = false;
 
 /**
  * How much a line is worth saying. Ordered, and compared with at_least

@@ -545,9 +545,45 @@ never launched, and gives up rather than guessing. A caller that does not get
 the acknowledgement does nothing - not borrowing is always safe, borrowing
 without exclusion is not.
 
-So what remains for the rebuild is the doorbell hold itself, which is now
-buildable: protect the doorbell page, wait for the acknowledgement, borrow,
-release. Every piece of that exists.
+The doorbell hold is now written, and the acknowledgement is where it stops.
+Measured on the machine, with the wait instrumented after three wrong
+guesses:
+
+    ack_target            0x31a   the generation to reach
+    ack_launched_mask     0xff    all eight processors launched
+    ack_outstanding_cpu   1
+    ack_outstanding_seen  0x317   three generations behind, and staying there
+
+**Processor 1 never takes an exit.** The guest has halted it, this VMM does
+not set "HLT exiting", and a halted processor executes nothing - so it never
+reaches the exit path where the high water mark is stamped. Waiting for it
+waits forever.
+
+That is what the interprocessor interrupt is actually for, and the earlier
+claim here that it was unnecessary was wrong. Observing the acknowledgement
+is sufficient for a processor that is *running*; it says nothing about one
+that is idle, and idle is the common case. The interrupt is not how KVM
+informs the others, it is how KVM **forces them out**.
+
+Two lighter ways to get that than taking over the guest's whole interrupt
+path:
+
+- **NMI exiting** (pin-based control bit 3) plus an NMI sent through the
+  local APIC's command register, which this VMM can already reach. A
+  processor taking an NMI exits whatever state it is in, including halted.
+  The cost is having to recognise and re-inject a genuine guest NMI, which
+  is rare but not optional.
+- **HLT exiting**, which would at least let a processor stamp on its way
+  into the halt. Cheaper, and not sufficient on its own: a processor that
+  halted *before* the change still wakes holding a stale translation.
+
+Three wrong guesses preceded the measurement, and they are worth listing so
+they are not made again: the initiator waiting for its own stale stamp
+(real, fixed), holding before acknowledging and deadlocking a held processor
+that can no longer stamp (real, fixed), and demanding equality with a
+generation the hot local APIC watch moves constantly (real, fixed with a
+monotone "at least" compare). None of them was the cause. The cause was a
+processor that was not running at all.
 
 ## The guest resets the controller and takes our queue with it
 

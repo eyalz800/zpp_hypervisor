@@ -922,14 +922,32 @@ bool hypervisor::wait_for_ept_acknowledgement(std::uint64_t budget)
             this->ept_generation.load(std::memory_order_acquire);
     }
 
+    // The target is captured once and compared with "at least", not
+    // "equal to".
+    //
+    // Equality cannot be satisfied here. The local APIC page is watched
+    // and is written constantly by the guest, and every one of those
+    // writes moves the generation twice - once to let the write through
+    // and once to protect the page again - so a processor that answers
+    // is stale again microseconds later. Demanding equality is a
+    // livelock, and re-reading the target each round makes it a worse
+    // one: the goalpost moves faster than anybody can reach it. Measured
+    // as acknowledgement refused on every attempt, with nothing wrong.
+    //
+    // What is actually needed is weaker and monotone: every processor
+    // has invalidated at least once *since the change this call is
+    // about*. High water marks only ever rise, so once a processor has
+    // passed the captured value it has passed it for good.
+    auto target = this->ept_generation.load(std::memory_order_acquire);
+    this->ack_target = target;
+    this->ack_launched_mask = 0;
+    for (std::size_t cpu{}; cpu < max_cpus; ++cpu) {
+        if (this->start_up_launched[cpu].load(std::memory_order_acquire)) {
+            this->ack_launched_mask |= (std::uint64_t{1} << cpu);
+        }
+    }
+
     while (budget--) {
-        // Re-read rather than capture once. Another processor arming or
-        // disarming a watch moves the generation while this waits, and a
-        // target that keeps moving is one nobody ever reaches - every
-        // processor that had answered would go back to looking
-        // outstanding.
-        auto generation =
-            this->ept_generation.load(std::memory_order_acquire);
         auto outstanding = false;
 
         for (std::size_t cpu{}; cpu < max_cpus; ++cpu) {
@@ -940,8 +958,11 @@ bool hypervisor::wait_for_ept_acknowledgement(std::uint64_t budget)
                     std::memory_order_acquire)) {
                 continue;
             }
-            if (this->ept_generation_seen[cpu] != generation) {
+            if (this->ept_generation_seen[cpu] < target) {
                 outstanding = true;
+                this->ack_outstanding_cpu = cpu;
+                this->ack_outstanding_seen =
+                    this->ept_generation_seen[cpu];
                 break;
             }
         }
@@ -1153,23 +1174,37 @@ void hypervisor::rebuild_channel_queue()
 
         scope_exit unwatch{[&] { unwatch_guest_page(doorbell_page); }};
 
+        // Acknowledged first, held second, and the order is not
+        // cosmetic.
+        //
+        // A processor still holding a translation cached before the
+        // arming above would write straight through the protection, so
+        // the borrow cannot begin until every running processor has said
+        // it has picked the change up. Not getting that answer means not
+        // borrowing - an unexcluded borrow desynchronises the guest's
+        // admin queue, and no channel is better than that.
+        //
+        // The other order deadlocks. A processor held at a faulting
+        // instruction takes no further exits, so if it stamped its high
+        // water mark before the arming moved the generation it can never
+        // stamp again and the wait for it never ends. Measured exactly
+        // that way, twice: acknowledgement refused on every attempt.
+        //
+        // Waiting before holding costs nothing. A processor that rings
+        // the doorbell in the gap takes the ordinary trapped write and
+        // proceeds, and whatever it submitted is part of the queue state
+        // the borrow reads when it starts.
+        if (!wait_for_ept_acknowledgement(std::uint64_t{1} << 24)) {
+            this->channel_rebuild_result = 0xf7;
+            return;
+        }
+
         if (!hold_guest_page(doorbell_page)) {
             this->channel_rebuild_result = 0xf6;
             return;
         }
 
         scope_exit unhold{[&] { release_guest_page(doorbell_page); }};
-
-        // A processor still holding a translation cached before that
-        // protection would write straight through it, so the borrow does
-        // not begin until every running processor has said it has picked
-        // the change up. Not getting the answer means not borrowing - an
-        // unexcluded borrow desynchronises the guest's admin queue, and no
-        // channel is better than that.
-        if (!wait_for_ept_acknowledgement(std::uint64_t{1} << 24)) {
-            this->channel_rebuild_result = 0xf7;
-            return;
-        }
 
         // Ours to create: the same identifiers and the same storage the
         // loader used, because the storage outlives every reset - it is
