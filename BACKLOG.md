@@ -969,3 +969,38 @@ Next suspect, on the grounds that it is the only ABI change: the field
 added to `zpp_launch_parameters`. Both sides are rebuilt together so it
 should be harmless, which is exactly why it is worth checking rather
 than assuming.
+
+## The real rig intercepts CPUID and loses the next instruction
+
+The sharpest signal yet, and a behavioural one rather than a memory read,
+which is why it is worth more than everything above it.
+
+The loader now asks CPUID leaf 0x40000000 immediately after
+`zpp_load_elf` returns and traces ebx. One binary, both rigs:
+
+    overlay    zpp: [main.cpp:1512] ZPP_TRACE hypervisor leaf ebx 0x5a70705a
+    real rig   (nothing at 1512)
+
+0x5a70705a is "ZppZ", so the overlay is demonstrably resident. On the
+real rig that line does not appear at all - while `ZPP_TRACE loaded` at
+1475 immediately before it does, and `chainloading` well after it does
+too. Execution therefore passes through the region and skips the trace.
+
+A `cpuid` followed by a call that never happens, on a machine where the
+same code works, is not the loader going wrong. Something intercepts the
+CPUID and returns with RIP past more than the instruction - which is the
+recurring failure this tree already warns about in the exit handler, and
+which the handler's own comments call out as the reason unhandled exits
+must halt rather than resume. So the hypervisor is very likely resident
+on the real rig after all, with a broken exit path, rather than absent.
+
+That in turn casts doubt on the entry above it - the probes in .bss
+reading zero. Both cannot be straightforwardly true, and the behavioural
+evidence is the stronger of the two. Do not resolve this by reasoning; the
+next step is to break in the VMM's own CPUID case on that machine, or to
+have that case record its exit count and the instruction length it read
+from the VMCS, and see what it does with the first CPUID after launch.
+
+The loader keeps the probe. One CPUID after launch is nearly free, and
+"the loader returned zero" has now twice been mistaken for "the
+hypervisor is running".

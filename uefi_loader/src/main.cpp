@@ -1478,6 +1478,40 @@ extern "C" EFI_STATUS EFIAPI uefi_main(EFI_HANDLE image_handle,
         trace::line("ZPP_TRACE chainload only, hypervisor not launched");
     }
 
+    // Did it actually go resident?
+    //
+    // Asked because the answer above does not say. zpp_load_elf returns
+    // zero when the launch path completed, and on one machine it does
+    // that while the hypervisor never initialises at all - measured with
+    // probes in its own .bss, all of which stay zero while the same build
+    // on another machine sets them correctly. A loader that reports
+    // success for a hypervisor that is not there sends every later
+    // investigation to the wrong place, and it sent several.
+    //
+    // This is the cheap half of what verify::present does and none of the
+    // destructive half: one CPUID leaf, no interprocessor interrupts, no
+    // APIC mode change. A guest running under this VMM reads
+    // ZppZppZppZpp from the hypervisor leaf; one on bare metal does not.
+    {
+        std::uint32_t signature[4]{};
+        asm volatile("cpuid"
+                     : "=a"(signature[0]),
+                       "=b"(signature[1]),
+                       "=c"(signature[2]),
+                       "=d"(signature[3])
+                     : "a"(0x40000000u), "c"(0u));
+
+        // As hex through hex_line, which is the mechanism every other
+        // trace here uses and is therefore known to reach the wire.
+        // Spelling it as text through trace::raw produced nothing on one
+        // machine while working on another, and chasing that is chasing
+        // the instrument rather than the measurement.
+        //
+        // ebx of the hypervisor leaf holds the first four characters, so
+        // a resident build reads 0x5a70705a - "ZppZ" little endian.
+        trace::hex_line("ZPP_TRACE hypervisor leaf ebx ", signature[1]);
+    }
+
     if (result) {
         // The code is the hypervisor's own error enumeration, so print it
         // - it is the only thing that says which step failed, and a
