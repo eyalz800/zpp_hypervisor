@@ -1395,6 +1395,59 @@ private:
      * is hot. Two because an instruction may straddle a page boundary;
      * fifteen bytes is the architectural maximum and cannot span more.
      */
+    /**
+     * Whether a write to a watched page is emulated from the decoded
+     * instruction, or allowed to execute by opening the page for one
+     * single step.
+     *
+     * Emulating is the better scheme and the reason the decoder exists:
+     * stepping leaves the page writable for every processor for the
+     * duration, and a second write slips through that window unobserved,
+     * which is how a controller reset went unnoticed.
+     *
+     * Switched off because the emulation cannot currently fetch the
+     * instruction it is emulating, and three separate defects follow from
+     * that. It is *not* off because of the guest hang on the real rig -
+     * that hang was measured to happen identically with this false, and
+     * with the whole diagnostic channel compiled out, so the two are
+     * unrelated. Say that plainly here because the previous version of
+     * this comment blamed the hang and was wrong.
+     *
+     * What has to be fixed before it goes back on:
+     *
+     * - `decode_guest_store` translates the guest's RIP through
+     *   `os_page_table`, built once from the launch-time CR3, and under
+     *   UEFI `physical_to_virtual` is null so the translation is the
+     *   identity. That holds only while the guest runs on the firmware's
+     *   identity map. Once it is on its own page tables a kernel linear
+     *   RIP is used as a physical address: either the window maps a page
+     *   number above MAXPHYADDR and the memcpy takes a #PF in root mode
+     *   with no recovery point, or unrelated bytes are decoded and a
+     *   fabricated value is written to a device register. Walk
+     *   `vmcs.guest_cr3()` at exit time instead.
+     * - `context::rsp` is the *host* stack pointer - the exit stub stores
+     *   the address of the context structure there, deliberately, because
+     *   restore_context iretqs onto it. The guest's RSP is in the VMCS.
+     *   So `mov [watched], rsp` writes a hypervisor stack address into a
+     *   device register, which also leaks a protected-module address to
+     *   the guest. Either fill the field from `vmcs.guest_rsp()` or
+     *   refuse encoding 4.
+     * - RIP is advanced by `vm_exit_instruction_length()`, which SDM
+     *   30.2.5 leaves *undefined* for an EPT violation that is not
+     *   encountered during event delivery; KVM's `handle_ept_violation`
+     *   never reads it, and `skip_emulated_instruction` carries an
+     *   explicit warning that other hypervisors do not set it. The
+     *   decoder already knows where the instruction ends, so it should
+     *   return that length, advance by it, and refuse on disagreement.
+     *
+     * Also unchecked, and worth fixing in the same pass: the exit
+     * qualification is never consulted (bit 8 clear means the access was
+     * to a paging-structure entry, not the instruction's own operand),
+     * and a store straddling the watched page's boundary is applied whole
+     * at the faulting page's base.
+     */
+    static constexpr bool emulate_watched_page_writes = false;
+
     static constexpr std::size_t instruction_window_pages_per_cpu = 2;
 
     /**

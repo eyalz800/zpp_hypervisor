@@ -13,6 +13,7 @@
 #include "zpp/nvme/iommu_gate.h"
 #include "zpp/nvme/log_writer.h"
 #include "zpp/nvme/registers.h"
+#include <initializer_list>
 
 #include <cstring>
 
@@ -607,7 +608,25 @@ void nvme_selftest::execute(const nvme::log_target & destination,
     // intercept is what a borrow costs. Done only when the channel is
     // being brought up, and against the firmware's own queue, so it
     // measures the controller rather than a guest.
-    for (std::uint32_t laps : {std::uint32_t{8}, std::uint32_t{64}}) {
+    // Switched off, and this is not a cosmetic saving.
+    //
+    // Each of these is a *further* borrow of the firmware's live admin
+    // queue, and admin_borrow::run returns borrow_result::timed_out from
+    // inside its drain loop - before the restore loops at the end - so a
+    // borrow that times out leaves the firmware's queue holding our
+    // filler commands, its completion phase bits toggled, and both
+    // doorbells at our positions, with nothing put back. The firmware's
+    // NVMe driver is what loads Windows off that disk moments later.
+    //
+    // The measurement they exist for is already recorded in BACKLOG.md
+    // (4 commands in 67 us, 32 in 526 us, 256 in 4264 us), so the only
+    // thing they can still do is turn a good boot into a broken one.
+    constexpr bool measure_borrow_cost = false;
+
+    for (std::uint32_t laps :
+         measure_borrow_cost
+             ? std::initializer_list<std::uint32_t>{8u, 64u}
+             : std::initializer_list<std::uint32_t>{}) {
         admin_borrow::snapshot again{g_scratch_submission,
                                      g_scratch_completion};
         auto started = arch::x86_64::rdtsc();

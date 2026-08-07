@@ -1728,7 +1728,9 @@ bool hypervisor::on_ept_violation(std::size_t cpu,
         // slip past a first, and the handler is told what was written
         // rather than having to read the register back and race the
         // guest for it.
-        if (auto store = decode_guest_store(cpu, context)) {
+        if (auto store = emulate_watched_page_writes
+                             ? decode_guest_store(cpu, context)
+                             : std::nullopt) {
             if (apply_guest_store(guest_physical, *store)) {
                 if (watch.on_write) {
                     guest_write written{
