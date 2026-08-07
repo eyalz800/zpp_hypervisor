@@ -645,3 +645,50 @@ queue from a live guest driver rather than from idle firmware, which is what
 Until then the honest description of the channel is that it covers early
 boot, which is most of what it was wanted for, and stops without saying so
 once Windows owns the disk.
+
+## The log's clock: measured, not assumed
+
+Continuous logging cannot be driven by guest exits, because a healthy guest
+barely takes any. Measured on the overlay rig with a steadily running
+Windows 11, `heartbeat_exits_seen` per processor:
+
+    1564, 161, 165, 163
+
+Fifteen hundred exits on the busiest processor and about a hundred and sixty
+on the rest - not millions. That is the VMM working as intended: it
+intercepts CPUID, a handful of MSRs, the local APIC page, the controller
+register page and EPT violations, and steady-state Windows does almost none
+of those. A write path reached only from an exit handler is therefore a write
+path that stops the moment the guest settles, which is exactly what was
+observed: one block written, then five samples over sixty seconds with every
+counter frozen.
+
+The VMX-preemption timer supplies the exits instead, at an interval this side
+picks. Two things had to be true and only one was:
+
+  - `arm_controller_poll` already wrote `vmx_preemption_timer_value` and set
+    pin-based control bit 6. That half existed.
+  - Nothing handled exit reason 52. There was no case for it, so the first
+    tick recorded `unhandled_exit` with `reason=0x34` and halted the
+    processor in `cli; hlt`. It had never been caught because the only caller
+    of `arm_controller_poll` sat on a disabled path - the arming half was
+    written and the receiving half was not.
+
+Worth keeping as a shape: a facility built in two halves, with only one half
+ever reachable, tests as if it works. The giveaway was a frozen RIP inside
+our own module rather than in the guest.
+
+Entry reloads the counter from the VMCS field every time while "save
+VMX-preemption timer value" is clear (SDM 26.6.4), so the field does not need
+rewriting per tick.
+
+Result, verified on the medium rather than from counters alone: 2048
+consecutive blocks off the raw device, sequence 16384-18431, `lost=0
+refused=0 dropped=0 reset=0`, while `RIP=fffff806...` showed Windows running
+normally.
+
+Tuning left open: at a 1 ms tick each block carries **one** record where it
+has room for about thirty, so the region wraps roughly thirty times faster
+than it needs to. The fix is to flush on a deadline that is long relative to
+the tick instead of on every tick, which trades log latency for region
+lifetime; neither number has been chosen against a real need yet.

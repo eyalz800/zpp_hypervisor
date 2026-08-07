@@ -1146,7 +1146,7 @@ void hypervisor::rebuild_channel_queue()
                 static_cast<volatile std::uint8_t *>(bar) +
                 nvme::offset_of(nvme::register_offset::capabilities))};
 
-        auto budget = std::uint64_t{1} << 26;
+        auto budget = std::uint64_t{1} << 24;
         for (;;) {
             auto status = nvme::controller_status{arch::x86_64::read32(
                 static_cast<volatile std::uint8_t *>(bar) +
@@ -1318,7 +1318,7 @@ void hypervisor::rebuild_channel_queue()
                                     payload,
                                     2,
                                     payload_status,
-                                    std::uint64_t{1} << 26);
+                                    std::uint64_t{1} << 24);
 
         this->channel_rebuild_result = static_cast<std::uint64_t>(result);
         this->rebuild_issued = nvme::admin_borrow::last_issued;
@@ -4657,6 +4657,26 @@ hypervisor::main(arch::x86_64::context & caller_context)
             advance_rip = false;
             break;
         }
+        case basic_reason::vmx_preemption_timer: {
+            // The clock this side runs the log on. Nothing to do but
+            // come back: the record-draining and flushing below is the
+            // whole reason the timer was armed, and it runs for every
+            // exit regardless of reason.
+            //
+            // The timer is not re-armed here. With "save VMX-preemption
+            // timer value" clear in the exit controls, VM entry reloads
+            // the counter from the VMCS field every time (SDM 26.6.4),
+            // so the field written by arm_controller_poll keeps
+            // producing exits at the same interval until the control is
+            // turned off again.
+            //
+            // Nothing retired to produce this exit, so RIP stays where
+            // it is. Advancing it here would have the guest skip a live
+            // instruction once per tick, which is the recurring mistake
+            // this file warns about.
+            advance_rip = false;
+            break;
+        }
         default: {
             // Everything reaching here exits unconditionally - there is
             // no VM execution control that turns it off - so arriving
@@ -4683,6 +4703,57 @@ hypervisor::main(arch::x86_64::context & caller_context)
         // is `if constexpr (!enabled) return;` and every sink behind it
         // folds away with it.
         diag::pump::run();
+
+        // Keep the timer running while the channel is live, because
+        // otherwise nothing happens at all.
+        //
+        // Measured, and it is the finding that decides how a continuous
+        // log has to work: a steadily running Windows takes about
+        // fifteen hundred exits on its busiest processor and a hundred
+        // and sixty on the others - not millions. This VMM intercepts
+        // very little, which is the point of it, and the consequence is
+        // that the write path is reached almost never. A log driven by
+        // guest exits is a log that stops the moment the guest settles.
+        //
+        // The preemption timer manufactures the exits instead, at an
+        // interval this side chooses. That is a real cost - an exit the
+        // guest would not otherwise have taken - so it is only armed
+        // while there is a channel to feed.
+        if constexpr (diag::policy_of(diag::sink::esp_blocks).present) {
+            arm_controller_poll(diag::esp_block_sink::ready());
+        }
+
+        // A heartbeat, so the channel has something to carry.
+        //
+        // Without it the log is silent whenever nothing goes wrong, which
+        // is most of the time - and a silent channel is
+        // indistinguishable from a broken one to whoever is reading the
+        // disk from another machine. That distinction is the whole point
+        // of the channel, so it emits a line periodically whether or not
+        // anything happened, and the line carries the two things worth
+        // knowing about a guest that is merely alive: which processor
+        // this is and how many exits it has taken.
+        //
+        // Counted rather than timed, because a count is free and reading
+        // the time stamp counter on every exit is not. The interval is
+        // large enough that the cost is nothing and small enough that a
+        // reader sees movement within a second on any busy guest.
+        if constexpr (diag::enabled) {
+            // Every few exits, not every twenty thousand. With the
+            // timer running the exits are ours and arrive on a schedule,
+            // so this counts them rather than guessing at a guest's
+            // rate - which the measurement above showed is far too low
+            // to divide by anything.
+            constexpr std::uint64_t heartbeat_exits = 8;
+            auto cpu = vmcs.vpid();
+            if ((0 != cpu) && (cpu <= max_cpus)) {
+                auto & seen = this->heartbeat_exits_seen[cpu - 1];
+                if (0 == (++seen % heartbeat_exits)) {
+                    diag::log<diag::severity::trace>(
+                        "cpu {} alive, {} exits", cpu - 1, seen);
+                }
+            }
+        }
 
         // Update RIP, unless nothing was executed. For an INIT signal or
         // a start-up IPI the instruction length field holds nothing

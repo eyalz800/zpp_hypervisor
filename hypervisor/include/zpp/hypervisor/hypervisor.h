@@ -438,6 +438,14 @@ private:
     std::uint64_t unresponsive_processors{};
 
     /**
+     * How many exits each processor has taken, for the heartbeat.
+     *
+     * Per processor and not shared, so the counter costs an increment
+     * with no contention on a path every exit runs through.
+     */
+    std::uint64_t heartbeat_exits_seen[max_cpus]{};
+
+    /**
      * What the rebuild read out of the controller before borrowing, and
      * how far the borrow got. Enough to tell "the queue was described
      * wrongly" from "the queue was described correctly and the controller
@@ -1352,7 +1360,7 @@ private:
      * exits it costs are not noticeable, and only while the channel is
      * down at all.
      */
-    static constexpr std::uint64_t controller_poll_microseconds = 10;
+    static constexpr std::uint64_t controller_poll_microseconds = 1000;
 
     /**
      * Whether the preemption timer is currently armed, so it is not
