@@ -678,3 +678,47 @@ the real disk only for a confirming run. After any real-disk run, verify:
 
 expecting `EFI PART`, `33423360` (the shrunk ESP - it must not shrink
 again) and `ZPLOGBLK`.
+
+## Three more silent liars
+
+**A debugger-only field must be `volatile`.** If nothing in the program
+reads it, its stores are dead and the optimizer deletes them; the symbol
+survives in .bss and reads its zero initializer for ever. This reported
+"configure never ran" on a run where three other fields proved it had.
+
+**Read `module_base` back before believing any member.** It is itself a
+member of the singleton, so it validates the base *and* the offset
+arithmetic in one read. This matters most because a guest reset destroys
+the hypervisor while leaving QEMU up: every subsequent read is recycled
+RAM, and recycled RAM looks exactly like a feature that never
+initialised - zeroed counters plus one word churning thousands of times a
+second. If `module_base` does not read back the traced base, stop; you are
+not reading our memory.
+
+**Symbol addresses shift between builds.** Switching one `constexpr` flag
+off removed code and moved the singleton from 0x1435000 to 0x1434000, and
+every static with it. Re-derive addresses from the binary you actually
+deployed, every time.
+
+## Do not `pkill -f qemu-system` over ssh
+
+The pattern matches the ssh session's own command line, so the shell kills
+itself before it launches anything. The failure is silent and confusing:
+no output, and the file you redirected to keeps its old timestamp, so it
+looks as though the previous run's log is the current one.
+
+    sudo pkill -9 -x qemu-system-x86_64     # exact name, no -f
+
+For the same reason `ps aux | grep -c "[q]emu-system"` counts your own
+command line. Check the actual `ps` lines rather than the count.
+
+## Check the config flags before blaming the code
+
+`rebuild_channel_after_reset` was left `enabled` after being measured,
+against its own comment saying it must not be. Every build for hours
+carried the one setting known to desynchronise the guest's admin queue and
+take Windows down - which under `-no-reboot` exits QEMU, and which
+destroys the hypervisor so that all its counters read as garbage
+afterwards. Before debugging a new failure, diff the flags in
+`diag/include/zpp/diag/config.h` against what the comments say they should
+be.
