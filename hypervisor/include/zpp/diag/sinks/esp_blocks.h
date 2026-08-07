@@ -173,6 +173,33 @@ struct esp_blocks_for
         target = handover.target;
         physical_of = translate;
 
+        // Stamp this boot, so its blocks can be told from the ones
+        // already on the medium.
+        //
+        // The region is never erased - it is written in place and wraps
+        // - so a reader looking at it sees blocks from every boot that
+        // ever wrote, and the sequence numbers restart from zero each
+        // time. Without something per boot they cannot be ordered or
+        // even separated, which is the whole reason the field exists.
+        // It was declared and written into every header and never
+        // assigned, so every block ever written carried boot zero.
+        //
+        // The time stamp counter is the only thing available here that
+        // differs between boots: there is no clock, no random source and
+        // no storage that survives. It is not unique in principle - two
+        // machines could agree - but the disk GUID in the signature
+        // already says which machine, so this only has to separate boots
+        // of one, and a counter that has been running since power on
+        // does that.
+        boot_id = timestamp();
+
+        // A boot that somehow reads zero would be indistinguishable from
+        // the unset case this is fixing, so it is nudged rather than
+        // left ambiguous.
+        if (0 == boot_id) {
+            boot_id = 1;
+        }
+
         queues::bound = typename queues::binding{
             .submission_doorbell = handover.submission_doorbell,
             .completion_doorbell = handover.completion_doorbell,
