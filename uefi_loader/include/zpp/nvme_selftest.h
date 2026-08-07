@@ -82,7 +82,7 @@ struct nvme_selftest
      * together by a static_assert in nvme_selftest.cpp, so they cannot
      * drift apart silently.
      */
-    static constexpr std::size_t queue_storage_bytes = 16384;
+    static constexpr std::size_t queue_storage_bytes = 24576;
 
     /**
      * Runs against a destination somebody else resolved.

@@ -58,6 +58,32 @@ public:
          * machine one - see the flag it comes from.
          */
         ept_not_initialized = 9,
+
+        /**
+         * The channel's controller is not known, so its register page
+         * cannot be redirected.
+         */
+        controller_not_available = 10,
+
+        /**
+         * A processor did not acknowledge an extended page table change
+         * in time. The change is made either way - the wait is what
+         * establishes that nobody is still using the old translation, so
+         * failing it means the caller must not proceed as though they
+         * were not.
+         */
+        acknowledgement_timed_out = 11,
+
+        /**
+         * The controller did not reach the requested CSTS.RDY within the
+         * spin budget the excursion allows it.
+         */
+        controller_never_settled = 12,
+
+        /**
+         * The controller refused one of the excursion's admin commands.
+         */
+        excursion_refused = 13,
     };
 
     /**
@@ -287,6 +313,45 @@ private:
     epte_for(std::uint64_t physical_address);
 
     /**
+     * Points the guest's view of the controller's register page at
+     * register_shadow, or back at the real registers.
+     *
+     * Armed while this VMM drives the controller itself, so that a guest
+     * driver polling CSTS on another processor keeps seeing the values it
+     * expects rather than a controller that appears to have come back on
+     * its own. That is the race that makes owning the controller for a
+     * few milliseconds unsafe otherwise, and it is not a small window:
+     * the driver's whole job at that moment is to poll that register.
+     *
+     * Writers are held for the duration by the page watch, so no
+     * processor can program the controller while it is ours, and every
+     * processor is made to acknowledge the change before it takes effect
+     * - a stale translation would read the real register.
+     */
+    std::expected<void, zpp::error>
+    shadow_controller_registers(bool armed);
+
+    /**
+     * Takes the controller for the length of one VM exit, while the guest
+     * has itself disabled it, and gives it back exactly as it was.
+     *
+     * The guest's admin queue is never touched. Its AQA, ASQ and ACQ are
+     * saved, ours are programmed in their place - legal only while CC.EN
+     * is clear, which is precisely the window the guest has just opened -
+     * a private I/O queue is created, whatever is staged is written, and
+     * then the controller is disabled again and the guest's registers
+     * restored. The guest re-initialises from scratch afterwards, which
+     * is what it asked for when it cleared CC.EN.
+     *
+     * Bracketed by two controller resets, so the ordering hazard that
+     * makes a borrow dangerous cannot arise: the guest's own Set Features
+     * is still the first admin command after the last reset, and our
+     * queue is destroyed before it creates any of its own, so no
+     * identifier can collide.
+     */
+    std::expected<void, zpp::error> run_reset_excursion();
+
+    /**
      * Flushes cached translations after an EPT entry has been changed.
      * Required by every modification made after launch - see the
      * definition for why this had no callers until page watches existed.
@@ -498,6 +563,13 @@ private:
     volatile std::uint64_t entry_failure_flags[max_cpus]{};
     volatile std::uint64_t entry_failure_error[max_cpus]{};
     volatile std::uint64_t entry_failures_seen{};
+
+    /**
+     * How the reset excursions went, for a reader with no other channel.
+     */
+    volatile std::uint64_t excursions_completed{};
+    volatile std::uint64_t excursions_refused{};
+    volatile std::uint64_t excursion_error{};
 
     volatile std::uint64_t resumes_reached[max_cpus]{};
 
@@ -1875,6 +1947,25 @@ private:
         std::uint8_t decoy_page[page_size]{};
 
         /**
+         * What the guest reads from the controller's register page while
+         * this VMM is using the controller.
+         *
+         * The alternative was to trap the guest's reads and answer them,
+         * which needs the instruction decoder on the read path - and the
+         * decoder is the part of this that is not trustworthy. Pointing
+         * the guest's extended page table entry at ordinary memory
+         * instead costs nothing per access, needs no decoding, and cannot
+         * disagree with itself: reads go here at full speed and see
+         * exactly the values put here, while writes still fault because
+         * the entry stays unwritable.
+         *
+         * In unprotected_memory because the guest must be able to read
+         * it. It is not storage either - it is refilled from the real
+         * registers every time the redirect is armed.
+         */
+        std::uint8_t register_shadow[page_size]{};
+
+        /**
          * The intermediate GDT to be loaded after page table switch
          * and before VMM and guest are launched.
          * Also to be reused in guest in case a new TSS needs to be
@@ -2169,6 +2260,14 @@ inline const zpp::error_category & category(hypervisor::error)
             case hypervisor::error::ept_not_initialized:
                 return "An EPT entry was asked for before the tables "
                        "were built";
+            case hypervisor::error::controller_not_available:
+                return "The channel's controller is not known";
+            case hypervisor::error::acknowledgement_timed_out:
+                return "A processor did not acknowledge an EPT change";
+            case hypervisor::error::controller_never_settled:
+                return "The controller did not reach the wanted CSTS.RDY";
+            case hypervisor::error::excursion_refused:
+                return "The controller refused an excursion command";
             }
         });
     return error_category;

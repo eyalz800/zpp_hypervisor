@@ -127,7 +127,26 @@ public:
     static constexpr std::size_t completion_offset = 4096;
     static constexpr std::size_t staging_offset = 8192;
     static constexpr std::size_t scratch_offset = 12288;
-    static constexpr std::size_t storage_bytes = 16384;
+
+    /**
+     * An admin queue pair of this VMM's own, for the window in which it
+     * drives the controller itself.
+     *
+     * Not the guest's admin queue, and that is the point: borrowing that
+     * one means operating on memory a live driver owns, which is
+     * unabandonable once started and was measured timing out. These two
+     * pages are ours, are only ever pointed at by ASQ and ACQ while the
+     * guest has itself disabled the controller, and are unprogrammed
+     * again before it is handed back.
+     * @{
+     */
+    static constexpr std::size_t admin_submission_offset = 16384;
+    static constexpr std::size_t admin_completion_offset = 20480;
+    /**
+     * @}
+     */
+
+    static constexpr std::size_t storage_bytes = 24576;
     /**
      * @}
      */
@@ -164,6 +183,8 @@ public:
     static inline completion_entry * completions{};
     static inline std::uint8_t * staging{};
     static inline std::uint8_t * scratch{};
+    static inline submission_entry * admin_submissions{};
+    static inline completion_entry * admin_completions{};
     /**
      * @}
      */
@@ -192,6 +213,10 @@ public:
             bytes + completion_offset);
         staging = bytes + staging_offset;
         scratch = bytes + scratch_offset;
+        admin_submissions = reinterpret_cast<submission_entry *>(
+            bytes + admin_submission_offset);
+        admin_completions = reinterpret_cast<completion_entry *>(
+            bytes + admin_completion_offset);
         return true;
     }
 

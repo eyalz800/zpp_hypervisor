@@ -162,6 +162,49 @@ inline constexpr bool restart_after_reservation = enabled;
 inline constexpr bool rebuild_channel_after_reset = false;
 
 /**
+ * Whether to take the controller for the length of one VM exit when the
+ * guest disables it, to write out whatever is staged.
+ *
+ * This is the alternative to the rebuild above, and it is safe in the two
+ * ways that one is not. The guest's admin queue is never touched - ours is
+ * programmed into ASQ and ACQ instead, which is legal only while CC.EN is
+ * clear and is therefore exactly what the guest has just made true. And
+ * the excursion is bracketed by two controller resets, so the guest's own
+ * Set Features is still the first admin command after the last one, and
+ * our queue is destroyed before it creates any of its own - so neither the
+ * ordering hazard nor an identifier collision can arise.
+ *
+ * The guest's view of the register page is redirected to ordinary memory
+ * for the duration, so a driver polling CSTS on another processor keeps
+ * seeing the controller it believes it disabled rather than one that
+ * appears to have come back by itself. Writers are held. That is what
+ * makes it race free rather than merely narrow, and it needs no
+ * instruction decoding: reads go to the shadow at full speed and writes
+ * still fault.
+ *
+ * What it does not give is continuity between resets. The controller is
+ * handed back disabled, as the guest asked, so the private queue is gone
+ * again and the next window is the next reset.
+ *
+ * **Switched off, and it took the development machine off the network the
+ * first time it ran.** Not the guest - the host, which had to be power
+ * cycled. What is almost certainly wrong is the shadow's use of
+ * wait_for_ept_acknowledgement while the register page is held: a
+ * processor that faults on the held page spins inside its own VM exit, in
+ * root mode, and the acknowledgement wait sends it a wake NMI. NMI
+ * exiting governs non-root operation only, so that NMI goes to the host
+ * IDT, reaches on_host_exception with no recovery point armed, and halts
+ * that processor for ever. Do that to several and every vCPU thread spins
+ * at once.
+ *
+ * So the ordering has to change before this is tried again: acknowledge
+ * the extended page table change *before* taking the hold, never while
+ * holding it, and never send a wake NMI to a processor that may be in
+ * root mode. Until then this stays false.
+ */
+inline constexpr bool excursion_at_controller_reset = false;
+
+/**
  * How much a line is worth saying. Ordered, and compared with at_least
  * below rather than with `>=` on the enumerators, so the ordering is
  * stated in one place.

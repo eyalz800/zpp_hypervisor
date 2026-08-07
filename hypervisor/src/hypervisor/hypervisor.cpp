@@ -1559,6 +1559,318 @@ void hypervisor::unwatch_guest_page(std::uint64_t guest_physical)
     }
 }
 
+namespace
+{
+/**
+ * Waits for CSTS.RDY to reach a value, bounded.
+ *
+ * The controller is allowed CAP.TO half-seconds to answer, and this runs
+ * inside a VM exit, so the bound is a spin count rather than a clock: the
+ * point is that it cannot become a hang, not that it matches the
+ * architectural allowance exactly.
+ */
+bool wait_for_ready(volatile std::uint8_t * bar, bool wanted)
+{
+    constexpr std::uint64_t budget = 1ull << 26;
+
+    auto at =
+        bar + zpp::nvme::offset_of(zpp::nvme::register_offset::status);
+
+    for (auto spun = budget; spun; --spun) {
+        auto status =
+            zpp::nvme::controller_status{zpp::arch::x86_64::read32(at)};
+
+        if (status.ready() == wanted) {
+            return true;
+        }
+    }
+
+    return false;
+}
+
+} // namespace
+
+std::expected<void, zpp::error> hypervisor::run_reset_excursion()
+{
+    using zpp::nvme::offset_of;
+    using zpp::nvme::register_offset;
+
+    // The whole body is behind the compile time condition, not only the
+    // calls into the sink. Naming a static member of a class template
+    // odr-uses it, so a plain reference would put the channel's queues
+    // and code into a build that has it switched off - which
+    // scripts/ci/check-diag-absent.sh fails, and did fail over exactly
+    // this function.
+    if constexpr (!diag::policy_of(diag::sink::esp_blocks).present) {
+        return std::unexpected(
+            zpp::error{error::controller_not_available});
+    } else {
+        if (!this->channel_bar) {
+            return std::unexpected(
+                zpp::error{error::controller_not_available});
+        }
+
+        auto * bar =
+            static_cast<volatile std::uint8_t *>(this->channel_bar);
+
+        // The guest has just cleared CC.EN and is waiting for the
+        // controller to follow. Let it, then take the controller while it
+        // is nobody's.
+        if (!wait_for_ready(bar, false)) {
+            return std::unexpected(
+                zpp::error{error::controller_never_settled});
+        }
+
+        // What the guest programmed, so it can be put back exactly. These
+        // are readable and are only writable while CC.EN is clear, which
+        // is why the whole excursion has to live inside this window.
+        auto guest_attributes = arch::x86_64::read32(
+            bar + offset_of(register_offset::admin_queue_attributes));
+        auto guest_submission = arch::x86_64::read64(
+            bar + offset_of(register_offset::admin_submission_queue_base));
+        auto guest_completion = arch::x86_64::read64(
+            bar + offset_of(register_offset::admin_completion_queue_base));
+
+        // Put it all back however this returns. The guest's
+        // re-initialisation reads these, and leaving ours behind would
+        // point its admin queue at memory it does not own.
+        scope_exit restore{[&] {
+            arch::x86_64::write32(
+                bar + offset_of(register_offset::configuration), 0);
+            wait_for_ready(bar, false);
+
+            arch::x86_64::write32(
+                bar + offset_of(register_offset::admin_queue_attributes),
+                guest_attributes);
+            arch::x86_64::write64(
+                bar + offset_of(
+                          register_offset::admin_submission_queue_base),
+                guest_submission);
+            arch::x86_64::write64(
+                bar + offset_of(
+                          register_offset::admin_completion_queue_base),
+                guest_completion);
+        }};
+
+        // Our own admin queue, in storage nothing else can reach. Four
+        // entries: the excursion issues two commands and the minimum a
+        // controller must accept is two.
+        constexpr std::uint32_t admin_entries = 4;
+
+        using queues = diag::esp_block_sink::queues;
+
+        auto admin_submission_physical =
+            this->host_page_table.virtual_to_physical(
+                queues::admin_submissions);
+        auto admin_completion_physical =
+            this->host_page_table.virtual_to_physical(
+                queues::admin_completions);
+
+        __builtin_memset(queues::admin_submissions,
+                         0,
+                         admin_entries * sizeof(nvme::submission_entry));
+        __builtin_memset(queues::admin_completions,
+                         0,
+                         admin_entries * sizeof(nvme::completion_entry));
+
+        // AQA carries both depths zero's based, ASQS in bits 11:0 and ACQS
+        // in bits 27:16.
+        arch::x86_64::write32(
+            bar + offset_of(register_offset::admin_queue_attributes),
+            (admin_entries - 1) | ((admin_entries - 1) << 16));
+        arch::x86_64::write64(
+            bar + offset_of(register_offset::admin_submission_queue_base),
+            admin_submission_physical);
+        arch::x86_64::write64(
+            bar + offset_of(register_offset::admin_completion_queue_base),
+            admin_completion_physical);
+
+        // Enable, with the entry sizes the queues actually use: a
+        // submission entry is 64 bytes and a completion entry 16, both
+        // expressed as a power of two, and the NVM command set at the
+        // smallest page size.
+        constexpr std::uint32_t enable = 1;
+        constexpr std::uint32_t submission_entry_size = 6u << 16;
+        constexpr std::uint32_t completion_entry_size = 4u << 20;
+
+        arch::x86_64::write32(
+            bar + offset_of(register_offset::configuration),
+            enable | submission_entry_size | completion_entry_size);
+
+        if (!wait_for_ready(bar, true)) {
+            return std::unexpected(
+                zpp::error{error::controller_never_settled});
+        }
+
+        // One command at a time on a queue nobody else uses, so the whole
+        // of the submission side is a slot, a doorbell and a wait.
+        std::uint32_t admin_tail{};
+        std::uint32_t admin_head{};
+        auto admin_phase = true;
+
+        auto run_admin = [&](const nvme::submission_entry & command) {
+            queues::admin_submissions[admin_tail] = command;
+            admin_tail = (admin_tail + 1) % admin_entries;
+
+            arch::x86_64::order_stores();
+            arch::x86_64::write32(
+                bar + nvme::submission_queue_doorbell_offset(
+                          0, this->channel_doorbell_stride),
+                admin_tail);
+
+            constexpr std::uint64_t budget = 1ull << 26;
+            for (auto spun = budget; spun; --spun) {
+                auto & entry = queues::admin_completions[admin_head];
+                if (entry.phase() != admin_phase) {
+                    continue;
+                }
+
+                arch::x86_64::order_loads();
+                auto status = entry.status();
+
+                admin_head = (admin_head + 1) % admin_entries;
+                if (0 == admin_head) {
+                    admin_phase = !admin_phase;
+                }
+
+                arch::x86_64::write32(
+                    bar + nvme::completion_queue_doorbell_offset(
+                              0, this->channel_doorbell_stride),
+                    admin_head);
+
+                return status;
+            }
+
+            return std::uint16_t{0xffff};
+        };
+
+        // The private pair. Destroyed with the controller at the end of
+        // this function, which is why its identifier cannot collide with
+        // anything the guest later creates.
+        auto completion_physical =
+            this->host_page_table.virtual_to_physical(queues::completions);
+        auto submission_physical =
+            this->host_page_table.virtual_to_physical(queues::submissions);
+
+        if (0 != run_admin(nvme::create_io_completion_queue(
+                     this->channel_queue_id,
+                     diag::esp_block_sink::queue_entries,
+                     completion_physical,
+                     false,
+                     0))) {
+            return std::unexpected(zpp::error{error::excursion_refused});
+        }
+
+        if (0 != run_admin(nvme::create_io_submission_queue(
+                     this->channel_queue_id,
+                     diag::esp_block_sink::queue_entries,
+                     submission_physical,
+                     this->channel_queue_id,
+                     nvme::queue_priority::medium))) {
+            return std::unexpected(zpp::error{error::excursion_refused});
+        }
+
+        // The queue is ours again, at position zero, and everything staged
+        // can go out through it.
+        diag::esp_block_sink::adopt_rebuilt_queue(
+            bar,
+            this->channel_doorbell_stride,
+            this->channel_queue_id,
+            this->channel_namespace);
+        diag::esp_block_sink::flush_pending();
+
+        return {};
+
+    } // if constexpr
+}
+
+std::expected<void, zpp::error>
+hypervisor::shadow_controller_registers(bool armed)
+{
+    if (!this->channel_bar) {
+        return std::unexpected(
+            zpp::error{error::controller_not_available});
+    }
+
+    auto bar = const_cast<const void *>(this->channel_bar);
+    auto bar_physical = this->host_page_table.virtual_to_physical(bar);
+    auto bar_page = bar_physical & ~(page_size - 1);
+
+    auto entry = epte_for(bar_page);
+    if (!entry) {
+        return std::unexpected(entry.error());
+    }
+
+    if (armed) {
+        // Fill the shadow from the real registers first, so everything
+        // the guest is not being lied to about - CAP, VS, the version and
+        // the reserved space - reads back exactly as it did.
+        auto * from = static_cast<const volatile std::uint8_t *>(
+            reinterpret_cast<const volatile void *>(bar_page));
+        auto * to = this->unprotected_memory.register_shadow;
+
+        for (std::size_t i{}; i < page_size; i += sizeof(std::uint32_t)) {
+            auto value = arch::x86_64::read32(from + i);
+            __builtin_memcpy(to + i, &value, sizeof(value));
+        }
+
+        // Worth being explicit about what this freezes. The page is the
+        // controller's own registers and nothing else - the doorbells
+        // start at 0x1000, the next page, and a PCI memory BAR is not
+        // shared with another device - so nothing unrelated is affected.
+        // But every register on it stops changing for the window, not
+        // only the two below: a controller that went fatal would have
+        // CSTS.CFS hidden, a shutdown in progress would have CSTS.SHST
+        // frozen, and a guest write to the interrupt mask is held rather
+        // than lost. That is acceptable for a bounded window and would
+        // not be for a permanent one.
+        //
+        // And then the two the guest must not see change. It has just
+        // cleared CC.EN and is waiting for CSTS.RDY to follow; both stay
+        // that way for as long as the controller is ours, whatever the
+        // hardware is actually doing.
+        constexpr std::size_t configuration = 0x14;
+        constexpr std::size_t status = 0x1c;
+
+        auto disabled = nvme::controller_configuration{
+            *reinterpret_cast<const std::uint32_t *>(to + configuration)};
+        auto stopped = nvme::controller_status{
+            *reinterpret_cast<const std::uint32_t *>(to + status)};
+
+        auto configuration_value = disabled.value() & ~std::uint32_t{1};
+        auto status_value = stopped.value() & ~std::uint32_t{1};
+
+        __builtin_memcpy(to + configuration,
+                         &configuration_value,
+                         sizeof(std::uint32_t));
+        __builtin_memcpy(
+            to + status, &status_value, sizeof(std::uint32_t));
+
+        auto shadow_physical =
+            this->host_page_table.virtual_to_physical(to);
+
+        (*entry)->page_number(shadow_physical >> 12);
+        (*entry)->read(true);
+        (*entry)->write(false);
+    } else {
+        (*entry)->page_number(bar_page >> 12);
+        (*entry)->read(true);
+        (*entry)->write(false);
+    }
+
+    invalidate_ept();
+
+    // A processor still holding the old translation would read the real
+    // register, which is the whole thing this exists to prevent - so the
+    // change is not merely announced, it is waited for.
+    if (!wait_for_ept_acknowledgement(std::uint64_t{1} << 24)) {
+        return std::unexpected(
+            zpp::error{error::acknowledgement_timed_out});
+    }
+
+    return {};
+}
+
 bool hypervisor::hold_guest_page(std::uint64_t guest_physical)
 {
     auto page = guest_physical >> 12;
@@ -2464,7 +2776,46 @@ void hypervisor::on_controller_register_write(
         self.channel_controller_enabled = now;
 
         if (was && !now) {
-            // Going down. The queues are gone with it.
+            // Going down. Take the controller while it is nobody's and
+            // write out what is staged, then let go.
+            //
+            // The guest's view of the register page is redirected first,
+            // so a driver polling CSTS on another processor keeps seeing
+            // the controller it has just disabled rather than the one this
+            // is briefly enabling. Everything is put back however the
+            // excursion ends.
+            if constexpr (diag::excursion_at_controller_reset) {
+                if (auto shadowed =
+                        self.shadow_controller_registers(true)) {
+                    scope_exit unshadow{
+                        [&] { self.shadow_controller_registers(false); }};
+
+                    auto held = self.hold_guest_page(
+                        reinterpret_cast<std::uint64_t>(self.channel_bar));
+                    scope_exit unhold{[&] {
+                        if (held) {
+                            self.release_guest_page(
+                                reinterpret_cast<std::uint64_t>(
+                                    self.channel_bar));
+                        }
+                    }};
+
+                    if (auto ran = self.run_reset_excursion(); !ran) {
+                        self.excursions_refused =
+                            self.excursions_refused + 1;
+                        self.excursion_error = ran.error().code();
+                    } else {
+                        self.excursions_completed =
+                            self.excursions_completed + 1;
+                    }
+                } else {
+                    self.excursions_refused = self.excursions_refused + 1;
+                    self.excursion_error = shadowed.error().code();
+                }
+            }
+
+            // The queues are gone with it either way: the excursion hands
+            // the controller back disabled, as the guest asked.
             diag::esp_block_sink::note_controller_write();
         } else if (!was && now) {
             // Coming back up. Handled here when the write is caught, and
