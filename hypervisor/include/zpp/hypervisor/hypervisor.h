@@ -68,25 +68,6 @@ public:
      */
     static constexpr std::size_t max_cpus = 32;
 
-private:
-    /**
-     * Whether initialize_ept has run.
-     *
-     * Guards epte_for, and exists because getting this wrong is silent
-     * in both directions. An entry edited before the tables are built
-     * lands in memory nothing will ever consult, and an entry edited
-     * between that and initialize_ept is overwritten by initialize_ept.
-     * Either way the protection or the watch simply is not there, and
-     * looks exactly like one that is.
-     *
-     * Three separate changes in one evening made that mistake - the
-     * local APIC watch twice and the queue storage once - so the rule
-     * that extended page table entries may only be touched after
-     * initialize_ept is enforced rather than remembered.
-     */
-    bool ept_initialized{};
-
-public:
     /**
      * Page size.
      */
@@ -1382,6 +1363,24 @@ private:
      * so the index cannot be local to either.
      */
     std::size_t next_ept_table{};
+
+    /**
+     * Whether initialize_ept has finished.
+     *
+     * Guards epte_for, and exists because getting this wrong is silent
+     * in both directions. An entry edited before the tables are built
+     * lands in memory nothing will ever consult, and one edited between
+     * that and initialize_ept is overwritten by it. Either way the
+     * protection or the watch is simply absent, and looks exactly like
+     * one that is there.
+     *
+     * Three separate changes in one evening made that mistake - the
+     * local APIC watch twice and the queue storage once - so the rule
+     * that an extended page table entry may only be touched after
+     * initialize_ept and protect_module have run is enforced here rather
+     * than remembered.
+     */
+    bool ept_initialized{};
 
     /**
      * How many pages may be watched at once.
