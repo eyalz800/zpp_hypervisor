@@ -255,6 +255,40 @@ mount the NTFS volume read-only and read the registry - for example
 `Enum\PCI\<instance>\Device Parameters\DMA Management` to find out what
 Windows decided about DMA remapping for the controller.
 
+## Every change to the target dies on reboot unless it is backed up
+
+TinyCore runs from RAM and restores `/home` and `/opt` from
+`mydata.tgz` at boot. **An edit you made and did not back up is gone, and it
+comes back as the *old* version rather than as a missing file** - which is
+far worse, because nothing looks broken.
+
+This has already cost a full debugging detour. After a reboot:
+`boot-zpp.sh` reverted to the version with the synthetic FAT disk, the
+`.bak` copies made minutes earlier were gone, and `check-boot-options.sh`
+had never existed. The rig then booted the *stale* loader sitting on the
+synthetic ESP - a binary from hours earlier with an already-fixed `invept`
+bug - and hung. Every conclusion drawn from that run was about a binary
+nobody had built that day.
+
+So: **after editing anything under `/home/tc` or `/opt`, back up
+immediately**, and verify the backup rather than trusting it.
+
+```sh
+sudo mount /dev/nvme0n1p2 /mnt/nvme0n1p2      # backup target lives on the ESP
+sudo filetool.sh -b
+tar tzf /mnt/nvme0n1p2/EFI/tc/tce/mydata.tgz | grep <the file you changed>
+tar xzf /mnt/nvme0n1p2/EFI/tc/tce/mydata.tgz -O home/tc/vm/boot-zpp.sh | grep -c zppesp
+```
+
+The backup writes to the real ESP, so it cannot run while the VM holds the
+NVMe - kill QEMU and let the device rebind first.
+
+**The tell that this has happened**: trace line numbers that do not match
+the source you just built (`ZPP_TRACE loading` at `main.cpp:1399` when your
+build puts it at 1430), or expected trace lines missing entirely. Both mean
+a different binary ran. Check the md5 of what is actually deployed before
+debugging anything.
+
 ## Validate the NVRAM boot options *before* every boot
 
 **A boot that lands in the UEFI shell looks exactly like a loader that ran
