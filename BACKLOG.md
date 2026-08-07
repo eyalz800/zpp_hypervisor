@@ -1004,3 +1004,44 @@ from the VMCS, and see what it does with the first CPUID after launch.
 The loader keeps the probe. One CPUID after launch is nearly free, and
 "the loader returned zero" has now twice been mistaken for "the
 hypervisor is running".
+
+## The channel works on the real NVMe
+
+Read off `/dev/nvme0n1` with `dd`, after a boot with the guest running:
+
+    2048 blocks read
+       924 stamped by the reservation, never written
+      1124 written by the hypervisor
+      sequence 0 to 1123 contiguous, epoch 1
+      seven to fifteen records per block
+      lost 0, refused 0, dropped 0, lost to reset 0
+
+So the destination, the borrow, the private queue, the hand-over and the
+resident writer all work on real hardware, and blocks fill properly rather
+than carrying one record each.
+
+What is *not* yet met: the guest does not survive. After those 1124 blocks
+the guest froze with RIP in the firmware range and the counters stopped -
+`sequence`, `lost_to_reset` and the exit count all static across seventy
+seconds. So the log covers the boot up to that hang and stops, and "while
+Windows runs" is only true of the part of the boot that ran. That hang is
+the next thing to chase and is very likely the same one reported as
+Windows sitting on its spinning circle.
+
+Note `lost_to_reset` stayed 0, so the guest had not yet reset the
+controller when it froze - the reset path is still unexercised on real
+hardware, and the instruction decoder built to survive it is therefore
+still unproven for its actual purpose.
+
+Two things this run also settled:
+
+  - The preemption timer is **not permitted** on this machine, so the log
+    has no clock there and the 1124 blocks were driven by the guest's own
+    exits during boot, which are plentiful while firmware and the boot
+    manager run and dry up once an OS settles. Continuous logging on this
+    machine therefore still needs a clock, and the timer cannot be it.
+    What can: the preemption timer is one of several ways to manufacture
+    an exit, and a periodic one that is always available is worth finding
+    before assuming this is fixed.
+  - Blocks carry seven to fifteen records, not one, which is what the
+    throttled heartbeat was meant to achieve.
