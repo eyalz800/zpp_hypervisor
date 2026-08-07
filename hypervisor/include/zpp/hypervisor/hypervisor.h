@@ -874,8 +874,30 @@ private:
     /**
      * Handles an I/O instruction that exited. Returns whether it was one
      * this VMM asked to see.
+     *
+     * Takes the guest context because the value an OUT carries is in
+     * RAX - see the note in the definition about why that needs no
+     * instruction decoder.
+     *
+     * Clears re_execute when this VMM performed the access itself, so the
+     * guest is resumed past its own instruction rather than at it. Left
+     * set on every path that hands the instruction back to the guest.
      */
-    bool on_io_instruction();
+    bool on_io_instruction(arch::x86_64::context & context,
+                           bool & re_execute);
+
+    /**
+     * Everything this VMM does about a guest asking for a sleep state.
+     *
+     * Separate from on_io_instruction because that function's job is to
+     * recognise the port; this one's is to decide what a sleep means, and
+     * the two answer to different references. Returns whether the guest
+     * still has to execute its own OUT - true on the pass-through path,
+     * false when this VMM performed the write itself.
+     *
+     * See zpp/hypervisor/power.h for what the three transitions require.
+     */
+    bool on_sleep_request(std::uint16_t port, std::uint32_t value);
 
     /**
      * Handles a write the local APIC page watch saw. Reads the interrupt
@@ -1790,6 +1812,72 @@ private:
     /**
      * @}
      */
+
+    /**
+     * The last sleep state the guest asked for, and what was done about
+     * it.
+     *
+     * A record rather than a log line because of where it has to be
+     * readable from: after an S3 the machine has been through a reset, so
+     * the channel's last block may be the only thing that got out, and
+     * after a *failed* suspend the interesting question is what this VMM
+     * had already taken apart by the time the write did not sleep. Both
+     * want a single place holding the whole of the last attempt.
+     */
+    struct
+    {
+        /**
+         * Non-zero once a sleep request has been seen. Checked first:
+         * every other field is meaningless until this is set.
+         */
+        std::uint64_t occurred{};
+
+        /**
+         * Which of the two control blocks the guest wrote, and the whole
+         * value it wrote there.
+         * @{
+         */
+        std::uint64_t port{};
+        std::uint64_t value{};
+        /**
+         * @}
+         */
+
+        /**
+         * The SLP_TYPx field out of that value. Platform specific and
+         * recorded only - see power.h on why it is not compared against a
+         * constant.
+         */
+        std::uint64_t sleep_type{};
+
+        /**
+         * Which processor saw the write, as a VPID.
+         */
+        std::uint64_t processor{};
+
+        /**
+         * How far the quiesce got before the OUT was executed, so a
+         * machine that never came back says where it stopped. One of
+         * power_stage below.
+         */
+        std::uint64_t stage{};
+    } sleep_request{};
+
+    /**
+     * The steps on_sleep_request records in sleep_request.stage, in the
+     * order it reaches them. A machine that suspends and never resumes
+     * leaves the last one it got past.
+     */
+    enum class power_stage : std::uint64_t
+    {
+        seen = 1,
+        channel_flushed = 2,
+        vmcs_cleared = 3,
+        left_vmx_operation = 4,
+        write_issued = 5,
+        write_returned = 6,
+        re_established = 7,
+    };
 
     /**
      * The exit nothing knew how to handle, filled in by

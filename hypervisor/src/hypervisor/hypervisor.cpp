@@ -18,6 +18,7 @@
 #include "zpp/elf_file.h"
 #include "zpp/elf_image_base.h"
 #include "zpp/error.h"
+#include "zpp/hypervisor/power.h"
 #include "zpp/loader.h"
 #include "zpp/nvme/command.h"
 #include "zpp/scope_exit.h"
@@ -2657,14 +2658,19 @@ void hypervisor::intercept_io_port(std::uint16_t port, bool intercept)
     }
 }
 
-bool hypervisor::on_io_instruction()
+bool hypervisor::on_io_instruction(arch::x86_64::context & context,
+                                   bool & re_execute)
 {
-    // SDM Table 28-5. The port is in bits 31:16 for the forms that carry
-    // one, which is every form this VMM asks to see; direction is bit 3,
-    // with one meaning in.
+    // SDM Table 30-5, "Exit Qualification for I/O Instructions". The port
+    // is in bits 31:16 for the forms that carry one, which is every form
+    // this VMM asks to see; direction is bit 3, with one meaning in; bits
+    // 2:0 give the size of the access, and bit 4 says whether it was a
+    // string instruction.
     auto qualification = this->vmcs.exit_qualification();
     auto port = static_cast<std::uint16_t>((qualification >> 16) & 0xffff);
     auto reading = 0 != (qualification & (1ull << 3));
+    auto string_form = 0 != (qualification & (1ull << 4));
+    auto size = qualification & 7;
 
     if ((0 == this->sleep_control_port) ||
         ((port != this->sleep_control_port) &&
@@ -2674,26 +2680,116 @@ bool hypervisor::on_io_instruction()
 
     // Only the write matters: reading the register tells the guest what
     // it already wrote and enters nothing.
-    if (!reading) {
-        log("guest is entering a sleep state through port {}", port);
-        diag::log<diag::severity::warning>("sleep entered through port {}",
-                                           port);
-
-        // Everything this VMM is dies here and nothing brings it back:
-        // root mode does not survive S3, and there is no resume path.
-        // Said out loud, in the channel that survives, rather than
-        // discovered later by noticing the machine is unvirtualized.
-        diag::pump::drain();
+    if (reading) {
+        intercept_io_port(port, false);
+        return true;
     }
+
+    // The value the guest is writing, with no instruction decoder
+    // involved.
+    //
+    // For a non-string OUT there is nowhere else it can come from: the
+    // architecture defines OUT's source as AL, AX or EAX and nothing
+    // else, and the exit qualification says which of the three by giving
+    // the size of the access. The port comes out of the same field
+    // whether it was named by DX or by an immediate, so the operand
+    // encoding bit does not have to be looked at either.
+    //
+    // A string form - OUTS - would be reading from memory instead, and
+    // there is no register to take it from. Windows does not use one to
+    // write this register and no firmware does either, so rather than
+    // guess, that case falls back to letting the guest execute its own
+    // instruction, which is what this whole function used to do.
+    if (string_form) {
+        log("sleep control written by a string instruction, passed "
+            "through");
+        intercept_io_port(port, false);
+        return true;
+    }
+
+    std::uint32_t value{};
+    switch (size) {
+    case 0:
+        value = static_cast<std::uint8_t>(context.rax);
+        break;
+    case 1:
+        value = static_cast<std::uint16_t>(context.rax);
+        break;
+    default:
+        value = static_cast<std::uint32_t>(context.rax);
+        break;
+    }
+
+    re_execute = on_sleep_request(port, value);
+    return true;
+}
+
+bool hypervisor::on_sleep_request(std::uint16_t port, std::uint32_t value)
+{
+    // Not every write to this register enters anything. It also carries
+    // SCI_EN, BM_RLD and GBL_RLS, and an operating system writes it while
+    // running normally - so the register is watched, and only SLP_EN is
+    // acted on.
+    if (!power::asks_for_sleep(value)) {
+        log("sleep control written {} with no enable, passed through",
+            value);
+
+        // Left armed. This was not the write worth seeing, so releasing
+        // the port here would spend the one interception on a write that
+        // entered nothing.
+        return true;
+    }
+
+    this->sleep_request.port = port;
+    this->sleep_request.value = value;
+    this->sleep_request.sleep_type = power::sleep_type(value);
+    this->sleep_request.processor = this->vmcs.vpid();
+    this->sleep_request.stage =
+        static_cast<std::uint64_t>(power_stage::seen);
+    this->sleep_request.occurred = 1;
+
+    log("guest is entering sleep type {} through port {}",
+        this->sleep_request.sleep_type,
+        port);
+    diag::log<diag::severity::warning>(
+        "sleep type {} entered through port {}",
+        this->sleep_request.sleep_type,
+        port);
+
+    // Everything staged in the channel, on the way out.
+    //
+    // Two calls and not one, because they do different things and the
+    // second used to be missing. drain() empties the retention ring into
+    // the sink; flush_pending() writes the sink's partially filled block
+    // to the medium and waits for the controller to acknowledge it.
+    // Without the flush, everything logged since the last full block -
+    // which on a quiet machine is everything interesting about the
+    // suspend - stayed in the staging buffer and went away with the
+    // power.
+    diag::pump::drain();
+    if constexpr (diag::policy_of(diag::sink::esp_blocks).present) {
+        diag::esp_block_sink::flush_pending();
+    }
+    this->sleep_request.stage =
+        static_cast<std::uint64_t>(power_stage::channel_flushed);
 
     // Passed through rather than emulated, by releasing the port and
     // resuming *without* advancing past the instruction: the guest
     // re-executes its own OUT, which now reaches hardware. That needs no
     // decoder and cannot disagree with what the instruction meant.
     //
-    // Releasing it also means this is seen once. A sleep is not a thing
-    // worth trapping twice, and re-arming would have to happen on a
-    // resume path that does not exist yet.
+    // Releasing it also means this is seen once, which is the right
+    // answer only while there is no resume path: a sleep is not worth
+    // trapping twice, and re-arming has to happen on a resume.
+    //
+    // The cost of the pass-through is that this processor is still in VMX
+    // operation with a VMCS current when the platform removes power, and
+    // SDM 27.11.1 says a VMCS active on a logical processor that leaves
+    // VMX operation may be corrupted - naming "removing power from the
+    // processor (e.g., as part of a transition to the S3 and S4 power
+    // states)" as one of the ways. It is harmless today only because
+    // nothing ever reads those regions again. It stops being harmless the
+    // moment a resume path does.
     intercept_io_port(port, false);
     return true;
 }
@@ -5320,15 +5416,20 @@ hypervisor::main(arch::x86_64::context & caller_context)
             // Reachable only for a port deliberately armed in the I/O
             // bitmaps, which today is the ACPI sleep control register
             // and nothing else.
-            if (!on_io_instruction()) {
+            bool re_execute = true;
+            if (!on_io_instruction(context, re_execute)) {
                 record_exit(full_reason);
                 on_unhandled_exit(full_reason);
                 break;
             }
-            // Deliberately not advanced. The handler released the port,
-            // so re-executing the guest's own instruction is what
-            // performs it.
-            advance_rip = false;
+
+            // RIP is left alone whenever the guest still has to run its
+            // own instruction: the handler released the port, so
+            // re-executing it is what performs the access. It advances
+            // only when this VMM performed the access itself, because
+            // then the instruction has had its effect and resuming at it
+            // would repeat it.
+            advance_rip = !re_execute;
             break;
         }
         case basic_reason::control_register_access: {
