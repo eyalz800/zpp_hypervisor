@@ -468,6 +468,18 @@ private:
     static void on_local_apic_write(void * context, std::uint64_t page);
 
     /**
+     * The guest has written the storage controller's register page.
+     *
+     * Armed only while the disk channel is live, and only on the page
+     * holding the configuration register - not the doorbell page, which
+     * is written constantly. The one thing it looks for is CC.EN going
+     * clear, because that is a controller reset and a reset destroys the
+     * queue pair the channel writes through.
+     */
+    static void on_controller_register_write(void * context,
+                                             std::uint64_t page);
+
+    /**
      * The guest physical page of the memory mapped local APIC, or zero
      * while it is not being watched.
      */

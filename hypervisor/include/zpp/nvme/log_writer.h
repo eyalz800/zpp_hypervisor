@@ -321,6 +321,9 @@ public:
      */
     static void forget()
     {
+        if (!storage_bound()) {
+            return;
+        }
         lost_to_reset += (submitted - completed);
         bound = binding{};
         submission_tail = 0;

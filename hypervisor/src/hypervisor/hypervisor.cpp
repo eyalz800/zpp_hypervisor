@@ -1674,6 +1674,18 @@ void hypervisor::watch_local_apic(bool watch)
     }
 }
 
+void hypervisor::on_controller_register_write(void * context,
+                                              std::uint64_t page)
+{
+    static_cast<void>(context);
+    static_cast<void>(page);
+
+    // Everything about what this means belongs to the channel, so it is
+    // asked rather than told. All this side knows is that the guest
+    // touched a page it was watching.
+    diag::esp_block_sink::note_controller_write();
+}
+
 void hypervisor::on_local_apic_write(void * context, std::uint64_t page)
 {
     auto & self = *static_cast<hypervisor *>(context);
@@ -3301,6 +3313,29 @@ hypervisor::main(arch::x86_64::context & caller_context)
             };
 
             if (diag::esp_block_sink::configure(handover, physical_of)) {
+                // Watch the page the configuration register lives on, so
+                // a guest reset of the controller is noticed rather than
+                // inferred - it cannot be inferred, because a completed
+                // reset leaves the status register looking exactly as it
+                // did before.
+                //
+                // This page and not the doorbell page. With a stride of
+                // zero the doorbells begin at the next page, and they are
+                // written on every command the guest issues; watching
+                // them would trap the guest's entire disk traffic. The
+                // registers on this page are touched while a driver sets
+                // itself up and almost never afterwards.
+                auto register_page = reinterpret_cast<std::uint64_t>(
+                                         handover.configuration_register) &
+                                     ~(page_size - 1);
+                if (auto armed = watch_guest_page_writes(
+                        register_page,
+                        &hypervisor::on_controller_register_write,
+                        this);
+                    !armed) {
+                    log("could not watch the controller register page");
+                }
+
                 log("disk channel live, namespace {}",
                     handover.target.namespace_id);
                 diag::log<diag::severity::info>(

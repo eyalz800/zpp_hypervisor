@@ -188,6 +188,44 @@ struct esp_blocks_for
     }
 
     /**
+     * Called when the guest has written the controller's configuration
+     * register, which is the only way this side learns about a reset.
+     *
+     * A reset destroys every I/O queue on the controller, ours included,
+     * and the guard read cannot infer that on its own: a *completed*
+     * reset leaves CSTS.RDY set and CC.EN set, exactly as they were
+     * before it. It catches a controller that is down and not one that
+     * went down and came back, so without this the channel would go on
+     * ringing a doorbell the controller no longer backs.
+     *
+     * The watch fires after the guest's write has been stepped over, so
+     * the register read here is the value the guest just wrote.
+     * Clearing CC.EN is the reset; everything else on this page - the
+     * admin queue base registers, the doorbell stride - is the driver
+     * setting itself up and is not our business.
+     */
+    static void note_controller_write()
+    {
+        if (!queues::bound.live()) {
+            return;
+        }
+
+        auto configuration = nvme::controller_configuration{
+            arch::x86_64::read32(queues::bound.configuration_register)};
+        if (configuration.enable()) {
+            return;
+        }
+
+        // Forget rather than try to survive it. What was outstanding is
+        // counted into lost_to_reset, so the loss reaches the next
+        // block's header instead of being silent, and ready() answers
+        // false from here on. Recreating the queue means borrowing the
+        // admin queue from a live guest driver, which is a larger job -
+        // see BACKLOG.md.
+        queues::forget();
+    }
+
+    /**
      * Whether the channel can be used at all in this boot.
      *
      * Four things have to be true, and every one of them is somebody
