@@ -285,6 +285,12 @@ private:
     void invalidate_ept();
 
     /**
+     * The invalidation without the announcement, for a processor that is
+     * catching up with somebody else's change rather than making one.
+     */
+    void invalidate_ept_locally();
+
+    /**
      * Prepare module protection from guest access.
      */
     std::expected<void, zpp::error> protect_module();
@@ -1205,6 +1211,24 @@ private:
      * value has to be remembered.
      */
     bool channel_controller_enabled{};
+
+    /**
+     * How many times the controller's register page has been written by
+     * the guest, and what the configuration register said the last time.
+     *
+     * Instrumentation, because the evidence available without it was
+     * consistent with two incompatible stories: the watch is armed, the
+     * entry denies writes, the handler is the right one, and the
+     * controller ended up enabled without the transition ever being
+     * seen. One of those observations has to be wrong and this says
+     * which.
+     * @{
+     */
+    std::uint64_t channel_register_writes{};
+    std::uint64_t channel_last_configuration{};
+    /**
+     * @}
+     */
     std::uint32_t channel_doorbell_stride{};
     std::uint16_t channel_queue_id{};
     std::uint32_t channel_namespace{};
@@ -1537,6 +1561,44 @@ private:
      * than remembered.
      */
     bool ept_initialized{};
+
+    /**
+     * How many times an extended page table entry has been changed, and
+     * how many of those each processor has caught up with.
+     *
+     * INVEPT is not a broadcast. It invalidates on the processor that
+     * executes it and nowhere else, so a watch armed on one processor is
+     * simply not armed on the others until they invalidate too - they go
+     * on using a translation cached before the change. That is not
+     * theoretical: it is why the controller's re-enable was missed after
+     * the reset was seen. The reset arrived on one processor, which
+     * re-armed the watch and invalidated itself, and the guest's driver
+     * then wrote the enable from a processor still holding the old
+     * permissive entry, so nothing trapped.
+     *
+     * The fix is the one KVM uses rather than a rendezvous: mark, and let
+     * every processor catch up on its own next entry.
+     * `kvm_make_request(KVM_REQ_TLB_FLUSH, vcpu)` sets a per-processor
+     * request and `kvm_check_request` services it in the run loop - no
+     * processor is ever held. Here that is a counter and a comparison on
+     * the exit path, which costs a load and a branch per exit and needs
+     * no interprocessor interrupt at all, because a guest that is running
+     * is a guest that is taking exits.
+     *
+     * What it does not give is an immediate guarantee: a processor that
+     * takes no exit keeps its stale entry. That is the same weakness the
+     * single-processor invalidation already had, bounded now by exit
+     * frequency rather than unbounded, and the direction is the safe one
+     * - a stale permissive entry costs an observation, never a wrong
+     * one. Somewhere that needs the guarantee would have to send the
+     * interrupt, which is the part KVM also has and this does not.
+     * @{
+     */
+    std::atomic<std::uint64_t> ept_generation{};
+    std::uint64_t ept_generation_seen[max_cpus]{};
+    /**
+     * @}
+     */
 
     /**
      * How many pages may be watched at once.

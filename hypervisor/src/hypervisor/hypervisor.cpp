@@ -747,6 +747,15 @@ std::expected<void, zpp::error> hypervisor::initialize_ept()
  */
 void hypervisor::invalidate_ept()
 {
+    // Announce the change before making it locally, so a processor that
+    // reads the counter after this point cannot conclude it is up to
+    // date when it is not.
+    this->ept_generation.fetch_add(1, std::memory_order_release);
+    invalidate_ept_locally();
+}
+
+void hypervisor::invalidate_ept_locally()
+{
     // INVEPT is only defined in VMX root operation. Outside it the
     // instruction is not merely ineffective, it raises #UD - which is
     // how this was found: a fault at a small offset from the module
@@ -942,7 +951,8 @@ void hypervisor::rebuild_channel_queue()
     // member of the sink's class template odr-uses it and would carry the
     // channel into a build that switched it off - which
     // scripts/ci/check-diag-absent.sh fails, and did over this function.
-    if constexpr (!diag::policy_of(diag::sink::esp_blocks).present) {
+    if constexpr (!diag::policy_of(diag::sink::esp_blocks).present ||
+                  !diag::rebuild_channel_after_reset) {
         return;
     } else {
         // Nothing to rebuild if the channel was never up.
@@ -1912,6 +1922,9 @@ void hypervisor::on_controller_register_write(void * context,
                 static_cast<volatile std::uint8_t *>(self.channel_bar) +
                 nvme::offset_of(nvme::register_offset::configuration))};
 
+        ++self.channel_register_writes;
+        self.channel_last_configuration = configuration.value();
+
         auto now = configuration.enable();
         auto was = self.channel_controller_enabled;
         self.channel_controller_enabled = now;
@@ -1920,11 +1933,9 @@ void hypervisor::on_controller_register_write(void * context,
             // Going down. The queues are gone with it.
             diag::esp_block_sink::note_controller_write();
         } else if (!was && now) {
-            // Coming back up, and this is the one moment the borrow is
-            // free: the driver must now poll CSTS.RDY, which it is
-            // required to allow the controller CAP.TO half-seconds to
-            // answer, and the admin queue it would contend for has just
-            // been reset to empty.
+            // Coming back up. Handled here when the write is caught, and
+            // by poll_for_controller_return when it is not - see there
+            // for why catching it cannot be relied on.
             self.rebuild_channel_queue();
         }
     }
@@ -3734,9 +3745,60 @@ hypervisor::main(arch::x86_64::context & caller_context)
         using basic_reason = arch::x86_64::vmx::exit_reason::basic_reason;
         auto & vmcs = this->vmcs;
 
-        // Virtual processor id.
-        auto vpid = vmcs.vpid();
-        static_cast<void>(vpid);
+        // Notice a controller that has come back, if the write that
+        // brought it back was not caught.
+        //
+        // It very often is not, and the reason is structural rather than
+        // a bug to fix here. A watch lets the guest's write land by
+        // making the page writable, stepping one instruction with the
+        // monitor trap flag, and protecting it again - and for that
+        // window the page is writable for every processor, not just the
+        // one being stepped. A driver resetting a controller writes CC
+        // twice in quick succession, disable then enable, and the second
+        // write goes through the window left open by the first.
+        //
+        // Measured exactly so: one trapped write carrying 0x00460000,
+        // the controller afterwards reading 0x00460001, and the
+        // transition never seen.
+        //
+        // So the state is polled rather than the edge caught. It costs
+        // one memory mapped read on exits where the channel is down and
+        // nothing at all once it is back, and it cannot miss - a
+        // controller that is enabled stays enabled to be found. Detection
+        // lands within microseconds of the enable, which is still inside
+        // the CSTS.RDY wait the driver is required to tolerate, so the
+        // borrow is still free.
+        if constexpr (diag::policy_of(diag::sink::esp_blocks).present) {
+            if (this->channel_bar && !this->channel_controller_enabled) {
+                auto configuration =
+                    nvme::controller_configuration{arch::x86_64::read32(
+                        static_cast<volatile std::uint8_t *>(
+                            this->channel_bar) +
+                        nvme::offset_of(
+                            nvme::register_offset::configuration))};
+                if (configuration.enable()) {
+                    this->channel_controller_enabled = true;
+                    rebuild_channel_queue();
+                }
+            }
+        }
+
+        // Catch this processor up with any extended page table change
+        // another one has made.
+        //
+        // INVEPT is not a broadcast, so an entry changed elsewhere is
+        // not changed here until this happens - see ept_generation. Done
+        // on the way out of the guest rather than on the way in, because
+        // the handlers below are what act on watches and they have to see
+        // an armed one as armed.
+        if (auto cpu = vmcs.vpid(); (0 != cpu) && (cpu <= max_cpus)) {
+            auto generation =
+                this->ept_generation.load(std::memory_order_acquire);
+            if (this->ept_generation_seen[cpu - 1] != generation) {
+                this->ept_generation_seen[cpu - 1] = generation;
+                invalidate_ept_locally();
+            }
+        }
 
         basic_reason reason{};
 

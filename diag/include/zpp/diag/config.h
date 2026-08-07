@@ -120,6 +120,48 @@ inline constexpr std::uint32_t esp_reservation_minimum_megabytes = 1;
 inline constexpr bool restart_after_reservation = enabled;
 
 /**
+ * Whether to rebuild the log channel's queue pair after the guest's
+ * driver has reset the controller.
+ *
+ * **Off, and it has been tried.** The design is sound and the pieces all
+ * work: the reset is detected, the mapping window reaches the guest's
+ * admin queue at an address we do not choose, and the borrow itself is
+ * proven byte-exact against this controller. What does not work yet is
+ * the timing.
+ *
+ * The borrow needs the admin queue to itself, and the one moment that is
+ * free is the CSTS.RDY wait the driver enters straight after writing
+ * CC.EN - a wait it must allow the controller CAP.TO half-seconds to
+ * finish. Being inside that window means noticing the enable
+ * immediately, and neither way of noticing is immediate enough:
+ *
+ * - Catching the write does not work, because a watch lets the guest's
+ *   write land by making the page writable and stepping one instruction,
+ *   and for that window the page is writable for every processor. A
+ *   driver writes CC twice in succession, disable then enable, and the
+ *   second write goes through the window the first opened. Measured: one
+ *   trapped write of 0x00460000, a controller afterwards reading
+ *   0x00460001, and no transition seen.
+ * - Polling the register on our own exits does notice it, but late. The
+ *   driver's own CSTS.RDY polling is memory mapped reads to a passed
+ *   through device, which cause no exits at all, so nothing forces us to
+ *   look during precisely the window that matters. By the time we do,
+ *   the driver has begun submitting its own admin commands and the
+ *   borrow is no longer alone in the queue. Measured: a borrow that
+ *   spent its whole 285 ms budget and returned timed_out.
+ *
+ * A timed out borrow leaves the guest's admin queue desynchronised,
+ * which its driver survives only by resetting the controller. That is
+ * not a thing to leave switched on.
+ *
+ * What it needs is emulating the guest's write instead of stepping over
+ * it, so the page is never writable and no second write can slip past.
+ * That is what a VMM with an instruction decoder does, and this one does
+ * not have one yet.
+ */
+inline constexpr bool rebuild_channel_after_reset = false;
+
+/**
  * How much a line is worth saying. Ordered, and compared with at_least
  * below rather than with `>=` on the enumerators, so the ordering is
  * stated in one place.
