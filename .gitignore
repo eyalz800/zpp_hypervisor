@@ -51,3 +51,7 @@ build/
 # Agent worktrees and scratch state. Never part of the tree.
 .claude/worktrees/
 scratchpad/
+
+# Recorded by scripts/deploy-to-rig.sh so a confusing boot can be checked
+# against what was actually deployed. Per-machine, not per-tree.
+.rig-deployed-hash
