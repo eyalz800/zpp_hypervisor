@@ -4,6 +4,7 @@
 
 #if ZPP_DIAG
 
+#include "zpp/arch/x86_64/asm.h"
 #include "zpp/arch/x86_64/mmio.h"
 #include "zpp/arch/x86_64/pci.h"
 #include "zpp/arch/x86_64/vmd.h"
@@ -569,8 +570,66 @@ void nvme_selftest::execute(const nvme::log_target & destination,
                                  g_scratch_completion};
 
     trace::line("selftest: borrowing the firmware's admin queue");
+
+    // Timed, because how long this takes decides an architecture.
+    //
+    // The borrow needs exclusive use of the admin queue for its whole
+    // duration, and the resident version of it will have to exclude a
+    // live guest driver for exactly that long. Whether that exclusion
+    // can be a doorbell trap that parks one processor, or has to be
+    // something heavier, depends entirely on whether this is hundreds of
+    // microseconds or milliseconds - and that is a property of the
+    // controller, not something to be reasoned about.
+    //
+    // Measured here rather than resident because it is the same code
+    // against the same controller, and here it costs nothing and risks
+    // nothing.
+    auto borrow_started = arch::x86_64::rdtsc();
     auto result = admin_borrow::run(
         bar, stride, where, saved, payload, 2, payload_status, 1u << 24);
+    auto borrow_ticks = arch::x86_64::rdtsc() - borrow_started;
+
+    trace::hex_line("selftest: borrow took tsc ticks ", borrow_ticks);
+    trace::hex_line("selftest: lap length was ", lap);
+
+    // Cost against a *deep* queue, which is the number that decides the
+    // resident design and cannot be read off the one above.
+    //
+    // The firmware's admin queue is shallow, so one lap here is four
+    // commands; a guest's is 256 deep, so one lap there is 512. Scaling
+    // the single measurement by 128 assumes the whole of it is marginal
+    // cost, which is exactly the assumption worth not making - a borrow
+    // has a fixed part, the snapshot and the restore, that does not grow
+    // with the lap.
+    //
+    // Any whole number of laps is a legal borrow, so timing a long one
+    // separates the two: the slope is what a command costs and the
+    // intercept is what a borrow costs. Done only when the channel is
+    // being brought up, and against the firmware's own queue, so it
+    // measures the controller rather than a guest.
+    for (std::uint32_t laps : {std::uint32_t{8}, std::uint32_t{64}}) {
+        admin_borrow::snapshot again{g_scratch_submission,
+                                     g_scratch_completion};
+        auto started = arch::x86_64::rdtsc();
+        auto measured = admin_borrow::run(bar,
+                                          stride,
+                                          where,
+                                          again,
+                                          nullptr,
+                                          0,
+                                          nullptr,
+                                          1u << 24,
+                                          laps);
+        auto ticks = arch::x86_64::rdtsc() - started;
+        if (borrow_result::ok != measured) {
+            trace::hex_line("selftest: timing borrow refused at laps ",
+                            laps);
+            break;
+        }
+        trace::hex_line("selftest: laps ", laps);
+        trace::hex_line("selftest:   commands ", lap * laps);
+        trace::hex_line("selftest:   tsc ticks ", ticks);
+    }
 
     switch (result) {
     case borrow_result::ok:

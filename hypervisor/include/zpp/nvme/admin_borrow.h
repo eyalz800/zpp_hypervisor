@@ -263,7 +263,8 @@ public:
                              const submission_entry * payload,
                              std::uint32_t payload_count,
                              std::uint16_t * payload_status,
-                             std::uint64_t spin_budget)
+                             std::uint64_t spin_budget,
+                             std::uint32_t laps = 1)
     {
         if ((where.completion_depth > max_depth) ||
             (where.submission_depth > max_depth) ||
@@ -272,8 +273,14 @@ public:
             return borrow_result::queue_too_deep;
         }
 
+        // Any whole number of laps restores both pointers and the phase,
+        // so `laps` is legal to vary and is only ever used to measure:
+        // one lap against the firmware's shallow queue says almost
+        // nothing about the cost against a guest's deep one, because it
+        // cannot separate the fixed cost of a borrow from the marginal
+        // cost of a command. Timing several lengths can.
         auto total =
-            length(where.submission_depth, where.completion_depth);
+            length(where.submission_depth, where.completion_depth) * laps;
         if ((0 == total) || (payload_count > total)) {
             return borrow_result::queue_too_deep;
         }
