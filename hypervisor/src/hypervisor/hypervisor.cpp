@@ -88,6 +88,28 @@ void hypervisor::initialize_registers()
     arch::x86_64::str(&this->os_tr);
 }
 
+namespace
+{
+/**
+ * What initialize_module_region worked out, recorded where a debugger
+ * can read it without doubt.
+ *
+ * Outside the singleton deliberately. That object is thirty megabytes,
+ * and these members sit twenty-one megabytes into it, so reading them
+ * means trusting both the object's address and a large offset. On one
+ * machine those reads return page-address-like values while the sink's
+ * own statics a little earlier in .bss read correctly, and there is no
+ * way to tell a wrong address from wrong contents by staring at either.
+ * A namespace scope global lands at a small .bss offset of its own and
+ * removes the question.
+ *
+ * volatile because nothing here reads them.
+ */
+volatile std::uint64_t g_module_base_seen{};
+volatile std::uint64_t g_module_size_seen{};
+volatile std::uint64_t g_module_base_handed_over{};
+} // namespace
+
 void hypervisor::initialize_module_region()
 {
     // Where this module begins and how far it runs.
@@ -124,6 +146,12 @@ void hypervisor::initialize_module_region()
                             : elf_image_base();
     this->module_size =
         elf_file(this->module_base, elf_file::state::loaded).memory_size();
+
+    g_module_base_handed_over =
+        reinterpret_cast<std::uint64_t>(this->handed_over_module_base);
+    g_module_base_seen =
+        reinterpret_cast<std::uint64_t>(this->module_base);
+    g_module_size_seen = this->module_size;
 }
 
 void hypervisor::initialize_os_page_table()
@@ -1540,6 +1568,10 @@ std::optional<arch::x86_64::memory_store> hypervisor::decode_guest_store(
     // memory, so the second is mapped from its own translation rather
     // than assumed to follow the first.
     constexpr std::size_t longest_instruction = 15;
+
+    // Serialised, because the window is now one shared pair of pages.
+    this->mapping_window_lock.lock();
+    scope_exit release{[&] { this->mapping_window_lock.unlock(); }};
 
     auto first_page = instruction_window_first_page(cpu);
     auto * bytes = static_cast<const std::uint8_t *>(

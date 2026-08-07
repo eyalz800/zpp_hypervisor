@@ -909,3 +909,63 @@ from the class DIE), so what is wrong is the singleton's address. Resolve
 that first - the guard variable trap earlier moved it by 0x1ced000, and
 `.bss` symbol plus base has now been shown to land somewhere unintended -
 before trusting any member read on that machine.
+
+## The real rig is not running the hypervisor, and the loader says it is
+
+Two earlier entries here are **withdrawn**, and the reason is the same
+both times: readings taken from a machine where the hypervisor was never
+resident.
+
+  - "elf_image_base can find the wrong base, and does on the rig" - the
+    0x78ed3000 it reported was uninitialised memory, not a misdetected
+    base.
+  - The correction to it, which claimed the self-validating read was
+    matching an identity map entry. That was wrong too. The addressing is
+    provably right: `sizeof(hypervisor)` is 0x1ced000, the singleton's
+    .bss symbol is 0x1435000, and 0x1435000 + 0x1ced000 = 0x3122000,
+    exactly where the guard variable sits. The overlay confirms it
+    empirically - `module_size` read through that address returns
+    0x3163000, which is the value computed independently from the
+    program headers and which no map entry could be.
+
+What is actually true, measured with three `volatile` globals at small
+.bss offsets written unconditionally at the end of
+`initialize_module_region()`:
+
+                       overlay        real rig
+    handed over        0x78dfb000     0
+    module_base used   0x78dfb000     0
+    module_size used   0x3163000      0
+    sequence           advancing      0
+
+The probe is sound - the overlay sets all three through the identical
+symbol addresses - so on the real rig `initialize_module_region()` never
+runs. The hypervisor is not going resident there at all, which explains
+every zero and every garbage reading taken from that machine, including
+the ones above.
+
+**And the loader reports success anyway.** `ZPP_TRACE loading` is followed
+by `ZPP_TRACE loaded`, `zpp_load_elf` returns zero and no
+`ZPP_HYPERVISOR_FAILED` is printed. So the loader's success is not
+evidence of residency, and every conclusion drawn from "it loaded, so it
+is running" on this rig has to be re-examined. That is what
+`verify::enabled` exists for and it is switched off in these builds.
+
+An earlier build did go resident on this machine - `epoch` 1, `sequence`
+1, `lost_to_reset` 1 - so this is a regression, and the changes in
+between are small enough to bisect: the decoder header, the 8- and
+16-bit MMIO accessors, the watch handler signature, the emulation path
+itself, the two counters, the module base handed over through
+`zpp_launch_parameters`, and the probes.
+
+Eliminated by measurement already: enlarging the mapping window from
+eight pages to seventy-two. Shrinking it back to ten, shared under
+`mapping_window_lock`, changes nothing - all three probes still read
+zero. The window has been left at ten regardless, because the aliasing
+argument in its comment was made about eight and growing it eightfold
+was never reasoned through.
+
+Next suspect, on the grounds that it is the only ABI change: the field
+added to `zpp_launch_parameters`. Both sides are rebuilt together so it
+should be harmless, which is exactly why it is worth checking rather
+than assuming.

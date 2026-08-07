@@ -1397,15 +1397,32 @@ private:
      */
     static constexpr std::size_t instruction_window_pages_per_cpu = 2;
 
+    /**
+     * One shared pair rather than a pair per processor.
+     *
+     * A slot per processor needed the window to span seventy-two pages,
+     * and the window's address is not freely chosen: the host page
+     * table's storage is fixed and aliases, so every page of it has to
+     * be checked against everything else the table maps. Growing it
+     * eightfold is exactly the sort of change that quietly breaks that
+     * on one machine and not another, and enlarging it coincided with
+     * the hypervisor no longer initialising on the real rig. Ten pages
+     * keeps the window the size the aliasing argument was made about.
+     *
+     * The cost is that instruction reads serialise on
+     * mapping_window_lock, which is real on the local APIC page because
+     * that page is hot. That is the right trade until the window's
+     * addressing is understood well enough to grow it deliberately.
+     */
     static constexpr std::size_t
     instruction_window_first_page(std::size_t cpu)
     {
-        return queue_window_pages +
-               (cpu * instruction_window_pages_per_cpu);
+        static_cast<void>(cpu);
+        return queue_window_pages;
     }
 
     static constexpr std::size_t mapping_window_pages =
-        queue_window_pages + (max_cpus * instruction_window_pages_per_cpu);
+        queue_window_pages + instruction_window_pages_per_cpu;
 
     /**
      * Serialises the window, which is one address shared by every
