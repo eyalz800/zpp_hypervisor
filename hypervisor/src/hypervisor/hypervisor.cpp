@@ -4025,6 +4025,25 @@ void hypervisor::inject_general_protection_fault()
     this->vmcs.vm_entry_exception_error_code(0);
 }
 
+void hypervisor::inject_invalid_opcode_exception()
+{
+    constexpr std::uint64_t invalid_opcode_vector = 6;
+
+    // A fault, like the general protection fault above, so the guest
+    // resumes at the instruction rather than past it - callers must not
+    // advance RIP.
+    //
+    // deliver_error_code is deliberately absent. SDM 29.2.1.3 lists the
+    // vectors for which the bit must be 1 - #DF, #TS, #NP, #SS, #GP, #PF
+    // and #AC - and requires it to be 0 for vectors in the ranges 0-7, 9,
+    // 15, 16 and 18-31. Vector 6 is in the first of those, so setting it
+    // would fail VM entry rather than deliver anything.
+    this->vmcs.vm_entry_interruption_information_field(
+        invalid_opcode_vector |
+        arch::x86_64::vmx::vm_entry_interruption::hardware_exception |
+        arch::x86_64::vmx::vm_entry_interruption::valid);
+}
+
 void hypervisor::on_unhandled_exit(arch::x86_64::vmx::exit_reason reason)
 {
     auto & vmcs = this->vmcs;
@@ -5214,9 +5233,14 @@ hypervisor::main(arch::x86_64::context & caller_context)
         //   present.
         // - rdmsr and wrmsr fault rather than being skipped, so a guest
         //   is never handed a value it did not read.
+        // - the VMX instructions fault with #UD, because the guest has
+        //   been told VMX is absent and that is what a processor without
+        //   it does. They used to reach `default:` and halt, which let a
+        //   guest instruction stop a processor.
         // - anything else stops the CPU instead of being resumed from,
         //   because resuming advances RIP past an instruction that never
-        //   took effect.
+        //   took effect. Nothing a *guest* can execute should reach it:
+        //   a case that faults is always available, and is better.
         //
         // The shape of the mistake was the same every time: answering
         // part of an interface, or resuming as though an unhandled
@@ -5836,6 +5860,89 @@ hypervisor::main(arch::x86_64::context & caller_context)
             // instruction once per tick, which is the recurring mistake
             // this file warns about.
             advance_rip = false;
+            break;
+        }
+        case basic_reason::vmxon:
+        case basic_reason::vmxoff:
+        case basic_reason::vmclear:
+        case basic_reason::vmptrld:
+        case basic_reason::vmptrst:
+        case basic_reason::vmread:
+        case basic_reason::vmwrite:
+        case basic_reason::vmlaunch:
+        case basic_reason::vmresume:
+        case basic_reason::invept:
+        case basic_reason::invvpid:
+        case basic_reason::vmfunc:
+        case basic_reason::vmcall: {
+            // Every instruction VMX added, and one exit reason each. They
+            // all exit unconditionally in VMX non-root operation - SDM
+            // 28.1.2 lists INVEPT, INVVPID, VMCALL, VMCLEAR, VMLAUNCH,
+            // VMPTRLD, VMPTRST, VMRESUME, VMXOFF and VMXON among the
+            // instructions that "cause VM exits when they are executed in
+            // VMX non-root operation", and VMREAD and VMWRITE join them
+            // whenever "VMCS shadowing" is 0, which it is here. So there
+            // is no control that turns any of this off, and until this
+            // block existed every one of them fell to `default:` and
+            // halted the processor. A guest instruction must never be able
+            // to stop a processor, which is what this fixes.
+            //
+            // The answer is an invalid opcode exception, and it is the
+            // *architecturally correct* one rather than a fallback,
+            // because of what the guest has already been told:
+            //
+            // - CPUID leaf 1 ECX[5] reports no VMX, in the cpuid case
+            //   above.
+            // - CR4's guest/host mask selects VMXE and the read shadow has
+            //   it clear, so the guest's own view of CR4 is VMXE = 0 - see
+            //   setup_vmcs and the control_register_access case.
+            //
+            // On a processor in that state VMXON raises #UD: its operation
+            // section (SDM Vol. 3C, VMXON) begins "IF (register operand)
+            // or (CR0.PE = 0) or (CR4.VMXE = 0) ... THEN #UD". And SDM
+            // 28.1.1 puts that exception above the exit: "Certain
+            // exceptions have priority over VM exits. These include
+            // invalid-opcode exceptions". The exit only happens at all
+            // because the *real* CR4 this VMM runs the guest with has VMXE
+            // set, which it must - a processor in root mode cannot clear
+            // it.
+            //
+            // The rest follow from the same fact. VMREAD, VMWRITE,
+            // VMLAUNCH and VMRESUME raise #UD when "not in VMX operation",
+            // and a guest that cannot execute VMXON never enters it.
+            // VMFUNC raises #UD when the "enable VM functions"
+            // VM-execution control is 0, which it is. VMCALL is the same
+            // case as the others: outside VMX operation it is not a
+            // recognised instruction, and this VMM implements no hypercall
+            // interface for it to reach - consistent with the hypervisor
+            // CPUID range answering zero for interface and feature leaves.
+            //
+            // A fault, so RIP stays at the instruction. Advancing it would
+            // be the mistake this file warns about twice over: the guest
+            // would skip a live instruction *and* believe it had worked.
+            inject_invalid_opcode_exception();
+            advance_rip = false;
+
+            // Said once per processor, with a count kept for the rest.
+            // Whether a guest hypervisor tried once and stood down or is
+            // retrying for ever is the whole question when VBS is on, and
+            // one line plus a counter answers it without an idle-loop's
+            // worth of noise. The count is readable from the exit ring's
+            // neighbourhood in a debugger; the line survives a restart.
+            if (auto cpu = vmcs.vpid() - 1; cpu < max_cpus) {
+                this->vmx_instructions_refused[cpu] =
+                    this->vmx_instructions_refused[cpu] + 1;
+
+                if (!this->vmx_instruction_logged[cpu]) {
+                    this->vmx_instruction_logged[cpu] = true;
+                    log("cpu {} vmx instruction, exit reason {}, rip {} "
+                        "cs {}: refused with #UD",
+                        cpu,
+                        static_cast<std::uint64_t>(full_reason.value()),
+                        vmcs.guest_rip(),
+                        vmcs.guest_cs_selector());
+                }
+            }
             break;
         }
         default: {

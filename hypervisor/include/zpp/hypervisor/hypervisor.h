@@ -1170,6 +1170,23 @@ private:
     void inject_general_protection_fault();
 
     /**
+     * Ask the processor to deliver an invalid opcode exception to the
+     * guest on the next VM entry.
+     *
+     * The answer for an instruction this VMM intercepts but does not
+     * implement, where the guest has already been told the feature is
+     * absent. SDM 28.1.1 puts invalid-opcode exceptions *above* VM exits
+     * in priority, so a guest whose own view of the machine says the
+     * instruction is unrecognised would have taken a #UD on real
+     * hardware and never reached a hypervisor at all. Delivering one is
+     * therefore not an approximation, it is the same answer bare metal
+     * gives.
+     *
+     * No error code, since #UD pushes none.
+     */
+    void inject_invalid_opcode_exception();
+
+    /**
      * Record an exit nothing here knows how to handle, and stop this CPU.
      *
      * Does not return. Resuming from an unhandled exit is not a neutral
@@ -1598,6 +1615,24 @@ private:
      * armed, without burying every other line.
      */
     bool monitor_logged[max_cpus]{};
+
+    /**
+     * Whether this processor has already had a VMX instruction exit
+     * recorded in the log, and how many it has taken.
+     *
+     * One line per processor for the same reason as monitor_logged: a
+     * guest hypervisor probing for VT-x retries, and a line each would
+     * bury everything else. The count keeps the information the
+     * suppressed lines carried - whether the guest tried once and stood
+     * down or is spinning on a feature it has been told it does not have,
+     * which are the two things worth telling apart here.
+     * @{
+     */
+    bool vmx_instruction_logged[max_cpus]{};
+    std::uint64_t vmx_instructions_refused[max_cpus]{};
+    /**
+     * @}
+     */
 
     /**
      * The first stack a processor started by the trampoline has, used only
