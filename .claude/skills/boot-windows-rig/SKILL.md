@@ -90,7 +90,7 @@ touching the disk channel has to boot the real ESP.
    Backing up needs the ESP mounted, so it cannot be done while the VM holds
    the NVMe.
 
-4. **Read** `~/zpp/serial.out` for the loader's trace. Windows itself prints
+5. **Read** `~/zpp/serial.out` for the loader's trace. Windows itself prints
    nothing there.
 
 ## What the rig actually does
