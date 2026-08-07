@@ -9,6 +9,22 @@ The rig already exists on the target. **Do not build a QEMU command line by
 hand** - an emulated NVMe with a qcow2 overlay is not equivalent to it and
 will not boot Windows, which wastes a session proving nothing.
 
+**An overlay cannot test the NVMe at all, and it is worth knowing why before
+reaching for one.** It looks like the safe option and it removes the thing
+being tested: with `-device nvme` the guest and the channel talk to QEMU's
+*model* of a controller, so the admin queue borrowed is QEMU's, the doorbell
+stride and `MQES` are QEMU's, and no real-device behaviour is exercised. The
+log blocks land in a file that disappears, when the entire point is that an
+agent elsewhere reads them off the medium. And it cannot be combined with
+passthrough at all - VFIO means the guest drives the hardware directly, so
+there is no layer to interpose a copy-on-write file into.
+
+What an overlay *is* good for is the filesystem half: the ESP reservation
+rewrites the FAT32 total-sector count, the FSInfo blocks and the backup boot
+sector, and that can be proved against a copy of the real ESP bytes without
+risking them. Do that first, then do the controller on the real rig with a
+verified backup in hand.
+
 Target: `tc@192.168.1.199`. RAM-based, so it regenerates its SSH host key on
 every boot - clear the stale key with `ssh-keygen -R` rather than treating the
 warning as an attack, and pass `-o StrictHostKeyChecking=no
@@ -16,23 +32,42 @@ warning as an attack, and pass `-o StrictHostKeyChecking=no
 
 ## The procedure
 
-1. **Build with the rig's flag.** In `uefi_loader/src/main.cpp`:
+**The synthetic FAT boot disk is gone.** The rig used to serve the loader from
+`file=fat:rw:$ZPP_ESP` at `bootindex=0`, and the loader ran from a volume that
+was not the one Windows lives on. That is removed: the firmware now boots the
+**passed-through NVMe**, exactly as bare metal does.
 
-   ```cpp
-   static constexpr bool chain_to_our_own_device_only = false;
+It had to go. The ESP reservation identifies its volume from the loaded
+image's own device path, so a loader started from the synthetic disk resolved
+to a volume with no NVMe node and refused to reserve anything. Anything
+touching the disk channel has to boot the real ESP.
+
+1. **Build.** No source edits are needed for the rig any more. For the disk
+   channel, `diag::sink::esp_blocks` must be `present` in
+   `diag/include/zpp/diag/config.h` and the build needs `-DZPP_DIAG=ON`.
+
+2. **Deploy** with the script, which refuses unless the disk matches the
+   build and reads back from a *fresh* mount rather than the one that wrote
+   it:
+
+   ```sh
+   ./scripts/deploy-to-rig.sh            # to /EFI/zpp/zpp_loader.efi
    ```
 
-   The committed value is `true`, which is correct for a bare-metal boot where
-   the loader and Windows share one ESP. In the rig they do not: the loader
-   boots from a virtio ESP and Windows is on the passed-through NVMe, so `true`
-   makes the loader search only its own device and report `no boot manager
-   found`. **This is a rig-only change - revert it before committing.**
+   It records the hash in `.rig-deployed-hash`. Check any confusing boot
+   against that before debugging the failure itself.
 
-2. **Deploy** the built `out/debug/x86_64/zpp_loader.efi` to
-   `~/zpp/esp/EFI/BOOT/BOOTX64.EFI` on the target. Back up whatever is there
-   first, and verify the md5 matches after copying.
+   **Never write `/EFI/Boot/bootx64.efi`** - that is Limine, the recovery
+   path, and the only way back if a boot leaves the machine unbootable.
 
-3. **Run** `cd ~/vm && sudo ./boot-zpp.sh`.
+3. **Make sure something will boot it.** The firmware needs a boot option
+   naming `\EFI\zpp\zpp_loader.efi`; see the NVRAM section below, and note
+   that Windows reasserts itself at the front of `BootOrder` on every boot it
+   completes. A `startup.nsh` at the ESP root is the reliable fallback, since
+   the shell runs it automatically - but remove it once an NVRAM entry
+   exists, or `bcfg boot add` will pile up duplicates on every boot.
+
+4. **Run** `cd ~/vm && sudo ./boot-zpp.sh`.
 
    If it dies with `sudo: dmidecode: command not found` and QEMU then rejects
    `-smbios type=4 ... max-speed=` as "expects a number", **do not reinstall
