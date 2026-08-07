@@ -1045,3 +1045,92 @@ Two things this run also settled:
     before assuming this is fixed.
   - Blocks carry seven to fifteen records, not one, which is what the
     throttled heartbeat was meant to achieve.
+
+## The hang: the APs never execute after their SIPI, so the BSP waits for ever
+
+Found by dumping the guest's stack and disassembling, not by inspection.
+Every number here was read off the running machine.
+
+**What it is spinning against.** The boot processor sits at `0x7ed7a41f`
+in this loop:
+
+    call InterlockedCompareExchange32
+    add  rsp, 0x20
+    test eax, eax
+    je   done                  ; leave only when the original value was 0
+    pause
+    jmp  loop
+
+with `RCX = 0x7ed68004`, and `RDX = R8 = 0x50415453`. Compare equals
+exchange, which identifies the caller exactly - EDK2 MpInitLib:
+
+    VOID WaitApWakeup (volatile UINT32 *ApSehaphore) {
+      while (InterlockedCompareExchange32 (ApSehaphore,
+               WAKEUP_AP_SIGNAL, WAKEUP_AP_SIGNAL) != 0) { CpuPause (); }
+    }
+
+`WAKEUP_AP_SIGNAL` is `SIGNATURE_32('S','T','A','P')` = 0x50415453. The
+contended memory confirms it - one dword per processor:
+
+    0x7ed68000: 00000000                    slot 0, the boot processor
+    0x7ed68004: 50415453 50415453 ...       slots 1..7, all still set
+    0x7ed68020: 00000000                    end of the array
+
+The caller frame is the walk over them: `imul $216, %r12` - 216 is
+`sizeof(CPU_AP_DATA)` - indexing `CpuMpData->CpuData` at offset 1104,
+skipping `BspNumber` at offset 12, bounded by `CpuCount` at offset 8.
+Frame chain from RBP: `0x7ed7b79f` then `0x7ed7ba8b` then `0x7fe03efa`.
+
+So the boot processor set each application processor's wake signal and is
+waiting for the processor to clear it. **None of them ever does.**
+
+**Why.** Their state, read per processor rather than inferred:
+
+    CPU#0   RIP=0x7ed7a41f  CS=0x0038  CR3=0x7fa01000   64-bit, spinning
+    CPU#1-7 EIP=0x00000000  CS=0x8700  CR3=0           real mode, PE clear
+
+Every general purpose register on an application processor is zero and
+EDX holds 0x000806eb, the CPUID value a processor has at reset. That is
+the architectural state immediately after a start-up IPI, *before one
+instruction has executed*. Their `heartbeat_exits_seen` is frozen at 4,
+and the fourth exit is the SIPI itself:
+
+    CPUID     cs=0x9b00 rip=0x0d
+    CPUID     cs=0x9b00 rip=0x2c
+    INIT (3)  cs=0x9b00 rip=0x46   activity_state -> 3, wait-for-SIPI
+    SIPI (4)  qual=0x87 cs=0x8700 rip=0
+
+Everything downstream of that is right: `start_up_launched` is 1 for all
+eight, `processor_virtualized` is 1 for all eight, the target segment
+0x8700 matches the vector the guest asked for, and 0x87000 really does
+hold the firmware's relocated trampoline (`mov ebp,eax; mov ax,cs; mov
+ds,ax; ...`). So the guest state is configured correctly and simply never
+runs.
+
+**Therefore the application processors are stuck in root mode**, in our
+own code, after handling their SIPI and before resuming the guest. The
+boot processor's spin is a consequence, not the fault.
+
+That narrows it to the exit path's tail on a processor whose fourth exit
+was a SIPI, and it makes two findings from the concurrency review prime
+suspects, because both halt a processor in root mode with no recovery
+point and neither touches `unhandled_exit` or `vm_entry_failure`:
+
+- `queues::forget()` assigning the binding non-atomically while another
+  processor is inside `submit()`, giving a store through a null MMIO
+  pointer.
+- the single shared `host_exception_recovery` slot, whose documented
+  safety argument - that only the boot processor is ever in `main` - is
+  false, because an adopted processor reaches `main` through
+  `start_up_on_this_processor`.
+
+Note the hang survives `emulate_watched_page_writes = false` and
+`ZPP_DIAG=OFF`, so it is in the core rather than the channel or the
+decoder.
+
+**A correction worth keeping.** An earlier reading of this said all eight
+processors were at the same RIP. That was a parsing artefact: the awk
+pairing carried CPU#0's RIP forward into blocks that did not print one,
+because `info registers -a` had been truncated by too short a read. Read
+each processor's block whole, and check for a distinguishing register -
+CR3 was 0 on every application processor, which is what exposed it.
