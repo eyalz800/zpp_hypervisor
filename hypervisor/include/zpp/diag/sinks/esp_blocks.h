@@ -446,6 +446,29 @@ struct esp_blocks_for
         }
     }
 
+    /**
+     * Writes whatever is staged, now, and waits for it to land.
+     *
+     * For the moment before the guest takes the controller away: a write
+     * to its register page can be the one that clears CC.EN, and after
+     * that the queues are gone and anything staged is only countable, not
+     * writable. Draining as well as flushing matters because a submitted
+     * command whose completion is never reaped is a block the medium may
+     * not have.
+     */
+    static void flush_pending()
+    {
+        if (!ready()) {
+            return;
+        }
+
+        if (0 != staged_records) {
+            flush();
+        }
+
+        queues::drain(spin_budget);
+    }
+
     static void flush()
     {
         if (0 == staged_records) {

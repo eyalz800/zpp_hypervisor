@@ -650,6 +650,27 @@ private:
 
         std::uint64_t page{};
         handler on_write{};
+
+        /**
+         * Called *before* the guest's write is allowed to take effect,
+         * with the page it is about to land on.
+         *
+         * The difference matters for the controller's register page. A
+         * write there can be the one that clears CC.EN, and once that has
+         * landed the queues are gone - so anything still staged is
+         * unwritable and gets counted into lost_to_reset instead. This
+         * hook is the last moment at which the queue is still the
+         * guest's own working controller, so it is where a flush has to
+         * happen.
+         *
+         * It cannot know *which* register is being written without
+         * decoding the instruction, and it does not need to: the pages
+         * this is armed on are touched while a driver sets itself up and
+         * almost never afterwards, so flushing on any write to one is
+         * cheap and always safe.
+         */
+        void (*before_write)(void * context, std::uint64_t page){};
+
         void * context{};
         mode behaviour{mode::notify};
         bool armed{};
@@ -675,7 +696,9 @@ private:
         std::uint64_t guest_physical,
         page_watch::handler on_write,
         void * context,
-        page_watch::mode behaviour = page_watch::mode::notify);
+        page_watch::mode behaviour = page_watch::mode::notify,
+        void (*before_write)(void * context,
+                             std::uint64_t page) = nullptr);
 
     /**
      * Starts and stops holding writers to a watched page.
@@ -779,6 +802,14 @@ private:
      * clear, because that is a controller reset and a reset destroys the
      * queue pair the channel writes through.
      */
+    /**
+     * Flushes everything staged while the controller is still the
+     * guest's own working one, before a write to its register page is
+     * allowed to land. See page_watch::before_write.
+     */
+    static void on_controller_register_before_write(void * context,
+                                                    std::uint64_t page);
+
     static void on_controller_register_write(void * context,
                                              std::uint64_t page,
                                              const guest_write * write);

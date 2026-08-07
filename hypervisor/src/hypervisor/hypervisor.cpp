@@ -1473,11 +1473,12 @@ std::expected<void, zpp::error> hypervisor::protect_region(
     return {};
 }
 
-std::expected<void, zpp::error>
-hypervisor::watch_guest_page_writes(std::uint64_t guest_physical,
-                                    page_watch::handler on_write,
-                                    void * context,
-                                    page_watch::mode behaviour)
+std::expected<void, zpp::error> hypervisor::watch_guest_page_writes(
+    std::uint64_t guest_physical,
+    page_watch::handler on_write,
+    void * context,
+    page_watch::mode behaviour,
+    void (*before_write)(void *, std::uint64_t))
 {
     auto page = guest_physical >> 12;
 
@@ -1489,6 +1490,7 @@ hypervisor::watch_guest_page_writes(std::uint64_t guest_physical,
         if (watch.armed && (watch.page == page)) {
             watch.on_write = on_write;
             watch.context = context;
+            watch.before_write = before_write;
             watch.behaviour = behaviour;
             return {};
         }
@@ -1520,6 +1522,7 @@ hypervisor::watch_guest_page_writes(std::uint64_t guest_physical,
     free_slot->page = page;
     free_slot->on_write = on_write;
     free_slot->context = context;
+    free_slot->before_write = before_write;
     free_slot->behaviour = behaviour;
     free_slot->held.store(false, std::memory_order_relaxed);
     free_slot->armed = true;
@@ -1703,6 +1706,12 @@ bool hypervisor::on_ept_violation(std::size_t cpu,
     for (auto & watch : this->watches) {
         if (!watch.armed || (watch.page != page)) {
             continue;
+        }
+
+        // Last chance to use the controller the guest is about to take
+        // away. See page_watch::before_write.
+        if (watch.before_write) {
+            watch.before_write(watch.context, page);
         }
 
         // A held page stops the writer here, at the faulting
@@ -2365,6 +2374,20 @@ void hypervisor::watch_local_apic(bool watch)
         // believing one is being watched when it is not is worse.
         this->watched_apic_page = 0;
         log("could not watch the local apic page at {}", base);
+    }
+}
+
+void hypervisor::on_controller_register_before_write(void * context,
+                                                     std::uint64_t page)
+{
+    static_cast<void>(context);
+    static_cast<void>(page);
+
+    // Behind `if constexpr` for the usual reason: naming a static member
+    // of a class template odr-uses it, and check-diag-absent.sh fails a
+    // release build that carries the channel.
+    if constexpr (diag::policy_of(diag::sink::esp_blocks).present) {
+        diag::esp_block_sink::flush_pending();
     }
 }
 
@@ -4200,7 +4223,10 @@ hypervisor::main(arch::x86_64::context & caller_context)
                     if (auto armed = watch_guest_page_writes(
                             register_page,
                             &hypervisor::on_controller_register_write,
-                            this);
+                            this,
+                            page_watch::mode::notify,
+                            &hypervisor::
+                                on_controller_register_before_write);
                         !armed) {
                         log("could not watch the controller register "
                             "page");

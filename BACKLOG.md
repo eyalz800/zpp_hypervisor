@@ -1192,3 +1192,35 @@ next experiment is to make them observable rather than to reason: arm the
 monitor trap flag on one application processor, or intercept CR0 loads so
 the protected-mode switch produces a fifth trace entry, and see how far
 they actually get.
+
+## Nothing is lost at the guest's controller reset any more
+
+The channel now flushes through the guest's own working controller at the
+last moment it is still there. Measured on the real rig with Windows
+running - RIP in the kernel range and advancing across four samples:
+
+    before   sequence 12, lost_to_reset 1
+    after    sequence 12, lost_to_reset 0, dropped 0
+
+The mechanism is a `before_write` hook on a page watch, called *before* the
+guest's write is allowed to take effect. The existing `on_write` runs after
+it has retired, which for the controller's register page is too late: if
+the write cleared CC.EN the queues are already gone, and anything staged
+is only countable, not writable.
+
+It deliberately does not decode the instruction to find out whether this
+particular write is the reset. It does not need to - the pages it is armed
+on are touched while a driver sets itself up and almost never afterwards,
+so flushing on any write to one is cheap and always correct. That also
+means it works with the instruction decoder switched off, which matters
+because the decoder has three unfixed defects.
+
+**What this is not.** It is not continuous logging. The log is now
+complete up to the reset rather than truncated by it, and it still stops
+there: Windows takes the controller, our private queue is destroyed, and
+`rebuild_channel_after_reset` is false. Continuity past that point needs
+the queue re-established, and the design for it is the bracketed excursion
+recorded earlier - at the CC.EN 0 to 1 edge, program our own ASQ/ACQ while
+CC.EN is clear, create a private queue, then restore the guest's registers
+- which avoids both the borrow from a live driver and the queue identifier
+collision that would make Windows' own Create fail.
