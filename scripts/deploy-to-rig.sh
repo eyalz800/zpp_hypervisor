@@ -42,13 +42,34 @@ if ! $SSH "test -b $PART" 2>/dev/null; then
     exit 1
 fi
 
-$SSH "sudo mkdir -p $MOUNT && sudo mount $PART $MOUNT" 2>/dev/null
+# Use wherever it is already mounted, and never assume a mount worked.
+#
+# The target mounts this partition at boot, so a second mount of it fails -
+# and a failed mount is not the problem. The problem is what happens next:
+# writing to the mount point then writes to a directory on the root file
+# system, which succeeds, so the copy lands in RAM and the disk is never
+# touched. That happened, and the only reason it was noticed is that the
+# read-back came up empty rather than wrong.
+EXISTING=$($SSH "mount | grep '^$PART ' | head -1 | cut -d' ' -f3" 2>/dev/null | tr -d '\r')
+
+if [ -n "$EXISTING" ]; then
+    MOUNT=$EXISTING
+    echo "already mounted at $MOUNT"
+else
+    $SSH "sudo mkdir -p $MOUNT && sudo mount $PART $MOUNT" 2>/dev/null
+    if ! $SSH "mount | grep -q ' $MOUNT '" 2>/dev/null; then
+        echo "FAIL: $PART is not mounted at $MOUNT and could not be mounted."
+        echo "      Refusing to write - the copy would land on the root"
+        echo "      file system and look like it had worked."
+        exit 1
+    fi
+fi
+
 # shellcheck disable=SC2086
 cat "$LOADER" | $SSH "sudo tee $MOUNT$DEST > /dev/null && sync"
-$SSH "sudo umount $MOUNT" 2>/dev/null
 
 # The read-back, from a mount that did not just write the file.
-GOT=$($SSH "sudo mount -o ro $PART $MOUNT >/dev/null 2>&1; md5sum $MOUNT$DEST | cut -d' ' -f1; sudo umount $MOUNT >/dev/null 2>&1" 2>/dev/null | tr -d '\r')
+GOT=$($SSH "sudo umount $MOUNT >/dev/null 2>&1; sudo mount -o ro $PART $MOUNT >/dev/null 2>&1; md5sum $MOUNT$DEST | cut -d' ' -f1; sudo umount $MOUNT >/dev/null 2>&1; sudo mount $PART $MOUNT >/dev/null 2>&1" 2>/dev/null | tr -d '\r')
 
 echo "on disk:  $GOT"
 if [ "$WANT" != "$GOT" ]; then
