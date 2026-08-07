@@ -1122,11 +1122,23 @@ std::expected<void, zpp::error> establish(EFI_HANDLE image_handle)
                             new_total);
             return std::unexpected(zpp::error{code::shrink_out_of_bounds});
         }
-        if ((where->partition_sectors - new_total) > wanted_sectors) {
+        // Rounded *up* by a cluster, because new_total was rounded down
+        // to a cluster boundary a few lines above, so the resulting gap
+        // is the amount asked for plus up to one cluster less a sector.
+        // Comparing against the bare request refuses whenever the
+        // partition size, the request and first_data_sector do not
+        // happen to be congruent modulo the cluster size - which is a
+        // coin flip on real formatting, and was measured refusing on an
+        // ordinary Windows ESP with 8-sector clusters while succeeding on
+        // the rig only because its numbers lined up.
+        auto permitted_gap =
+            wanted_sectors + layout->sectors_per_cluster - 1;
+
+        if ((where->partition_sectors - new_total) > permitted_gap) {
             trace::hex_line("esp reservation: refusing, gap would be ",
                             where->partition_sectors - new_total);
-            trace::hex_line("esp reservation: configured maximum ",
-                            wanted_sectors);
+            trace::hex_line("esp reservation: permitted maximum ",
+                            permitted_gap);
             return std::unexpected(zpp::error{code::shrink_out_of_bounds});
         }
 
@@ -1139,7 +1151,33 @@ std::expected<void, zpp::error> establish(EFI_HANDLE image_handle)
     }
 
     esp_reservation::filesystem_total_sectors = new_total;
-    esp_reservation::shrank_this_boot = shrank;
+    // Restart only when the next boot will recognise what was done.
+    //
+    // The reduce loop settles for less than was asked for when a cluster
+    // in the way cannot be moved, and the steady state test compares the
+    // gap against the configured size - so a short settle means every
+    // later boot re-enters the shrink branch, rewrites the same sector,
+    // sets this flag and resets the machine again. Modelled: with one
+    // cluster allocated 60 MB from the end of a 16 GiB ESP, every boot
+    // shrinks and restarts, for ever, and the machine never reaches
+    // Windows. The disk is not eaten - new_total is computed from the
+    // partition size, so it is the same absolute number every time - but
+    // it is a hard boot loop.
+    //
+    // A short settle is still a usable region; it is only the restart
+    // that must not fire, because the restart exists to make the
+    // firmware re-read a cluster count it has already cached, and a boot
+    // that will do the same thing again next time gains nothing from it.
+    auto converged =
+        (where->partition_sectors - new_total) >= target_sectors;
+
+    if (shrank && !converged) {
+        trace::hex_line("esp reservation: short settle, gap sectors ",
+                        where->partition_sectors - new_total);
+        trace::line("esp reservation: not restarting, it would repeat");
+    }
+
+    esp_reservation::shrank_this_boot = shrank && converged;
 
     if (shrank) {
         // Not this boot. The firmware's FAT driver mounted the volume
@@ -1164,8 +1202,29 @@ std::expected<void, zpp::error> establish(EFI_HANDLE image_handle)
     // Whole blocks only. The resident side addresses the channel in
     // units of nvme::block_size, so a trailing part of one is not
     // addressable and is left out rather than rounded into.
-    auto region_blocks =
-        (where->partition_sectors - new_total) / sectors_per_block;
+    // Never claim more than was asked for, even when more is already
+    // free.
+    //
+    // The steady state path takes the "already reserved" branch whenever
+    // the gap is at least the configured size, and it deliberately does
+    // not run the allocator scan - the argument being that the gap is one
+    // we made. That argument does not hold for a volume whose file system
+    // was already smaller than its partition for a reason we know nothing
+    // about: an ESP formatted smaller than its partition, a partition
+    // grown without growing the file system, or a vendor blob kept past
+    // the end. Without this clamp the region, and therefore stamp(),
+    // covers the *whole* gap - which on such a volume means writing over
+    // bytes nothing has established are free.
+    auto region_sectors = where->partition_sectors - new_total;
+    if (region_sectors > target_sectors) {
+        trace::hex_line("esp reservation: gap larger than asked, sectors ",
+                        region_sectors);
+        trace::hex_line("esp reservation: clamping to sectors ",
+                        target_sectors);
+        region_sectors = target_sectors;
+    }
+
+    auto region_blocks = region_sectors / sectors_per_block;
     if (0 == region_blocks) {
         return std::unexpected(zpp::error{code::too_few_clusters_left});
     }

@@ -37,6 +37,17 @@ struct extent
 };
 
 /**
+ * One block is one write, and it is 4 KB because that is the write
+ * granularity every NVMe namespace this would run on handles without a
+ * read-modify-write, whatever its logical block size reports.
+ *
+ * Defined here, before log_target, because log_target::usable() has to
+ * bound a device's logical block size against it - see there for why
+ * that bound matters.
+ */
+inline constexpr std::size_t block_size = 4096;
+
+/**
  * Everything the resident side is told about where to write.
  *
  * Deliberately inert data. There is no protocol here, no callback and no
@@ -158,9 +169,26 @@ struct log_target
      */
     constexpr bool usable() const
     {
+        // The upper bound is load bearing, not tidiness. Both consumers
+        // compute `block_size / target.block_size` - how many device
+        // logical blocks make up one of our 4 KB blocks - and a device
+        // block larger than ours makes that zero. Every block index then
+        // resolves to the first LBA of the region, and the count passed
+        // to the write command is zero, which the command encodes as
+        // `count - 1` - so 0xffff, i.e. 65536 logical blocks, a 512 MB
+        // write straight through the reservation and into whatever
+        // follows it on the EFI system partition. The destination check
+        // does not stop it, because the signature it looks for is in the
+        // first block.
+        //
+        // The loader refuses a block size above 4096 today, so this was
+        // unreachable. It is checked here as well because the severity is
+        // "the user's Windows installation" and the guard was three files
+        // away from the arithmetic that needs it.
         return (valid_magic == magic) && (0 != extent_count) &&
                (extent_count <= max_extents) && (0 != block_size) &&
-               (0 == (block_size & (block_size - 1)));
+               (0 == (block_size & (block_size - 1))) &&
+               (block_size <= nvme::block_size);
     }
 };
 
@@ -285,13 +313,9 @@ struct block_header
 };
 
 /**
- * How much of a block the records get. One block is one write, and it is
- * 4 KB because that is the write granularity every NVMe namespace this
- * would run on handles without a read-modify-write, whatever its logical
- * block size reports.
+ * How much of a block the records get.
  * @{
  */
-inline constexpr std::size_t block_size = 4096;
 
 /**
  * What the loader hands the resident side so the channel can carry on.

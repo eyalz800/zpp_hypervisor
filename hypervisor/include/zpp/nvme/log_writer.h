@@ -447,6 +447,18 @@ public:
 
         std::uint64_t lba{};
         auto per_block = block_size / target.block_size;
+
+        // Refused here as well as in log_target::usable(), because this
+        // is the arithmetic that goes wrong: a zero makes every index
+        // resolve to the region's first LBA and makes the block count
+        // zero, which the write command encodes as 0xffff - a 512 MB
+        // write past the region. A destination that got this far with a
+        // zero is one the checks upstream did not catch, which is exactly
+        // when the value of a second check is highest.
+        if (0 == per_block) {
+            return write_result::out_of_range;
+        }
+
         if (!target.lba_of(block_index * per_block, lba)) {
             return write_result::out_of_range;
         }
