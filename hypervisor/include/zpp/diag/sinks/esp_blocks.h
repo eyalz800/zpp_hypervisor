@@ -253,6 +253,52 @@ struct esp_blocks_for
     }
 
     /**
+     * Takes a queue pair that has just been created again, after the
+     * guest's reset destroyed the last one.
+     *
+     * The target, the storage and the translation hook all survive a
+     * reset - they are properties of the medium and of memory nobody
+     * reclaimed - so only the controller's side of it is rebuilt: the
+     * doorbells, the identifiers, and a position of nothing, because the
+     * queues are new and empty.
+     *
+     * The epoch moves, which is what makes any write still in flight
+     * against the old queue refuse itself rather than ring a doorbell the
+     * controller has forgotten.
+     */
+    static void adopt_rebuilt_queue(volatile std::uint8_t * bar,
+                                    std::uint32_t stride,
+                                    std::uint16_t queue_id,
+                                    std::uint32_t namespace_id)
+    {
+        auto doorbell = [&](std::uint32_t index)->volatile void *
+        {
+            return bar +
+                   nvme::offset_of(nvme::register_offset::doorbell_base) +
+                   (index * (4u << stride));
+        };
+
+        queues::bound = typename queues::binding{
+            .submission_doorbell = doorbell(2u * queue_id),
+            .completion_doorbell = doorbell((2u * queue_id) + 1u),
+            .status_register =
+                bar + nvme::offset_of(nvme::register_offset::status),
+            .configuration_register =
+                bar +
+                nvme::offset_of(nvme::register_offset::configuration),
+            .submission_id = queue_id,
+            .completion_id = queue_id,
+            .namespace_id = namespace_id,
+            .epoch = ++epoch,
+        };
+
+        // New queues, so nothing is outstanding and the first completion
+        // will carry phase one. forget() already zeroed the completion
+        // ring, which is what makes that safe to assume.
+        queues::bind_position(0, 0, true);
+    }
+
+    /**
      * Whether the channel can be used at all in this boot.
      *
      * Four things have to be true, and every one of them is somebody

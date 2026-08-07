@@ -19,6 +19,7 @@
 #include "zpp/elf_image_base.h"
 #include "zpp/error.h"
 #include "zpp/loader.h"
+#include "zpp/nvme/command.h"
 #include "zpp/scope_exit.h"
 #include <algorithm>
 #include <atomic>
@@ -897,24 +898,200 @@ std::expected<void, zpp::error> hypervisor::protect_module()
     return {};
 }
 
-void * hypervisor::map_window(std::uint64_t physical_address)
+void * hypervisor::map_window(std::uint64_t physical_address,
+                              std::size_t pages)
+{
+    return map_window_at(0, physical_address, pages);
+}
+
+void * hypervisor::map_window_at(std::size_t first_page,
+                                 std::uint64_t physical_address,
+                                 std::size_t pages)
 {
     auto page = physical_address & ~(page_size - 1);
+    auto span = pages + ((physical_address - page) ? 1 : 0);
 
-    this->host_page_table.map_page(
-        mapping_window,
-        page,
-        arch::x86_64::page_table::protection::read |
-            arch::x86_64::page_table::protection::write);
+    if ((first_page + span) > mapping_window_pages) {
+        return nullptr;
+    }
 
-    // The processor has a translation cached for this address from
-    // whoever used the window last, pointing at their page. Without this
-    // a read through it answers with their bytes, which is the entire
-    // failure mode a shared window has.
-    auto * at = reinterpret_cast<std::uint8_t *>(mapping_window);
-    arch::x86_64::invlpg(at);
+    for (std::size_t i{}; i < span; ++i) {
+        auto at = mapping_window + ((first_page + i) * page_size);
 
-    return at + (physical_address - page);
+        this->host_page_table.map_page(
+            at,
+            page + (i * page_size),
+            arch::x86_64::page_table::protection::read |
+                arch::x86_64::page_table::protection::write);
+
+        // The processor has a translation cached for this address from
+        // whoever used the window last, pointing at their page. Without
+        // this a read through it answers with their bytes, which is the
+        // entire failure mode a shared window has.
+        arch::x86_64::invlpg(reinterpret_cast<const void *>(at));
+    }
+
+    return reinterpret_cast<std::uint8_t *>(mapping_window +
+                                            (first_page * page_size)) +
+           (physical_address - page);
+}
+
+void hypervisor::rebuild_channel_queue()
+{
+    // The whole body behind `if constexpr`, because naming a static
+    // member of the sink's class template odr-uses it and would carry the
+    // channel into a build that switched it off - which
+    // scripts/ci/check-diag-absent.sh fails, and did over this function.
+    if constexpr (!diag::policy_of(diag::sink::esp_blocks).present) {
+        return;
+    } else {
+        // Nothing to rebuild if the channel was never up.
+        if (!this->channel_bar) {
+            return;
+        }
+
+        ++this->channel_rebuilds;
+        this->channel_rebuild_result = 0xff;
+
+        auto * bar = this->channel_bar;
+        auto started = arch::x86_64::rdtsc();
+
+        // Wait for the controller the guest has just enabled. It is
+        // allowed CAP.TO half-seconds to answer, and the guest is about to
+        // spend that same wait polling this register itself.
+        auto capabilities =
+            nvme::controller_capabilities{arch::x86_64::read64(
+                static_cast<volatile std::uint8_t *>(bar) +
+                nvme::offset_of(nvme::register_offset::capabilities))};
+
+        auto budget = std::uint64_t{1} << 26;
+        for (;;) {
+            auto status = nvme::controller_status{arch::x86_64::read32(
+                static_cast<volatile std::uint8_t *>(bar) +
+                nvme::offset_of(nvme::register_offset::status))};
+            if (status.fatal_status()) {
+                this->channel_rebuild_result = 0xf0;
+                return;
+            }
+            if (status.ready()) {
+                break;
+            }
+            if (0 == budget--) {
+                this->channel_rebuild_result = 0xf1;
+                return;
+            }
+        }
+
+        // Where the guest put its admin queue, and how deep it made it.
+        // Read now rather than remembered, because the guest chooses these
+        // afresh on every reset and may not choose the same thing twice.
+        auto attributes =
+            nvme::admin_queue_attributes{arch::x86_64::read32(
+                static_cast<volatile std::uint8_t *>(bar) +
+                nvme::offset_of(
+                    nvme::register_offset::admin_queue_attributes))};
+
+        auto submission_base = arch::x86_64::read64(
+            static_cast<volatile std::uint8_t *>(bar) +
+            nvme::offset_of(
+                nvme::register_offset::admin_submission_queue_base));
+        auto completion_base = arch::x86_64::read64(
+            static_cast<volatile std::uint8_t *>(bar) +
+            nvme::offset_of(
+                nvme::register_offset::admin_completion_queue_base));
+
+        nvme::admin_borrow::queues where{};
+        where.submission_depth = attributes.submission_queue_size();
+        where.completion_depth = attributes.completion_queue_size();
+
+        if ((0 == where.submission_depth) ||
+            (where.submission_depth > nvme::admin_borrow::max_depth) ||
+            (0 == where.completion_depth) ||
+            (where.completion_depth > nvme::admin_borrow::max_depth)) {
+            this->channel_rebuild_result = 0xf2;
+            return;
+        }
+
+        // The guest's queues are at addresses this VMM does not choose, so
+        // they are reached through the window rather than mapped. Two
+        // runs, at different window pages, because the borrow needs both
+        // live at once.
+        this->mapping_window_lock.lock();
+        scope_exit release{[&] { this->mapping_window_lock.unlock(); }};
+
+        constexpr std::size_t submission_pages = 4;
+        auto * submission =
+            static_cast<nvme::submission_entry *>(map_window_at(
+                0, submission_base & ~0xfffull, submission_pages));
+        auto * completion =
+            static_cast<nvme::completion_entry *>(map_window_at(
+                submission_pages, completion_base & ~0xfffull, 1));
+
+        if ((nullptr == submission) || (nullptr == completion)) {
+            this->channel_rebuild_result = 0xf3;
+            return;
+        }
+
+        where.submission = submission;
+        where.completion = completion;
+
+        nvme::admin_borrow::locate(where);
+
+        // Ours to create: the same identifiers and the same storage the
+        // loader used, because the storage outlives every reset - it is
+        // reserved memory - and only the controller's idea of the queues
+        // was lost.
+        nvme::submission_entry payload[2]{};
+        payload[0] = nvme::create_io_completion_queue(
+            this->channel_queue_id,
+            64,
+            this->channel_completion_physical,
+            false,
+            0);
+        payload[1] = nvme::create_io_submission_queue(
+            this->channel_queue_id,
+            64,
+            this->channel_submission_physical,
+            this->channel_queue_id,
+            nvme::queue_priority::medium);
+
+        std::uint16_t payload_status[2]{0xffff, 0xffff};
+
+        nvme::admin_borrow::snapshot saved{
+            this->channel_snapshot_submission,
+            this->channel_snapshot_completion};
+
+        auto result =
+            nvme::admin_borrow::run(bar,
+                                    this->channel_doorbell_stride,
+                                    where,
+                                    saved,
+                                    payload,
+                                    2,
+                                    payload_status,
+                                    std::uint64_t{1} << 26);
+
+        this->channel_rebuild_result = static_cast<std::uint64_t>(result);
+        this->channel_rebuild_ticks = arch::x86_64::rdtsc() - started;
+
+        if (nvme::borrow_result::ok != result) {
+            return;
+        }
+        if ((0 != payload_status[0]) || (0 != payload_status[1])) {
+            this->channel_rebuild_result = 0xf4;
+            return;
+        }
+
+        // The queues exist again, empty, so the channel is told where they
+        // are and that they start from nothing.
+        diag::esp_block_sink::adopt_rebuilt_queue(
+            static_cast<volatile std::uint8_t *>(bar),
+            this->channel_doorbell_stride,
+            this->channel_queue_id,
+            this->channel_namespace);
+
+        static_cast<void>(capabilities);
+    }
 }
 
 std::expected<void, zpp::error> hypervisor::protect_region(
@@ -1723,7 +1900,33 @@ void hypervisor::on_controller_register_write(void * context,
     // switched off. scripts/ci/check-diag-absent.sh fails the release
     // build over exactly that, and did over this line.
     if constexpr (diag::policy_of(diag::sink::esp_blocks).present) {
-        diag::esp_block_sink::note_controller_write();
+        auto & self = *static_cast<hypervisor *>(context);
+        if (!self.channel_bar) {
+            return;
+        }
+
+        // The write has already been stepped over, so this is the value
+        // the guest just wrote.
+        auto configuration =
+            nvme::controller_configuration{arch::x86_64::read32(
+                static_cast<volatile std::uint8_t *>(self.channel_bar) +
+                nvme::offset_of(nvme::register_offset::configuration))};
+
+        auto now = configuration.enable();
+        auto was = self.channel_controller_enabled;
+        self.channel_controller_enabled = now;
+
+        if (was && !now) {
+            // Going down. The queues are gone with it.
+            diag::esp_block_sink::note_controller_write();
+        } else if (!was && now) {
+            // Coming back up, and this is the one moment the borrow is
+            // free: the driver must now poll CSTS.RDY, which it is
+            // required to allow the controller CAP.TO half-seconds to
+            // answer, and the admin queue it would contend for has just
+            // been reset to empty.
+            self.rebuild_channel_queue();
+        }
     }
 }
 
@@ -3427,6 +3630,37 @@ hypervisor::main(arch::x86_64::context & caller_context)
                         log("could not watch the controller register "
                             "page");
                     }
+
+                    // Everything the rebuild will need after a reset has
+                    // taken the binding away, captured while it is still
+                    // there. The loader that supplied it is gone by then
+                    // and the sink will have forgotten it, which is the
+                    // point of forgetting.
+                    auto * registers =
+                        static_cast<volatile std::uint8_t *>(
+                            const_cast<void *>(
+                                handover.configuration_register));
+                    this->channel_bar =
+                        registers -
+                        nvme::offset_of(
+                            nvme::register_offset::configuration);
+                    this->channel_queue_id = handover.submission_id;
+                    this->channel_namespace = handover.namespace_id;
+                    this->channel_controller_enabled = true;
+
+                    auto capabilities =
+                        nvme::controller_capabilities{arch::x86_64::read64(
+                            static_cast<volatile std::uint8_t *>(
+                                this->channel_bar) +
+                            nvme::offset_of(
+                                nvme::register_offset::capabilities))};
+                    this->channel_doorbell_stride =
+                        capabilities.doorbell_stride();
+
+                    this->channel_submission_physical = physical_of(
+                        diag::esp_block_sink::queues::submissions);
+                    this->channel_completion_physical = physical_of(
+                        diag::esp_block_sink::queues::completions);
 
                     log("disk channel live, namespace {}",
                         handover.target.namespace_id);

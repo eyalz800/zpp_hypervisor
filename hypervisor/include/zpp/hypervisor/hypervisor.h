@@ -14,6 +14,7 @@
 #include "zpp/arch/x86_64/vmx/vmx_exit_reason.h"
 #include "zpp/error.h"
 #include "zpp/hypervisor/log.h"
+#include "zpp/nvme/admin_borrow.h"
 #include "zpp/small_map.h"
 #include "zpp/spin_lock.h"
 #include <atomic>
@@ -317,7 +318,36 @@ private:
      * concurrently changing underneath - which for the admin queue is
      * what the borrow's exclusion is for.
      */
-    void * map_window(std::uint64_t physical_address);
+    void * map_window(std::uint64_t physical_address,
+                      std::size_t pages = 1);
+
+    /**
+     * Which window page a run starts at, so two runs can be mapped at
+     * once without one overwriting the other.
+     */
+    void * map_window_at(std::size_t first_page,
+                         std::uint64_t physical_address,
+                         std::size_t pages);
+
+    /**
+     * Rebuilds the disk channel's queue pair by borrowing the guest's
+     * admin queue.
+     *
+     * Called from the exit that saw the guest enable the controller, and
+     * only from there. That is the one moment when the borrow is free:
+     * the driver has just written CC.EN and must now poll CSTS.RDY, which
+     * the architecture allows the controller CAP.TO x 500 ms to answer,
+     * so a borrow that takes milliseconds is indistinguishable from a
+     * slightly slow controller. The admin queue has also just been reset,
+     * so nothing of the guest's is outstanding in it, and the driver's
+     * initialisation path is single threaded - no other processor is
+     * touching it.
+     *
+     * Costs this processor the length of one lap, measured at 16.6 us per
+     * admin command against this controller. Costs every other processor
+     * nothing.
+     */
+    void rebuild_channel_queue();
 
     /**
      * Watches one page of guest physical memory for writes.
@@ -1125,6 +1155,22 @@ private:
     static constexpr std::uint64_t mapping_window = 0x10000000;
 
     /**
+     * How many pages the window spans.
+     *
+     * A guest's admin submission queue is up to 256 entries of 64 bytes,
+     * which is four pages, and its completion queue 256 of 16, which is
+     * one. Eight covers both with room, mapped as two separate runs, and
+     * the borrow needs live access across the whole of each - it writes
+     * commands into successive submission slots and reads completions
+     * back, so copying is not an option.
+     *
+     * Every page of it has to clear the aliasing check the address itself
+     * did: bits 29:12 run 0x10000 to 0x10007, none of which collide with
+     * the module or the queue storage.
+     */
+    static constexpr std::size_t mapping_window_pages = 8;
+
+    /**
      * Serialises the window, which is one address shared by every
      * processor. Held across the whole use, not just the mapping, because
      * the point of the window is the bytes reached through it.
@@ -1139,6 +1185,65 @@ private:
      * reading with `xp` from the monitor while the guest runs.
      */
     std::uint64_t mapping_window_verified{};
+
+    /**
+     * What the disk channel needs to rebuild its queue pair after the
+     * guest has reset the controller.
+     *
+     * Captured when the channel is first configured, because by the time
+     * it is needed the channel has forgotten its binding - that is what
+     * forgetting means - and the loader that supplied all of it is long
+     * gone.
+     * @{
+     */
+    volatile void * channel_bar{};
+
+    /**
+     * Whether the controller was enabled last time its configuration
+     * register was written. The rebuild is triggered by the transition
+     * back to enabled, not by the register being written, so the previous
+     * value has to be remembered.
+     */
+    bool channel_controller_enabled{};
+    std::uint32_t channel_doorbell_stride{};
+    std::uint16_t channel_queue_id{};
+    std::uint32_t channel_namespace{};
+    std::uint64_t channel_submission_physical{};
+    std::uint64_t channel_completion_physical{};
+    /**
+     * @}
+     */
+
+    /**
+     * How the rebuild went, for reading with `xp` while the guest runs:
+     * how many were attempted, and the borrow_result of the last one.
+     * @{
+     */
+    std::uint64_t channel_rebuilds{};
+    std::uint64_t channel_rebuild_result{};
+    std::uint64_t channel_rebuild_ticks{};
+
+    /**
+     * Where the guest's admin queue is copied to and compared against
+     * across a borrow.
+     *
+     * Sized for the deepest queue the borrow will accept, because the
+     * guest picks the depth and picks it again on every reset. Twenty
+     * kilobytes of .bss that a build without the channel does not carry -
+     * it is only reachable from the rebuild, which is only reachable from
+     * the channel being configured.
+     * @{
+     */
+    nvme::submission_entry
+        channel_snapshot_submission[nvme::admin_borrow::max_depth]{};
+    nvme::completion_entry
+        channel_snapshot_completion[nvme::admin_borrow::max_depth]{};
+    /**
+     * @}
+     */
+    /**
+     * @}
+     */
 
     /**
      * The exit nothing knew how to handle, filled in by
