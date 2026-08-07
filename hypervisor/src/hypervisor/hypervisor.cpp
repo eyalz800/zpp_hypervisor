@@ -2907,17 +2907,39 @@ hypervisor::main(arch::x86_64::context & caller_context)
     // noticed this. A zeroed copy also stands in for an absent block, so
     // nothing below needs to null check.
     zpp_launch_parameters launch{};
+    auto launch_given = false;
     if (auto given = reinterpret_cast<const zpp_launch_parameters *>(
             caller_context.rsi)) {
         launch = *given;
+        launch_given = true;
     }
 
     auto physical_to_virtual = launch.physical_to_virtual;
     auto start_up_memory =
         reinterpret_cast<std::uint64_t>(launch.start_up_memory);
 
-    this->sleep_control_port = launch.sleep_control_port;
-    this->sleep_control_port_secondary = launch.sleep_control_port_secondary;
+    // Only when there was a block to read them out of.
+    //
+    // This function runs again on every processor this VMM starts, and
+    // such a processor has no launch block - start_up_on_this_processor
+    // sets rsi to zero deliberately, because only the boot processor's
+    // once per boot setup needs anything out of it. The zeroed stand-in
+    // above is the right answer for reading a *local*, and the wrong one
+    // for writing shared state: it would overwrite what the boot
+    // processor established with nothing.
+    //
+    // That is not hypothetical. These two are read from inside the I/O
+    // exit handler, and the interception they belong to stays armed in
+    // the bitmap once set. Zeroing them left the port still trapping and
+    // no longer recognised, so the guest's next access to it became an
+    // unhandled exit and stopped the processor - with the rest of the
+    // guest's processors spinning behind it, which is what a boot that
+    // hangs with the disk channel enabled looked like.
+    if (launch_given) {
+        this->sleep_control_port = launch.sleep_control_port;
+        this->sleep_control_port_secondary =
+            launch.sleep_control_port_secondary;
+    }
 
     // The block copied above still holds one pointer that leads out of
     // this module, so it gets the same treatment one level down. Keeping
@@ -3001,6 +3023,53 @@ hypervisor::main(arch::x86_64::context & caller_context)
         initialize_module_region();
         initialize_os_page_table();
         initialize_host_page_table();
+
+        // The storage controller's registers, if a channel was handed
+        // over.
+        //
+        // The channel is driven from inside VM exits: the writer reads
+        // the controller's status before every write and rings a
+        // doorbell after it, and both are memory mapped registers in the
+        // controller's BAR. Nothing maps that BAR into the host page
+        // table - it maps the module, itself, and the local APIC page -
+        // so the first status read faults. Measured, not predicted: #PF
+        // with CR2 at BAR0 + 0x1c, which is CSTS, taken in the exit
+        // handler where there is no recovery point, so the processor
+        // halts and the guest's other processors spin behind it.
+        //
+        // Here rather than where the sink is configured, for the same
+        // reason the APIC page is mapped here: arming happens after this
+        // processor has switched to this table, and map_from walks the
+        // OS table through the loader's callback, which is one of the
+        // addresses that stops resolving at that switch.
+        //
+        // Page granularity and one page per register address. The four
+        // usually share one page - doorbells sit just past the register
+        // block - so this is normally a single mapping done four times,
+        // and map_from is idempotent.
+        if (diagnostic_channel_given) {
+            const volatile void * const registers[] = {
+                diagnostic_channel.status_register,
+                diagnostic_channel.configuration_register,
+                diagnostic_channel.submission_doorbell,
+                diagnostic_channel.completion_doorbell,
+            };
+
+            for (auto address : registers) {
+                if (!address) {
+                    continue;
+                }
+                auto page = reinterpret_cast<std::uint64_t>(address) &
+                            ~(page_size - 1);
+                this->host_page_table.map_from(
+                    page,
+                    page_size,
+                    arch::x86_64::page_table::protection::read |
+                        arch::x86_64::page_table::protection::write,
+                    this->os_page_table);
+                log("mapped controller register page {}", page);
+            }
+        }
 
         if (auto result = initialize_module_physical_to_virtual();
             !result) {
