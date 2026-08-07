@@ -5059,6 +5059,17 @@ hypervisor::main(arch::x86_64::context & caller_context)
         // had their say.
         record_exit(full_reason);
 
+        // Counted here, at the last point before control leaves this
+        // handler, so a frozen exit count can be read two ways round.
+        if (auto slot = vmcs.vpid(); (0 != slot) && (slot <= max_cpus)) {
+            this->resumes_reached[slot - 1] =
+                this->resumes_reached[slot - 1] + 1;
+            this->resume_activity_state[slot - 1] =
+                vmcs.guest_activity_state();
+            this->resume_guest_rip[slot - 1] = vmcs.guest_rip();
+            this->resume_guest_cs[slot - 1] = vmcs.guest_cs_selector();
+        }
+
         // The mirror of the launch: the guest's registers are put back
         // and the last thing executed in host mode is the resume itself.
         context.rip =

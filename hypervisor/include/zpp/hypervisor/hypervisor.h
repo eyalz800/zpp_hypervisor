@@ -460,6 +460,36 @@ private:
      * the stores are dead and the optimizer removes them, leaving the
      * symbols reading their zero initializers for ever.
      */
+    /**
+     * How many times each processor has reached the resume at the end of
+     * the exit handler.
+     *
+     * Exists to tell "stuck before the resume" from "resumed into a guest
+     * that does not execute", which no reading available from outside can
+     * distinguish: an application processor stuck in root mode and one
+     * whose guest silently fails to advance both show a frozen exit count
+     * and an unchanging guest state. If this equals the exit count then
+     * the resume was reached every time and the guest is the problem; if
+     * it lags by one then the processor never got there.
+     *
+     * volatile because only a debugger reads it.
+     */
+    volatile std::uint64_t resumes_reached[max_cpus]{};
+
+    /**
+     * The activity state, guest RIP and CS each processor was last
+     * resumed with.
+     *
+     * A guest that enters successfully and then executes nothing is a
+     * guest that is not runnable, and the only architectural state that
+     * does that is the activity state - 2 for shutdown, 3 for
+     * wait-for-SIPI. Nothing outside can read the field, so it is
+     * recorded here at the moment it matters.
+     */
+    volatile std::uint64_t resume_activity_state[max_cpus]{};
+    volatile std::uint64_t resume_guest_rip[max_cpus]{};
+    volatile std::uint64_t resume_guest_cs[max_cpus]{};
+
     volatile std::uint64_t emulated_writes{};
     volatile std::uint64_t stepped_writes{};
 
