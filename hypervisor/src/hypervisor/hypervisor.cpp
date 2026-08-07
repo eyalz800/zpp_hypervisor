@@ -1511,7 +1511,98 @@ void hypervisor::monitor_trap_flag(bool value)
               : (controls & ~monitor_trap_flag_bit));
 }
 
-bool hypervisor::on_ept_violation(std::size_t cpu)
+std::optional<arch::x86_64::memory_store> hypervisor::decode_guest_store(
+    std::size_t cpu, arch::x86_64::context & context)
+{
+    // The instruction is at the guest's RIP, which is a linear address
+    // in the guest's own address space, so it takes the guest's page
+    // tables to find - not this VMM's.
+    auto rip = this->vmcs.guest_rip();
+    auto physical = this->os_page_table.virtual_to_physical(rip);
+    if (!physical) {
+        return {};
+    }
+
+    // Fifteen bytes is the architectural maximum length of an
+    // instruction, and it may straddle a page boundary, which is why the
+    // window is two pages. They need not be contiguous in guest physical
+    // memory, so the second is mapped from its own translation rather
+    // than assumed to follow the first.
+    constexpr std::size_t longest_instruction = 15;
+
+    auto first_page = instruction_window_first_page(cpu);
+    auto * bytes = static_cast<const std::uint8_t *>(
+        map_window_at(first_page, physical, 1));
+    if (!bytes) {
+        return {};
+    }
+
+    std::uint8_t code[longest_instruction]{};
+
+    auto offset = physical & (page_size - 1);
+    auto in_first = page_size - offset;
+    if (in_first > longest_instruction) {
+        in_first = longest_instruction;
+    }
+
+    __builtin_memcpy(code, bytes, in_first);
+
+    if (in_first < longest_instruction) {
+        // The tail lives on the next linear page, which is translated
+        // separately - the guest is free to have mapped it anywhere, or
+        // not at all, and a decoder that read past the end of the first
+        // page would be reading whatever physically follows it.
+        auto next = this->os_page_table.virtual_to_physical(
+            (rip + in_first) & ~static_cast<std::uint64_t>(page_size - 1));
+
+        if (next) {
+            if (auto * tail = static_cast<const std::uint8_t *>(
+                    map_window_at(first_page + 1, next, 1))) {
+                __builtin_memcpy(
+                    code + in_first, tail, longest_instruction - in_first);
+            }
+        }
+    }
+
+    return arch::x86_64::decode_memory_store(
+        std::as_bytes(std::span{code}), context);
+}
+
+bool hypervisor::apply_guest_store(
+    std::uint64_t guest_physical, const arch::x86_64::memory_store & store)
+{
+    // Straight through the host page table, which is the only mapping of
+    // this page that is writable - the guest's own is not, which is the
+    // whole point. The identity between guest and host physical that the
+    // EPT establishes is what makes the address usable here directly.
+    auto * at = static_cast<volatile std::uint8_t *>(
+        reinterpret_cast<void *>(guest_physical));
+
+    if (!this->host_page_table.virtual_to_physical(
+            reinterpret_cast<const void *>(guest_physical))) {
+        return false;
+    }
+
+    switch (store.size) {
+    case 1:
+        arch::x86_64::write8(at, static_cast<std::uint8_t>(store.value));
+        return true;
+    case 2:
+        arch::x86_64::write16(at, static_cast<std::uint16_t>(store.value));
+        return true;
+    case 4:
+        arch::x86_64::write32(at, static_cast<std::uint32_t>(store.value));
+        return true;
+    case 8:
+        arch::x86_64::write64(at, store.value);
+        return true;
+    default:
+        return false;
+    }
+}
+
+bool hypervisor::on_ept_violation(std::size_t cpu,
+                                  arch::x86_64::context & context)
 {
     auto guest_physical = this->vmcs.guest_physical_address();
     auto page = guest_physical >> 12;
@@ -1539,14 +1630,60 @@ bool hypervisor::on_ept_violation(std::size_t cpu)
             zpp::spin_hint();
         }
 
-        // Let the guest's own instruction do the write, then look at
-        // what it did. The alternative is to decode and emulate it, and
-        // an EPT violation reports neither the data nor the operand size
-        // - SDM Table 30-7 - so that road starts with an x86 decoder.
+        // Emulate the write where the instruction can be decoded, and
+        // only step over it where it cannot.
+        //
+        // Stepping over means opening the page, letting one instruction
+        // retire and closing it again, and for that window the page is
+        // writable *for every processor*. That is not a theoretical
+        // hole: a driver writes CC twice in succession, disable then
+        // enable, and the second write goes through the window the first
+        // opened. Measured - one trapped write of 0x00460000, a
+        // controller afterwards reading 0x00460001, and no transition
+        // seen. Losing that transition is losing the channel, because a
+        // reset is the one event the sink has to notice.
+        //
+        // Emulating closes the window by never opening it. The page
+        // stays unwritable, every write faults, and each is applied by
+        // this VMM with the value it decoded - so a second write cannot
+        // slip past a first, and the handler is told what was written
+        // rather than having to read the register back and race the
+        // guest for it.
+        if (auto store = decode_guest_store(cpu, context)) {
+            if (apply_guest_store(guest_physical, *store)) {
+                if (watch.on_write) {
+                    guest_write written{
+                        .address = guest_physical,
+                        .value = store->value,
+                        .size = store->size,
+                    };
+
+                    watch.on_write(watch.context, page, &written);
+                }
+
+                this->emulated_writes = this->emulated_writes + 1;
+
+                // The instruction has been carried out, so the guest
+                // resumes after it rather than on it. Its length comes
+                // from the VMCS, which is why none of it had to be
+                // decoded.
+                this->vmcs.guest_rip(
+                    this->vmcs.guest_rip() +
+                    this->vmcs.vm_exit_instruction_length());
+                return true;
+            }
+        }
+
+        // Not a form the decoder handles, so fall back to letting the
+        // guest's own instruction do the write. This keeps the window
+        // described above, and is why the decoder refusing is a
+        // correctness question rather than only a performance one.
         if (auto entry = epte_for(page << 12)) {
             (*entry)->write(true);
             invalidate_ept();
         }
+
+        this->stepped_writes = this->stepped_writes + 1;
 
         this->stepping_watch[cpu] = true;
         this->stepping_page[cpu] = page;
@@ -1627,7 +1764,7 @@ bool hypervisor::on_monitor_trap_flag(std::size_t cpu)
 
     for (auto & watch : this->watches) {
         if (watch.armed && (watch.page == page) && watch.on_write) {
-            watch.on_write(watch.context, page);
+            watch.on_write(watch.context, page, nullptr);
             break;
         }
     }
@@ -2136,8 +2273,10 @@ void hypervisor::watch_local_apic(bool watch)
     }
 }
 
-void hypervisor::on_controller_register_write(void * context,
-                                              std::uint64_t page)
+void hypervisor::on_controller_register_write(
+    void * context,
+    std::uint64_t page,
+    const hypervisor::guest_write * write)
 {
     static_cast<void>(context);
     static_cast<void>(page);
@@ -2157,12 +2296,47 @@ void hypervisor::on_controller_register_write(void * context,
             return;
         }
 
-        // The write has already been stepped over, so this is the value
-        // the guest just wrote.
+        // The value the guest wrote, taken from the decoded
+        // instruction where there is one.
+        //
+        // Reading the register back instead is what this used to do, and
+        // it loses transitions: the read happens after the write, so a
+        // driver that writes CC twice in quick succession is observed
+        // only at whatever the register holds by the time this looks.
+        // Measured - a trapped write of 0x00460000 followed by a
+        // controller reading 0x00460001, and the disable never seen.
+        // The decoded value is what the instruction meant, and cannot
+        // have been overtaken.
+        //
+        // Only a write that lands on CC itself counts. The page carries
+        // other registers, and a store to one of them says nothing about
+        // whether the controller is being turned off.
+        constexpr auto configuration_offset =
+            nvme::offset_of(nvme::register_offset::configuration);
+
+        auto * bar =
+            static_cast<volatile std::uint8_t *>(self.channel_bar);
+
+        std::uint32_t configuration_value{};
+
+        if (write) {
+            auto bar_physical = self.host_page_table.virtual_to_physical(
+                const_cast<const void *>(self.channel_bar));
+
+            if (write->address != (bar_physical + configuration_offset)) {
+                return;
+            }
+
+            configuration_value = static_cast<std::uint32_t>(write->value);
+        } else {
+            // Stepped over rather than emulated, so the register is the
+            // only place the value can be had - with the race above.
+            configuration_value =
+                arch::x86_64::read32(bar + configuration_offset);
+        }
+
         auto configuration =
-            nvme::controller_configuration{arch::x86_64::read32(
-                static_cast<volatile std::uint8_t *>(self.channel_bar) +
-                nvme::offset_of(nvme::register_offset::configuration))};
+            nvme::controller_configuration{configuration_value};
 
         ++self.channel_register_writes;
         self.channel_last_configuration = configuration.value();
@@ -2183,14 +2357,25 @@ void hypervisor::on_controller_register_write(void * context,
     }
 }
 
-void hypervisor::on_doorbell_write(void * context, std::uint64_t page)
+void hypervisor::on_doorbell_write(void * context,
+                                   std::uint64_t page,
+                                   const hypervisor::guest_write * write)
 {
     static_cast<void>(context);
     static_cast<void>(page);
+    static_cast<void>(write);
 }
 
-void hypervisor::on_local_apic_write(void * context, std::uint64_t page)
+void hypervisor::on_local_apic_write(void * context,
+                                     std::uint64_t page,
+                                     const hypervisor::guest_write * write)
 {
+    // The decoded value is not used here: this handler cares that the
+    // interrupt command register was written, and reads the whole
+    // command out of the page, which is two registers wide in xAPIC
+    // mode and so wider than any single store.
+    static_cast<void>(write);
+
     auto & self = *static_cast<hypervisor *>(context);
 
     // The write has already happened - the watch steps over it before
@@ -4633,7 +4818,7 @@ hypervisor::main(arch::x86_64::context & caller_context)
             // A watched page was touched. RIP stays where it is: the
             // guest's instruction has not run yet, and the whole point
             // is to let it run for itself rather than emulate it.
-            if (!on_ept_violation(cpuid)) {
+            if (!on_ept_violation(cpuid, context)) {
                 // Nothing had that page watched, so the protection was
                 // put there by something that is not going to handle the
                 // fault - which is a bug here rather than a guest error,

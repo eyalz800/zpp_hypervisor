@@ -17,6 +17,26 @@ namespace zpp::arch::x86_64
  * to ordinary memory, which is why the fence functions below exist
  * separately.
  */
+inline std::uint8_t read8(const volatile void * address)
+{
+    return *static_cast<const volatile std::uint8_t *>(address);
+}
+
+inline void write8(volatile void * address, std::uint8_t value)
+{
+    *static_cast<volatile std::uint8_t *>(address) = value;
+}
+
+inline std::uint16_t read16(const volatile void * address)
+{
+    return *static_cast<const volatile std::uint16_t *>(address);
+}
+
+inline void write16(volatile void * address, std::uint16_t value)
+{
+    *static_cast<volatile std::uint16_t *>(address) = value;
+}
+
 inline std::uint32_t read32(const volatile void * address)
 {
     return *static_cast<const volatile std::uint32_t *>(address);

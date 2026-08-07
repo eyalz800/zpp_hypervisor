@@ -1,6 +1,7 @@
 #pragma once
 #include "zpp/arch/x86_64/ap_start_up.h"
 #include "zpp/arch/x86_64/context.h"
+#include "zpp/arch/x86_64/decoder.h"
 #include "zpp/arch/x86_64/exception_entry.h"
 #include "zpp/arch/x86_64/generic.h"
 #include "zpp/arch/x86_64/msr.h"
@@ -446,6 +447,23 @@ private:
     std::uint64_t heartbeat_exits_seen[max_cpus]{};
 
     /**
+     * How many writes to a watched page were emulated from a decoded
+     * instruction, and how many had to be stepped over instead.
+     *
+     * The ratio is the decoder's coverage of the traffic that actually
+     * occurs, which is the only measure of it that matters - a decoder
+     * that handles every form nobody uses is worth nothing. A stepped
+     * write is also the one that can still lose a transition, so a
+     * non-zero second number is a live hole rather than an inefficiency.
+     *
+     * volatile because nothing in this program reads them. Without it
+     * the stores are dead and the optimizer removes them, leaving the
+     * symbols reading their zero initializers for ever.
+     */
+    volatile std::uint64_t emulated_writes{};
+    volatile std::uint64_t stepped_writes{};
+
+    /**
      * What the rebuild read out of the controller before borrowing, and
      * how far the borrow got. Enough to tell "the queue was described
      * wrongly" from "the queue was described correctly and the controller
@@ -499,6 +517,33 @@ private:
      * neither is built, and this comment is the warning to whoever needs
      * one.
      */
+    /**
+     * A write a guest made to a watched page, as carried out by this VMM
+     * on its behalf.
+     *
+     * The address comes from the VMCS and the value and width from
+     * decoding the instruction, which is the division the hardware
+     * imposes: an EPT violation reports where a write went and never
+     * what it wrote - SDM Table 30-7.
+     */
+    struct guest_write
+    {
+        /**
+         * Guest physical address of the write.
+         */
+        std::uint64_t address{};
+
+        /**
+         * The value written, zero extended, of which `size` bytes count.
+         */
+        std::uint64_t value{};
+
+        /**
+         * Width in bytes: 1, 2, 4 or 8.
+         */
+        std::uint8_t size{};
+    };
+
     struct page_watch
     {
         /**
@@ -507,7 +552,19 @@ private:
          * which page was opened and not which byte the instruction
          * touched.
          */
-        using handler = void (*)(void * context, std::uint64_t page);
+        /**
+         * Called after the write has taken effect.
+         *
+         * `store` is what was written, when the write was emulated from
+         * a decoded instruction, and null when it was stepped over
+         * instead because the instruction was not one the decoder
+         * handles. A handler that needs the value must cope with both:
+         * re-reading the register is the fallback, and it is the racy
+         * one, which is why the decoded value is passed at all.
+         */
+        using handler = void (*)(void * context,
+                                 std::uint64_t page,
+                                 const guest_write * write);
 
         /**
          * What a violation on this page does.
@@ -589,7 +646,23 @@ private:
      * means nothing had that page watched, which is a bug rather than a
      * guest error, and the caller stops the CPU.
      */
-    bool on_ept_violation(std::size_t cpu);
+    bool on_ept_violation(std::size_t cpu,
+                          arch::x86_64::context & context);
+
+    /**
+     * Decodes the store that caused the current EPT violation.
+     *
+     * Nothing if the instruction is not one the decoder handles, which
+     * is the caller's signal to fall back to stepping over it.
+     */
+    std::optional<arch::x86_64::memory_store>
+    decode_guest_store(std::size_t cpu, arch::x86_64::context & context);
+
+    /**
+     * Performs a decoded store against guest physical memory.
+     */
+    bool apply_guest_store(std::uint64_t guest_physical,
+                           const arch::x86_64::memory_store & store);
 
     /**
      * Handles the monitor trap flag exit that a watched write is stepped
@@ -638,7 +711,9 @@ private:
      * command out of the page and, if one was issued, puts it through
      * the same decision the x2APIC path uses.
      */
-    static void on_local_apic_write(void * context, std::uint64_t page);
+    static void on_local_apic_write(void * context,
+                                    std::uint64_t page,
+                                    const guest_write * write);
 
     /**
      * The guest has written the storage controller's register page.
@@ -650,7 +725,8 @@ private:
      * queue pair the channel writes through.
      */
     static void on_controller_register_write(void * context,
-                                             std::uint64_t page);
+                                             std::uint64_t page,
+                                             const guest_write * write);
 
     /**
      * The guest has rung a doorbell while the channel was borrowing its
@@ -662,7 +738,9 @@ private:
      * effect, so whatever it was going to say to the controller it says
      * afterwards instead.
      */
-    static void on_doorbell_write(void * context, std::uint64_t page);
+    static void on_doorbell_write(void * context,
+                                  std::uint64_t page,
+                                  const guest_write * write);
 
     /**
      * The guest physical page of the memory mapped local APIC, or zero
@@ -1298,7 +1376,29 @@ private:
      * did: bits 29:12 run 0x10000 to 0x10007, none of which collide with
      * the module or the queue storage.
      */
-    static constexpr std::size_t mapping_window_pages = 8;
+    static constexpr std::size_t queue_window_pages = 8;
+
+    /**
+     * Two pages per processor, past the queue's eight, for reading the
+     * instruction that caused an EPT violation.
+     *
+     * Per processor and not shared, so the read needs no lock on a path
+     * that runs for every write to a watched page - the local APIC page
+     * is watched whenever the guest is not in x2APIC mode, and that page
+     * is hot. Two because an instruction may straddle a page boundary;
+     * fifteen bytes is the architectural maximum and cannot span more.
+     */
+    static constexpr std::size_t instruction_window_pages_per_cpu = 2;
+
+    static constexpr std::size_t
+    instruction_window_first_page(std::size_t cpu)
+    {
+        return queue_window_pages +
+               (cpu * instruction_window_pages_per_cpu);
+    }
+
+    static constexpr std::size_t mapping_window_pages =
+        queue_window_pages + (max_cpus * instruction_window_pages_per_cpu);
 
     /**
      * Serialises the window, which is one address shared by every
