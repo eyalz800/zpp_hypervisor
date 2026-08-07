@@ -880,3 +880,32 @@ Until that lands, treat any real-rig reading of hypervisor state as
 suspect unless `module_base` read back out of the singleton equals the
 base the loader traced. On the overlay it does; on the real rig it does
 not.
+
+### Correction: the "self-validating read" was not validating
+
+Reading `module_base` back out of the singleton was recorded above as the
+check that proves an address is right. It is a good idea and it is not
+what the recorded runs did.
+
+`hypervisor::module_base` sits at offset 0x1406008 into the class - past
+sixteen megabytes of per-processor stacks - and the singleton address used
+was the `.bss` symbol plus the module base. On the real rig that lands in
+`module_physical_to_virtual`, not on the scalar: `module_size` read at the
+neighbouring offset returned 0x78ed4000, an address rather than a size,
+and the values at successive offsets were consecutive page numbers. That
+is a map of module pages, and because the map is identity, an entry in it
+*equals a module address* - which is why the same read on the overlay
+returned something equal to the base and looked like a pass.
+
+So the overlay "validation" was a coincidence of reading an identity map,
+and the real rig's 0x78ed3000 is an entry from the same map rather than a
+misdetected base. The elf_image_base finding recorded above is therefore
+**not established** - it rests on this read. The scan's fragility is real
+as an argument, and handing the base over is still the right design, but
+the claim that it was measured going wrong is withdrawn.
+
+What a real self-validating read needs: the offsets are right (they come
+from the class DIE), so what is wrong is the singleton's address. Resolve
+that first - the guard variable trap earlier moved it by 0x1ced000, and
+`.bss` symbol plus base has now been shown to land somewhere unintended -
+before trusting any member read on that machine.

@@ -66,6 +66,21 @@ struct zpp_launch_parameters
     void * start_up_memory;
 
     /**
+     * Where the loader placed the hypervisor image, or null if it cannot
+     * say.
+     *
+     * Handed over rather than searched for. The resident side can find
+     * its own base by scanning backwards for the ELF magic, and that
+     * scan is only correct while no page between the true base and the
+     * key it starts from begins with those four bytes - which is not a
+     * property anything guarantees. Measured failing on one machine and
+     * succeeding on another with the same build, landing about a
+     * megabyte inside the image. The loader chose the address and has it
+     * exactly, so it says so.
+     */
+    const void * module_base;
+
+    /**
      * The diagnostic channel the loader established, or null.
      *
      * A `void *` because this header is included from C while the

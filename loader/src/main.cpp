@@ -75,6 +75,7 @@ zpp_load_elf(const struct zpp_loader_parameters * parameters)
     static zpp_launch_parameters handover{};
     handover.physical_to_virtual = parameters->physical_to_virtual;
     handover.start_up_memory = start_up_memory;
+    handover.module_base = base;
     handover.diagnostic_channel = parameters->diagnostic_channel;
     handover.sleep_control_port = parameters->sleep_control_port;
     handover.sleep_control_port_secondary =

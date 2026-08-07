@@ -991,6 +991,13 @@ private:
     std::size_t module_size{};
 
     /**
+     * The base the loader handed over, or null where it did not.
+     *
+     * Preferred over searching for it - see initialize_module_region.
+     */
+    const void * handed_over_module_base{};
+
+    /**
      * The guest CR0 register.
      */
     std::uint64_t guest_cr0{};

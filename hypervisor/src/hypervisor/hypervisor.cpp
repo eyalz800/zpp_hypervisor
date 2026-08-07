@@ -92,17 +92,25 @@ void hypervisor::initialize_module_region()
 {
     // Where this module begins and how far it runs.
     //
-    // Both are worked out from the image itself rather than supplied,
-    // because nothing outside is in a position to say: the loader chose
-    // the address, but this is position independent code and the only
-    // authority on its own extent is its own program headers.
+    // The base comes from the loader, which chose it; only the size is
+    // worked out from the image, which is the only authority on its own
+    // extent.
     //
-    // The base is found by searching for it - take the address of
-    // something known to be inside the module, round down to a page, and
-    // walk backwards a page at a time until the ELF magic appears, which
-    // it does exactly once, at the header. See elf_image_base.h, where
-    // the pad byte in front of the search key is deliberate: it leaves
-    // the key itself unaligned so the search cannot stop on it.
+    // Searching for the base is the fallback, not the plan, and the
+    // comment here used to claim the ELF magic "appears exactly once, at
+    // the header". It does not. The scan walks backwards a page at a
+    // time from a key inside the module and stops at the first page
+    // beginning with those four bytes, which is correct only while
+    // nothing in between happens to. Measured: on the real-NVMe rig it
+    // stopped 0xF7000 *inside* this image and reported a base a megabyte
+    // too high, while the same build on the overlay rig got it right. A
+    // displaced base displaces module_size, the range protect_module
+    // hides from the guest, and the physical map behind the decoy
+    // redirect - so it is not a cosmetic error.
+    //
+    // The pad byte in front of the search key in elf_image_base.h is
+    // still deliberate: it leaves the key itself unaligned so the search
+    // cannot stop on it. That was never the failure; a foreign page was.
     //
     // The size is the *memory* size, not the file size. They differ by
     // .bss, which is most of this module - the per-processor stacks
@@ -110,7 +118,10 @@ void hypervisor::initialize_module_region()
     // the VMM's own stacks outside every range derived from here: the
     // host mapping just below, and the protection that hides the module
     // from the guest.
-    this->module_base = elf_image_base();
+    this->module_base = this->handed_over_module_base
+                            ? static_cast<const unsigned char *>(
+                                  this->handed_over_module_base)
+                            : elf_image_base();
     this->module_size =
         elf_file(this->module_base, elf_file::state::loaded).memory_size();
 }
@@ -3683,6 +3694,13 @@ hypervisor::main(arch::x86_64::context & caller_context)
         this->sleep_control_port = launch.sleep_control_port;
         this->sleep_control_port_secondary =
             launch.sleep_control_port_secondary;
+
+        // Where this module was put. Inside the guard with the rest,
+        // because a processor this VMM started has no launch block and
+        // would otherwise write a null over the answer the boot
+        // processor already found - which is exactly how the sleep
+        // control port was lost once.
+        this->handed_over_module_base = launch.module_base;
     }
 
     // The block copied above still holds one pointer that leads out of
