@@ -466,7 +466,22 @@ private:
      * and a caller that needs the guarantee must then do nothing. Not
      * borrowing is always safe; borrowing without exclusion is not.
      */
-    bool wait_for_ept_acknowledgement(std::uint64_t budget);
+    /**
+     * Waits until every processor has picked up the current extended page
+     * table generation.
+     *
+     * `probe` decides whether a processor that has not answered is sent a
+     * wake NMI. It must be false for any caller that a processor might be
+     * spinning inside, because such a processor is in **root mode**, NMI
+     * exiting governs non-root operation only, and the NMI therefore
+     * arrives at the host IDT - where on_host_exception finds no recovery
+     * point and halts it for ever. That took the development machine off
+     * the network once; a passive wait that gives up is always safe, and a
+     * caller that cannot proceed without the acknowledgement should treat
+     * giving up as a refusal rather than force the issue.
+     */
+    bool wait_for_ept_acknowledgement(std::uint64_t budget,
+                                      bool probe = true);
 
     /**
      * Sends a non-maskable interrupt to one processor, to take it out of

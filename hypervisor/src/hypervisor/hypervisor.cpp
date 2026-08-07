@@ -975,7 +975,8 @@ void hypervisor::send_wake_nmi(std::uint64_t apic)
     ++this->wake_nmis_sent;
 }
 
-bool hypervisor::wait_for_ept_acknowledgement(std::uint64_t budget)
+bool hypervisor::wait_for_ept_acknowledgement(std::uint64_t budget,
+                                              bool probe)
 {
     // This processor is up to date by construction and has to say so.
     //
@@ -1061,8 +1062,8 @@ bool hypervisor::wait_for_ept_acknowledgement(std::uint64_t budget)
                 // soft spot left in this: the alternative is waiting
                 // forever for a processor the guest has parked, which is
                 // what the first version did.
-                if (!this->wake_requested[cpu].exchange(
-                        true, std::memory_order_acq_rel)) {
+                if (probe && !this->wake_requested[cpu].exchange(
+                                 true, std::memory_order_acq_rel)) {
                     send_wake_nmi(this->apic_id[cpu]);
                     probed = budget;
                 }
@@ -1863,7 +1864,11 @@ hypervisor::shadow_controller_registers(bool armed)
     // A processor still holding the old translation would read the real
     // register, which is the whole thing this exists to prevent - so the
     // change is not merely announced, it is waited for.
-    if (!wait_for_ept_acknowledgement(std::uint64_t{1} << 24)) {
+    // Passive: no wake NMI. A processor faulting on this page spins inside
+    // its own VM exit, in root mode, where an NMI reaches the host IDT and
+    // halts it - see wait_for_ept_acknowledgement. Giving up is the safe
+    // answer and the caller treats it as a refusal.
+    if (!wait_for_ept_acknowledgement(std::uint64_t{1} << 24, false)) {
         return std::unexpected(
             zpp::error{error::acknowledgement_timed_out});
     }
