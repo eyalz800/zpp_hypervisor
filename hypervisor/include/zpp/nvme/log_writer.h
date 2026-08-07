@@ -206,6 +206,59 @@ public:
     }
 
     /**
+     * Where in the queues the previous owner left off.
+     *
+     * Sharing the memory is not enough on its own, because a queue is
+     * half memory and half position. The loader submits at least one
+     * command of its own - the proof write - so by hand-over time the
+     * controller's internal submission head has advanced, one completion
+     * has been consumed, and the phase bit the next completion will
+     * carry is whatever the wrap left it as.
+     *
+     * A resident side starting from zero disagrees with the controller
+     * about all three, and the first disagreement is fatal in a way that
+     * looks like nothing at all: it writes at index zero and rings the
+     * doorbell with tail one, the controller compares that against a
+     * head it has already advanced to one, concludes the queue is empty,
+     * and fetches nothing. The command is never executed and no
+     * completion is ever posted. `submitted = 1, completed = 0`, exactly
+     * as if the memory were still wrong.
+     *
+     * So the position travels with the storage. The counters do not need
+     * to: `reap` only cares that `completed` and `submitted` start equal,
+     * because their difference is what "outstanding" means.
+     * @{
+     */
+    static void bind_position(std::uint32_t tail,
+                              std::uint32_t head,
+                              bool phase)
+    {
+        submission_tail = tail % Entries;
+        completion_head = head % Entries;
+        completion_phase = phase;
+        submitted = 0;
+        completed = 0;
+    }
+
+    static std::uint32_t tail_position()
+    {
+        return submission_tail;
+    }
+
+    static std::uint32_t head_position()
+    {
+        return completion_head;
+    }
+
+    static bool phase_position()
+    {
+        return completion_phase;
+    }
+    /**
+     * @}
+     */
+
+    /**
      * Where our doorbells are, and which identifiers the controller gave
      * us. Filled in by the bring-up; zero means no queue pair.
      */
@@ -312,6 +365,35 @@ public:
      * Reaps whatever has completed. Never waits: the write path is
      * called from a VM exit handler with a guest waiting to be resumed.
      */
+    /**
+     * Reaps until nothing is outstanding, or the budget runs out.
+     *
+     * For handing the queues on. Whoever inherits them starts with its
+     * own counters at zero, meaning "nothing outstanding", so anything
+     * left unreaped becomes a completion it will attribute to its own
+     * first command - and then believe a write succeeded that it never
+     * issued.
+     *
+     * The loader leaves exactly that behind: it submits a verify read
+     * and a write, reaps the read while waiting for it, and hands over
+     * with the write's completion still sitting in the queue. Measured
+     * as tail 2, head 1.
+     *
+     * Bounded, and a failure to drain is the caller's to act on: handing
+     * over a queue that would not settle is worse than handing over
+     * none.
+     */
+    static bool drain(std::uint64_t budget)
+    {
+        while (completed < submitted) {
+            reap();
+            if (0 == budget--) {
+                return false;
+            }
+        }
+        return true;
+    }
+
     static void reap()
     {
         while (completed < submitted) {

@@ -352,6 +352,29 @@ struct channel_handover
     void * queue_storage{};
 
     /**
+     * Where in those queues the loader left off.
+     *
+     * A queue is half memory and half position, and handing over only
+     * the memory leaves the resident side disagreeing with the
+     * controller about the other half. The loader submits its proof
+     * write before handing over, so the controller's submission head has
+     * already advanced and one completion has already been consumed.
+     *
+     * Starting from zero after that fails silently and in the most
+     * misleading way available: the resident side writes at index zero
+     * and rings the doorbell with tail one, the controller compares it
+     * against a head it has already moved to one, decides the queue is
+     * empty and fetches nothing at all.
+     * @{
+     */
+    std::uint32_t submission_tail{};
+    std::uint32_t completion_head{};
+    std::uint32_t completion_phase{};
+    /**
+     * @}
+     */
+
+    /**
      * Whether every field above was established. Checked rather than
      * assumed, so a partially filled structure is refused.
      */

@@ -656,6 +656,12 @@ void nvme_selftest::execute(const nvme::log_target & destination,
 
     // Written last, so a partially filled structure never reads as
     // usable.
+    // Where the queues stand after everything above, including the
+    // proof write below - so this is refreshed once more at the end.
+    channel.submission_tail = test_queues::tail_position();
+    channel.completion_head = test_queues::head_position();
+    channel.completion_phase = test_queues::phase_position() ? 1u : 0u;
+
     channel.magic = nvme::channel_handover::valid_magic;
     trace::line("selftest: channel handover prepared");
 
@@ -749,6 +755,33 @@ void nvme_selftest::execute(const nvme::log_target & destination,
 
     trace::hex_line("selftest: proof written and verified at lba ",
                     target.extents[0].first_lba);
+    // Settle the queues before naming where they stand.
+    //
+    // Whoever inherits them starts with its own counters at zero, which
+    // means "nothing outstanding", so a completion left sitting here
+    // becomes one it attributes to its own first command - and then
+    // believes a write landed that it never issued. The proof write's
+    // completion is exactly that: submit returns without waiting for it.
+    if (!test_queues::drain(1000000)) {
+        trace::line("selftest: queues would not settle, channel refused");
+        channel.magic = 0;
+        return;
+    }
+
+    // The proof write moved the queues on, so the hand-over's idea of
+    // where they stand is now stale by exactly one command. Refreshed
+    // here rather than before the write, because this is the position
+    // the resident side actually inherits.
+    channel.submission_tail = test_queues::tail_position();
+    channel.completion_head = test_queues::head_position();
+    channel.completion_phase = test_queues::phase_position() ? 1u : 0u;
+    trace::hex_line("selftest: handing over submission tail ",
+                    channel.submission_tail);
+    trace::hex_line("selftest: handing over completion head ",
+                    channel.completion_head);
+    trace::hex_line("selftest: handing over completion phase ",
+                    channel.completion_phase);
+
     trace::line(
         "selftest: VERDICT the private queue moves data to the disk");
 

@@ -164,6 +164,12 @@ struct esp_blocks_for
             return false;
         }
 
+        // And where those queues stand, which is the other half of
+        // inheriting them.
+        queues::bind_position(handover.submission_tail,
+                              handover.completion_head,
+                              0 != handover.completion_phase);
+
         target = handover.target;
         physical_of = translate;
 
