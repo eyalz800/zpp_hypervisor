@@ -740,3 +740,47 @@ Three wrong turns on the way here, recorded so they are not repeated:
     itself first and the rig silently stops running our loader - serial
     carries firmware output only. Restore RELEASEX64_OVMF_VARS.fd from
     .orig before every run, which is what makes bootindex=0 win.
+
+### Ruled out statically: the allocation and the protection
+
+Both halves of the obvious explanation are correct in the source, so the
+churn is not either of them:
+
+  - `elf_file::memory_size()` is `p_vaddr + p_memsz` of the last LOAD,
+    rounded up - the full 51.6 MB, not the file size. Its comment already
+    says why, and the comment is right.
+  - `hypervisor::module_size` is assigned from that `memory_size()`, and
+    `protect_module()` clears all four EPT permission bits over
+    `module_size / page_size` pages from `module_base`.
+    `max_module_size` is 100 MB, so nothing is truncated.
+
+So a correctly launched hypervisor does protect the whole image including
+the .bss tail, and the guest should not be able to write base + 0x1434070.
+The next measurement is therefore the self-validating one, not another
+guess: `module_base` is a member of the singleton, so reading it back
+proves whether the singleton address used for every other member read is
+right at all. If it reads the value the loader traced, the zero counters
+are real; if it does not, every singleton read taken so far - including
+`heartbeat_exits_seen` - measured nothing.
+
+One trap found while setting that up, worth the note because it silently
+produces plausible numbers: `llvm-dwarfdump --name=<member>` returns the
+first DIE anywhere in the file with that name, including members of
+nested and unrelated types. `heartbeat_exits_seen` resolved to offset
+0x38 while `module_base` resolved to 0x1406008; only one of those can be
+an offset into this class. Check the parent DIE, do not take the first
+`data_member_location` that matches.
+
+### Stop condition on the real rig
+
+Windows on the real NVMe has now been hard-killed many times across this
+work and has already produced one "Inaccessible boot device". The last
+attempt chainloaded and then QEMU exited on its own with an empty log,
+which is a new failure and not one worth diagnosing by repeatedly power
+cycling a real Windows install. The disk was verified intact afterwards -
+GPT signature, ESP still shrunk to 33423360 sectors, Windows boot region
+readable, reserved region still stamped - and the full binary backup on
+the external SSD remains the fallback.
+
+Continue this leg from the overlay, where a failed attempt costs a
+discarded file, and move to the real disk only for a confirming run.
