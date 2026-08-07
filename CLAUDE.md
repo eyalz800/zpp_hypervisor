@@ -367,6 +367,43 @@ Two things that cost time:
 - The module load address is printed on serial (`allocate_rwx done at …`) and is
   **not** stable across configurations, so read it per run rather than reusing it.
 
+### Never boot a ZPP_VERIFY_HYPERVISOR build
+
+`verify::present` is destructive by design: it takes every application
+processor the firmware had parked and leaves it **halted in real mode**,
+and leaves the boot processor's local APIC in x2APIC mode. A firmware that
+then waits for those processors spins for ever - EDK2's `MpInitLib` does
+exactly that in `WaitApWakeup`, on a per-processor `WAKEUP_AP_SIGNAL`
+semaphore - and the machine never reaches the operating system.
+
+**This cost a full day.** The switch persisted in a CMake cache and was
+inherited silently by every later build. The resulting hang was
+indistinguishable from a hypervisor bug, and seven candidate causes were
+bisected and eliminated - the instruction decoder, the whole diagnostic
+channel, NMI exiting, the module base hand-over, the mapping window size,
+connecting controllers early, per-exit logging - before the *build option*
+was suspected. `git bisect` could not find it either, because every commit
+tested carried the same stale cache entry.
+
+Three things now stop it recurring, and the first is the one that matters:
+
+- `scripts/check-bootable.sh` greps the built loader for strings only
+  `verify::present` emits and refuses. It is wired into
+  `deploy-to-rig.sh` and `rig-boot-test.sh`, so the bytes cannot reach a
+  real machine without passing it.
+- A verify build no longer chainloads at all. It used to return early only
+  on *failure* and fall through to the chainload on success, which is the
+  wrong way round - a passing destructive check is exactly the case that
+  must not continue. It now prints its verdict and stops.
+- The loader says so on serial, unmissably, before stopping.
+
+The general lesson, worth more than the specific bug: **when a hang
+survives every code change you can think of, suspect the build, not the
+code.** Check what is actually compiled in - `strings` on the binary
+answers it in seconds, and it is how this was finally found: the working
+binary lacked `hypervisor_bit=` and `leaf 0x40000000 ebx=`, which only
+`verify.h` emits.
+
 ## Debugging
 
 Run Bochs and gdb **inside a named tmux session**, never as a detached one-shot command, so

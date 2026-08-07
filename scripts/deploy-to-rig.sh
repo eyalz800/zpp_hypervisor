@@ -20,6 +20,11 @@ set -e
 
 TARGET=${ZPP_TARGET:-tc@192.168.1.199}
 LOADER=${1:-out/debug/x86_64/zpp_loader.efi}
+
+# Refuse a build that must not be booted. See check-bootable.sh: the
+# destructive self check persists in the CMake cache, its hang looks
+# exactly like a hypervisor bug, and a day was lost to it once.
+"$(dirname "$0")/check-bootable.sh" "$LOADER" || exit 1
 DEST=${ZPP_DEST:-/EFI/zpp/zpp_loader.efi}
 PART=${ZPP_PART:-/dev/nvme0n1p2}
 MOUNT=/mnt/zppdeploy

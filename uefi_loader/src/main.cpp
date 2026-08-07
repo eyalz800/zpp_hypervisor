@@ -1576,10 +1576,32 @@ extern "C" EFI_STATUS EFIAPI uefi_main(EFI_HANDLE image_handle,
     // is discarded when it is false and the chainload below becomes the
     // only path out.
     if constexpr (verify::enabled) {
-        if (!verify::present(system_table, parameters)) {
-            write_trace_variable();
-            return EFI_LOAD_ERROR;
-        }
+        auto present = verify::present(system_table, parameters);
+
+        // Stop either way, and especially when it passed.
+        //
+        // verify::present is destructive by design: it takes every
+        // application processor the firmware had parked and leaves it
+        // halted in real mode, and leaves this processor's local APIC in
+        // x2APIC mode, which the firmware's own xAPIC accesses cannot
+        // see. Chainloading after that boots an operating system onto a
+        // machine whose processors the firmware still believes it owns -
+        // and EDK2's MpInitLib then waits for them for ever in
+        // WaitApWakeup, which is a hang with no message and no obvious
+        // cause.
+        //
+        // It used to return only on failure and fall through to the
+        // chainload on success, which is the wrong way round: a *passing*
+        // destructive check is exactly the case that must not continue.
+        // That cost a day of bisecting a hypervisor that was not at
+        // fault, so the verdict is printed and the boot ends here.
+        trace::line(present ? "ZPP_TRACE VERIFY PASSED, not chainloading"
+                            : "ZPP_TRACE VERIFY FAILED, not chainloading");
+        trace::line("ZPP_TRACE this build destroys application processor "
+                    "state - rebuild with ZPP_VERIFY_HYPERVISOR=OFF to "
+                    "boot a guest");
+        write_trace_variable();
+        return present ? EFI_SUCCESS : EFI_LOAD_ERROR;
     }
 
     // The device this loader came from, so the search below can skip it.
