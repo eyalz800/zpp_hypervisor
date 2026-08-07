@@ -1696,7 +1696,15 @@ void hypervisor::on_controller_register_write(void * context,
     // Everything about what this means belongs to the channel, so it is
     // asked rather than told. All this side knows is that the guest
     // touched a page it was watching.
-    diag::esp_block_sink::note_controller_write();
+    //
+    // Behind `if constexpr` rather than a plain call, because naming a
+    // static member of a class template odr-uses it and would put the
+    // channel's storage and code into a build that has the channel
+    // switched off. scripts/ci/check-diag-absent.sh fails the release
+    // build over exactly that, and did over this line.
+    if constexpr (diag::policy_of(diag::sink::esp_blocks).present) {
+        diag::esp_block_sink::note_controller_write();
+    }
 }
 
 void hypervisor::on_local_apic_write(void * context, std::uint64_t page)
@@ -3320,53 +3328,64 @@ hypervisor::main(arch::x86_64::context & caller_context)
         // target, a missing doorbell. A hand-over that does not check
         // out leaves the sink not ready, and a sink that is not ready is
         // never offered a record.
-        if (diagnostic_channel_given) {
-            auto & handover = diagnostic_channel;
+        // The runtime condition inside a compile time one. Naming a
+        // static member of a class template odr-uses it, so the plain
+        // form put the channel's queues, staging buffer and code into
+        // builds that have it switched off - which is what
+        // scripts/ci/check-diag-absent.sh exists to catch.
+        if constexpr (diag::policy_of(diag::sink::esp_blocks).present) {
+            if (diagnostic_channel_given) {
+                auto & handover = diagnostic_channel;
 
-            // A captureless lambda, which converts to the plain
-            // function pointer the sink takes. Local to its one use
-            // rather than a member, since nothing else needs it and
-            // this VMM is a singleton anyway.
-            //
-            // The host page table is the only correct answer once
-            // resident: the identity the loader relied on stops being
-            // true the moment CR3 changes.
-            auto physical_of = [](const void * address) {
-                return instance().host_page_table.virtual_to_physical(
-                    address);
-            };
-
-            if (diag::esp_block_sink::configure(handover, physical_of)) {
-                // Watch the page the configuration register lives on, so
-                // a guest reset of the controller is noticed rather than
-                // inferred - it cannot be inferred, because a completed
-                // reset leaves the status register looking exactly as it
-                // did before.
+                // A captureless lambda, which converts to the plain
+                // function pointer the sink takes. Local to its one use
+                // rather than a member, since nothing else needs it and
+                // this VMM is a singleton anyway.
                 //
-                // This page and not the doorbell page. With a stride of
-                // zero the doorbells begin at the next page, and they are
-                // written on every command the guest issues; watching
-                // them would trap the guest's entire disk traffic. The
-                // registers on this page are touched while a driver sets
-                // itself up and almost never afterwards.
-                auto register_page = reinterpret_cast<std::uint64_t>(
-                                         handover.configuration_register) &
-                                     ~(page_size - 1);
-                if (auto armed = watch_guest_page_writes(
-                        register_page,
-                        &hypervisor::on_controller_register_write,
-                        this);
-                    !armed) {
-                    log("could not watch the controller register page");
-                }
+                // The host page table is the only correct answer once
+                // resident: the identity the loader relied on stops being
+                // true the moment CR3 changes.
+                auto physical_of = [](const void * address) {
+                    return instance().host_page_table.virtual_to_physical(
+                        address);
+                };
 
-                log("disk channel live, namespace {}",
-                    handover.target.namespace_id);
-                diag::log<diag::severity::info>(
-                    "disk channel live on namespace {}",
-                    handover.target.namespace_id);
-            } else {
-                log("disk channel refused the loader's hand-over");
+                if (diag::esp_block_sink::configure(handover,
+                                                    physical_of)) {
+                    // Watch the page the configuration register lives on,
+                    // so a guest reset of the controller is noticed rather
+                    // than inferred - it cannot be inferred, because a
+                    // completed reset leaves the status register looking
+                    // exactly as it did before.
+                    //
+                    // This page and not the doorbell page. With a stride
+                    // of zero the doorbells begin at the next page, and
+                    // they are written on every command the guest issues;
+                    // watching them would trap the guest's entire disk
+                    // traffic. The registers on this page are touched
+                    // while a driver sets itself up and almost never
+                    // afterwards.
+                    auto register_page =
+                        reinterpret_cast<std::uint64_t>(
+                            handover.configuration_register) &
+                        ~(page_size - 1);
+                    if (auto armed = watch_guest_page_writes(
+                            register_page,
+                            &hypervisor::on_controller_register_write,
+                            this);
+                        !armed) {
+                        log("could not watch the controller register "
+                            "page");
+                    }
+
+                    log("disk channel live, namespace {}",
+                        handover.target.namespace_id);
+                    diag::log<diag::severity::info>(
+                        "disk channel live on namespace {}",
+                        handover.target.namespace_id);
+                } else {
+                    log("disk channel refused the loader's hand-over");
+                }
             }
         }
     }
