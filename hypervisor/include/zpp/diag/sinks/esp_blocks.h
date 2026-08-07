@@ -237,8 +237,15 @@ struct esp_blocks_for
      */
     static bool ready()
     {
+        // The storage check is not redundant with the binding check,
+        // even though configure binds the storage first and would not
+        // set the binding if that failed. write() forms
+        // `staging + offset` and stores through it, so a null here is
+        // not a refusal - it is a write into low memory. Anything whose
+        // failure mode is that severe gets checked where it is used and
+        // not inferred from something nearby.
         return target.usable() && queues::bound.live() &&
-               (nullptr != physical_of);
+               queues::storage_bound() && (nullptr != physical_of);
     }
 
     /**
