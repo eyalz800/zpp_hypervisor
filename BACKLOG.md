@@ -525,10 +525,29 @@ What would fix it, and neither is free:
   memory mapped *reads* emulated, which is where an instruction decoder
   becomes unavoidable.
 
-The doorbell hold is the smaller of the two and does not need a decoder, so
-the interprocessor interrupt is the thing to build first. It is also what the
-extended page table generation counter is missing to become a hard guarantee
-rather than a best effort, so it pays for itself twice.
+The doorbell hold is the smaller of the two and needs no decoder, and it
+turns out to need no interprocessor interrupt either.
+
+**Why none can be sent, and why that does not matter.** This VMM leaves
+"external-interrupt exiting" clear, so an interrupt it sent to another
+processor would be delivered into the guest's own handler and cause no VM
+exit at all - SDM 28-7, "otherwise, the processor handles the interrupt
+normally". Setting that control means intercepting and re-injecting every
+interrupt the guest receives, which is a great deal of machinery for a
+hypervisor that deliberately leaves interrupts alone.
+
+But the interrupt was never the requirement. The requirement is *knowing*
+that every processor has picked the protection up, and that is observable
+without sending anything: each stamps `ept_generation_seen` on its own next
+exit, and a guest that is running takes exits constantly.
+`wait_for_ept_acknowledgement` waits for exactly that, skips processors that
+never launched, and gives up rather than guessing. A caller that does not get
+the acknowledgement does nothing - not borrowing is always safe, borrowing
+without exclusion is not.
+
+So what remains for the rebuild is the doorbell hold itself, which is now
+buildable: protect the doorbell page, wait for the acknowledgement, borrow,
+release. Every piece of that exists.
 
 ## The guest resets the controller and takes our queue with it
 

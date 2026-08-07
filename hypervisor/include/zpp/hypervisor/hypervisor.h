@@ -367,6 +367,34 @@ private:
     void arm_controller_poll(bool armed);
 
     /**
+     * Waits until every running processor has picked up the extended
+     * page table change just made, or gives up.
+     *
+     * This is what turns the generation counter from a best effort into
+     * a guarantee, and it is the piece a borrow needs: protecting the
+     * guest's doorbell is worth nothing if another processor is still
+     * writing through a translation cached before the protection.
+     *
+     * No interprocessor interrupt is involved, and none is available -
+     * this VMM leaves "external-interrupt exiting" clear, so an interrupt
+     * it sent would be delivered into the guest's own handler rather than
+     * causing a VM exit (SDM 28-7). Turning that control on means
+     * intercepting and re-injecting every interrupt the guest receives,
+     * which is a great deal of machinery to buy a shorter wait.
+     *
+     * It is not needed, because the acknowledgement is observable
+     * directly: each processor stamps ept_generation_seen on its own next
+     * exit, and a guest that is running takes exits constantly. So this
+     * waits for what it can see rather than demanding what it cannot
+     * send.
+     *
+     * Returns false if some processor did not answer inside the budget,
+     * and a caller that needs the guarantee must then do nothing. Not
+     * borrowing is always safe; borrowing without exclusion is not.
+     */
+    bool wait_for_ept_acknowledgement(std::uint64_t budget);
+
+    /**
      * Watches one page of guest physical memory for writes.
      *
      * Deliberately a general facility rather than a hook for whatever

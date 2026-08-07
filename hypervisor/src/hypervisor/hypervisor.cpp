@@ -907,6 +907,37 @@ std::expected<void, zpp::error> hypervisor::protect_module()
     return {};
 }
 
+bool hypervisor::wait_for_ept_acknowledgement(std::uint64_t budget)
+{
+    auto generation = this->ept_generation.load(std::memory_order_acquire);
+
+    while (budget--) {
+        auto outstanding = false;
+
+        for (std::size_t cpu{}; cpu < max_cpus; ++cpu) {
+            // Only processors that are actually running a guest can
+            // acknowledge. One that never launched holds no translation
+            // to be stale, so waiting on it would wait forever.
+            if (!this->start_up_launched[cpu].load(
+                    std::memory_order_acquire)) {
+                continue;
+            }
+            if (this->ept_generation_seen[cpu] != generation) {
+                outstanding = true;
+                break;
+            }
+        }
+
+        if (!outstanding) {
+            return true;
+        }
+
+        spin_hint();
+    }
+
+    return false;
+}
+
 void hypervisor::arm_controller_poll(bool armed)
 {
     if (armed == this->controller_poll_armed) {
