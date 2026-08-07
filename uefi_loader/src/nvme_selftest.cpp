@@ -13,6 +13,8 @@
 #include "zpp/nvme/log_writer.h"
 #include "zpp/nvme/registers.h"
 
+#include <cstring>
+
 namespace zpp
 {
 namespace
@@ -680,15 +682,30 @@ void nvme_selftest::execute(const nvme::log_target & destination)
         byte = 0;
     }
 
-    // The signature the guard just insisted on, put back exactly as the
-    // reservation stamped it - same file id, same block index - because
-    // this block is about to be read again by the same check on the next
-    // write, and by the resident side after that.
+    // The signature the guard just insisted on, put back *complete* -
+    // every field the reservation stamped, not merely the ones the guard
+    // happens to read today.
+    //
+    // Writing a partial one is a way to corrupt the guard rather than
+    // the data. The check reads the block that is already there, so it
+    // passes on the reservation's stamp and then this write replaces it;
+    // anything left out is gone, and the next write to this block is
+    // refused because the block no longer proves it is ours. An earlier
+    // version of this omitted both GUIDs and would have done exactly
+    // that - silently, since the failure lands one write later.
+    //
+    // So the rule is: a block this code writes must come out of it
+    // carrying everything it carried going in.
     auto header =
         reinterpret_cast<block_signature *>(test_queues::staging);
     header->signature_magic = block_signature::magic;
     header->file_id = target.file_id;
     header->block_index = 0;
+    std::memcpy(
+        header->disk_guid, target.disk_guid, sizeof(header->disk_guid));
+    std::memcpy(header->partition_guid,
+                target.partition_guid,
+                sizeof(header->partition_guid));
 
     static constexpr char marker[] = "ZPP_DISK_CHANNEL_PROOF_V1";
     for (std::size_t i{}; i < (sizeof(marker) - 1); ++i) {

@@ -16,48 +16,47 @@ os_page_table::os_page_table(
 
 std::uint64_t os_page_table::virtual_to_physical(std::uint64_t value) const
 {
-    // If no OS page table, return the received value.
+    // No callback means the platform identity maps, so the address is
+    // its own answer. That is the UEFI case, per zpp_loader_parameters.
     if (!physical_to_virtual) {
         return value;
     }
 
-    // Parse the virtual address.
     auto address_structure = virtual_address(value);
 
-    // The pml4e entry inside the pml4 table.
+    // Each level goes back through the callback because an entry names
+    // the *physical* address of the next table, and this runs on the
+    // OS's virtual mapping - following one as a pointer would read
+    // whatever the OS happens to have at that virtual address.
     auto pml4e = pte(pml4[address_structure.pml4e()]);
 
-    // Convert physical page directory pointer table back to virtual.
     auto pdpt = reinterpret_cast<std::uint64_t *>(
         physical_to_virtual(pml4e.page_number() << 12));
 
-    // Fetch the page directory pointer table entry.
     auto pdpte = pte(pdpt[address_structure.pdpte()]);
 
-    // If large, return the address now.
+    // Correctness, not an optimisation: where PS is set the page number
+    // names a data page, so descending into it would read whatever the
+    // OS put there and call it a page table. No such case at the pml4
+    // level - SDM 5.5.4 makes PS reserved in a PML4E.
     if (pdpte.large()) {
         return (pdpte.page_number() << 30) +
                address_structure.huge_offset();
     }
 
-    // Convert physical page directory back to virtual.
     auto pd = reinterpret_cast<std::uint64_t *>(
         physical_to_virtual(pdpte.page_number() << 12));
 
-    // Fetch the page directory entry.
     auto pde = pte(pd[address_structure.pde()]);
 
-    // If large, return the address now.
     if (pde.large()) {
         return (pde.page_number() << 21) +
                address_structure.large_offset();
     }
 
-    // Convert physical page table back to virtual.
     auto pt = reinterpret_cast<std::uint64_t *>(
         physical_to_virtual(pde.page_number() << 12));
 
-    // Return the address.
     return (pte(pt[address_structure.pte()]).page_number() << 12) +
            address_structure.offset();
 }

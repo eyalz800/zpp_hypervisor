@@ -9,43 +9,42 @@ void page_table::map_page(std::uint64_t address,
                           std::uint64_t physical_address,
                           protection protection)
 {
-    // Use this page table to map the address.
+    // Resolves the sub-table addresses through this table, so it is
+    // only correct once map_self has run. Before that, self_map_from.
     return map_page_from(address, physical_address, protection, *this);
 }
 
 std::uint64_t page_table::virtual_to_physical(std::uint64_t value) const
 {
-    // Parse the virtual address.
+    // Starts at the pdpt, not the pml4, because every pml4 entry
+    // map_page_from writes points at the same single pdpt - reading it
+    // could only confirm what is already known.
     auto address_structure = virtual_address(value);
 
-    // Fetch the page directory pointer table entry.
     auto pdpte = pdpt[address_structure.pdpte()];
 
-    // If large, return the address now.
     if (pdpte.large()) {
         return (pdpte.page_number() << 30) +
                address_structure.huge_offset();
     }
 
-    // Fetch the page directory according to how many page directories we
-    // have.
+    // The same fold map_page_from applies, and it has to stay the same
+    // expression - picking the other directory would report a physical
+    // address for a page this table never mapped, and one answer this
+    // produces is the value loaded into the host CR3.
     auto pd_index =
         address_structure.pdpte() / (std::size(pdpt) / std::size(pds));
     auto pd = pds[pd_index];
 
-    // Fetch the page directory entry.
     auto pde = pd[address_structure.pde()];
 
-    // If large, return the address now.
     if (pde.large()) {
         return (pde.page_number() << 21) +
                address_structure.large_offset();
     }
 
-    // Fetch the page table according to how many page tables we have.
     auto pt = pts[pd_index][address_structure.pde()];
 
-    // Return the address.
     return (pt[address_structure.pte()].page_number() << 12) +
            address_structure.offset();
 }
@@ -62,35 +61,28 @@ const arch::x86_64::pte & page_table::head() const
 
 arch::x86_64::pte & page_table::page_table_entry(std::uint64_t address)
 {
-    // Parse the virtual address.
+    // Returns whichever entry terminates the walk, so that changing it
+    // changes this address. Descending past a large-page entry would
+    // hand back a leaf the processor never consults, and a write to it
+    // would appear to work and do nothing.
     auto address_structure = virtual_address(address);
 
-    // Fetch the page directory pointer table entry.
     auto & pdpte = pdpt[address_structure.pdpte()];
-
-    // If large, return the pte.
     if (pdpte.large()) {
         return pdpte;
     }
 
-    // Fetch the page directory according to how many page directories we
-    // have.
     auto pd_index =
         address_structure.pdpte() / (std::size(pdpt) / std::size(pds));
     auto pd = pds[pd_index];
 
-    // Fetch the page directory entry.
     auto & pde = pd[address_structure.pde()];
-
-    // If large, return the pte.
     if (pde.large()) {
         return pde;
     }
 
-    // Fetch the page table according to how many page tables we have.
     auto pt = pts[pd_index][address_structure.pde()];
 
-    // Return the address.
     return pt[address_structure.pte()];
 }
 

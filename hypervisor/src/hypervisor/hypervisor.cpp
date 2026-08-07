@@ -390,57 +390,59 @@ void hypervisor::on_host_exception(
 
 void hypervisor::initialize_intermediate_gdt()
 {
-    // Fetch the intermediate GDT.
+    // Out of unprotected_memory, because protect_module makes the rest
+    // of this module not-present to the guest and the guest goes on
+    // running with these as its own descriptor tables.
     auto & intermediate_gdt =
         this->unprotected_memory
             .intermediate_gdt[this->next_virtual_processor - 1];
 
-    // Fetch the guest TSS.
     auto & guest_tss = this->unprotected_memory
                            .guest_tss[this->next_virtual_processor - 1];
 
-    // Copy OS Created GDT into our intermediate GDT.
+    // Copied rather than pointed at, because the host page table does
+    // not map the OS table and main switches onto it a few lines after
+    // calling here.
     std::memcpy(intermediate_gdt,
                 reinterpret_cast<const char *>(this->gdtr.base),
                 this->gdtr.limit + 1);
 
-    // If the TSS segment is present, just use the current OS GDT.
+    // A present task segment is all the guest needs, so it keeps the
+    // table it was found with. The branch below exists because VM entry
+    // rejects an unusable guest TR - SDM 29.3.1.2 - and UEFI leaves TR
+    // null.
     if (auto task_state_segment =
             arch::x86_64::segment_descriptor::from_memory(
                 reinterpret_cast<std::uint64_t>(intermediate_gdt),
                 this->os_tr);
         task_state_segment.present()) {
-        // Use the current gdtr base as guest GDT pointer.
         this->guest_gdt_pointer =
             reinterpret_cast<std::uint64_t *>(this->gdtr.base);
-
-        // Use the guest GDT as current gdtr limit.
         this->guest_gdt_limit = this->gdtr.limit;
-
-        // Set the intermediate GDT limit as current gdtr limit.
         this->intermediate_gdt_limit = this->gdtr.limit;
-
-        // Use the current TR as the guest TR.
         this->guest_tr = this->os_tr;
         return;
     }
 
-    // Set the guest GDT pointer to the intermediate GDT.
+    // The guest is pointed at the extended copy, since appending the new
+    // descriptor to the firmware's own table would write past its limit.
     this->guest_gdt_pointer =
         this->unprotected_memory
             .intermediate_gdt[this->next_virtual_processor - 1];
 
-    // Increase the intermediate GDT limit by one entry.
+    // Sixteen bytes, not eight: in IA-32e mode a TSS descriptor occupies
+    // the space of two entries, SDM 3.5.2.
     this->intermediate_gdt_limit =
         this->gdtr.limit + (2 * sizeof(std::uint64_t));
-
-    // Guest GDT limit is the same as intermediate GDT limit.
     this->guest_gdt_limit = this->intermediate_gdt_limit;
 
-    // The index of the TSS segment.
+    // One slot past the last descriptor the OS had, so nothing the guest
+    // already refers to is overwritten.
     auto tr_index = (this->gdtr.limit + 1) / sizeof(std::uint64_t);
 
-    // Create a task state segment.
+    // Available rather than busy because LTR faults on anything else and
+    // marks it busy itself; byte granular because SDM 29.3.1.2 requires
+    // G clear for a TR limit whose low twelve bits are not all ones.
     arch::x86_64::segment_descriptor task_state_segment;
     task_state_segment.limit(sizeof(guest_tss) - 1);
     task_state_segment.base_extended(
@@ -455,7 +457,9 @@ void hypervisor::initialize_intermediate_gdt()
     task_state_segment.default_operation_size(false);
     task_state_segment.granularity(false);
 
-    // Assign the task state segment.
+    // Two slots for the sixteen byte form. The selector still scales by
+    // eight - a table is indexed in eight byte units however many of
+    // them a descriptor spans.
     intermediate_gdt[tr_index] = task_state_segment.basic_value();
     intermediate_gdt[tr_index + 1] = task_state_segment.extended_value();
     this->guest_tr = tr_index << 3;
@@ -463,7 +467,6 @@ void hypervisor::initialize_intermediate_gdt()
 
 void hypervisor::load_intermediate_gdt()
 {
-    // Load the intermediate GDT.
     arch::x86_64::gdt_layout lgdt_layout{};
     lgdt_layout.base = reinterpret_cast<std::uint64_t>(
         this->unprotected_memory
@@ -471,7 +474,8 @@ void hypervisor::load_intermediate_gdt()
     lgdt_layout.limit = this->intermediate_gdt_limit;
     arch::x86_64::lgdt(lgdt_layout.data());
 
-    // Load TSS segment if changed.
+    // Only for a synthesized segment. The OS's own is already marked
+    // busy by the OS's LTR, and LTR faults on a busy descriptor.
     if (this->guest_tr != this->os_tr) {
         arch::x86_64::ltr(&this->guest_tr);
     }
@@ -479,7 +483,6 @@ void hypervisor::load_intermediate_gdt()
 
 void hypervisor::load_os_gdt()
 {
-    // Load the OS GDT.
     arch::x86_64::gdt_layout lgdt_layout{};
     lgdt_layout.base = reinterpret_cast<std::uint64_t>(this->gdtr.base);
     lgdt_layout.limit = this->gdtr.limit;
@@ -516,7 +519,8 @@ void hypervisor::initialize_mtrrs()
 {
     auto & mtrrs = this->mtrrs;
 
-    // Read the MTRR capabilities MSR.
+    // First, because the reads below are gated on it: whether the
+    // fixed-range registers exist, and how many variable ones there are.
     mtrrs.capabilities = arch::x86_64::mtrr_capabilities(
         arch::x86_64::rdmsr(arch::x86_64::msr::ia32_mtrr_capability));
 
@@ -550,14 +554,13 @@ void hypervisor::initialize_mtrrs()
         std::size(mtrrs.variable),
         mtrrs.capabilities.variable_range_register_count());
 
-    // Iterate all MTRR registers, and read them.
+    // Base and mask alternate in MSR space - 0x200, 0x201, then the next
+    // pair two higher - which is where the stride of two comes from.
     for (std::size_t i{}; i < mtrrs.variable_count; ++i) {
-        // Read the base value.
         auto mtrr_base =
             arch::x86_64::mtrr_variable_base(arch::x86_64::rdmsr(
                 arch::x86_64::msr::mtrr::physbase_0 + i * 2));
 
-        // Read the mask value.
         auto mtrr_mask =
             arch::x86_64::mtrr_variable_mask(arch::x86_64::rdmsr(
                 arch::x86_64::msr::mtrr::physmask_0 + i * 2));
@@ -582,7 +585,9 @@ void hypervisor::initialize_mtrrs()
 
 std::expected<void, zpp::error> hypervisor::initialize_ept()
 {
-    // Fill the first epml4e for 512 GB of ram.
+    // One entry only. It covers the 512 GB the identity map below
+    // describes; above that the entries stay not-present, so an access
+    // faults rather than resolving to unrelated memory.
     this->epml4->read(true);
     this->epml4->write(true);
     this->epml4->execute(true);
@@ -590,21 +595,25 @@ std::expected<void, zpp::error> hypervisor::initialize_ept()
     this->epml4->page_number(
         this->host_page_table.virtual_to_physical(&this->epdpt) >> 12);
 
-    // Fill a temporary RWX pdpte.
+    // A template for the loop below. Both execute bits are needed
+    // because mode-based execute control is on, which makes bit 10 a
+    // separate user-mode execute permission - SDM Table 31-4.
     arch::x86_64::vmx::epte rwx_pdpte;
     rwx_pdpte.read(true);
     rwx_pdpte.write(true);
     rwx_pdpte.execute(true);
     rwx_pdpte.execute_user(true);
 
-    // Map every epdpt entry to a unique epd.
+    // One page directory per gigabyte, all built up front: nothing fills
+    // an EPT entry on demand, so the map must be complete before entry.
     for (std::size_t i{}; i < std::size(this->epdpt); ++i) {
         this->epdpt[i] = rwx_pdpte;
         this->epdpt[i].page_number(
             this->host_page_table.virtual_to_physical(this->epd[i]) >> 12);
     }
 
-    // Fill a temporary RWX pde.
+    // The same one level down, with the large bit set so the entry maps
+    // two megabytes directly instead of naming a table.
     arch::x86_64::vmx::epte rwx_pde;
     rwx_pde.read(true);
     rwx_pde.write(true);
@@ -624,19 +633,20 @@ std::expected<void, zpp::error> hypervisor::initialize_ept()
     // large page covers.
     constexpr std::size_t entries_per_table = 512;
 
-    // Fill the page directory table entries with large pages.
+    // Large pages throughout, split to 4 KB only where the MTRRs
+    // disagree within a region: mapping all 512 GB at 4 KB would want
+    // 262144 tables and the pool holds 1024.
     std::size_t large_page_number{};
     for (std::size_t i{}; i < std::size(this->epd); ++i) {
         for (std::size_t j{}; j < std::size(*this->epd); ++j) {
-            // Calculate the physical address from the large page number.
+            // An identity map, so this is the host physical address too,
+            // which is what the MTRR lookup below answers about.
             auto physical_address = (large_page_number << 21);
 
-            // The current epde.
             auto & epde = this->epd[i][j];
             epde = rwx_pde;
             epde.large_page_number(large_page_number);
 
-            // Advance to the next large page number.
             ++large_page_number;
 
             // The memory type the MTRRs give this whole 2 MB region, when
@@ -782,16 +792,19 @@ hypervisor::epte_for(std::uint64_t physical_address)
     auto ept_count = std::size(this->ept);
     auto & host_page_table = this->host_page_table;
 
-    // Get the epde.
+    // Indexed rather than walked, which initialize_ept's complete
+    // identity map is what makes possible: bits 38:30 pick the page
+    // directory and bits 29:21 the entry in it.
     auto & epde = this->epd[physical_address >> 30]
                            [(physical_address >> 21) & 0x1ff];
 
     // Already split, so the entry exists and only has to be found.
     if (!epde.large()) {
-        // The ept physical address.
+        // An EPT entry names its table by physical address, and the
+        // module is not identity mapped in the host page table - hence
+        // the reverse map rather than a dereference.
         auto ept_physical_address = epde.page_number() << 12;
 
-        // Find the virtual address of the ept.
         auto ept = reinterpret_cast<arch::x86_64::vmx::epte *>(
             this->module_physical_to_virtual.find(ept_physical_address)
                 ->second);
@@ -829,7 +842,9 @@ hypervisor::epte_for(std::uint64_t physical_address)
         epte.type(memory_type);
     }
 
-    // Make the epde point to ept.
+    // Point the epde at the table. The memory type must be cleared for
+    // the reason given at the same three lines in initialize_ept: those
+    // bits are reserved in an entry that references a page table.
     epde.large(false);
     epde.type({});
     epde.page_number(host_page_table.virtual_to_physical(ept) >> 12);
@@ -842,12 +857,12 @@ std::expected<void, zpp::error> hypervisor::protect_module()
     auto number_of_pages = this->module_size / page_size;
     auto & host_page_table = this->host_page_table;
 
-    // Iterate all pages.
+    // A page at a time, because epte_for splits any 2 MB entry still
+    // covering one - protecting a whole large page would take two
+    // megabytes of the guest's memory with it.
     for (std::size_t i{}; i < number_of_pages; ++i) {
-        // Calculate the address.
         auto address = this->module_base + (i * page_size);
 
-        // Get the physical address.
         auto physical_address =
             host_page_table.virtual_to_physical(address);
 
@@ -856,7 +871,9 @@ std::expected<void, zpp::error> hypervisor::protect_module()
             return std::unexpected(entry.error());
         }
 
-        // Protect our module epte.
+        // All four bits: mode-based execute control makes the two
+        // execute permissions separate, so clearing only the supervisor
+        // one would leave the module fetchable from user mode.
         auto & epte = **entry;
         epte.read(false);
         epte.write(false);
@@ -1122,30 +1139,28 @@ void hypervisor::unprotect_guest_memory()
 {
     auto number_of_pages = sizeof(this->unprotected_memory) / page_size;
 
-    // Iterate all pages.
+    // Undoes protect_module over the part of the module the guest is
+    // meant to reach, so it has to run after it. Walked by hand rather
+    // than through epte_for for the same reason: protect_module has
+    // already split these pages, so the 4 KB entry is known to exist.
     for (std::size_t i{}; i < number_of_pages; ++i) {
-        // Calculate the address.
         auto address =
             reinterpret_cast<unsigned char *>(&this->unprotected_memory) +
             (i * page_size);
 
-        // Get the physical address.
         auto physical_address =
             this->host_page_table.virtual_to_physical(address);
 
-        // Get the epde.
         auto & epde = this->epd[physical_address >> 30]
                                [(physical_address >> 21) & 0x1ff];
 
-        // The ept physical address.
         auto ept_physical_address = epde.page_number() << 12;
 
-        // Find the virtual address of the ept.
         auto ept = reinterpret_cast<arch::x86_64::vmx::epte *>(
             this->module_physical_to_virtual.find(ept_physical_address)
                 ->second);
 
-        // Make epte accessible.
+        // The exact inverse of what protect_module wrote.
         auto & epte = ept[(physical_address >> 12) & 0x1ff];
         epte.read(true);
         epte.write(true);
@@ -1158,14 +1173,17 @@ void hypervisor::initialize_vmx()
 {
     namespace vmx_msr = arch::x86_64::vmx::msr;
 
-    // The VMX and VMCS regions.
+    // One pair per virtual processor: a VMCS may not be active on more
+    // than one logical processor.
     auto & vmx = this->vmx[this->next_virtual_processor - 1];
     auto & vmx_vmcs = this->vmx_vmcs[this->next_virtual_processor - 1];
 
-    // Get the value of the basic VMX msr.
+    // Its low bits are the VMCS revision identifier, which VMPTRLD
+    // checks against the first dword of the region.
     const auto & basic_msr = this->cached_vmx_msr(vmx_msr::basic);
 
-    // Convert virtual addresses to physical addresses for VMX state.
+    // The processor reaches all of these by physical address, through no
+    // page table of ours.
     this->vmx_physical = this->host_page_table.virtual_to_physical(&vmx);
     this->vmcs_physical =
         this->host_page_table.virtual_to_physical(&vmx_vmcs);
@@ -1178,21 +1196,24 @@ void hypervisor::initialize_vmx()
     this->io_bitmap_b_physical =
         this->host_page_table.virtual_to_physical(&this->io_bitmap_b);
 
-    // Assign the revision IDs for the VMX and VMCS regions.
     vmx.revision_id = basic_msr & 0xffffffff;
     vmx_vmcs.revision_id = basic_msr & 0xffffffff;
 
-    // Set host cr0 and cr4 to guest values.
+    // Started from what this processor was already running with, so the
+    // host keeps the paging mode and feature set it was found in.
     this->host_cr0 = this->guest_cr0;
     this->host_cr4 = this->guest_cr4;
 
-    // Adjust the cr0 according to the MSR restrictions.
+    // A bit set in FIXED0 must be 1 and a bit clear in FIXED1 must be 0
+    // in VMX operation (SDM A.7), hence the OR and the AND. vmxon faults
+    // on a CR0 that does not satisfy them.
     this->host_cr0 &=
         this->cached_vmx_msr(vmx_msr::cr0_fixed_1) & 0xffffffff;
     this->host_cr0 |=
         this->cached_vmx_msr(vmx_msr::cr0_fixed_0) & 0xffffffff;
 
-    // Adjust the cr4 according to the MSR restrictions.
+    // The same for CR4, SDM A.8. VMXE is the bit this turns on in
+    // practice, and vmxon cannot execute without it.
     this->host_cr4 &=
         this->cached_vmx_msr(vmx_msr::cr4_fixed_1) & 0xffffffff;
     this->host_cr4 |=
@@ -2479,15 +2500,15 @@ void hypervisor::on_vm_entry_failure(arch::x86_64::vmx::exit_reason reason)
 
 std::expected<void, zpp::error> hypervisor::enter_root_mode()
 {
-    // Backup cr0 and cr4.
+    // Into the state VMX requires, each behind a guard: every step below
+    // can fail, and a failure has to leave the loader the machine it was
+    // still running on.
     auto cr0 = arch::x86_64::cr0();
     auto cr4 = arch::x86_64::cr4();
 
-    // Change cr0.
     arch::x86_64::cr0(this->host_cr0);
     scope_exit restore_cr0{[&] { arch::x86_64::cr0(cr0); }};
 
-    // Change cr4.
     arch::x86_64::cr4(this->host_cr4);
     scope_exit restore_cr4{[&] { arch::x86_64::cr4(cr4); }};
 
@@ -2500,23 +2521,25 @@ std::expected<void, zpp::error> hypervisor::enter_root_mode()
         return result;
     }
 
-    // Turn on vmx.
     if (arch::x86_64::vmx::vmxon(&this->vmx_physical)) {
         return std::unexpected(zpp::error{error::vmxon_failed});
     }
     scope_exit turn_off_vmx{arch::x86_64::vmx::vmxoff};
 
-    // Clear the vmcs.
+    // VMCLEAR is the only thing that sets the launch state to clear, and
+    // VMLAUNCH requires clear (SDM 27.1). The state lives in the region
+    // itself and cannot be read back, so it has to be set here.
     if (arch::x86_64::vmx::vmclear(&this->vmcs_physical)) {
         return std::unexpected(zpp::error{error::vmclear_failed});
     }
 
-    // Load the vmcs structure.
     if (arch::x86_64::vmx::vmptrld(&this->vmcs_physical)) {
         return std::unexpected(zpp::error{error::vmptrld_failed});
     }
 
-    // Cancel all guards.
+    // Released, not run: from here the processor stays in VMX operation
+    // with these registers, which is what this function is for. main
+    // takes over the undoing.
     turn_off_vmx.release();
     restore_cr4.release();
     restore_cr0.release();
@@ -2537,27 +2560,33 @@ void hypervisor::setup_vmcs(arch::x86_64::context & guest_context)
     // beforehand, which is what this is for.
     this->vmx_vmcs[this->next_virtual_processor - 1].abort_indicator = 0;
 
-    // Set invalid link pointer.
+    // All ones is the "no linked VMCS" value. Any other value is taken
+    // as the address of a shadow VMCS and checked as one on VM entry,
+    // SDM 29.3.1.5 - zero would name physical page zero.
     vmcs.vmcs_link_pointer(0xffffffffffffffffull);
 
-    // Set virtual processor id.
+    // Must be non-zero with VPID enabled (SDM 29.2.1.1), and it doubles
+    // as this VMM's processor index - hence counting from one.
     vmcs.vpid(this->next_virtual_processor);
 
-    // Setup the EPT pointer.
     arch::x86_64::vmx::ept_pointer eptp;
     eptp.memory_type(arch::x86_64::memory_type::write_back);
     eptp.page_walk_length(4);
     eptp.page_number(this->epml4_physical >> 12);
     vmcs.ept_pointer(eptp);
 
-    // Set msr bitmap.
+    // All three bitmaps are shared by every VMCS, which is what lets
+    // intercept_interrupt_command and intercept_io_port be called once
+    // on the boot processor and take effect everywhere.
     vmcs.msr_bitmap(this->msr_bitmap_physical);
     vmcs.write(arch::x86_64::vmx::vmcs::field::io_bitmap_a,
                this->io_bitmap_a_physical);
     vmcs.write(arch::x86_64::vmx::vmcs::field::io_bitmap_b,
                this->io_bitmap_b_physical);
 
-    // Secondary execution control.
+    // What each control field below spells out is a request, not the
+    // value written: adjust_msr forces the bits the capability MSR
+    // requires, and a field that disagrees with it fails VM entry.
     vmcs.secondary_processor_based_vm_execution_controls(
         arch::x86_64::vmx::adjust_msr(
             this->cached_vmx_msr(vmx_msr::processor_based_contorls_2),
@@ -2576,11 +2605,11 @@ void hypervisor::setup_vmcs(arch::x86_64::context & guest_context)
                 arch::x86_64::vmx::vm_execution_controls::secondary::
                     mode_based_execute_control));
 
-    // Pin based execution controls.
+    // Nothing requested: external interrupts and NMIs stay the guest's,
+    // which owns the interrupt controller.
     vmcs.pin_based_vm_execution_controls(arch::x86_64::vmx::adjust_msr(
         this->cached_vmx_msr(vmx_msr::true_pin_based_controls), 0));
 
-    // Primary execution controls.
     vmcs.primary_processor_based_vm_execution_controls(
         arch::x86_64::vmx::adjust_msr(
             this->cached_vmx_msr(vmx_msr::true_processor_based_controls),
@@ -2595,24 +2624,27 @@ void hypervisor::setup_vmcs(arch::x86_64::context & guest_context)
                 arch::x86_64::vmx::vm_execution_controls::primary::
                     monitor_exiting));
 
-    // VM exit in 64 bit address space.
+    // The host runs in 64-bit mode after an exit, and DR7 and
+    // IA32_DEBUGCTL are saved on the way out so the guest gets back what
+    // it had rather than what the host was using.
     vmcs.vm_exit_controls(arch::x86_64::vmx::adjust_msr(
         this->cached_vmx_msr(vmx_msr::true_exit_controls),
         arch::x86_64::vmx::vm_exit_controls::host_address_space_size |
             arch::x86_64::vmx::vm_exit_controls::save_debug_controls));
 
-    // VM entry in 64 bit address space.
+    // The mirror on entry. apply_start_up clears ia_32e_mode_guest
+    // again, since it has to agree with CR0.PG or entry fails.
     vmcs.vm_entry_controls(arch::x86_64::vmx::adjust_msr(
         this->cached_vmx_msr(vmx_msr::true_entry_controls),
         arch::x86_64::vmx::vm_entry_controls::ia_32e_mode_guest |
             arch::x86_64::vmx::vm_entry_controls::load_debug_controls));
 
-    // Get the GDT base.
+    // The selectors below are resolved against the intermediate GDT
+    // rather than the OS one, which is not mapped here any more.
     auto intermediate_gdt_base = reinterpret_cast<std::uint64_t>(
         this->unprotected_memory
             .intermediate_gdt[this->next_virtual_processor - 1]);
 
-    // Write segment information.
     auto descriptor = arch::x86_64::segment_descriptor::from_memory(
         intermediate_gdt_base, guest_context.cs);
     vmcs.guest_cs_selector(guest_context.cs);
@@ -2692,23 +2724,28 @@ void hypervisor::setup_vmcs(arch::x86_64::context & guest_context)
     vmcs.guest_ldtr_access_rights(descriptor.vmx_access_rights());
     vmcs.guest_ldtr_base(descriptor.context_dependent_base());
 
-    // Set gdtr information.
+    // The guest keeps its own tables; the host gets ones inside the
+    // module, which is all the host page table maps. A host fault
+    // delivered through an unmapped table would escalate.
     vmcs.guest_gdtr_limit(this->guest_gdt_limit);
     vmcs.guest_gdtr_base(
         reinterpret_cast<std::uint64_t>(this->guest_gdt_pointer));
     vmcs.host_gdtr_base(reinterpret_cast<std::uint64_t>(this->host_gdt));
 
-    // Set idtr information.
     vmcs.guest_idtr_limit(this->idtr.limit);
     vmcs.guest_idtr_base(this->idtr.base);
     vmcs.host_idtr_base(reinterpret_cast<std::uintptr_t>(this->host_idt));
 
-    // Load CR0
+    // The CR0 shadow does nothing: CR0's guest/host mask is never set,
+    // so the guest reads the real register. Same dead shadow the CR4
+    // block below describes - setting a mask here would be needed first.
     vmcs.cr0_read_shadow(this->guest_cr0);
     vmcs.guest_cr0(this->host_cr0);
     vmcs.host_cr0(this->host_cr0);
 
-    // Load CR3
+    // The guest keeps the OS page table and the host runs on its own.
+    // CR3-load exiting is not set, so guest writes to CR3 are never seen
+    // here - which is what EPT is for.
     vmcs.guest_cr3(this->guest_cr3);
     vmcs.host_cr3(this->host_cr3);
 
@@ -2735,11 +2772,11 @@ void hypervisor::setup_vmcs(arch::x86_64::context & guest_context)
     vmcs.guest_cr4(this->host_cr4);
     vmcs.host_cr4(this->host_cr4);
 
-    // Load debug MSR and register.
+    // These take effect only because "load debug controls" is set in the
+    // entry controls above; without it VM entry ignores both fields.
     vmcs.guest_ia32_debugctl(this->ia32_debug_control);
     vmcs.guest_dr7(this->guest_dr7);
 
-    // Load rflags.
     vmcs.guest_rflags(guest_context.rflags);
 }
 
@@ -2752,27 +2789,29 @@ void hypervisor::vm_launch(arch::x86_64::context & guest_context,
     // Allocate a small stack for the host VM exit.
     alignas(0x10) unsigned char host_vm_launch_stack[0x1500]{};
 
-    // The host VM exit rsp.
+    // Two contexts below the top, because the top is what they occupy:
+    // vm_exit_entry captures the guest's registers at host_rsp, and the
+    // host's own captured context sits immediately above it.
     auto host_rsp = reinterpret_cast<std::uint64_t>(
         std::end(host_vm_launch_stack) -
         (2 * sizeof(arch::x86_64::context)));
 
-    // Construct the guest context on the host stack.
+    // Named so the exit path has something typed to hand to vmm_code;
+    // what fills it is the exit stub, not this.
     auto & local_guest_context =
         *::new (reinterpret_cast<void *>(host_rsp)) arch::x86_64::context;
 
-    // Construct the host context on the host stack.
     auto & host_context = *::new (reinterpret_cast<void *>(
         host_rsp + sizeof(arch::x86_64::context))) arch::x86_64::context;
 
-    // Write host rip.
+    // A VM exit arrives with no usable register state, so it lands in a
+    // naked stub rather than in C++.
     vmcs.host_rip(
         reinterpret_cast<std::uint64_t>(arch::x86_64::vm_exit_entry));
-
-    // Write host rsp.
     vmcs.host_rsp(host_rsp);
 
-    // Write guest rip, rsp.
+    // The caller's own captured RIP and RSP, so the guest is the loader
+    // continuing from the call that got here.
     vmcs.guest_rip(guest_context.rip);
     vmcs.guest_rsp(guest_context.rsp);
 
@@ -2797,10 +2836,10 @@ void hypervisor::vm_launch(arch::x86_64::context & guest_context,
     host_context.rax = reinterpret_cast<std::uint64_t>(&vm_exit_flag);
     host_context.rbx = reinterpret_cast<std::uint64_t>(&guest_context);
 
-    // Capture host context.
     arch::x86_64::capture_context(&host_context);
 
-    // If VM exit, call the VMM code.
+    // The second arrival here is a VM exit rather than the fall through
+    // from the capture - the same twice-returning trick main uses.
     if (vm_exit_flag) {
         // Call VMM code, which never returns.
         vmm_code(local_guest_context);
@@ -2809,7 +2848,8 @@ void hypervisor::vm_launch(arch::x86_64::context & guest_context,
         return;
     }
 
-    // Update the segment selectors for host.
+    // The capture took the caller's selectors, which mean something else
+    // in the host GDT. Overwritten with what VM exit itself loads.
     host_context.cs = this->host_cs;
     host_context.ds = 0;
     host_context.es = 0;
@@ -2817,24 +2857,26 @@ void hypervisor::vm_launch(arch::x86_64::context & guest_context,
     host_context.gs = 0;
     host_context.ss = 0;
 
-    // Increment the virtual processor id.
+    // Everything indexed by next_virtual_processor - 1 above belongs to
+    // this processor now, so the next one to launch takes the next slot.
     ++this->next_virtual_processor;
 
     // The next time we arrive after the capture context is due to VM
     // exit.
     vm_exit_flag = true;
 
-    // Start executing the guest at vmlaunch.
     guest_context.rip =
         reinterpret_cast<std::uint64_t>(arch::x86_64::vmx::vmlaunch);
 
     // Set rflags to host rflags, to leave interrupts disabled.
     guest_context.rflags = host_context.rflags;
 
-    // Set return value of guest to success.
+    // The value the loader will see: VM entry does not load the general
+    // purpose registers, so RAX carries into the guest, which resumes at
+    // the loader's return address.
     guest_context.rax = 0;
 
-    // Launch the VM.
+    // restore_context is the launch - RIP was pointed at vmlaunch above.
     arch::x86_64::restore_context(&guest_context);
 }
 
@@ -2914,7 +2956,8 @@ hypervisor::main(arch::x86_64::context & caller_context)
         }
     }};
 
-    // Initialize page table operations.
+    // The only way to read the OS page table from here: its levels are
+    // named by physical address and this module maps none of them.
     this->physical_to_virtual = physical_to_virtual;
 
     // Initialize special registers.
@@ -2952,22 +2995,18 @@ hypervisor::main(arch::x86_64::context & caller_context)
 
     // Perform only on first CPU load.
     if (0 == cpuid) {
-        // Initialize memory region.
+        // The order is forced: the host page table covers the module
+        // region and is built by reading the OS one, and the reverse
+        // translation is read back off the host table.
         initialize_module_region();
-
-        // Initialize OS page table.
         initialize_os_page_table();
-
-        // Initialize host page table.
         initialize_host_page_table();
 
-        // Initialize module physical to virtual translation.
         if (auto result = initialize_module_physical_to_virtual();
             !result) {
             return result;
         }
 
-        // Initialize host GDT.
         initialize_host_gdt();
 
         // Initialize host IDT, which needs the GDT above to exist.
@@ -3061,23 +3100,20 @@ hypervisor::main(arch::x86_64::context & caller_context)
 
     // Perform only on first CPU load.
     if (0 == cpuid) {
-        // Initialize VMX MSRS.
+        // Ordered too: the EPT derives its memory types from the MTRRs,
+        // the protection edits the EPT's entries, and unprotecting
+        // punches a hole back in that protection.
         initialize_vmx_msrs();
-
-        // Initialize MTRRS.
         initialize_mtrrs();
 
-        // Initialize the EPT.
         if (auto result = initialize_ept(); !result) {
             return result;
         }
 
-        // Protect module.
         if (auto result = protect_module(); !result) {
             return result;
         }
 
-        // Allow guest access to unprotected memory.
         unprotect_guest_memory();
 
         // Interception of the interrupt command for a guest that is not
@@ -3136,7 +3172,6 @@ hypervisor::main(arch::x86_64::context & caller_context)
         }
     }
 
-    // Initialize vmx.
     initialize_vmx();
 
     // Lay out the memory a processor this VMM starts begins executing in.
@@ -3150,15 +3185,14 @@ hypervisor::main(arch::x86_64::context & caller_context)
         initialize_start_up_memory(start_up_memory);
     }
 
-    // Enter root mode.
     if (auto result = enter_root_mode(); !result) {
         return result;
     }
 
-    // Guard to turn off vmx.
+    // The guard enter_root_mode released, taken up again here: a failure
+    // between now and the launch still has to leave VMX operation.
     scope_exit turn_off_vmx{arch::x86_64::vmx::vmxoff};
 
-    // Setup vmcs.
     setup_vmcs(caller_context);
 
     // On a processor this VMM started, replace the guest state just built
@@ -3194,7 +3228,6 @@ hypervisor::main(arch::x86_64::context & caller_context)
     log("launching guest on virtual processor {}",
         this->next_virtual_processor);
 
-    // Launch VM.
     vm_launch(caller_context, [&](auto & context) {
         using basic_reason = arch::x86_64::vmx::exit_reason::basic_reason;
         auto & vmcs = this->vmcs;
@@ -3203,7 +3236,6 @@ hypervisor::main(arch::x86_64::context & caller_context)
         auto vpid = vmcs.vpid();
         static_cast<void>(vpid);
 
-        // The basic exit reason.
         basic_reason reason{};
 
         // Get the exit reason. No failure to handle: reading it cannot
@@ -3224,7 +3256,8 @@ hypervisor::main(arch::x86_64::context & caller_context)
 
         reason = full_reason.basic();
 
-        // Get the guest RIP.
+        // Out of the VMCS, because what the exit stub's capture left in
+        // this field is its own return address, not the guest's RIP.
         context.rip = vmcs.guest_rip();
 
         // Whether the exit was caused by an instruction the guest should
@@ -3260,7 +3293,8 @@ hypervisor::main(arch::x86_64::context & caller_context)
         case basic_reason::cpuid: {
             std::uint32_t cpuid_result[4]{};
 
-            // Execute the cpuid instruction.
+            // The real instruction, whose answer is then edited - so
+            // every bit this VMM has no opinion on is the hardware's.
             arch::x86_64::cpuid(context.rax, context.rcx, cpuid_result);
 
             // The leaf, which is EAX. The high half of RAX is not part
@@ -3278,7 +3312,8 @@ hypervisor::main(arch::x86_64::context & caller_context)
             // new interface and nothing underneath can answer it instead.
             constexpr std::uint32_t diagnostic_leaf = 0x40000001;
 
-            // If needs to set hypervisor present bit.
+            // Leaf 1, the feature bits, where two of them are cleared
+            // and a third is deliberately left alone.
             if (1 == leaf) {
                 // Do not tell the guest it is virtualized. The nesting
                 // check in launch_on_this_processor already describes this
@@ -3446,7 +3481,6 @@ hypervisor::main(arch::x86_64::context & caller_context)
                 }
             }
 
-            // Place the cpuid result into the context.
             context.rax = cpuid_result[0];
             context.rbx = cpuid_result[1];
             context.rcx = cpuid_result[2];
@@ -3454,13 +3488,14 @@ hypervisor::main(arch::x86_64::context & caller_context)
             break;
         }
         case basic_reason::xsetbv: {
-            // Activate CR4 xsave bit.
+            // This is the host's CR4 - VM exit replaced the guest's -
+            // and XSETBV raises #UD with OSXSAVE clear (SDM 13.3), so
+            // without this the instruction below faults in the host.
             auto cr4 = arch::x86_64::cr4();
             if (!(cr4 & arch::x86_64::cr4_bits::os_xsave)) {
                 arch::x86_64::cr4(cr4 | arch::x86_64::cr4_bits::os_xsave);
             }
 
-            // Execute the xsetbv instruction.
             arch::x86_64::xsetbv(context.rcx,
                                  context.rax | (context.rdx << 32));
             break;
@@ -3811,11 +3846,10 @@ hypervisor::main(arch::x86_64::context & caller_context)
         // had their say.
         record_exit(full_reason);
 
-        // Resume the VM.
+        // The mirror of the launch: the guest's registers are put back
+        // and the last thing executed in host mode is the resume itself.
         context.rip =
             reinterpret_cast<std::uint64_t>(arch::x86_64::vmx::vmresume);
-
-        // Restore VM.
         arch::x86_64::restore_context(&context);
     });
 
@@ -3825,7 +3859,6 @@ hypervisor::main(arch::x86_64::context & caller_context)
 void hypervisor::launch_on_cpu_private_stack(
     hypervisor & hypervisor, arch::x86_64::context & caller_context)
 {
-    // Invoke the main function.
     auto result = hypervisor.main(caller_context);
 
     // Record the failure where a processor that is still running can
@@ -3846,7 +3879,9 @@ void hypervisor::launch_on_cpu_private_stack(
         }
     }
 
-    // Use result as return value.
+    // How it reaches the loader: _start captured this context with its
+    // RIP set to the return address, so restoring it below makes the
+    // module look like a function that returned this value.
     caller_context.rax = result ? 0 : result.error().code();
 
     // On success the hypervisor stays resident and its globals must
@@ -3855,7 +3890,6 @@ void hypervisor::launch_on_cpu_private_stack(
         zpp::crt::init::cleanup();
     }
 
-    // Restore context to caller.
     arch::x86_64::restore_context(&caller_context);
 }
 
@@ -3879,40 +3913,36 @@ void hypervisor::launch_on_cpu(arch::x86_64::context & caller_context)
         return;
     }
 
-    // Fetch the stack the hypervisor will launch with.
+    // A stack inside the module, because main switches onto the host
+    // page table, which does not map the caller's.
     auto & stack = this->stack[this->available_stack_index];
 
-    // Compute the stack top.
+    // The context is copied onto it for the same reason: main reads it
+    // after the switch, by when the original is unreachable.
     auto stack_top = stack + sizeof(stack) - sizeof(arch::x86_64::context);
 
-    // Copy construct caller context into the new stack top.
     auto copied_caller_context =
         ::new (stack_top) arch::x86_64::context(caller_context);
 
-    // Use the caller context as launch context.
+    // The call is assembled by hand out of the caller's own context,
+    // because it has to land on a different stack. RDI and RSI are the
+    // System V argument registers, and the callee is static, so they are
+    // its two parameters rather than a this pointer and one.
     auto & launch_context = caller_context;
 
-    // Set instruction pointer to the launch function.
     launch_context.rip =
         reinterpret_cast<std::uint64_t>(launch_on_cpu_private_stack);
-
-    // Set stack pointer to the stack top.
     launch_context.rsp = reinterpret_cast<std::uint64_t>(stack_top);
 
     // Simulate call instruction for proper stack alignment.
     launch_context.rsp -= sizeof(std::uint64_t);
 
-    // Set the this pointer.
     launch_context.rdi = reinterpret_cast<std::uint64_t>(this);
-
-    // Set first argument to copied caller context pointer.
     launch_context.rsi =
         reinterpret_cast<std::uint64_t>(copied_caller_context);
 
-    // Increment stack index.
     ++this->available_stack_index;
 
-    // Restore context to launch context.
     arch::x86_64::restore_context(&launch_context);
 }
 

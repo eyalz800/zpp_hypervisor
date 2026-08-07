@@ -368,6 +368,25 @@ private:
             }
         }
 
+        // The disk as well as the partition.
+        //
+        // The partition GUID alone is very nearly enough, being unique
+        // per partition rather than per position, but "very nearly" is
+        // the wrong standard for the one check standing between this
+        // code and somebody's installation. A machine with more than one
+        // NVMe namespace addresses them by an id this structure also
+        // carries, and an identifier that was copied rather than
+        // generated - a cloned disk, an image restored onto a second
+        // drive - collides by construction. Both GUIDs together mean a
+        // block has to prove it is on the disk the reservation signed,
+        // not merely that it looks like the right partition.
+        for (std::size_t i{}; i < sizeof(found->disk_guid); ++i) {
+            if (found->disk_guid[i] != target.disk_guid[i]) {
+                ++refused_signature;
+                return write_result::signature_mismatch;
+            }
+        }
+
         return write_result::ok;
     }
 

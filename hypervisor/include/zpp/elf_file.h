@@ -151,18 +151,15 @@ public:
      * Constructs an ELF file from an ELF file in memory.
      */
     elf_file(const void * file_data, state elf_state) :
-        // The ELF file data.
         m_file_data(reinterpret_cast<const unsigned char *>(file_data)),
-
-        // The ELF header is at the beginning of the ELF file data.
         m_header(reinterpret_cast<const elf_header *>(file_data)),
-
-        // The ELF program headers.
         m_program_headers(reinterpret_cast<const elf_phdr *>(
             m_file_data + m_header->e_phoff)),
 
-        // The preferred base is the first load segment virtual address
-        // rounded down to page boundary.
+        // Where the linker laid the image out, and so the origin every
+        // other address here is relative to. Rounded down because the
+        // first load segment may begin part way into a page, and the
+        // whole of that page has to be inside the allocation.
         m_preferred_base(
             std::find_if(m_program_headers,
                          m_program_headers + m_header->e_phnum,
@@ -173,8 +170,6 @@ public:
                 ->p_vaddr &
             ~0xfff),
 
-        // Find the dynamic program header according to the program header
-        // type.
         m_dynamic_phdr(std::find_if(m_program_headers,
                                     m_program_headers + m_header->e_phnum,
                                     [](auto & program_header) {
@@ -183,14 +178,16 @@ public:
                                                    program_header.p_type);
                                     })),
 
-        // Compute the dynamic segment address.
+        // The whole reason `state` exists. A segment sits at p_offset
+        // in a file and at p_vaddr in a loaded image, and those differ
+        // - so reading a loaded image at p_offset lands inside some
+        // other segment. The subtraction is the load bias.
         m_dynamic(reinterpret_cast<const elf_dyn *>(
             (state::unloaded == elf_state)
                 ? m_file_data + m_dynamic_phdr->p_offset
                 : m_dynamic_phdr->p_vaddr +
                       (m_file_data - m_preferred_base))),
 
-        // Finding the last load segment program header.
         m_last_load_phdr(
             std::find_if(std::reverse_iterator(m_program_headers +
                                                m_header->e_phnum),
@@ -202,8 +199,11 @@ public:
                 .base() -
             1),
 
-        // Compute the memory size according to last and first load program
-        // headers.
+        // One span covering every segment and the gaps between them,
+        // since the image has to stay at fixed offsets from a single
+        // base. p_memsz, not p_filesz: they differ by .bss, which here
+        // is most of the module - the per-processor stacks alone are
+        // megabytes.
         m_memory_size(((m_last_load_phdr->p_vaddr +
                         m_last_load_phdr->p_memsz + 0xfff) &
                        ~0xfff) -
@@ -222,34 +222,29 @@ public:
     template <typename Allocate, typename Protect>
     void * load(Allocate && allocate, Protect && protect)
     {
-        // Allocate enough memory.
         auto base = static_cast<unsigned char *>(allocate(m_memory_size));
-
-        // If failed to allocate, return nullptr.
         if (!base) {
             return nullptr;
         }
 
-        // The base difference, which is the new base minus the preferred
-        // base, to be used when converting ELF file addresses to point at
-        // the new relocated ELF.
+        // How far the image moved from where it was linked, which added
+        // to any address out of the file gives where that thing now
+        // lives - which is all a relative relocation is.
         auto base_difference =
             reinterpret_cast<std::ptrdiff_t>(base - m_preferred_base);
 
-        // Map ELF segments into memory.
+        // The only order that works: DT_REL/DT_RELA hold virtual
+        // addresses that do not resolve until the segments are mapped,
+        // and relocating writes into pages protection would close.
         map_segments(base_difference);
 
-        // The relocations and relocations size.
         auto [relocations, relocations_size] =
             get_relocations(base_difference);
 
-        // Relocate the ELF.
         relocate(relocations, relocations_size, base_difference);
 
-        // Protect ELF segments.
         protect_segments(std::forward<Protect>(protect), base_difference);
 
-        // Return the loaded ELF base.
         return base;
     }
 
@@ -324,23 +319,23 @@ private:
      */
     void map_segments(std::ptrdiff_t base_difference)
     {
-        // Iterate the program headers and load them.
         for (std::size_t i{}; i < m_header->e_phnum; ++i) {
             auto & program_header = m_program_headers[i];
 
-            // If not loadable, skip.
             if (elf_phdr::type::load !=
                 elf_phdr::type(program_header.p_type)) {
                 continue;
             }
 
-            // Load the segment.
             std::copy_n(m_file_data + program_header.p_offset,
                         program_header.p_filesz,
                         reinterpret_cast<unsigned char *>(
                             base_difference + program_header.p_vaddr));
 
-            // Zero memory.
+            // The tail beyond p_filesz is .bss, and the allocate
+            // callback promises nothing about the contents. Zeroing it
+            // here is what makes a zero-initialized global read as
+            // zero.
             std::fill_n(reinterpret_cast<unsigned char *>(
                             base_difference + program_header.p_vaddr +
                             program_header.p_filesz),
@@ -362,17 +357,19 @@ private:
         const elf_rela * rela{};
         std::size_t rela_size{};
 
-        // Parse the dynamic segment.
+        // Unbounded because the dynamic segment carries no count -
+        // DT_NULL is the only thing that ends it.
         for (std::size_t i{};; ++i) {
             auto & dynamic_entry = m_dynamic[i];
             auto tag = elf_dyn::tag(dynamic_entry.d_tag);
 
-            // If the end is reached.
             if (elf_dyn::tag::null == tag) {
                 break;
             }
 
-            // Parse dynamic entry.
+            // Each table and its size are separate entries in no
+            // guaranteed order, so all four are collected first and
+            // paired up afterwards.
             switch (tag) {
             case elf_dyn::tag::rel:
                 rel = reinterpret_cast<const elf_rel *>(
@@ -393,12 +390,15 @@ private:
             }
         }
 
-        // The relocation table and size to be returned.
+        // A variant rather than a pointer and a flag, so that relocate
+        // dispatches on the type - the two forms hold their value in
+        // different places, and getting that wrong is the bug
+        // documented there.
         std::variant<const elf_rela *, const elf_rel *> relocations;
         std::size_t relocations_size{};
 
-        // If rela relocations exist, prefer them, else use rel
-        // relocations.
+        // `llvm-readelf -d` on the hypervisor shows RELA and no REL, so
+        // the REL branch has never been exercised by a boot.
         if (rela) {
             relocations = rela;
             relocations_size = rela_size;
@@ -407,7 +407,6 @@ private:
             relocations_size = rel_size;
         }
 
-        // Return the relocation table and size.
         return {relocations, relocations_size};
     }
 
@@ -444,7 +443,9 @@ private:
                   std::size_t relocations_size,
                   std::ptrdiff_t base_difference)
     {
-        // Define the relocation strategy.
+        // One body instantiated for each alternative, so the two forms
+        // cannot drift apart; the `if constexpr` below is the only
+        // place they differ.
         auto relocate = [&](auto relocations) {
             // The relocation type. Strip the pointer first and the cv
             // second, never the other way around: the variant holds
@@ -461,42 +462,38 @@ private:
             using relocation_kind = std::remove_cv_t<
                 std::remove_pointer_t<decltype(relocations)>>;
 
-            // Get relocation types.
+            // The relative relocation number differs per architecture,
+            // and it is the only kind handled here.
             auto relative_relocation = relative_relocation_value();
 
-            // The relocation size is expressed in bytes, convert it to
-            // an entry count before iterating.
             auto relocations_count =
                 relocations_size / sizeof(relocation_kind);
 
-            // Iterate rela entries.
             for (std::size_t i{}; i < relocations_count; ++i) {
                 auto & relocation = relocations[i];
 
-                // If not relative, skip.
+                // Anything else needs a symbol resolved, and there is
+                // nothing to resolve against - this module links with
+                // no imports and llvm-nm -u on it must stay empty.
                 if (parse_relocation_type(relocation.r_info) !=
                     relative_relocation) {
                     continue;
                 }
 
-                // Get relocation target.
                 auto & target = *reinterpret_cast<std::uintptr_t *>(
                     base_difference + relocation.r_offset);
 
-                // If rela, use addend, else use target.
+                // RELA states the value, REL accumulates it. A RELA
+                // file leaves the target word zero, so treating one as
+                // the other writes the bare base.
                 if constexpr (std::is_same_v<relocation_kind, elf_rela>) {
-                    // Perform the relocation by assigning base
-                    // plus addend.
                     target = base_difference + relocation.r_addend;
                 } else {
-                    // Perform the relocation by adding base to
-                    // target.
                     target += base_difference;
                 }
             }
         };
 
-        // Perform the relocations.
         std::visit(relocate, relocations);
     }
 
@@ -508,17 +505,17 @@ private:
     void protect_segments(Protect && protect,
                           std::ptrdiff_t base_difference)
     {
-        // Iterate the program headers and change memory protection.
+        // p_memsz rather than p_filesz, so a segment's .bss tail gets
+        // the same protection as the rest of it. Every loader here
+        // passes a callback that does nothing, so this is untested.
         for (std::size_t i{}; i < m_header->e_phnum; ++i) {
             auto & program_header = m_program_headers[i];
 
-            // If not loadable, skip.
             if (elf_phdr::type::load !=
                 elf_phdr::type(program_header.p_type)) {
                 continue;
             }
 
-            // Protect the memory range.
             protect(reinterpret_cast<unsigned char *>(
                         base_difference + program_header.p_vaddr),
                     program_header.p_memsz,

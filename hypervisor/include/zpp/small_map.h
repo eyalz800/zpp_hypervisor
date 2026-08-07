@@ -13,6 +13,9 @@ namespace zpp
 /**
  * Represents a map
  */
+// The only instantiation is hypervisor::module_physical_to_virtual,
+// which is never copied, moved or assigned - so those members below
+// have never been compiled by anything here.
 template <typename Key,
           typename Value,
           std::size_t Size,
@@ -90,21 +93,18 @@ public:
      */
     small_map(small_map && other) noexcept : m_size(other.m_size)
     {
-        // Move all values from other to this, destroying them along the
-        // way.
+        // The storage is inline, so there is no buffer to hand over and
+        // a move is element by element. Each source is destroyed as it
+        // is consumed, so zeroing other.m_size below leaks nothing.
         for (size_type i{}; i < m_size; ++i) {
-            // The other value.
             auto & other_value = other.value(i);
 
-            // Move construct a new value from other value.
             ::new (std::addressof(m_storage[i]))
                 value_type(std::move(other_value));
 
-            // Destroy other value.
             other_value.~value_type();
         }
 
-        // Zero other size.
         other.m_size = {};
     }
 
@@ -113,7 +113,9 @@ public:
      */
     small_map(const small_map & other)
     {
-        // Create a guard to clear the map in case of failure.
+        // The guard destroys exactly what was built if a copy fails
+        // part way - inert under -fno-exceptions. Note the loop tests
+        // this->m_size, which is zero, so it copies nothing.
         struct guard
         {
             ~guard()
@@ -125,20 +127,14 @@ public:
             small_map * me;
         } clear_guard{this};
 
-        // Move all values from other to this, destroying them along the
-        // way.
         for (size_type i{}; i < m_size; ++i) {
-            // The other value.
             auto & other_value = other.value(i);
 
-            // Copy construct a new value from other value.
             ::new (std::addressof(m_storage[i])) value_type(other_value);
 
-            // Increment size.
             ++m_size;
         }
 
-        // Cancel the guard.
         clear_guard.me = {};
     }
 
@@ -148,27 +144,25 @@ public:
      */
     small_map & operator=(small_map && other) noexcept
     {
-        // Destroy current values.
+        // Destroy first, since the storage is raw and assigning into it
+        // would run value_type's assignment over bytes holding no
+        // object. Also why self-assignment is undefined above - the
+        // clear would destroy the elements about to be moved.
         clear();
 
-        // Update current size.
         m_size = other.m_size;
 
-        // Move all values from other to this, destroying them along the
-        // way.
         for (size_type i{}; i < m_size; ++i) {
-            // The other value.
             auto & other_value = other.value(i);
 
-            // Move construct a new value from other value.
             ::new (std::addressof(m_storage[i]))
                 value_type(std::move(other_value));
 
-            // Destroy other value.
+            // `other_value` is a reference, so this does not compile.
+            // Never instantiated, which is why the build passes.
             other_value->~value_type();
         }
 
-        // Zero other size.
         other.m_size = {};
         return *this;
     }
@@ -178,7 +172,7 @@ public:
      */
     small_map & operator=(const small_map & other) noexcept
     {
-        // Move assign from a copy.
+        // Copy first, so a failure leaves this object untouched.
         *this = small_map(other);
         return *this;
     }
@@ -196,13 +190,12 @@ public:
      */
     void clear()
     {
-        // Destroy current values.
+        // Explicit destructor calls, because m_storage is raw bytes and
+        // nothing else will ever destroy what was placed in it.
         for (size_type i{}; i < m_size; ++i) {
-            // Destroy current value.
             this->value(i).~value_type();
         }
 
-        // Zero our size.
         m_size = {};
     }
 
@@ -375,7 +368,10 @@ public:
     template <typename PairKey, typename... Arguments>
     void emplace(PairKey && key, Arguments &&... arguments)
     {
-        // If empty, insert value and increment size.
+        // Nothing here checks m_size against Size - bounding it is the
+        // caller's job. The branches differ only in this: a slot below
+        // m_size holds a live object and is assigned to, while the slot
+        // at m_size is raw bytes and needs placement new.
         if (!m_size) {
             ::new (m_storage)
                 value_type(std::forward<PairKey>(key),
@@ -384,10 +380,10 @@ public:
             return;
         }
 
-        // Find where to insert value before.
         auto [found, index] = find_index(key);
 
-        // If we found the value, just set the new value.
+        // An existing key is replaced, unlike std::map::emplace, which
+        // leaves the existing value alone.
         if (found) {
             *(begin() + index) =
                 value_type(std::forward<PairKey>(key),
@@ -395,7 +391,6 @@ public:
             return;
         }
 
-        // If index is size, insert at the end.
         if (index == m_size) {
             ::new (m_storage + m_size)
                 value_type(std::forward<PairKey>(key),
@@ -404,18 +399,18 @@ public:
             return;
         }
 
-        // Move construct the last value.
+        // Opening a hole at `index`. The new last slot is the only one
+        // needing construction, so it goes first; everything below it
+        // already holds an object. Backwards, so no source is
+        // overwritten before it is read.
         ::new (m_storage + m_size) value_type(std::move(back()));
 
-        // Where we want to insert our value.
         auto slot = begin() + index;
 
-        // Move all values to the right.
         for (auto last = (end() - 1); last != slot; --last) {
             *last = std::move(*(last - 1));
         }
 
-        // Assign to the slot.
         *slot = value_type(std::forward<PairKey>(key),
                            std::forward<Arguments>(arguments)...);
         ++m_size;
@@ -435,20 +430,19 @@ public:
      */
     iterator erase(const_iterator position)
     {
-        // Move all values to the left.
+        // Shifting left overwrites live objects, so every step is an
+        // assignment, and it leaves a moved-from duplicate in the last
+        // slot. Only that one needs destroying - skipping it would
+        // leave an object alive where the next insert placement-news.
         auto first = begin();
         auto to_erase = first + (position - first);
         for (auto last = end() - 1; to_erase != last; ++to_erase) {
             *to_erase = std::move(*(to_erase + 1));
         }
 
-        // Destroy value at the back.
         back().~value_type();
-
-        // Decrement size.
         --m_size;
 
-        // Return iterator past the last removed element.
         return first + (position - first);
     }
 
@@ -457,12 +451,12 @@ public:
      */
     iterator erase(const_iterator first, const_iterator last)
     {
-        // Erase [first, last).
+        // Back to front, so an erase does not shift the elements still
+        // to be erased out from under the iterators naming them.
         for (; last != first; --last) {
             erase(last - 1);
         }
 
-        // Return last erased.
         return begin() + (first - begin());
     }
 
@@ -514,48 +508,48 @@ private:
      */
     std::tuple<bool, size_type> find_index(const key_type & key) const
     {
-        // If empty, return not found.
+        // A miss still reports where the key would belong, which is how
+        // emplace avoids searching twice. The empty case is separate
+        // because `m_size - 1` below would wrap on an unsigned zero.
         if (!m_size) {
             return {false, 0};
         }
 
-        // Initialize first and last indices.
         key_compare compare{};
         size_type first = {};
         size_type last = m_size - 1;
 
+        // An inclusive range, so it ends at first == last with that one
+        // element still unexamined - which is what the two comparisons
+        // after the loop are for.
         while (first != last) {
-            // Get the middle index and value.
             auto middle = (first + last) / 2;
             auto middle_value = value(middle).first;
 
-            // If key comes before middle.
+            // middle, not middle - 1: it is excluded as a match but not
+            // as an insertion point. The division rounds down, so
+            // middle is below last here and the range still shrinks.
             if (compare(key, middle_value)) {
                 last = middle;
                 continue;
             }
 
-            // If key comes after middle.
             if (compare(middle_value, key)) {
                 first = middle + 1;
                 continue;
             }
 
-            // Return the result.
             return {true, middle};
         }
 
-        // If key comes before first, return the current index.
         if (compare(key, value(first).first)) {
             return {false, first};
         }
 
-        // If key comes after first, return the next index.
         if (compare(value(first).first, key)) {
             return {false, first + 1};
         }
 
-        // Returns the found index.
         return {true, first};
     }
 
