@@ -493,6 +493,46 @@ as C++ and destroy the file.
 - Loader entry points use `extern "C"` (called from C code in linux_loader)
 - `compile_commands.json` is auto-copied to each source directory after build (for clangd)
 
+## Working mode
+
+**Treat the objective as standing until its done-condition is met.** Not the
+next step - the objective. State the done-condition out loud at the start
+("the channel logs continuously while Windows runs, verified on the medium")
+and keep going until it is met or genuinely blocked.
+
+Stop for exactly three things:
+
+- an irreversible action outside what has already been authorised,
+- a decision the evidence cannot settle,
+- done.
+
+Everything else: pick the next item and go. In particular, these are **not**
+reasons to stop and hand back control:
+
+- a verified increment (commit it and continue),
+- a failed experiment (a failure is an input to the next step, not a place
+  to stop and explain),
+- a milestone worth reporting (report *while* passing it, not instead of
+  passing it),
+- permission that has already been given once.
+
+**Report as you pass, not instead of passing.** A run that produced a number
+is worth a line; it is not worth a summary and a wait.
+
+**Document decisions and alternatives as they are made**, in the commit that
+makes them and in `BACKLOG.md` when they shape future work. What was chosen
+is half the record - the other half is what was rejected and the measurement
+or citation that rejected it. Several decisions in this tree were reversed
+later by somebody re-deriving the same argument, because only the conclusion
+had been written down. Specifically:
+
+- when a choice was settled by a measurement, record the measurement,
+- when it was settled by the SDM or KVM, cite the section or function,
+- when an alternative was rejected, say which and why, so it is not
+  re-proposed,
+- when something is switched off, the switch's comment carries the reason
+  and what would have to change to switch it on.
+
 ## Integrating branches
 
 **Rebase onto the target and fast-forward. Never create a merge commit.**

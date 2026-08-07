@@ -580,6 +580,18 @@ private:
                                              std::uint64_t page);
 
     /**
+     * The guest has rung a doorbell while the channel was borrowing its
+     * admin queue.
+     *
+     * Nothing to do: by the time this is reached the writer has already
+     * been held at the faulting instruction for as long as the borrow
+     * lasted, which is the entire purpose. The write has not taken
+     * effect, so whatever it was going to say to the controller it says
+     * afterwards instead.
+     */
+    static void on_doorbell_write(void * context, std::uint64_t page);
+
+    /**
      * The guest physical page of the memory mapped local APIC, or zero
      * while it is not being watched.
      */

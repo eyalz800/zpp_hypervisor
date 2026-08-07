@@ -909,9 +909,27 @@ std::expected<void, zpp::error> hypervisor::protect_module()
 
 bool hypervisor::wait_for_ept_acknowledgement(std::uint64_t budget)
 {
-    auto generation = this->ept_generation.load(std::memory_order_acquire);
+    // This processor is up to date by construction and has to say so.
+    //
+    // Whoever calls this has just changed an entry, and changing one goes
+    // through invalidate_ept, which invalidates locally *and* moves the
+    // generation on. So the caller's own high water mark is stale the
+    // instant it makes the change, and waiting for it would wait for
+    // itself - which is what the first version of this did, and it
+    // reported no acknowledgement on every attempt.
+    if (auto cpu = this->vmcs.vpid(); (0 != cpu) && (cpu <= max_cpus)) {
+        this->ept_generation_seen[cpu - 1] =
+            this->ept_generation.load(std::memory_order_acquire);
+    }
 
     while (budget--) {
+        // Re-read rather than capture once. Another processor arming or
+        // disarming a watch moves the generation while this waits, and a
+        // target that keeps moving is one nobody ever reaches - every
+        // processor that had answered would go back to looking
+        // outstanding.
+        auto generation =
+            this->ept_generation.load(std::memory_order_acquire);
         auto outstanding = false;
 
         for (std::size_t cpu{}; cpu < max_cpus; ++cpu) {
@@ -1105,6 +1123,53 @@ void hypervisor::rebuild_channel_queue()
         where.completion = completion;
 
         nvme::admin_borrow::locate(where);
+
+        // Exclude the guest from the admin queue for the length of the
+        // borrow, and make sure the exclusion is actually in force before
+        // relying on it.
+        //
+        // The doorbell page is watched in hold mode, so a processor that
+        // rings any doorbell faults and is held at the faulting
+        // instruction - its write has not taken effect, so the queue is
+        // unchanged for as long as the hold lasts. Our own submissions are
+        // unaffected: they are stores from root mode, and extended page
+        // tables do not apply there.
+        //
+        // Armed only for the borrow. Left armed it would trap every
+        // doorbell the guest ever rings, which is its entire disk traffic.
+        auto doorbell_page =
+            reinterpret_cast<std::uint64_t>(bar) +
+            nvme::offset_of(nvme::register_offset::doorbell_base);
+
+        if (auto armed =
+                watch_guest_page_writes(doorbell_page,
+                                        &hypervisor::on_doorbell_write,
+                                        this,
+                                        page_watch::mode::hold);
+            !armed) {
+            this->channel_rebuild_result = 0xf5;
+            return;
+        }
+
+        scope_exit unwatch{[&] { unwatch_guest_page(doorbell_page); }};
+
+        if (!hold_guest_page(doorbell_page)) {
+            this->channel_rebuild_result = 0xf6;
+            return;
+        }
+
+        scope_exit unhold{[&] { release_guest_page(doorbell_page); }};
+
+        // A processor still holding a translation cached before that
+        // protection would write straight through it, so the borrow does
+        // not begin until every running processor has said it has picked
+        // the change up. Not getting the answer means not borrowing - an
+        // unexcluded borrow desynchronises the guest's admin queue, and no
+        // channel is better than that.
+        if (!wait_for_ept_acknowledgement(std::uint64_t{1} << 24)) {
+            this->channel_rebuild_result = 0xf7;
+            return;
+        }
 
         // Ours to create: the same identifiers and the same storage the
         // loader used, because the storage outlives every reset - it is
@@ -1998,6 +2063,12 @@ void hypervisor::on_controller_register_write(void * context,
             self.rebuild_channel_queue();
         }
     }
+}
+
+void hypervisor::on_doorbell_write(void * context, std::uint64_t page)
+{
+    static_cast<void>(context);
+    static_cast<void>(page);
 }
 
 void hypervisor::on_local_apic_write(void * context, std::uint64_t page)
