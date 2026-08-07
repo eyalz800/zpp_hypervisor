@@ -907,6 +907,34 @@ std::expected<void, zpp::error> hypervisor::protect_module()
     return {};
 }
 
+void hypervisor::arm_controller_poll(bool armed)
+{
+    if (armed == this->controller_poll_armed) {
+        return;
+    }
+    this->controller_poll_armed = armed;
+
+    auto controls = this->vmcs.pin_based_vm_execution_controls();
+
+    if (armed) {
+        // The unit the timer counts in is the time stamp counter shifted
+        // right by IA32_VMX_MISC[4:0], so the same wall clock interval is
+        // a different number on every machine and has to be computed.
+        auto divisor =
+            this->cached_vmx_msr(arch::x86_64::vmx::msr::misc) & 0x1f;
+        auto ticks = (controller_poll_microseconds * 1800) >> divisor;
+
+        this->vmcs.vmx_preemption_timer_value(ticks ? ticks : 1);
+        this->vmcs.pin_based_vm_execution_controls(
+            controls | arch::x86_64::vmx::vm_execution_controls::pin::
+                           activate_preemption_timer);
+    } else {
+        this->vmcs.pin_based_vm_execution_controls(
+            controls & ~arch::x86_64::vmx::vm_execution_controls::pin::
+                           activate_preemption_timer);
+    }
+}
+
 void * hypervisor::map_window(std::uint64_t physical_address,
                               std::size_t pages)
 {

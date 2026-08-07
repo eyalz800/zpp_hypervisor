@@ -484,6 +484,52 @@ reserved virtual address, pointed at whatever physical page is needed,
 tables and no growth of a structure whose size is fixed at compile time. With
 that, the borrow is a caller away.
 
+## Making the rebuild race free, which polling does not
+
+The rebuild is written and switched off, and the reason is a race rather
+than a missing piece. Worth stating exactly, because two plausible fixes do
+not fix it.
+
+The borrow needs the guest's admin queue to itself. The driver cannot submit
+to it until `CSTS.RDY` is set - but neither can we, because our own commands
+need a ready controller. **Both become eligible at the same instant**, and a
+borrow takes 8.5 ms, so it is guaranteed to overlap the driver's first
+`Identify` unless the driver is actually prevented from submitting.
+
+What does not fix it:
+
+- **Catching the `CC.EN` write.** A watch lets the write land by making the
+  page writable and stepping one instruction, and for that window the page is
+  writable for every processor. Measured: one trapped write of `0x00460000`,
+  the controller afterwards reading `0x00460001`, the transition never seen.
+- **Polling the register more often.** The VMX-preemption timer can
+  manufacture an exit every few microseconds whatever the guest is doing,
+  which does solve "nothing makes us look" - the driver's `CSTS.RDY` polling
+  is memory mapped reads to a passed through device and causes no exits at
+  all. But noticing promptly is not exclusion. Measured without it: a borrow
+  that spent its whole 285 ms budget and returned `timed_out`, leaving the
+  guest's admin queue desynchronised.
+
+What would fix it, and neither is free:
+
+- **Hold the guest's admin doorbell.** Write-protect the doorbell page and
+  park any processor that rings it until the borrow finishes, then let it
+  through - no decoder needed, and no processor stopped that was not trying
+  to use the queue. For it to be *strictly* race free every processor has to
+  have picked the protection up before the borrow starts, and "each catches
+  up on its next exit" is not that. It needs an interprocessor interrupt and
+  an acknowledgement, which is what KVM's `kvm_flush_remote_tlbs` does and
+  this VMM has no way to send.
+- **Hide `CSTS.RDY` until the borrow is done.** Then the driver cannot
+  legally proceed, because it is required to wait. This needs the guest's
+  memory mapped *reads* emulated, which is where an instruction decoder
+  becomes unavoidable.
+
+The doorbell hold is the smaller of the two and does not need a decoder, so
+the interprocessor interrupt is the thing to build first. It is also what the
+extended page table generation counter is missing to become a hard guarantee
+rather than a best effort, so it pays for itself twice.
+
 ## The guest resets the controller and takes our queue with it
 
 The disk channel's queue pair is created by the loader, before Windows'

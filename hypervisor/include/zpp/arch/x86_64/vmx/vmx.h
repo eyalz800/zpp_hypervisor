@@ -74,6 +74,30 @@ enum type : std::uint64_t
 /**
  * The secondary execution controls.
  */
+namespace vm_execution_controls::pin
+{
+enum type : std::uint64_t
+{
+    /**
+     * SDM Table 27-5, bit 6: "If this control is 1, the VMX-preemption
+     * timer counts down in VMX non-root operation... A VM exit occurs
+     * when the timer counts down to zero."
+     *
+     * The only way this VMM has of making itself look at something on a
+     * schedule. A guest that is running is usually taking exits, so
+     * polling on the exit path is normally enough - but a guest spinning
+     * on a memory mapped read of a passed through device takes none at
+     * all, and that is exactly the window where the storage controller's
+     * state has to be noticed. This manufactures the exits.
+     *
+     * Armed only while something is waiting to be noticed, because it
+     * costs the guest an exit every time it fires.
+     */
+    activate_preemption_timer = (1ull << 6),
+};
+
+} // namespace vm_execution_controls::pin
+
 namespace vm_execution_controls::secondary
 {
 enum type : std::uint64_t

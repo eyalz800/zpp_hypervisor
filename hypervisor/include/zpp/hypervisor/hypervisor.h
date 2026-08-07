@@ -356,6 +356,17 @@ private:
     void rebuild_channel_queue();
 
     /**
+     * Turns the preemption timer on or off.
+     *
+     * On, this VMM gets an exit every controller_poll_microseconds
+     * whatever the guest is doing - which is the point, because a guest
+     * spinning on a memory mapped read of a passed through device takes
+     * no exits of its own and that is precisely when the controller's
+     * state has to be seen.
+     */
+    void arm_controller_poll(bool armed);
+
+    /**
      * Watches one page of guest physical memory for writes.
      *
      * Deliberately a general facility rather than a hook for whatever
@@ -1224,6 +1235,26 @@ private:
      * which.
      * @{
      */
+    /**
+     * How long the preemption timer runs between checks, as a count of
+     * whatever unit the processor scales it to.
+     *
+     * The timer counts at a rate proportional to the time stamp counter,
+     * divided by 2^n where n is IA32_VMX_MISC[4:0], so the unit differs
+     * between machines and the value is computed from that rather than
+     * chosen. Ten microseconds: short enough to land well inside the
+     * CSTS.RDY wait a driver must already tolerate, long enough that the
+     * exits it costs are not noticeable, and only while the channel is
+     * down at all.
+     */
+    static constexpr std::uint64_t controller_poll_microseconds = 10;
+
+    /**
+     * Whether the preemption timer is currently armed, so it is not
+     * re-armed on every exit or left running once its reason is gone.
+     */
+    bool controller_poll_armed{};
+
     std::uint64_t channel_register_writes{};
     std::uint64_t channel_last_configuration{};
     /**
