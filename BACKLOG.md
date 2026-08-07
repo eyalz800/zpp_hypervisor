@@ -784,3 +784,55 @@ the external SSD remains the fallback.
 
 Continue this leg from the overlay, where a failed attempt costs a
 discarded file, and move to the real disk only for a confirming run.
+
+## Resolved: the real-NVMe channel stops at the guest's controller reset
+
+Measured on the real disk with the rebuild switched off, and every number
+below validated first by reading `module_base` back out of the singleton -
+it returned exactly the base the loader traced, which is what makes the
+rest of the snapshot trustworthy:
+
+    epoch             1                 configure() succeeded
+    physical_of       0x78df1590        translator stored
+    boot_id           0x8a598e999       stamped
+    sequence          1                 one block written
+    next_block_index  1
+    lost_to_reset     1                 one block lost to a reset
+    bound             all zero          the binding was forgotten
+
+So the resident side does work on real hardware: it configures, writes a
+block, and then Windows' NVMe driver clears CC.EN, `note_controller_write`
+calls `queues::forget()`, and with `rebuild_channel_after_reset` off the
+channel never returns. That is the documented limitation, now confirmed by
+direct evidence instead of inferred. The overlay logs indefinitely only
+because the emulated controller is never reset - `lost_to_reset` stays 0
+there.
+
+The remaining work is therefore exactly the piece already identified: to
+survive the reset the VMM must emulate the guest's CC write rather than
+step over it, so the register page is never briefly writable and no second
+write slips past. That needs the instruction decoder.
+
+### Two ways this investigation lied to itself
+
+Both cost a lot of time and both are the kind that produce confident,
+plausible numbers rather than errors.
+
+**The flag was on.** `rebuild_channel_after_reset` was left `enabled`
+after being measured, contradicting its own comment - which says in as
+many words that a timed out borrow desynchronises the guest's admin queue
+and "that is not a thing to leave switched on". With it on, the guest
+resets the machine; under `-no-reboot` QEMU exits. Crucially the reset
+takes the hypervisor with it, so every counter read afterwards is
+*recycled RAM*: that is where `configure_reject = untried`,
+`heartbeat_exits_seen = 0` and a word in .bss apparently changing 1900
+times a second all came from. None of it was our memory. Read
+`module_base` back before believing any other member.
+
+**The instrumentation was optimised away.** `configure_reject` is written
+in several places and read by nobody in the program, so the stores were
+provably dead and were removed, leaving the symbol reading its zero
+initializer for ever. It reported `untried` on a run where `epoch`,
+`boot_id` and `physical_of` all proved `configure()` had succeeded. Any
+field whose only reader is a debugger must be `volatile`, or it measures
+nothing and says so confidently.

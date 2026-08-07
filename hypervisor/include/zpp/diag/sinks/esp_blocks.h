@@ -103,7 +103,16 @@ struct esp_blocks_for
         not_ready,
     };
 
-    static inline reject configure_reject{reject::untried};
+    // Volatile because nothing in this program ever reads it.
+    //
+    // Without that the stores are provably dead and the optimizer removes
+    // them, leaving the symbol in .bss reading its zero initializer for
+    // ever - which is exactly what happened: the field reported untried
+    // on a run where epoch, boot_id and physical_of all proved configure()
+    // had succeeded. An instrumentation field whose only reader is a
+    // debugger has to say so, or it measures nothing and says it
+    // confidently.
+    static inline volatile reject configure_reject{reject::untried};
 
     static inline std::uint32_t staged_records{};
 
