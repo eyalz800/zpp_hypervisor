@@ -410,3 +410,40 @@ framebuffer from the halt paths, so it no longer has to survive a power
 cycle - it is read off the screen before the machine is powered off.
 Verified under emulation by reading the glyphs back out of framebuffer
 memory, including a line drawn by `on_unhandled_exit` itself.
+
+## The guest resets the controller and takes our queue with it
+
+The disk channel's queue pair is created by the loader, before Windows'
+storage driver has touched the controller. That driver then initialises the
+device the way any driver does - which includes taking `CC.EN` down and back
+up - and a controller reset destroys every I/O queue on it, ours included.
+After that the doorbell we hold is not backed by anything.
+
+Two things follow, and only the first is handled:
+
+- **Writing after the reset is refused rather than attempted.** Every write
+  does a guard read first and compares an epoch, and `queue_pair` counts what
+  it threw away in `lost_to_reset` so the loss is visible in the next block's
+  header rather than silent. That much is written and works.
+- **Nothing notices the reset, so the epoch never changes.** `esp_blocks.h`
+  has said so all along - "bumped by the reset detection, which is the second
+  wiring point and also absent". The guard reads `CSTS.RDY` and `CC.EN` and a
+  *completed* reset leaves both exactly as they were before it, so the guard
+  cannot tell. It catches a controller that is down; it cannot catch one that
+  went down and came back.
+
+So the channel is live from the hand-over until Windows' driver initialises
+the device, and after that it writes into a queue the controller has
+forgotten, with the guard waving it through. The failure is silent, which is
+the worst property available.
+
+What it needs is a watch on the configuration register page, which the page
+watch facility can already do - the same mechanism that watches the local
+APIC page - so a guest write clearing `CC.EN` bumps the epoch. Recreating the
+queue afterwards is a separate and larger job: it means borrowing the admin
+queue from a live guest driver rather than from idle firmware, which is what
+`admin_borrow` was written for and has never been asked to do.
+
+Until then the honest description of the channel is that it covers early
+boot, which is most of what it was wanted for, and stops without saying so
+once Windows owns the disk.
