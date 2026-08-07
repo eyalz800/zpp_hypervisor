@@ -107,28 +107,97 @@ public:
                   "needs a PRP list and this design has none");
 
     /**
-     * The queues themselves, page aligned because Create I/O Queue
-     * requires a page aligned physically contiguous buffer when PC is
-     * set, and PC is always set here.
+     * How the four buffers are laid out in the storage handed to
+     * bind_storage, one page each.
+     *
+     * A page each because Create I/O Queue requires a page aligned
+     * physically contiguous buffer when PC is set, and PC is always set
+     * here. The completion queue needs only a quarter of its page at
+     * this depth; the waste is a kilobyte and buys the alignment the
+     * controller demands.
      * @{
      */
-    alignas(4096) static inline submission_entry submissions[Entries]{};
-    alignas(4096) static inline completion_entry completions[Entries]{};
+    static constexpr std::size_t submission_offset = 0;
+    static constexpr std::size_t completion_offset = 4096;
+    static constexpr std::size_t staging_offset = 8192;
+    static constexpr std::size_t scratch_offset = 12288;
+    static constexpr std::size_t storage_bytes = 16384;
     /**
      * @}
      */
 
     /**
-     * One block being assembled, and one being verified. Separate
-     * buffers because the verify read of the destination must not land
-     * on top of the payload waiting to be written to it.
+     * The queues and buffers, in storage somebody else owns.
+     *
+     * Pointers rather than arrays, and that is the whole point. They
+     * used to be `static inline` arrays, which meant the copy in the
+     * loader's binary and the copy in the resident module were two
+     * different objects at two different addresses. The loader created
+     * the controller's queues against *its* arrays, handed over the
+     * doorbells, and the resident side then wrote commands into *its*
+     * arrays and rang a doorbell for queues the controller believed were
+     * somewhere else entirely. Nothing was ever fetched from where it
+     * was written and no completion ever arrived - measured as
+     * `submitted = 1, completed = 0` with nothing refused.
+     *
+     * Worse than useless: the loader's arrays live in its own image,
+     * which is EfiLoaderData, which the operating system reclaims after
+     * ExitBootServices. Ringing that doorbell asks the controller to
+     * fetch a command out of whatever Windows has since put there and
+     * execute it, with whatever opcode and addresses those bytes happen
+     * to spell.
+     *
+     * So the storage is allocated once, as EfiReservedMemoryType - the
+     * one kind no operating system may account for or reuse, the same
+     * kind the module itself lives in - and both sides are pointed at
+     * it. There is then exactly one submission queue, and it is the one
+     * the controller was told about.
      * @{
      */
-    alignas(4096) static inline std::uint8_t staging[block_size]{};
-    alignas(4096) static inline std::uint8_t scratch[block_size]{};
+    static inline submission_entry * submissions{};
+    static inline completion_entry * completions{};
+    static inline std::uint8_t * staging{};
+    static inline std::uint8_t * scratch{};
     /**
      * @}
      */
+
+    /**
+     * Points the four at one contiguous, page aligned, permanently
+     * allocated region of at least storage_bytes.
+     *
+     * Called by whoever owns that region: the loader before it creates
+     * the queues, and the resident side with the same address once it
+     * has been handed over. Refuses a misaligned base rather than
+     * letting the controller reject the queues later for a reason that
+     * would be much harder to read.
+     */
+    static bool bind_storage(void * base)
+    {
+        if ((nullptr == base) ||
+            (0 != (reinterpret_cast<std::uintptr_t>(base) & 0xfff))) {
+            return false;
+        }
+
+        auto * bytes = static_cast<std::uint8_t *>(base);
+        submissions =
+            reinterpret_cast<submission_entry *>(bytes + submission_offset);
+        completions =
+            reinterpret_cast<completion_entry *>(bytes + completion_offset);
+        staging = bytes + staging_offset;
+        scratch = bytes + scratch_offset;
+        return true;
+    }
+
+    /**
+     * Whether storage has been bound. Every path that touches a queue
+     * checks this, because a null here is a wild write rather than a
+     * refusal.
+     */
+    static bool storage_bound()
+    {
+        return nullptr != submissions;
+    }
 
     /**
      * Where our doorbells are, and which identifiers the controller gave
@@ -278,7 +347,10 @@ public:
                                std::uint64_t (*physical_of)(const void *),
                                std::uint64_t spin_budget)
     {
-        if (!bound.live()) {
+        // Storage as well as doorbells. A bound queue whose memory was
+        // never supplied would write commands through a null pointer,
+        // which is a wild store rather than a refusal.
+        if (!bound.live() || !storage_bound()) {
             return write_result::no_queues;
         }
 

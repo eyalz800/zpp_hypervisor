@@ -63,6 +63,11 @@ completion_entry g_scratch_completion[admin_borrow::max_depth]{};
 
 using test_queues = queue_pair<64>;
 
+static_assert(nvme_selftest::queue_storage_bytes ==
+                  test_queues::storage_bytes,
+              "the storage the loader allocates and the storage the "
+              "queue pair lays out have to be the same size");
+
 /**
  * Under UEFI the address space is identity mapped, so a physical address
  * is already a usable pointer and the reverse is equally trivial. Stated
@@ -368,7 +373,8 @@ void compare_and_report(std::uint32_t submission_depth,
 
 } // namespace
 
-void nvme_selftest::execute(const nvme::log_target & destination)
+void nvme_selftest::execute(const nvme::log_target & destination,
+                            void * queue_storage)
 {
     trace::line("selftest: begin");
 
@@ -518,6 +524,22 @@ void nvme_selftest::execute(const nvme::log_target & destination)
     auto lap = admin_borrow::length(where.submission_depth,
                                     where.completion_depth);
     trace::hex_line("selftest: lap length ", lap);
+
+    // The storage the queues live in, before anything touches them.
+    //
+    // Supplied rather than owned, and permanently allocated rather than
+    // part of this image: the resident side is handed the same address
+    // and points its own queue_pair at it, so there is exactly one
+    // submission queue and it is the one the controller is told about.
+    // See the comment on queue_pair's pointers for what having two of
+    // them cost.
+    if (!test_queues::bind_storage(queue_storage)) {
+        trace::line("selftest: no queue storage, refusing");
+        return;
+    }
+    channel.queue_storage = queue_storage;
+    trace::hex_line("selftest: queue storage at ",
+                    reinterpret_cast<std::uint64_t>(queue_storage));
 
     // Our own queues have to be zeroed before Create I/O Completion
     // Queue: the host owns the initial phase bits, and a stale entry
@@ -678,9 +700,7 @@ void nvme_selftest::execute(const nvme::log_target & destination)
     trace::hex_line("selftest: proof write to lba ",
                     target.extents[0].first_lba);
 
-    for (auto & byte : test_queues::staging) {
-        byte = 0;
-    }
+    std::memset(test_queues::staging, 0, nvme::block_size);
 
     // The signature the guard just insisted on, put back *complete* -
     // every field the reservation stamped, not merely the ones the guard

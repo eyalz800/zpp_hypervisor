@@ -330,6 +330,28 @@ struct channel_handover
      */
 
     /**
+     * The queue memory itself, which is the one thing this used to leave
+     * out and could least afford to.
+     *
+     * Without it each side used its own storage: the loader created the
+     * controller's queues against the arrays in its own image, and the
+     * resident side wrote commands into different arrays entirely and
+     * rang a doorbell for a queue the controller believed was elsewhere.
+     * Nothing was fetched from where it was written, so no completion
+     * ever arrived. And the loader's image is EfiLoaderData, reclaimed
+     * by the operating system after ExitBootServices, so that doorbell
+     * asked the controller to execute whatever Windows had since put
+     * there.
+     *
+     * One contiguous, page aligned, permanently allocated region of
+     * queue_pair::storage_bytes, laid out by queue_pair. Allocated as
+     * EfiReservedMemoryType so no operating system may account for it or
+     * reuse it, which is the same reason the module itself is allocated
+     * that way.
+     */
+    void * queue_storage{};
+
+    /**
      * Whether every field above was established. Checked rather than
      * assumed, so a partially filled structure is refused.
      */
@@ -339,7 +361,10 @@ struct channel_handover
                (nullptr != submission_doorbell) &&
                (nullptr != completion_doorbell) &&
                (nullptr != status_register) &&
-               (nullptr != configuration_register) && (0 != namespace_id);
+               (nullptr != configuration_register) &&
+               (0 != namespace_id) && (nullptr != queue_storage) &&
+               (0 == (reinterpret_cast<std::uintptr_t>(queue_storage) &
+                      0xfff));
     }
 };
 inline constexpr std::size_t block_payload =

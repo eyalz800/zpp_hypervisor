@@ -73,6 +73,18 @@ struct nvme_selftest
     static inline nvme::channel_handover channel{};
 
     /**
+     * How much permanently allocated, page aligned storage the queue
+     * pair needs handed to it.
+     *
+     * Stated here rather than reached for out of queue_pair, so this
+     * header stays light - the caller that allocates the region has no
+     * other reason to know what a submission queue is. The two are tied
+     * together by a static_assert in nvme_selftest.cpp, so they cannot
+     * drift apart silently.
+     */
+    static constexpr std::size_t queue_storage_bytes = 16384;
+
+    /**
      * Runs against a destination somebody else resolved.
      *
      * Taken as a parameter rather than reached for, because the only
@@ -85,12 +97,14 @@ struct nvme_selftest
      * reservation refused, and the run goes ahead and proves everything
      * up to the write, then stops short of it and hands over nothing.
      */
-    static void run(const nvme::log_target & destination)
+    static void run(const nvme::log_target & destination,
+                    void * queue_storage)
     {
         if constexpr (enabled) {
-            execute(destination);
+            execute(destination, queue_storage);
         } else {
             static_cast<void>(destination);
+            static_cast<void>(queue_storage);
         }
     }
 
@@ -99,7 +113,8 @@ private:
      * The implementation, out of line so that the header costs nothing.
      * Defined only when enabled - see nvme_selftest.cpp.
      */
-    static void execute(const nvme::log_target & destination);
+    static void execute(const nvme::log_target & destination,
+                        void * queue_storage);
 };
 
 } // namespace zpp

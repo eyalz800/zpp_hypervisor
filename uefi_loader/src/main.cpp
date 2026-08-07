@@ -1364,7 +1364,28 @@ extern "C" EFI_STATUS EFIAPI uefi_main(EFI_HANDLE image_handle,
     // Handed the region the reservation just signed, which is the only
     // destination its closing write can legally land in, and the target
     // it puts into the channel it hands across.
-    nvme_selftest::run(zpp::esp_reservation::target);
+    // The queue memory, allocated here and never freed.
+    //
+    // Through allocate_rwx because what that function does is exactly
+    // what is wanted - AllocatePages of EfiReservedMemoryType - and for
+    // the same reason it does it for the module: reserved memory is the
+    // one kind no operating system may account for, reuse, or restore
+    // over. The controller is given these addresses and keeps them for
+    // the life of the machine, long after this loader's own image has
+    // been reclaimed, so they cannot live in that image.
+    //
+    // Allocated by the caller rather than inside the self test because
+    // only this side of the loader has boot services, and because the
+    // resident side is handed the same region and has to point its own
+    // queue pair at it.
+    if constexpr (nvme_selftest::enabled) {
+        auto * queue_storage =
+            allocate_rwx(nvme_selftest::queue_storage_bytes);
+        if (!queue_storage) {
+            trace::line("ZPP_TRACE no queue storage, channel refused");
+        }
+        nvme_selftest::run(zpp::esp_reservation::target, queue_storage);
+    }
 
     // Declare the window the controller must be able to reach, while the
     // firmware's tables are still ours to edit. This has to happen before

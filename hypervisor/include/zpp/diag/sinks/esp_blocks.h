@@ -156,6 +156,14 @@ struct esp_blocks_for
             return false;
         }
 
+        // The same storage the loader created the queues against, not a
+        // second copy of it. Two copies is what this used to be, and the
+        // controller only ever knew about one of them - see the comment
+        // on queue_pair's pointers.
+        if (!queues::bind_storage(handover.queue_storage)) {
+            return false;
+        }
+
         target = handover.target;
         physical_of = translate;
 

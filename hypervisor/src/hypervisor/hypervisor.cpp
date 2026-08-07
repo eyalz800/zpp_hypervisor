@@ -3069,6 +3069,28 @@ hypervisor::main(arch::x86_64::context & caller_context)
                     this->os_page_table);
                 log("mapped controller register page {}", page);
             }
+
+            // And the queue memory, which is ordinary RAM rather than
+            // device registers but is just as unreachable: the loader
+            // allocated it, so it is outside the module and outside
+            // everything this table maps. The writer stores commands
+            // into it on the way to ringing a doorbell, so without this
+            // the fault simply moves from the status read to the store.
+            if (diagnostic_channel.queue_storage) {
+                auto base = reinterpret_cast<std::uint64_t>(
+                    diagnostic_channel.queue_storage);
+                for (std::uint64_t offset{};
+                     offset < nvme::queue_pair<64>::storage_bytes;
+                     offset += page_size) {
+                    this->host_page_table.map_from(
+                        base + offset,
+                        page_size,
+                        arch::x86_64::page_table::protection::read |
+                            arch::x86_64::page_table::protection::write,
+                        this->os_page_table);
+                }
+                log("mapped queue storage at {}", base);
+            }
         }
 
         if (auto result = initialize_module_physical_to_virtual();
