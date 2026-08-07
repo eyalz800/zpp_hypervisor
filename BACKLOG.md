@@ -836,3 +836,47 @@ initializer for ever. It reported `untried` on a run where `epoch`,
 `boot_id` and `physical_of` all proved `configure()` had succeeded. Any
 field whose only reader is a debugger must be `volatile`, or it measures
 nothing and says so confidently.
+
+## elf_image_base() can find the wrong base, and did
+
+`zpp::elf_image_base()` locates the running module by scanning *backwards*
+from a magic constant inside itself for the first page beginning with
+`\x7fELF`. That is a guess dressed as a computation: it is correct only
+while no page between the module's true base and that constant happens to
+start with those four bytes.
+
+Measured on the real-NVMe rig. The loader traced its allocation and the
+image is demonstrably there - `xp` reads the ELF header at 0x78ddc000 and
+the constant `staged_deadline_ticks` reads 0x989680 at base + 0x1048 - yet
+the singleton's own `module_base` member holds **0x78ed3000**, 0xF7000
+higher and *inside* our own image. The scan stopped early on a page about
+a megabyte into the module. The same build on the overlay rig computes the
+base correctly, so this is machine dependent, which is the worst property
+a bug like this can have.
+
+What it breaks is everything derived from the base:
+
+  - `module_size` is measured from it, so it describes the wrong range.
+  - `protect_module()` clears EPT permissions over that wrong range, which
+    leaves the low megabyte of the module reachable by the guest and
+    needlessly hides a megabyte past its end.
+  - `module_physical_to_virtual` maps the wrong pages, so the decoy
+    redirect for guest accesses is keyed on the wrong addresses.
+
+It is very likely the explanation for the earlier "a word inside our .bss
+changes nineteen hundred times a second" reading, which was recorded as
+unexplained: with the protected range displaced, part of what we think is
+ours is not protected at all.
+
+**The fix is to stop searching.** The loader knows exactly where it put
+the image - it is the return of `allocate_rwx`, and `zpp_load_elf` places
+the image at it - so the base should be handed over in
+`zpp_launch_parameters` like everything else the platform knows, and
+`elf_image_base()` kept only as the fallback for a build with no loader to
+ask. A scan that can be wrong is not a good way to learn something the
+caller already knows exactly.
+
+Until that lands, treat any real-rig reading of hypervisor state as
+suspect unless `module_base` read back out of the singleton equals the
+base the loader traced. On the overlay it does; on the real rig it does
+not.
