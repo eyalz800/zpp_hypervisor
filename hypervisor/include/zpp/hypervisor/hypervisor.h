@@ -282,6 +282,19 @@ private:
     std::expected<void, zpp::error> protect_module();
 
     /**
+     * Hides a physical range from the guest, the way protect_module
+     * hides the module.
+     *
+     * For memory that belongs to this VMM but does not live inside its
+     * image - the storage the log queues are created in, which the
+     * loader allocates. Anything the guest must not be able to write,
+     * and in that case must not be able to write because the controller
+     * executes what it finds there.
+     */
+    std::expected<void, zpp::error>
+    protect_region(std::uint64_t physical_address, std::uint64_t size);
+
+    /**
      * Watches one page of guest physical memory for writes.
      *
      * Deliberately a general facility rather than a hook for whatever

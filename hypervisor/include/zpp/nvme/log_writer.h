@@ -90,11 +90,17 @@ enum class write_result
  * block is 4096. PRP2 stays zero throughout, which removes an entire
  * class of mistake from the write path.
  *
- * The storage lives inside the module, so `protect_module` already denies
- * the guest every access to it. That is essential rather than tidy: the
- * submission queue holds raw commands carrying logical block addresses,
- * and a guest write into it would make the controller execute them. EPT
- * does not affect DMA, so the controller still reads it.
+ * The storage is hidden from the guest, and that is essential rather than
+ * tidy: the submission queue holds raw commands carrying logical block
+ * addresses, and a guest write into it would make the controller execute
+ * them. EPT does not affect DMA, so the controller still reads memory the
+ * guest cannot touch, which is exactly the asymmetry wanted.
+ *
+ * It used to be hidden for free, by living inside the module that
+ * `protect_module` covers. It no longer lives there - see bind_storage -
+ * so the resident side hides it explicitly through `protect_region`. That
+ * is a thing to keep in step: storage that moves out from under that call
+ * is storage the guest can write commands into.
  */
 template <std::uint32_t Entries>
 class queue_pair

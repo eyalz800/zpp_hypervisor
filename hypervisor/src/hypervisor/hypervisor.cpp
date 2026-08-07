@@ -884,6 +884,44 @@ std::expected<void, zpp::error> hypervisor::protect_module()
     return {};
 }
 
+std::expected<void, zpp::error> hypervisor::protect_region(
+    std::uint64_t physical_address, std::uint64_t size)
+{
+    // The same treatment the module gets, for memory that is ours but
+    // does not live inside it.
+    //
+    // The queue storage is the case this exists for. It used to be an
+    // array inside the module and was therefore covered by
+    // protect_module for free; it is now a separate allocation the
+    // loader makes, and being outside the module means being visible to
+    // the guest unless something says otherwise.
+    //
+    // Leaving it visible would be the worst hole in this channel. The
+    // submission queue holds raw NVMe commands - opcodes, logical block
+    // addresses, data pointers - and the controller executes whatever is
+    // in it when the doorbell rings. A guest able to write there does
+    // not merely corrupt the log, it dictates disk commands. EPT does
+    // not affect DMA, so the controller still reads the memory the guest
+    // can no longer touch, which is exactly the asymmetry wanted.
+    auto number_of_pages = (size + page_size - 1) / page_size;
+
+    for (std::size_t i{}; i < number_of_pages; ++i) {
+        auto entry = epte_for(physical_address + (i * page_size));
+        if (!entry) {
+            return std::unexpected(entry.error());
+        }
+
+        auto & epte = **entry;
+        epte.read(false);
+        epte.write(false);
+        epte.execute(false);
+        epte.execute_user(false);
+    }
+
+    invalidate_ept();
+    return {};
+}
+
 std::expected<void, zpp::error>
 hypervisor::watch_guest_page_writes(std::uint64_t guest_physical,
                                     page_watch::handler on_write,
@@ -3090,6 +3128,17 @@ hypervisor::main(arch::x86_64::context & caller_context)
                         this->os_page_table);
                 }
                 log("mapped queue storage at {}", base);
+
+                // And hidden from the guest, which protect_module did
+                // for free while this storage was an array inside the
+                // module. It is a separate allocation now, so it has to
+                // be said. A guest able to write the submission queue
+                // dictates what the controller executes.
+                if (auto hidden = protect_region(
+                        base, nvme::queue_pair<64>::storage_bytes);
+                    !hidden) {
+                    log("could not hide the queue storage");
+                }
             }
         }
 
