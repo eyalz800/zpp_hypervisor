@@ -92,6 +92,34 @@ inline constexpr std::uint32_t esp_reservation_megabytes = 64;
 inline constexpr std::uint32_t esp_reservation_minimum_megabytes = 1;
 
 /**
+ * Whether to restart immediately after establishing the reservation.
+ *
+ * The reservation cannot be used on the boot that creates it. The
+ * firmware's file system driver mounted the volume before the loader ran
+ * and still believes it owns the range, so the loader would be reserving
+ * blocks the driver may hand out for the rest of that boot - and the
+ * loader itself writes a trace file to that very partition later on. The
+ * channel therefore stays dark until the next boot, when the driver
+ * mounts a file system that ends where we left it.
+ *
+ * "The next boot" can be now. The reservation is established exactly
+ * once in the life of a machine, so this costs one extra restart ever,
+ * and it buys a channel that is live the first time the feature is
+ * switched on rather than the second - which matters most on a machine
+ * somebody has to walk over to.
+ *
+ * The loop this could become is worth naming. A restart that finds the
+ * reservation missing would establish it and restart again, forever. Two
+ * things stop it: the new total is computed from the partition's size
+ * rather than the current one, so a second pass over an already reserved
+ * volume changes nothing and reports "already reserved"; and the shrink
+ * is read back and refused if it did not take, so a restart is only
+ * reached after the medium has confirmed the write. If a machine ever
+ * does loop, this is the switch to turn off.
+ */
+inline constexpr bool restart_after_reservation = enabled;
+
+/**
  * How much a line is worth saying. Ordered, and compared with at_least
  * below rather than with `>=` on the enumerators, so the ordering is
  * stated in one place.

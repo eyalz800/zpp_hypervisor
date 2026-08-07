@@ -1364,6 +1364,30 @@ extern "C" EFI_STATUS EFIAPI uefi_main(EFI_HANDLE image_handle,
     // Handed the region the reservation just signed, which is the only
     // destination its closing write can legally land in, and the target
     // it puts into the channel it hands across.
+    // Restart, if the reservation was established just now.
+    //
+    // Nothing after this point can use it on this boot - see the comment
+    // on restart_after_reservation - so the rest of the boot would run
+    // with the channel dark and the machine would have to be started
+    // again by hand. Doing it here turns "reserve, then reboot, then
+    // debug" into one step.
+    //
+    // Reached only once in the life of a machine: the reservation is
+    // idempotent and the boot after this one finds it already there.
+    if constexpr (zpp::diag::restart_after_reservation) {
+        if (zpp::esp_reservation::shrank_this_boot) {
+            trace::line("ZPP_TRACE reservation established, restarting so "
+                        "the channel is live on the next boot");
+            write_trace_variable();
+            g_runtime_services->ResetSystem(
+                EfiResetWarm, EFI_SUCCESS, 0, nullptr);
+            // ResetSystem does not return. If the firmware ignores it,
+            // carrying on is still correct - the channel simply stays
+            // dark this boot, which is what would have happened anyway.
+            trace::line("ZPP_TRACE the firmware refused to restart");
+        }
+    }
+
     // The queue memory, allocated here and never freed.
     //
     // Through allocate_rwx because what that function does is exactly

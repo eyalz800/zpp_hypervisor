@@ -179,6 +179,61 @@ what a VMX instruction issued outside VMX operation looks like -
 `invept`, `invvpid`, `vmread` - since those are plain `#UD` outside root
 mode. Symbolize the offset before concluding anything.
 
+### Breaking inside the hypervisor itself
+
+To stop in the VMM's own code - the exit handler, the write path - the
+usual rule **inverts**.
+
+- **`hbreak` cannot work there.** SDM, VM-exit state loading: "DR7 is set
+  to 400H". Every VM exit disables all four debug registers before the
+  handler's first instruction, so a hardware breakpoint in host code can
+  never fire. This is architectural; there is no way to ask for it back.
+- **`break` (software) does work.** The hypervisor is itself KVM's guest,
+  and KVM adds `1u << BP_VECTOR` to the exception bitmap exactly when the
+  debugger has a software breakpoint armed - `vmx.c`, `update_exception_
+  bitmap`. So an `int3` in host code exits to L0 and reaches gdb.
+
+The "always hbreak, never break" rule elsewhere in these notes is about
+**Bochs at reset**, where the byte cached before the module is loaded is
+pre-load garbage that gets written back over real instructions. Once the
+module is mapped, a software breakpoint is correct - and in the VMM it is
+the only thing that can work.
+
+**You do not need to force a VM exit.** They arrive constantly: CPUID, MSR
+accesses, EPT violations, and this VMM's own interceptions. Break on the
+exit handler and the next one lands in it. If you want a *specific*
+instruction to cause one, arm the Monitor Trap Flag from inside the VMM
+rather than trying to drive it from the debugger.
+
+### A halted processor's RIP points past the `hlt`
+
+`halt()` is `hlt; ret`, so a processor stopped in a halt loop shows RIP on
+the **`ret`**, not on the `hlt`. It reads like a CPU stuck on a return
+instruction, which is nonsense and sends you looking for a corrupted
+stack. It means the processor is halted with interrupts disabled and will
+never resume. Sample RIP twice: frozen plus a `ret` at that address plus
+`cli`/`hlt` just before it is the signature.
+
+### Reading state while the guest is running
+
+gdb reads through the **current** CPU's page tables. Once Windows is
+running, our module is not mapped in the guest's CR3 and every read of it
+answers `Cannot access memory`. That is not a missing symbol or a wrong
+address - it is the wrong address space.
+
+Use the monitor's `xp` instead, which reads **physical** memory and
+ignores paging entirely:
+
+```
+xp /3gx 0x7a20f0b8      # note the space after xp
+```
+
+Our module is loaded at a physical address printed on serial and identity
+mapped by UEFI, so the addresses computed from `llvm-nm` plus the module
+base work directly as physical addresses. This is also the only way to
+read the VMM's counters without stopping the guest - and attaching gdb at
+all pauses the VM, which silently freezes whatever you were measuring.
+
 Rules that are correctness requirements, not preferences:
 
 - **Never `stepi` the guest through QEMU's gdbstub.** KVM implements
