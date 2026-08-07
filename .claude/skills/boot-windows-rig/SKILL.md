@@ -584,3 +584,97 @@ here - a truncated stream otherwise looks exactly like a short partition.
 
 Reading total-sectors-32 at offset `0x20` of the ESP boot sector says whether
 the reservation has already run: equal to the partition size means untouched.
+
+## Reading VMM memory through the monitor: four ways to get a plausible lie
+
+Every one of these produced a confident, wrong number in one session. All
+four are silent - none of them looks like an error.
+
+**A reading of `0x00010102464c457f` is a failed symbol lookup, not data.**
+That is `\x7fELF`. A helper like
+
+    A=$(llvm-nm ... | grep "$1" | awk '{print $1}' | head -1)
+    xp /1gx $((BASE + 0x$A))
+
+yields an empty `$A` when the name does not exist, so the address becomes
+the module base and the read returns the ELF header. `submitted`,
+`completed` and `lost_to_reset` are *not* statics of `esp_blocks_for`, and
+reading them this way reported queue depths that were never queue depths.
+List the symbols once and read them by their listed addresses.
+
+**`_ZGV...` is the guard variable, not the object.** A loose match on
+`instance` returns both `_ZZN...E8instance` (the object) and
+`_ZGVZN...E8instance` (its `__cxa_guard` byte). They were 0x1ced000 apart,
+and the guard came first in the sort. Match the exact mangling.
+
+**`llvm-dwarfdump --name=<member>` returns the first DIE anywhere in the
+file with that name**, including members of nested and unrelated types. In
+one binary `module_base` resolved to `0x1406008` and
+`heartbeat_exits_seen` to `0x38`; only one of those is an offset into that
+class. Check the parent DIE.
+
+**Validate the base before trusting any offset.** Two cheap anchors, both
+of which must hold: `xp /2gx BASE` shows ELF magic, and a known constant
+reads its known value - `staged_deadline_ticks` at `BASE + 0x1048` must be
+`0x989680`. A base that passes both can still be wrong for members whose
+offsets came from the traps above, so prefer a *self-validating* read:
+`module_base` is itself a member, so reading it back proves the address
+used for every other member of that object.
+
+## The VFIO rig forgets nothing: reset OVMF NVRAM every run
+
+`boot-zpp.sh` uses `RELEASEX64_OVMF_VARS.fd` as writable pflash, and
+Windows writes its own boot entry there the first time it boots. From then
+on the firmware boots Windows *directly* and never runs our loader -
+`bootindex=0` does not save you, because an explicit NVRAM boot option
+outranks it.
+
+The symptom is not an error. `serial.out` fills with 37 KB of firmware
+chatter (`i915:`, DP link training) and contains **zero** `zpp:` lines,
+while QEMU runs and Windows boots perfectly. It looks like the loader
+crashed early.
+
+    cp RELEASEX64_OVMF_VARS.fd.orig RELEASEX64_OVMF_VARS.fd
+
+before every run. There is also a `.beforetest` copy; `.orig` is the
+pristine one.
+
+Confirm the loader actually ran before reading anything:
+
+    grep -ac zpp /home/tc/zpp/serial.out          # must be non-zero
+    grep -a "ZPP_TRACE loading"  serial.out       # hypervisor launch began
+    grep -a "ZPP_TRACE loaded"   serial.out       # and returned
+    grep -a ZPP_HYPERVISOR_FAILED serial.out      # absent means success
+
+`loading`/`loaded` with no `ZPP_HYPERVISOR_FAILED` means `zpp_load_elf`
+returned zero. Note this build prints no positive "hypervisor is live"
+line unless `verify::enabled`, so success here is the absence of a failure
+rather than a confirmation.
+
+## The guest barely exits, so nothing runs on its own
+
+Measured with Windows running steadily: about 1500 VM exits on the busiest
+processor and 160 on the others - not millions. Anything reached only from
+the exit handler effectively never runs once the guest settles. If a
+counter is frozen, check the exit count before suspecting the feature.
+
+Driving work from the VMX-preemption timer is the answer, but note that
+arming it and handling exit reason 52 are separate; a tree can contain the
+first without the second, in which case the first tick halts the processor
+in `cli; hlt`. **A frozen RIP inside our own module, rather than in the
+guest, is the signature of a deliberate halt** - read `unhandled_exit` and
+`vm_entry_failure` before anything else.
+
+## Do not iterate on the real NVMe
+
+Windows on the passed-through disk has produced one "Inaccessible boot
+device" already, and repeated hard kills are how you get there. Iterate on
+the qcow2 overlay, where a failed borrow costs a discarded file, and use
+the real disk only for a confirming run. After any real-disk run, verify:
+
+    sudo dd if=/dev/nvme0n1 bs=512 skip=1 count=1 | od -An -c -N8       # EFI PART
+    sudo dd if=/dev/nvme0n1 bs=512 skip=32768 count=1 | od -An -tu4 -j32 -N4
+    sudo dd if=/dev/nvme0n1 bs=512 skip=33456128 count=1 | od -An -c -N8
+
+expecting `EFI PART`, `33423360` (the shrunk ESP - it must not shrink
+again) and `ZPLOGBLK`.
