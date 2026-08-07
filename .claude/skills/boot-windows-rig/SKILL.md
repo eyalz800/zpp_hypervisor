@@ -42,9 +42,23 @@ image's own device path, so a loader started from the synthetic disk resolved
 to a volume with no NVMe node and refused to reserve anything. Anything
 touching the disk channel has to boot the real ESP.
 
-1. **Build.** No source edits are needed for the rig any more. For the disk
-   channel, `diag::sink::esp_blocks` must be `present` in
-   `diag/include/zpp/diag/config.h` and the build needs `-DZPP_DIAG=ON`.
+1. **Build.** No source edits are needed for the rig any more - what used
+   to be an edit to `chain_to_our_own_device_only` is now derived from
+   `-DZPP_SEARCH_ALL_DEVICES`.
+
+   ```sh
+   cmake --preset debug -DZPP_DIAG=ON -DZPP_SEARCH_ALL_DEVICES=ON
+   ```
+
+   `ZPP_SEARCH_ALL_DEVICES=ON` makes the loader look for a boot manager on
+   every volume; `OFF` restricts it to the one it booted from. Now that the
+   loader boots the real ESP, `OFF` is the bare-metal-correct setting and
+   ought to work, since Windows' boot manager is on that same partition -
+   but every rig boot so far has used `ON`, so treat switching it as its own
+   experiment rather than folding it into another one.
+
+   For the disk channel, `diag::sink::esp_blocks` must additionally be
+   `present` in `diag/include/zpp/diag/config.h`.
 
 2. **Deploy** with the script, which refuses unless the disk matches the
    build and reads back from a *fresh* mount rather than the one that wrote
