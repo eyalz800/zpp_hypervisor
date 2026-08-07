@@ -121,6 +121,38 @@ Add `-monitor telnet:0.0.0.0:4444,server,nowait` the same way for a channel
 that inspects state **without perturbing it** - `info registers -a`, `xp`,
 `screendump`. Reach it with `nc 192.168.1.199 4444`.
 
+### Reading the disk channel's state while the guest runs
+
+The channel keeps counters that say exactly where a write went wrong, and
+they can be read through the monitor without pausing anything. Their
+addresses are `module base + symbol`, and the symbols are template statics
+so `llvm-nm` finds them under the mangled `queue_pair<64>` name:
+
+```sh
+llvm-nm out/debug/x86_64/zpp_hypervisor | grep -E 'queue_pairILj64EE'
+```
+
+What each one means when it is the odd one out:
+
+| counter | reading |
+|---------|---------|
+| `submitted` > `completed` | commands went out and nothing came back - the controller is not fetching from where we write, or the queue is gone |
+| `refused_guard` rising | the epoch check is rejecting writes; the controller was reset |
+| `refused_signature` rising | the destination did not carry our signature - the extent table is wrong, or something else took the blocks |
+| `failed` rising | the controller completed the command and reported an error |
+| `lost_to_reset` > 0 | a reset was noticed and the queue forgotten, with that many writes discarded |
+| all zero, nothing on disk | no write was ever attempted - look at the sink, not the queue |
+
+`submitted = 1, completed = 0` with everything else zero is the signature
+of a queue the controller is not reading: it has been caused by the two
+sides using different queue memory, and by the two sides disagreeing about
+the queue position. Both are fixed, and both looked identical from here.
+
+Remember the guest keeps its own copy of nothing - these are the resident
+module's statics, and the loader's identically named ones are a different
+object in a different binary. Reading the loader's by mistake shows a
+healthy queue that has nothing to do with the failure.
+
 ### Reading the recorded state out of a stopped guest
 
 This works without symbols, without breakpoints, and without catching the
