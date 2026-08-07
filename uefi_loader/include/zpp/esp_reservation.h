@@ -187,6 +187,21 @@ enum class esp_reservation_error : int
      * that.
      */
     stamp_failed,
+
+    /**
+     * The total about to be written is not a shrink of at most the
+     * configured amount.
+     *
+     * A backstop, not a condition anything is expected to reach. The
+     * total is computed from the partition's size rather than from the
+     * file system's current one, which makes the result the same
+     * absolute number however many times this runs - a second boot
+     * cannot take a second bite. This checks that property immediately
+     * before the only write that could violate it, so that a future
+     * change which breaks it fails loudly on the first boot instead of
+     * eating the volume sixty four megabytes at a time.
+     */
+    shrink_out_of_bounds,
 };
 
 /**
@@ -231,6 +246,9 @@ inline const zpp::error_category & category(esp_reservation_error)
                 return "The new total sector count did not read back.";
             case esp_reservation_error::stamp_failed:
                 return "The reserved range could not be signed.";
+            case esp_reservation_error::shrink_out_of_bounds:
+                return "The new total is not a shrink of at most the "
+                       "configured amount.";
             default:
                 return "Unknown error.";
             }

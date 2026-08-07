@@ -1102,6 +1102,34 @@ std::expected<void, zpp::error> establish(EFI_HANDLE image_handle)
                             reserve_sectors);
         }
 
+        // The last thing checked before the volume is modified, and the
+        // only check here whose job is to disbelieve the code above it.
+        //
+        // Two properties, both of which the arithmetic already has and
+        // neither of which is self evident at the point of the write.
+        // The total may only go down, because a file system told it owns
+        // more sectors than it did would hand out clusters that overlap
+        // the reserved range. And the whole gap from the end of the
+        // partition may be no larger than the amount configured, which
+        // is what makes running this every boot safe: the total is
+        // computed from the partition size rather than from the current
+        // total, so it is the same absolute number every time and a
+        // second boot cannot take a second sixty four megabytes.
+        //
+        // If either fails the volume is left exactly as it was found.
+        if (new_total > layout->total_sectors) {
+            trace::hex_line("esp reservation: refusing to grow, total ",
+                            new_total);
+            return std::unexpected(zpp::error{code::shrink_out_of_bounds});
+        }
+        if ((where->partition_sectors - new_total) > wanted_sectors) {
+            trace::hex_line("esp reservation: refusing, gap would be ",
+                            where->partition_sectors - new_total);
+            trace::hex_line("esp reservation: configured maximum ",
+                            wanted_sectors);
+            return std::unexpected(zpp::error{code::shrink_out_of_bounds});
+        }
+
         trace::hex_line("esp reservation: shrinking total sectors to ",
                         new_total);
         if (auto written = shrink(*where, *layout, new_total); !written) {
