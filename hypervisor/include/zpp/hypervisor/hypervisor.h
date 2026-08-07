@@ -586,6 +586,12 @@ private:
     volatile std::uint64_t excursions_refused{};
     volatile std::uint64_t excursion_error{};
 
+    /**
+     * Times the return to the real registers could not be confirmed on
+     * every processor. The change was made; the acknowledgement was not.
+     */
+    volatile std::uint64_t unshadow_unconfirmed{};
+
     volatile std::uint64_t resumes_reached[max_cpus]{};
 
     /**

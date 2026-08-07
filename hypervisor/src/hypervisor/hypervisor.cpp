@@ -1577,7 +1577,20 @@ namespace
  */
 bool wait_for_ready(volatile std::uint8_t * bar, bool wanted)
 {
-    constexpr std::uint64_t budget = 1ull << 26;
+    // Sized to what the wait actually costs, which is not what a spin
+    // count usually implies: every iteration is an uncached MMIO read
+    // across PCIe, so an iteration is closer to a microsecond than to a
+    // nanosecond. This budget is therefore a few hundred milliseconds,
+    // not a few hundred million of them.
+    //
+    // It was 1 << 26, which is over a minute of held processor - and a
+    // processor that spins rather than halts is a host CPU that never
+    // yields, which is how the development machine stopped answering its
+    // network rather than merely wedging its guest. Every spin in a VM
+    // exit has to be bounded by the thing it is waiting for: a controller
+    // enable measured in the low milliseconds here, against a driver
+    // unbind and rebind cycle of 178 ms that includes far more than this.
+    constexpr std::uint64_t budget = 1ull << 18;
 
     auto at =
         bar + zpp::nvme::offset_of(zpp::nvme::register_offset::status);
@@ -2797,8 +2810,24 @@ void hypervisor::on_controller_register_write(
             if constexpr (diag::excursion_at_controller_reset) {
                 if (auto shadowed =
                         self.shadow_controller_registers(true)) {
-                    scope_exit unshadow{
-                        [&] { self.shadow_controller_registers(false); }};
+                    // Not discarded. Pointing the entry back at the
+                    // real registers is the one step here that must not
+                    // fail quietly: a guest left reading the frozen
+                    // shadow would never see its controller return, which
+                    // is far worse than the excursion not happening.
+                    //
+                    // A failure here is "not confirmed" rather than
+                    // "still shadowed" - the entry is written before the
+                    // acknowledgement is waited for, so what failed is
+                    // the proof that every processor has picked it up,
+                    // not the change itself. Counted so a reader can see
+                    // it happened at all.
+                    scope_exit unshadow{[&] {
+                        if (!self.shadow_controller_registers(false)) {
+                            self.unshadow_unconfirmed =
+                                self.unshadow_unconfirmed + 1;
+                        }
+                    }};
 
                     auto held = self.hold_guest_page(
                         reinterpret_cast<std::uint64_t>(self.channel_bar));
