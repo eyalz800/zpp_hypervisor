@@ -411,6 +411,28 @@ cycle - it is read off the screen before the machine is powered off.
 Verified under emulation by reading the glyphs back out of framebuffer
 memory, including a line drawn by `on_unhandled_exit` itself.
 
+## The disk channel works, for the window it covers
+
+Confirmed on the real machine, real controller, real disk: the resident
+hypervisor completed a log write while Windows was booting, and the block is
+on the medium and readable from another machine with `dd` and
+`scripts/read-disk-log.py`.
+
+    8 blocks read
+        7 stamped by the reservation, never written
+        1 written by the hypervisor
+      seq 0, block 0, epoch 1, 1 record, nothing lost or dropped
+
+The block carries the log header *and* the destination signature, so it
+remains a legal destination for the next write rather than becoming a hole in
+the region.
+
+What that window is, precisely: from the hand-over until Windows' storage
+driver initialises the controller. The reset detection below fires at that
+point - `lost_to_reset` read 1 on the same boot, which is the write command
+still outstanding when the reset landed - and the channel goes quiet
+deliberately from then on. Extending it past that is the next piece of work.
+
 ## The guest resets the controller and takes our queue with it
 
 The disk channel's queue pair is created by the loader, before Windows'
