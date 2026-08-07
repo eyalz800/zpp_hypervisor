@@ -1134,3 +1134,61 @@ pairing carried CPU#0's RIP forward into blocks that did not print one,
 because `info registers -a` had been truncated by too short a read. Read
 each processor's block whole, and check for a distinguishing register -
 CR3 was 0 on every application processor, which is what exposed it.
+
+### The bisect so far, and two conclusions withdrawn
+
+The known-good loader is `4e167315`, still on the rig as
+`/EFI/zpp/zpp_loader.efi.bak-4e167315`. It boots Windows **reliably - two
+of two runs**, RIP in the kernel range and advancing - so the good/bad
+split is real and deterministic, not a race. It cannot be identified by
+commit: building `19d4fdc` gives `fb7398a4`, so it came from a dirty tree.
+It can be identified by its embedded strings, which is how the range was
+pinned: it contains `selftest: laps`, `already reserved` and `mapping
+window reads`, and lacks `cpu {} alive` - the heartbeat added in
+`737b754` - so it predates that commit.
+
+Eliminated on HEAD, each by its own boot rather than by argument:
+
+  - the instruction decoder and its emulation path
+  - the whole diagnostic channel (`ZPP_DIAG=OFF`)
+  - NMI exiting - tested twice, on HEAD and on `a340308` itself
+  - handing the module base over instead of scanning for it
+  - the mapping window at ten pages rather than eight
+  - connecting every controller before the self test
+  - the two log lines `arm_controller_poll` emitted on *every* exit
+
+The last of those is fixed and kept regardless: it was thousands of
+heap-allocating calls into shared state per boot, and it now speaks once
+per processor.
+
+**Two conclusions withdrawn.**
+
+The first: that all eight processors sat at the same RIP. That was a
+parsing artefact of a truncated `info registers -a`, where the pairing
+carried CPU#0's RIP into blocks that printed none. CR3 reading zero on
+every application processor is what exposed it.
+
+The second, and the more expensive: that the application processors were
+halted in `vmresume`'s failure loop. `vmresume`'s wrapper does fall into
+`cli; hlt; jmp` on failure, and such a failure produces no VM exit, so it
+was a good fit for a frozen exit count with nothing recorded. It is not
+what happens. The wrapper now reports before halting - it hands RFLAGS to
+`zpp_vmx_entry_failed`, which reads `vm_instruction_error` while the VMCS
+is still current - and `entry_failures_seen` is **zero**. `host_exception`
+is zero too. So no entry failed and no host exception was taken.
+
+What that leaves, and it is the thing to test next: the application
+processors are most likely *running*. Their guest state looked frozen only
+because a processor that takes no VM exits never syncs its registers out,
+so QEMU's view of them is stale - it dates from the SIPI. Their real-mode
+stub at 0x87000 is eight instructions ending in `mov cr0, eax`, and with
+unrestricted guest PE can be guest owned, so even the switch to protected
+mode need not exit. A processor can therefore run all the way into the
+firmware's park loop and produce nothing to observe.
+
+So the question is no longer "where are they stuck" but "why does a
+running processor not see the semaphore the boot processor writes". The
+next experiment is to make them observable rather than to reason: arm the
+monitor trap flag on one application processor, or intercept CR0 loads so
+the protected-mode switch produces a fifth trace entry, and see how far
+they actually get.

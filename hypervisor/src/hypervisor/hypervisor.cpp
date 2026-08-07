@@ -1124,10 +1124,24 @@ void hypervisor::arm_controller_poll(bool armed)
 
     if (armed && !(allowed_one & arch::x86_64::vmx::vm_execution_controls::
                                      pin::activate_preemption_timer)) {
-        // Nothing to turn on, and nothing to turn off later either.
-        diag::log<diag::severity::warning>(
-            "preemption timer not permitted, allowed-1 {}", allowed_one);
-        log("preemption timer not permitted, so the log has no clock");
+        // Said once per processor, not once per exit.
+        //
+        // arm_controller_poll runs from the exit path, so a plain log here
+        // was two heap-allocating calls into shared state on *every* exit
+        // of every processor - thousands of them - which is both absurd
+        // and a fine way to corrupt something. The flag is per processor
+        // and is never cleared, because a control the processor does not
+        // offer will not start being offered later.
+        if (auto slot = vmcs.vpid(); (0 != slot) && (slot <= max_cpus)) {
+            if (!this->timer_refusal_reported[slot - 1]) {
+                this->timer_refusal_reported[slot - 1] = true;
+                diag::log<diag::severity::warning>(
+                    "preemption timer not permitted, allowed-1 {}",
+                    allowed_one);
+                log("preemption timer not permitted, no clock");
+            }
+        }
+
         return;
     }
 
@@ -3261,6 +3275,29 @@ void hypervisor::on_unhandled_exit(arch::x86_64::vmx::exit_reason reason)
     for (;;) {
         arch::x86_64::disable_interrupts();
         arch::x86_64::halt();
+    }
+}
+
+extern "C" void zpp_vmx_entry_failed(std::uint64_t flags)
+{
+    auto & self = zpp::hypervisor::hypervisor::instance();
+
+    self.record_entry_failure(flags);
+}
+
+void hypervisor::record_entry_failure(std::uint64_t flags)
+{
+    this->entry_failures_seen = this->entry_failures_seen + 1;
+
+    // vpid is readable only if a VMCS is current, which carry says it is
+    // not - so fall back to a slot of zero rather than reading garbage.
+    constexpr std::uint64_t carry = 1;
+    auto slot = (flags & carry) ? std::uint64_t{} : this->vmcs.vpid();
+
+    if ((0 != slot) && (slot <= max_cpus)) {
+        this->entry_failure_flags[slot - 1] = flags;
+        this->entry_failure_error[slot - 1] =
+            this->vmcs.vm_instruction_error();
     }
 }
 

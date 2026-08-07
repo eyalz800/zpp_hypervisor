@@ -147,11 +147,28 @@ inline int __attribute__((naked)) invvpid(void *, void *)
     )!!");
 }
 
+/**
+ * Called when a VM entry fails, with RFLAGS as it was left by the failing
+ * instruction.
+ *
+ * A failing vmresume produces no VM exit, so the ordinary exit path never
+ * sees it and the VMCS's own error field is the only thing that says why.
+ * Halting without reading it discards the answer, which cost a long
+ * afternoon of guessing.
+ */
+extern "C" void zpp_vmx_entry_failed(std::uint64_t flags);
+
 inline void __attribute__((naked)) vmresume()
 {
     asm(R"!!(
         .intel_syntax noprefix
         vmresume
+        // Failed. Hand the flags over - carry means there was no current
+        // VMCS, zero means the error field has been set - and let the
+        // reporter read the field while this VMCS is still current.
+        pushfq
+        pop rdi
+        call zpp_vmx_entry_failed
         // Same as vmlaunch above: reaching this means VM entry failed on
         // the controls or the host state, and there is no caller to
         // return to.

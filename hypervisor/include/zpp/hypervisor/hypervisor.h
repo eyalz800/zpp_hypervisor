@@ -30,6 +30,14 @@ class hypervisor
 {
 public:
     /**
+     * Records a VM entry that failed without producing a VM exit.
+     *
+     * Public because the failure path reaches it from a naked assembly
+     * wrapper through an extern "C" shim, which is not a member.
+     */
+    void record_entry_failure(std::uint64_t flags);
+
+    /**
      * Hypervisor errors.
      */
     enum class error
@@ -474,6 +482,23 @@ private:
      *
      * volatile because only a debugger reads it.
      */
+    /**
+     * Whether this processor has already said the timer is unavailable.
+     */
+    bool timer_refusal_reported[max_cpus]{};
+
+    /**
+     * Why a VM entry failed, per processor, captured by
+     * zpp_vmx_entry_failed while the VMCS is still current.
+     *
+     * `flags` distinguishes the two failure kinds: carry set means there
+     * was no current VMCS at all, zero set means the instruction error
+     * field below says which check failed (SDM 31.4).
+     */
+    volatile std::uint64_t entry_failure_flags[max_cpus]{};
+    volatile std::uint64_t entry_failure_error[max_cpus]{};
+    volatile std::uint64_t entry_failures_seen{};
+
     volatile std::uint64_t resumes_reached[max_cpus]{};
 
     /**
