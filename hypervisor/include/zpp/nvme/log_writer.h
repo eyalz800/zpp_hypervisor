@@ -180,10 +180,10 @@ public:
         }
 
         auto * bytes = static_cast<std::uint8_t *>(base);
-        submissions =
-            reinterpret_cast<submission_entry *>(bytes + submission_offset);
-        completions =
-            reinterpret_cast<completion_entry *>(bytes + completion_offset);
+        submissions = reinterpret_cast<submission_entry *>(
+            bytes + submission_offset);
+        completions = reinterpret_cast<completion_entry *>(
+            bytes + completion_offset);
         staging = bytes + staging_offset;
         scratch = bytes + scratch_offset;
         return true;

@@ -363,8 +363,8 @@ struct channel_handover
                (nullptr != status_register) &&
                (nullptr != configuration_register) &&
                (0 != namespace_id) && (nullptr != queue_storage) &&
-               (0 == (reinterpret_cast<std::uintptr_t>(queue_storage) &
-                      0xfff));
+               (0 ==
+                (reinterpret_cast<std::uintptr_t>(queue_storage) & 0xfff));
     }
 };
 inline constexpr std::size_t block_payload =
