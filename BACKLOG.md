@@ -433,6 +433,57 @@ point - `lost_to_reset` read 1 on the same boot, which is the write command
 still outstanding when the reset landed - and the channel goes quiet
 deliberately from then on. Extending it past that is the next piece of work.
 
+## Re-creating the queue after the guest's reset: the design, measured
+
+The channel stops when the guest's driver resets the controller. Getting it
+back means one borrow of the guest's admin queue, and the shape of that
+borrow was decided by measurement rather than argument.
+
+**What a borrow costs.** Any whole number of laps is a legal borrow, so the
+cost was swept against the real controller at three lengths: 4 commands in
+67 us, 32 in 526 us, 256 in 4,264 us. Linear, ~30,000 ticks (16.6 us) per
+command, no measurable fixed cost. A guest's admin queue is 256 deep, so its
+lap is `lcm(256, 512)` = 512 commands:
+
+    512 x 30,043 ticks = 15.4M ticks = 8.5 ms
+
+**So the guest cannot be stopped for it.** `admin_borrow::run` says "the
+guest must be stopped", and that is a *sufficient* condition stated for
+simplicity, not a necessary one. What is necessary is only that nothing else
+touches the admin queue: no submission to its SQ, no consumption from its CQ.
+
+**Do it inside the guest's own controller-enable wait.** When a driver writes
+`CC.EN=1` it must then poll `CSTS.RDY`, and the architecture allows the
+controller up to `CAP.TO x 500 ms` to answer - a wait every driver already
+tolerates. We trap that write today for the reset detection. At that instant
+the admin queue has just been reset, so head and tail are zero and nothing of
+the guest's is outstanding, and the driver's initialisation path is single
+threaded. Holding that one write for 8.5 ms is indistinguishable from a
+slightly slow controller, costs no other processor anything, and needs no
+rendezvous, no doorbell trapping and no interrupt masking.
+
+**The blocker is not the borrow, it is addressing the guest's queue.** The
+admin queue lives at whatever physical address `ASQ`/`ACQ` name, and the host
+page table cannot currently map an arbitrary one. It has two page directories
+for 512 pdpt slots, so the directory is chosen by address bit 38 alone, and
+`detail/page_table.h` says what follows: two addresses agreeing in bit 38 and
+bits 29:12 land on the same leaf however far apart they are, the second
+mapping silently replaces the first, and nothing detects it. Mapping the
+guest's queue could therefore unmap the module out from under the VMM.
+
+That also means the mappings added for the channel - the controller's BAR and
+the queue storage - are collision free by luck rather than by construction:
+
+    module         0x78ddd000   bit38=0  bits29:12=0x38ddd
+    queue storage  0x7f72b000   bit38=0  bits29:12=0x3f72b
+    nvme BAR0    0x7011108000   bit38=1  bits29:12=0x11108
+
+**What to build first**, and it is small: a temporary mapping window. One
+reserved virtual address, pointed at whatever physical page is needed,
+`invlpg`d, used, and released - the classic technique, needing no extra
+tables and no growth of a structure whose size is fixed at compile time. With
+that, the borrow is a caller away.
+
 ## The guest resets the controller and takes our queue with it
 
 The disk channel's queue pair is created by the loader, before Windows'
