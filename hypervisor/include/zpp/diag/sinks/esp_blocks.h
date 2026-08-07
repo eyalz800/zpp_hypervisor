@@ -316,6 +316,19 @@ struct esp_blocks_for
         auto * header =
             reinterpret_cast<nvme::block_header *>(queues::staging);
         *header = nvme::block_header{};
+
+        // The signature the destination guard will demand of this block
+        // the next time round, put back as the reservation stamped it.
+        // A block that came out of here without one could be written
+        // once and never again.
+        header->signature.signature_magic = nvme::block_signature::magic;
+        header->signature.file_id = target.file_id;
+        header->signature.block_index = next_block_index;
+        for (std::size_t i{}; i < sizeof(target.disk_guid); ++i) {
+            header->signature.disk_guid[i] = target.disk_guid[i];
+            header->signature.partition_guid[i] = target.partition_guid[i];
+        }
+
         header->block_magic = nvme::block_header::magic;
         header->boot_id = boot_id;
         header->epoch = epoch;

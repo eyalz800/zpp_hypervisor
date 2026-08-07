@@ -205,6 +205,26 @@ struct block_header
 {
     static constexpr std::uint64_t magic = 0x314b4c42474f4c5aull;
 
+    /**
+     * The destination's own signature, carried through every write.
+     *
+     * First, and not beside the rest, because the write path reads the
+     * block it is about to overwrite and requires a signature at offset
+     * zero - that check is what makes writing next to somebody's boot
+     * manager acceptable. The reservation stamps one into every block of
+     * the region when it is established, and a written block has to come
+     * out carrying one too.
+     *
+     * Without this a block could be written exactly once. The header
+     * used to start at offset zero, so the first write replaced the
+     * signature with itself, and the next write to the same block - one
+     * wrap of the region later - read no signature and was refused. The
+     * region is sixteen thousand blocks, so the channel would have run
+     * for a couple of minutes and then gone quiet, correctly and
+     * unhelpfully.
+     */
+    block_signature signature{};
+
     std::uint64_t block_magic{};
 
     /**
