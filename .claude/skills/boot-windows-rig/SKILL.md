@@ -255,6 +255,65 @@ mount the NTFS volume read-only and read the registry - for example
 `Enum\PCI\<instance>\Device Parameters\DMA Management` to find out what
 Windows decided about DMA remapping for the controller.
 
+## Validate the NVRAM boot options *before* every boot
+
+**A boot that lands in the UEFI shell looks exactly like a loader that ran
+and failed.** Telling them apart costs a reboot, and the cause is usually
+that there was nothing to boot rather than that something broke. Check the
+variable store first - it answers this without starting the machine:
+
+```sh
+/home/tc/vm/check-boot-options.sh          # lists entries, fails if ours is absent
+```
+
+Two distinct failures it catches, both of which have already happened here:
+
+- **No entry at all.** BdsDxe goes straight to the shell and logs *nothing* -
+  there is no "failed to load" line, because nothing was attempted. An empty
+  boot attempt list next to a shell prompt means a missing option, not a
+  broken loader.
+- **The entry exists and is still never tried.** `BootOrder` is not a
+  complete list of the options that exist. On this machine the real NVMe sits
+  in NVRAM as `Boot0001` ("UEFI WDC PC SN520 ... 1834A4806408") and the
+  firmware went to the shell anyway, because `BootOrder` did not name it.
+  **Presence is not the same as will-be-tried**, so never conclude from
+  "the entry is there" that it will boot.
+
+Add the entry from the shell, with the position argument, so it goes to the
+front of `BootOrder` as well as being created:
+
+```
+bcfg boot add 0 FS0:\EFI\zpp\zpp_loader.efi "zpp loader"
+bcfg boot dump -v
+```
+
+This persists in `RELEASEX64_OVMF_VARS.fd`, so it survives reboots - and is
+therefore also something to re-check after restoring that file from `.orig`,
+which throws the entry away.
+
+Related trap already in CLAUDE.md, for the *host's* firmware rather than the
+guest's: auto-generated options carry no optional data, and firmware
+regenerates and reorders `BootOrder` as devices come and go.
+
+## Booting the loader from the real ESP, not the synthetic disk
+
+The rig normally serves the loader from a synthetic FAT disk
+(`file=fat:rw:$ZPP_ESP`, `bootindex=0`). That is fine for ordinary runs and
+**wrong for anything involving the ESP reservation**: the reservation
+identifies its volume from the loaded image's own device path, so booting
+from the synthetic disk makes it resolve to a volume with no NVMe node, and
+it refuses.
+
+Use `ZPP_BOOT_FROM_NVME=1`, which drops both synthetic-disk lines so the
+firmware boots the passed-through NVMe - the same path bare metal takes.
+The original script is backed up as `boot-zpp.sh.bak-prenvme`.
+
+Note the removable-media path on that disk is **Limine**, not us, and
+Limine's first menu entry is TinyCore. So booting the NVMe reaches Limine,
+not the loader, unless a boot option names the loader directly - which is
+what the `bcfg` entry above is for. Never overwrite
+`/EFI/Boot/bootx64.efi`; it is the recovery path.
+
 ## Always check the machine state before saying what it is
 
 `qemu-system-x86_64` being alive says the process exists, nothing more. It is
