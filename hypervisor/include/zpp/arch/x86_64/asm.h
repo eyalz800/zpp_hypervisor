@@ -310,6 +310,27 @@ inline std::uint64_t __attribute__((naked)) flags()
     )!!");
 }
 
+/**
+ * Invalidates one page's translation on this processor.
+ *
+ * For the temporary mapping window, which repoints a single reserved
+ * virtual address at whatever physical page is needed. Without this the
+ * processor would answer from the translation cached for whatever that
+ * address pointed at last, which is the previous caller's page.
+ *
+ * This processor only. `invlpg` is not a broadcast, and the window is
+ * taken under a lock and released before the lock is, so no other
+ * processor can be using that address to have cached anything for it.
+ */
+inline void __attribute__((naked)) invlpg(const void *)
+{
+    asm(R"!!(
+        .intel_syntax noprefix
+        invlpg [rdi]
+        ret
+    )!!");
+}
+
 inline void __attribute__((naked)) cpuid(std::uint32_t,
                                          std::uint32_t,
                                          std::uint32_t *)

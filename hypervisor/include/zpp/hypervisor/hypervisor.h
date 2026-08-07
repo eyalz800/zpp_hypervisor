@@ -302,6 +302,24 @@ private:
     protect_region(std::uint64_t physical_address, std::uint64_t size);
 
     /**
+     * Points the window at a physical page and returns the address it can
+     * be read and written through.
+     *
+     * For memory this VMM has to touch and does not own - the guest's
+     * admin queue, whose address comes out of the controller's ASQ and
+     * ACQ registers and is therefore not ours to choose. Mapping such a
+     * page permanently is not an option: the host page table aliases, so
+     * an address we did not pick could silently replace the module's own
+     * mapping and unmap the VMM from under itself.
+     *
+     * The caller must hold mapping_window_lock for as long as it uses the
+     * returned pointer, and the page must be one the guest is not
+     * concurrently changing underneath - which for the admin queue is
+     * what the borrow's exclusion is for.
+     */
+    void * map_window(std::uint64_t physical_address);
+
+    /**
      * Watches one page of guest physical memory for writes.
      *
      * Deliberately a general facility rather than a hook for whatever
@@ -1088,6 +1106,39 @@ private:
      * processor at a time.
      */
     spin_lock start_up_lock{};
+
+    /**
+     * The virtual address the temporary mapping window uses.
+     *
+     * Chosen rather than allocated, because the host page table's storage
+     * is fixed at compile time and aliases: two addresses agreeing in bit
+     * 38 and in bits 29:12 share a leaf, and the second mapping silently
+     * replaces the first. So a window address has to be checked against
+     * everything else this table maps rather than picked freely.
+     *
+     * This one has bit 38 clear and bits 29:12 of 0x10000, against the
+     * module's 0x38ddd, the queue storage's 0x3f72b, and the controller
+     * BARs which have bit 38 set. Nothing in the host address space lives
+     * here otherwise - the table maps itself, the module, and the two
+     * device regions.
+     */
+    static constexpr std::uint64_t mapping_window = 0x10000000;
+
+    /**
+     * Serialises the window, which is one address shared by every
+     * processor. Held across the whole use, not just the mapping, because
+     * the point of the window is the bytes reached through it.
+     */
+    spin_lock mapping_window_lock{};
+
+    /**
+     * What the window self check found: 0 not run, 1 correct, 2 wrong.
+     *
+     * A member rather than a log line because the log is not on the wire
+     * - it lives in memory for a debugger - and this is a fact worth
+     * reading with `xp` from the monitor while the guest runs.
+     */
+    std::uint64_t mapping_window_verified{};
 
     /**
      * The exit nothing knew how to handle, filled in by

@@ -897,6 +897,26 @@ std::expected<void, zpp::error> hypervisor::protect_module()
     return {};
 }
 
+void * hypervisor::map_window(std::uint64_t physical_address)
+{
+    auto page = physical_address & ~(page_size - 1);
+
+    this->host_page_table.map_page(
+        mapping_window,
+        page,
+        arch::x86_64::page_table::protection::read |
+            arch::x86_64::page_table::protection::write);
+
+    // The processor has a translation cached for this address from
+    // whoever used the window last, pointing at their page. Without this
+    // a read through it answers with their bytes, which is the entire
+    // failure mode a shared window has.
+    auto * at = reinterpret_cast<std::uint8_t *>(mapping_window);
+    arch::x86_64::invlpg(at);
+
+    return at + (physical_address - page);
+}
+
 std::expected<void, zpp::error> hypervisor::protect_region(
     std::uint64_t physical_address, std::uint64_t size)
 {
@@ -3295,6 +3315,36 @@ hypervisor::main(arch::x86_64::context & caller_context)
                     storage, nvme::queue_pair<64>::storage_bytes);
                 !hidden) {
                 log("could not hide the queue storage");
+            }
+        }
+
+        // Prove the temporary mapping window before anything depends on
+        // it.
+        //
+        // It is the primitive that will let the borrow reach the guest's
+        // admin queue, whose address this VMM does not choose, and it is
+        // exactly the kind of thing that appears to work while returning
+        // the previous caller's page. So it is pointed at a page whose
+        // first bytes are known - the module's own base, which begins
+        // with the ELF magic - and the answer is checked rather than
+        // assumed.
+        {
+            this->mapping_window_lock.lock();
+            scope_exit release{
+                [&] { this->mapping_window_lock.unlock(); }};
+            auto module_physical =
+                this->host_page_table.virtual_to_physical(
+                    this->module_base);
+            auto * through = static_cast<const unsigned char *>(
+                map_window(module_physical));
+
+            auto correct = (0x7f == through[0]) && ('E' == through[1]) &&
+                           ('L' == through[2]) && ('F' == through[3]);
+            this->mapping_window_verified = correct ? 1 : 2;
+            if (correct) {
+                log("mapping window reads the module base correctly");
+            } else {
+                log("mapping window is wrong");
             }
         }
 
