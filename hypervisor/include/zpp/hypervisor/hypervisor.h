@@ -395,6 +395,52 @@ private:
     bool wait_for_ept_acknowledgement(std::uint64_t budget);
 
     /**
+     * Sends a non-maskable interrupt to one processor, to take it out of
+     * whatever it is doing.
+     *
+     * The only tool available for this. An ordinary interrupt is
+     * delivered into the guest's own handler while "external-interrupt
+     * exiting" is clear, so it causes no exit at all; and a processor
+     * the guest has halted executes nothing, so it reaches no exit path
+     * by itself. Measured: an acknowledgement wait that never completed
+     * because processor 1 was halted and three generations behind.
+     *
+     * Written straight to the local APIC's command register, which the
+     * host page table already maps for the interrupt command watch.
+     * Delivery mode 100b is NMI, and the destination is a physical APIC
+     * id.
+     */
+    void send_wake_nmi(std::uint64_t apic);
+
+    /**
+     * Whether the NMI a processor is taking is one this VMM sent.
+     *
+     * Set before the interrupt is sent and cleared by the processor that
+     * takes it. A guest's own NMI finds this clear and is handed back
+     * rather than swallowed - swallowing one would lose a watchdog or a
+     * machine check the guest was relying on.
+     */
+    std::atomic<bool> wake_requested[max_cpus]{};
+
+    /**
+     * How many NMIs were sent to wake a processor, and how many arrived
+     * that were the guest's own and had to be given back.
+     * @{
+     */
+    std::uint64_t wake_nmis_sent{};
+    std::uint64_t guest_nmis_reinjected{};
+
+    /**
+     * How many processors were read as not executing because they did not
+     * answer a non-maskable interrupt. Worth counting: it is the one
+     * inference in the exclusion rather than an observation.
+     */
+    std::uint64_t unresponsive_processors{};
+    /**
+     * @}
+     */
+
+    /**
      * Watches one page of guest physical memory for writes.
      *
      * Deliberately a general facility rather than a hook for whatever

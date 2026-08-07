@@ -907,6 +907,35 @@ std::expected<void, zpp::error> hypervisor::protect_module()
     return {};
 }
 
+void hypervisor::send_wake_nmi(std::uint64_t apic)
+{
+    // Straight at the local APIC's command register, which the host page
+    // table already maps because the interrupt command watch needs it.
+    //
+    // The destination half is written first because writing the low half
+    // is what sends the interrupt - a destination written after it would
+    // be written after the thing that used it.
+    constexpr std::uint64_t base_mask = 0xffffff000ull;
+    auto base =
+        arch::x86_64::rdmsr(arch::x86_64::msr::ia32_apic_base) & base_mask;
+
+    constexpr std::uint64_t interrupt_command_low = 0x300;
+    constexpr std::uint64_t interrupt_command_high = 0x310;
+
+    // Delivery mode 100b is NMI, and an NMI carries no vector.
+    constexpr std::uint32_t delivery_mode_nmi = 0x4u << 8;
+    constexpr std::uint32_t level_assert = 1u << 14;
+
+    auto * bytes = reinterpret_cast<volatile std::uint8_t *>(base);
+
+    arch::x86_64::write32(bytes + interrupt_command_high,
+                          static_cast<std::uint32_t>(apic << 24));
+    arch::x86_64::write32(bytes + interrupt_command_low,
+                          delivery_mode_nmi | level_assert);
+
+    ++this->wake_nmis_sent;
+}
+
 bool hypervisor::wait_for_ept_acknowledgement(std::uint64_t budget)
 {
     // This processor is up to date by construction and has to say so.
@@ -947,6 +976,12 @@ bool hypervisor::wait_for_ept_acknowledgement(std::uint64_t budget)
         }
     }
 
+    // How long a processor is given to answer the interrupt before it is
+    // read as not executing. Generous: an interrupt takes microseconds to
+    // arrive and this is spins, not time.
+    constexpr std::uint64_t probe_patience = 1u << 20;
+    std::uint64_t probed{};
+
     while (budget--) {
         auto outstanding = false;
 
@@ -963,6 +998,45 @@ bool hypervisor::wait_for_ept_acknowledgement(std::uint64_t budget)
                 this->ack_outstanding_cpu = cpu;
                 this->ack_outstanding_seen =
                     this->ept_generation_seen[cpu];
+
+                // Take it out of whatever it is doing. Waiting alone is
+                // not enough, and the reason was measured rather than
+                // guessed: a processor the guest has halted executes
+                // nothing, reaches no exit path, and never stamps.
+                // The interrupt is the probe as well as the nudge.
+                //
+                // A processor that is executing guest code must answer a
+                // non-maskable interrupt: "NMI exiting" is set, so it
+                // takes one out of anything it is doing, including a
+                // halt. A processor that does not answer one is not
+                // executing - the SDM's own note on the control says an
+                // NMI is neither delivered nor causes an exit while a
+                // logical processor is in the wait-for-SIPI state, and
+                // this VMM puts processors there itself when the guest
+                // sends an INIT.
+                //
+                // So a silence that outlives the probe is read as "not
+                // running", and a processor that is not running holds no
+                // translation it can use. That is an inference rather
+                // than a fact reported by the hardware, and it is the one
+                // soft spot left in this: the alternative is waiting
+                // forever for a processor the guest has parked, which is
+                // what the first version did.
+                if (!this->wake_requested[cpu].exchange(
+                        true, std::memory_order_acq_rel)) {
+                    send_wake_nmi(this->apic_id[cpu]);
+                    probed = budget;
+                }
+
+                if ((0 != probed) &&
+                    ((probed - budget) > probe_patience)) {
+                    this->wake_requested[cpu].store(
+                        false, std::memory_order_release);
+                    this->ept_generation_seen[cpu] = target;
+                    ++this->unresponsive_processors;
+                    outstanding = false;
+                    continue;
+                }
                 break;
             }
         }
@@ -3077,8 +3151,14 @@ void hypervisor::setup_vmcs(arch::x86_64::context & guest_context)
 
     // Nothing requested: external interrupts and NMIs stay the guest's,
     // which owns the interrupt controller.
+    // NMI exiting, so that a non-maskable interrupt this VMM sends takes
+    // the target processor out of whatever it is doing - including a halt,
+    // which nothing else available here can do. The cost is that a genuine
+    // NMI from the guest's world arrives here too and has to be handed
+    // back; see the exception_or_nmi case in the exit handler.
     vmcs.pin_based_vm_execution_controls(arch::x86_64::vmx::adjust_msr(
-        this->cached_vmx_msr(vmx_msr::true_pin_based_controls), 0));
+        this->cached_vmx_msr(vmx_msr::true_pin_based_controls),
+        arch::x86_64::vmx::vm_execution_controls::pin::nmi_exiting));
 
     vmcs.primary_processor_based_vm_execution_controls(
         arch::x86_64::vmx::adjust_msr(
@@ -4019,6 +4099,40 @@ hypervisor::main(arch::x86_64::context & caller_context)
         // configuration problem that did not exist. When adding a case,
         // answer the whole of whatever it is, or fault.
         switch (reason) {
+        case basic_reason::exception_or_nmi: {
+            // Either a wake this VMM sent, or the guest's own.
+            //
+            // The stamp that a wake exists to collect has already
+            // happened - the catch-up at the top of this handler runs
+            // before any of these cases - so a wake needs nothing done
+            // to it beyond being consumed.
+            //
+            // Anything else is the guest's, and is handed straight back.
+            // Swallowing an NMI would lose a watchdog or a machine check
+            // the guest was relying on, and the guest cannot tell that a
+            // hypervisor took it.
+            auto information = vmcs.vm_exit_interruption_information();
+            constexpr std::uint32_t type_nmi = 2u << 8;
+            constexpr std::uint32_t type_mask = 7u << 8;
+            constexpr std::uint32_t valid = 1u << 31;
+
+            auto is_nmi = ((information & type_mask) == type_nmi);
+            auto cpu = vmcs.vpid();
+
+            if (is_nmi && (0 != cpu) && (cpu <= max_cpus) &&
+                this->wake_requested[cpu - 1].exchange(
+                    false, std::memory_order_acq_rel)) {
+                break;
+            }
+
+            if (is_nmi) {
+                ++this->guest_nmis_reinjected;
+                vmcs.vm_entry_interruption_information_field(
+                    valid | type_nmi | 2u);
+            }
+            break;
+        }
+
         case basic_reason::cpuid: {
             std::uint32_t cpuid_result[4]{};
 

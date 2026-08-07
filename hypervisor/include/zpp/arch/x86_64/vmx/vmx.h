@@ -93,6 +93,23 @@ enum type : std::uint64_t
      * Armed only while something is waiting to be noticed, because it
      * costs the guest an exit every time it fires.
      */
+    /**
+     * SDM Table 27-5, bit 3: "If this control is 1, NMIs cause VM exits.
+     * Otherwise, they are delivered using vector 2."
+     *
+     * Wanted for one reason: an NMI is the only thing that reliably
+     * takes a processor out of whatever it is doing, including a halt.
+     * Nothing else this VMM can send does - an ordinary interrupt is
+     * delivered straight into the guest's handler while
+     * "external-interrupt exiting" is clear, and a halted processor
+     * reaches no exit path of its own at all.
+     *
+     * The price is that a genuine NMI from the guest's own world now
+     * arrives here instead, and has to be handed back rather than
+     * swallowed. See on_nmi.
+     */
+    nmi_exiting = (1ull << 3),
+
     activate_preemption_timer = (1ull << 6),
 };
 

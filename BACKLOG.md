@@ -577,6 +577,30 @@ path:
   into the halt. Cheaper, and not sufficient on its own: a processor that
   halted *before* the change still wakes holding a stale translation.
 
+**The wake works, and the borrow still fails.** With the interrupt sent as a
+probe the exclusion is satisfied and the borrow runs, and it returns
+`timed_out` after 1.22 seconds:
+
+    wake_nmis_sent           7
+    unresponsive_processors  7
+    channel_rebuild_result   4      timed_out
+    channel_rebuild_ticks    0x82e6a48b
+
+Seven of seven not answering is correct rather than suspicious: this happens
+during the guest's storage driver initialisation, when Windows is still
+single threaded and every application processor is parked in wait-for-SIPI,
+where the SDM says an NMI is neither delivered nor causes an exit.
+
+So the remaining fault is in the borrow itself, and it is a new one rather
+than a variant of the exclusion problem. `AQA` reads `0x00010001` - two
+entries each, zero based - which gives a lap of four commands, the same
+geometry the loader borrows against successfully. A four command borrow that
+spends 1.22 seconds is not reaching the controller at all. The likely
+suspects, in order: the doorbell stride derived from `CAP`, the window
+mapping of the guest's queues, and whether `CSTS.RDY` was genuinely observed
+rather than read from an unmapped address. None of them is guessed at here
+because the last three guesses were all wrong and all cost a boot.
+
 Three wrong guesses preceded the measurement, and they are worth listing so
 they are not made again: the initiator waiting for its own stale stamp
 (real, fixed), holding before acknowledging and deadlocking a held processor
