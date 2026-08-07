@@ -89,6 +89,22 @@ struct esp_blocks_for
      * The block being filled, and where in the file it goes.
      * @{
      */
+    // The reasons configure() can turn a hand-over down, in the order
+    // it checks them.
+    enum class reject : std::uint32_t
+    {
+        untried = 0,
+        none,
+        magic,
+        target_unusable,
+        storage_unusable,
+        no_translator,
+        bind_storage,
+        not_ready,
+    };
+
+    static inline reject configure_reject{reject::untried};
+
     static inline std::uint32_t staged_records{};
 
     /**
@@ -152,7 +168,35 @@ struct esp_blocks_for
     static bool configure(const nvme::channel_handover & handover,
                           std::uint64_t (*translate)(const void *))
     {
-        if (!handover.usable() || (nullptr == translate)) {
+        // Why a hand-over was turned down, for a reader that has no
+        // other channel.
+        //
+        // Worth a static of its own: from outside, a sink that never
+        // configured and a sink that configured and was later forgotten
+        // look identical - both answer ready() false and leave the
+        // counters at zero - and they need opposite fixes. Cheap enough
+        // to keep, since it is one store on a path that runs once.
+        configure_reject = reject::none;
+
+        if (!handover.usable()) {
+            // Split by hand rather than asking the hand-over, because
+            // usable() is one expression and its answer alone does not
+            // say which half failed - and the two mean different things:
+            // a wrong magic is a hand-over that never happened, an
+            // unusable target or storage is one that happened and did
+            // not survive.
+            if (nvme::channel_handover::valid_magic != handover.magic) {
+                configure_reject = reject::magic;
+            } else if (!handover.target.usable()) {
+                configure_reject = reject::target_unusable;
+            } else {
+                configure_reject = reject::storage_unusable;
+            }
+            return false;
+        }
+
+        if (nullptr == translate) {
+            configure_reject = reject::no_translator;
             return false;
         }
 
@@ -161,6 +205,7 @@ struct esp_blocks_for
         // controller only ever knew about one of them - see the comment
         // on queue_pair's pointers.
         if (!queues::bind_storage(handover.queue_storage)) {
+            configure_reject = reject::bind_storage;
             return false;
         }
 
@@ -211,7 +256,12 @@ struct esp_blocks_for
             .epoch = ++epoch,
         };
 
-        return ready();
+        if (!ready()) {
+            configure_reject = reject::not_ready;
+            return false;
+        }
+
+        return true;
     }
 
     /**

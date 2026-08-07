@@ -4739,12 +4739,29 @@ hypervisor::main(arch::x86_64::context & caller_context)
         // large enough that the cost is nothing and small enough that a
         // reader sees movement within a second on any busy guest.
         if constexpr (diag::enabled) {
-            // Every few exits, not every twenty thousand. With the
-            // timer running the exits are ours and arrive on a schedule,
-            // so this counts them rather than guessing at a guest's
-            // rate - which the measurement above showed is far too low
-            // to divide by anything.
-            constexpr std::uint64_t heartbeat_exits = 8;
+            // A proof of life, deliberately slow.
+            //
+            // This record exists only so an idle channel can be told
+            // apart from a dead one, and it is the one record this side
+            // manufactures rather than observes. That makes its rate a
+            // direct tax on the region: the sink flushes a partly filled
+            // block once staged_deadline_ticks passes, so a heartbeat
+            // faster than a block fills turns every 128-byte record into
+            // a 4096-byte write.
+            //
+            // Measured at one per eight ticks: 152 blocks a second, one
+            // record in each, wrapping the 64 MB region every seven
+            // minutes and writing 620 KB/s to the medium for nothing.
+            // At one per thousand ticks it is 4 KB/s and the region holds
+            // about four and a half hours.
+            //
+            // The freshness the deadline buys is not lost by slowing this
+            // down, because it applies to real records too: anything the
+            // guest actually causes still reaches the medium within
+            // staged_deadline_ticks of being written. Only the synthetic
+            // traffic is throttled, and an idle guest now writes nothing
+            // at all - which is the correct behaviour, not a regression.
+            constexpr std::uint64_t heartbeat_exits = 1000;
             auto cpu = vmcs.vpid();
             if ((0 != cpu) && (cpu <= max_cpus)) {
                 auto & seen = this->heartbeat_exits_seen[cpu - 1];

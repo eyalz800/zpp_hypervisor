@@ -692,3 +692,51 @@ has room for about thirty, so the region wraps roughly thirty times faster
 than it needs to. The fix is to flush on a deadline that is long relative to
 the tick instead of on every tick, which trades log latency for region
 lifetime; neither number has been chosen against a real need yet.
+
+## Real-NVMe rig: the loader works, the resident side does not, and the
+## instrumentation disagrees with itself
+
+Established on the VFIO rig, real NVMe passed through, backup taken first:
+
+  - The loader half works end to end on the real controller. Serial says
+    `borrow returned ok`, `admin sq/cq entries differing 0x0`, `VERDICT
+    borrow restored the admin queue byte for byte`, `private queue pair
+    created`, `proof written and verified at lba 0x1fe8000`, and
+    `VERDICT the private queue moves data to the disk`. The reservation is
+    idempotent as designed - `already reserved, gap sectors 0x20000`.
+  - `zpp_load_elf` returned success: `ZPP_TRACE loading` then `loaded`,
+    with no `ZPP_HYPERVISOR_FAILED`.
+  - The resident side never configured the channel. `configure_reject`
+    reads `untried`, so `configure()` was not entered at all, and
+    `sequence`, `boot_id`, `target` and `physical_of` are all zero.
+
+Unresolved, and the next thing to settle before trusting any conclusion
+here: `heartbeat_exits_seen` reads zero on every processor, while the word
+at module base + 0x1434070 changes about nineteen hundred times a second.
+Both cannot be true of the same memory. The addressing checks out - one
+contiguous PT_LOAD from the base with MemSiz 0x31387ba, so 0x1434070 is
+inside .bss; ELF magic reads at base + 0; and the constant
+`staged_deadline_ticks` reads 0x989680 at base + 0x1048. So either that
+page is not covered by whatever protects the module, or the module is not
+solely where the base says it is.
+
+Do not theorise past this. The measurement that settles it is the extent
+actually protected: compare the allocation and the EPT protection against
+the ELF's full 51.6 MB MemSiz, rather than against its file size, and
+check whether the guest can write the tail of .bss. A guest sharing the
+module's .bss tail would explain the churn, the zeroed counters and the
+un-entered configure() at once.
+
+Three wrong turns on the way here, recorded so they are not repeated:
+
+  - `submitted`, `completed` and `lost_to_reset` are not statics of the
+    sink. A `grep ... | head -1` that matched nothing produced an empty
+    offset, so the read landed on the module base and returned the ELF
+    magic `0x00010102464c457f` as a plausible-looking number. Any reading
+    equal to that value is a failed symbol lookup, not data.
+  - `_ZGV...` is the guard variable, not the object. Matching `instance`
+    loosely picked it up and put every singleton read 0x1ced000 out.
+  - OVMF NVRAM persists across runs, so once Windows has booted it puts
+    itself first and the rig silently stops running our loader - serial
+    carries firmware output only. Restore RELEASEX64_OVMF_VARS.fd from
+    .orig before every run, which is what makes bootindex=0 win.
