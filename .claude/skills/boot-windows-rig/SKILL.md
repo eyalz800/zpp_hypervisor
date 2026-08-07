@@ -722,3 +722,59 @@ destroys the hypervisor so that all its counters read as garbage
 afterwards. Before debugging a new failure, diff the flags in
 `diag/include/zpp/diag/config.h` against what the comments say they should
 be.
+
+## Where the loader actually goes on the VFIO rig
+
+**`/EFI/zpp/zpp_loader.efi` on the real NVMe's ESP** (`/dev/nvme0n1p2`),
+not `~/zpp/esp/...`. That second path is read by nothing:
+`boot-zpp.sh` sets `ZPP_ESP` at the top and **never passes it to QEMU** -
+the only `-drive` entries are the two pflash ones - so the guest boots
+whatever the passed-through NVMe's ESP holds.
+
+That ESP holds Limine, whose `limine.conf` has two entries: TinyCore
+itself (`/EFI/tc/vm` - the *host* boots from this disk too, so Limine is
+also the recovery path and must stay intact) and `/zpp + windows`
+pointing at `boot():/EFI/zpp/zpp_loader.efi`.
+
+Deploying, with the old one kept:
+
+    cat out/debug/x86_64/zpp_loader.efi | ssh tc@rig 'cat > /tmp/new.efi'
+    ssh tc@rig 'sudo mount /dev/nvme0n1p2 /tmp/resp &&
+      sudo cp -n /tmp/resp/EFI/zpp/zpp_loader.efi /tmp/resp/EFI/zpp/zpp_loader.efi.bak &&
+      sudo cp /tmp/new.efi /tmp/resp/EFI/zpp/zpp_loader.efi && sync &&
+      md5sum /tmp/resp/EFI/zpp/zpp_loader.efi && sudo umount /tmp/resp'
+
+**This cost hours.** Deploying to the unused path meant a build from 14:31
+was under test all afternoon while newer binaries were compiled,
+"deployed" and measured. Every anomaly it produced looked like a
+hypervisor bug: counters at zero, trace lines that never appeared, a
+"misdetected module base", a vanishing CPUID. Two write-ups were made and
+withdrawn on the strength of it.
+
+Two symptoms identify it instantly, and both are cheaper than any of the
+theories:
+
+  - `wc -c /home/tc/zpp/serial.out` is **byte-identical across builds**.
+    Adding a trace line must change that number. If it does not, the
+    binary did not change.
+  - a trace you just added does not appear while the lines around it do.
+
+Always `md5sum` the file **at the path the firmware reads**, and compare
+it to the local build, on every deploy.
+
+## Booting from anywhere but the disk under test changes the experiment
+
+Firmware drives only what it needs to reach its boot option, so a disk it
+did not boot from has no driver and an NVMe controller left with `CC.EN
+0`. Two things then break, and both look like device bugs:
+
+  - the self test finds no live driver to borrow an admin queue from, and
+    logs exactly that;
+  - `esp_reservation` targets the device the loader was *loaded* from, so
+    booting off a virtual FAT disk points the channel's destination at
+    the wrong device and the resident side rejects the hand-over with
+    `target_unusable`.
+
+The loader now calls `connect_all_controllers()` before the self test,
+which fixes the first. The second is a reason to keep booting the loader
+off the disk under test.

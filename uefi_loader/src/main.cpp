@@ -1294,6 +1294,59 @@ free_file_path_device_path:
     return device_path;
 }
 
+/**
+ * Drives every controller the firmware knows about.
+ *
+ * Firmware connects only as much as it needs to reach the boot option it
+ * was told to start, so anything it did not boot from is left as a bare
+ * PCI device: no driver, no block io handle, and for an NVMe controller
+ * no CC.EN either.
+ *
+ * That last part is why this runs before the self test and not only
+ * before the boot manager search. The self test looks for a *live*
+ * driver to borrow the admin queue from, and whether one exists depended
+ * entirely on what the firmware happened to boot from: booting this
+ * loader off the disk under test made the answer yes by accident, and
+ * booting it from anywhere else left the controller disabled, the borrow
+ * with nothing to borrow, and the channel never established. Measured
+ * that way - "CC.EN 0, CSTS.RDY 0, no live driver to borrow from",
+ * followed by the resident side rejecting a hand-over whose magic was
+ * still zero.
+ *
+ * Idempotent: connecting an already driven controller fails, and that
+ * failure is uninteresting, which is why the per-handle result is
+ * ignored.
+ */
+// maybe_unused because both call sites are behind `if constexpr`: the
+// self test's is compiled out without the diagnostics, and the boot
+// manager search's when the loader is restricted to its own device. A
+// release build can therefore legitimately need neither.
+[[maybe_unused]] static void connect_all_controllers()
+{
+    EFI_HANDLE * all_handles{};
+    std::size_t number_of_all_handles{};
+
+    if (EFI_ERROR(
+            g_boot_services->LocateHandleBuffer(AllHandles,
+                                                nullptr,
+                                                nullptr,
+                                                &number_of_all_handles,
+                                                &all_handles))) {
+        return;
+    }
+
+    for (std::size_t i{}; i < number_of_all_handles; ++i) {
+        // Failure is normal and uninteresting: most handles are not
+        // controllers, and the ones that are may already be driven.
+        g_boot_services->ConnectController(
+            all_handles[i], nullptr, nullptr, true);
+    }
+
+    g_boot_services->FreePool(all_handles);
+    trace::hex_line("ZPP_TRACE connected controllers",
+                    number_of_all_handles);
+}
+
 extern "C" EFI_STATUS EFIAPI uefi_main(EFI_HANDLE image_handle,
                                        EFI_SYSTEM_TABLE * system_table)
 {
@@ -1408,6 +1461,10 @@ extern "C" EFI_STATUS EFIAPI uefi_main(EFI_HANDLE image_handle,
         if (!queue_storage) {
             trace::line("ZPP_TRACE no queue storage, channel refused");
         }
+        // Before the self test, so the controller it is about to
+        // inspect has a driver regardless of what the firmware booted.
+        connect_all_controllers();
+
         nvme_selftest::run(zpp::esp_reservation::target, queue_storage);
     }
 
@@ -1478,39 +1535,21 @@ extern "C" EFI_STATUS EFIAPI uefi_main(EFI_HANDLE image_handle,
         trace::line("ZPP_TRACE chainload only, hypervisor not launched");
     }
 
-    // Did it actually go resident?
+    // A residency check by CPUID used to sit here and has been taken
+    // out again.
     //
-    // Asked because the answer above does not say. zpp_load_elf returns
-    // zero when the launch path completed, and on one machine it does
-    // that while the hypervisor never initialises at all - measured with
-    // probes in its own .bss, all of which stay zero while the same build
-    // on another machine sets them correctly. A loader that reports
-    // success for a hypervisor that is not there sends every later
-    // investigation to the wrong place, and it sent several.
+    // It did its job: it proved the hypervisor resident on both rigs,
+    // which is what showed that a stale loader had been under test. Then
+    // it became the thing being measured. On the real rig its cpuid is
+    // the first VM exit this VMM ever takes, and the machine wedges in
+    // vmresume immediately after handling it - one exit recorded, reason
+    // 0xa, and no second one ever. A probe that stops the guest is worse
+    // than no probe.
     //
-    // This is the cheap half of what verify::present does and none of the
-    // destructive half: one CPUID leaf, no interprocessor interrupts, no
-    // APIC mode change. A guest running under this VMM reads
-    // ZppZppZppZpp from the hypervisor leaf; one on bare metal does not.
-    {
-        std::uint32_t signature[4]{};
-        asm volatile("cpuid"
-                     : "=a"(signature[0]),
-                       "=b"(signature[1]),
-                       "=c"(signature[2]),
-                       "=d"(signature[3])
-                     : "a"(0x40000000u), "c"(0u));
-
-        // As hex through hex_line, which is the mechanism every other
-        // trace here uses and is therefore known to reach the wire.
-        // Spelling it as text through trace::raw produced nothing on one
-        // machine while working on another, and chasing that is chasing
-        // the instrument rather than the measurement.
-        //
-        // ebx of the hypervisor leaf holds the first four characters, so
-        // a resident build reads 0x5a70705a - "ZppZ" little endian.
-        trace::hex_line("ZPP_TRACE hypervisor leaf ebx ", signature[1]);
-    }
+    // The wedge is a real defect and is not this probe's fault; a guest
+    // executes cpuid constantly and Windows was already hanging on this
+    // machine. It is written up in BACKLOG.md and wants fixing on its
+    // own terms, with the guest doing the cpuid rather than the loader.
 
     if (result) {
         // The code is the hypervisor's own error enumeration, so print it
@@ -1655,24 +1694,8 @@ extern "C" EFI_STATUS EFIAPI uefi_main(EFI_HANDLE image_handle,
     // block io handle at all - which is exactly the state the passed
     // through NVMe holding Windows was found in, enumerated as a PCI
     // device and invisible as a file system.
-    EFI_HANDLE * all_handles{};
-    std::size_t number_of_all_handles{};
-    if (!chain_to_our_own_device_only &&
-        !EFI_ERROR(
-            g_boot_services->LocateHandleBuffer(AllHandles,
-                                                nullptr,
-                                                nullptr,
-                                                &number_of_all_handles,
-                                                &all_handles))) {
-        for (std::size_t i{}; i < number_of_all_handles; ++i) {
-            // Failure is normal and uninteresting: most handles are not
-            // controllers, and the ones that are may already be driven.
-            g_boot_services->ConnectController(
-                all_handles[i], nullptr, nullptr, true);
-        }
-        g_boot_services->FreePool(all_handles);
-        trace::hex_line("ZPP_TRACE connected controllers",
-                        number_of_all_handles);
+    if constexpr (!chain_to_our_own_device_only) {
+        connect_all_controllers();
     }
 
     // The devices to search: either the one this loader was started from,

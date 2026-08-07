@@ -1095,6 +1095,42 @@ void hypervisor::arm_controller_poll(bool armed)
     if (armed == this->controller_poll_armed) {
         return;
     }
+
+    // Only if the processor allows this control to be set.
+    //
+    // A pin based control may be set to 1 only where the corresponding
+    // allowed-1 bit is set in the high half of IA32_VMX_PINBASED_CTLS, or
+    // of IA32_VMX_TRUE_PINBASED_CTLS where the basic capability MSR says
+    // the true controls exist - SDM Appendix A.3.1. Setting one that is
+    // not permitted does not fail loudly; it fails the *next VM entry*,
+    // and under a nested hypervisor it can simply not come back.
+    //
+    // Measured, and it is why this check exists: on the rig that passes a
+    // real NVMe through, arming the timer left the machine wedged in
+    // vmresume with exactly one exit recorded - reason 0xa, a plain
+    // CPUID - and no second exit ever. The same build on an emulated
+    // controller ran fine, so it read as a device problem for several
+    // rounds. It is not: it is a control the outer hypervisor does not
+    // offer, set without asking.
+    constexpr std::uint64_t true_controls_available = 1ull << 55;
+
+    auto capability_msr =
+        (this->cached_vmx_msr(arch::x86_64::vmx::msr::basic) &
+         true_controls_available)
+            ? arch::x86_64::vmx::msr::true_pin_based_controls
+            : arch::x86_64::vmx::msr::pin_based_controls;
+
+    auto allowed_one = this->cached_vmx_msr(capability_msr) >> 32;
+
+    if (armed && !(allowed_one & arch::x86_64::vmx::vm_execution_controls::
+                                     pin::activate_preemption_timer)) {
+        // Nothing to turn on, and nothing to turn off later either.
+        diag::log<diag::severity::warning>(
+            "preemption timer not permitted, allowed-1 {}", allowed_one);
+        log("preemption timer not permitted, so the log has no clock");
+        return;
+    }
+
     this->controller_poll_armed = armed;
 
     auto controls = this->vmcs.pin_based_vm_execution_controls();
