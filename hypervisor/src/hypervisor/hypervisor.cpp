@@ -3140,17 +3140,6 @@ hypervisor::main(arch::x86_64::context & caller_context)
                         this->os_page_table);
                 }
                 log("mapped queue storage at {}", base);
-
-                // And hidden from the guest, which protect_module did
-                // for free while this storage was an array inside the
-                // module. It is a separate allocation now, so it has to
-                // be said. A guest able to write the submission queue
-                // dictates what the controller executes.
-                if (auto hidden = protect_region(
-                        base, nvme::queue_pair<64>::storage_bytes);
-                    !hidden) {
-                    log("could not hide the queue storage");
-                }
             }
         }
 
@@ -3264,6 +3253,28 @@ hypervisor::main(arch::x86_64::context & caller_context)
 
         if (auto result = protect_module(); !result) {
             return result;
+        }
+
+        // And the queue storage, which protect_module covered for free
+        // while it was an array inside the module and does not cover now
+        // that the loader allocates it separately. A guest able to write
+        // the submission queue dictates what the controller executes, so
+        // this is not tidiness.
+        //
+        // Here and not beside the mapping further up, for the reason the
+        // local APIC watch is down here too: editing an extended page
+        // table entry before initialize_ept has built the tables edits
+        // nothing, and doing it between that and this point would be
+        // undone by initialize_ept itself. This is the first place the
+        // tables are final.
+        if (diagnostic_channel_given && diagnostic_channel.queue_storage) {
+            auto storage = reinterpret_cast<std::uint64_t>(
+                diagnostic_channel.queue_storage);
+            if (auto hidden = protect_region(
+                    storage, nvme::queue_pair<64>::storage_bytes);
+                !hidden) {
+                log("could not hide the queue storage");
+            }
         }
 
         unprotect_guest_memory();
