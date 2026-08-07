@@ -780,3 +780,58 @@ did not boot from has no driver and an NVMe controller left with `CC.EN
 The loader now calls `connect_all_controllers()` before the self test,
 which fixes the first. The second is a reason to keep booting the loader
 off the disk under test.
+
+## Do not kill a running Windows - ask it to shut down
+
+`pkill -9 qemu-system-x86_64` while Windows is up is an unclean shutdown
+every single time, and they accumulate: enough of them and Windows stops
+booting normally and comes up in recovery instead, which costs a repair
+cycle and someone sitting at the machine. That happened here after a long
+run of experiments, and it was entirely self-inflicted.
+
+Ask first, kill only if it does not finish:
+
+    # graceful: an ACPI power button event, which Windows honours
+    { printf "system_powerdown\n"; sleep 1; } | nc -w 6 <rig> 4446
+    # give it time - a real shutdown takes tens of seconds
+    # only then, if it has not exited:
+    sudo pkill -9 -x qemu-system-x86_64
+
+Two bonuses for free. A graceful shutdown is the only way to exercise the
+`CC.SHN` path, where the guest sets shutdown-notification with `CC.EN`
+still set and the queues are still alive - which is the *easy* half of
+surviving a controller reset. And a Windows that shuts down cleanly boots
+cleanly next time, which is worth more than the seconds saved by killing
+it.
+
+If Windows does end up in recovery: let it boot **without** the hypervisor
+(`boot.sh` rather than `boot-zpp.sh`), let it finish whatever it wants to
+do, and shut it down from inside Windows. Do not try to debug the
+hypervisor against a machine that is mid-repair - nothing measured there
+means anything.
+
+## Reserve a host core, so a wedge cannot cost you the connection
+
+`boot-zpp.sh` used to compute `cpus=$(grep -c ^processor /proc/cpuinfo)`
+and hand the guest **every** logical CPU. A guest processor that spins
+rather than halts never yields its host CPU - and a halted one does, which
+is why only the spinning case bites. With every CPU given away, a VMM bug
+that leaves processors spinning starves the host completely: it stays
+alive and simply never gets scheduled, so ssh reports "No route to host"
+rather than refusing the connection, and only a power cycle recovers it.
+
+Now one physical core - both hyperthreads - is reserved:
+
+    host_cpus=$(grep -c ^processor /proc/cpuinfo)
+    threads=2
+    cpus=$((host_cpus - threads))
+
+which gives a valid topology (6 = 3 cores x 2 threads on this 8-CPU box).
+Measured after the change: Windows reached the kernel and ssh answered on
+every probe throughout the boot.
+
+Keep it while the VMM is being actively broken. It costs one core and it
+removes "lost the machine" from the list of things a bug can do, which
+means an experiment no longer needs someone standing by. `-cpu host` is
+unaffected and stays; the backup of the original is
+`boot-zpp.sh.before-cpu-reserve`.
