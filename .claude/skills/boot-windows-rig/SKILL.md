@@ -74,6 +74,19 @@ touching the disk channel has to boot the real ESP.
    **Never write `/EFI/Boot/bootx64.efi`** - that is Limine, the recovery
    path, and the only way back if a boot leaves the machine unbootable.
 
+   **Never leave a build on the ESP that has not completed successfully at
+   least once.** Between experiments the ESP should hold the last known
+   good loader, not the experiment. A build that hangs Windows is
+   recoverable only while there is a channel to replace it, and the
+   channel is the machine itself - deploy something risky, lose the
+   machine, and the only way back is a power cycle and picking TinyCore
+   out of the Limine menu by hand. That has happened.
+
+   If the machine is unreachable and its ESP holds an experiment, the
+   recovery is: power cycle, select the **first** Limine entry (`/entry`,
+   TinyCore) rather than `/zpp + windows`, then deploy a known good
+   loader before doing anything else.
+
 3. **Make sure something will boot it.** The firmware needs a boot option
    naming `\EFI\zpp\zpp_loader.efi`; see the NVRAM section below, and note
    that Windows reasserts itself at the front of `BootOrder` on every boot it
