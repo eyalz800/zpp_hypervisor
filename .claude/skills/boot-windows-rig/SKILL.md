@@ -5,25 +5,25 @@ description: Use when booting Windows as a guest behind zpp_hypervisor on the Ti
 
 # Booting Windows behind the hypervisor
 
-The rig already exists on the target. **Do not build a QEMU command line by
-hand** - an emulated NVMe with a qcow2 overlay is not equivalent to it and
-will not boot Windows, which wastes a session proving nothing.
+The rig already exists on the target and it is **passthrough only**. Do not
+build a QEMU command line by hand, and do not introduce an emulated
+controller or a copy-on-write image as a "safer" intermediate step. There is
+one rig; everything is tested on it.
 
-**An overlay cannot test the NVMe at all, and it is worth knowing why before
-reaching for one.** It looks like the safe option and it removes the thing
-being tested: with `-device nvme` the guest and the channel talk to QEMU's
-*model* of a controller, so the admin queue borrowed is QEMU's, the doorbell
-stride and `MQES` are QEMU's, and no real-device behaviour is exercised. The
-log blocks land in a file that disappears, when the entire point is that an
-agent elsewhere reads them off the medium. And it cannot be combined with
-passthrough at all - VFIO means the guest drives the hardware directly, so
-there is no layer to interpose a copy-on-write file into.
+That is a deliberate decision, not an oversight. An emulated NVMe removes
+the thing being tested: the guest and the channel would talk to QEMU's
+*model* of a controller, so the admin queue is QEMU's, the doorbell stride
+and `MQES` are QEMU's, and no real-device behaviour is exercised at all. The
+log blocks would land in a file that disappears, when the whole point is
+that an agent elsewhere reads them off the medium. It also cannot be
+combined with passthrough - VFIO means the guest drives the hardware
+directly, so there is no layer to interpose an image into - so anything
+proved that way has to be proved again anyway.
 
-What an overlay *is* good for is the filesystem half: the ESP reservation
-rewrites the FAT32 total-sector count, the FSInfo blocks and the backup boot
-sector, and that can be proved against a copy of the real ESP bytes without
-risking them. Do that first, then do the controller on the real rig with a
-verified backup in hand.
+The consequence is that every experiment risks the real machine, so the
+discipline below is not optional: a verified backup in hand, one variable
+per boot, the known-good loader restored afterwards, and
+`scripts/check-bootable.sh` between the build and the disk.
 
 Target: `tc@192.168.1.199`. RAM-based, so it regenerates its SSH host key on
 every boot - clear the stale key with `ssh-keygen -R` rather than treating the
@@ -158,8 +158,6 @@ touching the disk channel has to boot the real ESP.
   Local QEMU is TCG on an ARM Mac, so the hypervisor cannot launch there - the
   trace stops after `start up memory`. That is expected and still proves which
   loader paths run.
-- **Never reuse a qcow2 overlay across attempts** if one is in play at all -
-  state from a failed boot silently contaminates the next run.
 - A control that fails proves nothing. If Windows will not boot, check that it
   boots *without* the hypervisor in the same configuration before blaming the
   hypervisor.
@@ -665,12 +663,16 @@ in `cli; hlt`. **A frozen RIP inside our own module, rather than in the
 guest, is the signature of a deliberate halt** - read `unhandled_exit` and
 `vm_entry_failure` before anything else.
 
-## Do not iterate on the real NVMe
+## Iterating on the real NVMe, which is the only option
 
 Windows on the passed-through disk has produced one "Inaccessible boot
-device" already, and repeated hard kills are how you get there. Iterate on
-the qcow2 overlay, where a failed borrow costs a discarded file, and use
-the real disk only for a confirming run. After any real-disk run, verify:
+device" already, and repeated hard kills are how you get there. There is no
+safer rig to fall back to, so the cost has to be paid in discipline rather
+than in isolation: back up first, change one thing per boot, keep the
+switch for anything new defaulted **off** so a plain build cannot run it,
+and restore the known-good loader after every experiment. A wedge costs a
+power cycle and needs someone at the machine - budget for that before
+enabling something untried. After any run, verify:
 
     sudo dd if=/dev/nvme0n1 bs=512 skip=1 count=1 | od -An -c -N8       # EFI PART
     sudo dd if=/dev/nvme0n1 bs=512 skip=32768 count=1 | od -An -tu4 -j32 -N4

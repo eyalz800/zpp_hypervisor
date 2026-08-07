@@ -123,12 +123,17 @@ void hypervisor::initialize_module_region()
     // the header". It does not. The scan walks backwards a page at a
     // time from a key inside the module and stops at the first page
     // beginning with those four bytes, which is correct only while
-    // nothing in between happens to. Measured: on the real-NVMe rig it
-    // stopped 0xF7000 *inside* this image and reported a base a megabyte
-    // too high, while the same build on the overlay rig got it right. A
-    // displaced base displaces module_size, the range protect_module
-    // hides from the guest, and the physical map behind the decoy
-    // redirect - so it is not a cosmetic error.
+    // nothing in between happens to. A displaced base would displace
+    // module_size, the range protect_module hides from the guest, and the
+    // physical map behind the decoy redirect, so it is not a cosmetic
+    // error.
+    //
+    // A reading that appeared to show it going wrong was withdrawn - it
+    // came from a machine where the hypervisor was not resident, so the
+    // memory read was not ours. The argument for handing the base over
+    // stands on its own: the loader knows the address exactly, and a scan
+    // that can be wrong is a poor way to learn something the caller
+    // already has.
     //
     // The pad byte in front of the search key in elf_image_base.h is
     // still deliberate: it leaves the key itself unaligned so the search
@@ -4820,6 +4825,16 @@ hypervisor::main(arch::x86_64::context & caller_context)
             auto is_nmi = ((information & type_mask) == type_nmi);
             auto cpu = vmcs.vpid();
 
+            // Nothing retired to produce this exit. The instruction
+            // length field is defined only for exits due to instruction
+            // execution and for software interrupts and exceptions - SDM
+            // 30.2.3 - so for an event-caused exit it holds whatever the
+            // last instruction-caused exit left there. Advancing by it
+            // resumes the guest mid-instruction, and this VMM sends
+            // itself NMIs, so every wake that lands on a running
+            // processor would do it.
+            advance_rip = false;
+
             if (is_nmi && (0 != cpu) && (cpu <= max_cpus) &&
                 this->wake_requested[cpu - 1].exchange(
                     false, std::memory_order_acq_rel)) {
@@ -4827,6 +4842,34 @@ hypervisor::main(arch::x86_64::context & caller_context)
             }
 
             if (is_nmi) {
+                // An NMI may only be injected at an instruction boundary
+                // that is not inside an interrupt shadow. SDM 29.3.1.5
+                // makes it a hard VM-entry check: blocking by STI and
+                // blocking by MOV SS must both be clear when the
+                // injected event type is NMI or external interrupt. The
+                // interruptibility state is saved as it was before the
+                // exit - SDM 30.3.4 - and an NMI recognised at a `sti;
+                // hlt` boundary, which is how an idle Windows processor
+                // waits, saves it with blocking by STI set.
+                //
+                // So the shadow is cleared before injecting. The
+                // alternative KVM takes is to refuse the injection and
+                // open an NMI window instead (vmx_nmi_blocked and
+                // vmx_nmi_allowed); clearing is correct here because the
+                // instruction the shadow belonged to has already retired
+                // - the exit was taken after it - so the boundary it
+                // described no longer exists.
+                //
+                // Getting this wrong does not lose the NMI, it fails the
+                // next VM entry, and a failed entry produces no VM exit -
+                // so it stops the processor with nothing recorded.
+                constexpr std::uint64_t blocking_by_sti = 1ull << 0;
+                constexpr std::uint64_t blocking_by_mov_ss = 1ull << 1;
+
+                vmcs.guest_interruptibility_state(
+                    vmcs.guest_interruptibility_state() &
+                    ~(blocking_by_sti | blocking_by_mov_ss));
+
                 ++this->guest_nmis_reinjected;
                 vmcs.vm_entry_interruption_information_field(
                     valid | type_nmi | 2u);

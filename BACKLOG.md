@@ -782,8 +782,8 @@ GPT signature, ESP still shrunk to 33423360 sectors, Windows boot region
 readable, reserved region still stamped - and the full binary backup on
 the external SSD remains the fallback.
 
-Continue this leg from the overlay, where a failed attempt costs a
-discarded file, and move to the real disk only for a confirming run.
+Continue this leg on the passed-through disk, carefully - see the decision
+recorded at the end of this file, which retires the copy-on-write rig.
 
 ## Resolved: the real-NVMe channel stops at the guest's controller reset
 
@@ -1224,3 +1224,40 @@ recorded earlier - at the CC.EN 0 to 1 edge, program our own ASQ/ACQ while
 CC.EN is clear, create a private queue, then restore the guest's registers
 - which avoids both the borrow from a live driver and the queue identifier
 collision that would make Windows' own Create fail.
+
+## Decision: the passed-through disk is the only rig
+
+The copy-on-write image and emulated-controller rig is retired. Everything
+is tested against the real controller, passed through.
+
+Why, since it looked like the safe option: an emulated NVMe removes the
+thing being tested. The guest and the channel talk to a *model* of a
+controller, so the admin queue borrowed is the model's, the doorbell stride
+and MQES are the model's, and no real-device behaviour is exercised - the
+one property the channel depends on. The log blocks land in a file that is
+then discarded, when the whole point is that an agent elsewhere reads them
+off the medium. And it cannot be combined with passthrough at all, because
+VFIO means the guest drives the hardware directly and there is no layer to
+interpose an image into, so anything proved that way has to be proved again
+on the real thing regardless.
+
+It also actively misled this work. Several conclusions were drawn from
+agreement or disagreement between the two rigs - a module base that "the
+same build computed correctly elsewhere", a channel that "logs
+indefinitely" - and the emulated controller simply never resets, so it
+never exercised the one event the design has to survive. Comparing two rigs
+where only one is real produced confident wrong answers more than once.
+
+What replaces the isolation is discipline, and it is not optional now:
+
+  - a verified backup before anything, which exists on the external SSD
+  - one variable per boot
+  - anything new defaulted **off**, so a plain build cannot run it
+  - scripts/check-bootable.sh between the build and the disk
+  - the known-good loader restored after every experiment
+  - and an accepted cost: a wedge needs someone at the machine to power
+    cycle it, so that has to be budgeted before enabling something untried
+
+The historical measurements above that name the other rig are left as they
+were written, because they are what was actually observed at the time -
+including the ones that were later withdrawn, and why.
