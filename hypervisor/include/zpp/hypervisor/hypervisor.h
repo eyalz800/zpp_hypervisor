@@ -2359,6 +2359,39 @@ private:
     volatile std::uint64_t apic_writes_undecoded{};
 
     /**
+     * The opening bytes of instructions the store decoder refused, and how
+     * many it has refused.
+     *
+     * The decoder covers the MOV forms that store a register or an
+     * immediate and refuses everything else, which is safe - the caller
+     * falls back to letting the guest's own instruction run - but it is
+     * not free: the interrupt command handler cannot act on a write it
+     * could not decode, so a start-up IPI in a refused form is a processor
+     * that never joins. Forty-five per cent of one guest's writes to the
+     * local APIC page were refused.
+     *
+     * Naming the forms is the whole point, and a count cannot do it. This
+     * keeps the first bytes so the opcode and its prefixes can be read
+     * off, and freezes when full because the interesting ones arrive
+     * during start-up.
+     * @{
+     */
+    static constexpr std::size_t refused_instruction_capacity = 64;
+    static constexpr std::size_t refused_instruction_bytes = 8;
+
+    struct refused_instruction
+    {
+        std::uint8_t code[refused_instruction_bytes]{};
+        std::uint64_t page{};
+    };
+
+    refused_instruction refused_instructions[refused_instruction_capacity]{};
+    volatile std::uint64_t refused_instruction_count{};
+    /**
+     * @}
+     */
+
+    /**
      * Synthetic hypervisor MSR accesses forwarded to whatever this VMM
      * runs under, rather than faulted.
      *

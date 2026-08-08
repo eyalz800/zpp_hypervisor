@@ -2957,8 +2957,30 @@ std::optional<arch::x86_64::memory_store> hypervisor::decode_guest_store(
         }
     }
 
-    return arch::x86_64::decode_memory_store(
+    auto store = arch::x86_64::decode_memory_store(
         std::as_bytes(std::span{code}), context);
+
+    // What was refused, so the forms can be named rather than counted.
+    //
+    // The bytes are already here - the fetch above did the work - and a
+    // count has already proved insufficient once: it said forty-five per
+    // cent of a guest's local APIC writes were refused and could not say
+    // which instructions they were, which is what decides whether covering
+    // them is a morning's work or a decoder rewrite.
+    if (!store) {
+        auto slot = this->refused_instruction_count;
+        this->refused_instruction_count = slot + 1;
+
+        if (slot < refused_instruction_capacity) {
+            auto & recorded = this->refused_instructions[slot];
+            for (std::size_t i{}; i < refused_instruction_bytes; ++i) {
+                recorded.code[i] = code[i];
+            }
+            recorded.page = this->vmcs.guest_physical_address() >> 12;
+        }
+    }
+
+    return store;
 }
 
 bool hypervisor::apply_guest_store(
