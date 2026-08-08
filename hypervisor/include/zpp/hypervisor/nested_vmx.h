@@ -114,37 +114,40 @@ inline constexpr bool pass_through_hypervisor_interface = false;
  * signature in the second leaf is what a guest matches on; the vendor
  * stays ours, which is what the reference does too.
  *
- * **Off, and off because announcing stops the machine reaching an
- * operating system at all.** Measured on the rig, same tree, same build,
- * one constant apart:
+ * **On, and it took implementing the interface's MSRs to get there.**
+ * Announcing used to stop the machine reaching an operating system at
+ * all, and the sequence was measured rather than reasoned about: the
+ * boot processor's last four exits were CPUID, CPUID, an RDMSR at guest
+ * RIP 0x1e086fd, and a triple fault at that same RIP, with exactly one
+ * MSR index ever faulted - 0x40000001, the hypercall MSR. Announcing an
+ * interface publishes its signature, the guest reads that MSR whether or
+ * not any feature bit invites it to, and a general protection fault
+ * there is fatal.
  *
- * - announced: the guest never leaves firmware. Its instruction pointer
- *   was identical on samples minutes apart, only the boot processor ever
- *   took an exit, and no application processor started. That is EDK2's
- *   MpInitLib waiting in WaitApWakeup for processors that never wake -
- *   the same shape a destructive self check leaves behind, arrived at
- *   from a different direction.
- * - not announced: the guest reaches the Windows kernel.
+ * So the MSRs are answered now - identity, the hypercall page and the
+ * processor index - and with them the same build reaches the Windows
+ * kernel with two processors running and no MSR faulted at all, where it
+ * had been sitting in this VMM's own halt loop after an unhandled triple
+ * fault. The guest also starts asking: 688 hypervisor leaves in a boot,
+ * against zero when nothing is announced.
  *
- * This was expensive to find and the reason is worth keeping: the
- * constant was flipped in the same commit that added an instruction
- * decoder, so the first boot that failed was blamed on the decoder, and
- * several boots went into bisecting a change that was innocent. The
- * decoder refuses **nothing** on this workload - measured, `refused
- * count` zero - and emulates only one instruction form. **A behavioural
- * switch does not belong in a commit that adds a mechanism**, because
- * the mechanism is what gets blamed.
+ * Two lessons are worth more than the fix. The switch was flipped in the
+ * commit that added an instruction decoder, so the first failing boot was
+ * blamed on the decoder and several boots went into bisecting a change
+ * that was innocent - **a behavioural switch does not belong in a commit
+ * that adds a mechanism.** And the state sampled from the emulator's
+ * monitor showed CS 8 with RFLAGS 2, which is this VMM's own host
+ * selector and the flags a VM exit loads, not the guest at all; reading
+ * it as guest state cost a wrong conclusion.
  *
- * What has to change before it can go on: the guest's start-up path when
- * it believes it is virtualized has to work. Carrying the faulting
- * offset through the stepped path was necessary and is done, and is not
- * sufficient - announcing still wedges with it in place. The next thing
- * to establish is what the guest actually does to start a processor once
- * it knows it is virtualized, which is a question about the guest's own
- * loader rather than about this VMM, and is why nothing further is
- * guessed at here.
+ * What is still not backed: no feature bit is claimed, so no hypercall,
+ * reference counter, reference TSC or frequency MSR is offered, and
+ * those still fault - which is the honest answer while nothing here
+ * implements them. A guest hypervisor has not armed yet
+ * (`guest_vmxon_count` zero), so the next question is what else virtualization
+ * based security wants before it will.
  */
-inline constexpr bool announce_hypervisor = false;
+inline constexpr bool announce_hypervisor = true;
 
 inline constexpr bool enabled =
 #if defined(ZPP_NESTED_VMX) && ZPP_NESTED_VMX

@@ -8485,7 +8485,147 @@ hypervisor::main(arch::x86_64::context & caller_context)
                 }
             }
 
+            // The hypervisor interface's own MSRs, which exist only
+            // because we said a hypervisor was here.
+            //
+            // **Announcing one and then faulting its MSRs killed the
+            // guest outright.** Measured on the rig: with the present bit
+            // set, the boot processor's last four exits were CPUID,
+            // CPUID, RDMSR at guest RIP 0x1e086fd, and a triple fault at
+            // the same RIP - and exactly one MSR index was ever faulted,
+            // 0x40000001. So the guest reads the hypercall MSR whether or
+            // not any feature bit invites it to, and a general protection
+            // fault there is fatal rather than informative. That is this
+            // project's recurring mistake stated exactly: answering part
+            // of an interface. Announce the interface and these are part
+            // of it.
+            //
+            // Three are answered and no more. Identity and the hypercall
+            // page are what the measurement demanded; the processor index
+            // is answered because it costs a register and a guest that
+            // has a hypercall page will ask for it. Everything else -
+            // reference counter, reference TSC, the frequency MSRs -
+            // stays faulting, which is honest: nothing here backs them,
+            // and no feature bit claims them.
+            if constexpr (nested_vmx::announce_hypervisor) {
+                constexpr std::uint32_t guest_os_id_msr = 0x40000000;
+                constexpr std::uint32_t hypercall_msr = 0x40000001;
+                constexpr std::uint32_t vp_index_msr = 0x40000002;
+
+                auto index = static_cast<std::uint32_t>(context.rcx);
+                auto answered = true;
+
+                if (basic_reason::rdmsr == reason) {
+                    std::uint64_t value{};
+
+                    switch (index) {
+                    case guest_os_id_msr:
+                        value = this->hyperv_guest_os_id;
+                        break;
+                    case hypercall_msr:
+                        value = this->hyperv_hypercall;
+                        break;
+                    case vp_index_msr:
+                        value = cpuid;
+                        break;
+                    default:
+                        answered = false;
+                        break;
+                    }
+
+                    if (answered) {
+                        context.rax = value & 0xffffffff;
+                        context.rdx = value >> 32;
+                    }
+                } else {
+                    auto value = (context.rax & 0xffffffff) |
+                                 (context.rdx << 32);
+
+                    switch (index) {
+                    case guest_os_id_msr:
+                        this->hyperv_guest_os_id = value;
+
+                        // Clearing the identity retires the hypercall
+                        // page, so a guest cannot leave one enabled
+                        // behind an identity it has withdrawn.
+                        if (0 == value) {
+                            this->hyperv_hypercall =
+                                this->hyperv_hypercall & ~std::uint64_t{1};
+                        }
+                        break;
+
+                    case hypercall_msr:
+                        // Not installed before the guest has identified
+                        // itself, which is the order the reference keeps
+                        // - but the write is still accepted. Faulting it
+                        // is what killed the guest, and the fault is not
+                        // made better by having a reason.
+                        if (0 == this->hyperv_guest_os_id) {
+                            this->hypercall_page_early =
+                                this->hypercall_page_early + 1;
+                            this->hyperv_hypercall = value;
+                            break;
+                        }
+
+                        this->hyperv_hypercall = value;
+
+                        if (0 != (value & 1)) {
+                            // What the guest will call, and all it will
+                            // ever get: `mov rax, 2` then `ret`, which is
+                            // the invalid-hypercall-code status. A
+                            // hypervisor that implements no hypercalls
+                            // must fail them all cleanly rather than
+                            // return success for a call it did not make.
+                            //
+                            // Written as one eight byte store because
+                            // that is exactly the instruction pair, in
+                            // the order the bytes 48 c7 c0 02 00 00 00 c3
+                            // appear in memory. Long mode only: nothing
+                            // reaching this VMM's guests calls a
+                            // hypercall page from 32 bit code, and a
+                            // wrong answer there is better refused than
+                            // guessed.
+                            auto page = arch::x86_64::memory_store{
+                                .value = 0xc300000002c0c748ull,
+                                .size = 8,
+                            };
+
+                            // Counted rather than faulted. A page this
+                            // VMM could not fill leaves the guest calling
+                            // into whatever the page already held, which
+                            // is bad - but the alternative is the fault
+                            // that is already known to be fatal, so the
+                            // failure is recorded and the guest runs.
+                            if (!apply_guest_store((value >> 12) << 12,
+                                                   page)) {
+                                this->hypercall_page_unwritable =
+                                    this->hypercall_page_unwritable + 1;
+                            }
+                        }
+                        break;
+
+                    default:
+                        answered = false;
+                        break;
+                    }
+                }
+
+                if (answered) {
+                    this->synthetic_msr_accesses =
+                        this->synthetic_msr_accesses + 1;
+                    break;
+                }
+            }
+
             inject_general_protection_fault();
+
+            // The same index the log records below, in a form that can be
+            // read out of a wedged guest through the emulator's monitor.
+            if (auto slot = this->faulted_msr_count;
+                slot < faulted_msr_capacity) {
+                this->faulted_msrs[slot] = context.rcx;
+                this->faulted_msr_count = slot + 1;
+            }
 
             // The MSR index, which is the one thing needed to tell an
             // absent architectural MSR from a synthetic one a guest was

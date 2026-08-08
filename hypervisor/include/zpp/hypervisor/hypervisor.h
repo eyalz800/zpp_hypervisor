@@ -2578,6 +2578,64 @@ private:
     volatile std::uint64_t synthetic_msr_accesses{};
 
     /**
+     * The guest operating system identity, as the guest declared it.
+     *
+     * It exists to gate the hypercall page: a guest that has not
+     * identified itself has no business enabling one, and the reference
+     * implementation refuses the enable in that order. Zero means it has
+     * not, and writing zero back retires the hypercall page with it.
+     */
+    volatile std::uint64_t hyperv_guest_os_id{};
+
+    /**
+     * The hypercall page's location and enable, in the layout the guest
+     * writes: bit 0 enables it, and bits 63:12 are the guest page frame
+     * the instructions are to be written into.
+     */
+    volatile std::uint64_t hyperv_hypercall{};
+
+    /**
+     * Hypercall page enables that could not be carried out, split by why.
+     *
+     * Neither is answered with a fault. **A general protection fault on
+     * this MSR is what killed the guest**, so refusing the write the way
+     * an absent MSR is refused reintroduces exactly the failure the MSR
+     * was implemented to remove - measured as a second wedge, with the
+     * index faulted once and three other accesses answered. The write is
+     * accepted and the page is simply not installed, which is what the
+     * reference does for the first of these.
+     *
+     * `early` counts an enable that arrived before the guest identified
+     * itself; `unwritable` counts a page this VMM could not store into.
+     * They are separate because they mean different things: the first is
+     * the guest's ordering and is legitimate, the second is a failure
+     * here.
+     */
+    volatile std::uint64_t hypercall_page_early{};
+
+    volatile std::uint64_t hypercall_page_unwritable{};
+
+    /**
+     * The first MSR indices this VMM answered with a general protection
+     * fault, oldest first, frozen once full.
+     *
+     * The log already records every one of them, but the log is a list of
+     * heap strings and reading it needs a debugger that can walk it. This
+     * needs two reads through the emulator's monitor, which is what is
+     * available while a guest is wedged.
+     *
+     * The first is what matters rather than the last. A guest that faults
+     * on an MSR usually dies on that one, and everything after it is the
+     * wreckage - so a ring that kept the newest would record the
+     * consequences and drop the cause.
+     */
+    static constexpr std::size_t faulted_msr_capacity = 16;
+
+    volatile std::uint64_t faulted_msrs[faulted_msr_capacity]{};
+
+    volatile std::uint64_t faulted_msr_count{};
+
+    /**
      * Which CPUID leaves the guest asked for, in order, and what it was
      * answered in ECX.
      *
