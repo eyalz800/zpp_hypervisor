@@ -455,7 +455,7 @@ bool hypervisor::on_vmx_instruction(arch::x86_64::vmx::exit_reason reason,
     case basic_reason::vmxon:
         return on_guest_vmxon(cpu, context);
     case basic_reason::vmxoff:
-        return on_guest_vmxoff(cpu, context);
+        return on_guest_vmxoff(cpu);
     case basic_reason::vmclear:
         return on_guest_vmclear(cpu, context);
     case basic_reason::vmptrld:
@@ -468,7 +468,7 @@ bool hypervisor::on_vmx_instruction(arch::x86_64::vmx::exit_reason reason,
         return on_guest_vmwrite(cpu, context);
     case basic_reason::vmlaunch:
     case basic_reason::vmresume:
-        return on_guest_vmlaunch(cpu, context, basic);
+        return on_guest_vmlaunch(cpu, basic);
     case basic_reason::invept:
     case basic_reason::invvpid:
         // Both are refused with the error the architecture reserves for a
@@ -481,7 +481,6 @@ bool hypervisor::on_vmx_instruction(arch::x86_64::vmx::exit_reason reason,
         // reports success has told a first-level hypervisor its extended
         // page tables were invalidated, and nothing here has any.
         vmx_fail(cpu,
-                 context,
                  instruction_error::invalid_operand_to_invept_invvpid);
         return true;
     case basic_reason::vmcall:
@@ -491,8 +490,7 @@ bool hypervisor::on_vmx_instruction(arch::x86_64::vmx::exit_reason reason,
         // that case. This VMM implements no hypercall interface, which
         // the hypervisor CPUID range already says by answering zero for
         // the interface and feature leaves.
-        vmx_fail(
-            cpu, context, instruction_error::vmcall_in_vmx_root_operation);
+        vmx_fail(cpu, instruction_error::vmcall_in_vmx_root_operation);
         return true;
     case basic_reason::vmfunc:
         // No VM function is supported: IA32_VMX_VMFUNC reads as zero and
@@ -505,32 +503,33 @@ bool hypervisor::on_vmx_instruction(arch::x86_64::vmx::exit_reason reason,
     }
 }
 
-void hypervisor::vmx_succeed(arch::x86_64::context & context)
+void hypervisor::vmx_succeed()
 {
     // SDM 33.2, VMsucceed: every arithmetic flag cleared.
-    static_cast<void>(context);
+    //
+    // In the VMCS rather than in the captured context, and that is not
+    // interchangeable: the context holds the *host's* flags, since it is
+    // what restore_context puts back before executing the resume. The
+    // guest's RFLAGS is loaded from this field on VM entry and from
+    // nowhere else.
     this->vmcs.guest_rflags(this->vmcs.guest_rflags() &
                             ~rflags_arithmetic);
 }
 
-void hypervisor::vmx_fail_invalid(arch::x86_64::context & context)
+void hypervisor::vmx_fail_invalid()
 {
     // SDM 33.2, VMfailInvalid: carry set, the rest cleared. This is the
     // failure that carries no error number, because there is no current
     // VMCS to record one in.
-    static_cast<void>(context);
     this->vmcs.guest_rflags(
         (this->vmcs.guest_rflags() & ~rflags_arithmetic) | rflags_carry);
 }
 
-void hypervisor::vmx_fail_valid(std::size_t cpu,
-                                arch::x86_64::context & context,
-                                instruction_error error)
+void hypervisor::vmx_fail_valid(std::size_t cpu, instruction_error error)
 {
     // SDM 33.2, VMfailValid: zero set, the rest cleared, and the error
     // number written to the VM-instruction error field of the current
     // VMCS - which is the shadow, not this VMM's own.
-    static_cast<void>(context);
     this->vmcs.guest_rflags(
         (this->vmcs.guest_rflags() & ~rflags_arithmetic) | rflags_zero);
 
@@ -539,19 +538,17 @@ void hypervisor::vmx_fail_valid(std::size_t cpu,
         static_cast<std::uint64_t>(error));
 }
 
-void hypervisor::vmx_fail(std::size_t cpu,
-                          arch::x86_64::context & context,
-                          instruction_error error)
+void hypervisor::vmx_fail(std::size_t cpu, instruction_error error)
 {
     // SDM 33.2, VMfail: "IF VMCS pointer is valid THEN
     // VMfailValid(ErrorNumber); ELSE VMfailInvalid". The error number has
     // nowhere to go without a current VMCS.
     if (no_current_vmcs == this->guest_current_vmcs[cpu]) {
-        vmx_fail_invalid(context);
+        vmx_fail_invalid();
         return;
     }
 
-    vmx_fail_valid(cpu, context, error);
+    vmx_fail_valid(cpu, error);
 }
 
 std::expected<std::uint64_t, zpp::error>
@@ -788,8 +785,7 @@ bool hypervisor::on_guest_vmxon(std::size_t cpu,
     // Already in VMX operation, which is a failure and not a fault. SDM
     // 33.3, VMXON: "ELSE VMfail('VMXON executed in VMX root operation')".
     if (this->guest_in_vmx_operation[cpu]) {
-        vmx_fail(
-            cpu, context, instruction_error::vmxon_in_vmx_root_operation);
+        vmx_fail(cpu, instruction_error::vmxon_in_vmx_root_operation);
         return true;
     }
 
@@ -816,7 +812,7 @@ bool hypervisor::on_guest_vmxon(std::size_t cpu,
     }
 
     if (!vmcs_pointer_valid(*pointer)) {
-        vmx_fail_invalid(context);
+        vmx_fail_invalid();
         return true;
     }
 
@@ -830,12 +826,12 @@ bool hypervisor::on_guest_vmxon(std::size_t cpu,
         std::span(reinterpret_cast<std::byte *>(&revision),
                   sizeof(revision)));
     if (!read) {
-        vmx_fail_invalid(context);
+        vmx_fail_invalid();
         return true;
     }
 
     if (vmcs12::revision != revision) {
-        vmx_fail_invalid(context);
+        vmx_fail_invalid();
         return true;
     }
 
@@ -846,12 +842,11 @@ bool hypervisor::on_guest_vmxon(std::size_t cpu,
 
     log("cpu {} guest vmxon at {}", cpu, *pointer);
 
-    vmx_succeed(context);
+    vmx_succeed();
     return true;
 }
 
-bool hypervisor::on_guest_vmxoff(std::size_t cpu,
-                                 arch::x86_64::context & context)
+bool hypervisor::on_guest_vmxoff(std::size_t cpu)
 {
     // Anything still current has to reach its own region before the
     // pointer to it is forgotten. SDM 27.11.1 asks for the same thing of
@@ -867,7 +862,7 @@ bool hypervisor::on_guest_vmxoff(std::size_t cpu,
 
     log("cpu {} guest vmxoff", cpu);
 
-    vmx_succeed(context);
+    vmx_succeed();
     return true;
 }
 
@@ -898,13 +893,12 @@ bool hypervisor::on_guest_vmclear(std::size_t cpu,
     }
 
     if (!vmcs_pointer_valid(*pointer)) {
-        vmx_fail(cpu, context, instruction_error::vmclear_invalid_address);
+        vmx_fail(cpu, instruction_error::vmclear_invalid_address);
         return true;
     }
 
     if (*pointer == this->guest_vmxon_pointer[cpu]) {
-        vmx_fail(
-            cpu, context, instruction_error::vmclear_with_vmxon_pointer);
+        vmx_fail(cpu, instruction_error::vmclear_with_vmxon_pointer);
         return true;
     }
 
@@ -917,7 +911,7 @@ bool hypervisor::on_guest_vmclear(std::size_t cpu,
         flush_guest_vmcs12(cpu);
         this->guest_current_vmcs[cpu] = no_current_vmcs;
 
-        vmx_succeed(context);
+        vmx_succeed();
         return true;
     }
 
@@ -934,7 +928,7 @@ bool hypervisor::on_guest_vmclear(std::size_t cpu,
         std::span(reinterpret_cast<const std::byte *>(&cleared),
                   sizeof(cleared))));
 
-    vmx_succeed(context);
+    vmx_succeed();
     return true;
 }
 
@@ -947,13 +941,12 @@ bool hypervisor::on_guest_vmptrld(std::size_t cpu,
     }
 
     if (!vmcs_pointer_valid(*pointer)) {
-        vmx_fail(cpu, context, instruction_error::vmptrld_invalid_address);
+        vmx_fail(cpu, instruction_error::vmptrld_invalid_address);
         return true;
     }
 
     if (*pointer == this->guest_vmxon_pointer[cpu]) {
-        vmx_fail(
-            cpu, context, instruction_error::vmptrld_with_vmxon_pointer);
+        vmx_fail(cpu, instruction_error::vmptrld_with_vmxon_pointer);
         return true;
     }
 
@@ -966,14 +959,12 @@ bool hypervisor::on_guest_vmptrld(std::size_t cpu,
         *pointer,
         std::span(reinterpret_cast<std::byte *>(&loaded), sizeof(loaded)));
     if (!read) {
-        vmx_fail(cpu, context, instruction_error::vmptrld_invalid_address);
+        vmx_fail(cpu, instruction_error::vmptrld_invalid_address);
         return true;
     }
 
     if (vmcs12::revision != loaded.revision_id()) {
-        vmx_fail(cpu,
-                 context,
-                 instruction_error::vmptrld_incorrect_revision_id);
+        vmx_fail(cpu, instruction_error::vmptrld_incorrect_revision_id);
         return true;
     }
 
@@ -987,7 +978,7 @@ bool hypervisor::on_guest_vmptrld(std::size_t cpu,
     this->guest_vmcs12[cpu] = loaded;
     this->guest_current_vmcs[cpu] = *pointer;
 
-    vmx_succeed(context);
+    vmx_succeed();
     return true;
 }
 
@@ -1012,7 +1003,7 @@ bool hypervisor::on_guest_vmptrst(std::size_t cpu,
         return false;
     }
 
-    vmx_succeed(context);
+    vmx_succeed();
     return true;
 }
 
@@ -1032,13 +1023,12 @@ bool hypervisor::on_guest_vmread(std::size_t cpu,
     // field to record why. SDM 33.3, VMREAD: "IF (in VMX root operation
     // AND current-VMCS pointer is not valid) ... THEN VMfailInvalid".
     if (no_current_vmcs == this->guest_current_vmcs[cpu]) {
-        vmx_fail_invalid(context);
+        vmx_fail_invalid();
         return true;
     }
 
     if (!encoding.valid()) {
-        vmx_fail(
-            cpu, context, instruction_error::unsupported_vmcs_component);
+        vmx_fail(cpu, instruction_error::unsupported_vmcs_component);
         return true;
     }
 
@@ -1046,7 +1036,7 @@ bool hypervisor::on_guest_vmread(std::size_t cpu,
 
     if (operand.is_register) {
         set_guest_register(context, operand.register_1, value);
-        vmx_succeed(context);
+        vmx_succeed();
         return true;
     }
 
@@ -1071,7 +1061,7 @@ bool hypervisor::on_guest_vmread(std::size_t cpu,
         return false;
     }
 
-    vmx_succeed(context);
+    vmx_succeed();
     return true;
 }
 
@@ -1085,7 +1075,7 @@ bool hypervisor::on_guest_vmwrite(std::size_t cpu,
         vmcs_field_encoding(guest_register(context, operand.register_2));
 
     if (no_current_vmcs == this->guest_current_vmcs[cpu]) {
-        vmx_fail_invalid(context);
+        vmx_fail_invalid();
         return true;
     }
 
@@ -1119,34 +1109,29 @@ bool hypervisor::on_guest_vmwrite(std::size_t cpu,
     }
 
     if (!encoding.valid()) {
-        vmx_fail(
-            cpu, context, instruction_error::unsupported_vmcs_component);
+        vmx_fail(cpu, instruction_error::unsupported_vmcs_component);
         return true;
     }
 
     if (encoding.read_only()) {
-        vmx_fail(cpu,
-                 context,
-                 instruction_error::vmwrite_to_read_only_component);
+        vmx_fail(cpu, instruction_error::vmwrite_to_read_only_component);
         return true;
     }
 
     this->guest_vmcs12[cpu].write(encoding, value);
 
-    vmx_succeed(context);
+    vmx_succeed();
     return true;
 }
 
-bool hypervisor::on_guest_vmlaunch(std::size_t cpu,
-                                   arch::x86_64::context & context,
-                                   basic_reason reason)
+bool hypervisor::on_guest_vmlaunch(std::size_t cpu, basic_reason reason)
 {
     // The launch-state checks first, because they are the ones the
     // architecture puts before any consistency check and the ones a
     // first-level hypervisor's own error handling is written around. SDM
     // 33.3, VMLAUNCH/VMRESUME.
     if (no_current_vmcs == this->guest_current_vmcs[cpu]) {
-        vmx_fail_invalid(context);
+        vmx_fail_invalid();
         return true;
     }
 
@@ -1154,16 +1139,13 @@ bool hypervisor::on_guest_vmlaunch(std::size_t cpu,
 
     if ((basic_reason::vmlaunch == reason) &&
         (vmcs12::launch_state::clear != shadow.state())) {
-        vmx_fail(
-            cpu, context, instruction_error::vmlaunch_with_non_clear_vmcs);
+        vmx_fail(cpu, instruction_error::vmlaunch_with_non_clear_vmcs);
         return true;
     }
 
     if ((basic_reason::vmresume == reason) &&
         (vmcs12::launch_state::launched != shadow.state())) {
-        vmx_fail(cpu,
-                 context,
-                 instruction_error::vmresume_with_non_launched_vmcs);
+        vmx_fail(cpu, instruction_error::vmresume_with_non_launched_vmcs);
         return true;
     }
 
@@ -1197,7 +1179,7 @@ bool hypervisor::on_guest_vmlaunch(std::size_t cpu,
         cpu,
         (basic_reason::vmlaunch == reason) ? "vmlaunch" : "vmresume");
 
-    vmx_fail(cpu, context, instruction_error::entry_invalid_control_field);
+    vmx_fail(cpu, instruction_error::entry_invalid_control_field);
     return true;
 }
 

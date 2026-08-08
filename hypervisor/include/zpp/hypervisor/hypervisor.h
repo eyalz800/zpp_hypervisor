@@ -1307,14 +1307,11 @@ private:
      * not, because the error field lives in that VMCS.
      * @{
      */
-    void vmx_succeed(arch::x86_64::context & context);
-    void vmx_fail_invalid(arch::x86_64::context & context);
+    void vmx_succeed();
+    void vmx_fail_invalid();
     void vmx_fail_valid(std::size_t cpu,
-                        arch::x86_64::context & context,
                         nested_vmx::instruction_error error);
-    void vmx_fail(std::size_t cpu,
-                  arch::x86_64::context & context,
-                  nested_vmx::instruction_error error);
+    void vmx_fail(std::size_t cpu, nested_vmx::instruction_error error);
     /**
      * @}
      */
@@ -1412,7 +1409,7 @@ private:
      * @{
      */
     bool on_guest_vmxon(std::size_t cpu, arch::x86_64::context & context);
-    bool on_guest_vmxoff(std::size_t cpu, arch::x86_64::context & context);
+    bool on_guest_vmxoff(std::size_t cpu);
     bool on_guest_vmclear(std::size_t cpu,
                           arch::x86_64::context & context);
     bool on_guest_vmptrld(std::size_t cpu,
@@ -1424,7 +1421,6 @@ private:
                           arch::x86_64::context & context);
     bool
     on_guest_vmlaunch(std::size_t cpu,
-                      arch::x86_64::context & context,
                       arch::x86_64::vmx::exit_reason::basic_reason reason);
     /**
      * @}
