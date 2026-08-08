@@ -30,6 +30,34 @@ static_assert(arch::x86_64::vmx::nested_entry_recovery_field ==
               "The nested entry stubs and the VMCS field disagree.");
 
 /**
+ * The two fields the TPR shadow is carried in, checked against what a
+ * shadow VMCS has storage for.
+ *
+ * Offering primary bit 21 is a promise a guest hypervisor can *write*
+ * these, and `vmcs_field_encoding::valid` is what decides that - a field
+ * whose index is past `index_capacity` is answered with error 12 and the
+ * control becomes unusable. Both are 64-bit and 32-bit control fields at
+ * indices 9 and 14, comfortably inside it, but the pairing is checked here
+ * rather than worked out by hand again: advertising a control whose fields
+ * cannot be written would be the same half-answered interface withholding
+ * it was.
+ * @{
+ */
+static_assert(vmcs_field_encoding(
+                  static_cast<std::uint64_t>(field::virtual_apic_address))
+                  .valid(),
+              "A guest hypervisor could not write the virtual-APIC "
+              "address the TPR shadow needs.");
+
+static_assert(
+    vmcs_field_encoding(static_cast<std::uint64_t>(field::tpr_threshold))
+        .valid(),
+    "A guest hypervisor could not write the TPR threshold.");
+/**
+ * @}
+ */
+
+/**
  * The pin-based controls this code names, from SDM Table 25-5.
  * @{
  */
@@ -742,8 +770,8 @@ std::expected<void, zpp::error> hypervisor::build_vmcs02(std::size_t cpu)
     if (0 == this->vmcs12_controls_captured) {
         this->vmcs12_pin_controls = pin12;
         this->vmcs12_primary_controls = primary12;
-        this->vmcs12_secondary_controls =
-            shadow.read(field::secondary_processor_based_vm_execution_controls);
+        this->vmcs12_secondary_controls = shadow.read(
+            field::secondary_processor_based_vm_execution_controls);
         this->vmcs12_exit_controls = exit12;
         this->vmcs12_entry_controls = entry12;
         this->vmcs12_controls_captured = 1;
@@ -911,6 +939,116 @@ std::expected<void, zpp::error> hypervisor::build_vmcs02(std::size_t cpu)
         eptp02 = pointer;
     }
 
+    // The TPR shadow, which a real guest hypervisor was measured setting -
+    // primary 0xa4206dfa, bit 21 - and which withholding cost seventeen
+    // second-level entries and then a boot loop. nested_vmx.h carries the
+    // whole capture. Three outcomes here: honoured, replaced, or refused.
+    auto tpr_shadow12 = 0 != (primary12 & primary_tpr_shadow);
+    auto honour_tpr_shadow = false;
+    std::uint64_t virtual_apic12{};
+    std::uint64_t tpr_threshold12{};
+
+    if (tpr_shadow12) {
+        virtual_apic12 = shadow.read(field::virtual_apic_address);
+        tpr_threshold12 = shadow.read(field::tpr_threshold);
+
+        // SDM 29.2.1.1 puts one check on the threshold that always
+        // applies here: "If the 'use TPR shadow' VM-execution control is 1
+        // and the 'virtual-interrupt delivery' VM-execution control is 0,
+        // bits 31:4 of the TPR threshold VM-execution control field must
+        // be 0." Virtual-interrupt delivery is not offered, so the second
+        // half of that condition is always true.
+        //
+        // The same paragraph has a second rule about the threshold - that
+        // its bits 3:0 "should not be greater than the value of bits 7:4
+        // of VTPR" - which is deliberately not checked. It says *should*
+        // rather than *must*, it would cost a guest page read on every
+        // entry, and KVM does not check it either.
+        if (0 != (tpr_threshold12 & ~0xfull)) {
+            return std::unexpected(
+                zpp::error{error::nested_controls_unsupported});
+        }
+
+        // The address, which is the part that has to be got right. SDM
+        // 29.2.1.1 lists the virtual-APIC address among the fields whose
+        // "bits 11:0 must be 0, and the fields are also subject to the
+        // checks on physical-address width described above in Section
+        // 28.2.1". KVM checks exactly those two, in
+        // `nested_vmx_check_tpr_shadow_controls` through
+        // `page_address_valid`.
+        //
+        // Two checks are added to them, and both are this VMM's rather
+        // than the architecture's.
+        //
+        // Zero is refused. A processor would accept it - page zero is 4 KB
+        // aligned and within any width - but a guest hypervisor that set
+        // the control and never wrote the field leaves exactly zero
+        // behind, since a shadow VMCS starts zeroed, and page zero holds
+        // the real-mode interrupt vector table. Accepting it would have
+        // the processor write VTPR over the guest's own IVT.
+        //
+        // Then the one that matters. **The processor reads and writes this
+        // page in root operation, where extended page tables do not
+        // apply** - so none of this VMM's protections cover those
+        // accesses. The module's own pages, the log queue storage and
+        // every watched page are hidden from the guest by extended
+        // page-table permissions and by nothing else, so a guest
+        // hypervisor naming one of them here would have the processor
+        // write into it on its behalf. That is the same hazard the MSR
+        // areas carry, and the reason their addresses are never handed to
+        // the processor at all; this one has to be, because the whole
+        // point of the control is that the processor uses the page.
+        //
+        // host_ept_lookup answers it directly and without allocating: it
+        // is this VMM's own translation for the address with the
+        // permissions accumulated down the walk. The test is therefore the
+        // right one rather than a list that can drift - may the guest
+        // itself read and write this page? If it may not, the processor
+        // may not either. The extended page tables are an identity map of
+        // the first 512 GB (see initialize_ept), so the L1-physical
+        // address vmcs12 names is also the host-physical address vmcs02
+        // gets, and a lookup that returns anything but `mapped` is already
+        // an address outside that map.
+        auto address_limit = 1ull << physical_address_bits();
+        auto ours = host_ept_lookup(virtual_apic12);
+
+        auto usable =
+            (0 != virtual_apic12) && (0 == (virtual_apic12 & 0xfff)) &&
+            (virtual_apic12 < address_limit) &&
+            (arch::x86_64::vmx::ept_walk_status::mapped == ours.status) &&
+            ours.permissions.read() && ours.permissions.write();
+
+        // A page this VMM will not let the processor touch does not have
+        // to refuse the entry, and refusing it is the worse of the two
+        // answers where the guest hypervisor also asked for CR8-load and
+        // CR8-store exiting. With both of those set the processor never
+        // consults the virtual-APIC page at all - SDM 27.6.8 makes MOV CR8
+        // the only operation that reads it here, since the other two need
+        // controls this VMM withholds, and CR8 exiting means MOV CR8
+        // never completes - so the control can be dropped with nothing
+        // lost, and the exits it would have replaced go to the guest
+        // hypervisor, which asked for them. That is KVM's fallback in
+        // `nested_get_vmcs12_pages`, under the comment "the processor will
+        // never use the TPR shadow, simply clear the bit from the
+        // execution control"; the same function calls failing the entry
+        // for any other configuration "_not_ what the processor does but
+        // it's basically the only possibility we have", which is the case
+        // below.
+        //
+        // Both controls, not either: a guest hypervisor that intercepts
+        // the load and not the store still expects `mov rax, cr8` to read
+        // VTPR out of the page.
+        constexpr std::uint64_t cr8_exiting =
+            primary_cr8_load_exiting | primary_cr8_store_exiting;
+
+        if (usable) {
+            honour_tpr_shadow = true;
+        } else if (cr8_exiting != (primary12 & cr8_exiting)) {
+            return std::unexpected(
+                zpp::error{error::nested_controls_unsupported});
+        }
+    }
+
     if (auto merged = merge_nested_bitmaps(cpu); !merged) {
         return merged;
     }
@@ -964,10 +1102,56 @@ std::expected<void, zpp::error> hypervisor::build_vmcs02(std::size_t cpu)
         (primary01 & ~(primary_interrupt_window | primary_nmi_window)) |
         primary12;
 
-    // The TPR shadow is not offered, and cannot be inherited from this
-    // VMM either, because the virtual-APIC page it needs is per-VMCS state
-    // nothing here maintains.
-    primary &= ~primary_tpr_shadow;
+    // The TPR shadow, decided above. Three branches, and the difference
+    // between them is which of them is allowed to leave the second-level
+    // guest's `mov cr8` reaching the physical control register.
+    if (honour_tpr_shadow) {
+        // Honoured. The control stays set - it is already in `primary`
+        // from the union - and the two fields behind it are written from
+        // vmcs12: the page the processor will virtualize VTPR in, and the
+        // threshold below which it exits. KVM copies the same pair, in
+        // `nested_get_vmcs12_pages` for the address and
+        // `prepare_vmcs02_early` for the threshold.
+        //
+        // The address is written unchanged because the extended page
+        // tables are an identity map, so vmcs12's L1-physical address is
+        // the host-physical one this field takes. Nothing pins the page:
+        // there is no paging here and no memory hot-unplug, and the
+        // validation above is what stands in for KVM's kvm_vcpu_map.
+        vmcs.virtual_apic_address(virtual_apic12);
+        vmcs.tpr_threshold(tpr_threshold12);
+    } else if (tpr_shadow12) {
+        // Asked for and not honoured, which the branch above only reaches
+        // for a virtual-APIC page this VMM refuses to let the processor
+        // touch *and* a guest hypervisor that intercepts both CR8
+        // accesses. Removing the control alone would be the bug this
+        // whole change exists to fix, so the intercepts it relies on are
+        // forced rather than assumed - redundant today, since they came
+        // out of vmcs12 through the union above, and load bearing the
+        // moment anything narrows that union. KVM forces the same pair in
+        // `prepare_vmcs02_early`: "else exec_control |=
+        // CPU_BASED_CR8_LOAD_EXITING | CPU_BASED_CR8_STORE_EXITING".
+        //
+        // Both exits reflect to the guest hypervisor, because
+        // `l1_wants_l2_exit` answers CR8 accesses against exactly these
+        // two controls and this branch requires both of them set.
+        primary &= ~primary_tpr_shadow;
+        primary |= primary_cr8_load_exiting | primary_cr8_store_exiting;
+    } else {
+        // Never asked for, so the bit can only be here from this VMM's
+        // own controls - which do not set it today, making this a guard
+        // rather than a case. It is removed and *nothing* is forced in its
+        // place, which is the opposite of the branch above and is
+        // deliberate: a guest hypervisor that did not ask for the TPR
+        // shadow does not believe its guest's CR8 is virtualized, so the
+        // architecture's answer is that the second-level guest owns the
+        // physical register, exactly as it would on bare hardware.
+        // Forcing CR8 exiting here would manufacture exits neither side
+        // asked for, which `l1_wants_l2_exit` would decline and the
+        // ordinary control-register handler would stop the processor on -
+        // it answers MOV to CR4 and nothing else.
+        primary &= ~primary_tpr_shadow;
+    }
 
     // The bitmaps, whose controls follow the merge rather than either
     // side. "Use MSR bitmaps" clear means *every* MSR access exits, which
@@ -1380,6 +1564,15 @@ bool hypervisor::l1_wants_l2_exit(std::size_t cpu,
         return secondary_set(secondary_enable_invpcid) &&
                primary_set(primary_invlpg_exiting);
     case basic_reason::tpr_below_threshold:
+        // Correct without qualification now that the control is honoured,
+        // and it was correct before only because the exit could not
+        // happen. The exit exists only where vmcs02 has the TPR shadow set
+        // (SDM 27.6.8: the threshold "exists only on processors that
+        // support the 1-setting of the 'use TPR shadow' VM-execution
+        // control"), `build_vmcs02` sets it in vmcs02 only where vmcs12
+        // set it, and this VMM never sets it for itself - so the exit is
+        // always the guest hypervisor's, never shared. `l0_wants_l2_exit`
+        // therefore does not name it.
         return primary_set(primary_tpr_shadow);
 
     case basic_reason::control_register_access: {

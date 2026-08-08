@@ -121,19 +121,42 @@ constexpr std::uint64_t supported_pin_based_controls =
  * guest. The rest are the plain intercepts, each of which costs nothing
  * to honour because it only ever adds an exit.
  *
- * Absent on purpose: TPR shadow and the CR3-target list. Both need state
- * of their own in the second-level VMCS that nothing here maintains.
+ * Absent on purpose: the CR3-target list, which needs four VMCS fields
+ * nothing here consults - IA32_VMX_MISC reports a target count of zero to
+ * say so.
  *
- * The TPR shadow does not stand alone, and that decides the order any
- * future work here has to happen in. SDM 29.2.1.1: "If the 'use TPR
- * shadow' VM-execution control is 0, the following VM-execution controls
- * must also be 0: 'virtualize x2APIC mode', 'APIC-register
- * virtualization', 'virtual-interrupt delivery', and 'IPI
- * virtualization'." So offering secondary bit 4 while withholding this
- * one describes a machine that cannot exist - a control a guest
- * hypervisor may set only alongside a control it may not. The two are one
- * piece of work, and BACKLOG.md records why it is the piece most likely to
- * be what a real guest hypervisor is reading these MSRs for.
+ * **The TPR shadow is here because a real guest hypervisor was measured
+ * setting it.** BACKLOG.md records the capture, read out of Hyper-V's own
+ * vmcs12 at the first `build_vmcs02` on the run where it engaged: pin
+ * 0x0000001e, primary **0xa4206dfa** - bit 21 set - secondary 0x00000000,
+ * exit 0x0003efff, entry 0x000013ff. It is the one control in that set
+ * this VMM withheld, and withholding it is what produced seventeen
+ * second-level entries followed by a boot loop: the guest hypervisor was
+ * told it could have the control, set it, and had `build_vmcs02` remove it
+ * with no compensating CR8-load or CR8-store exiting - so every `mov cr8`
+ * its own guest executed reached the *physical* control register and the
+ * virtual-APIC page it was told to expect was never written.
+ *
+ * Offering it is therefore only half of it. `build_vmcs02` honours it: it
+ * validates the virtual-APIC address vmcs12 names, writes it and the TPR
+ * threshold into vmcs02, and leaves the control set. What it does not
+ * honour it refuses, or removes and replaces with CR8 load and store
+ * exiting - see there.
+ *
+ * What is still absent is everything the TPR shadow is a prerequisite
+ * *for*. SDM 29.2.1.1: "If the 'use TPR shadow' VM-execution control is
+ * 0, the following VM-execution controls must also be 0: 'virtualize
+ * x2APIC mode', 'APIC-register virtualization', 'virtual-interrupt
+ * delivery', and 'IPI virtualization'." That pairing was once the argument
+ * for doing this work alongside secondary bit 4; the capture above retires
+ * it, because the guest hypervisor sets **no** secondary control at all.
+ * The pairing is real and now runs the other way round: offering the TPR
+ * shadow permits those controls to be offered later, and each still needs
+ * its own state before it may be. None is offered today, which is why the
+ * only user of the virtual-APIC page here is `mov cr8` (SDM 27.6.8 lists
+ * the three: MOV CR8, the APIC-access page under "virtualize APIC
+ * accesses", and the APIC MSRs under "virtualize x2APIC mode" - the latter
+ * two need controls this VMM withholds).
  */
 constexpr std::uint64_t supported_primary_controls =
     (1ull << 2) |  // Interrupt-window exiting.
@@ -147,6 +170,7 @@ constexpr std::uint64_t supported_primary_controls =
     (1ull << 16) | // CR3-store exiting.
     (1ull << 19) | // CR8-load exiting.
     (1ull << 20) | // CR8-store exiting.
+    (1ull << 21) | // Use TPR shadow.
     (1ull << 22) | // NMI-window exiting.
     (1ull << 23) | // MOV-DR exiting.
     (1ull << 24) | // Unconditional I/O exiting.
