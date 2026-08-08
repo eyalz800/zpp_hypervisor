@@ -5414,8 +5414,24 @@ void hypervisor::vm_launch(arch::x86_64::context & guest_context,
 {
     auto & vmcs = this->vmcs;
 
-    // Allocate a small stack for the host VM exit.
-    alignas(0x10) unsigned char host_vm_launch_stack[0x1500]{};
+    // The stack every VM exit on this processor runs on.
+    //
+    // Thirty two kilobytes rather than the 0x1500 it was, and the number is
+    // no longer a guess. Two contexts sit at the top, 1856 bytes of the
+    // total, and what has to fit below them is the deepest exit handler
+    // path - which is now the eager shadow extended page-table build, and
+    // that alone wants sixteen kilobytes: `build_shadow_ept` descends four
+    // levels with a whole 4096-byte table read into a local at each. On the
+    // old size the first shadow build would have run off the bottom of this
+    // array and into whatever `vm_launch`'s frame had below it, silently,
+    // and only with nested VMX switched on - which is the worst shape a bug
+    // can have here.
+    //
+    // Costing nothing is what makes the margin the right answer rather than
+    // a tight fit: this is a local of a function that never returns, on the
+    // 512 KB per-processor stack `launch_on_cpu` already reserved, so the
+    // whole of it comes out of memory that was allocated and unused.
+    alignas(0x10) unsigned char host_vm_launch_stack[0x8000]{};
 
     // Two contexts below the top, because the top is what they occupy:
     // vm_exit_entry captures the guest's registers at host_rsp, and the

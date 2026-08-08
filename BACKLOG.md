@@ -1838,6 +1838,35 @@ what reading can establish, and it cannot establish that any of it works.
 "Not run anywhere" above still says exactly what it said, and it is now the
 only thing between this and an answer.
 
+### The host stack was a quarter of what one shadow build needs
+
+Found by reading the exit path top to bottom before trying to run any of
+it, and worth recording because of what its symptom would have been.
+
+Every VM exit runs on `host_vm_launch_stack`, a local of `vm_launch`, which
+was 0x1500 bytes with two 928-byte contexts at the top - about 4.6 KB
+usable. The eager shadow builder descends four levels of a guest
+hypervisor's extended page tables and reads a whole 4096-byte table into a
+local at each, so `build_shadow_ept` alone wants sixteen kilobytes. The
+first shadow build would have run off the bottom of that array and into
+whatever lay below it in `vm_launch`'s frame.
+
+Three things make it the worst shape a bug can have here: it is silent, it
+only happens with nested VMX switched on, and what it corrupts is the frame
+of the function that owns the guest - so the failure would have appeared
+somewhere unrelated, on the one configuration nobody had run.
+
+The stack is now 0x8000. It costs nothing: it is a local of a function that
+never returns, on the 512 KB per-processor stack `launch_on_cpu` already
+reserved, so the whole of it comes out of memory that was allocated and
+unused. Rejected: moving the builder's four tables into per-processor
+members, which trades 16 KB of a stack nobody was using for 512 KB of .bss
+and makes the builder non-reentrant by construction rather than by
+accident.
+
+The general lesson, and it is the one this tree keeps relearning: a
+code path that has never executed has never had its *stack* checked either.
+
 ### The MSR areas, and the one restriction left in them
 
 The three MSR areas are processed in software, and the processor is given
