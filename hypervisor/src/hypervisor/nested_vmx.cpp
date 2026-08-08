@@ -183,7 +183,9 @@ std::uint64_t hypervisor::nested_vmx_capability_msr(std::size_t msr)
     // cannot honour is removed from the may-be-1 half, and anything the
     // hardware insists on is put back, since a control that must be 1
     // must also be permitted to be 1.
-    // A diagnostic that answers one question and must never ship on.
+    //
+    // Below it, a diagnostic that answers one question and must never
+    // ship on.
     //
     // A guest hypervisor that reads the capability MSRs and then declines
     // has been told something it will not accept, and the narrowing below
@@ -197,10 +199,41 @@ std::uint64_t hypervisor::nested_vmx_capability_msr(std::size_t msr)
     // withheld because nothing here honours it, so a guest hypervisor
     // that takes one up on the offer gets a VMM that does not do what it
     // just promised. Diagnostic only, on a machine that can be rebooted.
-    constexpr bool report_hardware_capabilities_unnarrowed = false;
+    //
+    // **A mask rather than a switch, and that is the whole point.** It was
+    // a single bool, and a run with it on widened five capability MSRs at
+    // once - so the result said "the capability set is the reason" and
+    // could not say which capability, which is the question worth an
+    // answer. One group per boot narrows it to one MSR in three boots,
+    // which is what a target costing a reboot per variable is worth
+    // spending. Set this to one `unnarrow_` value at a time.
+    constexpr std::uint64_t unnarrow_nothing = 0;
+    constexpr std::uint64_t unnarrow_pin_based = 1ull << 0;
+    constexpr std::uint64_t unnarrow_primary = 1ull << 1;
+    constexpr std::uint64_t unnarrow_secondary = 1ull << 2;
+    constexpr std::uint64_t unnarrow_exits = 1ull << 3;
+    constexpr std::uint64_t unnarrow_entries = 1ull << 4;
+    constexpr std::uint64_t unnarrow_ept_vpid = 1ull << 5;
 
-    auto narrow = [](std::uint64_t value, std::uint64_t supported) {
-        if constexpr (report_hardware_capabilities_unnarrowed) {
+    constexpr std::uint64_t report_hardware_capabilities_unnarrowed =
+        unnarrow_nothing;
+
+    // Whether this group is one of the ones being reported unnarrowed.
+    // Written so `narrow` and the extended-page-table capabilities below
+    // ask the same question, because the previous shape put the check
+    // inside `narrow` alone - and IA32_VMX_EPT_VPID_CAP is not narrowed
+    // through `narrow`, so it stayed narrowed through the whole
+    // experiment. Two of the three capabilities that run concluded were
+    // "the work" were never actually offered to the guest hypervisor that
+    // engaged.
+    auto reporting = [](std::uint64_t group) {
+        return 0 != (report_hardware_capabilities_unnarrowed & group);
+    };
+
+    auto narrow = [&](std::uint64_t value,
+                      std::uint64_t supported,
+                      std::uint64_t group) {
+        if (reporting(group)) {
             return value;
         }
 
@@ -238,26 +271,35 @@ std::uint64_t hypervisor::nested_vmx_capability_msr(std::size_t msr)
 
     case vmx_msr::pin_based_controls:
     case vmx_msr::true_pin_based_controls:
-        return narrow(hardware, nested_vmx::supported_pin_based_controls);
+        return narrow(hardware,
+                      nested_vmx::supported_pin_based_controls,
+                      unnarrow_pin_based);
 
     case vmx_msr::processor_based_contorls:
     case vmx_msr::true_processor_based_controls:
-        return narrow(hardware, nested_vmx::supported_primary_controls);
+        return narrow(hardware,
+                      nested_vmx::supported_primary_controls,
+                      unnarrow_primary);
 
     case vmx_msr::processor_based_contorls_2:
         // The secondary controls MSR is not a pair of halves like the
         // others: SDM A.3.3 gives it allowed-1 settings in bits 63:32 and
         // reserves bits 31:0 to zero. narrow handles that unchanged,
         // because an allowed-0 half of zero leaves nothing to put back.
-        return narrow(hardware, nested_vmx::supported_secondary_controls);
+        return narrow(hardware,
+                      nested_vmx::supported_secondary_controls,
+                      unnarrow_secondary);
 
     case vmx_msr::exit_controls:
     case vmx_msr::true_exit_controls:
-        return narrow(hardware, nested_vmx::supported_exit_controls);
+        return narrow(
+            hardware, nested_vmx::supported_exit_controls, unnarrow_exits);
 
     case vmx_msr::entry_controls:
     case vmx_msr::true_entry_controls:
-        return narrow(hardware, nested_vmx::supported_entry_controls);
+        return narrow(hardware,
+                      nested_vmx::supported_entry_controls,
+                      unnarrow_entries);
 
     case vmx_msr::misc: {
         // Two changes to the hardware's value, both of them removals.
@@ -318,6 +360,15 @@ std::uint64_t hypervisor::nested_vmx_capability_msr(std::size_t msr)
         //
         // See nested_vmx::supported_ept_vpid_capabilities for why each bit
         // is in the list and why the four that are absent are absent.
+        //
+        // The diagnostic reaches this one too, which it did not when it
+        // was a switch inside `narrow` - and that omission is why the run
+        // that made a guest hypervisor engage says nothing about the two
+        // capabilities in this MSR.
+        if (reporting(unnarrow_ept_vpid)) {
+            return hardware;
+        }
+
         return hardware & nested_vmx::supported_ept_vpid_capabilities;
 
     case vmx_msr::vm_functions:

@@ -123,6 +123,17 @@ constexpr std::uint64_t supported_pin_based_controls =
  *
  * Absent on purpose: TPR shadow and the CR3-target list. Both need state
  * of their own in the second-level VMCS that nothing here maintains.
+ *
+ * The TPR shadow does not stand alone, and that decides the order any
+ * future work here has to happen in. SDM 29.2.1.1: "If the 'use TPR
+ * shadow' VM-execution control is 0, the following VM-execution controls
+ * must also be 0: 'virtualize x2APIC mode', 'APIC-register
+ * virtualization', 'virtual-interrupt delivery', and 'IPI
+ * virtualization'." So offering secondary bit 4 while withholding this
+ * one describes a machine that cannot exist - a control a guest
+ * hypervisor may set only alongside a control it may not. The two are one
+ * piece of work, and BACKLOG.md records why it is the piece most likely to
+ * be what a real guest hypervisor is reading these MSRs for.
  */
 constexpr std::uint64_t supported_primary_controls =
     (1ull << 2) |  // Interrupt-window exiting.
@@ -224,8 +235,16 @@ constexpr std::uint64_t supported_secondary_controls =
  * what `ept_permissions::normalised` may leave in an entry - the two must
  * agree. Bit 21, accessed and dirty flags, because the shadow never sets
  * them and a guest hypervisor reading them would find nothing ever
- * accessed. Bit 22, advanced VM-exit information, because the reflected
- * exit qualification does not carry bits 11:9.
+ * accessed, and because `build_vmcs02` refuses an EPT pointer asking for
+ * them - the other half of withholding the bit. Bit 22, advanced VM-exit
+ * information, because the reflected exit qualification does not carry
+ * bits 11:9.
+ *
+ * Neither of the first two is what a real guest hypervisor was found to be
+ * objecting to. BACKLOG.md records the measurement and the correction: the
+ * run in which one engaged was made with this mask still applied, because
+ * the diagnostic that widened the control MSRs never reached this one. So
+ * they are honest gaps rather than the gate.
  */
 constexpr std::uint64_t supported_ept_vpid_capabilities =
     (1ull << 6) |  // Four-level page walks.

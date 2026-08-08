@@ -2547,3 +2547,80 @@ it is wanted for other reasons.
 The honest next step is to implement one of the three and offer only that
 one, rather than widening the set and finding out afterwards which promise
 was broken - the loop above is what a broken promise looks like.
+
+### Correction: the widening experiment did not widen what it was read as
+
+The entry above concludes that three bits are the work, and two of the
+three are wrong. The diagnostic switch lived inside `narrow`, and
+`narrow` is applied to five capability MSRs - pin-based, primary,
+secondary, exit and entry controls. IA32_VMX_EPT_VPID_CAP is not one of
+them: it is masked directly, `hardware & supported_ept_vpid_capabilities`,
+on its own line and outside the lambda.
+
+So during the run in which a guest hypervisor engaged and launched
+seventeen second-level entries, **execute-only translations and accessed
+and dirty flags were still withheld**. It engaged without them. They are
+not the gate, and the measurement that named them is the measurement that
+exonerates them.
+
+What was actually widened is every control the five masks withhold, which
+is far more than one bit:
+
+- pin-based: whatever the processor offers beyond external-interrupt
+  exiting, NMI exiting and virtual NMIs.
+- primary: **bit 21, use TPR shadow**, and anything else unlisted.
+- secondary: bit 4, virtualize x2APIC mode - measured, the only
+  difference on this rig.
+- exit and entry controls: every unlisted bit, which on a current
+  processor is a dozen or so apiece.
+
+**The prime suspect is the TPR shadow, and it is not independent of bit
+4.** SDM 29.2.1.1: "If the 'use TPR shadow' VM-execution control is 0,
+the following VM-execution controls must also be 0: 'virtualize x2APIC
+mode', 'APIC-register virtualization', 'virtual-interrupt delivery', and
+'IPI virtualization'." So the set as shipped is one no processor
+presents - and offering bit 4 alone, as the entry above proposed, would
+produce a set that is *architecturally impossible*: a guest hypervisor
+may set virtualize x2APIC mode only together with a control it is
+forbidden. The two have to be offered together or not at all.
+
+Worth noting what the rig's own secondary set contains: bits 1, 2, 3, 4,
+5, 6, 7, 11, 12, 16, 20. Virtualize APIC accesses, APIC-register
+virtualization and virtual-interrupt delivery are all absent from the
+hardware column too. So bit 4 is the *only* APIC capability available
+here, and it is exactly the one that needs the TPR shadow beside it.
+
+### The diagnostic is a mask now, so a boot answers a smaller question
+
+`report_hardware_capabilities_unnarrowed` was a `bool` and is now a set
+of group bits - `unnarrow_pin_based`, `unnarrow_primary`,
+`unnarrow_secondary`, `unnarrow_exits`, `unnarrow_entries`,
+`unnarrow_ept_vpid` - with the extended page table capabilities included,
+which is the omission above. Still `unnarrow_nothing`, still a lie while
+it is on, still never to ship.
+
+The reason is the one that entry demonstrates: a run that widens five
+MSRs at once answers "the capability set is the reason" and cannot answer
+"which capability", and the second question is the one worth a reboot. On
+a target where each variable costs a boot, the switch should cost one
+variable. Suggested order, cheapest inference first:
+`unnarrow_primary` alone, then `unnarrow_secondary` alone, then the two
+together - the pairing SDM 29.2.1.1 forces.
+
+### The extended-page-table pointer's accessed-and-dirty bit is checked
+
+IA32_VMX_EPT_VPID_CAP bit 21 is withheld, and until now that was only
+half of withholding it: `build_vmcs02` validated the guest hypervisor's
+EPT pointer for memory type, page-walk length, reserved bits 11:7 and
+address width, and said nothing about bit 6. A pointer with bit 6 set was
+accepted and the shadow then never set an accessed or a dirty bit in any
+entry it wrote, so a guest hypervisor polling its own tables would find
+nothing ever touched - the quiet half-answer this codebase's guest-facing
+notes warn about, arrived at by omission rather than by choice.
+
+KVM pairs the two in `nested_vmx_check_eptp`, under the comment "AD, if
+set, should be supported", and the check added here is that one: the bit
+is refused unless `nested_vmx_capability_msr` reports the capability. It
+is written against the reported value rather than against the constant,
+so if bit 21 is ever implemented and offered the check follows without
+being edited.

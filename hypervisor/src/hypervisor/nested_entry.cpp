@@ -835,13 +835,26 @@ std::expected<void, zpp::error> hypervisor::build_vmcs02(std::size_t cpu)
 
         // The checks SDM 29.2.1.1 puts on the pointer, in the same order
         // as KVM's `nested_vmx_check_eptp`: a memory type this VMM
-        // reports, a page-walk length it reports, and no bit set above
-        // what the processor can address. Bits 6:3 hold the walk length
-        // minus one, and bits 11:7 are reserved.
+        // reports, a page-walk length it reports, the accessed-and-dirty
+        // bit only where that capability is reported, and no bit set
+        // above what the processor can address. Bits 5:3 hold the walk
+        // length minus one, bit 6 enables accessed and dirty flags, and
+        // bits 11:7 are reserved.
         constexpr std::uint64_t eptp_memory_type_mask = 0x7;
         constexpr std::uint64_t eptp_walk_length_mask = 0x38;
         constexpr std::uint64_t eptp_walk_length_4 = 3ull << 3;
+        constexpr std::uint64_t eptp_access_and_dirty = 0x40;
         constexpr std::uint64_t eptp_reserved = 0xf80;
+
+        // IA32_VMX_EPT_VPID_CAP bit 21, from SDM A.10. The shadow never
+        // sets accessed or dirty in an entry it writes, so a guest
+        // hypervisor asking for them here would poll its own tables and
+        // find nothing ever touched. The capability MSR withholds the
+        // bit; this is the other half of withholding it, and without it
+        // the pointer is accepted and the promise quietly broken. KVM
+        // pairs the two the same way, in `nested_vmx_check_eptp`'s "AD,
+        // if set, should be supported".
+        constexpr std::uint64_t ept_cap_access_and_dirty = 1ull << 21;
 
         auto memory_type = eptp12 & eptp_memory_type_mask;
         auto is_uncachable =
@@ -854,8 +867,14 @@ std::expected<void, zpp::error> hypervisor::build_vmcs02(std::size_t cpu)
         auto address_mask =
             ((1ull << physical_address_bits()) - 1) & ~0xfffull;
 
+        auto access_and_dirty_offered =
+            0 != (nested_vmx_capability_msr(vmx_msr::vpid_ept_capability) &
+                  ept_cap_access_and_dirty);
+
         if ((!is_uncachable && !is_write_back) ||
             (eptp_walk_length_4 != (eptp12 & eptp_walk_length_mask)) ||
+            (!access_and_dirty_offered &&
+             (0 != (eptp12 & eptp_access_and_dirty))) ||
             (0 != (eptp12 & eptp_reserved)) ||
             (0 != (eptp12 & ~(address_mask | 0xfffull)))) {
             return std::unexpected(
