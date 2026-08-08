@@ -5542,6 +5542,15 @@ hypervisor::on_interrupt_command(std::uint64_t command)
     constexpr std::uint64_t shorthand_mask = 0x3;
     constexpr std::uint64_t shorthand_none = 0;
 
+    // The destination mode, bit 11. SDM 13.6.1, Figure 13-12 and the table
+    // beside it: "Destination Mode - Selects either physical (0) or
+    // logical (1) destination mode". A physical destination field is an
+    // APIC id; a logical one is an eight-bit message destination address,
+    // which SDM 13.6.2.2 says a receiving APIC compares against its own
+    // LDR and DFR. It is a bitmask under either model - flat or cluster -
+    // and not an identifier at all.
+    constexpr std::uint64_t destination_logical = 1ull << 11;
+
     // INIT, which is logged and otherwise left alone. Logged because it is
     // the first half of the only sequence that starts a processor, and
     // because a hang in that sequence is otherwise invisible: the log then
@@ -5589,6 +5598,37 @@ hypervisor::on_interrupt_command(std::uint64_t command)
     if (shorthand_none != shorthand) {
         log("broadcast start-up ipi, shorthand {}, not adopted",
             shorthand);
+        return command;
+    }
+
+    // A logical destination is a bitmask, so it is not something
+    // processor_slot can be asked about - and asking it anyway is worse
+    // than not answering. It compares the value against the table of known
+    // APIC ids, fails to match any, and then *allocates a slot for it*,
+    // spending an entry on a processor that does not exist and giving the
+    // rest of this function a slot index that names the wrong one. With a
+    // flat model and a single target the two even coincide often enough to
+    // look as though it works: logical id 0x01 is also physical APIC id 1.
+    //
+    // Passed through rather than adopted, which is the same answer the
+    // broadcast case above gets and for the same reason - this VMM has no
+    // way to resolve a set of targets into the one processor it would have
+    // to start in its own trampoline. That hands those processors to the
+    // guest unvirtualized, and is said out loud rather than left to be
+    // discovered.
+    //
+    // Resolving it properly would mean tracking each processor's LDR and
+    // DFR and reproducing the match, which is what KVM does:
+    // kvm_apic_match_dest in arch/x86/kvm/lapic.c branches on the
+    // destination mode before comparing anything, and
+    // kvm_apic_match_logical_addr then compares the address against LDR
+    // under whichever of flat or cluster DFR selects. Both registers are
+    // written through the APIC page or the x2APIC MSRs, so this VMM sees
+    // neither today.
+    if (0 != (command & destination_logical)) {
+        log("start-up ipi in logical destination mode, command {}, "
+            "not adopted",
+            command);
         return command;
     }
 
