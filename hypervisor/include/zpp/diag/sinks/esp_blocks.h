@@ -126,6 +126,12 @@ struct esp_blocks_for
     static inline std::uint32_t staged_records{};
 
     /**
+     * What `staged_records` was when the block's header was last built,
+     * and zero when no block is in flight. See flush().
+     */
+    static inline std::uint32_t header_records{};
+
+    /**
      * When the block being filled stops being allowed to wait, as a time
      * stamp counter reading. Zero while no block is being filled.
      *
@@ -563,43 +569,61 @@ struct esp_blocks_for
             return;
         }
 
-        auto * header =
-            reinterpret_cast<nvme::block_header *>(queues::staging);
-        *header = nvme::block_header{};
+        // Built once per shape of the block, not once per attempt.
+        //
+        // A retry while the destination read is out changes nothing about
+        // the block, and rebuilding it would re-checksum four kilobytes -
+        // very nearly a thousand words - on every VM exit for the whole of
+        // the wait. That cost lands on the guest's exit path, which is the
+        // one place in this program that has to stay cheap.
+        //
+        // `header_records` is what `staged_records` was when the header
+        // was last built, and zero when there is no block in flight. So a
+        // partial block that took another record on while its read was out
+        // is rebuilt, and a full one that is only waiting is not.
+        if (staged_records != header_records) {
+            auto * header =
+                reinterpret_cast<nvme::block_header *>(queues::staging);
+            *header = nvme::block_header{};
 
-        // The signature the destination guard will demand of this block
-        // the next time round, put back as the reservation stamped it.
-        // A block that came out of here without one could be written
-        // once and never again.
-        header->signature.signature_magic = nvme::block_signature::magic;
-        header->signature.file_id = target.file_id;
-        header->signature.block_index = next_block_index;
-        for (std::size_t i{}; i < sizeof(target.disk_guid); ++i) {
-            header->signature.disk_guid[i] = target.disk_guid[i];
-            header->signature.partition_guid[i] = target.partition_guid[i];
+            // The signature the destination guard will demand of this
+            // block the next time round, put back as the reservation
+            // stamped it. A block that came out of here without one could
+            // be written once and never again.
+            header->signature.signature_magic =
+                nvme::block_signature::magic;
+            header->signature.file_id = target.file_id;
+            header->signature.block_index = next_block_index;
+            for (std::size_t i{}; i < sizeof(target.disk_guid); ++i) {
+                header->signature.disk_guid[i] = target.disk_guid[i];
+                header->signature.partition_guid[i] =
+                    target.partition_guid[i];
+            }
+
+            header->block_magic = nvme::block_header::magic;
+            header->boot_id = boot_id;
+            header->epoch = epoch;
+            header->sequence = sequence;
+            header->block_index = next_block_index;
+            header->record_count = staged_records;
+            header->record_size = ring.record_size;
+
+            auto & position = reader<Which>::position;
+            header->records_lost = position.lost;
+            header->records_refused = position.refused;
+            header->blocks_dropped = dropped;
+            header->blocks_lost_to_reset = queues::lost_to_reset;
+
+            // Over everything after the checksum field itself, so that a
+            // torn write - which loses a tail - fails it.
+            header->checksum = nvme::checksum_of(
+                reinterpret_cast<const std::uint32_t *>(queues::staging) +
+                    (sizeof(nvme::block_header) / sizeof(std::uint32_t)),
+                (nvme::block_size - sizeof(nvme::block_header)) /
+                    sizeof(std::uint32_t));
+
+            header_records = staged_records;
         }
-
-        header->block_magic = nvme::block_header::magic;
-        header->boot_id = boot_id;
-        header->epoch = epoch;
-        header->sequence = sequence;
-        header->block_index = next_block_index;
-        header->record_count = staged_records;
-        header->record_size = ring.record_size;
-
-        auto & position = reader<Which>::position;
-        header->records_lost = position.lost;
-        header->records_refused = position.refused;
-        header->blocks_dropped = dropped;
-        header->blocks_lost_to_reset = queues::lost_to_reset;
-
-        // Over everything after the checksum field itself, so that a
-        // torn write - which loses a tail - fails it.
-        header->checksum = nvme::checksum_of(
-            reinterpret_cast<const std::uint32_t *>(queues::staging) +
-                (sizeof(nvme::block_header) / sizeof(std::uint32_t)),
-            (nvme::block_size - sizeof(nvme::block_header)) /
-                sizeof(std::uint32_t));
 
         auto result =
             wait ? queues::submit(target,
@@ -621,6 +645,7 @@ struct esp_blocks_for
 
         staged_records = 0;
         staged_deadline = 0;
+        header_records = 0;
         if (nvme::write_result::ok != result) {
             ++dropped;
             return;
