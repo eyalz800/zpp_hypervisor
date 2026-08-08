@@ -22,9 +22,12 @@ MONITOR_PORT=${MONITOR_PORT:-4446}
 # Fail fast and never hang: give up on the connection, notice a dead
 # session, and refuse to sit waiting for a password prompt that will not
 # come.
-SSH_OPTS="-o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null
-          -o ConnectTimeout=10 -o ServerAliveInterval=5
-          -o ServerAliveCountMax=3 -o BatchMode=yes"
+#
+# One line, and it has to stay one line. This is interpolated into a
+# `bash -c` string further down, where a newline ends the command rather
+# than separating two options - which failed as "could not copy", the one
+# message that reads like the target being unreachable.
+SSH_OPTS="-o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o ConnectTimeout=10 -o ServerAliveInterval=5 -o ServerAliveCountMax=3 -o BatchMode=yes"
 
 # shellcheck disable=SC2086
 rig() { timeout "$1" ssh $SSH_OPTS "$RIG" "$2"; }
