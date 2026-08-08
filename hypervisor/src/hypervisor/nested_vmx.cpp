@@ -347,11 +347,15 @@ bool hypervisor::on_nested_vmx_msr_write(std::uint32_t index,
     auto value = (context.rax & 0xffffffff) | (context.rdx << 32);
 
     if (arch::x86_64::msr::ia32_feature_control == index) {
-        // Write-once, like the real register: SDM 26.5.1 describes the
-        // lock bit as making the MSR read-only until the next reset. A
-        // write after the lock is set is a general protection fault
-        // rather than a silent no-op, because a hypervisor that finds its
-        // write ignored has no way to tell.
+        // Write-once, like the real register. SDM Table 7-1, "Layout of
+        // IA32_FEATURE_CONTROL", on bit 0: "If the lock bit is set, WRMSR
+        // to the IA32_FEATURE_CONTROL MSR will cause a general-protection
+        // exception. Once the lock bit is set, the MSR cannot be modified
+        // until a power-on reset."
+        //
+        // So a write after the lock is a fault rather than a silent
+        // no-op, which is also the only honest answer: a hypervisor whose
+        // write was ignored has no way to find out.
         if (0 !=
             (this->guest_feature_control[cpu] & feature_control_lock)) {
             inject_general_protection_fault();

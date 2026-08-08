@@ -1508,3 +1508,339 @@ it, in order of how much it proves per boot:
 3. Windows with VBS on and the switch on, expecting a Hyper-V launch
    failure rather than a hang. That is the one that needs the rig, and it
    is worth nothing until nested EPT exists.
+
+## Nested VMX coverage checklist
+
+What a complete nested VMX implementation has to do, where each requirement
+comes from, and whether this tree does it. **This list is the
+done-condition**: nested VMX is finished when every row is `yes`, and the
+rows that are not `yes` are the work.
+
+The citation column says where the requirement is *established* - an SDM
+section this project has actually looked up, or the KVM function that
+implements it. Rows citing KVM name the function so the shape can be
+compared rather than re-derived from scratch.
+
+Status values: `yes` implemented; `partial` implemented for some cases;
+`no` not implemented; `n/a` deliberately not offered to L1, with the
+capability MSR narrowed to say so.
+
+### A. VMX instruction emulation
+
+| # | Requirement | Established by | Status |
+|---|---|---|---|
+| A1 | VMXON: region checks, revision id, feature-control gate, `VMfail` when already in VMX operation | SDM 33.3 VMXON operation section; KVM `handle_vmxon` | yes |
+| A2 | VMXOFF: leave VMX operation, write back the current shadow | SDM 33.3 VMXOFF; KVM `handle_vmxoff` | yes |
+| A3 | VMCLEAR: address checks, VMXON-pointer check, clear the launch state of a *non-current* VMCS | SDM 33.3 VMCLEAR; KVM `handle_vmclear` | yes |
+| A4 | VMPTRLD: address checks, revision-id check, write back the outgoing shadow | SDM 33.3 VMPTRLD; KVM `handle_vmptrld` | yes |
+| A5 | VMPTRST: store the current pointer, all-ones when there is none | SDM 33.3 VMPTRST; KVM `handle_vmptrst` | yes |
+| A6 | VMREAD/VMWRITE: encoding decode, width handling, read-only refusal | SDM 27.11.2, Table 27-22, A.6 bit 29; KVM `handle_vmread`, `handle_vmwrite` | yes |
+| A7 | `VMsucceed`/`VMfailInvalid`/`VMfailValid` flag conventions and the error-number table | SDM 33.2, Table 33-1 | yes |
+| A8 | Memory-operand address computation from the instruction-information field plus the displacement | SDM 30.2.1, Table 30-14, Table 30-15; KVM `get_vmx_mem_address` | yes |
+| A9 | `#UD` for every VMX instruction when the guest is not in VMX operation, or CR4.VMXE is clear in its own view | SDM 33.3 operation sections, SDM 28.1.1; KVM `nested_vmx_check_permission`, `handle_vmxon` | yes |
+| A10 | `#GP(0)` when CPL > 0 | SDM 33.3; KVM `nested_vmx_check_permission` | yes |
+| A11 | INVEPT: descriptor decode, type checked against the reported capability, invalidate the shadow | SDM 33.3 INVEPT; KVM `handle_invept` | no |
+| A12 | INVVPID: descriptor decode, type check, invalidate | SDM 33.3 INVVPID; KVM `handle_invvpid` | no |
+| A13 | A VMX instruction executed by L2 is reflected to L1 unconditionally, so three-level nesting works | KVM `nested_vmx_l1_wants_exit`, the `EXIT_REASON_VMON` group | no |
+
+### B. VM entry: building the VMCS that runs L2 (vmcs02)
+
+| # | Requirement | Established by | Status |
+|---|---|---|---|
+| B1 | A second real VMCS per processor, switched to by VMLAUNCH/VMRESUME and away from on an exit to L1 | KVM `vmx_switch_vmcs`, `vmx->nested.vmcs02` | no |
+| B2 | Launch-state tracking, so a freshly cleared vmcs02 gets `vmlaunch` and a launched one `vmresume` | SDM 33.3 VMLAUNCH/VMRESUME | no |
+| B3 | Pin-based controls: union of L1's request and ours, with the preemption timer ours alone | KVM `prepare_vmcs02_early`, PIN CONTROLS block | no |
+| B4 | Primary controls: union of L1's and ours; interrupt-window and NMI-window exiting taken from L1 only | KVM `prepare_vmcs02_early`, EXEC CONTROLS block | no |
+| B5 | Secondary controls: some taken *only* from vmcs12, the rest unioned | KVM `prepare_vmcs02_early`, SECONDARY EXEC block | no |
+| B6 | Entry controls from L1, except the ones that follow from EFER, which are recomputed | KVM `prepare_vmcs02_early`, ENTRY CONTROLS block | no |
+| B7 | Exit controls are **ours**, not L1's - the hardware exit comes to us and L1's exit is emulated | KVM `prepare_vmcs02_early`, EXIT CONTROLS block and its comment | no |
+| B8 | Exception bitmap: bitwise or of what L1 wants to trap and what we must trap | KVM `prepare_vmcs02` comment on `vmx_update_exception_bitmap` | no |
+| B9 | CR0/CR4 guest-host masks merged, and the read shadows set from vmcs12 rather than from the effective register | KVM `prepare_vmcs02`, `nested_read_cr0`, `nested_read_cr4` | no |
+| B10 | Guest state copied from vmcs12: segments, descriptor tables, RSP/RIP/RFLAGS, activity state, interruptibility, pending debug exceptions | SDM 27.4; KVM `prepare_vmcs02_rare` | no |
+| B11 | MSR bitmap **merged**, not taken from either side: an MSR either of us wants must exit | KVM `nested_vmx_prepare_msr_bitmap` | no |
+| B12 | I/O: unconditional I/O exiting forced rather than merging bitmaps, because every I/O access needs an exit here | KVM `prepare_vmcs02_early`, `CPU_BASED_UNCOND_IO_EXITING` | no |
+| B13 | TSC offset composed across levels, and the multiplier too if scaling is offered | KVM `kvm_calc_nested_tsc_offset` | no |
+| B14 | Entry event injection: interruption-information field, error code and instruction length taken from vmcs12 on a launch | SDM 27.8.3; KVM `prepare_vmcs02_early`, interrupt/exception block | no |
+| B15 | VM-entry consistency checks on vmcs12's controls, host state and guest state, failing with error 7, error 8, or an entry-failure exit | SDM 29.2, 29.3; KVM `nested_vmx_check_controls`, `nested_vmx_check_host_state`, `nested_vmx_check_guest_state` | no |
+| B16 | VM-entry MSR-load list processed, with an MSR-load-failure exit | SDM 27.8.2; KVM `nested_vmx_load_msr` | no |
+| B17 | A VPID for L2 distinct from L1's, or a TLB flush on every transition instead | KVM `nested_vmx_transition_tlb_flush` | no |
+| B18 | The preemption timer armed for L2 from vmcs12's value and cancelled on exit | KVM `vmx_start_preemption_timer` | n/a |
+
+### C. VM exit: from L2 back to L1
+
+| # | Requirement | Established by | Status |
+|---|---|---|---|
+| C1 | Guest state saved back into vmcs12: CR0/CR3/CR4, RSP/RIP/RFLAGS, segments, activity state, interruptibility | SDM 30.3; KVM `sync_vmcs02_to_vmcs12`, `sync_vmcs02_to_vmcs12_rare` | no |
+| C2 | Exit information written into vmcs12: reason, qualification, guest-linear and guest-physical address, instruction length and information | SDM 30.2; KVM `prepare_vmcs12` | no |
+| C3 | The entry interruption-information field's valid bit cleared on exit, emulating what hardware does | SDM 30.2; KVM `prepare_vmcs12` and its comment | no |
+| C4 | IDT-vectoring information and error code written for an event that was mid-delivery when the exit happened | SDM 30.2.4; KVM `vmcs12_save_pending_event` | no |
+| C5 | Double fault and triple fault never reported as occurring during event delivery | SDM 30.2.4; KVM `vmcs12_save_pending_event`, first branch | no |
+| C6 | Launch state set to launched on a successful exit, and *not* on an entry-failure exit | SDM 33.3; KVM `prepare_vmcs12` | no |
+| C7 | L1's host state loaded into the VMCS that runs L1: CR0/CR3/CR4, RIP/RSP, segments, descriptor tables, EFER, PAT, SYSENTER | SDM 30.5; KVM `load_vmcs12_host_state` | no |
+| C8 | VM-exit MSR-store and MSR-load lists processed, with a VMX abort on failure | SDM 30.4, 30.6; KVM `nested_vmx_store_msr` | no |
+| C9 | Events queued for injection into L2 dropped on the way out | KVM `nested_vmx_vmexit`, the `kvm_clear_exception_queue` block | no |
+| C10 | An entry failure hardware detects surfaces to L1 as `VMfailValid`, not as an exit | SDM 33.3; KVM `nested_vmx_vmexit` failure path | no |
+
+### D. The reflect-or-handle decision
+
+| # | Requirement | Established by | Status |
+|---|---|---|---|
+| D1 | Two questions, in order: does *this VMM* want the exit, and only then does L1 want it | KVM `nested_vmx_reflect_vmexit`, `nested_vmx_l0_wants_exit`, `nested_vmx_l1_wants_exit` | no |
+| D2 | We always take: NMI, external interrupt, EPT violation, EPT misconfiguration, preemption timer | KVM `nested_vmx_l0_wants_exit` | no |
+| D3 | Always reflected: triple fault, task switch, CPUID, INVD, XSETBV, the VMX instructions, invalid guest state | KVM `nested_vmx_l1_wants_exit` | no |
+| D4 | Conditional on L1's controls: HLT, INVLPG, RDPMC, RDTSC, MOV DR, MWAIT, MONITOR, PAUSE, RDRAND, RDSEED, WBINVD, descriptor-table access, INVPCID, XSAVES/XRSTORS | KVM `nested_vmx_l1_wants_exit` | no |
+| D5 | Exception exits filtered through vmcs12's exception bitmap, with the page-fault error-code mask and match applied | SDM 27.6.3; KVM `nested_vmx_is_page_fault_vmexit` | no |
+| D6 | CR-access exits filtered through vmcs12's CR0/CR4 guest-host masks and the CR3-target list | KVM `nested_vmx_exit_handled_cr` | no |
+| D7 | I/O exits filtered through vmcs12's I/O bitmaps | KVM `nested_vmx_exit_handled_io` | no |
+| D8 | MSR exits filtered through vmcs12's MSR bitmap | KVM `nested_vmx_exit_handled_msr` | no |
+| D9 | The exits this VMM already owns for its own reasons - the interrupt command register, watched pages, the sleep port, the preemption timer that drives the log - keep working while L2 runs | this tree: `on_interrupt_command`, `on_ept_violation`, `arm_controller_poll` | no |
+
+### E. Nested EPT
+
+| # | Requirement | Established by | Status |
+|---|---|---|---|
+| E1 | A shadow EPT per EPTP12, composing L2-GPA→L1-GPA (L1's tables) with L1-GPA→HPA (ours) | KVM `nested_ept_init_mmu_context`, `nested_ept_get_eptp` | no |
+| E2 | Two permission sets combined per page - read, write, supervisor execute and user execute all intersected | KVM `kvm_init_shadow_ept_mmu` and the shadow-page permissions it installs | no |
+| E3 | Populated lazily from EPT violations taken while L2 runs, since eager construction cannot know what L2 will touch | KVM: L0 always takes the EPT violation - `nested_vmx_l0_wants_exit` | no |
+| E4 | An EPT violation caused by a gap in *L1's* tables reflected to L1, with the qualification and guest-physical address it would have seen | KVM `nested_ept_inject_page_fault` | no |
+| E5 | An EPT violation caused by a gap in *our* tables, or by a page we watch, handled here and never shown to L1 | KVM `nested_vmx_l0_wants_exit`, EPT-violation case | no |
+| E6 | EPT misconfiguration always ours, never L1's, because L2 never walks L1's tables directly | KVM `nested_vmx_l0_wants_exit`, EPT-misconfig case and its comment | no |
+| E7 | L1's INVEPT invalidates the shadow for the named EPTP, and an INVEPT type we do not report is refused | SDM 33.3 INVEPT; KVM `handle_invept` | no |
+| E8 | A change to *our* EPT - arming a page watch, protecting a region - invalidates every shadow built over it | this tree: `invalidate_ept`, `ept_generation` | no |
+| E9 | The memory type of a shadow leaf derived from the MTRRs as our own tables are, not taken from L1 | SDM Table 31-6 reserved-bit rule as already applied in `initialize_ept`; this tree: `mtrr_state::type_of` | no |
+| E10 | Large-page shadow leaves where both levels permit, to bound the size of the shadow | SDM 31.3.2 | no |
+| E11 | A bounded pool for shadow paging structures, with flush-and-rebuild on exhaustion rather than failure | this tree: the `ept` pool and the `out_of_ept_entries` precedent | no |
+| E12 | The module and every watched page remain unreachable from L2 | this tree: `protect_module`, `watch_guest_page_writes` | no |
+
+### F. Capability reporting
+
+| # | Requirement | Established by | Status |
+|---|---|---|---|
+| F1 | Control MSRs report a subset of the hardware's allowed-1 settings, with allowed-0 preserved | SDM A.3.1 through A.5 | yes |
+| F2 | `IA32_VMX_BASIC` reports our own revision id, 4096-byte regions, write-back, and the TRUE MSRs | SDM A.1 | yes |
+| F3 | `IA32_VMX_MISC` narrowed: no VMWRITE to exit-information fields, CR3-target count zero | SDM A.6 | yes |
+| F4 | `IA32_VMX_VMCS_ENUM` reports the highest index the shadow honours | SDM A.9 | yes |
+| F5 | `IA32_VMX_EPT_VPID_CAP` reports exactly the EPT and VPID features we honour | SDM A.10 | no - currently zero |
+| F6 | `IA32_VMX_VMFUNC` reports what we honour | SDM Table 27-7 bit 13; SDM 33.3 VMFUNC | n/a - zero, and VMFUNC takes `#UD` |
+| F7 | `IA32_FEATURE_CONTROL` virtualized with write-once semantics | SDM Table 7-1, bit 0 | yes |
+| F8 | The CR0/CR4 fixed-bit MSRs passed through, since they describe the real processor | SDM A.7, A.8 | yes |
+
+### G. What Hyper-V specifically needs
+
+Hyper-V is the target, so these are called out separately. Each is a row
+above, named here so that "can Hyper-V launch" has an answer rather than an
+essay.
+
+| Requirement | Row | Status |
+|---|---|---|
+| EPT, without which it does not start at all | E1-E12, F5 | no |
+| Secondary controls, unrestricted guest, VPID | B5, F5 | no |
+| A VMLAUNCH that actually runs L2 | B1-B17 | no |
+| Exit reflection for the exits its own guest takes | C1-C10, D1-D9 | no |
+| MSR bitmap merging, since it traps a great many MSRs | B11, D8 | no |
+| Event injection into L2 and back out again | B14, C4 | no |
+
+**So the answer today is no, and the first blocking row is E1.** Nothing in
+sections B, C, D or E is implemented. Sections A and F are, apart from the
+two invalidation instructions and the EPT capability MSR, which only mean
+anything once E exists.
+
+## Nested EPT: the design, and the SDM facts that decided it
+
+Settled by reading, before any of it was written, so that the next person
+does not re-derive it. Every claim here has a section number that was
+actually looked up.
+
+### The composition is a walk of L1's tables and a walk of ours
+
+L2-GPA → L1-GPA comes from L1's EPT; L1-GPA → HPA comes from ours. Ours is
+an identity map of the first 512 GB (`initialize_ept`), so the second walk
+contributes no *address* translation - only permissions and a memory type.
+That is what makes this tractable here and it is worth stating plainly,
+because it is a property of this VMM rather than of the architecture: a VMM
+whose own EPT relocated guest memory would have real work to do in the
+second walk.
+
+The shadow is a single set of tables mapping L2-GPA directly to HPA.
+
+### Permissions are intersected, then *normalised*, and the normalisation is not optional
+
+Intersecting read, write, supervisor-execute and user-execute across both
+walks is the obvious half. The half that is easy to get wrong is that a
+naive intersection can produce an entry the processor rejects outright.
+
+SDM 31.3.3.1 lists the EPT misconfiguration conditions, and two of them
+bite here:
+
+- "Bit 0 of the entry is clear (indicating that data reads are not allowed)
+  and any of the following hold: Bit 1 is set (indicating that data writes
+  are allowed)."
+- "... The processor does not support execute-only translations and either
+  of the following hold: Bit 2 is set ... the 'mode-based execute control
+  for EPT' VM-execution control is 1 and bit 10 is set."
+
+So an intersection that leaves write or execute set with read clear is a
+**misconfiguration**, not a restrictive mapping - and a misconfiguration is
+an exit this VMM would then take on its own tables, for ever. After
+intersecting: if read is clear, write must be cleared too, and execute and
+user-execute must be cleared unless execute-only translations are reported
+in IA32_VMX_EPT_VPID_CAP bit 0 (SDM A.10).
+
+An all-zero result is *not* a problem and needs no special case: SDM 31.3.2
+says "An EPT paging-structure entry is present if any of bits 2:0 is 1;
+otherwise, the entry is not present", with the note that bit 10 counts too
+when mode-based execute control is on. No permissions means not present
+means an EPT violation, which is exactly what is wanted.
+
+### The exit qualification for a reflected violation has to be synthesised
+
+SDM Table 30-7 defines bits 3, 4, 5 and 6 of the EPT-violation exit
+qualification as "the logical-AND of bit 0 / bit 1 / bit 2 / bit 10 in the
+EPT paging-structure entries used to translate the guest-physical address".
+Hardware computed those over the *shadow*, so they describe the
+intersection - not what L1's own tables say. Reflecting them unchanged
+would tell L1 its own tables denied an access they permit.
+
+They must therefore be recomputed from the walk of L1's tables alone, and
+the walk has to accumulate the AND across every level it traverses, not
+just read the leaf. Note 2 to the same table adds a case to get right:
+bits 5:3 are "cleared to 0" if any entry used was not present, or if
+4-level EPT is in use and the address sets bits in 51:48.
+
+Bits 0, 1 and 2 - the access type - and bits 7, 8 and 12 come from
+hardware's qualification unchanged, since they describe the access and the
+NMI-unblocking state rather than the tables.
+
+### Lazy fill needs no invalidation, which is the single most useful fact found
+
+SDM 31.4.3.4: "Because a logical processor does not cache any information
+derived from EPT paging-structure entries that are not present ... or
+misconfigured ..., it is not necessary to execute INVEPT following
+modification of an EPT paging-structure entry that had been not present or
+misconfigured."
+
+And SDM 31.4.3.1: "An EPT violation invalidates any guest-physical
+mappings (associated with the current EPTRTA) that would be used to
+translate the guest-physical address that caused the EPT violation."
+
+Together: filling in a shadow entry that was absent, on the fault that
+found it absent, requires no INVEPT at all. The fill path is therefore
+cheap and has no invalidation ordering to get wrong. Only *removing* or
+*narrowing* a shadow entry needs one, and 31.4.3.4 lists exactly which
+changes those are.
+
+### Over-invalidation is always architecturally safe
+
+SDM 31.4.3.2: "A logical processor may invalidate any cached mappings at
+any time. For this reason, the operations identified above may invalidate
+the indicated mappings despite the fact that doing so is not required."
+
+Every INVEPT type's description in Chapter 33 says the same locally - "It
+may invalidate other mappings as well". This is what licenses the cheap
+answer everywhere invalidation is needed: throw the whole shadow away and
+let it be rebuilt. It costs faults, never correctness, and it removes any
+need for per-address invalidation bookkeeping.
+
+The same fact settles what to do when the shadow's table pool runs out:
+discard the whole shadow and start again, rather than failing the entry.
+The pool is a cache of derived state, and that is the property that makes
+the bound safe.
+
+### Accessed and dirty flags are not offered, deliberately
+
+Bit 6 of the EPTP enables them (SDM Table 27-9), and SDM 31.3.5 then makes
+"processor accesses to guest paging-structure entries ... treated as
+writes", so every page holding one of L2's own page tables would have to be
+writable in the shadow or take violations. It also makes the flags sticky
+and adds an INVEPT requirement whenever software clears one (31.4.3.4).
+
+IA32_VMX_EPT_VPID_CAP bit 21 is therefore reported clear, which SDM
+29.2.1.1 turns into a hard VM-entry check on L1's behalf: "Bit 6 (enable
+bit for accessed and dirty flags for EPT) must be 0 if bit 21 of the
+IA32_VMX_EPT_VPID_CAP MSR ... is read as 0". So L1 cannot ask for what is
+not implemented, and does not have to be refused later.
+
+Page-modification logging goes with them: SDM 31.3.6 makes it depend on the
+same flags.
+
+### The shadow is keyed by L1's EPTP, and 4-level only
+
+SDM 31.4.2 defines EPTRTA as bits 51:12 of the EPTP, and says mappings are
+associated with it rather than with the whole pointer - so two EPTP values
+differing only in memory type or page-walk length share cached mappings.
+The shadow is therefore keyed on bits 51:12 of EPTP12 and rebuilt when
+those change.
+
+Only a page-walk length of 4 is offered: IA32_VMX_EPT_VPID_CAP bit 6
+reports 4-level, bit 7 reports 5-level (SDM A.10), and 29.2.1.1 checks
+L1's EPTP bits 5:3 against what is reported. Refusing 5-level keeps one
+walk shape rather than two. It also brings a check with it - SDM 31.3.2:
+"With 4-level EPT, bits 51:48 of the guest-physical address must all be
+zero; otherwise, an EPT violation occurs."
+
+### Memory type comes from our MTRR derivation, not from L1
+
+The memory type of a leaf lives in bits 5:3 of the last entry only (SDM
+Tables 31-3, 31-5, 31-7), and SDM 31.3.7.2 gives the legal encodings - 0,
+1, 4, 5, 6 - with "Other values are reserved and cause EPT
+misconfigurations".
+
+Whose choice wins is a real question with a defensible answer: the type
+describes a physical page, and which type a physical page needs is settled
+by the MTRRs, which `initialize_ept` already derives from. L1's choice for
+its own guest is a policy about memory it does not own the physical layout
+of. So the shadow takes ours, by the same `mtrr_state::type_of` call the
+identity map uses.
+
+This is a **known divergence**, recorded rather than hidden: an L1 that
+maps a page uncacheable while our derivation says write-back gets
+write-back. It is the safe direction for correctness of the *machine* - a
+cacheable mapping over a device range is the defect that derivation exists
+to fix - and the unsafe direction for fidelity to L1. Worth revisiting if
+an L1 is ever seen to depend on it.
+
+Note also that non-leaf entries have no memory-type field at all: SDM
+Table 31-6 reserves bits 6:3 of a PDE that references a page table, "must
+be 0", which `initialize_ept` already comments on for its own splits.
+
+### Large-page leaves where both walks permit
+
+A shadow leaf may be 2 MB or 1 GB only if L1's walk ended at that level
+*and* our own entry covering the result is a leaf at that level or larger
+*and* the memory type is uniform across it. Our own tables are 2 MB leaves
+almost everywhere, so this is the common case rather than an optimisation:
+without it a guest with gigabytes of memory needs a shadow page table per
+2 MB.
+
+The reserved-bit rules differ per level and have to be respected: SDM Table
+31-3 reserves bits 29:12 of a 1 GB PDPTE and Table 31-5 bits 20:12 of a
+2 MB PDE, and a set reserved bit is a misconfiguration rather than a
+wrong address.
+
+Capability reporting has to agree: IA32_VMX_EPT_VPID_CAP bits 16 and 17
+report 2 MB and 1 GB support (SDM A.10). They are reported only if the
+hardware reports them, since the shadow's leaves are real hardware entries.
+
+### EPT misconfiguration is always ours
+
+L2 never walks L1's tables - it walks the shadow - so a misconfigured entry
+encountered while L2 runs is one this VMM wrote. It is never reflected.
+That is also what KVM concludes, in `nested_vmx_l0_wants_exit`.
+
+The corollary is that a misconfiguration exit while running L2 is a bug
+here, and the misconfiguration conditions above are the list of ways to
+cause one. Since SDM 30.2.1 does not list EPT misconfiguration among the
+exits that save an exit qualification, there is no qualification to read:
+the guest-physical address field is the only evidence, and it *is* valid
+for both violation and misconfiguration.
+
+### What still has to be decided by measurement
+
+- Whether one shadow per processor or one per EPTP12 shared between
+  processors. Per processor is simpler and cannot race; shared halves the
+  fault cost when L1 runs the same L2 on many processors, which is the
+  normal case. Start per processor, measure the fault count, and only then
+  share.
+- The pool size. It is a straight trade of memory against how often the
+  flush-and-rebuild path runs, and neither side can be guessed - it needs
+  the fault count from a real L1.
