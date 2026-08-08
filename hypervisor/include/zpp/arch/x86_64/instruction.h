@@ -143,6 +143,19 @@ struct decoded_instruction
      * not stated.
      */
     bool sign_extends{};
+
+    /**
+     * Which kind of examination this is, for the forms that change nothing
+     * but the flags. A compare subtracts; a test ands; a bit test reports
+     * one bit in the carry flag. They are distinguished here rather than
+     * by the caller because only the flags tell them apart.
+     * @{
+     */
+    bool compares{};
+    bool tests_bit{};
+    /**
+     * @}
+     */
 };
 
 namespace instruction_detail
@@ -693,6 +706,7 @@ decode(std::span<const std::byte> code, const context & registers)
             // Seven is a compare, which leaves memory alone.
             if (7 == fields.reg) {
                 result.what = memory_operation::examine;
+                result.compares = true;
                 break;
             }
 
@@ -718,8 +732,12 @@ decode(std::span<const std::byte> code, const context & registers)
                 return {};
             }
 
+            // TEST ands its operands without storing the result.
             result.what = memory_operation::examine;
             result.size = size;
+            result.operand = operand_of(
+                static_cast<std::uint8_t>(fields.reg | found.extend_reg()),
+                size);
             break;
         }
 
@@ -735,10 +753,11 @@ decode(std::span<const std::byte> code, const context & registers)
                 return {};
             }
 
-            at.skip(instruction_detail::immediate_width(size));
-
             result.what = memory_operation::examine;
             result.size = size;
+            result.operand = instruction_detail::truncate(
+                at.next_immediate(instruction_detail::immediate_width(size)),
+                size);
             break;
         }
 
@@ -823,6 +842,7 @@ decode(std::span<const std::byte> code, const context & registers)
 
             if (4 == fields.reg) {
                 result.what = memory_operation::examine;
+                result.tests_bit = true;
                 break;
             }
 
@@ -898,6 +918,198 @@ constexpr std::uint64_t apply(const decoded_instruction & instruction,
     }
 
     return old;
+}
+
+/**
+ * The status flags an instruction leaves behind.
+ *
+ * **These are not optional, and leaving them out is how the first attempt
+ * at using this decoder killed a guest.** Every operation here except the
+ * plain moves and the exchange sets flags, and a guest branches on them
+ * immediately: `and [mem], eax` followed by `jz`, `cmp [mem], 1` followed
+ * by `jne`. Carrying out the arithmetic and leaving RFLAGS as it was makes
+ * the guest take the other branch, which is not a subtle corruption - it
+ * was measured as a triple fault after 179 emulated instructions.
+ *
+ * The narrow decoder this replaces never needed them because it only ever
+ * answered MOV, and MOV sets none. Adding the arithmetic made them
+ * mandatory in the same change, and that is the trap: the new forms look
+ * like more of the same and are not.
+ *
+ * SDM Vol. 1 3.4.3 for the definitions, and the per-instruction "Flags
+ * Affected" sections for which of them each operation touches.
+ */
+namespace status_flag
+{
+constexpr std::uint64_t carry = 1ull << 0;
+constexpr std::uint64_t parity = 1ull << 2;
+constexpr std::uint64_t adjust = 1ull << 4;
+constexpr std::uint64_t zero = 1ull << 6;
+constexpr std::uint64_t sign = 1ull << 7;
+constexpr std::uint64_t overflow = 1ull << 11;
+
+constexpr std::uint64_t arithmetic = carry | parity | adjust | zero |
+                                     sign | overflow;
+} // namespace status_flag
+
+namespace instruction_detail
+{
+constexpr bool parity_of(std::uint64_t result)
+{
+    // Even parity of the low byte only, which is what the architecture
+    // defines however wide the operand is.
+    auto low = static_cast<std::uint8_t>(result & 0xff);
+    auto ones = 0u;
+    for (auto i = 0u; i < 8u; ++i) {
+        ones += (low >> i) & 1u;
+    }
+    return 0 == (ones & 1u);
+}
+
+constexpr bool sign_of(std::uint64_t result, std::uint8_t size)
+{
+    auto bits = static_cast<unsigned>(size) * 8u;
+    return 0 != ((result >> (bits - 1u)) & 1u);
+}
+
+constexpr std::uint64_t common_flags(std::uint64_t result,
+                                     std::uint8_t size)
+{
+    std::uint64_t flags{};
+
+    if (0 == truncate(result, size)) {
+        flags |= status_flag::zero;
+    }
+
+    if (sign_of(truncate(result, size), size)) {
+        flags |= status_flag::sign;
+    }
+
+    if (parity_of(result)) {
+        flags |= status_flag::parity;
+    }
+
+    return flags;
+}
+
+} // namespace instruction_detail
+
+/**
+ * The flags after the instruction, given the flags before it, what memory
+ * held, and what it now holds.
+ *
+ * Returns the whole RFLAGS value so a caller assigns rather than merges -
+ * merging is where a flag gets left stale, which is the failure this
+ * exists to prevent.
+ */
+constexpr std::uint64_t flags_after(const decoded_instruction & instruction,
+                                    std::uint64_t before,
+                                    std::uint64_t old_memory,
+                                    std::uint64_t new_memory)
+{
+    using namespace instruction_detail;
+
+    auto size = instruction.size;
+    auto old = truncate(old_memory, size);
+    auto operand = truncate(instruction.operand, size);
+
+    switch (instruction.what) {
+    case memory_operation::store:
+    case memory_operation::load:
+    case memory_operation::exchange:
+        // MOV, MOVZX, MOVSX and XCHG affect no flags at all.
+        return before;
+
+    case memory_operation::combine:
+    case memory_operation::examine:
+        break;
+    }
+
+    // The bit operations set the carry flag from the bit as it was, and
+    // the SDM leaves the others undefined - so they are left alone rather
+    // than invented.
+    switch (instruction.how) {
+    case combine_with::set_bit:
+    case combine_with::clear_bit:
+    case combine_with::flip_bit: {
+        auto bit = (old >> operand) & 1u;
+        return (before & ~status_flag::carry) |
+               (bit ? status_flag::carry : 0);
+    }
+    default:
+        break;
+    }
+
+    // A plain bit test, which arrives as an examine with no combining
+    // operation, does the same thing.
+    if ((memory_operation::examine == instruction.what) &&
+        (combine_with::none == instruction.how) && instruction.tests_bit) {
+        auto bit = (old >> operand) & 1u;
+        return (before & ~status_flag::carry) |
+               (bit ? status_flag::carry : 0);
+    }
+
+    auto cleared = before & ~status_flag::arithmetic;
+
+    // A compare and a subtract set the same flags; a test and an AND
+    // likewise. What differs is only whether the result is written back,
+    // which is not this function's business.
+    auto subtracting = (combine_with::subtract == instruction.how) ||
+                       ((memory_operation::examine == instruction.what) &&
+                        (combine_with::none == instruction.how) &&
+                        instruction.compares);
+
+    if (subtracting) {
+        auto result = truncate(old - operand, size);
+        auto flags = cleared | common_flags(result, size);
+
+        // Borrow, and signed overflow, both from the operands' signs.
+        if (old < operand) {
+            flags |= status_flag::carry;
+        }
+
+        if (sign_of(old, size) != sign_of(operand, size)) {
+            if (sign_of(result, size) != sign_of(old, size)) {
+                flags |= status_flag::overflow;
+            }
+        }
+
+        if ((old & 0xf) < (operand & 0xf)) {
+            flags |= status_flag::adjust;
+        }
+
+        return flags;
+    }
+
+    if (combine_with::add == instruction.how) {
+        auto result = truncate(old + operand, size);
+        auto flags = cleared | common_flags(result, size);
+
+        if (result < old) {
+            flags |= status_flag::carry;
+        }
+
+        if (sign_of(old, size) == sign_of(operand, size)) {
+            if (sign_of(result, size) != sign_of(old, size)) {
+                flags |= status_flag::overflow;
+            }
+        }
+
+        if (((old & 0xf) + (operand & 0xf)) > 0xf) {
+            flags |= status_flag::adjust;
+        }
+
+        return flags;
+    }
+
+    // The logical operations: carry and overflow cleared, the rest from
+    // the result. A test computes the AND it does not store, which is why
+    // the result comes from the operands here rather than from memory.
+    auto result = (memory_operation::examine == instruction.what)
+                      ? truncate(old & operand, size)
+                      : truncate(new_memory, size);
+
+    return cleared | common_flags(result, size);
 }
 
 /**

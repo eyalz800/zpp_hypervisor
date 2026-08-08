@@ -268,6 +268,80 @@ static_assert(run(bit_set)->length <= sizeof(bit_set));
 static_assert(run(scaled_index)->length <= sizeof(scaled_index));
 static_assert(run(test_immediate)->length <= sizeof(test_immediate));
 
+// --- flags, which are not optional -------------------------------------
+//
+// Leaving these out killed a guest: it triple faulted after 179 emulated
+// instructions, because `and [mem], eax; jz` took the wrong branch.
+
+constexpr std::uint64_t no_flags = 0;
+constexpr std::uint64_t all_arithmetic = status_flag::arithmetic;
+
+// and [rcx], edx where the result is zero -> ZF set, CF and OF cleared
+static_assert((flags_after(*run(combine_and), all_arithmetic, 0x0000'0000,
+                           0x0000'0000) &
+               status_flag::zero) != 0);
+static_assert((flags_after(*run(combine_and), all_arithmetic, 0, 0) &
+               status_flag::carry) == 0);
+static_assert((flags_after(*run(combine_and), all_arithmetic, 0, 0) &
+               status_flag::overflow) == 0);
+
+// a non-zero logical result clears ZF
+static_assert((flags_after(*run(combine_or), no_flags, 1, 0xdead'beef) &
+               status_flag::zero) == 0);
+
+// and a negative one sets SF
+static_assert((flags_after(*run(combine_or), no_flags, 0, 0x8000'0000) &
+               status_flag::sign) != 0);
+
+// cmp dword [rcx], 1 with memory holding 1 -> equal, so ZF and no CF
+static_assert((flags_after(*run(group_compare), no_flags, 1, 1) &
+               status_flag::zero) != 0);
+static_assert((flags_after(*run(group_compare), no_flags, 1, 1) &
+               status_flag::carry) == 0);
+
+// with memory holding 0, 0 - 1 borrows -> CF set, ZF clear
+static_assert((flags_after(*run(group_compare), no_flags, 0, 0) &
+               status_flag::carry) != 0);
+static_assert((flags_after(*run(group_compare), no_flags, 0, 0) &
+               status_flag::zero) == 0);
+
+// sub [rcx], edx to zero sets ZF
+static_assert((flags_after(*run(combine_sub), no_flags, 0xdead'beef, 0) &
+               status_flag::zero) != 0);
+
+// add [rcx], edx that wraps sets CF
+static_assert((flags_after(*run(combine_add), no_flags, 0xffff'ffff,
+                           0xdead'beee) &
+               status_flag::carry) != 0);
+
+// bts reports the bit as it was in CF, and leaves the rest alone
+static_assert((flags_after(*run(bit_set), no_flags, 0x1000, 0x1000) &
+               status_flag::carry) != 0);
+static_assert((flags_after(*run(bit_set), no_flags, 0, 0x1000) &
+               status_flag::carry) == 0);
+static_assert(flags_after(*run(bit_set), status_flag::zero, 0, 0x1000) ==
+              (status_flag::zero));
+
+// bt likewise
+static_assert((flags_after(*run(bit_test), no_flags, 0x8, 0x8) &
+               status_flag::carry) != 0);
+
+// test dword [rcx], 0x10 against memory without that bit -> ZF
+static_assert((flags_after(*run(test_immediate), no_flags, 0x01, 0x01) &
+               status_flag::zero) != 0);
+static_assert((flags_after(*run(test_immediate), no_flags, 0x10, 0x10) &
+               status_flag::zero) == 0);
+
+// the moves and the exchange affect nothing at all
+static_assert(flags_after(*run(store_dword), all_arithmetic, 0, 0) ==
+              all_arithmetic);
+static_assert(flags_after(*run(load_dword), all_arithmetic, 0, 0) ==
+              all_arithmetic);
+static_assert(flags_after(*run(widen_sign), all_arithmetic, 0, 0) ==
+              all_arithmetic);
+static_assert(flags_after(*run(exchange), all_arithmetic, 0, 0) ==
+              all_arithmetic);
+
 int main()
 {
     std::printf("all instruction decoder static_asserts passed\n");
