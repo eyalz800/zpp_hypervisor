@@ -1401,3 +1401,110 @@ What replaces the isolation is discipline, and it is not optional now:
 The historical measurements above that name the other rig are left as they
 were written, because they are what was actually observed at the time -
 including the ones that were later withdrawn, and why.
+
+## Nested VMX: what exists, what is missing, and how it fails
+
+Landed off, behind `-DZPP_NESTED_VMX=ON` which defaults to `OFF`. Read this
+before turning it on, and read it before deciding what to build next.
+
+### What exists
+
+- **A guest instruction can no longer halt a processor.** All thirteen VMX
+  instructions had one exit reason each and no case, so every one of them
+  fell to `default:` in the exit handler, which halts. They now fault with
+  `#UD`, which is the architecturally correct answer given that the guest
+  is told CR4.VMXE is clear: VMXON's operation section raises `#UD` for
+  `CR4.VMXE = 0`, and SDM 28.1.1 puts invalid-opcode exceptions above the
+  VM exit. This is true in the default build and is not gated on the
+  switch.
+- **Guest memory access from a VM exit.** `read_guest_physical`,
+  `write_guest_physical` and `guest_linear_to_physical`, the last walking
+  `vmcs.guest_cr3()` rather than the launch-time `os_page_table`. This is
+  the piece item 3's fix and `emulate_watched_page_writes` were both
+  waiting for — the walker is now here, so re-enabling the write emulator
+  is a smaller job than its comment describes.
+- **A shadow VMCS**, stored in the guest's own VMCS region and indexed by
+  the encoding's width, type and index rather than by a named-field
+  layout. Cached per processor so VMREAD and VMWRITE do not pay a guest
+  memory access each.
+- **VMXON, VMXOFF, VMCLEAR, VMPTRLD, VMPTRST, VMREAD, VMWRITE** emulated,
+  with the `VMsucceed`/`VMfailInvalid`/`VMfailValid` conventions of SDM
+  33.2 and the error numbers of Table 33-1.
+- **The capability MSRs and `IA32_FEATURE_CONTROL`** answered, as a subset
+  of the hardware's rather than from a table of constants.
+
+### What is missing, in the order it has to be built
+
+1. **Nested EPT.** This is the one that decides everything else.
+   `IA32_VMX_EPT_VPID_CAP` reads as zero and the secondary controls offer
+   neither EPT nor VPIDs, because supporting them means shadowing the
+   guest's extended page tables against ours: combining two sets of
+   permissions per page, faulting into the shadow on a second-level EPT
+   violation, and rebuilding on the guest's INVEPT. Hyper-V and every
+   other current hypervisor require EPT, so **nothing real runs until this
+   exists.**
+   Rejected as a shortcut: using the guest's EPT pointer directly as the
+   second-level EPTP. Our own extended page tables are an identity map, so
+   it would *function* — and it would also hand the second-level guest our
+   module, our page tables and every watched page, because the module
+   protection and the channel's page watches live in entries the guest's
+   tables know nothing about.
+2. **A real VMCS built from the shadow** — vmcs02 — merging the shadow's
+   guest state and controls with this VMM's host state and the intercepts
+   it cannot give up.
+3. **Exit reflection.** For every exit the second-level guest takes, a
+   decision: reflected into the shadow's exit-information fields and
+   delivered to the guest hypervisor, or handled here. The interesting
+   cases are the ones this VMM already owns for its own reasons — NMI
+   exiting, the interrupt command register, the watched pages.
+
+### How it fails today, exactly
+
+With the switch on, a guest hypervisor executes VMXON, VMPTRLD, a full run
+of VMWRITEs, and then VMLAUNCH — which returns `VMfailValid` with
+VM-instruction error 7, "VM entry with invalid control field(s)", and the
+log line `guest vmlaunch refused: no second level entry`. RIP lands on the
+instruction after the VMLAUNCH, which is where SDM 33.3 puts a failure on
+the controls.
+
+Error 7 is the closest honest answer and it is not a precise one. There is
+no error number for "this VMM does not implement VM entry". It is defensible
+because the controls this VMM can honour genuinely exclude the ones any real
+guest hypervisor needs, and a hypervisor that consulted the capability MSRs
+first will already have found EPT missing.
+
+### Two known divergences, both deliberate
+
+- **A structurally valid encoding naming a field that does not exist is
+  accepted**, where hardware answers `VMfailValid` with error 12. Closing
+  it needs Appendix B as data; `vmcs_fields.h` is an enum of the fields
+  *this* VMM uses, so checking against it would refuse fields that do
+  exist — the worse error. The gap only ever accepts more than hardware
+  would, never less.
+- **Field indices at or above 28 are refused.** Derived from Appendix B and
+  from the region being 4096 bytes; what it excludes is 64-bit control
+  indices 28 to 41, encodings `00002038H` upwards, which belong to the
+  tertiary controls and the structures that go with them — none of which
+  are reported as supported. `IA32_VMX_VMCS_ENUM` reports the limit, which
+  SDM A.9 makes exactly its purpose, so a guest is told rather than
+  surprised.
+
+### Not run anywhere
+
+Nothing here has executed on hardware or under an emulator. It is checked
+only against the compiler, in all four configurations. What would establish
+it, in order of how much it proves per boot:
+
+1. A first-level probe of our own, under Bochs: VMXON on a region with our
+   revision identifier, VMPTRLD, VMWRITE then VMREAD of one field of each
+   width, VMPTRST, VMCLEAR, VMXOFF, with each outcome checked against the
+   flags the SDM specifies. That exercises every path above without needing
+   a guest hypervisor at all, and it is the only experiment that can be run
+   locally, since the VMX instructions never execute in the default build.
+2. The capability MSRs as the guest reads them, compared against the
+   hardware's — the narrowing is the part most likely to be wrong, and the
+   test machine's own values are already a filtered subset because QEMU
+   runs with `hv-passthrough`.
+3. Windows with VBS on and the switch on, expecting a Hyper-V launch
+   failure rather than a hang. That is the one that needs the rig, and it
+   is worth nothing until nested EPT exists.

@@ -276,9 +276,25 @@ Everything this VMM presents to its guest lives in the exit handler in
 Windows to boot, and each was found by Windows failing in a way that pointed
 somewhere else entirely.
 
-- **VMX is hidden** — CPUID leaf 1, ECX bit 5 cleared. Hyper-V launches ahead
-  of Windows whenever VBS is on, and would `#GP` on its own `vmxon`. Reporting
-  no VMX makes it stand down. Remove once nesting exists.
+- **VMX is hidden** — CPUID leaf 1, ECX bit 5 cleared, and CR4.VMXE reads back
+  clear through its read shadow. The two are keyed on the same
+  `nested_vmx::enabled` constant and must stay that way: "no VMX in CPUID, VMXE
+  set in CR4" exists on no real processor, and a guest that trusts CR4 faults on
+  its own `vmxon` — `BACKLOG.md` item 1. Hyper-V launches ahead of Windows
+  whenever VBS is on and stands down cleanly when it finds no VMX.
+- **The VMX instructions fault, they do not halt.** All thirteen exit
+  unconditionally in non-root operation (SDM 28.1.2), and until `8412b76` every
+  one of them fell to `default:` and halted the processor — a guest instruction
+  could stop a CPU. They now take `#UD`, which is the answer a processor with
+  CR4.VMXE clear gives (SDM 28.1.1 puts invalid-opcode above the exit).
+  **Nothing a guest can execute may reach `default:`**; a case that faults is
+  always available and always better.
+- **Nested VMX exists but is off** — `-DZPP_NESTED_VMX=ON`, default off. On, the
+  guest is told VMX exists and `nested_vmx.cpp` answers the instructions against
+  a shadow VMCS in the guest's own region. `VMLAUNCH` is still refused, so a real
+  guest hypervisor fails at launch instead of standing down, which is worse than
+  the lie. `hypervisor/include/zpp/hypervisor/nested_vmx.h` lists what has to
+  exist first; the short version is nested EPT.
 - **The whole hypervisor CPUID range is answered**, `0x40000000`–`0x4fffffff`,
   not just the leaf holding the signature. Unanswered leaves fall through to
   whatever is underneath, and underneath is not nothing: the QEMU test rig runs
@@ -293,7 +309,9 @@ somewhere else entirely.
   gives: `#GP`, with RIP left at the faulting instruction.
 - **Unhandled exits stop the CPU.** They are not resumed from, because the
   resume path advances RIP by the faulting instruction's length, so the guest
-  silently skips it and continues as though it had worked.
+  silently skips it and continues as though it had worked. This is for exits
+  that indicate a bug *here*, never for an instruction a guest chose to
+  execute — see the VMX case above for why.
 
 The recurring mistake in all of these is the same: answering *part* of an
 interface, or resuming as though an unhandled instruction had succeeded. Both
