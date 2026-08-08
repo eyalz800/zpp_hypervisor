@@ -96,19 +96,30 @@ constexpr std::uint8_t widen_zero[] = {0x0f, 0xb6, 0x11};
 static_assert(run(widen_zero)->what == memory_operation::load);
 static_assert(run(widen_zero)->size == 1);
 static_assert(!run(widen_zero)->sign_extends);
-static_assert(result_for_register(*run(widen_zero), 0xff, 0) == 0xff);
+static_assert(result_for_register(*run(widen_zero), 0xff,
+                                  0xffff'ffff'ffff'ffff) == 0xff);
 
 // movsx edx, byte [rcx]
 constexpr std::uint8_t widen_sign[] = {0x0f, 0xbe, 0x11};
 static_assert(run(widen_sign)->sign_extends);
-static_assert(result_for_register(*run(widen_sign), 0xff, 0) ==
-              0xffff'ffff'ffff'ffff);
+// A 32-bit destination is filled and the rest of the register cleared, so
+// sign extending a byte of 0xff gives 0x00000000ffffffff - not all ones.
+static_assert(result_for_register(*run(widen_sign), 0xff,
+                                  0xffff'ffff'ffff'ffff) ==
+              0x0000'0000'ffff'ffff);
 
 // movsx edx, word [rcx]
 constexpr std::uint8_t widen_sign_word[] = {0x0f, 0xbf, 0x11};
 static_assert(run(widen_sign_word)->size == 2);
-static_assert(result_for_register(*run(widen_sign_word), 0x8000, 0) ==
-              0xffff'ffff'ffff'8000);
+static_assert(result_for_register(*run(widen_sign_word), 0x8000,
+                                  0xffff'ffff'ffff'ffff) ==
+              0x0000'0000'ffff'8000);
+
+// movzx ax, byte [rcx] -- a 16-bit destination preserves the upper bits
+constexpr std::uint8_t widen_zero_word_dest[] = {0x66, 0x0f, 0xb6, 0x11};
+static_assert(result_for_register(*run(widen_zero_word_dest), 0x01,
+                                  0xffff'ffff'ffff'ffff) ==
+              0xffff'ffff'ffff'0001);
 
 // --- read-modify-write, which is what a driver does to a register ------
 

@@ -2961,6 +2961,12 @@ hypervisor::decode_guest_instruction(
     auto store = arch::x86_64::decode(
         std::as_bytes(std::span{code}), context);
 
+    // Kept for the trace, so a failing emulation can be identified by its
+    // opcode rather than by inference.
+    for (std::size_t i{}; i < sizeof(this->last_fetched_code); ++i) {
+        this->last_fetched_code[i] = code[i];
+    }
+
     // What was refused, so the forms can be named rather than counted.
     //
     // The bytes are already here - the fetch above did the work - and a
@@ -3018,7 +3024,8 @@ bool hypervisor::carry_out_guest_instruction(
     std::uint64_t guest_physical,
     const arch::x86_64::decoded_instruction & instruction,
     arch::x86_64::context & context,
-    guest_write & performed)
+    guest_write & performed,
+    bool & changed_memory)
 {
     using arch::x86_64::memory_operation;
 
@@ -3065,6 +3072,20 @@ bool hypervisor::carry_out_guest_instruction(
         slot = arch::x86_64::result_for_register(instruction, old, slot);
     }
 
+    // The flags, which are not optional.
+    //
+    // Every operation here except the moves and the exchange sets them,
+    // and the guest branches on them immediately - `and [mem], eax` is
+    // followed by a `jz`. Carrying out the arithmetic and leaving RFLAGS
+    // alone makes the guest take the other branch, and that is not a
+    // subtle corruption: it was measured as a triple fault, exit reason 2,
+    // after 179 emulated instructions. The decoder this replaces never
+    // needed it because MOV sets no flags.
+    if (arch::x86_64::memory_operation::store != instruction.what) {
+        this->vmcs.guest_rflags(arch::x86_64::flags_after(
+            instruction, this->vmcs.guest_rflags(), old, replacement));
+    }
+
     // What the watch is told. The value reported is what the memory now
     // holds, which for a combine is the combination rather than the
     // operand - a handler looking for "did the guest clear the enable
@@ -3074,6 +3095,38 @@ bool hypervisor::carry_out_guest_instruction(
         .value = writes_memory ? replacement : old,
         .size = instruction.size,
     };
+
+    changed_memory = writes_memory;
+
+    // Recorded newest-last so the few before a failure can be read out.
+    // Everything the emulation decided is here: what it thought the
+    // instruction was, the width, what memory held and what it now holds.
+    //
+    // Only the operations the narrow decoder could not answer are kept.
+    // A plain store is not new - it was emulated before this decoder
+    // existed and on a build that booted - so recording those fills the
+    // ring with traffic that is known good and hides the ones that are
+    // not. Freezes when full, because the first of a new kind is what
+    // matters.
+    if ((memory_operation::store != instruction.what) &&
+        (this->emulated_trace_count < emulated_trace_capacity)) {
+        auto slot = this->emulated_trace_count;
+        auto & recorded = this->emulated_trace[slot];
+
+        for (std::size_t i{}; i < sizeof(recorded.code); ++i) {
+            recorded.code[i] = this->last_fetched_code[i];
+        }
+
+        recorded.page = guest_physical >> 12;
+        recorded.old_value = old;
+        recorded.new_value = replacement;
+        recorded.what = static_cast<std::uint32_t>(instruction.what);
+        recorded.how = static_cast<std::uint32_t>(instruction.how);
+        recorded.size = instruction.size;
+        recorded.wrote = writes_memory ? 1u : 0u;
+
+        this->emulated_trace_count = this->emulated_trace_count + 1;
+    }
 
     return true;
 }
@@ -3192,10 +3245,26 @@ bool hypervisor::on_ept_violation(std::size_t cpu,
 
             guest_write written{};
 
+            auto changed_memory = false;
+
             if (!straddles &&
-                carry_out_guest_instruction(
-                    guest_physical, *store, context, written)) {
-                if (watch.on_write) {
+                carry_out_guest_instruction(guest_physical,
+                                            *store,
+                                            context,
+                                            written,
+                                            changed_memory)) {
+                // Only an access that actually changed memory is reported.
+                //
+                // The decoder now answers loads and examinations as well
+                // as writes, which is the point of it - but a handler
+                // watching a device register is watching for *writes*, and
+                // handing it a read would be a different event wearing the
+                // same shape. On the local APIC page that is not a
+                // subtlety: the interrupt command register's handler acts
+                // on a write to it, so reporting a read of it sends an
+                // interrupt the guest never asked for. Measured as a guest
+                // that never left early boot.
+                if (changed_memory && watch.on_write) {
                     watch.on_write(watch.context, page, &written);
                 }
 
@@ -3246,6 +3315,7 @@ bool hypervisor::on_ept_violation(std::size_t cpu,
 
         this->stepping_watch[cpu] = true;
         this->stepping_page[cpu] = page;
+        this->stepping_offset[cpu] = guest_physical & (page_size - 1);
         monitor_trap_flag(true);
         return true;
     }
@@ -3310,8 +3380,10 @@ bool hypervisor::on_monitor_trap_flag(std::size_t cpu)
     }
 
     auto page = this->stepping_page[cpu];
+    auto offset = this->stepping_offset[cpu];
     this->stepping_watch[cpu] = false;
     this->stepping_page[cpu] = {};
+    this->stepping_offset[cpu] = {};
     monitor_trap_flag(false);
 
     // Close the page again before the handler runs, so that a handler
@@ -3321,9 +3393,33 @@ bool hypervisor::on_monitor_trap_flag(std::size_t cpu)
         invalidate_ept();
     }
 
+    // What the step accomplished, in the shape an emulated write arrives
+    // in. The step has already run, so the page holds what the guest
+    // wrote and the value can simply be read back; the address comes from
+    // the exit, which reported it before the step was armed.
+    //
+    // **Passing nullptr here is what wedged the guest.** A handler given
+    // a page and no register cannot act, so every command that arrived
+    // this way was dropped - measured as 149 dropped against 178
+    // emulated, with the decoder refusing none of them, so these are not
+    // a decoder gap and no amount of decoder coverage would have reached
+    // them. The guest's start-up IPIs were among the dropped, no
+    // application processor started, and the firmware waited for them for
+    // ever in EDK2's MpInitLib. The guest never left firmware.
+    //
+    // Four bytes because every register on the pages watched here is a
+    // dword, and the width is not reported by the exit.
+    auto stepped = guest_write{
+        .address = (page << 12) | offset,
+        .value = arch::x86_64::read32(
+            reinterpret_cast<volatile std::uint8_t *>((page << 12) |
+                                                      offset)),
+        .size = 4,
+    };
+
     for (auto & watch : this->watches) {
         if (watch.armed && (watch.page == page) && watch.on_write) {
-            watch.on_write(watch.context, page, nullptr);
+            watch.on_write(watch.context, page, &stepped);
             break;
         }
     }
@@ -5246,19 +5342,40 @@ void hypervisor::on_local_apic_write(void * context,
     // Keying on the offset is exact. Writing the low half is what sends
     // the command, so this fires once per command and never on an end of
     // interrupt, which is the traffic the old test was trying to exclude.
+    // Stepped rather than emulated, so which register was written is not
+    // known - but the command is, because it is read from the page above
+    // rather than from the instruction.
+    //
+    // **Returning here threw away every command that arrived this way,
+    // and that was the wedge.** Measured on the rig with a hypervisor
+    // announced to the guest: 178 writes to this page emulated and 149
+    // stepped, with the decoder refusing *none* of them - so the stepped
+    // ones are not a decoder gap, they are accesses the exit
+    // qualification did not describe as an operand access, and no decoder
+    // would have recovered them. The guest's start-up IPIs were among
+    // them, no application processor ever started, and the firmware sat
+    // in its own wait loop for them for ever: EDK2's MpInitLib blocks in
+    // WaitApWakeup on a per-processor semaphore. The guest was stopped in
+    // firmware, RIP unchanged across samples minutes apart, having never
+    // reached the operating system.
+    //
+    // So the value is used and the offset is replaced by a weaker test
+    // that this path can actually make: the interrupt command register
+    // holding something other than what it last held. Any other register
+    // on the page leaves it alone, so unchanged means "not this one".
     if (!write) {
-        // Stepped rather than emulated, so which register was written is
-        // not known. Counted rather than guessed at: a decoder gap on
-        // this page is its own bug, and acting on the wrong register here
-        // would send an interrupt nobody asked for.
+        // Nothing at all is known about the access, which should no
+        // longer happen: both the emulated and the stepped path now
+        // report an address. Counted rather than guessed at, because
+        // acting on the wrong register sends an interrupt nobody asked
+        // for.
         self.apic_writes_undecoded = self.apic_writes_undecoded + 1;
         return;
     }
 
-    auto offset = write->address & (page_size - 1);
-
     // The destination alone sends nothing, so there is nothing to decide
     // until the low half follows it.
+    auto offset = write->address & (page_size - 1);
     if (interrupt_command_low != offset) {
         return;
     }
@@ -5266,6 +5383,32 @@ void hypervisor::on_local_apic_write(void * context,
     auto command = std::uint64_t{low} | (std::uint64_t{high >> 24} << 32);
 
     if (auto issue = self.on_interrupt_command(command)) {
+        // Only where the handler changed it.
+        //
+        // **The write has already gone out.** The watch calls this after
+        // the store has taken effect - emulated through this VMM's own
+        // mapping of the page, which is the real interrupt command
+        // register - so the command the guest wrote has already been
+        // issued by the time this runs. Re-writing an unchanged value
+        // sends it a second time, and two INITs or two start-up IPIs per
+        // command is not a subtle fault: it was measured as a triple
+        // fault, exit reason 2, after 179 emulated writes to this page.
+        //
+        // That did not happen while these writes were stepped rather than
+        // emulated, because a stepped write arrives here undecoded and is
+        // refused above - so the second send is new, and belongs to the
+        // emulation.
+        //
+        // What this does not fix, and is recorded rather than hidden: a
+        // handler that decides to *swallow* a command is too late, because
+        // the send already happened. Swallowing needs the decision made
+        // before the store is applied - `page_watch::before_write` is the
+        // hook for it - and the x2APIC path next door is already the right
+        // shape, deciding before it executes the write.
+        if (*issue == command) {
+            return;
+        }
+
         // Put back what the handler decided, in the form this interface
         // takes. The high half is written first, because writing the low
         // half is what sends it.

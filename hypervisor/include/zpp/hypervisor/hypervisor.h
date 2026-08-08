@@ -2361,6 +2361,45 @@ private:
      */
     volatile std::uint64_t apic_writes_undecoded{};
 
+
+    /**
+     * Each instruction this VMM carried out on the guest's behalf, newest
+     * last, wrapping.
+     *
+     * Wrapping rather than freezing, which is the opposite of the refused
+     * ring beside it, and deliberately: a refusal is interesting the first
+     * time it happens, whereas an emulation is interesting when it is the
+     * *last* thing before the guest died. The failure this exists for is a
+     * triple fault after a fixed number of emulations, and what is wanted
+     * is the few immediately before it.
+     * @{
+     */
+    static constexpr std::size_t emulated_trace_capacity = 32;
+
+    struct emulated_trace_entry
+    {
+        std::uint8_t code[8]{};
+        std::uint64_t page{};
+        std::uint64_t old_value{};
+        std::uint64_t new_value{};
+        std::uint32_t what{};
+        std::uint32_t how{};
+        std::uint32_t size{};
+        std::uint32_t wrote{};
+    };
+
+    emulated_trace_entry emulated_trace[emulated_trace_capacity]{};
+    volatile std::uint64_t emulated_trace_count{};
+
+    /**
+     * The bytes of the instruction most recently fetched for decoding, so
+     * the trace can name it. Written by the fetch and read by the record.
+     */
+    std::uint8_t last_fetched_code[8]{};
+    /**
+     * @}
+     */
+
     /**
      * The opening bytes of instructions the store decoder refused, and how
      * many it has refused.
@@ -3076,6 +3115,46 @@ private:
     static constexpr bool emulate_watched_page_writes = true;
 
     /**
+     * Whether a watched page's writes are carried out through the full
+     * instruction decoder or through the narrow store-only one.
+     *
+     * **Off, and the reason it is off is unresolved rather than
+     * understood.** Switching the exit path to the full decoder makes the
+     * guest triple fault - exit reason 2 - deterministically, at the same
+     * guest RIP, after the same 179 emulations, in early boot.
+     *
+     * What has been ruled out by measurement, so that the next person does
+     * not repeat it:
+     *
+     * - It is not the decoder's added coverage. A trace of every emulation
+     *   that was *not* a plain store recorded **zero** entries, so on this
+     *   workload the full decoder accepted exactly what the narrow one
+     *   accepted, and the extra opcodes were never exercised.
+     * - It is not the status flags. Computing them fixed nothing, and
+     *   skipping the write for stores - which set none - fixed nothing
+     *   either.
+     * - It is not the interrupt command being issued twice. That is a real
+     *   defect on this path, fixed separately, and it did not change this.
+     * - It is not the destination-width bug in the widening moves. That was
+     *   real, is fixed, and did not change this.
+     *
+     * All 179 emulations are the same instruction: `mov [rbx], r12d`
+     * storing zero to the local APIC page, which is an end-of-interrupt
+     * write and is ordinary traffic - and which the narrow decoder answers
+     * identically on a build that boots. So the difference is in this
+     * VMM's handling around the decode rather than in the decode, and
+     * finding it needs a comparison of the two paths' effects on the same
+     * instruction rather than another hypothesis.
+     *
+     * The decoder itself is kept, tested, and unused by the exit path. Its
+     * value does not depend on this switch: `check-instruction.sh` proves
+     * what it answers, and the eventual fix for the APIC page is more
+     * likely to be hardware APIC-access virtualization than any decoder,
+     * which is what a comparable bare-metal implementation relies on.
+     */
+    static constexpr bool decode_watched_page_fully = false;
+
+    /**
      * Reads the word a decoded instruction is about to act on.
      *
      * Only the forms that need the old contents ask for it - a plain store
@@ -3098,7 +3177,8 @@ private:
         std::uint64_t guest_physical,
         const arch::x86_64::decoded_instruction & instruction,
         arch::x86_64::context & context,
-        guest_write & performed);
+        guest_write & performed,
+        bool & changed_memory);
 
     static constexpr std::size_t instruction_window_pages_per_cpu = 2;
 
@@ -4023,6 +4103,25 @@ private:
      */
     bool stepping_watch[max_cpus]{};
     std::uint64_t stepping_page[max_cpus]{};
+
+    /**
+     * The offset within the watched page that the stepped access named.
+     *
+     * The processor reports the faulting guest-physical address on every
+     * EPT violation, so *which* register was touched is known even where
+     * the instruction could not be emulated - and it was being computed
+     * and then dropped on the stepping path, which left the handler with
+     * a page and no register. Carried here so that a stepped write
+     * reaches a handler in the same shape an emulated one does.
+     *
+     * This is the split both reference implementations use: the offset
+     * comes from the exit and the value comes from the page, and neither
+     * needs a decoder. SDM 32.4.3.3 describes the APIC-access exit as
+     * reporting the offset for exactly this reason, and KVM's
+     * `kvm_apic_write_nodecode` takes the offset from the exit and reads
+     * the value back out of the page rather than decoding anything.
+     */
+    std::uint64_t stepping_offset[max_cpus]{};
 
     /**
      * How many of this module's pages a guest has touched. One per

@@ -197,7 +197,18 @@ show_static  "verify_abandoned" 'queue_pairILj64EE16verify_abandonedE'
 echo "--- emulation and rebuild ---"
 show_member  "emulated_writes" emulated_writes
 show_member  "length disagreement" emulated_length_disagreement
+show_member  "length reported|decoded" emulated_length_reported 2
+show_member  "refused count" refused_instruction_count
+show_member  "refused[0..3] bytes" refused_instructions 8
+show_member  "emulated trace count" emulated_trace_count
 show_member  "rebuild re-entered" channel_rebuild_reentered
+
+# Why the processor stopped, if it did. Read `occurred` first: every other
+# field in the record is meaningless until it is set, and a record left
+# over from an earlier idea of what to capture reads as a real failure.
+echo "--- why a processor stopped ---"
+show_member  "unhandled occurred" unhandled_exit
+show_member  "host nmi count|rip" host_nmi_count 2
 show_member  "excursions completed" excursions_completed
 show_member  "borrow result" channel_rebuild_result
 show_member  "borrow ticks" channel_rebuild_ticks

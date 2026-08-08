@@ -113,8 +113,38 @@ inline constexpr bool pass_through_hypervisor_interface = false;
  * Deliberately not "Microsoft Hv" in the vendor leaf. The interface
  * signature in the second leaf is what a guest matches on; the vendor
  * stays ours, which is what the reference does too.
+ *
+ * **Off, and off because announcing stops the machine reaching an
+ * operating system at all.** Measured on the rig, same tree, same build,
+ * one constant apart:
+ *
+ * - announced: the guest never leaves firmware. Its instruction pointer
+ *   was identical on samples minutes apart, only the boot processor ever
+ *   took an exit, and no application processor started. That is EDK2's
+ *   MpInitLib waiting in WaitApWakeup for processors that never wake -
+ *   the same shape a destructive self check leaves behind, arrived at
+ *   from a different direction.
+ * - not announced: the guest reaches the Windows kernel.
+ *
+ * This was expensive to find and the reason is worth keeping: the
+ * constant was flipped in the same commit that added an instruction
+ * decoder, so the first boot that failed was blamed on the decoder, and
+ * several boots went into bisecting a change that was innocent. The
+ * decoder refuses **nothing** on this workload - measured, `refused
+ * count` zero - and emulates only one instruction form. **A behavioural
+ * switch does not belong in a commit that adds a mechanism**, because
+ * the mechanism is what gets blamed.
+ *
+ * What has to change before it can go on: the guest's start-up path when
+ * it believes it is virtualized has to work. Carrying the faulting
+ * offset through the stepped path was necessary and is done, and is not
+ * sufficient - announcing still wedges with it in place. The next thing
+ * to establish is what the guest actually does to start a processor once
+ * it knows it is virtualized, which is a question about the guest's own
+ * loader rather than about this VMM, and is why nothing further is
+ * guessed at here.
  */
-inline constexpr bool announce_hypervisor = true;
+inline constexpr bool announce_hypervisor = false;
 
 inline constexpr bool enabled =
 #if defined(ZPP_NESTED_VMX) && ZPP_NESTED_VMX

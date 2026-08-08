@@ -110,6 +110,19 @@ struct decoded_instruction
     std::uint8_t size{};
 
     /**
+     * Width of the register a result goes to, which is **not** always the
+     * width of the memory access.
+     *
+     * The widening moves are the whole reason this is separate: `movzx
+     * eax, byte [mem]` reads one byte and fills four. Using the memory
+     * width for both produced a register holding the old upper bits with a
+     * byte pasted in - measured as `ffffffffffffff01` where the
+     * architecture gives `0000000000000001`. Zero means "same as the
+     * access", which is every form except those.
+     */
+    std::uint8_t destination_size{};
+
+    /**
      * How long the instruction is, in bytes.
      *
      * Reported because the VMCS field that would otherwise answer it is
@@ -813,6 +826,12 @@ decode(std::span<const std::byte> code, const context & registers)
 
             result.what = memory_operation::load;
             result.size = narrow;
+
+            // The destination is as wide as the operand size says, which
+            // for these is what REX.W and the 0x66 prefix decide - the
+            // opcode only says how much of memory is read.
+            result.destination_size =
+                instruction_detail::width_of(found, false);
             result.destination = static_cast<std::uint8_t>(
                 fields.reg | found.extend_reg());
             result.writes_register = true;
@@ -1126,24 +1145,32 @@ result_for_register(const decoded_instruction & instruction,
                     std::uint64_t current_memory,
                     std::uint64_t current_register)
 {
-    auto size = instruction.size;
-    auto value = instruction_detail::truncate(current_memory, size);
+    auto read = instruction.size;
+
+    // Where the two differ, the *destination* width decides how much of
+    // the register the result occupies, and the access width decides only
+    // how much was read. Conflating them is the bug this parameter exists
+    // to have prevented.
+    auto written = (0 != instruction.destination_size)
+                       ? instruction.destination_size
+                       : read;
+
+    auto value = instruction_detail::truncate(current_memory, read);
 
     if (instruction.sign_extends) {
-        // The destination width, not the source width, is what the
-        // extension fills - and it is the whole register here, since the
-        // widening forms with a 16-bit destination are refused above.
-        return instruction_detail::sign_extend(value, size);
+        value = instruction_detail::truncate(
+            instruction_detail::sign_extend(value, read), written);
     }
 
     // A 4-byte or 8-byte result clears the rest of the register; a 1-byte
     // or 2-byte one leaves it alone. That asymmetry is the architecture's
     // and is easy to get wrong in the caller, which is why it is here.
-    if (size >= 4) {
+    if (written >= 4) {
         return value;
     }
 
-    return (current_register & ~instruction_detail::mask_for(size)) | value;
+    return (current_register & ~instruction_detail::mask_for(written)) |
+           value;
 }
 
 } // namespace zpp::arch::x86_64
