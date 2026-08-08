@@ -114,7 +114,7 @@ inline constexpr bool pass_through_hypervisor_interface = false;
  * signature in the second leaf is what a guest matches on; the vendor
  * stays ours, which is what the reference does too.
  */
-inline constexpr bool announce_hypervisor = false;
+inline constexpr bool announce_hypervisor = true;
 
 inline constexpr bool enabled =
 #if defined(ZPP_NESTED_VMX) && ZPP_NESTED_VMX

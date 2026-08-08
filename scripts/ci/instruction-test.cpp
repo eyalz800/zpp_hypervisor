@@ -1,0 +1,275 @@
+// Compile-time tests for the instruction decoder.
+//
+// Every case is a static_assert, so the check is the build: a decoder that
+// stops answering an encoding cannot be committed, and the encodings are
+// written out as bytes rather than assembled, so the test does not depend
+// on an assembler agreeing with the decoder about what it meant.
+#include "zpp/arch/x86_64/instruction.h"
+
+#include <cstdio>
+
+using namespace zpp::arch::x86_64;
+
+constexpr context registers_for_test()
+{
+    context registers{};
+    registers.rax = 0x1111'1111'1111'1111;
+    registers.rcx = 0x2222'2222'2222'2222;
+    registers.rdx = 0x0000'0000'dead'beef;
+    registers.rbx = 0x4444'4444'4444'4444;
+    registers.rsp = 0xffff'8000'0000'0000; // the host stack, never readable
+    registers.rbp = 0x6666'6666'6666'6666;
+    registers.rsi = 0x7777'7777'7777'7777;
+    registers.rdi = 0x8888'8888'8888'8888;
+    registers.r12 = 0xcccc'cccc'cccc'cccc;
+    return registers;
+}
+
+template <std::size_t Size>
+constexpr auto run(const std::uint8_t (&bytes)[Size])
+{
+    std::byte code[Size]{};
+    for (std::size_t i{}; i < Size; ++i) {
+        code[i] = static_cast<std::byte>(bytes[i]);
+    }
+
+    return decode(std::span<const std::byte>{code, Size},
+                  registers_for_test());
+}
+
+// --- plain stores, which the narrow decoder also handled ---------------
+
+// mov [rcx], edx
+constexpr std::uint8_t store_dword[] = {0x89, 0x11};
+static_assert(run(store_dword)->what == memory_operation::store);
+static_assert(run(store_dword)->size == 4);
+static_assert(run(store_dword)->operand == 0xdeadbeef);
+static_assert(run(store_dword)->length == 2);
+
+// mov [rcx], rdx
+constexpr std::uint8_t store_qword[] = {0x48, 0x89, 0x11};
+static_assert(run(store_qword)->size == 8);
+static_assert(run(store_qword)->operand == 0xdeadbeef);
+
+// mov word [rcx], dx
+constexpr std::uint8_t store_word[] = {0x66, 0x89, 0x11};
+static_assert(run(store_word)->size == 2);
+static_assert(run(store_word)->operand == 0xbeef);
+
+// mov dword [rcx], 0x12345678
+constexpr std::uint8_t store_immediate[] = {
+    0xc7, 0x01, 0x78, 0x56, 0x34, 0x12};
+static_assert(run(store_immediate)->operand == 0x12345678);
+static_assert(run(store_immediate)->length == 6);
+
+// mov qword [rcx], -1 -- the immediate is 32 bits, sign extended
+constexpr std::uint8_t store_negative[] = {
+    0x48, 0xc7, 0x01, 0xff, 0xff, 0xff, 0xff};
+static_assert(run(store_negative)->operand == 0xffffffffffffffffull);
+
+// --- loads, which it did not -------------------------------------------
+
+// mov edx, [rcx]
+constexpr std::uint8_t load_dword[] = {0x8b, 0x11};
+static_assert(run(load_dword)->what == memory_operation::load);
+static_assert(run(load_dword)->size == 4);
+static_assert(run(load_dword)->writes_register);
+static_assert(run(load_dword)->destination == 2); // rdx
+
+// A 4-byte load clears the upper half of the register; a 2-byte one does
+// not. That asymmetry is the architecture's and is the easiest thing here
+// to get wrong in a caller.
+static_assert(result_for_register(*run(load_dword), 0xaabbccdd,
+                                  0xffff'ffff'ffff'ffff) == 0xaabbccdd);
+
+// mov dx, [rcx]
+constexpr std::uint8_t load_word[] = {0x66, 0x8b, 0x11};
+static_assert(run(load_word)->size == 2);
+static_assert(result_for_register(*run(load_word), 0xaabb,
+                                  0xffff'ffff'ffff'ffff) ==
+              0xffff'ffff'ffff'aabb);
+
+// --- the widening moves ------------------------------------------------
+
+// movzx edx, byte [rcx]
+constexpr std::uint8_t widen_zero[] = {0x0f, 0xb6, 0x11};
+static_assert(run(widen_zero)->what == memory_operation::load);
+static_assert(run(widen_zero)->size == 1);
+static_assert(!run(widen_zero)->sign_extends);
+static_assert(result_for_register(*run(widen_zero), 0xff, 0) == 0xff);
+
+// movsx edx, byte [rcx]
+constexpr std::uint8_t widen_sign[] = {0x0f, 0xbe, 0x11};
+static_assert(run(widen_sign)->sign_extends);
+static_assert(result_for_register(*run(widen_sign), 0xff, 0) ==
+              0xffff'ffff'ffff'ffff);
+
+// movsx edx, word [rcx]
+constexpr std::uint8_t widen_sign_word[] = {0x0f, 0xbf, 0x11};
+static_assert(run(widen_sign_word)->size == 2);
+static_assert(result_for_register(*run(widen_sign_word), 0x8000, 0) ==
+              0xffff'ffff'ffff'8000);
+
+// --- read-modify-write, which is what a driver does to a register ------
+
+// or [rcx], edx
+constexpr std::uint8_t combine_or[] = {0x09, 0x11};
+static_assert(run(combine_or)->what == memory_operation::combine);
+static_assert(run(combine_or)->how == combine_with::bitwise_or);
+static_assert(apply(*run(combine_or), 0x0000'0001) == 0xdead'beef);
+
+// and [rcx], edx
+constexpr std::uint8_t combine_and[] = {0x21, 0x11};
+static_assert(run(combine_and)->how == combine_with::bitwise_and);
+static_assert(apply(*run(combine_and), 0xffff'0000) == 0xdead'0000);
+
+// xor [rcx], edx
+constexpr std::uint8_t combine_xor[] = {0x31, 0x11};
+static_assert(run(combine_xor)->how == combine_with::bitwise_xor);
+static_assert(apply(*run(combine_xor), 0xffff'ffff) == 0x2152'4110);
+
+// add [rcx], edx -- and the width has to wrap, not carry out of it
+constexpr std::uint8_t combine_add[] = {0x01, 0x11};
+static_assert(run(combine_add)->how == combine_with::add);
+static_assert(apply(*run(combine_add), 0xffff'ffff) == 0xdead'beee);
+
+// sub [rcx], edx
+constexpr std::uint8_t combine_sub[] = {0x29, 0x11};
+static_assert(apply(*run(combine_sub), 0xdead'beef) == 0);
+
+// --- the immediate group, where the operation is in the ModRM ----------
+
+// or dword [rcx], 0x40
+constexpr std::uint8_t group_or[] = {0x83, 0x09, 0x40};
+static_assert(run(group_or)->what == memory_operation::combine);
+static_assert(run(group_or)->how == combine_with::bitwise_or);
+static_assert(apply(*run(group_or), 1) == 0x41);
+static_assert(run(group_or)->length == 3);
+
+// and dword [rcx], -16 -- 0x83 sign extends its single byte
+constexpr std::uint8_t group_and[] = {0x83, 0x21, 0xf0};
+static_assert(run(group_and)->how == combine_with::bitwise_and);
+static_assert(apply(*run(group_and), 0xff) == 0xf0);
+
+// cmp dword [rcx], 1 -- examines, and leaves memory alone
+constexpr std::uint8_t group_compare[] = {0x83, 0x39, 0x01};
+static_assert(run(group_compare)->what == memory_operation::examine);
+static_assert(apply(*run(group_compare), 0x1234) == 0x1234);
+
+// --- the bit operations, which is how a flag gets set in a register ----
+
+// bts dword [rcx], 12
+constexpr std::uint8_t bit_set[] = {0x0f, 0xba, 0x29, 0x0c};
+static_assert(run(bit_set)->what == memory_operation::combine);
+static_assert(run(bit_set)->how == combine_with::set_bit);
+static_assert(apply(*run(bit_set), 0) == 0x1000);
+
+// btr dword [rcx], 12
+constexpr std::uint8_t bit_clear[] = {0x0f, 0xba, 0x31, 0x0c};
+static_assert(run(bit_clear)->how == combine_with::clear_bit);
+static_assert(apply(*run(bit_clear), 0xffff'ffff) == 0xffff'efff);
+
+// btc dword [rcx], 0
+constexpr std::uint8_t bit_flip[] = {0x0f, 0xba, 0x39, 0x00};
+static_assert(run(bit_flip)->how == combine_with::flip_bit);
+static_assert(apply(*run(bit_flip), 1) == 0);
+
+// bt dword [rcx], 3 -- examines only
+constexpr std::uint8_t bit_test[] = {0x0f, 0xba, 0x21, 0x03};
+static_assert(run(bit_test)->what == memory_operation::examine);
+
+// The immediate bit number is taken modulo the operand width.
+constexpr std::uint8_t bit_set_wrapping[] = {0x0f, 0xba, 0x29, 0x21};
+static_assert(run(bit_set_wrapping)->operand == 1);
+
+// --- exchange ----------------------------------------------------------
+
+// xchg [rcx], edx
+constexpr std::uint8_t exchange[] = {0x87, 0x11};
+static_assert(run(exchange)->what == memory_operation::exchange);
+static_assert(apply(*run(exchange), 0x1234) == 0xdead'beef);
+static_assert(run(exchange)->writes_register);
+static_assert(result_for_register(*run(exchange), 0x1234, 0) == 0x1234);
+
+// --- test --------------------------------------------------------------
+
+// test [rcx], edx
+constexpr std::uint8_t test_register[] = {0x85, 0x11};
+static_assert(run(test_register)->what == memory_operation::examine);
+
+// test dword [rcx], 0x10
+constexpr std::uint8_t test_immediate[] = {
+    0xf7, 0x01, 0x10, 0x00, 0x00, 0x00};
+static_assert(run(test_immediate)->what == memory_operation::examine);
+static_assert(run(test_immediate)->length == 6);
+
+// --- addressing forms, which only affect where the instruction ends ----
+
+// mov [rcx+0x10], edx
+constexpr std::uint8_t displacement_byte[] = {0x89, 0x51, 0x10};
+static_assert(run(displacement_byte)->length == 3);
+
+// mov [rcx+0x100], edx
+constexpr std::uint8_t displacement_dword[] = {
+    0x89, 0x91, 0x00, 0x01, 0x00, 0x00};
+static_assert(run(displacement_dword)->length == 6);
+
+// mov [rax+rbx*4], edx
+constexpr std::uint8_t scaled_index[] = {0x89, 0x14, 0x98};
+static_assert(run(scaled_index)->length == 3);
+
+// mov [rip+disp32], edx
+constexpr std::uint8_t rip_relative[] = {
+    0x89, 0x15, 0x00, 0x10, 0x00, 0x00};
+static_assert(run(rip_relative)->length == 6);
+
+// mov [rsp+0x8], edx -- a stack base is fine; only reading rsp is not
+constexpr std::uint8_t stack_base[] = {0x89, 0x54, 0x24, 0x08};
+static_assert(run(stack_base)->length == 4);
+static_assert(run(stack_base)->operand == 0xdeadbeef);
+
+// --- what must be refused ----------------------------------------------
+
+// mov edx, ecx -- a register destination is not a memory access
+constexpr std::uint8_t register_destination[] = {0x89, 0xca};
+static_assert(!run(register_destination).has_value());
+
+// mov [rcx], rsp -- that field holds the *host* stack pointer
+constexpr std::uint8_t from_stack_pointer[] = {0x48, 0x89, 0x21};
+static_assert(!run(from_stack_pointer).has_value());
+
+// mov [rcx], r12 -- encoding four with REX.B is r12 and is fine
+constexpr std::uint8_t from_r12[] = {0x4c, 0x89, 0x21};
+static_assert(run(from_r12)->operand == 0xcccc'cccc'cccc'cccc);
+
+// mov byte [rcx], ah -- a high byte, not a register
+constexpr std::uint8_t from_high_byte[] = {0x88, 0x21};
+static_assert(!run(from_high_byte).has_value());
+
+// adc dword [rcx], 1 -- needs a carry flag this does not carry
+constexpr std::uint8_t needs_carry[] = {0x83, 0x11, 0x01};
+static_assert(!run(needs_carry).has_value());
+
+// truncated immediate
+constexpr std::uint8_t truncated[] = {0xc7, 0x01, 0x78};
+static_assert(!run(truncated).has_value());
+
+// truncated modrm
+constexpr std::uint8_t truncated_modrm[] = {0x89};
+static_assert(!run(truncated_modrm).has_value());
+
+// an opcode outside the set
+constexpr std::uint8_t unknown[] = {0x0f, 0x05};
+static_assert(!run(unknown).has_value());
+
+// A decoded length never exceeds the bytes it was given, for every form.
+static_assert(run(store_dword)->length <= sizeof(store_dword));
+static_assert(run(bit_set)->length <= sizeof(bit_set));
+static_assert(run(scaled_index)->length <= sizeof(scaled_index));
+static_assert(run(test_immediate)->length <= sizeof(test_immediate));
+
+int main()
+{
+    std::printf("all instruction decoder static_asserts passed\n");
+    return 0;
+}
