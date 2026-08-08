@@ -8563,7 +8563,6 @@ hypervisor::main(arch::x86_64::context & caller_context)
                         if (0 == this->hyperv_guest_os_id) {
                             this->hypercall_page_early =
                                 this->hypercall_page_early + 1;
-                            this->hyperv_hypercall = value;
                             break;
                         }
 
@@ -8577,27 +8576,42 @@ hypervisor::main(arch::x86_64::context & caller_context)
                             // must fail them all cleanly rather than
                             // return success for a call it did not make.
                             //
-                            // Written as one eight byte store because
-                            // that is exactly the instruction pair, in
-                            // the order the bytes 48 c7 c0 02 00 00 00 c3
-                            // appear in memory. Long mode only: nothing
-                            // reaching this VMM's guests calls a
-                            // hypercall page from 32 bit code, and a
-                            // wrong answer there is better refused than
-                            // guessed.
-                            auto page = arch::x86_64::memory_store{
-                                .value = 0xc300000002c0c748ull,
-                                .size = 8,
+                            // `xor edx, edx` then `mov eax, 2` then
+                            // `ret`, which is the invalid hypercall code
+                            // status returned in the pair the interface
+                            // uses.
+                            //
+                            // These eight bytes assemble to themselves in
+                            // both 32 and 64 bit code, so one page serves
+                            // a caller in either mode. The obvious
+                            // spelling - `mov rax, 2` and `ret` - does
+                            // not: it is 64 bit only, and a 32 bit caller
+                            // would execute its REX prefix as `dec eax`.
+                            // Writing the mode independent form removes
+                            // the question rather than answering it,
+                            // which is worth more than the byte it costs.
+                            constexpr std::uint8_t instructions[]{
+                                0x31, 0xd2, 0xb8, 0x02,
+                                0x00, 0x00, 0x00, 0xc3,
                             };
 
-                            // Counted rather than faulted. A page this
-                            // VMM could not fill leaves the guest calling
-                            // into whatever the page already held, which
-                            // is bad - but the alternative is the fault
-                            // that is already known to be fatal, so the
-                            // failure is recorded and the guest runs.
-                            if (!apply_guest_store((value >> 12) << 12,
-                                                   page)) {
+                            // Through the mapping window, not through a
+                            // store against the host page table.
+                            //
+                            // **This is what `hypercall_page_unwritable`
+                            // counted 2 of.** `apply_guest_store` writes
+                            // at the guest physical address as though it
+                            // were a host virtual one, which works for
+                            // the local APIC because that page is mapped
+                            // here - and cannot work for a page of the
+                            // guest's own memory, which this VMM
+                            // deliberately never maps. The window is how
+                            // guest memory is reached, and it takes the
+                            // lock itself.
+                            if (!write_guest_physical(
+                                    (value >> 12) << 12,
+                                    std::as_bytes(
+                                        std::span{instructions}))) {
                                 this->hypercall_page_unwritable =
                                     this->hypercall_page_unwritable + 1;
                             }
