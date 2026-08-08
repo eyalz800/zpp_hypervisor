@@ -1722,7 +1722,14 @@ private:
      * Whether the preemption timer is currently armed, so it is not
      * re-armed on every exit or left running once its reason is gone.
      */
-    bool controller_poll_armed{};
+    /**
+     * Whether each processor has the preemption timer armed.
+     *
+     * One entry per processor, because the control it tracks lives in
+     * that processor's VMCS - see arm_controller_poll for what a single
+     * shared flag did instead.
+     */
+    bool controller_poll_armed[max_cpus]{};
 
     /**
      * Why an acknowledgement wait gave up, for reading with `xp`.

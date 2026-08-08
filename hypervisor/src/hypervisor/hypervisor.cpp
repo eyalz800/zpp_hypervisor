@@ -1098,7 +1098,24 @@ bool hypervisor::wait_for_ept_acknowledgement(std::uint64_t budget,
 
 void hypervisor::arm_controller_poll(bool armed)
 {
-    if (armed == this->controller_poll_armed) {
+    // Per processor, because the control it guards is per VMCS.
+    //
+    // This was one shared flag, and a shared flag in front of
+    // per-processor state gets the answer wrong twice over: the first
+    // processor to arm set the flag and its own pin-based controls, and
+    // every other processor then matched the flag and returned without
+    // arming, so at most one processor ever had a clock. Disarming was
+    // the mirror - the first to disarm cleared the flag and its own
+    // control, leaving every other processor's set with nothing able to
+    // turn it off again.
+    auto slot = vmcs.vpid();
+    if ((0 == slot) || (slot > max_cpus)) {
+        return;
+    }
+
+    auto & armed_here = this->controller_poll_armed[slot - 1];
+
+    if (armed == armed_here) {
         return;
     }
 
@@ -1151,7 +1168,7 @@ void hypervisor::arm_controller_poll(bool armed)
         return;
     }
 
-    this->controller_poll_armed = armed;
+    armed_here = armed;
 
     auto controls = this->vmcs.pin_based_vm_execution_controls();
 
@@ -2283,17 +2300,22 @@ void hypervisor::initialize_vmx()
     // A bit set in FIXED0 must be 1 and a bit clear in FIXED1 must be 0
     // in VMX operation (SDM A.7), hence the OR and the AND. vmxon faults
     // on a CR0 that does not satisfy them.
-    this->host_cr0 &=
-        this->cached_vmx_msr(vmx_msr::cr0_fixed_1) & 0xffffffff;
-    this->host_cr0 |=
-        this->cached_vmx_msr(vmx_msr::cr0_fixed_0) & 0xffffffff;
+    //
+    // The masks are used at their full width. They used to be truncated
+    // to thirty two bits, which is wrong in the direction that silently
+    // clears state: FIXED1 is an *allowed-1* mask, so `& 0xffffffff`
+    // turns every bit above 31 into "must be 0" and the AND then clears
+    // it from the control register. CR0 has nothing up there, but CR4
+    // does - bit 32 is FRED - and host_cr4 is what guest_cr4 is derived
+    // from, so the truncation would take the bit away from the guest as
+    // well. Latent on this machine and wrong by construction.
+    this->host_cr0 &= this->cached_vmx_msr(vmx_msr::cr0_fixed_1);
+    this->host_cr0 |= this->cached_vmx_msr(vmx_msr::cr0_fixed_0);
 
     // The same for CR4, SDM A.8. VMXE is the bit this turns on in
     // practice, and vmxon cannot execute without it.
-    this->host_cr4 &=
-        this->cached_vmx_msr(vmx_msr::cr4_fixed_1) & 0xffffffff;
-    this->host_cr4 |=
-        this->cached_vmx_msr(vmx_msr::cr4_fixed_0) & 0xffffffff;
+    this->host_cr4 &= this->cached_vmx_msr(vmx_msr::cr4_fixed_1);
+    this->host_cr4 |= this->cached_vmx_msr(vmx_msr::cr4_fixed_0);
 }
 
 std::expected<void, zpp::error> hypervisor::enable_vmx_in_feature_control()
