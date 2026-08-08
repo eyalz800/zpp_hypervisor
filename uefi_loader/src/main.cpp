@@ -90,7 +90,8 @@ static EFI_GUID g_efi_device_path_to_text_protocol_guid = {
     0x4852,
     {0x90, 0xCC, 0x55, 0x1A, 0x4E, 0x4A, 0x7F, 0x1C}};
 
-static EFI_GUID g_efi_mp_service_protocol_guid = {
+// Unused in a chainload-only build, which locates no protocols.
+[[maybe_unused]] static EFI_GUID g_efi_mp_service_protocol_guid = {
     0x3fdda605,
     0xa76e,
     0x4f46,
@@ -884,7 +885,9 @@ static void * allocate_below_one_megabyte(std::size_t size)
  * The address comes from the FADT rather than from a fixed chipset
  * location, so this stays correct on real hardware regardless of chipset.
  */
-static bool acpi_timer_advancing(EFI_SYSTEM_TABLE * system_table)
+// Unused in a chainload-only build, which does not wait for anything.
+[[maybe_unused]] static bool
+acpi_timer_advancing(EFI_SYSTEM_TABLE * system_table)
 {
     constexpr std::uint64_t acpi_20_guid_data1 = 0x8868e871;
     constexpr std::size_t fadt_pm_timer_block_offset = 76;
@@ -1368,33 +1371,106 @@ extern "C" EFI_STATUS EFIAPI uefi_main(EFI_HANDLE image_handle,
 
     trace::line("ZPP_TRACE entry");
 
+    // **A chainload-only build does exactly one thing and then stops
+    // being this loader.**
+    //
+    // Not "everything except launching the hypervisor", which is what
+    // this switch used to mean and which made it useless as a control:
+    // the loader still reserved a tail of the file system, borrowed the
+    // controller's admin queue, installed reserved regions, edited the
+    // firmware's tables, enumerated every boot option and validated a
+    // boot manager against its configuration - all of which it logged.
+    // A control has to be the *absence* of what is being tested, and
+    // that was the presence of nearly all of it.
+    //
+    // So this loads the boot manager from the file system this loader
+    // was itself loaded from, and starts it. The two are on the same EFI
+    // system partition by construction - this image is at
+    // \EFI\zpp\zpp_loader.efi on it - so no search is needed and none
+    // is done. Nothing is traced but the outcome.
+    if constexpr (ZPP_CHAINLOAD_ONLY) {
+        EFI_LOADED_IMAGE_PROTOCOL * our_image{};
+        if (EFI_ERROR(g_boot_services->HandleProtocol(
+                image_handle,
+                &g_efi_loaded_image_protocol_guid,
+                reinterpret_cast<void **>(&our_image)))) {
+            trace::line("ZPP_TRACE chainload only: no loaded image");
+            return EFI_LOAD_ERROR;
+        }
+
+        auto * path = file_device_path(
+            our_image->DeviceHandle,
+            u"\\EFI\\Microsoft\\Boot\\bootmgfw.efi");
+        if (!path) {
+            trace::line("ZPP_TRACE chainload only: no device path");
+            return EFI_LOAD_ERROR;
+        }
+
+        EFI_HANDLE started{};
+        if (EFI_ERROR(g_boot_services->LoadImage(
+                false, image_handle, path, nullptr, 0, &started))) {
+            trace::line("ZPP_TRACE chainload only: LoadImage failed");
+            return EFI_LOAD_ERROR;
+        }
+
+        trace::line("ZPP_TRACE chainload only: starting boot manager");
+        return g_boot_services->StartImage(started, nullptr, nullptr);
+    }
+
+    // **The rest of this function prepares the machine for the
+    // hypervisor.**
+    //
+    // The switch used to mean "everything this loader does, except launch
+    // the hypervisor", on the theory that keeping the two runs identical
+    // made them comparable. That was wrong twice over. It is not a
+    // control if the thing under test is still doing almost all of its
+    // work - reserving a tail of the file system, borrowing the
+    // controller's admin queue, installing reserved regions, editing the
+    // firmware's tables - and one of those steps *resets the machine*
+    // when it establishes the reservation, which turns the run into a
+    // boot loop rather than a boot.
+    //
+    // So the switch now means what it says: find the boot manager and
+    // start it. The chainload below connects controllers for itself,
+    // which is the only preparation it actually needs.
+    constexpr bool prepare_for_hypervisor = !ZPP_CHAINLOAD_ONLY;
+
+    if constexpr (!prepare_for_hypervisor) {
+        trace::line("ZPP_TRACE chainload only, nothing prepared");
+    }
+
     // Establish whether timed waits work before touching MP services,
     // since a dead timer makes them hang rather than return an error.
-    g_timed_waits_usable = acpi_timer_advancing(system_table);
-    trace::line(g_timed_waits_usable
-                    ? "ZPP_TRACE timed waits usable"
-                    : "ZPP_TRACE timed waits unusable, single cpu");
+    if constexpr (prepare_for_hypervisor) {
+        g_timed_waits_usable = acpi_timer_advancing(system_table);
+        trace::line(g_timed_waits_usable
+                        ? "ZPP_TRACE timed waits usable"
+                        : "ZPP_TRACE timed waits unusable, single cpu");
+    }
 
     // Still located although number_of_cpus now answers one
     // unconditionally: it is the only thing here that can see the other
     // processors at all, and trace_launch_context reports their state
     // through it. call_on_cpu needs it too, for the processor numbers
     // this loader no longer asks for.
-    status = g_boot_services->LocateProtocol(
-        &g_efi_mp_service_protocol_guid,
-        nullptr,
-        reinterpret_cast<void **>(&g_mp_services));
-    if (EFI_ERROR(status)) {
-        trace::line("ZPP_HYPERVISOR_FAILED no EFI_MP_SERVICES_PROTOCOL");
-        write_trace_variable();
-        return EFI_LOAD_ERROR;
+    if constexpr (prepare_for_hypervisor) {
+        status = g_boot_services->LocateProtocol(
+            &g_efi_mp_service_protocol_guid,
+            nullptr,
+            reinterpret_cast<void **>(&g_mp_services));
+        if (EFI_ERROR(status)) {
+            trace::line(
+                "ZPP_HYPERVISOR_FAILED no EFI_MP_SERVICES_PROTOCOL");
+            write_trace_variable();
+            return EFI_LOAD_ERROR;
+        }
+
+        trace::line("ZPP_TRACE mp services located");
+
+        // Before this loader has done anything, so it describes the
+        // machine the firmware handed over rather than the one we made.
+        trace_launch_context();
     }
-
-    trace::line("ZPP_TRACE mp services located");
-
-    // Before this loader has done anything, so it describes the machine
-    // the firmware handed over rather than the one we made.
-    trace_launch_context();
 
     // Take a tail of the EFI system partition out of its file system, so
     // there are blocks the guest's file system cannot reach and cannot
@@ -1407,7 +1483,9 @@ extern "C" EFI_STATUS EFIAPI uefi_main(EFI_HANDLE image_handle,
     // - which is something only this call puts there. Run the other way
     // round the self test has nowhere legal to write, and the channel it
     // hands over has no destination in it.
-    zpp::esp_reservation::establish(image_handle, system_table);
+    if constexpr (prepare_for_hypervisor) {
+        zpp::esp_reservation::establish(image_handle, system_table);
+    }
 
     // Proves the admin queue borrow against the firmware's own NVMe
     // driver, which has already initialised the controller and created
@@ -1429,7 +1507,8 @@ extern "C" EFI_STATUS EFIAPI uefi_main(EFI_HANDLE image_handle,
     //
     // Reached only once in the life of a machine: the reservation is
     // idempotent and the boot after this one finds it already there.
-    if constexpr (zpp::diag::restart_after_reservation) {
+    if constexpr (zpp::diag::restart_after_reservation &&
+                  prepare_for_hypervisor) {
         if (zpp::esp_reservation::shrank_this_boot) {
             trace::line("ZPP_TRACE reservation established, restarting so "
                         "the channel is live on the next boot");
@@ -1457,7 +1536,7 @@ extern "C" EFI_STATUS EFIAPI uefi_main(EFI_HANDLE image_handle,
     // only this side of the loader has boot services, and because the
     // resident side is handed the same region and has to point its own
     // queue pair at it.
-    if constexpr (nvme_selftest::enabled) {
+    if constexpr (nvme_selftest::enabled && prepare_for_hypervisor) {
         auto * queue_storage =
             allocate_rwx(nvme_selftest::queue_storage_bytes);
         if (!queue_storage) {
@@ -1474,12 +1553,16 @@ extern "C" EFI_STATUS EFIAPI uefi_main(EFI_HANDLE image_handle,
     // firmware's tables are still ours to edit. This has to happen before
     // the boot manager is started, because the guest reads the table once
     // and builds its translation domains from what it found.
-    reserved_region::install(system_table);
+    if constexpr (prepare_for_hypervisor) {
+        reserved_region::install(system_table);
+    }
 
     // Where the guest writes to put the machine to sleep. Only the
     // loader can find it, and the resident side cannot see a suspend
     // coming without it.
-    sleep_control_finder::run(system_table);
+    if constexpr (prepare_for_hypervisor) {
+        sleep_control_finder::run(system_table);
+    }
 
     // Everything the platform has to supply for the hypervisor to be
     // launched and to keep working after this loader is gone. Designated
@@ -1532,7 +1615,7 @@ extern "C" EFI_STATUS EFIAPI uefi_main(EFI_HANDLE image_handle,
     // passed-through disk carries no file system handle and its boot
     // manager cannot be found at all. Reusing the loader is what makes the
     // two runs comparable.
-    constexpr bool launch_hypervisor = !ZPP_CHAINLOAD_ONLY;
+    constexpr bool launch_hypervisor = prepare_for_hypervisor;
 
     std::uint64_t result{};
 
@@ -1542,7 +1625,6 @@ extern "C" EFI_STATUS EFIAPI uefi_main(EFI_HANDLE image_handle,
         trace::line("ZPP_TRACE loaded");
     } else {
         static_cast<void>(parameters);
-        trace::line("ZPP_TRACE chainload only, hypervisor not launched");
     }
 
     // A residency check by CPUID used to sit here and has been taken
