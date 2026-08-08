@@ -7518,10 +7518,11 @@ hypervisor::main(arch::x86_64::context & caller_context)
                 // unsupported. A guest that knows it is virtualized takes
                 // the nested path instead. The reference this is being
                 // compared against announces itself unconditionally.
-                if constexpr (!nested_vmx::pass_through_hypervisor_interface) {
-                    cpuid_result[2] &= ~(1u << 31);
-                } else {
+                if constexpr (nested_vmx::pass_through_hypervisor_interface ||
+                              nested_vmx::announce_hypervisor) {
                     cpuid_result[2] |= (1u << 31);
+                } else {
+                    cpuid_result[2] &= ~(1u << 31);
                 }
 
                 // Hide VMX, unless the nested machinery is compiled in.
@@ -7600,6 +7601,33 @@ hypervisor::main(arch::x86_64::context & caller_context)
                     cpuid_result[1] = 0x5a70705a;
                     cpuid_result[2] = 0x705a7070;
                     cpuid_result[3] = 0x70705a70;
+                } else if (nested_vmx::announce_hypervisor &&
+                           ((hypervisor_leaf_first + 1) == leaf)) {
+                    // The interface signature, which is what a guest
+                    // matches on rather than the vendor above. "Hv#1".
+                    //
+                    // Claimed with no features behind it, which the leaf
+                    // below is what actually says. A guest that recognises
+                    // the interface and finds it offers nothing keeps
+                    // doing everything the way it would without one - and
+                    // that is the point, because the enlightenment that
+                    // changes how it starts its processors is the one
+                    // thing this VMM must not have taken away from it.
+                    cpuid_result[0] = 0x31237648;
+                    cpuid_result[1] = 0;
+                    cpuid_result[2] = 0;
+                    cpuid_result[3] = 0;
+                } else if (nested_vmx::announce_hypervisor &&
+                           (leaf > (hypervisor_leaf_first + 1)) &&
+                           (leaf < diagnostic_leaf)) {
+                    // Every other leaf in the range, zero. The features
+                    // leaf reading zero is the whole design: nothing is
+                    // claimed, so nothing has to be implemented, and no
+                    // synthetic MSR has been invited.
+                    cpuid_result[0] = 0;
+                    cpuid_result[1] = 0;
+                    cpuid_result[2] = 0;
+                    cpuid_result[3] = 0;
                 } else if (diagnostic_leaf == leaf) {
                     // Reports another processor's most recent exit.
                     //

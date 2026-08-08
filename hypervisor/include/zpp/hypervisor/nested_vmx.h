@@ -77,6 +77,45 @@ namespace zpp::hypervisor::nested_vmx
  */
 inline constexpr bool pass_through_hypervisor_interface = false;
 
+/**
+ * Whether to announce this VMM to the guest and answer the hypervisor
+ * CPUID range ourselves, claiming no features at all.
+ *
+ * The bare-metal-honest alternative to the switch above, which forwards to
+ * whatever is underneath and therefore cannot ever ship: on real hardware
+ * there is nothing underneath to forward to.
+ *
+ * Three things were measured to arrive at this shape:
+ *
+ * - With no hypervisor announced, the guest asked for **zero** leaves in
+ *   the hypervisor range out of 49,860 CPUID leaves in a boot. It does not
+ *   go looking unless told.
+ * - Announcing one and forwarding the range made it look (225 leaves) and
+ *   use the enlightenments it found (9 synthetic MSR accesses) - and its
+ *   application-processor adoption fell from all eight to none, because a
+ *   guest that believes it is under a Hyper-V-compatible hypervisor starts
+ *   processors through an enlightened hypercall rather than through the
+ *   interrupt command register this VMM watches.
+ * - The reference implementation compared against claims only five feature
+ *   bits - reference counter, hypercall MSRs, VP index, reference TSC,
+ *   frequency MSRs - and nothing whatever about starting processors. Its
+ *   guest therefore keeps using INIT-SIPI-SIPI.
+ *
+ * So this claims *no* features. That is the smallest thing that makes the
+ * guest aware it is virtualized, and awareness is what the interesting
+ * question turns on: a guest that thinks it is on bare metal applies bare
+ * metal requirements to virtualization-based security - Secure Boot among
+ * them, which this rig cannot provide - while one that knows better does
+ * not. Claiming nothing also means there is nothing to implement and no
+ * synthetic MSR the guest has been invited to ask for, so the general
+ * protection fault those still take remains the honest answer.
+ *
+ * Deliberately not "Microsoft Hv" in the vendor leaf. The interface
+ * signature in the second leaf is what a guest matches on; the vendor
+ * stays ours, which is what the reference does too.
+ */
+inline constexpr bool announce_hypervisor = false;
+
 inline constexpr bool enabled =
 #if defined(ZPP_NESTED_VMX) && ZPP_NESTED_VMX
     true;
