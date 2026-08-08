@@ -2072,3 +2072,54 @@ tunable into a dead processor.
   hypervisor to settle.
 - Whether the per-processor duplication of shadows is worth the fault cost it
   saves, per the paragraph above.
+
+## The channel stops at the controller reset, and the clock was never the cause
+
+Settled on the rig, by reading the resident side's own memory through the
+emulator's monitor while Windows ran. Recorded because two earlier
+readings of this were wrong in ways that were reasonable at the time.
+
+What was measured, in order:
+
+- Windows boots under the VMM, reaches user mode, and settles. Seven of
+  eight processors park at one kernel address and one processor rotates
+  through the VMM's own text - so exits are happening.
+- `heartbeat_exits_seen` per processor, sampled twenty seconds apart:
+  processor 0 goes from 218,502 to 243,632. That is **about 1,250 exits
+  per second per processor**, unaided.
+- `ring_storage::written` keeps climbing throughout, so records are still
+  being produced.
+- The sink's `sequence` and `next_block_index` are frozen at 18, which is
+  exactly the nineteen blocks the disk holds for that boot.
+- `configure_reject` reads `none`, so configuration succeeded; the gate
+  reads zero, so nothing is holding it.
+- `queue_pair<64>::bound` is **entirely zero**. `forget()` ran.
+
+So the channel stopped because the guest reset the controller about seven
+seconds in, `note_controller_write` saw CC.EN clear, and the sink did what
+it is written to do. Everything upstream of the device was healthy.
+
+Two corrections that cost time and should not be re-derived:
+
+- **The log's clock is not what stops the channel.** A guest taking 1,250
+  exits per second per processor needs no manufactured ones. The earlier
+  reading - four heartbeats over four and a half seconds and then silence
+  - came from a boot that hung early, and was generalised to a settled
+  guest, which it does not describe. The fallback clock added for it is
+  still correct for a genuinely idle guest and is cheap, so it stays; it
+  is simply not the fix for this.
+- **`lost_to_reset` reading zero is not evidence that nothing was lost.**
+  It only ever reaches the medium inside the *next* block's header, and
+  after a reset there is no next block. The same is true of every counter
+  in that header. Read them from memory, not from the disk, when the
+  question is what happened after the last block.
+
+What that leaves is the reset itself, and the note under
+`rebuild_channel_after_reset` had gone stale: it says the rebuild needs a
+VMM that emulates the guest's write rather than stepping over it, and that
+"this one does not have one yet". It does - `zpp/arch/x86_64/decoder.h`,
+with its own check in CI. The remaining work is the four defects listed on
+`emulate_watched_page_writes`, of which the guest page table walk at exit
+time is the substantial one: there is no walker today, and
+`os_page_table` is built once from the launch-time CR3, so it is only
+right while the guest is still on the firmware's identity map.
