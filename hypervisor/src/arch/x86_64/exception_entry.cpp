@@ -13,15 +13,72 @@ extern "C" void __attribute__((naked)) zpp_x86_64_exception_common()
         .intel_syntax noprefix
         // rsp points at the exception frame: the vector and error code
         // the stub pushed, then the rip, cs, rflags, rsp and ss the CPU
-        // pushed. The CPU aligns the stack to sixteen bytes before it
-        // pushes, and the frame is always seven qwords because the stub
-        // fills in a missing error code, so rsp is 8 modulo 16 here and
-        // one more qword makes it what the call expects.
-        mov rdi, rsp
-        sub rsp, 0x8
+        // pushed.
+        //
+        // Every general purpose register is saved, and that is not
+        // symmetry for its own sake. This handler can now return, and the
+        // one vector it returns for is the non-maskable interrupt - which
+        // is not caused by the instruction it interrupts. Resuming means
+        // resuming code that was midway through something and owns every
+        // register it was using, so anything the C++ handler clobbers has
+        // to come back. A handler that returns having preserved only the
+        // callee-saved set would corrupt the interrupted VMM silently,
+        // which is worse than the halt this replaces.
+        //
+        // Pushed in the reverse of the order they are popped, so the
+        // sequence below reads the same way twice.
+        push rax
+        push rcx
+        push rdx
+        push rbx
+        push rbp
+        push rsi
+        push rdi
+        push r8
+        push r9
+        push r10
+        push r11
+        push r12
+        push r13
+        push r14
+        push r15
+
+        // The frame is above the fifteen registers just pushed.
+        lea rdi, [rsp + 0x78]
+
+        // The CPU aligns the stack to sixteen bytes before it pushes, and
+        // the frame is always seven qwords because the stub fills in a
+        // missing error code, so rsp was 8 modulo 16 on entry. Fifteen
+        // pushes is 120 bytes, which brings it to 0 modulo 16 - exactly
+        // what the call expects, so the padding the previous version
+        // needed is gone rather than merely moved.
         call zpp_x86_64_exception
-        // zpp_x86_64_exception never returns.
-        ud2
+
+        pop r15
+        pop r14
+        pop r13
+        pop r12
+        pop r11
+        pop r10
+        pop r9
+        pop r8
+        pop rdi
+        pop rsi
+        pop rbp
+        pop rbx
+        pop rdx
+        pop rcx
+        pop rax
+
+        // Drop the vector and error code the stub pushed, leaving rsp on
+        // the rip the CPU pushed, which is what iretq expects.
+        add rsp, 0x10
+
+        // Returning from a non-maskable interrupt this way is also what
+        // unblocks the next one: iret clears the latch that suppresses
+        // NMIs from delivery of the current one. A handler that halted
+        // instead left that latch set for ever.
+        iretq
     )!!");
 }
 

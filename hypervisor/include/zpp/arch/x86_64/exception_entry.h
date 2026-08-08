@@ -54,9 +54,15 @@ inline std::uint64_t exception_entry(std::size_t vector)
 }
 
 /**
- * The handler every entry stub funnels into, which never returns.
- * Implemented by the hypervisor.
+ * The handler every entry stub funnels into. Implemented by the
+ * hypervisor.
+ *
+ * It may return, and the stub restores every general purpose register
+ * and irets when it does. That is for the non-maskable interrupt, which
+ * is not caused by the instruction it interrupts and so is the one vector
+ * that can simply be resumed from. Anything else either unwinds to a
+ * recovery point or stops the processor, and neither comes back here.
  */
-extern "C" [[noreturn]] void zpp_x86_64_exception(exception_frame * frame);
+extern "C" void zpp_x86_64_exception(exception_frame * frame);
 
 } // namespace zpp::arch::x86_64

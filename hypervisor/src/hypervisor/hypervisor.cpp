@@ -401,6 +401,40 @@ void hypervisor::load_os_idt()
 void hypervisor::on_host_exception(
     const arch::x86_64::exception_frame & frame)
 {
+    // The non-maskable interrupt is answered first, and by returning.
+    //
+    // It is the one vector that is not caused by the instruction it
+    // interrupts, so there is nothing to recover from and nothing to
+    // diagnose - resuming is simply correct. Every other vector here is a
+    // fault in this VMM, where resuming would re-execute the faulting
+    // instruction and fault again.
+    //
+    // This is why the wake probe in wait_for_ept_acknowledgement was
+    // unusable. NMI exiting governs non-root operation only, so an NMI
+    // sent to a processor that is inside its own VM exit arrives *here*,
+    // and this handler used to halt any vector with no recovery point -
+    // for ever, with no record. One probe could take out several
+    // processors at once, and it took the development machine off the
+    // network. Every caller that might reach a spinning processor was
+    // then made to wait passively instead, which is why those waits time
+    // out rather than succeed.
+    //
+    // It is also a defect in its own right, independent of anything this
+    // VMM does deliberately: a thermal, watchdog or performance
+    // monitoring NMI arriving while any processor happened to be in root
+    // mode halted it silently.
+    //
+    // Deliberately before the recovery point is consulted. An NMI is not
+    // a fault, so unwinding to a recovery point armed for one would
+    // discard work that had not failed.
+    constexpr std::uint64_t non_maskable_interrupt = 2;
+
+    if (non_maskable_interrupt == frame.vector) {
+        this->host_nmi_count = this->host_nmi_count + 1;
+        this->host_nmi_rip = frame.rip;
+        return;
+    }
+
     // Record before touching anything that could fault again, so there is
     // something to read even if this handler does not survive.
     this->host_exception = frame;

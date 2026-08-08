@@ -258,9 +258,16 @@ public:
      * Halts if there is no recovery point, which is the case once the
      * guest is running: the VMCS points the host IDTR here, but main's
      * frame is gone by then and there is nowhere to unwind to.
+     *
+     * **Returns for a non-maskable interrupt**, which is the one vector
+     * that is not caused by the instruction it interrupts and so can
+     * simply be resumed from. That is what makes the wake probe in
+     * wait_for_ept_acknowledgement usable: such a probe reaches a
+     * processor that is inside its own VM exit, where NMI exiting does
+     * not apply and the interrupt arrives here instead. Every other
+     * vector still unwinds or stops.
      */
-    [[noreturn]] void
-    on_host_exception(const arch::x86_64::exception_frame & frame);
+    void on_host_exception(const arch::x86_64::exception_frame & frame);
 
     /**
      * What the start-up trampoline jumps to, once the processor it is
@@ -1981,6 +1988,28 @@ private:
      * vector is a page fault.
      */
     std::uint64_t host_exception_cr2{};
+
+    /**
+     * How many non-maskable interrupts this VMM has taken in root mode,
+     * and where the last one interrupted.
+     *
+     * Separate from host_exception, and deliberately: an NMI is not a
+     * fault, and letting one overwrite the record of a real one would
+     * destroy the evidence for the sake of an event that is usually
+     * routine. It also has to be visible, because a processor that is
+     * taking NMIs and resuming leaves no other trace - the halt that used
+     * to happen was at least loud.
+     *
+     * Non-zero on a machine nobody is probing means the hardware sends
+     * them: thermal, watchdog or performance monitoring. Every one of
+     * those used to halt a processor for ever.
+     * @{
+     */
+    volatile std::uint64_t host_nmi_count{};
+    volatile std::uint64_t host_nmi_rip{};
+    /**
+     * @}
+     */
 
     /**
      * One recorded VM exit. Sampled after the exit was handled, so the
