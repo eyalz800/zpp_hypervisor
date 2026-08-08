@@ -1163,10 +1163,32 @@ void hypervisor::arm_controller_poll(bool armed)
                 diag::log<diag::severity::warning>(
                     "preemption timer not permitted, allowed-1 {}",
                     allowed_one);
-                log("preemption timer not permitted, no clock");
+                log("preemption timer falling back to the guest's timer");
             }
         }
 
+        // Borrow the guest's own timer instead of asking for one.
+        //
+        // Measured on the rig, and this is what the fallback exists for:
+        // with the timer refused the channel wrote four heartbeats -
+        // three, seven, eleven and fifteen exits - across four and a half
+        // seconds of a four minute run, and then nothing. Not a broken
+        // writer. A guest that has settled stops exiting, and every
+        // record this side keeps is written from an exit.
+        //
+        // A guest that is merely stuck is still taking timer interrupts,
+        // and its handler arms the next one before it returns. Trapping
+        // that write costs an exit the guest was going to cause anyway,
+        // needs no control the processor can refuse, and ticks at
+        // whatever rate the guest has chosen rather than one this side
+        // has to pick.
+        //
+        // What it does not cover: a guest whose local APIC is in xAPIC
+        // mode programs the same timer through the APIC page, which is a
+        // memory write and not an MSR. If that turns up, the answer is
+        // to fault the APIC page rather than to widen this.
+        this->arm_guest_timer_poll(armed);
+        armed_here = armed;
         return;
     }
 
@@ -1191,6 +1213,17 @@ void hypervisor::arm_controller_poll(bool armed)
             controls & ~arch::x86_64::vmx::vm_execution_controls::pin::
                            activate_preemption_timer);
     }
+}
+
+void hypervisor::arm_guest_timer_poll(bool armed)
+{
+    // Writes only. A read of either register tells this side nothing it
+    // does not already have, and reads are the half a guest does far more
+    // often - Windows reads the deadline register to work out how long is
+    // left, and trapping that would multiply the cost for nothing.
+    this->intercept_msr(arch::x86_64::msr::ia32_tsc_deadline, false, armed);
+    this->intercept_msr(
+        arch::x86_64::msr::ia32_x2apic_init_count, false, armed);
 }
 
 void * hypervisor::map_window(std::uint64_t physical_address,
@@ -6177,6 +6210,34 @@ hypervisor::main(arch::x86_64::context & caller_context)
                      injection_valid)) {
                     advance_rip = false;
                 }
+                break;
+            }
+
+            // The guest arming its own next timer interrupt, which this
+            // VMM asked to see only because the preemption timer was
+            // refused. The exit *is* the point: the record draining below
+            // runs for every exit regardless of reason, so a guest that
+            // has settled still produces one of these per tick and the
+            // channel keeps moving.
+            //
+            // The write is then performed exactly as the guest wrote it.
+            // The local APIC underneath is the guest's own - nothing here
+            // virtualizes it - and no time stamp counter offset is
+            // programmed, so the value is already in the time base the
+            // hardware expects and needs no adjustment.
+            //
+            // A write the guest would have faulted on faults here instead,
+            // in the host. The conditions are architectural and depend on
+            // the timer's mode in the same local APIC, so a write that
+            // faults for this side is one that would have faulted for the
+            // guest - the difference is only where it lands. Worth
+            // knowing about; not worth guarding against by second
+            // guessing the guest's own APIC state.
+            if (auto index = static_cast<std::uint32_t>(context.rcx);
+                (arch::x86_64::msr::ia32_tsc_deadline == index) ||
+                (arch::x86_64::msr::ia32_x2apic_init_count == index)) {
+                arch::x86_64::wrmsr(
+                    index, (context.rax & 0xffffffff) | (context.rdx << 32));
                 break;
             }
 

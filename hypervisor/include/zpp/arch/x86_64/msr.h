@@ -31,6 +31,25 @@ enum type : std::size_t
 
     ia32_x2apic_apic_id = 0x802,
     ia32_x2apic_icr = 0x830,
+
+    /**
+     * The two ways a guest arms its next local timer interrupt, and the
+     * only periodic thing a settled guest does that this VMM can see
+     * without asking the processor for a control it may not be given.
+     *
+     * Which of the two is used is the guest's choice: with the deadline
+     * mode advertised in CPUID leaf 1 it writes a time stamp counter
+     * value to the deadline register, and otherwise it counts down from
+     * the initial count register. Both are written afresh for every tick,
+     * which is what makes either one a clock.
+     *
+     * The initial count is an x2APIC register, so it is an MSR only while
+     * the local APIC is in x2APIC mode. In xAPIC mode the same register
+     * lives on the APIC page and a write to it is a memory access this
+     * VMM does not see.
+     */
+    ia32_tsc_deadline = 0x6e0,
+    ia32_x2apic_init_count = 0x838,
     ia32_fs_base = 0xC0000100,
     ia32_gs_base = 0xC0000101,
 };

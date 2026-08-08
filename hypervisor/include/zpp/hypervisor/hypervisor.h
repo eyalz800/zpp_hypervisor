@@ -571,6 +571,17 @@ private:
     void arm_controller_poll(bool armed);
 
     /**
+     * Arms or releases the fallback clock: the guest's own timer.
+     *
+     * Used where the processor refuses the preemption timer, which is not
+     * hypothetical - the rig runs under an outer hypervisor that filters
+     * the capability MSRs and does not offer it. Without a clock the
+     * channel is driven by guest exits alone and stops the moment the
+     * guest settles, which is measured in arm_controller_poll.
+     */
+    void arm_guest_timer_poll(bool armed);
+
+    /**
      * Waits until every running processor has picked up the extended
      * page table change just made, or gives up.
      *
