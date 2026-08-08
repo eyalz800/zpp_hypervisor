@@ -1599,16 +1599,16 @@ capability MSR narrowed to say so.
 
 | # | Requirement | Established by | Status |
 |---|---|---|---|
-| E1 | A shadow EPT per EPTP12, composing L2-GPA→L1-GPA (L1's tables) with L1-GPA→HPA (ours) | KVM `nested_ept_init_mmu_context`, `nested_ept_get_eptp` | no |
-| E2 | Two permission sets combined per page - read, write, supervisor execute and user execute all intersected | KVM `kvm_init_shadow_ept_mmu` and the shadow-page permissions it installs | no |
+| E1 | A shadow EPT per EPTP12, composing L2-GPA→L1-GPA (L1's tables) with L1-GPA→HPA (ours) | KVM `nested_ept_init_mmu_context`, `nested_ept_get_eptp` | partial - `walk_ept` and `compose_ept` done and tested; the tables, the pool and the install are not |
+| E2 | Two permission sets combined per page - read, write, supervisor execute and user execute all intersected | KVM `kvm_init_shadow_ept_mmu` and the shadow-page permissions it installs | yes - `ept_permissions`, with the misconfiguration normalisation SDM 31.3.3.1 requires |
 | E3 | Populated lazily from EPT violations taken while L2 runs, since eager construction cannot know what L2 will touch | KVM: L0 always takes the EPT violation - `nested_vmx_l0_wants_exit` | no |
-| E4 | An EPT violation caused by a gap in *L1's* tables reflected to L1, with the qualification and guest-physical address it would have seen | KVM `nested_ept_inject_page_fault` | no |
+| E4 | An EPT violation caused by a gap in *L1's* tables reflected to L1, with the qualification and guest-physical address it would have seen | KVM `nested_ept_inject_page_fault` | partial - the qualification is synthesised (`reflected_ept_violation_qualification`); the reflection itself needs section C |
 | E5 | An EPT violation caused by a gap in *our* tables, or by a page we watch, handled here and never shown to L1 | KVM `nested_vmx_l0_wants_exit`, EPT-violation case | no |
-| E6 | EPT misconfiguration always ours, never L1's, because L2 never walks L1's tables directly | KVM `nested_vmx_l0_wants_exit`, EPT-misconfig case and its comment | no |
+| E6 | EPT misconfiguration always ours, never L1's, because L2 never walks L1's tables directly | KVM `nested_vmx_l0_wants_exit`, EPT-misconfig case and its comment | partial - a misconfiguration in *L1's* tables is a distinct outcome and is reflected; one in ours is attributed to us |
 | E7 | L1's INVEPT invalidates the shadow for the named EPTP, and an INVEPT type we do not report is refused | SDM 33.3 INVEPT; KVM `handle_invept` | no |
 | E8 | A change to *our* EPT - arming a page watch, protecting a region - invalidates every shadow built over it | this tree: `invalidate_ept`, `ept_generation` | no |
-| E9 | The memory type of a shadow leaf derived from the MTRRs as our own tables are, not taken from L1 | SDM Table 31-6 reserved-bit rule as already applied in `initialize_ept`; this tree: `mtrr_state::type_of` | no |
-| E10 | Large-page shadow leaves where both levels permit, to bound the size of the shadow | SDM 31.3.2 | no |
+| E9 | The memory type of a shadow leaf derived from the MTRRs as our own tables are, not taken from L1 | SDM Table 31-6 reserved-bit rule as already applied in `initialize_ept`; this tree: `mtrr_state::type_of` | yes - `compose_ept` takes the host walk's type |
+| E10 | Large-page shadow leaves where both levels permit, to bound the size of the shadow | SDM 31.3.2 | partial - `compose_ept` picks the smaller of the two page sizes; installing at that level is not written |
 | E11 | A bounded pool for shadow paging structures, with flush-and-rebuild on exhaustion rather than failure | this tree: the `ept` pool and the `out_of_ept_entries` precedent | no |
 | E12 | The module and every watched page remain unreachable from L2 | this tree: `protect_module`, `watch_guest_page_writes` | no |
 
@@ -1863,13 +1863,48 @@ exits that save an exit qualification, there is no qualification to read:
 the guest-physical address field is the only evidence, and it *is* valid
 for both violation and misconfiguration.
 
+### The memory budget, and where it goes
+
+Settled rather than left open, because the shape of the pool decides the
+shape of the code that draws from it. Sized off `max_cpus` (32) throughout,
+never off the machine this was written on.
+
+| What | Size | Why |
+|---|---|---|
+| Shadow root, one per processor | 32 x 4 KB = 128 KB | A shadow is per processor - see below |
+| Shadow table pool, per processor | 32 x 96 x 4 KB = 12 MB | 96 tables is one page-directory-pointer table plus 95 page directories, which at 2 MB leaves covers 95 GB of second-level address space per processor |
+| Second real VMCS, one per processor | 32 x 4 KB = 128 KB | Row B1 |
+| **Total** | **~12.3 MB** | Against a class already at ~30 MB |
+
+**Per processor rather than shared per EPTP12.** Both were considered. Shared
+would halve the fault cost when a guest hypervisor runs the same second-level
+guest on many processors, which is the normal case - but it needs the tables
+locked during a fill, because two processors can fault into the same page
+directory at once, and that lock sits on the hottest path nested EPT has.
+Per processor needs no synchronisation at all, and the cost is memory that
+the budget above shows is affordable. Revisit if the fault count measured
+against a real guest hypervisor says the duplication hurts; the fault count
+is the measurement that decides it, and it cannot be guessed.
+
+**The pool has a hard cap and a defined behaviour on exhaustion: discard the
+whole shadow and start again.** Not a failure, and not an unbounded pool. This
+is the one place where "over-invalidation is always safe" pays for itself
+directly - SDM 31.4.3.2 permits a processor to "invalidate any cached mappings
+at any time", so throwing the shadow away costs faults and never correctness.
+A shadow is derived state; that is the property that makes the bound safe, and
+it is why 96 tables per processor is a tuning parameter rather than a
+correctness one.
+
+The alternative rejected: growing the pool on demand from the heap. The fill
+path runs inside a VM exit, and this codebase's heap is a fixed arena whose
+`operator new` traps on exhaustion - so a heap allocation there converts a
+tunable into a dead processor.
+
 ### What still has to be decided by measurement
 
-- Whether one shadow per processor or one per EPTP12 shared between
-  processors. Per processor is simpler and cannot race; shared halves the
-  fault cost when L1 runs the same L2 on many processors, which is the
-  normal case. Start per processor, measure the fault count, and only then
-  share.
-- The pool size. It is a straight trade of memory against how often the
-  flush-and-rebuild path runs, and neither side can be guessed - it needs
-  the fault count from a real L1.
+- The pool size. 96 tables per processor is a first number, not a measured
+  one: it is a straight trade of memory against how often the
+  flush-and-rebuild path runs, and it needs the fault count from a real guest
+  hypervisor to settle.
+- Whether the per-processor duplication of shadows is worth the fault cost it
+  saves, per the paragraph above.
