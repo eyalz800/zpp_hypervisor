@@ -1116,3 +1116,21 @@ should be zero or match `verify_abandoned`. Then
 under a booting Windows - the number nobody has yet. `records_dropped`
 says whether the channel is keeping up with the guest; `dropped` says
 whether it is keeping up with the device.
+
+### Set aside: the verify rework did not close the drops
+
+With the destination read made asynchronous, all three switches on: epoch 2,
+twenty blocks written, `ok` twenty - and **1467 blocks still dropped**. So
+the rework did not fix it.
+
+One thing it did fix, and it is the one that matters for data loss:
+`records_dropped` is **zero**, where the sink's `accepting()` now makes
+records wait in the ring instead of being discarded while a block is in
+flight. So no log record is lost; what is lost is throughput.
+
+Parked here deliberately, with the switches off. The channel already meets
+the harder half of its purpose - it survives the guest's controller reset,
+proven by an epoch 2 block on the medium with the guest still booting - and
+what remains is a throughput problem behind a switch that is off. The
+remaining suspects are in the results table the rework added, which is now
+the right instrument and needs one more run to read properly.
