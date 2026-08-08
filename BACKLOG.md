@@ -160,6 +160,33 @@ this covers the calling processor only. Fixing that needs the rendezvous
 item 10 describes. It is safe in the direction that matters - a stale
 permissive entry costs a missed observation, never a wrong one.
 
+**Reopened and closed again: it was called and it always failed.** The
+call site passed `&type` where the instruction wants the type itself.
+SDM 33.3, INVEPT, opens with `INVEPT_TYPE := value of register operand`
+and its Op/En row makes that operand ModRM:reg, which is the first
+argument - so the register held a stack address, which is neither 1 nor
+2, and the next line of the same pseudocode applies: "IF
+IA32_VMX_EPT_VPID_CAP MSR indicates that processor does not support
+INVEPT_TYPE THEN VMfail(Invalid operand to INVEPT/INVVPID)". Every
+invalidation this VMM ever performed failed.
+
+It was silent because a failed invalidation has no symptom of its own -
+only a stale translation, whose symptom is a watch that does not fire or
+a protection that does not bite, attributed elsewhere. The `log("invept
+failed after an ept change")` line beside it was firing all along, in a
+log nobody had reason to read while chasing something else.
+
+Two things it is worth noticing about the shape of the bug. The parameter
+was `void *`, so `&type` type-checked and the type itself would not have;
+the signature now takes `std::uint64_t` and the wrong spelling no longer
+compiles. And the INVVPID call site three thousand lines away had it
+right - `reinterpret_cast<void *>(invvpid_single_context)` - so the tree
+disagreed with itself, which is the tell that was there to be found.
+
+Verified in the built release binary rather than by reading: the call site
+now assembles to `movl $0x1, %edi` before `callq` into the stub, where it
+previously computed a `leaq` of a stack slot.
+
 ### 5. `ia_32e_mode_guest` is set once and never re-derived — NOT A DEFECT
 
 Written from the state at launch, cleared for the real-mode start-up

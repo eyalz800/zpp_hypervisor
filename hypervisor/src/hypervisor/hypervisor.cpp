@@ -870,10 +870,16 @@ void hypervisor::invalidate_ept_locally()
         std::uint64_t reserved;
     } operand{eptp.value(), 0};
 
+    // The type by value, because it is a register operand: SDM 33.3,
+    // INVEPT, "INVEPT_TYPE := value of register operand". This passed the
+    // *address* of a variable holding it, which put a stack address in
+    // that register - not a supported type - so every invalidation this
+    // function ever performed failed with "invalid operand to
+    // INVEPT/INVVPID" and left the mapping cached. The signature now takes
+    // an integer so the mistake cannot be spelled.
     constexpr std::uint64_t single_context = 1;
-    auto type = single_context;
 
-    if (0 != arch::x86_64::vmx::invept(&type, &operand)) {
+    if (0 != arch::x86_64::vmx::invept(single_context, &operand)) {
         // Nothing useful to do with a failure here - the caller has
         // already changed the entry - but it must not pass silently,
         // because the symptom is a watch that never fires.
@@ -4846,9 +4852,7 @@ void hypervisor::apply_start_up(arch::x86_64::context & context,
     };
 
     invvpid_descriptor descriptor{vmcs.vpid(), 0};
-    if (arch::x86_64::vmx::invvpid(
-            reinterpret_cast<void *>(invvpid_single_context),
-            &descriptor)) {
+    if (arch::x86_64::vmx::invvpid(invvpid_single_context, &descriptor)) {
         log("invvpid failed on cpu {}", vmcs.vpid());
     }
 

@@ -119,7 +119,24 @@ inline int __attribute__((naked)) vmwrite(std::uint64_t, std::uint64_t)
     )!!");
 }
 
-inline int __attribute__((naked)) invept(void *, void *)
+/**
+ * The invalidation type each of these takes is a *register* operand rather
+ * than a pointer to one. SDM 33.3, INVEPT, opens its operation section
+ * with "INVEPT_TYPE := value of register operand", and its Op/En row makes
+ * that operand ModRM:reg - which is the first argument here. INVVPID says
+ * the same of INVVPID_TYPE.
+ *
+ * Spelled as an integer rather than as void *, because it was spelled as
+ * void * and one of the two call sites then passed the address of a
+ * variable holding the type. A stack address is not 1 or 2, so
+ * "IF ... processor does not support INVEPT_TYPE THEN VMfail(Invalid
+ * operand to INVEPT/INVVPID)" applied to every execution: the instruction
+ * failed every time and nothing was ever invalidated. It is silent by
+ * nature - the only consequence of a skipped invalidation is a stale
+ * translation - so the type of the parameter is what has to stop it.
+ * @{
+ */
+inline int __attribute__((naked)) invept(std::uint64_t, void *)
 {
     asm(R"!!(
         .intel_syntax noprefix
@@ -133,7 +150,7 @@ inline int __attribute__((naked)) invept(void *, void *)
     )!!");
 }
 
-inline int __attribute__((naked)) invvpid(void *, void *)
+inline int __attribute__((naked)) invvpid(std::uint64_t, void *)
 {
     asm(R"!!(
         .intel_syntax noprefix
@@ -146,6 +163,9 @@ inline int __attribute__((naked)) invvpid(void *, void *)
         ret
     )!!");
 }
+/**
+ * @}
+ */
 
 /**
  * Called when a VM entry fails, with RFLAGS as it was left by the failing
