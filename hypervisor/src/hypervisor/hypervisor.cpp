@@ -4897,6 +4897,62 @@ void hypervisor::watch_local_apic(bool watch)
     }
 }
 
+void hypervisor::note_apic_mode(std::size_t cpu)
+{
+    // IA32_APIC_BASE[EN] is bit 11 and [EXTD] is bit 10, and SDM 13.12.5.1
+    // reads the pair as the four states below - the fourth of which,
+    // EN=0 with EXTD=1, "is not valid and it is not possible to get into".
+    constexpr std::uint64_t apic_base_enabled = 1ull << 11;
+    constexpr std::uint64_t apic_base_extended = 1ull << 10;
+
+    auto base = arch::x86_64::rdmsr(arch::x86_64::msr::ia32_apic_base);
+
+    auto mode = apic_mode::disabled;
+    if (0 != (base & apic_base_extended)) {
+        mode = apic_mode::x2apic;
+    } else if (0 != (base & apic_base_enabled)) {
+        mode = apic_mode::xapic;
+    }
+
+    if (cpu < max_cpus) {
+        this->observed_apic_mode[cpu] = mode;
+    }
+
+    // Over every processor, not over the caller. A guest switches its
+    // processors to x2APIC one at a time, so during that switch both
+    // mechanisms are genuinely in use at once and disarming either would
+    // lose interrupt commands from the processors that have not moved yet.
+    auto any_x2apic = false;
+    auto any_xapic = false;
+    for (auto seen : this->observed_apic_mode) {
+        any_x2apic = any_x2apic || (apic_mode::x2apic == seen);
+        any_xapic = any_xapic || (apic_mode::xapic == seen);
+    }
+
+    // Armed only while some processor is in x2APIC mode, which is a
+    // correctness matter and not only a cost. The register is an MSR only
+    // in that mode - SDM 13.12.1 - so a guest in xAPIC mode writing it is
+    // one that should take #GP, and an armed bit would instead exit and
+    // have this VMM perform the write in the host, where the #GP has no
+    // recovery point and stops the processor.
+    intercept_interrupt_command(any_x2apic);
+
+    // And the page, only while some processor still uses it. Reads the
+    // base from the calling processor's own MSR, which is right because
+    // the page is a single physical address that every processor's local
+    // APIC answers at; a machine that gave each processor a different one
+    // would need a watch per processor and gets none.
+    watch_local_apic(any_xapic);
+
+    // The shape is KVM's. kvm_lapic_set_base in arch/x86/kvm/lapic.c
+    // notices any change in either of those two bits and calls
+    // set_virtual_apic_mode, and vmx_set_virtual_apic_mode in
+    // arch/x86/kvm/vmx/vmx.c then switches on the resulting mode to arm
+    // the APIC-access mechanism for xAPIC or the x2APIC MSR bitmap for
+    // x2APIC - the same two things, re-derived rather than left as they
+    // were set at launch.
+}
+
 void hypervisor::on_controller_register_before_write(void * context,
                                                      std::uint64_t page)
 {
@@ -7133,10 +7189,29 @@ hypervisor::main(arch::x86_64::context & caller_context)
         // Initialize host IDT, which needs the GDT above to exist.
         initialize_host_idt();
 
-        // Start intercepting the interrupt command register, before any
-        // other processor is launched. The MSR bitmap is shared by every
-        // VMCS, so this is done once.
-        intercept_interrupt_command(true);
+        // Start intercepting IA32_APIC_BASE, before any other processor is
+        // launched. The MSR bitmap is shared by every VMCS, so this is
+        // done once.
+        //
+        // Both halves, and reads as well as writes. It is inside the low
+        // range the bitmap covers, so with the bitmap left at zero it did
+        // not exit at all: a guest write reached the physical register,
+        // moved the local APIC's mode or its page out from under this VMM,
+        // and nothing here noticed. Whatever was armed at launch then
+        // stayed armed and was describing a machine that no longer
+        // existed.
+        //
+        // The read is intercepted too, even though the value handed back
+        // is the register's own. Reading it is what a guest does
+        // immediately before writing it, and a read that exits is the only
+        // cheap evidence of a guest that is about to change modes.
+        intercept_msr(arch::x86_64::msr::ia32_apic_base, true, true);
+        // The interrupt command register's own interception is no longer
+        // armed unconditionally here. It is derived from the mode instead,
+        // which is what note_apic_mode does - and it cannot run yet,
+        // because arming the other half of the same decision edits an
+        // extended page table entry and there is no table to edit until
+        // initialize_ept.
 
         // The MSRs nested VMX answers, armed here for the same reason and
         // in the same place: one shared bitmap, set up before a second
@@ -7311,20 +7386,6 @@ hypervisor::main(arch::x86_64::context & caller_context)
         }
 
         unprotect_guest_memory();
-
-        // Interception of the interrupt command for a guest that is not
-        // in x2APIC mode, where the command is a store to a page rather
-        // than an MSR write and the bitmap set up above cannot see it.
-        // Armed only while that is actually the mode, because the page
-        // is hot.
-        //
-        // Here, and not beside the MSR bitmap it complements, because
-        // arming a watch edits an extended page table entry. Done
-        // before initialize_ept() there is no table to edit; done
-        // between it and unprotect_guest_memory() the entry is written
-        // and then overwritten, and the watch is silently lost. This is
-        // the first point at which the tables are final.
-        watch_local_apic(!x2apic_enabled());
 
         // Take the diagnostic channel the loader established, if it
         // established one.
@@ -7509,6 +7570,31 @@ hypervisor::main(arch::x86_64::context & caller_context)
     // The guard enter_root_mode released, taken up again here: a failure
     // between now and the launch still has to leave VMX operation.
     scope_exit turn_off_vmx{arch::x86_64::vmx::vmxoff};
+
+    // Interception of the interrupt command, in whichever of its two forms
+    // the machine's local APICs are currently using: an MSR write in
+    // x2APIC mode, which the bitmap catches, or a store to the APIC page
+    // in xAPIC mode, which only a page watch can.
+    //
+    // Past initialize_ept and unprotect_guest_memory, because arming a
+    // watch edits an extended page table entry: before the first there is
+    // no table to edit, and between the two the entry is written and then
+    // overwritten and the watch is silently lost. And past enter_root_mode
+    // as well, which the arming used to precede - INVEPT is defined only
+    // in VMX root operation and invalidate_ept_locally correctly does
+    // nothing outside it, so a watch armed before this point was one whose
+    // invalidation never happened.
+    //
+    // On *every* launch and not only the boot processor's, which is the
+    // smaller half of the fix. The larger half is that this now also runs
+    // from the IA32_APIC_BASE write handler, so a mode change during the
+    // boot is followed rather than missed. It used to run exactly once,
+    // and the mode was therefore whatever it happened to be at launch for
+    // the rest of the boot - so a guest that moved to x2APIC afterwards,
+    // which is what an operating system does within milliseconds of
+    // starting, left both halves of this describing a machine that had
+    // stopped existing.
+    note_apic_mode(cpuid);
 
     setup_vmcs(caller_context);
 
@@ -8236,6 +8322,51 @@ hypervisor::main(arch::x86_64::context & caller_context)
                 break;
             }
 
+            // The guest moving its local APIC, or changing its mode, or
+            // switching it off.
+            //
+            // Performed as the guest wrote it: the local APIC underneath
+            // is the guest's own and nothing here virtualizes it, so the
+            // answer to "what should this register hold" is whatever the
+            // guest said. What this VMM needs from the exit is not a veto,
+            // it is the *notification* - both mechanisms it uses to see an
+            // interrupt command are chosen from the mode this register
+            // holds, and until now they were chosen once at launch and
+            // never revisited.
+            //
+            // A write the guest would have faulted on faults here instead,
+            // in the host, exactly as the timer registers above do and for
+            // the same reason: the conditions are architectural and depend
+            // on this same local APIC's current state, so a write that
+            // faults for this side is one that would have faulted for the
+            // guest. SDM 13.12.5 has the two that matter - a direct
+            // transition from x2APIC mode to xAPIC mode "is not valid, and
+            // the corresponding WRMSR to the IA32_APIC_BASE MSR causes a
+            // general-protection exception", and so does any attempt to
+            // reach EN=0 with EXTD=1.
+            if (arch::x86_64::msr::ia32_apic_base ==
+                static_cast<std::uint32_t>(context.rcx)) {
+                arch::x86_64::wrmsr(arch::x86_64::msr::ia32_apic_base,
+                                    (context.rax & 0xffffffff) |
+                                        (context.rdx << 32));
+
+                // Re-derive both interceptions from what the register now
+                // says, on this processor and across the machine. This is
+                // the shape of KVM's kvm_lapic_set_base, which notices a
+                // change in either of those two bits and calls
+                // set_virtual_apic_mode rather than leaving what was armed
+                // at launch in place.
+                //
+                // The index is bounds checked inside, so a VPID of zero -
+                // which underflows here - records nothing and still
+                // re-derives the two interceptions from every other
+                // processor. Losing one processor's entry is a missed
+                // observation; refusing to re-derive would be a missed
+                // IPI.
+                note_apic_mode(vmcs.vpid() - 1);
+                break;
+            }
+
             // The one MSR this VMM asks to see. It is inside the range the
             // bitmap covers, so it exits only because the bitmap says so.
             if (arch::x86_64::msr::ia32_x2apic_icr ==
@@ -8266,6 +8397,29 @@ hypervisor::main(arch::x86_64::context & caller_context)
             if ((basic_reason::rdmsr == reason) &&
                 on_nested_vmx_msr_read(
                     static_cast<std::uint32_t>(context.rcx), context)) {
+                break;
+            }
+
+            // IA32_APIC_BASE, answered with the register's own contents.
+            //
+            // Nothing is edited out of it. The local APIC below is the
+            // guest's, so the base it names, the mode it is in and the
+            // bootstrap-processor flag are all facts about hardware the
+            // guest owns - and a guest told a different base from the one
+            // its own stores would reach is a guest that has been lied to
+            // in the way `What the guest is told` in CLAUDE.md is about.
+            //
+            // Intercepted at all only so that the write half can be, since
+            // the bitmap's read and write bits are independent but a guest
+            // that is about to change modes reads this first. Cheap: an
+            // operating system reads it during start-up and hardly ever
+            // afterwards.
+            if (arch::x86_64::msr::ia32_apic_base ==
+                static_cast<std::uint32_t>(context.rcx)) {
+                auto value =
+                    arch::x86_64::rdmsr(arch::x86_64::msr::ia32_apic_base);
+                context.rax = value & 0xffffffff;
+                context.rdx = value >> 32;
                 break;
             }
 

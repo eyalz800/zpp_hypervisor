@@ -1273,6 +1273,46 @@ private:
     void watch_local_apic(bool watch);
 
     /**
+     * The state of a processor's local APIC, as this VMM last saw it.
+     *
+     * SDM 13.12.5.1 lists exactly these: "APIC disabled:
+     * IA32_APIC_BASE[EN]=0 and IA32_APIC_BASE[EXTD]=0", "xAPIC mode:
+     * ...EN=1 and ...EXTD=0", "x2APIC mode: ...EN=1 and ...EXTD=1", and
+     * an invalid fourth that a WRMSR cannot reach - "An execution of
+     * WRMSR to the IA32_APIC_BASE_MSR that attempts a transition from a
+     * valid state to this invalid state causes a general-protection
+     * exception."
+     */
+    enum class apic_mode : std::uint8_t
+    {
+        /**
+         * Not observed yet. A processor that has never launched, which is
+         * most entries for most of a boot.
+         */
+        unknown,
+        disabled,
+        xapic,
+        x2apic,
+    };
+
+    /**
+     * Reads this processor's IA32_APIC_BASE, records the mode it is in,
+     * and re-plumbs both interceptions to match what the machine as a
+     * whole now needs.
+     *
+     * Both are re-derived from *every* processor's recorded mode rather
+     * than from the caller's, and that is the point of keeping the array
+     * rather than a single value. The interceptions are global - one MSR
+     * bitmap shared by every VMCS, one set of extended page tables - and
+     * a guest switches its processors to x2APIC one at a time. Deriving
+     * from the caller alone would disarm the xAPIC page watch the instant
+     * the *first* processor switched, and the remaining ones would still
+     * be sending their interrupt commands through that page, unseen. That
+     * is the mechanism this VMM adopts application processors by.
+     */
+    void note_apic_mode(std::size_t cpu);
+
+    /**
      * Sets or clears one port's bit in the I/O permission bitmaps, so
      * that accesses to it exit. A port is watched only when something
      * asks for it; everything else stays with the guest.
@@ -1548,6 +1588,16 @@ private:
      * while it is not being watched.
      */
     std::uint64_t watched_apic_page{};
+
+    /**
+     * What mode each processor's local APIC was in the last time this VMM
+     * looked, which is at its launch and on every write it makes to
+     * IA32_APIC_BASE.
+     *
+     * Kept because the decision it feeds is global and the state is not.
+     * See note_apic_mode.
+     */
+    apic_mode observed_apic_mode[max_cpus]{};
 
     /**
      * Remove protection for unprotected guest memory.
