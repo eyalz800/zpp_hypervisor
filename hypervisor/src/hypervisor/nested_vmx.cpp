@@ -2,6 +2,7 @@
 #include "zpp/arch/x86_64/asm.h"
 #include "zpp/arch/x86_64/decoder.h"
 #include "zpp/arch/x86_64/msr.h"
+#include "zpp/diag/log.h"
 #include "zpp/hypervisor/hypervisor.h"
 #include <cstddef>
 #include <cstdint>
@@ -932,7 +933,17 @@ bool hypervisor::on_guest_vmxon(std::size_t cpu,
     this->guest_current_vmcs[cpu] = no_current_vmcs;
     this->guest_vmcs12[cpu].clear();
 
+    this->guest_vmxon_count[cpu] = this->guest_vmxon_count[cpu] + 1;
+
     log("cpu {} guest vmxon at {}", cpu, *pointer);
+
+    // Also to the retained channel, so the sequence reaches the medium
+    // rather than only a debugger's view of memory. A guest hypervisor
+    // entering VMX operation is the single most interesting thing this
+    // VMM can report, and it was previously visible only to whoever
+    // thought to walk the log list by hand.
+    diag::log<diag::severity::warning>(
+        "guest entered vmx operation on cpu {}", cpu);
 
     vmx_succeed();
     return true;
@@ -952,7 +963,15 @@ bool hypervisor::on_guest_vmxoff(std::size_t cpu)
     this->guest_vmxon_pointer[cpu] = 0;
     this->guest_current_vmcs[cpu] = no_current_vmcs;
 
+    this->guest_vmxoff_count[cpu] = this->guest_vmxoff_count[cpu] + 1;
+
     log("cpu {} guest vmxoff", cpu);
+
+    // The other half of the pair. Without this a guest hypervisor that
+    // starts and then stands down is indistinguishable from one that never
+    // started.
+    diag::log<diag::severity::warning>(
+        "guest left vmx operation on cpu {}", cpu);
 
     vmx_succeed();
     return true;

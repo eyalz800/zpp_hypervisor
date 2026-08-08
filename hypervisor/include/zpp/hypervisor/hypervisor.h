@@ -2711,6 +2711,30 @@ private:
      * @{
      */
     bool guest_in_vmx_operation[max_cpus]{};
+
+    /**
+     * How many times each processor's guest has entered and left VMX
+     * operation.
+     *
+     * Counted rather than inferred from `guest_in_vmx_operation`, because
+     * that flag is a *state* and the question is usually about *history*.
+     * A guest hypervisor that executes VMXON and then VMXOFF leaves the
+     * flag reading false, exactly as one that never tried does - and those
+     * two are opposite findings. "Tried and gave up" says the capability
+     * set was good enough to start and something later refused it;
+     * "never tried" says it was not.
+     *
+     * So the useful reading is the pair: entries above exits means VMX
+     * operation is live now, equal and non-zero means it came and went,
+     * and both zero means it was never attempted. This was got wrong once
+     * from the flag alone.
+     * @{
+     */
+    volatile std::uint64_t guest_vmxon_count[max_cpus]{};
+    volatile std::uint64_t guest_vmxoff_count[max_cpus]{};
+    /**
+     * @}
+     */
     std::uint64_t guest_vmxon_pointer[max_cpus]{};
     std::uint64_t guest_current_vmcs[max_cpus]{};
     arch::x86_64::vmx::vmcs12 guest_vmcs12[max_cpus]{};

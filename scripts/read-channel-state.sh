@@ -148,6 +148,17 @@ show_static  "refused_signature" 'queue_pairILj64EE17refused_signatureE'
 show_static  "submission_tail | head" 'queue_pairILj64EE15submission_tailE' 2
 show_static  "submissions | completions" 'queue_pairILj64EE11submissionsE'
 
+echo "--- did a guest hypervisor start ---"
+# Entries above exits means VMX operation is live now; equal and non-zero
+# means it came and went, which is a completely different finding from
+# never having tried; both zero means it never tried. Read as a pair.
+show_member  "guest vmxon [8]" guest_vmxon_count 8
+show_member  "guest vmxoff [8]" guest_vmxoff_count 8
+show_member  "in vmx operation now" guest_in_vmx_operation
+show_member  "vmcs12 captured" vmcs12_controls_captured
+show_member  "l2 entries [2]" l2_entries 2
+show_member  "apic writes undecoded" apic_writes_undecoded
+
 echo "--- emulation and rebuild ---"
 show_member  "emulated_writes" emulated_writes
 show_member  "length disagreement" emulated_length_disagreement
