@@ -7499,7 +7499,30 @@ hypervisor::main(arch::x86_64::context & caller_context)
                 // hardware, which is why it is the conventional way to
                 // announce a hypervisor - and why leaving it clear is
                 // indistinguishable from bare metal.
-                cpuid_result[2] &= ~(1u << 31);
+                //
+                // Kept clear, except where this VMM is deliberately
+                // presenting the interface of whatever it runs under.
+                //
+                // Measured, and it is why the first attempt at that
+                // presentation proved nothing: with this bit clear the
+                // guest asked for **zero** leaves in the whole hypervisor
+                // range - 0 of 49,860 CPUID leaves - so passing that range
+                // through was invisible to it. Announcing a hypervisor is
+                // what makes a guest go looking for one, and the two are
+                // therefore one switch.
+                //
+                // It also plausibly explains the feature this is all for.
+                // A guest that believes it is on bare metal applies bare
+                // metal requirements to virtualization-based security,
+                // Secure Boot among them, and this rig reports Secure Boot
+                // unsupported. A guest that knows it is virtualized takes
+                // the nested path instead. The reference this is being
+                // compared against announces itself unconditionally.
+                if constexpr (!nested_vmx::pass_through_hypervisor_interface) {
+                    cpuid_result[2] &= ~(1u << 31);
+                } else {
+                    cpuid_result[2] |= (1u << 31);
+                }
 
                 // Hide VMX, unless the nested machinery is compiled in.
                 //

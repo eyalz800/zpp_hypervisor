@@ -3174,3 +3174,60 @@ filesystem, which is reachable read-only from the host side.
 The switch is left off. It costs nothing off, it is honest about needing
 something underneath, and it is the right shape if the interface ever does
 turn out to matter.
+
+### Announcing a hypervisor works, and the guest then starts its processors somewhere else
+
+The measurement that names the actual chain, and it corrects the previous
+two entries.
+
+**The guest never looked for a hypervisor.** Recorded over a boot: 49,860
+CPUID leaves asked, and **zero** of them in the range `0x40000000`
+-`0x4fffffff`. Which is why the earlier attempt at presenting the interface
+proved nothing - the range was passed through faithfully and the guest never
+asked. `cpuid_leaf_1_ecx_reported` says why: bit 31 clear. `on_cpuid`
+deliberately clears it so this VMM is indistinguishable from bare metal.
+
+**Announcing one changes everything downstream.** With bit 31 set and the
+range passed through:
+
+    hypervisor-range leaves asked      0  ->  225
+    synthetic MSR accesses             0  ->    9
+    next_virtual_processor             9  ->    2
+
+So the guest looks, finds an interface, and **uses** it. And its
+application-processor adoption collapses from all eight to none - the same
+shape as the TPR shadow stall, and now with an explanation rather than a
+suspicion: a guest that believes it is running under a Hyper-V-compatible
+hypervisor starts its processors through an **enlightened hypercall**, not
+through INIT-SIPI-SIPI. Our start-up path is the interrupt command
+register. Nothing rings it, so nothing is adopted.
+
+That is the whole difference between forwarding an interface and
+implementing one. Forwarding sends the hypercall to whatever is underneath,
+which starts nothing on our behalf and tells us nothing. The reference this
+is compared against does not forward: it has a hypervisor-interface
+implementation of its own - hypercall page, guest OS identity, VP index,
+reference counter - and answers those calls itself.
+
+Which gives the honest shape of the remaining work, and it is larger than
+any switch:
+
+1. Announce a hypervisor (one bit, done, behind the switch).
+2. Present the interface *and answer it*: at minimum the hypercall page and
+   the VP index, and specifically whatever call starts a virtual processor,
+   because that is the one our own processor hand-over depends on.
+3. Only then does the question "does a guest hypervisor start" become
+   answerable, because only then is the guest's own start-up working under
+   an announced hypervisor.
+
+Also worth stating plainly: the bare-metal reading of the feature's
+requirements is the likely reason it never armed. A guest that thinks it is
+on bare metal demands Secure Boot for virtualization-based security, and
+this rig reports Secure Boot unsupported. A guest that knows it is
+virtualized takes a different path. That is consistent with the feature
+arming on this rig without this VMM present, and it is now testable rather
+than assumed - but only once step 2 exists, since step 1 alone breaks the
+processors.
+
+The switch is left off. It is honest about needing something underneath, and
+it now also breaks processor start-up, which is recorded in its comment.
