@@ -965,7 +965,7 @@ private:
     volatile std::uint64_t stepped_writes{};
 
     /**
-     * Where a stepped access's offset within its page came from.
+     * Where a watched access's offset within its page came from.
      *
      * `decoded` counts the ones the exit could not answer and the
      * instruction could; `unknown` counts the ones neither could, which
@@ -973,11 +973,13 @@ private:
      * offset zero. A non-zero `unknown` means a watch is being told about
      * a register that was not the one touched, which is exactly the
      * failure that hid a guest hypervisor's start-up interrupts - so it
-     * is counted rather than left to be inferred.
+     * is counted rather than left to be inferred. It also decides whether
+     * the access can be *emulated*, since an address that is not known
+     * cannot be written to.
      * @{
      */
-    volatile std::uint64_t stepping_offset_decoded{};
-    volatile std::uint64_t stepping_offset_unknown{};
+    volatile std::uint64_t access_offset_decoded{};
+    volatile std::uint64_t access_offset_unknown{};
     /**
      * @}
      */

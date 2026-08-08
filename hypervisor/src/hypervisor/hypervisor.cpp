@@ -3311,19 +3311,87 @@ bool hypervisor::on_ept_violation(std::size_t cpu,
         constexpr std::uint64_t qualification_operand_access = 1ull << 8;
 
         auto qualification = this->vmcs.exit_qualification();
+        auto reports_linear =
+            (0 != (qualification & qualification_linear_address_valid));
+
+        // Decoded up front, because both paths below want it: emulating
+        // needs the operation, and *addressing* needs it whenever the
+        // exit did not report a linear address.
+        auto instruction = decode_guest_instruction(cpu, context);
+
+        auto decoded_address =
+            instruction
+                ? arch::x86_64::effective_address(
+                      *instruction, context, this->vmcs.guest_rip())
+                : std::nullopt;
+
+        // Where in the page the access landed, from three sources,
+        // strongest first.
+        //
+        // **The guest-physical address is not one of them, despite being
+        // the obvious one.** The processor reports it at *page*
+        // granularity for an EPT violation, so its low twelve bits are
+        // not the offset the instruction named. Taking them anyway made
+        // every access look like an access to offset 0 - a reserved local
+        // APIC register - and the interrupt-command handler, which acts
+        // only on a write to the command register, could never be reached
+        // no matter what the guest wrote.
+        //
+        // Measured, which is the only reason it was found: twenty-four
+        // consecutive accesses recorded as page 0xfee00 offset 0, while
+        // the exit ring showed the writes arriving and the handler showed
+        // not one call. A guest hypervisor was running with its
+        // processors never starting, waiting for start-up interrupts this
+        // VMM had received and thrown the register number away from.
+        //
+        // The guest-linear address the same exit reports would answer it,
+        // and does whenever qualification bit 7 is set. It is not always:
+        // on the machine where the guest hypervisor runs, *every one* of
+        // those violations arrived with bit 7 clear. So the instruction's
+        // own addressing bytes are the third source and the only one that
+        // does not depend on what the hardware volunteered.
+        constexpr std::uint64_t page_offset_mask = page_size - 1;
+
+        auto page_base = guest_physical & ~page_offset_mask;
+        auto address = guest_physical;
+        auto address_known = reports_linear;
+
+        if (reports_linear) {
+            address = page_base | (this->vmcs.guest_linear_address() &
+                                   page_offset_mask);
+        } else if (decoded_address) {
+            address = page_base | (*decoded_address & page_offset_mask);
+            address_known = true;
+
+            this->access_offset_decoded = this->access_offset_decoded + 1;
+        } else {
+            this->access_offset_unknown = this->access_offset_unknown + 1;
+        }
+
+        // Whether the fault was the instruction's own operand rather than
+        // the processor walking the guest's paging structures.
+        //
+        // Bit 8 answers it outright, but only when bit 7 says the exit
+        // has a linear address at all. Without it the question is settled
+        // instead by *which page* faulted: these are watched pages, and a
+        // watched page is a device's registers - the local APIC, a
+        // controller's configuration space. No guest puts its paging
+        // structures in uncacheable device memory, so an access to one of
+        // them is never a table walk.
         auto operand_access =
-            (0 != (qualification & qualification_linear_address_valid)) &&
-            (0 != (qualification & qualification_operand_access));
+            reports_linear
+                ? (0 != (qualification & qualification_operand_access))
+                : address_known;
 
         if (auto store = (emulate_watched_page_writes && operand_access)
-                             ? decode_guest_instruction(cpu, context)
+                             ? instruction
                              : std::nullopt) {
             // A store that crosses the end of the watched page would be
             // applied whole at the faulting address, writing bytes onto
             // the page that follows. Refused rather than split: nothing
             // a driver does to a register straddles the page, so the
             // fallback costs nothing and a wrong split would be silent.
-            auto offset_in_page = guest_physical & (page_size - 1);
+            auto offset_in_page = address & page_offset_mask;
             auto straddles = (offset_in_page + store->size) > page_size;
 
             guest_write written{};
@@ -3331,11 +3399,8 @@ bool hypervisor::on_ept_violation(std::size_t cpu,
             auto changed_memory = false;
 
             if (!straddles &&
-                carry_out_guest_instruction(guest_physical,
-                                            *store,
-                                            context,
-                                            written,
-                                            changed_memory)) {
+                carry_out_guest_instruction(
+                    address, *store, context, written, changed_memory)) {
                 // Only an access that actually changed memory is reported.
                 //
                 // The decoder now answers loads and examinations as well
@@ -3399,60 +3464,10 @@ bool hypervisor::on_ept_violation(std::size_t cpu,
         this->stepping_watch[cpu] = true;
         this->stepping_page[cpu] = page;
 
-        // Which register on the page was touched, in three sources,
-        // strongest first.
-        //
-        // **The guest-physical address is not one of them, despite being
-        // the obvious one.** The processor reports it at *page*
-        // granularity for an EPT violation, so its low twelve bits are
-        // not the offset the instruction named. Taking them anyway made
-        // every stepped access look like an access to offset 0 - a
-        // reserved local APIC register - and the interrupt-command
-        // handler, which acts only on a write to the command register,
-        // could never be reached no matter what the guest wrote.
-        //
-        // Measured, which is the only reason it was found: twenty-four
-        // consecutive stepped accesses recorded as page 0xfee00 offset 0,
-        // while the exit ring showed the writes arriving and being
-        // stepped and the handler showed not one call. A guest hypervisor
-        // was running with its processors never starting, waiting for
-        // start-up interrupts this VMM had received and thrown the
-        // register number away from.
-        //
-        // The guest-linear address the same exit reports would answer it,
-        // and does whenever qualification bit 7 is set. It is not always:
-        // the first attempt at this fix used it alone and changed
-        // nothing, because on the machine where the guest hypervisor runs
-        // *every one* of those violations arrived with bit 7 clear - the
-        // same bit `operand_access` above tests, which is also why they
-        // are stepped rather than emulated.
-        //
-        // So the instruction is decoded and its operand's address
-        // computed. That is what `effective_address` exists for, and it
-        // is the only source that does not depend on what the hardware
-        // volunteered. It costs a guest page walk per stepped access,
-        // taken only when the exit did not answer.
-        auto offset = guest_physical & (page_size - 1);
-
-        if (0 != (qualification & qualification_linear_address_valid)) {
-            offset = this->vmcs.guest_linear_address() & (page_size - 1);
-        } else if (auto instruction =
-                       decode_guest_instruction(cpu, context)) {
-            if (auto address = arch::x86_64::effective_address(
-                    *instruction, context, this->vmcs.guest_rip())) {
-                offset = *address & (page_size - 1);
-                this->stepping_offset_decoded =
-                    this->stepping_offset_decoded + 1;
-            } else {
-                this->stepping_offset_unknown =
-                    this->stepping_offset_unknown + 1;
-            }
-        } else {
-            this->stepping_offset_unknown =
-                this->stepping_offset_unknown + 1;
-        }
-
-        this->stepping_offset[cpu] = offset;
+        // The address resolved above, whichever of the three sources
+        // answered it. Reaching here means the instruction could not be
+        // carried out, not that the address is unknown.
+        this->stepping_offset[cpu] = address & page_offset_mask;
         monitor_trap_flag(true);
         return true;
     }
