@@ -2347,6 +2347,18 @@ private:
     volatile std::uint64_t host_nmi_rip{};
 
     /**
+     * Writes to the local APIC page this VMM could not decode.
+     *
+     * The interrupt command register's handler needs to know *which*
+     * register was written, which it takes from the decoded store. A
+     * write that was stepped instead leaves that unknown, and guessing
+     * would mean sending an interrupt nobody asked for - so it is counted
+     * and ignored. Non-zero means the decoder has a gap on a page that
+     * matters, which is a bug of its own rather than a tolerable loss.
+     */
+    volatile std::uint64_t apic_writes_undecoded{};
+
+    /**
      * Whether the guest ever looked at VMX, and what it was told.
      *
      * These exist to separate two outcomes that are identical from

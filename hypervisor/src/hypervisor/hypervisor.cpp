@@ -5085,12 +5085,6 @@ void hypervisor::on_local_apic_write(void * context,
                                      std::uint64_t page,
                                      const hypervisor::guest_write * write)
 {
-    // The decoded value is not used here: this handler cares that the
-    // interrupt command register was written, and reads the whole
-    // command out of the page, which is two registers wide in xAPIC
-    // mode and so wider than any single store.
-    static_cast<void>(write);
-
     auto & self = *static_cast<hypervisor *>(context);
 
     // The write has already happened - the watch steps over it before
@@ -5103,16 +5097,54 @@ void hypervisor::on_local_apic_write(void * context,
     // produces, so one decision function serves both.
     constexpr std::uint64_t interrupt_command_low = 0x300;
     constexpr std::uint64_t interrupt_command_high = 0x310;
-    constexpr std::uint64_t delivery_status_pending = 1ull << 12;
 
     auto * bytes = reinterpret_cast<volatile std::uint8_t *>(page << 12);
     auto low = arch::x86_64::read32(bytes + interrupt_command_low);
     auto high = arch::x86_64::read32(bytes + interrupt_command_high);
 
-    // Every other register in this page is written far more often than
-    // the command is - the end of interrupt one on every interrupt - so
-    // a write that left no command pending was not a command at all.
-    if (0 == (low & delivery_status_pending)) {
+    // Which register was written, taken from the faulting address rather
+    // than guessed from the register's contents.
+    //
+    // **This gate used to test delivery status, and that made the whole
+    // path dead.** Bit 12 of the interrupt command register is Delivery
+    // Status and it is *read only*: SDM 12.6.1 describes it as "Delivery
+    // Status (Read Only)", with 0 meaning either no activity for this
+    // source *or* that the previous interrupt from it "was delivered to
+    // the processor core and accepted". Software cannot set it, so it was
+    // never a marker for "software wrote a command".
+    //
+    // And by the time this handler runs the send has completed: the write
+    // faults, the processor exits, the store is emulated, and only then is
+    // the watch's handler called - hundreds of cycles after a delivery
+    // that takes a handful. So the bit reads 0, the test refused every
+    // write, and `on_interrupt_command` was never reached for an xAPIC
+    // command. Measured: zero application processors adopted, seven left
+    // in the firmware's own wait loop, and not one line in the log -
+    // which the comment a few lines below correctly warns is the
+    // indistinguishable case.
+    //
+    // KVM makes the same point from the other side: it clears the busy bit
+    // on every guest write to this register, and its IPI decoder opens by
+    // asserting the bit is never set by then - see `kvm_apic_send_ipi` and
+    // the write path around it in arch/x86/kvm/lapic.c.
+    //
+    // Keying on the offset is exact. Writing the low half is what sends
+    // the command, so this fires once per command and never on an end of
+    // interrupt, which is the traffic the old test was trying to exclude.
+    if (!write) {
+        // Stepped rather than emulated, so which register was written is
+        // not known. Counted rather than guessed at: a decoder gap on
+        // this page is its own bug, and acting on the wrong register here
+        // would send an interrupt nobody asked for.
+        self.apic_writes_undecoded = self.apic_writes_undecoded + 1;
+        return;
+    }
+
+    auto offset = write->address & (page_size - 1);
+
+    // The destination alone sends nothing, so there is nothing to decide
+    // until the low half follows it.
+    if (interrupt_command_low != offset) {
         return;
     }
 
