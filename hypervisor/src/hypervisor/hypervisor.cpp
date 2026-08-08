@@ -3948,6 +3948,22 @@ void hypervisor::on_controller_register_write(
         ++self.channel_register_writes;
         self.channel_last_configuration = configuration.value();
 
+        // Every value, in order, for the observation build.
+        //
+        // The last value alone cannot answer the question this is for.
+        // Whether the guest's low power entry sets the shutdown
+        // notification without ever clearing the enable bit is a question
+        // about the *sequence*, and this VMM acts only on the enable bit
+        // - so a shutdown that leaves it set is invisible to everything
+        // else here.
+        if constexpr (diag::observe_controller_admin) {
+            auto slot = self.configuration_trace_count %
+                        configuration_trace_capacity;
+            self.configuration_trace[slot] = configuration.value();
+            self.configuration_trace_count =
+                self.configuration_trace_count + 1;
+        }
+
         auto now = configuration.enable();
         auto was = self.channel_controller_enabled;
         self.channel_controller_enabled = now;
@@ -4034,9 +4050,106 @@ void hypervisor::on_doorbell_write(void * context,
                                    std::uint64_t page,
                                    const hypervisor::guest_write * write)
 {
-    static_cast<void>(context);
     static_cast<void>(page);
-    static_cast<void>(write);
+
+    if constexpr (!diag::observe_controller_admin) {
+        static_cast<void>(context);
+        static_cast<void>(write);
+        return;
+    } else {
+        auto & self = *static_cast<hypervisor *>(context);
+
+        self.channel_doorbell_writes = self.channel_doorbell_writes + 1;
+
+        if (!write || !self.channel_bar) {
+            return;
+        }
+
+        // Only the admin submission queue's doorbell, which is the first
+        // on the page. Every other doorbell on it belongs to an I/O queue
+        // and carries the guest's ordinary disk traffic, which is
+        // counted above and otherwise ignored.
+        if (0 != (write->address & (page_size - 1))) {
+            return;
+        }
+
+        auto * bar = static_cast<volatile std::uint8_t *>(self.channel_bar);
+
+        // Where the guest put its admin submission queue, and how big it
+        // said it was. Read from the controller rather than remembered,
+        // because the driver may have moved it since - this runs from the
+        // driver's own initialisation, which is when it sets them.
+        auto queue_base = arch::x86_64::read64(
+            bar + nvme::offset_of(
+                      nvme::register_offset::admin_submission_queue_base));
+        auto attributes = arch::x86_64::read32(
+            bar +
+            nvme::offset_of(nvme::register_offset::admin_queue_attributes));
+
+        auto entries =
+            (attributes & 0xfff) + 1; // ASQS is a zero's based count
+        if (!queue_base || !entries) {
+            return;
+        }
+
+        auto tail = static_cast<std::uint32_t>(write->value);
+        if (tail >= entries) {
+            return;
+        }
+
+        constexpr std::uint32_t command_size = 64;
+
+        // Everything between what was looked at last and what the guest
+        // has just published. Wrapping is why this is a loop rather than
+        // a subtraction.
+        self.mapping_window_lock.lock();
+        scope_exit release{[&] { self.mapping_window_lock.unlock(); }};
+
+        for (auto at = self.admin_observed_head; at != tail;
+             at = (at + 1) % entries) {
+            auto offset = static_cast<std::uint64_t>(at) * command_size;
+            auto * command = static_cast<const std::uint32_t *>(
+                self.map_window_at(transfer_window_first_page,
+                                   queue_base + offset,
+                                   1));
+            if (!command) {
+                break;
+            }
+
+            // Freezes when full rather than wrapping, which is the
+            // opposite of every other ring here and deliberate.
+            //
+            // The commands this exists to see all arrive in one burst
+            // while the driver initialises: Identify, Set Features
+            // (Number of Queues), and the Create I/O Queue pair for each
+            // processor. Everything after that is steady state, and
+            // steady state is *chatty* - measured, it is Set Features on
+            // the power management feature alternating between two power
+            // states, for ever. A wrapping ring fills with that and
+            // throws away the only part anyone wanted. First N, not last
+            // N.
+            if (self.admin_observation_count >=
+                admin_observation_capacity) {
+                self.admin_observation_count =
+                    self.admin_observation_count + 1;
+                continue;
+            }
+
+            auto slot = self.admin_observation_count;
+
+            self.admin_observations[slot] = admin_observation{
+                .command = command[0],
+                .dword_10 = command[10],
+                .dword_11 = command[11],
+                .namespace_id = command[1],
+            };
+
+            self.admin_observation_count =
+                self.admin_observation_count + 1;
+        }
+
+        self.admin_observed_head = tail;
+    }
 }
 
 void hypervisor::on_local_apic_write(void * context,
@@ -5882,6 +5995,34 @@ hypervisor::main(arch::x86_64::context & caller_context)
                         !armed) {
                         log("could not watch the controller register "
                             "page");
+                    }
+
+                    // The doorbell page, for the observation build only.
+                    //
+                    // Left armed rather than armed around a borrow, which
+                    // is the opposite of what the rebuild does with the
+                    // same page and for the opposite reason: the rebuild
+                    // wants the guest excluded for a moment, this wants
+                    // to see everything it submits. With a doorbell
+                    // stride of zero that is every command on every
+                    // queue, which is exactly the cost this is meant to
+                    // price.
+                    if constexpr (diag::observe_controller_admin) {
+                        auto doorbell_page =
+                            register_page +
+                            nvme::offset_of(
+                                nvme::register_offset::doorbell_base);
+
+                        if (auto watching = watch_guest_page_writes(
+                                doorbell_page,
+                                &hypervisor::on_doorbell_write,
+                                this,
+                                page_watch::mode::notify);
+                            !watching) {
+                            log("could not watch the doorbell page");
+                        } else {
+                            log("observing the controller's admin queue");
+                        }
                     }
 
                     // Everything the rebuild will need after a reset has

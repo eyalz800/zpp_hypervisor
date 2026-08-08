@@ -2012,6 +2012,64 @@ private:
      */
 
     /**
+     * What the guest's driver submitted on its admin queue, and how much
+     * the watching cost.
+     *
+     * A ring, because the interesting commands arrive in one burst during
+     * the driver's initialisation and there is no reader until long
+     * afterwards. Newest entry is at `(count - 1) % capacity`, the same
+     * convention the exit trace uses.
+     *
+     * Each entry is the first command dword - opcode in its low byte and
+     * command identifier in its high half - followed by the two command
+     * dwords that carry the operands. That is enough to read every
+     * command this question turns on: Set Features carries the feature
+     * identifier in the first and the requested queue counts in the
+     * second, and both Create I/O Queue commands carry the queue
+     * identifier in the low half of the first.
+     * @{
+     */
+    static constexpr std::size_t admin_observation_capacity = 256;
+
+    struct admin_observation
+    {
+        std::uint32_t command{};
+        std::uint32_t dword_10{};
+        std::uint32_t dword_11{};
+        std::uint32_t namespace_id{};
+    };
+
+    admin_observation
+        admin_observations[admin_observation_capacity]{};
+    volatile std::uint64_t admin_observation_count{};
+
+    /**
+     * How far round the guest's admin submission queue this has already
+     * looked, so a doorbell ring reports only what is new.
+     */
+    std::uint32_t admin_observed_head{};
+
+    /**
+     * Every write to the doorbell page, counted. This is the cost of
+     * watching it, and the number that decides whether a permanent trap
+     * there is affordable.
+     */
+    volatile std::uint64_t channel_doorbell_writes{};
+
+    /**
+     * Every value the guest has written to the configuration register, in
+     * order. Set on its own says the guest is shutting the controller
+     * down without clearing the enable bit, which is the transition this
+     * VMM does not currently notice.
+     */
+    static constexpr std::size_t configuration_trace_capacity = 64;
+    std::uint32_t configuration_trace[configuration_trace_capacity]{};
+    volatile std::uint64_t configuration_trace_count{};
+    /**
+     * @}
+     */
+
+    /**
      * One recorded VM exit. Sampled after the exit was handled, so the
      * fields show the state the guest is about to be resumed with rather
      * than the state it exited in.

@@ -202,6 +202,37 @@ inline constexpr bool restart_after_reservation = enabled;
 inline constexpr bool rebuild_channel_after_reset = false;
 
 /**
+ * Whether to watch the controller's doorbell page and record what the
+ * guest's driver submits on its admin queue.
+ *
+ * Observation only. Nothing is emulated, nothing is created, and no
+ * command of ours is submitted - the handler reads the guest's own
+ * submission queue entries and records their opcode, identifier and the
+ * two command dwords, which is enough to read a Set Features (Number of
+ * Queues) request and every Create I/O Queue.
+ *
+ * It exists because every remaining decision about surviving the guest's
+ * controller reset currently rests on a guess about the guest: what its
+ * driver asks for, what it does with an allocation larger than it asked
+ * for, the highest queue identifier it actually creates in each space,
+ * how many times it disables the controller in a boot and in an idle
+ * hour, and whether its low power entry clears the enable bit at all or
+ * only sets the shutdown notification - which this VMM does not currently
+ * look at. One boot with this on settles all of them.
+ *
+ * The cost is the point as much as the facts are. With a doorbell stride
+ * of zero every I/O doorbell shares this page with the admin ones, so
+ * this traps the guest's entire disk traffic, and how much that actually
+ * costs has been asserted to be disqualifying without ever being
+ * measured. `channel_doorbell_writes` counts them, so the boot that
+ * gathers the facts also prices the mechanism.
+ *
+ * Off by default and never appropriate to leave on: it is an exit per
+ * command submitted.
+ */
+inline constexpr bool observe_controller_admin = false;
+
+/**
  * Whether to take the controller for the length of one VM exit when the
  * guest disables it, to write out whatever is staged.
  *

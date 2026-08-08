@@ -665,3 +665,56 @@ What this rules out: raising the identifier, on its own, in any form. What
 it leaves is the sequence this file already prescribes - reserve by
 patching the guest's Set Features completion, and create ours only after
 the guest has created its own.
+
+## What the guest's driver actually does, observed
+
+Read off the guest's own admin submission queue during a Windows boot on
+the rig, with `diag::observe_controller_admin` on. Every number that the
+reservation design rested on a guess about is here.
+
+**Set Features (Number of Queues)** is issued once, `value = 0x0007000f`.
+Both fields are zero's based, so that is **sixteen submission queues and
+eight completion queues requested**, on an eight processor machine.
+
+**It then creates exactly what it asked for**, and nothing else:
+
+    Create I/O CQ   QID 1..8    queue size 1024
+    Create I/O SQ   QID 1..16   queue size 1024
+
+with each submission queue's DW11 naming its completion queue, so
+submission queues nine to sixteen pair back onto completion queues one to
+eight. Two submission queues per completion queue, one pair per processor.
+
+Three consequences, and the first two close open questions:
+
+- **The identifier the channel has to reserve is above both ranges**:
+  submission seventeen and completion nine at the least. Four, which the
+  loader hardcoded, is inside both - chosen when the only other user of
+  this controller was firmware that created one queue and numbered it 1.
+- **Thirty two was refused for the reason the specification gives.**
+  The controller allocated what the guest asked for, so thirty two exceeds
+  the allocation in both spaces and Create returns Invalid Queue
+  Identifier, `0x4101`.
+- **This driver clamps its creates to its own request**, which is the
+  behaviour the reservation scheme needs but only under an allocation
+  equal to that request. It does not yet show what it would do with an
+  allocation *larger* than it asked for, which is what the corrected
+  ordering produces. Until that is observed, choose the identifier from
+  what the guest is seen to create rather than from what it was told.
+
+**The configuration register is written three times in a boot** -
+`0x00460000`, `0x00460000`, `0x00460001` - which is the documented
+disable-then-enable pair and nothing else. **No write ever set the
+shutdown notification.** So a mechanism that triggers on the enable bit
+fires about once per boot and never in steady state, which is the
+measurement that decides what the excursion can be: a flush at reset, not
+a channel.
+
+**Not settled, and it looked settled:** the doorbell page watch counted
+161 writes across the whole boot. A guest reading a Windows installation
+submits far more than that, and its I/O doorbells are on this page - with
+a stride of zero every queue's doorbell is within 0x80 of the admin one.
+So the watch is not catching them, and the cost of a permanently trapped
+doorbell page is **not** measured by this run. What is measured is that
+the admin doorbell traps reliably and that a guest boots normally with the
+page watched. The gap is worth understanding before that cost is quoted.
