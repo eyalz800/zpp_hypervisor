@@ -7966,11 +7966,14 @@ hypervisor::main(arch::x86_64::context & caller_context)
             // for_each_possible_cpuid_base_hypervisor in
             // arch/x86/include/asm/cpuid/api.h is
             // `for (function = 0x40000000; function < 0x40010000; function
-            // += 0x100)`, and KVM relocates its own block to a later base
-            // by exactly that rule when the first one is occupied by the
-            // interface a guest is being shown. So this layout is the one
-            // already in use rather than an invention, and a guest looking
-            // for the block at 0x40000000 never lands on it.
+            // += 0x100)`. And KVM does not assume its own block sits at
+            // the first of those bases either - kvm_get_hypervisor_cpuid
+            // in arch/x86/kvm/cpuid.c walks the same sequence looking for
+            // the signature and takes whichever base carries it. So a
+            // second vendor block at 0x40000100 is a layout the reference
+            // implementation already expects to find rather than an
+            // invention, and a guest scanning for the block at 0x40000000
+            // never lands on this one.
             constexpr std::uint32_t diagnostic_leaf = 0x40000100;
 
             // Leaf 1, the feature bits, where two of them are cleared
