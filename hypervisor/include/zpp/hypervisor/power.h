@@ -1,4 +1,5 @@
 #pragma once
+#include <cstddef>
 #include <cstdint>
 
 /**
@@ -79,6 +80,35 @@ inline constexpr std::uint32_t sleep_enable = 1u << 13;
  */
 
 /**
+ * The firmware ACPI control structure, as far as a waking vector is
+ * concerned.
+ *
+ * It is the one ACPI table with no revision, checksum or OEM identifier,
+ * so only the signature and the length are where they are in every other
+ * table. Checked against the FACS structure EDK2 declares in
+ * MdePkg/Include/IndustryStandard/Acpi65.h, which this build fetches:
+ * signature, length, hardware signature, then the thirty two bit waking
+ * vector, then the global lock, the flags, and the sixty four bit vector.
+ *
+ * `minimum_length` is what has to be there before either vector field may
+ * be read *or written*, and it is the end of the extended field rather
+ * than the end of the thirty two bit one. The difference matters because
+ * the two sides of this are not symmetric: a read past a short table
+ * returns a number nobody wrote, which is merely wrong, while a write past
+ * one lands in whatever the firmware put next to the table.
+ * @{
+ */
+inline constexpr std::uint32_t facs_signature = 0x53434146; // 'FACS'
+inline constexpr std::size_t facs_length_offset = 0x04;
+inline constexpr std::size_t facs_waking_vector_offset = 0x0c;
+inline constexpr std::size_t facs_extended_waking_vector_offset = 0x18;
+inline constexpr std::size_t facs_minimum_length =
+    facs_extended_waking_vector_offset + sizeof(std::uint64_t);
+/**
+ * @}
+ */
+
+/**
  * Whether a value written to the PM1 control register asks for a sleep
  * state, rather than being one of the many writes that touch the other
  * bits in the same register and enter nothing.
@@ -149,22 +179,51 @@ inline constexpr bool observe_waking_vector = false;
  * S3 resume comes back through it rather than straight into the guest's
  * own resume trampoline on bare hardware.
  *
- * Off, and unlike the switch above this one is off because the path behind
- * it does not exist yet rather than merely being unproven. Nothing reads
- * it. It is here so that the two questions stay separate: whether the
- * vector can be *found*, which observe_waking_vector answers on its own
- * and safely, and whether it can be *taken over*, which needs a trampoline
- * that re-establishes VMX operation and enters the guest at
- * hypervisor::guest_waking_vector.
+ * The path behind it exists now - hypervisor::arm_resume_from_sleep on the
+ * way down and zpp_resume_from_sleep_main on the way up - and this switch
+ * is off because it has never been run, not because there is nothing to
+ * run. It is the last of the three for a reason: the failure modes are not
+ * comparable. A machine that resumes unvirtualized has lost this VMM and
+ * kept its guest. A machine pointed at a trampoline that does not finish
+ * has lost both, and looks exactly like a dead motherboard from the
+ * outside - so this one needs somebody at the machine, and the two
+ * switches above answer their own questions first and safely.
  *
- * The order matters, because the failure modes are not comparable. A
- * machine that resumes unvirtualized has lost this VMM and kept its guest.
- * A machine pointed at a trampoline that does not finish has lost both,
- * and looks exactly like a dead motherboard from the outside.
- *
- * What would turn it on: that trampoline existing and having been run. See
- * BACKLOG.md item 7 for what it has to do and in what order.
+ * What would turn it on: a hardware run that suspends and comes back with
+ * the guest still virtualized, with resume_request.stage reaching
+ * `launched` in the channel. See BACKLOG.md item 7 for the experiments in
+ * order.
  */
 inline constexpr bool resume_from_waking_vector = false;
+
+/**
+ * The resume needs the quiesce, and the dependency is asserted rather than
+ * left to be discovered.
+ *
+ * Not because the resume path could not cope with a processor that was
+ * taken away mid-flight - it VMCLEARs and rebuilds every region it uses,
+ * so it could - but because the *guest's* write is what sleeps the
+ * machine, and on the pass-through path that write is re-executed by the
+ * guest after the port interception has been released. Releasing it is
+ * what makes the suspend seen once, and a resume that re-arms nothing
+ * would then miss the next one. Arming a resume is therefore only
+ * meaningful on the path where this VMM performs the write itself and
+ * keeps the port.
+ */
+static_assert(!resume_from_waking_vector || quiesce_on_sleep,
+              "resume_from_waking_vector requires quiesce_on_sleep");
+
+/**
+ * Reading the vector is a precondition of taking it over, and this keeps
+ * the two switches from disagreeing about whether it was read.
+ *
+ * The resume path reads the FACS itself rather than relying on this - it
+ * has to, since it also writes to it and must re-check the table it is
+ * about to modify - but observe_waking_vector is what puts the value on
+ * the wire, and a resume attempt with no log line saying what the guest's
+ * own vector was is one whose failure cannot be read afterwards.
+ */
+static_assert(!resume_from_waking_vector || observe_waking_vector,
+              "resume_from_waking_vector requires observe_waking_vector");
 
 } // namespace zpp::hypervisor::power

@@ -122,6 +122,25 @@ public:
          * describe.
          */
         guest_memory_unreachable = 17,
+
+        /**
+         * The firmware ACPI control structure the loader handed over is
+         * not one, or is too short to hold the fields a resume has to read
+         * and write.
+         *
+         * Not a machine failure: the loader read that table before the
+         * guest ever ran, and the guest has owned the memory since. A
+         * suspend still happens, it just happens without this VMM
+         * inserting itself into the resume.
+         */
+        no_usable_facs = 18,
+
+        /**
+         * There is nothing to resume into: the guest left no real mode
+         * waking vector, or this VMM has no trampoline page to point the
+         * platform at.
+         */
+        no_waking_vector = 19,
     };
 
     /**
@@ -240,6 +259,18 @@ public:
      * this class should use.
      */
     void start_up_on_this_processor(std::uint64_t slot);
+
+    /**
+     * The same, for a processor arriving on an S3 waking vector rather
+     * than a start-up IPI: it puts the FACS and the trampoline back the
+     * way the guest needs them, rewinds the per-processor bookkeeping, and
+     * launches.
+     *
+     * Public for the same narrow reason as the function above -
+     * zpp_resume_from_sleep_main reaches it from outside the class - and
+     * no more part of the interface than that one is.
+     */
+    void resume_from_sleep_on_this_processor(std::uint64_t slot);
 
 private:
     /**
@@ -981,8 +1012,14 @@ private:
      * false when this VMM performed the write itself.
      *
      * See zpp/hypervisor/power.h for what the three transitions require.
+     *
+     * `bytes` is how wide the guest's own access was, from the exit
+     * qualification, or zero where that field held a value SDM Table 30-5
+     * does not define.
      */
-    bool on_sleep_request(std::uint16_t port, std::uint32_t value);
+    bool on_sleep_request(std::uint16_t port,
+                          std::uint32_t value,
+                          std::uint8_t bytes);
 
     /**
      * Takes this processor out of VMX operation cleanly and then performs
@@ -998,7 +1035,8 @@ private:
      * caller stops the processor.
      */
     std::expected<void, zpp::error> quiesce_and_sleep(std::uint16_t port,
-                                                      std::uint32_t value);
+                                                      std::uint32_t value,
+                                                      std::uint8_t bytes);
 
     /**
      * The physical address of this processor's own VMXON and VMCS regions,
@@ -1033,6 +1071,128 @@ private:
      * the local APIC page and nothing else.
      */
     bool observe_guest_waking_vector();
+
+    /**
+     * What the FACS says about where a resume goes, read out of guest
+     * memory and checked before any of it is believed.
+     *
+     * A structure rather than four out-parameters because the four are
+     * only meaningful together: a vector is worth nothing without the
+     * length that says the field was inside the table.
+     */
+    struct waking_vector_record
+    {
+        /**
+         * The table's own declared length, and whether it was long enough
+         * to contain both vector fields. Everything else below is
+         * meaningless unless this is set - see power::facs_minimum_length
+         * for why the bound is the end of the extended field and not the
+         * end of the thirty two bit one.
+         */
+        std::uint32_t length{};
+        bool usable{};
+
+        /**
+         * The thirty two bit real mode vector, and the sixty four bit one.
+         *
+         * Both, because which one the guest used decides whether this
+         * approach works at all: the real mode field is the state
+         * apply_start_up already builds, and a guest that set only the
+         * extended one is entered through a different protocol and cannot
+         * be resumed into by anything here.
+         * @{
+         */
+        std::uint32_t vector{};
+        std::uint64_t extended{};
+        /**
+         * @}
+         */
+    };
+
+    /**
+     * Reads and checks that structure out of the handed-over FACS address.
+     *
+     * Through read_guest_physical rather than the mapping window directly,
+     * which is what gets the bound on how far a guest physical address may
+     * reach and keeps this off the window page the diagnostic channel's
+     * queues use.
+     */
+    std::expected<waking_vector_record, zpp::error> read_facs();
+
+    /**
+     * Points the platform's resume at this VMM's own trampoline, so that
+     * an S3 comes back through it rather than straight into the guest.
+     *
+     * Called on the way down, after the channel has been flushed and
+     * before the write that removes power, and only with
+     * power::resume_from_waking_vector on. Saves the guest's own vector in
+     * guest_waking_vector, rewrites the trampoline's entry to
+     * zpp_resume_from_sleep_main, and writes the trampoline page's address
+     * into the FACS with the extended field zeroed.
+     *
+     * Returns an error and changes nothing when the table or the guest's
+     * own vector is not something that can be resumed into. That is a
+     * normal outcome and not a failure of the suspend: the machine still
+     * sleeps, and still comes back unvirtualized, which is what it did
+     * before this existed.
+     */
+    std::expected<void, zpp::error> arm_resume_from_sleep();
+
+    /**
+     * Puts the FACS back the way the guest left it, and the trampoline
+     * back the way a start-up IPI needs it.
+     *
+     * Both halves of what arm_resume_from_sleep did, undone as the first
+     * thing the resume does rather than the last. That order is
+     * deliberate: if anything after it fails, the guest's own table is
+     * already truthful and the next suspend goes down the unmodified path
+     * instead of a second time into a trampoline whose hypervisor never
+     * finished coming back.
+     */
+    void disarm_resume_from_sleep();
+
+    /**
+     * Puts the per-processor bookkeeping back to what it was before any
+     * processor had launched, so that a resume can go through the ordinary
+     * launch path rather than a second copy of it.
+     *
+     * Every array here is indexed by a slot handed out at launch, and
+     * after an S3 none of those launches has happened: the platform has
+     * reset the processors, the guest will send INIT-SIPI-SIPI again, and
+     * the existing adoption path handles that. What it cannot handle is
+     * slots that are still marked taken - the counters would keep climbing
+     * and max_cpus would be reached after a few suspends.
+     */
+    void rewind_for_resume();
+
+    /**
+     * Moves the guest's entry point from the page apply_start_up put it on
+     * to the exact address the firmware waking vector names.
+     *
+     * apply_start_up takes a start-up IPI vector, which is a page number,
+     * so it can only begin a guest at a page boundary. The ACPI real mode
+     * waking protocol does not require the vector to be aligned: EDK2's
+     * AsmTransferControl far-jumps to (vector >> 4):(vector & 0xf),
+     * putting the low four bits in IP. For an aligned vector this writes
+     * exactly what apply_start_up already wrote.
+     */
+    void apply_waking_vector();
+
+    /**
+     * Whether this processor's launch is an S3 resume rather than a first
+     * boot, which decides whether main re-runs the once-per-boot setup.
+     *
+     * It must not. Everything that setup builds describes physical memory
+     * that S3 preserves and has not moved - the host page table, the host
+     * GDT and IDT, the extended page tables, the module's own protection -
+     * so building it again would at best repeat work and at worst read an
+     * operating system page table that is no longer the guest's.
+     *
+     * Not per processor, because only the boot processor comes back this
+     * way: the application processors are started from the guest's own
+     * start-up IPIs afterwards, through the path that already exists.
+     */
+    bool resuming_from_sleep{};
 
     /**
      * Whether the exit handler has to leave this processor's guest with
@@ -2314,6 +2474,63 @@ private:
     };
 
     /**
+     * How far a resume got, and what it was resuming into.
+     *
+     * The counterpart of sleep_request, and it exists for a sharper reason
+     * than symmetry: a resume that does not finish leaves a machine with
+     * no console, no guest and nothing running, so the only account of it
+     * is whatever was written to memory before it stopped - and read
+     * either from the channel's last block or by a debugger on the next
+     * boot. The trampoline's own account of the climb is separate and
+     * coarser; see start_up_trampoline_stage.
+     */
+    struct
+    {
+        /**
+         * Non-zero once a resume has been attempted. Checked first: every
+         * other field is meaningless until this is set.
+         */
+        std::uint64_t occurred{};
+
+        /**
+         * How many times this VMM has come back through the waking vector,
+         * which is the number a slot leak would show up in.
+         */
+        std::uint64_t count{};
+
+        /**
+         * One of resume_stage. A machine that never came back leaves the
+         * last one it got past.
+         */
+        std::uint64_t stage{};
+
+        /**
+         * Where the guest was entered, which is its own waking vector and
+         * not the trampoline's.
+         */
+        std::uint64_t guest_vector{};
+    } resume_request{};
+
+    /**
+     * The steps the resume records in resume_request.stage, in the order
+     * it reaches them.
+     *
+     * `entered` is written by the first C++ the resuming processor
+     * executes, so anything less than it means the failure was in the
+     * trampoline or before it - in the firmware's own resume, or in the
+     * vector this VMM wrote into the FACS - and start_up_trampoline_stage
+     * says which.
+     */
+    enum class resume_stage : std::uint64_t
+    {
+        armed = 1,
+        entered = 2,
+        disarmed = 3,
+        rewound = 4,
+        launched = 5,
+    };
+
+    /**
      * The exit nothing knew how to handle, filled in by
      * on_unhandled_exit just before it stops the CPU. For a debugger, and
      * for the same reason as vm_entry_failure below: none of it can be
@@ -2800,6 +3017,19 @@ private:
      * left none, and the two are told apart by sleep_request.occurred.
      */
     std::uint64_t guest_waking_vector{};
+
+    /**
+     * The extended waking vector the guest left there, saved because
+     * arming a resume zeroes it.
+     *
+     * Zeroing it is what forces the real mode protocol, which is the only
+     * one this VMM can serve: EDK2's S3Resume.c takes the sixteen bit
+     * vector when XFirmwareWakingVector is zero and a protected- or long
+     * mode path otherwise. Saved rather than discarded so that the guest's
+     * own table can be put back exactly as it was - see
+     * disarm_resume_from_sleep.
+     */
+    std::uint64_t guest_extended_waking_vector{};
     /**
      * @}
      */
@@ -2856,6 +3086,10 @@ inline const zpp::error_category & category(hypervisor::error)
             case hypervisor::error::guest_memory_unreachable:
                 return "Guest physical memory is out of the window's "
                        "reach";
+            case hypervisor::error::no_usable_facs:
+                return "No usable firmware ACPI control structure";
+            case hypervisor::error::no_waking_vector:
+                return "No waking vector to resume through";
             }
         });
     return error_category;

@@ -72,6 +72,26 @@ public:
     }
 
     /**
+     * Forces the lock open, whoever was holding it.
+     *
+     * The counterpart of zpp::heap::abandon_lock and for the same one
+     * caller: a processor coming back from a power transition. append is
+     * reachable from inside a VM exit, so the transition can catch another
+     * processor between the lock and the unlock above and leave the lock
+     * held by a processor the platform has since reset - after which the
+     * first log line on the way back never returns.
+     *
+     * Safe only while the caller is the only processor running. Note that
+     * append holds this across a push_back, which allocates, so a
+     * transition caught there leaves both this and the heap's lock held
+     * and both have to be abandoned.
+     */
+    static void abandon_lock()
+    {
+        m_lock.unlock();
+    }
+
+    /**
      * Appends a null terminated string.
      */
     static void append_value(line & out, const char * text)
@@ -207,6 +227,10 @@ private:
     /**
      * Guards the list. Not recursive, and never held across anything that
      * can fault, so a stopped CPU cannot leave it held.
+     *
+     * A power transition can, though, which is a different thing from a
+     * fault and is why abandon_lock exists: it takes every processor away
+     * wherever they happen to be, and this byte survives in memory.
      */
     static inline zpp::spin_lock m_lock{};
 };

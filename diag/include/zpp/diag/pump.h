@@ -73,7 +73,45 @@ struct pump
         run(ring.records);
     }
 
+    /**
+     * Releases every sink's gate, whoever was holding it.
+     *
+     * For a processor coming back from a power transition, and the failure
+     * this avoids is quiet rather than loud - which is what makes it worth
+     * having. A gate never spins: a processor that finds one held leaves
+     * its records in the ring and moves on. So a gate left held by a
+     * processor the platform reset does not hang anything; it makes the
+     * channel silent, for the rest of the boot, on the one path whose
+     * whole purpose is to report what happened. A resume that worked and a
+     * resume that hung would look the same from outside.
+     *
+     * Safe only while the caller is the only processor running. Unlike the
+     * heap's, this one leaves nothing half updated: a gate guards the
+     * pump's cursor advance, and a cursor that was mid-advance simply
+     * re-offers or skips a record.
+     */
+    static void abandon_gates()
+    {
+        if constexpr (enabled) {
+            release_each(sinks{});
+        }
+    }
+
 private:
+    template <typename... Sinks>
+    static void release_each(sink_list<Sinks...>)
+    {
+        (release_one<Sinks>(), ...);
+    }
+
+    template <typename Sink>
+    static void release_one()
+    {
+        if constexpr (policy_of(Sink::id).present) {
+            gate<Sink::id>::leave();
+        }
+    }
+
     /**
      * The fold. One `if constexpr` per sink, so a disabled sink is not a
      * branch that is never taken - it is not there.

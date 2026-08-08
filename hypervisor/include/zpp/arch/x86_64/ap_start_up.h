@@ -201,3 +201,24 @@ inline constexpr std::size_t ap_start_up_pages = 4;
  * namespaces or overloads.
  */
 extern "C" void zpp_ap_start_up_main(std::uint64_t processor);
+
+/**
+ * The same trampoline's other destination: where the boot processor
+ * arrives when the platform resumes from S3 through a waking vector this
+ * VMM has taken over.
+ *
+ * The blob is reused rather than copied, because the two entry states are
+ * the same one. A start-up IPI begins at CS = vector << 8, IP = 0; the
+ * ACPI real mode waking protocol far-jumps to (vector >> 4):(vector &
+ * 0xf), which EDK2's AsmTransferControl computes in
+ * MdeModulePkg/Universal/Acpi/BootScriptExecutorDxe/X64/S3Asm.nasm after
+ * clearing CR0.PE, CR0.PG, CR4.PAE and EFER.LME - and for a page aligned
+ * vector those two are the same address in the same mode. The trampoline
+ * page is page aligned by construction, so pointing the waking vector at
+ * it needs no second copy of any of this and no new assembly: only the
+ * area's `entry` field changes, and it is put back on the way out.
+ *
+ * Takes the same argument, for the same reason, and it is the boot
+ * processor's slot.
+ */
+extern "C" void zpp_resume_from_sleep_main(std::uint64_t processor);

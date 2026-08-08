@@ -2708,24 +2708,43 @@ bool hypervisor::on_io_instruction(arch::x86_64::context & context,
         return true;
     }
 
+    // Both the value and how wide the access was, from the same field.
+    //
+    // The width is carried on rather than re-derived from the table,
+    // because the path that performs the write itself has to perform the
+    // *guest's* instruction and not a corrected version of it. Table 30-5
+    // defines only 0, 1 and 3 here and says "other values not used", so
+    // anything else is reported as unknown rather than guessed at - the
+    // register's own width from the fixed table is the fallback there, and
+    // is the better answer for a value the architecture does not define.
     std::uint32_t value{};
+    std::uint8_t bytes{};
     switch (size) {
     case 0:
         value = static_cast<std::uint8_t>(context.rax);
+        bytes = 1;
         break;
     case 1:
         value = static_cast<std::uint16_t>(context.rax);
+        bytes = 2;
+        break;
+    case 3:
+        value = static_cast<std::uint32_t>(context.rax);
+        bytes = 4;
         break;
     default:
         value = static_cast<std::uint32_t>(context.rax);
+        bytes = 0;
         break;
     }
 
-    re_execute = on_sleep_request(port, value);
+    re_execute = on_sleep_request(port, value, bytes);
     return true;
 }
 
-bool hypervisor::on_sleep_request(std::uint16_t port, std::uint32_t value)
+bool hypervisor::on_sleep_request(std::uint16_t port,
+                                  std::uint32_t value,
+                                  std::uint8_t bytes)
 {
     // Not every write to this register enters anything. It also carries
     // SCI_EN, BM_RLD and GBL_RLS, and an operating system writes it while
@@ -2807,7 +2826,29 @@ bool hypervisor::on_sleep_request(std::uint16_t port, std::uint32_t value)
     } else {
         auto cpu = this->vmcs.vpid();
 
-        if (auto quiesced = quiesce_and_sleep(port, value); !quiesced) {
+        // Point the platform's resume at this VMM, while there is still a
+        // VMCS current and guest memory can still be reached through the
+        // window - both of which the quiesce below takes away.
+        //
+        // A refusal here is not a failure of the suspend. It means the
+        // table or the guest's own vector is not something that can be
+        // resumed into, and the machine then does exactly what it did
+        // before this existed: it sleeps, and it comes back
+        // unvirtualized. Said out loud rather than silently skipped,
+        // because "the resume did not happen" and "the resume was never
+        // armed" are the two things a run has to be able to tell apart.
+        if constexpr (power::resume_from_waking_vector) {
+            if (auto armed = arm_resume_from_sleep(); !armed) {
+                log("resume not armed, error {}; the machine will come "
+                    "back unvirtualized",
+                    armed.error().code());
+                diag::log<diag::severity::warning>(
+                    "resume not armed, error {}", armed.error().code());
+            }
+        }
+
+        if (auto quiesced = quiesce_and_sleep(port, value, bytes);
+            !quiesced) {
             // The write did not sleep the machine and this processor
             // could not be put back into VMX operation, so there is
             // nothing to resume into. Said out loud and then stopped,
@@ -2842,65 +2883,94 @@ bool hypervisor::on_sleep_request(std::uint16_t port, std::uint32_t value)
     }
 }
 
-bool hypervisor::observe_guest_waking_vector()
+std::expected<hypervisor::waking_vector_record, zpp::error>
+hypervisor::read_facs()
 {
     if (0 == this->sleep_facs_physical) {
-        log("no facs was handed over, so no waking vector to read");
-        return false;
+        return std::unexpected(zpp::error{error::no_usable_facs});
     }
 
-    // Offsets inside the firmware ACPI control structure. It is the one
-    // ACPI table with no revision, checksum or OEM identifier, so only the
-    // signature and the length are where they are in every other table.
+    // Read as bytes and taken apart here, rather than reached through a
+    // pointer into the mapping window.
     //
-    // Checked against the FACS structure EDK2 declares in
-    // MdePkg/Include/IndustryStandard/Acpi65.h, which this build fetches:
-    // signature, length, hardware signature, then the thirty two bit
-    // waking vector, then the global lock, the flags, and the sixty four
-    // bit vector.
-    constexpr std::uint32_t facs_signature = 0x53434146; // 'FACS'
-    constexpr std::size_t waking_vector_offset = 0x0c;
-    constexpr std::size_t extended_waking_vector_offset = 0x18;
+    // read_guest_physical is what carries the two things a hand-rolled
+    // window mapping does not: a refusal for an address past what the
+    // extended page tables describe, and the transfer window page rather
+    // than page zero, which the diagnostic channel's queues use. It also
+    // takes the window lock per page and releases it, so nothing is left
+    // holding a pointer into a shared mapping.
+    std::byte bytes[power::facs_minimum_length]{};
+    if (auto read = read_guest_physical(this->sleep_facs_physical,
+                                        std::span{bytes});
+        !read) {
+        return std::unexpected(read.error());
+    }
 
-    // The window and not a permanent mapping, for the reason map_window
-    // exists: this address is the firmware's choice, not ours, and adding
-    // it to the host page table could alias over the module's own mapping.
-    //
-    // One page. The structure is sixty four bytes and the specification
-    // requires it to be aligned on a sixty four byte boundary, so the two
-    // fields read below cannot straddle a page - but the base is masked
-    // and the offset added back rather than assuming the table starts at a
-    // page boundary, because nothing says it does.
-    auto page = this->sleep_facs_physical & ~(page_size - 1);
-    auto offset = static_cast<std::size_t>(this->sleep_facs_physical &
-                                           (page_size - 1));
-
-    this->mapping_window_lock.lock();
-    scope_exit release{[&] { this->mapping_window_lock.unlock(); }};
-
-    auto * table =
-        static_cast<const volatile std::uint8_t *>(map_window(page)) +
-        offset;
+    auto load32 = [&bytes](std::size_t at) {
+        std::uint32_t value{};
+        std::memcpy(&value, bytes + at, sizeof(value));
+        return value;
+    };
+    auto load64 = [&bytes](std::size_t at) {
+        std::uint64_t value{};
+        std::memcpy(&value, bytes + at, sizeof(value));
+        return value;
+    };
 
     // Re-checked here and not only in the loader. The loader read this
     // table before the guest ever ran; between then and now the guest has
     // owned that memory and could have put anything there, and the whole
     // point of reading it is to decide whether to write to it later.
-    auto signature = arch::x86_64::read32(table);
-    if (facs_signature != signature) {
-        log("facs signature is {} rather than a facs, refused", signature);
+    waking_vector_record found{};
+    if (power::facs_signature != load32(0)) {
+        log("facs signature is {} rather than a facs, refused", load32(0));
+        return std::unexpected(zpp::error{error::no_usable_facs});
+    }
+
+    found.length = load32(power::facs_length_offset);
+
+    // The length and not the specification's minimum, because the table
+    // says how long it is and that is the only bound that can be trusted
+    // against a structure the guest has owned since the loader saw it.
+    //
+    // The loader's own check is weaker on purpose - it only demands room
+    // for the thirty two bit field, which is all it reads - so it passes
+    // tables this refuses. That is the right way round: it reads, and this
+    // is what decides whether to write.
+    found.usable = (found.length >= power::facs_minimum_length);
+    if (!found.usable) {
+        log("facs declares {} bytes, too short for both waking vectors",
+            found.length);
+        return found;
+    }
+
+    found.vector = load32(power::facs_waking_vector_offset);
+    found.extended = load64(power::facs_extended_waking_vector_offset);
+    return found;
+}
+
+bool hypervisor::observe_guest_waking_vector()
+{
+    auto found = read_facs();
+    if (!found) {
+        log("no waking vector to read, error {}", found.error().code());
         return false;
     }
 
-    auto vector = arch::x86_64::read32(table + waking_vector_offset);
-    auto extended =
-        arch::x86_64::read64(table + extended_waking_vector_offset);
+    if (!found->usable) {
+        return false;
+    }
 
-    this->guest_waking_vector = vector;
+    this->guest_waking_vector = found->vector;
+    this->guest_extended_waking_vector = found->extended;
 
-    log("guest waking vector {} and extended {}", vector, extended);
+    log("guest waking vector {} and extended {}",
+        found->vector,
+        found->extended);
     diag::log<diag::severity::warning>(
-        "guest waking vector {} extended {}", vector, extended);
+        "guest waking vector {} extended {}",
+        found->vector,
+        found->extended);
 
     // Both are reported because which one the guest used decides whether
     // this approach works at all. The thirty two bit field is entered in
@@ -2909,7 +2979,7 @@ bool hypervisor::observe_guest_waking_vector()
     // in long mode through a different protocol, and a guest that set it
     // and left the other zero cannot be resumed into by anything written
     // here yet.
-    return 0 != vector;
+    return 0 != found->vector;
 }
 
 std::uint64_t hypervisor::own_vmxon_region_physical()
@@ -2931,8 +3001,8 @@ std::uint64_t hypervisor::own_vmcs_region_physical()
         &this->vmx_vmcs[cpu - 1]);
 }
 
-std::expected<void, zpp::error>
-hypervisor::quiesce_and_sleep(std::uint16_t port, std::uint32_t value)
+std::expected<void, zpp::error> hypervisor::quiesce_and_sleep(
+    std::uint16_t port, std::uint32_t value, std::uint8_t bytes)
 {
     // Which regions this processor is actually using, derived from the
     // VPID. vmx_physical and vmcs_physical cannot answer this - see
@@ -3003,14 +3073,29 @@ hypervisor::quiesce_and_sleep(std::uint16_t port, std::uint32_t value)
         static_cast<std::uint64_t>(power_stage::write_issued);
     arch::x86_64::wbinvd();
 
-    // The guest's own write, at the register's own width.
+    // The guest's own write, at the width the guest's own instruction
+    // used.
     //
     // Performed here rather than handed back because handing it back
     // requires a VM entry, and this processor has just left VMX operation
-    // - there is nothing to enter. The width comes from the table because
-    // writing four bytes to a two byte register writes whatever the
-    // platform put next to it as well.
-    switch (this->sleep_control_width) {
+    // - there is nothing to enter. The whole point of the pass-through
+    // path is that it "cannot disagree with what the guest meant", and
+    // this path gives that up the moment it chooses a width for itself:
+    // OUT's source is architecturally AL, AX or EAX and the exit
+    // qualification says which (SDM Table 30-5, bits 2:0), so reproducing
+    // the instruction is a matter of using that and nothing else.
+    //
+    // The register's width from the fixed ACPI description table was the
+    // first answer here and is now only the fallback, for the undefined
+    // encodings Table 30-5 leaves open. It was rejected as the primary
+    // because it is wrong in the direction that writes bits the guest did
+    // not: a two byte guest access issued as a four byte write puts zeroes
+    // into bits 31:16 of whatever the platform decoded there, which is not
+    // something the guest asked for. The other direction - a four byte
+    // guest access issued as two - only drops bits that are reserved in
+    // PM1_CNT, so it was the harmless half of a change that had a harmful
+    // half.
+    switch (bytes ? bytes : this->sleep_control_width) {
     case 1:
         arch::x86_64::out8(port, static_cast<std::uint8_t>(value));
         break;
@@ -3064,6 +3149,431 @@ hypervisor::quiesce_and_sleep(std::uint16_t port, std::uint32_t value)
         static_cast<std::uint64_t>(power_stage::re_established);
     log("sleep write returned; back in vmx operation");
     return {};
+}
+
+std::expected<void, zpp::error> hypervisor::arm_resume_from_sleep()
+{
+    // Somewhere to come back to. The trampoline page is the only code this
+    // VMM has that runs outside long mode, and without it there is no
+    // resume to arm - a waking vector pointing into long mode code would
+    // be entered in real mode and execute the first sixteen bits of it.
+    if (0 == this->start_up_memory) {
+        return std::unexpected(zpp::error{error::no_waking_vector});
+    }
+
+    auto found = read_facs();
+    if (!found) {
+        return std::unexpected(found.error());
+    }
+    if (!found->usable) {
+        return std::unexpected(zpp::error{error::no_usable_facs});
+    }
+
+    // Where the guest expects to continue, and there is no substitute for
+    // it. Entering the guest anywhere else is the lie that *What the guest
+    // is told* in CLAUDE.md is about, and a guest that left no real mode
+    // vector cannot be served by this at all - the extended field is
+    // entered through a different protocol.
+    if (0 == found->vector) {
+        return std::unexpected(zpp::error{error::no_waking_vector});
+    }
+
+    // And below one megabyte, because that is all the protocol can
+    // express. The far pointer the firmware builds has a sixteen bit
+    // segment, so a vector at or above 2^20 is truncated on the way into
+    // it rather than refused - EDK2's AsmTransferControl shifts it right
+    // by four and moves the result into BX, keeping sixteen bits. A guest
+    // that left one up there is not resumable through this field by any
+    // firmware, so this is refusing something already broken rather than
+    // being strict.
+    constexpr std::uint64_t highest_real_mode_vector = 0x100000;
+    if (found->vector >= highest_real_mode_vector) {
+        log("guest waking vector {} is not addressable in real mode",
+            found->vector);
+        return std::unexpected(zpp::error{error::no_waking_vector});
+    }
+
+    this->guest_waking_vector = found->vector;
+    this->guest_extended_waking_vector = found->extended;
+
+    // The trampoline, pointed at the resume rather than at an application
+    // processor's launch.
+    //
+    // assembly_owned is put back first, for the reason
+    // start_application_processor puts it back before every start: the
+    // trampoline relocates the descriptor table pointer and the far
+    // pointers by adding the page's base to them in place, which is
+    // correct exactly once. A resume that ran on a blob some processor had
+    // already climbed would add the base to values that already hold one
+    // and fault on the far jump, before it has any interrupt descriptor
+    // table - so the machine resets rather than reporting, which from the
+    // outside is indistinguishable from firmware that never reached the
+    // vector at all.
+    auto & area = *reinterpret_cast<arch::x86_64::ap_start_up_area *>(
+        this->start_up_memory + arch::x86_64::ap_start_up_area_offset);
+
+    std::memcpy(
+        area.assembly_owned,
+        arch::x86_64::zpp_ap_start_up_begin +
+            arch::x86_64::ap_start_up_area_offset +
+            offsetof(arch::x86_64::ap_start_up_area, assembly_owned),
+        sizeof(area.assembly_owned));
+
+    // Slot zero, because the processor that comes back through the waking
+    // vector is the boot processor and it takes its own slot again -
+    // rewind_for_resume is what makes that slot free.
+    area.entry =
+        reinterpret_cast<std::uint64_t>(zpp_resume_from_sleep_main);
+    area.argument = 0;
+    area.stack_top =
+        reinterpret_cast<std::uint64_t>(std::end(this->start_up_stack));
+
+    // And the table, last: until this write the platform still resumes
+    // into the guest, which is the outcome every failure above leaves in
+    // place.
+    //
+    // The extended field is zeroed to force the real mode protocol. EDK2's
+    // S3Resume.c takes the sixteen bit vector when XFirmwareWakingVector
+    // is zero and a protected- or long mode path otherwise, so leaving a
+    // non-zero extended field there would send the platform down a path
+    // that ignores the vector written below.
+    //
+    // Both fields in one write, so there is no window in which the
+    // platform would find our real mode vector next to the guest's
+    // extended one and prefer the second. The span runs from the thirty
+    // two bit vector to the end of the extended one, which puts the global
+    // lock and the flags in the middle of it - and those belong to the
+    // guest and the firmware between them, so they are read back and
+    // written out unchanged rather than zeroed along with the field this
+    // is here to clear.
+    //
+    // Offsets against the FACS structure EDK2 declares in
+    // MdePkg/Include/IndustryStandard/Acpi65.h: FirmwareWakingVector at
+    // 0x0c, GlobalLock at 0x10, Flags at 0x14, XFirmwareWakingVector at
+    // 0x18.
+    constexpr auto span =
+        power::facs_minimum_length - power::facs_waking_vector_offset;
+    constexpr auto between = power::facs_extended_waking_vector_offset -
+                             power::facs_waking_vector_offset -
+                             sizeof(std::uint32_t);
+
+    std::byte replacement[span]{};
+
+    if (auto read = read_guest_physical(
+            this->sleep_facs_physical + power::facs_waking_vector_offset +
+                sizeof(std::uint32_t),
+            std::span{replacement + sizeof(std::uint32_t), between});
+        !read) {
+        return std::unexpected(read.error());
+    }
+
+    // Our trampoline's page, as the thirty two bit field. It is below one
+    // megabyte by construction - initialize_start_up_memory refuses
+    // anything else, because a start-up IPI vector is a page number in
+    // eight bits - so the narrowing cannot lose anything.
+    //
+    // Copied as bytes rather than assigned through a pointer, so the
+    // low-to-high order the table wants is the one memcpy gives on this
+    // architecture and nothing depends on how a struct would be laid out.
+    auto ours = static_cast<std::uint32_t>(this->start_up_memory);
+    std::memcpy(replacement, &ours, sizeof(ours));
+
+    // The extended field stays as the array's zero initialisation, which
+    // is the point of writing this span at all.
+
+    if (auto written = write_guest_physical(
+            this->sleep_facs_physical + power::facs_waking_vector_offset,
+            std::span{replacement});
+        !written) {
+        return std::unexpected(written.error());
+    }
+
+    this->resume_request.stage =
+        static_cast<std::uint64_t>(resume_stage::armed);
+    this->resume_request.guest_vector = this->guest_waking_vector;
+    this->resume_request.occurred = 1;
+
+    log("resume armed: waking vector {} taken over, guest vector {}",
+        this->start_up_memory,
+        this->guest_waking_vector);
+    diag::log<diag::severity::warning>(
+        "resume armed at {}, guest vector {}",
+        this->start_up_memory,
+        this->guest_waking_vector);
+    return {};
+}
+
+void hypervisor::disarm_resume_from_sleep()
+{
+    // The trampoline first, because it is the half that cannot fail and
+    // the half a start-up IPI needs: the guest is about to send
+    // INIT-SIPI-SIPI to every other processor, and each of those goes
+    // through start_application_processor, which puts assembly_owned back
+    // but not entry. Leaving entry pointing here would send every
+    // application processor into the resume path instead of its own
+    // launch.
+    if (0 != this->start_up_memory) {
+        auto & area = *reinterpret_cast<arch::x86_64::ap_start_up_area *>(
+            this->start_up_memory + arch::x86_64::ap_start_up_area_offset);
+        area.entry = reinterpret_cast<std::uint64_t>(zpp_ap_start_up_main);
+    }
+
+    // Recorded here rather than at the end, because the trampoline is the
+    // half that decides whether anything else can run and the FACS write
+    // below is allowed to be skipped.
+    this->resume_request.stage =
+        static_cast<std::uint64_t>(resume_stage::disarmed);
+
+    // And the guest's own table, put back exactly as it was read.
+    //
+    // Not required for anything here to work - the guest rewrites both
+    // fields on its way into every suspend - and done anyway, because the
+    // alternative is leaving a table the guest owns naming a trampoline of
+    // ours. If this VMM then failed to come back on some later resume, the
+    // guest would be running on bare hardware with its own resume pointing
+    // at a page nothing maintains.
+    //
+    // Guarded on the address being non-zero, and that guard is doing real
+    // work rather than restating the obvious: this is the one place in the
+    // power path that *writes* to an address the loader supplied, and a
+    // zero one would put the guest's saved vector at physical 0x0c.
+    // Reaching here at all means the arm succeeded, so the address is set
+    // - but a write reached only through a chain of shoulds is worth one
+    // test.
+    if (0 == this->sleep_facs_physical) {
+        return;
+    }
+
+    constexpr auto span =
+        power::facs_minimum_length - power::facs_waking_vector_offset;
+    std::byte replacement[span]{};
+    if (auto read = read_guest_physical(
+            this->sleep_facs_physical + power::facs_waking_vector_offset,
+            std::span{replacement});
+        read) {
+        std::memcpy(replacement,
+                    reinterpret_cast<const std::byte *>(
+                        &this->guest_waking_vector),
+                    sizeof(std::uint32_t));
+        std::memcpy(replacement +
+                        (power::facs_extended_waking_vector_offset -
+                         power::facs_waking_vector_offset),
+                    reinterpret_cast<const std::byte *>(
+                        &this->guest_extended_waking_vector),
+                    sizeof(std::uint64_t));
+        static_cast<void>(write_guest_physical(
+            this->sleep_facs_physical + power::facs_waking_vector_offset,
+            std::span{replacement}));
+    }
+}
+
+void hypervisor::rewind_for_resume()
+{
+    // Which launches have happened, and after an S3 the answer is none.
+    //
+    // These two are what hand out slots, and every array below is indexed
+    // by one. Rewinding them is what lets the resuming boot processor take
+    // slot zero again and the guest's own start-up IPIs take one, two and
+    // upwards after it - and not rewinding them is how max_cpus is reached
+    // after a few suspends, with each suspend leaking as many slots as the
+    // machine has processors.
+    this->available_stack_index = 0;
+    this->next_virtual_processor = 1;
+
+    for (std::size_t cpu{}; cpu < max_cpus; ++cpu) {
+        // Nothing is running. start_up_launched is the one that matters
+        // most: wait_for_ept_acknowledgement waits on every processor it
+        // marks launched, and a processor the platform has reset answers
+        // nothing - so a stale mark here turns the first extended page
+        // table change after a resume into a full-budget spin per
+        // processor.
+        this->start_up_launched[cpu] = false;
+        this->processor_virtualized[cpu] = false;
+        this->started_by_trampoline[cpu] = false;
+        this->wake_requested[cpu] = false;
+        this->relaunch_after_sleep[cpu] = false;
+        this->controller_poll_armed[cpu] = false;
+
+        // The start-up bookkeeping, or the guest's re-sent INIT-SIPI-SIPI
+        // is refused. apply_start_up returns early for a processor whose
+        // started_by_start_up_ipi is already set - which every application
+        // processor's is, from before the suspend - and that early return
+        // is indistinguishable from a processor that never started.
+        this->started_by_start_up_ipi[cpu] = false;
+        this->start_up_handoff[cpu].store(start_up_handoff_state::none);
+        this->guest_start_up_vector[cpu] = 0;
+
+        // A watch that was mid-step when the power went. The extended page
+        // tables survive and so does whatever protection the step left,
+        // but the processor that was stepping does not - so the step is
+        // abandoned rather than waited for.
+        this->stepping_watch[cpu] = false;
+        this->stepping_page[cpu] = 0;
+
+        // The nested VMX view each processor had of itself. setup_vmcs
+        // seeds these per processor as it launches, and a stale
+        // "in VMX operation" would make the first guest VMX instruction
+        // after a resume answer against a shadow the guest has forgotten.
+        this->guest_in_vmx_operation[cpu] = false;
+        this->guest_vmxon_pointer[cpu] = 0;
+        this->guest_current_vmcs[cpu] = nested_vmx::no_current_vmcs;
+
+        // Caught up by construction: nothing has a cached translation,
+        // because nothing has run. Left low it would name every processor
+        // as outstanding.
+        this->ept_generation_seen[cpu] =
+            this->ept_generation.load(std::memory_order_acquire);
+    }
+
+    // The boot processor's own slot, and where its guest begins.
+    //
+    // started_by_trampoline is what tells main to skip the state capture,
+    // the intermediate GDT and the page table switch - all of which are
+    // wrong here for the same reason they are wrong for an application
+    // processor: this processor arrived out of a reset by way of the
+    // trampoline, so what it holds is not an operating system's.
+    // The page the waking vector is in, and not the vector itself: this
+    // array holds start-up IPI vectors, which are page numbers, and
+    // apply_start_up reads it as one. apply_waking_vector is what puts the
+    // remaining four bits back afterwards.
+    this->started_by_trampoline[0] = true;
+    this->guest_start_up_vector[0] = this->guest_waking_vector >> 12;
+
+    // The controller has been through a power cycle, whatever it was doing
+    // before. Marked down so the poll on the exit path notices it coming
+    // back and rebuilds the queue, rather than submitting into queues the
+    // controller no longer has.
+    this->channel_controller_enabled = false;
+
+    // Armed again rather than assumed to still be armed. The bitmap is in
+    // module memory and survives, so this is usually a no-op - but the
+    // pass-through path releases the port, and a machine that took that
+    // path on an earlier suspend would come back watching nothing.
+    if (this->sleep_control_port) {
+        intercept_io_port(this->sleep_control_port, true);
+        if (this->sleep_control_port_secondary) {
+            intercept_io_port(this->sleep_control_port_secondary, true);
+        }
+    }
+
+    // What makes main skip the once-per-boot setup. Set last, so that
+    // everything above has happened before any of it can be acted on.
+    this->resuming_from_sleep = true;
+
+    this->resume_request.stage =
+        static_cast<std::uint64_t>(resume_stage::rewound);
+}
+
+void hypervisor::apply_waking_vector()
+{
+    auto & vmcs = this->vmcs;
+    auto vector = this->guest_waking_vector;
+
+    // The firmware's own decoding, and nothing more than it. EDK2's
+    // AsmTransferControl builds a far pointer whose segment is the vector
+    // shifted right by four and whose offset is its low four bits, then
+    // far-jumps through it in real mode - so the linear address the guest
+    // begins at is the vector, reached as a segment plus an offset rather
+    // than as a page.
+    constexpr std::uint64_t real_mode_segment_limit = 0xffff;
+    auto selector = (vector >> 4) & 0xffff;
+
+    vmcs.guest_cs_selector(selector);
+    vmcs.guest_cs_base(selector << 4);
+    vmcs.guest_cs_limit(real_mode_segment_limit);
+    vmcs.guest_rip(vector & 0xf);
+
+    // The access rights apply_start_up already wrote are left alone: they
+    // describe a sixteen bit read-executable segment, which is what this
+    // is too. Only where it begins differs.
+    log("guest entered at waking vector {}, cs {} rip {}",
+        vector,
+        selector,
+        vector & 0xf);
+}
+
+void hypervisor::resume_from_sleep_on_this_processor(std::uint64_t slot)
+{
+    this->resume_request.occurred = 1;
+    this->resume_request.count = this->resume_request.count + 1;
+    this->resume_request.stage =
+        static_cast<std::uint64_t>(resume_stage::entered);
+
+    // Every lock, forced open, and this is the first thing done rather
+    // than part of the rewind below - because the rewind's own first act
+    // would otherwise be to wait on one of them.
+    //
+    // A spin lock's state is a byte in memory, and S3 preserves memory.
+    // Both of these are taken and released inside a VM exit, so the write
+    // that slept the machine could land while another processor held one:
+    // mapping_window_lock is held across every guest memory access and
+    // across the whole of rebuild_channel_queue, start_up_lock across a
+    // processor's entire launch. That processor no longer exists - the
+    // platform reset it - so nothing will ever release what it held, and
+    // the first use of that lock after a resume spins for good. It would
+    // look exactly like a resume that never arrived.
+    //
+    // Safe to force, and only here: this processor is the only one
+    // running, by the same argument the resume rests on throughout - the
+    // platform brings the boot processor up alone and the guest has not
+    // yet sent an INIT-SIPI-SIPI to anything. The same for the two outside
+    // this class, and the log's has to come before the first log line
+    // rather than after it. append holds its lock across a push_back,
+    // which allocates, so a transition caught in there leaves both held -
+    // see the note on each abandon_lock.
+    this->mapping_window_lock.unlock();
+    this->start_up_lock.unlock();
+    log_storage::abandon_lock();
+    crt::heap().abandon_lock();
+
+    // And the diagnostic channel's gates, whose failure is the quiet one:
+    // a gate left held makes the channel silent rather than stuck, on the
+    // path whose only job is to say whether this worked.
+    diag::pump::abandon_gates();
+
+    log("resumed from sleep on slot {}, guest vector {}",
+        slot,
+        this->guest_waking_vector);
+
+    disarm_resume_from_sleep();
+    rewind_for_resume();
+
+    // Twice returning, exactly as start_up_on_this_processor does it and
+    // for the same reason: this processor arrived on a waking vector
+    // rather than a call, so there is nowhere to return to and nothing
+    // left to do with it if the launch comes back.
+    std::atomic<bool> launch_returned;
+    launch_returned = false;
+
+    arch::x86_64::context context{};
+    arch::x86_64::capture_context(&context);
+
+    if (launch_returned) {
+        log("resume failed to launch on slot {}", slot);
+        diag::log<diag::severity::error>("resume failed to launch");
+        diag::pump::drain();
+        if constexpr (diag::policy_of(diag::sink::esp_blocks).present) {
+            diag::esp_block_sink::flush_pending();
+        }
+        for (;;) {
+            arch::x86_64::disable_interrupts();
+            arch::x86_64::halt();
+        }
+    }
+    launch_returned = true;
+
+    // What main reads out of the context, the same three fields
+    // start_up_on_this_processor sets: which processor this is, and no
+    // physical to virtual translation, since the once per boot setup that
+    // would use one is not going to run.
+    context.rdi = slot;
+    context.rsi = 0;
+    context.rdx = 0;
+
+    this->resume_request.stage =
+        static_cast<std::uint64_t>(resume_stage::launched);
+
+    launch_on_cpu(context);
 }
 
 void hypervisor::watch_local_apic(bool watch)
@@ -4678,6 +5188,26 @@ hypervisor::main(arch::x86_64::context & caller_context)
     auto from_trampoline =
         (cpuid < max_cpus) && this->started_by_trampoline[cpuid];
 
+    // Whether the once-per-boot setup below has to run, which is not the
+    // same question as "is this the boot processor".
+    //
+    // It is that on a first boot, and it is not on an S3 resume: the boot
+    // processor comes back through the trampoline with slot zero, and
+    // everything the once-per-boot setup builds describes physical memory
+    // that S3 preserved and did not move - the host page table, the host
+    // GDT and IDT, the extended page tables, the module's own protection.
+    // Building it again would at best repeat work; at worst
+    // initialize_os_page_table would read a page table that is no longer
+    // any operating system's, because the resuming processor is already on
+    // the host page table and the guest's CR3 belongs to a guest that has
+    // not run yet.
+    //
+    // What does run again is everything per-processor: initialize_vmx,
+    // enter_root_mode, setup_vmcs. Those are what a power transition
+    // actually destroyed - IA32_FEATURE_CONTROL is zero again (SDM 26.7),
+    // CR4.VMXE is clear, and no VMCS is current.
+    auto first_launch = (0 == cpuid) && !this->resuming_from_sleep;
+
     // Save the interrupt flag rather than assuming it was set: the Linux
     // loader enters through an IPI handler, where interrupts are already
     // disabled and enabling them would be enabling interrupts inside an
@@ -4731,8 +5261,8 @@ hypervisor::main(arch::x86_64::context & caller_context)
         this->apic_id[cpuid] = local_apic_id();
     }
 
-    // Perform only on first CPU load.
-    if (0 == cpuid) {
+    // Perform only on first CPU load. Not on a resume - see first_launch.
+    if (first_launch) {
         // The order is forced: the host page table covers the module
         // region and is built by reading the OS one, and the reverse
         // translation is read back off the host table.
@@ -4928,8 +5458,8 @@ hypervisor::main(arch::x86_64::context & caller_context)
         return std::unexpected(zpp::error{error::host_exception});
     }
 
-    // Perform only on first CPU load.
-    if (0 == cpuid) {
+    // Perform only on first CPU load. Not on a resume - see first_launch.
+    if (first_launch) {
         // Ordered too: the EPT derives its memory types from the MTRRs,
         // the protection edits the EPT's entries, and unprotecting
         // punches a hole back in that protection.
@@ -5131,7 +5661,14 @@ hypervisor::main(arch::x86_64::context & caller_context)
     // what works those out. Failure is not fatal and does not return an
     // error: it means processors cannot be started by this VMM, which
     // matters only where the loader is not launching it on them.
-    if ((0 == cpuid) && start_up_memory) {
+    // Not on a resume either, and this one for a sharper reason than the
+    // two blocks above: the trampoline page is the code this processor is
+    // coming back through, and initialize_start_up_memory rewrites it -
+    // the blob, the temporary page table, and `entry`. Doing that here
+    // would overwrite the resume's own arrangement with the application
+    // processor one, which is exactly what disarm_resume_from_sleep has
+    // already done deliberately and in the right order.
+    if (first_launch && start_up_memory) {
         initialize_start_up_memory(start_up_memory);
     }
 
@@ -5157,6 +5694,29 @@ hypervisor::main(arch::x86_64::context & caller_context)
     // overwritten here - it was only ever a starting point.
     if (from_trampoline && (cpuid < max_cpus)) {
         apply_start_up(caller_context, this->guest_start_up_vector[cpuid]);
+
+        // And, on a resume, at the exact address rather than at the page.
+        //
+        // apply_start_up takes a start-up IPI vector, which is a page
+        // number, so it can only ever begin a guest at a page boundary. A
+        // firmware waking vector is a full byte address and the ACPI real
+        // mode protocol does not require it to be aligned at all - EDK2's
+        // AsmTransferControl far-jumps to (vector >> 4):(vector & 0xf), so
+        // the low four bits land in IP rather than in the segment. Applied
+        // as a correction rather than by generalising apply_start_up,
+        // because for a page aligned vector it writes the same three
+        // values apply_start_up just did, which makes it self-checking.
+        //
+        // The slot test is load bearing rather than tidiness.
+        // resuming_from_sleep stays set for the rest of the boot - it has
+        // to, being what keeps the once-per-boot setup from running again
+        // - and every application processor the guest starts *after* a
+        // resume comes through this same branch. Without the test each of
+        // them would have its entry point moved to the boot processor's
+        // waking vector instead of the one its own start-up IPI named.
+        if (this->resuming_from_sleep && (0 == cpuid)) {
+            apply_waking_vector();
+        }
     }
 
     // Recorded before the launch rather than after it, because the launch
@@ -6348,4 +6908,21 @@ extern "C" void zpp_ap_start_up_main(std::uint64_t processor)
 {
     zpp::hypervisor::hypervisor::instance().start_up_on_this_processor(
         processor);
+}
+
+/**
+ * Where the boot processor arrives when the platform resumes from S3
+ * through a waking vector this VMM took over, declared by
+ * zpp/arch/x86_64/ap_start_up.h and reached from the same trampoline.
+ *
+ * A fourth caller of instance(), and the note on it in CLAUDE.md is the
+ * thing to check: construction must already have returned. It has, and by
+ * a wider margin than either of the other two - this is reachable only
+ * after a suspend, which is after a guest has been running, which is after
+ * the boot processor left main.
+ */
+extern "C" void zpp_resume_from_sleep_main(std::uint64_t processor)
+{
+    zpp::hypervisor::hypervisor::instance()
+        .resume_from_sleep_on_this_processor(processor);
 }
