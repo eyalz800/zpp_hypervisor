@@ -38,7 +38,20 @@ base=$(timeout 30 ssh $SSH_OPTS "$RIG" \
 
 if [ -z "${base:-}" ]; then
     say "could not read the module base from the rig's serial log."
-    say "is the guest running, and has the loader reached allocate_rwx?"
+    say ""
+    say "The usual cause is not the guest. That line is printed by the"
+    say "loader's serial trace, which is off by default:"
+    say ""
+    say "    grep ZPP_TRACE build/debug/CMakeCache.txt"
+    say ""
+    say "If it says OFF, rebuild with -DZPP_TRACE=ON and boot again. The"
+    say "channel does not depend on it - ZPP_DIAG is a separate switch and"
+    say "the log still reaches the disk - so a run with the trace off looks"
+    say "exactly like a healthy boot until you try to read memory and have"
+    say "no base to read it at. It has already cost one session's worth of"
+    say "readings taken at an address inherited from an earlier build."
+    say ""
+    say "Otherwise: is the guest running, and has the loader got that far?"
     exit 1
 fi
 

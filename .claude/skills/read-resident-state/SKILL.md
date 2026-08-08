@@ -79,3 +79,25 @@ by reading the resident side's own memory, and that needs no debugger.
   *different* CPU each sample, with the rest parked at one kernel address,
   is an idle guest with a CPU inside the VMM. Check the address against the
   module base before concluding anything.
+
+## The module base needs ZPP_TRACE=ON, and that is not the default
+
+`allocate_rwx done at 0x…` comes from the loader's serial trace, which is
+a *separate* switch from the diagnostic channel:
+
+    ZPP_DIAG=ON    the channel writes to the disk
+    ZPP_TRACE=ON   the loader prints, including the module base
+
+`ZPP_TRACE` defaults to **OFF**. A build without it boots normally, logs
+normally to the medium, and gives you no base — so every memory read has
+to be taken at an address inherited from some earlier build, which is
+exactly how a whole set of readings came out self-consistent and wrong.
+
+Check it before believing any address:
+
+    grep ZPP_TRACE build/debug/CMakeCache.txt
+
+and if the cache says OFF, `cmake --preset debug -DZPP_TRACE=ON` and boot
+again. Both switches persist in the cache, so a session that inherited
+`ON` from a previous one will work until the build directory is deleted -
+which is when it stops, silently, in the middle of an investigation.
