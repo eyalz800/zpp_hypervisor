@@ -72,6 +72,26 @@ target_include_directories(zpp_hypervisor SYSTEM PRIVATE
 target_compile_options(zpp_hypervisor PRIVATE
     -pedantic -Wall -Wextra -Werror
     -fPIE -nostdlib -ffreestanding -mno-red-zone
+    # Build the module out of relative paths, so the same source produces
+    # the same bytes wherever it is checked out.
+    #
+    # It does not, otherwise. `std::source_location` is how the log records
+    # where a line came from, and its file name is ordinary data in
+    # .rodata - stripping removes debug information and leaves that
+    # untouched - so the absolute build path ends up inside the binary.
+    # Measured: a release build carried
+    # ".../zpp_hypervisor/hypervisor/src/hypervisor/hypervisor.cpp", and
+    # the same tree built in a git worktree carried the worktree's path
+    # instead, so the two binaries differed for no reason but their
+    # location. That made check-nested-absent.sh's baseline hash
+    # unreproducible across checkouts, which is what exposed it.
+    #
+    # Both forms are given because they cover different things: the
+    # -ffile-prefix-map form covers __FILE__ and source_location, and the
+    # -fdebug-prefix-map form covers what lands in debug information for
+    # the debug build.
+    "-ffile-prefix-map=${ZPP_SOURCE_DIR}="
+    "-fdebug-prefix-map=${ZPP_SOURCE_DIR}="
     $<$<COMPILE_LANGUAGE:CXX>:-stdlib=libc++>
     -fno-rtti -fno-threadsafe-statics -fno-exceptions
     -D_LIBCPP_DISABLE_AVAILABILITY
