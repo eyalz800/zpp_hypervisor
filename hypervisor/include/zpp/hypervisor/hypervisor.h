@@ -2,9 +2,9 @@
 #include "zpp/arch/x86_64/ap_start_up.h"
 #include "zpp/arch/x86_64/context.h"
 #include "zpp/arch/x86_64/decoder.h"
-#include "zpp/arch/x86_64/instruction.h"
 #include "zpp/arch/x86_64/exception_entry.h"
 #include "zpp/arch/x86_64/generic.h"
+#include "zpp/arch/x86_64/instruction.h"
 #include "zpp/arch/x86_64/msr.h"
 #include "zpp/arch/x86_64/mtrr.h"
 #include "zpp/arch/x86_64/os_page_table.h"
@@ -775,7 +775,6 @@ private:
     std::optional<std::uint64_t>
     translate_guest_linear(std::uint64_t linear);
 
-
     /**
      * Where the decoder's instruction length disagreed with the
      * processor's, and what the two said.
@@ -964,6 +963,24 @@ private:
 
     volatile std::uint64_t emulated_writes{};
     volatile std::uint64_t stepped_writes{};
+
+    /**
+     * Where a stepped access's offset within its page came from.
+     *
+     * `decoded` counts the ones the exit could not answer and the
+     * instruction could; `unknown` counts the ones neither could, which
+     * fall back to the page-granular physical address and so report
+     * offset zero. A non-zero `unknown` means a watch is being told about
+     * a register that was not the one touched, which is exactly the
+     * failure that hid a guest hypervisor's start-up interrupts - so it
+     * is counted rather than left to be inferred.
+     * @{
+     */
+    volatile std::uint64_t stepping_offset_decoded{};
+    volatile std::uint64_t stepping_offset_unknown{};
+    /**
+     * @}
+     */
 
     /**
      * What the rebuild read out of the controller before borrowing, and
@@ -2458,6 +2475,50 @@ private:
      */
     volatile std::uint64_t apic_writes_undecoded{};
 
+    /**
+     * Which branch of the interrupt-command handler a start-up took.
+     *
+     * The handler logs every one of these, but the log is a list of heap
+     * strings and needs a debugger that can walk it; these are one
+     * monitor read each, which is what is available while a guest is
+     * running. They exist because the state after the fact could not
+     * distinguish them: with `number_of_known_processors` still 1 and no
+     * processor virtualized, every early refusal looks identical from
+     * outside.
+     */
+    volatile std::uint64_t ipi_init_seen{};
+
+    volatile std::uint64_t ipi_start_up_seen{};
+
+    volatile std::uint64_t ipi_refused_shorthand{};
+
+    volatile std::uint64_t ipi_refused_logical{};
+
+    volatile std::uint64_t ipi_last_command{};
+
+    /**
+     * Which register each watched-page access actually named.
+     *
+     * The exit ring shows the write happening and being stepped, and the
+     * interrupt-command handler shows it never arriving; between those
+     * two facts is the question of *which* register was written, and
+     * nothing recorded it. Inferring it from the APIC mode was wrong
+     * once already, so it is measured here instead.
+     *
+     * Frozen when full, because the first accesses are the ones that
+     * decide whether a processor starts.
+     */
+    struct watched_access
+    {
+        std::uint64_t page{};
+        std::uint64_t offset{};
+    };
+
+    static constexpr std::size_t watched_access_capacity = 24;
+
+    watched_access watched_accesses[watched_access_capacity]{};
+
+    volatile std::uint64_t watched_access_count{};
 
     /**
      * Each instruction this VMM carried out on the guest's behalf, newest
@@ -2633,7 +2694,6 @@ private:
     volatile std::uint64_t vmx_capability_reads{};
 
     volatile std::uint64_t feature_control_reads{};
-
 
     /**
      * The first MSR indices this VMM answered with a general protection
@@ -3346,8 +3406,8 @@ private:
      *   either.
      * - It is not the interrupt command being issued twice. That is a real
      *   defect on this path, fixed separately, and it did not change this.
-     * - It is not the destination-width bug in the widening moves. That was
-     *   real, is fixed, and did not change this.
+     * - It is not the destination-width bug in the widening moves. That
+     * was real, is fixed, and did not change this.
      *
      * All 179 emulations are the same instruction: `mov [rbx], r12d`
      * storing zero to the local APIC page, which is an end-of-interrupt
@@ -3372,8 +3432,8 @@ private:
      * must not, because a device register that reads back differently from
      * what was written is precisely the case a watch exists to observe.
      */
-    std::optional<std::uint64_t> read_guest_word(std::uint64_t guest_physical,
-                                                 std::uint8_t size);
+    std::optional<std::uint64_t>
+    read_guest_word(std::uint64_t guest_physical, std::uint8_t size);
 
     /**
      * Carries out a decoded instruction against guest memory, and reports

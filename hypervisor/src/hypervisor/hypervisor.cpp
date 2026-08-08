@@ -3082,8 +3082,8 @@ std::optional<std::uint64_t> hypervisor::read_guest_word(
     // below goes that way: the extended page tables establish an identity
     // between guest physical and host physical, and our own mapping of the
     // page is the only one that is not protected.
-    auto * at = reinterpret_cast<const volatile std::uint8_t *>(
-        guest_physical);
+    auto * at =
+        reinterpret_cast<const volatile std::uint8_t *>(guest_physical);
 
     if (!this->host_page_table.virtual_to_physical(
             reinterpret_cast<const void *>(guest_physical))) {
@@ -3135,9 +3135,8 @@ bool hypervisor::carry_out_guest_instruction(
     // examine that wrote its own value back would turn a read of a device
     // register into a write of it, which on a register with side effects
     // is a different instruction from the one the guest executed.
-    auto writes_memory =
-        (memory_operation::load != instruction.what) &&
-        (memory_operation::examine != instruction.what);
+    auto writes_memory = (memory_operation::load != instruction.what) &&
+                         (memory_operation::examine != instruction.what);
 
     if (writes_memory) {
         auto stored = arch::x86_64::memory_store{
@@ -3399,7 +3398,61 @@ bool hypervisor::on_ept_violation(std::size_t cpu,
 
         this->stepping_watch[cpu] = true;
         this->stepping_page[cpu] = page;
-        this->stepping_offset[cpu] = guest_physical & (page_size - 1);
+
+        // Which register on the page was touched, in three sources,
+        // strongest first.
+        //
+        // **The guest-physical address is not one of them, despite being
+        // the obvious one.** The processor reports it at *page*
+        // granularity for an EPT violation, so its low twelve bits are
+        // not the offset the instruction named. Taking them anyway made
+        // every stepped access look like an access to offset 0 - a
+        // reserved local APIC register - and the interrupt-command
+        // handler, which acts only on a write to the command register,
+        // could never be reached no matter what the guest wrote.
+        //
+        // Measured, which is the only reason it was found: twenty-four
+        // consecutive stepped accesses recorded as page 0xfee00 offset 0,
+        // while the exit ring showed the writes arriving and being
+        // stepped and the handler showed not one call. A guest hypervisor
+        // was running with its processors never starting, waiting for
+        // start-up interrupts this VMM had received and thrown the
+        // register number away from.
+        //
+        // The guest-linear address the same exit reports would answer it,
+        // and does whenever qualification bit 7 is set. It is not always:
+        // the first attempt at this fix used it alone and changed
+        // nothing, because on the machine where the guest hypervisor runs
+        // *every one* of those violations arrived with bit 7 clear - the
+        // same bit `operand_access` above tests, which is also why they
+        // are stepped rather than emulated.
+        //
+        // So the instruction is decoded and its operand's address
+        // computed. That is what `effective_address` exists for, and it
+        // is the only source that does not depend on what the hardware
+        // volunteered. It costs a guest page walk per stepped access,
+        // taken only when the exit did not answer.
+        auto offset = guest_physical & (page_size - 1);
+
+        if (0 != (qualification & qualification_linear_address_valid)) {
+            offset = this->vmcs.guest_linear_address() & (page_size - 1);
+        } else if (auto instruction =
+                       decode_guest_instruction(cpu, context)) {
+            if (auto address = arch::x86_64::effective_address(
+                    *instruction, context, this->vmcs.guest_rip())) {
+                offset = *address & (page_size - 1);
+                this->stepping_offset_decoded =
+                    this->stepping_offset_decoded + 1;
+            } else {
+                this->stepping_offset_unknown =
+                    this->stepping_offset_unknown + 1;
+            }
+        } else {
+            this->stepping_offset_unknown =
+                this->stepping_offset_unknown + 1;
+        }
+
+        this->stepping_offset[cpu] = offset;
         monitor_trap_flag(true);
         return true;
     }
@@ -3493,11 +3546,21 @@ bool hypervisor::on_monitor_trap_flag(std::size_t cpu)
     //
     // Four bytes because every register on the pages watched here is a
     // dword, and the width is not reported by the exit.
+    if (auto slot = this->watched_access_count;
+        slot < watched_access_capacity) {
+        this->watched_accesses[slot] = watched_access{
+            .page = page,
+            .offset = offset,
+        };
+
+        this->watched_access_count = slot + 1;
+    }
+
     auto stepped = guest_write{
         .address = (page << 12) | offset,
-        .value = arch::x86_64::read32(
-            reinterpret_cast<volatile std::uint8_t *>((page << 12) |
-                                                      offset)),
+        .value =
+            arch::x86_64::read32(reinterpret_cast<volatile std::uint8_t *>(
+                (page << 12) | offset)),
         .size = 4,
     };
 
@@ -5624,7 +5687,10 @@ hypervisor::on_interrupt_command(std::uint64_t command)
 
     auto delivery_mode =
         (command >> delivery_mode_shift) & delivery_mode_mask;
+    this->ipi_last_command = command;
+
     if (delivery_mode_init == delivery_mode) {
+        this->ipi_init_seen = this->ipi_init_seen + 1;
         log("guest init ipi, command {}", command);
         return command;
     }
@@ -5650,8 +5716,11 @@ hypervisor::on_interrupt_command(std::uint64_t command)
     // there - zero, in practice - and matching that against the table of
     // known processors credited the boot processor with a start-up IPI
     // nobody had sent it.
+    this->ipi_start_up_seen = this->ipi_start_up_seen + 1;
+
     auto shorthand = (command >> shorthand_shift) & shorthand_mask;
     if (shorthand_none != shorthand) {
+        this->ipi_refused_shorthand = this->ipi_refused_shorthand + 1;
         log("broadcast start-up ipi, shorthand {}, not adopted",
             shorthand);
         return command;
@@ -5682,6 +5751,7 @@ hypervisor::on_interrupt_command(std::uint64_t command)
     // written through the APIC page or the x2APIC MSRs, so this VMM sees
     // neither today.
     if (0 != (command & destination_logical)) {
+        this->ipi_refused_logical = this->ipi_refused_logical + 1;
         log("start-up ipi in logical destination mode, command {}, "
             "not adopted",
             command);
@@ -6566,8 +6636,8 @@ void hypervisor::setup_vmcs(arch::x86_64::context & guest_context)
         // records one register over, and a guest that trusts this register
         // over CPUID faults on its own vmxon.
         constexpr std::uint64_t feature_control_lock = 1ull << 0;
-        constexpr std::uint64_t feature_control_vmxon_outside_smx =
-            1ull << 2;
+        constexpr std::uint64_t feature_control_vmxon_outside_smx = 1ull
+                                                                    << 2;
 
         this->guest_feature_control[cpu] =
             feature_control_lock |
@@ -8039,7 +8109,8 @@ hypervisor::main(arch::x86_64::context & caller_context)
                 // unsupported. A guest that knows it is virtualized takes
                 // the nested path instead. The reference this is being
                 // compared against announces itself unconditionally.
-                if constexpr (nested_vmx::pass_through_hypervisor_interface ||
+                if constexpr (nested_vmx::
+                                  pass_through_hypervisor_interface ||
                               nested_vmx::announce_hypervisor) {
                     cpuid_result[2] |= (1u << 31);
                 } else {
@@ -8554,8 +8625,8 @@ hypervisor::main(arch::x86_64::context & caller_context)
                         context.rdx = value >> 32;
                     }
                 } else {
-                    auto value = (context.rax & 0xffffffff) |
-                                 (context.rdx << 32);
+                    auto value =
+                        (context.rax & 0xffffffff) | (context.rdx << 32);
 
                     switch (index) {
                     case guest_os_id_msr:
@@ -8607,8 +8678,14 @@ hypervisor::main(arch::x86_64::context & caller_context)
                             // the question rather than answering it,
                             // which is worth more than the byte it costs.
                             constexpr std::uint8_t instructions[]{
-                                0x31, 0xd2, 0xb8, 0x02,
-                                0x00, 0x00, 0x00, 0xc3,
+                                0x31,
+                                0xd2,
+                                0xb8,
+                                0x02,
+                                0x00,
+                                0x00,
+                                0x00,
+                                0xc3,
                             };
 
                             // Through the mapping window, not through a
