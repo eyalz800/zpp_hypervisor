@@ -6113,8 +6113,28 @@ void hypervisor::setup_vmcs(arch::x86_64::context & guest_context)
         this->guest_in_vmx_operation[cpu] = false;
         this->guest_vmxon_pointer[cpu] = 0;
         this->guest_current_vmcs[cpu] = nested_vmx::no_current_vmcs;
+        // Constructed rather than passed through.
+        //
+        // Passing the hardware register on hands the guest whatever else
+        // the platform happened to set - the inside-SMX permission, the
+        // SGX bits - none of which this VMM backs. What it must say is
+        // exactly two things: locked, so the guest does not try to write
+        // it, and VMXON permitted outside SMX, which is the only mode
+        // offered. That pairs with concealing the extension in CPUID.
+        //
+        // And it says nothing about VMX at all where nesting is compiled
+        // out. Granting VMXON while CPUID reports no VMX and CR4.VMXE
+        // reads back clear is the same inconsistency BACKLOG.md item 1
+        // records one register over, and a guest that trusts this register
+        // over CPUID faults on its own vmxon.
+        constexpr std::uint64_t feature_control_lock = 1ull << 0;
+        constexpr std::uint64_t feature_control_vmxon_outside_smx =
+            1ull << 2;
+
         this->guest_feature_control[cpu] =
-            arch::x86_64::rdmsr(arch::x86_64::msr::ia32_feature_control);
+            feature_control_lock |
+            (nested_vmx::enabled ? feature_control_vmxon_outside_smx
+                                 : std::uint64_t{});
 
         // And the second-level VMCS, which this is the only place that
         // prepares. VMCLEAR is what puts the launch state where VMLAUNCH
@@ -7480,6 +7500,20 @@ hypervisor::main(arch::x86_64::context & caller_context)
                 if constexpr (!nested_vmx::enabled) {
                     cpuid_result[2] &= ~(1u << 5);
                 }
+
+                // Safer mode extensions, ECX[6], concealed.
+                //
+                // Nothing here implements SMX, and the pairing matters
+                // rather than the bit on its own: IA32_FEATURE_CONTROL has
+                // separate permissions for VMXON inside and outside SMX,
+                // and the value handed to the guest below grants only
+                // outside. A guest told SMX exists may take the inside-SMX
+                // path and find it refused. Concealing the extension and
+                // granting only the outside permission are one decision,
+                // and a smaller bare-metal reference that carries this
+                // exact guest makes both, saying "currently support VMX
+                // outside SMX only" where it does.
+                cpuid_result[2] &= ~(1u << 6);
 
                 // What the guest was actually told, so bit 5 can be read
                 // back rather than reasoned about. A guest that never
