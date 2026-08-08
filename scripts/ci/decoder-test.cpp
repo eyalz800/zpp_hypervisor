@@ -100,6 +100,41 @@ static_assert(!run(mov_ah).has_value());
 constexpr std::uint8_t truncated[] = {0xc7, 0x01, 0x78};
 static_assert(!run(truncated).has_value());
 
+// mov [rcx], rsp  (encoding four without REX.R names RSP, whose field in
+// the context is the *host* stack pointer, not the guest's) -> refused
+constexpr std::uint8_t mov_from_rsp[] = {0x48, 0x89, 0x21};
+static_assert(!run(mov_from_rsp).has_value());
+
+// mov [rcx], r12  (encoding four *with* REX.R is r12, and is fine)
+constexpr std::uint8_t mov_from_r12[] = {0x4c, 0x89, 0x21};
+static_assert(run(mov_from_r12)->size == 8);
+static_assert(run(mov_from_r12)->length == 3);
+
+// --- the instruction length, which the VMCS does not supply for an EPT
+// --- violation, so a wrong one here is a guest resumed mid-instruction
+static_assert(run(mov_m32_edx)->length == 2);      // opcode, modrm
+static_assert(run(mov_m64_rdx)->length == 3);      // rex, opcode, modrm
+static_assert(run(mov_m16_dx)->length == 3);       // 0x66, opcode, modrm
+static_assert(run(mov_m32_imm)->length == 6);      // + imm32
+static_assert(run(mov_disp8_eax)->length == 3);    // + disp8
+static_assert(run(mov_r8d)->length == 3);          // rex, opcode, modrm
+static_assert(run(mov_disp8_imm)->length == 7);    // + disp8 + imm32
+static_assert(run(mov_m64_imm)->length == 7);      // rex + imm32
+static_assert(run(mov_sib)->length == 7);          // sib + disp32
+static_assert(run(mov_riprel)->length == 6);       // + disp32
+
+// mov word [rcx], 0x1234 -> prefix, opcode, modrm, imm16
+constexpr std::uint8_t mov_imm16[] = {0x66, 0xc7, 0x01, 0x34, 0x12};
+static_assert(run(mov_imm16)->size == 2);
+static_assert(run(mov_imm16)->length == 5);
+
+// Every length has to be the whole instruction and no more, so the one
+// property that must hold for all of them is stated once: a decoded
+// length never exceeds the bytes it was given.
+static_assert(run(mov_m32_edx)->length <= sizeof(mov_m32_edx));
+static_assert(run(mov_sib)->length <= sizeof(mov_sib));
+static_assert(run(mov_m64_imm)->length <= sizeof(mov_m64_imm));
+
 int main()
 {
     std::printf("all decoder static_asserts passed\n");

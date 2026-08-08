@@ -1990,6 +1990,87 @@ void hypervisor::monitor_trap_flag(bool value)
               : (controls & ~monitor_trap_flag_bit));
 }
 
+std::optional<std::uint64_t>
+hypervisor::translate_guest_linear(std::uint64_t linear)
+{
+    // The guest's own four level page table, walked at exit time from the
+    // CR3 the VMCS holds now.
+    //
+    // Not os_page_table, which is built once from the CR3 the launch saw
+    // and is therefore only right while the guest is still on the
+    // firmware's identity map. Once an operating system is on its own
+    // tables that map answers with a kernel linear address used as a
+    // physical one, and the two failure modes are both silent: either the
+    // window maps a page number above the physical address width and the
+    // copy faults in root mode with no recovery point armed, or unrelated
+    // bytes decode into a plausible instruction and a fabricated value is
+    // written to a device register.
+    //
+    // The caller holds mapping_window_lock. This walks through the same
+    // window page the instruction fetch uses, which is safe only because
+    // the walk finishes and yields a number before that fetch re-points
+    // it - the lock is not recursive and cannot be taken here.
+    if (0 == (this->vmcs.vm_entry_controls() &
+              arch::x86_64::vmx::vm_entry_controls::ia_32e_mode_guest)) {
+        // Only long mode is walked. A guest in 32-bit paging has a
+        // different table shape entirely, and answering with a
+        // long-mode walk of it would be worse than refusing.
+        return {};
+    }
+
+    // Bits 11:0 of CR3 are flags and a process context identifier, not
+    // address. SDM 5.5, "4-Level Paging".
+    constexpr std::uint64_t address_mask = 0x000ffffffffff000ull;
+    constexpr std::uint64_t present = 1ull << 0;
+    constexpr std::uint64_t large_page = 1ull << 7;
+
+    auto table = this->vmcs.guest_cr3() & address_mask;
+
+    // From the outermost level inwards, with the size of the page each
+    // level would terminate at. A terminating entry is one with the page
+    // size bit set, which is only meaningful on the middle two levels.
+    constexpr struct
+    {
+        std::uint32_t shift;
+        std::uint64_t page_size;
+    } levels[] = {
+        {39, 0},                    // no 512 GB pages exist
+        {30, 1ull << 30},
+        {21, 1ull << 21},
+        {12, 0},                    // the last level always terminates
+    };
+
+    for (std::size_t level{}; level < 4; ++level) {
+        auto * entries = static_cast<const std::uint64_t *>(
+            map_window_at(transfer_window_first_page, table, 1));
+        if (!entries) {
+            return {};
+        }
+
+        auto index = (linear >> levels[level].shift) & 0x1ff;
+        auto entry = entries[index];
+
+        if (!(entry & present)) {
+            return {};
+        }
+
+        if (3 == level) {
+            return (entry & address_mask) | (linear & (page_size - 1));
+        }
+
+        if ((0 != levels[level].page_size) && (entry & large_page)) {
+            auto offset = linear & (levels[level].page_size - 1);
+            return (entry & address_mask &
+                    ~(levels[level].page_size - 1)) |
+                   offset;
+        }
+
+        table = entry & address_mask;
+    }
+
+    return {};
+}
+
 std::optional<arch::x86_64::memory_store> hypervisor::decode_guest_store(
     std::size_t cpu, arch::x86_64::context & context)
 {
@@ -1997,10 +2078,24 @@ std::optional<arch::x86_64::memory_store> hypervisor::decode_guest_store(
     // in the guest's own address space, so it takes the guest's page
     // tables to find - not this VMM's.
     auto rip = this->vmcs.guest_rip();
-    auto physical = this->os_page_table.virtual_to_physical(rip);
+
+    // Serialised, because the window is now one shared pair of pages -
+    // and taken before the walk, which reaches through it too.
+    this->mapping_window_lock.lock();
+    scope_exit release{[&] { this->mapping_window_lock.unlock(); }};
+
+    auto physical = this->translate_guest_linear(rip);
     if (!physical) {
         return {};
     }
+
+    // Both translations are done before either page is mapped, because
+    // the walk and the instruction fetch share a window page and the walk
+    // must not be re-pointed under itself.
+    constexpr std::uint64_t page_mask =
+        ~static_cast<std::uint64_t>(page_size - 1);
+    auto tail_linear = (rip & page_mask) + page_size;
+    auto tail_physical = this->translate_guest_linear(tail_linear);
 
     // Fifteen bytes is the architectural maximum length of an
     // instruction, and it may straddle a page boundary, which is why the
@@ -2009,20 +2104,16 @@ std::optional<arch::x86_64::memory_store> hypervisor::decode_guest_store(
     // than assumed to follow the first.
     constexpr std::size_t longest_instruction = 15;
 
-    // Serialised, because the window is now one shared pair of pages.
-    this->mapping_window_lock.lock();
-    scope_exit release{[&] { this->mapping_window_lock.unlock(); }};
-
     auto first_page = instruction_window_first_page(cpu);
     auto * bytes = static_cast<const std::uint8_t *>(
-        map_window_at(first_page, physical, 1));
+        map_window_at(first_page, *physical, 1));
     if (!bytes) {
         return {};
     }
 
     std::uint8_t code[longest_instruction]{};
 
-    auto offset = physical & (page_size - 1);
+    auto offset = *physical & (page_size - 1);
     auto in_first = page_size - offset;
     if (in_first > longest_instruction) {
         in_first = longest_instruction;
@@ -2031,16 +2122,14 @@ std::optional<arch::x86_64::memory_store> hypervisor::decode_guest_store(
     __builtin_memcpy(code, bytes, in_first);
 
     if (in_first < longest_instruction) {
-        // The tail lives on the next linear page, which is translated
-        // separately - the guest is free to have mapped it anywhere, or
-        // not at all, and a decoder that read past the end of the first
-        // page would be reading whatever physically follows it.
-        auto next = this->os_page_table.virtual_to_physical(
-            (rip + in_first) & ~static_cast<std::uint64_t>(page_size - 1));
-
-        if (next) {
+        // The tail lives on the next linear page, which was translated
+        // separately above - the guest is free to have mapped it
+        // anywhere, or not at all, and a decoder that read past the end
+        // of the first page would be reading whatever physically follows
+        // it.
+        if (tail_physical) {
             if (auto * tail = static_cast<const std::uint8_t *>(
-                    map_window_at(first_page + 1, next, 1))) {
+                    map_window_at(first_page + 1, *tail_physical, 1))) {
                 __builtin_memcpy(
                     code + in_first, tail, longest_instruction - in_first);
             }
@@ -2138,10 +2227,33 @@ bool hypervisor::on_ept_violation(std::size_t cpu,
         // slip past a first, and the handler is told what was written
         // rather than having to read the register back and race the
         // guest for it.
-        if (auto store = emulate_watched_page_writes
+        // Only a violation caused by the instruction's own operand may
+        // be emulated. Bit 8 of the exit qualification clear means the
+        // access was to a paging-structure entry - the processor walking
+        // the guest's tables - and there is no store in the instruction
+        // to carry out for that. SDM Table 28-7.
+        constexpr std::uint64_t qualification_linear_address_valid =
+            1ull << 7;
+        constexpr std::uint64_t qualification_operand_access = 1ull << 8;
+
+        auto qualification = this->vmcs.exit_qualification();
+        auto operand_access =
+            (0 != (qualification & qualification_linear_address_valid)) &&
+            (0 != (qualification & qualification_operand_access));
+
+        if (auto store = (emulate_watched_page_writes && operand_access)
                              ? decode_guest_store(cpu, context)
                              : std::nullopt) {
-            if (apply_guest_store(guest_physical, *store)) {
+            // A store that crosses the end of the watched page would be
+            // applied whole at the faulting address, writing bytes onto
+            // the page that follows. Refused rather than split: nothing
+            // a driver does to a register straddles the page, so the
+            // fallback costs nothing and a wrong split would be silent.
+            auto offset_in_page = guest_physical & (page_size - 1);
+            auto straddles =
+                (offset_in_page + store->size) > page_size;
+
+            if (!straddles && apply_guest_store(guest_physical, *store)) {
                 if (watch.on_write) {
                     guest_write written{
                         .address = guest_physical,
@@ -2155,12 +2267,33 @@ bool hypervisor::on_ept_violation(std::size_t cpu,
                 this->emulated_writes = this->emulated_writes + 1;
 
                 // The instruction has been carried out, so the guest
-                // resumes after it rather than on it. Its length comes
-                // from the VMCS, which is why none of it had to be
-                // decoded.
-                this->vmcs.guest_rip(
-                    this->vmcs.guest_rip() +
-                    this->vmcs.vm_exit_instruction_length());
+                // resumes after it rather than on it - by the length the
+                // decoder measured, not the one the VMCS reports.
+                //
+                // SDM 30.2.5 leaves the VM-exit instruction length field
+                // *undefined* for an EPT violation that was not
+                // encountered during event delivery, and KVM agrees by
+                // construction: handle_ept_violation never reads it, and
+                // skip_emulated_instruction warns that it is not always
+                // set. Advancing by an undefined value resumes the guest
+                // somewhere inside its own instruction stream.
+                //
+                // Where the processor did supply a length and the two
+                // disagree, the decoder has misread the instruction, and
+                // the value already written to the device register makes
+                // that unsafe to paper over. Recorded and the processor
+                // stopped, rather than resumed at either address.
+                auto reported = this->vmcs.vm_exit_instruction_length();
+                if ((0 != reported) && (reported != store->length)) {
+                    this->emulated_length_disagreement =
+                        this->emulated_length_disagreement + 1;
+                    this->emulated_length_reported = reported;
+                    this->emulated_length_decoded = store->length;
+                    return false;
+                }
+
+                this->vmcs.guest_rip(this->vmcs.guest_rip() +
+                                     store->length);
                 return true;
             }
         }

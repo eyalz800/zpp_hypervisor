@@ -28,6 +28,22 @@ struct memory_store
      * Width of the store in bytes: 1, 2, 4 or 8.
      */
     std::uint8_t size{};
+
+    /**
+     * How long the instruction is, in bytes.
+     *
+     * Reported because the VMCS field that would otherwise answer this is
+     * not available for the exit that needs it. SDM 30.2.5 leaves the
+     * VM-exit instruction length *undefined* for an EPT violation not
+     * encountered during event delivery, and KVM's handle_ept_violation
+     * accordingly never reads it - its skip_emulated_instruction carries
+     * an explicit warning that the field is not always set.
+     *
+     * The decoder already knows where the instruction ends, so it says
+     * so, and a caller that has a length from anywhere else should refuse
+     * on disagreement rather than pick one.
+     */
+    std::uint8_t length{};
 };
 
 namespace detail
@@ -184,28 +200,14 @@ constexpr std::optional<memory_store> decode_memory_store(
         size = 2;
     }
 
-    if (from_register) {
-        // An 8-bit store without REX names AH, CH, DH or BH for
-        // encodings four to seven, which are high halves rather than
-        // whole registers. Refused rather than mistaken for RSP, RBP,
-        // RSI and RDI, which is what indexing the table would do.
-        if ((1 == size) && (0 == rex) && (reg >= 4)) {
-            return {};
-        }
-
-        auto index = static_cast<std::uint8_t>(reg | ((rex & 0x4) << 1));
-
-        return memory_store{
-            .value = detail::truncate(
-                registers.*detail::encoded_registers[index], size),
-            .size = size,
-        };
-    }
-
-    // An immediate: everything between the ModRM byte and it has to be
-    // stepped over to find it, which is the one place this decoder has
-    // to understand addressing at all. It never computes the address -
-    // the VMCS already reported it - only how many bytes it occupies.
+    // Everything between the ModRM byte and the end of the instruction
+    // has to be stepped over, which is the one place this decoder has to
+    // understand addressing at all. It never computes the address - the
+    // VMCS already reported it - only how many bytes it occupies.
+    //
+    // Walked for every form, not only the immediate one, because the
+    // instruction's length is part of the answer and there is no length
+    // without reaching its end.
     if (0x4 == rm) {
         // A SIB byte is present. Its base of five with mod zero means a
         // 32-bit displacement rather than a base register.
@@ -226,6 +228,47 @@ constexpr std::optional<memory_store> decode_memory_store(
         at += 1;
     } else if (2 == mod) {
         at += 4;
+    }
+
+    if (from_register) {
+        // An 8-bit store without REX names AH, CH, DH or BH for
+        // encodings four to seven, which are high halves rather than
+        // whole registers. Refused rather than mistaken for RSP, RBP,
+        // RSI and RDI, which is what indexing the table would do.
+        if ((1 == size) && (0 == rex) && (reg >= 4)) {
+            return {};
+        }
+
+        auto index = static_cast<std::uint8_t>(reg | ((rex & 0x4) << 1));
+
+        // Encoding four without REX.R is RSP, and the context this is
+        // handed is the *host's*: the exit stub deliberately stores the
+        // address of the context structure in its rsp field, because
+        // restoring it iretqs onto that stack. So reading it here would
+        // write a hypervisor stack address into a device register and
+        // hand a protected module address to the guest at the same time.
+        //
+        // Refused rather than filled from the VMCS guest RSP, because
+        // storing RSP to a device register is not a thing a driver does,
+        // and a refusal costs nothing here - the caller falls back to
+        // letting the guest's own instruction perform the write.
+        //
+        // Encoding twelve is R12 and is unaffected: REX.B moves the
+        // index past the point where it would collide.
+        if (4 == index) {
+            return {};
+        }
+
+        if (at > code.size()) {
+            return {};
+        }
+
+        return memory_store{
+            .value = detail::truncate(
+                registers.*detail::encoded_registers[index], size),
+            .size = size,
+            .length = static_cast<std::uint8_t>(at),
+        };
     }
 
     // The immediate itself. The 64-bit form still carries only 32 bits,
@@ -253,6 +296,7 @@ constexpr std::optional<memory_store> decode_memory_store(
     return memory_store{
         .value = detail::truncate(value, size),
         .size = size,
+        .length = static_cast<std::uint8_t>(at + immediate_size),
     };
 }
 

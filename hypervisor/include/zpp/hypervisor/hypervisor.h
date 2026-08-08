@@ -582,6 +582,41 @@ private:
     void arm_guest_timer_poll(bool armed);
 
     /**
+     * Translates a guest linear address through the guest's own page
+     * table, as of this exit.
+     *
+     * The caller must hold mapping_window_lock: the walk reads each level
+     * through the window, and the lock is not recursive so this cannot
+     * take it. It also shares a window page with the instruction fetch,
+     * so a caller doing both must finish every walk before mapping
+     * anything for the fetch.
+     *
+     * Long mode only. A guest under 32-bit paging has a different table
+     * shape, and answering for it with a four level walk would be worse
+     * than refusing.
+     */
+    std::optional<std::uint64_t>
+    translate_guest_linear(std::uint64_t linear);
+
+    /**
+     * Where the decoder's instruction length disagreed with the
+     * processor's, and what the two said.
+     *
+     * Read from a debugger. A disagreement means the decoder misread an
+     * instruction whose store has already been applied to a device
+     * register, so it is not resumed from - but it has to be visible,
+     * because a processor that stops with no record of why is the worst
+     * outcome of the three.
+     * @{
+     */
+    volatile std::uint64_t emulated_length_disagreement{};
+    volatile std::uint64_t emulated_length_reported{};
+    volatile std::uint64_t emulated_length_decoded{};
+    /**
+     * @}
+     */
+
+    /**
      * Waits until every running processor has picked up the extended
      * page table change just made, or gives up.
      *
@@ -2303,48 +2338,45 @@ private:
      * duration, and a second write slips through that window unobserved,
      * which is how a controller reset went unnoticed.
      *
-     * Switched off because the emulation cannot currently fetch the
-     * instruction it is emulating, and three separate defects follow from
-     * that. It is *not* off because of the guest hang on the real rig -
-     * that hang was measured to happen identically with this false, and
-     * with the whole diagnostic channel compiled out, so the two are
-     * unrelated. Say that plainly here because the previous version of
-     * this comment blamed the hang and was wrong.
+     * Switched **on**. It was off because the emulation could not fetch
+     * the instruction it was emulating, and four defects followed from
+     * that; all four are now closed and each has a check behind it.
      *
-     * What has to be fixed before it goes back on:
+     * It was *not* off because of the guest hang on the real rig - that
+     * hang was measured to happen identically with this false, and with
+     * the whole diagnostic channel compiled out, so the two are
+     * unrelated. Said plainly because a previous version of this comment
+     * blamed the hang and was wrong.
      *
-     * - `decode_guest_store` translates the guest's RIP through
-     *   `os_page_table`, built once from the launch-time CR3, and under
-     *   UEFI `physical_to_virtual` is null so the translation is the
-     *   identity. That holds only while the guest runs on the firmware's
-     *   identity map. Once it is on its own page tables a kernel linear
-     *   RIP is used as a physical address: either the window maps a page
-     *   number above MAXPHYADDR and the memcpy takes a #PF in root mode
-     *   with no recovery point, or unrelated bytes are decoded and a
-     *   fabricated value is written to a device register. Walk
-     *   `vmcs.guest_cr3()` at exit time instead.
-     * - `context::rsp` is the *host* stack pointer - the exit stub stores
-     *   the address of the context structure there, deliberately, because
-     *   restore_context iretqs onto it. The guest's RSP is in the VMCS.
-     *   So `mov [watched], rsp` writes a hypervisor stack address into a
-     *   device register, which also leaks a protected-module address to
-     *   the guest. Either fill the field from `vmcs.guest_rsp()` or
-     *   refuse encoding 4.
-     * - RIP is advanced by `vm_exit_instruction_length()`, which SDM
-     *   30.2.5 leaves *undefined* for an EPT violation that is not
-     *   encountered during event delivery; KVM's `handle_ept_violation`
-     *   never reads it, and `skip_emulated_instruction` carries an
-     *   explicit warning that other hypervisors do not set it. The
-     *   decoder already knows where the instruction ends, so it should
-     *   return that length, advance by it, and refuse on disagreement.
+     * What was fixed, so that a regression in any of them is recognisable
+     * rather than mysterious:
      *
-     * Also unchecked, and worth fixing in the same pass: the exit
-     * qualification is never consulted (bit 8 clear means the access was
-     * to a paging-structure entry, not the instruction's own operand),
-     * and a store straddling the watched page's boundary is applied whole
-     * at the faulting page's base.
+     * - The instruction is fetched by walking `vmcs.guest_cr3()` at exit
+     *   time, in `translate_guest_linear`. It used to go through
+     *   `os_page_table`, built once from the launch-time CR3, which is
+     *   only right while the guest is on the firmware's identity map -
+     *   after that a kernel linear address was used as a physical one.
+     * - A store sourced from encoding four without REX.R is refused.
+     *   `context::rsp` is the *host* stack pointer, stored there
+     *   deliberately by the exit stub, so reading it would write a
+     *   hypervisor stack address into a device register and hand a
+     *   protected module address to the guest.
+     * - RIP advances by the length the decoder measured. The VMCS field
+     *   is undefined for this exit (SDM 30.2.5) and KVM never reads it.
+     *   Where the processor does report one and the two disagree, the
+     *   decoder has misread an instruction whose store is already applied
+     *   - that is recorded in `emulated_length_disagreement` and the
+     *   processor is stopped rather than resumed at either address.
+     * - The exit qualification is consulted: only an access by the
+     *   instruction's own operand is emulated, never the processor
+     *   walking a paging structure. A store straddling the watched page's
+     *   end is refused rather than applied whole at the faulting address.
+     *
+     * The fallback is unchanged and still correct: anything refused above
+     * is stepped over as before, which reopens the window this closes but
+     * is never wrong.
      */
-    static constexpr bool emulate_watched_page_writes = false;
+    static constexpr bool emulate_watched_page_writes = true;
 
     static constexpr std::size_t instruction_window_pages_per_cpu = 2;
 
