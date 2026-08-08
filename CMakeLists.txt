@@ -33,6 +33,23 @@ option(ZPP_DIAG
     "Compile the diagnostic log, its ring and its sinks (debug builds only)"
     ON)
 
+# Nested VMX: whether the guest is told VT-x exists.
+#
+# Off, and the default is the decision rather than a convenience. With it off
+# the guest sees no VMX in CPUID, no VMXE in CR4 and takes a #UD on every VMX
+# instruction - one consistent machine, and the one this VMM boots Windows in
+# today, VBS included, because Hyper-V stands down when it finds no VMX.
+#
+# With it on the guest is told VMX exists and the instruction emulation answers
+# for it, but VMLAUNCH is refused: there is no VMCS built from the shadow, no
+# reflection of a second-level exit, and no shadow of the guest's extended page
+# tables. A guest hypervisor therefore fails at launch instead of standing down
+# cleanly, which is worse. hypervisor/include/zpp/hypervisor/nested_vmx.h
+# carries the full list of what has to exist before this can default on.
+option(ZPP_NESTED_VMX
+    "Report VMX to the guest and emulate the VMX instructions"
+    OFF)
+
 # === Hypervisor (freestanding x86_64 PIE ELF) ===
 ExternalProject_Add(hypervisor
     SOURCE_DIR "${CMAKE_CURRENT_SOURCE_DIR}/cmake/hypervisor"
@@ -45,6 +62,7 @@ ExternalProject_Add(hypervisor
         -DZPP_OUTPUT_DIR=${ZPP_OUTPUT_DIR}
         -DZPP_HYPERVISOR_WAIT_FOR_DEBUGGER=${ZPP_HYPERVISOR_WAIT_FOR_DEBUGGER}
         -DZPP_DIAG=${ZPP_DIAG}
+        -DZPP_NESTED_VMX=${ZPP_NESTED_VMX}
     INSTALL_COMMAND ""
     BUILD_ALWAYS ON
 )

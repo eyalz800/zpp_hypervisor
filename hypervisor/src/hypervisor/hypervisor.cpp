@@ -4247,6 +4247,29 @@ void hypervisor::setup_vmcs(arch::x86_64::context & guest_context)
     // as this VMM's processor index - hence counting from one.
     vmcs.vpid(this->next_virtual_processor);
 
+    // The nested VMX state for this processor, seeded before it runs a
+    // single guest instruction.
+    //
+    // The current-VMCS pointer starts at the architecture's own sentinel
+    // rather than at zero, because zero is a legal physical page and
+    // everything that asks "is there a current VMCS" compares against it.
+    // Zero-initialized storage would therefore claim page zero is current.
+    //
+    // IA32_FEATURE_CONTROL starts as the hardware's, which is the value
+    // the guest would have found had this VMM not been here: firmware sets
+    // and locks it long before any operating system runs, and where it did
+    // not, enable_vmx_in_feature_control did during launch. Copying it
+    // rather than fabricating one keeps a guest that is refused VMX by its
+    // own firmware refused here too - that decision is the platform
+    // owner's, not this VMM's.
+    if (auto cpu = this->next_virtual_processor - 1; cpu < max_cpus) {
+        this->guest_in_vmx_operation[cpu] = false;
+        this->guest_vmxon_pointer[cpu] = 0;
+        this->guest_current_vmcs[cpu] = nested_vmx::no_current_vmcs;
+        this->guest_feature_control[cpu] =
+            arch::x86_64::rdmsr(arch::x86_64::msr::ia32_feature_control);
+    }
+
     arch::x86_64::vmx::ept_pointer eptp;
     eptp.memory_type(arch::x86_64::memory_type::write_back);
     eptp.page_walk_length(4);
@@ -4800,6 +4823,29 @@ hypervisor::main(arch::x86_64::context & caller_context)
         // other processor is launched. The MSR bitmap is shared by every
         // VMCS, so this is done once.
         intercept_interrupt_command(true);
+
+        // The MSRs nested VMX answers, armed here for the same reason and
+        // in the same place: one shared bitmap, set up before a second
+        // processor exists.
+        //
+        // Both blocks are inside the range the bitmap covers, so without
+        // this they reach hardware and the guest reads the real
+        // capabilities of the processor this VMM is already using - which
+        // is not a subset of anything, and IA32_FEATURE_CONTROL of which
+        // is locked by enable_vmx_in_feature_control before any guest
+        // runs.
+        if constexpr (nested_vmx::enabled) {
+            intercept_msr(
+                arch::x86_64::msr::ia32_feature_control, true, true);
+
+            for (auto msr = arch::x86_64::vmx::msr::begin;
+                 msr < arch::x86_64::vmx::msr::end;
+                 ++msr) {
+                intercept_msr(static_cast<std::uint32_t>(msr), true, true);
+            }
+
+            log("nested vmx: reporting vmx to the guest");
+        }
 
         // A suspend takes this VMM away and nothing brings it back, so
         // the least that can be done is notice. Armed only if the loader
@@ -5390,13 +5436,28 @@ hypervisor::main(arch::x86_64::context & caller_context)
                 // indistinguishable from bare metal.
                 cpuid_result[2] &= ~(1u << 31);
 
-                // Hide VMX. We hold VMX root mode and do not support
-                // nesting, so a guest hypervisor would #GP on its own
-                // vmxon and take the boot down with it. Reporting no VMX
-                // makes it stand down instead: Hyper-V, which launches
-                // ahead of Windows whenever VBS is on, hands straight
-                // off to the OS. Remove this once nesting exists.
-                cpuid_result[2] &= ~(1u << 5);
+                // Hide VMX, unless the nested machinery is compiled in.
+                //
+                // Hidden is the default and the reason is not that the
+                // instructions cannot be answered - they are, in
+                // nested_vmx.cpp - but that VMLAUNCH cannot be. A guest
+                // hypervisor told VMX exists gets as far as a fully
+                // written VMCS and is then refused, and for Hyper-V, which
+                // launches ahead of Windows whenever VBS is on, that is a
+                // failure at launch rather than the clean stand-down it
+                // performs when it finds no VMX at all.
+                //
+                // Bit 5 of leaf 1 ECX is the VMX bit, and it is the one
+                // half of a pair: the other is CR4.VMXE, which the read
+                // shadow answers for. The two must agree, because the
+                // combination "no VMX in CPUID, VMXE set in CR4" exists on
+                // no real processor and a guest that trusts CR4 over CPUID
+                // then faults on its own vmxon - which is exactly the
+                // defect BACKLOG.md records as item 1. Both are keyed on
+                // the same constant so they cannot drift apart.
+                if constexpr (!nested_vmx::enabled) {
+                    cpuid_result[2] &= ~(1u << 5);
+                }
 
                 // MONITOR/MWAIT, ECX[3], is deliberately left as the
                 // hardware reports it. Both instructions execute in the
@@ -5533,6 +5594,28 @@ hypervisor::main(arch::x86_64::context & caller_context)
             break;
         }
         case basic_reason::wrmsr:
+            // The MSRs nested VMX owns, which are only armed in the bitmap
+            // when it is compiled in. Taken before the interrupt command
+            // register below because the two sets do not overlap and the
+            // order costs nothing; taken before the fault below because
+            // this is precisely the case where an in-range MSR access
+            // exits for a reason other than being unimplemented.
+            if (on_nested_vmx_msr_write(
+                    static_cast<std::uint32_t>(context.rcx), context)) {
+                // A locked IA32_FEATURE_CONTROL or a capability MSR
+                // answers with a general protection fault, and a fault is
+                // reported at the faulting instruction.
+                constexpr std::uint64_t injection_valid = 1ull << 31;
+                if (0 !=
+                    (vmcs.read(
+                         arch::x86_64::vmx::vmcs::field::
+                             vm_entry_interruption_information_field) &
+                     injection_valid)) {
+                    advance_rip = false;
+                }
+                break;
+            }
+
             // The one MSR this VMM asks to see. It is inside the range the
             // bitmap covers, so it exits only because the bitmap says so.
             if (arch::x86_64::msr::ia32_x2apic_icr ==
@@ -5555,12 +5638,24 @@ hypervisor::main(arch::x86_64::context & caller_context)
             }
             [[fallthrough]];
         case basic_reason::rdmsr: {
+            // The read half of the same set. Answered before the fault
+            // below for the same reason: with nested VMX compiled in the
+            // bitmap is no longer all zeroes, so an in-range MSR can exit
+            // because this VMM asked to see it rather than because it does
+            // not exist.
+            if ((basic_reason::rdmsr == reason) &&
+                on_nested_vmx_msr_read(
+                    static_cast<std::uint32_t>(context.rcx), context)) {
+                break;
+            }
+
             // SDM 28.1.3 lists, among the reasons RDMSR causes a VM exit,
             // that "the MSR address is not in the ranges 00000000H -
             // 00001FFFH and C0000000H - C0001FFFH". Accesses inside those
-            // ranges are governed by the bitmap, which is all zeroes, so
-            // they never exit. Outside them the access exits
-            // unconditionally and no bitmap can stop it.
+            // ranges are governed by the bitmap, which is all zeroes
+            // unless nested VMX armed something in it, so they otherwise
+            // never exit. Outside them the access exits unconditionally
+            // and no bitmap can stop it.
             //
             // Nothing outside those ranges is a real MSR on this
             // architecture. What lives there is the synthetic MSR space a
@@ -5810,7 +5905,36 @@ hypervisor::main(arch::x86_64::context & caller_context)
                 break;
             }
 
-            vmcs.cr4_read_shadow(value & ~cr4_vmxe);
+            // What the guest is allowed to see in the bit it just wrote.
+            //
+            // With nesting off it always reads back clear, so the guest's
+            // view agrees with the CPUID leaf that told it there is no
+            // VMX. With nesting on it reads back what the guest asked for,
+            // because the guest is entitled to turn VMX on and see that it
+            // did. The real register keeps the bit either way: a processor
+            // in root mode must have it set, and IA32_VMX_CR4_FIXED0 says
+            // so.
+            //
+            // One refusal on top of that, and it is the guest's own rule
+            // rather than this VMM's: SDM 26.8 says "Once in VMX
+            // operation, it is not possible to clear CR4.VMXE". A guest
+            // that has executed VMXON and then tries to clear the bit gets
+            // the general protection fault hardware would have given it,
+            // with RIP left on the instruction.
+            auto shadow = value;
+
+            if constexpr (!nested_vmx::enabled) {
+                shadow &= ~cr4_vmxe;
+            } else if (auto cpu = vmcs.vpid() - 1;
+                       (cpu < max_cpus) &&
+                       this->guest_in_vmx_operation[cpu] &&
+                       (0 == (value & cr4_vmxe))) {
+                inject_general_protection_fault();
+                advance_rip = false;
+                break;
+            }
+
+            vmcs.cr4_read_shadow(shadow);
             vmcs.guest_cr4(value | cr4_vmxe);
             break;
         }
@@ -5917,10 +6041,36 @@ hypervisor::main(arch::x86_64::context & caller_context)
             // interface for it to reach - consistent with the hypervisor
             // CPUID range answering zero for interface and feature leaves.
             //
+            // With nesting compiled in, the instruction is answered
+            // instead: the emulation sets RFLAGS to VMsucceed or to one of
+            // the two failures and the guest is resumed past it, exactly
+            // as it would be past any instruction that retired. A VMX
+            // instruction that *fails* still retires - its failure is in
+            // the flags - so this is the one place in this handler where
+            // advancing past an instruction that did not do what the guest
+            // asked is correct.
+            if (on_vmx_instruction(full_reason, context)) {
+                break;
+            }
+
             // A fault, so RIP stays at the instruction. Advancing it would
             // be the mistake this file warns about twice over: the guest
             // would skip a live instruction *and* believe it had worked.
-            inject_invalid_opcode_exception();
+            //
+            // The emulation may already have injected a general protection
+            // fault of its own, for a privileged instruction attempted
+            // from user mode or a write to a locked MSR. Injecting again
+            // would overwrite it, so it only happens where nothing has
+            // been injected - which the interruption information field
+            // says, since it is cleared on every exit that did not inject.
+            constexpr std::uint64_t injection_valid = 1ull << 31;
+            if (0 ==
+                (vmcs.read(arch::x86_64::vmx::vmcs::field::
+                               vm_entry_interruption_information_field) &
+                 injection_valid)) {
+                inject_invalid_opcode_exception();
+            }
+
             advance_rip = false;
 
             // Said once per processor, with a count kept for the rest.
@@ -5936,7 +6086,7 @@ hypervisor::main(arch::x86_64::context & caller_context)
                 if (!this->vmx_instruction_logged[cpu]) {
                     this->vmx_instruction_logged[cpu] = true;
                     log("cpu {} vmx instruction, exit reason {}, rip {} "
-                        "cs {}: refused with #UD",
+                        "cs {}: faulted",
                         cpu,
                         static_cast<std::uint64_t>(full_reason.value()),
                         vmcs.guest_rip(),

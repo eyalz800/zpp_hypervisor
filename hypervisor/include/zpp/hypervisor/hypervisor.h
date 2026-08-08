@@ -11,10 +11,12 @@
 #include "zpp/arch/x86_64/vmx/ept.h"
 #include "zpp/arch/x86_64/vmx/msr.h"
 #include "zpp/arch/x86_64/vmx/vmcs.h"
+#include "zpp/arch/x86_64/vmx/vmcs12.h"
 #include "zpp/arch/x86_64/vmx/vmx.h"
 #include "zpp/arch/x86_64/vmx/vmx_exit_reason.h"
 #include "zpp/error.h"
 #include "zpp/hypervisor/log.h"
+#include "zpp/hypervisor/nested_vmx.h"
 #include "zpp/nvme/admin_borrow.h"
 #include "zpp/small_map.h"
 #include "zpp/spin_lock.h"
@@ -1235,6 +1237,200 @@ private:
     void inject_general_protection_fault();
 
     /**
+     * Handles the exit a VMX instruction the guest executed produced.
+     *
+     * Returns whether it was handled. False means the caller must deliver
+     * an invalid opcode exception and leave RIP where it is, which is
+     * both what a processor without VMX does and what happens whenever
+     * nested_vmx::enabled is false. True means this set the guest's
+     * RFLAGS to VMsucceed, VMfailInvalid or VMfailValid and the caller
+     * must advance RIP past the instruction, exactly as it would for any
+     * instruction that completed - a VMX instruction that *fails* still
+     * retires, and its failure is in the flags.
+     *
+     * It may also have injected a fault of its own, in which case it
+     * returns false as well, since the caller's behaviour is the same: do
+     * not advance RIP. Whether the exception was #UD or #GP is decided
+     * here.
+     */
+    bool on_vmx_instruction(arch::x86_64::vmx::exit_reason reason,
+                            arch::x86_64::context & context);
+
+    /**
+     * Answers a read of one of the MSRs nested VMX owns, or says it does
+     * not own this one.
+     *
+     * The two blocks are IA32_FEATURE_CONTROL and the VMX capability
+     * range 480H-491H. Both are inside the range the MSR bitmap covers,
+     * so they only exit because the bitmap is told to make them - see
+     * intercept_msr.
+     * @{
+     */
+    bool on_nested_vmx_msr_read(std::uint32_t index,
+                                arch::x86_64::context & context);
+
+    bool on_nested_vmx_msr_write(std::uint32_t index,
+                                 arch::x86_64::context & context);
+    /**
+     * @}
+     */
+
+    /**
+     * What this VMM reports for one of the VMX capability MSRs.
+     *
+     * Every value is derived from the hardware's, narrowed rather than
+     * invented, and that is deliberate on a machine whose own capability
+     * MSRs are already a filtered subset: the test rig runs QEMU with
+     * hv-passthrough, which filters them through enlightened VMCS
+     * version 1. A value written from a table of constants would offer a
+     * guest hypervisor controls the processor underneath does not permit,
+     * and the first VM entry using one would fail.
+     */
+    std::uint64_t nested_vmx_capability_msr(std::size_t msr);
+
+    /**
+     * Arms or releases an MSR in the bitmap, for reads, writes or both.
+     *
+     * The generalisation of intercept_interrupt_command, which arms one
+     * bit of one of the four bitmaps and was the only caller until the
+     * capability MSRs needed the read halves too.
+     */
+    void intercept_msr(std::uint32_t index, bool read, bool write);
+
+    /**
+     * The three ways a VMX instruction reports its outcome in RFLAGS, from
+     * SDM 33.2, "Conventions".
+     *
+     * vmx_fail is the one the operation sections name most often, and it
+     * is not a fourth outcome: it is VMfailValid where there is a current
+     * VMCS to record the error number in and VMfailInvalid where there is
+     * not, because the error field lives in that VMCS.
+     * @{
+     */
+    void vmx_succeed(arch::x86_64::context & context);
+    void vmx_fail_invalid(arch::x86_64::context & context);
+    void vmx_fail_valid(std::size_t cpu,
+                        arch::x86_64::context & context,
+                        nested_vmx::instruction_error error);
+    void vmx_fail(std::size_t cpu,
+                  arch::x86_64::context & context,
+                  nested_vmx::instruction_error error);
+    /**
+     * @}
+     */
+
+    /**
+     * The linear address of the memory operand of the VMX instruction that
+     * caused this exit.
+     *
+     * Computed rather than read, because nothing reports it: SDM 30.2.1
+     * puts only "the value of the instruction's displacement field" in the
+     * exit qualification for these instructions, and SDM 27.9.1's list of
+     * the exits that use the guest-linear address field does not include
+     * any of them. So base, index, scale and segment come out of the
+     * instruction-information field and are put back together here.
+     *
+     * Fails where the operand is a register, which for an instruction
+     * whose only operand is m64 is the #UD SDM 33.3 gives for "(register
+     * operand)".
+     */
+    std::expected<std::uint64_t, zpp::error>
+    vmx_operand_linear_address(const arch::x86_64::context & context);
+
+    /**
+     * The base of one of the segments the instruction-information field's
+     * segment-register encoding can name.
+     */
+    std::uint64_t guest_segment_base(std::uint64_t segment);
+
+    /**
+     * Reads and writes a guest general purpose register by its
+     * architectural encoding.
+     *
+     * RSP is special and has to be: the captured context's rsp holds the
+     * address of the context structure, because the exit stub puts it
+     * there for restore_context to iretq onto. So the guest's own RSP
+     * lives in the VMCS and nowhere else, and reading the context for it
+     * would hand the guest a hypervisor stack address - which BACKLOG.md
+     * records as one of the three defects keeping the write emulator off.
+     * @{
+     */
+    std::uint64_t guest_register(const arch::x86_64::context & context,
+                                 std::uint64_t encoding);
+
+    void set_guest_register(arch::x86_64::context & context,
+                            std::uint64_t encoding,
+                            std::uint64_t value);
+    /**
+     * @}
+     */
+
+    /**
+     * Copies out of, and into, guest memory named by a linear address.
+     *
+     * A page at a time, because a translation is only good for the page it
+     * resolved and an operand may straddle two.
+     * @{
+     */
+    std::expected<void, zpp::error>
+    read_guest_linear(std::uint64_t linear, std::span<std::byte> into);
+
+    std::expected<void, zpp::error> write_guest_linear(
+        std::uint64_t linear, std::span<const std::byte> from);
+    /**
+     * @}
+     */
+
+    /**
+     * The 64-bit value the m64 operand of VMXON, VMPTRLD or VMCLEAR points
+     * at, which is the physical address of a region.
+     */
+    std::expected<std::uint64_t, zpp::error>
+    read_guest_vmcs_pointer(const arch::x86_64::context & context);
+
+    /**
+     * Whether a region pointer passes the checks every one of those three
+     * instructions applies to it.
+     */
+    bool vmcs_pointer_valid(std::uint64_t pointer);
+
+    /**
+     * Writes the cached shadow VMCS back to the guest's own region.
+     *
+     * Called by anything that stops a VMCS being current, which is what
+     * makes a VMCS moved between processors keep its contents.
+     */
+    void flush_guest_vmcs12(std::size_t cpu);
+
+    /**
+     * The VMX instructions a guest hypervisor executes, one each.
+     *
+     * Each returns whether the instruction was completed - true meaning
+     * RFLAGS now says VMsucceed, VMfailInvalid or VMfailValid and the
+     * caller must advance RIP, false meaning a fault was delivered or is
+     * to be delivered by the caller and RIP stays put.
+     * @{
+     */
+    bool on_guest_vmxon(std::size_t cpu, arch::x86_64::context & context);
+    bool on_guest_vmxoff(std::size_t cpu, arch::x86_64::context & context);
+    bool on_guest_vmclear(std::size_t cpu,
+                          arch::x86_64::context & context);
+    bool on_guest_vmptrld(std::size_t cpu,
+                          arch::x86_64::context & context);
+    bool on_guest_vmptrst(std::size_t cpu,
+                          arch::x86_64::context & context);
+    bool on_guest_vmread(std::size_t cpu, arch::x86_64::context & context);
+    bool on_guest_vmwrite(std::size_t cpu,
+                          arch::x86_64::context & context);
+    bool
+    on_guest_vmlaunch(std::size_t cpu,
+                      arch::x86_64::context & context,
+                      arch::x86_64::vmx::exit_reason::basic_reason reason);
+    /**
+     * @}
+     */
+
+    /**
      * Ask the processor to deliver an invalid opcode exception to the
      * guest on the next VM entry.
      *
@@ -1680,6 +1876,47 @@ private:
      * armed, without burying every other line.
      */
     bool monitor_logged[max_cpus]{};
+
+    /**
+     * The nested VMX state, one set per processor.
+     *
+     * All of it is per processor because all of it describes a *logical
+     * processor's* position in VMX operation, which is what the
+     * architecture makes it: VMXON puts "the logical processor in VMX
+     * operation" and leaves it "with no current VMCS" (SDM 33.3, VMXON),
+     * and the current-VMCS pointer is likewise per processor.
+     *
+     * The shadow VMCS is the exception in kind but not in placement. Its
+     * authoritative copy lives in the guest's own VMCS region, so that a
+     * VMCS taken from one processor and loaded on another keeps its
+     * contents; this is a cache of the current one, loaded by VMPTRLD and
+     * written back by anything that stops it being current. That is the
+     * arrangement KVM uses, and the reason is the same: VMREAD and
+     * VMWRITE are frequent and a guest memory access each would be paid
+     * on every one of them.
+     * @{
+     */
+    bool guest_in_vmx_operation[max_cpus]{};
+    std::uint64_t guest_vmxon_pointer[max_cpus]{};
+    std::uint64_t guest_current_vmcs[max_cpus]{};
+    arch::x86_64::vmx::vmcs12 guest_vmcs12[max_cpus]{};
+
+    /**
+     * IA32_FEATURE_CONTROL as the guest sees it.
+     *
+     * Answered rather than passed through, because the hardware value is
+     * locked by the time any guest runs - this VMM's own
+     * enable_vmx_in_feature_control sets the lock bit during launch, and
+     * the register is write-once per reset. A guest hypervisor reading
+     * the real one would find it locked with settings it did not choose
+     * and could not change, and a guest that tries to write it would
+     * either fault or silently fail. So the guest gets its own copy, and
+     * its own write-once semantics on that copy.
+     */
+    std::uint64_t guest_feature_control[max_cpus]{};
+    /**
+     * @}
+     */
 
     /**
      * Whether this processor has already had a VMX instruction exit

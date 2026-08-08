@@ -89,6 +89,13 @@ target_compile_options(zpp_hypervisor PRIVATE
     # entry and no command line can put diagnostics into a release binary.
     $<$<CONFIG:Debug>:-DZPP_DIAG=$<BOOL:${ZPP_DIAG}>>
     $<$<CONFIG:Release>:-DZPP_DIAG=0>
+    # Nested VMX. Same shape as the diagnostic switch - an always defined 0/1
+    # macro turned into a constexpr bool by nested_vmx.h - and defined for both
+    # configurations rather than debug only, because unlike diagnostics this is
+    # a change to what the *guest* is told and a release build has to be able
+    # to carry it once it works. It defaults off in both; see nested_vmx.h for
+    # what is still missing.
+    -DZPP_NESTED_VMX=$<BOOL:${ZPP_NESTED_VMX}>
     $<$<CONFIG:Release>:-O2>
     $<$<CONFIG:Release>:-ffunction-sections>
     $<$<CONFIG:Release>:-fdata-sections>
