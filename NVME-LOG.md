@@ -821,3 +821,122 @@ before the guest is resumed.
 
 Worth noting for whoever builds it: only the submission half needs
 reducing. The completion half already has eight spare identifiers.
+
+## Reducing the grant, as built
+
+`diag::reduce_guest_queue_grant`, off by default, and it needs
+`rebuild_channel_after_reset` - a `static_assert` says so, because without
+the reservation there is no allocation to hold anything back from and
+reducing the answer would take a queue away from the guest and leave
+nothing valid above it.
+
+`hypervisor::patch_guest_queue_grant` runs from the guest's own admin
+doorbell exit, after `observe_guest_admin_submissions` has read the
+command off the guest's submission queue and taken its command identifier
+from CDW0 bits 31:16. It maps the guest's admin completion queue through
+the window, finds the completion for that identifier, and **rewrites four
+bytes of DW0 in place**. That is the whole of it.
+
+Nothing is submitted, nothing is injected, and no doorbell is rung. The
+completion is the guest's own, posted by the controller for a command the
+guest itself issued, landing at the guest's own slot with the guest's own
+phase - so the controller's internal tail is exactly where it would have
+been, and none of the lap machinery is involved. Restoring is legal for
+the same reason the lap's restore is: Base 2.0 3.3.1.2, a controller never
+reads a completion queue.
+
+### Why not substitution, which this document favoured
+
+The shape recommended above - put a command of ours into the guest's
+submission slot while the doorbell is held, then rewrite the completion's
+command identifier *and* DW0 - was tried on paper and rejected for two
+reasons, both worth keeping so it is not re-proposed:
+
+- **The doorbell has already rung.** `page_watch::handler` is documented
+  as "called after the write has taken effect", and `on_ept_violation`
+  applies the decoded store before calling the handler. So there is no
+  point at which our code runs with the guest's doorbell write pending,
+  and the premise that "the controller has not yet fetched the entry" is
+  false as the machinery stands. Making it true means deferring a store
+  the watch currently applies, which is new machinery on the one path
+  that must not be wrong.
+- **A foreign command identifier is the worse exposure.** Substituting
+  puts a completion carrying *our* identifier into the guest's admin
+  queue for a window. Leaving the guest's own command in place puts a
+  completion carrying the guest's identifier there, with the controller's
+  own status, differing from the truth only in DW0. Under the unmasked
+  admin interrupt below, those two failure modes are not comparable.
+
+### The race that is real, and how it is handled
+
+Because the doorbell rings before the handler runs, the controller's
+completion can arrive **before** this code looks for it. A Set Features is
+two DMA round trips; reading the guest's submission entry through the
+window is a comparable number of microseconds. Either can win, so both
+are handled: the queue's already-posted region is searched newest first
+over `[0, tail)` before anything is waited for, and only then is the tail
+polled. `channel_grant_already_posted` records which side of the race the
+run was on, which is a measurement nobody has yet.
+
+Newest-first is what makes matching on a command identifier safe against a
+driver that reuses one earlier in the epoch. On top of that the entry's
+DW0 must equal the allocation our own reservation was granted - which
+5.2.30.1.5 guarantees, since ours is the first Set Features after the
+reset and the allocation cannot change until the next one. That check is
+both the discriminator and a test of the ordering argument: a
+disagreement is recorded as `0xe8` and nothing is edited.
+
+### The consequence nobody would guess
+
+`create_channel_queue` had to change as well, and without that change the
+reduction buys nothing at all. Its identifier was
+`max(highest created, requested) + 1`, where `requested` is the guest's
+own request read off its submission queue - a margin against a driver
+creating its set in an unexpected order. With the grant reduced the guest
+asks for sixteen, is told fifteen, and creates fifteen; a margin of
+sixteen still chooses seventeen, which is outside the allocation and
+refused with Invalid Queue Identifier. So the request is now clamped by
+what the guest was *told* - `hypervisor::queue_limit` - and the same
+clamp decides when the guest has finished creating, since waiting for its
+full request to be met would wait for ever.
+
+### The admin interrupt, again, and why it matters less here
+
+Vector 0 is still not masked and there is still no MSI-X table access on
+the resident side. What is different is the cost of losing that race
+under *this* mechanism. A guest interrupt service routine on another
+processor that read the completion before it was edited would find the
+guest's own entry, with the guest's own command identifier and the
+controller's own status, saying sixteen rather than fifteen. The guest
+then creates sixteen submission queues, `create_channel_queue` finds no
+room and refuses, and the guest boots. **The failure mode is no channel,
+not a confused driver** - the same outcome as the switch being off.
+
+That is not an argument that masking is unnecessary for the lap in
+`create_channel_queue_after_guest`, where a completion carrying one of our
+own identifiers really can reach the guest's driver. It is only an
+argument that the reduction does not add to that exposure.
+
+If it is to be built, the cheapest form is probably the **function mask**
+in the device's MSI-X Message Control register, which is in PCI
+configuration space rather than in the table BAR, so it needs no second
+BAR to be sized, mapped and validated - only the controller's bus, device
+and function handed across by the loader, and a configuration space
+access mechanism the resident side does not currently have. The bit's
+position and the semantics of masking while a vector is pending are
+stated from memory here and have not been checked against the PCIe
+specification, so check them before writing any of it.
+
+### What the two halves do, and what is measured
+
+Reduction is applied per space, and only where the guest's own request
+leaves nothing above it. On this machine that is the submission half
+alone: sixteen requested against sixteen granted, so NSQA is shown as
+fifteen, while eight completion queues requested against sixteen granted
+already leaves nine to sixteen free and NCQA is passed through exactly as
+the controller wrote it.
+
+**Never run on hardware.** Neither emulator can reach it, for the reasons
+in the split above: the doorbell trap needs VT-x, which Bochs has and QEMU
+does not, and the completion needs a modelled NVMe controller, which QEMU
+has and Bochs does not.

@@ -634,6 +634,46 @@ private:
     void create_channel_queue();
 
     /**
+     * Rewrites the Number of Queues answer the guest is about to read, so
+     * that one submission queue identifier is left over for the channel.
+     *
+     * Called from the exit that saw the guest ring its admin doorbell for
+     * its own Set Features (Number of Queues), after the submission has
+     * been parsed and the command identifier taken off it. The controller
+     * has been told to fetch that command, so this waits for the
+     * completion the controller posts for it and edits DW0 in place
+     * before the guest - which is this processor, held inside this exit -
+     * can look at it.
+     *
+     * Nothing is submitted, nothing is injected and no doorbell is rung.
+     * The completion is the guest's own, at the guest's own slot with the
+     * guest's own phase and command identifier, and four bytes of it are
+     * changed. See diag::reduce_guest_queue_grant for why the answer has
+     * to be edited at all, and for what losing the race against the
+     * guest's own interrupt service routine would cost.
+     */
+    void patch_guest_queue_grant();
+
+    /**
+     * The most queues the guest can create in one space: what it asked
+     * for, clamped by what it was told it was granted.
+     *
+     * Both drivers clamp their creates this way - Linux takes
+     * `min(*count, nr_io_queues)` in `nvme_set_queue_count`, Windows'
+     * stornvme clamps to NSQA+1 and NCQA+1 - so this is the number that
+     * decides both when the guest has finished creating and which
+     * identifier is free above it. A granted count of zero means nothing
+     * was ever reported, in which case the guest's request is all this
+     * knows and the answer is the request.
+     */
+    static constexpr std::uint64_t queue_limit(std::uint64_t requested,
+                                               std::uint64_t granted)
+    {
+        return ((0 != granted) && (granted < requested)) ? granted
+                                                         : requested;
+    }
+
+    /**
      * Runs one borrow of the guest's admin queue with the given payload,
      * excluding every other processor for its duration.
      *
@@ -3233,6 +3273,79 @@ private:
      */
     volatile std::uint64_t channel_quiesce_submission_tail{};
     volatile std::uint64_t channel_quiesce_expected_tail{};
+    /**
+     * @}
+     */
+
+    /**
+     * How the guest's Number of Queues answer was edited, and what it
+     * said before and after.
+     *
+     * Zero while untried, 1 for an answer that was reduced, 2 for one
+     * that needed no reduction because the guest asked for less than the
+     * allocation in both spaces, otherwise a refusal code:
+     *
+     * - 0xfb, there is no controller;
+     * - 0xf9, no reservation is in force, so there is no allocation to
+     *   hold anything back from and the controller's answer is the truth;
+     * - 0xf2, the admin completion queue's geometry is not one this can
+     *   reach;
+     * - 0xf3, the mapping window could not reach it;
+     * - 0xf4, the completion never arrived inside the budget;
+     * - 0xf5, too many other completions arrived before it;
+     * - 0xe6, the controller refused the guest's own Set Features, so
+     *   there is nothing to edit and the guest has an error to handle;
+     * - 0xe7, the grant is one queue, and taking the guest's only queue
+     *   is not a trade this makes;
+     * - 0xe8, the answer the guest was given is not the allocation the
+     *   reservation was granted, which falsifies the ordering the whole
+     *   scheme rests on - see NVMe Base 5.2.30.1.5 and the check itself.
+     *
+     * channel_grant_already_posted says which side of the race this was
+     * on: 1 means the controller had answered before the doorbell's exit
+     * handler got to look, 0 means it was waited for. Neither is a fault
+     * - both are handled - but it is the measurement that says how much
+     * of a race it actually is on this controller.
+     *
+     * All volatile: nothing in this program reads them, so without it the
+     * stores are dead and the optimizer may remove them.
+     * @{
+     */
+    volatile std::uint64_t channel_grant_result{};
+    volatile std::uint64_t channel_grant_reported{};
+    volatile std::uint64_t channel_grant_presented{};
+    volatile std::uint64_t channel_grant_scanned{};
+    volatile std::uint64_t channel_grant_already_posted{};
+    volatile std::uint64_t channel_grant_ticks{};
+    /**
+     * @}
+     */
+
+    /**
+     * What the guest was told it was granted, as real counts, in the two
+     * spaces. This is what its creates are clamped by, so it is what
+     * decides the identifier above them - see queue_limit. Zero until an
+     * answer has been seen, which is also what a build with
+     * diag::reduce_guest_queue_grant off leaves them at.
+     * @{
+     */
+    std::uint32_t channel_guest_granted_submission_queues{};
+    std::uint32_t channel_guest_granted_completion_queues{};
+    /**
+     * @}
+     */
+
+    /**
+     * The command identifier the guest put on its own Set Features
+     * (Number of Queues), and whether one is waiting to be answered.
+     *
+     * Taken off the submission entry rather than guessed, because it is
+     * the only way to recognise that command's completion among whatever
+     * else the controller posts in the same window.
+     * @{
+     */
+    std::uint16_t channel_grant_command_id{};
+    bool channel_grant_pending{};
     /**
      * @}
      */

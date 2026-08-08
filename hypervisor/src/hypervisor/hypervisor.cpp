@@ -1729,7 +1729,13 @@ void hypervisor::reserve_channel_queue_allocation()
 
         this->channel_reserve_result = 1;
 
-        if constexpr (diag::create_channel_queue_after_guest) {
+        // Two things still need the watch: the guest's own Set Features,
+        // whose answer is edited from its doorbell, and its Create
+        // commands. Either switch on its own is a reason to keep it, and
+        // the reduction takes the watch off again itself once the answer
+        // has been edited when the creation is not going to want it.
+        if constexpr (diag::create_channel_queue_after_guest ||
+                      diag::reduce_guest_queue_grant) {
             keep_watching = true;
         }
 
@@ -1759,17 +1765,30 @@ void hypervisor::create_channel_queue()
         // this has not seen, or creates the rest of it after this fires.
         // Measured on the rig the two agree: it asks for sixteen and
         // eight and creates exactly one to sixteen and one to eight.
+        //
+        // The request is clamped by what the guest was *told* before it
+        // is used as a margin, and without that clamp the reduction below
+        // buys nothing: with diag::reduce_guest_queue_grant on the guest
+        // asks for sixteen submission queues, is told fifteen, creates
+        // fifteen - and a margin of sixteen would still choose
+        // seventeen, which is outside the allocation and refused with
+        // Invalid Queue Identifier. See queue_limit; with that switch off
+        // the granted count is zero and this is the request, unchanged.
         auto highest = [](std::uint64_t created, std::uint64_t requested) {
             return (created > requested) ? created : requested;
         };
 
         auto submission_id =
             highest(this->channel_guest_highest_submission_queue,
-                    this->channel_guest_requested_submission_queues) +
+                    queue_limit(
+                        this->channel_guest_requested_submission_queues,
+                        this->channel_guest_granted_submission_queues)) +
             1;
         auto completion_id =
             highest(this->channel_guest_highest_completion_queue,
-                    this->channel_guest_requested_completion_queues) +
+                    queue_limit(
+                        this->channel_guest_requested_completion_queues,
+                        this->channel_guest_granted_completion_queues)) +
             1;
 
         // Inside the allocation, or nothing is created at all.
@@ -1891,6 +1910,329 @@ void hypervisor::create_channel_queue()
     }
 }
 
+void hypervisor::patch_guest_queue_grant()
+{
+    if constexpr (!diag::policy_of(diag::sink::esp_blocks).present ||
+                  !diag::rebuild_channel_after_reset ||
+                  !diag::reduce_guest_queue_grant) {
+        return;
+    } else {
+        // Once per epoch. The guest issues this feature once, during
+        // initialisation - 5.2.30.1.5 says it may only be issued before
+        // any I/O queue exists - and a second answer would arrive after
+        // ours had already decided what the guest believes.
+        if (0 != this->channel_grant_result) {
+            return;
+        }
+
+        if (!this->channel_bar) {
+            this->channel_grant_result = 0xfb;
+            return;
+        }
+
+        // No reservation, no lie worth telling. Without our own Set
+        // Features having gone first the controller's allocation is
+        // whatever the guest asked for, so reducing the answer would take
+        // a queue away from the guest and leave nothing valid above it -
+        // the identifier we would then choose is outside the allocation
+        // and Create returns Invalid Queue Identifier, which is measured
+        // and recorded in NVME-LOG.md as status 0x4101.
+        if (1 != this->channel_reserve_result) {
+            this->channel_grant_result = 0xf9;
+            return;
+        }
+
+        auto started = arch::x86_64::rdtsc();
+
+        auto * bar =
+            static_cast<volatile std::uint8_t *>(this->channel_bar);
+
+        // Where the guest put its admin completion queue and how deep it
+        // made it, read from the controller rather than remembered: the
+        // guest chooses both afresh on every reset.
+        auto attributes =
+            nvme::admin_queue_attributes{arch::x86_64::read32(
+                bar + nvme::offset_of(
+                          nvme::register_offset::admin_queue_attributes))};
+        auto completion_base = arch::x86_64::read64(
+            bar + nvme::offset_of(
+                      nvme::register_offset::admin_completion_queue_base));
+
+        auto depth = attributes.completion_queue_size();
+
+        // One page reaches the whole queue at the deepest this will look
+        // at - 256 entries of 16 bytes - and ACQ's low twelve bits are
+        // reserved, so a base that is not page aligned is a register this
+        // does not understand rather than a queue in an unusual place.
+        if ((0 == depth) || (depth > nvme::admin_borrow::max_depth) ||
+            (0 == completion_base) ||
+            (0 != (completion_base & (page_size - 1)))) {
+            this->channel_grant_result = 0xf2;
+            return;
+        }
+
+        // **The doorbell page is deliberately not held for this**, and
+        // the reservation's borrow does hold it, so the difference is
+        // worth stating. A hold buys exclusion from other processors
+        // *writing* doorbells, and this writes none and submits nothing -
+        // it reads a queue and changes four bytes of one entry the
+        // controller has finished with. What a hold would not buy is the
+        // only exposure there is, which is another processor's interrupt
+        // service routine *reading* that entry first; see
+        // diag::reduce_guest_queue_grant. So it would cost an
+        // acknowledgement wait and a wake NMI broadcast at a new point in
+        // the boot and close nothing.
+        this->mapping_window_lock.lock();
+        scope_exit release{[&] { this->mapping_window_lock.unlock(); }};
+
+        // Again, now that this is the only processor in here.
+        //
+        // The check above was made before the lock, so two processors
+        // both taking a doorbell violation could both have passed it and
+        // queued up here. Without this the second one patches a
+        // completion the first has already reduced, finds the counts no
+        // longer equal to the allocation, and replaces a successful
+        // result with 0xe8 - a refusal that did not happen.
+        if (0 != this->channel_grant_result) {
+            return;
+        }
+
+        // The same window page the borrow points at the guest's
+        // completion queue. Reusing it is safe because both hold the
+        // window's lock for the whole of what they read through it, and
+        // neither is reachable from inside the other.
+        constexpr std::size_t completion_window_page = 4;
+
+        auto * completion = static_cast<nvme::completion_entry *>(
+            map_window_at(completion_window_page, completion_base, 1));
+        if (!completion) {
+            this->channel_grant_result = 0xf3;
+            return;
+        }
+
+        // Where the controller will post next, worked out from the phase
+        // bits alone. No doorbell has to have been observed for this, and
+        // no software head pointer of the guest's has to be guessed at -
+        // see admin_borrow::locate.
+        nvme::admin_borrow::queues where{};
+        where.completion = completion;
+        where.completion_depth = depth;
+        nvme::admin_borrow::locate(where);
+
+        auto slot = where.completion_tail;
+        auto phase = where.completion_phase;
+
+        auto ours = [&](const nvme::completion_entry & entry) {
+            return (entry.command_id() ==
+                    this->channel_grant_command_id) &&
+                   (0 == entry.submission_queue_id());
+        };
+
+        // **It may already be there, and this is a race rather than a
+        // possibility.** The watch applies the guest's store before
+        // calling its handler - page_watch::handler, "called after the
+        // write has taken effect" - so the doorbell has rung by the time
+        // anything here runs, and a Set Features is two DMA round trips
+        // for the controller against a few microseconds of reading the
+        // guest's submission queue here. Either can win.
+        //
+        // So look at what is already posted before waiting for anything.
+        // Newest first, over the slots this lap has written - which are
+        // exactly [0, tail), since the host is required to zero a
+        // completion queue before enabling it and only the controller
+        // writes it afterwards. Newest first is what makes a command
+        // identifier the guest has reused earlier in the epoch harmless:
+        // the most recent occurrence is the one being answered now.
+        //
+        // A controller that had wrapped would leave older entries above
+        // the tail carrying the previous lap's phase, and this does not
+        // look at them. It cannot have: the queue is 256 entries deep,
+        // was zeroed at the enable a few commands ago, and this runs
+        // during the driver's initialisation. If it somehow had, nothing
+        // is found and the wait below times out, which costs the channel
+        // and nothing else.
+        auto already_posted = false;
+
+        for (std::uint32_t back{1}; back <= where.completion_tail;
+             ++back) {
+            auto & entry = completion[where.completion_tail - back];
+            if (entry.phase() != phase) {
+                continue;
+            }
+            arch::x86_64::order_loads();
+            if (ours(entry)) {
+                slot = where.completion_tail - back;
+                already_posted = true;
+                break;
+            }
+        }
+
+        // The controller writes the phase tag last, which is what makes
+        // polling it safe: the same rule Linux's nvme_cqe_pending relies
+        // on, testing `(status & 1) == cq_phase` and then issuing
+        // dma_rmb() before reading the rest of the entry. order_loads is
+        // that barrier, and admin_borrow::run does the same thing in the
+        // same order.
+        auto budget = std::uint64_t{1} << 24;
+        std::uint32_t scanned{};
+
+        while (!already_posted) {
+            auto & entry = completion[slot];
+
+            if (entry.phase() != phase) {
+                if (0 == budget--) {
+                    this->channel_grant_scanned = scanned;
+                    this->channel_grant_ticks =
+                        arch::x86_64::rdtsc() - started;
+                    this->channel_grant_result = 0xf4;
+                    return;
+                }
+                zpp::spin_hint();
+                continue;
+            }
+
+            arch::x86_64::order_loads();
+
+            if (ours(entry)) {
+                break;
+            }
+
+            // Somebody else's, which at this moment means another admin
+            // command of the guest's - an Asynchronous Event Request
+            // completing, or an Identify issued in the same burst. It is
+            // stepped past and left completely alone: this reads the
+            // queue and writes four bytes of one entry, and consumes
+            // nothing.
+            ++scanned;
+            if (scanned > nvme::admin_borrow::max_foreign) {
+                this->channel_grant_scanned = scanned;
+                this->channel_grant_ticks =
+                    arch::x86_64::rdtsc() - started;
+                this->channel_grant_result = 0xf5;
+                return;
+            }
+
+            slot = (slot + 1) % depth;
+            if (0 == slot) {
+                phase = !phase;
+            }
+            budget = std::uint64_t{1} << 24;
+        }
+
+        auto & entry = completion[slot];
+
+        this->channel_grant_scanned = scanned;
+        this->channel_grant_already_posted = already_posted ? 1 : 0;
+        this->channel_grant_reported = entry.command_specific;
+        this->channel_grant_ticks = arch::x86_64::rdtsc() - started;
+
+        // A refused Set Features has no allocation in it to edit, and the
+        // guest has an error to handle that is none of our business.
+        if (0 != entry.status()) {
+            this->channel_grant_result = 0xe6;
+            return;
+        }
+
+        auto granted_submission =
+            nvme::number_of_submission_queues(entry.command_specific);
+        auto granted_completion =
+            nvme::number_of_completion_queues(entry.command_specific);
+
+        // The entry has to be the answer to a Number of Queues, and this
+        // is what proves it rather than assumes it.
+        //
+        // 5.2.30.1.5 freezes the allocation at the first Set Features
+        // completed after a controller level reset, and ours was that
+        // one - so the guest's answer must be exactly what our
+        // reservation was granted. Two things ride on the check. It is
+        // the discriminator that makes matching on a command identifier
+        // safe, since an entry that carried the same identifier for some
+        // other command would have to hold this exact pair of counts in
+        // DW0 by coincidence. And a disagreement falsifies the ordering
+        // argument the whole reservation rests on, which is worth
+        // recording loudly rather than papering over by editing whatever
+        // was found.
+        if ((granted_submission !=
+             this->channel_allocated_submission_queues) ||
+            (granted_completion !=
+             this->channel_allocated_completion_queues)) {
+            this->channel_grant_result = 0xe8;
+            return;
+        }
+
+        // Reduce a half only where the guest's own request leaves nothing
+        // above it. Measured on the rig that is the submission half
+        // alone: it asks for sixteen submission queues against an
+        // allocation of sixteen, and eight completion queues against an
+        // allocation of sixteen, so the completion half already has eight
+        // spare identifiers and is left exactly as the controller wrote
+        // it.
+        auto present_submission = granted_submission;
+        auto present_completion = granted_completion;
+        auto wanted = false;
+        auto too_small = false;
+
+        if (this->channel_guest_requested_submission_queues >=
+            granted_submission) {
+            wanted = true;
+            if (granted_submission >= 2) {
+                present_submission = granted_submission - 1;
+            } else {
+                too_small = true;
+            }
+        }
+
+        if (this->channel_guest_requested_completion_queues >=
+            granted_completion) {
+            wanted = true;
+            if (granted_completion >= 2) {
+                present_completion = granted_completion - 1;
+            } else {
+                too_small = true;
+            }
+        }
+
+        if (!wanted) {
+            // Nothing to do, and that is a success rather than a
+            // refusal: there is already an identifier above what the
+            // guest can reach in both spaces.
+            this->channel_guest_granted_submission_queues =
+                granted_submission;
+            this->channel_guest_granted_completion_queues =
+                granted_completion;
+            this->channel_grant_presented = entry.command_specific;
+            this->channel_grant_result = 2;
+            return;
+        }
+
+        // A controller with one queue is a controller whose only queue
+        // belongs to the guest. No channel is better than a boot disk
+        // with nowhere to submit.
+        if (too_small) {
+            this->channel_grant_result = 0xe7;
+            return;
+        }
+
+        // Both halves zero's based, the same encoding the request uses -
+        // see nvme::number_of_submission_queues.
+        auto presented = ((present_submission - 1) & 0xffffu) |
+                         (((present_completion - 1) & 0xffffu) << 16);
+
+        entry.command_specific = presented;
+        arch::x86_64::order_stores();
+
+        this->channel_guest_granted_submission_queues = present_submission;
+        this->channel_guest_granted_completion_queues = present_completion;
+        this->channel_grant_presented = presented;
+        this->channel_grant_result = 1;
+
+        diag::log<diag::severity::info>(
+            "grant {} shown to the guest as {}",
+            static_cast<std::uint64_t>(this->channel_grant_reported),
+            static_cast<std::uint64_t>(presented));
+    }
+}
+
 void hypervisor::stop_watching_channel_doorbells()
 {
     if constexpr (!diag::policy_of(diag::sink::esp_blocks).present ||
@@ -1939,6 +2281,21 @@ void hypervisor::forget_channel_queue_observations()
         this->channel_guest_created_submission_queues = 0;
         this->channel_guest_created_completion_queues = 0;
         this->channel_guest_deleted_queues = 0;
+
+        // What the guest was told describes the allocation the reset has
+        // just cleared, and the command identifier describes a command
+        // that can never complete now: the controller discards everything
+        // outstanding at a controller level reset.
+        this->channel_grant_result = 0;
+        this->channel_grant_reported = 0;
+        this->channel_grant_presented = 0;
+        this->channel_grant_scanned = 0;
+        this->channel_grant_already_posted = 0;
+        this->channel_grant_ticks = 0;
+        this->channel_guest_granted_submission_queues = 0;
+        this->channel_guest_granted_completion_queues = 0;
+        this->channel_grant_command_id = 0;
+        this->channel_grant_pending = false;
 
         this->channel_create_result = 0;
         this->channel_create_status = 0;
@@ -4487,6 +4844,32 @@ void hypervisor::on_doorbell_write(void * context,
             self.observe_guest_admin_submissions(tail);
         }
 
+        // The guest's Number of Queues answer, edited before it reads it.
+        //
+        // Here rather than inside the observation because the window's
+        // lock is not recursive and the poll below takes it, and because
+        // the wait has to happen after the doorbell has rung: the
+        // controller does not fetch the command until it has, and the
+        // watch applies the guest's store before calling this.
+        if constexpr (diag::rebuild_channel_after_reset &&
+                      diag::reduce_guest_queue_grant) {
+            if (self.channel_grant_pending) {
+                self.channel_grant_pending = false;
+                self.patch_guest_queue_grant();
+
+                // With the creation off there is nothing left for the
+                // watch to see, and leaving it armed is an exit per disk
+                // command for the rest of the boot - the stride is zero
+                // on this controller, so every I/O doorbell is on this
+                // page. This is the control run for the reduction on its
+                // own: the guest is told fifteen, creates fifteen, and
+                // nothing is created behind it.
+                if constexpr (!diag::create_channel_queue_after_guest) {
+                    self.stop_watching_channel_doorbells();
+                }
+            }
+        }
+
         // Whether the guest has finished creating its own queues.
         //
         // There is no signal for that, so this is the closest thing the
@@ -4502,6 +4885,14 @@ void hypervisor::on_doorbell_write(void * context,
         // A guest that creates *more* than it asked for would defeat
         // this, and no driver does: both clamp their creates to the
         // smaller of their own request and the allocation.
+        //
+        // Clamped by what it was told, not only by what it asked for.
+        // With diag::reduce_guest_queue_grant on, the guest is told one
+        // less than the controller granted in whichever space had no
+        // spare, and it then creates one less than it asked for - so
+        // waiting for its request to be met would wait for ever. With
+        // that switch off the granted count is zero, queue_limit answers
+        // the request, and this is exactly what it was.
         if constexpr (diag::rebuild_channel_after_reset &&
                       diag::create_channel_queue_after_guest) {
             auto due =
@@ -4511,9 +4902,13 @@ void hypervisor::on_doorbell_write(void * context,
                 (0 != self.channel_guest_requested_submission_queues) &&
                 (0 != self.channel_guest_requested_completion_queues) &&
                 (self.channel_guest_created_submission_queues >=
-                 self.channel_guest_requested_submission_queues) &&
+                 queue_limit(
+                     self.channel_guest_requested_submission_queues,
+                     self.channel_guest_granted_submission_queues)) &&
                 (self.channel_guest_created_completion_queues >=
-                 self.channel_guest_requested_completion_queues);
+                 queue_limit(
+                     self.channel_guest_requested_completion_queues,
+                     self.channel_guest_granted_completion_queues));
 
             if (due) {
                 self.create_channel_queue();
@@ -4593,6 +4988,18 @@ void hypervisor::observe_guest_admin_submissions(std::uint32_t tail)
                             nvme::number_of_submission_queues(command[11]);
                         this->channel_guest_requested_completion_queues =
                             nvme::number_of_completion_queues(command[11]);
+
+                        // Which command's completion has to be edited.
+                        // CDW0 bits 31:16 are the identifier the guest
+                        // chose, and it is the only way to recognise
+                        // that completion among whatever else the
+                        // controller posts in the same window.
+                        if constexpr (diag::reduce_guest_queue_grant) {
+                            this->channel_grant_command_id =
+                                static_cast<std::uint16_t>(command[0] >>
+                                                           16);
+                            this->channel_grant_pending = true;
+                        }
                     }
                     break;
 

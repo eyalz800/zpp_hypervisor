@@ -150,6 +150,16 @@ show_member  "reserve status" channel_reserve_status
 show_member  "reserve allocation (DW0)" channel_reserve_allocation
 show_member  "quiesce sqhd|expected" channel_quiesce_submission_tail 2
 
+echo "--- what the guest was told it was granted ---"
+show_member  "grant result" channel_grant_result
+show_member  "grant as the controller wrote" channel_grant_reported
+show_member  "grant as the guest reads it" channel_grant_presented
+show_member  "grant already posted" channel_grant_already_posted
+show_member  "grant entries stepped past" channel_grant_scanned
+show_member  "grant ticks" channel_grant_ticks
+show_member  "granted sq (told)" channel_guest_granted_submission_queues
+show_member  "granted cq (told)" channel_guest_granted_completion_queues
+
 echo "--- what the guest's driver did ---"
 show_member  "guest requested sq" channel_guest_requested_submission_queues
 show_member  "guest requested cq" channel_guest_requested_completion_queues
@@ -188,6 +198,30 @@ The reservation and the creation, which are two different runs:
                                        tail expected, and they should be equal
   reserve result 0xf7                  a processor never acknowledged the doorbell
                                        protection, so nothing was borrowed
+The grant, which is what leaves the channel an identifier at all:
+  grant result 0                       never attempted - the guest's own Set
+                                       Features was not seen on the doorbell
+  grant result 1                       the answer was reduced; the two words
+                                       beside it are DW0 as the controller
+                                       wrote it and DW0 as the guest reads it,
+                                       and 0x000f000f becoming 0x000f000e is
+                                       sixteen submission queues shown as
+                                       fifteen
+  grant result 2                       no reduction was needed - the guest
+                                       asked for less than the allocation in
+                                       both spaces, so an identifier was
+                                       already free
+  grant result 0xe8                    the guest was answered something other
+                                       than what the reservation was granted;
+                                       the ordering argument is wrong and
+                                       nothing was edited
+  grant result 0xf4                    the completion never arrived
+  grant already posted 1               the controller answered before this got
+                                       to look, which is expected some of the
+                                       time and is handled
+  granted sq (told) 15                 what the guest's creates are clamped by,
+                                       and therefore what decides the identifier
+                                       chosen above them
   create result 0xe2                   no room above what the guest took - the
                                        four guest numbers say whether that is the
                                        guest being greedy or the allocation being

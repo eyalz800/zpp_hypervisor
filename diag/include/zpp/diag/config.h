@@ -302,6 +302,89 @@ inline constexpr bool rebuild_channel_after_reset = false;
 inline constexpr bool create_channel_queue_after_guest = false;
 
 /**
+ * Whether to reduce what the guest is told it was granted, so that one
+ * submission queue identifier is left over for the channel.
+ *
+ * **This is the piece that makes create_channel_queue_after_guest able to
+ * succeed at all on the development machine, and it is needed because of
+ * a measurement rather than because of a design.** Measured on the rig
+ * with the reservation on: asking for the maximum is granted DW0 =
+ * 0x000f000f - sixteen submission and sixteen completion queues, both
+ * halves zero's based - and that is everything the controller has. The
+ * guest, read off its own admin submission queue, asks for sixteen
+ * submission and eight completion queues and then creates submission
+ * queues 1 to 16 and completion queues 1 to 8. So there are eight spare
+ * completion identifiers and **no spare submission identifier at all**,
+ * and reserving a larger allocation cannot manufacture one, because the
+ * guest wants the whole of it.
+ *
+ * The one remaining lever is what the guest *believes*. NVMe Base
+ * 5.2.30.1.5 freezes the allocation at the first Set Features (Number of
+ * Queues) completed after a controller level reset; ours is that one, so
+ * the controller's allocation is sixteen and cannot change. The guest's
+ * own Set Features arrives second and is answered with the same
+ * allocation - and both drivers clamp their creates to
+ * `min(their request, what they were told)`: Linux in
+ * `nvme_set_queue_count`, `nr_io_queues = min(result & 0xffff, result >>
+ * 16) + 1` followed by `*count = min(*count, nr_io_queues)`, and Windows'
+ * stornvme to NSQA+1 and NCQA+1. Telling the guest one less than the
+ * controller granted therefore leaves exactly one identifier that is
+ * valid for us and unreachable for it.
+ *
+ * **How the answer is edited, and why it needs no lap.** The completion
+ * is a DMA write by the controller, so there is no VM exit for it. What
+ * there *is* an exit for is the guest's admin submission doorbell, which
+ * is already watched. The processor that rang it is held inside that
+ * exit, so it has not yet looked at its completion queue - and the
+ * completion for its own command lands in its own queue at its own slot
+ * with its own phase, posted by the controller for a command the guest
+ * itself submitted. Nothing has to be injected, no doorbell is rung, and
+ * the controller's completion queue tail is not disturbed: four bytes of
+ * DW0 are rewritten in place, in an entry the controller has finished
+ * writing and will never read back (Base 2.0 3.3.1.2, the tail "is only
+ * used internally by the controller and is not visible to the host").
+ *
+ * **Substitution was considered and rejected**, and it was the shape
+ * NVME-LOG.md favoured, so the reason matters. It would put a command of
+ * ours into the guest's submission slot before the doorbell landed and
+ * then rewrite both the command identifier and DW0 of the resulting
+ * completion. Two things kill it. The watch calls its handler *after*
+ * the store has been applied - see page_watch::handler, "called after the
+ * write has taken effect" - so the doorbell has already rung by the time
+ * anything of ours runs, and deferring it is new machinery on the one
+ * path that must not be wrong. And a substituted command puts a
+ * completion carrying *our* identifier into the guest's queue for a
+ * window, which is strictly worse than the guest's own identifier under
+ * the unmasked interrupt below: an unrecognised command identifier handed
+ * to a closed source boot disk miniport is the risk this whole design
+ * avoids everywhere else.
+ *
+ * **What the unmasked admin interrupt can do here, stated exactly,
+ * because it is different from what it can do to a lap.** Vector 0 is
+ * still not masked - there is no MSI-X table access on the resident side
+ * - so a guest interrupt service routine on another processor could read
+ * that completion between the controller posting it and this rewriting
+ * it. The entry it would find is the guest's own, with the guest's own
+ * command identifier and the controller's own status; the only thing
+ * wrong with it is that DW0 says sixteen rather than fifteen. So the
+ * failure mode of losing that race is **no channel** - the guest creates
+ * sixteen submission queues, create_channel_queue finds no room and
+ * refuses, and the guest boots. That is the same outcome as the switch
+ * being off. The lap in create_channel_queue_after_guest has the real
+ * exposure and still carries the argument written there.
+ *
+ * Only the half that has no spare is reduced. On this machine that is the
+ * submission half alone: the guest asks for eight completion queues
+ * against an allocation of sixteen, so NCQA is left exactly as the
+ * controller wrote it and the guest's completion queue arrangement is
+ * untouched.
+ *
+ * Off by default. Turning it on changes what a live driver is told about
+ * its own controller, which is the most invasive thing in this file.
+ */
+inline constexpr bool reduce_guest_queue_grant = false;
+
+/**
  * Whether to watch the controller's doorbell page and record what the
  * guest's driver submits on its admin queue.
  *
@@ -801,6 +884,13 @@ static_assert(enabled || !any_sink(),
 static_assert(static_cast<std::uint8_t>(category::count) <=
                   (8 * sizeof(category_mask)),
               "more categories than the mask can hold");
+static_assert(!reduce_guest_queue_grant || rebuild_channel_after_reset,
+              "reducing the grant needs the reservation that establishes "
+              "the allocation, and the doorbell watch it arms");
+static_assert(!create_channel_queue_after_guest ||
+                  rebuild_channel_after_reset,
+              "creating a queue needs the allocation the reservation "
+              "spends");
 /**
  * @}
  */

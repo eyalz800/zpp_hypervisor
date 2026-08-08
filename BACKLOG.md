@@ -2382,9 +2382,16 @@ edge, borrow the guest's admin queue once and issue a single
 `Set Features (Number of Queues)` asking for the maximum. Create nothing. The
 guest's own Set Features arrives later with still no I/O queue in existence,
 so it completes and reports the allocation reserved here - which is at least
-what it asked for. **No completion patch exists and none should be built**:
-the patch scheme earlier in NVME-LOG.md is what this ordering replaces, and
-conflating the two is a mistake already made once.
+what it asked for.
+
+**Corrected by measurement: a completion patch is needed after all, and it
+is now built.** The claim that the ordering made one obsolete assumed the
+reservation could exceed what the guest wants. It cannot on this controller.
+Measured with the reservation on: the grant is DW0 = `0x000f000f`, sixteen
+submission and sixteen completion queues, which is everything it has - and
+the guest asks for sixteen submission queues and creates all sixteen. So
+there are eight spare completion identifiers and no spare submission
+identifier at any allocation. See below.
 
 **`diag::create_channel_queue_after_guest`, steps 4 and 5.** Create our own
 pair once the guest has created its own, at an identifier above them.
@@ -2426,6 +2433,46 @@ rather than one:
   is an exit per disk command, which would confound the very run it is there
   to support.
 
+## Reducing the grant, so that there is an identifier to create at
+
+`diag::reduce_guest_queue_grant`, off, and it needs
+`rebuild_channel_after_reset` - a `static_assert` says so. Written because
+of the measurement above: the controller has no spare submission queue at
+any allocation, so the only remaining lever is what the guest *believes* it
+was granted.
+
+`hypervisor::patch_guest_queue_grant` runs from the guest's own admin
+doorbell exit, finds the completion for the command identifier the guest put
+on its Set Features, and rewrites four bytes of DW0 - NSQA fifteen instead
+of sixteen. Nothing is submitted, no doorbell is rung, no lap runs, and the
+controller's completion queue tail is not disturbed: the completion is the
+guest's own, at its own slot with its own phase, and only DW0 is a lie.
+`create_channel_queue` then finds submission queue sixteen free and inside
+the allocation.
+
+### What was rejected, and why
+
+- **Substitution**, which is the shape NVME-LOG.md recommended: put a
+  command of ours into the guest's submission slot while the doorbell is
+  held, and rewrite the resulting completion's identifier as well as DW0.
+  Rejected twice over. The premise is false - `page_watch::handler` is
+  called *after* the store has been applied, so the doorbell has already
+  rung and nothing here ever runs with it pending; making that untrue means
+  deferring a store the watch currently applies, on the one path that must
+  not be wrong. And it would put a completion carrying one of *our*
+  identifiers into the guest's admin queue for a window, which is the exact
+  exposure this design avoids everywhere else.
+- **Reducing both halves unconditionally.** A half is reduced only where the
+  guest's own request leaves nothing above it. On this machine that is the
+  submission half alone, so the guest's completion queue arrangement is
+  passed through byte for byte and one fewer thing changes.
+- **Believing the entry on its command identifier alone.** The edited entry
+  must also carry a DW0 equal to the allocation our own reservation was
+  granted - which 5.2.30.1.5 guarantees, ours being the first Set Features
+  after the reset. That is both the discriminator against a reused
+  identifier and a test of the ordering argument; a disagreement is recorded
+  as `0xe8` and nothing is edited.
+
 ### What is unsolved, stated rather than hidden
 
 The admin queue's interrupt is not masked for the borrow. NVME-LOG.md
@@ -2436,6 +2483,24 @@ interrupts disabled, so it stays pending in its local APIC and is delivered
 after the restore, finding the guest's own completions and nothing else. If
 the guest misbehaves *after* a successful create rather than during it, this
 is the first thing to look at.
+
+**The grant reduction does not add to that exposure, and the reason is worth
+keeping.** Losing that race there means a guest interrupt service routine
+reads the completion before it is edited - and what it finds is the guest's
+own entry, with the guest's own identifier and the controller's own status,
+saying sixteen rather than fifteen. The guest then creates sixteen
+submission queues, the create finds no room and refuses, and the guest
+boots. The failure mode is *no channel*, which is what the switch being off
+already gives.
+
+If the mask is ever built, the cheapest form is probably the **function
+mask** in the device's MSI-X Message Control register, which lives in PCI
+configuration space rather than in the table BAR - so it needs no second BAR
+sized, mapped and validated, only the controller's bus, device and function
+handed across by the loader and a configuration space access mechanism the
+resident side does not have. The bit's position and the semantics of masking
+a pending vector are recalled rather than looked up; check both before
+writing any of it.
 
 The wake probe is used again, in both borrows. That is only safe because
 `1e8791f` made `on_host_exception` return for vector 2; before it, a probe
@@ -2455,6 +2520,17 @@ the constructor's stores for the new instrumentation fields, which are
 is already zero. That is the same trade `configure_reject` documents: a field
 whose only reader is a debugger measures nothing unless it is volatile.
 `.bss`, `.data` and `.rodata` are unchanged in size.
+
+It moved again for the grant reduction, and the second cause is the one that
+would have wasted an afternoon. Nine instructions in the constructor, for
+the same reason as before - and forty bytes in `.data.rel.ro`, every one of
+them a **line number**. `zpp::hypervisor::log` takes a defaulted
+`std::source_location`, so each call site carries a 24 byte
+`{line, column, file, function}` record, and each below an insertion point
+shifts by exactly the lines added - twenty three of them, comments included.
+Comparing the two disassemblies mnemonic by mnemonic showed nine added
+instructions and nothing else, which is the check to run rather than reading
+the hash and guessing.
 
 ### Hyper-V probes VMX and declines, and the rig is why
 
