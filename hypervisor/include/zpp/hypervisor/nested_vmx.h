@@ -170,7 +170,35 @@ constexpr std::uint64_t supported_primary_controls =
     (1ull << 16) | // CR3-store exiting.
     (1ull << 19) | // CR8-load exiting.
     (1ull << 20) | // CR8-store exiting.
-    (1ull << 21) | // Use TPR shadow.
+                   //
+                   // The pair above is what a guest hypervisor is given
+                   // *instead* of the TPR shadow, and that is deliberate.
+                   //
+                   // Bit 21, use TPR shadow, was offered briefly and
+                   // withdrawn: advertising it deterministically stalled
+                   // the guest's own application-processor start-up, with
+                   // seven processors left in the firmware's wait loop and
+                   // the boot processor spinning for them. Measured twice,
+                   // and `build_vmcs02` never ran in either - so it was
+                   // the advertisement alone, not the honouring of it.
+                   // BACKLOG.md records the debugger session.
+                   //
+                   // Withholding it is sound rather than merely expedient.
+                   // SDM 27.6.8 makes CR8-load and CR8-store exiting the
+                   // architectural alternative: with both set the
+                   // processor never consults a virtual-APIC page, so a
+                   // guest hypervisor that wants to see its guest's task
+                   // priority has a way that costs this VMM nothing but
+                   // reflected exits, which `l1_wants_l2_exit` already
+                   // answers. KVM's own fallback in
+                   // nested_get_vmcs12_pages does the same substitution
+                   // when it cannot map the page.
+                   //
+                   // The code that honours the TPR shadow is kept and is
+                   // dormant: nothing sets a control that is not offered.
+                   // It becomes live the moment this bit returns, which
+                   // should not happen until the start-up stall is
+                   // understood.
     (1ull << 22) | // NMI-window exiting.
     (1ull << 23) | // MOV-DR exiting.
     (1ull << 24) | // Unconditional I/O exiting.
