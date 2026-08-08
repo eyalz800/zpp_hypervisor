@@ -2892,3 +2892,48 @@ Two things fall out of the table that are not gaps today and would be:
   noticing because it is the shape the rest should keep: an exit control
   that saves state for a control that is not offered would be a promise
   about a field nothing writes.
+
+### Advertising the TPR shadow moves the failure later rather than fixing it
+
+Measured, and it is the reason the nested switch must not be treated as
+close to working.
+
+`465ae43` advertises primary bit 21 and honours it in `build_vmcs02`. With
+`ZPP_NESTED_VMX=ON` and the shipped narrowed set otherwise, the guest boots
+to the kernel on **processor zero only**, which then spins inside a twenty
+byte range, while the other seven sit parked at one low address and never
+enter the kernel. It reproduces identically across boots, at different
+kernel base addresses, so it is deterministic and not a flaky boot.
+
+Reverting just the two source files that commit touched, and rebuilding the
+same nested configuration, boots all eight processors into the kernel with
+one in user mode. So the commit causes it.
+
+**But not through the code it added.** `vmcs12_controls_captured` reads 0 in
+the failing run, so `build_vmcs02` never ran: no address was validated, no
+CR8 exiting was forced, no vmcs02 was built. `supported_primary_controls`
+feeds exactly one place, the capability MSR. The only thing that reached
+the guest was a different value in `IA32_VMX_PROCBASED_CTLS`.
+
+So the guest hypervisor reads bit 21, gets *further* into its own start-up
+than it did before, and wedges there instead of standing down cleanly. Put
+beside the other two measurements it is a progression, not a contradiction:
+
+    shipped set          declines, never enters VMX operation, Windows boots
+    plus bit 21          gets further, and the guest wedges before its
+                         application processors start
+    whole set widened    engages, seventeen L2 entries, then a boot loop
+
+Which says bit 21 is **necessary and not sufficient**, and that the earlier
+reading of "primary alone did not engage, so the TPR shadow is not the
+gate" was too strong: not engaging and not getting further are different
+outcomes, and only the first was checked.
+
+The commit is kept rather than reverted, because with the switch off it is
+inert - the switch-off release binary hashes identically to the recorded
+baseline, verified independently. What is not safe is the switch itself: it
+now has a known deterministic regression under it, and that has to be
+understood before the switch is used for anything else. The next thing to
+measure is `nested_capability_reads` in the failing run against the
+shipped run - a higher count is direct evidence of "got further" rather
+than an inference from where the processors ended up.
