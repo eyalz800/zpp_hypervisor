@@ -2892,9 +2892,32 @@ hypervisor::translate_guest_linear(std::uint64_t linear)
     return {};
 }
 
+arch::x86_64::code_size hypervisor::guest_code_size()
+{
+    // SDM Table 27-2, "Format of Access Rights": bit 13 is "L - 64-bit
+    // mode active (for CS only)" and bit 14 is "D/B - Default operation
+    // size (0 = 16-bit segment; 1 = 32-bit segment)".
+    constexpr std::uint64_t long_mode_code = 1ull << 13;
+    constexpr std::uint64_t default_operation_size = 1ull << 14;
+
+    auto rights = this->vmcs.guest_cs_access_rights();
+
+    if (0 != (rights & long_mode_code)) {
+        return arch::x86_64::code_size::bits_64;
+    }
+
+    // Read from the segment and not from the paging mode. A guest in
+    // protected mode with paging on can still be executing a 16-bit code
+    // segment, and a processor this VMM has just started out of a start-up
+    // IPI is in real mode with these very bits clear.
+    return (0 != (rights & default_operation_size))
+               ? arch::x86_64::code_size::bits_32
+               : arch::x86_64::code_size::bits_16;
+}
+
 std::optional<arch::x86_64::decoded_instruction>
-hypervisor::decode_guest_instruction(
-    std::size_t cpu, arch::x86_64::context & context)
+hypervisor::decode_guest_instruction(std::size_t cpu,
+                                     arch::x86_64::context & context)
 {
     // The instruction is at the guest's RIP, which is a linear address
     // in the guest's own address space, so it takes the guest's page
@@ -2958,8 +2981,19 @@ hypervisor::decode_guest_instruction(
         }
     }
 
+    // The guest's own code segment decides what these bytes mean, and the
+    // decoder refuses anything that is not 32- or 64-bit code rather than
+    // reading it as long mode and reporting a length that is short. A
+    // refusal here costs the observation and nothing else: the caller
+    // falls back to stepping the guest's own instruction.
+    //
+    // Reachable, and not only through real mode. A real-mode guest is
+    // already excluded upstream, because translate_guest_linear walks
+    // 4-level paging only - but a *compatibility-mode* code segment under
+    // that same paging has L clear and D/B either way, and its
+    // instructions are fetched here perfectly happily.
     auto store = arch::x86_64::decode(
-        std::as_bytes(std::span{code}), context);
+        std::as_bytes(std::span{code}), context, guest_code_size());
 
     // Kept for the trace, so a failing emulation can be identified by its
     // opcode rather than by inference.

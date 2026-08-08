@@ -1181,6 +1181,22 @@ private:
                           std::uint64_t guest_physical);
 
     /**
+     * The size of the guest's current code segment, which decides what the
+     * bytes at its instruction pointer mean.
+     *
+     * From the CS access rights in the VMCS, whose format SDM Table 27-2
+     * gives: bit 13 is L, "64-bit mode active (for CS only)", and bit 14
+     * is D/B, "Default operation size (0 = 16-bit segment; 1 = 32-bit
+     * segment)". L wins, since a 64-bit code segment has D/B clear.
+     *
+     * Sixteen bits is a real answer here rather than a corner case. This
+     * VMM enables unrestricted guest and starts application processors in
+     * real mode, and `apply_start_up` writes those very access rights with
+     * `code_64_bit(false)` and `default_operation_size(false)`.
+     */
+    arch::x86_64::code_size guest_code_size();
+
+    /**
      * Decodes the store that caused the current EPT violation.
      *
      * Nothing if the instruction is not one the decoder handles, which

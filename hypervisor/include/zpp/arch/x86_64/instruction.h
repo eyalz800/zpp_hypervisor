@@ -44,6 +44,35 @@ namespace zpp::arch::x86_64
  */
 
 /**
+ * The size of the code the instruction was fetched from, which decides
+ * what its bytes mean.
+ *
+ * Not an optimisation and not diagnostic: the same bytes are different
+ * instructions in each of these. In sixteen-bit code the default operand
+ * size is two rather than four, so the 0x66 prefix means the *opposite* of
+ * what it means here; and `mod=00, rm=110` is a sixteen-bit displacement
+ * with no scale-index-base byte, so the instruction ends somewhere else.
+ * Measured on `66 89 06 00 03` - `mov [0x0300], ax`, five bytes - which a
+ * long-mode decoder reads as three, and a caller that trusted the answer
+ * would resume the guest two bytes into the middle of its own instruction.
+ *
+ * Taken from the guest's own code segment rather than assumed, because a
+ * processor coming out of a start-up IPI runs in real mode and this VMM
+ * enables unrestricted guest, so sixteen-bit guest code is not a
+ * hypothetical here.
+ */
+enum class code_size : std::uint8_t
+{
+    /**
+     * Real mode, virtual-8086 mode, or a protected-mode code segment with
+     * D/B clear. Refused rather than decoded - see `decode`.
+     */
+    bits_16,
+    bits_32,
+    bits_64,
+};
+
+/**
  * What an instruction does to the memory it touches.
  */
 enum class memory_operation : std::uint8_t
@@ -305,6 +334,16 @@ private:
 struct prefixes
 {
     bool operand_size{};
+
+    /**
+     * Whether 0x67 was present. Recorded rather than ignored, because what
+     * it does depends on the code size: in 64-bit code it selects 32-bit
+     * addressing, which leaves the ModRM and scale-index-base bytes
+     * exactly as they are, and in 32-bit code it selects *16-bit*
+     * addressing, which does not. Only the first is ignorable.
+     */
+    bool address_size{};
+
     std::uint8_t rex{};
 
     constexpr bool wide() const
@@ -320,16 +359,20 @@ struct prefixes
 
 constexpr bool is_ignorable_prefix(std::uint8_t byte)
 {
-    // Address size, the segment overrides, lock and the repeat prefixes.
-    // None of them changes the operand this decoder reports: an address
-    // is never computed here, and lock does not alter the value written.
-    return (0x67 == byte) || (0x2e == byte) || (0x36 == byte) ||
-           (0x3e == byte) || (0x26 == byte) || (0x64 == byte) ||
-           (0x65 == byte) || (0xf0 == byte) || (0xf2 == byte) ||
-           (0xf3 == byte);
+    // The segment overrides, lock and the repeat prefixes. None of them
+    // changes the operand this decoder reports or where the instruction
+    // ends: an address is never computed here, and lock does not alter the
+    // value written.
+    //
+    // The address-size prefix is deliberately *not* in this list any more.
+    // It is recorded instead, because whether it can be ignored depends on
+    // the code size - see `prefixes::address_size`.
+    return (0x2e == byte) || (0x36 == byte) || (0x3e == byte) ||
+           (0x26 == byte) || (0x64 == byte) || (0x65 == byte) ||
+           (0xf0 == byte) || (0xf2 == byte) || (0xf3 == byte);
 }
 
-constexpr prefixes read_prefixes(cursor & code)
+constexpr prefixes read_prefixes(cursor & code, code_size size)
 {
     prefixes found{};
 
@@ -342,6 +385,12 @@ constexpr prefixes read_prefixes(cursor & code)
             continue;
         }
 
+        if (0x67 == byte) {
+            found.address_size = true;
+            code.next();
+            continue;
+        }
+
         if (is_ignorable_prefix(byte)) {
             code.next();
             continue;
@@ -349,7 +398,16 @@ constexpr prefixes read_prefixes(cursor & code)
 
         // REX must be the last prefix before the opcode, so recording it
         // also ends the search.
-        if ((0x40 <= byte) && (byte <= 0x4f)) {
+        //
+        // Only in 64-bit code. Outside it, 0x40 to 0x4f are the one-byte
+        // INC and DEC forms and are opcodes, not prefixes - consuming one
+        // as a prefix would read the byte after it as the opcode and
+        // decode an unrelated instruction. Unreachable in practice, since
+        // a register INC touches no memory and so cannot fault a watched
+        // page, but "unreachable" is not a property of this function and
+        // this is a compile-time constant test.
+        if ((code_size::bits_64 == size) && (0x40 <= byte) &&
+            (byte <= 0x4f)) {
             found.rex = byte;
             code.next();
         }
@@ -539,15 +597,42 @@ constexpr std::uint64_t context::* register_of(std::uint8_t index)
  * caller the ability to *observe* the access, which is why the coverage
  * matters even though a refusal is never wrong.
  *
+ * Sixteen-bit code is refused outright rather than decoded. Every operand
+ * width and every instruction length below assumes a default operand size
+ * of four and long-mode addressing, and neither holds there - so the
+ * answer would not merely be incomplete, it would be wrong, and the caller
+ * would advance the guest's instruction pointer into the middle of an
+ * instruction. See `code_size` for the measurement.
+ *
  * @param code The instruction bytes, from the first prefix.
  * @param registers The guest's registers as of the faulting instruction.
+ * @param mode The size of the guest's current code segment. Passed in
+ *             rather than assumed, because there is nothing in the bytes
+ *             that says which it is.
  */
 constexpr std::optional<decoded_instruction>
-decode(std::span<const std::byte> code, const context & registers)
+decode(std::span<const std::byte> code,
+       const context & registers,
+       code_size mode)
 {
+    if (code_size::bits_16 == mode) {
+        return {};
+    }
+
     instruction_detail::cursor at{code};
 
-    auto found = instruction_detail::read_prefixes(at);
+    auto found = instruction_detail::read_prefixes(at, mode);
+
+    // An address-size prefix on 32-bit code selects 16-bit addressing, and
+    // then `mod=00, rm=110` is a 16-bit displacement and there is no
+    // scale-index-base byte at all - so every length below is wrong by two
+    // or by four. Refused for the same reason 16-bit code is. In 64-bit
+    // code the prefix selects 32-bit addressing, which changes nothing
+    // this decoder looks at, and is ignored as it always was.
+    if (found.address_size && (code_size::bits_32 == mode)) {
+        return {};
+    }
+
     auto opcode = at.next();
 
     // The two-byte escape, which carries the bit operations and the

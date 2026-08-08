@@ -26,7 +26,7 @@ constexpr context registers_for_test()
 }
 
 template <std::size_t Size>
-constexpr auto run(const std::uint8_t (&bytes)[Size])
+constexpr auto run_in(const std::uint8_t (&bytes)[Size], code_size mode)
 {
     std::byte code[Size]{};
     for (std::size_t i{}; i < Size; ++i) {
@@ -34,7 +34,16 @@ constexpr auto run(const std::uint8_t (&bytes)[Size])
     }
 
     return decode(std::span<const std::byte>{code, Size},
-                  registers_for_test());
+                  registers_for_test(),
+                  mode);
+}
+
+// The default for every case below, so the existing bodies read unchanged.
+// The code size cases state theirs explicitly.
+template <std::size_t Size>
+constexpr auto run(const std::uint8_t (&bytes)[Size])
+{
+    return run_in(bytes, code_size::bits_64);
 }
 
 // --- plain stores, which the narrow decoder also handled ---------------
@@ -272,6 +281,56 @@ static_assert(!run(truncated_modrm).has_value());
 // an opcode outside the set
 constexpr std::uint8_t unknown[] = {0x0f, 0x05};
 static_assert(!run(unknown).has_value());
+
+// --- the code size, which decides what the same bytes mean --------------
+
+// mov [0x0300], ax -- 66 89 06 00 03, five bytes in 16-bit code. There the
+// 0x66 prefix selects a 32-bit operand rather than a 16-bit one, and
+// mod=00, rm=110 is a 16-bit displacement with no scale-index-base byte.
+// A long-mode reading calls it three bytes and a 32-bit store, so a caller
+// that trusted it would resume two bytes inside the instruction. Refused.
+constexpr std::uint8_t sixteen_bit_store[] = {
+    0x66, 0x89, 0x06, 0x00, 0x03};
+static_assert(!run_in(sixteen_bit_store, code_size::bits_16).has_value());
+
+// The same bytes are decodable in the two sizes that are answered, and the
+// wrong length is exactly the one recorded above - which is what makes
+// refusing 16-bit code the fix rather than a caution.
+static_assert(run_in(sixteen_bit_store, code_size::bits_64)->length == 3);
+static_assert(run_in(sixteen_bit_store, code_size::bits_64)->size == 2);
+
+// Nothing at all is decoded in 16-bit code, not merely the ambiguous
+// forms.
+static_assert(!run_in(store_dword, code_size::bits_16).has_value());
+static_assert(!run_in(load_dword, code_size::bits_16).has_value());
+static_assert(!run_in(bit_set, code_size::bits_16).has_value());
+
+// --- 32-bit code, which is answered ------------------------------------
+
+// mov [ecx], edx. The default operand size is four in a D/B code segment,
+// same as long mode without REX.W, and the addressing bytes have the same
+// shape - so the answer is identical.
+static_assert(run_in(store_dword, code_size::bits_32)->size == 4);
+static_assert(run_in(store_dword, code_size::bits_32)->length == 2);
+
+// mov word [ecx], dx -- 0x66 narrows in 32-bit code just as it does here.
+static_assert(run_in(store_word, code_size::bits_32)->size == 2);
+static_assert(run_in(store_word, code_size::bits_32)->operand == 0xbeef);
+
+// 0x40 to 0x4f are INC and DEC opcodes outside 64-bit code, not REX. Read
+// as a prefix, the byte after one becomes the opcode and an unrelated
+// instruction comes out; `48 89 11` is `mov [rcx], rdx` in long mode and
+// `dec eax` in 32-bit code, which touches no memory.
+static_assert(run_in(store_qword, code_size::bits_64)->size == 8);
+static_assert(!run_in(store_qword, code_size::bits_32).has_value());
+
+// An address-size prefix selects 16-bit addressing in 32-bit code, which
+// changes the addressing bytes and therefore every length. Refused there,
+// and ignored in 64-bit code where it selects 32-bit addressing and
+// changes nothing this decoder reads.
+constexpr std::uint8_t address_size_store[] = {0x67, 0x89, 0x11};
+static_assert(run_in(address_size_store, code_size::bits_64)->length == 3);
+static_assert(!run_in(address_size_store, code_size::bits_32).has_value());
 
 // A decoded length never exceeds the bytes it was given, for every form.
 static_assert(run(store_dword)->length <= sizeof(store_dword));
