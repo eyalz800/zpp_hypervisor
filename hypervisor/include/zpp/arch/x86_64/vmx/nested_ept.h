@@ -477,4 +477,218 @@ constexpr ept_walk_result walk_ept(std::uint64_t table_physical_address,
     return result;
 }
 
+/**
+ * What composing two walks of two levels of extended page tables produced,
+ * and therefore who owns the fault that provoked it.
+ */
+enum class ept_compose_outcome
+{
+    /**
+     * Both walks succeeded and the composition is a mapping the shadow can
+     * hold.
+     */
+    composed,
+
+    /**
+     * The guest hypervisor's own tables do not map the address. Its guest
+     * would have taken an EPT violation on real hardware, so the exit is
+     * reflected to it.
+     */
+    reflect_violation,
+
+    /**
+     * The guest hypervisor's own tables hold a value the processor
+     * rejects. Reflected as an EPT misconfiguration for the same reason.
+     */
+    reflect_misconfiguration,
+
+    /**
+     * This VMM's own tables are what denied the access - the module, a
+     * watched page, or an address past the identity map. Never shown to
+     * the guest hypervisor, whose tables are innocent and whose view of
+     * its own guest would be wrong if it were told otherwise.
+     */
+    host_denied,
+};
+
+/**
+ * The composition of one guest-physical address through both levels.
+ */
+struct ept_composition
+{
+    ept_compose_outcome outcome{ept_compose_outcome::host_denied};
+
+    /**
+     * The permissions to install: the intersection of both walks, with any
+     * combination the processor rejects removed.
+     */
+    ept_permissions permissions{};
+
+    /**
+     * The host physical address the composition resolves to, offset
+     * included.
+     */
+    std::uint64_t physical_address{};
+
+    /**
+     * The larger page the two walks agree on, as a shift. A leaf may be
+     * installed at this size and no larger: a 2 MB mapping in the guest
+     * hypervisor's tables over a 4 KB entry of ours has to be split, or
+     * the shadow would grant the whole 2 MB the permissions of one page.
+     */
+    std::uint64_t page_shift{};
+
+    /**
+     * The memory type, taken from *our* walk.
+     *
+     * A known and deliberate divergence, recorded in BACKLOG.md rather
+     * than hidden: the type describes a physical page, and which type a
+     * physical page needs is settled by the memory-type range registers,
+     * which this VMM's own tables are derived from. A guest hypervisor's
+     * choice for its own guest is a policy about memory whose physical
+     * layout it does not own. So an L1 that maps a page uncacheable gets
+     * our derivation instead.
+     */
+    memory_type type{};
+};
+
+/**
+ * Composes a walk of the guest hypervisor's extended page tables with a
+ * walk of this VMM's own.
+ *
+ * The first walk translates a second-level guest-physical address to a
+ * first-level one; the second translates that to a host physical address.
+ * Composing them is what a shadow extended page table holds, and doing it
+ * here - on two results, with no memory access of its own - is what makes
+ * the rules testable.
+ */
+constexpr ept_composition compose_ept(const ept_walk_result & guest,
+                                      const ept_walk_result & host,
+                                      bool execute_only_supported)
+{
+    ept_composition composition;
+
+    // The guest hypervisor's tables first, because a fault they explain is
+    // one this VMM must not absorb. Order matters: an address its tables
+    // do not map is its business even if ours would also have refused it.
+    switch (guest.status) {
+    case ept_walk_status::misconfigured:
+        composition.outcome =
+            ept_compose_outcome::reflect_misconfiguration;
+        return composition;
+    case ept_walk_status::not_present:
+    case ept_walk_status::address_out_of_range:
+        composition.outcome = ept_compose_outcome::reflect_violation;
+        return composition;
+    case ept_walk_status::mapped:
+        break;
+    }
+
+    // Ours second. A misconfiguration here is a bug in this VMM rather
+    // than anything the guest did, and it is reported as ours so that a
+    // caller can stop rather than hand the guest hypervisor a fault it
+    // cannot explain.
+    if (ept_walk_status::mapped != host.status) {
+        composition.outcome = ept_compose_outcome::host_denied;
+        return composition;
+    }
+
+    auto permissions = guest.permissions.intersected_with(host.permissions)
+                           .normalised(execute_only_supported);
+
+    // An empty intersection is attributed to us rather than reflected, and
+    // that is the conservative direction on purpose. Reaching here means
+    // the guest hypervisor's tables *do* map the address - its walk
+    // succeeded - so telling it that its own tables denied the access
+    // would be false. What is left is either our protection, which is ours
+    // to handle, or two permission sets that overlap in nothing, which is
+    // also not something the guest hypervisor can act on.
+    if (!permissions.present()) {
+        composition.outcome = ept_compose_outcome::host_denied;
+        return composition;
+    }
+
+    composition.outcome = ept_compose_outcome::composed;
+    composition.permissions = permissions;
+    composition.physical_address = host.physical_address;
+    composition.page_shift = (guest.page_shift < host.page_shift)
+                                 ? guest.page_shift
+                                 : host.page_shift;
+    composition.type = host.type;
+
+    return composition;
+}
+
+/**
+ * The exit qualification to give the guest hypervisor for a reflected EPT
+ * violation.
+ *
+ * **It has to be synthesised rather than forwarded, and forwarding it is a
+ * subtle lie.** SDM Table 30-7 defines bits 3, 4, 5 and 6 as "the
+ * logical-AND of bit 0 / bit 1 / bit 2 / bit 10 in the EPT
+ * paging-structure entries used to translate the guest-physical address" -
+ * and the entries hardware used were the *shadow's*, which hold the
+ * intersection of both levels. Passing them on would tell a guest
+ * hypervisor that its own tables refused an access they permit, and it
+ * would then go looking for a bug in them.
+ *
+ * So those four come from the walk of its tables alone. Note 2 to the same
+ * table gives the case where they are not permissions at all: bits 5:3 are
+ * "cleared to 0" if any entry used "is not present" or if "4-level EPT is
+ * in use and the guest-physical address sets any bits in the range 51:48".
+ * Note 3 says the same of bit 6, separately and only when mode-based
+ * execute control is 1. Both fall out of the walk having already cleared
+ * its accumulated permissions in those two cases.
+ *
+ * Everything describing the *access* rather than the tables is kept as
+ * hardware reported it: bits 2:0, the access type; bit 7, whether the
+ * guest linear address is valid, and bit 8, whether the access was to a
+ * paging-structure entry; bit 12, NMI unblocking due to IRET; bit 13, a
+ * shadow-stack access; and bit 16, an access asynchronous to instruction
+ * execution.
+ *
+ * Everything else is cleared rather than forwarded, because every one of
+ * them is a capability this VMM does not report and whose value the SDM
+ * therefore leaves undefined: bits 11:9 need "advanced VM-exit information
+ * for EPT violations", which Note 4 makes an IA32_VMX_EPT_VPID_CAP bit;
+ * bit 14 needs supervisor shadow-stack control enabled through the EPT
+ * pointer; bit 15 needs guest-paging verification. Forwarding an undefined
+ * bit is how a guest comes to depend on one.
+ */
+constexpr std::uint64_t
+reflected_ept_violation_qualification(std::uint64_t hardware_qualification,
+                                      const ept_walk_result & guest,
+                                      bool mode_based_execute_control)
+{
+    // What describes the access, and is therefore hardware's to report.
+    constexpr std::uint64_t about_the_access =
+        (1ull << 0) | (1ull << 1) | (1ull << 2) | (1ull << 7) |
+        (1ull << 8) | (1ull << 12) | (1ull << 13) | (1ull << 16);
+
+    auto qualification = hardware_qualification & about_the_access;
+
+    if (guest.permissions.read()) {
+        qualification |= (1ull << 3);
+    }
+
+    if (guest.permissions.write()) {
+        qualification |= (1ull << 4);
+    }
+
+    if (guest.permissions.execute()) {
+        qualification |= (1ull << 5);
+    }
+
+    // Bit 6 exists only with mode-based execute control. Table 30-7: "If
+    // the 'mode-based execute control' VM-execution control is 0, the
+    // value of this bit is undefined." Left clear in that case rather than
+    // filled in with the user-execute permission, so nothing can come to
+    // rely on it.
+    if (mode_based_execute_control && guest.permissions.execute_user()) {
+        qualification |= (1ull << 6);
+    }
+
+    return qualification;
+}
+
 } // namespace zpp::arch::x86_64::vmx

@@ -394,6 +394,284 @@ constexpr tree absent_with_reserved_bit = [] {
 static_assert(walk(absent_with_reserved_bit).status ==
               ept_walk_status::not_present);
 
+// ---------------------------------------------------------------------------
+// compose_ept: who owns the fault, and what gets installed.
+// ---------------------------------------------------------------------------
+
+constexpr ept_walk_result
+mapped_at(std::uint64_t physical,
+          std::uint64_t shift,
+          ept_permissions permissions,
+          memory_type type = memory_type::write_back)
+{
+    ept_walk_result result;
+    result.status = ept_walk_status::mapped;
+    result.physical_address = physical;
+    result.page_shift = shift;
+    result.permissions = permissions;
+    result.type = type;
+    return result;
+}
+
+constexpr ept_walk_result failed_with(ept_walk_status status)
+{
+    ept_walk_result result;
+    result.status = status;
+    result.permissions = ept_permissions();
+    return result;
+}
+
+constexpr auto host_rwx_2mb =
+    mapped_at(0x40000000, 21, rwx, memory_type::write_back);
+
+// The ordinary case: both sides map it, both grant everything.
+constexpr auto plain =
+    compose_ept(mapped_at(0x8000, 12, rwx), host_rwx_2mb, false);
+static_assert(plain.outcome == ept_compose_outcome::composed);
+static_assert(plain.permissions == rwx);
+static_assert(plain.physical_address == 0x40000000);
+
+// The page size is the *smaller* of the two. A 2 MB mapping on our side
+// under a 4 KB one of L1's must not become a 2 MB shadow leaf, or the
+// shadow grants a whole 2 MB the permissions of one page.
+static_assert(plain.page_shift == 12);
+static_assert(compose_ept(mapped_at(0, 21, rwx), host_rwx_2mb, false)
+                  .page_shift == 21);
+static_assert(compose_ept(mapped_at(0, 30, rwx), host_rwx_2mb, false)
+                  .page_shift == 21);
+
+// The memory type is ours, never L1's - the recorded divergence.
+static_assert(compose_ept(mapped_at(0, 12, rwx, memory_type::uncachable),
+                          mapped_at(0, 21, rwx, memory_type::write_back),
+                          false)
+                  .type == memory_type::write_back);
+
+// Permissions intersect. A page we watch - write removed on our side -
+// stays installable as read-only rather than becoming L1's business.
+constexpr auto watched =
+    compose_ept(mapped_at(0, 12, rwx),
+                mapped_at(0, 21, ept_permissions(true, false, true, true)),
+                false);
+static_assert(watched.outcome == ept_compose_outcome::composed);
+static_assert(!watched.permissions.write());
+static_assert(watched.permissions.read());
+
+// A gap in L1's tables is L1's to hear about, and the two ways of having
+// one produce the same answer.
+static_assert(compose_ept(failed_with(ept_walk_status::not_present),
+                          host_rwx_2mb,
+                          false)
+                  .outcome == ept_compose_outcome::reflect_violation);
+static_assert(
+    compose_ept(failed_with(ept_walk_status::address_out_of_range),
+                host_rwx_2mb,
+                false)
+        .outcome == ept_compose_outcome::reflect_violation);
+
+// A misconfiguration in L1's tables is reflected as one, not as a
+// violation.
+static_assert(compose_ept(failed_with(ept_walk_status::misconfigured),
+                          host_rwx_2mb,
+                          false)
+                  .outcome ==
+              ept_compose_outcome::reflect_misconfiguration);
+
+// L1's tables are consulted first, so a fault they explain is theirs even
+// where ours would also have refused. Getting this order wrong absorbs a
+// fault L1 is waiting for.
+static_assert(compose_ept(failed_with(ept_walk_status::not_present),
+                          failed_with(ept_walk_status::not_present),
+                          false)
+                  .outcome == ept_compose_outcome::reflect_violation);
+
+// Our own gap, with L1's tables fine, is ours.
+static_assert(compose_ept(mapped_at(0, 12, rwx),
+                          failed_with(ept_walk_status::not_present),
+                          false)
+                  .outcome == ept_compose_outcome::host_denied);
+static_assert(compose_ept(mapped_at(0, 12, rwx),
+                          failed_with(ept_walk_status::misconfigured),
+                          false)
+                  .outcome == ept_compose_outcome::host_denied);
+
+// A module page - everything cleared on our side - is ours, and is never
+// reflected. L1's tables map it perfectly well and it must not be told
+// otherwise.
+static_assert(compose_ept(mapped_at(0, 12, rwx),
+                          mapped_at(0, 21, nothing),
+                          false)
+                  .outcome == ept_compose_outcome::host_denied);
+
+// Two permission sets overlapping in nothing is also ours, for the same
+// reason: L1's walk succeeded, so saying its tables refused would be
+// false.
+static_assert(compose_ept(mapped_at(0, 12, read_only),
+                          mapped_at(0, 21, execute_no_read),
+                          true)
+                  .outcome == ept_compose_outcome::host_denied);
+
+// And whatever is composed is always something the processor accepts,
+// which is normalisation applied after the intersection rather than
+// before.
+constexpr bool composition_always_legal()
+{
+    for (int i = 1; i < 16; ++i) {
+        for (int j = 1; j < 16; ++j) {
+            auto left = ept_permissions(
+                0 != (i & 1), 0 != (i & 2), 0 != (i & 4), 0 != (i & 8));
+            auto right = ept_permissions(
+                0 != (j & 1), 0 != (j & 2), 0 != (j & 4), 0 != (j & 8));
+
+            for (auto execute_only : {false, true}) {
+                auto composed = compose_ept(mapped_at(0, 12, left),
+                                            mapped_at(0, 21, right),
+                                            execute_only);
+
+                if (ept_compose_outcome::composed != composed.outcome) {
+                    continue;
+                }
+
+                auto permissions = composed.permissions;
+
+                if (permissions.read()) {
+                    continue;
+                }
+
+                if (permissions.write()) {
+                    return false;
+                }
+
+                if (!execute_only && (permissions.execute() ||
+                                      permissions.execute_user())) {
+                    return false;
+                }
+            }
+        }
+    }
+    return true;
+}
+
+static_assert(composition_always_legal());
+
+// A composition never grants what either side withheld - the property that
+// makes the shadow safe rather than merely plausible.
+constexpr bool composition_never_widens()
+{
+    for (int i = 1; i < 16; ++i) {
+        for (int j = 1; j < 16; ++j) {
+            auto left = ept_permissions(
+                0 != (i & 1), 0 != (i & 2), 0 != (i & 4), 0 != (i & 8));
+            auto right = ept_permissions(
+                0 != (j & 1), 0 != (j & 2), 0 != (j & 4), 0 != (j & 8));
+
+            for (auto execute_only : {false, true}) {
+                auto composed = compose_ept(mapped_at(0, 12, left),
+                                            mapped_at(0, 21, right),
+                                            execute_only);
+
+                if (ept_compose_outcome::composed != composed.outcome) {
+                    continue;
+                }
+
+                auto got = composed.permissions;
+
+                if (got.read() && !(left.read() && right.read())) {
+                    return false;
+                }
+                if (got.write() && !(left.write() && right.write())) {
+                    return false;
+                }
+                if (got.execute() &&
+                    !(left.execute() && right.execute())) {
+                    return false;
+                }
+                if (got.execute_user() &&
+                    !(left.execute_user() && right.execute_user())) {
+                    return false;
+                }
+            }
+        }
+    }
+    return true;
+}
+
+static_assert(composition_never_widens());
+
+// ---------------------------------------------------------------------------
+// The reflected exit qualification.
+// ---------------------------------------------------------------------------
+
+// Everything hardware reported about the *tables* must be replaced, and
+// everything it reported about the *access* kept. Start from a
+// qualification with every bit set, so anything not deliberately kept
+// shows up as dropped.
+constexpr std::uint64_t every_bit = ~std::uint64_t{};
+
+constexpr auto reflected_all_granted =
+    reflected_ept_violation_qualification(
+        every_bit, mapped_at(0, 12, rwx), true);
+
+// The access bits survive: 2:0 access type, 7 linear address valid, 8
+// translation of a linear address, 12 NMI unblocking, 13 shadow stack, 16
+// asynchronous.
+static_assert(0 != (reflected_all_granted & 0x7));
+static_assert(0 != (reflected_all_granted & (1ull << 7)));
+static_assert(0 != (reflected_all_granted & (1ull << 8)));
+static_assert(0 != (reflected_all_granted & (1ull << 12)));
+static_assert(0 != (reflected_all_granted & (1ull << 13)));
+static_assert(0 != (reflected_all_granted & (1ull << 16)));
+
+// The permission bits are L1's, so with everything granted they are all
+// set.
+static_assert(0 != (reflected_all_granted & (1ull << 3)));
+static_assert(0 != (reflected_all_granted & (1ull << 4)));
+static_assert(0 != (reflected_all_granted & (1ull << 5)));
+static_assert(0 != (reflected_all_granted & (1ull << 6)));
+
+// The bits belonging to capabilities this VMM does not report are cleared
+// rather than forwarded, even though hardware had them set: 11:9 advanced
+// VM-exit information, 14 supervisor shadow stack, 15 guest-paging
+// verification, and everything above 16.
+static_assert(0 == (reflected_all_granted & (0x7ull << 9)));
+static_assert(0 == (reflected_all_granted & (1ull << 14)));
+static_assert(0 == (reflected_all_granted & (1ull << 15)));
+static_assert(0 == (reflected_all_granted >> 17));
+
+// Bit 6 is left clear without mode-based execute control, whatever L1's
+// tables say, because Table 30-7 leaves its value undefined there.
+static_assert(0 == (reflected_ept_violation_qualification(
+                        every_bit, mapped_at(0, 12, rwx), false) &
+                    (1ull << 6)));
+
+// The permission bits reflect L1's tables and not hardware's. A read-only
+// mapping in L1 reports readable and not writable, even though the
+// qualification handed in claims writable.
+constexpr auto reflected_read_only = reflected_ept_violation_qualification(
+    every_bit, mapped_at(0, 12, read_only), true);
+static_assert(0 != (reflected_read_only & (1ull << 3)));
+static_assert(0 == (reflected_read_only & (1ull << 4)));
+static_assert(0 == (reflected_read_only & (1ull << 5)));
+static_assert(0 == (reflected_read_only & (1ull << 6)));
+
+// A walk that found nothing present reports no permissions at all - Note 2
+// and Note 3 to Table 30-7 - and the walker having cleared them is what
+// makes that fall out rather than needing a case here.
+constexpr auto reflected_absent = reflected_ept_violation_qualification(
+    every_bit, failed_with(ept_walk_status::not_present), true);
+static_assert(0 == (reflected_absent & (0xfull << 3)));
+
+constexpr auto reflected_out_of_range =
+    reflected_ept_violation_qualification(
+        every_bit,
+        failed_with(ept_walk_status::address_out_of_range),
+        true);
+static_assert(0 == (reflected_out_of_range & (0xfull << 3)));
+
+// And with nothing set in the incoming qualification, nothing is invented.
+static_assert(0 ==
+              reflected_ept_violation_qualification(
+                  0, failed_with(ept_walk_status::not_present), true));
+
 int main()
 {
     std::printf("all nested ept static_asserts passed\n");
