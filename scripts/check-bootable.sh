@@ -45,4 +45,43 @@ for marker in 'hypervisor_bit=' 'leaf 0x40000000 ebx=' 'vmm exits '; do
     fi
 done
 
-echo "ok: $loader carries no destructive self check"
+# The other switch that persists in the cache, and the one that is worse
+# to be wrong about, because nothing about the boot looks wrong.
+#
+# ZPP_CHAINLOAD_ONLY starts the boot manager without launching the
+# hypervisor. It exists to answer "does this machine boot at all without
+# us", which is a question worth being able to ask - but a build carrying
+# it boots perfectly, reaches the kernel, and produces no diagnostics
+# whatsoever, because there is no resident side to produce them.
+#
+# Measured cost of not checking: a run reported a Windows kernel twice
+# over and an empty log channel, and the empty channel was read as the
+# channel being broken. It was not. The hypervisor had never started.
+#
+# Refused by default rather than warned about, since every deployment
+# this script guards wants the hypervisor. Set ZPP_ALLOW_CHAINLOAD_ONLY=1
+# to deploy one deliberately.
+if [ "${ZPP_ALLOW_CHAINLOAD_ONLY:-0}" != "1" ]; then
+    if LC_ALL=C grep -qa 'chainload only, hypervisor not launched' \
+        "$loader"; then
+        echo "REFUSING: $loader is a chainload-only build." >&2
+        echo "" >&2
+        echo "It boots the guest without launching the hypervisor, so it" >&2
+        echo "reaches the operating system and logs nothing - which reads" >&2
+        echo "as a working boot and a broken log channel." >&2
+        echo "" >&2
+        echo "Rebuild with the switch off before deploying:" >&2
+        echo "  cmake --preset debug -DZPP_CHAINLOAD_ONLY=OFF" >&2
+        echo "  cmake --build --preset debug" >&2
+        echo "" >&2
+        echo "The switch persists in the CMake cache, so passing it once" >&2
+        echo "is not enough - check it, do not assume it." >&2
+        echo "" >&2
+        echo "To deploy one deliberately:" >&2
+        echo "  ZPP_ALLOW_CHAINLOAD_ONLY=1 $0 $loader" >&2
+        exit 1
+    fi
+fi
+
+echo "ok: $loader launches the hypervisor and carries no destructive"\
+     "self check"
