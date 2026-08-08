@@ -155,6 +155,34 @@ public:
          * parameter and this as its defined consequence.
          */
         out_of_shadow_ept_tables = 20,
+
+        /**
+         * A guest hypervisor asked for a VM entry this VMM will not
+         * make, and which of these it was decides the VM-instruction
+         * error number the guest hypervisor is given.
+         *
+         * `nested_controls_unsupported` is a control setting outside what
+         * the capability MSRs told it it could have, or an extended
+         * page-table pointer the same MSRs refuse - both of which SDM
+         * 29.2.1 makes checks on the VM-execution controls, so both
+         * answer with error 7. `nested_host_state_unsupported` is SDM
+         * 29.2.2's half of the same, and answers with error 8.
+         *
+         * `nested_msr_area_unsupported` is the one that is a limit here
+         * rather than in the architecture: the VM-entry and VM-exit MSR
+         * areas are not processed yet, so a non-empty one is refused
+         * instead of being ignored. Ignoring it would enter a
+         * second-level guest without the MSRs its hypervisor asked to be
+         * loaded, which is the half-answered interface this codebase
+         * warns about.
+         * @{
+         */
+        nested_controls_unsupported = 21,
+        nested_host_state_unsupported = 22,
+        nested_msr_area_unsupported = 23,
+        /**
+         * @}
+         */
     };
 
     /**
@@ -292,6 +320,17 @@ public:
      * no more part of the interface than that one is.
      */
     void resume_from_sleep_on_this_processor(std::uint64_t slot);
+
+    /**
+     * Unwinds to the point a VM entry into a second-level guest was
+     * decided from, after the processor refused that entry.
+     *
+     * Does not return. Public for the same narrow reason as the two above:
+     * `zpp_vmx_nested_entry_failure` reaches it from the failure stub,
+     * which is the only code that runs between the refusal and here.
+     */
+    [[noreturn]] void
+    on_nested_entry_failure(arch::x86_64::context * recovery);
 
 private:
     /**
@@ -999,9 +1038,15 @@ private:
      * Handles an EPT violation. Returns whether it was ours - a false
      * means nothing had that page watched, which is a bug rather than a
      * guest error, and the caller stops the CPU.
+     *
+     * The address is a parameter rather than read from the VMCS because a
+     * second-level guest's violation names a *second-level* address, and
+     * no watch is keyed on one. The nested path composes the two levels
+     * first and passes what this VMM's own tables refused.
      */
     bool on_ept_violation(std::size_t cpu,
-                          arch::x86_64::context & context);
+                          arch::x86_64::context & context,
+                          std::uint64_t guest_physical);
 
     /**
      * Decodes the store that caused the current EPT violation.
@@ -1747,9 +1792,137 @@ private:
     bool
     on_guest_vmlaunch(std::size_t cpu,
                       arch::x86_64::vmx::exit_reason::basic_reason reason);
+    bool on_guest_invept(std::size_t cpu, arch::x86_64::context & context);
+    bool on_guest_invvpid(std::size_t cpu,
+                          arch::x86_64::context & context);
     /**
      * @}
      */
+
+    /**
+     * Builds the VMCS a second-level guest runs under and makes it
+     * current.
+     *
+     * Everything the architecture lets the guest hypervisor choose comes
+     * from its own VMCS; everything this VMM cannot give up is unioned on
+     * top; the host-state area is this VMM's, copied field for field out
+     * of the VMCS that was current, because the VM exit comes here and not
+     * to the guest hypervisor.
+     *
+     * On failure nothing has been switched and the caller may still answer
+     * the guest hypervisor with VMfail.
+     */
+    std::expected<void, zpp::error> build_vmcs02(std::size_t cpu);
+
+    /**
+     * Refreshes this processor's merged MSR and I/O bitmaps from the guest
+     * hypervisor's, when it has named ones this VMM has not read yet.
+     */
+    std::expected<void, zpp::error> merge_nested_bitmaps(std::size_t cpu);
+
+    /**
+     * What the exit handler does next with an exit the second-level guest
+     * took.
+     */
+    enum class l2_exit_outcome
+    {
+        /**
+         * Given to the guest hypervisor. Its own VMCS is current again,
+         * its guest state is where its VM exit would have left it, and
+         * nothing else in the handler applies.
+         */
+        reflected,
+
+        /**
+         * Answered here, completely. The second-level guest is resumed
+         * without the handler's own cases running - either because the
+         * answer is one only this path knows, as it is for an extended
+         * page-table fault composed across two levels, or because there
+         * was nothing to do.
+         */
+        handled,
+
+        /**
+         * Answered here, by the handler's ordinary cases, with the
+         * second-level VMCS current. The exits this VMM intercepts for
+         * its own reasons take this path so that one piece of code
+         * answers them whichever guest asked.
+         */
+        deferred,
+    };
+
+    /**
+     * Decides what becomes of an exit the second-level guest took, and
+     * either gives it to the guest hypervisor, answers it, or leaves it to
+     * the exit handler's own cases.
+     */
+    l2_exit_outcome on_l2_exit(std::size_t cpu,
+                               arch::x86_64::vmx::exit_reason reason,
+                               arch::x86_64::context & context,
+                               bool & advance_rip);
+
+    /**
+     * The extended page-table fault half of that decision: which of the
+     * two levels of tables refused the access, and therefore whose fault
+     * it is.
+     */
+    l2_exit_outcome on_l2_ept_fault(std::size_t cpu,
+                                    arch::x86_64::vmx::exit_reason reason,
+                                    arch::x86_64::context & context,
+                                    bool & advance_rip);
+
+    /**
+     * Whether this VMM's own MSR bitmap or I/O bitmap asked for the
+     * access, which is what makes an exit this VMM's rather than the guest
+     * hypervisor's.
+     * @{
+     */
+    bool own_msr_intercepted(std::uint32_t index, bool write) const;
+    bool own_io_port_intercepted(std::uint16_t port) const;
+    /**
+     * @}
+     */
+
+    /**
+     * Whether this VMM must take an exit for itself whatever the guest
+     * hypervisor asked for.
+     */
+    bool l0_wants_l2_exit(std::size_t cpu,
+                          arch::x86_64::vmx::exit_reason reason,
+                          const arch::x86_64::context & context);
+
+    /**
+     * Whether the guest hypervisor's own controls say it wants the exit.
+     */
+    bool l1_wants_l2_exit(std::size_t cpu,
+                          arch::x86_64::vmx::exit_reason reason,
+                          const arch::x86_64::context & context);
+
+    /**
+     * Hands one exit to the guest hypervisor: its guest state saved back
+     * into its VMCS, the exit-information fields written, its own host
+     * state loaded, and its VMCS made current again.
+     */
+    void reflect_l2_exit(std::size_t cpu,
+                         arch::x86_64::vmx::exit_reason reason,
+                         std::uint64_t qualification);
+
+    /**
+     * The guest-state half of that: what the second-level guest changed
+     * while it ran, copied back into the guest hypervisor's VMCS.
+     */
+    void save_l2_state(std::size_t cpu);
+
+    /**
+     * The other half: the guest hypervisor's own host state, loaded into
+     * the guest-state area of the VMCS that runs it.
+     */
+    void load_l1_host_state(std::size_t cpu);
+
+    /**
+     * Whatever a transition between the two levels has to invalidate.
+     */
+    void nested_transition_flush();
 
     /**
      * Ask the processor to deliver an invalid opcode exception to the
@@ -1793,6 +1966,19 @@ private:
      */
     [[noreturn]] void
     on_vm_entry_failure(arch::x86_64::vmx::exit_reason reason);
+
+    /**
+     * Everything the VM exit handler does on the way back to whichever
+     * guest it came from, and the resume itself.
+     *
+     * Does not return. Split out of the handler because there are two ways
+     * in now: the ordinary end of the exit-reason switch, and a
+     * second-level exit reflected into the guest hypervisor, which has
+     * nothing left to do below and must not fall through the switch.
+     */
+    [[noreturn]] void resume_guest(arch::x86_64::context & context,
+                                   arch::x86_64::vmx::exit_reason reason,
+                                   bool advance_rip);
 
     /**
      * Setup the VM control structure according to the given guest context,
@@ -2301,6 +2487,71 @@ private:
     std::uint64_t guest_vmxon_pointer[max_cpus]{};
     std::uint64_t guest_current_vmcs[max_cpus]{};
     arch::x86_64::vmx::vmcs12 guest_vmcs12[max_cpus]{};
+
+    /**
+     * Whether this processor is running the second-level guest rather than
+     * the guest hypervisor, and whether the VMCS it runs it with has been
+     * launched.
+     *
+     * The second is not the same as vmcs12's launch state and must not be
+     * confused with it. vmcs12's belongs to the guest hypervisor and is
+     * what VMLAUNCH and VMRESUME check on its behalf; this one belongs to
+     * the real VMCS underneath, which VMCLEAR left clear once and which
+     * SDM 29 step 5 makes "launched" only after a VM entry has passed
+     * every check - so an entry that fails on guest state leaves it clear
+     * and the next attempt must be a VMLAUNCH again.
+     * @{
+     */
+    bool running_l2[max_cpus]{};
+    bool vmcs02_launched[max_cpus]{};
+    bool l2_entry_logged[max_cpus]{};
+    /**
+     * @}
+     */
+
+    /**
+     * Where each processor's second-level VMCS is, by physical address,
+     * and how many times it has entered and left one.
+     *
+     * The counters exist for the same reason every other counter in this
+     * class does: there is no channel out of a running guest but a
+     * debugger, and "did the second level ever run" is the first question
+     * anybody asks.
+     * @{
+     */
+    std::uint64_t vmcs02_physical[max_cpus]{};
+    std::uint64_t l2_entries[max_cpus]{};
+    std::uint64_t l2_exits_reflected[max_cpus]{};
+    std::uint64_t l2_exits_handled[max_cpus]{};
+    /**
+     * @}
+     */
+
+    /**
+     * Where a failed VM entry into the second-level guest comes back to,
+     * and what it came back with.
+     *
+     * `nested_entry_recovery` is captured immediately before the entry is
+     * decided on and restored by `zpp_vmx_nested_entry_failure`, which is
+     * the only way back: a failed VM entry produces no VM exit, so the
+     * ordinary exit path never runs and the processor is left in host mode
+     * with a guest stack. The address of the context is handed to the
+     * failure stub through a VMCS field - see
+     * `nested_entry_recovery_field`.
+     *
+     * `nested_entry_failed` is what tells the two arrivals apart, in
+     * memory rather than in a register because the second arrival restores
+     * every register to what the first left. Same shape as the flag
+     * `vm_launch` uses for the same trick.
+     * @{
+     */
+    arch::x86_64::context
+        nested_entry_recovery[nested_vmx::enabled ? max_cpus : 1]{};
+    std::atomic<bool> nested_entry_failed[max_cpus]{};
+    std::uint64_t nested_entry_error[max_cpus]{};
+    /**
+     * @}
+     */
 
     /**
      * IA32_FEATURE_CONTROL as the guest sees it.
@@ -3203,6 +3454,86 @@ private:
     alignas(page_size) arch::x86_64::vmx::vmx_vmcs vmx_vmcs[max_cpus];
 
     /**
+     * How many processors get a second-level VMCS and the bitmaps that go
+     * with it.
+     *
+     * One when nested VMX is off, for the reason `shadow_ept_tables`
+     * gives at length: the nested sources are compiled in both
+     * configurations - which is what type-checks them - so the members
+     * have to exist, and a zero-length array is not a thing. Nothing
+     * reaches them there.
+     */
+    static constexpr std::size_t nested_regions_per_cpu =
+        nested_vmx::enabled ? max_cpus : 1;
+
+    /**
+     * The VMCS each processor runs a second-level guest with - vmcs02.
+     *
+     * A second *real* VMCS rather than a reuse of the first, because both
+     * have to hold state at the same time: the guest hypervisor's own
+     * guest state stays in vmcs01 for the whole time its guest runs, and
+     * is what the processor is put back to on the way out. KVM keeps the
+     * pair for the same reason, in `vmx_switch_vmcs`.
+     *
+     * Both stay *active* on this processor across the switch, which is
+     * what makes the switch cheap: VMPTRLD makes the named VMCS current
+     * and leaves the outgoing one active, so nothing is written back and
+     * nothing is re-read. VMCLEAR is what would force that, and it is
+     * executed exactly once per processor - in `setup_vmcs`, to put the
+     * launch state where VMLAUNCH needs to find it.
+     */
+    alignas(page_size)
+        arch::x86_64::vmx::vmx_vmcs vmcs02[nested_regions_per_cpu];
+
+    /**
+     * The MSR and I/O bitmaps a second-level guest runs under: the union
+     * of what the guest hypervisor asked to intercept and what this VMM
+     * intercepts for itself.
+     *
+     * Merged rather than either side's, and merging rather than forcing
+     * everything to exit is the decision worth recording. KVM forces
+     * unconditional I/O exiting in `prepare_vmcs02_early` because it
+     * emulates I/O anyway; this VMM does not emulate I/O or MSR accesses
+     * for anybody, so an exit neither side asked for would arrive with
+     * nothing able to answer it. A union has the property that matters
+     * instead: every exit belongs to one of the two, and the one it
+     * belongs to already knows how to answer it.
+     *
+     * Per processor because the guest hypervisor's bitmaps are per VMCS
+     * and a VMCS is current on one processor at a time.
+     * @{
+     */
+    alignas(page_size) std::uint8_t
+        nested_msr_bitmap[nested_regions_per_cpu][page_size]{};
+    alignas(page_size) std::uint8_t
+        nested_io_bitmap[nested_regions_per_cpu][2 * page_size]{};
+    /**
+     * @}
+     */
+
+    /**
+     * Where the merged bitmaps are, and what they were merged from.
+     *
+     * The addresses are the guest hypervisor's own bitmap pointers as they
+     * were when the merge was done. A merge costs three page reads out of
+     * guest memory, which is not something to pay on every VM entry when a
+     * guest hypervisor changes its bitmaps approximately never - so it is
+     * paid when the pointer moves, and `intercept_msr` and
+     * `intercept_io_port` are the only things on this side that can
+     * invalidate it. Neither is called after launch.
+     * @{
+     */
+    std::uint64_t nested_msr_bitmap_physical[max_cpus]{};
+    std::uint64_t nested_io_bitmap_physical[max_cpus]{};
+    std::uint64_t nested_msr_bitmap_source[max_cpus]{};
+    std::uint64_t nested_io_bitmap_a_source[max_cpus]{};
+    std::uint64_t nested_io_bitmap_b_source[max_cpus]{};
+    bool nested_bitmaps_merged[max_cpus]{};
+    /**
+     * @}
+     */
+
+    /**
      * How many paging-structure pages each processor's shadow extended
      * page table may use.
      *
@@ -3452,6 +3783,12 @@ inline const zpp::error_category & category(hypervisor::error)
                 return "No waking vector to resume through";
             case hypervisor::error::out_of_shadow_ept_tables:
                 return "Out of shadow extended page table pages";
+            case hypervisor::error::nested_controls_unsupported:
+                return "Nested VM-execution controls out of range";
+            case hypervisor::error::nested_host_state_unsupported:
+                return "Nested host state out of range";
+            case hypervisor::error::nested_msr_area_unsupported:
+                return "Nested MSR-area lists are not processed";
             }
         });
     return error_category;

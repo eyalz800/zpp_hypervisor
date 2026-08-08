@@ -1730,61 +1730,61 @@ capability MSR narrowed to say so.
 | A8 | Memory-operand address computation from the instruction-information field plus the displacement | SDM 30.2.1, Table 30-14, Table 30-15; KVM `get_vmx_mem_address` | yes |
 | A9 | `#UD` for every VMX instruction when the guest is not in VMX operation, or CR4.VMXE is clear in its own view | SDM 33.3 operation sections, SDM 28.1.1; KVM `nested_vmx_check_permission`, `handle_vmxon` | yes |
 | A10 | `#GP(0)` when CPL > 0 | SDM 33.3; KVM `nested_vmx_check_permission` | yes |
-| A11 | INVEPT: descriptor decode, type checked against the reported capability, invalidate the shadow | SDM 33.3 INVEPT; KVM `handle_invept` | no |
-| A12 | INVVPID: descriptor decode, type check, invalidate | SDM 33.3 INVVPID; KVM `handle_invvpid` | no |
-| A13 | A VMX instruction executed by L2 is reflected to L1 unconditionally, so three-level nesting works | KVM `nested_vmx_l1_wants_exit`, the `EXIT_REASON_VMON` group | no |
+| A11 | INVEPT: descriptor decode, type checked against the reported capability, invalidate the shadow | SDM 33.3 INVEPT; KVM `handle_invept` | yes - `on_guest_invept`, both types, and both discard the shadow |
+| A12 | INVVPID: descriptor decode, type check, invalidate | SDM 33.3 INVVPID; KVM `handle_invvpid` | yes - `on_guest_invvpid`, all four types, each answered by invalidating our own VPID |
+| A13 | A VMX instruction executed by L2 is reflected to L1 unconditionally, so three-level nesting works | KVM `nested_vmx_l1_wants_exit`, the `EXIT_REASON_VMON` group | yes - by `l1_wants_l2_exit`'s default, which reflects |
 
 ### B. VM entry: building the VMCS that runs L2 (vmcs02)
 
 | # | Requirement | Established by | Status |
 |---|---|---|---|
-| B1 | A second real VMCS per processor, switched to by VMLAUNCH/VMRESUME and away from on an exit to L1 | KVM `vmx_switch_vmcs`, `vmx->nested.vmcs02` | no |
-| B2 | Launch-state tracking, so a freshly cleared vmcs02 gets `vmlaunch` and a launched one `vmresume` | SDM 33.3 VMLAUNCH/VMRESUME | no |
-| B3 | Pin-based controls: union of L1's request and ours, with the preemption timer ours alone | KVM `prepare_vmcs02_early`, PIN CONTROLS block | no |
-| B4 | Primary controls: union of L1's and ours; interrupt-window and NMI-window exiting taken from L1 only | KVM `prepare_vmcs02_early`, EXEC CONTROLS block | no |
-| B5 | Secondary controls: some taken *only* from vmcs12, the rest unioned | KVM `prepare_vmcs02_early`, SECONDARY EXEC block | no |
-| B6 | Entry controls from L1, except the ones that follow from EFER, which are recomputed | KVM `prepare_vmcs02_early`, ENTRY CONTROLS block | no |
-| B7 | Exit controls are **ours**, not L1's - the hardware exit comes to us and L1's exit is emulated | KVM `prepare_vmcs02_early`, EXIT CONTROLS block and its comment | no |
-| B8 | Exception bitmap: bitwise or of what L1 wants to trap and what we must trap | KVM `prepare_vmcs02` comment on `vmx_update_exception_bitmap` | no |
-| B9 | CR0/CR4 guest-host masks merged, and the read shadows set from vmcs12 rather than from the effective register | KVM `prepare_vmcs02`, `nested_read_cr0`, `nested_read_cr4` | no |
-| B10 | Guest state copied from vmcs12: segments, descriptor tables, RSP/RIP/RFLAGS, activity state, interruptibility, pending debug exceptions | SDM 27.4; KVM `prepare_vmcs02_rare` | no |
-| B11 | MSR bitmap **merged**, not taken from either side: an MSR either of us wants must exit | KVM `nested_vmx_prepare_msr_bitmap` | no |
-| B12 | I/O: unconditional I/O exiting forced rather than merging bitmaps, because every I/O access needs an exit here | KVM `prepare_vmcs02_early`, `CPU_BASED_UNCOND_IO_EXITING` | no |
-| B13 | TSC offset composed across levels, and the multiplier too if scaling is offered | KVM `kvm_calc_nested_tsc_offset` | no |
-| B14 | Entry event injection: interruption-information field, error code and instruction length taken from vmcs12 on a launch | SDM 27.8.3; KVM `prepare_vmcs02_early`, interrupt/exception block | no |
-| B15 | VM-entry consistency checks on vmcs12's controls, host state and guest state, failing with error 7, error 8, or an entry-failure exit | SDM 29.2, 29.3; KVM `nested_vmx_check_controls`, `nested_vmx_check_host_state`, `nested_vmx_check_guest_state` | no |
-| B16 | VM-entry MSR-load list processed, with an MSR-load-failure exit | SDM 27.8.2; KVM `nested_vmx_load_msr` | no |
-| B17 | A VPID for L2 distinct from L1's, or a TLB flush on every transition instead | KVM `nested_vmx_transition_tlb_flush` | no |
+| B1 | A second real VMCS per processor, switched to by VMLAUNCH/VMRESUME and away from on an exit to L1 | KVM `vmx_switch_vmcs`, `vmx->nested.vmcs02` | yes - `vmcs02`, one page per processor, switched to by `build_vmcs02` and back by `reflect_l2_exit` |
+| B2 | Launch-state tracking, so a freshly cleared vmcs02 gets `vmlaunch` and a launched one `vmresume` | SDM 33.3 VMLAUNCH/VMRESUME | yes - `vmcs02_launched`, set only on an exit that is not an entry failure, per SDM 29 step 5 |
+| B3 | Pin-based controls: union of L1's request and ours, with the preemption timer ours alone | KVM `prepare_vmcs02_early`, PIN CONTROLS block | yes - union less the preemption timer and posted interrupts |
+| B4 | Primary controls: union of L1's and ours; interrupt-window and NMI-window exiting taken from L1 only | KVM `prepare_vmcs02_early`, EXEC CONTROLS block | yes - union, with the two window controls from vmcs12 alone and the TPR shadow removed |
+| B5 | Secondary controls: some taken *only* from vmcs12, the rest unioned | KVM `prepare_vmcs02_early`, SECONDARY EXEC block | yes - unrestricted guest from vmcs12 alone, mode-based execute cleared, EPT and VPID forced on |
+| B6 | Entry controls from L1, except the ones that follow from EFER, which are recomputed | KVM `prepare_vmcs02_early`, ENTRY CONTROLS block | yes - vmcs12's, unchanged |
+| B7 | Exit controls are **ours**, not L1's - the hardware exit comes to us and L1's exit is emulated | KVM `prepare_vmcs02_early`, EXIT CONTROLS block and its comment | yes - ours, unchanged |
+| B8 | Exception bitmap: bitwise or of what L1 wants to trap and what we must trap | KVM `prepare_vmcs02` comment on `vmx_update_exception_bitmap` | yes - bitwise or, with the page-fault mask and match from vmcs12 since we trap no page faults |
+| B9 | CR0/CR4 guest-host masks merged, and the read shadows set from vmcs12 rather than from the effective register | KVM `prepare_vmcs02`, `nested_read_cr0`, `nested_read_cr4` | yes - masks unioned, read shadows carrying the whole effective value |
+| B10 | Guest state copied from vmcs12: segments, descriptor tables, RSP/RIP/RFLAGS, activity state, interruptibility, pending debug exceptions | SDM 27.4; KVM `prepare_vmcs02_rare` | yes - `guest_state_fields`, one list used in both directions |
+| B11 | MSR bitmap **merged**, not taken from either side: an MSR either of us wants must exit | KVM `nested_vmx_prepare_msr_bitmap` | yes - `merge_nested_bitmaps`, cached on the bitmap pointers |
+| B12 | I/O: unconditional I/O exiting forced rather than merging bitmaps, because every I/O access needs an exit here | KVM `prepare_vmcs02_early`, `CPU_BASED_UNCOND_IO_EXITING` | n/a - the bitmaps are merged instead; forcing every I/O access to exit would produce exits neither side asked for, and nothing here emulates I/O |
+| B13 | TSC offset composed across levels, and the multiplier too if scaling is offered | KVM `kvm_calc_nested_tsc_offset` | yes - the two offsets summed; no multiplier, since TSC scaling is not offered |
+| B14 | Entry event injection: interruption-information field, error code and instruction length taken from vmcs12 on a launch | SDM 27.8.3; KVM `prepare_vmcs02_early`, interrupt/exception block | yes - the three fields taken from vmcs12 when its valid bit is set |
+| B15 | VM-entry consistency checks on vmcs12's controls, host state and guest state, failing with error 7, error 8, or an entry-failure exit | SDM 29.2, 29.3; KVM `nested_vmx_check_controls`, `nested_vmx_check_host_state`, `nested_vmx_check_guest_state` | partial - the controls are checked against the *narrowed* capability MSRs, the NMI rules of SDM 29.2.1.1 are checked, and the EPT pointer is validated; the guest-state checks are left to the processor and surface as a reflected entry-failure exit |
+| B16 | VM-entry MSR-load list processed, with an MSR-load-failure exit | SDM 27.8.2; KVM `nested_vmx_load_msr` | no - a non-empty VM-entry MSR-load list refuses the entry with error 7 |
+| B17 | A VPID for L2 distinct from L1's, or a TLB flush on every transition instead | KVM `nested_vmx_transition_tlb_flush` | yes - a flush on every transition, `nested_transition_flush` |
 | B18 | The preemption timer armed for L2 from vmcs12's value and cancelled on exit | KVM `vmx_start_preemption_timer` | n/a |
 
 ### C. VM exit: from L2 back to L1
 
 | # | Requirement | Established by | Status |
 |---|---|---|---|
-| C1 | Guest state saved back into vmcs12: CR0/CR3/CR4, RSP/RIP/RFLAGS, segments, activity state, interruptibility | SDM 30.3; KVM `sync_vmcs02_to_vmcs12`, `sync_vmcs02_to_vmcs12_rare` | no |
-| C2 | Exit information written into vmcs12: reason, qualification, guest-linear and guest-physical address, instruction length and information | SDM 30.2; KVM `prepare_vmcs12` | no |
-| C3 | The entry interruption-information field's valid bit cleared on exit, emulating what hardware does | SDM 30.2; KVM `prepare_vmcs12` and its comment | no |
-| C4 | IDT-vectoring information and error code written for an event that was mid-delivery when the exit happened | SDM 30.2.4; KVM `vmcs12_save_pending_event` | no |
-| C5 | Double fault and triple fault never reported as occurring during event delivery | SDM 30.2.4; KVM `vmcs12_save_pending_event`, first branch | no |
-| C6 | Launch state set to launched on a successful exit, and *not* on an entry-failure exit | SDM 33.3; KVM `prepare_vmcs12` | no |
-| C7 | L1's host state loaded into the VMCS that runs L1: CR0/CR3/CR4, RIP/RSP, segments, descriptor tables, EFER, PAT, SYSENTER | SDM 30.5; KVM `load_vmcs12_host_state` | no |
-| C8 | VM-exit MSR-store and MSR-load lists processed, with a VMX abort on failure | SDM 30.4, 30.6; KVM `nested_vmx_store_msr` | no |
-| C9 | Events queued for injection into L2 dropped on the way out | KVM `nested_vmx_vmexit`, the `kvm_clear_exception_queue` block | no |
-| C10 | An entry failure hardware detects surfaces to L1 as `VMfailValid`, not as an exit | SDM 33.3; KVM `nested_vmx_vmexit` failure path | no |
+| C1 | Guest state saved back into vmcs12: CR0/CR3/CR4, RSP/RIP/RFLAGS, segments, activity state, interruptibility | SDM 30.3; KVM `sync_vmcs02_to_vmcs12`, `sync_vmcs02_to_vmcs12_rare` | yes - `save_l2_state`, the same field list the entry loaded, plus the masked control registers |
+| C2 | Exit information written into vmcs12: reason, qualification, guest-linear and guest-physical address, instruction length and information | SDM 30.2; KVM `prepare_vmcs12` | yes - `reflect_l2_exit` |
+| C3 | The entry interruption-information field's valid bit cleared on exit, emulating what hardware does | SDM 30.2; KVM `prepare_vmcs12` and its comment | yes - emulated in vmcs12 rather than read back from vmcs02 |
+| C4 | IDT-vectoring information and error code written for an event that was mid-delivery when the exit happened | SDM 30.2.4; KVM `vmcs12_save_pending_event` | yes - copied from the processor's own report, which is the guest hypervisor's account since every injected event came from vmcs12 |
+| C5 | Double fault and triple fault never reported as occurring during event delivery | SDM 30.2.4; KVM `vmcs12_save_pending_event`, first branch | yes - by the same route: the rule is the processor's and it applied it |
+| C6 | Launch state set to launched on a successful exit, and *not* on an entry-failure exit | SDM 33.3; KVM `prepare_vmcs12` | yes |
+| C7 | L1's host state loaded into the VMCS that runs L1: CR0/CR3/CR4, RIP/RSP, segments, descriptor tables, EFER, PAT, SYSENTER | SDM 30.5; KVM `load_vmcs12_host_state` | yes - `load_l1_host_state`, with the segment shapes SDM 30.5.3 fixes |
+| C8 | VM-exit MSR-store and MSR-load lists processed, with a VMX abort on failure | SDM 30.4, 30.6; KVM `nested_vmx_store_msr` | no - a non-empty VM-exit MSR-store or MSR-load list refuses the entry with error 7 |
+| C9 | Events queued for injection into L2 dropped on the way out | KVM `nested_vmx_vmexit`, the `kvm_clear_exception_queue` block | yes - vmcs02's entry-interruption field is rewritten from vmcs12 on every entry, and vmcs12's valid bit is cleared on the way out |
+| C10 | An entry failure hardware detects surfaces to L1 as `VMfailValid`, not as an exit | SDM 33.3; KVM `nested_vmx_vmexit` failure path | yes - a refused entry unwinds through `on_nested_entry_failure` to a `VMfailValid` carrying the processor's own error number |
 
 ### D. The reflect-or-handle decision
 
 | # | Requirement | Established by | Status |
 |---|---|---|---|
-| D1 | Two questions, in order: does *this VMM* want the exit, and only then does L1 want it | KVM `nested_vmx_reflect_vmexit`, `nested_vmx_l0_wants_exit`, `nested_vmx_l1_wants_exit` | no |
-| D2 | We always take: NMI, external interrupt, EPT violation, EPT misconfiguration, preemption timer | KVM `nested_vmx_l0_wants_exit` | no |
-| D3 | Always reflected: triple fault, task switch, CPUID, INVD, XSETBV, the VMX instructions, invalid guest state | KVM `nested_vmx_l1_wants_exit` | no |
-| D4 | Conditional on L1's controls: HLT, INVLPG, RDPMC, RDTSC, MOV DR, MWAIT, MONITOR, PAUSE, RDRAND, RDSEED, WBINVD, descriptor-table access, INVPCID, XSAVES/XRSTORS | KVM `nested_vmx_l1_wants_exit` | no |
-| D5 | Exception exits filtered through vmcs12's exception bitmap, with the page-fault error-code mask and match applied | SDM 27.6.3; KVM `nested_vmx_is_page_fault_vmexit` | no |
-| D6 | CR-access exits filtered through vmcs12's CR0/CR4 guest-host masks and the CR3-target list | KVM `nested_vmx_exit_handled_cr` | no |
-| D7 | I/O exits filtered through vmcs12's I/O bitmaps | KVM `nested_vmx_exit_handled_io` | no |
-| D8 | MSR exits filtered through vmcs12's MSR bitmap | KVM `nested_vmx_exit_handled_msr` | no |
-| D9 | The exits this VMM already owns for its own reasons - the interrupt command register, watched pages, the sleep port, the preemption timer that drives the log - keep working while L2 runs | this tree: `on_interrupt_command`, `on_ept_violation`, `arm_controller_poll` | no |
+| D1 | Two questions, in order: does *this VMM* want the exit, and only then does L1 want it | KVM `nested_vmx_reflect_vmexit`, `nested_vmx_l0_wants_exit`, `nested_vmx_l1_wants_exit` | yes - `on_l2_exit` asks `l0_wants_l2_exit` first |
+| D2 | We always take: NMI, external interrupt, EPT violation, EPT misconfiguration, preemption timer | KVM `nested_vmx_l0_wants_exit` | partial - NMI, both extended page-table exits and the preemption timer; external interrupts are *not* ours, because this VMM never sets external-interrupt exiting and the control can only be there because L1 asked |
+| D3 | Always reflected: triple fault, task switch, CPUID, INVD, XSETBV, the VMX instructions, invalid guest state | KVM `nested_vmx_l1_wants_exit` | yes - by `l1_wants_l2_exit`'s default |
+| D4 | Conditional on L1's controls: HLT, INVLPG, RDPMC, RDTSC, MOV DR, MWAIT, MONITOR, PAUSE, RDRAND, RDSEED, WBINVD, descriptor-table access, INVPCID, XSAVES/XRSTORS | KVM `nested_vmx_l1_wants_exit` | yes |
+| D5 | Exception exits filtered through vmcs12's exception bitmap, with the page-fault error-code mask and match applied | SDM 27.6.3; KVM `nested_vmx_is_page_fault_vmexit` | yes |
+| D6 | CR-access exits filtered through vmcs12's CR0/CR4 guest-host masks and the CR3-target list | KVM `nested_vmx_exit_handled_cr` | partial - filtered through vmcs12's masks; the CR3-target list is not consulted because IA32_VMX_MISC reports a count of zero |
+| D7 | I/O exits filtered through vmcs12's I/O bitmaps | KVM `nested_vmx_exit_handled_io` | yes - every byte of the access checked against vmcs12's bitmaps |
+| D8 | MSR exits filtered through vmcs12's MSR bitmap | KVM `nested_vmx_exit_handled_msr` | yes |
+| D9 | The exits this VMM already owns for its own reasons - the interrupt command register, watched pages, the sleep port, the preemption timer that drives the log - keep working while L2 runs | this tree: `on_interrupt_command`, `on_ept_violation`, `arm_controller_poll` | partial - the MSR and I/O intercepts and the preemption timer keep working through the merged bitmaps and `l0_wants_l2_exit`; a watched page works but costs a shadow rebuild per stepped write |
 
 ### E. Nested EPT
 
@@ -1793,10 +1793,10 @@ capability MSR narrowed to say so.
 | E1 | A shadow EPT per EPTP12, composing L2-GPA→L1-GPA (L1's tables) with L1-GPA→HPA (ours) | KVM `nested_ept_init_mmu_context`, `nested_ept_get_eptp` | yes - `build_shadow_ept`, eager, keyed on bits 51:12 of EPTP12 |
 | E2 | Two permission sets combined per page - read, write, supervisor execute and user execute all intersected | KVM `kvm_init_shadow_ept_mmu` and the shadow-page permissions it installs | yes - `ept_permissions`, with the misconfiguration normalisation SDM 31.3.3.1 requires |
 | E3 | Populated eagerly instead of lazily, which removes fault-time composition and the widen-without-invalidate case | SDM 31.4.3.4, 31.4.3.2; lazy is KVM's shape and stays recorded as the optimisation | yes - deliberately not lazy |
-| E4 | An EPT violation caused by a gap in *L1's* tables reflected to L1, with the qualification and guest-physical address it would have seen | KVM `nested_ept_inject_page_fault` | partial - the qualification is synthesised (`reflected_ept_violation_qualification`); the reflection itself needs section C |
-| E5 | An EPT violation caused by a gap in *our* tables, or by a page we watch, handled here and never shown to L1 | KVM `nested_vmx_l0_wants_exit`, EPT-violation case | no |
-| E6 | EPT misconfiguration always ours, never L1's, because L2 never walks L1's tables directly | KVM `nested_vmx_l0_wants_exit`, EPT-misconfig case and its comment | partial - a misconfiguration in *L1's* tables is a distinct outcome and is reflected; one in ours is attributed to us |
-| E7 | L1's INVEPT invalidates the shadow for the named EPTP, and an INVEPT type we do not report is refused | SDM 33.3 INVEPT; KVM `handle_invept` | no |
+| E4 | An EPT violation caused by a gap in *L1's* tables reflected to L1, with the qualification and guest-physical address it would have seen | KVM `nested_ept_inject_page_fault` | yes - `on_l2_ept_fault` |
+| E5 | An EPT violation caused by a gap in *our* tables, or by a page we watch, handled here and never shown to L1 | KVM `nested_vmx_l0_wants_exit`, EPT-violation case | yes - the `host_denied` outcome, with the L1-physical address the walk produced handed to `on_ept_violation` |
+| E6 | EPT misconfiguration always ours, never L1's, because L2 never walks L1's tables directly | KVM `nested_vmx_l0_wants_exit`, EPT-misconfig case and its comment | yes - and *deliberately unlike KVM*: a misconfiguration in L1's own tables is reflected, because the walk that found it walked L1's tables and not the shadow |
+| E7 | L1's INVEPT invalidates the shadow for the named EPTP, and an INVEPT type we do not report is refused | SDM 33.3 INVEPT; KVM `handle_invept` | yes - `discard_shadow_ept` for either type |
 | E8 | A change to *our* EPT - arming a page watch, protecting a region - invalidates every shadow built over it | this tree: `invalidate_ept`, `ept_generation` | yes - `shadow_ept_pointer_for` compares generations and rebuilds |
 | E9 | The memory type of a shadow leaf derived from the MTRRs as our own tables are, not taken from L1 | SDM Table 31-6 reserved-bit rule as already applied in `initialize_ept`; this tree: `mtrr_state::type_of` | yes - `compose_ept` takes the host walk's type |
 | E10 | Large-page shadow leaves where both levels permit, to bound the size of the shadow | SDM 31.3.2 | yes - plus coarsening a uniform 4 KB run to one 2 MB leaf, which is what keeps eager affordable |
@@ -1811,7 +1811,7 @@ capability MSR narrowed to say so.
 | F2 | `IA32_VMX_BASIC` reports our own revision id, 4096-byte regions, write-back, and the TRUE MSRs | SDM A.1 | yes |
 | F3 | `IA32_VMX_MISC` narrowed: no VMWRITE to exit-information fields, CR3-target count zero | SDM A.6 | yes |
 | F4 | `IA32_VMX_VMCS_ENUM` reports the highest index the shadow honours | SDM A.9 | yes |
-| F5 | `IA32_VMX_EPT_VPID_CAP` reports exactly the EPT and VPID features we honour | SDM A.10 | no - currently zero |
+| F5 | `IA32_VMX_EPT_VPID_CAP` reports exactly the EPT and VPID features we honour | SDM A.10 | yes - `supported_ept_vpid_capabilities`, narrowed from the hardware's |
 | F6 | `IA32_VMX_VMFUNC` reports what we honour | SDM Table 27-7 bit 13; SDM 33.3 VMFUNC | n/a - zero, and VMFUNC takes `#UD` |
 | F7 | `IA32_FEATURE_CONTROL` virtualized with write-once semantics | SDM Table 7-1, bit 0 | yes |
 | F8 | The CR0/CR4 fixed-bit MSRs passed through, since they describe the real processor | SDM A.7, A.8 | yes |
@@ -1824,17 +1824,33 @@ essay.
 
 | Requirement | Row | Status |
 |---|---|---|
-| EPT, without which it does not start at all | E1-E12, F5 | no |
-| Secondary controls, unrestricted guest, VPID | B5, F5 | no |
-| A VMLAUNCH that actually runs L2 | B1-B17 | no |
-| Exit reflection for the exits its own guest takes | C1-C10, D1-D9 | no |
-| MSR bitmap merging, since it traps a great many MSRs | B11, D8 | no |
-| Event injection into L2 and back out again | B14, C4 | no |
+| EPT, without which it does not start at all | E1-E12, F5 | written |
+| Secondary controls, unrestricted guest, VPID | B5, F5 | written |
+| A VMLAUNCH that actually runs L2 | B1-B17 | written, except B16 |
+| Exit reflection for the exits its own guest takes | C1-C10, D1-D9 | written, except C8 |
+| MSR bitmap merging, since it traps a great many MSRs | B11, D8 | written |
+| Event injection into L2 and back out again | B14, C4 | written |
 
-**So the answer today is no, and the first blocking row is E1.** Nothing in
-sections B, C, D or E is implemented. Sections A and F are, apart from the
-two invalidation instructions and the EPT capability MSR, which only mean
-anything once E exists.
+**Every row above is now written, and not one of them has executed.** That
+is a different answer from "yes" and the distinction is the whole of what
+is left: the checklist measures coverage against the SDM and KVM, which is
+what reading can establish, and it cannot establish that any of it works.
+"Not run anywhere" above still says exactly what it said.
+
+The two rows that are genuinely absent rather than untested are B16 and C8,
+the VM-entry and VM-exit MSR-load and MSR-store areas. A VM entry naming a
+non-empty one is refused with error 7 rather than entered without loading
+what was asked for, and Hyper-V uses those areas - so this is the next
+thing that has to exist, ahead of any run.
+
+Why they were not simply passed through, since a first-level guest-physical
+address is a host physical one here and the processor could be handed the
+list directly: the processor reads and *writes* those lists in root
+operation, where extended page tables do not apply. A guest hypervisor
+could then name this module's own physical pages as its VM-exit MSR-store
+area and have the processor write MSR values into them. Processing the
+lists in software, with the addresses checked, is the only shape that
+closes that.
 
 ## Nested EPT: the design, and the SDM facts that decided it
 

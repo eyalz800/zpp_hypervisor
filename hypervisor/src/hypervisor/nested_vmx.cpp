@@ -1,4 +1,5 @@
 #include "zpp/hypervisor/nested_vmx.h"
+#include "zpp/arch/x86_64/asm.h"
 #include "zpp/arch/x86_64/decoder.h"
 #include "zpp/arch/x86_64/msr.h"
 #include "zpp/hypervisor/hypervisor.h"
@@ -278,12 +279,19 @@ std::uint64_t hypervisor::nested_vmx_capability_msr(std::size_t msr)
         return (vmcs_field_encoding::index_capacity - 1) << 1;
 
     case vmx_msr::vpid_ept_capability:
-        // Zero: no extended page tables and no VPIDs for a first-level
-        // hypervisor. It agrees with the secondary controls, which offer
-        // neither, and it is the single fact that decides whether a real
-        // guest hypervisor can run here - see
-        // nested_vmx::supported_secondary_controls.
-        return 0;
+        // Narrowed to what the shadow builder and the two invalidation
+        // instructions actually honour, and narrowed *from* the hardware's
+        // rather than replacing it, so a machine that cannot do one of
+        // these does not have it promised on its behalf.
+        //
+        // Not a pair of halves like the control MSRs - SDM A.10 makes
+        // every bit a plain capability - so it is masked rather than run
+        // through `narrow`, which would put an allowed-0 half back that
+        // does not exist here.
+        //
+        // See nested_vmx::supported_ept_vpid_capabilities for why each bit
+        // is in the list and why the four that are absent are absent.
+        return hardware & nested_vmx::supported_ept_vpid_capabilities;
 
     case vmx_msr::vm_functions:
         // Zero: no VM functions. The secondary control that enables
@@ -474,19 +482,9 @@ bool hypervisor::on_vmx_instruction(arch::x86_64::vmx::exit_reason reason,
     case basic_reason::vmresume:
         return on_guest_vmlaunch(cpu, basic);
     case basic_reason::invept:
+        return on_guest_invept(cpu, context);
     case basic_reason::invvpid:
-        // Both are refused with the error the architecture reserves for a
-        // bad operand, error 28, because the capability that makes either
-        // meaningful is not reported: IA32_VMX_EPT_VPID_CAP reads as zero,
-        // and SDM 33.3 makes the supported types of each the contents of
-        // that MSR. With no type supported, every type is invalid.
-        //
-        // Refusing rather than succeeding is the point. An INVEPT that
-        // reports success has told a first-level hypervisor its extended
-        // page tables were invalidated, and nothing here has any.
-        vmx_fail(cpu,
-                 instruction_error::invalid_operand_to_invept_invvpid);
-        return true;
+        return on_guest_invvpid(cpu, context);
     case basic_reason::vmcall:
         // VMCALL from a guest that has done VMXON is, from its own point
         // of view, VMCALL in VMX root operation - there is no VMM above
@@ -1128,6 +1126,145 @@ bool hypervisor::on_guest_vmwrite(std::size_t cpu,
     return true;
 }
 
+bool hypervisor::on_guest_invept(std::size_t cpu,
+                                 arch::x86_64::context & context)
+{
+    // The type is a register operand and the descriptor a memory one, the
+    // same way round as the instruction this VMM executes itself. SDM
+    // 33.3, INVEPT: "INVEPT_TYPE := value of register operand", with the
+    // register named by Reg2 of the instruction-information field.
+    auto operand =
+        decode_operand(this->vmcs.vm_exit_instruction_information());
+    auto type = guest_register(context, operand.register_2);
+
+    constexpr std::uint64_t single_context = 1;
+    constexpr std::uint64_t all_context = 2;
+
+    // The supported types are the ones IA32_VMX_EPT_VPID_CAP reports, as
+    // the same operation section says, and this VMM reports both.
+    if ((single_context != type) && (all_context != type)) {
+        vmx_fail(cpu,
+                 instruction_error::invalid_operand_to_invept_invvpid);
+        return true;
+    }
+
+    // The descriptor is read even for the all-context type, because the
+    // memory operand is still decoded and a bad address is still a fault.
+    auto linear = vmx_operand_linear_address(context);
+    if (!linear) {
+        return false;
+    }
+
+    struct alignas(0x10) descriptor
+    {
+        std::uint64_t eptp{};
+        std::uint64_t reserved{};
+    } operand_value{};
+
+    auto read = read_guest_linear(
+        *linear,
+        std::span(reinterpret_cast<std::byte *>(&operand_value),
+                  sizeof(operand_value)));
+    if (!read) {
+        return false;
+    }
+
+    // Both types discard the shadow, which is over-invalidation for the
+    // single-context type and is the safe direction: SDM 31.4.3.2 permits
+    // a processor to "invalidate any cached mappings at any time", so
+    // discarding more than was asked for is architecturally allowed where
+    // discarding less is not. The alternative - keeping a shadow per EPT
+    // pointer so that only the named one is discarded - buys nothing until
+    // there is more than one shadow per processor, and there is one.
+    //
+    // Discarding rather than rebuilding, because the next VM entry needs
+    // the shadow and nothing between now and then reads it.
+    discard_shadow_ept(cpu);
+
+    vmx_succeed();
+    return true;
+}
+
+bool hypervisor::on_guest_invvpid(std::size_t cpu,
+                                  arch::x86_64::context & context)
+{
+    auto operand =
+        decode_operand(this->vmcs.vm_exit_instruction_information());
+    auto type = guest_register(context, operand.register_2);
+
+    // SDM 33.3, INVVPID, gives four types: 0 individual-address, 1
+    // single-context, 2 all-context, 3 single-context retaining globals.
+    // All four are reported, so all four are accepted.
+    constexpr std::uint64_t highest_type = 3;
+
+    if (type > highest_type) {
+        vmx_fail(cpu,
+                 instruction_error::invalid_operand_to_invept_invvpid);
+        return true;
+    }
+
+    auto linear = vmx_operand_linear_address(context);
+    if (!linear) {
+        return false;
+    }
+
+    struct alignas(0x10) descriptor
+    {
+        std::uint64_t vpid{};
+        std::uint64_t linear_address{};
+    } operand_value{};
+
+    auto read = read_guest_linear(
+        *linear,
+        std::span(reinterpret_cast<std::byte *>(&operand_value),
+                  sizeof(operand_value)));
+    if (!read) {
+        return false;
+    }
+
+    // SDM 33.3, INVVPID: "VMfail(Invalid operand to INVEPT/INVVPID)" if
+    // the descriptor's VPID is 0000H for any type but all-context.
+    constexpr std::uint64_t individual_address = 0;
+    constexpr std::uint64_t all_context = 2;
+
+    if ((all_context != type) && (0 == (operand_value.vpid & 0xffff))) {
+        vmx_fail(cpu,
+                 instruction_error::invalid_operand_to_invept_invvpid);
+        return true;
+    }
+
+    // And the same section refuses a non-canonical linear address for the
+    // individual-address type.
+    if (individual_address == type) {
+        auto address = operand_value.linear_address;
+        auto sign_extended = static_cast<std::uint64_t>(
+            static_cast<std::int64_t>(address << 16) >> 16);
+
+        if (address != sign_extended) {
+            vmx_fail(cpu,
+                     instruction_error::invalid_operand_to_invept_invvpid);
+            return true;
+        }
+    }
+
+    // The VPID in the descriptor is the guest hypervisor's own numbering
+    // and names nothing this processor has ever tagged a mapping with: a
+    // second-level guest runs under *this* VMM's VPID, which is what
+    // `build_vmcs02` writes. So every type is answered the same way, by
+    // invalidating that one - which SDM 31.4.3.1 makes cover every PCID
+    // and, for combined mappings, every extended page-table root.
+    //
+    // Over-invalidation again, and permitted for the same reason as
+    // above. What it costs is the second-level guest's translations on
+    // every INVVPID the guest hypervisor executes, which is the price of
+    // not allocating a VPID per second-level guest. BACKLOG.md records the
+    // measurement that would justify allocating one.
+    nested_transition_flush();
+
+    vmx_succeed();
+    return true;
+}
+
 bool hypervisor::on_guest_vmlaunch(std::size_t cpu, basic_reason reason)
 {
     // The launch-state checks first, because they are the ones the
@@ -1153,38 +1290,130 @@ bool hypervisor::on_guest_vmlaunch(std::size_t cpu, basic_reason reason)
         return true;
     }
 
-    // And here is the limit of what this implements.
+    // Where a VM entry the processor refuses comes back to.
     //
-    // Running the second-level guest needs three things that do not
-    // exist: a real VMCS built by merging the shadow's guest state and
-    // controls with this VMM's own host state, a decision for every exit
-    // that second-level guest takes about whether it is reflected into
-    // the shadow or handled here, and a shadow of the first level's
-    // extended page tables combined with this VMM's. The third is what
-    // makes the other two worth having, and it is the largest of them.
+    // It has to be captured here and not at the entry, because there is
+    // no "here" at the entry: it is executed from a naked stub with the
+    // guest's registers already loaded, by restore_context, out of the
+    // tail of the exit handler. This is the last point that is still
+    // ordinary C++ on the host stack.
     //
-    // So the entry is refused, with the error number the architecture
-    // gives for controls a processor will not accept. It is honest in the
-    // sense that matters: no first-level hypervisor is told its guest is
-    // running when it is not, and RIP lands on the instruction after the
-    // VMLAUNCH, which is where SDM 33.3 says a failure on the controls
-    // puts it - "failure to pass checks on the VMX controls or on the
-    // host-state area passes control to the instruction following the
-    // VMLAUNCH or VMRESUME instruction".
-    //
-    // It is not honest in the sense of naming the real reason, and there
-    // is no error number that does. Error 7 is the closest: the controls
-    // this VMM can honour genuinely do not include the ones any real
-    // guest hypervisor needs, because IA32_VMX_EPT_VPID_CAP reads as zero
-    // and every one of them requires extended page tables. A first-level
-    // hypervisor that consulted the capability MSRs before writing its
-    // controls will have found that out already.
-    log("cpu {} guest {} refused: no second level entry",
-        cpu,
-        (basic_reason::vmlaunch == reason) ? "vmlaunch" : "vmresume");
+    // The flag is in memory rather than in a variable for the same reason
+    // vm_launch's is: the second arrival restores every register to what
+    // the first left, so only memory can tell the two apart.
+    this->nested_entry_failed[cpu].store(false, std::memory_order_relaxed);
+    this->nested_entry_error[cpu] = 0;
 
-    vmx_fail(cpu, instruction_error::entry_invalid_control_field);
+    arch::x86_64::capture_context(&this->nested_entry_recovery[cpu]);
+
+    if (this->nested_entry_failed[cpu].load(std::memory_order_relaxed)) {
+        // Arrived from zpp_vmx_nested_entry_failure, which has already put
+        // this VMM's own VMCS back and recorded what the processor said.
+        //
+        // The error number is the hardware's rather than one invented
+        // here, and that is the honest answer: vmcs02's controls come from
+        // the guest hypervisor's own and its host state from this VMM's,
+        // so a refusal is a refusal of something one of the two asked for.
+        // SDM Table 33-1 gives 7 for the controls and 8 for the host-state
+        // area, which is exactly the distinction the field carries.
+        auto refusal = this->nested_entry_error[cpu];
+
+        log("cpu {} second level entry refused by the processor, "
+            "vm-instruction error {}",
+            cpu,
+            refusal);
+
+        vmx_fail(cpu,
+                 (0 != refusal)
+                     ? static_cast<instruction_error>(refusal)
+                     : instruction_error::entry_invalid_control_field);
+        return true;
+    }
+
+    if (auto built = build_vmcs02(cpu); !built) {
+        // Nothing has been switched: build_vmcs02 does everything that can
+        // fail before it makes vmcs02 current. So the guest hypervisor is
+        // told its VM entry did not happen, with RIP on the instruction
+        // after the VMLAUNCH - which is where SDM 33.3 puts a failure on
+        // the controls or on the host-state area.
+        log("cpu {} guest {} refused: error {}",
+            cpu,
+            (basic_reason::vmlaunch == reason) ? "vmlaunch" : "vmresume",
+            built.error().code());
+
+        vmx_fail(
+            cpu,
+            (zpp::error{error::nested_host_state_unsupported}.code() ==
+             built.error().code())
+                ? instruction_error::entry_invalid_host_state_field
+                : instruction_error::entry_invalid_control_field);
+        return true;
+    }
+
+    // From here vmcs02 is current and the tail of the exit handler enters
+    // it rather than resuming the guest hypervisor. Its RIP must not be
+    // advanced: it still names the VMLAUNCH, which is where it stays until
+    // an exit is reflected and vmcs12's host RIP replaces it - and
+    // advancing now would write into vmcs02 and move the second-level
+    // guest instead.
+    this->running_l2[cpu] = true;
+    this->l2_entries[cpu] = this->l2_entries[cpu] + 1;
+
+    if (!this->l2_entry_logged[cpu]) {
+        this->l2_entry_logged[cpu] = true;
+        log("cpu {} entering the second level, rip {} cr3 {}",
+            cpu,
+            shadow.read(arch::x86_64::vmx::vmcs::field::guest_rip),
+            shadow.read(arch::x86_64::vmx::vmcs::field::guest_cr3));
+    }
+
     return true;
 }
 
+void hypervisor::on_nested_entry_failure(arch::x86_64::context * recovery)
+{
+    // Nothing was switched: a refused VM entry is not a VM exit, so vmcs02
+    // is still current and its VM-instruction error field is the only
+    // account of why. Read it before anything makes another VMCS current.
+    auto slot = this->vmcs.vpid();
+    auto refusal = this->vmcs.read(
+        arch::x86_64::vmx::vmcs::field::vm_instruction_error);
+
+    // Back onto this VMM's own VMCS, so everything after the unwind is
+    // talking about the guest hypervisor again.
+    //
+    // A failure here is not recoverable and traps, for the reason
+    // vmcs::write gives: the region is this VMM's own and was current a
+    // few instructions ago, so a refusal means the state this code
+    // believes it is in is not the state the processor is in.
+    auto region = own_vmcs_region_physical();
+    if ((0 == region) || arch::x86_64::vmx::vmptrld(&region)) {
+        __builtin_trap();
+    }
+
+    if ((0 != slot) && (slot <= max_cpus)) {
+        auto cpu = slot - 1;
+        this->running_l2[cpu] = false;
+        this->nested_entry_error[cpu] = refusal;
+        this->nested_entry_failed[cpu].store(true,
+                                             std::memory_order_relaxed);
+    }
+
+    arch::x86_64::restore_context(recovery);
+    std::unreachable();
+}
+
 } // namespace zpp::hypervisor
+
+/**
+ * The failure stub's landing point, which exists only to reach the
+ * singleton. Declared by zpp/arch/x86_64/vmx/asm.h, which the VMX layer
+ * uses without knowing what implements it - the same arrangement the host
+ * exception entry stubs use.
+ */
+extern "C" void
+zpp_vmx_nested_entry_failure(zpp::arch::x86_64::context * recovery)
+{
+    zpp::hypervisor::hypervisor::instance().on_nested_entry_failure(
+        recovery);
+}

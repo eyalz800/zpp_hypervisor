@@ -17,6 +17,15 @@ enum type : std::size_t
     ia32_debug_control = 0x1d9,
 
     /**
+     * The page-attribute table, which a VM exit reloads from the host
+     * state area when the "load IA32_PAT" VM-exit control is set. Named
+     * here because the nested exit path has to perform that load itself:
+     * this VMM's own exit controls do not set the bit, so the field would
+     * never be read.
+     */
+    ia32_pat = 0x277,
+
+    /**
      * x2APIC registers, addressed as MSRs rather than through the APIC
      * page. The interrupt command register is what a processor writes to
      * send an inter-processor interrupt, including the INIT and start-up

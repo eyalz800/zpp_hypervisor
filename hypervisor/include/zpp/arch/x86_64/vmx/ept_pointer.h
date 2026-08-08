@@ -2,6 +2,7 @@
 #include "zpp/arch/x86_64/memory_type.h"
 #include <cstdint>
 #include <cstring>
+#include <type_traits>
 
 namespace zpp::arch::x86_64::vmx
 {

@@ -2264,9 +2264,9 @@ bool hypervisor::apply_guest_store(
 }
 
 bool hypervisor::on_ept_violation(std::size_t cpu,
-                                  arch::x86_64::context & context)
+                                  arch::x86_64::context & context,
+                                  std::uint64_t guest_physical)
 {
-    auto guest_physical = this->vmcs.guest_physical_address();
     auto page = guest_physical >> 12;
 
     for (auto & watch : this->watches) {
@@ -5160,6 +5160,35 @@ void hypervisor::setup_vmcs(arch::x86_64::context & guest_context)
         this->guest_current_vmcs[cpu] = nested_vmx::no_current_vmcs;
         this->guest_feature_control[cpu] =
             arch::x86_64::rdmsr(arch::x86_64::msr::ia32_feature_control);
+
+        // And the second-level VMCS, which this is the only place that
+        // prepares. VMCLEAR is what puts the launch state where VMLAUNCH
+        // needs to find it, and it is executed exactly once per processor
+        // because every entry afterwards rewrites every field - so there
+        // is never cached state in it worth writing back, which is the
+        // other thing VMCLEAR does and the reason not to repeat it.
+        //
+        // It leaves this VMM's own VMCS current: SDM 27.1 has VMCLEAR make
+        // the *named* VMCS inactive and not current, and this names the
+        // other one.
+        if constexpr (nested_vmx::enabled) {
+            auto & region = this->vmcs02[cpu];
+
+            region.revision_id = static_cast<std::uint32_t>(
+                this->cached_vmx_msr(vmx_msr::basic) & 0xffffffff);
+            region.abort_indicator = 0;
+
+            this->vmcs02_physical[cpu] =
+                this->host_page_table.virtual_to_physical(&region);
+
+            this->running_l2[cpu] = false;
+            this->vmcs02_launched[cpu] = false;
+            this->nested_bitmaps_merged[cpu] = false;
+
+            if (arch::x86_64::vmx::vmclear(&this->vmcs02_physical[cpu])) {
+                log("cpu {} could not clear its second level vmcs", cpu);
+            }
+        }
     }
 
     arch::x86_64::vmx::ept_pointer eptp;
@@ -6226,15 +6255,6 @@ hypervisor::main(arch::x86_64::context & caller_context)
         auto full_reason =
             arch::x86_64::vmx::exit_reason(vmcs.exit_reason());
 
-        // A failed VM entry arrives here looking like an exit, so it has
-        // to be separated out before anything treats it as one. Nothing
-        // below applies to it: the guest did not run, the instruction
-        // length field describes no instruction, and resuming would fail
-        // the same way again.
-        if (full_reason.entry_failure()) {
-            on_vm_entry_failure(full_reason);
-        }
-
         reason = full_reason.basic();
 
         // Out of the VMCS, because what the exit stub's capture left in
@@ -6244,6 +6264,49 @@ hypervisor::main(arch::x86_64::context & caller_context)
         // Whether the exit was caused by an instruction the guest should
         // be resumed past. Cleared by the handlers for which it is not.
         bool advance_rip = true;
+
+        // A second-level guest's exit is decided before anything else
+        // looks at it, because "whose exit is this" is a different
+        // question from "what does it mean" and has to be asked first.
+        //
+        // Three answers. Reflected: the guest hypervisor's own VMCS is
+        // current again and nothing below applies. Handled: answered
+        // completely by the composition of the two levels of extended page
+        // tables, which is the one thing only that path knows. Deferred:
+        // the cases below answer it with the second-level VMCS current,
+        // which is what keeps one piece of code answering an intercept
+        // whichever guest ran into it.
+        //
+        // Nothing a second-level guest does reaches `default:` below,
+        // which would stop the processor: an exit neither this VMM nor the
+        // guest hypervisor asked for cannot happen, since the controls
+        // that produced it are the union of the two, and everything not
+        // named in the decision is reflected.
+        if constexpr (nested_vmx::enabled) {
+            if (auto slot = vmcs.vpid(); (0 != slot) &&
+                                         (slot <= max_cpus) &&
+                                         this->running_l2[slot - 1]) {
+                if (l2_exit_outcome::deferred !=
+                    on_l2_exit(
+                        slot - 1, full_reason, context, advance_rip)) {
+                    resume_guest(context, full_reason, advance_rip);
+                }
+            }
+        }
+
+        // A failed VM entry arrives here looking like an exit, so it has
+        // to be separated out before anything treats it as one. Nothing
+        // below applies to it: the guest did not run, the instruction
+        // length field describes no instruction, and resuming would fail
+        // the same way again.
+        //
+        // After the nested decision rather than before it, because an
+        // entry into a *second-level* guest that failed is one the guest
+        // hypervisor asked for and has to be told about, where this one is
+        // a bug here with nothing left to do but stop.
+        if (full_reason.entry_failure()) {
+            on_vm_entry_failure(full_reason);
+        }
 
         // What follows is the whole of what this VMM presents to its
         // guest, and every case in it is load bearing for booting
@@ -6950,7 +7013,8 @@ hypervisor::main(arch::x86_64::context & caller_context)
             // A watched page was touched. RIP stays where it is: the
             // guest's instruction has not run yet, and the whole point
             // is to let it run for itself rather than emulate it.
-            if (!on_ept_violation(cpuid, context)) {
+            if (!on_ept_violation(
+                    cpuid, context, vmcs.guest_physical_address())) {
                 // Nothing had that page watched, so the protection was
                 // put there by something that is not going to handle the
                 // fault - which is a bug here rather than a guest error,
@@ -7058,6 +7122,20 @@ hypervisor::main(arch::x86_64::context & caller_context)
             // advancing past an instruction that did not do what the guest
             // asked is correct.
             if (on_vmx_instruction(full_reason, context)) {
+                // Unless the instruction was a VMLAUNCH or VMRESUME that
+                // took, in which case this processor is now about to enter
+                // the second-level guest and RIP belongs to it. The guest
+                // hypervisor's own RIP stays on its VMLAUNCH until an exit
+                // is reflected and vmcs12's host RIP replaces it;
+                // advancing here would write into vmcs02 instead and move
+                // the second-level guest.
+                if constexpr (nested_vmx::enabled) {
+                    if (auto slot = vmcs.vpid();
+                        (0 != slot) && (slot <= max_cpus) &&
+                        this->running_l2[slot - 1]) {
+                        advance_rip = false;
+                    }
+                }
                 break;
             }
 
@@ -7115,134 +7193,167 @@ hypervisor::main(arch::x86_64::context & caller_context)
         }
         }
 
-        // Move a few records out of the ring on the way back to the
-        // guest.
-        //
-        // Here rather than on a timer, because this is the only place
-        // that is guaranteed to run while a guest is alive and is
-        // already a context where taking microseconds is normal. The
-        // budget is four records, so this is a trickle that keeps up
-        // with a guest rather than a flush - a flush belongs in the halt
-        // paths, where there is no guest left to delay.
-        //
-        // It compiles to nothing when the facility is off: pump::run
-        // is `if constexpr (!enabled) return;` and every sink behind it
-        // folds away with it.
-        diag::pump::run();
-
-        // Keep the timer running while the channel is live, because
-        // otherwise nothing happens at all.
-        //
-        // Measured, and it is the finding that decides how a continuous
-        // log has to work: a steadily running Windows takes about
-        // fifteen hundred exits on its busiest processor and a hundred
-        // and sixty on the others - not millions. This VMM intercepts
-        // very little, which is the point of it, and the consequence is
-        // that the write path is reached almost never. A log driven by
-        // guest exits is a log that stops the moment the guest settles.
-        //
-        // The preemption timer manufactures the exits instead, at an
-        // interval this side chooses. That is a real cost - an exit the
-        // guest would not otherwise have taken - so it is only armed
-        // while there is a channel to feed.
-        if constexpr (diag::policy_of(diag::sink::esp_blocks).present) {
-            arm_controller_poll(diag::esp_block_sink::ready());
-        }
-
-        // A heartbeat, so the channel has something to carry.
-        //
-        // Without it the log is silent whenever nothing goes wrong, which
-        // is most of the time - and a silent channel is
-        // indistinguishable from a broken one to whoever is reading the
-        // disk from another machine. That distinction is the whole point
-        // of the channel, so it emits a line periodically whether or not
-        // anything happened, and the line carries the two things worth
-        // knowing about a guest that is merely alive: which processor
-        // this is and how many exits it has taken.
-        //
-        // Counted rather than timed, because a count is free and reading
-        // the time stamp counter on every exit is not. The interval is
-        // large enough that the cost is nothing and small enough that a
-        // reader sees movement within a second on any busy guest.
-        if constexpr (diag::enabled) {
-            // A proof of life, deliberately slow.
-            //
-            // This record exists only so an idle channel can be told
-            // apart from a dead one, and it is the one record this side
-            // manufactures rather than observes. That makes its rate a
-            // direct tax on the region: the sink flushes a partly filled
-            // block once staged_deadline_ticks passes, so a heartbeat
-            // faster than a block fills turns every 128-byte record into
-            // a 4096-byte write.
-            //
-            // Measured at one per eight ticks: 152 blocks a second, one
-            // record in each, wrapping the 64 MB region every seven
-            // minutes and writing 620 KB/s to the medium for nothing.
-            // At one per thousand ticks it is 4 KB/s and the region holds
-            // about four and a half hours.
-            //
-            // The freshness the deadline buys is not lost by slowing this
-            // down, because it applies to real records too: anything the
-            // guest actually causes still reaches the medium within
-            // staged_deadline_ticks of being written. Only the synthetic
-            // traffic is throttled, and an idle guest now writes nothing
-            // at all - which is the correct behaviour, not a regression.
-            constexpr std::uint64_t heartbeat_exits = 1000;
-            auto cpu = vmcs.vpid();
-            if ((0 != cpu) && (cpu <= max_cpus)) {
-                auto & seen = this->heartbeat_exits_seen[cpu - 1];
-                if (0 == (++seen % heartbeat_exits)) {
-                    diag::log<diag::severity::trace>(
-                        "cpu {} alive, {} exits", cpu - 1, seen);
-                }
-            }
-        }
-
-        // Update RIP, unless nothing was executed. For an INIT signal or
-        // a start-up IPI the instruction length field holds nothing
-        // meaningful, and both handlers have already put RIP where the
-        // processor is meant to resume - adding to it would land the
-        // guest a few bytes into its own entry point.
-        if (advance_rip) {
-            context.rip += vmcs.vm_exit_instruction_length();
-            vmcs.guest_rip(context.rip);
-        }
-
-        // Record what is about to be resumed, now that the handlers have
-        // had their say.
-        record_exit(full_reason);
-
-        // Counted here, at the last point before control leaves this
-        // handler, so a frozen exit count can be read two ways round.
-        if (auto slot = vmcs.vpid(); (0 != slot) && (slot <= max_cpus)) {
-            this->resumes_reached[slot - 1] =
-                this->resumes_reached[slot - 1] + 1;
-            this->resume_activity_state[slot - 1] =
-                vmcs.guest_activity_state();
-            this->resume_guest_rip[slot - 1] = vmcs.guest_rip();
-            this->resume_guest_cs[slot - 1] = vmcs.guest_cs_selector();
-        }
-
-        // Whether this processor has been out of VMX operation and back
-        // since the last entry, which only the sleep quiesce does. Its
-        // return leaves the launch state clear, and VMRESUME requires
-        // launched (SDM 27.1) - so that one case has to leave through
-        // VMLAUNCH instead. Consumed here, so the next exit resumes.
-        auto relaunch = false;
-        if (auto slot = vmcs.vpid(); (0 != slot) && (slot <= max_cpus)) {
-            relaunch = this->relaunch_after_sleep[slot - 1];
-            this->relaunch_after_sleep[slot - 1] = false;
-        }
-
-        // The mirror of the launch: the guest's registers are put back
-        // and the last thing executed in host mode is the resume itself.
-        context.rip = reinterpret_cast<std::uint64_t>(
-            relaunch ? arch::x86_64::vmx::vmlaunch
-                     : arch::x86_64::vmx::vmresume);
-        arch::x86_64::restore_context(&context);
+        resume_guest(context, full_reason, advance_rip);
     });
 
     return {};
+}
+
+void hypervisor::resume_guest(arch::x86_64::context & context,
+                              arch::x86_64::vmx::exit_reason full_reason,
+                              bool advance_rip)
+{
+    auto & vmcs = this->vmcs;
+
+    // Move a few records out of the ring on the way back to the
+    // guest.
+    //
+    // Here rather than on a timer, because this is the only place
+    // that is guaranteed to run while a guest is alive and is
+    // already a context where taking microseconds is normal. The
+    // budget is four records, so this is a trickle that keeps up
+    // with a guest rather than a flush - a flush belongs in the halt
+    // paths, where there is no guest left to delay.
+    //
+    // It compiles to nothing when the facility is off: pump::run
+    // is `if constexpr (!enabled) return;` and every sink behind it
+    // folds away with it.
+    diag::pump::run();
+
+    // Keep the timer running while the channel is live, because
+    // otherwise nothing happens at all.
+    //
+    // Measured, and it is the finding that decides how a continuous
+    // log has to work: a steadily running Windows takes about
+    // fifteen hundred exits on its busiest processor and a hundred
+    // and sixty on the others - not millions. This VMM intercepts
+    // very little, which is the point of it, and the consequence is
+    // that the write path is reached almost never. A log driven by
+    // guest exits is a log that stops the moment the guest settles.
+    //
+    // The preemption timer manufactures the exits instead, at an
+    // interval this side chooses. That is a real cost - an exit the
+    // guest would not otherwise have taken - so it is only armed
+    // while there is a channel to feed.
+    if constexpr (diag::policy_of(diag::sink::esp_blocks).present) {
+        arm_controller_poll(diag::esp_block_sink::ready());
+    }
+
+    // A heartbeat, so the channel has something to carry.
+    //
+    // Without it the log is silent whenever nothing goes wrong, which
+    // is most of the time - and a silent channel is
+    // indistinguishable from a broken one to whoever is reading the
+    // disk from another machine. That distinction is the whole point
+    // of the channel, so it emits a line periodically whether or not
+    // anything happened, and the line carries the two things worth
+    // knowing about a guest that is merely alive: which processor
+    // this is and how many exits it has taken.
+    //
+    // Counted rather than timed, because a count is free and reading
+    // the time stamp counter on every exit is not. The interval is
+    // large enough that the cost is nothing and small enough that a
+    // reader sees movement within a second on any busy guest.
+    if constexpr (diag::enabled) {
+        // A proof of life, deliberately slow.
+        //
+        // This record exists only so an idle channel can be told
+        // apart from a dead one, and it is the one record this side
+        // manufactures rather than observes. That makes its rate a
+        // direct tax on the region: the sink flushes a partly filled
+        // block once staged_deadline_ticks passes, so a heartbeat
+        // faster than a block fills turns every 128-byte record into
+        // a 4096-byte write.
+        //
+        // Measured at one per eight ticks: 152 blocks a second, one
+        // record in each, wrapping the 64 MB region every seven
+        // minutes and writing 620 KB/s to the medium for nothing.
+        // At one per thousand ticks it is 4 KB/s and the region holds
+        // about four and a half hours.
+        //
+        // The freshness the deadline buys is not lost by slowing this
+        // down, because it applies to real records too: anything the
+        // guest actually causes still reaches the medium within
+        // staged_deadline_ticks of being written. Only the synthetic
+        // traffic is throttled, and an idle guest now writes nothing
+        // at all - which is the correct behaviour, not a regression.
+        constexpr std::uint64_t heartbeat_exits = 1000;
+        auto cpu = vmcs.vpid();
+        if ((0 != cpu) && (cpu <= max_cpus)) {
+            auto & seen = this->heartbeat_exits_seen[cpu - 1];
+            if (0 == (++seen % heartbeat_exits)) {
+                diag::log<diag::severity::trace>(
+                    "cpu {} alive, {} exits", cpu - 1, seen);
+            }
+        }
+    }
+
+    // Update RIP, unless nothing was executed. For an INIT signal or
+    // a start-up IPI the instruction length field holds nothing
+    // meaningful, and both handlers have already put RIP where the
+    // processor is meant to resume - adding to it would land the
+    // guest a few bytes into its own entry point.
+    if (advance_rip) {
+        context.rip += vmcs.vm_exit_instruction_length();
+        vmcs.guest_rip(context.rip);
+    }
+
+    // Record what is about to be resumed, now that the handlers have
+    // had their say.
+    record_exit(full_reason);
+
+    // Counted here, at the last point before control leaves this
+    // handler, so a frozen exit count can be read two ways round.
+    if (auto slot = vmcs.vpid(); (0 != slot) && (slot <= max_cpus)) {
+        this->resumes_reached[slot - 1] =
+            this->resumes_reached[slot - 1] + 1;
+        this->resume_activity_state[slot - 1] =
+            vmcs.guest_activity_state();
+        this->resume_guest_rip[slot - 1] = vmcs.guest_rip();
+        this->resume_guest_cs[slot - 1] = vmcs.guest_cs_selector();
+    }
+
+    // Whether this processor has been out of VMX operation and back
+    // since the last entry, which only the sleep quiesce does. Its
+    // return leaves the launch state clear, and VMRESUME requires
+    // launched (SDM 27.1) - so that one case has to leave through
+    // VMLAUNCH instead. Consumed here, so the next exit resumes.
+    auto relaunch = false;
+    if (auto slot = vmcs.vpid(); (0 != slot) && (slot <= max_cpus)) {
+        relaunch = this->relaunch_after_sleep[slot - 1];
+        this->relaunch_after_sleep[slot - 1] = false;
+    }
+
+    // Which entry this processor leaves through, which is three
+    // questions rather than one.
+    //
+    // A processor running a second-level guest goes back to it through
+    // the nested pair, whose failure path recovers instead of halting -
+    // a guest hypervisor's VMLAUNCH is a guest instruction and no guest
+    // instruction may stop a processor. Which of the two depends on
+    // vmcs02's own launch state, which SDM 29 step 5 makes "launched"
+    // only after an entry has passed every check.
+    //
+    // Otherwise it is the ordinary pair, and VMLAUNCH only where this
+    // processor has been out of VMX operation and back since its last
+    // entry - see relaunch above.
+    auto entry = relaunch ? arch::x86_64::vmx::vmlaunch
+                          : arch::x86_64::vmx::vmresume;
+
+    if constexpr (nested_vmx::enabled) {
+        if (auto slot = vmcs.vpid(); (0 != slot) && (slot <= max_cpus) &&
+                                     this->running_l2[slot - 1]) {
+            entry = this->vmcs02_launched[slot - 1]
+                        ? arch::x86_64::vmx::nested_vmresume
+                        : arch::x86_64::vmx::nested_vmlaunch;
+        }
+    }
+
+    // The mirror of the launch: the guest's registers are put back
+    // and the last thing executed in host mode is the resume itself.
+    context.rip = reinterpret_cast<std::uint64_t>(entry);
+    arch::x86_64::restore_context(&context);
+    std::unreachable();
 }
 
 void hypervisor::launch_on_cpu_private_stack(

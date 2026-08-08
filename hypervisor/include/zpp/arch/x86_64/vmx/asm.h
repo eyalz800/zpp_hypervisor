@@ -1,4 +1,6 @@
 #pragma once
+#include "zpp/arch/x86_64/context.h"
+#include <cstddef>
 #include <cstdint>
 
 namespace zpp::arch::x86_64::vmx
@@ -197,5 +199,104 @@ inline void __attribute__((naked)) vmresume()
         jmp 1b
     )!!");
 }
+
+/**
+ * Where the two entries below park the address of the context to unwind
+ * to when a VM entry into a second-level guest fails.
+ *
+ * A VMCS field rather than a register or a global, and the choice is
+ * forced. On a failed VM entry no VM exit happens, so nothing has been
+ * reloaded: every general purpose register still holds what the entry was
+ * about to give the guest, RSP names a guest stack the host page table
+ * does not map, and the only per-processor thing still addressable is the
+ * VMCS that was current. So the recovery point has to come out of the
+ * VMCS.
+ *
+ * The CR3-target values are the fields with nothing in them. SDM 25.6.7
+ * makes the list consulted only "if the CR3-target count is n, ... the
+ * first n CR3-target values", and this VMM reports a CR3-target count of
+ * zero through IA32_VMX_MISC and writes zero into the field - so no
+ * processor ever reads them, and no guest hypervisor is offered the list.
+ * They are natural width, which a pointer needs, where the other spare
+ * field of the right shape is 32 bits.
+ *
+ * Named here and spelled literally in the two stubs below, because inline
+ * assembly cannot see a constant expression. Whoever changes one changes
+ * both; nested_vmx.cpp asserts this is the encoding of CR3-target value 0.
+ */
+constexpr std::uint64_t nested_entry_recovery_field = 0x6008;
+
+/**
+ * Where the recovery context's stack pointer sits inside it, which the
+ * stubs below reach by offset because they cannot call anything until
+ * they have it.
+ */
+constexpr std::size_t nested_entry_recovery_rsp_offset = 0x20;
+
+static_assert(nested_entry_recovery_rsp_offset ==
+                  __builtin_offsetof(arch::x86_64::context, rsp),
+              "The nested entry recovery stub indexes context::rsp by "
+              "hand and the offset has moved.");
+
+/**
+ * Called when a VM entry into a second-level guest fails, on the stack the
+ * recovery context named, with that context as its argument.
+ *
+ * Does not return: it puts the processor back where the entry was decided
+ * from, which is inside the VM exit handler that decided it, so that the
+ * guest hypervisor can be told its VM entry failed rather than the
+ * processor stopping. A guest hypervisor's VMLAUNCH is a guest
+ * instruction, and no guest instruction may halt a processor.
+ */
+extern "C" void
+zpp_vmx_nested_entry_failure(arch::x86_64::context * recovery);
+
+/**
+ * VM entry into a second-level guest, launching and resuming.
+ *
+ * Separate from vmlaunch and vmresume above because the failure paths
+ * differ in kind rather than in detail. A failed entry on this VMM's own
+ * VMCS is a bug here and stops the processor; a failed entry on a VMCS
+ * built out of a guest hypervisor's is something a guest asked for, and
+ * has to come back with an answer.
+ *
+ * The recovery reads the context pointer out of the VMCS, moves onto the
+ * host stack that context recorded, and calls. Nothing before that may
+ * touch memory through RSP: it still names the guest's stack, which the
+ * host page table does not map. VMREAD into a register touches none.
+ * @{
+ */
+inline void __attribute__((naked)) nested_vmlaunch()
+{
+    asm(R"!!(
+        .intel_syntax noprefix
+        vmlaunch
+        mov eax, 0x6008
+        vmread rdi, rax
+        mov rsp, [rdi + 0x20]
+        call zpp_vmx_nested_entry_failure
+    1:  cli
+        hlt
+        jmp 1b
+    )!!");
+}
+
+inline void __attribute__((naked)) nested_vmresume()
+{
+    asm(R"!!(
+        .intel_syntax noprefix
+        vmresume
+        mov eax, 0x6008
+        vmread rdi, rax
+        mov rsp, [rdi + 0x20]
+        call zpp_vmx_nested_entry_failure
+    1:  cli
+        hlt
+        jmp 1b
+    )!!");
+}
+/**
+ * @}
+ */
 
 } // namespace zpp::arch::x86_64::vmx

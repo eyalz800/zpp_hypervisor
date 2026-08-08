@@ -1,0 +1,1695 @@
+#include "zpp/arch/x86_64/asm.h"
+#include "zpp/arch/x86_64/memory_type.h"
+#include "zpp/arch/x86_64/msr.h"
+#include "zpp/arch/x86_64/vmx/ept_pointer.h"
+#include "zpp/arch/x86_64/vmx/nested_ept.h"
+#include "zpp/hypervisor/hypervisor.h"
+#include "zpp/hypervisor/nested_vmx.h"
+#include <cstddef>
+#include <cstdint>
+#include <cstring>
+#include <iterator>
+#include <span>
+
+namespace zpp::hypervisor
+{
+namespace
+{
+using arch::x86_64::vmx::vmcs12;
+using arch::x86_64::vmx::vmcs_field_encoding;
+using basic_reason = arch::x86_64::vmx::exit_reason::basic_reason;
+using field = arch::x86_64::vmx::vmcs::field;
+
+/**
+ * The recovery-context field the entry stubs read is CR3-target value 0.
+ * asm.h spells the encoding literally, because inline assembly cannot see
+ * a constant expression; this is what keeps the two spellings honest.
+ */
+static_assert(arch::x86_64::vmx::nested_entry_recovery_field ==
+                  field::cr3_target_value_0,
+              "The nested entry stubs and the VMCS field disagree.");
+
+/**
+ * The pin-based controls this code names, from SDM Table 25-5.
+ * @{
+ */
+constexpr std::uint64_t pin_external_interrupt = 1ull << 0;
+constexpr std::uint64_t pin_preemption_timer = 1ull << 6;
+constexpr std::uint64_t pin_posted_interrupts = 1ull << 7;
+/**
+ * @}
+ */
+
+/**
+ * The primary processor-based controls this code names, from SDM Table
+ * 25-6.
+ * @{
+ */
+constexpr std::uint64_t primary_interrupt_window = 1ull << 2;
+constexpr std::uint64_t primary_tsc_offsetting = 1ull << 3;
+constexpr std::uint64_t primary_hlt_exiting = 1ull << 7;
+constexpr std::uint64_t primary_invlpg_exiting = 1ull << 9;
+constexpr std::uint64_t primary_mwait_exiting = 1ull << 10;
+constexpr std::uint64_t primary_rdpmc_exiting = 1ull << 11;
+constexpr std::uint64_t primary_rdtsc_exiting = 1ull << 12;
+constexpr std::uint64_t primary_cr3_load_exiting = 1ull << 15;
+constexpr std::uint64_t primary_cr3_store_exiting = 1ull << 16;
+constexpr std::uint64_t primary_cr8_load_exiting = 1ull << 19;
+constexpr std::uint64_t primary_cr8_store_exiting = 1ull << 20;
+constexpr std::uint64_t primary_tpr_shadow = 1ull << 21;
+constexpr std::uint64_t primary_nmi_window = 1ull << 22;
+constexpr std::uint64_t primary_mov_dr_exiting = 1ull << 23;
+constexpr std::uint64_t primary_unconditional_io = 1ull << 24;
+constexpr std::uint64_t primary_io_bitmaps = 1ull << 25;
+constexpr std::uint64_t primary_monitor_trap_flag = 1ull << 27;
+constexpr std::uint64_t primary_msr_bitmaps = 1ull << 28;
+constexpr std::uint64_t primary_monitor_exiting = 1ull << 29;
+constexpr std::uint64_t primary_pause_exiting = 1ull << 30;
+constexpr std::uint64_t primary_secondary_controls = 1ull << 31;
+/**
+ * @}
+ */
+
+/**
+ * The secondary processor-based controls this code names, from SDM Table
+ * 25-7.
+ * @{
+ */
+constexpr std::uint64_t secondary_enable_ept = 1ull << 1;
+constexpr std::uint64_t secondary_descriptor_table_exiting = 1ull << 2;
+constexpr std::uint64_t secondary_enable_vpid = 1ull << 5;
+constexpr std::uint64_t secondary_wbinvd_exiting = 1ull << 6;
+constexpr std::uint64_t secondary_unrestricted_guest = 1ull << 7;
+constexpr std::uint64_t secondary_pause_loop_exiting = 1ull << 10;
+constexpr std::uint64_t secondary_rdrand_exiting = 1ull << 11;
+constexpr std::uint64_t secondary_enable_invpcid = 1ull << 12;
+constexpr std::uint64_t secondary_rdseed_exiting = 1ull << 16;
+constexpr std::uint64_t secondary_enable_xsaves = 1ull << 20;
+constexpr std::uint64_t secondary_mode_based_execute = 1ull << 22;
+/**
+ * @}
+ */
+
+/**
+ * The VM-exit controls this code names, from SDM Table 25-13.
+ * @{
+ */
+constexpr std::uint64_t exit_save_debug_controls = 1ull << 2;
+constexpr std::uint64_t exit_host_address_space_size = 1ull << 9;
+constexpr std::uint64_t exit_save_ia32_pat = 1ull << 18;
+constexpr std::uint64_t exit_load_ia32_pat = 1ull << 19;
+constexpr std::uint64_t exit_save_ia32_efer = 1ull << 20;
+constexpr std::uint64_t exit_load_ia32_efer = 1ull << 21;
+/**
+ * @}
+ */
+
+/**
+ * The VM-entry controls this code names, from SDM Table 25-16.
+ * @{
+ */
+constexpr std::uint64_t entry_ia32e_mode_guest = 1ull << 9;
+/**
+ * @}
+ */
+
+/**
+ * CR4.VMXE, which a guest of any level must have set in the real register
+ * because IA32_VMX_CR4_FIXED0 requires it in VMX operation, and must not
+ * see set unless it put it there itself.
+ */
+constexpr std::uint64_t cr4_vmxe = 1ull << 13;
+
+/**
+ * The valid bit of an interruption-information field, SDM Table 25-19.
+ */
+constexpr std::uint64_t interruption_valid = 1ull << 31;
+
+/**
+ * The interruption type field of one, bits 10:8, and the value that means
+ * a non-maskable interrupt. SDM Table 25-19.
+ * @{
+ */
+constexpr std::uint64_t interruption_type_shift = 8;
+constexpr std::uint64_t interruption_type_mask = 0x7;
+constexpr std::uint64_t interruption_type_nmi = 2;
+constexpr std::uint64_t interruption_vector_mask = 0xff;
+/**
+ * @}
+ */
+
+/**
+ * The host-state area, which vmcs02 takes unchanged from the VMCS that
+ * runs the guest hypervisor.
+ *
+ * It is this VMM's rather than the guest hypervisor's because the VM exit
+ * a second-level guest takes comes *here*: the processor knows one host
+ * and it is this one. The guest hypervisor's own host state is loaded into
+ * the guest-state area of vmcs01 instead, and only when an exit is
+ * actually reflected to it. KVM says the same of the exit controls in
+ * `prepare_vmcs02_early`: "L2->L1 exit controls are emulated - the
+ * hardware exit is to L0 so we should use its exit controls".
+ *
+ * IA32_PAT, IA32_EFER and IA32_PERF_GLOBAL_CTRL are absent because the
+ * exit controls copied alongside do not load them, so the processor never
+ * reads those fields. They are host state that does not apply.
+ */
+constexpr field host_state_fields[] = {
+    field::host_es_selector,
+    field::host_cs_selector,
+    field::host_ss_selector,
+    field::host_ds_selector,
+    field::host_fs_selector,
+    field::host_gs_selector,
+    field::host_tr_selector,
+    field::host_ia32_sysenter_cs,
+    field::host_cr0,
+    field::host_cr3,
+    field::host_cr4,
+    field::host_fs_base,
+    field::host_gs_base,
+    field::host_tr_base,
+    field::host_gdtr_base,
+    field::host_idtr_base,
+    field::host_ia32_sysenter_esp,
+    field::host_ia32_sysenter_eip,
+    field::host_rsp,
+    field::host_rip,
+};
+
+/**
+ * The guest-state fields carried in both directions between the guest
+ * hypervisor's VMCS and the one that runs its guest.
+ *
+ * One list rather than two, because the two directions must agree: a field
+ * loaded on the way in and not saved on the way out is a field the
+ * second-level guest's changes to are silently discarded, which is exactly
+ * the class of bug that shows up somewhere unrelated. SDM 27.4 defines the
+ * guest-state area and SDM 30.3 defines what a VM exit saves back into it;
+ * everything unconditional in the second list is here.
+ *
+ * What is deliberately absent, and handled by name instead: CR0, CR4 and
+ * their read shadows, because the masks make them a computation rather
+ * than a copy; RIP, RSP and RFLAGS, which are saved back but loaded from
+ * the guest hypervisor's own values; DR7, IA32_PAT and IA32_EFER, whose
+ * save-back is conditional on the guest hypervisor's exit controls; and
+ * the interruptibility state, which the entry-event path also writes.
+ */
+constexpr field guest_state_fields[] = {
+    field::guest_es_selector,
+    field::guest_cs_selector,
+    field::guest_ss_selector,
+    field::guest_ds_selector,
+    field::guest_fs_selector,
+    field::guest_gs_selector,
+    field::guest_ldtr_selector,
+    field::guest_tr_selector,
+    field::guest_es_limit,
+    field::guest_cs_limit,
+    field::guest_ss_limit,
+    field::guest_ds_limit,
+    field::guest_fs_limit,
+    field::guest_gs_limit,
+    field::guest_ldtr_limit,
+    field::guest_tr_limit,
+    field::guest_gdtr_limit,
+    field::guest_idtr_limit,
+    field::guest_es_access_rights,
+    field::guest_cs_access_rights,
+    field::guest_ss_access_rights,
+    field::guest_ds_access_rights,
+    field::guest_fs_access_rights,
+    field::guest_gs_access_rights,
+    field::guest_ldtr_access_rights,
+    field::guest_tr_access_rights,
+    field::guest_es_base,
+    field::guest_cs_base,
+    field::guest_ss_base,
+    field::guest_ds_base,
+    field::guest_fs_base,
+    field::guest_gs_base,
+    field::guest_ldtr_base,
+    field::guest_tr_base,
+    field::guest_gdtr_base,
+    field::guest_idtr_base,
+    field::guest_cr3,
+    field::guest_pending_debug_exceptions,
+    field::guest_ia32_sysenter_esp,
+    field::guest_ia32_sysenter_eip,
+    field::guest_ia32_sysenter_cs,
+    field::guest_activity_state,
+    field::guest_ia32_debugctl,
+    field::guest_pdpte_0,
+    field::guest_pdpte_1,
+    field::guest_pdpte_2,
+    field::guest_pdpte_3,
+};
+
+/**
+ * The effective CR0 and CR4 a second-level guest reads, which is what its
+ * read shadow under this VMM has to answer with.
+ *
+ * A guest reads `(shadow & mask) | (register & ~mask)`. Under the guest
+ * hypervisor alone that is vmcs12's own three fields; under this VMM the
+ * mask is wider - it includes the bits this VMM owns - so the shadow has
+ * to carry the whole answer rather than half of it. Writing the effective
+ * value into the shadow does that for every bit the wider mask covers,
+ * and the bits it does not cover are outside vmcs12's mask too, where the
+ * real register already agrees. KVM computes the same value in
+ * `nested_read_cr0` and `nested_read_cr4`.
+ * @{
+ */
+constexpr std::uint64_t effective_control_register(std::uint64_t value,
+                                                   std::uint64_t shadow,
+                                                   std::uint64_t mask)
+{
+    return (value & ~mask) | (shadow & mask);
+}
+/**
+ * @}
+ */
+
+} // namespace
+
+bool hypervisor::own_msr_intercepted(std::uint32_t index, bool write) const
+{
+    // The same four 1024-byte bitmaps intercept_msr writes, read back.
+    // SDM 27.6.9, "MSR-Bitmap Address".
+    std::size_t base{};
+    std::uint32_t bit{};
+
+    if (index < 0x2000) {
+        base = write ? 0x800 : 0x000;
+        bit = index;
+    } else if ((index >= 0xc0000000) && (index < 0xc0002000)) {
+        base = write ? 0xc00 : 0x400;
+        bit = index - 0xc0000000;
+    } else {
+        // Outside both ranges no bitmap is consulted and the access exits
+        // unconditionally (SDM 28.1.3), so this VMM's bitmap did not ask
+        // for it and the answer here is no.
+        //
+        // That matters more than it looks. This VMM answers an
+        // out-of-range MSR with a general protection fault, which is what
+        // bare hardware gives - but for a *second-level* guest the machine
+        // is the guest hypervisor, and the synthetic MSR ranges a
+        // hypervisor presents to its guest live exactly there: Hyper-V's
+        // are at 40000000H upwards. Claiming those would have this VMM
+        // fault an interface the guest hypervisor implements.
+        return false;
+    }
+
+    return 0 != (this->msr_bitmap[base + (bit / 8)] & (1u << (bit % 8)));
+}
+
+bool hypervisor::own_io_port_intercepted(std::uint16_t port) const
+{
+    // Bitmap A covers ports 0000H-7FFFH and bitmap B 8000H-FFFFH. SDM
+    // 27.6.4, "I/O-Bitmap Addresses".
+    const auto & bitmap =
+        (port < 0x8000) ? this->io_bitmap_a : this->io_bitmap_b;
+    auto bit = static_cast<std::size_t>(port & 0x7fff);
+
+    return 0 != (bitmap[bit / 8] & (1u << (bit % 8)));
+}
+
+std::expected<void, zpp::error>
+hypervisor::merge_nested_bitmaps(std::size_t cpu)
+{
+    auto & shadow = this->guest_vmcs12[cpu];
+
+    auto msr_source = shadow.read(field::msr_bitmap);
+    auto io_a_source = shadow.read(field::io_bitmap_a);
+    auto io_b_source = shadow.read(field::io_bitmap_b);
+
+    if (this->nested_bitmaps_merged[cpu] &&
+        (msr_source == this->nested_msr_bitmap_source[cpu]) &&
+        (io_a_source == this->nested_io_bitmap_a_source[cpu]) &&
+        (io_b_source == this->nested_io_bitmap_b_source[cpu])) {
+        return {};
+    }
+
+    // The guest hypervisor's page is read straight into the destination
+    // and this VMM's own is then or'd on top, rather than the other way
+    // round with a scratch page in between. There is nowhere to put a
+    // scratch page: the host stack a VM exit runs on is under four
+    // kilobytes, so a page-sized local would run off the end of it, and a
+    // per-processor scratch member would cost what it saves.
+    //
+    // Reading into the destination means a failed read leaves a
+    // half-merged bitmap behind. That is why nested_bitmaps_merged is set
+    // only at the end: a failure refuses the VM entry and the next attempt
+    // starts the merge again, so the half-merged state is never entered
+    // with.
+    //
+    // The merge itself is the union. A bit set on either side is an exit,
+    // which is what makes it safe: every exit that happens is one of the
+    // two asked for, and whichever asked for it knows how to answer it.
+    auto merge_page =
+        [&](std::uint64_t from,
+            const void * ours,
+            std::uint8_t * into,
+            bool read_theirs) -> std::expected<void, zpp::error> {
+        if (read_theirs) {
+            auto read = read_guest_physical(
+                from,
+                std::span(reinterpret_cast<std::byte *>(into), page_size));
+            if (!read) {
+                return std::unexpected(read.error());
+            }
+        } else {
+            std::memset(into, 0, page_size);
+        }
+
+        auto mine = static_cast<const std::uint8_t *>(ours);
+        for (std::size_t i{}; i < page_size; ++i) {
+            into[i] = static_cast<std::uint8_t>(into[i] | mine[i]);
+        }
+
+        return {};
+    };
+
+    auto primary12 =
+        shadow.read(field::primary_processor_based_vm_execution_controls);
+
+    auto their_msr_bitmap = 0 != (primary12 & primary_msr_bitmaps);
+    auto their_io_bitmaps = 0 != (primary12 & primary_io_bitmaps);
+
+    if (auto merged = merge_page(msr_source,
+                                 this->msr_bitmap,
+                                 this->nested_msr_bitmap[cpu],
+                                 their_msr_bitmap);
+        !merged) {
+        return merged;
+    }
+
+    if (auto merged = merge_page(io_a_source,
+                                 this->io_bitmap_a,
+                                 this->nested_io_bitmap[cpu],
+                                 their_io_bitmaps);
+        !merged) {
+        return merged;
+    }
+
+    if (auto merged = merge_page(io_b_source,
+                                 this->io_bitmap_b,
+                                 this->nested_io_bitmap[cpu] + page_size,
+                                 their_io_bitmaps);
+        !merged) {
+        return merged;
+    }
+
+    this->nested_msr_bitmap_physical[cpu] =
+        this->host_page_table.virtual_to_physical(
+            this->nested_msr_bitmap[cpu]);
+    this->nested_io_bitmap_physical[cpu] =
+        this->host_page_table.virtual_to_physical(
+            this->nested_io_bitmap[cpu]);
+
+    this->nested_msr_bitmap_source[cpu] = msr_source;
+    this->nested_io_bitmap_a_source[cpu] = io_a_source;
+    this->nested_io_bitmap_b_source[cpu] = io_b_source;
+    this->nested_bitmaps_merged[cpu] = true;
+
+    return {};
+}
+
+std::expected<void, zpp::error> hypervisor::build_vmcs02(std::size_t cpu)
+{
+    namespace vmx_msr = arch::x86_64::vmx::msr;
+
+    if constexpr (!nested_vmx::enabled) {
+        return std::unexpected(
+            zpp::error{error::nested_controls_unsupported});
+    }
+
+    auto & vmcs = this->vmcs;
+    auto & shadow = this->guest_vmcs12[cpu];
+
+    auto pin12 = shadow.read(field::pin_based_vm_execution_controls);
+    auto primary12 =
+        shadow.read(field::primary_processor_based_vm_execution_controls);
+    auto secondary12 =
+        (0 != (primary12 & primary_secondary_controls))
+            ? shadow.read(
+                  field::secondary_processor_based_vm_execution_controls)
+            : std::uint64_t{};
+    auto exit12 = shadow.read(field::vm_exit_controls);
+    auto entry12 = shadow.read(field::vm_entry_controls);
+
+    // Every control the guest hypervisor set has to be one the capability
+    // MSRs told it it could set, and every control they said must be 1 has
+    // to be 1. SDM 29.2.1.1 makes that the first check on the VM-execution
+    // controls, and adjust_msr applied to the narrowed MSR is exactly it:
+    // a value that already satisfies both halves is its own fixed point.
+    //
+    // Checked against the *narrowed* MSRs rather than the hardware's,
+    // which is the point of narrowing them. Without this a guest
+    // hypervisor could set a control this VMM never offered - virtualized
+    // APIC accesses, say - and the union below would hand it to the
+    // processor with nothing here maintaining the state it needs.
+    auto within_capability = [&](std::size_t msr, std::uint64_t value) {
+        return value == arch::x86_64::vmx::adjust_msr(
+                            nested_vmx_capability_msr(msr), value);
+    };
+
+    if (!within_capability(vmx_msr::true_pin_based_controls, pin12) ||
+        !within_capability(vmx_msr::true_processor_based_controls,
+                           primary12) ||
+        !within_capability(vmx_msr::true_exit_controls, exit12) ||
+        !within_capability(vmx_msr::true_entry_controls, entry12) ||
+        ((0 != (primary12 & primary_secondary_controls)) &&
+         !within_capability(vmx_msr::processor_based_contorls_2,
+                            secondary12))) {
+        return std::unexpected(
+            zpp::error{error::nested_controls_unsupported});
+    }
+
+    // The two consistency rules SDM 29.2.1.1 states about NMIs, which are
+    // the only control combinations reachable here that a union of the two
+    // sides cannot repair. Both are also KVM's
+    // `nested_vmx_check_nmi_controls`.
+    constexpr std::uint64_t pin_nmi_exiting = 1ull << 3;
+    constexpr std::uint64_t pin_virtual_nmis = 1ull << 5;
+
+    if (((0 == (pin12 & pin_nmi_exiting)) &&
+         (0 != (pin12 & pin_virtual_nmis))) ||
+        ((0 == (pin12 & pin_virtual_nmis)) &&
+         (0 != (primary12 & primary_nmi_window)))) {
+        return std::unexpected(
+            zpp::error{error::nested_controls_unsupported});
+    }
+
+    // The MSR areas are not processed, so a non-empty one is refused
+    // rather than ignored. Entering without loading the MSRs a guest
+    // hypervisor asked for would run its guest with the wrong ones and
+    // tell it nothing.
+    if ((0 != shadow.read(field::vm_entry_msr_load_count)) ||
+        (0 != shadow.read(field::vm_exit_msr_load_count)) ||
+        (0 != shadow.read(field::vm_exit_msr_store_count))) {
+        return std::unexpected(
+            zpp::error{error::nested_msr_area_unsupported});
+    }
+
+    // A 64-bit host is the only shape this can put back, since the exit
+    // comes here and the guest hypervisor is resumed in whatever mode its
+    // own host-state area describes. SDM 29.2.2 makes this an error 8
+    // condition on its own terms - the host-state checks are where the
+    // address-space size and the CS selector are validated together.
+    if (0 == (exit12 & exit_host_address_space_size)) {
+        return std::unexpected(
+            zpp::error{error::nested_host_state_unsupported});
+    }
+
+    // The second level of address translation, which is either a shadow
+    // composed out of the guest hypervisor's tables or - when it uses
+    // none - this VMM's own.
+    //
+    // The second case is not a shortcut. Without extended page tables of
+    // its own a guest hypervisor shadow-pages instead, so its guest's
+    // physical addresses *are* its own, and its own are what this VMM's
+    // identity map already translates with the module and every watched
+    // page removed. So the protections are still in force, which is the
+    // whole reason BACKLOG.md rejects handing the guest hypervisor's EPT
+    // pointer straight to the processor.
+    std::uint64_t eptp02{};
+
+    if (0 != (secondary12 & secondary_enable_ept)) {
+        auto eptp12 = shadow.read(field::ept_pointer);
+
+        // The checks SDM 29.2.1.1 puts on the pointer, in the same order
+        // as KVM's `nested_vmx_check_eptp`: a memory type this VMM
+        // reports, a page-walk length it reports, and no bit set above
+        // what the processor can address. Bits 6:3 hold the walk length
+        // minus one, and bits 11:7 are reserved.
+        constexpr std::uint64_t eptp_memory_type_mask = 0x7;
+        constexpr std::uint64_t eptp_walk_length_mask = 0x38;
+        constexpr std::uint64_t eptp_walk_length_4 = 3ull << 3;
+        constexpr std::uint64_t eptp_reserved = 0xf80;
+
+        auto memory_type = eptp12 & eptp_memory_type_mask;
+        auto is_uncachable =
+            memory_type == static_cast<std::uint64_t>(
+                               arch::x86_64::memory_type::uncachable);
+        auto is_write_back =
+            memory_type == static_cast<std::uint64_t>(
+                               arch::x86_64::memory_type::write_back);
+
+        auto address_mask =
+            ((1ull << physical_address_bits()) - 1) & ~0xfffull;
+
+        if ((!is_uncachable && !is_write_back) ||
+            (eptp_walk_length_4 != (eptp12 & eptp_walk_length_mask)) ||
+            (0 != (eptp12 & eptp_reserved)) ||
+            (0 != (eptp12 & ~(address_mask | 0xfffull)))) {
+            return std::unexpected(
+                zpp::error{error::nested_controls_unsupported});
+        }
+
+        auto shadow_pointer = shadow_ept_pointer_for(cpu, eptp12);
+        if (!shadow_pointer) {
+            return std::unexpected(shadow_pointer.error());
+        }
+
+        eptp02 = *shadow_pointer;
+    } else {
+        arch::x86_64::vmx::ept_pointer pointer;
+        pointer.memory_type(arch::x86_64::memory_type::write_back);
+        pointer.page_walk_length(4);
+        pointer.page_number(this->epml4_physical >> 12);
+        eptp02 = pointer;
+    }
+
+    if (auto merged = merge_nested_bitmaps(cpu); !merged) {
+        return merged;
+    }
+
+    // Everything that is this VMM's, read out of the VMCS that runs the
+    // guest hypervisor before that one stops being current.
+    std::uint64_t host_values[std::size(host_state_fields)]{};
+    for (std::size_t i{}; i < std::size(host_state_fields); ++i) {
+        host_values[i] = vmcs.read(host_state_fields[i]);
+    }
+
+    auto pin01 = vmcs.pin_based_vm_execution_controls();
+    auto primary01 = vmcs.primary_processor_based_vm_execution_controls();
+    auto secondary01 =
+        vmcs.secondary_processor_based_vm_execution_controls();
+    auto exit01 = vmcs.vm_exit_controls();
+    auto exception_bitmap01 = vmcs.read(field::exception_bitmap);
+    auto cr0_mask01 = vmcs.read(field::cr0_guest_host_mask);
+    auto cr4_mask01 = vmcs.read(field::cr4_guest_host_mask);
+    auto vpid01 = vmcs.vpid();
+
+    // From here nothing may fail: vmcs02 is about to become current, and a
+    // caller that answered VMfail with it current would resume the guest
+    // hypervisor on the wrong VMCS.
+    if (arch::x86_64::vmx::vmptrld(&this->vmcs02_physical[cpu])) {
+        return std::unexpected(zpp::error{error::vmptrld_failed});
+    }
+
+    for (std::size_t i{}; i < std::size(host_state_fields); ++i) {
+        vmcs.write(host_state_fields[i], host_values[i]);
+    }
+
+    // Pin-based controls: the union, less the preemption timer, which is
+    // this VMM's alone. The capability MSRs do not offer it to a guest
+    // hypervisor, and this VMM arms it to drive its own log - so a guest
+    // hypervisor's copy of the bit means nothing and its exits are not
+    // reflected.
+    vmcs.pin_based_vm_execution_controls(arch::x86_64::vmx::adjust_msr(
+        this->cached_vmx_msr(vmx_msr::true_pin_based_controls),
+        (pin01 | pin12) &
+            ~(pin_preemption_timer | pin_posted_interrupts)));
+
+    // Primary controls: the union, with the two window controls taken from
+    // the guest hypervisor alone. A window exit says "the guest can take
+    // an interrupt now", which is an answer to a question only whoever
+    // asked it can act on - so inheriting this VMM's would produce exits
+    // with nothing to do, and inheriting the guest hypervisor's produces
+    // exits it is waiting for. KVM does the same in
+    // `prepare_vmcs02_early`.
+    auto primary =
+        (primary01 & ~(primary_interrupt_window | primary_nmi_window)) |
+        primary12;
+
+    // The TPR shadow is not offered, and cannot be inherited from this
+    // VMM either, because the virtual-APIC page it needs is per-VMCS state
+    // nothing here maintains.
+    primary &= ~primary_tpr_shadow;
+
+    // The bitmaps, whose controls follow the merge rather than either
+    // side. "Use MSR bitmaps" clear means *every* MSR access exits, which
+    // is what a guest hypervisor that set no bitmap asked for - so the
+    // control is the guest hypervisor's, and the bitmap behind it is the
+    // union.
+    if (0 != (primary12 & primary_msr_bitmaps)) {
+        primary |= primary_msr_bitmaps;
+        vmcs.msr_bitmap(this->nested_msr_bitmap_physical[cpu]);
+    } else {
+        primary &= ~primary_msr_bitmaps;
+    }
+
+    // I/O the same way, with one asymmetry: this VMM always uses bitmaps
+    // and has ports of its own in them, so a guest hypervisor that uses
+    // neither still gets bitmap-driven exits - its own guest's I/O reaches
+    // it only for the ports this VMM watches, which is exactly right,
+    // since it asked for none.
+    if (0 != (primary12 & primary_unconditional_io)) {
+        primary |= primary_unconditional_io;
+        primary &= ~primary_io_bitmaps;
+    } else {
+        primary &= ~primary_unconditional_io;
+        primary |= primary_io_bitmaps;
+        vmcs.write(field::io_bitmap_a,
+                   this->nested_io_bitmap_physical[cpu]);
+        vmcs.write(field::io_bitmap_b,
+                   this->nested_io_bitmap_physical[cpu] + page_size);
+    }
+
+    // Extended page tables are always in use for a second-level guest, so
+    // the secondary controls are always activated whatever the guest
+    // hypervisor asked.
+    primary |= primary_secondary_controls;
+
+    vmcs.primary_processor_based_vm_execution_controls(
+        arch::x86_64::vmx::adjust_msr(
+            this->cached_vmx_msr(vmx_msr::true_processor_based_controls),
+            primary));
+
+    // Secondary controls: the union, with three corrections.
+    //
+    // Unrestricted guest comes from the guest hypervisor alone. With it
+    // on, a guest may run with CR0.PE clear, and the guest-state checks
+    // SDM 29.3.1 applies are relaxed accordingly - so inheriting this
+    // VMM's copy would accept a second-level guest state its own
+    // hypervisor's VMCS says is invalid. KVM clears it for the same
+    // reason.
+    //
+    // Mode-based execute control is cleared, and this is the one that is
+    // not obvious. The capability MSRs do not offer it, so bit 10 of the
+    // guest hypervisor's own extended page-table entries means nothing it
+    // chose - it has no reason ever to set it. The shadow builder
+    // intersects that bit with this VMM's, so composing it would leave
+    // every shadow leaf denying user-mode execute, and the second-level
+    // guest would fault on the first instruction it ran in user mode. With
+    // the control clear the processor ignores bit 10 entirely and bit 2
+    // governs both modes, which is what both levels meant.
+    //
+    // Extended page tables and VPIDs are always on, because the pointer
+    // written below is always a real one and the VPID always non-zero.
+    auto secondary =
+        (secondary01 | secondary12) &
+        ~(secondary_mode_based_execute | secondary_unrestricted_guest);
+
+    secondary |= secondary12 & secondary_unrestricted_guest;
+    secondary |= secondary_enable_ept | secondary_enable_vpid;
+
+    vmcs.secondary_processor_based_vm_execution_controls(
+        arch::x86_64::vmx::adjust_msr(
+            this->cached_vmx_msr(vmx_msr::processor_based_contorls_2),
+            secondary));
+
+    // Exit controls are this VMM's, unchanged. The exit comes here.
+    vmcs.vm_exit_controls(exit01);
+
+    // Entry controls are the guest hypervisor's, unchanged. They describe
+    // what VM entry loads into *its* guest, which is a decision it owns
+    // completely - including "IA-32e mode guest", which has to agree with
+    // the CR0 and CR4 it wrote beside them or the entry fails its own
+    // consistency check and is reflected as such.
+    vmcs.vm_entry_controls(arch::x86_64::vmx::adjust_msr(
+        this->cached_vmx_msr(vmx_msr::true_entry_controls), entry12));
+
+    vmcs.ept_pointer(eptp02);
+    vmcs.vpid(vpid01);
+
+    // All ones is "no linked VMCS". VMCS shadowing is not offered, so the
+    // guest hypervisor's own link pointer is not consulted.
+    vmcs.vmcs_link_pointer(~std::uint64_t{});
+
+    // Where a refused entry unwinds to. See asm.h: the stubs read this
+    // field because on a refusal nothing has been reloaded and there is no
+    // other per-processor thing left addressable.
+    vmcs.write(field::cr3_target_value_0,
+               reinterpret_cast<std::uint64_t>(
+                   &this->nested_entry_recovery[cpu]));
+    vmcs.write(field::cr3_target_count, 0);
+
+    // The exception bitmap is the bitwise or of what the guest hypervisor
+    // wants to trap and what this VMM does, which is the merge KVM
+    // describes on `vmx_update_exception_bitmap`. The page-fault
+    // error-code mask and match come from the guest hypervisor unchanged,
+    // because this VMM traps no page faults of its own - if it ever does,
+    // both must go to zero so that every page fault exits and the
+    // filtering moves into the reflect decision.
+    vmcs.write(field::exception_bitmap,
+               exception_bitmap01 | shadow.read(field::exception_bitmap));
+    vmcs.write(field::page_fault_error_code_mask,
+               shadow.read(field::page_fault_error_code_mask));
+    vmcs.write(field::page_fault_error_code_match,
+               shadow.read(field::page_fault_error_code_match));
+
+    // The control-register masks are the union too, and the read shadows
+    // then have to carry the whole answer rather than half of it - see
+    // effective_control_register.
+    auto cr0_mask12 = shadow.read(field::cr0_guest_host_mask);
+    auto cr4_mask12 = shadow.read(field::cr4_guest_host_mask);
+    auto cr0_12 = shadow.read(field::guest_cr0);
+    auto cr4_12 = shadow.read(field::guest_cr4);
+
+    vmcs.write(field::cr0_guest_host_mask, cr0_mask01 | cr0_mask12);
+    vmcs.write(field::cr4_guest_host_mask, cr4_mask01 | cr4_mask12);
+
+    vmcs.cr0_read_shadow(effective_control_register(
+        cr0_12, shadow.read(field::cr0_read_shadow), cr0_mask12));
+    vmcs.cr4_read_shadow(effective_control_register(
+        cr4_12, shadow.read(field::cr4_read_shadow), cr4_mask12));
+
+    // VMXE is forced into the real register for the same reason it is for
+    // the guest hypervisor: IA32_VMX_CR4_FIXED0 requires it in VMX
+    // operation, so a guest-state area without it fails VM entry. The read
+    // shadow above answers for the bit, so nothing sees it.
+    vmcs.guest_cr0(cr0_12);
+    vmcs.guest_cr4(cr4_12 | cr4_vmxe);
+
+    for (auto guest_field : guest_state_fields) {
+        vmcs.write(guest_field, shadow.read(guest_field));
+    }
+
+    vmcs.guest_rip(shadow.read(field::guest_rip));
+    vmcs.guest_rsp(shadow.read(field::guest_rsp));
+    vmcs.guest_rflags(shadow.read(field::guest_rflags));
+    vmcs.guest_dr7(shadow.read(field::guest_dr7));
+    vmcs.write(field::guest_ia32_pat, shadow.read(field::guest_ia32_pat));
+    vmcs.write(field::guest_ia32_efer,
+               shadow.read(field::guest_ia32_efer));
+    vmcs.write(field::guest_interruptibility_state,
+               shadow.read(field::guest_interruptibility_state));
+
+    // The time stamp counter offset composes across levels: what this VMM
+    // applies to the guest hypervisor, plus what the guest hypervisor
+    // applies to its own guest. KVM's `kvm_calc_nested_tsc_offset` is the
+    // same sum. This VMM applies none today, so the sum is the guest
+    // hypervisor's, and writing it as a sum is what keeps it correct if
+    // that changes.
+    auto tsc_offset01 = (0 != (primary01 & primary_tsc_offsetting))
+                            ? vmcs.read(field::tsc_offset)
+                            : std::uint64_t{};
+    auto tsc_offset12 = (0 != (primary12 & primary_tsc_offsetting))
+                            ? shadow.read(field::tsc_offset)
+                            : std::uint64_t{};
+    vmcs.write(field::tsc_offset, tsc_offset01 + tsc_offset12);
+
+    // The event the guest hypervisor asked to inject, taken from its VMCS
+    // on the entry that starts its guest running. SDM 27.8.3 makes the
+    // three fields a set: the information field's valid bit decides
+    // whether the other two are read at all.
+    auto injection =
+        shadow.read(field::vm_entry_interruption_information_field);
+    vmcs.write(field::vm_entry_interruption_information_field, injection);
+
+    if (0 != (injection & interruption_valid)) {
+        vmcs.write(field::vm_entry_exception_error_code,
+                   shadow.read(field::vm_entry_exception_error_code));
+        vmcs.write(field::vm_entry_instruction_length,
+                   shadow.read(field::vm_entry_instruction_length));
+    }
+
+    vmcs.write(field::vm_entry_msr_load_count, 0);
+    vmcs.write(field::vm_exit_msr_load_count, 0);
+    vmcs.write(field::vm_exit_msr_store_count, 0);
+
+    // The transition itself. A guest hypervisor without VPIDs of its own
+    // expects VM entry to flush, and a second-level guest shares this
+    // VMM's VPID - so the flush has to be performed rather than left to
+    // hardware, which will not do it for a non-zero VPID.
+    nested_transition_flush();
+
+    return {};
+}
+
+void hypervisor::nested_transition_flush()
+{
+    // Single-context, on this VMM's own VPID, which SDM 31.4.3.1 makes
+    // invalidate "linear mappings and combined mappings associated with
+    // that VPID ... for all PCIDs and, for combined mappings, all
+    // EPTRTAs". That covers both levels at once: the guest hypervisor's
+    // mappings and its guest's differ only in the extended page-table
+    // root, and this invalidates every root.
+    //
+    // Over-invalidation rather than precision, deliberately. The
+    // alternative is a VPID of its own for the second level, which buys
+    // back the mappings this throws away and costs a second identifier per
+    // processor plus the bookkeeping to keep it in step with the guest
+    // hypervisor's own. The measurement that would justify it is the exit
+    // rate of a real guest hypervisor, which nothing has yet run.
+    constexpr std::uint64_t single_context = 1;
+
+    struct alignas(0x10) invvpid_descriptor
+    {
+        std::uint64_t vpid{};
+        std::uint64_t linear_address{};
+    };
+
+    invvpid_descriptor descriptor{this->vmcs.vpid(), 0};
+
+    if (arch::x86_64::vmx::invvpid(single_context, &descriptor)) {
+        log("invvpid failed on a nested transition, cpu {}",
+            this->vmcs.vpid());
+    }
+}
+
+bool hypervisor::l0_wants_l2_exit(std::size_t cpu,
+                                  arch::x86_64::vmx::exit_reason reason,
+                                  const arch::x86_64::context & context)
+{
+    auto & vmcs = this->vmcs;
+
+    // The question this answers is narrow on purpose: not "can this VMM
+    // handle it" but "must it", whatever the guest hypervisor asked. KVM
+    // splits the decision the same way in `nested_vmx_l0_wants_exit`, and
+    // asks it first, because an exit this VMM needs is one no reflection
+    // may take away.
+    switch (reason.basic()) {
+    case basic_reason::exception_or_nmi: {
+        // A non-maskable interrupt is this VMM's whoever is running: NMI
+        // exiting is set in its own pin controls and the handler hands the
+        // interrupt back to the guest's world. Everything else in this
+        // exit is an exception, and exceptions belong to whoever put the
+        // vector in the exception bitmap.
+        auto information =
+            vmcs.read(field::vm_exit_interruption_information);
+        auto type = (information >> interruption_type_shift) &
+                    interruption_type_mask;
+
+        return interruption_type_nmi == type;
+    }
+
+    case basic_reason::ept_violation:
+    case basic_reason::ept_misconfiguration:
+        // Always, and the composition decides afterwards whose fault it
+        // was. The processor walked the *shadow*, which is neither side's
+        // table, so nothing about the exit as delivered describes what the
+        // guest hypervisor's tables say - that has to be worked out here.
+        // KVM reaches the same conclusion in `nested_vmx_l0_wants_exit`.
+        return true;
+
+    case basic_reason::vmx_preemption_timer:
+        // This VMM's clock. The capability MSRs do not offer the timer, so
+        // a guest hypervisor cannot have armed it.
+        return true;
+
+    case basic_reason::monitor_trap_flag:
+        // Only while this VMM is stepping a watched write. A guest
+        // hypervisor may set the flag itself - it is in the primary
+        // controls it is offered - and then the exit is its own.
+        return this->stepping_watch[cpu];
+
+    case basic_reason::rdmsr:
+    case basic_reason::wrmsr:
+        // The MSR number is in ECX, which is a guest register and
+        // therefore in the captured context rather than in the VMCS.
+        return own_msr_intercepted(static_cast<std::uint32_t>(context.rcx),
+                                   basic_reason::wrmsr == reason.basic());
+
+    case basic_reason::io_instruction: {
+        // The port is in the exit qualification, bits 31:16. SDM Table
+        // 28-5, "Exit Qualification for I/O Instructions".
+        auto port =
+            static_cast<std::uint16_t>(vmcs.exit_qualification() >> 16);
+
+        return own_io_port_intercepted(port);
+    }
+
+    default:
+        return false;
+    }
+}
+
+bool hypervisor::l1_wants_l2_exit(std::size_t cpu,
+                                  arch::x86_64::vmx::exit_reason reason,
+                                  const arch::x86_64::context & context)
+{
+    auto & vmcs = this->vmcs;
+    auto & shadow = this->guest_vmcs12[cpu];
+
+    auto primary12 =
+        shadow.read(field::primary_processor_based_vm_execution_controls);
+    auto secondary12 =
+        (0 != (primary12 & primary_secondary_controls))
+            ? shadow.read(
+                  field::secondary_processor_based_vm_execution_controls)
+            : std::uint64_t{};
+    auto pin12 = shadow.read(field::pin_based_vm_execution_controls);
+
+    auto primary_set = [&](std::uint64_t control) {
+        return 0 != (primary12 & control);
+    };
+
+    auto secondary_set = [&](std::uint64_t control) {
+        return 0 != (secondary12 & control);
+    };
+
+    switch (reason.basic()) {
+    case basic_reason::exception_or_nmi: {
+        // Filtered through the guest hypervisor's own exception bitmap,
+        // with the page-fault error-code mask and match applied to vector
+        // 14. SDM 27.6.3: a page fault exits if
+        // "(error_code & mask) == match" agrees with the bitmap bit.
+        auto information =
+            vmcs.read(field::vm_exit_interruption_information);
+        auto vector = information & interruption_vector_mask;
+        auto bitmap = shadow.read(field::exception_bitmap);
+
+        constexpr std::uint64_t page_fault_vector = 14;
+
+        if (page_fault_vector == vector) {
+            auto error_code =
+                vmcs.read(field::vm_exit_interruption_error_code);
+            auto mask = shadow.read(field::page_fault_error_code_mask);
+            auto match = shadow.read(field::page_fault_error_code_match);
+            auto in_bitmap = 0 != (bitmap & (1ull << page_fault_vector));
+
+            return in_bitmap == ((error_code & mask) == match);
+        }
+
+        return 0 != (bitmap & (1ull << vector));
+    }
+
+    case basic_reason::external_interrupt:
+        // Unlike KVM, which always takes this for itself because its host
+        // has interrupt handlers to run, this VMM never sets
+        // external-interrupt exiting - interrupts are the guest's, which
+        // owns the interrupt controller. So the control can only be set
+        // because the guest hypervisor asked, and the exit can only be
+        // its own.
+        return 0 != (pin12 & pin_external_interrupt);
+
+    case basic_reason::interrupt_window:
+        return primary_set(primary_interrupt_window);
+    case basic_reason::nmi_window:
+        return primary_set(primary_nmi_window);
+    case basic_reason::hlt:
+        return primary_set(primary_hlt_exiting);
+    case basic_reason::invlpg:
+        return primary_set(primary_invlpg_exiting);
+    case basic_reason::rdpmc:
+        return primary_set(primary_rdpmc_exiting);
+    case basic_reason::rdtsc:
+    case basic_reason::rdtscp:
+        return primary_set(primary_rdtsc_exiting);
+    case basic_reason::mov_debug_register:
+        return primary_set(primary_mov_dr_exiting);
+    case basic_reason::mwait:
+        return primary_set(primary_mwait_exiting);
+    case basic_reason::monitor:
+        return primary_set(primary_monitor_exiting);
+    case basic_reason::monitor_trap_flag:
+        return primary_set(primary_monitor_trap_flag);
+    case basic_reason::pause:
+        return primary_set(primary_pause_exiting) ||
+               secondary_set(secondary_pause_loop_exiting);
+    case basic_reason::rdrand:
+        return secondary_set(secondary_rdrand_exiting);
+    case basic_reason::rdseed:
+        return secondary_set(secondary_rdseed_exiting);
+    case basic_reason::wbinvd:
+        return secondary_set(secondary_wbinvd_exiting);
+    case basic_reason::gdtr_or_idtr:
+    case basic_reason::ldtr_or_tr:
+        return secondary_set(secondary_descriptor_table_exiting);
+    case basic_reason::xsaves:
+    case basic_reason::xrstors:
+        return secondary_set(secondary_enable_xsaves);
+    case basic_reason::invpcid:
+        return secondary_set(secondary_enable_invpcid) &&
+               primary_set(primary_invlpg_exiting);
+    case basic_reason::tpr_below_threshold:
+        return primary_set(primary_tpr_shadow);
+
+    case basic_reason::control_register_access: {
+        // SDM Table 28-3, "Exit Qualification for Control-Register
+        // Accesses": bits 3:0 the register number, bits 5:4 the access
+        // type, bits 11:8 the general purpose register. Same shape as
+        // KVM's `nested_vmx_exit_handled_cr`.
+        auto qualification = vmcs.exit_qualification();
+        auto number = qualification & 0xf;
+        auto access = (qualification >> 4) & 0x3;
+
+        constexpr std::uint64_t access_move_to = 0;
+        constexpr std::uint64_t access_move_from = 1;
+        constexpr std::uint64_t access_clts = 2;
+        constexpr std::uint64_t access_lmsw = 3;
+
+        auto cr0_mask = shadow.read(field::cr0_guest_host_mask);
+        auto cr4_mask = shadow.read(field::cr4_guest_host_mask);
+
+        switch (access) {
+        case access_move_to:
+            switch (number) {
+            case 0: {
+                // A write exits to the guest hypervisor only if it changes
+                // a bit the guest hypervisor masked. The value written is
+                // in the named register, which is L2's - and L2's
+                // registers are the captured context, not the VMCS. That
+                // is more than this decision needs: the mask being zero
+                // is already the common case, and a spurious reflection is
+                // harmless where a missed one is not.
+                return 0 != cr0_mask;
+            }
+            case 3:
+                return primary_set(primary_cr3_load_exiting);
+            case 4:
+                return 0 != cr4_mask;
+            case 8:
+                return primary_set(primary_cr8_load_exiting);
+            default:
+                return true;
+            }
+        case access_move_from:
+            switch (number) {
+            case 3:
+                return primary_set(primary_cr3_store_exiting);
+            case 8:
+                return primary_set(primary_cr8_store_exiting);
+            default:
+                return true;
+            }
+        case access_clts:
+            // CLTS clears CR0.TS, so it exits to the guest hypervisor only
+            // if that bit is one it owns.
+            return 0 != (cr0_mask & (1ull << 3));
+        case access_lmsw:
+        default:
+            // LMSW writes CR0's low four bits.
+            return 0 != (cr0_mask & 0xf);
+        }
+    }
+
+    case basic_reason::io_instruction: {
+        // SDM Table 28-5: bits 2:0 the size, bit 3 the direction, bit 4
+        // string, bit 5 REP, bit 6 operand encoding, bits 31:16 the port.
+        if (primary_set(primary_unconditional_io)) {
+            return true;
+        }
+
+        if (!primary_set(primary_io_bitmaps)) {
+            return false;
+        }
+
+        auto qualification = vmcs.exit_qualification();
+        auto port = static_cast<std::uint32_t>(qualification >> 16);
+        auto size = static_cast<std::uint32_t>((qualification & 0x7) + 1);
+
+        // Every byte of the access is checked, because a wide access whose
+        // first port is not intercepted may still touch one that is. KVM's
+        // `nested_vmx_exit_handled_io` walks the same range.
+        for (std::uint32_t i{}; i < size; ++i) {
+            auto at = port + i;
+            if (at > 0xffff) {
+                break;
+            }
+
+            auto base = (at < 0x8000) ? shadow.read(field::io_bitmap_a)
+                                      : shadow.read(field::io_bitmap_b);
+            auto bit = at & 0x7fff;
+
+            std::uint8_t byte{};
+            auto read = read_guest_physical(
+                base + (bit / 8),
+                std::span(reinterpret_cast<std::byte *>(&byte), 1));
+
+            // A bitmap this VMM cannot read is treated as intercepting.
+            // The guest hypervisor named the page; if it is unreadable
+            // that is its problem to see, and reflecting shows it.
+            if (!read || (0 != (byte & (1u << (bit % 8))))) {
+                return true;
+            }
+        }
+
+        return false;
+    }
+
+    case basic_reason::rdmsr:
+    case basic_reason::wrmsr: {
+        if (!primary_set(primary_msr_bitmaps)) {
+            // No bitmap means every MSR access exits, which is what the
+            // guest hypervisor asked for.
+            return true;
+        }
+
+        auto index = static_cast<std::uint32_t>(context.rcx);
+        auto write = basic_reason::wrmsr == reason.basic();
+
+        std::size_t base{};
+        std::uint32_t bit{};
+
+        if (index < 0x2000) {
+            base = write ? 0x800 : 0x000;
+            bit = index;
+        } else if ((index >= 0xc0000000) && (index < 0xc0002000)) {
+            base = write ? 0xc00 : 0x400;
+            bit = index - 0xc0000000;
+        } else {
+            // Outside both ranges the bitmap is not consulted and the
+            // access exits unconditionally, so it is the guest
+            // hypervisor's. SDM 28.1.3.
+            return true;
+        }
+
+        std::uint8_t byte{};
+        auto read = read_guest_physical(
+            shadow.read(field::msr_bitmap) + base + (bit / 8),
+            std::span(reinterpret_cast<std::byte *>(&byte), 1));
+
+        return !read || (0 != (byte & (1u << (bit % 8))));
+    }
+
+    default:
+        // Everything else is the guest hypervisor's, which is KVM's
+        // default in `nested_vmx_l1_wants_exit` and is the safe direction:
+        // the exits that reach here unconditionally - triple fault, task
+        // switch, CPUID, INVD, XSETBV, every VMX instruction, invalid
+        // guest state - are all ones it must see, and reflecting one it
+        // did not expect is an error it can report where absorbing one it
+        // was waiting for is a hang.
+        //
+        // The VMX instructions being reflected is what makes three levels
+        // of nesting work: a guest hypervisor emulating them for its own
+        // guest gets them, exactly as this VMM gets them from the level
+        // above.
+        return true;
+    }
+}
+
+void hypervisor::save_l2_state(std::size_t cpu)
+{
+    auto & vmcs = this->vmcs;
+    auto & shadow = this->guest_vmcs12[cpu];
+
+    // Everything unconditional first, in the same order it was loaded, so
+    // that the two lists cannot drift apart.
+    for (auto guest_field : guest_state_fields) {
+        shadow.write(guest_field, vmcs.read(guest_field));
+    }
+
+    shadow.write(field::guest_rip, vmcs.guest_rip());
+    shadow.write(field::guest_rsp, vmcs.guest_rsp());
+    shadow.write(field::guest_rflags, vmcs.guest_rflags());
+    shadow.write(field::guest_interruptibility_state,
+                 vmcs.read(field::guest_interruptibility_state));
+
+    // The control registers, put back through the same masks they were
+    // built with. What the second-level guest owns is the real register;
+    // what its hypervisor owns is what it last wrote into vmcs12, and
+    // saving the real value over that would tell it its own masked bits
+    // had changed underneath it. KVM's `vmcs12_guest_cr0` and
+    // `vmcs12_guest_cr4` compose the same two halves.
+    auto cr0_mask12 = shadow.read(field::cr0_guest_host_mask);
+    auto cr4_mask12 = shadow.read(field::cr4_guest_host_mask);
+
+    shadow.write(field::guest_cr0,
+                 (vmcs.guest_cr0() & ~cr0_mask12) |
+                     (shadow.read(field::guest_cr0) & cr0_mask12));
+
+    // VMXE is removed on the way back for the same reason it was forced in
+    // on the way out: the bit is this VMM's, and a guest hypervisor that
+    // never set it in its own guest's CR4 must not find it there.
+    shadow.write(field::guest_cr4,
+                 ((vmcs.guest_cr4() & ~cr4_vmxe) & ~cr4_mask12) |
+                     (shadow.read(field::guest_cr4) & cr4_mask12));
+
+    // "IA-32e mode guest" is a guest state bit wearing a control's
+    // clothing, and SDM 30.3 has a VM exit update it. KVM says the same
+    // in `sync_vmcs02_to_vmcs12`.
+    shadow.write(
+        field::vm_entry_controls,
+        (shadow.read(field::vm_entry_controls) & ~entry_ia32e_mode_guest) |
+            (vmcs.vm_entry_controls() & entry_ia32e_mode_guest));
+
+    // The three saved conditionally, on the guest hypervisor's own exit
+    // controls. SDM 30.4, "Saving MSRs", and SDM 30.3 for DR7.
+    auto exit12 = shadow.read(field::vm_exit_controls);
+
+    if (0 != (exit12 & exit_save_debug_controls)) {
+        shadow.write(field::guest_dr7, vmcs.guest_dr7());
+        shadow.write(field::guest_ia32_debugctl,
+                     vmcs.read(field::guest_ia32_debugctl));
+    }
+
+    if (0 != (exit12 & exit_save_ia32_pat)) {
+        shadow.write(field::guest_ia32_pat,
+                     vmcs.read(field::guest_ia32_pat));
+    }
+
+    if (0 != (exit12 & exit_save_ia32_efer)) {
+        shadow.write(field::guest_ia32_efer,
+                     vmcs.read(field::guest_ia32_efer));
+    }
+}
+
+void hypervisor::load_l1_host_state(std::size_t cpu)
+{
+    auto & vmcs = this->vmcs;
+    auto & shadow = this->guest_vmcs12[cpu];
+
+    auto exit12 = shadow.read(field::vm_exit_controls);
+
+    auto host_cr0_12 = shadow.read(field::host_cr0);
+    auto host_cr4_12 = shadow.read(field::host_cr4);
+
+    vmcs.guest_cr0(host_cr0_12);
+    vmcs.guest_cr3(shadow.read(field::host_cr3));
+    vmcs.guest_cr4(host_cr4_12 | cr4_vmxe);
+
+    // The read shadows have to follow, or the guest hypervisor reads back
+    // the state of its own guest. CR4's is the one that matters: VMXE is
+    // in this VMM's mask and forced into the register above, so without
+    // this the guest hypervisor would read a CR4 it never wrote.
+    vmcs.cr0_read_shadow(host_cr0_12);
+    vmcs.cr4_read_shadow(host_cr4_12);
+
+    vmcs.guest_rip(shadow.read(field::host_rip));
+    vmcs.guest_rsp(shadow.read(field::host_rsp));
+
+    // SDM 30.5.4: "RFLAGS is cleared, except bit 1, which is always set".
+    constexpr std::uint64_t rflags_reserved_one = 1ull << 1;
+    vmcs.guest_rflags(rflags_reserved_one);
+
+    // SDM 30.5.4 again: no blocking by STI or MOV SS, and the activity
+    // state is active. A hypervisor arriving at its own exit handler is
+    // running.
+    vmcs.write(field::guest_interruptibility_state, 0);
+    vmcs.write(field::guest_activity_state,
+               arch::x86_64::vmx::activity_state::active);
+    vmcs.write(field::guest_pending_debug_exceptions, 0);
+
+    // SDM 30.5.3, "Loading Host Segment and Descriptor-Table Registers".
+    // The selectors come from the host-state area; everything else about
+    // each segment is fixed by the architecture rather than stored, which
+    // is why these are constants rather than copies.
+    //
+    // Access-rights encoding, SDM Table 25-2: bits 3:0 type, bit 4 S, bits
+    // 6:5 DPL, bit 7 P, bit 13 L, bit 14 D/B, bit 15 G, bit 16 unusable.
+    constexpr std::uint64_t code_access_long = 0xa09b;
+    constexpr std::uint64_t code_access_legacy = 0xc09b;
+    constexpr std::uint64_t data_access = 0xc093;
+    constexpr std::uint64_t task_access = 0x008b;
+    constexpr std::uint64_t unusable_access = 0x10000;
+    constexpr std::uint64_t flat_limit = 0xffffffff;
+    constexpr std::uint64_t task_limit = 0x67;
+    constexpr std::uint64_t descriptor_table_limit = 0xffff;
+
+    auto in_ia32e_mode = 0 != (exit12 & exit_host_address_space_size);
+
+    vmcs.guest_cs_selector(shadow.read(field::host_cs_selector));
+    vmcs.guest_cs_base(0);
+    vmcs.guest_cs_limit(flat_limit);
+    vmcs.guest_cs_access_rights(in_ia32e_mode ? code_access_long
+                                              : code_access_legacy);
+
+    // The five data segments, all with the same fixed shape. FS and GS
+    // are the two exceptions and only in the base, which the host-state
+    // area has to carry because a long-mode descriptor cannot.
+    struct data_segment
+    {
+        field selector;
+        field vmcs_selector;
+        field vmcs_base;
+        field vmcs_limit;
+        field vmcs_access;
+        std::uint64_t base;
+    };
+
+    const data_segment data_segments[] = {
+        {field::host_ss_selector,
+         field::guest_ss_selector,
+         field::guest_ss_base,
+         field::guest_ss_limit,
+         field::guest_ss_access_rights,
+         0},
+        {field::host_ds_selector,
+         field::guest_ds_selector,
+         field::guest_ds_base,
+         field::guest_ds_limit,
+         field::guest_ds_access_rights,
+         0},
+        {field::host_es_selector,
+         field::guest_es_selector,
+         field::guest_es_base,
+         field::guest_es_limit,
+         field::guest_es_access_rights,
+         0},
+        {field::host_fs_selector,
+         field::guest_fs_selector,
+         field::guest_fs_base,
+         field::guest_fs_limit,
+         field::guest_fs_access_rights,
+         shadow.read(field::host_fs_base)},
+        {field::host_gs_selector,
+         field::guest_gs_selector,
+         field::guest_gs_base,
+         field::guest_gs_limit,
+         field::guest_gs_access_rights,
+         shadow.read(field::host_gs_base)},
+    };
+
+    for (const auto & segment : data_segments) {
+        vmcs.write(segment.vmcs_selector, shadow.read(segment.selector));
+        vmcs.write(segment.vmcs_base, segment.base);
+        vmcs.write(segment.vmcs_limit, flat_limit);
+        vmcs.write(segment.vmcs_access, data_access);
+    }
+
+    vmcs.guest_tr_selector(shadow.read(field::host_tr_selector));
+    vmcs.guest_tr_base(shadow.read(field::host_tr_base));
+    vmcs.guest_tr_limit(task_limit);
+    vmcs.guest_tr_access_rights(task_access);
+
+    // LDTR is unusable after a VM exit, whatever it was.
+    vmcs.guest_ldtr_selector(0);
+    vmcs.guest_ldtr_base(0);
+    vmcs.guest_ldtr_limit(0);
+    vmcs.guest_ldtr_access_rights(unusable_access);
+
+    vmcs.guest_gdtr_base(shadow.read(field::host_gdtr_base));
+    vmcs.guest_gdtr_limit(descriptor_table_limit);
+    vmcs.guest_idtr_base(shadow.read(field::host_idtr_base));
+    vmcs.guest_idtr_limit(descriptor_table_limit);
+
+    vmcs.write(field::guest_ia32_sysenter_cs,
+               shadow.read(field::host_ia32_sysenter_cs));
+    vmcs.write(field::guest_ia32_sysenter_esp,
+               shadow.read(field::host_ia32_sysenter_esp));
+    vmcs.write(field::guest_ia32_sysenter_eip,
+               shadow.read(field::host_ia32_sysenter_eip));
+
+    // SDM 30.5.4: DR7 is set to 400H and IA32_DEBUGCTL to 0.
+    constexpr std::uint64_t dr7_after_exit = 0x400;
+    vmcs.guest_dr7(dr7_after_exit);
+    vmcs.write(field::guest_ia32_debugctl, 0);
+
+    // IA32_PAT and IA32_EFER are written to the *registers* rather than to
+    // the guest-state area, and that is not a shortcut - it is the only
+    // thing that works here. This VMM's own VM-entry controls do not load
+    // either, so a value put in the field would never be read; the
+    // architecture's "load IA32_PAT on VM exit" means the register, and
+    // the register is what the guest hypervisor will be running with.
+    //
+    // The alternative - adding the two load controls to this VMM's own
+    // VMCS - was rejected because it changes the VMCS that runs the
+    // ordinary guest, which is the code path a working Windows boot
+    // depends on, for the sake of a path that only exists with nested VMX
+    // switched on.
+    if (0 != (exit12 & exit_load_ia32_pat)) {
+        arch::x86_64::wrmsr(arch::x86_64::msr::ia32_pat,
+                            shadow.read(field::host_ia32_pat));
+    }
+
+    if (0 != (exit12 & exit_load_ia32_efer)) {
+        arch::x86_64::wrmsr(
+            arch::x86_64::msr::ia32_extended_feature_enable,
+            shadow.read(field::host_ia32_efer));
+    }
+}
+
+void hypervisor::reflect_l2_exit(std::size_t cpu,
+                                 arch::x86_64::vmx::exit_reason reason,
+                                 std::uint64_t qualification)
+{
+    auto & vmcs = this->vmcs;
+    auto & shadow = this->guest_vmcs12[cpu];
+
+    // The guest state first, while the VMCS that ran the second-level
+    // guest is still current.
+    save_l2_state(cpu);
+
+    shadow.write(field::exit_reason, reason.value());
+    shadow.write(field::exit_qualification, qualification);
+
+    if (!reason.entry_failure()) {
+        // SDM 33.3, VMLAUNCH: the launch state becomes launched once an
+        // entry has completed, and an entry that failed after loading
+        // guest state never reached that step. KVM writes the same
+        // condition in `prepare_vmcs12`.
+        shadow.state(vmcs12::launch_state::launched);
+
+        // SDM 30.2: the rest of the exit-information fields are written
+        // only for an ordinary exit. On an entry failure the architecture
+        // updates the reason and the qualification and leaves the others
+        // alone, so writing them would fabricate an account of an
+        // instruction that never ran.
+        shadow.write(field::guest_linear_address,
+                     vmcs.read(field::guest_linear_address));
+        shadow.write(field::guest_physical_address,
+                     vmcs.read(field::guest_physical_address));
+        shadow.write(field::vm_exit_interruption_information,
+                     vmcs.read(field::vm_exit_interruption_information));
+        shadow.write(field::vm_exit_interruption_error_code,
+                     vmcs.read(field::vm_exit_interruption_error_code));
+        shadow.write(field::vm_exit_instruction_length,
+                     vmcs.read(field::vm_exit_instruction_length));
+        shadow.write(field::vm_exit_instruction_information,
+                     vmcs.read(field::vm_exit_instruction_information));
+
+        // SDM 30.2.4, "Information for VM Exits During Event Delivery".
+        // Copied from the hardware's own report rather than reconstructed,
+        // because everything the second-level guest was in the middle of
+        // delivering was put there by an entry this VMM built out of
+        // vmcs12 - so the processor's account is the guest hypervisor's
+        // account. The rule that a double or triple fault is never
+        // reported as occurring during delivery is the processor's to
+        // apply, and it applied it.
+        shadow.write(field::idt_vectoring_information_field,
+                     vmcs.read(field::idt_vectoring_information_field));
+        shadow.write(field::idt_vectoring_error_code,
+                     vmcs.read(field::idt_vectoring_error_code));
+
+        // SDM 30.2: the valid bit of the VM-entry interruption-information
+        // field is cleared on every VM exit. Emulated rather than read
+        // back, because the field being read back is vmcs02's and the one
+        // the guest hypervisor will next look at is vmcs12's.
+        shadow.write(
+            field::vm_entry_interruption_information_field,
+            shadow.read(field::vm_entry_interruption_information_field) &
+                ~interruption_valid);
+    }
+
+    // Back onto the VMCS that runs the guest hypervisor.
+    auto region = own_vmcs_region_physical();
+    if ((0 == region) || arch::x86_64::vmx::vmptrld(&region)) {
+        // Not recoverable: without its own VMCS there is no guest
+        // hypervisor to return to and nothing to resume. Same reasoning as
+        // vmcs::write.
+        __builtin_trap();
+    }
+
+    this->running_l2[cpu] = false;
+
+    // Anything queued for the second-level guest is dropped here, which
+    // vmcs02's own field holding it makes automatic: the next entry
+    // rewrites it from vmcs12, and vmcs12's valid bit was just cleared.
+    load_l1_host_state(cpu);
+
+    nested_transition_flush();
+
+    this->l2_exits_reflected[cpu] = this->l2_exits_reflected[cpu] + 1;
+}
+
+hypervisor::l2_exit_outcome
+hypervisor::on_l2_ept_fault(std::size_t cpu,
+                            arch::x86_64::vmx::exit_reason reason,
+                            arch::x86_64::context & context,
+                            bool & advance_rip)
+{
+    auto & vmcs = this->vmcs;
+    auto & shadow = this->guest_vmcs12[cpu];
+
+    // Nothing retired: the faulting access has not happened yet, and the
+    // whole point of every outcome below is to let it happen or to hand
+    // the fault to whoever can explain it.
+    advance_rip = false;
+
+    auto guest_physical = vmcs.guest_physical_address();
+    auto qualification = vmcs.exit_qualification();
+
+    auto primary12 =
+        shadow.read(field::primary_processor_based_vm_execution_controls);
+    auto secondary12 =
+        (0 != (primary12 & primary_secondary_controls))
+            ? shadow.read(
+                  field::secondary_processor_based_vm_execution_controls)
+            : std::uint64_t{};
+
+    // Without extended page tables of its own the guest hypervisor's guest
+    // runs on this VMM's, so the address that faulted is one of this VMM's
+    // own guest-physical addresses and the ordinary handler is the right
+    // one. That is the same code path the guest hypervisor's own faults
+    // take, which is what makes it correct rather than convenient.
+    if (0 == (secondary12 & secondary_enable_ept)) {
+        return l2_exit_outcome::deferred;
+    }
+
+    auto eptp12 = shadow.read(field::ept_pointer);
+
+    // Walk the guest hypervisor's tables for the address the processor
+    // reported, which is a second-level guest-physical one. The processor
+    // walked the *shadow*, so its account of which permissions were
+    // missing describes neither side's table on its own.
+    auto guest_walk = arch::x86_64::vmx::walk_ept(
+        eptp12 & (((1ull << 52) - 1) & ~0xfffull),
+        guest_physical,
+        physical_address_bits(),
+        execute_only_translations_offered,
+        [&](std::uint64_t at) -> std::optional<arch::x86_64::vmx::epte> {
+            std::uint64_t value{};
+            auto read = read_guest_physical(
+                at,
+                std::span(reinterpret_cast<std::byte *>(&value),
+                          sizeof(value)));
+            if (!read) {
+                return std::nullopt;
+            }
+            return arch::x86_64::vmx::epte(value);
+        });
+
+    auto composition = arch::x86_64::vmx::compose_ept(
+        guest_walk,
+        host_ept_lookup(guest_walk.physical_address),
+        execute_only_translations_offered);
+
+    switch (composition.outcome) {
+    case arch::x86_64::vmx::ept_compose_outcome::reflect_violation:
+        // The guest hypervisor's own tables do not map it. Its guest would
+        // have taken this exact fault on bare metal, so it gets it - with
+        // a qualification synthesised from the walk of *its* tables rather
+        // than forwarded from the shadow's, which is the whole of
+        // reflected_ept_violation_qualification's reason for existing.
+        reflect_l2_exit(
+            cpu,
+            static_cast<std::uint64_t>(basic_reason::ept_violation),
+            arch::x86_64::vmx::reflected_ept_violation_qualification(
+                qualification, guest_walk, false));
+        return l2_exit_outcome::reflected;
+
+    case arch::x86_64::vmx::ept_compose_outcome::reflect_misconfiguration:
+        // Its tables hold a value the processor rejects. Reflected for the
+        // same reason, and with no qualification, because SDM 30.2.1 does
+        // not list EPT misconfiguration among the exits that save one.
+        reflect_l2_exit(
+            cpu,
+            static_cast<std::uint64_t>(basic_reason::ept_misconfiguration),
+            0);
+        return l2_exit_outcome::reflected;
+
+    case arch::x86_64::vmx::ept_compose_outcome::composed:
+        // Both levels permit it, so the shadow is behind: either this
+        // VMM's own tables have moved since it was built - a page watch
+        // armed, a region protected - or a rebuild ran out of pool and
+        // left the entry absent. Rebuilding is the answer to both, and it
+        // is the only outcome here that is not a fault at all.
+        //
+        // shadow_ept_pointer_for rebuilds only when the source or the
+        // generation moved, so the ordinary case where neither did costs
+        // one comparison and this becomes a resume - which is also what
+        // makes a genuine bug visible as a loop rather than hidden by
+        // rebuilding for ever.
+        if (auto pointer = shadow_ept_pointer_for(cpu, eptp12); !pointer) {
+            log("cpu {} shadow ept rebuild failed after an l2 fault at "
+                "{}: error {}",
+                cpu,
+                guest_physical,
+                pointer.error().code());
+            record_exit(reason);
+            on_unhandled_exit(reason);
+        } else {
+            vmcs.ept_pointer(*pointer);
+        }
+
+        return l2_exit_outcome::handled;
+
+    case arch::x86_64::vmx::ept_compose_outcome::host_denied:
+    default:
+        // This VMM's own tables refused it, so the guest hypervisor's are
+        // innocent and must not be told otherwise - it would go looking
+        // for a bug in tables that permit the access.
+        //
+        // Which leaves the watched-page machinery, keyed on this VMM's own
+        // guest-physical addresses. The walk of the guest hypervisor's
+        // tables just produced one, so it is handed over rather than taken
+        // from the VMCS: the field the processor wrote holds a
+        // second-level address, which no watch is keyed on.
+        //
+        // Opening a watched page changes this VMM's own tables and so
+        // bumps the generation the shadow was built against. Nothing is
+        // done about that here, because nothing needs to be: the resumed
+        // access faults again, the composition then says `composed`, and
+        // the branch above rebuilds. It costs a rebuild per stepped write
+        // and is paid only by a guest hypervisor whose guest touches a
+        // page this VMM watches - which is the disk channel's queue, owned
+        // by the first-level guest's own operating system.
+        //
+        // A page nothing watches stops the processor, exactly as the
+        // first-level guest's own access to the module does. BACKLOG.md
+        // records that as a limit rather than a design.
+        if (!on_ept_violation(cpu, context, guest_walk.physical_address)) {
+            log("cpu {} second level touched {} at first level {}, which "
+                "nothing here watches",
+                cpu,
+                guest_physical,
+                guest_walk.physical_address);
+            record_exit(reason);
+            on_unhandled_exit(reason);
+        }
+
+        return l2_exit_outcome::handled;
+    }
+}
+
+hypervisor::l2_exit_outcome
+hypervisor::on_l2_exit(std::size_t cpu,
+                       arch::x86_64::vmx::exit_reason reason,
+                       arch::x86_64::context & context,
+                       bool & advance_rip)
+{
+    // SDM 29, step 5: the launch state becomes launched only after the
+    // guest-state checks and the MSR loads have passed, so an entry
+    // failure leaves it where it was and the next attempt has to be a
+    // VMLAUNCH again.
+    if (!reason.entry_failure()) {
+        this->vmcs02_launched[cpu] = true;
+    } else {
+        // The processor accepted the controls and the host state, loaded
+        // the guest state the guest hypervisor wrote, and then found it
+        // inconsistent. That is its guest's state and its own account to
+        // receive: SDM 29.8 delivers it as a VM exit with bit 31 of the
+        // reason set, and the guest hypervisor's own error handling is
+        // written around exactly that.
+        log("cpu {} second level entry failed after loading guest state, "
+            "reason {} qualification {}",
+            cpu,
+            reason.value(),
+            this->vmcs.exit_qualification());
+
+        reflect_l2_exit(cpu, reason, this->vmcs.exit_qualification());
+        advance_rip = false;
+        return l2_exit_outcome::reflected;
+    }
+
+    // Extended page-table faults are decided by composing the two levels
+    // rather than by the table below, because which level refused the
+    // access is not something the exit itself says.
+    if ((basic_reason::ept_violation == reason.basic()) ||
+        (basic_reason::ept_misconfiguration == reason.basic())) {
+        auto outcome = on_l2_ept_fault(cpu, reason, context, advance_rip);
+        if (l2_exit_outcome::deferred != outcome) {
+            this->l2_exits_handled[cpu] = this->l2_exits_handled[cpu] + 1;
+        }
+        return outcome;
+    }
+
+    // Two questions in order, which is KVM's shape in
+    // `nested_vmx_reflect_vmexit` and is the order that matters: an exit
+    // this VMM must have is one no reflection may take away, and only
+    // after that does the guest hypervisor's own configuration decide.
+    if (l0_wants_l2_exit(cpu, reason, context)) {
+        this->l2_exits_handled[cpu] = this->l2_exits_handled[cpu] + 1;
+        return l2_exit_outcome::deferred;
+    }
+
+    if (!l1_wants_l2_exit(cpu, reason, context)) {
+        // Neither side asked for it, which can only happen where this
+        // VMM's own controls are wider than the union it built - the
+        // MONITOR and MWAIT intercepts are the two. The ordinary handler
+        // answers them the same way it does for any guest.
+        this->l2_exits_handled[cpu] = this->l2_exits_handled[cpu] + 1;
+        return l2_exit_outcome::deferred;
+    }
+
+    reflect_l2_exit(cpu, reason, this->vmcs.exit_qualification());
+    advance_rip = false;
+    return l2_exit_outcome::reflected;
+}
+
+} // namespace zpp::hypervisor

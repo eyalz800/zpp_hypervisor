@@ -19,21 +19,32 @@ namespace zpp::hypervisor::nested_vmx
  *
  * With it on, the guest is told VMX exists and the machinery below
  * answers for it: VMXON through VMPTRST keep a shadow VMCS per processor,
- * the capability MSRs report a subset of the hardware's, and
- * IA32_FEATURE_CONTROL is answered rather than passed through.
+ * the capability MSRs report a subset of the hardware's,
+ * IA32_FEATURE_CONTROL is answered rather than passed through, and
+ * VMLAUNCH builds a second real VMCS out of the shadow and runs the
+ * second-level guest with it - with a shadow of the first level's
+ * extended page tables composed against this VMM's own, and every exit
+ * the second-level guest takes either answered here or reflected into the
+ * shadow's exit-information fields.
  *
- * **What is still missing, and why it is off:** VMLAUNCH and VMRESUME do
- * not run a second-level guest. There is no vmcs02 built from the shadow,
- * no reflection of a second-level exit back to the first level, and no
- * shadow of the first level's extended page tables. So a guest hypervisor
- * gets as far as a fully written VMCS and is then refused, which for
- * Hyper-V means a failure at launch rather than a clean stand-down. That
- * is strictly worse than not being told about VMX at all, which is why
- * this is off until those three exist.
+ * **Why it is still off:** none of it has executed. Not on hardware, not
+ * under an emulator, not once - it is checked against the compiler in
+ * four configurations and against the SDM and KVM by reading, and that is
+ * all. BACKLOG.md's "Not run anywhere" section lists the experiments that
+ * would change that, in the order of how much each proves. Until one of
+ * them has been run, "the guest is told VMX exists" is a promise this VMM
+ * has no evidence it keeps, and a broken promise about VMX is worse for a
+ * guest than a clean absence: Hyper-V stands down gracefully when it
+ * finds no VMX and does not when it finds a broken one.
  *
- * Turning it on: -DZPP_NESTED_VMX=ON. Useful for exercising the
- * instruction emulation and the capability reporting under a debugger,
- * where the refusal at VMLAUNCH is the expected end of the run.
+ * The rows that are still `no` in BACKLOG.md's coverage checklist are the
+ * other half of the answer, and two of them are load bearing: the VM-entry
+ * and VM-exit MSR-load and MSR-store areas are not processed, so a VM
+ * entry naming a non-empty one is refused; and a guest hypervisor's
+ * exception, task-switch and interrupt injection paths have been written
+ * but never exercised.
+ *
+ * Turning it on: -DZPP_NESTED_VMX=ON.
  */
 inline constexpr bool enabled =
 #if defined(ZPP_NESTED_VMX) && ZPP_NESTED_VMX
@@ -138,28 +149,98 @@ constexpr std::uint64_t supported_primary_controls =
 /**
  * The secondary processor-based controls a first-level hypervisor may set.
  *
- * Extended page tables and VPIDs are both absent, and that absence is the
- * single fact that decides whether a real guest hypervisor can run here.
- * Hyper-V and every other modern one require EPT, so this is what makes
- * the refusal at VMLAUNCH honest rather than surprising: a first-level
- * hypervisor is told there is no EPT, and IA32_VMX_EPT_VPID_CAP reads as
- * zero to agree with it.
+ * Extended page tables are the one that decides whether a real guest
+ * hypervisor can run here at all: Hyper-V and every other modern one
+ * require them. They are offered because the shadow exists -
+ * `build_shadow_ept` composes the first level's tables with this VMM's own
+ * and hands the result to VM entry as the EPT pointer, so the control is
+ * honoured rather than merely reported.
  *
- * Supporting them means shadowing the first level's extended page tables
- * against this VMM's own, which has to combine two sets of permissions
- * per page and rebuild on the first level's INVEPT. Nothing here does
- * that, and reporting the control without doing it would hand a guest a
- * page table that is never consulted.
+ * VPIDs are offered for the same reason Hyper-V wants them, and honoured
+ * in the way SDM 31.4.1 makes sufficient rather than by allocating one:
+ * the second-level guest runs under *this* VMM's VPID, and the transitions
+ * either side of it invalidate it. A second-level guest's own mappings
+ * cannot be confused with the first level's regardless, because they are
+ * combined mappings associated with the shadow's EPT root address as well
+ * as with the VPID, and the two roots differ.
+ *
+ * Unrestricted guest is offered because a guest hypervisor starting its
+ * own processors starts them in real mode, and without it every one of
+ * those entries would fail the guest-state checks.
+ *
+ * Absent on purpose: everything to do with the local APIC - virtualized
+ * APIC accesses, x2APIC virtualization, APIC-register virtualization,
+ * virtual-interrupt delivery - because each needs pages and state of its
+ * own that nothing here maintains. Mode-based execute control is absent
+ * too, and its absence is load bearing rather than incidental: bit 10 of a
+ * guest hypervisor's own extended page-table entries means nothing it
+ * chose, so composing it into the shadow would deny user-mode execute
+ * across the whole second-level guest. `build_vmcs02` therefore also
+ * clears the control it inherits from this VMM's own VMCS.
  */
 constexpr std::uint64_t supported_secondary_controls =
+    (1ull << 1) |  // Enable EPT.
     (1ull << 2) |  // Descriptor-table exiting.
     (1ull << 3) |  // Enable RDTSCP.
+    (1ull << 5) |  // Enable VPID.
     (1ull << 6) |  // WBINVD exiting.
+    (1ull << 7) |  // Unrestricted guest.
     (1ull << 10) | // PAUSE-loop exiting.
     (1ull << 11) | // RDRAND exiting.
     (1ull << 12) | // Enable INVPCID.
     (1ull << 16) | // RDSEED exiting.
     (1ull << 20);  // Enable XSAVES/XRSTORS.
+
+/**
+ * The extended-page-table and VPID capabilities reported to a first-level
+ * hypervisor through IA32_VMX_EPT_VPID_CAP, from SDM A.10.
+ *
+ * Narrowed from the hardware's rather than replacing it, like every other
+ * capability here, so a machine that cannot do one of these does not have
+ * it promised on its behalf. Each bit below is one the shadow builder
+ * honours:
+ *
+ * - bit 6, four-level page walks, because `shadow_ept_entry` descends
+ *   exactly four and `build_shadow_ept` reads a PML4 at the top.
+ * - bit 8, uncacheable, and bit 14, write-back, as the memory types an
+ *   EPT pointer may name. Both are accepted because the shadow's own
+ *   pointer type is this VMM's choice and the leaf types come from the
+ *   memory-type range registers either way - which is the divergence
+ *   BACKLOG.md records under E9.
+ * - bits 16 and 17, 2 MB and 1 GB leaves, because the builder reads both.
+ *   It installs neither as a 1 GB shadow leaf - it fans a 1 GB mapping
+ *   out to 2 MB entries - but what the bits report is what a *guest
+ *   hypervisor* may write, not what the shadow holds.
+ * - bit 20 with bits 25 and 26, INVEPT and both of its types, because
+ *   `on_guest_invept` answers them by discarding the shadow.
+ * - bit 32 with bits 40 through 43, INVVPID and all four of its types,
+ *   because `on_guest_invvpid` answers every one of them the same way,
+ *   by invalidating this VMM's own VPID entirely. SDM 31.4.3.2 permits a
+ *   processor to invalidate more than it was asked to, which is what
+ *   makes one answer serve four types.
+ *
+ * Absent on purpose: bit 0, execute-only translations, which
+ * `execute_only_translations_offered` also reports false and which decides
+ * what `ept_permissions::normalised` may leave in an entry - the two must
+ * agree. Bit 21, accessed and dirty flags, because the shadow never sets
+ * them and a guest hypervisor reading them would find nothing ever
+ * accessed. Bit 22, advanced VM-exit information, because the reflected
+ * exit qualification does not carry bits 11:9.
+ */
+constexpr std::uint64_t supported_ept_vpid_capabilities =
+    (1ull << 6) |  // Four-level page walks.
+    (1ull << 8) |  // Uncacheable EPT paging structures.
+    (1ull << 14) | // Write-back EPT paging structures.
+    (1ull << 16) | // 2 MB EPT leaves.
+    (1ull << 17) | // 1 GB EPT leaves.
+    (1ull << 20) | // INVEPT.
+    (1ull << 25) | // INVEPT single-context.
+    (1ull << 26) | // INVEPT all-context.
+    (1ull << 32) | // INVVPID.
+    (1ull << 40) | // INVVPID individual-address.
+    (1ull << 41) | // INVVPID single-context.
+    (1ull << 42) | // INVVPID all-context.
+    (1ull << 43);  // INVVPID single-context retaining globals.
 
 /**
  * The VM-exit controls a first-level hypervisor may set.
