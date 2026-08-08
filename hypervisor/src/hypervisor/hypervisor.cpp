@@ -1022,6 +1022,47 @@ void hypervisor::send_wake_nmi(std::uint64_t apic)
     ++this->wake_nmis_sent;
 }
 
+void hypervisor::send_start_up_ipi(std::uint64_t apic,
+                                   std::uint64_t vector)
+{
+    // Delivery mode 110b is start-up, and its vector is the entry point's
+    // page number rather than an interrupt vector.
+    constexpr std::uint64_t delivery_mode_start_up = 0x6ull << 8;
+    constexpr std::uint64_t level_assert = 1ull << 14;
+
+    if (x2apic_enabled()) {
+        constexpr std::uint64_t destination_shift = 32;
+
+        arch::x86_64::wrmsr(arch::x86_64::msr::ia32_x2apic_icr,
+                            vector | delivery_mode_start_up |
+                                (apic << destination_shift));
+        return;
+    }
+
+    // xAPIC, so the command goes through the APIC page, which the host
+    // page table already maps because the interrupt command watch needs
+    // it. The destination half is written first: writing the low half is
+    // what sends the interrupt, so a destination written after it would
+    // be written after the thing that used it.
+    constexpr std::uint64_t base_mask = 0xffffff000ull;
+    auto base =
+        arch::x86_64::rdmsr(arch::x86_64::msr::ia32_apic_base) & base_mask;
+
+    constexpr std::uint64_t interrupt_command_low = 0x300;
+    constexpr std::uint64_t interrupt_command_high = 0x310;
+
+    auto * bytes = reinterpret_cast<volatile std::uint8_t *>(base);
+
+    // Eight bits of destination, in 31:24. The x2APIC form above carries
+    // thirty-two, which is the other reason these cannot share a line.
+    arch::x86_64::write32(bytes + interrupt_command_high,
+                          static_cast<std::uint32_t>(apic << 24));
+    arch::x86_64::write32(
+        bytes + interrupt_command_low,
+        static_cast<std::uint32_t>(vector | delivery_mode_start_up |
+                                   level_assert));
+}
+
 bool hypervisor::wait_for_ept_acknowledgement(std::uint64_t budget,
                                               bool probe)
 {
@@ -5827,19 +5868,12 @@ bool hypervisor::start_up_broadcast(std::uint64_t vector)
             // and swallowed for another, so this target gets its own
             // command. Identical in effect to the broadcast the guest
             // wrote, restricted to the processor that still needs it.
-            constexpr std::uint64_t delivery_mode_start_up = (6ull << 8);
-            constexpr std::uint64_t destination_shift = 32;
-
             log("broadcast start-up ipi, apic id {} needs hardware, "
                 "vector {}",
                 destination,
                 vector);
 
-            arch::x86_64::wrmsr(
-                arch::x86_64::msr::ia32_x2apic_icr,
-                vector | delivery_mode_start_up |
-                    (static_cast<std::uint64_t>(destination)
-                     << destination_shift));
+            send_start_up_ipi(destination, vector);
         }
     }
 
@@ -6117,12 +6151,14 @@ bool hypervisor::start_application_processor(std::size_t slot,
 
     // The vector is the trampoline page's page number, which is the whole
     // reason that page had to be below one megabyte.
-    constexpr std::uint64_t delivery_mode_start_up = (6ull << 8);
-    constexpr std::uint64_t destination_shift = 32;
-    arch::x86_64::wrmsr(arch::x86_64::msr::ia32_x2apic_icr,
-                        (this->start_up_memory >> 12) |
-                            delivery_mode_start_up |
-                            (this->apic_id[slot] << destination_shift));
+    //
+    // Through send_start_up_ipi rather than straight to the x2APIC
+    // command MSR, which is what this used to do. That MSR does not exist
+    // while the APIC is in xAPIC mode and the write faults - see
+    // send_start_up_ipi. A guest that writes its own command to the APIC
+    // page is on a processor in exactly that mode, so this path could
+    // never have started a processor there.
+    send_start_up_ipi(this->apic_id[slot], this->start_up_memory >> 12);
 
     // Bounded, so that a processor which never arrives costs a delay
     // rather than the machine. Everything it has to do between the IPI and

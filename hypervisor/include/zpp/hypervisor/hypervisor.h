@@ -855,6 +855,28 @@ private:
     void send_wake_nmi(std::uint64_t apic);
 
     /**
+     * Sends a start-up IPI to one processor, in whichever local APIC mode
+     * this one is actually in.
+     *
+     * The mode is not a detail here, it is the whole function. The two
+     * places that started a processor both wrote the **x2APIC** interrupt
+     * command MSR unconditionally, and that MSR does not exist while the
+     * APIC is in xAPIC mode - the write takes a general protection fault.
+     * Measured exactly that way: vector 13, error code 0, faulting RIP
+     * inside `wrmsr`, with the boot processor left halted in
+     * `on_host_exception` and no VM exit record to explain it, because
+     * the fault was in this VMM rather than in the guest.
+     *
+     * It was reached the moment a broadcast start-up IPI was resolved
+     * into per-processor ones, but it was never specific to that: the
+     * targeted path had the same write and the same fault waiting in it.
+     * A guest that writes its command to the APIC *page* - which is what
+     * "xAPIC" means, and what this machine's guest does - is by
+     * definition on a processor where that MSR is unavailable.
+     */
+    void send_start_up_ipi(std::uint64_t apic, std::uint64_t vector);
+
+    /**
      * Whether the NMI a processor is taking is one this VMM sent.
      *
      * Set before the interrupt is sent and cleared by the processor that
