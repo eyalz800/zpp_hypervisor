@@ -44,21 +44,53 @@ public:
 
     /**
      * How many lines are kept.
+     *
+     * Four thousand rather than the five hundred it was. A line is a
+     * heap string and the arena is twenty megabytes, so even at a
+     * generous hundred bytes a line this is under two per cent of it -
+     * and the thing being chased through this log is a *sequence* across
+     * several processors, which five hundred lines could not hold.
      */
-    static constexpr std::size_t max_lines = 512;
+    static constexpr std::size_t max_lines = 4096;
 
     /**
      * Adds a line, dropping the oldest if the log is full.
+     *
+     * A line identical to the one before it does not take a slot. It
+     * replaces that line, which grows a `[times=N]` marker instead.
+     *
+     * This is not tidiness, and it is not solved by a bigger ring
+     * either. A hypervisor logs from inside its exit handlers, so one
+     * repeating event evicts everything else in a fraction of a second:
+     * measured on a real boot, every one of the 512 lines the ring then
+     * held was the same shadow EPT rebuild, and the interrupt sequence
+     * being looked for had been pushed out by it. A log that cannot
+     * survive its own noisiest line is a log that is only readable when
+     * it is not needed.
      */
     static void append(line && text)
     {
         auto & lines = storage();
 
         m_lock.lock();
-        lines.push_back(std::move(text));
-        if (lines.size() > max_lines) {
-            lines.pop_front();
+
+        if (repeats_last(lines, text)) {
+            // Rebuilt from the recorded length rather than edited in
+            // place, so the marker does not accumulate one copy per
+            // repeat.
+            ++m_repeats;
+            lines.back().resize(m_last_length);
+            append_repeat_marker(lines.back(), m_repeats);
+        } else {
+            m_repeats = 1;
+            m_last_length = text.size();
+
+            lines.push_back(std::move(text));
+            if (lines.size() > max_lines) {
+                lines.pop_front();
+            }
         }
+
         m_lock.unlock();
     }
 
@@ -206,6 +238,51 @@ private:
     }
 
     /**
+     * Whether `text` is the line already at the back.
+     *
+     * Compared against the first `m_last_length` characters rather than
+     * against the whole line, because the back may already carry a
+     * `[times=N]` marker - and the recorded length is what that marker
+     * was appended after.
+     */
+    static bool repeats_last(const line_list & lines, const line & text)
+    {
+        if (lines.empty() || (text.size() != m_last_length)) {
+            return false;
+        }
+
+        const auto & last = lines.back();
+        return (last.size() >= m_last_length) &&
+               (0 == last.compare(0, m_last_length, text));
+    }
+
+    /**
+     * Appends ` [times=N]`, in decimal.
+     *
+     * Decimal rather than the hex every other value in this log uses,
+     * because this one is a count of lines rather than a value read out
+     * of the machine, and reading "0x200" as "512 repeats" is a step
+     * nobody should have to take.
+     */
+    static void append_repeat_marker(line & out, std::uint64_t count)
+    {
+        out.append(" [times=");
+
+        char digits[20]{};
+        std::size_t written{};
+        do {
+            digits[written++] = static_cast<char>('0' + (count % 10));
+            count /= 10;
+        } while (count);
+
+        while (written) {
+            out.push_back(digits[--written]);
+        }
+
+        out.push_back(']');
+    }
+
+    /**
      * The lines.
      *
      * zpp::allocator's default constructor calls crt::heap(), so this
@@ -223,6 +300,21 @@ private:
      * initialization look unusable. See the notes there.
      */
     static inline line_list m_lines{};
+
+    /**
+     * The length of the line at the back *before* any `[times=N]` marker
+     * was appended to it, and how many times it has been seen.
+     *
+     * Held beside the list rather than parsed back out of it, since the
+     * marker's own text would otherwise have to be recognised - and a
+     * line that legitimately ends in one would then be miscounted.
+     * @{
+     */
+    static inline std::size_t m_last_length{};
+    static inline std::uint64_t m_repeats{};
+    /**
+     * @}
+     */
 
     /**
      * Guards the list. Not recursive, and never held across anything that

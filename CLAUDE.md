@@ -367,6 +367,53 @@ state is recorded into members as it happens:
   `line` and `line_list` aliases, so moving the log to a per-CPU heap is a
   change to that class and to nothing else.
 
+### Reading the log ring
+
+Four thousand lines, and a line identical to the one before it does not take
+a slot — it grows a `[times=N]` marker on the line already there. Both of
+those exist for the same measured reason: before them, all 512 lines of a
+real boot were the same shadow EPT rebuild and the sequence being chased had
+been evicted. **Do not remove the deduplication in favour of a bigger ring.**
+One event inside an exit handler repeats faster than any ring can absorb.
+
+Getting it out, with no restart and nothing perturbed:
+
+```sh
+# 1. QEMU can open a gdb stub on an ALREADY RUNNING guest, from its monitor.
+#    This is the whole trick - a wedged guest does not have to be re-run,
+#    and re-running it is usually how the state gets lost.
+printf 'gdbserver tcp::1234\n' | nc <rig> 4446
+
+# 2. The module base is on serial, and is NOT stable across runs.
+ssh <rig> 'grep -ao "allocate_rwx done at 0x[0-9a-f]*" serial.out | tail -1'
+
+# 3. Attach, in tmux, and load symbols at that base.
+x86_64-elf-gdb -q
+  (gdb) target remote <rig>:1234
+  (gdb) add-symbol-file out/debug/x86_64/zpp_hypervisor -o <base>
+  (gdb) source scripts/zpp.gdb
+  (gdb) zpplog          # the log, oldest first
+  (gdb) zpph            # $h = the singleton, for $h->exit_trace and friends
+```
+
+`scripts/zpp.gdb` walks the list and the strings by hand. It has to: the
+hypervisor is built against libc++ headers only, gdb has no libc++ pretty
+printers loaded, and a `std::list<std::string>` therefore prints as raw
+nodes and unions.
+
+To capture the whole ring rather than a screen of it, `set logging file …`,
+`set logging redirect on`, `set logging enabled on`, then `zpplog`.
+
+Two things that made this work where the earlier attempts did not:
+
+- **`info threads` first.** It says which CPUs are inside our module and
+  which are parked in firmware, by symbol, before any member is read — that
+  one line said more than an hour of reading memory by offset had.
+- **Do not compute member offsets by hand.** `llvm-dwarfdump --name=<member>`
+  will happily answer with a *different* DIE of the same name, and the
+  resulting addresses read as plausible zeroes. With symbols loaded,
+  `$h->member` is both correct and checkable.
+
 Build with `-DZPP_HYPERVISOR_WAIT_FOR_DEBUGGER=ON` and the hypervisor spins at
 its entry point until released with `set var gdb_attached = 1`. Use it. Racing a
 gdb attach against the guest does not work when the failure being chased kills
