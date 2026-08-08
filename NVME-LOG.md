@@ -988,3 +988,37 @@ because the queue was created with something wrong in it that the create
 itself did not reject. `refused_guard`, `refused_signature`, `submitted`
 and `completed` in `queue_pair` split those three apart and were not read.
 Read them first.
+
+### The drops are not the device, and three uncounted paths hide which
+
+Measured on the run above, with all three switches on and the channel live
+on the rebuilt queue:
+
+    epoch                2        rebuilt
+    sequence            21        blocks written
+    dropped           1975        blocks discarded
+    submitted           65
+    completed           65        every command that went out came back
+    failed               0
+    refused_guard         0
+    refused_signature     0
+
+**The rebuilt queue works.** Sixty-five commands submitted, sixty-five
+completed, nothing failed and nothing refused. The submission tail and the
+completion head agree with those counts. So whatever is discarding blocks
+is not the controller, not the guard read and not the signature check - it
+is upstream of the device entirely, in the decision to submit.
+
+`write()` counts a drop for any `submit` that does not return `ok`, and
+three of `submit`'s failure returns increment nothing:
+
+- `out_of_range`, when `target.lba_of` cannot map the block index
+- `queue_full`, when the queue has more outstanding than it can hold
+- `timed_out`
+
+`queue_full` is excluded by the measurement: `submitted - completed` is
+zero, so the queue was empty every time. That leaves two, and a counter per
+result is the only way to say which rather than guess - which is what to
+add before the next run. Neither remaining candidate is obviously right at
+sequence twenty-one of a sixteen-thousand-block region, which is why
+guessing has already been wrong once here.

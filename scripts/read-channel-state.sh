@@ -136,6 +136,18 @@ echo "--- is the device still ours ---"
 show_static  "queue bound (0 = forgotten)" 'queue_pairILj64EE5boundE' 4
 show_static  "lost_to_reset" 'queue_pairILj64EE13lost_to_resetE'
 
+# Why a submission did not land, split three ways. A live queue that drops
+# every block is one of: the guard read refusing, the block's signature
+# refusing, or the command going out and never completing. These separate
+# them, and reading them was the step that was skipped when a rebuilt
+# queue wrote one block and then dropped fifteen hundred.
+show_static  "submitted | completed" 'queue_pairILj64EE9submittedE'
+show_static  "failed" 'queue_pairILj64EE6failedE'
+show_static  "refused_guard" 'queue_pairILj64EE13refused_guardE'
+show_static  "refused_signature" 'queue_pairILj64EE17refused_signatureE'
+show_static  "submission_tail | head" 'queue_pairILj64EE15submission_tailE' 2
+show_static  "submissions | completions" 'queue_pairILj64EE11submissionsE'
+
 echo "--- emulation and rebuild ---"
 show_member  "emulated_writes" emulated_writes
 show_member  "length disagreement" emulated_length_disagreement
