@@ -3351,16 +3351,20 @@ void hypervisor::disarm_resume_from_sleep()
             this->sleep_facs_physical + power::facs_waking_vector_offset,
             std::span{replacement});
         read) {
-        std::memcpy(replacement,
-                    reinterpret_cast<const std::byte *>(
-                        &this->guest_waking_vector),
-                    sizeof(std::uint32_t));
+        // Narrowed explicitly rather than by copying four bytes out of the
+        // front of a sixty four bit member, which would be reading a width
+        // off an endianness. Both members hold what read_facs put in them,
+        // so the thirty two bit one cannot lose anything.
+        auto theirs =
+            static_cast<std::uint32_t>(this->guest_waking_vector);
+        auto extended = this->guest_extended_waking_vector;
+
+        std::memcpy(replacement, &theirs, sizeof(theirs));
         std::memcpy(replacement +
                         (power::facs_extended_waking_vector_offset -
                          power::facs_waking_vector_offset),
-                    reinterpret_cast<const std::byte *>(
-                        &this->guest_extended_waking_vector),
-                    sizeof(std::uint64_t));
+                    &extended,
+                    sizeof(extended));
         static_cast<void>(write_guest_physical(
             this->sleep_facs_physical + power::facs_waking_vector_offset,
             std::span{replacement}));
