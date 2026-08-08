@@ -189,7 +189,7 @@ echo "--- why a block did not go out ---"
 show_results
 
 echo "--- the destination read ---"
-show_static  "outstanding | landed" 'queue_pairILj64EE18verify_outstandingE' 2 b
+show_static  "outstanding|landed|spent" 'queue_pairILj64EE18verify_outstandingE' 3 b
 show_static  "verify_block" 'queue_pairILj64EE12verify_blockE'
 show_static  "verify ticks last | max" 'queue_pairILj64EE17verify_ticks_lastE' 2
 show_static  "verify_abandoned" 'queue_pairILj64EE16verify_abandonedE'
