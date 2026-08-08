@@ -551,6 +551,20 @@ public:
         return true;
     }
 
+    /**
+     * Whether the controller has posted something not yet consumed.
+     *
+     * A load from our own memory and a comparison - no device access -
+     * so it can be asked on a path that runs per VM exit, and it is what
+     * lets the guard read be paid only when a doorbell is about to be
+     * rung.
+     */
+    static bool completions_waiting()
+    {
+        return (completed < submitted) &&
+               (completions[completion_head].phase() == completion_phase);
+    }
+
     static void reap()
     {
         while (completed < submitted) {
@@ -691,6 +705,53 @@ private:
             return write_result::no_queues;
         }
 
+        // The epoch alone, before anything expensive. A binding from the
+        // previous epoch is refused here for the cost of one load; the
+        // register half of the guard read is paid below, where something
+        // is actually about to be rung.
+        if (bound.epoch != current_epoch) {
+            ++refused_guard;
+            return write_result::epoch_changed;
+        }
+
+        // Collecting completions is the cheap half and comes first,
+        // because a block waiting on its destination read passes through
+        // here on every VM exit and must cost close to nothing.
+        //
+        // `reap` rings the completion doorbell, so it is guarded like
+        // every other ring - but only when there is something to reap,
+        // which is one load from our own memory to decide. That also
+        // means the doorbell is only ever rung when the controller has
+        // just posted into this queue, which is stronger evidence that
+        // the queue still exists than the guard read can give: a
+        // *completed* reset leaves CSTS.RDY and CC.EN exactly as they
+        // were, which is why note_controller_write exists at all.
+        if (completions_waiting()) {
+            if (!controller_still_ours(current_epoch)) {
+                ++refused_guard;
+                return write_result::epoch_changed;
+            }
+
+            reap();
+        }
+
+        if (verify_outstanding && !verify_landed) {
+            if ((arch::x86_64::rdtsc() - verify_issued) <
+                verify_ticks_budget) {
+                return write_result::verify_pending;
+            }
+
+            // Long enough that the controller has lost it rather than
+            // being slow. Reported, and deliberately still outstanding:
+            // whenever it does land it DMAs into scratch, so a second
+            // read must not be issued on top of it. The next attempt
+            // waits for this one and then starts a fresh verify.
+            ++verify_abandoned;
+            return write_result::timed_out;
+        }
+
+        // Past here something is going to be submitted, so the
+        // destination has to be resolved.
         std::uint64_t lba{};
         auto per_block = block_size / target.block_size;
 
@@ -709,30 +770,7 @@ private:
             return write_result::out_of_range;
         }
 
-        if (!controller_still_ours(current_epoch)) {
-            ++refused_guard;
-            return write_result::epoch_changed;
-        }
-
-        reap();
-
         if (verify_outstanding) {
-            if (!verify_landed) {
-                if ((arch::x86_64::rdtsc() - verify_issued) <
-                    verify_ticks_budget) {
-                    return write_result::verify_pending;
-                }
-
-                // Long enough that the controller has lost it rather
-                // than being slow. Reported, and deliberately still
-                // outstanding: whenever it does land it DMAs into
-                // scratch, so a second read must not be issued on top of
-                // it. The next attempt waits for this one and then starts
-                // a fresh verify.
-                ++verify_abandoned;
-                return write_result::timed_out;
-            }
-
             auto verified_block = verify_block;
             verify_outstanding = false;
             verify_landed = false;
