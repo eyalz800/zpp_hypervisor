@@ -1279,6 +1279,38 @@ void hypervisor::rebuild_channel_queue()
             return;
         }
 
+        // One rebuild at a time, across every processor.
+        //
+        // The enable is observed in two places - the emulated write to the
+        // configuration register, and the poll on this VMM's own exits -
+        // and `channel_controller_enabled` that guards both is a plain
+        // bool written from every processor's exit path. So two
+        // processors can both decide the controller has just come up and
+        // both start a borrow.
+        //
+        // They would serialise on mapping_window_lock rather than run
+        // together, which is what has kept this from being seen, but
+        // serialised is not harmless: the second borrow finds the queue
+        // already created and gets Invalid Queue Identifier, and unlike
+        // the first it runs *after* the guest's driver is live. That is
+        // precisely the unexcluded borrow that was once measured spending
+        // its whole budget and timing out, with the guest's admin queue
+        // desynchronised behind it.
+        //
+        // An exchange rather than a test and a set, because the two
+        // observers are what create the race in the first place.
+        if (this->channel_rebuild_running.exchange(
+                true, std::memory_order_acquire)) {
+            this->channel_rebuild_reentered =
+                this->channel_rebuild_reentered + 1;
+            return;
+        }
+
+        scope_exit release_rebuild{[this] {
+            this->channel_rebuild_running.store(
+                false, std::memory_order_release);
+        }};
+
         ++this->channel_rebuilds;
         this->channel_rebuild_result = 0xff;
 
@@ -1385,8 +1417,13 @@ void hypervisor::rebuild_channel_queue()
         //
         // Armed only for the borrow. Left armed it would trap every
         // doorbell the guest ever rings, which is its entire disk traffic.
+        // Translated, not cast: these take guest physical addresses and
+        // `bar` is a host virtual pointer. Casting is right only while
+        // that mapping is the identity, which is not something this VMM
+        // establishes or checks.
         auto doorbell_page =
-            reinterpret_cast<std::uint64_t>(bar) +
+            this->host_page_table.virtual_to_physical(
+                const_cast<const void *>(bar)) +
             nvme::offset_of(nvme::register_offset::doorbell_base);
 
         if (auto armed =
@@ -3912,13 +3949,23 @@ void hypervisor::on_controller_register_write(
                         }
                     }};
 
-                    auto held = self.hold_guest_page(
-                        reinterpret_cast<std::uint64_t>(self.channel_bar));
+                    // Translated, not cast. hold_guest_page takes a guest
+                    // physical address and channel_bar is a host virtual
+                    // pointer; casting one to the other is right only for
+                    // as long as that mapping happens to be the identity,
+                    // which is not a property this VMM establishes or
+                    // checks. The same value is translated properly a few
+                    // lines above to compare against the faulting
+                    // address, so the two spellings sat next to each
+                    // other disagreeing.
+                    auto bar_page =
+                        self.host_page_table.virtual_to_physical(
+                            const_cast<const void *>(self.channel_bar));
+
+                    auto held = self.hold_guest_page(bar_page);
                     scope_exit unhold{[&] {
                         if (held) {
-                            self.release_guest_page(
-                                reinterpret_cast<std::uint64_t>(
-                                    self.channel_bar));
+                            self.release_guest_page(bar_page);
                         }
                     }};
 
@@ -3938,7 +3985,8 @@ void hypervisor::on_controller_register_write(
 
             // The queues are gone with it either way: the excursion hands
             // the controller back disabled, as the guest asked.
-            diag::esp_block_sink::note_controller_write();
+            diag::esp_block_sink::note_controller_write(
+                configuration_value);
         } else if (!was && now) {
             // Coming back up. Handled here when the write is caught, and
             // by poll_for_controller_return when it is not - see there
@@ -5776,9 +5824,19 @@ hypervisor::main(arch::x86_64::context & caller_context)
                     // traffic. The registers on this page are touched
                     // while a driver sets itself up and almost never
                     // afterwards.
+                    // Translated, not cast. The hand-over carries host
+                    // virtual pointers and a page watch is keyed by guest
+                    // physical address; the two agree only while the BAR
+                    // mapping is the identity, which nothing here
+                    // establishes. on_controller_register_write already
+                    // translates the same pointer to compare against the
+                    // faulting address, so leaving this a cast made the
+                    // watch and its own handler disagree about what they
+                    // were watching.
                     auto register_page =
-                        reinterpret_cast<std::uint64_t>(
-                            handover.configuration_register) &
+                        this->host_page_table.virtual_to_physical(
+                            const_cast<const void *>(
+                                handover.configuration_register)) &
                         ~(page_size - 1);
                     if (auto armed = watch_guest_page_writes(
                             register_page,

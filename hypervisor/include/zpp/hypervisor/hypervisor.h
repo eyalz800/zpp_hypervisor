@@ -2464,6 +2464,26 @@ private:
     bool channel_controller_enabled{};
 
     /**
+     * Whether a rebuild is in progress, and how often one was refused
+     * because another was.
+     *
+     * The enable is observed both from the emulated write to the
+     * configuration register and from this VMM's own poll, so two
+     * processors can reach the rebuild for the same transition. The
+     * second must not run: it borrows the guest's admin queue after the
+     * driver is live, which is the case that was measured timing out.
+     *
+     * The count is instrumentation - a reader that finds it non-zero
+     * knows the race is real on this machine rather than theoretical.
+     * @{
+     */
+    std::atomic<bool> channel_rebuild_running{};
+    volatile std::uint64_t channel_rebuild_reentered{};
+    /**
+     * @}
+     */
+
+    /**
      * How many times the controller's register page has been written by
      * the guest, and what the configuration register said the last time.
      *

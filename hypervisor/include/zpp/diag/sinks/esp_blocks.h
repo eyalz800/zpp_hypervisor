@@ -290,14 +290,28 @@ struct esp_blocks_for
      * admin queue base registers, the doorbell stride - is the driver
      * setting itself up and is not our business.
      */
-    static void note_controller_write()
+    static void note_controller_write(std::uint32_t written)
     {
         if (!queues::bound.live()) {
             return;
         }
 
-        auto configuration = nvme::controller_configuration{
-            arch::x86_64::read32(queues::bound.configuration_register)};
+        // The value the guest wrote, handed in, rather than read back
+        // from the device.
+        //
+        // Reading it back is a race with the guest, and it is the same
+        // race the caller was rewritten to remove: a driver writes the
+        // configuration register twice in succession, disable then
+        // enable, and a read that lands after the second one sees the
+        // controller enabled and concludes no reset happened. The caller
+        // decodes the instruction and therefore knows what was written;
+        // there is no reason to ask the device and every reason not to.
+        //
+        // It still works when the caller falls back to stepping over the
+        // write, because the fallback reads the register once, at the
+        // same point, and passes that - one source of truth either way
+        // rather than two that can disagree.
+        auto configuration = nvme::controller_configuration{written};
         if (configuration.enable()) {
             return;
         }
