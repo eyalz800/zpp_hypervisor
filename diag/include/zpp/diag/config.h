@@ -230,7 +230,7 @@ inline constexpr bool restart_after_reservation = enabled;
  * doorbell stride of zero, per I/O command too - see
  * observe_controller_admin, which exists to price exactly that.
  */
-inline constexpr bool rebuild_channel_after_reset = enabled;
+inline constexpr bool rebuild_channel_after_reset = false;
 
 /**
  * Whether to create the channel's own queue pair once the guest has
