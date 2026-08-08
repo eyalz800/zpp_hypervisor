@@ -773,3 +773,51 @@ So the watch is not catching them, and the cost of a permanently trapped
 doorbell page is **not** measured by this run. What is measured is that
 the admin doorbell traps reliably and that a guest boots normally with the
 page watched. The gap is worth understanding before that cost is quoted.
+
+## The reservation works, and the controller has no spare submission queue
+
+Measured on the rig, with the reservation on and creation off.
+
+**Asking for the maximum has to ask for FFFEh, not FFFFh.** A Set Features
+(Number of Queues) with CDW11 = FFFFFFFFh came back `0x4002` - do-not-retry
+set, status code type 0, status code 02h, Invalid Field in Command. Both
+halves are zero's based, so FFFFh asks for 65536 and is the reserved
+encoding; FFFEh asks for 65535 and is accepted.
+
+**With that fixed the reservation is granted, and the grant is the
+problem.** DW0 comes back `0x000f000f`: NSQA and NCQA both 15, zero's
+based, so the controller's maximum is **sixteen submission queues and
+sixteen completion queues**. That is everything it has - it is what
+answering "give me all of them" returns.
+
+Against what the guest was already observed to do:
+
+    space        controller max   guest creates   spare
+    completion   16               1..8            9..16
+    submission   16               1..16           none
+
+The guest clamps to its own request rather than to the allocation - it
+asked for sixteen submission queues and created sixteen - so reserving a
+larger allocation does not hold anything back from it. There is room for
+our completion queue and none at all for our submission queue.
+
+**So the completion patch is necessary after all**, and the earlier
+reasoning that retired it was right about the ordering and wrong about the
+arithmetic. The ordering argument still holds: our Set Features is the
+first after the reset, the guest's is the second, and the allocation
+cannot change between them, so the guest is told what we reserved. What
+that argument assumed is that the reservation could exceed what the guest
+wants. On this controller it cannot, because the guest wants all of it.
+
+What has to happen instead is to reduce what the guest *believes* it was
+granted: report NSQA fifteen rather than sixteen in the completion it
+reads, so it creates submission queues one to fifteen and leaves sixteen.
+The completion is a DMA write by the controller and there is no exit for
+it, so this needs one of the interception shapes NVME-LOG already
+describes - and the cheapest is the one that substitutes our own command
+into the guest's submission slot while the doorbell is held, since the
+controller then posts a completion we asked for and we rewrite it in place
+before the guest is resumed.
+
+Worth noting for whoever builds it: only the submission half needs
+reducing. The completion half already has eight spare identifiers.

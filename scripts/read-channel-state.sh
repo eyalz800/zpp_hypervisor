@@ -83,7 +83,13 @@ mon() {
 static() { $NM "$BINARY" | grep -E "$1" | head -1 | awk '{print $1}'; }
 
 # A member of the singleton, by name, as base + instance + offset.
-instance=$($NM "$BINARY" \
+# Prefixed, because llvm-nm prints a bare hex address with leading zeros
+# and the arithmetic below is done in python, where a leading zero makes it
+# an invalid decimal literal rather than the octal it used to be. The
+# static path already prefixed its own; this one did not, so every member
+# read failed while every static read worked - which looks like the
+# members being absent rather than the script being wrong.
+instance=0x$($NM "$BINARY" \
     | grep -E '^[0-9a-f]+ b _ZZN3zpp10hypervisor10hypervisor8instanceEvE8instance$' \
     | awk '{print $1}')
 

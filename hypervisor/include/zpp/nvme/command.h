@@ -659,7 +659,27 @@ constexpr submission_entry set_features_maximum_number_of_queues()
         make_command_dword0(admin_opcode::set_features, 0);
     entry.command_dword10 = std::uint32_t{
         static_cast<std::uint8_t>(feature_identifier::number_of_queues)};
-    entry.command_dword11 = 0xffffffffu;
+    // FFFEh in each half, not FFFFh, and this is measured rather than
+    // reasoned.
+    //
+    // Asking with CDW11 = FFFFFFFFh was refused by the controller on the
+    // rig with status 0x4002 - do-not-retry set, status code type 0,
+    // status code 02h, Invalid Field in Command. Both halves are zero's
+    // based, so FFFFh in a half asks for 65536 queues and is the reserved
+    // encoding of the field; FFFEh asks for 65535, which is the largest
+    // value that is not.
+    //
+    // The number is not the point - no controller has anything like that
+    // many - and the grant comes back in DW0 clamped to what it has. The
+    // point is only to name a value large enough that the clamp, rather
+    // than the request, decides the allocation, while staying inside what
+    // the field is allowed to hold.
+    //
+    // If a controller ever refuses this too, the next thing to try is an
+    // ordinary large count such as 255 in each half: the clamp makes it
+    // equivalent in practice, and it removes any question about encodings
+    // near the top of the field.
+    entry.command_dword11 = 0xfffefffeu;
     return entry;
 }
 
