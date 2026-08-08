@@ -2305,6 +2305,49 @@ private:
      */
     volatile std::uint64_t host_nmi_count{};
     volatile std::uint64_t host_nmi_rip{};
+
+    /**
+     * Whether the guest ever looked at VMX, and what it was told.
+     *
+     * These exist to separate two outcomes that are identical from
+     * outside and have opposite causes. A guest that never executes
+     * VMXON has either not looked - virtualization based security off,
+     * or the VMX bit not reported - or looked and declined, which means
+     * a capability it requires is missing from what this VMM advertises.
+     *
+     * `cpuid_leaf_1_ecx_reported` is what leaf 1 actually answered, so
+     * bit 5 says whether the guest was told VMX exists at all.
+     * @{
+     */
+    volatile std::uint64_t nested_capability_reads{};
+    volatile std::uint64_t nested_capability_last_msr{};
+    volatile std::uint64_t cpuid_leaf_1_ecx_reported{};
+
+    /**
+     * Every capability MSR the guest read and what it was answered with.
+     *
+     * A guest hypervisor that reads these and then declines has been told
+     * something it will not accept, and the only way to find out which is
+     * to see the answers rather than re-derive them. Freezes when full:
+     * the reads that matter are the probe, and a guest that goes on to
+     * run would otherwise flood it.
+     * @{
+     */
+    static constexpr std::size_t capability_answer_capacity = 48;
+
+    struct capability_answer
+    {
+        std::uint64_t msr{};
+        std::uint64_t value{};
+    };
+
+    capability_answer capability_answers[capability_answer_capacity]{};
+    /**
+     * @}
+     */
+    /**
+     * @}
+     */
     /**
      * @}
      */

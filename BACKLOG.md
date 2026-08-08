@@ -2455,3 +2455,47 @@ the constructor's stores for the new instrumentation fields, which are
 is already zero. That is the same trade `configure_reject` documents: a field
 whose only reader is a debugger measures nothing unless it is volatile.
 `.bss`, `.data` and `.rodata` are unchanged in size.
+
+### Hyper-V probes VMX and declines, and the rig is why
+
+Corrected from the earlier entry, which said virtualization based security
+was off. It is on. The guest still never executes VMXON, and the reason is
+measurable rather than inferable.
+
+Instrumented and read from the running VMM:
+
+    cpuid leaf 1 ecx reported   0x77fab22b   bit 5 set - VMX was offered
+    capability MSR reads        28           it read the whole set
+    guest_in_vmx_operation      0            and then did not enter
+
+So it looked and declined. What it was told, beside what the hardware
+underneath actually offers:
+
+    msr             hardware              advertised
+    PROCBASED2      0x001118fe00000000    0x001118ee00000000
+    EPT_VPID_CAP    0x00000f0106334041    0x00000f0106134040
+
+Two different findings in that table.
+
+**We narrow three things the hardware does offer**: secondary control bit
+4, virtualize x2APIC mode; and in the extended page table capabilities bit
+0, execute-only translations, and bit 21, accessed and dirty flags. Each
+is presumably narrowed because the shadow builder does not implement it,
+and each is a candidate to restore - but only alongside the support, since
+advertising a capability this VMM does not honour is worse than withholding
+it.
+
+**Neither column has secondary control bit 14, VMCS shadowing, nor bit 22,
+mode-based execute control.** The hardware does not offer them, so nothing
+here can. That is the rig rather than this VMM: the outer hypervisor is
+QEMU with `hv-passthrough`, which filters the VMX capability MSRs through
+enlightened VMCS version 1 - already recorded as the reason the preemption
+timer is refused. Mode-based execute control is what hypervisor-protected
+code integrity is built on, so a Hyper-V that wants it cannot get it here
+whatever this side advertises.
+
+What follows: restoring the three narrowed bits is worth trying and is
+cheap, but it should not be expected to be sufficient. Testing a real
+nested Hyper-V may need an outer configuration that passes the full
+capability set through, or bare metal. Either way the question is now a
+specific one about two named bits rather than "does it work".

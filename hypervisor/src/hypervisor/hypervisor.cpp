@@ -7042,6 +7042,11 @@ hypervisor::main(arch::x86_64::context & caller_context)
                     cpuid_result[2] &= ~(1u << 5);
                 }
 
+                // What the guest was actually told, so bit 5 can be read
+                // back rather than reasoned about. A guest that never
+                // executes VMXON may simply never have been offered it.
+                this->cpuid_leaf_1_ecx_reported = cpuid_result[2];
+
                 // MONITOR/MWAIT, ECX[3], is deliberately left as the
                 // hardware reports it. Both instructions execute in the
                 // guest and neither is intercepted, so there is nothing

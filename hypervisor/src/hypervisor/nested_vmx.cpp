@@ -334,6 +334,18 @@ bool hypervisor::on_nested_vmx_msr_read(std::uint32_t index,
     } else if ((index >= arch::x86_64::vmx::msr::begin) &&
                (index < arch::x86_64::vmx::msr::end)) {
         value = nested_vmx_capability_msr(index);
+
+        // Counted, because a guest that reads these and then does not
+        // enter VMX operation has looked and declined - which points at a
+        // capability this VMM does not advertise, and is a different
+        // problem from a guest that never looked.
+        if (this->nested_capability_reads < capability_answer_capacity) {
+            this->capability_answers[this->nested_capability_reads] =
+                capability_answer{.msr = index, .value = value};
+        }
+
+        this->nested_capability_reads = this->nested_capability_reads + 1;
+        this->nested_capability_last_msr = index;
     } else {
         return false;
     }
