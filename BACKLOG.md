@@ -2499,3 +2499,51 @@ cheap, but it should not be expected to be sufficient. Testing a real
 nested Hyper-V may need an outer configuration that passes the full
 capability set through, or bare metal. Either way the question is now a
 specific one about two named bits rather than "does it work".
+
+### Hyper-V does launch a second-level guest here, and the capability set is the gate
+
+The measurement that turns "why does it decline" into "which capabilities
+must be implemented", and the first time a *real* guest hypervisor has run
+anything under this VMM rather than the Bochs harness doing it.
+
+Behind a diagnostic in `nested_vmx_capability_msr` that reports the
+hardware's capability set unnarrowed - a lie while it is on, since every
+bit normally withheld is withheld because nothing here honours it, and
+therefore never to be left on.
+
+    narrowed, as shipped        unnarrowed, diagnostic only
+    ------------------------    ---------------------------
+    VMXON never executed        vmcs02_launched   1
+    l2_entries        0         l2_entries       17
+    Windows boots               28 boots, looping
+
+Seventeen second-level entries, `nested_entry_failed` zero, and then the
+guest loops. So the decline is not Hyper-V rejecting this VMM on some
+principle and not virtualization based security being off: it reads the
+capability MSRs, finds the set too small, and stands down cleanly - which
+is the behaviour the guest-facing notes always described. Widen the set
+and it engages immediately.
+
+The difference between the two columns is three bits, and they are the
+work:
+
+- secondary control bit 4, virtualize x2APIC mode. Withheld because the
+  virtual-APIC page and its state are not maintained here.
+- extended page table capability bit 0, execute-only translations.
+  Withheld because `execute_only_translations_offered` reports false and
+  `ept_permissions::normalised` must agree with it.
+- extended page table capability bit 21, accessed and dirty flags.
+  Withheld because the shadow never sets them, so a guest hypervisor
+  reading them would find nothing ever accessed.
+
+What is not the gate, and both were suspected: mode-based execute control
+and VMCS shadowing. The processor has mode-based execute control - bit 22
+is set in bare metal's IA32_VMX_PROCBASED_CTLS2, `0x005fbcff` - and the
+outer hypervisor withholds it either way, with `hv-passthrough` (`0x001118fe`)
+and without it (`0x001378ff`). Since Hyper-V engages regardless, it does
+not need either. Removing `hv-passthrough` is therefore not indicated, and
+it is wanted for other reasons.
+
+The honest next step is to implement one of the three and offer only that
+one, rather than widening the set and finding out afterwards which promise
+was broken - the loop above is what a broken promise looks like.

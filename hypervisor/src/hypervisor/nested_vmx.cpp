@@ -183,7 +183,27 @@ std::uint64_t hypervisor::nested_vmx_capability_msr(std::size_t msr)
     // cannot honour is removed from the may-be-1 half, and anything the
     // hardware insists on is put back, since a control that must be 1
     // must also be permitted to be 1.
+    // A diagnostic that answers one question and must never ship on.
+    //
+    // A guest hypervisor that reads the capability MSRs and then declines
+    // has been told something it will not accept, and the narrowing below
+    // is the only difference between what this VMM reports and what the
+    // processor underneath offers. Reporting the hardware's set unchanged
+    // says whether the capability set is the reason at all - which is
+    // worth knowing *before* implementing support for a capability that
+    // turns out not to be the one being objected to.
+    //
+    // It is a lie while it is on. Every bit this normally withholds is
+    // withheld because nothing here honours it, so a guest hypervisor
+    // that takes one up on the offer gets a VMM that does not do what it
+    // just promised. Diagnostic only, on a machine that can be rebooted.
+    constexpr bool report_hardware_capabilities_unnarrowed = false;
+
     auto narrow = [](std::uint64_t value, std::uint64_t supported) {
+        if constexpr (report_hardware_capabilities_unnarrowed) {
+            return value;
+        }
+
         auto allowed_0 = value & 0xffffffff;
         auto allowed_1 = (value >> 32) & 0xffffffff;
 
