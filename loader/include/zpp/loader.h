@@ -119,6 +119,16 @@ struct zpp_launch_parameters
      * put next to this one. Zero when the loader found no register.
      */
     uint8_t sleep_control_width;
+
+    /**
+     * The physical address of the firmware ACPI control structure, or zero
+     * when the loader found none or found one that did not check out.
+     *
+     * That table holds the firmware waking vector, which is where the
+     * platform jumps on an S3 resume and therefore the only place a VMM
+     * with no component inside the guest can insert itself into one.
+     */
+    uint64_t sleep_facs_physical;
 };
 
 struct zpp_loader_parameters
@@ -178,6 +188,7 @@ struct zpp_loader_parameters
     uint16_t sleep_control_port;
     uint16_t sleep_control_port_secondary;
     uint8_t sleep_control_width;
+    uint64_t sleep_facs_physical;
     /**
      * @}
      */

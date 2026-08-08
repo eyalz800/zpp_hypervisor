@@ -2774,6 +2774,16 @@ bool hypervisor::on_sleep_request(std::uint16_t port, std::uint32_t value)
     this->sleep_request.stage =
         static_cast<std::uint64_t>(power_stage::channel_flushed);
 
+    // Where the platform will come back to, if it comes back at all.
+    //
+    // Read before anything else is decided, because it is the fact
+    // everything else about a resume depends on and the only one that can
+    // be established without risking a machine that does not wake. See
+    // power::observe_waking_vector.
+    if constexpr (power::observe_waking_vector) {
+        observe_guest_waking_vector();
+    }
+
     // Passed through rather than emulated, by releasing the port and
     // resuming *without* advancing past the instruction: the guest
     // re-executes its own OUT, which now reaches hardware. That needs no
@@ -2830,6 +2840,76 @@ bool hypervisor::on_sleep_request(std::uint16_t port, std::uint32_t value)
         }
         return false;
     }
+}
+
+bool hypervisor::observe_guest_waking_vector()
+{
+    if (0 == this->sleep_facs_physical) {
+        log("no facs was handed over, so no waking vector to read");
+        return false;
+    }
+
+    // Offsets inside the firmware ACPI control structure. It is the one
+    // ACPI table with no revision, checksum or OEM identifier, so only the
+    // signature and the length are where they are in every other table.
+    //
+    // Checked against the FACS structure EDK2 declares in
+    // MdePkg/Include/IndustryStandard/Acpi65.h, which this build fetches:
+    // signature, length, hardware signature, then the thirty two bit
+    // waking vector, then the global lock, the flags, and the sixty four
+    // bit vector.
+    constexpr std::uint32_t facs_signature = 0x53434146; // 'FACS'
+    constexpr std::size_t waking_vector_offset = 0x0c;
+    constexpr std::size_t extended_waking_vector_offset = 0x18;
+
+    // The window and not a permanent mapping, for the reason map_window
+    // exists: this address is the firmware's choice, not ours, and adding
+    // it to the host page table could alias over the module's own mapping.
+    //
+    // One page. The structure is sixty four bytes and the specification
+    // requires it to be aligned on a sixty four byte boundary, so the two
+    // fields read below cannot straddle a page - but the base is masked
+    // and the offset added back rather than assuming the table starts at a
+    // page boundary, because nothing says it does.
+    auto page = this->sleep_facs_physical & ~(page_size - 1);
+    auto offset = static_cast<std::size_t>(this->sleep_facs_physical &
+                                           (page_size - 1));
+
+    this->mapping_window_lock.lock();
+    scope_exit release{[&] { this->mapping_window_lock.unlock(); }};
+
+    auto * table =
+        static_cast<const volatile std::uint8_t *>(map_window(page)) +
+        offset;
+
+    // Re-checked here and not only in the loader. The loader read this
+    // table before the guest ever ran; between then and now the guest has
+    // owned that memory and could have put anything there, and the whole
+    // point of reading it is to decide whether to write to it later.
+    auto signature = arch::x86_64::read32(table);
+    if (facs_signature != signature) {
+        log("facs signature is {} rather than a facs, refused", signature);
+        return false;
+    }
+
+    auto vector = arch::x86_64::read32(table + waking_vector_offset);
+    auto extended =
+        arch::x86_64::read64(table + extended_waking_vector_offset);
+
+    this->guest_waking_vector = vector;
+
+    log("guest waking vector {} and extended {}", vector, extended);
+    diag::log<diag::severity::warning>(
+        "guest waking vector {} extended {}", vector, extended);
+
+    // Both are reported because which one the guest used decides whether
+    // this approach works at all. The thirty two bit field is entered in
+    // real mode, which is the state a trampoline of ours could serve and
+    // is what apply_start_up already builds. The extended field is entered
+    // in long mode through a different protocol, and a guest that set it
+    // and left the other zero cannot be resumed into by anything written
+    // here yet.
+    return 0 != vector;
 }
 
 std::uint64_t hypervisor::own_vmxon_region_physical()
@@ -4525,6 +4605,7 @@ hypervisor::main(arch::x86_64::context & caller_context)
         this->sleep_control_port_secondary =
             launch.sleep_control_port_secondary;
         this->sleep_control_width = launch.sleep_control_width;
+        this->sleep_facs_physical = launch.sleep_facs_physical;
 
         // Where this module was put. Inside the guard with the rest,
         // because a processor this VMM started has no launch block and

@@ -59,6 +59,30 @@ struct sleep_control
      */
     std::uint8_t control_width{};
 
+    /**
+     * Where the firmware ACPI control structure is, as a physical
+     * address, or zero when it was not found or did not check out.
+     *
+     * That table holds the firmware waking vector: the address the
+     * platform jumps to, in real mode, when it resumes from S3. The
+     * operating system writes its own resume trampoline's address there
+     * on its way down, so this is the one place a VMM can insert itself
+     * into a resume - there is nothing else that runs on the way back up
+     * and nothing in the guest that would call us.
+     *
+     * Found here for the same reason the control port is: it comes out of
+     * the fixed ACPI description table, and the resident side has no
+     * table walker and nothing it could trust to point at one.
+     *
+     * A *physical* address, and the two are the same thing here only
+     * because UEFI identity maps before ExitBootServices. Named as
+     * physical because that is what the resident side needs - once it has
+     * switched to the host page table, which maps the module, itself and
+     * the local APIC page and nothing else, the only way to reach this
+     * table is through the mapping window by physical address.
+     */
+    std::uint64_t facs_address{};
+
     constexpr bool usable() const
     {
         return (valid_magic == magic) && (0 != pm1a_control_port) &&

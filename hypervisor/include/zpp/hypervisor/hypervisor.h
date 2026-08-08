@@ -952,6 +952,22 @@ private:
      */
 
     /**
+     * Reads the firmware waking vector the guest left in the FACS, into
+     * guest_waking_vector, and says whether it found one.
+     *
+     * Read only. Nothing is written to the table, and nothing about the
+     * resume changes - the point is to establish that the table was found
+     * and that the guest did leave a vector there, which is the fact a
+     * resume path rests on and the one thing that can be checked without
+     * risking a machine that does not come back.
+     *
+     * Reached through the mapping window, because the FACS is ordinary
+     * firmware memory and the host page table maps the module, itself and
+     * the local APIC page and nothing else.
+     */
+    bool observe_guest_waking_vector();
+
+    /**
      * Whether the exit handler has to leave this processor's guest with
      * VMLAUNCH rather than VMRESUME.
      *
@@ -2409,6 +2425,28 @@ private:
      * width rather than at a convenient one.
      */
     std::uint8_t sleep_control_width{};
+
+    /**
+     * The physical address of the firmware ACPI control structure, or
+     * zero. Holds the firmware waking vector - see
+     * observe_guest_waking_vector.
+     */
+    std::uint64_t sleep_facs_physical{};
+
+    /**
+     * The waking vector the guest left in that table, read on the way into
+     * a sleep state.
+     *
+     * The address the platform will jump to in real mode when it resumes,
+     * which on an unmodified machine is the guest's own resume trampoline.
+     * Recorded because a resume path has to enter the guest *there* - the
+     * guest is expecting to continue from its own trampoline, and anywhere
+     * else is a guest that has been lied to.
+     *
+     * Zero means either that nothing has read it yet or that the guest
+     * left none, and the two are told apart by sleep_request.occurred.
+     */
+    std::uint64_t guest_waking_vector{};
     /**
      * @}
      */

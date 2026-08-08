@@ -124,20 +124,46 @@ constexpr std::uint32_t sleep_type(std::uint32_t value)
 inline constexpr bool quiesce_on_sleep = false;
 
 /**
+ * Whether this VMM reads the firmware waking vector out of the FACS on the
+ * way into a sleep state.
+ *
+ * Read only: it writes nothing, changes no behaviour, and cannot make a
+ * suspend or a resume go differently. It exists because everything a
+ * resume path could do rests on one unverified fact - that the guest
+ * leaves its own resume entry point in that table, where this VMM can find
+ * it - and that fact is checkable on its own, with a log line, before
+ * anything is built on it.
+ *
+ * Off anyway, because nothing arrives on by default here before it has
+ * been run once, and this one does touch guest memory through the mapping
+ * window from inside a VM exit. What would turn it on: a hardware run that
+ * suspends and reports a non-zero "guest waking vector" line. That result
+ * is also what would justify writing to the field, and its absence is what
+ * would stop the whole approach - a guest that leaves no vector cannot be
+ * resumed into, and the answer would have to be somewhere else entirely.
+ */
+inline constexpr bool observe_waking_vector = false;
+
+/**
  * Whether this VMM takes over the ACPI firmware waking vector, so that an
  * S3 resume comes back through it rather than straight into the guest's
  * own resume trampoline on bare hardware.
  *
  * Off, and unlike the switch above this one is off because the path behind
- * it is incomplete rather than merely unproven - see
- * hypervisor::resume_from_sleep. Switching it on without finishing it
- * would point the firmware at a trampoline that does not re-launch the
- * guest, which is strictly worse than the machine coming back
- * unvirtualized: the guest would not come back at all.
+ * it does not exist yet rather than merely being unproven. Nothing reads
+ * it. It is here so that the two questions stay separate: whether the
+ * vector can be *found*, which observe_waking_vector answers on its own
+ * and safely, and whether it can be *taken over*, which needs a trampoline
+ * that re-establishes VMX operation and enters the guest at
+ * hypervisor::guest_waking_vector.
  *
- * What would turn it on: resume_from_sleep re-establishing VMX operation
- * and entering the guest at the vector recorded in
- * saved_guest_waking_vector, verified on hardware.
+ * The order matters, because the failure modes are not comparable. A
+ * machine that resumes unvirtualized has lost this VMM and kept its guest.
+ * A machine pointed at a trampoline that does not finish has lost both,
+ * and looks exactly like a dead motherboard from the outside.
+ *
+ * What would turn it on: that trampoline existing and having been run. See
+ * BACKLOG.md item 7 for what it has to do and in what order.
  */
 inline constexpr bool resume_from_waking_vector = false;
 

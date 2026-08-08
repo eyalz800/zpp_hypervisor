@@ -139,6 +139,7 @@ static int zpp_init(void)
         .sleep_control_port = 0,
         .sleep_control_port_secondary = 0,
         .sleep_control_width = 0,
+        .sleep_facs_physical = 0,
         /* System V already, so no adaptation is needed. */
         .adjust_launch_calling_convention = NULL,
     };
