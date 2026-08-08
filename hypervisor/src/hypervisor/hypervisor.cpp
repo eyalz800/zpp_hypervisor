@@ -2892,7 +2892,8 @@ hypervisor::translate_guest_linear(std::uint64_t linear)
     return {};
 }
 
-std::optional<arch::x86_64::memory_store> hypervisor::decode_guest_store(
+std::optional<arch::x86_64::decoded_instruction>
+hypervisor::decode_guest_instruction(
     std::size_t cpu, arch::x86_64::context & context)
 {
     // The instruction is at the guest's RIP, which is a linear address
@@ -2957,7 +2958,7 @@ std::optional<arch::x86_64::memory_store> hypervisor::decode_guest_store(
         }
     }
 
-    auto store = arch::x86_64::decode_memory_store(
+    auto store = arch::x86_64::decode(
         std::as_bytes(std::span{code}), context);
 
     // What was refused, so the forms can be named rather than counted.
@@ -2981,6 +2982,100 @@ std::optional<arch::x86_64::memory_store> hypervisor::decode_guest_store(
     }
 
     return store;
+}
+
+std::optional<std::uint64_t>
+hypervisor::read_guest_word(std::uint64_t guest_physical,
+                            std::uint8_t size)
+{
+    // Straight through the host page table, for the same reason the write
+    // below goes that way: the extended page tables establish an identity
+    // between guest physical and host physical, and our own mapping of the
+    // page is the only one that is not protected.
+    auto * at = reinterpret_cast<const volatile std::uint8_t *>(
+        guest_physical);
+
+    if (!this->host_page_table.virtual_to_physical(
+            reinterpret_cast<const void *>(guest_physical))) {
+        return {};
+    }
+
+    switch (size) {
+    case 1:
+        return arch::x86_64::read8(at);
+    case 2:
+        return arch::x86_64::read16(at);
+    case 4:
+        return arch::x86_64::read32(at);
+    case 8:
+        return arch::x86_64::read64(at);
+    default:
+        return {};
+    }
+}
+
+bool hypervisor::carry_out_guest_instruction(
+    std::uint64_t guest_physical,
+    const arch::x86_64::decoded_instruction & instruction,
+    arch::x86_64::context & context,
+    guest_write & performed)
+{
+    using arch::x86_64::memory_operation;
+
+    // A store replaces the contents outright, so the old value is not
+    // needed - and must not be demanded, since a device register that
+    // reads differently from what was written is exactly the case this
+    // exists to observe.
+    auto needs_old = (memory_operation::store != instruction.what);
+
+    std::uint64_t old{};
+    if (needs_old) {
+        auto read = read_guest_word(guest_physical, instruction.size);
+        if (!read) {
+            return false;
+        }
+
+        old = *read;
+    }
+
+    auto replacement = arch::x86_64::apply(instruction, old);
+
+    // Written back only where the instruction actually changes memory. An
+    // examine that wrote its own value back would turn a read of a device
+    // register into a write of it, which on a register with side effects
+    // is a different instruction from the one the guest executed.
+    auto writes_memory =
+        (memory_operation::load != instruction.what) &&
+        (memory_operation::examine != instruction.what);
+
+    if (writes_memory) {
+        auto stored = arch::x86_64::memory_store{
+            .value = replacement,
+            .size = instruction.size,
+        };
+
+        if (!apply_guest_store(guest_physical, stored)) {
+            return false;
+        }
+    }
+
+    if (instruction.writes_register) {
+        auto & slot =
+            context.*arch::x86_64::register_of(instruction.destination);
+        slot = arch::x86_64::result_for_register(instruction, old, slot);
+    }
+
+    // What the watch is told. The value reported is what the memory now
+    // holds, which for a combine is the combination rather than the
+    // operand - a handler looking for "did the guest clear the enable
+    // bit" wants the result, not the mask.
+    performed = guest_write{
+        .address = guest_physical,
+        .value = writes_memory ? replacement : old,
+        .size = instruction.size,
+    };
+
+    return true;
 }
 
 bool hypervisor::apply_guest_store(
@@ -3085,7 +3180,7 @@ bool hypervisor::on_ept_violation(std::size_t cpu,
             (0 != (qualification & qualification_operand_access));
 
         if (auto store = (emulate_watched_page_writes && operand_access)
-                             ? decode_guest_store(cpu, context)
+                             ? decode_guest_instruction(cpu, context)
                              : std::nullopt) {
             // A store that crosses the end of the watched page would be
             // applied whole at the faulting address, writing bytes onto
@@ -3095,14 +3190,12 @@ bool hypervisor::on_ept_violation(std::size_t cpu,
             auto offset_in_page = guest_physical & (page_size - 1);
             auto straddles = (offset_in_page + store->size) > page_size;
 
-            if (!straddles && apply_guest_store(guest_physical, *store)) {
-                if (watch.on_write) {
-                    guest_write written{
-                        .address = guest_physical,
-                        .value = store->value,
-                        .size = store->size,
-                    };
+            guest_write written{};
 
+            if (!straddles &&
+                carry_out_guest_instruction(
+                    guest_physical, *store, context, written)) {
+                if (watch.on_write) {
                     watch.on_write(watch.context, page, &written);
                 }
 

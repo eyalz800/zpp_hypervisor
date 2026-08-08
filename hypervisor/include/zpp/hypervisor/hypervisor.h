@@ -2,6 +2,7 @@
 #include "zpp/arch/x86_64/ap_start_up.h"
 #include "zpp/arch/x86_64/context.h"
 #include "zpp/arch/x86_64/decoder.h"
+#include "zpp/arch/x86_64/instruction.h"
 #include "zpp/arch/x86_64/exception_entry.h"
 #include "zpp/arch/x86_64/generic.h"
 #include "zpp/arch/x86_64/msr.h"
@@ -774,6 +775,7 @@ private:
     std::optional<std::uint64_t>
     translate_guest_linear(std::uint64_t linear);
 
+
     /**
      * Where the decoder's instruction length disagreed with the
      * processor's, and what the two said.
@@ -1184,8 +1186,9 @@ private:
      * Nothing if the instruction is not one the decoder handles, which
      * is the caller's signal to fall back to stepping over it.
      */
-    std::optional<arch::x86_64::memory_store>
-    decode_guest_store(std::size_t cpu, arch::x86_64::context & context);
+    std::optional<arch::x86_64::decoded_instruction>
+    decode_guest_instruction(std::size_t cpu,
+                             arch::x86_64::context & context);
 
     /**
      * Performs a decoded store against guest physical memory.
@@ -3071,6 +3074,31 @@ private:
      * is never wrong.
      */
     static constexpr bool emulate_watched_page_writes = true;
+
+    /**
+     * Reads the word a decoded instruction is about to act on.
+     *
+     * Only the forms that need the old contents ask for it - a plain store
+     * must not, because a device register that reads back differently from
+     * what was written is precisely the case a watch exists to observe.
+     */
+    std::optional<std::uint64_t> read_guest_word(std::uint64_t guest_physical,
+                                                 std::uint8_t size);
+
+    /**
+     * Carries out a decoded instruction against guest memory, and reports
+     * what it did.
+     *
+     * The counterpart to the pure decoder: it supplies the current
+     * contents that `apply` needs, writes the result back where the
+     * instruction changes memory, puts any register result in place, and
+     * fills in what the watch handler is told.
+     */
+    bool carry_out_guest_instruction(
+        std::uint64_t guest_physical,
+        const arch::x86_64::decoded_instruction & instruction,
+        arch::x86_64::context & context,
+        guest_write & performed);
 
     static constexpr std::size_t instruction_window_pages_per_cpu = 2;
 

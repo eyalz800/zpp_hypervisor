@@ -145,7 +145,7 @@ struct decoded_instruction
     bool sign_extends{};
 };
 
-namespace detail
+namespace instruction_detail
 {
 /**
  * The general purpose registers in *encoding* order.
@@ -490,7 +490,7 @@ constexpr combine_with bit_operation(std::uint8_t reg)
     }
 }
 
-} // namespace detail
+} // namespace instruction_detail
 
 /**
  * The register a decoded instruction writes its result to.
@@ -501,7 +501,7 @@ constexpr combine_with bit_operation(std::uint8_t reg)
  */
 constexpr std::uint64_t context::* register_of(std::uint8_t index)
 {
-    return detail::encoded_registers[index & 0xf];
+    return instruction_detail::encoded_registers[index & 0xf];
 }
 
 /**
@@ -519,9 +519,9 @@ constexpr std::uint64_t context::* register_of(std::uint8_t index)
 constexpr std::optional<decoded_instruction>
 decode(std::span<const std::byte> code, const context & registers)
 {
-    detail::cursor at{code};
+    instruction_detail::cursor at{code};
 
-    auto found = detail::read_prefixes(at);
+    auto found = instruction_detail::read_prefixes(at);
     auto opcode = at.next();
 
     // The two-byte escape, which carries the bit operations and the
@@ -533,7 +533,7 @@ decode(std::span<const std::byte> code, const context & registers)
 
     auto operand_of = [&](std::uint8_t index,
                           std::uint8_t size) -> std::uint64_t {
-        return detail::truncate(registers.*register_of(index), size);
+        return instruction_detail::truncate(registers.*register_of(index), size);
     };
 
     decoded_instruction result{};
@@ -547,8 +547,8 @@ decode(std::span<const std::byte> code, const context & registers)
         case 0xc6:
         case 0xc7: {
             auto byte_form = (0x88 == opcode) || (0xc6 == opcode);
-            auto size = detail::width_of(found, byte_form);
-            auto fields = detail::read_modrm(at);
+            auto size = instruction_detail::width_of(found, byte_form);
+            auto fields = instruction_detail::read_modrm(at);
 
             if (fields.names_register()) {
                 return {};
@@ -558,14 +558,14 @@ decode(std::span<const std::byte> code, const context & registers)
             result.size = size;
 
             if ((0x88 == opcode) || (0x89 == opcode)) {
-                if (detail::names_high_byte(size, found, fields.reg)) {
+                if (instruction_detail::names_high_byte(size, found, fields.reg)) {
                     return {};
                 }
 
                 auto index = static_cast<std::uint8_t>(
                     fields.reg | found.extend_reg());
 
-                if (detail::names_host_stack_pointer(index)) {
+                if (instruction_detail::names_host_stack_pointer(index)) {
                     return {};
                 }
 
@@ -573,28 +573,28 @@ decode(std::span<const std::byte> code, const context & registers)
                 break;
             }
 
-            auto immediate = detail::immediate_width(size);
+            auto immediate = instruction_detail::immediate_width(size);
             auto value = at.next_immediate(immediate);
 
             // The 64-bit form carries 32 bits, sign extended, so a
             // negative immediate stores what the instruction means rather
             // than its low half.
-            result.operand = detail::truncate(
-                (8 == size) ? detail::sign_extend(value, 4) : value, size);
+            result.operand = instruction_detail::truncate(
+                (8 == size) ? instruction_detail::sign_extend(value, 4) : value, size);
             break;
         }
 
         // MOV from memory into a register.
         case 0x8a:
         case 0x8b: {
-            auto size = detail::width_of(found, 0x8a == opcode);
-            auto fields = detail::read_modrm(at);
+            auto size = instruction_detail::width_of(found, 0x8a == opcode);
+            auto fields = instruction_detail::read_modrm(at);
 
             if (fields.names_register()) {
                 return {};
             }
 
-            if (detail::names_high_byte(size, found, fields.reg)) {
+            if (instruction_detail::names_high_byte(size, found, fields.reg)) {
                 return {};
             }
 
@@ -622,20 +622,20 @@ decode(std::span<const std::byte> code, const context & registers)
         case 0x30:
         case 0x31: {
             auto byte_form = (0 == (opcode & 1));
-            auto size = detail::width_of(found, byte_form);
-            auto fields = detail::read_modrm(at);
+            auto size = instruction_detail::width_of(found, byte_form);
+            auto fields = instruction_detail::read_modrm(at);
 
             if (fields.names_register()) {
                 return {};
             }
 
-            if (detail::names_high_byte(size, found, fields.reg)) {
+            if (instruction_detail::names_high_byte(size, found, fields.reg)) {
                 return {};
             }
 
             auto index = static_cast<std::uint8_t>(fields.reg |
                                                    found.extend_reg());
-            if (detail::names_host_stack_pointer(index)) {
+            if (instruction_detail::names_host_stack_pointer(index)) {
                 return {};
             }
 
@@ -669,8 +669,8 @@ decode(std::span<const std::byte> code, const context & registers)
         case 0x80:
         case 0x81:
         case 0x83: {
-            auto size = detail::width_of(found, 0x80 == opcode);
-            auto fields = detail::read_modrm(at);
+            auto size = instruction_detail::width_of(found, 0x80 == opcode);
+            auto fields = instruction_detail::read_modrm(at);
 
             if (fields.names_register()) {
                 return {};
@@ -678,17 +678,17 @@ decode(std::span<const std::byte> code, const context & registers)
 
             auto immediate = (0x83 == opcode)
                                  ? std::uint8_t{1}
-                                 : detail::immediate_width(size);
+                                 : instruction_detail::immediate_width(size);
             auto value = at.next_immediate(immediate);
 
             if ((0x83 == opcode) || (8 == size)) {
-                value = detail::sign_extend(
+                value = instruction_detail::sign_extend(
                     value, (0x83 == opcode) ? std::uint8_t{1}
                                             : std::uint8_t{4});
             }
 
             result.size = size;
-            result.operand = detail::truncate(value, size);
+            result.operand = instruction_detail::truncate(value, size);
 
             // Seven is a compare, which leaves memory alone.
             if (7 == fields.reg) {
@@ -696,7 +696,7 @@ decode(std::span<const std::byte> code, const context & registers)
                 break;
             }
 
-            auto how = detail::group_one_operation(fields.reg);
+            auto how = instruction_detail::group_one_operation(fields.reg);
             if (combine_with::none == how) {
                 return {};
             }
@@ -711,8 +711,8 @@ decode(std::span<const std::byte> code, const context & registers)
         // access rather than falling back to stepping.
         case 0x84:
         case 0x85: {
-            auto size = detail::width_of(found, 0x84 == opcode);
-            auto fields = detail::read_modrm(at);
+            auto size = instruction_detail::width_of(found, 0x84 == opcode);
+            auto fields = instruction_detail::read_modrm(at);
 
             if (fields.names_register()) {
                 return {};
@@ -725,8 +725,8 @@ decode(std::span<const std::byte> code, const context & registers)
 
         case 0xf6:
         case 0xf7: {
-            auto size = detail::width_of(found, 0xf6 == opcode);
-            auto fields = detail::read_modrm(at);
+            auto size = instruction_detail::width_of(found, 0xf6 == opcode);
+            auto fields = instruction_detail::read_modrm(at);
 
             if (fields.names_register() || (0 != fields.reg)) {
                 // Only the test form. The others in this group - not, neg,
@@ -735,7 +735,7 @@ decode(std::span<const std::byte> code, const context & registers)
                 return {};
             }
 
-            at.skip(detail::immediate_width(size));
+            at.skip(instruction_detail::immediate_width(size));
 
             result.what = memory_operation::examine;
             result.size = size;
@@ -745,20 +745,20 @@ decode(std::span<const std::byte> code, const context & registers)
         // XCHG with memory, which is where a lock-free updater goes.
         case 0x86:
         case 0x87: {
-            auto size = detail::width_of(found, 0x86 == opcode);
-            auto fields = detail::read_modrm(at);
+            auto size = instruction_detail::width_of(found, 0x86 == opcode);
+            auto fields = instruction_detail::read_modrm(at);
 
             if (fields.names_register()) {
                 return {};
             }
 
-            if (detail::names_high_byte(size, found, fields.reg)) {
+            if (instruction_detail::names_high_byte(size, found, fields.reg)) {
                 return {};
             }
 
             auto index = static_cast<std::uint8_t>(fields.reg |
                                                    found.extend_reg());
-            if (detail::names_host_stack_pointer(index)) {
+            if (instruction_detail::names_host_stack_pointer(index)) {
                 return {};
             }
 
@@ -786,7 +786,7 @@ decode(std::span<const std::byte> code, const context & registers)
             auto narrow = ((0xb6 == opcode) || (0xbe == opcode))
                               ? std::uint8_t{1}
                               : std::uint8_t{2};
-            auto fields = detail::read_modrm(at);
+            auto fields = instruction_detail::read_modrm(at);
 
             if (fields.names_register()) {
                 return {};
@@ -804,8 +804,8 @@ decode(std::span<const std::byte> code, const context & registers)
         // The bit group with an immediate bit number: test, and the three
         // that change the bit.
         case 0xba: {
-            auto size = detail::width_of(found, false);
-            auto fields = detail::read_modrm(at);
+            auto size = instruction_detail::width_of(found, false);
+            auto fields = instruction_detail::read_modrm(at);
 
             if (fields.names_register()) {
                 return {};
@@ -826,7 +826,7 @@ decode(std::span<const std::byte> code, const context & registers)
                 break;
             }
 
-            auto how = detail::bit_operation(fields.reg);
+            auto how = instruction_detail::bit_operation(fields.reg);
             if (combine_with::none == how) {
                 return {};
             }
@@ -860,8 +860,8 @@ constexpr std::uint64_t apply(const decoded_instruction & instruction,
                               std::uint64_t current)
 {
     auto size = instruction.size;
-    auto old = detail::truncate(current, size);
-    auto operand = detail::truncate(instruction.operand, size);
+    auto old = instruction_detail::truncate(current, size);
+    auto operand = instruction_detail::truncate(instruction.operand, size);
 
     switch (instruction.what) {
     case memory_operation::store:
@@ -884,9 +884,9 @@ constexpr std::uint64_t apply(const decoded_instruction & instruction,
     case combine_with::bitwise_xor:
         return old ^ operand;
     case combine_with::add:
-        return detail::truncate(old + operand, size);
+        return instruction_detail::truncate(old + operand, size);
     case combine_with::subtract:
-        return detail::truncate(old - operand, size);
+        return instruction_detail::truncate(old - operand, size);
     case combine_with::set_bit:
         return old | (std::uint64_t{1} << operand);
     case combine_with::clear_bit:
@@ -915,13 +915,13 @@ result_for_register(const decoded_instruction & instruction,
                     std::uint64_t current_register)
 {
     auto size = instruction.size;
-    auto value = detail::truncate(current_memory, size);
+    auto value = instruction_detail::truncate(current_memory, size);
 
     if (instruction.sign_extends) {
         // The destination width, not the source width, is what the
         // extension fills - and it is the whole register here, since the
         // widening forms with a 16-bit destination are refused above.
-        return detail::sign_extend(value, size);
+        return instruction_detail::sign_extend(value, size);
     }
 
     // A 4-byte or 8-byte result clears the rest of the register; a 1-byte
@@ -931,7 +931,7 @@ result_for_register(const decoded_instruction & instruction,
         return value;
     }
 
-    return (current_register & ~detail::mask_for(size)) | value;
+    return (current_register & ~instruction_detail::mask_for(size)) | value;
 }
 
 } // namespace zpp::arch::x86_64
