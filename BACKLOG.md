@@ -3079,3 +3079,59 @@ with ours first:
   the reason recorded where those controls are declared - concealing them
   produced a bugcheck. Worth not "fixing" by imitation.
 - **TSC scaling.** It advertises the secondary control; we do not.
+
+### What we do wrong: we hide the interface the guest needs to nest
+
+Hyper-V boots on this rig **without** us and does not boot **with** us, and
+the difference is not the VMX capability set. It is what the guest is told
+it is running on.
+
+Without us, the outer hypervisor exposes a full set of Hyper-V
+enlightenments - the test rig's own configuration does this deliberately -
+so Windows sees a hypervisor it recognises, one that advertises
+nested-virtualization support, and it arms virtualization-based security on
+top of it.
+
+With us, `on_cpuid` answers the **whole** range `0x40000000`-`0x4fffffff`
+with `ZppZppZppZpp` and a diagnostic leaf, and nothing else. No interface
+version, no hypercall MSR, no VP index, no reference counter, and nothing
+about nested virtualization. So Windows sees an unrecognised hypervisor
+offering no enlightenments, and declines to arm the feature - which is
+exactly the measurement: `guest_vmxon_count` zero on every processor,
+virtualization-based security reported "not enabled", and all four
+*hardware* prerequisites reported present because those come from leaf 1
+and the extended page tables, which we do pass through.
+
+The comparison that makes it plain: a smaller bare-metal reference of the
+same size class, which carries a Windows guest with a nested hypervisor,
+does the opposite on purpose. It reports its own vendor signature at the
+first leaf and then **supplies the Hyper-V interface leaves anyway** - the
+interface version at the second leaf, and a feature leaf advertising the
+hypercall MSR, the VP index MSR, the reference counter and the frequency
+MSRs. It presents itself as itself *plus* an interface the guest knows how
+to use.
+
+**Answering the whole range was the right fix for the problem it solved and
+is the wrong answer for this one.** It exists because a guest that reads our
+vendor from one leaf and a Hyper-V interface from the next acts on the more
+specific claim and starts using synthetic MSRs - and that cost an afternoon
+and a `0xc000000d`. Both facts are true at once: hiding the interface keeps
+the guest from asking for things we cannot do, and it is also what stops it
+nesting.
+
+Which names the work, and it has two halves that must land together:
+
+1. **Present the interface**: the version leaf, and a feature leaf naming
+   only what is actually backed. For nesting specifically that includes
+   whatever leaf reports nested-virtualization support, since that is what
+   a guest hypervisor looks for before enabling itself.
+2. **Back it.** The synthetic MSRs live at `0x40000000` and above, which is
+   **outside both ranges the MSR bitmap covers**, so every access exits
+   unconditionally and the handler answers `#GP` - by design, and correctly,
+   for a VMM that claims no interface. Claiming one means those accesses
+   have to be answered, and the cheapest honest way here is to forward them
+   to the hypervisor underneath, which does implement them. A build that
+   does half of this is the `0xc000000d` failure again, on purpose.
+
+The second half is why this is not a one-line change, and why it should be
+built behind a switch and measured rather than assumed.
