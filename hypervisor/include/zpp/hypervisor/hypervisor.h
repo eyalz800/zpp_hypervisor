@@ -2324,6 +2324,27 @@ private:
     volatile std::uint64_t cpuid_leaf_1_ecx_reported{};
 
     /**
+     * The control fields a guest hypervisor actually wrote into its own
+     * VMCS, captured at the first entry that uses them.
+     *
+     * This is the measurement that names what a guest hypervisor
+     * *requires*, rather than inferring it from which withholding makes
+     * it decline. Bisecting the advertised set costs a reboot per
+     * variable and cannot separate controls that the architecture
+     * couples; reading what it set answers directly.
+     * @{
+     */
+    volatile std::uint64_t vmcs12_pin_controls{};
+    volatile std::uint64_t vmcs12_primary_controls{};
+    volatile std::uint64_t vmcs12_secondary_controls{};
+    volatile std::uint64_t vmcs12_exit_controls{};
+    volatile std::uint64_t vmcs12_entry_controls{};
+    volatile std::uint64_t vmcs12_controls_captured{};
+    /**
+     * @}
+     */
+
+    /**
      * Every capability MSR the guest read and what it was answered with.
      *
      * A guest hypervisor that reads these and then declines has been told

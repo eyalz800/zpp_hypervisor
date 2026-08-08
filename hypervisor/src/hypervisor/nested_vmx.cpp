@@ -207,13 +207,13 @@ std::uint64_t hypervisor::nested_vmx_capability_msr(std::size_t msr)
     // answer. One group per boot narrows it to one MSR in three boots,
     // which is what a target costing a reboot per variable is worth
     // spending. Set this to one `unnarrow_` value at a time.
-    constexpr std::uint64_t unnarrow_nothing = 0;
-    constexpr std::uint64_t unnarrow_pin_based = 1ull << 0;
-    constexpr std::uint64_t unnarrow_primary = 1ull << 1;
-    constexpr std::uint64_t unnarrow_secondary = 1ull << 2;
-    constexpr std::uint64_t unnarrow_exits = 1ull << 3;
-    constexpr std::uint64_t unnarrow_entries = 1ull << 4;
-    constexpr std::uint64_t unnarrow_ept_vpid = 1ull << 5;
+    [[maybe_unused]] constexpr std::uint64_t unnarrow_nothing = 0;
+    [[maybe_unused]] constexpr std::uint64_t unnarrow_pin_based = 1ull << 0;
+    [[maybe_unused]] constexpr std::uint64_t unnarrow_primary = 1ull << 1;
+    [[maybe_unused]] constexpr std::uint64_t unnarrow_secondary = 1ull << 2;
+    [[maybe_unused]] constexpr std::uint64_t unnarrow_exits = 1ull << 3;
+    [[maybe_unused]] constexpr std::uint64_t unnarrow_entries = 1ull << 4;
+    [[maybe_unused]] constexpr std::uint64_t unnarrow_ept_vpid = 1ull << 5;
 
     constexpr std::uint64_t report_hardware_capabilities_unnarrowed =
         unnarrow_nothing;

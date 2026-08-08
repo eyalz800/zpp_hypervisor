@@ -733,6 +733,22 @@ std::expected<void, zpp::error> hypervisor::build_vmcs02(std::size_t cpu)
     auto exit12 = shadow.read(field::vm_exit_controls);
     auto entry12 = shadow.read(field::vm_entry_controls);
 
+    // What the guest hypervisor actually asked for, recorded once.
+    //
+    // Only the first entry's values are kept: a hypervisor that runs
+    // many second-level guests would otherwise leave the last one's
+    // controls here, and the question this answers is what it needs at
+    // all, which the first launch already settles.
+    if (0 == this->vmcs12_controls_captured) {
+        this->vmcs12_pin_controls = pin12;
+        this->vmcs12_primary_controls = primary12;
+        this->vmcs12_secondary_controls =
+            shadow.read(field::secondary_processor_based_vm_execution_controls);
+        this->vmcs12_exit_controls = exit12;
+        this->vmcs12_entry_controls = entry12;
+        this->vmcs12_controls_captured = 1;
+    }
+
     // Every control the guest hypervisor set has to be one the capability
     // MSRs told it it could set, and every control they said must be 1 has
     // to be 1. SDM 29.2.1.1 makes that the first check on the VM-execution

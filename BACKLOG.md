@@ -2624,3 +2624,55 @@ is refused unless `nested_vmx_capability_msr` reports the capability. It
 is written against the reported value rather than against the constant,
 so if bit 21 is ever implemented and offered the check follows without
 being edited.
+
+### What the guest hypervisor actually asks for, read from its own VMCS
+
+The bisection was abandoned in favour of this, and it should have been done
+first. Four boots widening one group of capability MSRs at a time - primary
+alone, secondary alone, exit with entry, primary with secondary - all left
+`l2_entries` at zero. Only widening all five together made it engage, and no
+amount of that names the control it wants.
+
+So capture what it *writes* instead. On the engaging configuration, the
+first `build_vmcs02` records the guest hypervisor's own control fields:
+
+    pin        0x0000001e
+    primary    0xa4206dfa
+    secondary  0x00000000
+    exit       0x0003efff
+    entry      0x000013ff
+
+Read against our masks, two things follow and both retire earlier guesses.
+
+**It sets primary bit 21, use TPR shadow.** `supported_primary_controls`
+withholds it and `build_vmcs02` strips it from vmcs02 unconditionally. So
+in the engaging run the guest hypervisor was told it could have TPR shadow,
+set it, and had it silently removed - with no compensating CR8-load or
+CR8-store exiting, since neither our own VMCS nor a first level using TPR
+shadow sets those. Every `mov cr8` its second-level guest executed
+therefore reached the *physical* control register, changing the real
+processor's interrupt priority, and the virtual-APIC page it was told to
+expect was never updated. Seventeen entries and then a loop is what that
+produces. This is a promise broken in vmcs02 rather than a missing
+capability, which is why widening the advertisement alone made things
+worse.
+
+**It sets no secondary controls at all** - not virtualize x2APIC mode, not
+even EPT. That retires the whole of the previous entry's bit 4 argument,
+including the SDM 29.2.1.1 pairing: the pairing is real, but nothing here
+is trying to use the paired control. Withholding bit 4 is fine.
+
+Pin asks for its required-1 bits plus NMI exiting and nothing else, so no
+pin control is implicated either.
+
+The work is therefore one item, not three: honour TPR shadow. Advertise
+primary bit 21; in `build_vmcs02`, when vmcs12 sets it, validate the
+virtual-APIC address vmcs12 names, write it and the TPR threshold into
+vmcs02, and stop stripping the control. Where it is stripped anyway, force
+CR8 load and store exiting so the physical register is never reached. The
+exit side already exists - `l1_wants_l2_exit` answers
+`tpr_below_threshold` against this control.
+
+The exit and entry values above are recorded for the same comparison
+against `supported_exit_controls` and `supported_entry_controls`, which has
+not been done yet.
