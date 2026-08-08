@@ -12,4 +12,4 @@
 # The format is the compiler's `--version` first line, two spaces, the hash.
 # Keyed on the compiler because the hash is as much a property of the toolchain
 # as of the source; a version with no line here is skipped with a warning.
-Homebrew clang version 22.1.1  ea0d9d8b9485484d1ef15c026d15c39a44e81ce7e1d5096f41e8da9edd77872f
+Homebrew clang version 22.1.1  d4e108ccd0bf4a6e5321036a37c538cbeb6d50c7351d3d8a714a26624909d9d9

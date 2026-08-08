@@ -2359,6 +2359,17 @@ private:
     volatile std::uint64_t apic_writes_undecoded{};
 
     /**
+     * Synthetic hypervisor MSR accesses forwarded to whatever this VMM
+     * runs under, rather than faulted.
+     *
+     * Non-zero says the guest took up the interface it was offered, which
+     * is the point of offering it. Zero with the interface presented means
+     * the guest looked and did not use it, and the two are worth telling
+     * apart.
+     */
+    volatile std::uint64_t synthetic_msr_accesses{};
+
+    /**
      * Whether the guest ever looked at VMX, and what it was told.
      *
      * These exist to separate two outcomes that are identical from

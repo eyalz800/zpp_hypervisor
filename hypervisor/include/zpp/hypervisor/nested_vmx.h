@@ -46,6 +46,37 @@ namespace zpp::hypervisor::nested_vmx
  *
  * Turning it on: -DZPP_NESTED_VMX=ON.
  */
+/**
+ * Whether to let the guest see the hypervisor interface of whatever this
+ * VMM is itself running under, instead of answering the whole hypervisor
+ * CPUID range ourselves.
+ *
+ * **This is what stops a guest hypervisor starting, and it is off because
+ * turning it on is only half a change.**
+ *
+ * Measured: Hyper-V arms on this rig without this VMM in the way and does
+ * not arm with it, while every *hardware* prerequisite it reports is
+ * present. The difference is that the outer hypervisor exposes a full set
+ * of Hyper-V enlightenments and we hide them - so the guest sees an
+ * unrecognised hypervisor advertising nothing about nested virtualization,
+ * and declines.
+ *
+ * The other half is the synthetic MSRs. They live at 0x40000000 and above,
+ * outside both ranges the MSR bitmap covers, so every access exits
+ * unconditionally and is answered with a general protection fault. That is
+ * the honest answer for a VMM claiming no interface and a fatal one for a
+ * VMM claiming one - it is the 0xc000000d this tree already paid for. So
+ * this switch forwards those accesses to the hypervisor underneath, which
+ * does implement them, and the two halves are deliberately the same
+ * switch: neither is safe alone.
+ *
+ * Off by default because it hands the guest an interface this VMM does not
+ * implement and cannot implement alone - it works only while something
+ * underneath does. On bare metal there is nothing underneath, so this must
+ * stay off there and the interface would have to be implemented instead.
+ */
+inline constexpr bool pass_through_hypervisor_interface = false;
+
 inline constexpr bool enabled =
 #if defined(ZPP_NESTED_VMX) && ZPP_NESTED_VMX
     true;

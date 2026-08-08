@@ -7495,7 +7495,8 @@ hypervisor::main(arch::x86_64::context & caller_context)
                 // likewise passed through untouched, so the guest sees
                 // one consistent answer across both leaves.
             } else if ((leaf >= hypervisor_leaf_first) &&
-                       (leaf <= hypervisor_leaf_last)) {
+                       (leaf <= hypervisor_leaf_last) &&
+                       !nested_vmx::pass_through_hypervisor_interface) {
                 // Answer the whole hypervisor range, not just the leaf
                 // carrying the signature. Anything left unanswered falls
                 // through to whatever is underneath, and underneath is
@@ -7726,6 +7727,44 @@ hypervisor::main(arch::x86_64::context & caller_context)
             // instruction instead leaves the guest believing it read a
             // value, and Windows fails a long way from here with
             // 0xc000000d, blaming its own boot configuration.
+            // Forwarded rather than faulted, where this VMM has told the
+            // guest an interface exists.
+            //
+            // A synthetic MSR is only answerable by whoever implements the
+            // interface it belongs to. Claiming the interface and then
+            // faulting its MSRs is the worst of both, and is precisely the
+            // 0xc000000d recorded below - so the two are the same switch.
+            // What makes forwarding sound here is that the interface being
+            // claimed is not ours: it is the one underneath, which does
+            // implement these, and passing the access straight down is the
+            // whole of what "pass through" means.
+            //
+            // Bounded to the synthetic range on purpose. Everything below
+            // it is architectural and must keep faulting when absent,
+            // which is what the comment above this is about.
+            if constexpr (nested_vmx::pass_through_hypervisor_interface) {
+                constexpr std::uint32_t synthetic_first = 0x40000000;
+                constexpr std::uint32_t synthetic_last = 0x4fffffff;
+
+                if (auto index = static_cast<std::uint32_t>(context.rcx);
+                    (index >= synthetic_first) &&
+                    (index <= synthetic_last)) {
+                    if (basic_reason::rdmsr == reason) {
+                        auto value = arch::x86_64::rdmsr(index);
+                        context.rax = value & 0xffffffff;
+                        context.rdx = value >> 32;
+                    } else {
+                        arch::x86_64::wrmsr(index,
+                                            (context.rax & 0xffffffff) |
+                                                (context.rdx << 32));
+                    }
+
+                    this->synthetic_msr_accesses =
+                        this->synthetic_msr_accesses + 1;
+                    break;
+                }
+            }
+
             inject_general_protection_fault();
 
             // The MSR index, which is the one thing needed to tell an
