@@ -5719,13 +5719,6 @@ hypervisor::on_interrupt_command(std::uint64_t command)
         return command;
     }
 
-    // A broadcast start-up IPI cannot be redirected one processor at a
-    // time, and this VMM has no other way to enumerate what it would be
-    // broadcasting to - it learns a processor exists by being told to
-    // start it. So it is passed through, which hands those processors to
-    // the guest unvirtualized, and said out loud rather than left to be
-    // discovered.
-    //
     // Decoded rather than ignored, which is what used to happen. Reading
     // bits 63:32 of a shorthand command yields whatever the guest left
     // there - zero, in practice - and matching that against the table of
@@ -5733,11 +5726,35 @@ hypervisor::on_interrupt_command(std::uint64_t command)
     // nobody had sent it.
     this->ipi_start_up_seen = this->ipi_start_up_seen + 1;
 
+    // A broadcast names no destination, so there is nothing to look up.
+    // It is resolved against the platform's roster instead and every
+    // target run through the same path a targeted command takes.
+    //
+    // It used to be passed through, on the stated grounds that this VMM
+    // could not enumerate what it would be broadcasting to. That was
+    // true and the conclusion was still wrong: **this is how Windows
+    // starts its processors**, so the case being punted on was the only
+    // one that ever happens. Measured on the rig - one broadcast INIT
+    // and two broadcast start-up IPIs, shorthand 3, all refused, and not
+    // one processor adopted across an entire boot.
+    //
+    // Passing it through is worse than refusing when a guest hypervisor
+    // is above: the processors do start, outside this VMM, so they
+    // belong to neither layer. The guest hypervisor's rendezvous never
+    // completes and it resets the machine, which is what it did.
     auto shorthand = (command >> shorthand_shift) & shorthand_mask;
     if (shorthand_none != shorthand) {
+        auto vector = command & vector_mask;
+
+        if (start_up_broadcast(vector)) {
+            return {};
+        }
+
         this->ipi_refused_shorthand = this->ipi_refused_shorthand + 1;
-        log("broadcast start-up ipi, shorthand {}, not adopted",
-            shorthand);
+        log("broadcast start-up ipi, shorthand {}, vector {}, no roster "
+            "to resolve it against",
+            shorthand,
+            vector);
         return command;
     }
 
@@ -5776,10 +5793,66 @@ hypervisor::on_interrupt_command(std::uint64_t command)
     auto destination = command >> destination_shift;
     auto vector = command & vector_mask;
 
+    return (start_up_result::adopted ==
+            start_up_processor(destination, vector))
+               ? std::optional<std::uint64_t>{}
+               : std::optional<std::uint64_t>{command};
+}
+
+bool hypervisor::start_up_broadcast(std::uint64_t vector)
+{
+    // Nothing to resolve against. Answered by the caller passing the
+    // guest's own command through, which is what this did before the
+    // roster existed - and is still the only thing left when a loader
+    // could not supply one.
+    if (0 == this->number_of_platform_processors) {
+        return false;
+    }
+
+    auto self = local_apic_id();
+
+    // "All excluding self", the only broadcast a start-up IPI may use.
+    // The other two forms include the sender, which SDM 11.6.1 does not
+    // allow for INIT or start-up delivery modes - both references agree,
+    // and the guest sends the legal one.
+    for (std::size_t i{}; i < this->number_of_platform_processors; ++i) {
+        auto destination = this->platform_apic_id[i];
+        if (destination == self) {
+            continue;
+        }
+
+        if (start_up_result::needs_hardware ==
+            start_up_processor(destination, vector)) {
+            // The guest's broadcast cannot be forwarded for one target
+            // and swallowed for another, so this target gets its own
+            // command. Identical in effect to the broadcast the guest
+            // wrote, restricted to the processor that still needs it.
+            constexpr std::uint64_t delivery_mode_start_up = (6ull << 8);
+            constexpr std::uint64_t destination_shift = 32;
+
+            log("broadcast start-up ipi, apic id {} needs hardware, "
+                "vector {}",
+                destination,
+                vector);
+
+            arch::x86_64::wrmsr(
+                arch::x86_64::msr::ia32_x2apic_icr,
+                vector | delivery_mode_start_up |
+                    (static_cast<std::uint64_t>(destination)
+                     << destination_shift));
+        }
+    }
+
+    return true;
+}
+
+hypervisor::start_up_result hypervisor::start_up_processor(
+    std::uint64_t destination, std::uint64_t vector)
+{
     auto slot = processor_slot(destination);
     if (!slot) {
         log("no room to track the processor with apic id {}", destination);
-        return command;
+        return start_up_result::needs_hardware;
     }
 
     if (this->processor_virtualized[*slot]) {
@@ -5795,7 +5868,7 @@ hypervisor::on_interrupt_command(std::uint64_t command)
         if (this->started_by_start_up_ipi[*slot]) {
             log("guest start-up ipi for cpu {}, already started, ignored",
                 *slot);
-            return {};
+            return start_up_result::adopted;
         }
 
         // Under the hypervisor and out of an INIT, so the target chose
@@ -5816,7 +5889,7 @@ hypervisor::on_interrupt_command(std::uint64_t command)
             log("guest start-up ipi for cpu {}, vector {}, handed over",
                 *slot,
                 vector);
-            return {};
+            return start_up_result::adopted;
         }
 
         // Not listening, so the hardware path is the only one that can
@@ -5856,7 +5929,7 @@ hypervisor::on_interrupt_command(std::uint64_t command)
             *slot,
             vector,
             expected);
-        return command;
+        return start_up_result::needs_hardware;
     }
 
     // Never seen before, so this is the guest starting it for the first
@@ -5867,18 +5940,18 @@ hypervisor::on_interrupt_command(std::uint64_t command)
     // guest asked for.
     if (!this->start_up_memory) {
         log("no start-up memory, cpu {} will run unvirtualized", *slot);
-        return command;
+        return start_up_result::needs_hardware;
     }
 
     if (start_application_processor(*slot, vector)) {
-        return {};
+        return start_up_result::adopted;
     }
 
-    // It did not come up. Passing the guest's own start-up IPI through is
-    // the least bad thing left: the processor is still waiting for one, so
+    // It did not come up. Letting a real start-up IPI reach it is the
+    // least bad thing left: the processor is still waiting for one, so
     // the guest gets a processor it can use, unvirtualized. Losing it
     // outright would usually take the guest down with it.
-    return command;
+    return start_up_result::needs_hardware;
 }
 
 void hypervisor::initialize_start_up_memory(std::uint64_t memory)
@@ -7090,6 +7163,23 @@ hypervisor::main(arch::x86_64::context & caller_context)
         // processor already found - which is exactly how the sleep
         // control port was lost once.
         this->handed_over_module_base = launch.module_base;
+
+        // Copied, not pointed at. The array is the loader's and this
+        // module outlives it - the same reason every other field here is
+        // copied rather than referenced.
+        this->number_of_platform_processors = 0;
+        if (launch.processor_apic_ids) {
+            auto count = launch.number_of_processor_apic_ids;
+            if (count > max_cpus) {
+                count = max_cpus;
+            }
+
+            for (std::size_t i{}; i < count; ++i) {
+                this->platform_apic_id[i] = launch.processor_apic_ids[i];
+            }
+
+            this->number_of_platform_processors = count;
+        }
     }
 
     // The block copied above still holds one pointer that leads out of

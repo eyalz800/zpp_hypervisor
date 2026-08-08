@@ -129,6 +129,40 @@ struct zpp_launch_parameters
      * with no component inside the guest can insert itself into one.
      */
     uint64_t sleep_facs_physical;
+
+    /**
+     * The local APIC id of every processor the platform reports, and how
+     * many there are. Null and zero where the loader could not say.
+     *
+     * Wanted for one case that cannot be answered any other way: a guest
+     * that starts its processors with a **broadcast** start-up IPI. The
+     * command names no destination at all - it says "all excluding self"
+     * - so a VMM that learns a processor exists by being told to start
+     * it learns nothing from it, and the processors come up outside the
+     * VMM entirely. With a guest hypervisor above, that is worse than
+     * refusing: those processors then belong to nobody, its rendezvous
+     * never completes, and it resets the machine.
+     *
+     * Every full hypervisor resolves the same shorthand against a roster
+     * it already holds - KVM's kvm_apic_match_dest against kvm->vcpus,
+     * for one - because it created every processor before the guest
+     * asked for one. This VMM launches on the boot processor alone, so
+     * the roster has to be handed to it.
+     *
+     * From the loader because only the loader has a platform to ask.
+     * Under UEFI that is EFI_MP_SERVICES_PROTOCOL; a loader that runs
+     * under an operating system already launches the hypervisor on every
+     * processor, so it has no broadcast to resolve and may leave this
+     * null.
+     *
+     * The array need not outlive the call: the hypervisor copies it.
+     * @{
+     */
+    const uint32_t * processor_apic_ids;
+    size_t number_of_processor_apic_ids;
+    /**
+     * @}
+     */
 };
 
 struct zpp_loader_parameters
@@ -189,6 +223,17 @@ struct zpp_loader_parameters
     uint16_t sleep_control_port_secondary;
     uint8_t sleep_control_width;
     uint64_t sleep_facs_physical;
+    /**
+     * @}
+     */
+
+    /**
+     * Every processor's local APIC id, as this loader's platform reports
+     * them, or null. See zpp_launch_parameters for what needs it.
+     * @{
+     */
+    const uint32_t * processor_apic_ids;
+    size_t number_of_processor_apic_ids;
     /**
      * @}
      */

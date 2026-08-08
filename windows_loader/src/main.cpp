@@ -105,6 +105,12 @@ extern "C" NTAPI NTSTATUS driver_entry(PDRIVER_OBJECT driver_object,
         .sleep_control_port_secondary = 0,
         .sleep_control_width = 0,
         .sleep_facs_physical = 0,
+        // Nor this, for the same reason. A guest's broadcast start-up IPI
+        // names processors this loader has already launched the
+        // hypervisor on, so every one of them is known by the time one
+        // arrives and there is nothing left for a roster to answer.
+        .processor_apic_ids = nullptr,
+        .number_of_processor_apic_ids = 0,
         .adjust_launch_calling_convention = invoke_entry,
     };
 

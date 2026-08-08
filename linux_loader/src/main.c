@@ -140,6 +140,11 @@ static int zpp_init(void)
         .sleep_control_port_secondary = 0,
         .sleep_control_width = 0,
         .sleep_facs_physical = 0,
+        /* Nor this, for the same reason: every processor is already
+         * running the hypervisor by the time a guest broadcasts a
+         * start-up IPI, so there is nothing for a roster to answer. */
+        .processor_apic_ids = NULL,
+        .number_of_processor_apic_ids = 0,
         /* System V already, so no adaptation is needed. */
         .adjust_launch_calling_convention = NULL,
     };

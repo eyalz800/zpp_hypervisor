@@ -1697,6 +1697,44 @@ private:
     on_interrupt_command(std::uint64_t command);
 
     /**
+     * What starting one processor needed.
+     */
+    enum class start_up_result
+    {
+        /**
+         * It was started, or is already running, and the guest's own
+         * write must not go out for it.
+         */
+        adopted,
+
+        /**
+         * Only a real start-up IPI can move it from where it is, so one
+         * has to reach the hardware naming this target.
+         */
+        needs_hardware,
+    };
+
+    /**
+     * Starts, or hands a vector to, the one processor with the given local
+     * APIC id.
+     *
+     * Split out of on_interrupt_command so that a broadcast can run every
+     * processor through exactly the same path a targeted command does.
+     * There is no separate broadcast policy, and that is deliberate: the
+     * two used to differ, and the difference was that a broadcast did
+     * nothing at all.
+     */
+    start_up_result start_up_processor(std::uint64_t destination,
+                                       std::uint64_t vector);
+
+    /**
+     * Resolves a broadcast start-up IPI against the platform's roster and
+     * starts each target. Returns whether the guest's own write may be
+     * swallowed.
+     */
+    bool start_up_broadcast(std::uint64_t vector);
+
+    /**
      * Returns the index this VMM tracks the processor with the given local
      * APIC id under, allocating one if this is the first time it has been
      * named. Returns nothing when there is no room left.
@@ -3047,6 +3085,34 @@ private:
      * so this counts from one.
      */
     std::size_t number_of_known_processors = 1;
+
+    /**
+     * The local APIC id of every processor the platform reports, copied
+     * from the launch block.
+     *
+     * Distinct from `apic_id` above, which holds only the processors this
+     * VMM has met - one it launched on, or one a guest named in a
+     * targeted start-up IPI. This is the whole machine, and it exists for
+     * the one command that names no destination: a **broadcast** start-up
+     * IPI, "all excluding self", which is how Windows starts its
+     * processors.
+     *
+     * Without it a broadcast can only be passed through, and a processor
+     * that starts that way is running outside this VMM. With a guest
+     * hypervisor above, that is not merely a lost observation - it
+     * produces processors that neither layer owns, its rendezvous never
+     * completes, and it resets the machine. Measured, on the rig, as a
+     * boot that reached the second level and then reset the box.
+     *
+     * Copied rather than pointed at, like everything else handed over:
+     * the launch block belongs to the loader and does not outlive it.
+     * @{
+     */
+    std::uint32_t platform_apic_id[max_cpus]{};
+    std::size_t number_of_platform_processors{};
+    /**
+     * @}
+     */
 
     /**
      * Whether the processor at each index is running under this

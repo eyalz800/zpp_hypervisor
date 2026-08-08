@@ -82,6 +82,9 @@ zpp_load_elf(const struct zpp_loader_parameters * parameters)
         parameters->sleep_control_port_secondary;
     handover.sleep_control_width = parameters->sleep_control_width;
     handover.sleep_facs_physical = parameters->sleep_facs_physical;
+    handover.processor_apic_ids = parameters->processor_apic_ids;
+    handover.number_of_processor_apic_ids =
+        parameters->number_of_processor_apic_ids;
 
     for (std::size_t i{}; i < cpus; ++i) {
         // Rebuilt per processor because it captures i, which is the one

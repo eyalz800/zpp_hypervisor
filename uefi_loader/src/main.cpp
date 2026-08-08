@@ -515,6 +515,70 @@ static bool file_exists(EFI_HANDLE device, const char16_t * path)
  * located, and asking costs nothing. Reading only: waking or borrowing
  * one is exactly what was removed from this loader.
  */
+/**
+ * Every processor's local APIC id, for the hypervisor to resolve a
+ * broadcast start-up IPI against. See `zpp_launch_parameters`.
+ *
+ * Static because the hypervisor goes resident and this loader's frames do
+ * not - though it copies the array rather than keeping the pointer, so
+ * this only has to survive the call.
+ *
+ * Separate from `trace_launch_context`, which enumerates the same
+ * processors and is compiled out entirely when tracing is off. Reading a
+ * roster the hypervisor needs out of a function that may not exist is the
+ * sort of coupling that works until the day the build option changes.
+ * @{
+ */
+static std::uint32_t g_processor_apic_ids[256]{};
+static std::size_t g_number_of_processor_apic_ids{};
+/**
+ * @}
+ */
+
+/**
+ * Asks MP services for them.
+ *
+ * Every processor the firmware reports, not only the enabled ones. A
+ * guest's broadcast start-up IPI goes to whatever the hardware has, and a
+ * roster missing an entry is a processor that comes up outside this VMM -
+ * which is the failure this exists to prevent, in miniature. The
+ * hypervisor knows which ones it managed to adopt; it cannot know about
+ * one it was never told existed.
+ *
+ * Reading only. Waking or borrowing a processor is exactly what was
+ * removed from this loader.
+ */
+static void collect_processor_roster()
+{
+    g_number_of_processor_apic_ids = 0;
+
+    if (!g_mp_services) {
+        return;
+    }
+
+    std::size_t total{};
+    std::size_t enabled{};
+    if (EFI_ERROR(g_mp_services->GetNumberOfProcessors(
+            g_mp_services, &total, &enabled))) {
+        return;
+    }
+
+    for (std::size_t i{};
+         (i < total) && (g_number_of_processor_apic_ids <
+                         (sizeof(g_processor_apic_ids) /
+                          sizeof(g_processor_apic_ids[0])));
+         ++i) {
+        EFI_PROCESSOR_INFORMATION information{};
+        if (EFI_ERROR(g_mp_services->GetProcessorInfo(
+                g_mp_services, i, &information))) {
+            continue;
+        }
+
+        g_processor_apic_ids[g_number_of_processor_apic_ids++] =
+            static_cast<std::uint32_t>(information.ProcessorId);
+    }
+}
+
 static void trace_launch_context()
 {
     if constexpr (!trace::enabled) {
@@ -1398,9 +1462,9 @@ extern "C" EFI_STATUS EFIAPI uefi_main(EFI_HANDLE image_handle,
             return EFI_LOAD_ERROR;
         }
 
-        auto * path = file_device_path(
-            our_image->DeviceHandle,
-            u"\\EFI\\Microsoft\\Boot\\bootmgfw.efi");
+        auto * path =
+            file_device_path(our_image->DeviceHandle,
+                             u"\\EFI\\Microsoft\\Boot\\bootmgfw.efi");
         if (!path) {
             trace::line("ZPP_TRACE chainload only: no device path");
             return EFI_LOAD_ERROR;
@@ -1471,6 +1535,10 @@ extern "C" EFI_STATUS EFIAPI uefi_main(EFI_HANDLE image_handle,
         // machine the firmware handed over rather than the one we made.
         trace_launch_context();
     }
+
+    // Outside the trace block above, and not inside it, because the
+    // hypervisor needs this whether or not anything is being traced.
+    collect_processor_roster();
 
     // Take a tail of the EFI system partition out of its file system, so
     // there are blocks the guest's file system cannot reach and cannot
@@ -1599,6 +1667,8 @@ extern "C" EFI_STATUS EFIAPI uefi_main(EFI_HANDLE image_handle,
             zpp::sleep_control_finder::found.usable()
                 ? zpp::sleep_control_finder::found.facs_address
                 : std::uint64_t{},
+        .processor_apic_ids = g_processor_apic_ids,
+        .number_of_processor_apic_ids = g_number_of_processor_apic_ids,
         .adjust_launch_calling_convention = invoke_entry,
     };
 
