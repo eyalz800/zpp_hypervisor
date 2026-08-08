@@ -102,6 +102,24 @@ public:
          * range that names one.
          */
         no_region_for_processor = 15,
+
+        /**
+         * A guest linear address did not translate through the guest's own
+         * page tables: some level was not present, or the paging mode is
+         * not one this walker implements.
+         *
+         * A guest error rather than a machine one in the not-present case,
+         * and the caller's job to turn into the fault the guest would have
+         * taken.
+         */
+        guest_address_not_mapped = 16,
+
+        /**
+         * A guest physical access ran past what the mapping window can
+         * reach in one go, or named a page the extended page tables do not
+         * describe.
+         */
+        guest_memory_unreachable = 17,
     };
 
     /**
@@ -426,6 +444,53 @@ private:
     void * map_window_at(std::size_t first_page,
                          std::uint64_t physical_address,
                          std::size_t pages);
+
+    /**
+     * Copies out of, and into, guest physical memory.
+     *
+     * Guest physical rather than host physical because that is what a
+     * guest hands over - a VMCS pointer, a VMXON pointer, a page table
+     * root. The extended page tables this VMM builds are an identity map
+     * of the first 512 GB (see initialize_ept), so the translation is the
+     * identity and this does not walk them; what it does do is refuse an
+     * address above that, since beyond the map there is no entry and a
+     * host access to it would fault in root mode with no recovery point.
+     *
+     * Takes the mapping window lock for the duration, one page at a time,
+     * so a copy that straddles a page boundary is two mappings rather
+     * than a requirement on the window's size. The lock is not recursive,
+     * so nothing called from inside these may take it again.
+     * @{
+     */
+    std::expected<void, zpp::error> read_guest_physical(
+        std::uint64_t guest_physical, std::span<std::byte> into);
+
+    std::expected<void, zpp::error> write_guest_physical(
+        std::uint64_t guest_physical, std::span<const std::byte> from);
+    /**
+     * @}
+     */
+
+    /**
+     * Translates a guest linear address through the guest's own page
+     * tables, as they are at this exit.
+     *
+     * The guest's CR3 comes from the VMCS rather than from the
+     * os_page_table built at launch time, and that distinction is the
+     * whole point of this existing: the launch-time table is a snapshot of
+     * the firmware's identity map, and BACKLOG.md records what using it
+     * later costs - a kernel linear address is used as a physical one, and
+     * either the window maps a page above MAXPHYADDR and the copy faults
+     * in root mode, or unrelated bytes are read and acted on.
+     *
+     * Four-level paging only, which is what the guest is in whenever this
+     * is reachable: everything that calls it is a VMX instruction, and
+     * SDM 33.3 makes every one of them raise #UD unless CR0.PE is set,
+     * with IA32_EFER.LMA and CS.L agreeing. Five-level paging (CR4.LA57)
+     * is refused rather than guessed at.
+     */
+    std::expected<std::uint64_t, zpp::error>
+    guest_linear_to_physical(std::uint64_t linear);
 
     /**
      * Rebuilds the disk channel's queue pair by borrowing the guest's
@@ -1795,6 +1860,26 @@ private:
         queue_window_pages + instruction_window_pages_per_cpu;
 
     /**
+     * Where read_guest_physical and its siblings point the window.
+     *
+     * The same page as the instruction window, deliberately, and the
+     * window is not grown for it. The header above records why growing it
+     * is not a small change - the window's address is not freely chosen,
+     * every page has to be checked against the aliasing the host page
+     * table's fixed storage produces, and enlarging it once coincided
+     * with the hypervisor no longer initialising on the real rig.
+     *
+     * Sharing is safe because both uses hold mapping_window_lock for the
+     * whole of the bytes they read through it, and neither is reachable
+     * from inside the other - the lock is not recursive, so that is a
+     * requirement rather than an observation. One page rather than two
+     * because these copy a page at a time and re-point the window for
+     * each, so a copy straddling a boundary needs no second page.
+     */
+    static constexpr std::size_t transfer_window_first_page =
+        queue_window_pages;
+
+    /**
      * Serialises the window, which is one address shared by every
      * processor. Held across the whole use, not just the mapping, because
      * the point of the window is the bytes reached through it.
@@ -2533,6 +2618,11 @@ inline const zpp::error_category & category(hypervisor::error)
                 return "vmxoff failed, still in VMX operation";
             case hypervisor::error::no_region_for_processor:
                 return "No VMXON or VMCS region for this processor";
+            case hypervisor::error::guest_address_not_mapped:
+                return "A guest linear address does not translate";
+            case hypervisor::error::guest_memory_unreachable:
+                return "Guest physical memory is out of the window's "
+                       "reach";
             }
         });
     return error_category;
