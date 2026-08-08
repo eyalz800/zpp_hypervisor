@@ -154,12 +154,25 @@ inline constexpr bool restart_after_reservation = enabled;
  * which its driver survives only by resetting the controller. That is
  * not a thing to leave switched on.
  *
- * What it needs is emulating the guest's write instead of stepping over
- * it, so the page is never writable and no second write can slip past.
- * That is what a VMM with an instruction decoder does, and this one does
- * not have one yet.
+ * What it needed was emulating the guest's write instead of stepping
+ * over it, so the page is never writable and no second write can slip
+ * past. That is what a VMM with an instruction decoder does, and this one
+ * now has one: `emulate_watched_page_writes` is on, and the four defects
+ * that kept it off are closed, each with a check behind it.
+ *
+ * Measured on the rig with emulation on and this still off: 197 writes to
+ * watched pages emulated rather than stepped, and zero disagreements
+ * between the decoder's instruction length and the processor's. So the
+ * window the second write used to slip through is closed, which is the
+ * one thing this was waiting for.
+ *
+ * Turned on to find out whether that is sufficient. If the borrow times
+ * out again the failure is the same as before - a desynchronised admin
+ * queue that the driver recovers from by resetting the controller - so
+ * the thing to read is whether the enable transition is seen at all
+ * before deciding anything else about the timing.
  */
-inline constexpr bool rebuild_channel_after_reset = false;
+inline constexpr bool rebuild_channel_after_reset = enabled;
 
 /**
  * Whether to take the controller for the length of one VM exit when the
