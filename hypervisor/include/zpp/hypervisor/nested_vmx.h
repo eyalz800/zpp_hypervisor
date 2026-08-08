@@ -37,12 +37,12 @@ namespace zpp::hypervisor::nested_vmx
  * guest than a clean absence: Hyper-V stands down gracefully when it
  * finds no VMX and does not when it finds a broken one.
  *
- * The rows that are still `no` in BACKLOG.md's coverage checklist are the
- * other half of the answer, and two of them are load bearing: the VM-entry
- * and VM-exit MSR-load and MSR-store areas are not processed, so a VM
- * entry naming a non-empty one is refused; and a guest hypervisor's
- * exception, task-switch and interrupt injection paths have been written
- * but never exercised.
+ * BACKLOG.md's coverage checklist has no `no` rows left, which measures
+ * coverage against the SDM and KVM and measures nothing else. The one
+ * restriction worth knowing without reading it: a VM-entry or VM-exit MSR
+ * area may only name MSRs this VMM will read and write, because it has no
+ * WRMSR that can fault and recover, and an area naming anything else
+ * refuses the entry.
  *
  * Turning it on: -DZPP_NESTED_VMX=ON.
  */

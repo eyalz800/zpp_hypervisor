@@ -7122,17 +7122,18 @@ hypervisor::main(arch::x86_64::context & caller_context)
             // advancing past an instruction that did not do what the guest
             // asked is correct.
             if (on_vmx_instruction(full_reason, context)) {
-                // Unless the instruction was a VMLAUNCH or VMRESUME that
-                // took, in which case this processor is now about to enter
-                // the second-level guest and RIP belongs to it. The guest
-                // hypervisor's own RIP stays on its VMLAUNCH until an exit
-                // is reflected and vmcs12's host RIP replaces it;
-                // advancing here would write into vmcs02 instead and move
-                // the second-level guest.
+                // Unless it was a VMLAUNCH or VMRESUME that settled where
+                // RIP goes for itself, which is either of the two
+                // outcomes that are not a VMfail: the second-level guest
+                // is about to run and RIP is now its own, or its entry
+                // failed after loading guest state and the guest
+                // hypervisor has been put back at its own host RIP.
+                // Advancing in either case moves a RIP somebody else owns.
                 if constexpr (nested_vmx::enabled) {
                     if (auto slot = vmcs.vpid();
                         (0 != slot) && (slot <= max_cpus) &&
-                        this->running_l2[slot - 1]) {
+                        this->nested_rip_settled[slot - 1]) {
+                        this->nested_rip_settled[slot - 1] = false;
                         advance_rip = false;
                     }
                 }

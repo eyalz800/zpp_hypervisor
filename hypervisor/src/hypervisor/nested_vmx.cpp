@@ -251,11 +251,18 @@ std::uint64_t hypervisor::nested_vmx_capability_msr(std::size_t msr)
         // reporting a non-zero count would invite a first-level
         // hypervisor to fill them in and expect MOV to CR3 to stop
         // exiting for those values.
+        // And the MSR-list capacity in bits 27:25, which SDM A.6 makes
+        // "(N+1)*512" - so zero is 512 entries, which is what
+        // `check_nested_msr_area` enforces. Narrowed rather than passed
+        // through because the areas are processed in software here, one
+        // guest memory read per entry, and a list a processor would
+        // happily walk is time this VMM spends inside a VM exit.
         constexpr std::uint64_t vmwrite_to_exit_information = 1ull << 29;
         constexpr std::uint64_t cr3_target_count = 0x1ffull << 16;
+        constexpr std::uint64_t msr_list_capacity = 0x7ull << 25;
 
-        return hardware &
-               ~(vmwrite_to_exit_information | cr3_target_count);
+        return hardware & ~(vmwrite_to_exit_information |
+                            cr3_target_count | msr_list_capacity);
     }
 
     case vmx_msr::cr0_fixed_0:
@@ -1331,11 +1338,38 @@ bool hypervisor::on_guest_vmlaunch(std::size_t cpu, basic_reason reason)
     }
 
     if (auto built = build_vmcs02(cpu); !built) {
-        // Nothing has been switched: build_vmcs02 does everything that can
-        // fail before it makes vmcs02 current. So the guest hypervisor is
-        // told its VM entry did not happen, with RIP on the instruction
-        // after the VMLAUNCH - which is where SDM 33.3 puts a failure on
-        // the controls or on the host-state area.
+        // The MSR-load area is the one failure that happens *after* the
+        // switch, because SDM 29 step 4 puts the loads after the guest
+        // state - and it is the one the architecture answers with an exit
+        // rather than with VMfail: SDM 29.4 says the processor "responds
+        // to such failures by loading state from the host-state area, as
+        // it would for a VM exit". So the guest hypervisor is given that
+        // exit, with the reason and the qualification SDM 29.8 defines.
+        if (this->nested_msr_load_failed[cpu]) {
+            this->nested_msr_load_failed[cpu] = false;
+
+            constexpr std::uint64_t entry_failure = 1ull << 31;
+
+            log("cpu {} second level entry failed loading msr entry {}",
+                cpu,
+                this->nested_msr_failure_entry[cpu]);
+
+            reflect_l2_exit(
+                cpu,
+                entry_failure |
+                    static_cast<std::uint64_t>(
+                        basic_reason::entry_failure_msr_loading),
+                this->nested_msr_failure_entry[cpu]);
+
+            this->nested_rip_settled[cpu] = true;
+            return true;
+        }
+
+        // Everything else fails before the switch, so nothing has moved
+        // and the guest hypervisor is simply told its VM entry did not
+        // happen, with RIP on the instruction after the VMLAUNCH - which
+        // is where SDM 33.3 puts a failure on the controls or on the
+        // host-state area.
         log("cpu {} guest {} refused: error {}",
             cpu,
             (basic_reason::vmlaunch == reason) ? "vmlaunch" : "vmresume",
@@ -1357,6 +1391,7 @@ bool hypervisor::on_guest_vmlaunch(std::size_t cpu, basic_reason reason)
     // advancing now would write into vmcs02 and move the second-level
     // guest instead.
     this->running_l2[cpu] = true;
+    this->nested_rip_settled[cpu] = true;
     this->l2_entries[cpu] = this->l2_entries[cpu] + 1;
 
     if (!this->l2_entry_logged[cpu]) {

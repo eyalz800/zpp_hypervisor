@@ -139,6 +139,165 @@ constexpr std::uint64_t interruption_vector_mask = 0xff;
  */
 
 /**
+ * One entry of a VM-entry or VM-exit MSR area, SDM 27.7.2, Figure 27-1:
+ * bits 31:0 the MSR index, bits 63:32 reserved and required to be zero,
+ * bits 127:64 the value.
+ */
+struct msr_area_entry
+{
+    std::uint32_t index{};
+    std::uint32_t reserved{};
+    std::uint64_t value{};
+};
+
+static_assert(sizeof(msr_area_entry) == 16);
+
+/**
+ * How many entries an MSR area may name.
+ *
+ * SDM A.6 puts the limit in IA32_VMX_MISC bits 27:25, as "(N+1)*512" - so
+ * zero there is 512, which is what `nested_vmx_capability_msr` narrows the
+ * field to. Reported rather than assumed, so a guest hypervisor building a
+ * longer list is told rather than surprised.
+ */
+constexpr std::uint64_t msr_area_capacity = 512;
+
+/**
+ * Whether an MSR area may name this index at all.
+ *
+ * The three rules SDM 29.4 and SDM 30.4 share, and KVM's
+ * `nested_vmx_msr_check_common` applies:
+ *
+ * - bits 31:8 equal to 000008H, which is the x2APIC register range. A
+ *   local APIC in x2APIC mode is reached through those, and this VMM
+ *   intercepts the interrupt command register among them.
+ * - the microcode update registers, IA32_BIOS_UPDT_TRIG and
+ *   IA32_BIOS_SIGN_ID.
+ * - the reserved dword, which must be zero.
+ */
+constexpr bool msr_area_index_allowed(const msr_area_entry & entry)
+{
+    constexpr std::uint32_t x2apic_page = 0x8;
+    constexpr std::uint32_t bios_update_trigger = 0x79;
+    constexpr std::uint32_t bios_signature = 0x8b;
+
+    if (0 != entry.reserved) {
+        return false;
+    }
+
+    if (x2apic_page == (entry.index >> 8)) {
+        return false;
+    }
+
+    return (bios_update_trigger != entry.index) &&
+           (bios_signature != entry.index);
+}
+
+/**
+ * Whether this VMM will read or write the named MSR on a guest
+ * hypervisor's behalf.
+ *
+ * **A list rather than a rule, and the direction is the safe one.** SDM
+ * 29.4's last failure condition is "an attempt to write bits 127:64 to the
+ * MSR indexed by bits 31:0 of the entry would cause a general-protection
+ * exception if executed via WRMSR with CPL = 0", and SDM 30.4 says the
+ * same of RDMSR. Answering that question in general needs a WRMSR that can
+ * fault and recover, and this VMM has no such thing: the host exception
+ * recovery point is a single shared context that `main` disarms before the
+ * guest ever runs, so a #GP in root operation stops the processor. A guest
+ * hypervisor's VM entry is a guest instruction, and no guest instruction
+ * may do that.
+ *
+ * So an index outside this list fails the entry rather than being
+ * attempted, which is an outcome the architecture already has a name for -
+ * the same failure a processor reports for an MSR it will not load. A
+ * guest hypervisor is told; nothing is silently skipped.
+ *
+ * The list is what a hypervisor actually puts in these areas: the two
+ * memory-typing and paging-mode MSRs, the system-call set, the two base
+ * registers a context switch needs, the speculation controls, and the time
+ * stamp counter.
+ *
+ * Removing the restriction needs a fault-tolerant WRMSR, which needs a
+ * per-processor host exception recovery point. BACKLOG.md records that as
+ * the change, since it touches the exception path every processor shares.
+ */
+constexpr bool msr_area_index_handled(std::uint32_t index)
+{
+    switch (index) {
+    case 0x10:       // IA32_TIME_STAMP_COUNTER.
+    case 0x48:       // IA32_SPEC_CTRL.
+    case 0x49:       // IA32_PRED_CMD.
+    case 0x10b:      // IA32_FLUSH_CMD.
+    case 0x174:      // IA32_SYSENTER_CS.
+    case 0x175:      // IA32_SYSENTER_ESP.
+    case 0x176:      // IA32_SYSENTER_EIP.
+    case 0x1d9:      // IA32_DEBUGCTL.
+    case 0x277:      // IA32_PAT.
+    case 0xd90:      // IA32_BNDCFGS.
+    case 0xda0:      // IA32_XSS.
+    case 0xc0000080: // IA32_EFER.
+    case 0xc0000081: // IA32_STAR.
+    case 0xc0000082: // IA32_LSTAR.
+    case 0xc0000083: // IA32_CSTAR.
+    case 0xc0000084: // IA32_FMASK.
+    case 0xc0000102: // IA32_KERNEL_GS_BASE.
+    case 0xc0000103: // IA32_TSC_AUX.
+        return true;
+    default:
+        return false;
+    }
+}
+
+/**
+ * Whether writing this value to this MSR would fault, for the two in the
+ * list above whose *value* can fault rather than only their index.
+ *
+ * IA32_EFER is the one the SDM calls out itself, in the footnote to SDM
+ * 29.4: "If CR0.PG = 1, WRMSR to the IA32_EFER MSR causes a
+ * general-protection exception if it would modify the LME bit". Root
+ * operation always has CR0.PG = 1 here, so a guest hypervisor asking to
+ * change LME is asking for a fault. Its reserved bits fault too - SCE,
+ * LME, LMA and NXE are the whole of it.
+ *
+ * IA32_PAT faults on a byte that is not one of the six defined memory
+ * types, SDM Table 13-11: 0, 1, 4, 5, 6 and 7, with 2 and 3 reserved.
+ */
+inline bool msr_area_value_writable(std::uint32_t index,
+                                    std::uint64_t value)
+{
+    constexpr std::uint32_t ia32_efer = 0xc0000080;
+    constexpr std::uint32_t ia32_pat = 0x277;
+
+    if (ia32_efer == index) {
+        constexpr std::uint64_t efer_defined =
+            (1ull << 0) | (1ull << 8) | (1ull << 10) | (1ull << 11);
+        constexpr std::uint64_t efer_lme = 1ull << 8;
+
+        if (0 != (value & ~efer_defined)) {
+            return false;
+        }
+
+        auto current = arch::x86_64::rdmsr(
+            arch::x86_64::msr::ia32_extended_feature_enable);
+
+        return (value & efer_lme) == (current & efer_lme);
+    }
+
+    if (ia32_pat == index) {
+        for (auto byte = 0; byte < 8; ++byte) {
+            auto type = (value >> (byte * 8)) & 0xff;
+
+            if ((2 == type) || (3 == type) || (type > 7)) {
+                return false;
+            }
+        }
+    }
+
+    return true;
+}
+
+/**
  * The host-state area, which vmcs02 takes unchanged from the VMCS that
  * runs the guest hypervisor.
  *
@@ -270,6 +429,135 @@ constexpr std::uint64_t effective_control_register(std::uint64_t value,
  */
 
 } // namespace
+
+std::expected<void, zpp::error> hypervisor::check_nested_msr_area(
+    std::uint64_t address, std::uint64_t count, bool loading)
+{
+    if (0 == count) {
+        return {};
+    }
+
+    // SDM 29.2.1.1 checks the address itself as a control: 16-byte aligned
+    // and the last byte within the processor's physical-address width.
+    // That part is the architecture's and applies whether or not the
+    // contents are looked at.
+    auto bytes = count * sizeof(msr_area_entry);
+    auto limit = 1ull << physical_address_bits();
+
+    if ((0 != (address & 0xf)) || (count > msr_area_capacity) ||
+        (address >= limit) || (bytes > (limit - address))) {
+        return std::unexpected(
+            zpp::error{error::nested_controls_unsupported});
+    }
+
+    // The contents, which is where this diverges from a processor and does
+    // so deliberately. A processor checks each entry as it processes it -
+    // at VM entry for the entry area, and at VM *exit* for the two exit
+    // areas, where a failure is a VMX abort and a VMX abort is a shutdown.
+    // There is no shutdown available here that does not take the whole
+    // machine with it, so all three are checked up front instead, and a
+    // guest hypervisor is refused before its guest runs rather than after.
+    //
+    // What that costs is precision about which failure it was; what it
+    // buys is that the exit path cannot fail on anything but memory that
+    // stopped being readable, which is the one case left for the abort
+    // below.
+    for (std::uint64_t i{}; i < count; ++i) {
+        msr_area_entry entry{};
+
+        auto read = read_guest_physical(
+            address + (i * sizeof(entry)),
+            std::span(reinterpret_cast<std::byte *>(&entry),
+                      sizeof(entry)));
+        if (!read) {
+            return std::unexpected(
+                zpp::error{error::nested_msr_area_unsupported});
+        }
+
+        if (!msr_area_index_allowed(entry) ||
+            !msr_area_index_handled(entry.index) ||
+            (loading &&
+             !msr_area_value_writable(entry.index, entry.value))) {
+            return std::unexpected(
+                zpp::error{error::nested_msr_area_unsupported});
+        }
+    }
+
+    return {};
+}
+
+std::expected<void, zpp::error> hypervisor::load_nested_msrs(
+    std::size_t cpu, std::uint64_t address, std::uint64_t count)
+{
+    for (std::uint64_t i{}; i < count; ++i) {
+        // SDM 29.8: the exit qualification of an MSR-loading failure is
+        // "the number of the entry that caused the problem (1 for the
+        // first entry, 2 for the second, etc.)".
+        this->nested_msr_failure_entry[cpu] = i + 1;
+
+        msr_area_entry entry{};
+
+        auto read = read_guest_physical(
+            address + (i * sizeof(entry)),
+            std::span(reinterpret_cast<std::byte *>(&entry),
+                      sizeof(entry)));
+        if (!read) {
+            return std::unexpected(
+                zpp::error{error::guest_memory_unreachable});
+        }
+
+        // Re-checked rather than trusted, because the area is guest memory
+        // and nothing stops a guest hypervisor rewriting it between the
+        // check and here. The check exists to give a good answer early;
+        // this exists so that a bad one cannot reach WRMSR.
+        if (!msr_area_index_allowed(entry) ||
+            !msr_area_index_handled(entry.index) ||
+            !msr_area_value_writable(entry.index, entry.value)) {
+            return std::unexpected(
+                zpp::error{error::nested_msr_area_unsupported});
+        }
+
+        arch::x86_64::wrmsr(entry.index, entry.value);
+    }
+
+    return {};
+}
+
+std::expected<void, zpp::error>
+hypervisor::store_nested_msrs(std::uint64_t address, std::uint64_t count)
+{
+    for (std::uint64_t i{}; i < count; ++i) {
+        msr_area_entry entry{};
+
+        auto read = read_guest_physical(
+            address + (i * sizeof(entry)),
+            std::span(reinterpret_cast<std::byte *>(&entry),
+                      sizeof(entry)));
+        if (!read) {
+            return std::unexpected(
+                zpp::error{error::guest_memory_unreachable});
+        }
+
+        if (!msr_area_index_allowed(entry) ||
+            !msr_area_index_handled(entry.index)) {
+            return std::unexpected(
+                zpp::error{error::nested_msr_area_unsupported});
+        }
+
+        entry.value = arch::x86_64::rdmsr(entry.index);
+
+        auto written = write_guest_physical(
+            address + (i * sizeof(entry)),
+            std::span(reinterpret_cast<const std::byte *>(&entry),
+                      sizeof(entry)));
+        if (!written) {
+            return std::unexpected(
+                zpp::error{error::guest_memory_unreachable});
+        }
+    }
+
+    return {};
+}
 
 bool hypervisor::own_msr_intercepted(std::uint32_t index, bool write) const
 {
@@ -480,15 +768,35 @@ std::expected<void, zpp::error> hypervisor::build_vmcs02(std::size_t cpu)
             zpp::error{error::nested_controls_unsupported});
     }
 
-    // The MSR areas are not processed, so a non-empty one is refused
-    // rather than ignored. Entering without loading the MSRs a guest
-    // hypervisor asked for would run its guest with the wrong ones and
-    // tell it nothing.
-    if ((0 != shadow.read(field::vm_entry_msr_load_count)) ||
-        (0 != shadow.read(field::vm_exit_msr_load_count)) ||
-        (0 != shadow.read(field::vm_exit_msr_store_count))) {
-        return std::unexpected(
-            zpp::error{error::nested_msr_area_unsupported});
+    // All three MSR areas are checked here, up front, rather than each
+    // where a processor would look at it. See check_nested_msr_area for
+    // why: a failure in either exit area is a VMX abort, and a VMX abort
+    // is a shutdown there is no way to perform on one guest's behalf.
+    auto entry_load_address =
+        shadow.read(field::vm_entry_msr_load_address);
+    auto entry_load_count = shadow.read(field::vm_entry_msr_load_count);
+    auto exit_load_address = shadow.read(field::vm_exit_msr_load_address);
+    auto exit_load_count = shadow.read(field::vm_exit_msr_load_count);
+    auto exit_store_address =
+        shadow.read(field::vm_exit_msr_store_address);
+    auto exit_store_count = shadow.read(field::vm_exit_msr_store_count);
+
+    if (auto checked = check_nested_msr_area(
+            entry_load_address, entry_load_count, true);
+        !checked) {
+        return checked;
+    }
+
+    if (auto checked = check_nested_msr_area(
+            exit_load_address, exit_load_count, true);
+        !checked) {
+        return checked;
+    }
+
+    if (auto checked = check_nested_msr_area(
+            exit_store_address, exit_store_count, false);
+        !checked) {
+        return checked;
     }
 
     // A 64-bit host is the only shape this can put back, since the exit
@@ -796,9 +1104,32 @@ std::expected<void, zpp::error> hypervisor::build_vmcs02(std::size_t cpu)
                    shadow.read(field::vm_entry_instruction_length));
     }
 
+    // The processor is given no MSR areas of its own. The three the guest
+    // hypervisor named are processed here instead, in software, and
+    // handing its addresses to the processor is what must not happen: the
+    // processor reads and *writes* those lists in root operation, where
+    // extended page tables do not apply - so a guest hypervisor could name
+    // this module's own physical pages as its VM-exit MSR-store area and
+    // have the processor write MSR values into them. Every other
+    // protection this VMM has is an extended page-table permission, and
+    // none of them would apply.
     vmcs.write(field::vm_entry_msr_load_count, 0);
     vmcs.write(field::vm_exit_msr_load_count, 0);
     vmcs.write(field::vm_exit_msr_store_count, 0);
+
+    // SDM 29, step 4: the MSR loads are the last thing a VM entry does
+    // before the launch state changes. Done here, at the end, for the same
+    // reason - and after the guest state is in vmcs02, so that a failure
+    // leaves the same thing behind a processor's would.
+    this->nested_msr_load_failed[cpu] = false;
+
+    if (auto loaded =
+            load_nested_msrs(cpu, entry_load_address, entry_load_count);
+        !loaded) {
+        this->nested_msr_load_failed[cpu] = true;
+        return std::unexpected(
+            zpp::error{error::nested_msr_area_unsupported});
+    }
 
     // The transition itself. A guest hypervisor without VPIDs of its own
     // expects VM entry to flush, and a second-level guest shares this
@@ -1456,6 +1787,21 @@ void hypervisor::reflect_l2_exit(std::size_t cpu,
                 ~interruption_valid);
     }
 
+    // SDM 30.4: the VM-exit MSR-store area is processed after the guest
+    // state is saved and before host state is loaded, so it reads the
+    // values the second-level guest was running with.
+    auto aborted = false;
+
+    if (auto stored = store_nested_msrs(
+            shadow.read(field::vm_exit_msr_store_address),
+            shadow.read(field::vm_exit_msr_store_count));
+        !stored) {
+        aborted = true;
+        log("cpu {} could not store the guest hypervisor's exit msrs: {}",
+            cpu,
+            stored.error().code());
+    }
+
     // Back onto the VMCS that runs the guest hypervisor.
     auto region = own_vmcs_region_physical();
     if ((0 == region) || arch::x86_64::vmx::vmptrld(&region)) {
@@ -1472,9 +1818,38 @@ void hypervisor::reflect_l2_exit(std::size_t cpu,
     // rewrites it from vmcs12, and vmcs12's valid bit was just cleared.
     load_l1_host_state(cpu);
 
+    // SDM 30.6: and the VM-exit MSR-load area after host state, which is
+    // why this is here rather than beside the store above.
+    if (auto loaded =
+            load_nested_msrs(cpu,
+                             shadow.read(field::vm_exit_msr_load_address),
+                             shadow.read(field::vm_exit_msr_load_count));
+        !loaded) {
+        aborted = true;
+        log("cpu {} could not load the guest hypervisor's exit msrs: {}",
+            cpu,
+            loaded.error().code());
+    }
+
     nested_transition_flush();
 
     this->l2_exits_reflected[cpu] = this->l2_exits_reflected[cpu] + 1;
+
+    // A failure in either exit area is a VMX abort, SDM 30.4 and SDM 30.6.
+    // A real abort is a shutdown, which is not something to do to a whole
+    // machine because one guest's hypervisor named a page that stopped
+    // being readable - so this takes KVM's answer in `nested_vmx_abort`
+    // instead and kills the *guest hypervisor's* virtual machine, by
+    // giving it the triple fault its own guest would have taken. That is
+    // reachable only through unreadable guest memory: every other reason
+    // an entry in one of those areas can fail was checked before the
+    // second-level guest ever ran.
+    if (aborted) {
+        this->guest_vmcs12[cpu].write(
+            field::exit_reason,
+            static_cast<std::uint64_t>(basic_reason::triple_fault));
+        this->guest_vmcs12[cpu].write(field::exit_qualification, 0);
+    }
 }
 
 hypervisor::l2_exit_outcome

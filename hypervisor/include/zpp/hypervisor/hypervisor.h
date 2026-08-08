@@ -169,12 +169,13 @@ public:
          * 29.2.2's half of the same, and answers with error 8.
          *
          * `nested_msr_area_unsupported` is the one that is a limit here
-         * rather than in the architecture: the VM-entry and VM-exit MSR
-         * areas are not processed yet, so a non-empty one is refused
-         * instead of being ignored. Ignoring it would enter a
-         * second-level guest without the MSRs its hypervisor asked to be
-         * loaded, which is the half-answered interface this codebase
-         * warns about.
+         * rather than in the architecture: an MSR area may only name
+         * indices this VMM will read and write, because it has no WRMSR
+         * that can fault and recover - see `msr_area_index_handled`. An
+         * index outside that list refuses the entry, which is the same
+         * shape of answer a processor gives for an MSR it will not load,
+         * rather than the silent skip that would leave a second-level
+         * guest running without what its hypervisor asked for.
          * @{
          */
         nested_controls_unsupported = 21,
@@ -1821,6 +1822,28 @@ private:
     std::expected<void, zpp::error> merge_nested_bitmaps(std::size_t cpu);
 
     /**
+     * The VM-entry and VM-exit MSR areas a guest hypervisor named:
+     * checked, loaded and stored in software.
+     *
+     * All three are checked at VM entry rather than each where a processor
+     * would look at it, because a failure in either exit area is a VMX
+     * abort and there is no shutdown to perform on one guest's behalf.
+     * @{
+     */
+    std::expected<void, zpp::error> check_nested_msr_area(
+        std::uint64_t address, std::uint64_t count, bool loading);
+
+    std::expected<void, zpp::error> load_nested_msrs(std::size_t cpu,
+                                                     std::uint64_t address,
+                                                     std::uint64_t count);
+
+    std::expected<void, zpp::error>
+    store_nested_msrs(std::uint64_t address, std::uint64_t count);
+    /**
+     * @}
+     */
+
+    /**
      * What the exit handler does next with an exit the second-level guest
      * took.
      */
@@ -2549,6 +2572,30 @@ private:
         nested_entry_recovery[nested_vmx::enabled ? max_cpus : 1]{};
     std::atomic<bool> nested_entry_failed[max_cpus]{};
     std::uint64_t nested_entry_error[max_cpus]{};
+
+    /**
+     * Whether a VMLAUNCH or VMRESUME has already decided where the guest
+     * hypervisor's RIP goes, so that the exit handler does not advance it.
+     *
+     * Two outcomes set it and neither is a VMfail: the second-level guest
+     * is about to run and RIP belongs to it now, or its entry failed after
+     * loading guest state and the guest hypervisor has been put back at
+     * its own host RIP. Only a VMfail leaves RIP to be advanced past the
+     * instruction, which is what the architecture does with it.
+     */
+    bool nested_rip_settled[max_cpus]{};
+
+    /**
+     * The MSR-load area failure that produces an entry-failure exit rather
+     * than a VMfail, and the entry number SDM 29.8 puts in its exit
+     * qualification - "1 for the first entry, 2 for the second, etc.".
+     * @{
+     */
+    bool nested_msr_load_failed[max_cpus]{};
+    std::uint64_t nested_msr_failure_entry[max_cpus]{};
+    /**
+     * @}
+     */
     /**
      * @}
      */
@@ -3788,7 +3835,7 @@ inline const zpp::error_category & category(hypervisor::error)
             case hypervisor::error::nested_host_state_unsupported:
                 return "Nested host state out of range";
             case hypervisor::error::nested_msr_area_unsupported:
-                return "Nested MSR-area lists are not processed";
+                return "Nested MSR-area names an MSR we will not touch";
             }
         });
     return error_category;

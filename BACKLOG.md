@@ -1753,7 +1753,7 @@ capability MSR narrowed to say so.
 | B13 | TSC offset composed across levels, and the multiplier too if scaling is offered | KVM `kvm_calc_nested_tsc_offset` | yes - the two offsets summed; no multiplier, since TSC scaling is not offered |
 | B14 | Entry event injection: interruption-information field, error code and instruction length taken from vmcs12 on a launch | SDM 27.8.3; KVM `prepare_vmcs02_early`, interrupt/exception block | yes - the three fields taken from vmcs12 when its valid bit is set |
 | B15 | VM-entry consistency checks on vmcs12's controls, host state and guest state, failing with error 7, error 8, or an entry-failure exit | SDM 29.2, 29.3; KVM `nested_vmx_check_controls`, `nested_vmx_check_host_state`, `nested_vmx_check_guest_state` | partial - the controls are checked against the *narrowed* capability MSRs, the NMI rules of SDM 29.2.1.1 are checked, and the EPT pointer is validated; the guest-state checks are left to the processor and surface as a reflected entry-failure exit |
-| B16 | VM-entry MSR-load list processed, with an MSR-load-failure exit | SDM 27.8.2; KVM `nested_vmx_load_msr` | no - a non-empty VM-entry MSR-load list refuses the entry with error 7 |
+| B16 | VM-entry MSR-load list processed, with an MSR-load-failure exit | SDM 27.8.2; KVM `nested_vmx_load_msr` | yes - `load_nested_msrs`, with the exit reason 34 and entry-number qualification SDM 29.8 defines; the indices it will write are a list, see below |
 | B17 | A VPID for L2 distinct from L1's, or a TLB flush on every transition instead | KVM `nested_vmx_transition_tlb_flush` | yes - a flush on every transition, `nested_transition_flush` |
 | B18 | The preemption timer armed for L2 from vmcs12's value and cancelled on exit | KVM `vmx_start_preemption_timer` | n/a |
 
@@ -1768,7 +1768,7 @@ capability MSR narrowed to say so.
 | C5 | Double fault and triple fault never reported as occurring during event delivery | SDM 30.2.4; KVM `vmcs12_save_pending_event`, first branch | yes - by the same route: the rule is the processor's and it applied it |
 | C6 | Launch state set to launched on a successful exit, and *not* on an entry-failure exit | SDM 33.3; KVM `prepare_vmcs12` | yes |
 | C7 | L1's host state loaded into the VMCS that runs L1: CR0/CR3/CR4, RIP/RSP, segments, descriptor tables, EFER, PAT, SYSENTER | SDM 30.5; KVM `load_vmcs12_host_state` | yes - `load_l1_host_state`, with the segment shapes SDM 30.5.3 fixes |
-| C8 | VM-exit MSR-store and MSR-load lists processed, with a VMX abort on failure | SDM 30.4, 30.6; KVM `nested_vmx_store_msr` | no - a non-empty VM-exit MSR-store or MSR-load list refuses the entry with error 7 |
+| C8 | VM-exit MSR-store and MSR-load lists processed, with a VMX abort on failure | SDM 30.4, 30.6; KVM `nested_vmx_store_msr` | yes - and the abort is KVM's `nested_vmx_abort`: a triple fault given to the guest hypervisor, since a real VMX abort is a shutdown of the whole machine |
 | C9 | Events queued for injection into L2 dropped on the way out | KVM `nested_vmx_vmexit`, the `kvm_clear_exception_queue` block | yes - vmcs02's entry-interruption field is rewritten from vmcs12 on every entry, and vmcs12's valid bit is cleared on the way out |
 | C10 | An entry failure hardware detects surfaces to L1 as `VMfailValid`, not as an exit | SDM 33.3; KVM `nested_vmx_vmexit` failure path | yes - a refused entry unwinds through `on_nested_entry_failure` to a `VMfailValid` carrying the processor's own error number |
 
@@ -1826,8 +1826,8 @@ essay.
 |---|---|---|
 | EPT, without which it does not start at all | E1-E12, F5 | written |
 | Secondary controls, unrestricted guest, VPID | B5, F5 | written |
-| A VMLAUNCH that actually runs L2 | B1-B17 | written, except B16 |
-| Exit reflection for the exits its own guest takes | C1-C10, D1-D9 | written, except C8 |
+| A VMLAUNCH that actually runs L2 | B1-B17 | written |
+| Exit reflection for the exits its own guest takes | C1-C10, D1-D9 | written |
 | MSR bitmap merging, since it traps a great many MSRs | B11, D8 | written |
 | Event injection into L2 and back out again | B14, C4 | written |
 
@@ -1835,22 +1835,46 @@ essay.
 is a different answer from "yes" and the distinction is the whole of what
 is left: the checklist measures coverage against the SDM and KVM, which is
 what reading can establish, and it cannot establish that any of it works.
-"Not run anywhere" above still says exactly what it said.
+"Not run anywhere" above still says exactly what it said, and it is now the
+only thing between this and an answer.
 
-The two rows that are genuinely absent rather than untested are B16 and C8,
-the VM-entry and VM-exit MSR-load and MSR-store areas. A VM entry naming a
-non-empty one is refused with error 7 rather than entered without loading
-what was asked for, and Hyper-V uses those areas - so this is the next
-thing that has to exist, ahead of any run.
+### The MSR areas, and the one restriction left in them
 
-Why they were not simply passed through, since a first-level guest-physical
-address is a host physical one here and the processor could be handed the
-list directly: the processor reads and *writes* those lists in root
-operation, where extended page tables do not apply. A guest hypervisor
-could then name this module's own physical pages as its VM-exit MSR-store
-area and have the processor write MSR values into them. Processing the
-lists in software, with the addresses checked, is the only shape that
-closes that.
+The three MSR areas are processed in software, and the processor is given
+none of its own. Handing it the guest hypervisor's addresses would have
+worked - a first-level guest-physical address is a host physical one here -
+and is exactly what must not happen: the processor reads and *writes* those
+lists in root operation, where extended page tables do not apply, so a
+guest hypervisor could name this module's own pages as its VM-exit
+MSR-store area and have the processor write MSR values into them. Every
+other protection this VMM has is an extended page-table permission and none
+of them would apply.
+
+What is restricted: the *indices* an area may name are a list, in
+`msr_area_index_handled`. SDM 29.4's last failure condition is "an attempt
+to write bits 127:64 to the MSR indexed by bits 31:0 of the entry would
+cause a general-protection exception if executed via WRMSR with CPL = 0",
+and answering that in general needs a WRMSR that can fault and recover.
+This VMM has none: `host_exception_recovery` is a single shared context
+that `main` disarms before the guest ever runs, so a #GP in root operation
+stops the processor - and a guest hypervisor's VM entry is a guest
+instruction, which may never do that.
+
+So an index outside the list fails the entry, which is an outcome the
+architecture already has a name for and which the guest hypervisor is told
+about. The direction is the safe one: too strict, never too permissive.
+
+**Removing the restriction needs a per-processor host exception recovery
+point.** That is a change to the exception path every processor shares,
+which is why it was not made here. Two of the listed indices carry a value
+check as well, because their *value* can fault where their index cannot:
+IA32_EFER, whose LME bit cannot change while CR0.PG is 1 - the SDM's own
+footnote to 29.4 - and IA32_PAT, whose bytes must each be one of the six
+defined memory types.
+
+Rejected: attempting the write and recovering from the fault, for the
+reason above. Rejected: refusing every area outright, which is where this
+started - Hyper-V uses them, so that is a refusal of the target.
 
 ## Nested EPT: the design, and the SDM facts that decided it
 
