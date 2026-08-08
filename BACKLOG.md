@@ -1763,18 +1763,18 @@ capability MSR narrowed to say so.
 
 | # | Requirement | Established by | Status |
 |---|---|---|---|
-| E1 | A shadow EPT per EPTP12, composing L2-GPA→L1-GPA (L1's tables) with L1-GPA→HPA (ours) | KVM `nested_ept_init_mmu_context`, `nested_ept_get_eptp` | partial - `walk_ept` and `compose_ept` done and tested; the tables, the pool and the install are not |
+| E1 | A shadow EPT per EPTP12, composing L2-GPA→L1-GPA (L1's tables) with L1-GPA→HPA (ours) | KVM `nested_ept_init_mmu_context`, `nested_ept_get_eptp` | yes - `build_shadow_ept`, eager, keyed on bits 51:12 of EPTP12 |
 | E2 | Two permission sets combined per page - read, write, supervisor execute and user execute all intersected | KVM `kvm_init_shadow_ept_mmu` and the shadow-page permissions it installs | yes - `ept_permissions`, with the misconfiguration normalisation SDM 31.3.3.1 requires |
-| E3 | Populated lazily from EPT violations taken while L2 runs, since eager construction cannot know what L2 will touch | KVM: L0 always takes the EPT violation - `nested_vmx_l0_wants_exit` | no |
+| E3 | Populated eagerly instead of lazily, which removes fault-time composition and the widen-without-invalidate case | SDM 31.4.3.4, 31.4.3.2; lazy is KVM's shape and stays recorded as the optimisation | yes - deliberately not lazy |
 | E4 | An EPT violation caused by a gap in *L1's* tables reflected to L1, with the qualification and guest-physical address it would have seen | KVM `nested_ept_inject_page_fault` | partial - the qualification is synthesised (`reflected_ept_violation_qualification`); the reflection itself needs section C |
 | E5 | An EPT violation caused by a gap in *our* tables, or by a page we watch, handled here and never shown to L1 | KVM `nested_vmx_l0_wants_exit`, EPT-violation case | no |
 | E6 | EPT misconfiguration always ours, never L1's, because L2 never walks L1's tables directly | KVM `nested_vmx_l0_wants_exit`, EPT-misconfig case and its comment | partial - a misconfiguration in *L1's* tables is a distinct outcome and is reflected; one in ours is attributed to us |
 | E7 | L1's INVEPT invalidates the shadow for the named EPTP, and an INVEPT type we do not report is refused | SDM 33.3 INVEPT; KVM `handle_invept` | no |
-| E8 | A change to *our* EPT - arming a page watch, protecting a region - invalidates every shadow built over it | this tree: `invalidate_ept`, `ept_generation` | no |
+| E8 | A change to *our* EPT - arming a page watch, protecting a region - invalidates every shadow built over it | this tree: `invalidate_ept`, `ept_generation` | yes - `shadow_ept_pointer_for` compares generations and rebuilds |
 | E9 | The memory type of a shadow leaf derived from the MTRRs as our own tables are, not taken from L1 | SDM Table 31-6 reserved-bit rule as already applied in `initialize_ept`; this tree: `mtrr_state::type_of` | yes - `compose_ept` takes the host walk's type |
-| E10 | Large-page shadow leaves where both levels permit, to bound the size of the shadow | SDM 31.3.2 | partial - `compose_ept` picks the smaller of the two page sizes; installing at that level is not written |
-| E11 | A bounded pool for shadow paging structures, with flush-and-rebuild on exhaustion rather than failure | this tree: the `ept` pool and the `out_of_ept_entries` precedent | no |
-| E12 | The module and every watched page remain unreachable from L2 | this tree: `protect_module`, `watch_guest_page_writes` | no |
+| E10 | Large-page shadow leaves where both levels permit, to bound the size of the shadow | SDM 31.3.2 | yes - plus coarsening a uniform 4 KB run to one 2 MB leaf, which is what keeps eager affordable |
+| E11 | A bounded pool for shadow paging structures, with a defined behaviour on exhaustion | this tree: the `ept` pool precedent | yes - 96 pages per processor, and exhaustion refuses the VM entry rather than entering on a partial table |
+| E12 | The module and every watched page remain unreachable from L2 | this tree: `protect_module`, `watch_guest_page_writes` | yes - composed through `host_ept_lookup`, so our cleared permissions carry into every shadow leaf |
 
 ### F. Capability reporting
 
