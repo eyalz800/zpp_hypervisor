@@ -1680,25 +1680,63 @@ first will already have found EPT missing.
   SDM A.9 makes exactly its purpose, so a guest is told rather than
   surprised.
 
-### Not run anywhere
+### Run: the instruction emulation and the capability MSRs, under Bochs
 
-Nothing here has executed on hardware or under an emulator. It is checked
-only against the compiler, in all four configurations. What would establish
-it, in order of how much it proves per boot:
+Experiments 1 and 2 below are done. `verify_nested::present` in the UEFI
+loader executes a first-level hypervisor's worth of VMX as the guest of
+this VMM, under Bochs' own emulated VT-x, and reports each outcome against
+what the SDM says it should be. Every step answers correctly:
 
-1. A first-level probe of our own, under Bochs: VMXON on a region with our
-   revision identifier, VMPTRLD, VMWRITE then VMREAD of one field of each
-   width, VMPTRST, VMCLEAR, VMXOFF, with each outcome checked against the
-   flags the SDM specifies. That exercises every path above without needing
-   a guest hypervisor at all, and it is the only experiment that can be run
-   locally, since the VMX instructions never execute in the default build.
-2. The capability MSRs as the guest reads them, compared against the
-   hardware's — the narrowing is the part most likely to be wrong, and the
-   test machine's own values are already a filtered subset because QEMU
-   runs with `hv-passthrough`.
-3. Windows with VBS on and the switch on, expecting a Hyper-V launch
-   failure rather than a hang. That is the one that needs the rig, and it
-   is worth nothing until nested EPT exists.
+- CPUID leaf 1 ECX[5] reports VMX, and the five capability MSRs read back
+  as `IA32_VMX_BASIC 0x009810007a707001`, `IA32_VMX_MISC 0x400001e0`,
+  `IA32_VMX_VMCS_ENUM 0x36`, `IA32_VMX_PROCBASED_CTLS2 0x00111cee00000000`
+  and `IA32_VMX_EPT_VPID_CAP 0x00000f0106134140` - each exactly the
+  narrowed set, checked bit for bit against `supported_secondary_controls`
+  and `supported_ept_vpid_capabilities`.
+- CR4.VMXE reads back set after the guest sets it, and clear after VMXOFF.
+- VMXON, then VMXON again, VMPTRST with and without a current VMCS, VMREAD
+  with none, VMCLEAR, VMPTRLD, VMCLEAR and VMXOFF - each with the flags
+  SDM 33.2 specifies.
+- VMWRITE then VMREAD of one field of each of the four widths, each
+  reading back exactly what the width says it should: `0xabcd` from a
+  16-bit field written `0x1234abcd`, `0x42` from a 32-bit field written
+  with a value whose high half was set, and both 64-bit values whole.
+- VMWRITE to a VM-exit information field and VMREAD of an encoding with a
+  reserved bit set, both VMfailValid.
+- INVEPT and INVVPID all-context, both VMsucceed, and INVEPT with an
+  unsupported type VMfailValid.
+
+**The probe found one disagreement and the SDM settled it in the VMM's
+favour.** A second VMXON while already in VMX root operation: the probe
+expected VMfailValid with error 15, and the VMM answered VMfailInvalid.
+SDM 33.3 says `VMfail("VMXON executed in VMX root operation")`, and SDM
+33.2 defines VMfail as "IF VMCS pointer is valid THEN
+VMfailValid(ErrorNumber); ELSE VMfailInvalid" - and VMXON has just set the
+current-VMCS pointer to all ones, so there is none. The VMM was right.
+
+That is the whole reason the probe writes its expectations out by hand
+instead of taking them from the VMM's own headers: a probe that shares its
+constants with the thing it is probing cannot disagree with it, and this
+one could.
+
+Two things about running it, both of which cost a run to find:
+
+- The smoke harness needs a `ZPP_VERIFY_HYPERVISOR=ON` build, because the
+  marker it greps for only exists there. A plain debug build boots fine
+  and reports nothing, which looks exactly like a hang.
+- It also needs `ZPP_DIAG=OFF`. With the channel on, the loader reserves
+  space on the ESP and then *restarts the machine* so the channel is live
+  on the next boot, and under the harness that is the end of the run.
+
+What is still not run:
+
+3. A second-level guest. The probe stops where a guest hypervisor would
+   have written its controls; VMLAUNCH, the vmcs02 construction, the exit
+   reflection and the shadow extended page tables have still never
+   executed. This is the next experiment and it is the one that matters,
+   because sections B, C and D are all downstream of it.
+4. Windows with VBS on and the switch on, on the rig. Worth nothing until
+   3 passes.
 
 ## Nested VMX coverage checklist
 
@@ -1835,8 +1873,10 @@ essay.
 is a different answer from "yes" and the distinction is the whole of what
 is left: the checklist measures coverage against the SDM and KVM, which is
 what reading can establish, and it cannot establish that any of it works.
-"Not run anywhere" above still says exactly what it said, and it is now the
-only thing between this and an answer.
+"Run: the instruction emulation and the capability MSRs" above is what has
+executed, and it is the instruction half only. The second-level guest -
+VMLAUNCH, vmcs02, the reflection, the shadow tables - has still never run,
+and that is the only thing between this and an answer.
 
 ### The switch-on build overwrites the switch-off binary, and the check caught it
 

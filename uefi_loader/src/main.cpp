@@ -19,6 +19,7 @@ extern "C" {
 #include "zpp/sleep_control.h"
 #include "zpp/trace.h"
 #include "zpp/verify.h"
+#include "zpp/verify_nested.h"
 
 #include <cstddef>
 #include <cstdint>
@@ -108,6 +109,7 @@ using zpp::reserved_region;
 using zpp::sleep_control_finder;
 using zpp::trace;
 using zpp::verify;
+using zpp::verify_nested;
 
 /**
  * Traces a device path in the same text form the firmware's own boot
@@ -1585,6 +1587,35 @@ extern "C" EFI_STATUS EFIAPI uefi_main(EFI_HANDLE image_handle,
     // only path out.
     if constexpr (verify::enabled) {
         auto present = verify::present(system_table, parameters);
+
+        // And, while this processor is still a guest of ours, what the VMX
+        // it is offered actually answers.
+        //
+        // Before the verdict rather than after, because the verdict ends
+        // the boot - and after the processor check rather than before,
+        // because a VMX probe on a machine with no VMM under it would be
+        // probing the firmware's own processor. It runs on the boot
+        // processor only, which is the one the check above just confirmed
+        // is virtualized.
+        //
+        // Its result does not change the verdict. The two answer different
+        // questions - "is the VMM there" and "does its VMX answer" - and
+        // folding them would make a build with nested VMX switched off,
+        // where the probe correctly finds nothing to do, indistinguishable
+        // from one where it found something wrong.
+        if (present) {
+            auto nested_ok = verify_nested::present(system_table);
+
+            if (system_table->ConOut) {
+                auto * verdict = nested_ok
+                                     ? u"zpp: ZPP_NESTED_VMX_OK\r\n"
+                                     : u"zpp: ZPP_NESTED_VMX_FAILED\r\n";
+                system_table->ConOut->OutputString(
+                    system_table->ConOut,
+                    reinterpret_cast<CHAR16 *>(
+                        const_cast<char16_t *>(verdict)));
+            }
+        }
 
         // Stop either way, and especially when it passed.
         //
