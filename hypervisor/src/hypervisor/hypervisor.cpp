@@ -2393,7 +2393,8 @@ std::expected<void, zpp::error> hypervisor::watch_guest_page_writes(
     page_watch::handler on_write,
     void * context,
     page_watch::mode behaviour,
-    void (*before_write)(void *, std::uint64_t))
+    void (*before_write)(void *, std::uint64_t),
+    page_watch::filter filter_write)
 {
     auto page = guest_physical >> 12;
 
@@ -2406,6 +2407,7 @@ std::expected<void, zpp::error> hypervisor::watch_guest_page_writes(
             watch.on_write = on_write;
             watch.context = context;
             watch.before_write = before_write;
+            watch.filter_write = filter_write;
             watch.behaviour = behaviour;
             return {};
         }
@@ -2438,6 +2440,7 @@ std::expected<void, zpp::error> hypervisor::watch_guest_page_writes(
     free_slot->on_write = on_write;
     free_slot->context = context;
     free_slot->before_write = before_write;
+    free_slot->filter_write = filter_write;
     free_slot->behaviour = behaviour;
     free_slot->held.store(false, std::memory_order_relaxed);
     free_slot->armed = true;
@@ -3435,6 +3438,58 @@ bool hypervisor::on_ept_violation(std::size_t cpu,
             auto offset_in_page = address & page_offset_mask;
             auto straddles = (offset_in_page + store->size) > page_size;
 
+            // The watch gets to refuse the write before it happens.
+            //
+            // Only a plain store, because that is the only form whose
+            // value is known without reading memory first, and the
+            // registers this exists for are written outright rather than
+            // combined into. Anything else falls through and is applied
+            // as before.
+            //
+            // This is where a start-up IPI is caught. Writing the local
+            // APIC's command register *is* the send, so a VMM that
+            // redirects one has to decide here - after the write there is
+            // nothing left to redirect. See page_watch::filter.
+            if (watch.filter_write && !straddles &&
+                (arch::x86_64::memory_operation::store == store->what)) {
+                guest_write intended{
+                    .address = address,
+                    .value = store->operand,
+                };
+
+                auto allowed =
+                    watch.filter_write(watch.context, page, &intended);
+
+                if (!allowed) {
+                    // Refused. The guest still retires the instruction -
+                    // it must, or it re-executes and faults for ever -
+                    // but memory and the device are left alone.
+                    this->emulated_writes = this->emulated_writes + 1;
+                    this->filtered_writes = this->filtered_writes + 1;
+
+                    auto reported =
+                        this->vmcs.vm_exit_instruction_length();
+                    if ((0 != reported) && (reported != store->length)) {
+                        this->emulated_length_disagreement =
+                            this->emulated_length_disagreement + 1;
+                        this->emulated_length_reported = reported;
+                        this->emulated_length_decoded = store->length;
+                        return false;
+                    }
+
+                    this->vmcs.guest_rip(this->vmcs.guest_rip() +
+                                         store->length);
+                    return true;
+                }
+
+                // Allowed, possibly with a different value.
+                if (*allowed != store->operand) {
+                    auto replaced = *store;
+                    replaced.operand = *allowed;
+                    store = replaced;
+                }
+            }
+
             guest_write written{};
 
             auto changed_memory = false;
@@ -3453,7 +3508,12 @@ bool hypervisor::on_ept_violation(std::size_t cpu,
                 // on a write to it, so reporting a read of it sends an
                 // interrupt the guest never asked for. Measured as a guest
                 // that never left early boot.
-                if (changed_memory && watch.on_write) {
+                // Not when a filter answered it. The filter is the
+                // handler for an emulated write - it already saw the
+                // value, before the write rather than after - and
+                // calling both would act on one command twice.
+                if (changed_memory && watch.on_write &&
+                    !watch.filter_write) {
                     watch.on_write(watch.context, page, &written);
                 }
 
@@ -5005,7 +5065,12 @@ void hypervisor::watch_local_apic(bool watch)
     }
 
     if (auto armed = watch_guest_page_writes(
-            base, &hypervisor::on_local_apic_write, this)) {
+            base,
+            &hypervisor::on_local_apic_write,
+            this,
+            page_watch::mode::notify,
+            nullptr,
+            &hypervisor::filter_local_apic_write)) {
         this->watched_apic_page = base;
         log("watching the local apic page at {}", base);
     } else {
@@ -5549,6 +5614,52 @@ void hypervisor::observe_guest_admin_submissions(std::uint32_t tail)
         // submission tail is.
         this->channel_expected_admin_tail = tail;
     }
+}
+
+std::optional<std::uint64_t> hypervisor::filter_local_apic_write(
+    void * context, std::uint64_t page, const guest_write * write)
+{
+    auto & self = *static_cast<hypervisor *>(context);
+
+    if (!write) {
+        return {};
+    }
+
+    // Writing the low half is what sends the command. Every other
+    // register on the page - the end of interrupt, the task priority, the
+    // destination half at 0x310 - is left exactly alone.
+    constexpr std::uint64_t interrupt_command_low = 0x300;
+    constexpr std::uint64_t interrupt_command_high = 0x310;
+    constexpr std::uint64_t page_offset_mask = page_size - 1;
+
+    if (interrupt_command_low != (write->address & page_offset_mask)) {
+        return write->value;
+    }
+
+    // The destination half, which the guest wrote first - it has to, for
+    // the same reason this hook exists - so it is already in the page and
+    // is read from there rather than remembered.
+    //
+    // Composed into the x2APIC shape, destination in bits 63:32, so the
+    // one decision function serves both forms. The xAPIC destination is
+    // eight bits in 31:24 of that dword.
+    auto * bytes = reinterpret_cast<volatile std::uint8_t *>(page << 12);
+    auto high = arch::x86_64::read32(bytes + interrupt_command_high);
+
+    auto command = (write->value & 0xffffffffull) |
+                   (static_cast<std::uint64_t>(high >> 24) << 32);
+
+    self.apic_page_commands_filtered =
+        self.apic_page_commands_filtered + 1;
+
+    // Nothing means this VMM answered the command itself and the guest's
+    // write must not go out. A value means it did not, and the guest's
+    // own command goes to the hardware unchanged.
+    if (!self.on_interrupt_command(command)) {
+        return {};
+    }
+
+    return write->value;
 }
 
 void hypervisor::on_local_apic_write(void * context,

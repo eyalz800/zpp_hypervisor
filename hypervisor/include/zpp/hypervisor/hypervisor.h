@@ -984,6 +984,23 @@ private:
     volatile std::uint64_t resume_guest_cs[max_cpus]{};
 
     volatile std::uint64_t emulated_writes{};
+
+    /**
+     * Writes a watch refused, counted separately from the ones applied.
+     *
+     * A refused write is the interesting one: it is a command this VMM
+     * decided to answer itself rather than let reach the device. Zero
+     * here while a guest is starting processors means the interception
+     * is not happening, which is indistinguishable from every other
+     * reason a processor fails to start unless it is counted.
+     */
+    volatile std::uint64_t filtered_writes{};
+
+    /**
+     * Interrupt commands the local APIC page filter saw before they were
+     * sent. Distinct from filtered_writes, which counts the ones refused.
+     */
+    volatile std::uint64_t apic_page_commands_filtered{};
     volatile std::uint64_t stepped_writes{};
 
     /**
@@ -1159,6 +1176,40 @@ private:
          */
         void (*before_write)(void * context, std::uint64_t page){};
 
+        /**
+         * Called *instead of* applying the guest's write, with the value
+         * it was about to write, and able to refuse it.
+         *
+         * Returns the value to write, or nothing to suppress the write
+         * entirely. A handler that only wants to observe returns what it
+         * was given.
+         *
+         * `before_write` above cannot do this: it returns void, so by the
+         * time anything has been decided the write is going to happen
+         * anyway. That is fine for flushing a queue and useless for a
+         * register whose *side effect* is the thing being intercepted.
+         *
+         * The local APIC's interrupt command register is exactly that
+         * register, and this is the hook it always needed. Writing its
+         * low half sends the interrupt, so a VMM that wants to redirect
+         * a start-up IPI into its own trampoline has to decide before the
+         * write lands, not after. Measured before this existed: the
+         * guest's broadcast start-up IPI reached the hardware first, took
+         * all seven application processors out of the wait-for-SIPI state
+         * in the same instant, and every trampoline IPI this VMM then
+         * sent them was ignored - trampoline stage 0, seven times, while
+         * the one processor that did come up had simply won the race.
+         *
+         * Only reachable when the write is emulated. A stepped write is
+         * performed by the guest's own instruction, so there is no moment
+         * between deciding and applying for anything to happen in - which
+         * is one more reason emulating is the path that matters.
+         */
+        using filter = std::optional<std::uint64_t> (*)(
+            void * context, std::uint64_t page, const guest_write * write);
+
+        filter filter_write{};
+
         void * context{};
         mode behaviour{mode::notify};
         bool armed{};
@@ -1185,8 +1236,8 @@ private:
         page_watch::handler on_write,
         void * context,
         page_watch::mode behaviour = page_watch::mode::notify,
-        void (*before_write)(void * context,
-                             std::uint64_t page) = nullptr);
+        void (*before_write)(void * context, std::uint64_t page) = nullptr,
+        page_watch::filter filter_write = nullptr);
 
     /**
      * Starts and stops holding writers to a watched page.
@@ -1588,6 +1639,24 @@ private:
     static void on_local_apic_write(void * context,
                                     std::uint64_t page,
                                     const guest_write * write);
+
+    /**
+     * The same decision, made *before* the write reaches the register.
+     *
+     * Which is the only place it can usefully be made. Writing the low
+     * half of the interrupt command register is what sends the
+     * interrupt, so a start-up IPI this VMM means to redirect has to be
+     * refused here - afterwards there is nothing left to redirect, and
+     * the processors it named have already left the wait-for-SIPI state
+     * that made them startable.
+     *
+     * Returns the value to write, or nothing to suppress the write.
+     * `on_local_apic_write` above remains for the stepped path, where
+     * the guest's own instruction performs the write and no such moment
+     * exists.
+     */
+    static std::optional<std::uint64_t> filter_local_apic_write(
+        void * context, std::uint64_t page, const guest_write * write);
 
     /**
      * The guest has written the storage controller's register page.
