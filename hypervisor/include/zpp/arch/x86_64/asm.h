@@ -522,4 +522,23 @@ inline void __attribute__((naked)) invd()
     )!!");
 }
 
+/**
+ * Writes back every modified cache line and invalidates the caches.
+ *
+ * The counterpart of `invd` above and the safe one: SDM Vol. 2A, INVD,
+ * says of itself that data cached internally and not written back "will be
+ * lost" and that software should use WBINVD instead. So WBINVD is what
+ * exists for the case where this VMM's own writes have to be in memory
+ * rather than in a cache - before the platform removes power from the
+ * processors, which discards whatever the caches still hold.
+ */
+inline void __attribute__((naked)) wbinvd()
+{
+    asm(R"!!(
+        .intel_syntax noprefix
+        wbinvd
+        ret
+    )!!");
+}
+
 } // namespace zpp::arch::x86_64

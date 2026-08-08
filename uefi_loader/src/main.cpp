@@ -1506,6 +1506,10 @@ extern "C" EFI_STATUS EFIAPI uefi_main(EFI_HANDLE image_handle,
             zpp::sleep_control_finder::found.usable()
                 ? zpp::sleep_control_finder::found.pm1b_control_port
                 : std::uint16_t{},
+        .sleep_control_width =
+            zpp::sleep_control_finder::found.usable()
+                ? zpp::sleep_control_finder::found.control_width
+                : std::uint8_t{},
         .adjust_launch_calling_convention = invoke_entry,
     };
 

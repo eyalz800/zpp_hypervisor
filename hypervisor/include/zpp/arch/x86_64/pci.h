@@ -52,6 +52,21 @@ inline void out8(std::uint16_t port, std::uint8_t value)
 }
 
 /**
+ * Writes a word to an IO port.
+ *
+ * Not needed by anything in this header - configuration space is reached a
+ * byte or a doubleword at a time - but it belongs beside the other two
+ * rather than in a second copy of the same reasoning somewhere else. Its
+ * caller is the ACPI sleep control register, which the fixed ACPI
+ * description table almost always reports as two bytes wide, and which has
+ * to be written at the width the table gives.
+ */
+inline void out16(std::uint16_t port, std::uint16_t value)
+{
+    asm volatile("outw %0, %1" : : "a"(value), "Nd"(port));
+}
+
+/**
  * Writes a doubleword to an IO port.
  */
 inline void out32(std::uint16_t port, std::uint32_t value)

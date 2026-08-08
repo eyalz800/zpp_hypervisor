@@ -4,6 +4,7 @@
 #include "zpp/arch/x86_64/generic.h"
 #include "zpp/arch/x86_64/interrupt_gate.h"
 #include "zpp/arch/x86_64/page_table.h"
+#include "zpp/arch/x86_64/pci.h"
 #include "zpp/arch/x86_64/segment_descriptor.h"
 #include "zpp/arch/x86_64/vm_exit_entry.h"
 #include "zpp/arch/x86_64/vmx/asm.h"
@@ -2789,9 +2790,200 @@ bool hypervisor::on_sleep_request(std::uint16_t port, std::uint32_t value)
     // processor (e.g., as part of a transition to the S3 and S4 power
     // states)" as one of the ways. It is harmless today only because
     // nothing ever reads those regions again. It stops being harmless the
-    // moment a resume path does.
-    intercept_io_port(port, false);
-    return true;
+    // moment a resume path does, which is what the quiesce below is for.
+    if constexpr (!power::quiesce_on_sleep) {
+        intercept_io_port(port, false);
+        return true;
+    } else {
+        auto cpu = this->vmcs.vpid();
+
+        if (auto quiesced = quiesce_and_sleep(port, value); !quiesced) {
+            // The write did not sleep the machine and this processor
+            // could not be put back into VMX operation, so there is
+            // nothing to resume into. Said out loud and then stopped,
+            // rather than resumed into a VMCS that is not current - a
+            // VMRESUME with no current VMCS produces no VM exit and no
+            // recovery point, which is the failure that is impossible to
+            // read afterwards.
+            log("could not re-enter vmx operation after a sleep that did "
+                "not happen, error {}",
+                quiesced.error().code());
+            diag::log<diag::severity::error>(
+                "stranded outside vmx operation after a failed sleep");
+            diag::pump::drain();
+            if constexpr (diag::policy_of(diag::sink::esp_blocks)
+                              .present) {
+                diag::esp_block_sink::flush_pending();
+            }
+            for (;;) {
+                arch::x86_64::disable_interrupts();
+                arch::x86_64::halt();
+            }
+        }
+
+        // Back in VMX operation with the launch state clear, which is
+        // what the exit handler's tail has to know: VMRESUME requires
+        // launched and VMCLEAR is the only thing that sets clear (SDM
+        // 27.1), so leaving this guest has to be a VMLAUNCH.
+        if ((0 != cpu) && (cpu <= max_cpus)) {
+            this->relaunch_after_sleep[cpu - 1] = true;
+        }
+        return false;
+    }
+}
+
+std::uint64_t hypervisor::own_vmxon_region_physical()
+{
+    auto cpu = this->vmcs.vpid();
+    if ((0 == cpu) || (cpu > max_cpus)) {
+        return 0;
+    }
+    return this->host_page_table.virtual_to_physical(&this->vmx[cpu - 1]);
+}
+
+std::uint64_t hypervisor::own_vmcs_region_physical()
+{
+    auto cpu = this->vmcs.vpid();
+    if ((0 == cpu) || (cpu > max_cpus)) {
+        return 0;
+    }
+    return this->host_page_table.virtual_to_physical(
+        &this->vmx_vmcs[cpu - 1]);
+}
+
+std::expected<void, zpp::error>
+hypervisor::quiesce_and_sleep(std::uint16_t port, std::uint32_t value)
+{
+    // Which regions this processor is actually using, derived from the
+    // VPID. vmx_physical and vmcs_physical cannot answer this - see
+    // own_vmcs_region_physical.
+    auto vmxon_region = own_vmxon_region_physical();
+    auto vmcs_region = own_vmcs_region_physical();
+    if ((0 == vmxon_region) || (0 == vmcs_region)) {
+        return std::unexpected(zpp::error{error::no_region_for_processor});
+    }
+
+    // This processor only, and that is a limit rather than an oversight.
+    //
+    // The other processors are in the guest, and the only way to make one
+    // execute VMCLEAR is to make it take a VM exit. It cannot be done for
+    // a processor the guest has parked in wait-for-SIPI: SDM 28.2 says of
+    // NMIs that "if a logical processor is in the wait-for-SIPI state,
+    // NMIs are blocked. The NMI is not delivered and no VM exit occurs",
+    // and SDM 29.7.2 repeats it for external interrupts, INIT and SMI.
+    // From here there is no way to tell which state each processor is in,
+    // and sending a wake NMI to one that may be in root mode has already
+    // taken this machine down once - see the comment on
+    // wait_for_ept_acknowledgement.
+    //
+    // So a rendezvous would work sometimes and hang or wedge otherwise,
+    // which is the worst of the three outcomes. The consequence is
+    // accepted instead and pushed onto the resume: every VMCS other than
+    // this one may be corrupted per SDM 27.11.1, so a resume path must
+    // rebuild all of them from scratch rather than trust any to have
+    // survived. That is no harder than reusing them, and it is correct
+    // whatever state the guest left its processors in.
+    auto others = this->next_virtual_processor - 1;
+    if (others > 1) {
+        log("quiescing this processor only; {} others may be left with a "
+            "corrupted vmcs",
+            others - 1);
+    }
+
+    if (arch::x86_64::vmx::vmclear(&vmcs_region)) {
+        return std::unexpected(zpp::error{error::vmclear_failed});
+    }
+    this->sleep_request.stage =
+        static_cast<std::uint64_t>(power_stage::vmcs_cleared);
+
+    // Checked rather than discarded, unlike the scope guards that use this
+    // on the failure paths out of main. There the processor is on its way
+    // back to the loader whatever happens; here everything after it
+    // depends on having actually left VMX operation, and a VMXOFF that
+    // failed with the carry flag means this processor is still in it - so
+    // the OUT below would run from root mode with a VMCS this function has
+    // already cleared.
+    if (arch::x86_64::vmx::vmxoff()) {
+        return std::unexpected(zpp::error{error::vmxoff_failed});
+    }
+    this->sleep_request.stage =
+        static_cast<std::uint64_t>(power_stage::left_vmx_operation);
+
+    // Everything written above has to be in memory rather than in a cache
+    // when the power goes, and the guest's own flush has already happened
+    // - it comes before the write that sleeps, because that write does not
+    // return. So the writes this function has just made are on the wrong
+    // side of it, and VMCLEAR's copy of the VMCS data to the region in
+    // memory is among them.
+    //
+    // WBINVD and not INVD, for the reason invd() carries: INVD discards
+    // modified lines without writing them back, which would throw away
+    // exactly what this is here to preserve.
+    this->sleep_request.stage =
+        static_cast<std::uint64_t>(power_stage::write_issued);
+    arch::x86_64::wbinvd();
+
+    // The guest's own write, at the register's own width.
+    //
+    // Performed here rather than handed back because handing it back
+    // requires a VM entry, and this processor has just left VMX operation
+    // - there is nothing to enter. The width comes from the table because
+    // writing four bytes to a two byte register writes whatever the
+    // platform put next to it as well.
+    switch (this->sleep_control_width) {
+    case 1:
+        arch::x86_64::out8(port, static_cast<std::uint8_t>(value));
+        break;
+    case 4:
+        arch::x86_64::out32(port, value);
+        break;
+    default:
+        arch::x86_64::out16(port, static_cast<std::uint16_t>(value));
+        break;
+    }
+
+    // Only reached when the platform did not sleep. That is a normal
+    // outcome, not a failure: a sleep can be refused, and a write to the
+    // secondary control block does not sleep on its own.
+    this->sleep_request.stage =
+        static_cast<std::uint64_t>(power_stage::write_returned);
+
+    // Back into VMX operation with this processor's own regions.
+    //
+    // IA32_FEATURE_CONTROL has not been touched by anything - no reset has
+    // happened on this path - but enable_vmx_in_feature_control is called
+    // anyway rather than assumed, because it is the function that knows
+    // what VMXON requires and it is cheap.
+    if (auto allowed = enable_vmx_in_feature_control(); !allowed) {
+        return allowed;
+    }
+
+    if (arch::x86_64::vmx::vmxon(&vmxon_region)) {
+        return std::unexpected(zpp::error{error::vmxon_failed});
+    }
+
+    // VMCLEAR before VMPTRLD, and not only to set the launch state: this
+    // region was active on a processor that left VMX operation, which is
+    // the case SDM 27.11.1 says may corrupt it. The VMCLEAR above happened
+    // first and is what makes that not so here; this one is the ordinary
+    // requirement that VMLAUNCH needs a clear launch state.
+    if (arch::x86_64::vmx::vmclear(&vmcs_region)) {
+        return std::unexpected(zpp::error{error::vmclear_failed});
+    }
+
+    if (arch::x86_64::vmx::vmptrld(&vmcs_region)) {
+        return std::unexpected(zpp::error{error::vmptrld_failed});
+    }
+
+    // The VMCS still holds every field it held before, because VMCLEAR
+    // copies the data to the region rather than erasing it (SDM 27.11.1)
+    // and nothing between then and now wrote to the region. So the guest
+    // can be entered exactly where it was, and the port interception is
+    // left armed - the guest is very likely about to try again.
+    this->sleep_request.stage =
+        static_cast<std::uint64_t>(power_stage::re_established);
+    log("sleep write returned; back in vmx operation");
+    return {};
 }
 
 void hypervisor::watch_local_apic(bool watch)
@@ -4332,6 +4524,7 @@ hypervisor::main(arch::x86_64::context & caller_context)
         this->sleep_control_port = launch.sleep_control_port;
         this->sleep_control_port_secondary =
             launch.sleep_control_port_secondary;
+        this->sleep_control_width = launch.sleep_control_width;
 
         // Where this module was put. Inside the guard with the rest,
         // because a processor this VMM started has no launch block and
@@ -5684,10 +5877,22 @@ hypervisor::main(arch::x86_64::context & caller_context)
             this->resume_guest_cs[slot - 1] = vmcs.guest_cs_selector();
         }
 
+        // Whether this processor has been out of VMX operation and back
+        // since the last entry, which only the sleep quiesce does. Its
+        // return leaves the launch state clear, and VMRESUME requires
+        // launched (SDM 27.1) - so that one case has to leave through
+        // VMLAUNCH instead. Consumed here, so the next exit resumes.
+        auto relaunch = false;
+        if (auto slot = vmcs.vpid(); (0 != slot) && (slot <= max_cpus)) {
+            relaunch = this->relaunch_after_sleep[slot - 1];
+            this->relaunch_after_sleep[slot - 1] = false;
+        }
+
         // The mirror of the launch: the guest's registers are put back
         // and the last thing executed in host mode is the resume itself.
-        context.rip =
-            reinterpret_cast<std::uint64_t>(arch::x86_64::vmx::vmresume);
+        context.rip = reinterpret_cast<std::uint64_t>(
+            relaunch ? arch::x86_64::vmx::vmlaunch
+                     : arch::x86_64::vmx::vmresume);
         arch::x86_64::restore_context(&context);
     });
 

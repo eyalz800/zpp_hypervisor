@@ -138,6 +138,7 @@ static int zpp_init(void)
         .diagnostic_channel = NULL,
         .sleep_control_port = 0,
         .sleep_control_port_secondary = 0,
+        .sleep_control_width = 0,
         /* System V already, so no adaptation is needed. */
         .adjust_launch_calling_convention = NULL,
     };

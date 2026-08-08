@@ -80,6 +80,7 @@ zpp_load_elf(const struct zpp_loader_parameters * parameters)
     handover.sleep_control_port = parameters->sleep_control_port;
     handover.sleep_control_port_secondary =
         parameters->sleep_control_port_secondary;
+    handover.sleep_control_width = parameters->sleep_control_width;
 
     for (std::size_t i{}; i < cpus; ++i) {
         // Rebuilt per processor because it captures i, which is the one

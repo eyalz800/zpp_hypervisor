@@ -107,6 +107,18 @@ struct zpp_launch_parameters
     /**
      * @}
      */
+
+    /**
+     * How wide that register is, in bytes, from the same table. Two on the
+     * usual platform, and the specification allows four.
+     *
+     * Needed because a VMM that performs the guest's write itself has to
+     * perform it at the register's own width. Writing four bytes to a two
+     * byte register is not a wider version of the same access - it is a
+     * write to two registers, the second of which is whatever the platform
+     * put next to this one. Zero when the loader found no register.
+     */
+    uint8_t sleep_control_width;
 };
 
 struct zpp_loader_parameters
@@ -165,6 +177,7 @@ struct zpp_loader_parameters
      */
     uint16_t sleep_control_port;
     uint16_t sleep_control_port_secondary;
+    uint8_t sleep_control_width;
     /**
      * @}
      */

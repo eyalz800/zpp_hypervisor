@@ -84,6 +84,24 @@ public:
          * The controller refused one of the excursion's admin commands.
          */
         excursion_refused = 13,
+
+        /**
+         * VMXOFF failed with the carry flag, so this processor is still
+         * in VMX operation when the code after it assumed otherwise.
+         *
+         * Distinct from vmxon_failed because the two mean opposite things
+         * about where the processor now is, and the sleep quiesce has to
+         * be able to tell them apart from a single error code printed by
+         * a loader.
+         */
+        vmxoff_failed = 14,
+
+        /**
+         * The sleep quiesce could not work out which VMXON or VMCS region
+         * belongs to this processor, because the VPID was outside the
+         * range that names one.
+         */
+        no_region_for_processor = 15,
     };
 
     /**
@@ -898,6 +916,53 @@ private:
      * See zpp/hypervisor/power.h for what the three transitions require.
      */
     bool on_sleep_request(std::uint16_t port, std::uint32_t value);
+
+    /**
+     * Takes this processor out of VMX operation cleanly and then performs
+     * the guest's sleep write itself, so that the platform removes power
+     * from a processor holding no active VMCS.
+     *
+     * Called only from on_sleep_request and only with
+     * power::quiesce_on_sleep on. Returns normally if the write did not
+     * sleep the machine, having put this processor back into VMX operation
+     * with its VMCS current and its launch state clear - so the caller has
+     * to VMLAUNCH rather than VMRESUME. Returns an error if it could not
+     * get back, in which case there is nothing left to resume into and the
+     * caller stops the processor.
+     */
+    std::expected<void, zpp::error> quiesce_and_sleep(std::uint16_t port,
+                                                      std::uint32_t value);
+
+    /**
+     * The physical address of this processor's own VMXON and VMCS regions,
+     * derived from the VPID rather than read out of vmx_physical and
+     * vmcs_physical.
+     *
+     * Those two are single scalars that initialize_vmx overwrites on every
+     * processor it runs on, so by the time any guest is running they name
+     * whichever processor was virtualized last. That is correct where they
+     * are used - between initialize_vmx and the launch on one processor,
+     * under start_up_lock - and wrong anywhere reached from a VM exit.
+     * @{
+     */
+    std::uint64_t own_vmxon_region_physical();
+    std::uint64_t own_vmcs_region_physical();
+    /**
+     * @}
+     */
+
+    /**
+     * Whether the exit handler has to leave this processor's guest with
+     * VMLAUNCH rather than VMRESUME.
+     *
+     * Set only by the sleep quiesce, which leaves VMX operation and comes
+     * back with a VMCLEAR - and VMCLEAR is the only thing that sets the
+     * launch state to clear, which VMLAUNCH requires and VMRESUME refuses
+     * (SDM 27.1). Per processor because the quiesce runs on whichever one
+     * saw the guest's write, and cleared by the handler that acts on it so
+     * the next ordinary exit resumes normally.
+     */
+    bool relaunch_after_sleep[max_cpus]{};
 
     /**
      * Handles a write the local APIC page watch saw. Reads the interrupt
@@ -2337,6 +2402,13 @@ private:
      */
     std::uint16_t sleep_control_port{};
     std::uint16_t sleep_control_port_secondary{};
+
+    /**
+     * How wide it is, in bytes. Only used on the path that performs the
+     * guest's write itself, which has to perform it at the register's own
+     * width rather than at a convenient one.
+     */
+    std::uint8_t sleep_control_width{};
     /**
      * @}
      */
@@ -2384,6 +2456,10 @@ inline const zpp::error_category & category(hypervisor::error)
                 return "The controller did not reach the wanted CSTS.RDY";
             case hypervisor::error::excursion_refused:
                 return "The controller refused an excursion command";
+            case hypervisor::error::vmxoff_failed:
+                return "vmxoff failed, still in VMX operation";
+            case hypervisor::error::no_region_for_processor:
+                return "No VMXON or VMCS region for this processor";
             }
         });
     return error_category;
