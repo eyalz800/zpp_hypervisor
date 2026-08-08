@@ -153,8 +153,14 @@ struct verify
      * The leaf this VMM answers with a processor's most recent exit,
      * selected by ecx. Inside the range it already owns, so nothing
      * underneath can answer it instead.
+     *
+     * 0x40000100 and not 0x40000001, which is where the interface
+     * signature goes: while it was there, an announcing build answered
+     * this leaf with "Hv#1" and every reading taken through it was that
+     * rather than a trace. Must stay equal to `diagnostic_leaf` in the
+     * exit handler - the two are separate builds and nothing links them.
      */
-    static constexpr std::uint32_t diagnostic_leaf = 0x40000001;
+    static constexpr std::uint32_t diagnostic_leaf = 0x40000100;
 
     static constexpr std::uint32_t signature_ebx = 0x5a70705a;
     static constexpr std::uint32_t signature_ecx = 0x705a7070;

@@ -7708,10 +7708,60 @@ hypervisor::main(arch::x86_64::context & caller_context)
             constexpr std::uint32_t hypervisor_leaf_first = 0x40000000;
             constexpr std::uint32_t hypervisor_leaf_last = 0x4fffffff;
 
+            // The block that begins at hypervisor_leaf_first, in the shape
+            // the interface signature below commits this VMM to. Named
+            // rather than written as offsets so the maximum leaf reported
+            // at the base cannot drift from the set actually answered -
+            // which is exactly what had happened.
+            constexpr std::uint32_t interface_leaf =
+                hypervisor_leaf_first + 1;
+            constexpr std::uint32_t version_leaf =
+                hypervisor_leaf_first + 2;
+            constexpr std::uint32_t features_leaf =
+                hypervisor_leaf_first + 3;
+            constexpr std::uint32_t recommendations_leaf =
+                hypervisor_leaf_first + 4;
+            constexpr std::uint32_t limits_leaf =
+                hypervisor_leaf_first + 5;
+
+            // The highest leaf of that block, which is what EAX at the
+            // base means: KVM's own reader takes it that way -
+            // kvm_get_hypervisor_cpuid in arch/x86/kvm/cpuid.c matches the
+            // signature in EBX/ECX/EDX and then records `cpuid.limit =
+            // entry->eax` - and KVM's documentation of its own signature
+            // leaf says outright that "the value in eax corresponds to the
+            // maximum cpuid function present in this leaf".
+            //
+            // It used to be the diagnostic leaf's number, which was wrong
+            // in both directions at once: it under-reported the block
+            // while more leaves were answered above it, and it named a
+            // leaf that is not part of this block at all.
+            constexpr std::uint32_t hypervisor_leaf_maximum =
+                nested_vmx::announce_hypervisor ? limits_leaf
+                                                : hypervisor_leaf_first;
+
             // Reports a given processor's most recent exit, selected by
             // ecx. Inside the range this VMM already owns, so it costs no
             // new interface and nothing underneath can answer it instead.
-            constexpr std::uint32_t diagnostic_leaf = 0x40000001;
+            //
+            // In its own block at 0x40000100 rather than at 0x40000001,
+            // and moving it was a bug fix rather than tidying: 0x40000001
+            // is where the interface signature goes, so on any build with
+            // announce_hypervisor on the signature shadowed the diagnostic
+            // entirely and every reading taken through it was the four
+            // bytes "Hv#1" instead of a trace.
+            //
+            // 0x100 is the step because that is the granularity a vendor
+            // block may begin on. KVM's own scan says so:
+            // for_each_possible_cpuid_base_hypervisor in
+            // arch/x86/include/asm/cpuid/api.h is
+            // `for (function = 0x40000000; function < 0x40010000; function
+            // += 0x100)`, and KVM relocates its own block to a later base
+            // by exactly that rule when the first one is occupied by the
+            // interface a guest is being shown. So this layout is the one
+            // already in use rather than an invention, and a guest looking
+            // for the block at 0x40000000 never lands on it.
+            constexpr std::uint32_t diagnostic_leaf = 0x40000100;
 
             // Leaf 1, the feature bits, where two of them are cleared
             // and a third is deliberately left alone.
@@ -7851,38 +7901,61 @@ hypervisor::main(arch::x86_64::context & caller_context)
                 // It then uses the Hyper-V synthetic MSRs, which this
                 // implements no more than it implements the interface.
                 if (hypervisor_leaf_first == leaf) {
-                    // The highest leaf answered here, which now includes
-                    // the diagnostic leaf below.
-                    cpuid_result[0] = diagnostic_leaf;
+                    // The highest leaf of *this* block, which is the set
+                    // answered below and nothing else.
+                    cpuid_result[0] = hypervisor_leaf_maximum;
 
                     // HyperVisor Name: ZppZppZppZpp.
                     cpuid_result[1] = 0x5a70705a;
                     cpuid_result[2] = 0x705a7070;
                     cpuid_result[3] = 0x70705a70;
                 } else if (nested_vmx::announce_hypervisor &&
-                           ((hypervisor_leaf_first + 1) == leaf)) {
+                           (interface_leaf == leaf)) {
                     // The interface signature, which is what a guest
                     // matches on rather than the vendor above. "Hv#1".
                     //
-                    // Claimed with no features behind it, which the leaf
-                    // below is what actually says. A guest that recognises
-                    // the interface and finds it offers nothing keeps
-                    // doing everything the way it would without one - and
-                    // that is the point, because the enlightenment that
-                    // changes how it starts its processors is the one
+                    // Claimed with no features behind it, which the three
+                    // leaves below are what actually say. A guest that
+                    // recognises the interface and finds it offers nothing
+                    // keeps doing everything the way it would without one
+                    // - and that is the point, because the enlightenment
+                    // that changes how it starts its processors is the one
                     // thing this VMM must not have taken away from it.
                     cpuid_result[0] = 0x31237648;
                     cpuid_result[1] = 0;
                     cpuid_result[2] = 0;
                     cpuid_result[3] = 0;
                 } else if (nested_vmx::announce_hypervisor &&
-                           (leaf > (hypervisor_leaf_first + 1)) &&
-                           (leaf < diagnostic_leaf)) {
-                    // Every other leaf in the range, zero. The features
-                    // leaf reading zero is the whole design: nothing is
-                    // claimed, so nothing has to be implemented, and no
-                    // synthetic MSR has been invited.
+                           ((version_leaf == leaf) ||
+                            (features_leaf == leaf) ||
+                            (recommendations_leaf == leaf))) {
+                    // Version, features and recommendations, all zero, and
+                    // written out here rather than reached by falling
+                    // through to the zeroes at the bottom. Falling through
+                    // gave the same bytes and said nothing about why, and
+                    // these three are the leaves that decide what a guest
+                    // is entitled to expect - so they are the last place a
+                    // silent answer belongs.
+                    //
+                    // Recommendations zero is what makes an unimplemented
+                    // hypercall legal. Nothing is recommended, so a guest
+                    // has been told to use no enlightenment, and a guest
+                    // that uses none never issues a hypercall this VMM
+                    // would have to answer. Features zero says the same
+                    // for the synthetic MSRs: none is claimed, so none has
+                    // been invited.
                     cpuid_result[0] = 0;
+                    cpuid_result[1] = 0;
+                    cpuid_result[2] = 0;
+                    cpuid_result[3] = 0;
+                } else if (nested_vmx::announce_hypervisor &&
+                           (limits_leaf == leaf)) {
+                    // Implementation limits, of which the only one this
+                    // VMM has an honest number for is how many processors
+                    // it can track - max_cpus, the dimension of every
+                    // per-processor array here. A guest reading zero would
+                    // be reading a claim that no processor is supported.
+                    cpuid_result[0] = static_cast<std::uint32_t>(max_cpus);
                     cpuid_result[1] = 0;
                     cpuid_result[2] = 0;
                     cpuid_result[3] = 0;
