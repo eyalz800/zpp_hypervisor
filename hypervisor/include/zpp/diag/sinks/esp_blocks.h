@@ -440,6 +440,26 @@ struct esp_blocks_for
     }
 
     /**
+     * Whether there is room for a record right now.
+     *
+     * False only while a full block is waiting on its destination read,
+     * which is the one state in which this sink has nowhere to put
+     * anything: the staging buffer *is* the block. The pump asks before
+     * advancing its cursor, so a record offered while this is false stays
+     * in the ring and is offered again - the wait then costs nothing at
+     * all until the ring itself runs out, and the ring already reports
+     * that in band as `records_lost`.
+     *
+     * Without it the alternative is to take the record and drop it, which
+     * is what `records_dropped` counts and what that counter is now a
+     * backstop for rather than the normal path.
+     */
+    static bool accepting()
+    {
+        return staged_records < records_per_block();
+    }
+
+    /**
      * Takes one record into the block being assembled, and submits the
      * block when it is full.
      *

@@ -162,6 +162,26 @@ private:
             for (std::size_t processor{}; processor < ring.processors;
                  ++processor) {
                 for (std::size_t taken{}; taken < budget; ++taken) {
+                    // A sink that cannot take a record right now.
+                    //
+                    // Optional, and detected rather than required, like
+                    // flush_if_due below. Asked *before* the cursor
+                    // advances, which is the whole point: the record stays
+                    // in the ring and is offered again next pass, rather
+                    // than being handed over and dropped. The ring is the
+                    // buffer for exactly this, and when it does run out
+                    // its own `lost` counter says so - which reaches the
+                    // reader in band, unlike a counter of a sink's own.
+                    //
+                    // The return of write() cannot express this: it means
+                    // refused, and four refusals in a row take the sink
+                    // off the pump for the rest of the boot.
+                    if constexpr (requires { Sink::accepting(); }) {
+                        if (!Sink::accepting()) {
+                            break;
+                        }
+                    }
+
                     record entry{};
                     if (!ring_reader::next(position, processor, entry)) {
                         break;
