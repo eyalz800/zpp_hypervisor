@@ -292,6 +292,7 @@ public:
         // out again, and would be matched by the wrong completion.
         verify_outstanding = false;
         verify_landed = false;
+        verify_expired = false;
     }
 
     static std::uint32_t tail_position()
@@ -412,6 +413,14 @@ public:
      */
     static inline bool verify_outstanding{};
     static inline bool verify_landed{};
+
+    /**
+     * Whether this verify has already been given up on and counted. Once
+     * a read is past its budget every later attempt refuses too, and
+     * without this `verify_abandoned` would count attempts - which
+     * `results[timed_out]` already does - rather than reads.
+     */
+    static inline bool verify_expired{};
     static inline std::uint16_t verify_id{};
     static inline std::uint64_t verify_block{};
     static inline std::uint64_t verify_issued{};
@@ -485,6 +494,7 @@ public:
         // fresh verify instead of waiting for one that cannot arrive.
         verify_outstanding = false;
         verify_landed = false;
+        verify_expired = false;
         for (std::uint32_t i{}; i < Entries; ++i) {
             completions[i] = completion_entry{};
         }
@@ -742,11 +752,15 @@ private:
             }
 
             // Long enough that the controller has lost it rather than
-            // being slow. Reported, and deliberately still outstanding:
-            // whenever it does land it DMAs into scratch, so a second
-            // read must not be issued on top of it. The next attempt
-            // waits for this one and then starts a fresh verify.
-            ++verify_abandoned;
+            // being slow. Reported once, and deliberately still
+            // outstanding: whenever it does land it DMAs into scratch, so
+            // a second read must not be issued on top of it. The next
+            // attempt waits for this one and then starts a fresh verify.
+            if (!verify_expired) {
+                verify_expired = true;
+                ++verify_abandoned;
+            }
+
             return write_result::timed_out;
         }
 
@@ -774,6 +788,7 @@ private:
             auto verified_block = verify_block;
             verify_outstanding = false;
             verify_landed = false;
+            verify_expired = false;
 
             // The read that landed was for some other block - the only
             // way that happens is a block given up on above - so it says
@@ -806,6 +821,7 @@ private:
                             physical_of(scratch));
 
         verify_landed = false;
+        verify_expired = false;
         verify_outstanding = true;
         verify_block = block_index;
         verify_issued = arch::x86_64::rdtsc();
