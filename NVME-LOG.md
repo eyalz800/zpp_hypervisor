@@ -1022,3 +1022,97 @@ result is the only way to say which rather than guess - which is what to
 add before the next run. Neither remaining candidate is obviously right at
 sequence twenty-one of a sixteen-thousand-block region, which is why
 guessing has already been wrong once here.
+
+### Which of the two it was, settled from the source and then instrumented
+
+`out_of_range` cannot happen, and the proof needs nothing from the rig.
+
+- `esp_blocks_for::write` and the pump both require `ready()`, which
+  requires `log_target::usable()`, which bounds the medium's logical
+  block size to a power of two no larger than 4096. So
+  `per_block = 4096 / target.block_size` is at least one, and the
+  `0 == per_block` refusal - the one that exists because a zero would
+  encode a 512 MB write - is unreachable from the resident path.
+- `next_block_index` is only ever set to
+  `(next_block_index + 1) % blocks_in_file()`, and
+  `blocks_in_file() * per_block` is at most `total_blocks()`. The index
+  handed to `lba_of` is therefore always strictly inside the extents.
+  There is no arithmetic left for it to refuse.
+- The rebuild does not disturb either: `adopt_rebuilt_queue` touches the
+  controller's side only, and `next_block_index`, `sequence` and the
+  target are exactly the state it deliberately leaves alone.
+
+`timed_out` is what the numbers say, independently of that argument. A
+written block costs exactly two submissions - the destination read, then
+the write - and nothing else on this path submits anything. The sequence
+was 21, so at most 42 of the 65 submissions belong to written blocks;
+65 is odd, so at least 23 submissions went out with no write behind them.
+The only ways to submit a read and not follow it with a write are
+`signature_mismatch`, `epoch_changed` and `timed_out`, and the first two
+are counted and read zero.
+
+So the reads were being issued, abandoned, and completing afterwards -
+which is exactly what `submitted == completed` with `failed` zero says.
+The channel was discarding blocks for latency alone.
+
+One thing that made the numbers harder to read than they had to be, worth
+fixing in its own right: `dropped` and `sequence` are per boot, while
+`submitted` and `completed` are reset by `bind_position` on every
+rebuild. Comparing them across an epoch boundary compares two different
+scopes, and that is why the 1975 could not be divided between the epochs
+at all.
+
+### What the counter measures, and what replaced the spin
+
+`queue_pair::results` is an array indexed by the `write_result`
+enumerator, incremented on **every** return from submit including `ok`.
+Its non-ok entries must sum to the sink's `dropped`; a disagreement means
+something other than `flush` is discarding blocks.
+`scripts/read-channel-state.sh` prints it with the names beside the
+numbers, so the reasoning above never has to be repeated.
+
+The fix is that the write path no longer waits for the device at all. The
+destination read is issued on one call and collected on a later one, and
+a block whose read has not come back **stays staged** rather than being
+discarded - the new `verify_pending`, which is not a failure and not a
+drop. A slow controller now costs the block a few more VM exits of
+latency instead of costing the block. That is also what pump.h has said
+all along about what a sink may do: never wait.
+
+Three details in it that are not obvious:
+
+- **Landing is recognised by command identifier**, not by the completion
+  count moving. The old wait took `before = completed` and spun until it
+  changed, which is wrong whenever a previous block's write is still
+  outstanding: that completion satisfies the wait, and the signature is
+  then checked against a scratch buffer the read has not filled. It was a
+  false refusal rather than a false write, and it had not been seen -
+  `refused_signature` was zero - but it was reachable.
+- **The abandoned read is left outstanding on purpose.** Past
+  `verify_ticks_budget`, about a second and a half, the block is given up
+  and `timed_out` counted, but the command is not forgotten: whenever it
+  does land it DMAs into `scratch`, so a second read must not be issued
+  on top of it. The next attempt waits for it and then starts a fresh
+  verify. That keeps exactly one read into that buffer in flight, ever.
+- **The budget is in ticks now, not polls.** A poll count is a different
+  amount of wall clock time in every build and on every processor, so
+  "the read did not complete in 1<<22 polls" never said how long that
+  was. `verify_ticks_last` and `verify_ticks_max` say how long a read
+  actually takes, which is the measurement this whole question needed and
+  did not have.
+
+`submit` keeps its waiting form for the two callers that have no later
+pass: the loader's proof write, which runs while the controller is idle,
+and the flush taken as the guest disables the controller. Its loop polls
+with `reap` rather than repeating the whole attempt, because the
+attempt's guard read is two uncached register accesses and a budget in
+the millions of those is seconds of bus traffic rather than a spin.
+
+**What to read on the next run**, in order: `results` under "why a block
+did not go out"; `ok` should climb with `sequence`, `verify_pending` is
+expected to be large and means only that blocks waited, and `timed_out`
+should be zero or match `verify_abandoned`. Then
+`verify ticks last | max`, which says how slow the controller really is
+under a booting Windows - the number nobody has yet. `records_dropped`
+says whether the channel is keeping up with the guest; `dropped` says
+whether it is keeping up with the device.
