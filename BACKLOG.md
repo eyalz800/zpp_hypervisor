@@ -3135,3 +3135,42 @@ Which names the work, and it has two halves that must land together:
 
 The second half is why this is not a one-line change, and why it should be
 built behind a switch and measured rather than assumed.
+
+### Passing the interface through did not make the feature arm
+
+The hypothesis in the previous entry was tested and is **not confirmed**.
+
+With the switch on - the whole hypervisor CPUID range left to whatever this
+VMM runs under, and synthetic MSR accesses forwarded down instead of
+faulted - measured on the rig with nesting compiled in:
+
+    synthetic_msr_accesses   0
+    guest_vmxon_count        0 on every processor
+    l2_entries               0
+    next_virtual_processor   9    all eight processors adopted, guest healthy
+
+The guest booted normally and **took nothing**. Not one synthetic MSR was
+touched, so it is not that the interface was offered and refused - it never
+looked. Which means hiding the interface is not what stops the feature
+arming, and the reasoning that said it was has a hole in it.
+
+What is now known, and worth keeping separate from what is not:
+
+- The CPUID handler does execute the real instruction first and edit the
+  answer, so with the switch on the range genuinely carries the underlying
+  hypervisor's leaves. The mechanism works; the guest did not respond to it.
+- Every hardware prerequisite the guest reports is present, on both
+  settings.
+- No processor enters VMX operation on either setting, now measured with
+  counters rather than inferred from a state flag.
+
+So the difference between arming without this VMM and not arming with it is
+still unexplained, and the next thing to do is stop guessing at it from
+this side. The guest decides this, and the guest can be asked: its own
+event log records why the feature did not start, and that is a far more
+direct instrument than any counter here. Reading it needs the guest's
+filesystem, which is reachable read-only from the host side.
+
+The switch is left off. It costs nothing off, it is honest about needing
+something underneath, and it is the right shape if the interface ever does
+turn out to matter.
