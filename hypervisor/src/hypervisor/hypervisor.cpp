@@ -8392,6 +8392,22 @@ hypervisor::main(arch::x86_64::context & caller_context)
             }
             [[fallthrough]];
         case basic_reason::rdmsr: {
+            // Whether the guest is looking at virtualization at all.
+            //
+            // `guest_vmxon_count` staying zero has two completely
+            // different causes and they are indistinguishable from it: a
+            // guest that never considered entering VMX operation, and one
+            // that read the capabilities and declined. Counted here, at
+            // the exit, so it does not matter which path below answers.
+            if (auto index = static_cast<std::uint32_t>(context.rcx);
+                (index >= 0x480) && (index <= 0x491)) {
+                this->vmx_capability_reads =
+                    this->vmx_capability_reads + 1;
+            } else if (0x3a == index) {
+                this->feature_control_reads =
+                    this->feature_control_reads + 1;
+            }
+
             // The read half of the same set. Answered before the fault
             // below for the same reason: with nested VMX compiled in the
             // bitmap is no longer all zeroes, so an in-range MSR can exit

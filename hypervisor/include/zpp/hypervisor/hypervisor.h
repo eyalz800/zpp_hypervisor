@@ -2616,6 +2616,26 @@ private:
     volatile std::uint64_t hypercall_page_unwritable{};
 
     /**
+     * How often the guest read the VMX capability MSRs, and the feature
+     * control MSR, whoever answered them.
+     *
+     * These separate two states that look identical from
+     * `guest_vmxon_count` being zero: a guest that never considered
+     * virtualization at all, and one that read what this VMM offers and
+     * decided against it. The second is a question about which capability
+     * bit is missing; the first is a question about the guest's own
+     * policy, and no amount of work on the capability set would move it.
+     *
+     * Counted at the exit rather than inside a handler, so that an MSR
+     * answered by the nested path, by the pass-through path, or by a
+     * fault is counted the same way.
+     */
+    volatile std::uint64_t vmx_capability_reads{};
+
+    volatile std::uint64_t feature_control_reads{};
+
+
+    /**
      * The first MSR indices this VMM answered with a general protection
      * fault, oldest first, frozen once full.
      *
