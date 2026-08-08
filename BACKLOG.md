@@ -1829,7 +1829,8 @@ capability MSR narrowed to say so.
 | B1 | A second real VMCS per processor, switched to by VMLAUNCH/VMRESUME and away from on an exit to L1 | KVM `vmx_switch_vmcs`, `vmx->nested.vmcs02` | yes - `vmcs02`, one page per processor, switched to by `build_vmcs02` and back by `reflect_l2_exit` |
 | B2 | Launch-state tracking, so a freshly cleared vmcs02 gets `vmlaunch` and a launched one `vmresume` | SDM 33.3 VMLAUNCH/VMRESUME | yes - `vmcs02_launched`, set only on an exit that is not an entry failure, per SDM 29 step 5 |
 | B3 | Pin-based controls: union of L1's request and ours, with the preemption timer ours alone | KVM `prepare_vmcs02_early`, PIN CONTROLS block | yes - union less the preemption timer and posted interrupts |
-| B4 | Primary controls: union of L1's and ours; interrupt-window and NMI-window exiting taken from L1 only | KVM `prepare_vmcs02_early`, EXEC CONTROLS block | yes - union, with the two window controls from vmcs12 alone and the TPR shadow removed |
+| B4 | Primary controls: union of L1's and ours; interrupt-window and NMI-window exiting taken from L1 only | KVM `prepare_vmcs02_early`, EXEC CONTROLS block | yes - union, with the two window controls from vmcs12 alone |
+| B4a | TPR shadow honoured: the virtual-APIC address validated and written, the TPR threshold copied, and CR8 load and store exiting forced wherever the control is dropped instead | SDM 29.2.1.1, 27.6.8; KVM `nested_vmx_check_tpr_shadow_controls`, `nested_get_vmcs12_pages`, `prepare_vmcs02_early` | yes - and it is the one control a real guest hypervisor was measured setting and not getting |
 | B5 | Secondary controls: some taken *only* from vmcs12, the rest unioned | KVM `prepare_vmcs02_early`, SECONDARY EXEC block | yes - unrestricted guest from vmcs12 alone, mode-based execute cleared, EPT and VPID forced on |
 | B6 | Entry controls from L1, except the ones that follow from EFER, which are recomputed | KVM `prepare_vmcs02_early`, ENTRY CONTROLS block | yes - vmcs12's, unchanged |
 | B7 | Exit controls are **ours**, not L1's - the hardware exit comes to us and L1's exit is emulated | KVM `prepare_vmcs02_early`, EXIT CONTROLS block and its comment | yes - ours, unchanged |
@@ -2751,4 +2752,143 @@ exit side already exists - `l1_wants_l2_exit` answers
 
 The exit and entry values above are recorded for the same comparison
 against `supported_exit_controls` and `supported_entry_controls`, which has
-not been done yet.
+now been done - see the next entry but one.
+
+### The TPR shadow is honoured, and what to read to tell whether it worked
+
+The one item the entry above named. Primary bit 21 is now in
+`supported_primary_controls` and `build_vmcs02` reaches one of three
+outcomes when vmcs12 sets it, rather than stripping it:
+
+- **honoured** - the virtual-APIC address goes into vmcs02 and vmcs12's TPR
+  threshold beside it, and the control stays set. KVM writes the same pair,
+  in `nested_get_vmcs12_pages` for the address and `prepare_vmcs02_early`
+  for the threshold.
+- **replaced** - for an address this VMM will not let the processor touch,
+  where vmcs12 also intercepts **both** CR8 accesses. With both intercepts
+  the processor never consults the page at all, so the control is dropped
+  and CR8 load and store exiting forced in its place, and those exits go to
+  the guest hypervisor, which asked for them. KVM's own fallback, same
+  condition, in `nested_get_vmcs12_pages`.
+- **refused**, error 7, for anything else. KVM's comment on that path is
+  worth keeping: failing the entry is "_not_ what the processor does but
+  it's basically the only possibility we have".
+
+**The address check is the part that had to be got right, because unlike
+the MSR areas this address is handed to the processor.** SDM 29.2.1.1 gives
+two of the four checks - bits 11:0 zero, and the physical-address width
+checks of 28.2.1 - and KVM's `nested_vmx_check_tpr_shadow_controls` does
+exactly those through `page_address_valid`. The other two are this VMM's:
+
+- zero is refused, which a processor would not do. A shadow VMCS starts
+  zeroed, so zero is precisely what a guest hypervisor that set the control
+  and never wrote the field leaves behind, and page zero holds the guest's
+  own real-mode interrupt vector table.
+- the page must be one the guest itself may read and write under this VMM's
+  extended page tables, asked through `host_ept_lookup`. **The processor
+  reads and writes the virtual-APIC page in root operation, where extended
+  page tables do not apply**, so the module's pages, the log queue storage
+  and every watched page - each hidden by EPT permissions and by nothing
+  else - would otherwise be writable by the processor on a guest
+  hypervisor's behalf. Asking the tables rather than keeping a list is what
+  stops the check drifting from what is actually protected.
+
+Rejected, with the reason, so it is not re-proposed:
+
+- **offering secondary bit 4, virtualize x2APIC mode, alongside this.** The
+  earlier entry argued the pair from SDM 29.2.1.1's requirement that the TPR
+  shadow be set for it. The capture retires that: the guest hypervisor sets
+  no secondary control at all. The pairing is real but runs the other way
+  now - the TPR shadow is the prerequisite those controls could later be
+  built on, and each still needs its own state first.
+- **forcing CR8 load and store exiting wherever the control is not set.**
+  KVM does this unconditionally in `prepare_vmcs02_early`'s
+  `#ifdef CONFIG_X86_64` else branch, and it is wrong here. A guest
+  hypervisor that never set the TPR shadow does not believe its guest's CR8
+  is virtualized, so the second-level guest owning the physical register is
+  what bare hardware would do; forcing the intercepts would manufacture
+  exits `l1_wants_l2_exit` declines and the ordinary control-register
+  handler stops the processor on - it answers MOV to CR4 and nothing else.
+  The intercepts are forced only in the **replaced** case, where vmcs12
+  already carries both and the exits therefore reflect.
+- **checking that the threshold's bits 3:0 do not exceed VTPR's bits 7:4.**
+  SDM 29.2.1.1 says *should*, not *must*, it would cost a guest page read
+  on every entry, and KVM does not check it either. Its companion rule -
+  bits 31:4 of the threshold must be 0 whenever virtual-interrupt delivery
+  is 0, which here is always - **is** checked.
+
+The exit side needed no change. `l1_wants_l2_exit` answers
+`tpr_below_threshold` against primary bit 21, and that is right: vmcs02
+carries the control only where vmcs12 set it and this VMM never sets it for
+itself, so the exit is always the guest hypervisor's and
+`l0_wants_l2_exit` correctly does not name it. Two static_asserts were added
+for the other half of the promise - that a shadow VMCS has storage for the
+virtual-APIC address and the TPR threshold at all, since advertising a
+control whose fields answer VMWRITE with error 12 would be the same
+half-answered interface withholding it was.
+
+**What to read on the rig.** The done-condition is a guest hypervisor
+engaging with the shipped narrowed set plus bit 21 - no `unnarrow_*`
+diagnostic - launching a second level, and Windows continuing to boot. In
+order, from the running VMM's own memory:
+
+- `vmcs12_controls_captured` must be 1, and `vmcs12_primary_controls`
+  `0xa4206dfa` or near it with **bit 21 set**. If it is 0, nothing engaged
+  and the rest says nothing - that is the failure to chase first, and it
+  means bit 21 was not the whole gate.
+- `vmcs02_launched` 1 and `l2_entries` climbing past seventeen - both
+  per-processor arrays, so read the entry for whichever processor engaged.
+  Seventeen was where the previous run stopped being useful; a number that
+  keeps rising is the shape wanted, not a particular value.
+- `nested_entry_failed`, also per processor, **false**. True here with the
+  entry now carrying a virtual-APIC address means the address or the
+  threshold was refused by the *processor* rather than by the checks above,
+  and the log line `second level entry refused by the processor` says with
+  what.
+- the log for `guest {} refused: error 21` - `nested_controls_unsupported`,
+  which is what the three virtual-APIC address checks and the threshold
+  check answer with. Its presence with `l2_entries` at zero is this change
+  refusing something the previous build silently accepted; error 22 there is
+  the host-state check instead and unrelated.
+- Windows itself. A boot that completes is the measurement; a loop after
+  seventeen entries is the *old* symptom and would mean the TPR shadow was
+  not the whole of it.
+
+### Neither the exit nor the entry controls withhold anything the guest set
+
+The comparison the capture was recorded for, done against all four masks
+rather than the two, because the same arithmetic answers all of them. The
+default1 classes are from SDM A.3.1, A.3.2, A.4.1 and A.5, quoted rather
+than remembered - a bit in one of those classes is reported as settable
+whatever the mask says, because `narrow` puts the allowed-0 half back:
+`allowed_1 = (allowed_1 & supported) | allowed_0`.
+
+| group | measured | default1 bits it set | beyond default1 | withheld **and** set |
+|---|---|---|---|---|
+| pin | `0x0000001e` | 1, 2, 4 | 3 - NMI exiting | none |
+| primary | `0xa4206dfa` | 1, 4, 5, 6, 8, 13, 14, 26 | 3, 7, 10, 11, **21**, 29, 31 | none, now that 21 is offered |
+| exit | `0x0003efff` | 0-8, 10, 11, 13, 14, 16, 17 | 9 - host address-space size; 15 - acknowledge interrupt on exit | none |
+| entry | `0x000013ff` | 0-8, 12 | 9 - IA-32e mode guest | none |
+
+So **primary bit 21 was the only withheld control the guest hypervisor
+set**, in any group. There is nothing else to implement from this capture,
+which is worth stating plainly because the two previous entries each named
+capabilities that turned out to be innocent.
+
+Two things fall out of the table that are not gaps today and would be:
+
+- **exit bit 15, acknowledge interrupt on exit, is offered and not
+  honoured.** It only means anything on an external-interrupt exit, and the
+  guest hypervisor does not set pin bit 0 - so it can never take one. If
+  one ever did, `reflect_l2_exit` would hand it vmcs02's
+  interruption-information field, and vmcs02's exit controls are *this*
+  VMM's, which do not acknowledge - so the field's valid bit would be clear
+  and the interrupt still pending in the local APIC. Honouring it means
+  acknowledging the interrupt during reflection and synthesising the field,
+  which is why it is written down rather than done.
+- **exit bit 12, save VMX-preemption timer value, is clear**, which agrees
+  with the pin-based mask not offering the timer. That is the one place the
+  four masks are visibly consistent with each other, and it is worth
+  noticing because it is the shape the rest should keep: an exit control
+  that saves state for a control that is not offered would be a promise
+  about a field nothing writes.
