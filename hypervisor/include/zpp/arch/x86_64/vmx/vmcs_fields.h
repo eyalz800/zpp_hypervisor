@@ -84,7 +84,7 @@ enum vmcs_field : std::uint64_t
     vm_entry_interruption_information_field = 0x4016,
     vm_entry_exception_error_code = 0x4018,
     vm_entry_instruction_length = 0x401a,
-    trr_threshold = 0x401c,
+    tpr_threshold = 0x401c,
     secondary_processor_based_vm_execution_controls = 0x401e,
     ple_gap = 0x4020,
     ple_window = 0x4022,

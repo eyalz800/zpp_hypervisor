@@ -872,14 +872,14 @@ public:
         return write(field::vm_entry_instruction_length, value);
     }
 
-    std::uint64_t trr_threshold() const
+    std::uint64_t tpr_threshold() const
     {
-        return read(field::trr_threshold);
+        return read(field::tpr_threshold);
     }
 
-    void trr_threshold(std::uint64_t value) const
+    void tpr_threshold(std::uint64_t value) const
     {
-        return write(field::trr_threshold, value);
+        return write(field::tpr_threshold, value);
     }
 
     std::uint64_t secondary_processor_based_vm_execution_controls() const
