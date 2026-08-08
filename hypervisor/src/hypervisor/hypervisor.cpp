@@ -3009,24 +3009,74 @@ hypervisor::decode_guest_instruction(std::size_t cpu,
     // which instructions they were, which is what decides whether covering
     // them is a morning's work or a decoder rewrite.
     if (!store) {
-        auto slot = this->refused_instruction_count;
-        this->refused_instruction_count = slot + 1;
+        record_refused_instruction(code, refusal::not_decoded);
+        return store;
+    }
 
-        if (slot < refused_instruction_capacity) {
-            auto & recorded = this->refused_instructions[slot];
-            for (std::size_t i{}; i < refused_instruction_bytes; ++i) {
-                recorded.code[i] = code[i];
-            }
-            recorded.page = this->vmcs.guest_physical_address() >> 12;
-        }
+    // A decode that cannot be true of the instruction that faulted.
+    //
+    // A watch clears the write permission and nothing else, so reads of
+    // the page stay permitted and a pure read of one cannot fault. The
+    // caller has already required bit 8 of the exit qualification, so this
+    // is not a paging-structure access either. So the access was the
+    // instruction's own operand and it was a write, and an instruction
+    // that leaves memory alone cannot have produced it.
+    //
+    // SDM, "Exit Qualification for EPT Violations": bit 1 is "Set if the
+    // access causing the EPT violation was a data write." A read-modify-
+    // write sets bit 0 as well, which is why the test is on bit 1 alone
+    // rather than on the pair.
+    //
+    // Nothing here should ever be true. If it is, the decoder was handed
+    // bytes that are not the faulting instruction - a wrong answer from
+    // translate_guest_linear, or a window pointed at the wrong page - and
+    // the paths that *do* write have been writing fabricated values at
+    // fabricated lengths all along, silently. So it is counted, the bytes
+    // are kept, and the decode is refused: carrying it out would advance
+    // the guest past its own write by a length measured from unrelated
+    // bytes, and the write would simply be lost. Stepping loses only the
+    // observation.
+    constexpr std::uint64_t qualification_data_write = 1ull << 1;
+    auto wrote =
+        0 != (this->vmcs.exit_qualification() & qualification_data_write);
+    auto leaves_memory_alone =
+        (arch::x86_64::memory_operation::load == store->what) ||
+        (arch::x86_64::memory_operation::examine == store->what);
+
+    if (wrote && leaves_memory_alone) {
+        this->impossible_decodes = this->impossible_decodes + 1;
+        record_refused_instruction(code, refusal::impossible_operation);
+        log("impossible decode at rip {}, page {}",
+            rip,
+            this->vmcs.guest_physical_address() >> 12);
+        return {};
     }
 
     return store;
 }
 
-std::optional<std::uint64_t>
-hypervisor::read_guest_word(std::uint64_t guest_physical,
-                            std::uint8_t size)
+void hypervisor::record_refused_instruction(const std::uint8_t * code,
+                                            refusal why)
+{
+    auto slot = this->refused_instruction_count;
+    this->refused_instruction_count = slot + 1;
+
+    if (slot >= refused_instruction_capacity) {
+        // Frozen when full rather than wrapping, because the interesting
+        // ones arrive during start-up.
+        return;
+    }
+
+    auto & recorded = this->refused_instructions[slot];
+    for (std::size_t i{}; i < refused_instruction_bytes; ++i) {
+        recorded.code[i] = code[i];
+    }
+    recorded.page = this->vmcs.guest_physical_address() >> 12;
+    recorded.why = why;
+}
+
+std::optional<std::uint64_t> hypervisor::read_guest_word(
+    std::uint64_t guest_physical, std::uint8_t size)
 {
     // Straight through the host page table, for the same reason the write
     // below goes that way: the extended page tables establish an identity

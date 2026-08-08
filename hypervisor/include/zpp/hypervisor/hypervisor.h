@@ -1197,6 +1197,37 @@ private:
     arch::x86_64::code_size guest_code_size();
 
     /**
+     * Why an entry is in the ring, so the two kinds cannot be mistaken for
+     * each other while reading it.
+     */
+    enum class refusal : std::uint8_t
+    {
+        /**
+         * The decoder does not answer this form. Expected, and the number
+         * of them is a coverage measurement rather than a fault.
+         */
+        not_decoded,
+
+        /**
+         * The decoder answered, and the answer cannot be true of the
+         * instruction that faulted. See impossible_decodes.
+         */
+        impossible_operation,
+    };
+
+    /**
+     * Puts the opening bytes of an instruction into the ring, with the
+     * reason it is there and the page it faulted on.
+     *
+     * One place rather than two, because the two reasons are recorded from
+     * the same function and a ring whose entries were written by two
+     * different pieces of code would be the easiest thing here to get
+     * subtly out of step.
+     */
+    void record_refused_instruction(const std::uint8_t * code,
+                                    refusal why);
+
+    /**
      * Decodes the store that caused the current EPT violation.
      *
      * Nothing if the instruction is not one the decoder handles, which
@@ -2432,6 +2463,14 @@ private:
      * keeps the first bytes so the opcode and its prefixes can be read
      * off, and freezes when full because the interesting ones arrive
      * during start-up.
+     *
+     * Two kinds of entry share the ring, told apart by `why`. A
+     * `not_decoded` entry is a coverage gap and is expected; an
+     * `impossible_operation` entry is a fault in something else entirely -
+     * see impossible_decodes below. They share the ring rather than having
+     * one each because the second must read zero, and a ring that is empty
+     * is a worse place to keep a thing that must be empty than one that
+     * has traffic in it and can be seen to be working.
      * @{
      */
     static constexpr std::size_t refused_instruction_capacity = 64;
@@ -2441,13 +2480,41 @@ private:
     {
         std::uint8_t code[refused_instruction_bytes]{};
         std::uint64_t page{};
+        refusal why{};
     };
 
-    refused_instruction refused_instructions[refused_instruction_capacity]{};
+    refused_instruction
+        refused_instructions[refused_instruction_capacity]{};
     volatile std::uint64_t refused_instruction_count{};
     /**
      * @}
      */
+
+    /**
+     * Decodes that cannot describe the instruction that faulted.
+     *
+     * `watch_guest_page_writes` clears the write permission and nothing
+     * else, so reads of a watched page are still permitted and a pure read
+     * of one cannot fault. Every violation that reaches the emulation path
+     * is therefore a write - the caller has already excluded a
+     * paging-structure access with bit 8 of the exit qualification - and
+     * an instruction that does not write memory cannot have caused one.
+     *
+     * So a `load` or an `examine` decoded at the instruction pointer of a
+     * write-caused violation means the decoder was handed bytes that are
+     * **not** the faulting instruction. Two things could do that: a wrong
+     * answer from `translate_guest_linear`, or a mapping window pointed at
+     * the wrong page. Both would be silent on the write paths and both
+     * would produce the wrong value at the wrong address, and advance the
+     * guest's instruction pointer by a length measured from unrelated
+     * bytes.
+     *
+     * This must read zero. It is not a coverage measurement like the count
+     * above it - a non-zero value is a much larger bug than a decoder gap,
+     * and it says so where nothing else would: a fabricated value written
+     * to a device register looks exactly like a guest that wrote it.
+     */
+    volatile std::uint64_t impossible_decodes{};
 
     /**
      * Synthetic hypervisor MSR accesses forwarded to whatever this VMM
