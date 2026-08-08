@@ -147,7 +147,7 @@ inline constexpr bool pass_through_hypervisor_interface = false;
  * (`guest_vmxon_count` zero), so the next question is what else virtualization
  * based security wants before it will.
  */
-inline constexpr bool announce_hypervisor = true;
+inline constexpr bool announce_hypervisor = false;
 
 inline constexpr bool enabled =
 #if defined(ZPP_NESTED_VMX) && ZPP_NESTED_VMX
