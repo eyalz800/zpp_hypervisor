@@ -2994,3 +2994,88 @@ The lesson about method, which cost a boot and a wrong entry: **a kernel
 RIP is not evidence of a healthy boot.** Two of the runs called "booted
 normally" were spinning at the same instruction. Read all eight
 processors, or read `resumes_reached`, before calling a boot good.
+
+### Why Hyper-V does not start here, from the guest's own report
+
+Settled by looking at what Windows says about itself rather than by
+inferring from our counters, and it moves the whole question.
+
+`msinfo32` under this VMM, with nesting compiled in:
+
+    Virtualization-based security         Not enabled
+    Secure Boot State                    Unsupported
+    Kernel DMA Protection                On
+    Hyper-V - VM Monitor Mode Extensions            Yes
+    Hyper-V - Second Level Address Translation      Yes
+    Hyper-V - Virtualization Enabled in Firmware    Yes
+    Hyper-V - Data Execution Protection             Yes
+
+All four hardware prerequisites report **Yes**, so the VMX this VMM
+advertises is being seen and accepted as sufficient. And
+virtualization-based security is **not enabled** - so no Hyper-V starts,
+and there is nothing to nest. Confirmed on our side the same run:
+`guest_vmxon_count` zero on every processor, `l2_entries` zero,
+`vmcs12_controls_captured` zero.
+
+**Secure Boot reads Unsupported**, and that is a standard prerequisite for
+virtualization-based security. Chainloading the boot manager from our own
+loader is what removes it: nothing in the chain is signed, so the firmware
+cannot report a secure boot state to the operating system.
+
+Which reframes every capability-set measurement taken so far. The
+bisection was measuring a **second-order** effect: widening the advertised
+set once pushed Windows over the line into enabling the feature - that is
+the run with seventeen L2 entries - but in the shipped configuration the
+feature never arms, so nothing reads the capability MSRs in earnest. Two
+consequences:
+
+- "Hyper-V declines our capability set" was never established. It does not
+  get as far as deciding.
+- The run that engaged is still the only evidence about what a real guest
+  hypervisor needs, and it remains valid.
+
+What would make it startable, in order of cost:
+
+1. **Let the feature arm without demanding platform security.** The policy
+   that gates it on Secure Boot is a guest-side setting; with it relaxed
+   the feature can enable on a machine whose firmware cannot attest. This
+   is a change inside the guest, not here.
+2. Make the chain attestable, which means signing the loader and giving
+   the firmware a secure boot configuration. Much larger, and it would
+   have to be maintained.
+
+Until one of those, a nested Hyper-V cannot be reached on this rig
+whatever this VMM advertises, and no amount of capability work will change
+it. That is worth stating plainly because a great deal of effort went into
+the capability set on the assumption that it was the gate.
+
+### What a smaller bare-metal reference advertises, beside us
+
+Compared bit by bit against an implementation of comparable size that
+carries a Windows guest with a nested hypervisor. Differences that matter,
+with ours first:
+
+- **The TPR shadow.** It does not advertise primary bit 21 at all, and
+  offers CR8-load and CR8-store exiting instead. That is what the
+  withdrawal above rests on, and it is the difference that fixed the
+  application-processor stall.
+- **IA32_VMX_BASIC bit 54.** It reports instruction information for INS and
+  OUTS; we clear it because nothing here supplies it. Ours is the honest
+  answer and should stay, but the difference is worth knowing if a guest
+  hypervisor ever keys on it.
+- **Entry control, load IA32_PERF_GLOBAL_CTRL.** It advertises this; we do
+  not. The measured capture shows the guest hypervisor does not set it, so
+  it is not required.
+- **Extended page table capabilities.** It hides 2 MB and 1 GB leaves as
+  well as accessed and dirty flags. We advertise the large-page bits
+  because the shadow builder reads them, which is defensible - but it is
+  the more generous answer of the two.
+- **IA32_FEATURE_CONTROL.** It *constructs* the value as lock plus
+  VMX-outside-SMX; we pass the hardware register through. Passing through
+  is wider: it carries whatever else the platform set, including the inside
+  SMX bit and any SGX bits.
+- **CPUID.** It masks safer mode extensions and hides MONITOR and MWAIT.
+  We deliberately leave MONITOR and MWAIT as hardware reports them, for
+  the reason recorded where those controls are declared - concealing them
+  produced a bugcheck. Worth not "fixing" by imitation.
+- **TSC scaling.** It advertises the secondary control; we do not.
