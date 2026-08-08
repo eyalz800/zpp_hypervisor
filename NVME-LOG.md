@@ -625,3 +625,43 @@ that header.
 executed only against the model. That is the single largest gap and it
 should be closed under QEMU - which models NVMe fully - before anything
 is attempted on hardware.
+
+## Measured: the queue identifier, and why a higher one is not the answer
+
+The ordering hazard written down above stopped being theoretical. Both
+halves of it were run on the rig, with `rebuild_channel_after_reset` on and
+the guest's `CC` writes emulated rather than stepped.
+
+| Channel's I/O queue identifier | Create I/O SQ/CQ result | Guest |
+|---|---|---|
+| 4 | accepted, status 0 | boot loop, `INACCESSIBLE_BOOT_DEVICE` |
+| 32 | refused, status `0x4101` | boots to the login screen |
+
+`0x4101` decodes as DNR set, status code type 1 (command specific) and
+status code 01h, which is **Invalid Queue Identifier** - the answer Figures
+156 and 160 give for an identifier that exceeds the Number of Queues
+allocation. There is no allocation at that moment: the rebuild runs at the
+`CC.EN` edge, before the guest's own Set Features, and 5.2.30.1.5 says the
+allocation is cleared by a controller level reset and established by the
+first Set Features completed after it.
+
+So the two outcomes are the two failure modes of the same defect, and
+neither is a channel:
+
+- An identifier the guest will want is accepted by this controller even
+  with no allocation in force, and then collides. The guest's own create
+  for that identifier is refused, its storage initialisation fails, and it
+  bugchecks and resets - which re-enters the rebuild, which recreates the
+  queue, which is why it never converges.
+- An identifier the guest will not want is out of range and refused, so
+  there is no private queue at all. The guest boots precisely because
+  nothing was created behind its back.
+
+The second run is the useful control: it isolates queue creation as the
+thing that breaks the guest, since everything else about the borrow ran
+identically and the admin queue still came back byte for byte.
+
+What this rules out: raising the identifier, on its own, in any form. What
+it leaves is the sequence this file already prescribes - reserve by
+patching the guest's Set Features completion, and create ours only after
+the guest has created its own.

@@ -1421,7 +1421,20 @@ void hypervisor::rebuild_channel_queue()
         // the doorbell in the gap takes the ordinary trapped write and
         // proceeds, and whatever it submitted is part of the queue state
         // the borrow reads when it starts.
-        if (!wait_for_ept_acknowledgement(std::uint64_t{1} << 24)) {
+        // Passively. The default sends a wake NMI to a processor that has
+        // not answered, and the rule on the declaration is that no caller
+        // a processor might be spinning inside may do that: such a
+        // processor is in root mode, NMI exiting governs non-root
+        // operation only, so the NMI arrives at the host IDT where
+        // on_host_exception finds no recovery point and halts it for
+        // ever. That took the development machine off the network once.
+        //
+        // This path was relying on nobody being in that position yet -
+        // the application processors are still unlaunched during the
+        // guest's storage initialisation - which is a property of when it
+        // happens rather than of what it does, and is not the rule. The
+        // excursion path next door already passes false.
+        if (!wait_for_ept_acknowledgement(std::uint64_t{1} << 24, false)) {
             this->channel_rebuild_result = 0xf7;
             return;
         }
