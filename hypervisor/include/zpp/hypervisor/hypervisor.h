@@ -3559,23 +3559,19 @@ private:
      */
 
     /**
-     * Where the merged bitmaps are, and what they were merged from.
+     * Where the merged bitmaps are, by physical address, since that is
+     * what the VMCS fields hold.
      *
-     * The addresses are the guest hypervisor's own bitmap pointers as they
-     * were when the merge was done. A merge costs three page reads out of
-     * guest memory, which is not something to pay on every VM entry when a
-     * guest hypervisor changes its bitmaps approximately never - so it is
-     * paid when the pointer moves, and `intercept_msr` and
-     * `intercept_io_port` are the only things on this side that can
-     * invalidate it. Neither is called after launch.
+     * There is deliberately nothing here caching what they were merged
+     * from. Caching on the guest hypervisor's bitmap *addresses* was
+     * written first and is wrong: the contents live in guest memory it
+     * writes directly, with no VMWRITE and no exit, so the address is
+     * unchanged exactly when a hypervisor adds or drops an intercept. See
+     * `merge_nested_bitmaps`.
      * @{
      */
     std::uint64_t nested_msr_bitmap_physical[max_cpus]{};
     std::uint64_t nested_io_bitmap_physical[max_cpus]{};
-    std::uint64_t nested_msr_bitmap_source[max_cpus]{};
-    std::uint64_t nested_io_bitmap_a_source[max_cpus]{};
-    std::uint64_t nested_io_bitmap_b_source[max_cpus]{};
-    bool nested_bitmaps_merged[max_cpus]{};
     /**
      * @}
      */

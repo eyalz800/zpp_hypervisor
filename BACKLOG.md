@@ -1838,6 +1838,34 @@ what reading can establish, and it cannot establish that any of it works.
 "Not run anywhere" above still says exactly what it said, and it is now the
 only thing between this and an answer.
 
+### The switch-on build overwrites the switch-off binary, and the check caught it
+
+A `-DZPP_NESTED_VMX=ON` build in a second build directory still writes
+`out/release/x86_64/zpp_hypervisor`, because the output directory follows
+`CMAKE_BUILD_TYPE` and not the build directory. Building the switch-on
+release and then `cmake --build --preset release` leaves the switch-*on*
+binary in place: the plain preset's own outputs are up to date by its own
+stamps, so it does not relink.
+
+Which means every measurement of the switch-off binary taken after a
+switch-on build is a measurement of the wrong file, and the recorded
+baseline would have been a hash of the switch-on release.
+
+`check-nested-absent.sh` caught it, on the string check rather than the
+hash - eight strings only nested code emits, in a binary compiled with
+`ZPP_NESTED_VMX=0`. That is worth recording as evidence the check has
+teeth, because its own header says the string check is the one that proves
+the *code* is gone rather than merely unreachable, and this is the first
+time it has had something to find.
+
+The procedure that avoids it: delete `out/<config>/x86_64/zpp_hypervisor`
+before rebuilding the plain preset, so ninja has a missing output to
+relink. Rejected: giving the nested build directories an output directory
+of their own, which is a change to the build system for the sake of an
+ad-hoc developer workflow, and which would also stop the smoke scripts -
+they read `out/<config>` by name - from being pointed at a switch-on build
+at all.
+
 ### The host stack was a quarter of what one shadow build needs
 
 Found by reading the exit path top to bottom before trying to run any of

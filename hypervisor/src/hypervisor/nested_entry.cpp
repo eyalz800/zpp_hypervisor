@@ -610,12 +610,26 @@ hypervisor::merge_nested_bitmaps(std::size_t cpu)
     auto io_a_source = shadow.read(field::io_bitmap_a);
     auto io_b_source = shadow.read(field::io_bitmap_b);
 
-    if (this->nested_bitmaps_merged[cpu] &&
-        (msr_source == this->nested_msr_bitmap_source[cpu]) &&
-        (io_a_source == this->nested_io_bitmap_a_source[cpu]) &&
-        (io_b_source == this->nested_io_bitmap_b_source[cpu])) {
-        return {};
-    }
+    // Every VM entry, with no cache on the bitmap addresses.
+    //
+    // A cache on the addresses was written first and is wrong, which is
+    // worth recording because it looks obviously right: the addresses are
+    // VMCS fields and a guest hypervisor changes them rarely, so caching
+    // on them seems free. But the *contents* live in guest memory the
+    // guest hypervisor writes directly, with no VMWRITE and no exit - a
+    // hypervisor that stops intercepting an MSR clears a bit in the page
+    // it already named. Cached on the address, this VMM would have gone on
+    // trapping what the guest hypervisor stopped asking for and, worse,
+    // gone on *not* trapping what it started asking for. KVM re-merges on
+    // every entry too, in `nested_vmx_prepare_msr_bitmap`.
+    //
+    // What it costs is one guest page read per area the guest hypervisor
+    // actually uses, per entry - four kilobytes for a hypervisor that uses
+    // MSR bitmaps and no I/O bitmaps, which is the usual shape. Caching it
+    // correctly needs a way to notice a write to those pages, and this VMM
+    // has one: `watch_guest_page_writes`. That is the optimisation, and
+    // the measurement that would justify it is the entry rate of a real
+    // guest hypervisor, which nothing has yet run.
 
     // The guest hypervisor's page is read straight into the destination
     // and this VMM's own is then or'd on top, rather than the other way
@@ -625,10 +639,9 @@ hypervisor::merge_nested_bitmaps(std::size_t cpu)
     // per-processor scratch member would cost what it saves.
     //
     // Reading into the destination means a failed read leaves a
-    // half-merged bitmap behind. That is why nested_bitmaps_merged is set
-    // only at the end: a failure refuses the VM entry and the next attempt
-    // starts the merge again, so the half-merged state is never entered
-    // with.
+    // half-merged bitmap behind. Harmless, because a failure refuses the
+    // VM entry and the next attempt merges again from scratch - so the
+    // half-merged state is never entered with.
     //
     // The merge itself is the union. A bit set on either side is an exit,
     // which is what makes it safe: every exit that happens is one of the
@@ -693,11 +706,6 @@ hypervisor::merge_nested_bitmaps(std::size_t cpu)
     this->nested_io_bitmap_physical[cpu] =
         this->host_page_table.virtual_to_physical(
             this->nested_io_bitmap[cpu]);
-
-    this->nested_msr_bitmap_source[cpu] = msr_source;
-    this->nested_io_bitmap_a_source[cpu] = io_a_source;
-    this->nested_io_bitmap_b_source[cpu] = io_b_source;
-    this->nested_bitmaps_merged[cpu] = true;
 
     return {};
 }
@@ -1359,20 +1367,36 @@ bool hypervisor::l1_wants_l2_exit(std::size_t cpu,
         switch (access) {
         case access_move_to:
             switch (number) {
-            case 0: {
+            case 0:
+            case 4: {
                 // A write exits to the guest hypervisor only if it changes
-                // a bit the guest hypervisor masked. The value written is
-                // in the named register, which is L2's - and L2's
-                // registers are the captured context, not the VMCS. That
-                // is more than this decision needs: the mask being zero
-                // is already the common case, and a spurious reflection is
-                // harmless where a missed one is not.
-                return 0 != cr0_mask;
+                // a bit the guest hypervisor owns, which is what SDM
+                // 26.1.3 makes the guest/host mask mean - so the decision
+                // needs the value being written, not just the mask.
+                //
+                // Comparing rather than testing the mask matters here, and
+                // for CR4 specifically. This VMM masks VMXE for itself, so
+                // *every* CR4 write by a second-level guest exits whether
+                // or not the guest hypervisor asked. Reflecting all of
+                // them because its mask happens to be non-empty would hand
+                // it exits for bits it does not own, and a hypervisor that
+                // trusts the architecture will act on the ones it sees.
+                //
+                // The register the value is in is named by bits 11:8, and
+                // it is a *second-level* register - so it is in the
+                // captured context, not in the VMCS. guest_register knows
+                // that RSP is the exception.
+                auto gpr = (qualification >> 8) & 0xf;
+                auto written = guest_register(context, gpr);
+
+                auto mask = (0 == number) ? cr0_mask : cr4_mask;
+                auto current =
+                    (0 == number) ? vmcs.guest_cr0() : vmcs.guest_cr4();
+
+                return 0 != ((written ^ current) & mask);
             }
             case 3:
                 return primary_set(primary_cr3_load_exiting);
-            case 4:
-                return 0 != cr4_mask;
             case 8:
                 return primary_set(primary_cr8_load_exiting);
             default:
