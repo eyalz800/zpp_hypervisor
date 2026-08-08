@@ -10,6 +10,7 @@
 #include "zpp/arch/x86_64/page_table.h"
 #include "zpp/arch/x86_64/vmx/ept.h"
 #include "zpp/arch/x86_64/vmx/msr.h"
+#include "zpp/arch/x86_64/vmx/nested_ept.h"
 #include "zpp/arch/x86_64/vmx/vmcs.h"
 #include "zpp/arch/x86_64/vmx/vmcs12.h"
 #include "zpp/arch/x86_64/vmx/vmx.h"
@@ -141,6 +142,19 @@ public:
          * platform at.
          */
         no_waking_vector = 19,
+
+        /**
+         * A shadow extended page table could not be finished within the
+         * per-processor pool.
+         *
+         * A refused VM entry rather than a partial table, which is the one
+         * place eager construction is stricter than filling on demand: a
+         * lazily filled shadow can be discarded and rebuilt at will, an
+         * eagerly built one that ran out has no partial state worth
+         * entering with. BACKLOG.md records the pool size as a tuning
+         * parameter and this as its defined consequence.
+         */
+        out_of_shadow_ept_tables = 20,
     };
 
     /**
@@ -1456,6 +1470,104 @@ private:
      * capability MSRs needed the read halves too.
      */
     void intercept_msr(std::uint32_t index, bool read, bool write);
+
+    /**
+     * The shadow extended page table for a guest hypervisor's EPT pointer,
+     * built if it is not already current.
+     *
+     * Eager: the whole table is constructed by descending the guest
+     * hypervisor's own tables and composing every mapping it finds with
+     * ours. BACKLOG.md records why that was chosen over filling entries as
+     * faults arrive - it removes fault-time composition and the
+     * widen-without-invalidate case of SDM 31.4.3.4 entirely, both of
+     * which fail as a hang rather than as a bug.
+     *
+     * Rebuilt when the guest hypervisor points elsewhere, and when this
+     * VMM's own tables have changed under it.
+     */
+    std::expected<std::uint64_t, zpp::error>
+    shadow_ept_pointer_for(std::size_t cpu, std::uint64_t eptp12);
+
+    /**
+     * Builds the shadow from scratch. Fails only where the pool runs out
+     * or the guest hypervisor's root cannot be read.
+     */
+    std::expected<void, zpp::error> build_shadow_ept(std::size_t cpu,
+                                                     std::uint64_t eptp12);
+
+    /**
+     * Forces the next entry to rebuild. Called where something has changed
+     * that the shadow was composed from - a guest hypervisor's INVEPT, or
+     * a change to this VMM's own tables.
+     */
+    void discard_shadow_ept(std::size_t cpu);
+
+    /**
+     * This VMM's own translation for a host physical address, in the shape
+     * `compose_ept` takes.
+     *
+     * Indexed rather than walked, which initialize_ept's complete identity
+     * map is what makes possible - the same reasoning epte_for gives for
+     * doing it that way.
+     */
+    arch::x86_64::vmx::ept_walk_result
+    host_ept_lookup(std::uint64_t physical_address);
+
+    /**
+     * The processor's physical-address width, cached.
+     *
+     * SDM 31.3.3.1 makes it the boundary for an entry's reserved address
+     * bits, so the walker needs it per entry - hence the cache rather than
+     * a CPUID each time.
+     */
+    std::uint64_t physical_address_bits();
+
+    /**
+     * Whether execute-only translations are offered to a guest hypervisor,
+     * which is IA32_VMX_EPT_VPID_CAP bit 0 (SDM A.10).
+     *
+     * Not offered. It is the one capability that changes what
+     * `ept_permissions::normalised` may leave in an entry, so reporting it
+     * without honouring it - or honouring it without reporting it - would
+     * put the composition and the capability MSR at odds. Clear on both
+     * sides is the pairing that cannot drift.
+     */
+    static constexpr bool execute_only_translations_offered = false;
+
+    /**
+     * One paging-structure page out of this processor's shadow pool,
+     * zeroed.
+     */
+    std::expected<arch::x86_64::vmx::epte *, zpp::error>
+    shadow_ept_table(std::size_t cpu);
+
+    /**
+     * The shadow entry that maps a second-level guest-physical address at
+     * a given page size, creating the tables above it as needed.
+     */
+    std::expected<arch::x86_64::vmx::epte *, zpp::error>
+    shadow_ept_entry(std::size_t cpu,
+                     std::uint64_t guest_physical,
+                     std::uint64_t shift);
+
+    /**
+     * Composes one mapping and writes it into the shadow, splitting to 4
+     * KB where the composition does not hold across the whole region.
+     * @{
+     */
+    std::expected<void, zpp::error>
+    install_shadow_leaf(std::size_t cpu,
+                        std::uint64_t guest_physical,
+                        const arch::x86_64::vmx::ept_walk_result & guest,
+                        std::uint64_t shift);
+
+    std::expected<void, zpp::error>
+    install_shadow_split(std::size_t cpu,
+                         std::uint64_t guest_physical,
+                         const arch::x86_64::vmx::ept_walk_result & guest);
+    /**
+     * @}
+     */
 
     /**
      * The three ways a VMX instruction reports its outcome in RFLAGS, from
@@ -2941,6 +3053,104 @@ private:
     alignas(page_size) arch::x86_64::vmx::vmx_vmcs vmx_vmcs[max_cpus];
 
     /**
+     * How many paging-structure pages each processor's shadow extended
+     * page table may use.
+     *
+     * Ninety six is one page-directory-pointer table plus ninety five page
+     * directories, and at 2 MB leaves a page directory covers a gigabyte -
+     * so this is 95 GB of second-level guest-physical space per processor
+     * before a single split. Splits to 4 KB spend one more each.
+     *
+     * The shadow is built eagerly, so this is a hard cap with a defined
+     * consequence rather than a hint: a build that cannot finish refuses
+     * the guest hypervisor's VM entry instead of entering with a table
+     * that is quietly incomplete. BACKLOG.md records why eager
+     * construction makes that the right failure - a lazy shadow can
+     * discard and rebuild on demand, an eager one that ran out has no
+     * partial state worth entering with.
+     *
+     * Per processor rather than shared, which costs the duplication and
+     * buys the absence of any lock on the build path.
+     *
+     * Sized to one page when the switch is off, so a build that cannot run
+     * nested VMX does not reserve twelve megabytes for it. It cannot be
+     * removed altogether: the nested code is compiled in both
+     * configurations - which is what type-checks it - so the members have
+     * to exist for it to name. One page rather than zero because a
+     * zero-length array is not a thing, and the cap is checked against
+     * this same constant, so the off build simply refuses on its first
+     * table. That path is unreachable there, since nothing calls it.
+     */
+    static constexpr std::size_t shadow_ept_tables_per_cpu =
+        nested_vmx::enabled ? 96 : 1;
+
+    /**
+     * The shadow extended page tables, one set per processor.
+     *
+     * The root is separate from the pool because it is never recycled: a
+     * rebuild zeroes it and hands the pool back, and the pointer written
+     * into the VMCS stays the same. That keeps the EPT pointer stable
+     * across rebuilds, which matters because SDM 31.4.2 associates cached
+     * mappings with bits 51:12 of the pointer - so a stable root plus a
+     * global invalidation is a complete story, where a moving root would
+     * leave the old one's mappings cached against an address that had been
+     * reused.
+     * @{
+     */
+    alignas(page_size) arch::x86_64::vmx::epte shadow_epml4[max_cpus][512];
+    alignas(page_size) arch::x86_64::vmx::epte
+        shadow_ept_tables[max_cpus][shadow_ept_tables_per_cpu][512];
+    /**
+     * @}
+     */
+
+    /**
+     * How much of each processor's pool is in use, and what its shadow was
+     * built from.
+     *
+     * `shadow_ept_source` holds bits 51:12 of the guest hypervisor's own
+     * EPT pointer, or zero for a shadow never built. Compared rather than
+     * the whole pointer, because SDM 31.4.2 defines the EPTRTA as bits
+     * 51:12 and associates mappings with it - so two pointers differing
+     * only in memory type or page-walk length describe the same tables and
+     * need no rebuild.
+     *
+     * `shadow_ept_generation_seen` is this VMM's own ept_generation when
+     * the shadow was built. Ours changing - a page watch armed, a region
+     * protected - invalidates every shadow composed over it, and comparing
+     * generations is how that is noticed without an interprocessor
+     * interrupt, exactly as the existing catch-up on the exit path does.
+     * @{
+     */
+    std::size_t shadow_ept_next_table[max_cpus]{};
+    std::uint64_t shadow_ept_source[max_cpus]{};
+    std::uint64_t shadow_ept_generation_seen[max_cpus]{};
+    std::uint64_t shadow_ept_pointer[max_cpus]{};
+    /**
+     * @}
+     */
+
+    /**
+     * What each processor's last shadow build covered and spent.
+     *
+     * The build cost is what decides whether eager construction stays -
+     * BACKLOG.md names it as the measurement that would justify moving to
+     * lazy fill - and it cannot be measured on a machine nobody can attach
+     * to unless it is recorded here.
+     * @{
+     */
+    std::uint64_t shadow_ept_regions_built[max_cpus]{};
+    std::uint64_t shadow_ept_splits[max_cpus]{};
+    /**
+     * @}
+     */
+
+    /**
+     * The processor's physical-address width, or zero before it is read.
+     */
+    std::uint64_t cached_physical_address_bits{};
+
+    /**
      * The MSR bitmap of the VM control structure.
      */
     alignas(page_size) std::uint8_t msr_bitmap[page_size]{};
@@ -3090,6 +3300,8 @@ inline const zpp::error_category & category(hypervisor::error)
                 return "No usable firmware ACPI control structure";
             case hypervisor::error::no_waking_vector:
                 return "No waking vector to resume through";
+            case hypervisor::error::out_of_shadow_ept_tables:
+                return "Out of shadow extended page table pages";
             }
         });
     return error_category;
