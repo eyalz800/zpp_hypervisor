@@ -202,21 +202,41 @@ them.
 it needs a guest that actually uses xAPIC to exercise the interesting
 path at all.
 
-### 7. S3/S4 leaves the machine unvirtualized — PARTLY FIXED
+### 7. S3/S4 leaves the machine unvirtualized — WRITTEN, NEVER RUN
 
-There is still no resume path, so a suspend takes the hypervisor away and
-the guest keeps running on bare hardware without being told. What has
-changed is that the entry side is no longer blind and no longer leaves a
-mess behind, and that the one fact a resume would rest on is now findable.
-The rest of this entry is the design, written down so the next attempt does
-not re-derive it.
+The resume path exists now. It has never executed a single instruction, on
+any machine or emulator, so the honest status is "written" and the switch
+that turns it on is off. What is real is that all three stages are code
+rather than design: the entry side quiesces, the vector is found and read,
+and the platform's resume can be pointed at this VMM's own trampoline.
 
 Read `hypervisor/include/zpp/hypervisor/power.h` first: it states what each
 of S3, S4 and S5 costs, with the citations.
 
-**Three switches, all off.** `power::quiesce_on_sleep`,
+**Three switches, all off, and now ordered.** `power::quiesce_on_sleep`,
 `power::observe_waking_vector`, `power::resume_from_waking_vector`. Each
-comment says what would turn it on.
+comment says what would turn it on, and two `static_assert`s in that header
+enforce the order — the resume requires the other two, because the resume
+re-arms a port that only the quiesce path keeps, and because a resume
+attempt with no log line saying what the guest's own vector was is one whose
+failure cannot be read afterwards.
+
+**The whole feature is debug-only, by accident of where the finder lives.**
+`uefi_loader/src/sleep_control.cpp` is wrapped in `#if ZPP_DIAG`, and
+`cmake/uefi-loader/CMakeLists.txt` hardcodes `ZPP_DIAG=0` for release. So in
+a release build the loader finds no PM1 control register, hands over port
+zero, `on_io_instruction` returns `false` on its first test, and every one of
+these switches is inert whatever it is set to. That is not wrong — the
+switches are unproven and the channel is the only way to read a result — but
+it is not stated anywhere else and it means "turn the switch on and ship it"
+is not a thing that can happen. Making it release-capable is a separate
+decision: it needs the finder out from behind `ZPP_DIAG`, and it needs a
+reason to trust the path without a channel to watch it on.
+
+The Windows and Linux loaders pass zeroes for all four sleep fields
+(`windows_loader/src/main.cpp:104`, `linux_loader/src/main.c:139`), so this
+is UEFI-only as well. That one is deliberate and cheap to change: both would
+need an ACPI table walk of their own.
 
 #### What each transition does now
 
@@ -241,57 +261,156 @@ comment says what would turn it on.
   power button - but do not credit it with more than that.
 - **The guest's own view** is unchanged in every case: it gets the sleep it
   asked for. On the quiesce path the write is performed rather than handed
-  back, which the guest cannot distinguish, and RIP advances past it.
+  back, and it is now performed *at the width the guest's own instruction
+  used* rather than at the register's width from the fixed table. That was
+  the wrong way round: `OUT`'s source is architecturally AL, AX or EAX and
+  the exit qualification says which (SDM Table 30-5, bits 2:0), so the guest's
+  size is the one that reproduces the instruction. The table's width is now
+  only the fallback for the encodings Table 30-5 leaves undefined. The
+  rejected version was wrong in the direction that *writes bits the guest did
+  not*: a two-byte guest access issued as four puts zeroes into bits 31:16 of
+  whatever the platform decoded there.
 
-#### What a resume path has to do, in order
+#### What the resume path does, in order
 
-Three things make this smaller than it looks.
+Three things made this smaller than it looked, and all three were verified
+against EDK2's own sources in `build/*/_deps/edk2-src` rather than recalled.
 
 1. **The trampoline already exists.** `arch/x86_64/ap_start_up.S` climbs
    real mode to long mode on the host page table, parameterised by an
    `ap_start_up_area`. The ACPI real-mode waking protocol and a SIPI
    produce the *same* entry state: EDK2's `AsmTransferControl`
    (`MdeModulePkg/Universal/Acpi/BootScriptExecutorDxe/X64/S3Asm.nasm`)
-   clears CR0.PE, CR4.PAE and EFER.LME and then far-jumps to
+   clears CR0.PE, CR0.PG, CR4.PAE and EFER.LME and then far-jumps to
    `(vector >> 4):(vector & 0xf)`, while a SIPI enters at `CS = page << 8,
    IP = 0` - and for a page-aligned vector those are the same address.
-   So the blob is reusable verbatim, with `entry` rewritten at sleep time
-   and put back to `zpp_ap_start_up_main` on the way out. No second copy
-   and no new assembly.
+   Confirmed instruction by instruction: `shrd ebx, ecx, 20` followed by
+   `and ecx, 0xf` and `mov bx, cx` leaves bits 31:16 of `EBX` holding bits
+   19:4 of the vector and bits 15:0 holding its low nibble, and those four
+   bytes are stored over the operands of a `jmp far ptr16:16` - offset first,
+   segment second. So the blob is reused with only `entry` rewritten. No
+   second copy and no new assembly, as predicted.
+
+   Two things the prediction missed, both now handled:
+
+   - **The vector need not be page aligned.** `apply_start_up` takes a
+     *start-up IPI vector*, which is a page number, so it can only ever begin
+     a guest at a page boundary - and the ACPI protocol puts the low four bits
+     in IP. `apply_waking_vector` applies the firmware's own decoding
+     afterwards as a correction, which for an aligned vector writes exactly
+     what `apply_start_up` already wrote and is therefore self-checking. The
+     vector is also refused above one megabyte, because a sixteen-bit segment
+     cannot name anything higher and the firmware would truncate rather than
+     refuse.
+   - **The blob is not idempotent.** It relocates its GDT pointer and three
+     far pointers by adding the page's base to them *in place*, which is
+     correct exactly once. `start_application_processor` already restores
+     `assembly_owned` before every start for this reason; the arm does the
+     same, or a resume running on a blob some processor had already climbed
+     would fault on its first far jump, before it has an IDT, and reset the
+     machine - indistinguishable from firmware that never reached the vector.
 2. **Memory is already right.** S3 preserves it, and everything this VMM
    keeps describes physical memory that has not moved: host page table,
    host GDT and IDT, EPT, the module. So `initialize_os_page_table`,
    `initialize_host_page_table`, `initialize_host_gdt`,
    `initialize_host_idt`, `initialize_ept` and `protect_module` must **not**
    run again.
+
+   That is done by one local in `main`: `first_launch = (0 == cpuid) &&
+   !resuming_from_sleep`, replacing the three `if (0 == cpuid)` guards.
+   `initialize_start_up_memory` is inside it too, and for a sharper reason
+   than the rest - it rewrites the very page the resuming processor is coming
+   back through.
+
+   What *does* re-run is everything per-processor, and that is exactly what
+   the power transition destroyed: `initialize_vmx` (which re-stamps both
+   regions' revision identifiers), `enter_root_mode` (which calls
+   `enable_vmx_in_feature_control`, since IA32_FEATURE_CONTROL is zero again
+   after a reset - SDM 26.7 - then VMXON, VMCLEAR, VMPTRLD), and `setup_vmcs`.
+   No new copy of any of that: the resume goes through `launch_on_cpu` and
+   `main` like any other processor, which it has to, because the exit handler
+   is a lambda inside `main`'s `vm_launch` call and cannot be reached from
+   anywhere else.
 3. **The application processors need nothing.** The guest sends
    INIT-SIPI-SIPI again during its own resume, and the existing adoption
    path handles that. What does need doing is rewinding the per-processor
-   bookkeeping - `processor_virtualized`, `started_by_trampoline`,
-   `start_up_launched`, `next_virtual_processor`, the stack index - or the
-   slots leak and `max_cpus` is reached after a few suspends.
+   bookkeeping, and the list is longer than the four originally named -
+   `rewind_for_resume` has it. The two that would have been silent bugs:
+
+   - `started_by_start_up_ipi[]`. `apply_start_up` returns early for a
+     processor whose entry is already set, and every application processor's
+     is, from before the suspend. Left set, the guest's re-sent SIPI is
+     refused and the early return is indistinguishable from a processor that
+     never started.
+   - `start_up_launched[]`. `wait_for_ept_acknowledgement` waits on every
+     processor it finds marked launched and probes silent ones with an NMI.
+     Left set, the first EPT change after a resume spends the full budget
+     per processor waiting on processors the platform has reset.
 
 The order, then:
 
-- **On the way down**, after the quiesce and before the OUT: read
-  `FirmwareWakingVector`, save it in `guest_waking_vector`, **zero
-  `XFirmwareWakingVector`**, and write the trampoline page's physical
-  address into `FirmwareWakingVector`. Zeroing the extended field is what
-  forces the real-mode protocol: EDK2's `S3Resume.c` uses the 16-bit vector
-  only when `XFirmwareWakingVector == 0`, and takes a protected- or
-  long-mode path otherwise. Then WBINVD, then the OUT.
-- **On the way up**, in the resume entry the trampoline reaches: rewind the
-  bookkeeping, `enable_vmx_in_feature_control()` (IA32_FEATURE_CONTROL is
-  zero again - SDM 26.7), VMXON, **zero the VMCS region and re-stamp the
-  revision identifier** before VMCLEAR and VMPTRLD, re-run `setup_vmcs`,
-  then `apply_start_up` at `guest_waking_vector` to build a real-mode guest
-  there, restore the trampoline's `entry`, and VMLAUNCH.
+- **On the way down** (`arm_resume_from_sleep`), after the channel flush and
+  before the quiesce: re-read and re-check the FACS, save
+  `FirmwareWakingVector` in `guest_waking_vector` and
+  `XFirmwareWakingVector` beside it, restore the trampoline's
+  `assembly_owned`, point `entry` at `zpp_resume_from_sleep_main`, and write
+  the trampoline page's address into `FirmwareWakingVector` with
+  `XFirmwareWakingVector` **zeroed**. Zeroing the extended field is what
+  forces the real-mode protocol: EDK2's `S3Resume.c:519` takes the sixteen-bit
+  vector only when `XFirmwareWakingVector == 0` and a protected- or long-mode
+  path otherwise. Both fields go out in one `write_guest_physical`, with the
+  global lock and flags between them read back and written unchanged - those
+  belong to the guest and the firmware. Then the quiesce's WBINVD, then the
+  OUT. A refusal at any point leaves the table untouched and the machine
+  resumes unvirtualized, which is what it did before.
+- **On the way up** (`zpp_resume_from_sleep_main`): force every surviving lock
+  open, disarm (trampoline `entry` back to `zpp_ap_start_up_main`, FACS back
+  to the guest's own two vectors), rewind the bookkeeping, then capture a
+  context and `launch_on_cpu` into `main` exactly as an application processor
+  does.
 
 The VMCS is rebuilt rather than reused **on purpose**. Only the quiescing
 processor's region was VMCLEARed before the power went; every other one was
 active on a processor that left VMX operation, which is the case SDM 27.11.1
-says may corrupt it. Rebuilding is no harder than reusing and is correct
-whatever state the guest left its processors in.
+says may corrupt it. `enter_root_mode`'s VMCLEAR is the architectural repair
+for that - SDM 27.11.1: "the VMCLEAR instruction initializes any
+implementation-specific information in the VMCS region referenced by its
+operand" - so no explicit zeroing of the region is needed, and the earlier
+plan's "zero the VMCS region" step was dropped as redundant rather than
+implemented.
+
+#### Locks survive S3, and forcing them open is the only way out
+
+Not in the original design and the largest thing missed by it. A spin lock is
+a byte in memory; S3 preserves memory; and every one of these is taken inside
+a VM exit, so the write that slept the machine can land while *another*
+processor holds one. That processor no longer exists, nothing will ever
+release what it held, and the first use after the resume waits for ever - a
+resume that never arrives, which from outside is a dead machine.
+
+Four of them, found by grepping for the type rather than by reasoning about
+which mattered:
+
+- `hypervisor::mapping_window_lock` - held across every guest memory access
+  and across the whole of `rebuild_channel_queue`.
+- `hypervisor::start_up_lock` - held across a processor's entire launch.
+- `log_storage::m_lock` - held across a `push_back`, which allocates, so a
+  transition caught there leaves this **and** the heap's held.
+- `zpp::heap::m_lock` - any allocation at all.
+
+Each now has an `abandon_lock` (or `pump::abandon_gates`) with the reason on
+it, called as the first thing the resume does. The heap's carries a residual
+risk stated rather than glossed: the power can land *inside* `split_block` or
+`coalesce`, leaving the free list half updated, and there is no better answer
+- re-running `init` would orphan every live allocation including the log's
+nodes. A window of a few instructions is accepted against a hang that is
+certain.
+
+The diagnostic channel's `diag::gate` is the same shape with a different
+failure: it never spins, so a held gate does not hang - it makes the channel
+permanently silent, on the one path whose entire job is to report whether this
+worked. A resume that worked and a resume that hung would look identical.
+`pump::abandon_gates` releases them all.
 
 #### What was rejected, so it is not re-proposed
 
@@ -313,39 +432,84 @@ whatever state the guest left its processors in.
 - **Serving the extended waking vector.** It is entered in long mode
   through a different protocol. Zeroing it and serving the real-mode one
   reuses machinery that already works.
+- **Zeroing the VMCS region before VMCLEAR on the way up.** Planned, then
+  dropped as redundant: SDM 27.11.1 says VMCLEAR "initializes any
+  implementation-specific information in the VMCS region referenced by its
+  operand", which is the whole of what a possibly-corrupted region needs.
+  `initialize_vmx` re-stamps the revision identifier on both regions anyway.
+- **A second resume entry point that does not go through `main`.** Considered
+  first and abandoned: the exit handler is a lambda passed to `vm_launch` from
+  inside `main`, so anything that ends up running the guest has to come
+  through `main` or duplicate four hundred lines of exit handling. The resume
+  therefore uses `launch_on_cpu` like every other processor, and the
+  once-per-boot work is skipped by one local rather than by a parallel path.
+- **Rewinding `resuming_from_sleep` after the resuming processor launches.**
+  There is nowhere to do it - `main` does not return - so the flag stays set
+  for the rest of the boot. That is harmless for `first_launch`, which also
+  tests `0 == cpuid`, but it is *not* harmless for `apply_waking_vector`:
+  every application processor the guest starts after a resume comes through
+  the same branch, and without the slot test each would be entered at the boot
+  processor's waking vector instead of its own. The test is the fix; the flag
+  is deliberately not cleared.
+- **Re-initialising the heap on resume** to recover from a lock left held
+  mid-update. It would reset the free list and orphan every live allocation,
+  the log's nodes among them. See the note on `abandon_lock`.
 
-#### The experiments, cheapest first
+#### The experiments, in order, none of them run yet
 
 Each needs `-DZPP_DIAG=ON` so the channel carries the result off the
-machine, and each is one variable.
+machine - and note that without it the loader finds no register at all, so
+this is a requirement rather than a convenience. Each is one variable, and
+the `static_assert`s in `power.h` enforce the order for the last one.
 
-1. **Is the FACS there, and does the guest leave a vector in it?** Turn on
-   `observe_waking_vector` only. Suspend the guest, resume it (the machine
-   comes back unvirtualized, as today), read the channel. Wanted: a
-   non-zero "guest waking vector" and a zero extended one. A zero
-   `FirmwareWakingVector` with a non-zero extended one stops the whole
-   approach and the answer has to be found somewhere else.
-2. **Does the quiesce complete?** Add `quiesce_on_sleep`. Suspend and
-   resume. Wanted: `sleep_request.stage` reaching `write_issued`, and the
-   machine actually sleeping rather than hanging. `write_returned` or
-   `re_established` means the write did not sleep, which is also a useful
-   result.
-3. **Does the guest tolerate a suspend at all?** Independent of the two
-   above and worth doing first, because it is free: `system_powerdown` on
-   the QEMU monitor sends an ACPI power-button event, which is a real S5
-   request and needs nothing inside the guest. It exercises the recognition
-   and the flush without any resume. A `lid`- or timer-driven S3 needs the
-   guest to cooperate, so on Windows that is `powercfg /h off` plus a
-   deliberate sleep from the menu; on the TinyCore rig,
-   `echo mem > /sys/power/state`.
-4. **Does the resume path work?** Only after 1 and 2, and only with
-   someone at the machine, because the failure mode is a machine that looks
-   dead. Wanted: the channel showing the resume entry reached, then the
-   guest continuing.
+0. **Does the guest tolerate a suspend at all?** Free, and first because it
+   is: `system_powerdown` on the QEMU monitor is a genuine S5 ACPI
+   power-button request and needs nothing inside the guest. All three
+   switches off. Wanted in the channel: `sleep type N entered through port P`
+   with a plausible port, and the machine powering off. This exercises the
+   recognition, the decode and the flush and risks nothing, because the
+   pass-through path is what already boots.
+1. **Is the FACS there, and does the guest leave a vector in it?**
+   `observe_waking_vector` only. Suspend and resume; the machine comes back
+   unvirtualized, as today. Wanted: `guest waking vector V extended 0` with V
+   non-zero and below one megabyte. **A zero `FirmwareWakingVector` with a
+   non-zero extended one stops the whole approach** - the real-mode protocol
+   is the only one this serves - and the answer would have to be found
+   somewhere else entirely. A "facs declares N bytes, too short" line means
+   the loader's weaker check passed a table this refuses to write to.
+2. **Does the quiesce complete?** Add `quiesce_on_sleep`. Suspend and resume.
+   Wanted: `sleep_request.stage` reaching `write_issued` (5) and the machine
+   actually sleeping. `write_returned` (6) or `re_established` (7) means the
+   write did not sleep, which is also a useful result and not a failure.
+   A stage stuck at `channel_flushed` (2) means the flush did not return -
+   look at the NVMe drain, not at VMX.
+3. **Does the arm work without breaking the resume?** Add
+   `resume_from_waking_vector`. **Somebody has to be at the machine**: the
+   failure mode is a machine that looks like a dead motherboard, and the way
+   out is the power button. Wanted, in order, from `resume_request.stage`:
+   `armed` (1) in the channel on the way down, then on the way up `entered`
+   (2), `disarmed` (3), `rewound` (4), `launched` (5), then ordinary guest
+   exits resuming.
 
-Note that none of this can be exercised under emulation: Bochs has no
-VT-x, and QEMU's monitor can request S5 but the interesting path is S3 on
-real firmware.
+   How to read a failure between `armed` and `entered` - the gap where the
+   machine is dead and nothing of ours has run:
+
+   - `start_up_trampoline_stage()` on the next boot says whether the
+     trampoline ran at all and how far it got, because that byte is in the
+     trampoline page and survives. Zero means the firmware never reached our
+     vector, and the question is then the firmware's own S3 resume, not this
+     code.
+   - Anything non-zero and below 6 means it faulted on the climb, at the step
+     the value names, and the machine reset - which takes the evidence with
+     it, hence the stage byte.
+   - `resume_request.stage` still reading `armed` after a successful
+     unvirtualized resume means the firmware ignored the field. Check whether
+     it re-wrote `XFirmwareWakingVector` itself, which some do.
+
+Nothing here can be exercised under emulation. Bochs has no VT-x, and QEMU's
+monitor can request S5 but the interesting path is S3 on real firmware.
+Experiment 0 is the exception and is worth taking, precisely because it is
+the only one that is.
 
 ### 8. Debug and microcode state is unmanaged — HALF FIXED
 
