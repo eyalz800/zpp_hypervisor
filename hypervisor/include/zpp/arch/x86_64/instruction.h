@@ -35,12 +35,18 @@ namespace zpp::arch::x86_64
  * Keeping it pure is also what makes it testable at compile time, which is
  * how every operation below is checked.
  *
- * What is deliberately absent: anything that computes an address. The
- * faulting address is reported by the hardware in the VMCS, so the
- * addressing bytes are walked only to find where the instruction ends and
- * never interpreted. That is the one piece of a general emulator this does
- * not need, and leaving it out removes segmentation, the address-size
- * prefix and the whole of RIP-relative arithmetic from the surface.
+ * The addressing bytes were once walked only to find where the
+ * instruction ends, on the grounds that the hardware reports the faulting
+ * address. It does not always: an EPT violation reports a guest-linear
+ * address only when exit qualification bit 7 is set, and the
+ * guest-physical address beside it is page granular, so with that bit
+ * clear the exit says which page was touched and nothing about where in
+ * it. So the addressing is now interpreted as well as walked, and
+ * `effective_address` computes what the instruction named.
+ *
+ * Still deliberately absent: segmentation. A segment override is recorded
+ * and then refused, because FS and GS carry bases that are not page
+ * aligned and live in an MSR rather than in the instruction.
  */
 
 /**
@@ -126,6 +132,74 @@ enum class combine_with : std::uint8_t
 };
 
 /**
+ * Where an instruction's memory operand is, as the encoding names it.
+ *
+ * The pieces rather than the address, because the address needs the
+ * guest's RIP and the instruction's own length, and neither is a property
+ * of the ModRM byte. `effective_address` puts them together.
+ *
+ * This exists because the address the hardware reports is not always
+ * usable. An EPT violation reports a guest-linear address only when
+ * qualification bit 7 is set, and the guest-physical address it reports
+ * alongside is **page granular** - so when that bit is clear there is no
+ * offset within the page to be had from the exit at all. Measured: under
+ * a hypervisor that reflects EPT violations to this one, twenty-four
+ * consecutive accesses to the local APIC page arrived with bit 7 clear,
+ * and every one of them looked like a write to offset zero.
+ */
+struct memory_addressing
+{
+    /**
+     * Whether the fields below were filled in. Clear for an instruction
+     * whose operand is a register, and for one this decoder refused.
+     */
+    bool known{};
+
+    /**
+     * Whether a segment override prefix was present.
+     *
+     * Recorded and never applied. In 64-bit code FS and GS have bases
+     * that are not zero and not page aligned, so an override moves the
+     * offset within the page as well as the address - and the base lives
+     * in an MSR rather than in the instruction. A caller wanting the
+     * address must refuse rather than compute one that is quietly wrong.
+     */
+    bool segment_override{};
+
+    /**
+     * Whether the address is 64 bits wide. Clear in 32-bit code, and in
+     * 64-bit code carrying the 0x67 prefix, both of which truncate the
+     * whole computation rather than any one term of it.
+     */
+    bool wide{};
+
+    bool has_base{};
+    bool has_index{};
+
+    /**
+     * Whether the displacement is relative to the end of the instruction
+     * rather than absolute. No base and no index in that case.
+     */
+    bool rip_relative{};
+
+    /**
+     * Base and index in *encoding* order, so `register_of` maps them.
+     */
+    std::uint8_t base{};
+    std::uint8_t index{};
+
+    /**
+     * One, two, four or eight. Meaningless unless `has_index`.
+     */
+    std::uint8_t scale{1};
+
+    /**
+     * Already sign extended from whatever width the encoding carried.
+     */
+    std::int64_t displacement{};
+};
+
+/**
  * One decoded instruction, as much of it as carrying it out requires.
  */
 struct decoded_instruction
@@ -198,6 +272,12 @@ struct decoded_instruction
     /**
      * @}
      */
+
+    /**
+     * Where the memory operand is. See `memory_addressing` for why this
+     * is answered at all, given that the hardware reports an address.
+     */
+    memory_addressing where{};
 };
 
 namespace instruction_detail
@@ -344,6 +424,12 @@ struct prefixes
      */
     bool address_size{};
 
+    /**
+     * Whether any segment override was present. Recorded for the address
+     * computation only - see `memory_addressing::segment_override`.
+     */
+    bool segment_override{};
+
     std::uint8_t rex{};
 
     constexpr bool wide() const
@@ -356,6 +442,12 @@ struct prefixes
         return static_cast<std::uint8_t>((rex & 0x4) << 1);
     }
 };
+
+constexpr bool is_segment_override(std::uint8_t byte)
+{
+    return (0x2e == byte) || (0x36 == byte) || (0x3e == byte) ||
+           (0x26 == byte) || (0x64 == byte) || (0x65 == byte);
+}
 
 constexpr bool is_ignorable_prefix(std::uint8_t byte)
 {
@@ -392,6 +484,8 @@ constexpr prefixes read_prefixes(cursor & code, code_size size)
         }
 
         if (is_ignorable_prefix(byte)) {
+            found.segment_override =
+                found.segment_override || is_segment_override(byte);
             code.next();
             continue;
         }
@@ -417,11 +511,13 @@ constexpr prefixes read_prefixes(cursor & code, code_size size)
 }
 
 /**
- * The ModRM byte, and the addressing bytes after it stepped over.
+ * The ModRM byte, and the addressing bytes after it read out.
  *
- * Only `mod` and `reg` are interpreted. `rm` decides how many bytes of
- * addressing follow, which is all this needs it for - the address itself
- * comes from the VMCS.
+ * `mod` and `reg` say what the operation is; `rm` and what follows say
+ * where its memory operand is. The addressing used to be stepped over
+ * rather than interpreted, on the grounds that the hardware reports the
+ * address - it does not always, which is what `memory_addressing`
+ * records.
  */
 struct modrm
 {
@@ -429,13 +525,17 @@ struct modrm
     std::uint8_t reg{};
     std::uint8_t rm{};
 
+    memory_addressing where{};
+
     constexpr bool names_register() const
     {
         return 0x3 == mod;
     }
 };
 
-constexpr modrm read_modrm(cursor & code)
+constexpr modrm read_modrm(cursor & code,
+                           const prefixes & found_prefixes,
+                           code_size mode)
 {
     auto byte = code.next();
 
@@ -449,22 +549,66 @@ constexpr modrm read_modrm(cursor & code)
         return found;
     }
 
+    // REX.B extends the base and REX.X the index, each by eight. Both are
+    // zero outside 64-bit code, where `read_prefixes` never records a REX
+    // byte in the first place.
+    auto extend_base =
+        static_cast<std::uint8_t>((found_prefixes.rex & 0x1) << 3);
+    auto extend_index =
+        static_cast<std::uint8_t>((found_prefixes.rex & 0x2) << 2);
+
+    found.where.known = true;
+    found.where.segment_override = found_prefixes.segment_override;
+    found.where.wide =
+        (code_size::bits_64 == mode) && !found_prefixes.address_size;
+
+    // How wide the displacement is, decided before it is read, because
+    // the scale-index-base byte can add one where the mod field alone
+    // would say there is none.
+    std::uint8_t displacement_width{};
+    if (1 == found.mod) {
+        displacement_width = 1;
+    } else if (2 == found.mod) {
+        displacement_width = 4;
+    }
+
     if (0x4 == found.rm) {
         // A scale-index-base byte follows. Its base of five with mod zero
         // means a 32-bit displacement instead of a base register.
         auto sib = code.next();
+
+        auto index =
+            static_cast<std::uint8_t>(((sib >> 3) & 0x7) | extend_index);
+
+        // Encoding four with REX.X clear is the encoding for *no* index,
+        // not for RSP - there is no scaled RSP. With REX.X it is R12 and
+        // is an ordinary index.
+        found.where.has_index = (4 != index);
+        found.where.index = index;
+        found.where.scale = static_cast<std::uint8_t>(1u << (sib >> 6));
+
         if ((0 == found.mod) && (0x5 == (sib & 0x7))) {
-            code.skip(4);
+            displacement_width = 4;
+        } else {
+            found.where.has_base = true;
+            found.where.base =
+                static_cast<std::uint8_t>((sib & 0x7) | extend_base);
         }
     } else if ((0 == found.mod) && (0x5 == found.rm)) {
-        // RIP relative, which carries a 32-bit displacement.
-        code.skip(4);
+        // A 32-bit displacement with no base. In 64-bit code it is
+        // relative to the end of the instruction; in 32-bit code the same
+        // encoding is an absolute address.
+        displacement_width = 4;
+        found.where.rip_relative = (code_size::bits_64 == mode);
+    } else {
+        found.where.has_base = true;
+        found.where.base =
+            static_cast<std::uint8_t>(found.rm | extend_base);
     }
 
-    if (1 == found.mod) {
-        code.skip(1);
-    } else if (2 == found.mod) {
-        code.skip(4);
+    if (0 != displacement_width) {
+        found.where.displacement = static_cast<std::int64_t>(sign_extend(
+            code.next_immediate(displacement_width), displacement_width));
     }
 
     return found;
@@ -644,10 +788,16 @@ decode(std::span<const std::byte> code,
 
     auto operand_of = [&](std::uint8_t index,
                           std::uint8_t size) -> std::uint64_t {
-        return instruction_detail::truncate(registers.*register_of(index), size);
+        return instruction_detail::truncate(registers.*register_of(index),
+                                            size);
     };
 
     decoded_instruction result{};
+
+    // Declared out here rather than in each case, because every form that
+    // reaches the end has a memory operand and the address is stamped on
+    // the result once, below, instead of nine times.
+    instruction_detail::modrm fields{};
 
     if (!two_byte) {
         switch (opcode) {
@@ -659,7 +809,7 @@ decode(std::span<const std::byte> code,
         case 0xc7: {
             auto byte_form = (0x88 == opcode) || (0xc6 == opcode);
             auto size = instruction_detail::width_of(found, byte_form);
-            auto fields = instruction_detail::read_modrm(at);
+            fields = instruction_detail::read_modrm(at, found, mode);
 
             if (fields.names_register()) {
                 return {};
@@ -669,12 +819,13 @@ decode(std::span<const std::byte> code,
             result.size = size;
 
             if ((0x88 == opcode) || (0x89 == opcode)) {
-                if (instruction_detail::names_high_byte(size, found, fields.reg)) {
+                if (instruction_detail::names_high_byte(
+                        size, found, fields.reg)) {
                     return {};
                 }
 
-                auto index = static_cast<std::uint8_t>(
-                    fields.reg | found.extend_reg());
+                auto index = static_cast<std::uint8_t>(fields.reg |
+                                                       found.extend_reg());
 
                 if (instruction_detail::names_host_stack_pointer(index)) {
                     return {};
@@ -691,28 +842,32 @@ decode(std::span<const std::byte> code,
             // negative immediate stores what the instruction means rather
             // than its low half.
             result.operand = instruction_detail::truncate(
-                (8 == size) ? instruction_detail::sign_extend(value, 4) : value, size);
+                (8 == size) ? instruction_detail::sign_extend(value, 4)
+                            : value,
+                size);
             break;
         }
 
         // MOV from memory into a register.
         case 0x8a:
         case 0x8b: {
-            auto size = instruction_detail::width_of(found, 0x8a == opcode);
-            auto fields = instruction_detail::read_modrm(at);
+            auto size =
+                instruction_detail::width_of(found, 0x8a == opcode);
+            fields = instruction_detail::read_modrm(at, found, mode);
 
             if (fields.names_register()) {
                 return {};
             }
 
-            if (instruction_detail::names_high_byte(size, found, fields.reg)) {
+            if (instruction_detail::names_high_byte(
+                    size, found, fields.reg)) {
                 return {};
             }
 
             result.what = memory_operation::load;
             result.size = size;
-            result.destination = static_cast<std::uint8_t>(
-                fields.reg | found.extend_reg());
+            result.destination =
+                static_cast<std::uint8_t>(fields.reg | found.extend_reg());
             result.writes_register = true;
             break;
         }
@@ -734,18 +889,19 @@ decode(std::span<const std::byte> code,
         case 0x31: {
             auto byte_form = (0 == (opcode & 1));
             auto size = instruction_detail::width_of(found, byte_form);
-            auto fields = instruction_detail::read_modrm(at);
+            fields = instruction_detail::read_modrm(at, found, mode);
 
             if (fields.names_register()) {
                 return {};
             }
 
-            if (instruction_detail::names_high_byte(size, found, fields.reg)) {
+            if (instruction_detail::names_high_byte(
+                    size, found, fields.reg)) {
                 return {};
             }
 
-            auto index = static_cast<std::uint8_t>(fields.reg |
-                                                   found.extend_reg());
+            auto index =
+                static_cast<std::uint8_t>(fields.reg | found.extend_reg());
             if (instruction_detail::names_host_stack_pointer(index)) {
                 return {};
             }
@@ -780,22 +936,24 @@ decode(std::span<const std::byte> code,
         case 0x80:
         case 0x81:
         case 0x83: {
-            auto size = instruction_detail::width_of(found, 0x80 == opcode);
-            auto fields = instruction_detail::read_modrm(at);
+            auto size =
+                instruction_detail::width_of(found, 0x80 == opcode);
+            fields = instruction_detail::read_modrm(at, found, mode);
 
             if (fields.names_register()) {
                 return {};
             }
 
-            auto immediate = (0x83 == opcode)
-                                 ? std::uint8_t{1}
-                                 : instruction_detail::immediate_width(size);
+            auto immediate =
+                (0x83 == opcode)
+                    ? std::uint8_t{1}
+                    : instruction_detail::immediate_width(size);
             auto value = at.next_immediate(immediate);
 
             if ((0x83 == opcode) || (8 == size)) {
                 value = instruction_detail::sign_extend(
-                    value, (0x83 == opcode) ? std::uint8_t{1}
-                                            : std::uint8_t{4});
+                    value,
+                    (0x83 == opcode) ? std::uint8_t{1} : std::uint8_t{4});
             }
 
             result.size = size;
@@ -823,8 +981,9 @@ decode(std::span<const std::byte> code,
         // access rather than falling back to stepping.
         case 0x84:
         case 0x85: {
-            auto size = instruction_detail::width_of(found, 0x84 == opcode);
-            auto fields = instruction_detail::read_modrm(at);
+            auto size =
+                instruction_detail::width_of(found, 0x84 == opcode);
+            fields = instruction_detail::read_modrm(at, found, mode);
 
             if (fields.names_register()) {
                 return {};
@@ -841,8 +1000,9 @@ decode(std::span<const std::byte> code,
 
         case 0xf6:
         case 0xf7: {
-            auto size = instruction_detail::width_of(found, 0xf6 == opcode);
-            auto fields = instruction_detail::read_modrm(at);
+            auto size =
+                instruction_detail::width_of(found, 0xf6 == opcode);
+            fields = instruction_detail::read_modrm(at, found, mode);
 
             if (fields.names_register() || (0 != fields.reg)) {
                 // Only the test form. The others in this group - not, neg,
@@ -854,7 +1014,8 @@ decode(std::span<const std::byte> code,
             result.what = memory_operation::examine;
             result.size = size;
             result.operand = instruction_detail::truncate(
-                at.next_immediate(instruction_detail::immediate_width(size)),
+                at.next_immediate(
+                    instruction_detail::immediate_width(size)),
                 size);
             break;
         }
@@ -862,19 +1023,21 @@ decode(std::span<const std::byte> code,
         // XCHG with memory, which is where a lock-free updater goes.
         case 0x86:
         case 0x87: {
-            auto size = instruction_detail::width_of(found, 0x86 == opcode);
-            auto fields = instruction_detail::read_modrm(at);
+            auto size =
+                instruction_detail::width_of(found, 0x86 == opcode);
+            fields = instruction_detail::read_modrm(at, found, mode);
 
             if (fields.names_register()) {
                 return {};
             }
 
-            if (instruction_detail::names_high_byte(size, found, fields.reg)) {
+            if (instruction_detail::names_high_byte(
+                    size, found, fields.reg)) {
                 return {};
             }
 
-            auto index = static_cast<std::uint8_t>(fields.reg |
-                                                   found.extend_reg());
+            auto index =
+                static_cast<std::uint8_t>(fields.reg | found.extend_reg());
             if (instruction_detail::names_host_stack_pointer(index)) {
                 return {};
             }
@@ -903,7 +1066,7 @@ decode(std::span<const std::byte> code,
             auto narrow = ((0xb6 == opcode) || (0xbe == opcode))
                               ? std::uint8_t{1}
                               : std::uint8_t{2};
-            auto fields = instruction_detail::read_modrm(at);
+            fields = instruction_detail::read_modrm(at, found, mode);
 
             if (fields.names_register()) {
                 return {};
@@ -917,8 +1080,8 @@ decode(std::span<const std::byte> code,
             // opcode only says how much of memory is read.
             result.destination_size =
                 instruction_detail::width_of(found, false);
-            result.destination = static_cast<std::uint8_t>(
-                fields.reg | found.extend_reg());
+            result.destination =
+                static_cast<std::uint8_t>(fields.reg | found.extend_reg());
             result.writes_register = true;
             result.sign_extends = (0xbe == opcode) || (0xbf == opcode);
             break;
@@ -928,7 +1091,7 @@ decode(std::span<const std::byte> code,
         // that change the bit.
         case 0xba: {
             auto size = instruction_detail::width_of(found, false);
-            auto fields = instruction_detail::read_modrm(at);
+            fields = instruction_detail::read_modrm(at, found, mode);
 
             if (fields.names_register()) {
                 return {};
@@ -941,8 +1104,8 @@ decode(std::span<const std::byte> code,
             // The bit number is taken modulo the operand width for the
             // immediate form - SDM, BT: "the offset is taken modulo the
             // operand size".
-            result.operand = bit & ((static_cast<std::uint64_t>(size) * 8u) -
-                                    1u);
+            result.operand =
+                bit & ((static_cast<std::uint64_t>(size) * 8u) - 1u);
 
             if (4 == fields.reg) {
                 result.what = memory_operation::examine;
@@ -970,7 +1133,73 @@ decode(std::span<const std::byte> code,
     }
 
     result.length = static_cast<std::uint8_t>(at.taken());
+    result.where = fields.where;
     return result;
+}
+
+/**
+ * The linear address the instruction's memory operand names.
+ *
+ * Wanted because the hardware does not always report it. An EPT violation
+ * carries a guest-linear address only when exit qualification bit 7 is
+ * set, and the guest-physical address beside it is page granular - so
+ * where that bit is clear, this is the only thing that says *which*
+ * register on a watched page was touched. Measured on the local APIC
+ * page: with the address taken from the physical address instead, every
+ * access read as offset zero and a guest hypervisor's start-up interrupts
+ * were never seen.
+ *
+ * Refused rather than approximated in three cases, each of which would be
+ * wrong rather than merely incomplete:
+ *
+ *   - a segment override, whose base is not in the instruction,
+ *   - a base naming encoding four, since the context handed here holds
+ *     the *host's* stack pointer in that slot - the same reason
+ *     `names_host_stack_pointer` refuses it as a source operand. The
+ *     index cannot name it: encoding four in the index field means no
+ *     index at all,
+ *   - an instruction whose operand is a register, which has no address.
+ *
+ * @param instruction As returned by `decode`.
+ * @param registers The guest's registers as of the faulting instruction.
+ * @param rip The guest's RIP, needed only by the RIP-relative form. It is
+ *            the address of the instruction, not of its end - the length
+ *            is added here.
+ */
+constexpr std::optional<std::uint64_t>
+effective_address(const decoded_instruction & instruction,
+                  const context & registers,
+                  std::uint64_t rip)
+{
+    const auto & where = instruction.where;
+
+    if (!where.known || where.segment_override) {
+        return {};
+    }
+
+    auto address = static_cast<std::uint64_t>(where.displacement);
+
+    if (where.rip_relative) {
+        address += rip + instruction.length;
+    } else {
+        if (where.has_base) {
+            if (instruction_detail::names_host_stack_pointer(where.base)) {
+                return {};
+            }
+
+            address += registers.*register_of(where.base);
+        }
+
+        if (where.has_index) {
+            address += registers.*register_of(where.index) * where.scale;
+        }
+    }
+
+    if (!where.wide) {
+        address &= 0xffff'ffffull;
+    }
+
+    return address;
 }
 
 /**
@@ -1052,8 +1281,8 @@ constexpr std::uint64_t zero = 1ull << 6;
 constexpr std::uint64_t sign = 1ull << 7;
 constexpr std::uint64_t overflow = 1ull << 11;
 
-constexpr std::uint64_t arithmetic = carry | parity | adjust | zero |
-                                     sign | overflow;
+constexpr std::uint64_t arithmetic =
+    carry | parity | adjust | zero | sign | overflow;
 } // namespace status_flag
 
 namespace instruction_detail
@@ -1106,10 +1335,11 @@ constexpr std::uint64_t common_flags(std::uint64_t result,
  * merging is where a flag gets left stale, which is the failure this
  * exists to prevent.
  */
-constexpr std::uint64_t flags_after(const decoded_instruction & instruction,
-                                    std::uint64_t before,
-                                    std::uint64_t old_memory,
-                                    std::uint64_t new_memory)
+constexpr std::uint64_t
+flags_after(const decoded_instruction & instruction,
+            std::uint64_t before,
+            std::uint64_t old_memory,
+            std::uint64_t new_memory)
 {
     using namespace instruction_detail;
 
@@ -1158,10 +1388,10 @@ constexpr std::uint64_t flags_after(const decoded_instruction & instruction,
     // A compare and a subtract set the same flags; a test and an AND
     // likewise. What differs is only whether the result is written back,
     // which is not this function's business.
-    auto subtracting = (combine_with::subtract == instruction.how) ||
-                       ((memory_operation::examine == instruction.what) &&
-                        (combine_with::none == instruction.how) &&
-                        instruction.compares);
+    auto subtracting =
+        (combine_with::subtract == instruction.how) ||
+        ((memory_operation::examine == instruction.what) &&
+         (combine_with::none == instruction.how) && instruction.compares);
 
     if (subtracting) {
         auto result = truncate(old - operand, size);

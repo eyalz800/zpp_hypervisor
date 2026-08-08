@@ -17,7 +17,8 @@ constexpr context registers_for_test()
     registers.rcx = 0x2222'2222'2222'2222;
     registers.rdx = 0x0000'0000'dead'beef;
     registers.rbx = 0x4444'4444'4444'4444;
-    registers.rsp = 0xffff'8000'0000'0000; // the host stack, never readable
+    registers.rsp =
+        0xffff'8000'0000'0000; // the host stack, never readable
     registers.rbp = 0x6666'6666'6666'6666;
     registers.rsi = 0x7777'7777'7777'7777;
     registers.rdi = 0x8888'8888'8888'8888;
@@ -88,13 +89,15 @@ static_assert(run(load_dword)->destination == 2); // rdx
 // A 4-byte load clears the upper half of the register; a 2-byte one does
 // not. That asymmetry is the architecture's and is the easiest thing here
 // to get wrong in a caller.
-static_assert(result_for_register(*run(load_dword), 0xaabbccdd,
+static_assert(result_for_register(*run(load_dword),
+                                  0xaabbccdd,
                                   0xffff'ffff'ffff'ffff) == 0xaabbccdd);
 
 // mov dx, [rcx]
 constexpr std::uint8_t load_word[] = {0x66, 0x8b, 0x11};
 static_assert(run(load_word)->size == 2);
-static_assert(result_for_register(*run(load_word), 0xaabb,
+static_assert(result_for_register(*run(load_word),
+                                  0xaabb,
                                   0xffff'ffff'ffff'ffff) ==
               0xffff'ffff'ffff'aabb);
 
@@ -105,7 +108,8 @@ constexpr std::uint8_t widen_zero[] = {0x0f, 0xb6, 0x11};
 static_assert(run(widen_zero)->what == memory_operation::load);
 static_assert(run(widen_zero)->size == 1);
 static_assert(!run(widen_zero)->sign_extends);
-static_assert(result_for_register(*run(widen_zero), 0xff,
+static_assert(result_for_register(*run(widen_zero),
+                                  0xff,
                                   0xffff'ffff'ffff'ffff) == 0xff);
 
 // movsx edx, byte [rcx]
@@ -113,20 +117,23 @@ constexpr std::uint8_t widen_sign[] = {0x0f, 0xbe, 0x11};
 static_assert(run(widen_sign)->sign_extends);
 // A 32-bit destination is filled and the rest of the register cleared, so
 // sign extending a byte of 0xff gives 0x00000000ffffffff - not all ones.
-static_assert(result_for_register(*run(widen_sign), 0xff,
+static_assert(result_for_register(*run(widen_sign),
+                                  0xff,
                                   0xffff'ffff'ffff'ffff) ==
               0x0000'0000'ffff'ffff);
 
 // movsx edx, word [rcx]
 constexpr std::uint8_t widen_sign_word[] = {0x0f, 0xbf, 0x11};
 static_assert(run(widen_sign_word)->size == 2);
-static_assert(result_for_register(*run(widen_sign_word), 0x8000,
+static_assert(result_for_register(*run(widen_sign_word),
+                                  0x8000,
                                   0xffff'ffff'ffff'ffff) ==
               0x0000'0000'ffff'8000);
 
 // movzx ax, byte [rcx] -- a 16-bit destination preserves the upper bits
 constexpr std::uint8_t widen_zero_word_dest[] = {0x66, 0x0f, 0xb6, 0x11};
-static_assert(result_for_register(*run(widen_zero_word_dest), 0x01,
+static_assert(result_for_register(*run(widen_zero_word_dest),
+                                  0x01,
                                   0xffff'ffff'ffff'ffff) ==
               0xffff'ffff'ffff'0001);
 
@@ -347,7 +354,9 @@ constexpr std::uint64_t no_flags = 0;
 constexpr std::uint64_t all_arithmetic = status_flag::arithmetic;
 
 // and [rcx], edx where the result is zero -> ZF set, CF and OF cleared
-static_assert((flags_after(*run(combine_and), all_arithmetic, 0x0000'0000,
+static_assert((flags_after(*run(combine_and),
+                           all_arithmetic,
+                           0x0000'0000,
                            0x0000'0000) &
                status_flag::zero) != 0);
 static_assert((flags_after(*run(combine_and), all_arithmetic, 0, 0) &
@@ -380,9 +389,9 @@ static_assert((flags_after(*run(combine_sub), no_flags, 0xdead'beef, 0) &
                status_flag::zero) != 0);
 
 // add [rcx], edx that wraps sets CF
-static_assert((flags_after(*run(combine_add), no_flags, 0xffff'ffff,
-                           0xdead'beee) &
-               status_flag::carry) != 0);
+static_assert(
+    (flags_after(*run(combine_add), no_flags, 0xffff'ffff, 0xdead'beee) &
+     status_flag::carry) != 0);
 
 // bts reports the bit as it was in CF, and leaves the rest alone
 static_assert((flags_after(*run(bit_set), no_flags, 0x1000, 0x1000) &
@@ -411,6 +420,100 @@ static_assert(flags_after(*run(widen_sign), all_arithmetic, 0, 0) ==
               all_arithmetic);
 static_assert(flags_after(*run(exchange), all_arithmetic, 0, 0) ==
               all_arithmetic);
+
+// --- the effective address ---------------------------------------------
+//
+// Wanted because an EPT violation does not always report one: it carries a
+// guest-linear address only with exit qualification bit 7 set, and the
+// guest-physical address beside it is page granular. Every case below is
+// therefore an offset within a page as much as an address.
+
+template <std::size_t Size>
+constexpr auto address_of(const std::uint8_t (&bytes)[Size],
+                          std::uint64_t rip = 0)
+{
+    return effective_address(*run(bytes), registers_for_test(), rip);
+}
+
+// mov [rcx], edx -- base only. rcx is 0x2222'2222'2222'2222.
+static_assert(*address_of(store_dword) == 0x2222222222222222ull);
+
+// mov [rcx+0x300], edx -- the encoding a local APIC write compiles to,
+// and the one this whole thing exists for.
+constexpr std::uint8_t store_disp32[] = {
+    0x89, 0x91, 0x00, 0x03, 0x00, 0x00};
+static_assert(*address_of(store_disp32) ==
+              (0x2222222222222222ull + 0x300));
+
+// mov [rcx+8], edx -- a one-byte displacement.
+constexpr std::uint8_t store_disp8[] = {0x89, 0x51, 0x08};
+static_assert(*address_of(store_disp8) == 0x222222222222222aull);
+
+// mov [rcx-8], edx -- and a negative one, which is sign extended rather
+// than added as 0xf8.
+constexpr std::uint8_t store_negative_disp8[] = {0x89, 0x51, 0xf8};
+static_assert(*address_of(store_negative_disp8) == 0x222222222222221aull);
+
+// mov [rcx+rax*4], edx -- a scale-index-base byte with both registers.
+constexpr std::uint8_t store_indexed[] = {0x89, 0x14, 0x81};
+static_assert(*address_of(store_indexed) ==
+              (0x2222222222222222ull + (0x1111111111111111ull * 4)));
+
+// mov [rcx+rax*4+0x300], edx -- the same with a displacement, which is
+// how a compiler indexes a register file.
+constexpr std::uint8_t store_indexed_disp[] = {
+    0x89, 0x94, 0x81, 0x00, 0x03, 0x00, 0x00};
+static_assert(*address_of(store_indexed_disp) ==
+              (0x2222222222222222ull + (0x1111111111111111ull * 4) +
+               0x300));
+
+// mov [rcx*1], edx with no base -- mod zero, base five in the
+// scale-index-base byte, which means a 32-bit displacement instead.
+constexpr std::uint8_t store_index_only[] = {
+    0x89, 0x14, 0x0d, 0x00, 0x03, 0x00, 0x00};
+static_assert(*address_of(store_index_only) ==
+              (0x2222222222222222ull + 0x300));
+
+// mov [rip+0x300], edx -- relative to the *end* of the instruction, so
+// the length is part of the answer.
+constexpr std::uint8_t store_rip_relative[] = {
+    0x89, 0x15, 0x00, 0x03, 0x00, 0x00};
+static_assert(*address_of(store_rip_relative, 0xfee00000) ==
+              (0xfee00000ull + 6 + 0x300));
+
+// The same bytes in 32-bit code are an absolute address, not a relative
+// one - mod zero with rm five means something else there.
+static_assert(*effective_address(*run_in(store_rip_relative,
+                                         code_size::bits_32),
+                                 registers_for_test(),
+                                 0xfee00000) == 0x300);
+
+// A segment override is refused rather than approximated: FS and GS carry
+// bases that are not page aligned and are not in the instruction.
+constexpr std::uint8_t store_through_gs[] = {
+    0x65, 0x89, 0x91, 0x00, 0x03, 0x00, 0x00};
+static_assert(!address_of(store_through_gs).has_value());
+
+// So is a base of RSP, because the context this is handed holds the
+// *host's* stack pointer in that slot.
+constexpr std::uint8_t store_through_rsp[] = {0x89, 0x14, 0x24};
+static_assert(!address_of(store_through_rsp).has_value());
+
+// R12 uses the same encoding with REX.B and is unaffected.
+constexpr std::uint8_t store_through_r12[] = {0x41, 0x89, 0x14, 0x24};
+static_assert(*address_of(store_through_r12) == 0xccccccccccccccccull);
+
+// The address-size prefix truncates the whole computation rather than any
+// one term of it.
+constexpr std::uint8_t store_address_size[] = {0x67, 0x89, 0x11};
+static_assert(*address_of(store_address_size) == 0x22222222ull);
+
+// A read-modify-write form addresses memory the same way. The APIC page
+// sees these too, which is why the decoder answers them at all.
+constexpr std::uint8_t combine_disp32[] = {
+    0x09, 0x91, 0x00, 0x03, 0x00, 0x00};
+static_assert(*address_of(combine_disp32) ==
+              (0x2222222222222222ull + 0x300));
 
 int main()
 {
