@@ -2937,3 +2937,60 @@ understood before the switch is used for anything else. The next thing to
 measure is `nested_capability_reads` in the failing run against the
 shipped run - a higher count is direct evidence of "got further" rather
 than an inference from where the processors ended up.
+
+### The wedge, under a debugger: the guest is waiting for processors firmware still owns
+
+Debugged with gdb against the QEMU stub, reading only - no single stepping,
+which on this target ORs TF into the guest's RFLAGS and takes an entry
+failure on the next resume.
+
+**The seven idle processors never left firmware.** At their RIP:
+
+    0x7f96b019: mov %rsp,%rax ; sub $8,%eax ; xor ecx,ecx ; xor edx,edx
+    0x7f96b024: monitor %rax,%ecx,%edx
+    0x7f96b027: mov %rbx,%rax ; shl $4,%eax
+    0x7f96b02d: mwait %eax,%ecx
+    0x7f96b030: jmp 0x7f96b019          <- all seven are here
+    0x7f96b032: cli ; hlt ; jmp 0x7f96b032
+
+That is the firmware's own application-processor wait loop, monitoring its
+wakeup semaphore. Not Windows, and not this VMM.
+
+**Processor zero is in the Windows kernel waiting for them**, spinning over
+three globals with every branch returning to the top of the loop.
+
+And from the VMM's own memory:
+
+    next_virtual_processor   2            exactly one processor was handed over
+    watched_apic_page        0xfee00000   the guest is in xAPIC mode
+    resumes_reached[0]       6771         processor zero is alive and exiting
+    resumes_reached[1]       0            processor one has never taken an exit
+    nested_capability_reads  14           against 28 whenever it does not wedge
+    vmcs12_controls_captured 0            build_vmcs02 never ran
+
+So the hand-over started one processor and then stopped, and the start-up
+IPIs are travelling through the APIC *page* rather than the x2APIC MSR,
+because the guest is in xAPIC mode.
+
+**A correction to the previous entry, and to how the bisection was read.**
+The run that widened all primary controls reported RIP `fffff80479942262`,
+which is the same `...942262` offset as this spin loop. That run wedged in
+exactly this way, and was recorded as booting normally because only the
+loader-run count and a single RIP were checked. Both runs that advertised
+primary bit 21 wedged, and `nested_capability_reads` reads 14 in both
+against 28 in every run that did not. The correlation with bit 21 is two
+for two.
+
+Which reframes the question. It is not how honouring the TPR shadow breaks
+vmcs02 - `build_vmcs02` never runs. It is **how advertising primary bit 21
+in IA32_VMX_PROCBASED_CTLS stalls the guest's own application-processor
+start-up.** The guest evidently does something different when it believes
+the TPR shadow exists, and whatever that is meets our start-up IPI
+interception. Item 6 above records that xAPIC MMIO interrupt-command
+interception was fixed and never run; it is directly in this path and
+should be read with suspicion.
+
+The lesson about method, which cost a boot and a wrong entry: **a kernel
+RIP is not evidence of a healthy boot.** Two of the runs called "booted
+normally" were spinning at the same instruction. Read all eight
+processors, or read `resumes_reached`, before calling a boot good.
