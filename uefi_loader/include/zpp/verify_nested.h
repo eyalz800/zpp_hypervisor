@@ -7,6 +7,78 @@ extern "C" {
 #include <cstddef>
 #include <cstdint>
 
+/**
+ * Where a VM exit from the second-level guest comes back to.
+ *
+ * At namespace scope with C linkage, and both of those are forced. A VM
+ * exit loads RSP and RIP from the host-state area of the VMCS that ran the
+ * guest, so the landing point is entered with no arguments and with every
+ * general purpose register still holding what the second-level guest left
+ * there - which is the whole point of a VM exit, and is why a real
+ * hypervisor's first instruction is a push. Nothing can be passed to it,
+ * so what it needs has to be at a fixed address, and the assembly that
+ * reaches it can only name an unmangled symbol.
+ * @{
+ */
+extern "C" {
+/**
+ * `used` is not decoration. Two of these three are named only from inline
+ * assembly, which the compiler does not see as a use - so without it the
+ * definitions are never emitted and the link fails on symbols the assembly
+ * is the only reader of.
+ */
+[[gnu::used]] inline std::uint64_t zpp_probe_resume_rsp{};
+[[gnu::used]] inline std::uint64_t zpp_probe_resume_rip{};
+[[gnu::used]] inline std::uint64_t zpp_probe_exit_taken{};
+}
+/**
+ * @}
+ */
+
+/**
+ * The guest hypervisor's host RIP: where the processor lands when the
+ * second-level guest exits.
+ *
+ * Nothing here may touch the stack before RSP is loaded. The host-state
+ * area names a page the probe allocated, so RSP is *valid* on arrival -
+ * but it is not the stack the C++ that launched was using, and that one is
+ * in zpp_probe_resume_rsp. The jump afterwards lands back inside the
+ * launcher, which is a longjmp in everything but name.
+ *
+ * The flag is written before the jump because after it there is no here to
+ * write it in.
+ */
+extern "C" inline void __attribute__((naked)) zpp_probe_l1_host()
+{
+    asm volatile(".intel_syntax noprefix\n\t"
+                 "mov qword ptr [rip + zpp_probe_exit_taken], 1\n\t"
+                 "mov rsp, qword ptr [rip + zpp_probe_resume_rsp]\n\t"
+                 "jmp qword ptr [rip + zpp_probe_resume_rip]\n\t"
+                 ".att_syntax prefix");
+}
+
+/**
+ * The whole of the second-level guest: one CPUID, then a halt.
+ *
+ * CPUID is the instruction to choose. SDM 28.1.2 makes it exit
+ * unconditionally in VMX non-root operation - there is no control that
+ * turns it off - and the VMM reflects it unconditionally too, as KVM's
+ * `nested_vmx_l1_wants_exit` does. So a correct run produces exactly one
+ * exit, with reason 10, delivered to the guest hypervisor.
+ *
+ * The halt is a backstop rather than a step. Reaching it means the exit
+ * did not happen, and a halted second-level guest is a hang the harness's
+ * timeout catches rather than a wrong answer it reports.
+ */
+extern "C" inline void __attribute__((naked)) zpp_probe_l2_entry()
+{
+    asm volatile(".intel_syntax noprefix\n\t"
+                 "cpuid\n\t"
+                 "1: hlt\n\t"
+                 "jmp 1b\n\t"
+                 ".att_syntax prefix");
+}
+
 namespace zpp
 {
 /**
@@ -20,10 +92,12 @@ namespace zpp
  * guest - which is the only place those instructions ever execute, since
  * the default build faults on all of them.
  *
- * What it is not: a test of VM entry. That needs a second-level guest,
- * which needs its own state and its own stack, and is the next experiment
- * rather than this one. This stops at the point where a guest hypervisor
- * would have written its controls.
+ * It goes all the way to a second-level guest: `launch` below writes a
+ * whole VMCS out of the state this processor is running with, enters a
+ * guest that differs from its hypervisor in exactly one thing - RIP - and
+ * checks that the exit that guest takes comes back here with the reason,
+ * the guest RIP and the instruction length the architecture says it
+ * should.
  *
  * Runs in the same build as `verify`, behind the same switch, and for the
  * same reason it is behind one: it leaves the processor in VMX operation
@@ -241,6 +315,96 @@ struct verify_nested
      * @}
      */
 
+    /**
+     * Reads the descriptor-table registers and the selectors, which a
+     * guest-state area needs and which no MSR carries.
+     * @{
+     */
+    struct descriptor_table
+    {
+        std::uint16_t limit{};
+        std::uint64_t base{};
+    } __attribute__((packed));
+
+    static descriptor_table read_gdtr()
+    {
+        descriptor_table table{};
+        asm volatile("sgdt %0" : "=m"(table));
+        return table;
+    }
+
+    static descriptor_table read_idtr()
+    {
+        descriptor_table table{};
+        asm volatile("sidt %0" : "=m"(table));
+        return table;
+    }
+
+    static std::uint16_t read_tr()
+    {
+        std::uint16_t value{};
+        asm volatile("str %0" : "=r"(value));
+        return value;
+    }
+
+    static std::uint16_t read_cs()
+    {
+        std::uint16_t value{};
+        asm volatile("mov %%cs, %0" : "=r"(value));
+        return value;
+    }
+
+    static std::uint16_t read_ss()
+    {
+        std::uint16_t value{};
+        asm volatile("mov %%ss, %0" : "=r"(value));
+        return value;
+    }
+
+    static std::uint16_t read_ds()
+    {
+        std::uint16_t value{};
+        asm volatile("mov %%ds, %0" : "=r"(value));
+        return value;
+    }
+
+    static std::uint16_t read_es()
+    {
+        std::uint16_t value{};
+        asm volatile("mov %%es, %0" : "=r"(value));
+        return value;
+    }
+
+    static std::uint64_t read_cr0()
+    {
+        std::uint64_t value{};
+        asm volatile("mov %%cr0, %0" : "=r"(value));
+        return value;
+    }
+
+    static std::uint64_t read_cr3()
+    {
+        std::uint64_t value{};
+        asm volatile("mov %%cr3, %0" : "=r"(value));
+        return value;
+    }
+    /**
+     * @}
+     */
+
+    /**
+     * A control value the capability MSR will accept: everything the low
+     * half insists on, and nothing the high half forbids. SDM A.3.1 -
+     * "bits 31:0 indicate the allowed 0-settings ... bits 63:32 indicate
+     * the allowed 1-settings".
+     */
+    static constexpr std::uint64_t adjust(std::uint64_t capability,
+                                          std::uint64_t wanted)
+    {
+        return (wanted | (capability & 0xffffffff)) &
+               ((capability >> 32) & 0xffffffff);
+    }
+
     static std::uint64_t read_cr4()
     {
         std::uint64_t value{};
@@ -311,6 +475,466 @@ struct verify_nested
     /**
      * @}
      */
+
+    /**
+     * The rest of the encodings a whole VMCS needs, from SDM Appendix B.
+     *
+     * Written out here rather than taken from the VMM's own
+     * `vmcs_fields.h`, for the same reason the expectations are: this is
+     * the guest side, and a probe that reaches into the thing it probes
+     * for its constants cannot disagree with it.
+     * @{
+     */
+    static constexpr std::uint64_t field_guest_es_selector = 0x0800;
+    static constexpr std::uint64_t field_guest_cs_selector = 0x0802;
+    static constexpr std::uint64_t field_guest_ss_selector = 0x0804;
+    static constexpr std::uint64_t field_guest_ds_selector = 0x0806;
+    static constexpr std::uint64_t field_guest_fs_selector = 0x0808;
+    static constexpr std::uint64_t field_guest_gs_selector = 0x080a;
+    static constexpr std::uint64_t field_guest_ldtr_selector = 0x080c;
+    static constexpr std::uint64_t field_guest_tr_selector = 0x080e;
+    static constexpr std::uint64_t field_host_es_selector = 0x0c00;
+    static constexpr std::uint64_t field_host_cs_selector = 0x0c02;
+    static constexpr std::uint64_t field_host_ss_selector = 0x0c04;
+    static constexpr std::uint64_t field_host_ds_selector = 0x0c06;
+    static constexpr std::uint64_t field_host_fs_selector = 0x0c08;
+    static constexpr std::uint64_t field_host_gs_selector = 0x0c0a;
+    static constexpr std::uint64_t field_host_tr_selector = 0x0c0c;
+    static constexpr std::uint64_t field_vmcs_link_pointer = 0x2800;
+    static constexpr std::uint64_t field_guest_debugctl = 0x2802;
+    static constexpr std::uint64_t field_guest_efer = 0x2806;
+    static constexpr std::uint64_t field_pin_controls = 0x4000;
+    static constexpr std::uint64_t field_primary_controls = 0x4002;
+    static constexpr std::uint64_t field_cr3_target_count = 0x400a;
+    static constexpr std::uint64_t field_exit_controls = 0x400c;
+    static constexpr std::uint64_t field_exit_msr_store_count = 0x400e;
+    static constexpr std::uint64_t field_exit_msr_load_count = 0x4010;
+    static constexpr std::uint64_t field_entry_controls = 0x4012;
+    static constexpr std::uint64_t field_entry_msr_load_count = 0x4014;
+    static constexpr std::uint64_t field_entry_interruption_information =
+        0x4016;
+    static constexpr std::uint64_t field_vm_instruction_error = 0x4400;
+    static constexpr std::uint64_t field_exit_instruction_length = 0x440c;
+    static constexpr std::uint64_t field_guest_es_limit = 0x4800;
+    static constexpr std::uint64_t field_guest_cs_limit = 0x4802;
+    static constexpr std::uint64_t field_guest_ss_limit = 0x4804;
+    static constexpr std::uint64_t field_guest_ds_limit = 0x4806;
+    static constexpr std::uint64_t field_guest_fs_limit = 0x4808;
+    static constexpr std::uint64_t field_guest_gs_limit = 0x480a;
+    static constexpr std::uint64_t field_guest_ldtr_limit = 0x480c;
+    static constexpr std::uint64_t field_guest_tr_limit = 0x480e;
+    static constexpr std::uint64_t field_guest_gdtr_limit = 0x4810;
+    static constexpr std::uint64_t field_guest_idtr_limit = 0x4812;
+    static constexpr std::uint64_t field_guest_es_access = 0x4814;
+    static constexpr std::uint64_t field_guest_cs_access = 0x4816;
+    static constexpr std::uint64_t field_guest_ss_access = 0x4818;
+    static constexpr std::uint64_t field_guest_ds_access = 0x481a;
+    static constexpr std::uint64_t field_guest_fs_access = 0x481c;
+    static constexpr std::uint64_t field_guest_gs_access = 0x481e;
+    static constexpr std::uint64_t field_guest_ldtr_access = 0x4820;
+    static constexpr std::uint64_t field_guest_tr_access = 0x4822;
+    static constexpr std::uint64_t field_guest_interruptibility = 0x4824;
+    static constexpr std::uint64_t field_guest_activity_state = 0x4826;
+    static constexpr std::uint64_t field_guest_sysenter_cs = 0x482a;
+    static constexpr std::uint64_t field_host_sysenter_cs = 0x4c00;
+    static constexpr std::uint64_t field_cr0_guest_host_mask = 0x6000;
+    static constexpr std::uint64_t field_cr4_guest_host_mask = 0x6002;
+    static constexpr std::uint64_t field_cr0_read_shadow = 0x6004;
+    static constexpr std::uint64_t field_cr4_read_shadow = 0x6006;
+    static constexpr std::uint64_t field_guest_cr0 = 0x6800;
+    static constexpr std::uint64_t field_guest_cr3 = 0x6802;
+    static constexpr std::uint64_t field_guest_cr4 = 0x6804;
+    static constexpr std::uint64_t field_guest_es_base = 0x6806;
+    static constexpr std::uint64_t field_guest_cs_base = 0x6808;
+    static constexpr std::uint64_t field_guest_ss_base = 0x680a;
+    static constexpr std::uint64_t field_guest_ds_base = 0x680c;
+    static constexpr std::uint64_t field_guest_fs_base = 0x680e;
+    static constexpr std::uint64_t field_guest_gs_base = 0x6810;
+    static constexpr std::uint64_t field_guest_ldtr_base = 0x6812;
+    static constexpr std::uint64_t field_guest_tr_base = 0x6814;
+    static constexpr std::uint64_t field_guest_gdtr_base = 0x6816;
+    static constexpr std::uint64_t field_guest_idtr_base = 0x6818;
+    static constexpr std::uint64_t field_guest_dr7 = 0x681a;
+    static constexpr std::uint64_t field_guest_rsp = 0x681c;
+    static constexpr std::uint64_t field_guest_rflags = 0x6820;
+    static constexpr std::uint64_t field_guest_pending_debug = 0x6822;
+    static constexpr std::uint64_t field_guest_sysenter_esp = 0x6824;
+    static constexpr std::uint64_t field_guest_sysenter_eip = 0x6826;
+    static constexpr std::uint64_t field_host_cr0 = 0x6c00;
+    static constexpr std::uint64_t field_host_cr3 = 0x6c02;
+    static constexpr std::uint64_t field_host_cr4 = 0x6c04;
+    static constexpr std::uint64_t field_host_fs_base = 0x6c06;
+    static constexpr std::uint64_t field_host_gs_base = 0x6c08;
+    static constexpr std::uint64_t field_host_tr_base = 0x6c0a;
+    static constexpr std::uint64_t field_host_gdtr_base = 0x6c0c;
+    static constexpr std::uint64_t field_host_idtr_base = 0x6c0e;
+    static constexpr std::uint64_t field_host_sysenter_esp = 0x6c10;
+    static constexpr std::uint64_t field_host_sysenter_eip = 0x6c12;
+    static constexpr std::uint64_t field_host_rsp = 0x6c14;
+    static constexpr std::uint64_t field_host_rip = 0x6c16;
+    /**
+     * @}
+     */
+
+    /**
+     * The TRUE capability MSRs, which IA32_VMX_BASIC bit 55 says exist and
+     * which the VMM reports set, and IA32_EFER, which a 64-bit guest-state
+     * area has to carry.
+     * @{
+     */
+    static constexpr std::uint32_t ia32_vmx_true_pinbased_ctls = 0x48d;
+    static constexpr std::uint32_t ia32_vmx_true_procbased_ctls = 0x48e;
+    static constexpr std::uint32_t ia32_vmx_true_exit_ctls = 0x48f;
+    static constexpr std::uint32_t ia32_vmx_true_entry_ctls = 0x490;
+    static constexpr std::uint32_t ia32_efer = 0xc0000080;
+    /**
+     * @}
+     */
+
+    /**
+     * Writes a whole VMCS out of the state this processor is running with,
+     * launches a second-level guest into one CPUID, and checks that the
+     * exit comes back here with the reason and the state the architecture
+     * says it should.
+     *
+     * The second-level guest runs with *this* processor's own paging, GDT
+     * and control registers - the same CR3, the same flat segments - and
+     * differs from its hypervisor in exactly one thing, RIP. That is the
+     * smallest guest that can exist, and it is deliberate: anything it
+     * gets wrong is the VMM's, because nothing about the guest itself is
+     * novel.
+     *
+     * Extended page tables are not enabled in it. Without them the
+     * second-level guest's physical addresses are the first level's, which
+     * is what the VMM's own identity map already translates - so this
+     * exercises the entry and the reflection without also depending on the
+     * shadow page-table builder, and a failure has one place to be rather
+     * than two. Turning them on is the next experiment.
+     */
+    template <typename Line, typename Say, typename Step>
+    static bool launch(EFI_SYSTEM_TABLE * system_table,
+                       std::uint64_t vmcs_region,
+                       Line && line,
+                       Say && say,
+                       Step && step)
+    {
+        // A stack for the guest hypervisor's own host state to land on.
+        // Never actually used for anything - `zpp_probe_l1_host` moves off
+        // it immediately - but VM exit loads RSP from the field whatever
+        // the landing code does with it, so it has to name real memory.
+        EFI_PHYSICAL_ADDRESS host_stack = 0xffffffff;
+        auto status = system_table->BootServices->AllocatePages(
+            AllocateMaxAddress, EfiBootServicesData, 1, &host_stack);
+
+        if (EFI_ERROR(status)) {
+            line("zpp: nested FAIL could not allocate a host stack\r\n");
+            return false;
+        }
+
+        auto gdtr = read_gdtr();
+        auto idtr = read_idtr();
+
+        auto cs = read_cs();
+        auto ss = read_ss();
+        auto ds = read_ds();
+        auto es = read_es();
+        auto tr = read_tr();
+
+        auto cr0 = read_cr0();
+        auto cr3 = read_cr3();
+        auto cr4 = read_cr4();
+        auto efer = read_msr(ia32_efer);
+
+        auto ok = true;
+
+        auto write = [&](std::uint64_t field, std::uint64_t value) {
+            if (outcome::succeeded != outcome_of(vmwrite(field, value))) {
+                ok = false;
+            }
+        };
+
+        // The controls, each put through its capability MSR rather than
+        // written as wanted - a control the MSR forbids fails the entry
+        // with error 7, and a control it insists on and this leaves clear
+        // fails it the same way. The TRUE MSRs, because IA32_VMX_BASIC
+        // bit 55 says they exist.
+        write(field_pin_controls,
+              adjust(read_msr(ia32_vmx_true_pinbased_ctls), 0));
+        write(field_primary_controls,
+              adjust(read_msr(ia32_vmx_true_procbased_ctls), 0));
+
+        // Host address-space size is the one control this must set. The
+        // guest hypervisor is 64-bit, and a VM exit that did not say so
+        // would put it back in compatibility mode.
+        constexpr std::uint64_t exit_host_address_space_size = 1ull << 9;
+        constexpr std::uint64_t entry_ia32e_mode_guest = 1ull << 9;
+
+        write(field_exit_controls,
+              adjust(read_msr(ia32_vmx_true_exit_ctls),
+                     exit_host_address_space_size));
+        write(field_entry_controls,
+              adjust(read_msr(ia32_vmx_true_entry_ctls),
+                     entry_ia32e_mode_guest));
+
+        write(field_exception_bitmap, 0);
+        write(field_cr3_target_count, 0);
+        write(field_entry_msr_load_count, 0);
+        write(field_exit_msr_load_count, 0);
+        write(field_exit_msr_store_count, 0);
+        write(field_entry_interruption_information, 0);
+        write(field_vmcs_link_pointer, ~std::uint64_t{});
+
+        write(field_cr0_guest_host_mask, 0);
+        write(field_cr4_guest_host_mask, 0);
+        write(field_cr0_read_shadow, cr0);
+        write(field_cr4_read_shadow, cr4);
+
+        // The guest-state area: this processor, with a different RIP.
+        //
+        // The access rights are the architecture's encodings rather than
+        // anything read back, because a descriptor's bytes are not what
+        // the VMCS field holds - SDM Table 25-2 packs type, S, DPL, P, L,
+        // D/B and G into bits 15:0 with bit 16 as "unusable". A 64-bit
+        // code segment is 0xa09b, a flat data segment 0xc093, a busy
+        // 64-bit task-state segment 0x008b, and an unusable segment is
+        // bit 16 alone.
+        constexpr std::uint64_t code_access = 0xa09b;
+        constexpr std::uint64_t data_access = 0xc093;
+        constexpr std::uint64_t task_access = 0x008b;
+        constexpr std::uint64_t unusable_access = 0x10000;
+        constexpr std::uint64_t flat_limit = 0xffffffff;
+
+        write(field_guest_cs_selector, cs);
+        write(field_guest_cs_base, 0);
+        write(field_guest_cs_limit, flat_limit);
+        write(field_guest_cs_access, code_access);
+
+        struct
+        {
+            std::uint64_t selector_field;
+            std::uint64_t base_field;
+            std::uint64_t limit_field;
+            std::uint64_t access_field;
+            std::uint16_t selector;
+        } data_segments[] = {
+            {field_guest_ss_selector,
+             field_guest_ss_base,
+             field_guest_ss_limit,
+             field_guest_ss_access,
+             ss},
+            {field_guest_ds_selector,
+             field_guest_ds_base,
+             field_guest_ds_limit,
+             field_guest_ds_access,
+             ds},
+            {field_guest_es_selector,
+             field_guest_es_base,
+             field_guest_es_limit,
+             field_guest_es_access,
+             es},
+            {field_guest_fs_selector,
+             field_guest_fs_base,
+             field_guest_fs_limit,
+             field_guest_fs_access,
+             0},
+            {field_guest_gs_selector,
+             field_guest_gs_base,
+             field_guest_gs_limit,
+             field_guest_gs_access,
+             0},
+        };
+
+        for (const auto & one : data_segments) {
+            write(one.selector_field, one.selector);
+            write(one.base_field, 0);
+            write(one.limit_field, flat_limit);
+            write(one.access_field,
+                  (0 == one.selector) ? unusable_access : data_access);
+        }
+
+        write(field_guest_tr_selector, tr);
+        write(field_guest_tr_base, 0);
+        write(field_guest_tr_limit, 0x67);
+        write(field_guest_tr_access, task_access);
+
+        write(field_guest_ldtr_selector, 0);
+        write(field_guest_ldtr_base, 0);
+        write(field_guest_ldtr_limit, 0);
+        write(field_guest_ldtr_access, unusable_access);
+
+        write(field_guest_gdtr_base, gdtr.base);
+        write(field_guest_gdtr_limit, gdtr.limit);
+        write(field_guest_idtr_base, idtr.base);
+        write(field_guest_idtr_limit, idtr.limit);
+
+        write(field_guest_cr0, cr0);
+        write(field_guest_cr3, cr3);
+        write(field_guest_cr4, cr4);
+        write(field_guest_efer, efer);
+        write(field_guest_dr7, 0x400);
+        write(field_guest_debugctl, 0);
+        write(field_guest_activity_state, 0);
+        write(field_guest_interruptibility, 0);
+        write(field_guest_pending_debug, 0);
+        write(field_guest_sysenter_cs, 0);
+        write(field_guest_sysenter_esp, 0);
+        write(field_guest_sysenter_eip, 0);
+
+        // Bit 1 is reserved and must be 1; everything else stays clear,
+        // and interrupts stay off because there is nothing here to take
+        // one.
+        write(field_guest_rflags, 0x2);
+        write(field_guest_rsp, host_stack + 0x800);
+        write(field_guest_rip,
+              reinterpret_cast<std::uint64_t>(&zpp_probe_l2_entry));
+
+        // The guest hypervisor's own host state, which is where a VM exit
+        // puts this processor back.
+        write(field_host_cs_selector, cs);
+        write(field_host_ss_selector, ss);
+        write(field_host_ds_selector, ds);
+        write(field_host_es_selector, es);
+        write(field_host_fs_selector, 0);
+        write(field_host_gs_selector, 0);
+        write(field_host_tr_selector, tr);
+        write(field_host_cr0, cr0);
+        write(field_host_cr3, cr3);
+        write(field_host_cr4, cr4);
+        write(field_host_fs_base, 0);
+        write(field_host_gs_base, 0);
+        write(field_host_tr_base, 0);
+        write(field_host_gdtr_base, gdtr.base);
+        write(field_host_idtr_base, idtr.base);
+        write(field_host_sysenter_cs, 0);
+        write(field_host_sysenter_esp, 0);
+        write(field_host_sysenter_eip, 0);
+        write(field_host_rsp, host_stack + 0xf00);
+        write(field_host_rip,
+              reinterpret_cast<std::uint64_t>(&zpp_probe_l1_host));
+
+        if (!ok) {
+            line("zpp: nested FAIL a vmwrite building the vmcs failed"
+                 "\r\n");
+            system_table->BootServices->FreePages(host_stack, 1);
+            return false;
+        }
+
+        line("zpp: nested vmcs12 written, launching\r\n");
+
+        // The launch, and the two ways back from it.
+        //
+        // A VMLAUNCH that the processor refuses returns to the instruction
+        // after it, with the flags saying why. One that succeeds does not
+        // return at all - the next thing this processor does in the guest
+        // hypervisor's world is arrive at its host RIP, which is
+        // `zpp_probe_l1_host`, which jumps back to the same label. So both
+        // paths land on `1:` and the flag says which happened.
+        //
+        // Every register is clobbered because one of the two paths ran a
+        // guest in between.
+        zpp_probe_exit_taken = 0;
+
+        std::uint64_t flags{};
+
+        // AT&T syntax for this one block, where the two Intel-syntax
+        // stubs above are Intel. Not a style lapse: a forward reference to
+        // a numeric local label inside a RIP-relative bracket -
+        // `lea rax, [rip + 1f]` - is not something the Intel-syntax parser
+        // accepts, and the label is the whole trick here.
+        asm volatile("lea 1f(%%rip), %%rax\n\t"
+                     "mov %%rax, zpp_probe_resume_rip(%%rip)\n\t"
+                     "mov %%rsp, zpp_probe_resume_rsp(%%rip)\n\t"
+                     "vmlaunch\n\t"
+                     "1:\n\t"
+                     "pushfq\n\t"
+                     "pop %0\n\t"
+                     : "=r"(flags)
+                     :
+                     : "rax",
+                       "rbx",
+                       "rcx",
+                       "rdx",
+                       "rsi",
+                       "rdi",
+                       "r8",
+                       "r9",
+                       "r10",
+                       "r11",
+                       "r12",
+                       "r13",
+                       "r14",
+                       "r15",
+                       "cc",
+                       "memory");
+
+        if (0 == zpp_probe_exit_taken) {
+            step("vmlaunch", outcome_of(flags), outcome::succeeded);
+
+            std::uint64_t error{};
+            vmread(field_vm_instruction_error, error);
+            say("vm-instruction error", error);
+
+            line("zpp: nested FAIL the second level never ran\r\n");
+            system_table->BootServices->FreePages(host_stack, 1);
+            return false;
+        }
+
+        line("zpp: nested the second level ran and exited\r\n");
+
+        // What the guest hypervisor is told about the exit. The reason has
+        // to be 10, CPUID, with bit 31 clear - a set bit 31 would mean the
+        // entry failed after loading guest state, which is a different
+        // answer and a wrong one here.
+        std::uint64_t reason{};
+        std::uint64_t exit_rip{};
+        std::uint64_t length{};
+
+        auto read_ok = outcome::succeeded ==
+                       outcome_of(vmread(field_exit_reason, reason));
+        read_ok &= outcome::succeeded ==
+                   outcome_of(vmread(field_guest_rip, exit_rip));
+        read_ok &=
+            outcome::succeeded ==
+            outcome_of(vmread(field_exit_instruction_length, length));
+
+        say("exit reason", reason);
+        say("guest rip at exit", exit_rip);
+        say("exit instruction length", length);
+
+        constexpr std::uint64_t exit_reason_cpuid = 10;
+
+        auto entered =
+            reinterpret_cast<std::uint64_t>(&zpp_probe_l2_entry);
+
+        if (!read_ok) {
+            line("zpp: nested FAIL could not read the exit fields\r\n");
+            ok = false;
+        }
+
+        if (exit_reason_cpuid != reason) {
+            line("zpp: nested FAIL exit reason was not cpuid\r\n");
+            ok = false;
+        }
+
+        // RIP is saved at the *faulting* instruction, so it is where the
+        // second-level guest started - the CPUID is the first instruction
+        // there. SDM 30.3: the guest RIP saved is "the value that would
+        // have been saved" for the instruction that caused the exit.
+        if (entered != exit_rip) {
+            line("zpp: nested FAIL guest rip is not where L2 started"
+                 "\r\n");
+            ok = false;
+        }
+
+        // CPUID is two bytes, and the exit-information field says so.
+        if (2 != length) {
+            line("zpp: nested FAIL instruction length is not two\r\n");
+            ok = false;
+        }
+
+        system_table->BootServices->FreePages(host_stack, 1);
+        return ok;
+    }
 
     /**
      * Runs the probe and reports every step, returning whether all of it
@@ -623,6 +1247,13 @@ struct verify_nested
         passed &= step("invept with an unsupported type",
                        outcome_of(invept(7, descriptor)),
                        outcome::failed_valid);
+
+        // And now the one that matters: a second-level guest, actually
+        // run. Everything above exercises the instruction emulation, which
+        // is a shadow VMCS and some flag conventions; this exercises the
+        // VMCS the VMM builds out of that shadow, the entry into it, and
+        // the reflection of the exit back here.
+        passed &= launch(system_table, vmcs_region, line, say, step);
 
         // And back out, leaving the processor as it was found. VMXOFF
         // first, because clearing CR4.VMXE while in VMX operation is a

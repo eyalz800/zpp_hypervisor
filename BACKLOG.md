@@ -1728,15 +1728,52 @@ Two things about running it, both of which cost a run to find:
   space on the ESP and then *restarts the machine* so the channel is live
   on the next boot, and under the harness that is the end of the run.
 
+### Run: a second-level guest, entered and exited, under Bochs
+
+Experiment 3 as well. The same probe writes a whole vmcs12 out of the state
+the processor is running with and launches a second-level guest that
+differs from its hypervisor in exactly one thing - RIP, pointing at two
+instructions, `cpuid` then a halt. Measured, on the reflected exit:
+
+- `exit reason 0x0000000000000a` - CPUID, with bit 31 clear, so this was a
+  VM exit and not an entry failure.
+- `guest rip at exit 0x000000003dd33f50`, which is where the second-level
+  guest was entered: RIP is saved at the faulting instruction and the CPUID
+  is the first one there.
+- `exit instruction length 0x02`, which is the length of CPUID.
+
+That is sections B, C and D executing end to end: the vmcs02 built out of
+the shadow, the entry into it, the second-level guest running real
+instructions, the exit decided by `l1_wants_l2_exit`, the guest state saved
+back into vmcs12, the exit-information fields written, and the guest
+hypervisor's own host state loaded so that it resumed at its host RIP with
+its own stack.
+
+CPUID is the instruction to launch into, and not arbitrarily: SDM 28.1.2
+makes it exit unconditionally in VMX non-root operation, so the
+second-level guest cannot fail to produce an exit, and the reflect decision
+gives it to the guest hypervisor unconditionally too. A run that produces
+no exit is therefore a real failure rather than a guest that happened not
+to trap, and the halt after it turns that case into a hang the harness
+times out on rather than a wrong answer it reports.
+
+What the launch deliberately does *not* enable is extended page tables in
+vmcs12. Without them the second-level guest's physical addresses are the
+first level's, which the VMM's own identity map already translates - so
+this exercises the entry and the reflection without also depending on the
+shadow page-table builder, and a failure has one place to be rather than
+two.
+
 What is still not run:
 
-3. A second-level guest. The probe stops where a guest hypervisor would
-   have written its controls; VMLAUNCH, the vmcs02 construction, the exit
-   reflection and the shadow extended page tables have still never
-   executed. This is the next experiment and it is the one that matters,
-   because sections B, C and D are all downstream of it.
-4. Windows with VBS on and the switch on, on the rig. Worth nothing until
-   3 passes.
+4. The shadow extended page tables. `build_shadow_ept`, `compose_ept`
+   against a real guest hypervisor's tables, and the fault path in
+   `on_l2_ept_fault` have never executed - the probe's guest hypervisor
+   does not use EPT. Turning it on in the probe means building an EPT12 for
+   the second-level guest, which is the next experiment and is a smaller
+   one than this was.
+5. Windows with VBS on and the switch on, on the rig. Worth nothing until 4
+   passes.
 
 ## Nested VMX coverage checklist
 
@@ -1873,10 +1910,11 @@ essay.
 is a different answer from "yes" and the distinction is the whole of what
 is left: the checklist measures coverage against the SDM and KVM, which is
 what reading can establish, and it cannot establish that any of it works.
-"Run: the instruction emulation and the capability MSRs" above is what has
-executed, and it is the instruction half only. The second-level guest -
-VMLAUNCH, vmcs02, the reflection, the shadow tables - has still never run,
-and that is the only thing between this and an answer.
+The two "Run:" sections above are what has executed: the instruction
+emulation, the capability MSRs, and a second-level guest entered and
+exited with the exit reflected. What has not is the shadow extended page
+tables, which the probe's guest hypervisor does not use - and Hyper-V
+does, so that is what stands between this and an answer.
 
 ### The switch-on build overwrites the switch-off binary, and the check caught it
 
