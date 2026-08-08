@@ -940,3 +940,51 @@ the controller wrote it.
 in the split above: the doorbell trap needs VT-x, which Bochs has and QEMU
 does not, and the completion needs a modelled NVMe controller, which QEMU
 has and Bochs does not.
+
+## The channel survives the guest's controller reset, once
+
+The blocker that has ended every run since this began is cleared, and the
+thing that replaces it is smaller and different.
+
+Two runs on the rig, with the reservation and the grant reduction on.
+
+**Run A, creation off - the control.** The guest is told one submission
+queue fewer than the controller granted and nothing is created behind it.
+`grant result` 1, the controller wrote `0x000f000f` and the guest reads
+`0x000f000e`, so it was told fifteen submission and sixteen completion
+queues. `grant already posted` 0, so the completion had not even landed
+when the edit was made - the window is real but was not close. Windows
+booted normally. So the lie itself is harmless to the guest.
+
+**Run B, all three on.** The guest created exactly fifteen submission
+queues and eight completion queues, leaving room, and `create result` 1
+with status 0 - our pair was created. Decoding the bound doorbells gives
+**submission queue 16 and completion queue 9**, each one above the guest's
+highest in its own space, which is why the two identifiers differ. Windows
+booted to user mode and kept running: no loop, no bugcheck.
+
+And on the medium, which is the only proof that counts:
+
+    26 blocks, sequence 0..25
+      epoch 1: sequence 0..24
+      epoch 2: sequence 25
+
+**A block written after the reset, on the rebuilt queue pair.** That has
+never happened before.
+
+**What is not fixed: it wrote one block and stopped.** The in-memory
+`dropped` counter read 1536 when sampled, while the last block on the
+medium reports zero - which is the header lag this file already warns
+about, since a counter only travels in the *next* block. So the sequence
+is: rebuild succeeds, one block goes out, and every submission after it
+fails. At roughly thirty-one records a block that is a lot of lost log,
+and it is the next thing to chase.
+
+The suspects, in order, and none is measured yet: the created queue's
+doorbell position or completion phase is wrong for a queue the controller
+has just made, so completions are never recognised; the guard read is
+refusing on an epoch that moved; or the submission genuinely times out
+because the queue was created with something wrong in it that the create
+itself did not reject. `refused_guard`, `refused_signature`, `submitted`
+and `completed` in `queue_pair` split those three apart and were not read.
+Read them first.
