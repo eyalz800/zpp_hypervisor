@@ -268,6 +268,13 @@ public:
      * `payload_status` receives each payload command's completion status
      * so the caller can tell a created queue from a refused one.
      *
+     * `payload_result` receives each payload command's DW0, the command
+     * specific result. Optional, because the two Create commands have no
+     * result worth reading - but Set Features (Number of Queues) answers
+     * *entirely* in DW0: the status only says the feature was accepted,
+     * and how many queues were actually allocated is in there. A
+     * reservation that cannot read it does not know what it reserved.
+     *
      * The guest must be stopped and the admin interrupt vector masked
      * before this is called. Neither is checked here, because neither is
      * checkable from here - they are the caller's contract, stated in
@@ -280,6 +287,7 @@ public:
                              const submission_entry * payload,
                              std::uint32_t payload_count,
                              std::uint16_t * payload_status,
+                             std::uint32_t * payload_result,
                              std::uint64_t spin_budget,
                              std::uint32_t laps = 1)
     {
@@ -390,8 +398,13 @@ public:
                 } else {
                     auto index =
                         static_cast<std::uint32_t>(id - first_command_id);
-                    if ((index < payload_count) && payload_status) {
-                        payload_status[index] = entry.status();
+                    if (index < payload_count) {
+                        if (payload_status) {
+                            payload_status[index] = entry.status();
+                        }
+                        if (payload_result) {
+                            payload_result[index] = entry.command_specific;
+                        }
                     }
                     ++reaped;
                 }

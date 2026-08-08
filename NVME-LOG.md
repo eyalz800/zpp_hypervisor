@@ -588,6 +588,61 @@ The identifier also has to be chosen rather than assumed. Drivers allocate
 contiguously from 1, so taking a low one collides and the controller answers
 Invalid Queue Identifier. Take the highest inside the allocation.
 
+### The order, as built
+
+Written and switched off, in two switches rather than one:
+`diag::rebuild_channel_after_reset` for steps 1 to 3 and
+`diag::create_channel_queue_after_guest` for steps 4 and 5. The split is a
+control experiment, not tidiness - with only the first on, every part of the
+borrow happens at the same moment it did when the guest boot looped and
+nothing is created, so a boot that survives clears the borrow itself and a
+boot that does not indicts it.
+
+`hypervisor::reserve_channel_queue_allocation` runs at the CC.EN 0 to 1 edge,
+arms the doorbell page in holding mode, and borrows once for a single
+`Set Features (Number of Queues)` asking for the maximum - CDW11 = `ffffffffh`,
+both halves being zero's based. `admin_borrow::run` now reports each payload
+command's DW0 as well as its status, because for this command DW0 *is* the
+answer: the status only says the feature was accepted.
+
+`hypervisor::observe_guest_admin_submissions` then reads every admin command
+the guest submits off its own submission queue, keyed on the doorbell watch,
+and keeps four numbers: the Number of Queues it asked for, the highest Create
+I/O SQ and Create I/O CQ identifier it has issued, and how many of each it has
+created. **No completion is patched.** The earlier section of this document
+describing a patch scheme is obsolete under this ordering and building one
+would be a mistake that has already been made once.
+
+`hypervisor::create_channel_queue` fires when the guest has created at least as
+many queues as it asked for in both spaces, and takes
+`max(highest created, requested) + 1` in each - the requested count being a
+margin against a driver that creates its set in an order this has not seen,
+and being itself an observation of the guest rather than of the controller. If
+that is outside the allocation nothing is created at all, which is the outcome
+that lets the guest boot. On success the doorbell watch is removed, so the
+steady state costs no exits.
+
+What stands in for quiescence, all of it necessary and none of it sufficient
+on its own: the creating processor is the one held inside the exit for the
+guest's own doorbell write, so the thread driving storage initialisation
+cannot submit; the doorbell page is held for the borrow, after an
+acknowledgement wait that now probes with a wake NMI - usable again since a
+non-maskable interrupt taken in root mode returns instead of halting the
+processor that took it; and the borrow does not start until SQHD equals the
+tail the guest last published, which is what proves the controller has fetched
+every entry the borrow is about to overwrite.
+
+**What is not solved, and is the thing to watch on the first hardware run:**
+the admin queue's interrupt is not masked. This document says MSI-X vector 0
+must be masked for the duration and there is no MSI-X table access on the
+resident side to do it with. The argument standing in its place is that the
+only processor which can take that interrupt is the one held inside the exit
+with interrupts disabled, so it stays pending in the local APIC and is
+delivered after the restore, where it finds the guest's own completions and
+nothing else. That is an argument about *when* this runs rather than a
+property of what it does, and it is the first thing to revisit if the guest
+misbehaves after the create rather than during it.
+
 ### A correction worth keeping
 
 The lap length was reported as wrong during review, on the grounds that it

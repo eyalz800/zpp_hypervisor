@@ -587,8 +587,8 @@ private:
     guest_linear_to_physical(std::uint64_t linear);
 
     /**
-     * Rebuilds the disk channel's queue pair by borrowing the guest's
-     * admin queue.
+     * Reserves the disk channel's I/O queue allocation, by borrowing the
+     * guest's admin queue for one Set Features (Number of Queues).
      *
      * Called from the exit that saw the guest enable the controller, and
      * only from there. That is the one moment when the borrow is free:
@@ -600,11 +600,100 @@ private:
      * initialisation path is single threaded - no other processor is
      * touching it.
      *
+     * It is also the one moment when the *reservation* is legal, and that
+     * is the stronger reason. NVMe Base 5.2.30.1.5 - quoted verbatim in
+     * NVME-LOG.md - says the allocation is cleared by a controller level
+     * reset and established by the first Set Features completed after
+     * one, and that a Set Features issued after any I/O queue has been
+     * created is aborted with Command Sequence Error. So this has to run
+     * after the reset and before anything is created, which is exactly
+     * here.
+     *
+     * **Creates nothing.** Creating is create_channel_queue, and it
+     * happens later for the same reason: our Create must not precede the
+     * guest's own Set Features.
+     *
      * Costs this processor the length of one lap, measured at 16.6 us per
      * admin command against this controller. Costs every other processor
      * nothing.
      */
-    void rebuild_channel_queue();
+    void reserve_channel_queue_allocation();
+
+    /**
+     * Creates the channel's own queue pair, once the guest has created
+     * its own.
+     *
+     * Called from the exit that saw the guest ring its admin doorbell for
+     * the Create that completed its set, and only when the identifiers
+     * chosen from what it created are inside the reserved allocation.
+     * Unlike the reservation this runs while the guest's driver is live,
+     * which is the whole of what makes it risky - see
+     * diag::create_channel_queue_after_guest for what stands in for
+     * quiescence and what does not.
+     */
+    void create_channel_queue();
+
+    /**
+     * Runs one borrow of the guest's admin queue with the given payload,
+     * excluding every other processor for its duration.
+     *
+     * Everything both callers above share: find the guest's queues from
+     * the controller's own registers, reach them through the mapping
+     * window, wait for the queue to fall quiescent, get every processor
+     * to acknowledge the doorbell protection, hold it, borrow, and let
+     * go. What differs between them is only the payload and when they
+     * are called.
+     *
+     * Returns zero on success. Any other value is a refusal code, kept
+     * distinct from nvme::borrow_result's small numbers by starting at
+     * 0xf0, and recorded so that a channel which stays down says which
+     * step it stopped at.
+     *
+     * The caller must **not** hold mapping_window_lock: this takes it,
+     * and it is not recursive.
+     */
+    std::uint64_t
+    borrow_guest_admin_queue(const nvme::submission_entry * payload,
+                             std::uint32_t payload_count,
+                             std::uint16_t * payload_status,
+                             std::uint32_t * payload_result);
+
+    /**
+     * Records what the guest just submitted on its admin queue, from the
+     * entries between where this last looked and the tail it has just
+     * published.
+     *
+     * The caller holds mapping_window_lock, which is why this is a
+     * function of its own: the borrow that may follow takes that lock
+     * too, so the observation has to finish and let go before it starts.
+     */
+    void observe_guest_admin_submissions(std::uint32_t tail);
+
+    /**
+     * Removes the doorbell page watch, once there is nothing left to see
+     * on it.
+     *
+     * With a doorbell stride of zero - which is what real hardware
+     * reports - every I/O queue's doorbell shares the page with the admin
+     * one, so a watch left armed is an exit per disk command for the rest
+     * of the boot. NVME-LOG.md says the trap is armed only between the
+     * enable and our queues existing, and this is the second half of
+     * that.
+     *
+     * Does nothing under observe_controller_admin, whose whole purpose is
+     * to price a permanently trapped doorbell page.
+     */
+    void stop_watching_channel_doorbells();
+
+    /**
+     * Forgets everything observed about the guest's queue configuration.
+     *
+     * Called when the guest disables the controller, because a controller
+     * level reset clears the allocation and deletes every queue - so the
+     * identifiers, the counts and the reservation all describe a
+     * controller that no longer exists.
+     */
+    void forget_channel_queue_observations();
 
     /**
      * Turns the preemption timer on or off.
@@ -2248,8 +2337,7 @@ private:
         std::uint32_t namespace_id{};
     };
 
-    admin_observation
-        admin_observations[admin_observation_capacity]{};
+    admin_observation admin_observations[admin_observation_capacity]{};
     volatile std::uint64_t admin_observation_count{};
 
     /**
@@ -2944,6 +3032,149 @@ private:
     std::uint64_t channel_rebuilds{};
     std::uint64_t channel_rebuild_result{};
     std::uint64_t channel_rebuild_ticks{};
+
+    /**
+     * The reservation and the creation that spends it, as separate
+     * records.
+     *
+     * Separate because they happen milliseconds apart, in different exits,
+     * and either can fail while the other worked - a reservation that was
+     * refused and a creation that never became eligible look identical
+     * from the medium, which is nothing at all. All volatile: nothing in
+     * this program reads any of them, so without it the stores are dead
+     * and the optimizer is entitled to remove them, which is exactly what
+     * happened to configure_reject once.
+     * @{
+     */
+    /**
+     * Non-zero once the reservation has been attempted this epoch, and
+     * how it went: zero while untried, 1 for a reservation that took,
+     * otherwise the refusal code borrow_guest_admin_queue returned or
+     * 0xe0 for a Set Features the controller refused.
+     */
+    volatile std::uint64_t channel_reserve_result{};
+
+    /**
+     * The status and DW0 of our own Set Features, exactly as the
+     * controller answered. DW0 is the whole answer - NSQA in bits 15:0
+     * and NCQA in 31:16, both zero's based - and the status only says
+     * whether the feature was accepted at all.
+     * @{
+     */
+    volatile std::uint64_t channel_reserve_status{};
+    volatile std::uint64_t channel_reserve_allocation{};
+    /**
+     * @}
+     */
+
+    /**
+     * The allocation as real counts, which is what every comparison here
+     * is against. Zero means no reservation is in force, and nothing may
+     * be created.
+     * @{
+     */
+    std::uint32_t channel_allocated_submission_queues{};
+    std::uint32_t channel_allocated_completion_queues{};
+    /**
+     * @}
+     */
+
+    /**
+     * What the guest asked the controller for, read off its own Set
+     * Features (Number of Queues) rather than out of the completion. Real
+     * counts. Zero until it has issued one.
+     * @{
+     */
+    volatile std::uint64_t channel_guest_requested_submission_queues{};
+    volatile std::uint64_t channel_guest_requested_completion_queues{};
+    /**
+     * @}
+     */
+
+    /**
+     * The highest identifier the guest has actually created in each
+     * space, and how many it has created. Two spaces, because they are
+     * two spaces: measured on the rig, the guest creates completion
+     * queues 1 to 8 and submission queues 1 to 16.
+     * @{
+     */
+    volatile std::uint64_t channel_guest_highest_submission_queue{};
+    volatile std::uint64_t channel_guest_highest_completion_queue{};
+    volatile std::uint64_t channel_guest_created_submission_queues{};
+    volatile std::uint64_t channel_guest_created_completion_queues{};
+    /**
+     * @}
+     */
+
+    /**
+     * Whether the guest has deleted an I/O queue this epoch.
+     *
+     * A driver deleting queues is tearing the controller down, and
+     * creating one behind it at that point is the worst possible moment.
+     * Once this is set nothing is created until the next enable.
+     */
+    volatile std::uint64_t channel_guest_deleted_queues{};
+
+    /**
+     * How the creation went: zero while untried, 1 for a queue pair that
+     * exists, otherwise the refusal code, 0xe1 for a Create the
+     * controller refused, or 0xe2 for an allocation with no room above
+     * what the guest took.
+     * @{
+     */
+    volatile std::uint64_t channel_create_result{};
+    volatile std::uint64_t channel_create_status{};
+    volatile std::uint64_t channel_create_ticks{};
+    /**
+     * @}
+     */
+
+    /**
+     * The identifiers chosen for our own queue pair, in the two spaces.
+     * @{
+     */
+    std::uint16_t channel_created_submission_id{};
+    std::uint16_t channel_created_completion_id{};
+    /**
+     * @}
+     */
+
+    /**
+     * Whether the doorbell page is watched right now.
+     *
+     * Armed at the enable and removed once the queue pair exists or has
+     * been given up on, which is what NVME-LOG.md prescribes and what
+     * keeps the steady state free: with a doorbell stride of zero every
+     * I/O doorbell shares that page, so a permanent watch is an exit per
+     * disk command.
+     */
+    bool channel_doorbell_watched{};
+
+    /**
+     * The admin submission queue tail the guest last published, which is
+     * the value its own doorbell write carried.
+     *
+     * Kept because a doorbell cannot be read back - PCIe Transport 1.0c
+     * 3.1.2.1, "if a doorbell register is read, the value returned is
+     * vendor specific" - and a borrow needs it: SQHD equal to this is
+     * what says the controller has fetched everything the guest wrote,
+     * and therefore that no unfetched entry is about to be overwritten.
+     */
+    std::uint32_t channel_expected_admin_tail{};
+
+    /**
+     * What the quiescence wait was looking at when it gave up. Only
+     * meaningful when a result code says it did.
+     * @{
+     */
+    volatile std::uint64_t channel_quiesce_submission_tail{};
+    volatile std::uint64_t channel_quiesce_expected_tail{};
+    /**
+     * @}
+     */
+    /**
+     * @}
+     */
 
     /**
      * Where the guest's admin queue is copied to and compared against

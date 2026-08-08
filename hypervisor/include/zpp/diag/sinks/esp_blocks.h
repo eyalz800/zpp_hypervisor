@@ -338,10 +338,20 @@ struct esp_blocks_for
      * The epoch moves, which is what makes any write still in flight
      * against the old queue refuse itself rather than ring a doorbell the
      * controller has forgotten.
+     *
+     * The two identifiers are separate parameters because they are
+     * separate spaces, and after a guest has configured the controller
+     * they genuinely differ. Measured on the rig: Windows creates
+     * completion queues 1 to 8 and submission queues 1 to 16, pairing two
+     * submission queues onto each completion queue, so the first free
+     * identifier is 9 in one space and 17 in the other. They were one
+     * parameter while the only other user of this controller was firmware
+     * that created a single queue and numbered it 1.
      */
     static void adopt_rebuilt_queue(volatile std::uint8_t * bar,
                                     std::uint32_t stride,
-                                    std::uint16_t queue_id,
+                                    std::uint16_t submission_id,
+                                    std::uint16_t completion_id,
                                     std::uint32_t namespace_id)
     {
         auto doorbell = [&](std::uint32_t index)->volatile void *
@@ -352,15 +362,15 @@ struct esp_blocks_for
         };
 
         queues::bound = typename queues::binding{
-            .submission_doorbell = doorbell(2u * queue_id),
-            .completion_doorbell = doorbell((2u * queue_id) + 1u),
+            .submission_doorbell = doorbell(2u * submission_id),
+            .completion_doorbell = doorbell((2u * completion_id) + 1u),
             .status_register =
                 bar + nvme::offset_of(nvme::register_offset::status),
             .configuration_register =
                 bar +
                 nvme::offset_of(nvme::register_offset::configuration),
-            .submission_id = queue_id,
-            .completion_id = queue_id,
+            .submission_id = submission_id,
+            .completion_id = completion_id,
             .namespace_id = namespace_id,
             .epoch = ++epoch,
         };

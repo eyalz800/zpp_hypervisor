@@ -624,6 +624,77 @@ constexpr submission_entry set_features_number_of_queues(
 }
 
 /**
+ * Builds a Set Features command asking for the largest Number of Queues
+ * allocation this controller will give.
+ *
+ * Both halves of CDW11 are zero's based, so 0xffff in each asks for
+ * 65536 queues - more than any controller has. Asking for more than
+ * exists is the intended use rather than an abuse: the grant is reported
+ * back in DW0 of the completion and may be smaller than the request,
+ * which is why Linux reads it as
+ * `min(result & 0xffff, result >> 16) + 1` and honours it
+ * (`nvme_set_queue_count`, drivers/nvme/host/core.c, quoted at
+ * core.c:1703 in the header comment on set_features_number_of_queues
+ * above). So the answer to this is "everything you can have", stated in
+ * one command.
+ *
+ * Why the *maximum* rather than a number: the allocation is frozen by
+ * the first Set Features completed after a controller level reset and
+ * cannot be raised afterwards - NVMe Base 5.2.30.1.5, quoted verbatim in
+ * NVME-LOG.md, "After that first successful Set Features command, the
+ * number of I/O queues allocated shall not change until a CLR occurs".
+ * A reservation therefore gets exactly one attempt per reset and has no
+ * way to ask again, so it asks for everything and chooses an identifier
+ * afterwards from what the guest is then seen to create.
+ *
+ * Spelled as its own function rather than as
+ * `set_features_number_of_queues(0, 0)`: that one takes real counts and
+ * subtracts one, so zero would underflow into the right bits by
+ * accident - a thing that reads as a bug for ever afterwards.
+ */
+constexpr submission_entry set_features_maximum_number_of_queues()
+{
+    submission_entry entry{};
+    entry.command_dword0 =
+        make_command_dword0(admin_opcode::set_features, 0);
+    entry.command_dword10 = std::uint32_t{
+        static_cast<std::uint8_t>(feature_identifier::number_of_queues)};
+    entry.command_dword11 = 0xffffffffu;
+    return entry;
+}
+
+/**
+ * Reads a Number of Queues grant or request out of the dword that
+ * carries it - DW0 of a Set Features completion, or CDW11 of the
+ * command.
+ *
+ * The same encoding serves both, which is the whole reason these are
+ * one pair of functions: NSQ in bits 15:0 and NCQ in bits 31:16, both
+ * zero's based. Verified against SPDK's
+ * `union spdk_nvme_feat_number_of_queues` (nsqr:16, ncqr:16) as cited on
+ * set_features_number_of_queues above, and against Linux encoding a
+ * request as `(*count - 1) | ((*count - 1) << 16)` and decoding a grant
+ * as `min(result & 0xffff, result >> 16) + 1`.
+ *
+ * They return real counts, so a caller never sees the zero's base. The
+ * count is at least one for every value, which is correct: a controller
+ * that reports zero has granted one queue, not none.
+ * @{
+ */
+constexpr std::uint32_t number_of_submission_queues(std::uint32_t value)
+{
+    return (value & 0xffffu) + 1;
+}
+
+constexpr std::uint32_t number_of_completion_queues(std::uint32_t value)
+{
+    return ((value >> 16) & 0xffffu) + 1;
+}
+/**
+ * @}
+ */
+
+/**
  * FUA - Force Unit Access, CDW12 bit 30 of a Read or a Write. When set
  * the command does not complete until the data is on non-volatile
  * media.

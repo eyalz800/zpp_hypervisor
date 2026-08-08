@@ -183,23 +183,123 @@ inline constexpr bool restart_after_reservation = enabled;
  * than one guest moving around. The same build with only the emulation
  * on boots and settles, so this switch is the difference.
  *
- * So the borrow still disturbs the guest's driver, and the remaining
- * suspicion is where it happens rather than whether it can be noticed:
- * the borrow runs after the guest's enable has landed, which is already
- * inside the window where the driver may submit its own admin commands.
- * The two things to try, in order:
+ * **Why it boot loops was then diagnosed, and it was not the timing.**
+ * Two causes, both measured, both recorded at the end of NVME-LOG.md:
  *
- * - Borrow from inside the emulation of the CC.EN write, before the
- *   enable is applied to the controller at all. The driver cannot have
- *   submitted anything yet, because the instruction that starts the
- *   controller has not retired.
- * - Failing that, the shadowed register page in
- *   excursion_at_controller_reset, which holds writers instead of racing
- *   them. That took the development machine off the network once, for a
- *   reason since fixed - the wake NMI it sent to a processor that was in
- *   root mode - so it needs its ordering re-checked before a second try.
+ * - **The identifier collided.** The loader hardcodes I/O queue 4 and
+ *   the resident side inherited it. With `observe_controller_admin` on,
+ *   the guest's own admin queue says what it does: it asks for sixteen
+ *   submission queues and eight completion queues, then creates
+ *   completion queues 1 to 8 and submission queues 1 to 16. Four is
+ *   inside both ranges, so the guest's own Create for it is refused, its
+ *   storage initialisation fails, and it bugchecks and resets - which
+ *   re-enters the rebuild, which recreates the queue, which is why it
+ *   never converged. Raising the identifier to 32 was refused with
+ *   status 0x4101, Invalid Queue Identifier, because it exceeded the
+ *   allocation - and the guest then booted, which is the control that
+ *   isolates queue creation as the thing that breaks it.
+ * - **The ordering was wrong.** NVMe Base 5.2.30.1.5 says a Set Features
+ *   (Number of Queues) submitted after any I/O queue has been created is
+ *   aborted with Command Sequence Error, that the allocation is cleared
+ *   by a controller level reset, and that it is fixed by the first Set
+ *   Features completed after one. Creating our queues at the CC.EN edge
+ *   put them before the guest's own Set Features.
+ *
+ * So this switch now runs the sequence NVME-LOG.md's "The order to use"
+ * prescribes, and it is split across two switches because the two halves
+ * carry very different risk:
+ *
+ * **This one is the reservation, steps 1 to 3.** At the CC.EN 0 to 1
+ * edge, borrow the admin queue once and issue Set Features (Number of
+ * Queues) asking for the maximum, **creating nothing**. The guest's own
+ * Set Features arrives later with still no I/O queue created, so it
+ * completes, and the controller reports the allocation reserved here -
+ * which is at least what the guest asked for. No completion patch is
+ * needed and none is built: an earlier section of NVME-LOG.md describes
+ * one, and this ordering makes it obsolete.
+ *
+ * On its own this creates no queue and therefore restores no channel. It
+ * is the control run: everything the borrow does happens, at the same
+ * moment it did when the guest boot looped, and the only difference is
+ * that nothing is created. A guest that boots normally with this on has
+ * cleared the borrow itself of the boot loop.
+ *
+ * The doorbell page is watched while this is on, from the enable until
+ * the queue is created or given up on, which is what records the guest's
+ * Create commands. That costs an exit per admin command and, with a
+ * doorbell stride of zero, per I/O command too - see
+ * observe_controller_admin, which exists to price exactly that.
  */
 inline constexpr bool rebuild_channel_after_reset = false;
+
+/**
+ * Whether to create the channel's own queue pair once the guest has
+ * created its own - step 4, and the unproven half.
+ *
+ * Needs rebuild_channel_after_reset, which reserves the allocation this
+ * spends. Off independently of it so that the reservation can be run on
+ * its own first: a boot loop with only that on is a fault in the borrow,
+ * and a boot loop with this on as well is a fault in creating a queue
+ * behind a live driver. Those are different problems and one boot each
+ * separates them.
+ *
+ * **The identifier is chosen from what the guest is observed to create,
+ * never from what it was told.** The guest is told the whole allocation,
+ * which after asking for the maximum is far more than it wants, and
+ * NVME-LOG.md's observation notes that no run has yet shown what this
+ * driver does with an allocation larger than its request. What is
+ * observed is its admin submission queue: the Number of Queues it asks
+ * for, and every Create I/O SQ and Create I/O CQ identifier it actually
+ * issues, tracked in the two separate spaces. Ours is one above the
+ * higher of what it created and what it asked for, in each space, and
+ * only if that is still inside the allocation - otherwise nothing is
+ * created and the channel stays down, which is the outcome that lets the
+ * guest boot.
+ *
+ * **The honest part: this borrows the admin queue while the guest's
+ * driver is live**, which is the quiescence problem that has blocked
+ * this all along. What makes it defensible rather than merely narrower
+ * than before:
+ *
+ * - It runs from inside the VM exit of the guest's own doorbell write
+ *   for its last Create, so the processor that drives storage
+ *   initialisation is held in our handler and cannot submit anything.
+ *   Windows' storage stack is single threaded at that point.
+ * - The doorbell page is held for the borrow, so any other processor
+ *   that rings any doorbell stops at the faulting instruction with its
+ *   write not yet applied. The hold is preceded by an acknowledgement
+ *   wait, so no processor can still be running on a stale translation.
+ * - The wait probes with a wake NMI, which is usable again: a processor
+ *   that takes one in root mode now returns from it instead of halting
+ *   for ever. That is the whole reason a passive wait was needed before,
+ *   and passive waits are what timed out rather than succeeding.
+ * - The borrow starts only once the guest's admin queue is quiescent,
+ *   measured rather than assumed: the located submission tail and
+ *   completion tail have to stop moving before a command of ours is
+ *   submitted. The guest's last Create is in flight when the doorbell
+ *   write is seen, and borrowing over it would overwrite entries the
+ *   controller has not fetched.
+ *
+ * **What is not solved, stated rather than hidden:**
+ *
+ * - The admin queue's interrupt is not masked. NVME-LOG.md says vector 0
+ *   must be masked in the controller's MSI-X table for the duration, and
+ *   no code here can do that - there is no MSI-X table access on the
+ *   resident side. The argument standing in for it is that the only
+ *   processor which could take that interrupt is the one held inside
+ *   this exit with interrupts disabled, so the interrupt stays pending
+ *   in its local APIC and is delivered after everything is restored,
+ *   where it finds the guest's own completions and nothing else. That is
+ *   an argument about when this runs, not a property of what it does.
+ * - The borrow rings the guest's completion queue doorbell as it laps,
+ *   so at the end the controller believes the guest has consumed
+ *   entries it may not have read yet. That is pre-existing in
+ *   admin_borrow and is why the quiescence wait matters.
+ * - Neither emulator can exercise any of this: QEMU models NVMe but has
+ *   no VT-x, Bochs has VT-x and no NVMe at all. It is first run on
+ *   hardware.
+ */
+inline constexpr bool create_channel_queue_after_guest = false;
 
 /**
  * Whether to watch the controller's doorbell page and record what the

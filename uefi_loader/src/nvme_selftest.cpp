@@ -586,8 +586,15 @@ void nvme_selftest::execute(const nvme::log_target & destination,
     // against the same controller, and here it costs nothing and risks
     // nothing.
     auto borrow_started = arch::x86_64::rdtsc();
-    auto result = admin_borrow::run(
-        bar, stride, where, saved, payload, 2, payload_status, 1u << 24);
+    auto result = admin_borrow::run(bar,
+                                    stride,
+                                    where,
+                                    saved,
+                                    payload,
+                                    2,
+                                    payload_status,
+                                    nullptr,
+                                    1u << 24);
     auto borrow_ticks = arch::x86_64::rdtsc() - borrow_started;
 
     trace::hex_line("selftest: borrow took tsc ticks ", borrow_ticks);
@@ -636,6 +643,7 @@ void nvme_selftest::execute(const nvme::log_target & destination,
                                           again,
                                           nullptr,
                                           0,
+                                          nullptr,
                                           nullptr,
                                           1u << 24,
                                           laps);

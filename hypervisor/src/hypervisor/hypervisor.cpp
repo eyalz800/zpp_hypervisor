@@ -1261,7 +1261,8 @@ void hypervisor::arm_guest_timer_poll(bool armed)
     // does not already have, and reads are the half a guest does far more
     // often - Windows reads the deadline register to work out how long is
     // left, and trapping that would multiply the cost for nothing.
-    this->intercept_msr(arch::x86_64::msr::ia32_tsc_deadline, false, armed);
+    this->intercept_msr(
+        arch::x86_64::msr::ia32_tsc_deadline, false, armed);
     this->intercept_msr(
         arch::x86_64::msr::ia32_x2apic_init_count, false, armed);
 }
@@ -1304,7 +1305,11 @@ void * hypervisor::map_window_at(std::size_t first_page,
            (physical_address - page);
 }
 
-void hypervisor::rebuild_channel_queue()
+std::uint64_t hypervisor::borrow_guest_admin_queue(
+    const nvme::submission_entry * payload,
+    std::uint32_t payload_count,
+    std::uint16_t * payload_status,
+    std::uint32_t * payload_result)
 {
     // The whole body behind `if constexpr`, because naming a static
     // member of the sink's class template odr-uses it and would carry the
@@ -1312,14 +1317,28 @@ void hypervisor::rebuild_channel_queue()
     // scripts/ci/check-diag-absent.sh fails, and did over this function.
     if constexpr (!diag::policy_of(diag::sink::esp_blocks).present ||
                   !diag::rebuild_channel_after_reset) {
-        return;
+        static_cast<void>(payload);
+        static_cast<void>(payload_count);
+        static_cast<void>(payload_status);
+        static_cast<void>(payload_result);
+        return 0xff;
     } else {
-        // Nothing to rebuild if the channel was never up.
+        // Nothing to borrow against if the channel was never up.
         if (!this->channel_bar) {
-            return;
+            return 0xfb;
         }
 
-        // One rebuild at a time, across every processor.
+        // The doorbell page has to be watched in holding mode already.
+        // This does not arm it: arming is what the enable does, and it
+        // stays armed until the queue pair exists, because the same watch
+        // is what records the guest's Create commands. Arming it here
+        // instead would leave the window between the enable and the first
+        // borrow unobserved.
+        if (!this->channel_doorbell_watched) {
+            return 0xf5;
+        }
+
+        // One borrow at a time, across every processor.
         //
         // The enable is observed in two places - the emulated write to the
         // configuration register, and the poll on this VMM's own exits -
@@ -1330,12 +1349,10 @@ void hypervisor::rebuild_channel_queue()
         //
         // They would serialise on mapping_window_lock rather than run
         // together, which is what has kept this from being seen, but
-        // serialised is not harmless: the second borrow finds the queue
-        // already created and gets Invalid Queue Identifier, and unlike
-        // the first it runs *after* the guest's driver is live. That is
-        // precisely the unexcluded borrow that was once measured spending
-        // its whole budget and timing out, with the guest's admin queue
-        // desynchronised behind it.
+        // serialised is not harmless: the second borrow runs after the
+        // guest's driver is live. That is precisely the unexcluded borrow
+        // that was once measured spending its whole budget and timing
+        // out, with the guest's admin queue desynchronised behind it.
         //
         // An exchange rather than a test and a set, because the two
         // observers are what create the race in the first place.
@@ -1343,43 +1360,33 @@ void hypervisor::rebuild_channel_queue()
                 true, std::memory_order_acquire)) {
             this->channel_rebuild_reentered =
                 this->channel_rebuild_reentered + 1;
-            return;
+            return 0xfa;
         }
 
         scope_exit release_rebuild{[this] {
-            this->channel_rebuild_running.store(
-                false, std::memory_order_release);
+            this->channel_rebuild_running.store(false,
+                                                std::memory_order_release);
         }};
 
-        ++this->channel_rebuilds;
-        this->channel_rebuild_result = 0xff;
-
         auto * bar = this->channel_bar;
-        auto started = arch::x86_64::rdtsc();
 
-        // Wait for the controller the guest has just enabled. It is
-        // allowed CAP.TO half-seconds to answer, and the guest is about to
-        // spend that same wait polling this register itself.
-        auto capabilities =
-            nvme::controller_capabilities{arch::x86_64::read64(
-                static_cast<volatile std::uint8_t *>(bar) +
-                nvme::offset_of(nvme::register_offset::capabilities))};
-
+        // Wait for the controller. At the enable it is the one the guest
+        // has just started, and the guest is about to spend that same
+        // wait polling this register itself; later on it is already up
+        // and this reads once.
         auto budget = std::uint64_t{1} << 24;
         for (;;) {
             auto status = nvme::controller_status{arch::x86_64::read32(
                 static_cast<volatile std::uint8_t *>(bar) +
                 nvme::offset_of(nvme::register_offset::status))};
             if (status.fatal_status()) {
-                this->channel_rebuild_result = 0xf0;
-                return;
+                return 0xf0;
             }
             if (status.ready()) {
                 break;
             }
             if (0 == budget--) {
-                this->channel_rebuild_result = 0xf1;
-                return;
+                return 0xf1;
             }
         }
 
@@ -1409,8 +1416,7 @@ void hypervisor::rebuild_channel_queue()
             (where.submission_depth > nvme::admin_borrow::max_depth) ||
             (0 == where.completion_depth) ||
             (where.completion_depth > nvme::admin_borrow::max_depth)) {
-            this->channel_rebuild_result = 0xf2;
-            return;
+            return 0xf2;
         }
 
         // The guest's queues are at addresses this VMM does not choose, so
@@ -1429,8 +1435,7 @@ void hypervisor::rebuild_channel_queue()
                 submission_pages, completion_base & ~0xfffull, 1));
 
         if ((nullptr == submission) || (nullptr == completion)) {
-            this->channel_rebuild_result = 0xf3;
-            return;
+            return 0xf3;
         }
 
         where.submission = submission;
@@ -1441,8 +1446,6 @@ void hypervisor::rebuild_channel_queue()
         this->rebuild_submission_base = submission_base;
         this->rebuild_completion_base = completion_base;
         this->rebuild_stride = this->channel_doorbell_stride;
-
-        nvme::admin_borrow::locate(where);
 
         // Exclude the guest from the admin queue for the length of the
         // borrow, and make sure the exclusion is actually in force before
@@ -1455,8 +1458,6 @@ void hypervisor::rebuild_channel_queue()
         // unaffected: they are stores from root mode, and extended page
         // tables do not apply there.
         //
-        // Armed only for the borrow. Left armed it would trap every
-        // doorbell the guest ever rings, which is its entire disk traffic.
         // Translated, not cast: these take guest physical addresses and
         // `bar` is a host virtual pointer. Casting is right only while
         // that mapping is the identity, which is not something this VMM
@@ -1466,25 +1467,13 @@ void hypervisor::rebuild_channel_queue()
                 const_cast<const void *>(bar)) +
             nvme::offset_of(nvme::register_offset::doorbell_base);
 
-        if (auto armed =
-                watch_guest_page_writes(doorbell_page,
-                                        &hypervisor::on_doorbell_write,
-                                        this,
-                                        page_watch::mode::hold);
-            !armed) {
-            this->channel_rebuild_result = 0xf5;
-            return;
-        }
-
-        scope_exit unwatch{[&] { unwatch_guest_page(doorbell_page); }};
-
         // Acknowledged first, held second, and the order is not
         // cosmetic.
         //
-        // A processor still holding a translation cached before the
-        // arming above would write straight through the protection, so
-        // the borrow cannot begin until every running processor has said
-        // it has picked the change up. Not getting that answer means not
+        // A processor still holding a translation cached before the page
+        // was armed would write straight through the protection, so the
+        // borrow cannot begin until every running processor has said it
+        // has picked the change up. Not getting that answer means not
         // borrowing - an unexcluded borrow desynchronises the guest's
         // admin queue, and no channel is better than that.
         //
@@ -1494,58 +1483,91 @@ void hypervisor::rebuild_channel_queue()
         // stamp again and the wait for it never ends. Measured exactly
         // that way, twice: acknowledgement refused on every attempt.
         //
-        // Waiting before holding costs nothing. A processor that rings
-        // the doorbell in the gap takes the ordinary trapped write and
-        // proceeds, and whatever it submitted is part of the queue state
-        // the borrow reads when it starts.
-        // Passively. The default sends a wake NMI to a processor that has
-        // not answered, and the rule on the declaration is that no caller
-        // a processor might be spinning inside may do that: such a
-        // processor is in root mode, NMI exiting governs non-root
-        // operation only, so the NMI arrives at the host IDT where
-        // on_host_exception finds no recovery point and halts it for
-        // ever. That took the development machine off the network once.
-        //
-        // This path was relying on nobody being in that position yet -
-        // the application processors are still unlaunched during the
-        // guest's storage initialisation - which is a property of when it
-        // happens rather than of what it does, and is not the rule. The
-        // excursion path next door already passes false.
-        if (!wait_for_ept_acknowledgement(std::uint64_t{1} << 24, false)) {
-            this->channel_rebuild_result = 0xf7;
-            return;
+        // **Probing.** The wake NMI is sent, which this caller refused to
+        // do for as long as taking one in root mode halted the processor
+        // that took it - that is what took the development machine off
+        // the network, and it is fixed: on_host_exception returns for
+        // vector 2 and the entry stub saves, restores and irets. Probing
+        // is not optional here, because a processor the guest has halted
+        // executes nothing, reaches no exit path and never stamps -
+        // measured, one processor three generations behind and staying
+        // there. Waiting passively for it waits for ever, which is why
+        // the passive form of this wait timed out rather than succeeded.
+        if (!wait_for_ept_acknowledgement(std::uint64_t{1} << 24, true)) {
+            return 0xf7;
         }
 
         if (!hold_guest_page(doorbell_page)) {
-            this->channel_rebuild_result = 0xf6;
-            return;
+            return 0xf6;
         }
 
         scope_exit unhold{[&] { release_guest_page(doorbell_page); }};
 
-        // Ours to create: the same identifiers and the same storage the
-        // loader used, because the storage outlives every reset - it is
-        // reserved memory - and only the controller's idea of the queues
-        // was lost.
-        nvme::submission_entry payload[2]{};
-        payload[0] = nvme::create_io_completion_queue(
-            this->channel_queue_id,
-            64,
-            this->channel_completion_physical,
-            false,
-            0);
-        payload[1] = nvme::create_io_submission_queue(
-            this->channel_queue_id,
-            64,
-            this->channel_submission_physical,
-            this->channel_queue_id,
-            nvme::queue_priority::medium);
+        // Only now is the queue anyone's to read, and only now is it
+        // worth waiting for it to fall still.
+        //
+        // What has to be true is narrower than "nothing is happening",
+        // and it is worth being exact because the wide version cannot be
+        // established at all. A completion arriving mid borrow is
+        // handled - it is recognised as the guest's by its command
+        // identifier, held, and replayed into the slot it would have
+        // occupied. What is *not* handled is a submission the controller
+        // has not fetched yet: the borrow writes its own commands over
+        // the queue from the submission tail on, so an entry still
+        // waiting there is destroyed.
+        //
+        // SQHD answers exactly that question. Every completion carries
+        // the controller's submission head at the time it was posted, so
+        // SQHD equal to the tail the guest last published means the
+        // controller has taken everything the guest wrote. The caller
+        // supplies that tail, because it is the value the guest's own
+        // doorbell write carried and cannot be read back from the device
+        // - PCIe Transport 1.0c 3.1.2.1, a doorbell read returns a vendor
+        // specific value.
+        //
+        // Then a stillness check on top, which is cheap and catches the
+        // case SQHD cannot: a completion posted between the locate and
+        // the first submission.
+        constexpr std::uint32_t stable_rounds = 64;
+        auto settle = std::uint64_t{1} << 22;
+        std::uint32_t stable{};
 
-        std::uint16_t payload_status[2]{0xffff, 0xffff};
+        nvme::admin_borrow::locate(where);
+        auto last_completion_tail = where.completion_tail;
+        auto last_completion_phase = where.completion_phase;
+        auto last_submission_tail = where.submission_tail;
+
+        while (stable < stable_rounds) {
+            if (0 == settle--) {
+                this->channel_quiesce_submission_tail =
+                    where.submission_tail;
+                this->channel_quiesce_expected_tail =
+                    this->channel_expected_admin_tail;
+                return 0xf8;
+            }
+
+            nvme::admin_borrow::locate(where);
+
+            if ((where.completion_tail == last_completion_tail) &&
+                (where.completion_phase == last_completion_phase) &&
+                (where.submission_tail == last_submission_tail) &&
+                (where.submission_tail ==
+                 this->channel_expected_admin_tail)) {
+                ++stable;
+                continue;
+            }
+
+            last_completion_tail = where.completion_tail;
+            last_completion_phase = where.completion_phase;
+            last_submission_tail = where.submission_tail;
+            stable = 0;
+        }
 
         nvme::admin_borrow::snapshot saved{
             this->channel_snapshot_submission,
             this->channel_snapshot_completion};
+
+        auto started = arch::x86_64::rdtsc();
 
         auto result =
             nvme::admin_borrow::run(bar,
@@ -1553,8 +1575,9 @@ void hypervisor::rebuild_channel_queue()
                                     where,
                                     saved,
                                     payload,
-                                    2,
+                                    payload_count,
                                     payload_status,
+                                    payload_result,
                                     std::uint64_t{1} << 24);
 
         this->channel_rebuild_result = static_cast<std::uint64_t>(result);
@@ -1564,22 +1587,368 @@ void hypervisor::rebuild_channel_queue()
         this->channel_rebuild_ticks = arch::x86_64::rdtsc() - started;
 
         if (nvme::borrow_result::ok != result) {
+            // A borrow that stops halfway has left the queue
+            // desynchronised and cannot be retried into it. Not
+            // recoverable from here; recorded so the medium says which
+            // step it was.
+            return 0xd0 | static_cast<std::uint64_t>(result);
+        }
+
+        return 0;
+    }
+}
+
+void hypervisor::reserve_channel_queue_allocation()
+{
+    if constexpr (!diag::policy_of(diag::sink::esp_blocks).present ||
+                  !diag::rebuild_channel_after_reset) {
+        return;
+    } else {
+        if (!this->channel_bar) {
             return;
         }
-        if ((0 != payload_status[0]) || (0 != payload_status[1])) {
-            this->channel_rebuild_result = 0xf4;
+
+        // Once per epoch. A controller level reset clears the allocation
+        // and this is what re-establishes it; asking twice inside one
+        // epoch would be refused anyway, since 5.2.30.1.5 freezes the
+        // allocation at the first Set Features completed after the reset.
+        if (0 != this->channel_reserve_result) {
             return;
         }
+
+        ++this->channel_rebuilds;
+
+        // Watch the doorbell page before borrowing, not after.
+        //
+        // It is two things at once and both are needed from this instant:
+        // the exclusion the borrow rests on, and the only way to see what
+        // the guest's driver submits. The guest's own Set Features and its
+        // Create commands follow within microseconds of this exit, and a
+        // watch armed after the borrow would miss whichever of them
+        // arrived first.
+        //
+        // Holding mode rather than notify, and it costs nothing to leave
+        // it there: a watch in holding mode with nobody holding behaves
+        // exactly as a notifying one.
+        //
+        // Translated, not cast, for the same reason as everywhere else
+        // this address is formed.
+        auto doorbell_page =
+            this->host_page_table.virtual_to_physical(
+                const_cast<const void *>(this->channel_bar)) +
+            nvme::offset_of(nvme::register_offset::doorbell_base);
+
+        if (auto armed =
+                watch_guest_page_writes(doorbell_page,
+                                        &hypervisor::on_doorbell_write,
+                                        this,
+                                        page_watch::mode::hold);
+            !armed) {
+            this->channel_reserve_result = 0xf5;
+            return;
+        }
+
+        this->channel_doorbell_watched = true;
+
+        // Nothing of the guest's has been submitted yet: the controller
+        // has only just been enabled, and the processor that would submit
+        // the first command is this one, held inside this exit.
+        this->channel_expected_admin_tail = 0;
+        this->admin_observed_head = 0;
+
+        // One command, and it creates nothing.
+        //
+        // That is the whole correction. NVMe Base 5.2.30.1.5 constrains
+        // Set Features and nothing else - a Create I/O queue may be
+        // issued at any point after an allocation exists - so the
+        // sequence that breaks the guest is reserving and creating in one
+        // borrow and letting the guest's own Set Features arrive after
+        // our queues exist. It is aborted with Command Sequence Error,
+        // and Linux turns that into zero I/O queues and no block device
+        // (`nvme_set_queue_count` sets *count = 0 on any error status).
+        nvme::submission_entry payload[1]{
+            nvme::set_features_maximum_number_of_queues()};
+
+        std::uint16_t status[1]{0xffff};
+        std::uint32_t granted[1]{};
+
+        auto refusal =
+            borrow_guest_admin_queue(payload, 1, status, granted);
+
+        // Another processor got here first and is inside the borrow now.
+        //
+        // Recorded as nothing rather than as a refusal, and that is the
+        // point: the one that did claim it is about to write the real
+        // answer, and a loser writing 0xfa afterwards would replace a
+        // successful reservation with a failure that did not happen. Two
+        // processors reach here for one transition because the enable is
+        // observed twice - from the emulated write and from the poll.
+        if (0xfa == refusal) {
+            return;
+        }
+
+        // Whatever happens from here, the doorbell page comes off again
+        // unless something is still going to need it.
+        //
+        // Only a reservation that took, with the creation switched on,
+        // does: that is the one case where a later Create of the guest's
+        // still has to be seen. A reservation that was refused will never
+        // create anything, and the control build creates nothing by
+        // definition - and leaving the watch armed for either would trap
+        // the guest's entire disk traffic for the rest of the boot, which
+        // is a cost the control run must not be paying while it is
+        // supposed to be measuring the borrow.
+        //
+        // Declared after the reentry check above so it cannot fire on
+        // that path: another processor is inside the borrow there and is
+        // relying on the hold.
+        auto keep_watching = false;
+        scope_exit stop_watching{[&] {
+            if (!keep_watching) {
+                stop_watching_channel_doorbells();
+            }
+        }};
+
+        this->channel_reserve_status = status[0];
+        this->channel_reserve_allocation = granted[0];
+
+        if (0 != refusal) {
+            this->channel_reserve_result = refusal;
+            return;
+        }
+
+        if (0 != status[0]) {
+            this->channel_reserve_result = 0xe0;
+            return;
+        }
+
+        this->channel_allocated_submission_queues =
+            nvme::number_of_submission_queues(granted[0]);
+        this->channel_allocated_completion_queues =
+            nvme::number_of_completion_queues(granted[0]);
+
+        this->channel_reserve_result = 1;
+
+        if constexpr (diag::create_channel_queue_after_guest) {
+            keep_watching = true;
+        }
+
+        diag::log<diag::severity::info>(
+            "reserved {} submission and {} completion queues",
+            this->channel_allocated_submission_queues,
+            this->channel_allocated_completion_queues);
+    }
+}
+
+void hypervisor::create_channel_queue()
+{
+    if constexpr (!diag::policy_of(diag::sink::esp_blocks).present ||
+                  !diag::rebuild_channel_after_reset ||
+                  !diag::create_channel_queue_after_guest) {
+        return;
+    } else {
+        // The identifiers, chosen from what the guest did rather than
+        // from what it was told.
+        //
+        // One above the higher of two observations of the guest, in each
+        // space separately: the highest identifier it has actually
+        // created, and the number it asked the controller for. The second
+        // is not "what it was told" - it is the guest's own request, read
+        // off its own submission queue - and it is the margin that
+        // survives a driver which creates its whole request in an order
+        // this has not seen, or creates the rest of it after this fires.
+        // Measured on the rig the two agree: it asks for sixteen and
+        // eight and creates exactly one to sixteen and one to eight.
+        auto highest = [](std::uint64_t created, std::uint64_t requested) {
+            return (created > requested) ? created : requested;
+        };
+
+        auto submission_id =
+            highest(this->channel_guest_highest_submission_queue,
+                    this->channel_guest_requested_submission_queues) +
+            1;
+        auto completion_id =
+            highest(this->channel_guest_highest_completion_queue,
+                    this->channel_guest_requested_completion_queues) +
+            1;
+
+        // Inside the allocation, or nothing is created at all.
+        //
+        // This is the case that was measured as status 0x4101 - DNR,
+        // command specific, Invalid Queue Identifier - and the guest
+        // booted precisely because nothing had been created behind its
+        // back. Refusing here reaches the same outcome without spending a
+        // borrow on it, and says so in a counter rather than in a status
+        // nobody can see.
+        if ((submission_id > this->channel_allocated_submission_queues) ||
+            (completion_id > this->channel_allocated_completion_queues) ||
+            (submission_id > 0xffffu) || (completion_id > 0xffffu)) {
+            this->channel_create_result = 0xe2;
+            stop_watching_channel_doorbells();
+            return;
+        }
+
+        // Both doorbells have to land inside the two pages of the
+        // controller's registers this VMM can reach. With a stride of
+        // zero and identifiers in the tens they are a few hundred bytes
+        // into the doorbell page, but the stride is the controller's to
+        // choose and the identifier is now the guest's, so the product is
+        // checked rather than assumed.
+        auto stride = this->channel_doorbell_stride;
+        auto submission_doorbell = nvme::submission_queue_doorbell_offset(
+            static_cast<std::uint32_t>(submission_id), stride);
+        auto completion_doorbell = nvme::completion_queue_doorbell_offset(
+            static_cast<std::uint32_t>(completion_id), stride);
+
+        constexpr std::uint32_t reachable = 2 * page_size;
+        if ((submission_doorbell + sizeof(std::uint32_t) > reachable) ||
+            (completion_doorbell + sizeof(std::uint32_t) > reachable)) {
+            this->channel_create_result = 0xe3;
+            stop_watching_channel_doorbells();
+            return;
+        }
+
+        auto started = arch::x86_64::rdtsc();
+
+        // Ours to create: the same storage the loader used, because the
+        // storage outlives every reset - it is reserved memory - and only
+        // the controller's idea of the queues was lost. The identifiers
+        // are not the loader's: it hardcodes four, which is inside both
+        // of the ranges this guest uses.
+        //
+        // Interrupts deliberately disabled on the completion queue. The
+        // guest never has to see anything of ours, and a queue that
+        // signals nothing cannot be the thing that makes it.
+        nvme::submission_entry payload[2]{};
+        payload[0] = nvme::create_io_completion_queue(
+            static_cast<std::uint16_t>(completion_id),
+            diag::esp_block_sink::queue_entries,
+            this->channel_completion_physical,
+            false,
+            0);
+        payload[1] = nvme::create_io_submission_queue(
+            static_cast<std::uint16_t>(submission_id),
+            diag::esp_block_sink::queue_entries,
+            this->channel_submission_physical,
+            static_cast<std::uint16_t>(completion_id),
+            nvme::queue_priority::medium);
+
+        std::uint16_t status[2]{0xffff, 0xffff};
+
+        auto refusal =
+            borrow_guest_admin_queue(payload, 2, status, nullptr);
+
+        // Somebody else is inside a borrow. Left untried rather than
+        // recorded as refused, so that the next doorbell ring tries
+        // again - the trigger is a condition rather than an edge, so it
+        // is still true when the guest submits its next command.
+        if (0xfa == refusal) {
+            return;
+        }
+
+        this->channel_create_ticks = arch::x86_64::rdtsc() - started;
+        this->channel_create_status =
+            (std::uint64_t{status[1]} << 16) | status[0];
+
+        if (0 != refusal) {
+            this->channel_create_result = refusal;
+            stop_watching_channel_doorbells();
+            return;
+        }
+
+        if ((0 != status[0]) || (0 != status[1])) {
+            this->channel_create_result = 0xe1;
+            stop_watching_channel_doorbells();
+            return;
+        }
+
+        this->channel_created_submission_id =
+            static_cast<std::uint16_t>(submission_id);
+        this->channel_created_completion_id =
+            static_cast<std::uint16_t>(completion_id);
 
         // The queues exist again, empty, so the channel is told where they
         // are and that they start from nothing.
         diag::esp_block_sink::adopt_rebuilt_queue(
-            static_cast<volatile std::uint8_t *>(bar),
-            this->channel_doorbell_stride,
-            this->channel_queue_id,
+            static_cast<volatile std::uint8_t *>(this->channel_bar),
+            stride,
+            this->channel_created_submission_id,
+            this->channel_created_completion_id,
             this->channel_namespace);
 
-        static_cast<void>(capabilities);
+        this->channel_create_result = 1;
+
+        diag::log<diag::severity::info>(
+            "channel queue pair created, submission {} completion {}",
+            this->channel_created_submission_id,
+            this->channel_created_completion_id);
+
+        // Nothing left to watch for. The doorbell page carries every I/O
+        // queue's doorbell as well as the admin one whenever the stride
+        // is zero, which it is on real hardware, so leaving it armed is an
+        // exit per disk command for the rest of the boot.
+        stop_watching_channel_doorbells();
+    }
+}
+
+void hypervisor::stop_watching_channel_doorbells()
+{
+    if constexpr (!diag::policy_of(diag::sink::esp_blocks).present ||
+                  !diag::rebuild_channel_after_reset) {
+        return;
+    } else {
+        // Left armed where the observation build asked for it: that
+        // switch exists to price a permanently trapped doorbell page, and
+        // removing the trap under it would measure nothing.
+        if (diag::observe_controller_admin || !this->channel_bar ||
+            !this->channel_doorbell_watched) {
+            return;
+        }
+
+        auto doorbell_page =
+            this->host_page_table.virtual_to_physical(
+                const_cast<const void *>(this->channel_bar)) +
+            nvme::offset_of(nvme::register_offset::doorbell_base);
+
+        unwatch_guest_page(doorbell_page);
+        this->channel_doorbell_watched = false;
+    }
+}
+
+void hypervisor::forget_channel_queue_observations()
+{
+    if constexpr (!diag::policy_of(diag::sink::esp_blocks).present ||
+                  !diag::rebuild_channel_after_reset) {
+        return;
+    } else {
+        // A controller level reset clears the Number of Queues allocation
+        // and deletes every I/O queue - 5.2.30.1.5 - so every number here
+        // describes a controller that no longer exists. Keeping any of it
+        // would let the next epoch reason from the last one's
+        // identifiers.
+        this->channel_reserve_result = 0;
+        this->channel_reserve_status = 0;
+        this->channel_reserve_allocation = 0;
+        this->channel_allocated_submission_queues = 0;
+        this->channel_allocated_completion_queues = 0;
+
+        this->channel_guest_requested_submission_queues = 0;
+        this->channel_guest_requested_completion_queues = 0;
+        this->channel_guest_highest_submission_queue = 0;
+        this->channel_guest_highest_completion_queue = 0;
+        this->channel_guest_created_submission_queues = 0;
+        this->channel_guest_created_completion_queues = 0;
+        this->channel_guest_deleted_queues = 0;
+
+        this->channel_create_result = 0;
+        this->channel_create_status = 0;
+        this->channel_created_submission_id = 0;
+        this->channel_created_completion_id = 0;
+
+        this->channel_expected_admin_tail = 0;
+        this->admin_observed_head = 0;
+
+        stop_watching_channel_doorbells();
     }
 }
 
@@ -1933,9 +2302,14 @@ std::expected<void, zpp::error> hypervisor::run_reset_excursion()
 
         // The queue is ours again, at position zero, and everything staged
         // can go out through it.
+        // One identifier in both spaces here, and correctly so: the
+        // excursion runs with the controller reset and nothing of the
+        // guest's on it, so identifier space is empty and the pair is
+        // this VMM's to name.
         diag::esp_block_sink::adopt_rebuilt_queue(
             bar,
             this->channel_doorbell_stride,
+            this->channel_queue_id,
             this->channel_queue_id,
             this->channel_namespace);
         diag::esp_block_sink::flush_pending();
@@ -2124,10 +2498,10 @@ hypervisor::translate_guest_linear(std::uint64_t linear)
         std::uint32_t shift;
         std::uint64_t page_size;
     } levels[] = {
-        {39, 0},                    // no 512 GB pages exist
+        {39, 0}, // no 512 GB pages exist
         {30, 1ull << 30},
         {21, 1ull << 21},
-        {12, 0},                    // the last level always terminates
+        {12, 0}, // the last level always terminates
     };
 
     for (std::size_t level{}; level < 4; ++level) {
@@ -2322,8 +2696,8 @@ bool hypervisor::on_ept_violation(std::size_t cpu,
         // access was to a paging-structure entry - the processor walking
         // the guest's tables - and there is no store in the instruction
         // to carry out for that. SDM Table 28-7.
-        constexpr std::uint64_t qualification_linear_address_valid =
-            1ull << 7;
+        constexpr std::uint64_t qualification_linear_address_valid = 1ull
+                                                                     << 7;
         constexpr std::uint64_t qualification_operand_access = 1ull << 8;
 
         auto qualification = this->vmcs.exit_qualification();
@@ -2340,8 +2714,7 @@ bool hypervisor::on_ept_violation(std::size_t cpu,
             // a driver does to a register straddles the page, so the
             // fallback costs nothing and a wrong split would be silent.
             auto offset_in_page = guest_physical & (page_size - 1);
-            auto straddles =
-                (offset_in_page + store->size) > page_size;
+            auto straddles = (offset_in_page + store->size) > page_size;
 
             if (!straddles && apply_guest_store(guest_physical, *store)) {
                 if (watch.on_write) {
@@ -3767,7 +4140,7 @@ void hypervisor::resume_from_sleep_on_this_processor(std::uint64_t slot)
     // Both of these are taken and released inside a VM exit, so the write
     // that slept the machine could land while another processor held one:
     // mapping_window_lock is held across every guest memory access and
-    // across the whole of rebuild_channel_queue, start_up_lock across a
+    // across the whole of borrow_guest_admin_queue, start_up_lock across a
     // processor's entire launch. That processor no longer exists - the
     // platform reset it - so nothing will ever release what it held, and
     // the first use of that lock after a resume spins for good. It would
@@ -4043,11 +4416,24 @@ void hypervisor::on_controller_register_write(
             // the controller back disabled, as the guest asked.
             diag::esp_block_sink::note_controller_write(
                 configuration_value);
+
+            // And so is the allocation, and every identifier that was
+            // chosen against it. A controller level reset clears the
+            // Number of Queues feature and deletes every I/O queue -
+            // NVMe Base 5.2.30.1.5 - so the next epoch has to observe
+            // the guest again from nothing.
+            self.forget_channel_queue_observations();
         } else if (!was && now) {
             // Coming back up. Handled here when the write is caught, and
             // by poll_for_controller_return when it is not - see there
             // for why catching it cannot be relied on.
-            self.rebuild_channel_queue();
+            //
+            // Reserving, not creating. This is the only moment the
+            // reservation is legal - after the reset that cleared the
+            // allocation and before any I/O queue exists - and creating
+            // here is what boot looped the guest, because the guest's own
+            // Set Features then arrived after our queues existed.
+            self.reserve_channel_queue_allocation();
         }
     }
 }
@@ -4058,7 +4444,13 @@ void hypervisor::on_doorbell_write(void * context,
 {
     static_cast<void>(page);
 
-    if constexpr (!diag::observe_controller_admin) {
+    // Armed for two different reasons and this serves both. The
+    // observation build wants every command the guest submits, recorded
+    // and counted; the rebuild wants only the Number of Queues request
+    // and the Create identifiers, and wants to know when the guest has
+    // finished creating so that it can create its own above them.
+    if constexpr (!diag::observe_controller_admin &&
+                  !diag::rebuild_channel_after_reset) {
         static_cast<void>(context);
         static_cast<void>(write);
         return;
@@ -4079,7 +4471,66 @@ void hypervisor::on_doorbell_write(void * context,
             return;
         }
 
-        auto * bar = static_cast<volatile std::uint8_t *>(self.channel_bar);
+        auto tail = static_cast<std::uint32_t>(write->value);
+
+        {
+            // Everything between what was looked at last and what the
+            // guest has just published, read through the window.
+            //
+            // The lock is released before anything below it runs: a
+            // borrow takes the same lock and it is not recursive, so a
+            // create triggered from here has to happen outside this
+            // block.
+            self.mapping_window_lock.lock();
+            scope_exit release{[&] { self.mapping_window_lock.unlock(); }};
+
+            self.observe_guest_admin_submissions(tail);
+        }
+
+        // Whether the guest has finished creating its own queues.
+        //
+        // There is no signal for that, so this is the closest thing the
+        // guest itself provides: it has now created at least as many
+        // queues as it asked the controller for, in both spaces. Measured
+        // on the rig that is exactly right - it asks for sixteen
+        // submission and eight completion queues and creates precisely
+        // those - and it is also what makes the identifier chosen below
+        // safe if it is wrong in the generous direction, since the
+        // identifier is one above the higher of what was created and what
+        // was requested.
+        //
+        // A guest that creates *more* than it asked for would defeat
+        // this, and no driver does: both clamp their creates to the
+        // smaller of their own request and the allocation.
+        if constexpr (diag::rebuild_channel_after_reset &&
+                      diag::create_channel_queue_after_guest) {
+            auto due =
+                (1 == self.channel_reserve_result) &&
+                (0 == self.channel_create_result) &&
+                (0 == self.channel_guest_deleted_queues) &&
+                (0 != self.channel_guest_requested_submission_queues) &&
+                (0 != self.channel_guest_requested_completion_queues) &&
+                (self.channel_guest_created_submission_queues >=
+                 self.channel_guest_requested_submission_queues) &&
+                (self.channel_guest_created_completion_queues >=
+                 self.channel_guest_requested_completion_queues);
+
+            if (due) {
+                self.create_channel_queue();
+            }
+        }
+    }
+}
+
+void hypervisor::observe_guest_admin_submissions(std::uint32_t tail)
+{
+    if constexpr (!diag::observe_controller_admin &&
+                  !diag::rebuild_channel_after_reset) {
+        static_cast<void>(tail);
+        return;
+    } else {
+        auto * bar =
+            static_cast<volatile std::uint8_t *>(this->channel_bar);
 
         // Where the guest put its admin submission queue, and how big it
         // said it was. Read from the controller rather than remembered,
@@ -4089,8 +4540,8 @@ void hypervisor::on_doorbell_write(void * context,
             bar + nvme::offset_of(
                       nvme::register_offset::admin_submission_queue_base));
         auto attributes = arch::x86_64::read32(
-            bar +
-            nvme::offset_of(nvme::register_offset::admin_queue_attributes));
+            bar + nvme::offset_of(
+                      nvme::register_offset::admin_queue_attributes));
 
         auto entries =
             (attributes & 0xfff) + 1; // ASQS is a zero's based count
@@ -4098,28 +4549,86 @@ void hypervisor::on_doorbell_write(void * context,
             return;
         }
 
-        auto tail = static_cast<std::uint32_t>(write->value);
         if (tail >= entries) {
             return;
         }
 
         constexpr std::uint32_t command_size = 64;
 
-        // Everything between what was looked at last and what the guest
-        // has just published. Wrapping is why this is a loop rather than
-        // a subtraction.
-        self.mapping_window_lock.lock();
-        scope_exit release{[&] { self.mapping_window_lock.unlock(); }};
-
-        for (auto at = self.admin_observed_head; at != tail;
+        // Wrapping is why this is a loop rather than a subtraction.
+        for (auto at = this->admin_observed_head; at != tail;
              at = (at + 1) % entries) {
             auto offset = static_cast<std::uint64_t>(at) * command_size;
-            auto * command = static_cast<const std::uint32_t *>(
-                self.map_window_at(transfer_window_first_page,
-                                   queue_base + offset,
-                                   1));
+            auto * command =
+                static_cast<const std::uint32_t *>(this->map_window_at(
+                    transfer_window_first_page, queue_base + offset, 1));
             if (!command) {
                 break;
+            }
+
+            // What the rebuild needs, which is three commands out of the
+            // whole admin command set.
+            //
+            // Read here rather than off the recorded ring, because the
+            // ring is the observation build's and freezes when full,
+            // while these have to be right whatever else the guest has
+            // submitted.
+            if constexpr (diag::rebuild_channel_after_reset) {
+                auto opcode = static_cast<std::uint8_t>(command[0] & 0xff);
+                auto queue_id = command[10] & 0xffffu;
+
+                switch (static_cast<nvme::admin_opcode>(opcode)) {
+                case nvme::admin_opcode::set_features:
+                    // Only the Number of Queues feature. CDW10 bits 7:0
+                    // are the feature identifier; the guest issues Set
+                    // Features constantly for power management once it
+                    // has settled, and those say nothing about queues.
+                    if (static_cast<std::uint8_t>(command[10] & 0xff) ==
+                        static_cast<std::uint8_t>(
+                            nvme::feature_identifier::number_of_queues)) {
+                        // The request, not a grant: this is the guest's
+                        // own submission, so it is what the guest wants
+                        // rather than what the controller answered.
+                        this->channel_guest_requested_submission_queues =
+                            nvme::number_of_submission_queues(command[11]);
+                        this->channel_guest_requested_completion_queues =
+                            nvme::number_of_completion_queues(command[11]);
+                    }
+                    break;
+
+                case nvme::admin_opcode::create_io_completion_queue:
+                    this->channel_guest_created_completion_queues =
+                        this->channel_guest_created_completion_queues + 1;
+                    if (queue_id >
+                        this->channel_guest_highest_completion_queue) {
+                        this->channel_guest_highest_completion_queue =
+                            queue_id;
+                    }
+                    break;
+
+                case nvme::admin_opcode::create_io_submission_queue:
+                    this->channel_guest_created_submission_queues =
+                        this->channel_guest_created_submission_queues + 1;
+                    if (queue_id >
+                        this->channel_guest_highest_submission_queue) {
+                        this->channel_guest_highest_submission_queue =
+                            queue_id;
+                    }
+                    break;
+
+                case nvme::admin_opcode::delete_io_completion_queue:
+                case nvme::admin_opcode::delete_io_submission_queue:
+                    // A driver deleting queues is taking the controller
+                    // apart, and creating one behind it at that point is
+                    // the worst available moment. Nothing more is created
+                    // until the next enable.
+                    this->channel_guest_deleted_queues =
+                        this->channel_guest_deleted_queues + 1;
+                    break;
+
+                default:
+                    break;
+                }
             }
 
             // Freezes when full rather than wrapping, which is the
@@ -4134,27 +4643,34 @@ void hypervisor::on_doorbell_write(void * context,
             // states, for ever. A wrapping ring fills with that and
             // throws away the only part anyone wanted. First N, not last
             // N.
-            if (self.admin_observation_count >=
-                admin_observation_capacity) {
-                self.admin_observation_count =
-                    self.admin_observation_count + 1;
-                continue;
+            if constexpr (diag::observe_controller_admin) {
+                if (this->admin_observation_count >=
+                    admin_observation_capacity) {
+                    this->admin_observation_count =
+                        this->admin_observation_count + 1;
+                    continue;
+                }
+
+                auto slot = this->admin_observation_count;
+
+                this->admin_observations[slot] = admin_observation{
+                    .command = command[0],
+                    .dword_10 = command[10],
+                    .dword_11 = command[11],
+                    .namespace_id = command[1],
+                };
+
+                this->admin_observation_count =
+                    this->admin_observation_count + 1;
             }
-
-            auto slot = self.admin_observation_count;
-
-            self.admin_observations[slot] = admin_observation{
-                .command = command[0],
-                .dword_10 = command[10],
-                .dword_11 = command[11],
-                .namespace_id = command[1],
-            };
-
-            self.admin_observation_count =
-                self.admin_observation_count + 1;
         }
 
-        self.admin_observed_head = tail;
+        this->admin_observed_head = tail;
+
+        // What a borrow compares SQHD against. The doorbell cannot be
+        // read back, so this is the only record of where the guest's
+        // submission tail is.
+        this->channel_expected_admin_tail = tail;
     }
 }
 
@@ -6062,14 +6578,22 @@ hypervisor::main(arch::x86_64::context & caller_context)
                             nvme::offset_of(
                                 nvme::register_offset::doorbell_base);
 
+                        // Holding mode rather than notify, so that this
+                        // and the rebuild ask for the same thing on the
+                        // same page: re-arming replaces rather than
+                        // duplicating, and two callers disagreeing about
+                        // the mode would leave whichever armed last in
+                        // charge. A hold nobody holds behaves exactly
+                        // like a notify.
                         if (auto watching = watch_guest_page_writes(
                                 doorbell_page,
                                 &hypervisor::on_doorbell_write,
                                 this,
-                                page_watch::mode::notify);
+                                page_watch::mode::hold);
                             !watching) {
                             log("could not watch the doorbell page");
                         } else {
+                            this->channel_doorbell_watched = true;
                             log("observing the controller's admin queue");
                         }
                     }
@@ -6240,7 +6764,7 @@ hypervisor::main(arch::x86_64::context & caller_context)
                             nvme::register_offset::configuration))};
                 if (configuration.enable()) {
                     this->channel_controller_enabled = true;
-                    rebuild_channel_queue();
+                    reserve_channel_queue_allocation();
                 }
             }
         }
@@ -6698,8 +7222,9 @@ hypervisor::main(arch::x86_64::context & caller_context)
             if (auto index = static_cast<std::uint32_t>(context.rcx);
                 (arch::x86_64::msr::ia32_tsc_deadline == index) ||
                 (arch::x86_64::msr::ia32_x2apic_init_count == index)) {
-                arch::x86_64::wrmsr(
-                    index, (context.rax & 0xffffffff) | (context.rdx << 32));
+                arch::x86_64::wrmsr(index,
+                                    (context.rax & 0xffffffff) |
+                                        (context.rdx << 32));
                 break;
             }
 

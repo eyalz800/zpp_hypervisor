@@ -2371,3 +2371,87 @@ turned on inside the guest - Core Isolation, or `hypervisorlaunchtype` in
 the boot configuration. That is a change inside Windows, not something
 this side can arrange, and it is the one remaining step before any claim
 that Hyper-V boots nested.
+## The queue reservation, built to the corrected ordering and switched off
+
+Written against the two causes NVME-LOG.md's last two sections established -
+the identifier collision and the Set Features ordering - and switched off in
+two pieces so the next boot can tell them apart.
+
+**`diag::rebuild_channel_after_reset`, steps 1 to 3.** At the CC.EN 0 to 1
+edge, borrow the guest's admin queue once and issue a single
+`Set Features (Number of Queues)` asking for the maximum. Create nothing. The
+guest's own Set Features arrives later with still no I/O queue in existence,
+so it completes and reports the allocation reserved here - which is at least
+what it asked for. **No completion patch exists and none should be built**:
+the patch scheme earlier in NVME-LOG.md is what this ordering replaces, and
+conflating the two is a mistake already made once.
+
+**`diag::create_channel_queue_after_guest`, steps 4 and 5.** Create our own
+pair once the guest has created its own, at an identifier above them.
+
+Splitting them is the control experiment and is the reason to run two boots
+rather than one:
+
+- Reservation on, creation off: everything the borrow does happens, at the
+  same instant it happened when the guest boot looped, and nothing is
+  created. A guest that boots clears the borrow. A guest that does not
+  indicts it, and the second switch never has to be tried.
+- Both on: the only difference is a queue pair created behind a live driver.
+
+### What was rejected, and why
+
+- **Raising the identifier alone.** Measured already and recorded in
+  NVME-LOG.md: 4 collides and boot loops, 32 exceeds the allocation and is
+  refused with `0x4101`. Both are failure modes of the same defect.
+- **Creating and reserving in one borrow at the CC.EN edge, then deleting
+  our queues before handing back.** It reads as a way to keep one borrow: no
+  I/O queue exists when the guest's Set Features arrives, so 5.2.30.1.5 is
+  satisfied on the "currently exist" reading. It is rejected because the
+  specification's words are "after creation of any I/O Submission and/or I/O
+  Completion Queues", which a controller may reasonably implement as a latch
+  set by the first create since the reset. Whether this controller does
+  cannot be established from here, and getting it wrong aborts the guest's
+  own negotiation - which Linux turns into zero I/O queues and no block
+  device.
+- **Choosing the identifier from the allocation.** The guest is told the
+  whole allocation, which after asking for the maximum is far more than it
+  wants, and no run has yet shown what Windows does with an allocation larger
+  than its request. The identifier comes from what it is *seen to create*,
+  with its own requested count as the margin - also an observation of the
+  guest rather than of the controller.
+- **A permanent doorbell watch.** With a stride of zero every I/O doorbell
+  shares the admin page, so the watch is armed at the enable and removed as
+  soon as there is nothing left to see - on a created queue, on a refusal,
+  and immediately after the reservation in the control build. Left armed it
+  is an exit per disk command, which would confound the very run it is there
+  to support.
+
+### What is unsolved, stated rather than hidden
+
+The admin queue's interrupt is not masked for the borrow. NVME-LOG.md
+requires MSI-X vector 0 masked, and there is no MSI-X table access on the
+resident side. What stands in for it is an argument about timing: the only
+processor that can take that interrupt is the one held inside the exit with
+interrupts disabled, so it stays pending in its local APIC and is delivered
+after the restore, finding the guest's own completions and nothing else. If
+the guest misbehaves *after* a successful create rather than during it, this
+is the first thing to look at.
+
+The wake probe is used again, in both borrows. That is only safe because
+`1e8791f` made `on_host_exception` return for vector 2; before it, a probe
+that reached a processor in root mode halted it for ever. Every passive wait
+this codebase added to work around that is a wait that times out rather than
+succeeds, which is why the probe is not optional.
+
+### Where the release binary moved, and why
+
+`scripts/ci/nested-off-baseline` is re-recorded. The whole of the movement is
+**208 bytes in `hypervisor::hypervisor()`** and nothing else: comparing the
+release object symbol by symbol, every other function is byte identical and
+the new ones compile to one to six bytes each and are collected away, since
+`ZPP_DIAG=0` discards their bodies and nothing calls them. The 208 bytes are
+the constructor's stores for the new instrumentation fields, which are
+`volatile` - so they are written even though the object lives in `.bss` and
+is already zero. That is the same trade `configure_reject` documents: a field
+whose only reader is a debugger measures nothing unless it is volatile.
+`.bss`, `.data` and `.rodata` are unchanged in size.
