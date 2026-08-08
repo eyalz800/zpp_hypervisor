@@ -1,0 +1,15 @@
+# The SHA-256 of out/release/x86_64/zpp_hypervisor built with
+# ZPP_NESTED_VMX=OFF, one line per compiler version string.
+#
+# Read scripts/ci/check-nested-absent.sh for why this exists. The short
+# version: while nested VMX is being built, the switch-off binary is not
+# supposed to move, so any change to it should be a deliberate and stated act
+# rather than something noticed later on a machine that stopped booting.
+#
+# Updating a line is fine. Updating it without saying in the commit message
+# what shared code changed and why is not - that is the whole point.
+#
+# The format is the compiler's `--version` first line, two spaces, the hash.
+# Keyed on the compiler because the hash is as much a property of the toolchain
+# as of the source; a version with no line here is skipped with a warning.
+Homebrew clang version 22.1.1  d93b73e7a2a573c0902dbfbc8aebd07e20f8b9265f7cab6973b3c3190f93a373
