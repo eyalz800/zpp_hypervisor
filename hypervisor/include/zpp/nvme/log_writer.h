@@ -1,4 +1,5 @@
 #pragma once
+#include "zpp/arch/x86_64/asm.h"
 #include "zpp/arch/x86_64/mmio.h"
 #include "zpp/nvme/command.h"
 #include "zpp/nvme/log_format.h"
@@ -73,6 +74,27 @@ enum class write_result
 
     /** A submitted command did not complete inside its budget. */
     timed_out,
+
+    /**
+     * The destination read is out on the device and has not come back
+     * yet. Not a failure and **not a drop**: the caller keeps the block
+     * and asks again.
+     *
+     * This exists because the write path runs inside a VM exit handler.
+     * The destination check needs a read to complete, and the only two
+     * shapes available are "spin until it does" and "come back later".
+     * Spinning was measured wrong on the medium: with the guest's own
+     * driver using the controller, every read exceeded the spin budget,
+     * every block was discarded, and the channel wrote one block and
+     * then nothing for the rest of the boot.
+     */
+    verify_pending,
+
+    /**
+     * Not a result. The number of enumerators above it, so `results` can
+     * be indexed by one without a table that has to be kept in step.
+     */
+    count,
 };
 
 /**
@@ -263,6 +285,13 @@ public:
         completion_phase = phase;
         submitted = 0;
         completed = 0;
+
+        // Command identifiers are `submitted & 0xffff`, so resetting the
+        // counters restarts them. Any verify still believed to be
+        // outstanding is against identifiers that are about to be handed
+        // out again, and would be matched by the wrong completion.
+        verify_outstanding = false;
+        verify_landed = false;
     }
 
     static std::uint32_t tail_position()
@@ -336,6 +365,99 @@ public:
      */
 
     /**
+     * How many entries `results` has: one per write_result enumerator.
+     */
+    static constexpr std::size_t result_kinds =
+        static_cast<std::size_t>(write_result::count);
+
+    /**
+     * **Every return from submit, counted by which return it was.**
+     *
+     * The counters above answer "what did the device do". They cannot
+     * answer "why did a block not go out", because three of submit's
+     * returns used to increment nothing at all - out_of_range,
+     * queue_full and timed_out - and the caller counted one `dropped`
+     * for all of them. A run that discarded 1975 blocks with
+     * `submitted == completed`, `failed`, `refused_guard` and
+     * `refused_signature` all zero therefore said only "not the device",
+     * and the choice between the remaining three was argued from the
+     * source rather than read off the machine.
+     *
+     * The whole point of this array is that the argument is not needed.
+     * Read it and the answer is a number beside a name.
+     *
+     * Indexed by `static_cast<std::size_t>(result)`, incremented on
+     * **every** return including `ok`, so the entries sum to the number
+     * of calls and `dropped` has to equal the sum of the ones that are
+     * not `ok`. A disagreement between those two is itself a finding.
+     */
+    static inline std::uint64_t results[result_kinds]{};
+
+    /**
+     * The destination read that is out on the device, if there is one.
+     *
+     * The check itself is unchanged - the block is read and must carry
+     * the loader's signature - but waiting for it is no longer done by
+     * spinning. The command is issued on one call and collected on a
+     * later one, so a slow controller costs the block a few more VM
+     * exits of latency instead of costing the block.
+     *
+     * `verify_landed` is set by `reap`, and only by the completion whose
+     * command identifier matches `verify_id`. Matching on the identifier
+     * rather than on "the completion count moved" is what makes the
+     * check honest: with a previous block's write still outstanding, a
+     * count that moved says only that *something* completed, and acting
+     * on it reads a scratch buffer the read has not filled yet.
+     * @{
+     */
+    static inline bool verify_outstanding{};
+    static inline bool verify_landed{};
+    static inline std::uint16_t verify_id{};
+    static inline std::uint64_t verify_block{};
+    static inline std::uint64_t verify_issued{};
+
+    /**
+     * How long the destination read took, in time stamp counter ticks,
+     * last time and at worst. This is the measurement the spin budget
+     * never had: a budget in *iterations* is a different amount of time
+     * in every build and on every processor, so "the read did not
+     * complete in 1<<22 polls" never said how long that was.
+     * @{
+     */
+    static inline std::uint64_t verify_ticks_last{};
+    static inline std::uint64_t verify_ticks_max{};
+    /**
+     * @}
+     */
+
+    /**
+     * How many verifies were given up on, having been outstanding
+     * longer than `verify_ticks_budget`.
+     *
+     * Given up on for reporting only: the command is left outstanding on
+     * purpose, because it will DMA into `scratch` whenever it does land
+     * and a second read must not be issued on top of it. So the next
+     * attempt waits for this one before starting a fresh verify.
+     */
+    static inline std::uint64_t verify_abandoned{};
+
+    /**
+     * How long a destination read may be outstanding before the block
+     * waiting on it is given up.
+     *
+     * A tick count rather than a poll count, so it means the same wall
+     * clock time in a debug build and a release one. Roughly a second
+     * and a half on any processor this runs on, which is far longer than
+     * a saturated NVMe controller's worst read and far shorter than a
+     * boot: the intent is to catch a command the controller has lost,
+     * not to bound the device's latency.
+     */
+    static inline std::uint64_t verify_ticks_budget{1ull << 32};
+    /**
+     * @}
+     */
+
+    /**
      * Forgets the queue pair. Called the moment a reset is observed, so
      * that nothing rings a doorbell the controller no longer backs.
      *
@@ -356,6 +478,13 @@ public:
         completion_phase = true;
         submitted = 0;
         completed = 0;
+
+        // The queue the verify read was sitting on no longer exists, so
+        // that command will never complete and will never DMA into
+        // scratch. Forgetting it here is what lets the next epoch start a
+        // fresh verify instead of waiting for one that cannot arrive.
+        verify_outstanding = false;
+        verify_landed = false;
         for (std::uint32_t i{}; i < Entries; ++i) {
             completions[i] = completion_entry{};
         }
@@ -431,6 +560,19 @@ public:
             }
             arch::x86_64::order_loads();
 
+            // Which command this was, before the entry is stepped over.
+            // The identifier is the only thing that ties a completion to
+            // the read the destination check is waiting for; the count
+            // does not, because a previous block's write can be
+            // outstanding at the same time.
+            if (verify_outstanding && (verify_id == entry.command_id())) {
+                verify_landed = true;
+                verify_ticks_last = arch::x86_64::rdtsc() - verify_issued;
+                if (verify_ticks_last > verify_ticks_max) {
+                    verify_ticks_max = verify_ticks_last;
+                }
+            }
+
             if (0 != entry.status()) {
                 ++failed;
             }
@@ -446,7 +588,23 @@ public:
     }
 
     /**
-     * Submits one block, without waiting for it.
+     * Moves one block along, without ever waiting for the device.
+     *
+     * Called repeatedly for the same `block_index` until it answers
+     * something other than `verify_pending`. Each call does as much as
+     * can be done without blocking: issue the destination read, or
+     * collect it and issue the write.
+     *
+     * **This is the call the write path uses**, and the reason it exists
+     * is measured. The path runs inside a VM exit handler with a guest
+     * waiting, so the destination read used to be waited for by spinning
+     * on a poll count. Once the guest's own driver was using the
+     * controller, every read exceeded that budget: the block was
+     * discarded, the read completed a moment later anyway, and the
+     * channel wrote one block per epoch and then nothing - 1975 blocks
+     * discarded against 65 submissions, none failed and none refused.
+     * Coming back on the next exit costs the block microseconds of
+     * latency and costs the guest nothing.
      *
      * `target` is the loader's validated extent table and is the only
      * way a destination can be named, so an out of range index is a
@@ -457,11 +615,74 @@ public:
      * controller will use. Under the host page table that is a lookup;
      * while boot services are alive it is the identity.
      */
+    static write_result
+    try_submit(const log_target & target,
+               std::uint64_t block_index,
+               std::uint32_t current_epoch,
+               std::uint64_t (*physical_of)(const void *))
+    {
+        return note(
+            attempt(target, block_index, current_epoch, physical_of));
+    }
+
+    /**
+     * The waiting form, for callers that can afford to block.
+     *
+     * Two of them can: the loader's proof write, which runs while boot
+     * services are alive and the controller is otherwise idle, and the
+     * flush taken immediately before the guest disables the controller,
+     * where anything not written now is not writable at all.
+     *
+     * `spin_budget` bounds the polling only. The full attempt is not
+     * repeated per poll on purpose: its guard read costs two uncached
+     * register accesses, and at a budget in the millions that is seconds
+     * of bus traffic rather than a spin.
+     */
     static write_result submit(const log_target & target,
                                std::uint64_t block_index,
                                std::uint32_t current_epoch,
                                std::uint64_t (*physical_of)(const void *),
                                std::uint64_t spin_budget)
+    {
+        auto result =
+            attempt(target, block_index, current_epoch, physical_of);
+
+        auto spun = spin_budget;
+        while (write_result::verify_pending == result) {
+            if (0 == spun--) {
+                result = write_result::timed_out;
+                break;
+            }
+
+            reap();
+            if (verify_outstanding && !verify_landed) {
+                continue;
+            }
+
+            result =
+                attempt(target, block_index, current_epoch, physical_of);
+        }
+
+        return note(result);
+    }
+
+private:
+    /**
+     * Counts a result by which result it was, and passes it through.
+     */
+    static write_result note(write_result result)
+    {
+        ++results[static_cast<std::size_t>(result)];
+        return result;
+    }
+
+    /**
+     * One step of the block, uncounted. Never blocks.
+     */
+    static write_result attempt(const log_target & target,
+                                std::uint64_t block_index,
+                                std::uint32_t current_epoch,
+                                std::uint64_t (*physical_of)(const void *))
     {
         // Storage as well as doorbells. A bound queue whose memory was
         // never supplied would write commands through a null pointer,
@@ -494,77 +715,95 @@ public:
         }
 
         reap();
+
+        if (verify_outstanding) {
+            if (!verify_landed) {
+                if ((arch::x86_64::rdtsc() - verify_issued) <
+                    verify_ticks_budget) {
+                    return write_result::verify_pending;
+                }
+
+                // Long enough that the controller has lost it rather
+                // than being slow. Reported, and deliberately still
+                // outstanding: whenever it does land it DMAs into
+                // scratch, so a second read must not be issued on top of
+                // it. The next attempt waits for this one and then starts
+                // a fresh verify.
+                ++verify_abandoned;
+                return write_result::timed_out;
+            }
+
+            auto verified_block = verify_block;
+            verify_outstanding = false;
+            verify_landed = false;
+
+            // The read that landed was for some other block - the only
+            // way that happens is a block given up on above - so it says
+            // nothing about this one. Fall through and start again.
+            if (verified_block == block_index) {
+                if (!destination_is_ours(target, block_index)) {
+                    ++refused_signature;
+                    return write_result::signature_mismatch;
+                }
+
+                auto command = write(target.namespace_id,
+                                     lba,
+                                     static_cast<std::uint16_t>(per_block),
+                                     physical_of(staging),
+                                     true);
+                return issue(command, current_epoch);
+            }
+        }
+
         if ((submitted - completed) >= (Entries - 1)) {
             return write_result::queue_full;
         }
 
         // The destination has to prove it is ours before it is
-        // overwritten. This is a synchronous read, and it is the one
-        // place the write path waits - which is affordable because it
-        // happens once per block rather than once per record, and
-        // unaffordable to skip.
-        if (auto verified = verify_destination(target,
-                                               block_index,
-                                               lba,
-                                               per_block,
-                                               current_epoch,
-                                               physical_of,
-                                               spin_budget);
-            write_result::ok != verified) {
-            return verified;
-        }
-
-        auto command = write(target.namespace_id,
-                             lba,
-                             static_cast<std::uint16_t>(per_block),
-                             physical_of(staging),
-                             true);
-        return issue(command, current_epoch);
-    }
-
-private:
-    /**
-     * Reads the destination and requires the loader's signature in it.
-     */
-    static write_result
-    verify_destination(const log_target & target,
-                       std::uint64_t block_index,
-                       std::uint64_t lba,
-                       std::uint32_t per_block,
-                       std::uint32_t current_epoch,
-                       std::uint64_t (*physical_of)(const void *),
-                       std::uint64_t spin_budget)
-    {
+        // overwritten, so the block is read first. Issued here and
+        // collected above, on a later call.
         auto command = read(target.namespace_id,
                             lba,
                             static_cast<std::uint16_t>(per_block),
                             physical_of(scratch));
+
+        verify_landed = false;
+        verify_outstanding = true;
+        verify_block = block_index;
+        verify_issued = arch::x86_64::rdtsc();
+
+        // The identifier issue() is about to use, recorded before it is
+        // used so that reap() can recognise the completion. issue()
+        // takes it from `submitted`, which it only advances once the
+        // doorbell has been rung.
+        verify_id = static_cast<std::uint16_t>(submitted & 0xffff);
+
         if (auto issued = issue(command, current_epoch);
             write_result::ok != issued) {
+            verify_outstanding = false;
             return issued;
         }
 
-        auto before = completed;
-        auto spun = spin_budget;
-        while (completed == before) {
-            reap();
-            if (0 == spun--) {
-                return write_result::timed_out;
-            }
-        }
+        return write_result::verify_pending;
+    }
 
+    /**
+     * Whether what was read back into scratch is the block this channel
+     * owns. No waiting and no device access: the read has already landed.
+     */
+    static bool destination_is_ours(const log_target & target,
+                                    std::uint64_t block_index)
+    {
         auto found = reinterpret_cast<const block_signature *>(scratch);
         if ((block_signature::magic != found->signature_magic) ||
             (target.file_id != found->file_id) ||
             (block_index != found->block_index)) {
-            ++refused_signature;
-            return write_result::signature_mismatch;
+            return false;
         }
 
         for (std::size_t i{}; i < sizeof(found->partition_guid); ++i) {
             if (found->partition_guid[i] != target.partition_guid[i]) {
-                ++refused_signature;
-                return write_result::signature_mismatch;
+                return false;
             }
         }
 
@@ -582,12 +821,11 @@ private:
         // not merely that it looks like the right partition.
         for (std::size_t i{}; i < sizeof(found->disk_guid); ++i) {
             if (found->disk_guid[i] != target.disk_guid[i]) {
-                ++refused_signature;
-                return write_result::signature_mismatch;
+                return false;
             }
         }
 
-        return write_result::ok;
+        return true;
     }
 
     /**

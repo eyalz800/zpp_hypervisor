@@ -106,8 +106,37 @@ show_static() {
     local addr; addr=$(static "$2")
     [ -n "$addr" ] || { printf '  %-26s <no symbol>\n' "$1"; return; }
     printf '  %-26s ' "$1"
-    mon "xp/${3:-1}gx $(at "0x$addr")" | sed 's/^[^:]*: //' | tr '\n' ' '
+    mon "xp/${3:-1}${4:-g}x $(at "0x$addr")" | sed 's/^[^:]*: //' | tr '\n' ' '
     printf '\n'
+}
+
+# queue_pair::results, one line per write_result enumerator.
+#
+# The array is indexed by the enumerator and every return from submit
+# increments one entry, so this is the whole answer to "why did a block
+# not go out" - no arithmetic, no inference from which other counter
+# stayed at zero. It exists because that inference was done twice and was
+# wrong once: three of submit's returns used to increment nothing, and a
+# run with 1975 blocks discarded, submitted equal to completed and
+# nothing failed or refused could not say which of them it was.
+#
+# The order here is the order in zpp/nvme/log_writer.h and has to stay
+# that way.
+show_results() {
+    local addr; addr=$(static 'queue_pairILj64EE7resultsE')
+    [ -n "$addr" ] || { printf '  %-26s <no symbol>\n' "submit results"; return; }
+
+    local names=(ok no_queues epoch_changed out_of_range \
+                 signature_mismatch queue_full timed_out verify_pending)
+    local words index=0
+    words=$(mon "xp/8gx $(at "0x$addr")" | sed 's/^[^:]*: //' \
+        | tr -s ' ' '\n' | grep -E '^0x')
+
+    for word in $words; do
+        [ "$index" -lt "${#names[@]}" ] || break
+        printf '    %-24s %s\n' "${names[$index]}" "$word"
+        index=$((index + 1))
+    done
 }
 
 show_member() {
@@ -130,17 +159,15 @@ show_static  "configure_reject|staged" 'esp_blocks_forILNS0_4sinkE4EE16configure
 show_static  "epoch" 'esp_blocks_forILNS0_4sinkE4EE5epochE'
 show_static  "sequence" 'esp_blocks_forILNS0_4sinkE4EE8sequenceE'
 show_static  "next_block_index" 'esp_blocks_forILNS0_4sinkE4EE16next_block_indexE'
-show_static  "dropped" 'esp_blocks_forILNS0_4sinkE4EE7droppedE'
+show_static  "dropped (blocks)" 'esp_blocks_forILNS0_4sinkE4EE7droppedE'
+show_static  "records_dropped" 'esp_blocks_forILNS0_4sinkE4EE15records_droppedE'
+show_static  "staged_records" 'esp_blocks_forILNS0_4sinkE4EE14staged_recordsE' 1 w
 
 echo "--- is the device still ours ---"
 show_static  "queue bound (0 = forgotten)" 'queue_pairILj64EE5boundE' 4
 show_static  "lost_to_reset" 'queue_pairILj64EE13lost_to_resetE'
 
-# Why a submission did not land, split three ways. A live queue that drops
-# every block is one of: the guard read refusing, the block's signature
-# refusing, or the command going out and never completing. These separate
-# them, and reading them was the step that was skipped when a rebuilt
-# queue wrote one block and then dropped fifteen hundred.
+# What the device did with what it was given.
 show_static  "submitted | completed" 'queue_pairILj64EE9submittedE'
 show_static  "failed" 'queue_pairILj64EE6failedE'
 show_static  "refused_guard" 'queue_pairILj64EE13refused_guardE'
@@ -158,6 +185,14 @@ show_member  "in vmx operation now" guest_in_vmx_operation
 show_member  "vmcs12 captured" vmcs12_controls_captured
 show_member  "l2 entries [2]" l2_entries 2
 show_member  "apic writes undecoded" apic_writes_undecoded
+echo "--- why a block did not go out ---"
+show_results
+
+echo "--- the destination read ---"
+show_static  "outstanding | landed" 'queue_pairILj64EE18verify_outstandingE' 2 b
+show_static  "verify_block" 'queue_pairILj64EE12verify_blockE'
+show_static  "verify ticks last | max" 'queue_pairILj64EE17verify_ticks_lastE' 2
+show_static  "verify_abandoned" 'queue_pairILj64EE16verify_abandonedE'
 
 echo "--- emulation and rebuild ---"
 show_member  "emulated_writes" emulated_writes
@@ -206,6 +241,55 @@ Reading it:
   queue bound all zero                 forget() ran; the guest reset the controller
   configure_reject = 1                 that is reject::none, success, not a rejection
   epoch = 2                            the queue pair was rebuilt after a reset
+
+Why a block did not go out - read this before reasoning about it:
+  every return from submit is counted by which return it was, so the
+  eight numbers under "why a block did not go out" are the answer rather
+  than the input to an argument. Their non-ok entries have to sum to
+  "dropped (blocks)"; if they do not, something else is dropping blocks.
+  ok                                   blocks written
+  out_of_range                         lba_of refused the index. It cannot
+                                       happen while the target is usable -
+                                       next_block_index is kept below
+                                       blocks_in_file() - so any count here
+                                       means the target or that bound is wrong
+  timed_out                            a destination read was outstanding
+                                       longer than verify_ticks_budget, about
+                                       a second and a half. Compare against
+                                       verify_abandoned, which counts the same
+                                       thing at the queue
+  verify_pending                       not a failure: a pass that left the
+                                       block staged because its destination
+                                       read had not come back. Climbs fast and
+                                       is expected to - it is one per pump
+                                       pass while a block waits, so a large
+                                       number beside a climbing "ok" is a slow
+                                       device, not a broken one
+  queue_full                           more outstanding than the queue holds.
+                                       Cross-check submitted minus completed
+  epoch_changed                        the guard read refused; equals
+                                       refused_guard
+  signature_mismatch                   the destination did not carry the
+                                       loader's signature; equals
+                                       refused_signature
+
+The destination read, which is the only thing the write path waits on:
+  outstanding 1, landed 0              a read is out on the device now; the
+                                       block is staged and will go out when it
+                                       lands. Sample again - if it never
+                                       lands, the queue is not being serviced
+  verify ticks last | max              how long the read took, in time stamp
+                                       counter ticks. This is the number the
+                                       old poll budget never gave: divide by
+                                       the processor's frequency for seconds.
+                                       A max in the tens of millions is a few
+                                       milliseconds, which is a busy
+                                       controller and is handled; a max near
+                                       verify_ticks_budget is a lost command
+  records_dropped climbing             records thrown away because the block
+                                       they belonged in was still waiting.
+                                       The channel is keeping up with the
+                                       device but not with the guest
 
 The reservation and the creation, which are two different runs:
   reserve result 0                     never attempted - the enable was not seen

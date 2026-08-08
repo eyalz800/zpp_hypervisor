@@ -79,9 +79,18 @@ struct esp_blocks_for
     static inline std::uint64_t (*physical_of)(const void *){};
 
     /**
-     * How long a synchronous read may spin before the channel gives up
-     * on it. A count rather than a duration, because there is no clock
-     * here that a VM exit handler may block on.
+     * How long the *waiting* paths may spin: the flush taken before the
+     * guest disables the controller, and the drain behind it. A count
+     * rather than a duration, because there is no clock here that a VM
+     * exit handler may block on.
+     *
+     * The steady-state write path does not use it and no longer spins at
+     * all. It used to, and that was the whole failure: a budget in polls
+     * is a different amount of time in every build, and once the guest's
+     * driver was using the controller no destination read came back
+     * inside it. Every block was then discarded even though every read
+     * completed a moment later - 1975 discarded against 65 submissions
+     * with nothing failed and nothing refused.
      */
     static inline std::uint64_t spin_budget{1u << 22};
 
@@ -145,11 +154,31 @@ struct esp_blocks_for
      */
 
     /**
-     * Records that did not fit because the device was behind. Counted
-     * here and reported in the next block's header, so that falling
-     * behind is visible to the reader rather than only to a debugger.
+     * Blocks that did not go out. Counted here and reported in the next
+     * block's header, so that falling behind is visible to the reader
+     * rather than only to a debugger.
+     *
+     * One per *failed* attempt. A block whose destination read is still
+     * out on the device is not counted: it has not failed, it is waiting,
+     * and it stays staged until it goes out. Which of the failures it was
+     * is in `queues::results`, indexed by the write_result enumerator -
+     * this counter has never been able to say, and reading it as though
+     * it could is what cost the run that saw 1975 of them.
      */
     static inline std::uint64_t dropped{};
+
+    /**
+     * Records thrown away because the block they belonged in was full and
+     * still waiting on its destination read.
+     *
+     * Records rather than blocks, so it is a different unit from
+     * `dropped` and a different unit from the ring's own `lost`. The pump
+     * cannot be told "not now" - four refusals in a row and it marks this
+     * sink dead for the boot, see failures_tolerated in diag/config.h -
+     * so a record that arrives while a block is stuck is taken and
+     * dropped rather than refused.
+     */
+    static inline std::uint64_t records_dropped{};
 
     /**
      * How many records one block holds. Derived rather than stated, so
@@ -408,16 +437,33 @@ struct esp_blocks_for
      * Takes one record into the block being assembled, and submits the
      * block when it is full.
      *
-     * Returns true whenever the record was taken. A full staging block
-     * that cannot be submitted is a **drop**, counted and reported in
-     * band, rather than a refusal - because a refusal would make the
-     * pump mark this sink dead after a handful of them, and a device
-     * that is momentarily behind is not a dead device.
+     * Returns true whenever the record was taken, **and also when it was
+     * dropped** - a refusal would make the pump mark this sink dead after
+     * a handful of them, and a device that is momentarily behind is not a
+     * dead device. What was dropped is counted instead: blocks in
+     * `dropped`, records in `records_dropped`.
      */
     static bool write(const record & entry)
     {
         if (!ready()) {
             return false;
+        }
+
+        // A full block that has not gone out yet holds the staging
+        // buffer, so there is nowhere to put this record until it does.
+        //
+        // Retried first, because the retry is what makes the block leave:
+        // its destination read was issued on an earlier pass and this is
+        // where it is collected. Only if it is still out on the device is
+        // the record dropped - and dropped rather than refused, because
+        // four refusals in a row take this sink off the pump for the rest
+        // of the boot.
+        if (staged_records >= records_per_block()) {
+            flush();
+            if (staged_records >= records_per_block()) {
+                ++records_dropped;
+                return true;
+            }
         }
 
         auto offset = sizeof(nvme::block_header) +
@@ -439,16 +485,8 @@ struct esp_blocks_for
     }
 
     /**
-     * Submits the block being assembled, however full it is.
-     *
-     * Called when a block fills, and it is also the entry point a timer
-     * or the halt path would use to bound how long a partial block can
-     * sit unwritten - "every few milliseconds" is this, called from the
-     * exit path once a deadline has passed. That deadline is the fourth
-     * wiring point.
-     */
-    /**
-     * Writes the block being filled if it has waited long enough.
+     * Writes the block being filled if it has waited long enough, and
+     * carries on a block that is waiting on the device.
      *
      * Called from the exit path on every pass, so the cost in the common
      * case is one time stamp read and a comparison. That is deliberate:
@@ -464,8 +502,21 @@ struct esp_blocks_for
      */
     static void flush_if_due()
     {
-        if ((0 != staged_records) && (0 != staged_deadline) &&
-            (timestamp() >= staged_deadline)) {
+        if (0 == staged_records) {
+            return;
+        }
+
+        // A block that filled and has not gone out is retried on every
+        // pass rather than on a deadline. The deadline bounds how long a
+        // *partial* block may wait for records that may never come; a
+        // full one is only waiting for the device, and the sooner its
+        // destination read is collected the sooner it leaves.
+        if (staged_records >= records_per_block()) {
+            flush();
+            return;
+        }
+
+        if ((0 != staged_deadline) && (timestamp() >= staged_deadline)) {
             flush();
         }
     }
@@ -487,13 +538,26 @@ struct esp_blocks_for
         }
 
         if (0 != staged_records) {
-            flush();
+            // The waiting form here and only here. Coming back on a later
+            // pass is the right answer everywhere else; on this path there
+            // is no later pass, because the register write that brought us
+            // here can be the one that takes the queues away.
+            flush(true);
         }
 
         queues::drain(spin_budget);
     }
 
-    static void flush()
+    /**
+     * Writes the block being filled.
+     *
+     * `wait` decides what happens when the destination read has not come
+     * back yet: false leaves the block staged and returns, so the next
+     * pass collects it, and true spins for it because the caller has no
+     * next pass. Leaving it staged is the steady-state answer - the write
+     * path runs inside a VM exit handler and the guest is waiting.
+     */
+    static void flush(bool wait = false)
     {
         if (0 == staged_records) {
             return;
@@ -520,7 +584,6 @@ struct esp_blocks_for
         header->epoch = epoch;
         header->sequence = sequence;
         header->block_index = next_block_index;
-        staged_deadline = 0;
         header->record_count = staged_records;
         header->record_size = ring.record_size;
 
@@ -538,10 +601,26 @@ struct esp_blocks_for
             (nvme::block_size - sizeof(nvme::block_header)) /
                 sizeof(std::uint32_t));
 
-        auto result = queues::submit(
-            target, next_block_index, epoch, physical_of, spin_budget);
+        auto result =
+            wait ? queues::submit(target,
+                                  next_block_index,
+                                  epoch,
+                                  physical_of,
+                                  spin_budget)
+                 : queues::try_submit(
+                       target, next_block_index, epoch, physical_of);
+
+        // Still out on the device. The block keeps the staging buffer and
+        // its place in the file, and the next pass collects the read - so
+        // a slow controller costs this block latency rather than costing
+        // the block. The header is rebuilt on the retry, which is why
+        // nothing above this is conditional on it being the first attempt.
+        if (nvme::write_result::verify_pending == result) {
+            return;
+        }
 
         staged_records = 0;
+        staged_deadline = 0;
         if (nvme::write_result::ok != result) {
             ++dropped;
             return;
