@@ -2370,6 +2370,43 @@ private:
     volatile std::uint64_t synthetic_msr_accesses{};
 
     /**
+     * Which CPUID leaves the guest asked for, in order, and what it was
+     * answered in ECX.
+     *
+     * The instrument for "what does the guest check before it decides".
+     * Every other measurement here says what this VMM did; this says what
+     * the guest wanted, which is the only thing that can name a missing
+     * answer rather than guess at one.
+     *
+     * Frozen when full rather than wrapping, for the same reason the admin
+     * observation ring is: the leaves that decide anything are asked once
+     * during start-up, and steady state re-asks a handful for ever.
+     * @{
+     */
+    static constexpr std::size_t cpuid_trace_capacity = 512;
+
+    struct cpuid_trace_entry
+    {
+        std::uint32_t leaf{};
+        std::uint32_t subleaf{};
+        std::uint32_t ecx_answered{};
+        std::uint32_t eax_answered{};
+    };
+
+    cpuid_trace_entry cpuid_trace[cpuid_trace_capacity]{};
+    volatile std::uint64_t cpuid_trace_count{};
+
+    /**
+     * How many of those were in the range reserved for a hypervisor, which
+     * is the subset that says whether the guest went looking for one at
+     * all.
+     */
+    volatile std::uint64_t cpuid_hypervisor_leaves_asked{};
+    /**
+     * @}
+     */
+
+    /**
      * Whether the guest ever looked at VMX, and what it was told.
      *
      * These exist to separate two outcomes that are identical from

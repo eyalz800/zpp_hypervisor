@@ -7421,6 +7421,29 @@ hypervisor::main(arch::x86_64::context & caller_context)
             // of it and real CPUID ignores it.
             auto leaf = static_cast<std::uint32_t>(context.rax);
 
+            // Recorded before the answer is edited, so the pair below is
+            // what the guest asked and what it was told, in order. Frozen
+            // when full: the leaves that decide anything are asked during
+            // start-up.
+            auto trace_slot = this->cpuid_trace_count;
+            this->cpuid_trace_count = trace_slot + 1;
+
+            if ((leaf >= 0x40000000u) && (leaf <= 0x4fffffffu)) {
+                this->cpuid_hypervisor_leaves_asked =
+                    this->cpuid_hypervisor_leaves_asked + 1;
+            }
+
+            scope_exit record_cpuid{[&] {
+                if (trace_slot < cpuid_trace_capacity) {
+                    this->cpuid_trace[trace_slot] = cpuid_trace_entry{
+                        .leaf = leaf,
+                        .subleaf = static_cast<std::uint32_t>(context.rcx),
+                        .ecx_answered = cpuid_result[2],
+                        .eax_answered = cpuid_result[0],
+                    };
+                }
+            }};
+
             // The range reserved for hypervisor use. Nothing physical
             // answers here, so whatever a guest reads is whatever the
             // layer above it chose to say.
