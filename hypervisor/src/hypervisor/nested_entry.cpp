@@ -1299,6 +1299,19 @@ std::expected<void, zpp::error> hypervisor::build_vmcs02(std::size_t cpu)
     vmcs.write(field::guest_ia32_pat, shadow.read(field::guest_ia32_pat));
     vmcs.write(field::guest_ia32_efer,
                shadow.read(field::guest_ia32_efer));
+
+    // Carried because the entry control that loads it is now offered.
+    //
+    // A guest hypervisor that sets "load IA32_BNDCFGS" expects the value
+    // in its own VMCS to be the one its guest runs with, so leaving this
+    // field at whatever the entered VMCS happened to hold would honour
+    // the control's presence and not its meaning. Copied unconditionally
+    // rather than under the control bit, exactly as IA32_PAT and
+    // IA32_EFER above are: the processor ignores the field when the
+    // control is clear, so there is nothing to gate and a gate would
+    // only be another thing to get wrong.
+    vmcs.write(field::guest_ia32_bndcfgs,
+               shadow.read(field::guest_ia32_bndcfgs));
     vmcs.write(field::guest_interruptibility_state,
                shadow.read(field::guest_interruptibility_state));
 
@@ -1810,6 +1823,15 @@ void hypervisor::save_l2_state(std::size_t cpu)
         shadow.write(field::guest_ia32_efer,
                      vmcs.read(field::guest_ia32_efer));
     }
+
+    // The other half of carrying it in. Unconditional for the same
+    // reason the load above is: there is no "save IA32_BNDCFGS" exit
+    // control to test - the processor always writes the field on exit -
+    // so a guest hypervisor reading it back expects what its guest left
+    // there, and anything else silently loses the guest's bounds
+    // configuration across every exit.
+    shadow.write(field::guest_ia32_bndcfgs,
+                 vmcs.read(field::guest_ia32_bndcfgs));
 }
 
 void hypervisor::load_l1_host_state(std::size_t cpu)

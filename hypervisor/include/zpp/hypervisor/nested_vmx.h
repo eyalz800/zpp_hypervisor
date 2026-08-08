@@ -277,7 +277,28 @@ constexpr std::uint64_t supported_primary_controls =
                    // The pair above is what a guest hypervisor is given
                    // *instead* of the TPR shadow, and that is deliberate.
                    //
-                   // Bit 21, use TPR shadow, is **not** offered, and
+    (1ull << 21) | // Use TPR shadow - OFFERED, experiment in progress.
+                   //
+                   // **Re-offered because the stall that withdrew it is now
+                   // suspected to have been a different bug entirely.** The
+                   // symptom recorded both times it was withdrawn was seven
+                   // application processors left in the firmware's wait loop
+                   // and the boot processor spinning for them - which is the
+                   // *identical* symptom to a failure since traced to the
+                   // emulator being told to offer interrupt remapping that
+                   // the host kernel does not implement, and fixed by
+                   // turning that off. Every run that withdrew this bit was
+                   // made with the broken setting in place, so the stall was
+                   // never attributable to the bit on its own.
+                   //
+                   // What to read after this boot, in order: guest_vmxon_count
+                   // (never once read in a run with this bit offered), then
+                   // vmcs12_controls_captured and l2_entries. Zero vmxon means
+                   // the capability set is still being refused and the answer
+                   // is elsewhere; non-zero means a guest hypervisor entered
+                   // VMX operation here for the first time.
+                   //
+                   // Bit 21, use TPR shadow, was previously **not** offered, and
                    // that is the one thing standing between this VMM and
                    // a guest hypervisor.
                    //
@@ -465,7 +486,29 @@ constexpr std::uint64_t supported_exit_controls =
     (1ull << 18) | // Save IA32_PAT.
     (1ull << 19) | // Load IA32_PAT.
     (1ull << 20) | // Save IA32_EFER.
-    (1ull << 21);  // Load IA32_EFER.
+    (1ull << 21) | // Load IA32_EFER.
+    (1ull << 23);  // Clear IA32_BNDCFGS.
+                   //
+                   // The other half of the entry control that loads it,
+                   // and a guest hypervisor wants **both or neither**.
+                   // Established from underneath rather than guessed:
+                   // with the emulator's own capability set degraded to
+                   // this VMM's and then restored one control at a time,
+                   // the guest hypervisor launched only when the entry
+                   // and exit halves were offered together. Entry alone
+                   // was measured and was not enough.
+                   //
+                   // The same run cleared four other differences of
+                   // suspicion, which is worth as much as the finding:
+                   // virtualize x2APIC mode, execute-only translations,
+                   // accessed and dirty flags, and the two instruction
+                   // information bits were all absent while it launched,
+                   // so none of them is required. That retires the
+                   // theory that the local APIC path was implicated.
+                   //
+                   // Nothing is claimed that is not carried: the guest's
+                   // IA32_BNDCFGS travels into the entered VMCS and back
+                   // out with it, beside IA32_PAT and IA32_EFER.
 
 /**
  * The VM-entry controls a first-level hypervisor may set.
@@ -478,6 +521,31 @@ constexpr std::uint64_t supported_entry_controls =
     (1ull << 2) |  // Load debug controls.
     (1ull << 9) |  // IA-32e mode guest.
     (1ull << 14) | // Load IA32_PAT.
-    (1ull << 15);  // Load IA32_EFER.
+    (1ull << 15) | // Load IA32_EFER.
+    (1ull << 16);  // Load IA32_BNDCFGS.
+                   //
+                   // **This one bit is what a guest hypervisor refuses
+                   // on, and it was found by measurement rather than by
+                   // reading.** With the emulator underneath answering
+                   // the capability MSRs itself, its advertised set was
+                   // degraded one group at a time towards this VMM's,
+                   // and the guest hypervisor was booted at each step:
+                   // it launched until this control was withdrawn, and
+                   // stopped the moment it was. Four boots, no change to
+                   // this tree, and the answer is a bit neither the
+                   // capability comparison nor the guest loader's own
+                   // required table pointed at - that table covers the
+                   // *primary* controls, and this is an entry control,
+                   // so nothing in it could ever have named this.
+                   //
+                   // Measured either side of the change:
+                   //   underneath, offering it: 0x0001d3ff000011fb
+                   //   this VMM, without it:    0x0000d3ff000011fb
+                   //
+                   // Honoured rather than merely claimed: the guest's
+                   // IA32_BNDCFGS is carried into the entered VMCS and
+                   // back out again, next to IA32_PAT and IA32_EFER,
+                   // which are the two controls this sits beside and
+                   // which already worked that way.
 
 } // namespace zpp::hypervisor::nested_vmx
