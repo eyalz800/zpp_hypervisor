@@ -1729,6 +1729,35 @@ cheap and has no invalidation ordering to get wrong. Only *removing* or
 *narrowing* a shadow entry needs one, and 31.4.3.4 lists exactly which
 changes those are.
 
+### L1 may widen its own permissions without any INVEPT, so a fill-only shadow is wrong
+
+The most important consequence of the paragraph above, and the one easiest to
+get wrong, because it makes the *obvious* design incorrect rather than slow.
+
+SDM 31.4.3.4, in full: "Software **may** use the INVEPT instruction after
+modifying a present EPT paging-structure entry ... to change any of the
+privilege bits 2:0 from 0 to 1. Failure to do so may cause an EPT violation
+that would not otherwise occur. Because an EPT violation invalidates any
+mappings that would be used by the access that caused the EPT violation ...,
+an EPT violation will not recur if the original access is performed again,
+even if the INVEPT instruction is not executed."
+
+"May", not "should". A guest hypervisor is entitled to relax a permission in
+its own tables and never invalidate anything, because on real hardware the
+resulting violation is self-clearing: the fault invalidates the stale
+mapping and the retried access succeeds.
+
+A shadow that is only ever *filled* - populate on a violation when the entry
+is absent, otherwise reflect - breaks exactly there. The shadow entry is
+present but narrow, L1 has since widened its own, no INVEPT arrives, and the
+violation recurs for ever with L1 seeing nothing wrong with its tables.
+
+So the fill path must **re-derive the permissions of an entry that is already
+present**, on every violation, not only install absent ones. That is one
+extra intersect-and-write on a path that has already paid for a walk, so it
+costs nothing measurable - but it has to be deliberate, and the reason has to
+be written down, because the code looks redundant without it.
+
 ### Over-invalidation is always architecturally safe
 
 SDM 31.4.3.2: "A logical processor may invalidate any cached mappings at
