@@ -3231,3 +3231,48 @@ processors.
 
 The switch is left off. It is honest about needing something underneath, and
 it now also breaks processor start-up, which is recorded in its comment.
+
+### The blocker is the instruction decoder, not the interface
+
+Announced a hypervisor claiming **no features at all** - vendor leaf ours,
+interface signature in the second leaf, every other leaf in the range zero.
+The guest looked (105 hypervisor-range leaves) and used nothing (zero
+synthetic MSR accesses), exactly as intended. And its
+application-processor adoption still collapsed: `next_virtual_processor` 2,
+`resumes_reached[1]` zero.
+
+So the collapse is **not** the enlightened hypercall start-up. Nothing was
+claimed and nothing was used. What it is:
+
+    APIC-page writes emulated    179
+    APIC-page writes undecoded   148
+
+**Forty-five per cent of the guest's writes to the local APIC page are
+instructions `decode_memory_store` does not handle**, and the interrupt
+command handler correctly refuses to act on one it could not decode -
+guessing which register was written would mean sending an interrupt nobody
+asked for. So when the guest takes a different path through its own APIC
+code, the start-up IPI lands among the undecoded writes and is never seen.
+
+That is one mechanism for three symptoms, and it retires two explanations:
+
+- Advertising the TPR shadow "stalling application-processor start-up" is
+  this, not anything about the control.
+- Announcing a hypervisor "making the guest start processors through a
+  hypercall" is also this. No hypercall was available to it.
+
+It also explains why the shipped configuration works: on that path the
+guest happens to use forms the decoder covers. The coverage was never
+sufficient - it was sufficient *for one code path*, which is not a property
+worth relying on, and `apic_writes_undecoded` existing at all was the clue.
+
+The work is bounded and unglamorous: find which forms those 148 writes use
+and extend the decoder to cover them. `decode_memory_store` handles the MOV
+forms that store a register or an immediate and refuses everything else -
+deliberately, and that refusal is what is now costing the processors. The
+instrument for naming them is a ring of the undecoded instructions' first
+bytes, which is a small change to the same handler that counts them.
+
+Until then, announcing a hypervisor and advertising the TPR shadow both
+stay off, and both switches record that the reason is the decoder rather
+than anything about what they announce.
