@@ -2339,3 +2339,35 @@ with its own check in CI. The remaining work is the four defects listed on
 time is the substantial one: there is no walker today, and
 `os_page_table` is built once from the launch-time CR3, so it is only
 right while the guest is still on the firmware's identity map.
+
+### The nested build runs on the rig, and nothing exercised it
+
+First hardware run of the nested code, with `ZPP_NESTED_VMX=ON` deployed
+to the real machine and the passed-through NVMe.
+
+**Windows boots and runs normally.** Stable kernel addresses across four
+minutes, no boot loop, no regression against the switch-off build. That is
+worth having on its own: the nested code is compiled into every path the
+guest takes and does not disturb a guest that never uses it.
+
+**Nothing nested happened.** Read from the running VMM's own memory:
+
+    guest_in_vmx_operation[0..7]   all zero
+    l2_entries                     0
+    running_l2                     0
+    vmcs02_launched                0
+    nested_entry_failed            0
+
+The first line is the one that settles it: the guest never executed
+`VMXON`. So this is not our code refusing a guest hypervisor, and not a
+launch that failed - nothing ever asked. Virtualization-based security is
+off in that Windows installation, and with it off no Hyper-V starts, which
+is exactly what the guest-facing notes predict.
+
+So the reflection, save-back and shadow paths remain exercised only by
+`verify_nested::present` under Bochs, where they do run end to end. What
+is still unrun is a *real* guest hypervisor, and reaching it needs VBS
+turned on inside the guest - Core Isolation, or `hypervisorlaunchtype` in
+the boot configuration. That is a change inside Windows, not something
+this side can arrange, and it is the one remaining step before any claim
+that Hyper-V boots nested.
