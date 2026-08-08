@@ -1730,6 +1730,11 @@ Two things about running it, both of which cost a run to find:
 
 ### Run: a second-level guest, entered and exited, under Bochs
 
+Run with `scripts/ci/bochs-nested.sh`, which is separate from the smoke
+script beside it because the two have different stop conditions - that one
+kills the emulator the moment the hypervisor's own verdict appears, and the
+probe runs after it.
+
 Experiment 3 as well. The same probe writes a whole vmcs12 out of the state
 the processor is running with and launches a second-level guest that
 differs from its hypervisor in exactly one thing - RIP, pointing at two
@@ -1764,16 +1769,24 @@ this exercises the entry and the reflection without also depending on the
 shadow page-table builder, and a failure has one place to be rather than
 two.
 
+The probe launches twice, and the second time its guest hypervisor uses
+extended page tables of its own - one page-map level-4 entry over four
+one-gigabyte identity leaves, four gigabytes in all. That run produces the
+same three correct answers, which means the shadow was built: the VMM
+walked the guest hypervisor's tables, composed each gigabyte with its own
+2 MB entries, installed the result, and the second-level guest executed
+through it.
+
+So `build_shadow_ept`, `compose_ept` against a real guest hypervisor's
+tables, and the EPT pointer written into vmcs02 have all executed.
+
 What is still not run:
 
-4. The shadow extended page tables. `build_shadow_ept`, `compose_ept`
-   against a real guest hypervisor's tables, and the fault path in
-   `on_l2_ept_fault` have never executed - the probe's guest hypervisor
-   does not use EPT. Turning it on in the probe means building an EPT12 for
-   the second-level guest, which is the next experiment and is a smaller
-   one than this was.
-5. Windows with VBS on and the switch on, on the rig. Worth nothing until 4
-   passes.
+4. Windows with VBS on and the switch on, on the rig. Everything below the
+   guest hypervisor has now answered correctly under an emulator, and
+   nothing about that says Hyper-V will boot - it exercises far more of
+   this than a two-instruction guest does, and the exits it takes are the
+   conditional ones in `l1_wants_l2_exit` that the probe never reaches.
 
 ## Nested VMX coverage checklist
 
@@ -1910,11 +1923,12 @@ essay.
 is a different answer from "yes" and the distinction is the whole of what
 is left: the checklist measures coverage against the SDM and KVM, which is
 what reading can establish, and it cannot establish that any of it works.
-The two "Run:" sections above are what has executed: the instruction
-emulation, the capability MSRs, and a second-level guest entered and
-exited with the exit reflected. What has not is the shadow extended page
-tables, which the probe's guest hypervisor does not use - and Hyper-V
-does, so that is what stands between this and an answer.
+The "Run:" sections above are what has executed: the instruction emulation,
+the capability MSRs, and a second-level guest entered and exited with the
+exit reflected - twice, the second time through a shadow extended page
+table composed from the guest hypervisor's own. What stands between this
+and an answer is a real guest hypervisor, which takes exits the probe never
+reaches.
 
 ### The switch-on build overwrites the switch-off binary, and the check caught it
 

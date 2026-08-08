@@ -500,6 +500,7 @@ struct verify_nested
     static constexpr std::uint64_t field_host_fs_selector = 0x0c08;
     static constexpr std::uint64_t field_host_gs_selector = 0x0c0a;
     static constexpr std::uint64_t field_host_tr_selector = 0x0c0c;
+    static constexpr std::uint64_t field_ept_pointer = 0x201a;
     static constexpr std::uint64_t field_vmcs_link_pointer = 0x2800;
     static constexpr std::uint64_t field_guest_debugctl = 0x2802;
     static constexpr std::uint64_t field_guest_efer = 0x2806;
@@ -513,6 +514,7 @@ struct verify_nested
     static constexpr std::uint64_t field_entry_msr_load_count = 0x4014;
     static constexpr std::uint64_t field_entry_interruption_information =
         0x4016;
+    static constexpr std::uint64_t field_secondary_controls = 0x401e;
     static constexpr std::uint64_t field_vm_instruction_error = 0x4400;
     static constexpr std::uint64_t field_exit_instruction_length = 0x440c;
     static constexpr std::uint64_t field_guest_es_limit = 0x4800;
@@ -614,10 +616,21 @@ struct verify_nested
     template <typename Line, typename Say, typename Step>
     static bool launch(EFI_SYSTEM_TABLE * system_table,
                        std::uint64_t vmcs_region,
+                       bool with_ept,
                        Line && line,
                        Say && say,
                        Step && step)
     {
+        // A clear launch state each time, so both runs can use VMLAUNCH.
+        // SDM 29.1: VMLAUNCH requires clear and VMRESUME requires
+        // launched, and the first run leaves it launched - so without this
+        // the second would be answered with error 4 and never enter.
+        if ((outcome::succeeded != outcome_of(vmclear(vmcs_region))) ||
+            (outcome::succeeded != outcome_of(vmptrld(vmcs_region)))) {
+            line("zpp: nested FAIL could not re-clear the vmcs\r\n");
+            return false;
+        }
+
         // A stack for the guest hypervisor's own host state to land on.
         // Never actually used for anything - `zpp_probe_l1_host` moves off
         // it immediately - but VM exit loads RSP from the field whatever
@@ -630,6 +643,18 @@ struct verify_nested
             line("zpp: nested FAIL could not allocate a host stack\r\n");
             return false;
         }
+
+        EFI_PHYSICAL_ADDRESS ept_pages = 0xffffffff;
+
+        // Both allocations, given back on every path out - there are
+        // four, and the second run of this needs the pages the first
+        // returned.
+        auto release = [&] {
+            system_table->BootServices->FreePages(host_stack, 1);
+            if (0xffffffff != ept_pages) {
+                system_table->BootServices->FreePages(ept_pages, 2);
+            }
+        };
 
         auto gdtr = read_gdtr();
         auto idtr = read_idtr();
@@ -660,8 +685,72 @@ struct verify_nested
         // bit 55 says they exist.
         write(field_pin_controls,
               adjust(read_msr(ia32_vmx_true_pinbased_ctls), 0));
+
+        // Extended page tables, when this run wants them: the secondary
+        // controls have to be activated to hold the bit, and the bit needs
+        // a real table under it.
+        constexpr std::uint64_t primary_secondary_controls = 1ull << 31;
+        constexpr std::uint64_t secondary_enable_ept = 1ull << 1;
+
+        if (with_ept) {
+            if (EFI_ERROR(system_table->BootServices->AllocatePages(
+                    AllocateMaxAddress,
+                    EfiBootServicesData,
+                    2,
+                    &ept_pages))) {
+                line("zpp: nested FAIL could not allocate ept12\r\n");
+                system_table->BootServices->FreePages(host_stack, 1);
+                return false;
+            }
+
+            // Four gigabytes, identity mapped, as one page-map level-4
+            // entry over four one-gigabyte leaves. That is the whole of
+            // what the second-level guest can reach, and it is enough: its
+            // code, its stack and the page tables it walks are all inside
+            // the firmware's own low memory.
+            //
+            // Entry layout from SDM Tables 31-1 through 31-5: bits 2:0 are
+            // read, write and execute; bits 5:3 of a *leaf* are the memory
+            // type, and are reserved in an entry that references another
+            // table; bit 7 says a page-directory-pointer entry maps a
+            // gigabyte rather than referencing a directory.
+            constexpr std::uint64_t entry_read_write_execute = 0x7;
+            constexpr std::uint64_t entry_large = 1ull << 7;
+            constexpr std::uint64_t entry_write_back = 6ull << 3;
+            constexpr std::uint64_t gigabyte = 1ull << 30;
+
+            auto * pml4 = reinterpret_cast<std::uint64_t *>(ept_pages);
+            auto * pdpt =
+                reinterpret_cast<std::uint64_t *>(ept_pages + 0x1000);
+
+            for (std::size_t i{}; i < 512; ++i) {
+                pml4[i] = 0;
+                pdpt[i] = 0;
+            }
+
+            pml4[0] = (ept_pages + 0x1000) | entry_read_write_execute;
+
+            for (std::size_t i{}; i < 4; ++i) {
+                pdpt[i] = (i * gigabyte) | entry_read_write_execute |
+                          entry_large | entry_write_back;
+            }
+
+            // The pointer itself: bits 2:0 the memory type, bits 5:3 the
+            // page-walk length minus one, and the address above. SDM
+            // Table 25-9.
+            constexpr std::uint64_t eptp_write_back = 6;
+            constexpr std::uint64_t eptp_walk_length_4 = 3ull << 3;
+
+            write(field_ept_pointer,
+                  ept_pages | eptp_write_back | eptp_walk_length_4);
+            write(field_secondary_controls,
+                  adjust(read_msr(ia32_vmx_procbased_ctls2),
+                         secondary_enable_ept));
+        }
+
         write(field_primary_controls,
-              adjust(read_msr(ia32_vmx_true_procbased_ctls), 0));
+              adjust(read_msr(ia32_vmx_true_procbased_ctls),
+                     with_ept ? primary_secondary_controls : 0));
 
         // Host address-space size is the one control this must set. The
         // guest hypervisor is 64-bit, and a VM exit that did not say so
@@ -815,11 +904,13 @@ struct verify_nested
         if (!ok) {
             line("zpp: nested FAIL a vmwrite building the vmcs failed"
                  "\r\n");
-            system_table->BootServices->FreePages(host_stack, 1);
+            release();
             return false;
         }
 
-        line("zpp: nested vmcs12 written, launching\r\n");
+        line(with_ept ? "zpp: nested vmcs12 written with ept, launching"
+                        "\r\n"
+                      : "zpp: nested vmcs12 written, launching\r\n");
 
         // The launch, and the two ways back from it.
         //
@@ -875,7 +966,7 @@ struct verify_nested
             say("vm-instruction error", error);
 
             line("zpp: nested FAIL the second level never ran\r\n");
-            system_table->BootServices->FreePages(host_stack, 1);
+            release();
             return false;
         }
 
@@ -932,7 +1023,7 @@ struct verify_nested
             ok = false;
         }
 
-        system_table->BootServices->FreePages(host_stack, 1);
+        release();
         return ok;
     }
 
@@ -1253,7 +1344,14 @@ struct verify_nested
         // is a shadow VMCS and some flag conventions; this exercises the
         // VMCS the VMM builds out of that shadow, the entry into it, and
         // the reflection of the exit back here.
-        passed &= launch(system_table, vmcs_region, line, say, step);
+        // Twice: once with the guest hypervisor using no extended page
+        // tables of its own, and once with them. The first exercises the
+        // entry and the reflection alone; the second adds the shadow the
+        // VMM composes out of the guest hypervisor's tables and its own,
+        // which is the piece Hyper-V cannot do without.
+        passed &=
+            launch(system_table, vmcs_region, false, line, say, step);
+        passed &= launch(system_table, vmcs_region, true, line, say, step);
 
         // And back out, leaving the processor as it was found. VMXOFF
         // first, because clearing CR4.VMXE while in VMX operation is a
