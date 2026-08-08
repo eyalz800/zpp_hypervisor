@@ -135,6 +135,29 @@ show_member  "emulated_writes" emulated_writes
 show_member  "length disagreement" emulated_length_disagreement
 show_member  "rebuild re-entered" channel_rebuild_reentered
 show_member  "excursions completed" excursions_completed
+show_member  "borrow result" channel_rebuild_result
+show_member  "borrow ticks" channel_rebuild_ticks
+
+echo "--- the reservation, at the enable ---"
+show_member  "reserve result" channel_reserve_result
+show_member  "reserve status" channel_reserve_status
+show_member  "reserve allocation (DW0)" channel_reserve_allocation
+show_member  "quiesce sqhd|expected" channel_quiesce_submission_tail 2
+
+echo "--- what the guest's driver did ---"
+show_member  "guest requested sq" channel_guest_requested_submission_queues
+show_member  "guest requested cq" channel_guest_requested_completion_queues
+show_member  "guest highest sq" channel_guest_highest_submission_queue
+show_member  "guest highest cq" channel_guest_highest_completion_queue
+show_member  "guest created sq" channel_guest_created_submission_queues
+show_member  "guest created cq" channel_guest_created_completion_queues
+show_member  "guest deleted queues" channel_guest_deleted_queues
+
+echo "--- creating ours above them ---"
+show_member  "create result" channel_create_result
+show_member  "create status (cq|sq)" channel_create_status
+show_member  "create ticks" channel_create_ticks
+show_member  "doorbell writes" channel_doorbell_writes
 
 cat >&2 <<'NOTES'
 
@@ -144,5 +167,27 @@ Reading it:
   queue bound all zero                 forget() ran; the guest reset the controller
   configure_reject = 1                 that is reject::none, success, not a rejection
   epoch = 2                            the queue pair was rebuilt after a reset
+
+The reservation and the creation, which are two different runs:
+  reserve result 0                     never attempted - the enable was not seen
+  reserve result 1                     the allocation is ours; read it in DW0,
+                                       NSQA in bits 15:0 and NCQA in 31:16, both
+                                       zero's based, so add one to each
+  reserve result 0xe0                  the controller refused the Set Features;
+                                       the status beside it says why, and 0x0c
+                                       generic is Command Sequence Error, meaning
+                                       an I/O queue already existed
+  reserve result 0xf8                  the admin queue never fell quiet; the two
+                                       quiesce words are the SQHD seen and the
+                                       tail expected, and they should be equal
+  reserve result 0xf7                  a processor never acknowledged the doorbell
+                                       protection, so nothing was borrowed
+  create result 0xe2                   no room above what the guest took - the
+                                       four guest numbers say whether that is the
+                                       guest being greedy or the allocation being
+                                       small
+  create result 0xe1                   the controller refused a Create; 0x4101 in
+                                       either half is Invalid Queue Identifier
+  create result 1 and epoch 2          the channel is back on its own queue pair
 Sample twice with a gap. A single reading of a counter says almost nothing.
 NOTES
