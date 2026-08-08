@@ -6145,6 +6145,19 @@ bool hypervisor::start_application_processor(std::size_t slot,
             offsetof(arch::x86_64::ap_start_up_area, assembly_owned),
         sizeof(area.assembly_owned));
 
+    // And the stage, which the memcpy above does not cover: it lives at
+    // 0xa2 and assembly_owned ends at 0x80.
+    //
+    // That made the failure diagnostic lie in the one case it exists for.
+    // "Zero means the trampoline never ran a single instruction" is only
+    // true until some processor has run it - after that every later
+    // failure reports the *previous* processor's stage, and reports it as
+    // though it were its own. Read from a real boot as
+    // "cpu 2 did not come up, trampoline stage 6" six times over, with
+    // the 6 belonging to processor 1, which had succeeded.
+    area.stage = static_cast<std::uint8_t>(
+        arch::x86_64::ap_start_up_stage::not_started);
+
     area.argument = slot;
     area.stack_top =
         reinterpret_cast<std::uint64_t>(std::end(this->start_up_stack));
