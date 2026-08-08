@@ -166,13 +166,40 @@ inline constexpr bool restart_after_reservation = enabled;
  * window the second write used to slip through is closed, which is the
  * one thing this was waiting for.
  *
- * Turned on to find out whether that is sufficient. If the borrow times
- * out again the failure is the same as before - a desynchronised admin
- * queue that the driver recovers from by resetting the controller - so
- * the thing to read is whether the enable transition is seen at all
- * before deciding anything else about the timing.
+ * **Turned on, run, and turned back off again.** The emulation was
+ * necessary and is not sufficient.
+ *
+ * What worked: the enable transition is seen, the borrow completes, and
+ * the channel comes back on a new queue pair. The proof is on the medium
+ * - the newest boot's blocks carry epoch 2, and the epoch only advances
+ * when the queue is rebuilt, so every earlier boot in the region reads
+ * epoch 1. It wrote 28 blocks where the same build with this off stopped
+ * at 18, which is the channel continuing past the reset that used to end
+ * it.
+ *
+ * What did not: the guest boot loops. Measured as twelve runs of the
+ * loader in four and a half minutes, and independently as a different
+ * kernel base in every sample, which is a fresh boot each time rather
+ * than one guest moving around. The same build with only the emulation
+ * on boots and settles, so this switch is the difference.
+ *
+ * So the borrow still disturbs the guest's driver, and the remaining
+ * suspicion is where it happens rather than whether it can be noticed:
+ * the borrow runs after the guest's enable has landed, which is already
+ * inside the window where the driver may submit its own admin commands.
+ * The two things to try, in order:
+ *
+ * - Borrow from inside the emulation of the CC.EN write, before the
+ *   enable is applied to the controller at all. The driver cannot have
+ *   submitted anything yet, because the instruction that starts the
+ *   controller has not retired.
+ * - Failing that, the shadowed register page in
+ *   excursion_at_controller_reset, which holds writers instead of racing
+ *   them. That took the development machine off the network once, for a
+ *   reason since fixed - the wake NMI it sent to a processor that was in
+ *   root mode - so it needs its ordering re-checked before a second try.
  */
-inline constexpr bool rebuild_channel_after_reset = enabled;
+inline constexpr bool rebuild_channel_after_reset = false;
 
 /**
  * Whether to take the controller for the length of one VM exit when the
