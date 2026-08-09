@@ -308,6 +308,29 @@ hypervisor::shadow_ept_entry(std::size_t cpu,
             return &entry;
         }
 
+        // A larger mapping already covering this address, where a
+        // smaller one is now wanted.
+        //
+        // Impossible while the shadow was built top down in one pass, and
+        // routine now that it is filled a fault at a time: a 2 MB
+        // mapping goes in first, and a later fault inside it needs 4 KB
+        // because this VMM's own tables split that region or watch a page
+        // of it. Descending through the large entry instead treats a
+        // guest frame number as if it addressed a table - which is
+        // exactly what it did, and the walk then failed to find that
+        // "table" among the module's pages and stopped the processor.
+        // Measured: `could not install a shadow leaf for 0x11c4c9000:
+        // error 0x4`, followed by an unhandled EPT violation.
+        //
+        // Dropped rather than split into a full table of equivalents.
+        // The addresses it covered lose their mapping and fault back in
+        // one at a time, which is what this shadow does with everything
+        // else and costs a fault each; reconstructing 512 entries here
+        // would cost the same walk this design exists to avoid.
+        if (ept_permissions::of(entry).present() && entry.large()) {
+            entry = epte{};
+        }
+
         if (!ept_permissions::of(entry).present()) {
             auto created = shadow_ept_table(cpu);
             if (!created) {
