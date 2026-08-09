@@ -1764,7 +1764,8 @@ private:
      */
     void apply_start_up(arch::x86_64::context & context,
                         std::uint64_t vector,
-                        const char * from = "?");
+                        const char * from = "?",
+                        bool first_launch = false);
 
     /**
      * Handles an intercepted write to the x2APIC interrupt command

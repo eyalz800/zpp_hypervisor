@@ -6366,7 +6366,8 @@ void hypervisor::start_up_on_this_processor(std::uint64_t slot)
 
 void hypervisor::apply_start_up(arch::x86_64::context & context,
                                 std::uint64_t vector,
-                                const char * from)
+                                const char * from,
+                                bool first_launch)
 {
     auto & vmcs = this->vmcs;
 
@@ -6379,7 +6380,20 @@ void hypervisor::apply_start_up(arch::x86_64::context & context,
     // Guarded here rather than relying on the hardware to discard the
     // second one, which it does not do reliably.
     if (auto cpu = vmcs.vpid() - 1; cpu < max_cpus) {
-        if (this->started_by_start_up_ipi[cpu]) {
+        // A processor being launched out of the trampoline is being
+        // started for the first time, whatever this flag says. The guard
+        // below exists to ignore the *second* start-up IPI of an
+        // INIT-SIPI-SIPI sequence, and a launch is not one of those.
+        //
+        // Honouring it there is a contradiction rather than a
+        // conservatism: declining leaves the VMCS holding what
+        // setup_vmcs captured, which on this path is this VMM's own C
+        // frame - an unusable CS and a RIP inside this module - and VM
+        // entry rejects it. Measured as exactly one processor of eight
+        // failing per boot, a different one each time, with
+        // "cpu N start-up already applied, not applying again, asked by
+        // launch" immediately before it.
+        if (this->started_by_start_up_ipi[cpu] && !first_launch) {
             // Said out loud, because returning here leaves the guest
             // state as whoever built it last, and on a processor coming
             // out of the trampoline that state is this VMM's own C frame
@@ -7988,8 +8002,10 @@ hypervisor::main(arch::x86_64::context & caller_context)
     // fields described the boot processor's firmware state and is
     // overwritten here - it was only ever a starting point.
     if (from_trampoline && (cpuid < max_cpus)) {
-        apply_start_up(
-            caller_context, this->guest_start_up_vector[cpuid], "launch");
+        apply_start_up(caller_context,
+                       this->guest_start_up_vector[cpuid],
+                       "launch",
+                       true);
 
         // And, on a resume, at the exact address rather than at the page.
         //
