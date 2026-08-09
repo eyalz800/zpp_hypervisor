@@ -5673,15 +5673,45 @@ std::optional<std::uint64_t> hypervisor::filter_local_apic_write(
     constexpr std::uint64_t page_offset_mask = page_size - 1;
 
     if (interrupt_command_low != (write->address & page_offset_mask)) {
+        auto offset = write->address & page_offset_mask;
+
         // Which register, for the writes this hook deliberately passes
         // through. A wedged guest hypervisor writing the page twice every
         // few seconds is doing something with it, and "not the interrupt
         // command register" is all this used to be able to say. Collapsed
         // by the log the same way as everything else, so a register
         // written in a loop with one value costs one line.
-        log("guest apic write, register {}, value {}",
-            write->address & page_offset_mask,
-            write->value);
+        //
+        // Three registers are excluded, and "twice every few seconds" is
+        // exactly the assumption that turned out to be wrong about them.
+        // Measured on the rig: an idle Hyper-V writes the timer's initial
+        // count and then the end of interrupt once per tick, at about ten
+        // thousand a second on the boot processor alone - 1.25 million
+        // exits in one run, the whole of that processor's exit ring, two
+        // alternating RIPs. Every one took the global log lock and
+        // allocated a line whose only content was a counter value that
+        // never repeats, so the deduplication could not collapse them
+        // either. The dominant cost of an interrupt on this machine was
+        // this diagnostic.
+        //
+        // They are excluded rather than the log being made cheaper
+        // because none of the three says anything: the end of interrupt
+        // carries no value, the task priority is not consulted here, and
+        // the initial count is a deadline whose *rate* is the interesting
+        // thing and is better read from the exit ring. Everything a guest
+        // writes once - the LVTs, the destination format, the spurious
+        // vector - still logs, which is what this was added to see.
+        constexpr std::uint64_t end_of_interrupt = 0xb0;
+        constexpr std::uint64_t task_priority = 0x80;
+        constexpr std::uint64_t timer_initial_count = 0x380;
+
+        if ((end_of_interrupt != offset) && (task_priority != offset) &&
+            (timer_initial_count != offset)) {
+            log("guest apic write, register {}, value {}",
+                offset,
+                write->value);
+        }
+
         return write->value;
     }
 
