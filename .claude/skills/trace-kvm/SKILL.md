@@ -50,10 +50,23 @@ ssh $RIG 'T=/sys/kernel/tracing
 #    unprivileged. Check all of them - one reading 1 proves nothing about
 #    the others, and may be left over from an earlier run.
 
-# 3. Feed the FIFO, then stream it here.
-ssh $RIG 'sudo vm/trace-stream.sh 120'
-ssh $RIG 'timeout 130 cat /tmp/zpp-trace.fifo' > /tmp/kvm.log
+# 3. Feed the FIFO, then stream it here. START THIS BEFORE THE GUEST
+#    BOOTS, and run it long enough to span what you are looking for.
+ssh $RIG 'sudo vm/trace-stream.sh 300'
+ssh $RIG 'timeout 310 cat /tmp/zpp-trace.fifo' > /tmp/kvm.log
 ```
+
+**Start the capture before the boot, not after.** The events worth having
+arrive minutes in - a guest hypervisor starts its application processors
+long after the firmware has finished - and a capture armed at a fixed
+sleep after boot samples an arbitrary window. Three captures came back
+with nothing but end-of-interrupt traffic for exactly this reason, and
+each cost a full boot to discover.
+
+The ordering constraint that makes this awkward is real: `events/kvm`
+only exists once `kvm.ko` is loaded, and the launcher reloads it. So arm
+within the launcher (as `boot-ipi.sh` does), or arm immediately after the
+insmod and start the stream before the firmware hands over.
 
 ## Traps
 
