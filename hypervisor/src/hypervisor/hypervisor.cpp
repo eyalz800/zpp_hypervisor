@@ -7305,11 +7305,49 @@ void hypervisor::setup_vmcs(std::size_t cpu,
     vmcs.guest_idtr_base(this->idtr.base);
     vmcs.host_idtr_base(reinterpret_cast<std::uintptr_t>(this->host_idt));
 
-    // The CR0 shadow does nothing: this VMM owns no CR0 bit, so the guest
-    // reads the real register. Same dead shadow the CR4 block below
-    // describes - setting a mask here would be needed first.
+    // NE is owned by this VMM, and it is the bit a guest cannot be
+    // allowed to reach.
     //
-    // The mask is written all the same, and that is not tidiness. A VMCS
+    // IA32_VMX_CR0_FIXED0 requires CR0.NE set in VMX operation, and
+    // unrestricted guest exempts only PE and PG from the fixed bits. SDM
+    // 28.1.3, "MOV to CR0": an execution that does not cause a VM exit
+    // "leaves unmodified any bit in CR0 corresponding to a bit set in the
+    // CR0 guest/host mask", and with unrestricted guest set it "causes a
+    // general-protection exception if it attempts to set any bit in CR0
+    // other than bit 0 (PE) or bit 31 (PG) to a value not supported in VMX
+    // operation".
+    //
+    // So with this mask at zero - which it was - a guest writing a CR0
+    // with NE clear takes a #GP that no processor outside VMX would have
+    // given it. That is not hypothetical: Hyper-V's application processor
+    // trampoline does exactly that. Disassembled off the rig at guest
+    // physical 0x2000, the whole of its transition to protected mode is
+    //
+    //     mov  eax, 1
+    //     mov  cr0, eax
+    //     mov  ax, 0x20
+    //     mov  ds, ax
+    //     jmp  far [edi+0x74]
+    //
+    // - a literal 1, so PE set and every other bit cleared, NE among
+    // them. The processor took a #GP with the real mode interrupt vector
+    // table still loaded, vectored through a zero entry, and executed
+    // zero-filled memory from there: measured, the processor's guest RIP
+    // crawled from 0x53af to 0x6409 over four minutes with the same CS.
+    // It therefore never reached its `mov dword [ds:0x98], 1` alive flag,
+    // so Hyper-V INIT-ed it, gave up, and its boot processor waited for an
+    // application processor that could not start.
+    //
+    // With NE in the mask the bit is simply left unmodified and no fault
+    // occurs, whether or not the write exits. KVM host-owns it the same
+    // way: `vmx_l1_guest_owned_cr0_bits` (vmx-internal.h:636) is a small
+    // allow list and `vmcs_writel(CR0_GUEST_HOST_MASK, ~...owned_bits)`
+    // (vmx.c:4808) makes everything else the host's, while
+    // `KVM_VM_CR0_ALWAYS_ON_UNRESTRICTED_GUEST` (vmx.c:151) is
+    // X86_CR0_NE exactly.
+    //
+    // The mask is written all the same when it is zero, and that is not
+    // tidiness either. A VMCS
     // field that has never been written has no defined value, and
     // build_vmcs02 composes the second-level mask as
     // `cr0_mask01 | cr0_mask12` - so leaving this one unwritten ORs
@@ -7321,7 +7359,7 @@ void hypervisor::setup_vmcs(std::size_t cpu,
     // Measured, on a Windows application processor coming up under
     // Hyper-V: `unhandled exit reason 0x1c qualification 0xe00`, which is
     // MOV to CR0 from R14.
-    vmcs.cr0_guest_host_mask(0);
+    vmcs.cr0_guest_host_mask(arch::x86_64::cr0_bits::numeric_error);
     vmcs.cr0_read_shadow(this->guest_cr0);
     vmcs.guest_cr0(this->host_cr0);
     vmcs.host_cr0(this->host_cr0);
@@ -9390,9 +9428,10 @@ hypervisor::main(arch::x86_64::context & caller_context)
             break;
         }
         case basic_reason::control_register_access: {
-            // Reachable only because CR4's guest/host mask is non-zero:
-            // a write to a masked bit exits instead of landing in the
-            // register. Today that is VMXE and nothing else.
+            // Reachable because a guest/host mask is non-zero: a write
+            // that would change a masked bit away from what the read
+            // shadow says exits instead of landing in the register.
+            // Today that is CR4.VMXE and CR0.NE.
             //
             // The guest is given what it asked for in the shadow, so a
             // read back agrees with its own write, while the real
