@@ -123,14 +123,17 @@ ssh $RIG 'T=/sys/kernel/tracing
 # 2. The launcher arms after its insmod - see vm/arm-ipi-trace.sh, which
 #    clears filters rather than setting them and never resizes.
 
-# 3. Exactly one reader, streamed here. Never to the rig's disk: the
-#    traces are large and the rig's /home is a RAM disk.
-ssh -n $RIG 'sudo cat /sys/kernel/tracing/trace_pipe' > /tmp/kvm.log &
-
-# 4. Prove the pipe before trusting it with a boot, using a busy event.
+# 3. Prove the mechanism records at all, with a producer of our own and a
+#    reader bounded ON THE REMOTE. Five seconds, one session at risk.
 ssh -n $RIG 'sudo sh -c "echo 1 > /sys/kernel/tracing/events/sched/sched_switch/enable"'
-#    Bytes in /tmp/kvm.log within seconds, or stop - do not investigate
-#    with reads of trace.
+ssh -n $RIG 'timeout 5 sudo cat /sys/kernel/tracing/trace_pipe' > /tmp/probe.txt
+#    Empty? STOP. Nothing below will help, and each further attempt
+#    leaks another ssh session.
+
+# 4. Only then, the capture - still bounded, re-issued in a loop for a
+#    long run. Never to the rig's disk: /home there is a RAM disk.
+while ssh -n $RIG 'timeout 120 sudo cat /sys/kernel/tracing/trace_pipe' >> /tmp/kvm.log
+do :; done &
 
 # 5. Boot, and leave it alone.
 ```
