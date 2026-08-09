@@ -1970,8 +1970,6 @@ private:
      * Builds the shadow from scratch. Fails only where the pool runs out
      * or the guest hypervisor's root cannot be read.
      */
-    std::expected<void, zpp::error> build_shadow_ept(std::size_t cpu,
-                                                     std::uint64_t eptp12);
 
     /**
      * Forces the next entry to rebuild. Called where something has changed
@@ -4914,7 +4912,6 @@ private:
      * to unless it is recorded here.
      * @{
      */
-    std::uint64_t shadow_ept_regions_built[max_cpus]{};
     std::uint64_t shadow_ept_splits[max_cpus]{};
 
     /**
