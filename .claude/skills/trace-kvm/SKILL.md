@@ -90,6 +90,71 @@ produced 3,281,493 lines.
 Afterwards check `ps -o stat | grep -c '^D'` is 0. Non-zero means a
 reader wedged and its session is leaking.
 
+## Killing the guest: by PID, by process NAME
+
+Use `scripts/rig-kill-qemu.sh`. Three rules it encodes, each of which cost
+a run:
+
+- **Never match processes by command line.** `pkill -f qemu-system` and
+  `ps -o args | grep "[q]emu-system"` match anything whose *arguments*
+  mention it. That includes the ssh command running the check and the
+  launcher, which carries `ZPP_QEMU_EXTRA=...` in its environment. A
+  `pkill -f boot-zpp.sh` killed its own ssh session mid-command, and the
+  `ps` form made `ensure-traced-kvm.sh` refuse to load KVM - "REFUSING: 1
+  qemu still running" - and the boot died with `Could not access KVM
+  kernel module`. Match `/proc/<pid>/comm`, which is the process name and
+  cannot match a mention.
+- **Kill QEMU only, never the launcher.** `boot-zpp.sh` rebinds the NVMe
+  and the GPU back from vfio-pci *after* QEMU exits. Kill the launcher and
+  the devices stay with vfio-pci: no `/dev/nvme0n1p2`, so the next deploy
+  fails and the next run cannot claim the devices.
+- **TERM first, KILL second.** A QEMU killed mid-VFIO-teardown becomes a
+  zombie whose last thread sits in D state in the kernel holding every
+  pinned guest page - measured twice at 12-13 GB. Nothing reaps it, it
+  does not clear on its own, and the only fix found is a reboot. The
+  script reports the zombie explicitly, because the next symptom is a
+  launch that mysteriously cannot allocate guest memory.
+
+## The rig has no display of its own
+
+There is **no `i915` module on this kernel** - `modprobe i915` answers
+`not found in modules.dep` - so the host can never drive the passed
+through GPU. The console is `(S) dummy device`. The screen shows
+something only while a guest owns the GPU through VFIO; the moment the
+guest resets, shuts down, or QEMU exits, it goes dark and stays dark.
+
+So a black screen is not evidence about the guest. Ask the QEMU monitor
+(`info status`) or read the hypervisor's own state - never infer from
+the display.
+
+## Reading resident state when no CPU is in our code
+
+`add-symbol-file` plus `$h->member` only works while a CPU is *inside the
+module*, and most of the time none is: the module hides itself, clearing
+every EPT permission on its own pages, so from guest context those
+addresses read as `Cannot access memory`. Attaching repeatedly and hoping
+to land in root operation failed eight times out of eight.
+
+**Use the QEMU monitor's `xp` instead.** It reads *physical* memory,
+which bypasses EPT and guest paging entirely, and the module base printed
+on serial *is* a physical address. Compute member offsets offline against
+the ELF and read them live:
+
+```sh
+# offsets, from the ELF - expand a CU first or the class type is unknown
+x86_64-elf-gdb -q -batch out/debug/x86_64/zpp_hypervisor \
+  -ex "ptype zpp::hypervisor::hypervisor::on_l2_exit" \
+  -ex "print/x (long)&((zpp::hypervisor::hypervisor *)0)->l2_entries"
+
+# live, through the monitor: instance = base + symbol offset
+printf 'xp/1gx 0x6a85ae20\n' | nc -w 6 <rig> 4446
+```
+
+`info status` distinguishes the two failures that look identical from
+outside: `paused (shutdown)` means the guest stopped itself and every
+counter is frozen at its final value - do not read a frozen counter as a
+livelock, which is a mistake made once here.
+
 ## Never read `trace`
 
 Only `trace_pipe`. Reading the static `trace` file has hung
