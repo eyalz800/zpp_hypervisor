@@ -4718,6 +4718,36 @@ private:
         nested_vmx::enabled ? 96 : 1;
 
     /**
+     * How many shadows each processor keeps, each keyed by the guest
+     * hypervisor's own EPT pointer.
+     *
+     * One was not enough, and the failure is not subtle. A guest
+     * hypervisor switches between the extended page tables of the guests
+     * it runs, and with a single shadow every switch discarded eleven to
+     * twenty-four thousand composed regions and walked them again.
+     * Measured on the rig as the whole log filling with alternating
+     * rebuilds between two roots, 0x102184000 and 0x102187000, while the
+     * second level advanced by a few hundred entries a minute.
+     *
+     * Four, which is what KVM keeps: `kvm_mmu` holds the current root
+     * plus `prev_roots[KVM_MMU_NUM_PREV_ROOTS]`, matched against an
+     * incoming EPT pointer by `nested_ept_root_matches` before anything
+     * is rebuilt. ACRN answers the same question with a table keyed by
+     * guest EPTP - `vept_desc_bucket[MAX_ACTIVE_VVMCS_NUM *
+     * MAX_VCPUS_PER_VM]`, looked up by `find_vept_desc` - which is the
+     * same design with the bound derived from its configuration rather
+     * than fixed. Neither rebuilds on a switch, and neither keeps one.
+     *
+     * The pool below is *shared* between them rather than divided, for
+     * the reason the division would fail: the two shadows this workload
+     * produces need 27 and 57 tables, so equal shares of a 96 table pool
+     * would starve the larger one while the smaller left half its share
+     * unused.
+     */
+    static constexpr std::size_t shadow_ept_slots =
+        nested_vmx::enabled ? 4 : 1;
+
+    /**
      * The shadow extended page tables, one set per processor.
      *
      * The root is separate from the pool because it is never recycled: a
@@ -4730,9 +4760,61 @@ private:
      * reused.
      * @{
      */
-    alignas(page_size) arch::x86_64::vmx::epte shadow_epml4[max_cpus][512];
+    alignas(page_size) arch::x86_64::vmx::epte
+        shadow_epml4[max_cpus][shadow_ept_slots][512];
     alignas(page_size) arch::x86_64::vmx::epte
         shadow_ept_tables[max_cpus][shadow_ept_tables_per_cpu][512];
+
+    /**
+     * Which slot owns each table of the shared pool: zero for free, and
+     * otherwise the slot's index plus one.
+     *
+     * Plus one so that zero means free, which is what the member's own
+     * zero initialization already gives - the alternative needed a pass
+     * over the pool before the first build, and a pool that is
+     * accidentally "all owned by slot zero" fails by finding no free
+     * table rather than by saying so.
+     *
+     * A bitmap allocator in all but name, and ACRN's `sept_page_pool`
+     * with its `sept_page_bitmap` is the same thing: shadows differ in
+     * size by more than two to one here, so ownership has to be per table
+     * rather than per range.
+     */
+    static constexpr std::uint8_t shadow_table_free = 0;
+
+    std::uint8_t shadow_ept_table_slot[max_cpus]
+                                      [shadow_ept_tables_per_cpu]{};
+
+    /**
+     * The slot each processor is building into or resuming with. Held
+     * rather than passed, so that the table allocator and the leaf
+     * installer do not each need it threaded through them.
+     */
+    std::size_t shadow_ept_current_slot[max_cpus]{};
+
+    /**
+     * The slot to replace when every one is in use, advanced on each
+     * replacement.
+     *
+     * Round robin rather than least recently used. The set is four and
+     * the workload alternates between two, so the two differ only when
+     * the set is genuinely too small - and at that point the right answer
+     * is a bigger set, which the counters below make visible.
+     */
+    std::size_t shadow_ept_next_victim[max_cpus]{};
+
+    /**
+     * Whether a shadow was found for the pointer asked for, or had to be
+     * built. A cache that never hits is a cache that is the wrong shape,
+     * and these are how that shows rather than being argued about.
+     * @{
+     */
+    std::uint64_t shadow_ept_cache_hits[max_cpus]{};
+    std::uint64_t shadow_ept_builds[max_cpus]{};
+    std::uint64_t shadow_ept_evictions[max_cpus]{};
+    /**
+     * @}
+     */
     /**
      * @}
      */
@@ -4755,10 +4837,10 @@ private:
      * interrupt, exactly as the existing catch-up on the exit path does.
      * @{
      */
-    std::size_t shadow_ept_next_table[max_cpus]{};
-    std::uint64_t shadow_ept_source[max_cpus]{};
-    std::uint64_t shadow_ept_generation_seen[max_cpus]{};
-    std::uint64_t shadow_ept_pointer[max_cpus]{};
+    std::size_t shadow_ept_tables_used[max_cpus][shadow_ept_slots]{};
+    std::uint64_t shadow_ept_source[max_cpus][shadow_ept_slots]{};
+    std::uint64_t shadow_ept_generation_seen[max_cpus][shadow_ept_slots]{};
+    std::uint64_t shadow_ept_pointer[max_cpus][shadow_ept_slots]{};
     /**
      * @}
      */

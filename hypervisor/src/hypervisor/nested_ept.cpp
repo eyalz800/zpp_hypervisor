@@ -225,13 +225,30 @@ ept_walk_result hypervisor::host_ept_lookup(std::uint64_t physical_address)
 std::expected<arch::x86_64::vmx::epte *, zpp::error>
 hypervisor::shadow_ept_table(std::size_t cpu)
 {
-    if (this->shadow_ept_next_table[cpu] >= shadow_ept_tables_per_cpu) {
-        return std::unexpected(
-            zpp::error{error::out_of_shadow_ept_tables});
+    // A scan of the shared pool rather than a bump, because the pool is
+    // shared between this processor's shadows and they are freed
+    // individually. Ninety-six entries and about sixty allocations per
+    // build, so the scan costs nothing next to the walk it serves.
+    auto slot = this->shadow_ept_current_slot[cpu];
+
+    std::size_t index{};
+    for (;; ++index) {
+        if (index >= shadow_ept_tables_per_cpu) {
+            return std::unexpected(
+                zpp::error{error::out_of_shadow_ept_tables});
+        }
+
+        if (shadow_table_free == this->shadow_ept_table_slot[cpu][index]) {
+            break;
+        }
     }
 
-    auto table =
-        this->shadow_ept_tables[cpu][this->shadow_ept_next_table[cpu]++];
+    this->shadow_ept_table_slot[cpu][index] =
+        static_cast<std::uint8_t>(slot + 1);
+    this->shadow_ept_tables_used[cpu][slot] =
+        this->shadow_ept_tables_used[cpu][slot] + 1;
+
+    auto table = this->shadow_ept_tables[cpu][index];
 
     // Zeroed on handing out rather than on release, so a rebuild costs
     // nothing for the part of the pool it does not use. An entry of all
@@ -340,7 +357,8 @@ hypervisor::shadow_ept_entry(std::size_t cpu,
     // the capability MSR promises: IA32_VMX_EPT_VPID_CAP reports a
     // page-walk length of four and not five, and SDM 29.2.1.1 then checks
     // the guest hypervisor's own pointer against that on its behalf.
-    auto * table = this->shadow_epml4[cpu];
+    auto * table =
+        this->shadow_epml4[cpu][this->shadow_ept_current_slot[cpu]];
 
     for (auto level = std::uint64_t{3};; --level) {
         auto index = (guest_physical >> (12 + (9 * level))) & 0x1ff;
@@ -398,10 +416,21 @@ hypervisor::build_shadow_ept(std::size_t cpu, std::uint64_t eptp12)
     // SDM 31.4.2 associates cached mappings with bits 51:12 of the
     // pointer, so a stable root plus the global invalidation at the end is
     // a complete story.
-    std::memset(
-        this->shadow_epml4[cpu], 0, sizeof(epte) * entries_per_table);
+    auto slot = this->shadow_ept_current_slot[cpu];
 
-    this->shadow_ept_next_table[cpu] = 0;
+    std::memset(this->shadow_epml4[cpu][slot],
+                0,
+                sizeof(epte) * entries_per_table);
+
+    // This slot's tables only. The others belong to shadows that are
+    // still valid, which is the entire point of keeping more than one.
+    for (std::size_t i{}; i < shadow_ept_tables_per_cpu; ++i) {
+        if ((slot + 1) == this->shadow_ept_table_slot[cpu][i]) {
+            this->shadow_ept_table_slot[cpu][i] = shadow_table_free;
+        }
+    }
+
+    this->shadow_ept_tables_used[cpu][slot] = 0;
     this->shadow_ept_regions_built[cpu] = 0;
     this->shadow_ept_splits[cpu] = 0;
 
@@ -587,12 +616,12 @@ hypervisor::build_shadow_ept(std::size_t cpu, std::uint64_t eptp12)
     pointer.memory_type(memory_type::write_back);
     pointer.page_walk_length(4);
     pointer.page_number(this->host_page_table.virtual_to_physical(
-                            this->shadow_epml4[cpu]) >>
+                            this->shadow_epml4[cpu][slot]) >>
                         12);
 
-    this->shadow_ept_pointer[cpu] = pointer;
-    this->shadow_ept_source[cpu] = root;
-    this->shadow_ept_generation_seen[cpu] =
+    this->shadow_ept_pointer[cpu][slot] = pointer;
+    this->shadow_ept_source[cpu][slot] = root;
+    this->shadow_ept_generation_seen[cpu][slot] =
         this->ept_generation.load(std::memory_order_acquire);
 
     // Globally, and without trying to be clever about scope. The shadow's
@@ -603,13 +632,14 @@ hypervisor::build_shadow_ept(std::size_t cpu, std::uint64_t eptp12)
     // buys nothing at build time.
     invalidate_ept_locally();
 
-    log("cpu {} shadow ept built from {}: {} regions, {} splits, {} "
-        "tables",
+    log("cpu {} shadow ept built from {} into slot {}: {} regions, {} "
+        "splits, {} tables",
         cpu,
         root,
+        slot,
         this->shadow_ept_regions_built[cpu],
         this->shadow_ept_splits[cpu],
-        this->shadow_ept_next_table[cpu]);
+        this->shadow_ept_tables_used[cpu][slot]);
 
     return {};
 }
@@ -619,33 +649,77 @@ hypervisor::shadow_ept_pointer_for(std::size_t cpu, std::uint64_t eptp12)
 {
     auto root = eptp12 & (((1ull << 52) - 1) & ~0xfffull);
 
-    // Rebuilt when the guest hypervisor points somewhere else, and when
-    // this VMM's own tables have moved under it. The second is the case
-    // that would otherwise be silent: a page watch armed or a region
-    // protected changes permissions the shadow already composed, and a
-    // shadow built before that would go on granting what our tables no
-    // longer do.
+    // Rebuilt when no shadow this processor holds was built from this
+    // pointer, and when this VMM's own tables have moved under the one
+    // that was. The second is the case that would otherwise be silent: a
+    // page watch armed or a region protected changes permissions the
+    // shadow already composed, and a shadow built before that would go on
+    // granting what our tables no longer do.
     auto generation = this->ept_generation.load(std::memory_order_acquire);
 
-    if ((root == this->shadow_ept_source[cpu]) &&
-        (generation == this->shadow_ept_generation_seen[cpu])) {
-        return this->shadow_ept_pointer[cpu];
+    for (std::size_t slot{}; slot < shadow_ept_slots; ++slot) {
+        if ((root != this->shadow_ept_source[cpu][slot]) ||
+            (generation != this->shadow_ept_generation_seen[cpu][slot])) {
+            continue;
+        }
+
+        // A guest hypervisor switching between its guests' tables comes
+        // back here, and this is the switch being free rather than
+        // costing a walk of the whole address space. KVM answers the same
+        // question with nested_ept_root_matches over its cached roots.
+        this->shadow_ept_current_slot[cpu] = slot;
+        this->shadow_ept_cache_hits[cpu] =
+            this->shadow_ept_cache_hits[cpu] + 1;
+        return this->shadow_ept_pointer[cpu][slot];
     }
 
+    // Nothing matched, so one has to be built. A slot never used is taken
+    // first; otherwise the round robin victim is replaced, and that
+    // replacement is counted - a set that is too small shows up as
+    // evictions rather than as a mystery.
+    auto chosen = shadow_ept_slots;
+    for (std::size_t slot{}; slot < shadow_ept_slots; ++slot) {
+        if (0 == this->shadow_ept_source[cpu][slot]) {
+            chosen = slot;
+            break;
+        }
+    }
+
+    if (shadow_ept_slots == chosen) {
+        chosen = this->shadow_ept_next_victim[cpu] % shadow_ept_slots;
+        this->shadow_ept_next_victim[cpu] = chosen + 1;
+        this->shadow_ept_evictions[cpu] =
+            this->shadow_ept_evictions[cpu] + 1;
+    }
+
+    this->shadow_ept_current_slot[cpu] = chosen;
+    this->shadow_ept_builds[cpu] = this->shadow_ept_builds[cpu] + 1;
+
     if (auto result = build_shadow_ept(cpu, eptp12); !result) {
+        // A failed build leaves the slot unusable, and saying it holds
+        // the pointer it failed on would hand it out next time.
+        this->shadow_ept_source[cpu][chosen] = 0;
         return std::unexpected(result.error());
     }
 
-    return this->shadow_ept_pointer[cpu];
+    return this->shadow_ept_pointer[cpu][chosen];
 }
 
 void hypervisor::discard_shadow_ept(std::size_t cpu)
 {
+    // Every slot, because INVEPT's all-context type names them all and the
+    // single-context type names one this VMM cannot distinguish from the
+    // others without keeping the guest hypervisor's own pointer per slot
+    // - which it does, but discarding more than was asked for is the safe
+    // direction and SDM 31.4.3.2 permits it outright.
+    //
     // Zeroing the source is enough to force a rebuild, and is cheaper than
     // rebuilding here: the next entry needs the shadow, and nothing
-    // between now and then reads it. Deliberately not zeroing the tables,
-    // which the rebuild does anyway as it hands them out.
-    this->shadow_ept_source[cpu] = 0;
+    // between now and then reads it. Deliberately not freeing the tables,
+    // which the rebuild does for the slot it takes.
+    for (std::size_t slot{}; slot < shadow_ept_slots; ++slot) {
+        this->shadow_ept_source[cpu][slot] = 0;
+    }
 }
 
 } // namespace zpp::hypervisor
