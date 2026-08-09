@@ -97,6 +97,13 @@ echo "== trace arming =="
 $SSH 'cat > /home/tc/vm/arm-ipi-trace.sh && chmod +x /home/tc/vm/arm-ipi-trace.sh' <<'ARM'
 #!/bin/sh
 T=/sys/kernel/tracing
+
+# tracefs is not mounted on every boot of this machine, and when it is
+# not, $T exists as an empty directory - so arming writes to files that
+# are not there, reports nothing, and the trace comes back empty. Which
+# reads exactly like "the guest never did it", and did once.
+[ -d $T/events ] || mount -t tracefs nodev $T 2>/dev/null
+
 for e in $T/events/kvm/*/enable; do echo 0 > $e 2>/dev/null; done
 for e in $T/events/kvm/*/filter; do echo 0 > $e 2>/dev/null; done
 
@@ -112,7 +119,7 @@ done
 
 echo > $T/trace 2>/dev/null
 echo 1 > $T/tracing_on 2>/dev/null
-echo "armed: ipi=$(cat $T/events/kvm/kvm_apic_ipi/enable) accept=$(cat $T/events/kvm/kvm_apic_accept_irq/enable)"
+echo "armed: ipi=$(cat $T/events/kvm/kvm_apic_ipi/enable) accept=$(cat $T/events/kvm/kvm_apic_accept_irq/enable) events=$(ls $T/events/kvm 2>/dev/null | wc -l)"
 ARM
 echo "  ok"
 
