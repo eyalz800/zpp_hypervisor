@@ -4248,6 +4248,31 @@ private:
         std::uint64_t guest_cs_selector{};
         std::uint64_t guest_cs_base{};
         std::uint64_t guest_cs_access_rights{};
+
+        /**
+         * Which processor failed, and what it believed about itself.
+         *
+         * Absent until it cost an hour. The record said the guest CS was
+         * unusable and the guest RIP was inside this module, which is the
+         * state `setup_vmcs` captures from a starting processor's own C
+         * frame before `apply_start_up` overwrites it - so the reading was
+         * "the start-up state was never applied". Whose it was, and
+         * whether that processor thought it had come from the trampoline
+         * at all, could only be inferred from the order of log lines.
+         *
+         * `virtual_processor` is recorded beside `cpu` because the two are
+         * indexed independently - `apply_start_up`'s own guard uses
+         * `vpid() - 1` while everything around it uses the slot - and they
+         * coincide only while processors are launched in slot order.
+         * @{
+         */
+        std::uint64_t cpu{};
+        std::uint64_t virtual_processor{};
+        std::uint64_t from_trampoline{};
+        std::uint64_t start_up_vector{};
+        /**
+         * @}
+         */
     } vm_entry_failure{};
 
     /**

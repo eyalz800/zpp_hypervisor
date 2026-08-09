@@ -6747,6 +6747,22 @@ void hypervisor::on_vm_entry_failure(arch::x86_64::vmx::exit_reason reason)
     record.guest_cs_base = vmcs.guest_cs_base();
     record.guest_cs_access_rights = vmcs.guest_cs_access_rights();
 
+    // Who this was, which the record could not say before. The VPID is
+    // this VMM's virtual processor number and the slot is its index into
+    // the per processor arrays; both are recorded because they are
+    // maintained separately and agree only by construction.
+    record.virtual_processor = vmcs.vpid();
+
+    auto cpu = (0 != record.virtual_processor)
+                   ? (record.virtual_processor - 1)
+                   : 0;
+    record.cpu = cpu;
+
+    if (cpu < max_cpus) {
+        record.from_trampoline = this->started_by_trampoline[cpu] ? 1 : 0;
+        record.start_up_vector = this->guest_start_up_vector[cpu];
+    }
+
     // Written last, so a debugger that finds this set knows the rest of
     // the record is complete rather than half filled in.
     record.occurred = 1;
@@ -6761,8 +6777,16 @@ void hypervisor::on_vm_entry_failure(arch::x86_64::vmx::exit_reason reason)
     // Into the log as well as the members, for the reason given in
     // on_unhandled_exit: the members need a debugger on a CPU that is
     // about to stop, and the log outlives the restart.
-    log("stopping, vm entry failed, reason {} instruction error {} "
+    log("stopping, vm entry failed, cpu {} vp {} from trampoline {} "
+        "start-up vector {} cs {} rights {} reason {} instruction error "
+        "{} "
         "activity {} rip {} cr0 {} cr4 {} rflags {}",
+        record.cpu,
+        record.virtual_processor,
+        record.from_trampoline,
+        record.start_up_vector,
+        record.guest_cs_selector,
+        record.guest_cs_access_rights,
         reason.value(),
         record.instruction_error,
         record.activity_state,
