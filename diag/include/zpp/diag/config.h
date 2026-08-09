@@ -726,7 +726,8 @@ constexpr policy policy_of(sink which)
         // hypervisor/src/diag/instantiate.cpp explicitly instantiates
         // every sink so the freestanding toolchain compiles all of it
         // regardless, which is the trap this file warns about elsewhere.
-        return {.present = enabled,
+        //
+        return {.present = false,
                 .floor = severity::trace,
                 .categories = all_categories,
                 .shape = form::binary,
