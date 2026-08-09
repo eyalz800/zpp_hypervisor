@@ -469,17 +469,17 @@ void hypervisor::on_host_exception(
     std::unreachable();
 }
 
-void hypervisor::initialize_intermediate_gdt()
+void hypervisor::initialize_intermediate_gdt(std::size_t cpu)
 {
     // Out of unprotected_memory, because protect_module makes the rest
     // of this module not-present to the guest and the guest goes on
     // running with these as its own descriptor tables.
+    // By slot, like everything else per processor. See setup_vmcs on why
+    // the shared counter is not an identity.
     auto & intermediate_gdt =
-        this->unprotected_memory
-            .intermediate_gdt[this->next_virtual_processor - 1];
+        this->unprotected_memory.intermediate_gdt[cpu];
 
-    auto & guest_tss = this->unprotected_memory
-                           .guest_tss[this->next_virtual_processor - 1];
+    auto & guest_tss = this->unprotected_memory.guest_tss[cpu];
 
     // Copied rather than pointed at, because the host page table does
     // not map the OS table and main switches onto it a few lines after
@@ -508,8 +508,7 @@ void hypervisor::initialize_intermediate_gdt()
     // The guest is pointed at the extended copy, since appending the new
     // descriptor to the firmware's own table would write past its limit.
     this->guest_gdt_pointer =
-        this->unprotected_memory
-            .intermediate_gdt[this->next_virtual_processor - 1];
+        this->unprotected_memory.intermediate_gdt[cpu];
 
     // Sixteen bytes, not eight: in IA-32e mode a TSS descriptor occupies
     // the space of two entries, SDM 3.5.2.
@@ -546,12 +545,11 @@ void hypervisor::initialize_intermediate_gdt()
     this->guest_tr = tr_index << 3;
 }
 
-void hypervisor::load_intermediate_gdt()
+void hypervisor::load_intermediate_gdt(std::size_t cpu)
 {
     arch::x86_64::gdt_layout lgdt_layout{};
     lgdt_layout.base = reinterpret_cast<std::uint64_t>(
-        this->unprotected_memory
-            .intermediate_gdt[this->next_virtual_processor - 1]);
+        this->unprotected_memory.intermediate_gdt[cpu]);
     lgdt_layout.limit = this->intermediate_gdt_limit;
     arch::x86_64::lgdt(lgdt_layout.data());
 
@@ -3724,14 +3722,20 @@ void hypervisor::unprotect_guest_memory()
     }
 }
 
-void hypervisor::initialize_vmx()
+void hypervisor::initialize_vmx(std::size_t cpu)
 {
     namespace vmx_msr = arch::x86_64::vmx::msr;
 
     // One pair per virtual processor: a VMCS may not be active on more
     // than one logical processor.
-    auto & vmx = this->vmx[this->next_virtual_processor - 1];
-    auto & vmx_vmcs = this->vmx_vmcs[this->next_virtual_processor - 1];
+    //
+    // Indexed by this processor's own slot rather than by a shared
+    // counter. The counter was claimed here and advanced later, inside
+    // vm_launch, and between those two the starter has already been
+    // released to bring up the next processor - so which entry this
+    // picked depended on another processor's timing.
+    auto & vmx = this->vmx[cpu];
+    auto & vmx_vmcs = this->vmx_vmcs[cpu];
 
     // Its low bits are the VMCS revision identifier, which VMPTRLD
     // checks against the first dword of the region.
@@ -6885,7 +6889,8 @@ std::expected<void, zpp::error> hypervisor::enter_root_mode()
     return {};
 }
 
-void hypervisor::setup_vmcs(arch::x86_64::context & guest_context)
+void hypervisor::setup_vmcs(std::size_t cpu,
+                            arch::x86_64::context & guest_context)
 {
     namespace vmx_msr = arch::x86_64::vmx::msr;
 
@@ -6897,7 +6902,7 @@ void hypervisor::setup_vmcs(arch::x86_64::context & guest_context)
     // is not a VM entry failure, so nothing else here would notice one.
     // The indicator names the cause - but only if it was known to be zero
     // beforehand, which is what this is for.
-    this->vmx_vmcs[this->next_virtual_processor - 1].abort_indicator = 0;
+    this->vmx_vmcs[cpu].abort_indicator = 0;
 
     // All ones is the "no linked VMCS" value. Any other value is taken
     // as the address of a shadow VMCS and checked as one on VM entry,
@@ -6906,7 +6911,22 @@ void hypervisor::setup_vmcs(arch::x86_64::context & guest_context)
 
     // Must be non-zero with VPID enabled (SDM 29.2.1.1), and it doubles
     // as this VMM's processor index - hence counting from one.
-    vmcs.vpid(this->next_virtual_processor);
+    //
+    // Derived from the slot rather than taken from a shared counter, so
+    // that `vmcs.vpid() - 1` **is** the slot by construction. It was
+    // equal by accident before: the counter was read here and advanced
+    // later, inside vm_launch, and the starter was released in between -
+    // so the identity a processor answered with depended on when the
+    // processors around it happened to run.
+    //
+    // Everything on the exit path answers "which processor am I" with
+    // this field: record_exit, emulate_init_signal, apply_start_up. When
+    // it disagreed with the slot, the consequences were silent and
+    // various - one processor's exits credited to another's ring, a
+    // start-up flag cleared at the wrong index, and a slot reporting
+    // `virtualized 1, by_sipi 0, exits 0` while its processor was plainly
+    // running.
+    vmcs.vpid(cpu + 1);
 
     // The nested VMX state for this processor, seeded before it runs a
     // single guest instruction.
@@ -6923,7 +6943,7 @@ void hypervisor::setup_vmcs(arch::x86_64::context & guest_context)
     // rather than fabricating one keeps a guest that is refused VMX by its
     // own firmware refused here too - that decision is the platform
     // owner's, not this VMM's.
-    if (auto cpu = this->next_virtual_processor - 1; cpu < max_cpus) {
+    if (cpu < max_cpus) {
         this->guest_in_vmx_operation[cpu] = false;
         this->guest_vmxon_pointer[cpu] = 0;
         this->guest_current_vmcs[cpu] = nested_vmx::no_current_vmcs;
@@ -7091,8 +7111,7 @@ void hypervisor::setup_vmcs(arch::x86_64::context & guest_context)
     // The selectors below are resolved against the intermediate GDT
     // rather than the OS one, which is not mapped here any more.
     auto intermediate_gdt_base = reinterpret_cast<std::uint64_t>(
-        this->unprotected_memory
-            .intermediate_gdt[this->next_virtual_processor - 1]);
+        this->unprotected_memory.intermediate_gdt[cpu]);
 
     auto descriptor = arch::x86_64::segment_descriptor::from_memory(
         intermediate_gdt_base, guest_context.cs);
@@ -7700,8 +7719,8 @@ hypervisor::main(arch::x86_64::context & caller_context)
     // intermediate GDT exists to stay valid across the page table switch
     // below, and this processor has no switch to make.
     if (!from_trampoline) {
-        initialize_intermediate_gdt();
-        load_intermediate_gdt();
+        initialize_intermediate_gdt(cpuid);
+        load_intermediate_gdt(cpuid);
     }
 
     // Guard to restore GDT, on the processors that had one to replace.
@@ -7983,7 +8002,7 @@ hypervisor::main(arch::x86_64::context & caller_context)
         }
     }
 
-    initialize_vmx();
+    initialize_vmx(cpuid);
 
     // Lay out the memory a processor this VMM starts begins executing in.
     //
@@ -8036,7 +8055,7 @@ hypervisor::main(arch::x86_64::context & caller_context)
     // stopped existing.
     note_apic_mode(cpuid);
 
-    setup_vmcs(caller_context);
+    setup_vmcs(cpuid, caller_context);
 
     // On a processor this VMM started, replace the guest state just built
     // with the state a processor holds after an INIT followed by a

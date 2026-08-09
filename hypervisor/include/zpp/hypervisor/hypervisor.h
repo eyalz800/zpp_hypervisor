@@ -390,12 +390,12 @@ private:
      * when switching to host page table, but before we launch
      * our VMM and guest.
      */
-    void initialize_intermediate_gdt();
+    void initialize_intermediate_gdt(std::size_t cpu);
 
     /**
      * Load the intermediate GDT.
      */
-    void load_intermediate_gdt();
+    void load_intermediate_gdt(std::size_t cpu);
 
     /**
      * Load the OS GDT.
@@ -1718,7 +1718,7 @@ private:
     /**
      * Initialize needed vmx structures.
      */
-    void initialize_vmx();
+    void initialize_vmx(std::size_t cpu);
 
     /**
      * Permit VMXON in IA32_FEATURE_CONTROL, which vmxon requires before it
@@ -2428,7 +2428,8 @@ private:
      * Setup the VM control structure according to the given guest context,
      * and configured host fields.
      */
-    void setup_vmcs(arch::x86_64::context & guest_context);
+    void setup_vmcs(std::size_t cpu,
+                    arch::x86_64::context & guest_context);
 
     /**
      * Configure the RIP and RSP fields of the VM control structure and
