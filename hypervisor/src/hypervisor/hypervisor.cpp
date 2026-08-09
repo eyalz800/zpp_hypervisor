@@ -6738,15 +6738,50 @@ void hypervisor::record_exit(arch::x86_64::vmx::exit_reason reason)
     }
 
     auto & count = this->exit_trace_count[cpu];
-    auto & entry = this->exit_trace[cpu][count % exit_trace_capacity];
 
-    entry.reason = reason.value();
-    entry.qualification = vmcs.exit_qualification();
-    entry.activity_state = vmcs.guest_activity_state();
-    entry.cs_selector = vmcs.guest_cs_selector();
-    entry.rip = vmcs.guest_rip();
+    exit_trace_entry recorded{};
+    recorded.reason = reason.value();
+    recorded.qualification = vmcs.exit_qualification();
+    recorded.activity_state = vmcs.guest_activity_state();
+    recorded.cs_selector = vmcs.guest_cs_selector();
+    recorded.rip = vmcs.guest_rip();
+    recorded.repeated = 1;
 
     ++count;
+
+    // A repeat grows the entry already there rather than taking a slot,
+    // which is the only thing that keeps this ring worth reading.
+    //
+    // A guest spinning on a lock takes the same exit at the same RIP about
+    // a thousand times a second - measured on the rig, all eight
+    // processors inside Hyper-V taking VMX-preemption timer exits at one
+    // unchanging RIP - so without this every one of the thirty-two slots
+    // holds that line and the sequence that led into the spin, which is
+    // the part worth having, has been evicted by the time anyone looks.
+    //
+    // Compared on everything except the repeat count, so two genuinely
+    // different exits never merge. exit_trace_count counts slots written
+    // rather than exits taken, because that is what the ring index needs;
+    // exit_total counts exits, and the two disagree deliberately - one
+    // says what happened, the other how much of it.
+    ++this->exit_total[cpu];
+
+    if (count > 1) {
+        auto & previous =
+            this->exit_trace[cpu][(count - 2) % exit_trace_capacity];
+
+        if ((previous.reason == recorded.reason) &&
+            (previous.qualification == recorded.qualification) &&
+            (previous.activity_state == recorded.activity_state) &&
+            (previous.cs_selector == recorded.cs_selector) &&
+            (previous.rip == recorded.rip)) {
+            ++previous.repeated;
+            --count;
+            return;
+        }
+    }
+
+    this->exit_trace[cpu][(count - 1) % exit_trace_capacity] = recorded;
 }
 
 void hypervisor::inject_general_protection_fault()

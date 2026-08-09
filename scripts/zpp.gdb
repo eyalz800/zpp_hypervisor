@@ -97,7 +97,8 @@ define zppexits
   zpph
   set $cpu = $arg0
   set $n = $h->exit_trace_count[$cpu]
-  printf "cpu %d: %lu exits total\n", $cpu, $n
+  printf "cpu %d: %lu exits total, %lu distinct in the ring\n", \
+    $cpu, $h->exit_total[$cpu], $n
   set $cap = 32
   set $count = $n
   if $count > $cap
@@ -107,9 +108,13 @@ define zppexits
   while $i < $count
     set $slot = ($n - $count + $i) % $cap
     set $e = &$h->exit_trace[$cpu][$slot]
-    printf "  %2d reason 0x%lx qual 0x%lx activity %lu cs 0x%lx rip 0x%lx\n", \
+    printf "  %2d reason 0x%lx qual 0x%lx activity %lu cs 0x%lx rip 0x%lx", \
       $i, $e->reason, $e->qualification, $e->activity_state, \
       $e->cs_selector, $e->rip
+    if $e->repeated > 1
+      printf " [times=%lu]", $e->repeated
+    end
+    printf "\n"
     set $i = $i + 1
   end
 end
@@ -158,4 +163,26 @@ document zppcpu
 Select a processor currently executing inside the hypervisor module.
 Required before zpplog/zpph/zppwhy: the module's pages are unreadable
 from guest context. Set $zpp_base, $zpp_end and $zpp_cpus first.
+end
+
+# The counters that say whether a nested guest is still making progress.
+#
+# A boot processor spinning on the VMX-preemption timer looks identical
+# whether the layer above it is idle or wedged - the exit ring shows one
+# reason at one RIP either way. What separates them is whether the second
+# level is still being entered: an idle guest hypervisor still runs its
+# guest, a wedged one does not.
+define zppstat
+  zpph
+  set $i = 0
+  while $i < 8
+    printf "cpu %d: l2 entries %llu, shadow leaves %llu\n", \
+      $i, $h->l2_entries[$i], $h->shadow_ept_leaves_filled[$i]
+    set $i = $i + 1
+  end
+end
+
+document zppstat
+Print the nested-entry counters. Run twice: what matters is whether
+l2 entries moves, not its value.
 end

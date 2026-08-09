@@ -3064,6 +3064,20 @@ private:
         std::uint64_t activity_state{};
         std::uint64_t cs_selector{};
         std::uint64_t rip{};
+
+        /**
+         * How many times in a row this exact exit repeated, counting the
+         * first. One for an ordinary entry.
+         *
+         * A ring without this is destroyed by any guest that spins. A
+         * processor waiting on a lock takes the same VMX-preemption timer
+         * exit at the same RIP about a thousand times a second, so all
+         * thirty-two slots hold one line and everything that led up to the
+         * spin is gone - which is exactly the history worth having, and it
+         * was lost that way on every run of this until the counter was
+         * added. The log ring carries [times=N] for the same reason.
+         */
+        std::uint64_t repeated{};
     };
 
     /**
@@ -3086,11 +3100,22 @@ private:
     exit_trace_entry exit_trace[max_cpus][exit_trace_capacity]{};
 
     /**
-     * Total exits recorded per CPU. Not reduced modulo the capacity, so it
-     * also says how many exits happened in total and where the ring wraps
-     * - the newest entry is at (count - 1) % capacity.
+     * How many ring slots have been written per CPU. Not reduced modulo
+     * the capacity, so it says where the ring wraps - the newest entry is
+     * at (count - 1) % capacity.
+     *
+     * Slots written, not exits taken: a repeat of the exit already in the
+     * newest slot grows that entry's `repeated` instead of consuming a
+     * slot. exit_total below is the count of exits.
      */
     std::uint64_t exit_trace_count[max_cpus]{};
+
+    /**
+     * Exits taken per CPU, counting repeats. Together with the ring's
+     * `repeated` counts this says how much of the history the window
+     * covers.
+     */
+    std::uint64_t exit_total[max_cpus]{};
 
     /**
      * Whether a start-up IPI has already started each processor, cleared

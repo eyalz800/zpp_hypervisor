@@ -84,6 +84,7 @@ while [ "$attempt" -le "$ATTEMPTS" ]; do
         -ex "set logging enabled on" \
         -ex "zpplog" \
         -ex "zppwhy" \
+        -ex "zppstat" \
         -ex "zppexits 0" \
         -ex "zppexits 1" \
         -ex "zppexits 2" \
