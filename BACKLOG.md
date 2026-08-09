@@ -3337,3 +3337,93 @@ Two things to keep when doing it:
   target is in wait-for-SIPI, so that is what this tests too. Do not
   reintroduce a flag that means "already started" - two of them went
   stale here and cost a boot each.
+
+## Findings from a static review against the SDM and KVM
+
+Raised by a read-only review of the nested path while chasing a Windows
+boot under Hyper-V that reached the spinner and quiesced. Ranked by how
+close they are to live. The first two of the list were fixed immediately
+(`8800804`, and the disk sink in `14e53da`); these are what is left.
+
+**NMIs are never reflected to L1.** `l0_wants_l2_exit`
+(`nested_entry.cpp:1426-1438`) claims every `exception_or_nmi` of NMI
+type for this VMM, so the ordinary handler injects it into *L2* through
+vmcs02's entry-interruption field. KVM takes the exit in L0 and then
+reflects when L1 asked for it - `nested.c:4309-4324`, gated on
+`nested_exit_on_nmi` (`nested.h:234-237`). The recorded Hyper-V vmcs12
+capture is `pin 0x0000001e`, and bit 3 of that is NMI exiting: Hyper-V
+asks and never receives one. Fix: claim the NMI only when it is this
+VMM's own wake, and let `l1_wants_l2_exit` reflect the rest.
+`reflect_l2_exit` already copies the interruption information verbatim.
+
+**"Acknowledge interrupt on exit" is advertised and not implemented.**
+Offered in `supported_exit_controls` (`nested_vmx.h:485`), dropped at
+`nested_entry.cpp:1229` where vmcs02 takes `exit01` unchanged, and never
+emulated - while external-interrupt exits *are* reflected. SDM 30:
+without the control "the interrupt controller is not acknowledged and the
+interrupt remains pending", and the interruption-information field "is
+marked invalid ... and the remainder of the field is undefined". KVM
+emulates it in software (`nested.c:4335-4345`) and says outright that the
+hardware field cannot be forwarded (`nested.c:6569-6574`). Latent only
+because the measured capture has external-interrupt exiting clear. The
+honest one-line move is to stop advertising bit 15 until the vector is
+synthesised from the LAPIC on reflection.
+
+**An event interrupted mid-delivery is dropped unless the exit was
+reflected.** `reflect_l2_exit` propagates IDT-vectoring
+(`nested_entry.cpp:2049-2052`); the `deferred` and `handled` paths never
+read `idt_vectoring_information_field`, and nothing else in the tree
+does. KVM re-queues on every exit - `__vmx_complete_interrupts`,
+`vmx.c:7105-7157`. This is live for **L1** as well as L2, and watched
+pages are device registers, so it coincides exactly with interrupt-heavy
+code. Fix: before resuming an exit that was not reflected, copy a valid
+IDT-vectoring field into the entry-interruption field, with the error
+code and, for software types, the instruction length.
+
+**Every INVEPT names EPT01's root.** `hypervisor.cpp:860-885` hardcodes
+`epml4_physical`, and `discard_shadow_ept{,_for}` issue none at all. SDM
+31.4.3.1 scopes single-context INVEPT to "the EPTRTA specified in the
+INVEPT descriptor", and 31.4.3.2 says neither INVVPID nor a VM transition
+is required to invalidate guest-physical mappings. So L1's own
+write-protection of its guest's pages can fail to take effect, and a
+re-used shadow slot can serve stale mappings. Dormant while the measured
+Hyper-V capture has `secondary 0x00000000` - no EPT of its own - so L2
+runs on EPT01. Fix: an all-context INVEPT (type 2, already advertised)
+after each shadow discard and slot release.
+
+**The exit-driven log channel dies on any processor that entered L2.**
+Two halves. `nested_entry.cpp:1089-1092` masks the preemption timer out
+of the *union* of both sides' pin controls, so vmcs01's own timer is
+removed too - KVM masks only vmcs12's contribution (`nested.c:2352-2354`)
+- which also makes `l0_wants_l2_exit`'s preemption-timer case dead code.
+And `arm_controller_poll` (`hypervisor.cpp:1276-1294`) reads and writes
+whichever VMCS is current, so from the exit tail it arms *vmcs02* and
+latches `armed_here`, never arming vmcs01 again.
+
+**`record_exit` reads vmcs01 for a reflected L2 exit.** `reflect_l2_exit`
+has already executed `vmptrld` on this VMM's own region
+(`nested_entry.cpp:2082-2088`) by the time `record_exit` runs, so a
+reflected exit is recorded with the L2 exit *reason* beside vmcs01's
+stale qualification, RIP, activity state and CS. It corrupts the
+instrument being used to chase all of the above. Fix: sample the fields
+in `on_l2_exit` before the VMCS switch and pass them in.
+
+Smaller, recorded so they are not re-derived: `translate_guest_linear`
+has no EPT12 level and walks L2-physical addresses as host-physical
+(benign only while `secondary12 == 0`); a stepped watched page is
+reopened in EPT01 only, so the shadow leaf stays writable for L2;
+emulating APIC MMIO on a processor already in x2APIC mode writes a dead
+window (SDM 13.12.2); `started_by_guest_start_up_ipi` is written in two
+places and read nowhere; vmcs01's exception bitmap is read but never
+written.
+
+Checked and found correct, so they need not be looked at again:
+interrupts are not lost while this VMM is in root mode (vmcs01 sets NMI
+exiting only, and a VM exit clears IF, so an arriving interrupt stays
+pending in the LAPIC); the APIC-virtualization secondary controls are
+rejected by `within_capability` rather than silently ignored; the TPR
+shadow is offered and honoured including KVM's CR8-exiting substitution;
+page-fault filtering in `l1_wants_l2_exit` is truth-table identical to
+`nested_vmx_is_page_fault_vmexit`; `reflect_l2_exit`'s field set is
+complete against `prepare_vmcs12`; and `filter_local_apic_write`'s ICR
+composition matches `kvm_apic_send_ipi`.
