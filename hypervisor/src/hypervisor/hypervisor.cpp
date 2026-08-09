@@ -8080,8 +8080,17 @@ hypervisor::main(arch::x86_64::context & caller_context)
     // jumping into a dead frame.
     this->host_exception_recovery_flag = nullptr;
 
-    log("launching guest on virtual processor {}",
-        this->next_virtual_processor);
+    // This processor's own VPID, read from its own VMCS, rather than the
+    // counter it was taken from.
+    //
+    // The two are equal here only because the increment happens later,
+    // inside vm_launch, and nothing else has claimed a number in between
+    // - which is a property of the *other* processors' timing, not of
+    // this one's state. Everything else on the exit path already answers
+    // "which processor am I" with vmcs.vpid(); a shared mutable counter
+    // is not an identity and reading one as though it were is what makes
+    // a misattributed processor impossible to see.
+    log("launching guest on virtual processor {}", vmcs.vpid());
 
     vm_launch(caller_context, [&](auto & context) {
         using basic_reason = arch::x86_64::vmx::exit_reason::basic_reason;
