@@ -3107,6 +3107,26 @@ private:
     bool started_by_start_up_ipi[max_cpus]{};
 
     /**
+     * Whether the *guest* has ever started this processor, as opposed to
+     * the firmware having done so before the guest existed.
+     *
+     * The two are not the same event and conflating them is what stalled
+     * a Windows boot under Hyper-V. `started_by_start_up_ipi` is set by
+     * apply_start_up for every vector it applies, including the seven
+     * processors the firmware brings up with its broadcast start-up IPI -
+     * so an operating system starting its own processors later found them
+     * all already flagged, and each of its start-up IPIs was swallowed as
+     * a duplicate.
+     *
+     * Set only where a start-up IPI arrived from the guest, and never
+     * cleared: a processor the guest has started once is one whose
+     * duplicate start-up IPIs are worth ignoring for the rest of the
+     * boot, which is precisely what the guard wants and what the firmware
+     * flag cannot say.
+     */
+    bool started_by_guest_start_up_ipi[max_cpus]{};
+
+    /**
      * Each processor's x2APIC id, recorded by that processor as it comes
      * up, so an intercepted interrupt command register write naming a
      * destination can be turned back into an index here.

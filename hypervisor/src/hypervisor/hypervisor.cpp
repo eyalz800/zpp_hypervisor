@@ -5957,6 +5957,14 @@ hypervisor::on_interrupt_command(std::uint64_t command)
     auto destination = command >> destination_shift;
     auto vector = command & vector_mask;
 
+    // Recorded before the attempt, because it is a fact about the guest
+    // having asked rather than about the attempt succeeding: a start-up
+    // IPI this VMM passes to hardware still means the guest has started
+    // that processor, and its duplicate must still be ignored.
+    if (auto slot = processor_slot(destination)) {
+        this->started_by_guest_start_up_ipi[*slot] = true;
+    }
+
     return (start_up_result::adopted ==
             start_up_processor(destination, vector))
                ? std::optional<std::uint64_t>{}
@@ -5983,6 +5991,10 @@ bool hypervisor::start_up_broadcast(std::uint64_t vector)
         auto destination = this->platform_apic_id[i];
         if (destination == self) {
             continue;
+        }
+
+        if (auto slot = processor_slot(destination)) {
+            this->started_by_guest_start_up_ipi[*slot] = true;
         }
 
         if (start_up_result::needs_hardware ==
@@ -6022,7 +6034,33 @@ hypervisor::start_up_result hypervisor::start_up_processor(
         // (SIPIs). SIPIs that arrive while a logical processor is in the
         // active state and in VMX non-root operation are discarded and do
         // not cause VM exits."
-        if (this->started_by_start_up_ipi[*slot]) {
+        // Only the *second* start-up IPI of one sequence is ignored, and
+        // "one sequence" means since this processor's last INIT from the
+        // sender that is asking now.
+        //
+        // `started_by_start_up_ipi` alone is not that. apply_start_up
+        // sets it for every processor it applies a vector to, including
+        // the seven the firmware started with its broadcast SIPI long
+        // before the guest's operating system existed. So by the time
+        // Windows starts its own processors, all seven look "already
+        // started" and every one of their start-up IPIs is swallowed.
+        //
+        // Measured, and this is the whole of the remaining stall: slot 1
+        // reports `by_sipi 0` while the log says "already started,
+        // ignored" for it - both true, in that order, because the SIPI
+        // was swallowed and the INIT that followed then cleared the flag.
+        // Hyper-V does not re-send after that, so the processor never
+        // receives the vector, never checks in, and gets INITed again.
+        //
+        // The INIT is what separates them. A processor that has taken one
+        // since it was last started is *waiting* for a start-up IPI - SDM
+        // 11.4.2 - and the next one is the first of its sequence, not the
+        // second. `started_by_start_up_ipi` is cleared by
+        // emulate_init_signal, so what is wanted is exactly the flag
+        // itself; what was missing is that the firmware's own start-up
+        // must not count as the guest's.
+        if (this->started_by_start_up_ipi[*slot] &&
+            this->started_by_guest_start_up_ipi[*slot]) {
             log("guest start-up ipi for cpu {}, already started, ignored",
                 *slot);
             return start_up_result::adopted;
