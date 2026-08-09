@@ -41,6 +41,20 @@ case "$BASE" in
 esac
 echo "module base: $BASE"
 
+# How far the module reaches, so a processor can be told to be inside it.
+# Every read below is of a page the module has hidden from the guest, so it
+# only answers on a processor in root operation - see zppcpu.
+# awk is BSD awk here and has no strtonum, so the hex arithmetic is the
+# shell's.
+SPAN=0
+for pair in $(llvm-readelf -l "$ELF" 2>/dev/null \
+              | awk '/^  LOAD/ {print $3 "+" $6}'); do
+    end=$(( ${pair%+*} + ${pair#*+} ))
+    [ "$end" -gt "$SPAN" ] && SPAN=$end
+done
+[ "$SPAN" -gt 0 ] || SPAN=$((0x400000))
+CPUS=${ZPP_CPUS:-8}
+
 # batch mode, so a stub that never answers ends the run instead of
 # leaving an interactive gdb nobody is watching.
 x86_64-elf-gdb -q -batch \
@@ -50,6 +64,10 @@ x86_64-elf-gdb -q -batch \
     -ex "add-symbol-file $ELF -o $BASE" \
     -ex "source scripts/zpp.gdb" \
     -ex "info threads" \
+    -ex "set \$zpp_base = $BASE" \
+    -ex "set \$zpp_end = $BASE + $SPAN" \
+    -ex "set \$zpp_cpus = $CPUS" \
+    -ex "zppcpu" \
     -ex "set logging file $OUT" \
     -ex "set logging redirect on" \
     -ex "set logging overwrite on" \

@@ -117,3 +117,45 @@ end
 document zppexits
 Print the recent VM exits recorded for one CPU: zppexits <cpu>.
 end
+
+# Select a processor that is inside our module.
+#
+# Everything above reads memory in the hypervisor's own pages, and those
+# pages are hidden from the guest - the module clears every extended page
+# table permission on them. So from a processor in guest context they read
+# as "Cannot access memory", and the class type resolves against the
+# selected frame, so `$h->member` answers "not a structure pointer" rather
+# than anything useful. Both failures look like the module being gone.
+#
+# gdb selects thread 1 by default and thread 1 is the boot processor, which
+# is the one *least* likely to be in root operation. So pick by where the
+# program counter is instead of by number.
+#
+# Needs $zpp_base and $zpp_end, which scripts/rig-dump-log.sh sets from the
+# serial log and the ELF. $zpp_cpus bounds the search.
+define zppcpu
+  if $zpp_cpus == 0
+    set $zpp_cpus = 8
+  end
+  set $i = 1
+  set $found = 0
+  while $i <= $zpp_cpus && !$found
+    eval "thread %d", $i
+    if $pc >= $zpp_base && $pc < $zpp_end
+      set $found = 1
+      printf "reading from cpu %d, inside the module at %p\n", $i - 1, $pc
+    else
+      set $i = $i + 1
+    end
+  end
+  if !$found
+    printf "no processor is inside the module - every read below will fail\n"
+    printf "the module hides its own pages, so guest context cannot see them\n"
+  end
+end
+
+document zppcpu
+Select a processor currently executing inside the hypervisor module.
+Required before zpplog/zpph/zppwhy: the module's pages are unreadable
+from guest context. Set $zpp_base, $zpp_end and $zpp_cpus first.
+end
