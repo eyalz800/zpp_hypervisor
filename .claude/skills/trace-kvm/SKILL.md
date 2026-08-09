@@ -18,51 +18,39 @@ The rig cannot always be rebooted - nobody may be there to do it - so a
 capture that wedges the host costs the rest of the session, not just the
 trace.
 
-## Status of this skill
+## It works. What was actually wrong
 
-The traps below are established: each was observed, diagnosed and, where
-possible, confirmed by fixing it. **The end-to-end recipe has not yet
-produced a full boot capture.** One capture of 78 lines succeeded and
-every later attempt returned nothing - including a `trace_marker` write,
-which is a producer under our own control, so the failure is in
-recording or in delivery and not in whether the guest did anything.
+**The events were never enabled.** Every "armed: ipi=1" that was trusted
+came from reading the control files as the unprivileged user `tc`, and
+tracefs returns an **empty string** rather than an error there - so the
+arming report was reporting on nothing, and `kvm_apic_ipi` and even
+`sched_switch` sat at `0` while five capture attempts recorded exactly
+what was enabled: nothing. `boot-zpp.sh` also never arms at all, unlike
+`boot-ipi.sh`.
 
-Two hypotheses were tested and **both are wrong**, which is worth knowing
-before they are tried again:
+Read every tracefs control with `sudo`. An empty answer is not "off", it
+is "you could not read it".
 
-- *"Resizing `buffer_size_kb` wedges it"* - a capture attempt with the
-  buffer never resized on a fresh boot produced nothing either.
+Once armed as root, a fifteen second capture produced **3,281,493 lines**
+with ssh untouched and no D-state process. Use
+`vm/trace-capture.sh <seconds> <output>`, then collect the file with an
+ordinary read - a regular file cannot block the way a pipe can.
+
+Four hypotheses were tested and are **wrong**; do not re-propose them:
+
+- *"Resizing `buffer_size_kb` wedges it"* - captures with the buffer
+  never resized produced nothing either.
 - *"`buffer_percent` at 50 holds the reader"* - setting it to 0 changed
-  nothing, though it is still correct to set.
-- *"`timeout` was killing sudo rather than cat, losing buffered data"* -
-  putting the bound inside sudo, and bounding by bytes with `head -c` so
-  no signal is involved at all, both produced nothing.
+  nothing on its own, though it is still worth setting.
+- *"`timeout` kills sudo rather than cat, losing buffered data"* -
+  bounding inside sudo, and by bytes with `head -c`, both produced
+  nothing.
+- *"This kernel's ftrace does not record"* - it records 3.2 million lines
+  in fifteen seconds.
 
-One trap **is** real and was found along the way, and it is the reason
-the arming order in `vm/arm-ipi-trace.sh` matters:
-
-- **Writing `buffer_size_kb` sets `tracing_on` back to 0.** Measured:
-  `on=1` before the write, `on=0` after. So `tracing_on` must be set
-  *last*, after the resize and after the event enables - which is what
-  the original script did, and what I broke by "fixing" it. Any recipe
-  that turns tracing on first and sizes the buffer afterwards is silently
-  disarmed.
-
-What is left is the kernel itself. With `tracing_on=1` set last, the
-buffer allocated, `buffer_percent=0` and `sched_switch` enabled - a
-kernel tracepoint, so nothing to do with the KVM modules - a bounded read
-of `trace_pipe` still returns zero bytes, and a bounded read of `trace`
-hangs. Both consumers of the ring buffer are therefore broken, which is
-below anything this skill can arrange.
-
-`available_tracers` lists only `nop`. The build tree for
-`6.12.11-zpptrace` is not on the development machine and
-`/proc/config.gz` is not readable on the rig, so its tracing options
-could not be checked - and a `.config` found under `~/git/linux` is
-arm64 6.16.0-rc2 and has nothing to do with it. **Check the real config
-before spending another session on this**: if `CONFIG_FTRACE` and
-`CONFIG_TRACING` are not both set, no arrangement of the files above will
-ever record anything, and the kernel needs rebuilding.
+One real trap was found along the way and still applies: **writing
+`buffer_size_kb` sets `tracing_on` back to 0**, so `tracing_on` must be
+set last, after the resize and after the event enables.
 
 ## What goes wrong
 
@@ -131,6 +119,13 @@ ever record anything, and the kernel needs rebuilding.
 - **`ps | grep trace_pipe` matches your own command line.** Misread as a
   live reader twice in one session. Same trap as `pkill -f qemu-system`,
   which killed the ssh session issuing it.
+
+- **The output is a RAM disk and the events are not rate limited.**
+  `sched_switch` alone wrote 554 MB in fifteen seconds and left the host
+  with 410 MB free - which is how a trace becomes an OOM kill that takes
+  QEMU with it. Enable only the KVM events wanted, and keep the size
+  bound in `trace-capture.sh`. Never enable `sched_switch` for anything
+  but a one-shot proof that recording works.
 
 ## The recipe
 
