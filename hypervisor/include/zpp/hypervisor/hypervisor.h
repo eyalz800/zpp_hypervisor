@@ -4774,6 +4774,19 @@ private:
      */
     std::uint64_t shadow_ept_regions_built[max_cpus]{};
     std::uint64_t shadow_ept_splits[max_cpus]{};
+
+    /**
+     * Mappings installed into an existing shadow by a second-level fault,
+     * rather than by building the shadow.
+     *
+     * These are the pages a guest hypervisor mapped *after* its shadow was
+     * built, which it is entitled to do without invalidating anything -
+     * SDM 31.4.3.3 requires INVEPT when an entry becomes more restrictive,
+     * not when it becomes less. A shadow built from a walk cannot learn
+     * about them any other way, and before this each one was an exit that
+     * resumed unchanged and faulted again for ever.
+     */
+    std::uint64_t shadow_ept_leaves_filled[max_cpus]{};
     /**
      * @}
      */

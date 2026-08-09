@@ -2212,19 +2212,37 @@ hypervisor::on_l2_ept_fault(std::size_t cpu,
             0);
         return l2_exit_outcome::reflected;
 
-    case arch::x86_64::vmx::ept_compose_outcome::composed:
-        // Both levels permit it, so the shadow is behind: either this
-        // VMM's own tables have moved since it was built - a page watch
-        // armed, a region protected - or a rebuild ran out of pool and
-        // left the entry absent. Rebuilding is the answer to both, and it
-        // is the only outcome here that is not a fault at all.
+    case arch::x86_64::vmx::ept_compose_outcome::composed: {
+        // Both levels permit it, so the shadow is behind and this is not
+        // a fault at all - it is a mapping that has to be put there.
         //
-        // shadow_ept_pointer_for rebuilds only when the source or the
-        // generation moved, so the ordinary case where neither did costs
-        // one comparison and this becomes a resume - which is also what
-        // makes a genuine bug visible as a loop rather than hidden by
-        // rebuilding for ever.
-        if (auto pointer = shadow_ept_pointer_for(cpu, eptp12); !pointer) {
+        // Rebuilding when the source or the generation moved is not
+        // enough, and the reason is architectural rather than a bug in
+        // the rebuild: a guest hypervisor that changes an EPT entry from
+        // not-present to present **is not required to invalidate
+        // anything**. SDM 31.4.3.3, "Guidelines for Use of the INVEPT
+        // Instruction", requires invalidation when an entry is made
+        // *more restrictive* and lists making one less restrictive among
+        // the cases where software may skip it. So a shadow built from a
+        // walk never learns about a page mapped after it was built,
+        // nothing moves the source or the generation, and the access is
+        // resumed to fault identically for ever.
+        //
+        // Measured on the rig, and it is what a Windows guest does within
+        // seconds of Hyper-V launching: exit reason 48 filling the boot
+        // processor's whole exit ring, qualification 0x184 - an
+        // instruction fetch, linear address valid - at one unchanging
+        // guest RIP, 1,062,627 exits, while the second level managed a
+        // hundred entries in total. The comment that used to be here
+        // called a loop the way a genuine bug would show itself. This is
+        // that loop, and the bug is the assumption above it.
+        //
+        // So the faulting mapping is installed rather than the whole
+        // shadow rebuilt. One leaf, not eleven thousand regions - the
+        // rebuild is still there for what it is for, which is the source
+        // or the generation actually moving.
+        auto pointer = shadow_ept_pointer_for(cpu, eptp12);
+        if (!pointer) {
             log("cpu {} shadow ept rebuild failed after an l2 fault at "
                 "{}: error {}",
                 cpu,
@@ -2232,11 +2250,37 @@ hypervisor::on_l2_ept_fault(std::size_t cpu,
                 pointer.error().code());
             record_exit(reason);
             on_unhandled_exit(reason);
-        } else {
-            vmcs.ept_pointer(*pointer);
+            return l2_exit_outcome::handled;
         }
 
+        vmcs.ept_pointer(*pointer);
+
+        auto page =
+            guest_physical & ~((1ull << composition.page_shift) - 1);
+
+        if (auto installed = install_shadow_leaf(
+                cpu, page, guest_walk, composition.page_shift);
+            !installed) {
+            log("cpu {} could not install a shadow leaf for {}: error {}",
+                cpu,
+                page,
+                installed.error().code());
+            record_exit(reason);
+            on_unhandled_exit(reason);
+            return l2_exit_outcome::handled;
+        }
+
+        // The shadow's entry for this address has just changed from
+        // permitting nothing to permitting something, and this processor
+        // may hold the old one. Locally only: no other processor can have
+        // cached a translation through a shadow that is this one's alone.
+        invalidate_ept_locally();
+
+        this->shadow_ept_leaves_filled[cpu] =
+            this->shadow_ept_leaves_filled[cpu] + 1;
+
         return l2_exit_outcome::handled;
+    }
 
     case arch::x86_64::vmx::ept_compose_outcome::host_denied:
     default:
