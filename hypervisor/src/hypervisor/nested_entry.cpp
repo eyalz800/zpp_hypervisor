@@ -2233,21 +2233,52 @@ hypervisor::on_l2_ept_fault(std::size_t cpu,
         // The watched pages are the local APIC page and the disk
         // controller's registers, which a guest writes constantly.
         //
-        // So the access decides, not the intersection. If what composed
-        // does not permit what faulted, then it is this VMM's own
-        // protection that refused it, and the watched-page machinery
-        // below is the handler - exactly as it is when the FIRST level
-        // guest writes the same page.
+        // So the access decides, not the intersection - and then which
+        // side of the composition lacked it decides who answers.
         auto access_read = 0 != (qualification & (1ull << 0));
         auto access_write = 0 != (qualification & (1ull << 1));
         auto access_fetch = 0 != (qualification & (1ull << 2));
 
-        auto satisfied =
-            (!access_read || composition.permissions.read()) &&
-            (!access_write || composition.permissions.write()) &&
-            (!access_fetch || composition.permissions.execute());
+        auto permits =
+            [&](const arch::x86_64::vmx::ept_permissions & permissions) {
+                return (!access_read || permissions.read()) &&
+                       (!access_write || permissions.write()) &&
+                       (!access_fetch || permissions.execute());
+            };
 
-        if (!satisfied) {
+        // Which table refused it decides who answers, and the two are not
+        // interchangeable.
+        //
+        // The guest hypervisor's tables mapping the address is not the
+        // same as their permitting the access. Removing write from a page
+        // it has mapped is how a hypervisor watches one - it is what this
+        // VMM does to the local APIC page, and what Hyper-V does to its
+        // guest's - and the intersection with ours is then still
+        // non-empty, so it arrives here as `composed` rather than as a
+        // walk failure. Attributing that to this VMM hands its guest's
+        // trap to the wrong level: the watched-page machinery below would
+        // emulate an access the guest hypervisor was waiting to be told
+        // about, and a page only *it* watches would find nothing here
+        // watching it and stop the processor.
+        //
+        // So the guest hypervisor's own permissions are tested first. Its
+        // guest would have taken this fault on bare metal, which is the
+        // same test the walk-failure case above applies, and the
+        // qualification is synthesised the same way - bits 3, 4 and 5 come
+        // from the walk of *its* tables, which is exactly what it needs to
+        // see to know which permission it removed.
+        if (!permits(guest_walk.permissions)) {
+            reflect_l2_exit(
+                cpu,
+                static_cast<std::uint64_t>(basic_reason::ept_violation),
+                arch::x86_64::vmx::reflected_ept_violation_qualification(
+                    qualification, guest_walk, false));
+            return l2_exit_outcome::reflected;
+        }
+
+        // Left over: the guest hypervisor permits it and the composition
+        // does not, so the permission missing is this VMM's own.
+        if (!permits(composition.permissions)) {
             if (!on_ept_violation(
                     cpu, context, guest_walk.physical_address)) {
                 log("cpu {} second level {} to {} at first level {}, "
