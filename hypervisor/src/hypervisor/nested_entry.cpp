@@ -2213,6 +2213,56 @@ hypervisor::on_l2_ept_fault(std::size_t cpu,
         return l2_exit_outcome::reflected;
 
     case arch::x86_64::vmx::ept_compose_outcome::composed: {
+        // "Composed" means the intersection is non-empty, NOT that it
+        // permits what faulted, and the difference is a watched page.
+        //
+        // A watch clears write and keeps read and execute - see the
+        // `write(false)` in the watch setup - so a second-level guest
+        // writing a watched page composes to a perfectly valid read and
+        // execute mapping. `compose_ept` reports `host_denied` only when
+        // the intersection is *empty*, which that is not, so the write
+        // arrived here, a read-only leaf was installed, the write was
+        // resumed, and it faulted again on the leaf just installed.
+        //
+        // Measured, and it is what ends a Windows boot under Hyper-V:
+        // the last eight exits before the guest gave up were all exit
+        // reason 48 at one unchanging RIP with qualification 0x1aa - a
+        // write, to a page reported readable and executable but not
+        // writable - and 411,333 shadow leaves had been installed for
+        // 88,281 second-level entries. One leaf per fault, no progress.
+        // The watched pages are the local APIC page and the disk
+        // controller's registers, which a guest writes constantly.
+        //
+        // So the access decides, not the intersection. If what composed
+        // does not permit what faulted, then it is this VMM's own
+        // protection that refused it, and the watched-page machinery
+        // below is the handler - exactly as it is when the FIRST level
+        // guest writes the same page.
+        auto access_read = 0 != (qualification & (1ull << 0));
+        auto access_write = 0 != (qualification & (1ull << 1));
+        auto access_fetch = 0 != (qualification & (1ull << 2));
+
+        auto satisfied =
+            (!access_read || composition.permissions.read()) &&
+            (!access_write || composition.permissions.write()) &&
+            (!access_fetch || composition.permissions.execute());
+
+        if (!satisfied) {
+            if (!on_ept_violation(
+                    cpu, context, guest_walk.physical_address)) {
+                log("cpu {} second level {} to {} at first level {}, "
+                    "which nothing here watches",
+                    cpu,
+                    access_write ? "write" : "access",
+                    guest_physical,
+                    guest_walk.physical_address);
+                record_exit(reason);
+                on_unhandled_exit(reason);
+            }
+
+            return l2_exit_outcome::handled;
+        }
+
         // Both levels permit it, so the shadow is behind and this is not
         // a fault at all - it is a mapping that has to be put there.
         //

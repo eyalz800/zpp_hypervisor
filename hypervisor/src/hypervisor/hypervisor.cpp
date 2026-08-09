@@ -6059,10 +6059,39 @@ hypervisor::start_up_result hypervisor::start_up_processor(
         // emulate_init_signal, so what is wanted is exactly the flag
         // itself; what was missing is that the firmware's own start-up
         // must not count as the guest's.
-        if (this->started_by_start_up_ipi[*slot] &&
-            this->started_by_guest_start_up_ipi[*slot]) {
-            log("guest start-up ipi for cpu {}, already started, ignored",
-                *slot);
+        // None of the above survives contact with a guest hypervisor,
+        // and the reason is that both flags are a *proxy* for a fact the
+        // processor already records.
+        //
+        // KVM makes exactly one test, in `kvm_apic_accept_events`
+        // (lapic.c): "INITs are blocked while CPU is in specific states
+        // ..., while SIPIs are dropped if the CPU isn't in wait-for-SIPI
+        // (WFS)" - it delivers the vector when the target's mp_state is
+        // KVM_MP_STATE_INIT_RECEIVED and drops it otherwise. There is no
+        // "already started" flag anywhere in it, and its delivery path
+        // (APIC_DM_STARTUP) records every SIPI unconditionally.
+        //
+        // Measured on the rig with Hyper-V running, which is what the
+        // proxy cost: slots 2-7 had *both* flags set while their VMCS
+        // activity state was 3 - wait-for-SIPI - so every start-up IPI
+        // Hyper-V sent them was swallowed, and its boot processor sat
+        // spinning at one RIP taking preemption-timer exits, waiting for
+        // processors that were waiting for it. Slot 1 was the control:
+        // flags 0 and 1, so this guard never even looked at it, and it
+        // was parked in the same state at RIP 0x90e7. Two flags, one of
+        // them cleared by INIT, could not describe it; the activity
+        // state describes it exactly.
+        //
+        // So the architectural fact decides. It is written on every
+        // resume from the VMCS itself, and SDM 11.4.2 says a processor
+        // in wait-for-SIPI is waiting for precisely this message.
+        constexpr std::uint64_t wait_for_sipi = 3;
+
+        if (wait_for_sipi != this->resume_activity_state[*slot]) {
+            log("guest start-up ipi for cpu {}, activity {} is not "
+                "wait-for-sipi, dropped",
+                *slot,
+                this->resume_activity_state[*slot]);
             return start_up_result::adopted;
         }
 
