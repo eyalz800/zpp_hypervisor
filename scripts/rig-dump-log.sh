@@ -88,6 +88,11 @@ while [ "$attempt" -le "$ATTEMPTS" ]; do
         -ex "zppexits 0" \
         -ex "zppexits 1" \
         -ex "zppexits 2" \
+        -ex "zppexits 3" \
+        -ex "zppexits 4" \
+        -ex "zppexits 5" \
+        -ex "zppexits 6" \
+        -ex "zppexits 7" \
         -ex "set logging enabled off" \
         -ex "detach" 2>&1)
 
