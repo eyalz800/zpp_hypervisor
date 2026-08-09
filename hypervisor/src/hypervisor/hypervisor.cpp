@@ -7185,9 +7185,23 @@ void hypervisor::setup_vmcs(arch::x86_64::context & guest_context)
     vmcs.guest_idtr_base(this->idtr.base);
     vmcs.host_idtr_base(reinterpret_cast<std::uintptr_t>(this->host_idt));
 
-    // The CR0 shadow does nothing: CR0's guest/host mask is never set,
-    // so the guest reads the real register. Same dead shadow the CR4
-    // block below describes - setting a mask here would be needed first.
+    // The CR0 shadow does nothing: this VMM owns no CR0 bit, so the guest
+    // reads the real register. Same dead shadow the CR4 block below
+    // describes - setting a mask here would be needed first.
+    //
+    // The mask is written all the same, and that is not tidiness. A VMCS
+    // field that has never been written has no defined value, and
+    // build_vmcs02 composes the second-level mask as
+    // `cr0_mask01 | cr0_mask12` - so leaving this one unwritten ORs
+    // whatever the region happened to hold into a mask that decides which
+    // of a second-level guest's CR0 writes exit. Bits nobody owns then
+    // produce exits neither this VMM nor the guest hypervisor will claim:
+    // the reflection test finds the guest hypervisor does not own them,
+    // the handler here accepts only CR4, and the processor stops.
+    // Measured, on a Windows application processor coming up under
+    // Hyper-V: `unhandled exit reason 0x1c qualification 0xe00`, which is
+    // MOV to CR0 from R14.
+    vmcs.cr0_guest_host_mask(0);
     vmcs.cr0_read_shadow(this->guest_cr0);
     vmcs.guest_cr0(this->host_cr0);
     vmcs.host_cr0(this->host_cr0);
@@ -9271,10 +9285,19 @@ hypervisor::main(arch::x86_64::context & caller_context)
             auto access = (qualification >> 4) & 0x3;
             auto gpr = (qualification >> 8) & 0xf;
 
-            // Only a MOV to CR4 can arrive here. Anything else means the
-            // mask grew without this growing with it, and guessing at
-            // it would resume the guest as though something had worked.
-            if ((4 != number) || (0 != access)) {
+            // A MOV to CR0 or to CR4 can arrive here. Anything else
+            // means a mask grew without this growing with it, and
+            // guessing would resume the guest as though something had
+            // worked.
+            //
+            // CR0 is accepted rather than refused because a guest writes
+            // it - an application processor enables paging on its way up
+            // - and CLAUDE.md's rule is that nothing a guest can execute
+            // may reach an unhandled exit. This VMM owns no CR0 bit, so
+            // the write is simply performed: the value goes to the guest
+            // register and to the shadow, and the guest reads back what
+            // it wrote.
+            if (((0 != number) && (4 != number)) || (0 != access)) {
                 record_exit(full_reason);
                 on_unhandled_exit(full_reason);
                 break;
@@ -9332,6 +9355,27 @@ hypervisor::main(arch::x86_64::context & caller_context)
                 break;
             default:
                 value = context.r15;
+                break;
+            }
+
+            // CR0, which this VMM owns no bit of, so the write is simply
+            // performed.
+            //
+            // NE is forced on, and it is the architecture's requirement
+            // rather than a policy: IA32_VMX_CR0_FIXED0 has it set, so a
+            // guest CR0 without it fails VM entry. PE and PG are exempt
+            // from the fixed bits because unrestricted guest is enabled,
+            // which is what lets an application processor come up in real
+            // mode and turn paging on here. apply_start_up states the same
+            // rule from the other direction.
+            //
+            // The shadow gets what the guest wrote, unmodified, so a read
+            // back agrees with the write even for the bit the register
+            // keeps.
+            if (0 == number) {
+                vmcs.cr0_read_shadow(value);
+                vmcs.guest_cr0(value |
+                               arch::x86_64::cr0_bits::numeric_error);
                 break;
             }
 
