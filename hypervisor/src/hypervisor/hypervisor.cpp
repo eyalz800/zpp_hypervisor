@@ -5645,6 +5645,15 @@ std::optional<std::uint64_t> hypervisor::filter_local_apic_write(
     constexpr std::uint64_t page_offset_mask = page_size - 1;
 
     if (interrupt_command_low != (write->address & page_offset_mask)) {
+        // Which register, for the writes this hook deliberately passes
+        // through. A wedged guest hypervisor writing the page twice every
+        // few seconds is doing something with it, and "not the interrupt
+        // command register" is all this used to be able to say. Collapsed
+        // by the log the same way as everything else, so a register
+        // written in a loop with one value costs one line.
+        log("guest apic write, register {}, value {}",
+            write->address & page_offset_mask,
+            write->value);
         return write->value;
     }
 
@@ -5867,6 +5876,22 @@ hypervisor::on_interrupt_command(std::uint64_t command)
     auto delivery_mode =
         (command >> delivery_mode_shift) & delivery_mode_mask;
     this->ipi_last_command = command;
+
+    // Every command, not only the two that start a processor.
+    //
+    // A guest hypervisor that has stopped making progress and pokes the
+    // interrupt command register every few seconds is sending *something*,
+    // and which delivery mode and destination it is decides whether the
+    // answer is here or above. Measured on the rig: two writes to
+    // 0xfee00000 followed by about 2500 VMX-preemption timer exits at one
+    // unchanging RIP, repeating for as long as the guest was left up, with
+    // nothing in this log to say what was being sent.
+    //
+    // Affordable only because the log collapses a repeat into a [times=N]
+    // on the line already there - a guest sending the same IPI in a loop
+    // costs one line, not one per send. Without that this would be the
+    // hottest logger in the tree.
+    log("guest ipi command {}, delivery mode {}", command, delivery_mode);
 
     if (delivery_mode_init == delivery_mode) {
         this->ipi_init_seen = this->ipi_init_seen + 1;
