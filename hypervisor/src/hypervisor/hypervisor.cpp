@@ -3438,24 +3438,48 @@ bool hypervisor::on_ept_violation(std::size_t cpu,
 
             // The watch gets to refuse the write before it happens.
             //
-            // Only a plain store, because that is the only form whose
-            // value is known without reading memory first, and the
-            // registers this exists for are written outright rather than
-            // combined into. Anything else falls through and is applied
-            // as before.
-            //
             // This is where a start-up IPI is caught. Writing the local
             // APIC's command register *is* the send, so a VMM that
             // redirects one has to decide here - after the write there is
             // nothing left to redirect. See page_watch::filter.
+            //
+            // Every form that writes memory is consulted, not only a
+            // plain store. Restricting it to stores was the other half of
+            // the bug fixed alongside this: a read-modify-write reached
+            // the notify instead, *after* the send, and the notify's
+            // handler adopts a start-up IPI by starting the processor
+            // itself - so the hardware had the guest's command and this
+            // VMM sent a second one. Two start-up IPIs per command is not
+            // subtle; the same shape was measured as a triple fault, exit
+            // reason 2, after 179 emulated writes to this page.
+            //
+            // The value a non-store form will leave behind is not in the
+            // instruction, so it is computed the way
+            // carry_out_guest_instruction computes it - read what is
+            // there, apply the operation. A register that reads
+            // differently from what was written makes this the wrong
+            // question for a *store*, which is why a store still uses its
+            // operand and never reads first.
             auto filter_consulted = false;
 
-            if (watch.filter_write && !straddles &&
-                (arch::x86_64::memory_operation::store == store->what)) {
+            auto writes_memory =
+                (arch::x86_64::memory_operation::load != store->what) &&
+                (arch::x86_64::memory_operation::examine != store->what);
+
+            std::optional<std::uint64_t> intended_value;
+            if (arch::x86_64::memory_operation::store == store->what) {
+                intended_value = store->operand;
+            } else if (writes_memory) {
+                if (auto old = read_guest_word(address, store->size)) {
+                    intended_value = arch::x86_64::apply(*store, *old);
+                }
+            }
+
+            if (watch.filter_write && !straddles && intended_value) {
                 filter_consulted = true;
                 guest_write intended{
                     .address = address,
-                    .value = store->operand,
+                    .value = *intended_value,
                 };
 
                 auto allowed =
@@ -3484,7 +3508,26 @@ bool hypervisor::on_ept_violation(std::size_t cpu,
                 }
 
                 // Allowed, possibly with a different value.
-                if (*allowed != store->operand) {
+                //
+                // A plain store carries the value in its operand, so
+                // replacing it is the whole of the rewrite. Every other
+                // form derives what it writes from what is already there,
+                // and there is nowhere to put a value the operation would
+                // not have produced - so a filter that rewrites one is
+                // refused emulation rather than half honoured, and the
+                // access takes the stepping path instead.
+                //
+                // Unreachable today, and deliberately not papered over:
+                // the only filter here is the local APIC's, and
+                // on_interrupt_command returns the command it was given
+                // on every path, so the rewrite never fires. It is the
+                // next filter that would find this out.
+                if (*allowed != *intended_value) {
+                    if (arch::x86_64::memory_operation::store !=
+                        store->what) {
+                        return false;
+                    }
+
                     auto replaced = *store;
                     replaced.operand = *allowed;
                     store = replaced;
