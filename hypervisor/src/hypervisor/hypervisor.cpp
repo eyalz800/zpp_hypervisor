@@ -3851,6 +3851,16 @@ void hypervisor::emulate_init_signal(arch::x86_64::context & context)
     // is the last of those looks like nothing else in the log.
     auto activity_state_found = vmcs.guest_activity_state();
 
+    // Whichever path got here, the guest's INIT has now been applied to
+    // this processor, so the standing request is satisfied. One store,
+    // and deliberately not a branch: this runs inside the 210 microsecond
+    // budget described above, where every added instruction is a chance
+    // to lose the start-up IPI that follows.
+    if (auto slot = vmcs.vpid(); (0 != slot) && (slot <= max_cpus)) {
+        this->pending_guest_init[slot - 1].store(false,
+                                                 std::memory_order_relaxed);
+    }
+
     // What remains is the activity state and the two things that state
     // requires to be clear. Wait-for-SIPI does not permit a pending event:
     // real hardware fails VM entry on a valid VM-entry interruption
@@ -5871,6 +5881,35 @@ hypervisor::on_interrupt_command(std::uint64_t command)
     if (delivery_mode_init == delivery_mode) {
         this->ipi_init_seen = this->ipi_init_seen + 1;
         log("guest init ipi, command {}", command);
+
+        // Marked as well as forwarded, because forwarding alone is not
+        // delivery when this VMM is itself a guest.
+        //
+        // KVM's `vmx_apic_init_signal_blocked` is
+        // `nested.vmxon && !is_guest_mode`, so every instant a processor
+        // is inside this VMM's own code the INIT is blocked - and
+        // `kvm_apic_accept_events` does not defer the start-up IPI that
+        // follows, it clears KVM_APIC_SIPI and returns. Windows allows
+        // about 210 microseconds between the two, while this VMM enters
+        // root mode thousands of times a second filling shadow EPT
+        // leaves. Measured from identical builds: one run left all seven
+        // application processors in wait-for-SIPI, the next left six
+        // running in the firmware's own park loop and one waiting. A
+        // processor still in that park loop never took an INIT, so it
+        // never published a hand-off, so the start-up IPI that followed
+        // had nowhere to go.
+        //
+        // The same Windows and Hyper-V start every processor under KVM
+        // alone, where `nested.vmxon` is false for those vCPUs and
+        // nothing is ever blocked. The difference is this VMM's, so the
+        // delivery is made this VMM's too.
+        //
+        // The write still goes out unchanged. When the layer below does
+        // deliver it, the ordinary init_signal exit does everything and
+        // the flag is consumed without being acted on - so this can only
+        // add an INIT the guest genuinely sent, never invent one.
+        mark_guest_init_targets(command);
+
         return command;
     }
 
@@ -5969,6 +6008,56 @@ hypervisor::on_interrupt_command(std::uint64_t command)
             start_up_processor(destination, vector))
                ? std::optional<std::uint64_t>{}
                : std::optional<std::uint64_t>{command};
+}
+
+void hypervisor::mark_guest_init_targets(std::uint64_t command)
+{
+    // Resolved exactly the way a start-up IPI's targets are, because it
+    // is the same command format and the same roster. Without a roster
+    // there is nothing to resolve against and the forwarded write is all
+    // there is - the same answer start_up_broadcast gives.
+    if (0 == this->number_of_platform_processors) {
+        return;
+    }
+
+    constexpr std::uint64_t destination_shift = 32;
+    constexpr std::uint64_t destination_shorthand_shift = 18;
+    constexpr std::uint64_t destination_shorthand_mask = 3;
+    constexpr std::uint64_t shorthand_none = 0;
+    constexpr std::uint64_t shorthand_all_excluding_self = 3;
+
+    auto shorthand = (command >> destination_shorthand_shift) &
+                     destination_shorthand_mask;
+
+    auto mark = [&](std::uint64_t destination) {
+        if (auto slot = processor_slot(destination)) {
+            this->pending_guest_init[*slot].store(
+                true, std::memory_order_release);
+        }
+    };
+
+    if (shorthand_none == shorthand) {
+        mark(command >> destination_shift);
+        return;
+    }
+
+    // "All excluding self" is the only broadcast form INIT may use - SDM
+    // 11.6.1 - and it is the one a guest sends. Anything else is left to
+    // the forwarded write rather than guessed at.
+    if (shorthand_all_excluding_self != shorthand) {
+        return;
+    }
+
+    auto self = local_apic_id();
+
+    for (std::size_t i{}; i < this->number_of_platform_processors; ++i) {
+        auto destination = this->platform_apic_id[i];
+        if (destination == self) {
+            continue;
+        }
+
+        mark(destination);
+    }
 }
 
 bool hypervisor::start_up_broadcast(std::uint64_t vector)
@@ -9786,6 +9875,29 @@ void hypervisor::resume_guest(arch::x86_64::context & context,
     if (advance_rip) {
         context.rip += vmcs.vm_exit_instruction_length();
         vmcs.guest_rip(context.rip);
+    }
+
+    // A guest INIT the layer below never delivered, applied here.
+    //
+    // Consumed by the target itself and nowhere else, because what an
+    // INIT leaves behind is an activity state, and that field lives in a
+    // VMCS only this processor can have current. Placed after the RIP
+    // update so it cannot be fought by it: emulate_init_signal puts the
+    // processor where wait-for-SIPI requires, and the start-up IPI that
+    // follows is what sets CS and RIP.
+    //
+    // After the exchange rather than before any handler, so an ordinary
+    // init_signal exit that *was* delivered has already run and this
+    // finds nothing left to do - the flag is set by whoever decoded the
+    // guest's write and cleared by whichever path applies it first.
+    if (auto slot = vmcs.vpid(); (0 != slot) && (slot <= max_cpus)) {
+        if (this->pending_guest_init[slot - 1].exchange(
+                false, std::memory_order_acquire)) {
+            log("cpu {} applying a guest init the layer below did not "
+                "deliver",
+                slot - 1);
+            emulate_init_signal(context);
+        }
     }
 
     // Record what is about to be resumed, now that the handlers have

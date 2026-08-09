@@ -1828,6 +1828,12 @@ private:
     bool start_up_broadcast(std::uint64_t vector);
 
     /**
+     * Flag every processor a guest INIT names, so each can apply it to
+     * its own VMCS if the layer below never delivers it.
+     */
+    void mark_guest_init_targets(std::uint64_t command);
+
+    /**
      * Returns the index this VMM tracks the processor with the given local
      * APIC id under, allocating one if this is the first time it has been
      * named. Returns nothing when there is no room left.
@@ -3507,6 +3513,30 @@ private:
      * that the processor that started it knows it succeeded.
      */
     std::atomic<bool> start_up_launched[max_cpus]{};
+
+    /**
+     * A guest INIT this VMM must apply itself, one flag per slot.
+     *
+     * The INIT is still written out to hardware, because when it is
+     * delivered the ordinary `init_signal` exit does everything and this
+     * flag is simply consumed. It exists for when it is *not* delivered,
+     * which under a layer is routine rather than exceptional: KVM's
+     * `vmx_apic_init_signal_blocked` is
+     * `nested.vmxon && !is_guest_mode`, so for the whole time any
+     * processor is inside this VMM's own code the INIT is held and
+     * `kvm_apic_accept_events` **discards the start-up IPI that follows
+     * it** rather than deferring it. Windows allows about 210
+     * microseconds from the INIT to the first start-up IPI; this VMM
+     * enters root mode thousands of times a second filling shadow EPT
+     * leaves, so the loss is frequent and which processors survive it
+     * varies between runs of the same build.
+     *
+     * Set by the processor that decoded the guest's command, for every
+     * target the roster names; consumed by the target itself, because
+     * the activity state it has to write lives in a VMCS only that
+     * processor can make current.
+     */
+    std::atomic<bool> pending_guest_init[max_cpus]{};
 
     /**
      * Serializes starting a processor, because bringing one up walks
