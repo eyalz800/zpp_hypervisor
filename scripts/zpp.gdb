@@ -50,3 +50,70 @@ end
 document zpph
 Set $h to the hypervisor singleton.
 end
+
+# Why a CPU stopped, and what it was doing just before.
+#
+# The log says what happened in order; this says what the state WAS at the
+# moment a CPU gave up. Check `occurred` first - every other field in those
+# two records is meaningless until it is set, and zeroes read as plausible
+# values.
+define zppwhy
+  zpph
+  printf "unhandled_exit.occurred = %lu\n", $h->unhandled_exit.occurred
+  if $h->unhandled_exit.occurred != 0
+    printf "  reason 0x%lx qual 0x%lx linear 0x%lx rip 0x%lx cs 0x%lx\n", \
+      $h->unhandled_exit.reason, $h->unhandled_exit.qualification, \
+      $h->unhandled_exit.guest_linear_address, $h->unhandled_exit.guest_rip, \
+      $h->unhandled_exit.guest_cs_selector
+  end
+  printf "vm_entry_failure.occurred = %lu\n", $h->vm_entry_failure.occurred
+  if $h->vm_entry_failure.occurred != 0
+    printf "  cpu %lu vp %lu from_trampoline %lu vector 0x%lx\n", \
+      $h->vm_entry_failure.cpu, $h->vm_entry_failure.virtual_processor, \
+      $h->vm_entry_failure.from_trampoline, $h->vm_entry_failure.start_up_vector
+    printf "  activity %lu intr 0x%lx entry_ctls 0x%lx\n", \
+      $h->vm_entry_failure.activity_state, \
+      $h->vm_entry_failure.interruptibility_state, \
+      $h->vm_entry_failure.entry_controls
+    printf "  cr0 0x%lx cr4 0x%lx rflags 0x%lx rip 0x%lx cs 0x%lx base 0x%lx ar 0x%lx\n", \
+      $h->vm_entry_failure.guest_cr0, $h->vm_entry_failure.guest_cr4, \
+      $h->vm_entry_failure.guest_rflags, $h->vm_entry_failure.guest_rip, \
+      $h->vm_entry_failure.guest_cs_selector, $h->vm_entry_failure.guest_cs_base, \
+      $h->vm_entry_failure.guest_cs_access_rights
+  end
+end
+
+document zppwhy
+Print the unhandled-exit and VM-entry-failure records, if either fired.
+end
+
+# The most recent exits on one CPU, oldest of the window first.
+#
+#   zppexits 0
+#
+# The ring is sampled after each exit was handled, so an entry shows the
+# state the guest was about to be RESUMED with, not the state it exited in.
+define zppexits
+  zpph
+  set $cpu = $arg0
+  set $n = $h->exit_trace_count[$cpu]
+  printf "cpu %d: %lu exits total\n", $cpu, $n
+  set $cap = 32
+  set $count = $n
+  if $count > $cap
+    set $count = $cap
+  end
+  set $i = 0
+  while $i < $count
+    set $slot = ($n - $count + $i) % $cap
+    set $e = &$h->exit_trace[$cpu][$slot]
+    printf "  %2d reason 0x%lx qual 0x%lx activity %lu cs 0x%lx rip 0x%lx\n", \
+      $i, $e->reason, $e->qualification, $e->activity_state, \
+      $e->cs_selector, $e->rip
+    set $i = $i + 1
+  end
+end
+
+document zppexits
+Print the recent VM exits recorded for one CPU: zppexits <cpu>.
+end
