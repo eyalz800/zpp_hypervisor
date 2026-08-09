@@ -1631,10 +1631,33 @@ bool hypervisor::l1_wants_l2_exit(std::size_t cpu,
                 auto written = guest_register(context, gpr);
 
                 auto mask = (0 == number) ? cr0_mask : cr4_mask;
-                auto current =
-                    (0 == number) ? vmcs.guest_cr0() : vmcs.guest_cr4();
 
-                return 0 != ((written ^ current) & mask);
+                // Against the *read shadow*, which is what the guest
+                // hypervisor decided its guest should believe the
+                // register holds - not against the register itself.
+                //
+                // SDM 28.1.3: "MOV to CR0 ... causes a VM exit unless the
+                // value of its source operand matches, for the position
+                // of each bit set in the CR0 guest/host mask, the
+                // corresponding bit in the CR0 read shadow", and the same
+                // sentence for CR4. KVM's nested_vmx_exit_handled_cr
+                // spells it `vmcs12->cr0_guest_host_mask & (val ^
+                // vmcs12->cr0_read_shadow)`.
+                //
+                // This used to compare against vmcs02's guest CR0, which
+                // build_vmcs02 writes from vmcs12's *guest* field. The two
+                // are different fields and are meant to differ - a guest
+                // hypervisor owns a bit precisely so it can show its guest
+                // something other than what the register holds. Wherever
+                // they differed the decision was made on the wrong
+                // operand, in both directions: an exit reflected that was
+                // never wanted, and - the one that costs a boot - an exit
+                // swallowed that the guest hypervisor was waiting for.
+                auto shadow_value =
+                    (0 == number) ? shadow.read(field::cr0_read_shadow)
+                                  : shadow.read(field::cr4_read_shadow);
+
+                return 0 != ((written ^ shadow_value) & mask);
             }
             case 3:
                 return primary_set(primary_cr3_load_exiting);
@@ -1652,14 +1675,61 @@ bool hypervisor::l1_wants_l2_exit(std::size_t cpu,
             default:
                 return true;
             }
-        case access_clts:
+        case access_clts: {
             // CLTS clears CR0.TS, so it exits to the guest hypervisor only
-            // if that bit is one it owns.
-            return 0 != (cr0_mask & (1ull << 3));
+            // if that bit is one it owns *and* one it is showing as set.
+            //
+            // SDM 28.1.3: "The CLTS instruction causes a VM exit if the
+            // bits in position 3 (corresponding to CR0.TS) are set in both
+            // the CR0 guest/host mask and the CR0 read shadow." 28.3
+            // gives the other half: mask set and shadow clear means CLTS
+            // "completes but does not change the contents of CR0.TS" - no
+            // exit. Testing the mask alone reflected that case too. KVM:
+            // nested.c case 2, `(mask & X86_CR0_TS) && (read_shadow &
+            // X86_CR0_TS)`.
+            constexpr std::uint64_t task_switched = 1ull << 3;
+            auto shadow_value = shadow.read(field::cr0_read_shadow);
+
+            return (0 != (cr0_mask & task_switched)) &&
+                   (0 != (shadow_value & task_switched));
+        }
         case access_lmsw:
-        default:
-            // LMSW writes CR0's low four bits.
-            return 0 != (cr0_mask & 0xf);
+        default: {
+            // LMSW writes CR0's low four bits, and whether that exits
+            // depends on the value it would write - which is in the
+            // qualification, not in a register.
+            //
+            // SDM 28.1.3 splits it in two, because "LMSW never clears bit
+            // 0 of CR0 (CR0.PE)":
+            //
+            //   - PE exits only if the bit is set in both the mask and the
+            //     source operand while clear in the read shadow. A source
+            //     with PE clear cannot clear it, so it is not a change.
+            //   - bits 3:1 exit if the mask owns the bit and the source
+            //     and the read shadow disagree about it.
+            //
+            // SDM Table 28-3 puts the source data in bits 31:16 of the
+            // exit qualification. KVM builds the same two-part test in
+            // nested_vmx_exit_handled_cr's LMSW case.
+            //
+            // This used to return "any of the low four bits is owned",
+            // which reflects every LMSW a second-level guest executes
+            // whatever it writes.
+            constexpr std::uint64_t protection_enable = 1ull << 0;
+            constexpr std::uint64_t lmsw_upper_bits = 0xeull;
+
+            auto source = (qualification >> 16) & 0xffff;
+            auto shadow_value = shadow.read(field::cr0_read_shadow);
+
+            if ((0 != (cr0_mask & protection_enable)) &&
+                (0 != (source & protection_enable)) &&
+                (0 == (shadow_value & protection_enable))) {
+                return true;
+            }
+
+            return 0 !=
+                   (cr0_mask & lmsw_upper_bits & (source ^ shadow_value));
+        }
         }
     }
 
