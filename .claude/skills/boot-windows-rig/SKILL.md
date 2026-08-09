@@ -94,7 +94,23 @@ touching the disk channel has to boot the real ESP.
    the shell runs it automatically - but remove it once an NVRAM entry
    exists, or `bcfg boot add` will pile up duplicates on every boot.
 
-4. **Run** `cd ~/vm && sudo ./boot-zpp.sh`.
+4. **Run** `cd ~/vm && sudo ./boot-zpp.sh`. **The `sudo` is not optional
+   and leaving it off does not fail loudly.** Without it the script keeps
+   going past every device step, printing
+
+   ```
+   can't create /sys/bus/pci/devices/0000:02:00.0/driver/unbind: Permission denied
+   can't create /sys/bus/pci/drivers/vfio-pci/remove_id: Permission denied
+   can't create /sys/bus/pci/rescan: Permission denied
+   ```
+
+   and then runs its own teardown, so it exits with no QEMU and no error
+   that names the cause. `nohup ... &` from an ssh command hides those
+   lines unless the log is read back, and the run then looks exactly like
+   a guest that booted and died. Launch it as
+   `setsid sh -c "cd /home/tc/vm && nohup sudo ./boot-zpp.sh > /tmp/boot-zpp.log 2>&1 &"`
+   and confirm a `qemu` process exists by `/proc/<pid>/comm` before
+   believing it started.
 
    If it dies with `sudo: dmidecode: command not found` and QEMU then rejects
    `-smbios type=4 ... max-speed=` as "expects a number", **do not reinstall
