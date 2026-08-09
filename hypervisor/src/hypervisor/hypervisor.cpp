@@ -3448,8 +3448,11 @@ bool hypervisor::on_ept_violation(std::size_t cpu,
             // APIC's command register *is* the send, so a VMM that
             // redirects one has to decide here - after the write there is
             // nothing left to redirect. See page_watch::filter.
+            auto filter_consulted = false;
+
             if (watch.filter_write && !straddles &&
                 (arch::x86_64::memory_operation::store == store->what)) {
+                filter_consulted = true;
                 guest_write intended{
                     .address = address,
                     .value = store->operand,
@@ -3506,12 +3509,37 @@ bool hypervisor::on_ept_violation(std::size_t cpu,
                 // on a write to it, so reporting a read of it sends an
                 // interrupt the guest never asked for. Measured as a guest
                 // that never left early boot.
-                // Not when a filter answered it. The filter is the
+                // Not when the filter answered it. The filter is the
                 // handler for an emulated write - it already saw the
-                // value, before the write rather than after - and
-                // calling both would act on one command twice.
+                // value, before the write rather after - and calling
+                // both would act on one command twice.
+                //
+                // Whether the filter *ran*, not whether one exists, and
+                // that is the whole of this condition. The filter is
+                // consulted only for a plain store, so testing for its
+                // existence silently dropped every other form that writes
+                // memory: a locked read-modify-write against a watched
+                // page changed the page and told nobody.
+                //
+                // That is not a corner. SDM Table 30-7 says an EPT
+                // violation from a read-modify-write sets bit 1 and may
+                // also set bit 0, and the boot processor's ring on the
+                // rig is full of qualification 0x2b against 0xfee00000 -
+                // both bits, so a read-modify-write to the local APIC
+                // page. Every one of those went past
+                // filter_local_apic_write and on_local_apic_write alike,
+                // so on_interrupt_command never saw it: no start-up IPI
+                // adoption, no broadcast resolution against the roster,
+                // and no log line. The write itself still reached the
+                // register, which is why this was invisible.
+                //
+                // KVM does not key APIC emulation on the instruction form
+                // at all - apic_mmio_write (lapic.c) gates on width and
+                // alignment only, and x86.c:8068 degrades a locked
+                // exchange against the APIC page to a plain write so it
+                // lands in the same dispatcher.
                 if (changed_memory && watch.on_write &&
-                    !watch.filter_write) {
+                    !filter_consulted) {
                     watch.on_write(watch.context, page, &written);
                 }
 
