@@ -692,17 +692,102 @@ hypervisor::shadow_ept_pointer_for(std::size_t cpu, std::uint64_t eptp12)
             this->shadow_ept_evictions[cpu] + 1;
     }
 
+    // Emptied rather than built, which is the whole of the change from
+    // walking the guest hypervisor's tables up front.
+    //
+    // Nothing is composed here. The shadow starts with every entry
+    // not-present, every access to it faults, and the fault installs the
+    // one mapping it needed - which is what KVM does, its nested EPT
+    // being the shadow MMU filled by kvm_mmu_page_fault rather than a
+    // structure built ahead of use.
+    //
+    // What the eager build cost, measured on the rig: a guest hypervisor
+    // that unmapped 511 pages issued INVEPT and this VMM walked
+    // twenty-two thousand regions to answer it, hundreds of times over -
+    // visible in the log as the same root rebuilt with the region count
+    // ticking down 0x5d18, 0x5b19, 0x591a. It also had to guess how much
+    // of the address space the second-level guest would touch, and the
+    // answer was "far less than all of it".
+    release_shadow_slot(cpu, chosen);
+    std::memset(this->shadow_epml4[cpu][chosen],
+                0,
+                sizeof(epte) * entries_per_table);
+
+    arch::x86_64::vmx::ept_pointer pointer;
+    pointer.memory_type(memory_type::write_back);
+    pointer.page_walk_length(4);
+    pointer.page_number(this->host_page_table.virtual_to_physical(
+                            this->shadow_epml4[cpu][chosen]) >>
+                        12);
+
+    this->shadow_ept_pointer[cpu][chosen] = pointer;
+    this->shadow_ept_source[cpu][chosen] = root;
+    this->shadow_ept_generation_seen[cpu][chosen] = generation;
     this->shadow_ept_current_slot[cpu] = chosen;
     this->shadow_ept_builds[cpu] = this->shadow_ept_builds[cpu] + 1;
 
-    if (auto result = build_shadow_ept(cpu, eptp12); !result) {
-        // A failed build leaves the slot unusable, and saying it holds
-        // the pointer it failed on would hand it out next time.
-        this->shadow_ept_source[cpu][chosen] = 0;
-        return std::unexpected(result.error());
-    }
+    // This processor may hold mappings from whatever was in this slot
+    // before, against a pointer that has just been reused.
+    invalidate_ept_locally();
 
     return this->shadow_ept_pointer[cpu][chosen];
+}
+
+std::expected<void, zpp::error> hypervisor::fill_shadow_leaf(
+    std::size_t cpu,
+    std::uint64_t guest_physical,
+    const arch::x86_64::vmx::ept_walk_result & guest,
+    std::uint64_t shift)
+{
+    auto installed =
+        install_shadow_leaf(cpu, guest_physical, guest, shift);
+    if (installed) {
+        return {};
+    }
+
+    if (static_cast<int>(error::out_of_shadow_ept_tables) !=
+        installed.error().code()) {
+        return installed;
+    }
+
+    // The other slots first. Each is a shadow of a guest the guest
+    // hypervisor is not running at this instant, so losing one costs the
+    // faults to fill it again and nothing else.
+    auto current = this->shadow_ept_current_slot[cpu];
+    for (std::size_t slot{}; slot < shadow_ept_slots; ++slot) {
+        if (slot != current) {
+            release_shadow_slot(cpu, slot);
+        }
+    }
+
+    this->shadow_ept_reclaims[cpu] = this->shadow_ept_reclaims[cpu] + 1;
+
+    installed = install_shadow_leaf(cpu, guest_physical, guest, shift);
+    if (installed) {
+        return {};
+    }
+
+    if (static_cast<int>(error::out_of_shadow_ept_tables) !=
+        installed.error().code()) {
+        return installed;
+    }
+
+    // Still not enough, so this shadow alone has outgrown the pool.
+    // Resetting it loses every mapping filled so far and they fault back
+    // in, which is slow and is the only answer that makes progress -
+    // where refusing would stop the processor. Counted separately,
+    // because one of these means the pool is too small for a single
+    // shadow and no amount of slot juggling will help.
+    release_shadow_slot(cpu, current);
+    std::memset(this->shadow_epml4[cpu][current],
+                0,
+                sizeof(epte) * entries_per_table);
+
+    this->shadow_ept_resets[cpu] = this->shadow_ept_resets[cpu] + 1;
+
+    log("cpu {} shadow ept reset: one shadow does not fit the pool", cpu);
+
+    return install_shadow_leaf(cpu, guest_physical, guest, shift);
 }
 
 void hypervisor::release_shadow_slot(std::size_t cpu, std::size_t slot)

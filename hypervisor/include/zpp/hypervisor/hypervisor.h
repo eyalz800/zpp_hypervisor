@@ -2002,6 +2002,29 @@ private:
     void release_shadow_slot(std::size_t cpu, std::size_t slot);
 
     /**
+     * Installs one mapping into the current shadow, reclaiming pool if it
+     * has to.
+     *
+     * The fault path's counterpart to install_shadow_leaf, and the reason
+     * it exists is that running out of tables means something different
+     * here. An eager build that ran out could fail cleanly: it had no
+     * partial shadow worth entering with, so refusing was the answer. A
+     * fault has no such option - the guest cannot be resumed until this
+     * mapping is there, and refusing stops the processor.
+     *
+     * So it reclaims instead, in the order that costs least: the other
+     * slots first, since losing a shadow costs the faults to refill it,
+     * and this slot last, since resetting it loses everything already
+     * filled. Either way the pool is non-empty afterwards and the retry
+     * succeeds, which is what makes this terminate.
+     */
+    std::expected<void, zpp::error>
+    fill_shadow_leaf(std::size_t cpu,
+                     std::uint64_t guest_physical,
+                     const arch::x86_64::vmx::ept_walk_result & guest,
+                     std::uint64_t shift);
+
+    /**
      * This VMM's own translation for a host physical address, in the shape
      * `compose_ept` takes.
      *
@@ -4833,6 +4856,22 @@ private:
     std::uint64_t shadow_ept_cache_hits[max_cpus]{};
     std::uint64_t shadow_ept_builds[max_cpus]{};
     std::uint64_t shadow_ept_evictions[max_cpus]{};
+
+    /**
+     * Pool pressure on the fault path.
+     *
+     * `reclaims` is a fill that had to drop this processor's *other*
+     * shadows to find a table, which costs those shadows the faults to
+     * fill again. `resets` is one that had to drop its own as well, and
+     * means a single shadow no longer fits the pool - the one number here
+     * that says "make the pool bigger" rather than "this is working".
+     * @{
+     */
+    std::uint64_t shadow_ept_reclaims[max_cpus]{};
+    std::uint64_t shadow_ept_resets[max_cpus]{};
+    /**
+     * @}
+     */
     /**
      * @}
      */

@@ -2258,7 +2258,7 @@ hypervisor::on_l2_ept_fault(std::size_t cpu,
         auto page =
             guest_physical & ~((1ull << composition.page_shift) - 1);
 
-        if (auto installed = install_shadow_leaf(
+        if (auto installed = fill_shadow_leaf(
                 cpu, page, guest_walk, composition.page_shift);
             !installed) {
             log("cpu {} could not install a shadow leaf for {}: error {}",
