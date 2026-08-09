@@ -3276,3 +3276,64 @@ bytes, which is a small change to the same handler that counts them.
 Until then, announcing a hypervisor and advertising the TPR shadow both
 stay off, and both switches record that the reason is the decoder rather
 than anything about what they announce.
+
+## Emulate INIT ourselves instead of forwarding it to hardware
+
+Application processors do not reliably start under a guest hypervisor,
+and the reason is not in this tree's logic - it is that the sequence is
+handed to the layer below at exactly the moment that layer is entitled
+to throw half of it away.
+
+`filter_local_apic_write` decodes a start-up IPI and applies it to each
+target through this VMM's own roster, but an INIT is passed through as
+the guest wrote it, on the reasoning that INIT is what leaves a target in
+wait-for-SIPI and there is nothing to improve on. That is true on bare
+metal. It is false when this VMM is itself a guest:
+
+```c
+/* KVM, vmx.c */
+bool vmx_apic_init_signal_blocked(struct kvm_vcpu *vcpu)
+{
+        return to_vmx(vcpu)->nested.vmxon && !is_guest_mode(vcpu);
+}
+
+/* KVM, lapic.c, kvm_apic_accept_events */
+if (!kvm_apic_init_sipi_allowed(vcpu)) {
+        clear_bit(KVM_APIC_SIPI, &apic->pending_events);   /* discarded */
+        return 0;
+}
+```
+
+`nested.vmxon && !is_guest_mode` is precisely "zpp has executed VMXON and
+is in VMX root mode right now" - any instant a processor is inside this
+VMM's own code. In that state KVM does not defer the start-up IPI, it
+**drops** it, keeping only the INIT pending. Windows allows about 210
+microseconds from the INIT to the first start-up IPI and 200 more to the
+second, while this VMM enters root mode thousands of times a second
+filling shadow EPT leaves - so the sequence is lost often, and which
+processors survive it varies run to run. Measured: one run left all seven
+application processors in wait-for-SIPI, the next left six running in the
+firmware's park loop and one in wait-for-SIPI, from identical builds.
+
+Under KVM alone the same Windows and the same Hyper-V start their
+processors every time, because `nested.vmxon` is false for those vCPUs
+and the sequence is never blocked. **The difference is ours.**
+
+So the delivery must not depend on the layer below. INIT should be
+emulated for the targets the same way the start-up IPI already is: the
+command is decoded here, each target named by the roster is marked, and
+the target applies wait-for-SIPI to its own VMCS - a VMCS can only be
+written by the processor it is current on, so this needs a way to make a
+target exit promptly and a per-slot pending-INIT flag, not a remote VMCS
+write.
+
+Two things to keep when doing it:
+
+- `emulate_init_signal` must stay as short as it is, and for the reason
+  written there rather than for tidiness: every instruction between the
+  INIT and the resume is a chance to lose the IPI.
+- The start-up IPI side is already right and was made right by this
+  session's fix: KVM's `kvm_apic_accept_events` tests only whether the
+  target is in wait-for-SIPI, so that is what this tests too. Do not
+  reintroduce a flag that means "already started" - two of them went
+  stale here and cost a boot each.
