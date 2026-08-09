@@ -1981,6 +1981,27 @@ private:
     void discard_shadow_ept(std::size_t cpu);
 
     /**
+     * Discards only the shadow built from the given guest EPT pointer.
+     *
+     * What the single-context INVEPT type actually asks for. Discarding
+     * every shadow instead is permitted - SDM 31.4.3.2 lets a processor
+     * invalidate any cached mapping at any time - but it throws away the
+     * shadows of the guest hypervisor's *other* guests, which it then has
+     * to pay to rebuild the next time it switches to one.
+     */
+    void discard_shadow_ept_for(std::size_t cpu, std::uint64_t root);
+
+    /**
+     * Marks one slot unused and hands its tables back to the shared pool.
+     *
+     * Freeing the tables is not optional. A slot that keeps them while
+     * saying it holds nothing is a slot whose pages no build can reach
+     * and no build will reclaim, and four of those exhaust a
+     * ninety-six-table pool without a single shadow being live.
+     */
+    void release_shadow_slot(std::size_t cpu, std::size_t slot);
+
+    /**
      * This VMM's own translation for a host physical address, in the shape
      * `compose_ept` takes.
      *

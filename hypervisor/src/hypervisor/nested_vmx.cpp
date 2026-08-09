@@ -209,9 +209,11 @@ std::uint64_t hypervisor::nested_vmx_capability_msr(std::size_t msr)
     // which is what a target costing a reboot per variable is worth
     // spending. Set this to one `unnarrow_` value at a time.
     [[maybe_unused]] constexpr std::uint64_t unnarrow_nothing = 0;
-    [[maybe_unused]] constexpr std::uint64_t unnarrow_pin_based = 1ull << 0;
+    [[maybe_unused]] constexpr std::uint64_t unnarrow_pin_based = 1ull
+                                                                  << 0;
     [[maybe_unused]] constexpr std::uint64_t unnarrow_primary = 1ull << 1;
-    [[maybe_unused]] constexpr std::uint64_t unnarrow_secondary = 1ull << 2;
+    [[maybe_unused]] constexpr std::uint64_t unnarrow_secondary = 1ull
+                                                                  << 2;
     [[maybe_unused]] constexpr std::uint64_t unnarrow_exits = 1ull << 3;
     [[maybe_unused]] constexpr std::uint64_t unnarrow_entries = 1ull << 4;
     [[maybe_unused]] constexpr std::uint64_t unnarrow_ept_vpid = 1ull << 5;
@@ -1278,17 +1280,29 @@ bool hypervisor::on_guest_invept(std::size_t cpu,
         return false;
     }
 
-    // Both types discard the shadow, which is over-invalidation for the
-    // single-context type and is the safe direction: SDM 31.4.3.2 permits
-    // a processor to "invalidate any cached mappings at any time", so
-    // discarding more than was asked for is architecturally allowed where
-    // discarding less is not. The alternative - keeping a shadow per EPT
-    // pointer so that only the named one is discarded - buys nothing until
-    // there is more than one shadow per processor, and there is one.
+    // The single-context type discards only the shadow built from the
+    // pointer it names, which is what it asks for and is now possible:
+    // this processor keeps a shadow per guest EPT pointer, so the others
+    // can be left alone.
+    //
+    // It used to discard all of them, on the grounds that
+    // over-invalidation is the safe direction - SDM 31.4.3.2 lets a
+    // processor invalidate any cached mapping at any time - and that
+    // keeping one per pointer bought nothing while there was only one.
+    // Both halves were true and the second has expired. What it cost,
+    // measured after the shadows became per pointer: 2,820 rebuilds
+    // against 12,056 cache hits, each rebuild a walk of eleven to
+    // twenty-four thousand regions, on a guest hypervisor that issues
+    // this instruction constantly.
     //
     // Discarding rather than rebuilding, because the next VM entry needs
     // the shadow and nothing between now and then reads it.
-    discard_shadow_ept(cpu);
+    if (single_context == type) {
+        discard_shadow_ept_for(
+            cpu, operand_value.eptp & (((1ull << 52) - 1) & ~0xfffull));
+    } else {
+        discard_shadow_ept(cpu);
+    }
 
     vmx_succeed();
     return true;

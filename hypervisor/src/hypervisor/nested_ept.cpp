@@ -705,6 +705,34 @@ hypervisor::shadow_ept_pointer_for(std::size_t cpu, std::uint64_t eptp12)
     return this->shadow_ept_pointer[cpu][chosen];
 }
 
+void hypervisor::release_shadow_slot(std::size_t cpu, std::size_t slot)
+{
+    if (slot >= shadow_ept_slots) {
+        return;
+    }
+
+    this->shadow_ept_source[cpu][slot] = 0;
+    this->shadow_ept_generation_seen[cpu][slot] = 0;
+
+    for (std::size_t i{}; i < shadow_ept_tables_per_cpu; ++i) {
+        if ((slot + 1) == this->shadow_ept_table_slot[cpu][i]) {
+            this->shadow_ept_table_slot[cpu][i] = shadow_table_free;
+        }
+    }
+
+    this->shadow_ept_tables_used[cpu][slot] = 0;
+}
+
+void hypervisor::discard_shadow_ept_for(std::size_t cpu,
+                                        std::uint64_t root)
+{
+    for (std::size_t slot{}; slot < shadow_ept_slots; ++slot) {
+        if (root == this->shadow_ept_source[cpu][slot]) {
+            release_shadow_slot(cpu, slot);
+        }
+    }
+}
+
 void hypervisor::discard_shadow_ept(std::size_t cpu)
 {
     // Every slot, because INVEPT's all-context type names them all and the
@@ -718,7 +746,7 @@ void hypervisor::discard_shadow_ept(std::size_t cpu)
     // between now and then reads it. Deliberately not freeing the tables,
     // which the rebuild does for the slot it takes.
     for (std::size_t slot{}; slot < shadow_ept_slots; ++slot) {
-        this->shadow_ept_source[cpu][slot] = 0;
+        release_shadow_slot(cpu, slot);
     }
 }
 
