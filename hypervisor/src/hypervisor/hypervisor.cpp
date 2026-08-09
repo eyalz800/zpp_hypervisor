@@ -6747,6 +6747,17 @@ void hypervisor::record_exit(arch::x86_64::vmx::exit_reason reason)
     recorded.rip = vmcs.guest_rip();
     recorded.repeated = 1;
 
+    // Only the two reasons that report one, so nothing else pays a VMREAD
+    // on a path taken by every exit.
+    constexpr std::uint64_t ept_violation = 48;
+    constexpr std::uint64_t ept_misconfiguration = 49;
+    constexpr std::uint64_t basic_reason_mask = 0xffff;
+
+    if (auto basic = recorded.reason & basic_reason_mask;
+        (ept_violation == basic) || (ept_misconfiguration == basic)) {
+        recorded.guest_physical = vmcs.guest_physical_address();
+    }
+
     ++count;
 
     // A repeat grows the entry already there rather than taking a slot,
@@ -6774,7 +6785,8 @@ void hypervisor::record_exit(arch::x86_64::vmx::exit_reason reason)
             (previous.qualification == recorded.qualification) &&
             (previous.activity_state == recorded.activity_state) &&
             (previous.cs_selector == recorded.cs_selector) &&
-            (previous.rip == recorded.rip)) {
+            (previous.rip == recorded.rip) &&
+            (previous.guest_physical == recorded.guest_physical)) {
             ++previous.repeated;
             --count;
             return;

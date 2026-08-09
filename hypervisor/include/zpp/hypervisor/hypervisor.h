@@ -3066,6 +3066,21 @@ private:
         std::uint64_t rip{};
 
         /**
+         * The guest-physical address the exit reported, for the two
+         * reasons that report one - EPT violation and EPT
+         * misconfiguration. Zero for every other reason, and not read for
+         * them either: it is one more VMREAD on a path that runs on every
+         * exit.
+         *
+         * Worth its slot because the qualification says what kind of page
+         * refused the access and never which page. "A read-modify-write
+         * to something readable and executable but not writable" is every
+         * watched page at once, and which one it is decides who is at
+         * fault.
+         */
+        std::uint64_t guest_physical{};
+
+        /**
          * How many times in a row this exact exit repeated, counting the
          * first. One for an ordinary entry.
          *

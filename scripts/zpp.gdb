@@ -111,6 +111,9 @@ define zppexits
     printf "  %2d reason 0x%lx qual 0x%lx activity %lu cs 0x%lx rip 0x%lx", \
       $i, $e->reason, $e->qualification, $e->activity_state, \
       $e->cs_selector, $e->rip
+    if $e->guest_physical != 0
+      printf " gpa 0x%lx", $e->guest_physical
+    end
     if $e->repeated > 1
       printf " [times=%lu]", $e->repeated
     end
