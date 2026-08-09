@@ -55,27 +55,63 @@ done
 [ "$SPAN" -gt 0 ] || SPAN=$((0x400000))
 CPUS=${ZPP_CPUS:-8}
 
-# batch mode, so a stub that never answers ends the run instead of
-# leaving an interactive gdb nobody is watching.
-x86_64-elf-gdb -q -batch \
-    -ex "set confirm off" \
-    -ex "set pagination off" \
-    -ex "target remote ${RIG#*@}:$PORT" \
-    -ex "add-symbol-file $ELF -o $BASE" \
-    -ex "source scripts/zpp.gdb" \
-    -ex "info threads" \
-    -ex "set \$zpp_base = $BASE" \
-    -ex "set \$zpp_end = $BASE + $SPAN" \
-    -ex "set \$zpp_cpus = $CPUS" \
-    -ex "zppcpu" \
-    -ex "set logging file $OUT" \
-    -ex "set logging redirect on" \
-    -ex "set logging overwrite on" \
-    -ex "set logging enabled on" \
-    -ex "zpplog" \
-    -ex "zppwhy" \
-    -ex "zppexits 0" \
-    -ex "set logging enabled off" \
-    -ex "detach"
+# Attaching samples one instant, and at that instant every processor may
+# be in guest context - which is the normal case for a guest that is
+# running well, since that is where a guest spends its time. Nothing can
+# be read then, so this samples again rather than reporting a healthy
+# guest as unreadable. Attach, look, detach: each attempt lands somewhere
+# else, and the guest keeps running between them.
+ATTEMPTS=${ZPP_DUMP_ATTEMPTS:-12}
+
+attempt=1
+while [ "$attempt" -le "$ATTEMPTS" ]; do
+    # batch mode, so a stub that never answers ends the run instead of
+    # leaving an interactive gdb nobody is watching.
+    OUTPUT=$(x86_64-elf-gdb -q -batch \
+        -ex "set confirm off" \
+        -ex "set pagination off" \
+        -ex "target remote ${RIG#*@}:$PORT" \
+        -ex "add-symbol-file $ELF -o $BASE" \
+        -ex "source scripts/zpp.gdb" \
+        -ex "info threads" \
+        -ex "set \$zpp_base = $BASE" \
+        -ex "set \$zpp_end = $BASE + $SPAN" \
+        -ex "set \$zpp_cpus = $CPUS" \
+        -ex "zppcpu" \
+        -ex "set logging file $OUT" \
+        -ex "set logging redirect on" \
+        -ex "set logging overwrite on" \
+        -ex "set logging enabled on" \
+        -ex "zpplog" \
+        -ex "zppwhy" \
+        -ex "zppexits 0" \
+        -ex "zppexits 1" \
+        -ex "zppexits 2" \
+        -ex "set logging enabled off" \
+        -ex "detach" 2>&1)
+
+    case "$OUTPUT" in
+        *"could not connect"*)
+            echo "$OUTPUT" | tail -3
+            echo "no gdb stub on port $PORT - launch with" >&2
+            echo "  ZPP_QEMU_EXTRA=\"-gdb tcp:0.0.0.0:$PORT\" sudo -E ./boot-zpp.sh" >&2
+            exit 1
+            ;;
+        *"reading from cpu"*)
+            echo "$OUTPUT" | grep "reading from cpu"
+            break
+            ;;
+    esac
+
+    echo "attempt $attempt: every processor was in guest context"
+    attempt=$((attempt + 1))
+done
+
+if [ "$attempt" -gt "$ATTEMPTS" ]; then
+    echo "no processor entered the module in $ATTEMPTS attaches." >&2
+    echo "the guest may be running entirely in guest context - which is" >&2
+    echo "healthy - or stopped. Ask the monitor: info status." >&2
+    exit 1
+fi
 
 echo "log ring in $OUT: $(wc -l < "$OUT") lines"
