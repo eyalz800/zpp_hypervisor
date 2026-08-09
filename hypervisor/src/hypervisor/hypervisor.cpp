@@ -7026,6 +7026,42 @@ void hypervisor::setup_vmcs(arch::x86_64::context & guest_context)
         this->cached_vmx_msr(vmx_msr::true_pin_based_controls),
         arch::x86_64::vmx::vm_execution_controls::pin::nmi_exiting));
 
+    // Trapping MONITOR and MWAIT, which is **off**, and the reason is a
+    // measurement rather than a preference.
+    //
+    // Neither is emulated: the handler logs the first one per processor
+    // and resumes. So the only thing the two controls bought was that
+    // first line - and they were charging two VM exits for every
+    // iteration of every idle loop in the guest, for ever.
+    //
+    // What that costs is not marginal. A UEFI firmware parks its
+    // application processors in `monitor; mwait; jmp`, and this VMM now
+    // adopts those processors, so all seven of them sat in that loop
+    // taking exits. Measured on the rig: exit reasons 36 and 39
+    // alternating in every processor's exit ring, 1,190,000 exits each in
+    // under two minutes, against 1,000,000 on the boot processor that was
+    // actually trying to boot Windows - and a guest hypervisor above
+    // managing 11 second-level entries in 25 seconds while that went on.
+    //
+    // Not trapping them also lets MWAIT do what the guest asked: idle the
+    // processor. A processor idling that way is still reachable, because
+    // the one thing this VMM needs to wake it with is an NMI and an NMI
+    // ends MWAIT - see send_wake_nmi, which exists for the harder case of
+    // a halted processor.
+    //
+    // Turn it on to ask questions about a guest's idle path - whether it
+    // reaches MWAIT, on which processor, and whether its monitor arms -
+    // and turn it off again afterwards.
+    constexpr bool trap_monitor_and_mwait = false;
+
+    auto monitor_controls =
+        trap_monitor_and_mwait
+            ? (arch::x86_64::vmx::vm_execution_controls::primary::
+                   mwait_exiting |
+               arch::x86_64::vmx::vm_execution_controls::primary::
+                   monitor_exiting)
+            : std::uint64_t{};
+
     vmcs.primary_processor_based_vm_execution_controls(
         arch::x86_64::vmx::adjust_msr(
             this->cached_vmx_msr(vmx_msr::true_processor_based_controls),
@@ -7035,10 +7071,7 @@ void hypervisor::setup_vmcs(arch::x86_64::context & guest_context)
                     enable_msr_bitmaps |
                 arch::x86_64::vmx::vm_execution_controls::primary::
                     enable_io_bitmaps |
-                arch::x86_64::vmx::vm_execution_controls::primary::
-                    mwait_exiting |
-                arch::x86_64::vmx::vm_execution_controls::primary::
-                    monitor_exiting));
+                monitor_controls));
 
     // The host runs in 64-bit mode after an exit, and DR7 and
     // IA32_DEBUGCTL are saved on the way out so the guest gets back what
