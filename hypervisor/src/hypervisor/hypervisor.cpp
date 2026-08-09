@@ -4007,6 +4007,12 @@ void hypervisor::emulate_init_signal(arch::x86_64::context & context)
 void hypervisor::emulate_start_up_ipi(arch::x86_64::context & context,
                                       std::uint64_t vector)
 {
+    // Logged because this is one of three ways into apply_start_up and
+    // the only one with no line of its own, which left "who called it"
+    // unanswerable from a log - and the answer is the whole question when
+    // apply_start_up declines to apply anything.
+    log("cpu {} start-up ipi exit, vector {}", this->vmcs.vpid(), vector);
+
     // Reached whenever this processor's INIT left it waiting on hardware,
     // which is every INIT on bare metal and under Bochs. Under a layer
     // that discards the IPI while this VMM is in root mode the INIT
@@ -6371,6 +6377,15 @@ void hypervisor::apply_start_up(arch::x86_64::context & context,
     // second one, which it does not do reliably.
     if (auto cpu = vmcs.vpid() - 1; cpu < max_cpus) {
         if (this->started_by_start_up_ipi[cpu]) {
+            // Said out loud, because returning here leaves the guest
+            // state as whoever built it last, and on a processor coming
+            // out of the trampoline that state is this VMM's own C frame
+            // - an unusable CS and a RIP inside this module, which VM
+            // entry then rejects. Silently declining to apply start-up
+            // state and silently failing to enter look identical from
+            // outside, and one of them is this function's fault.
+            log("cpu {} start-up already applied, not applying again",
+                cpu);
             return;
         }
         this->started_by_start_up_ipi[cpu] = true;
