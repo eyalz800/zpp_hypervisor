@@ -3946,7 +3946,8 @@ void hypervisor::emulate_init_signal(arch::x86_64::context & context)
             if (auto state = handoff.load();
                 start_up_handoff_state::is_delivered(state)) {
                 apply_start_up(context,
-                               start_up_handoff_state::vector(state));
+                               start_up_handoff_state::vector(state),
+                               "init wait");
                 return;
             }
             zpp::spin_hint();
@@ -3973,7 +3974,8 @@ void hypervisor::emulate_init_signal(arch::x86_64::context & context)
                 expected, start_up_handoff_state::hardware_wait) &&
             start_up_handoff_state::is_delivered(expected)) {
             apply_start_up(context,
-                           start_up_handoff_state::vector(expected));
+                           start_up_handoff_state::vector(expected),
+                           "init race");
             return;
         }
     } else {
@@ -4018,7 +4020,7 @@ void hypervisor::emulate_start_up_ipi(arch::x86_64::context & context,
     // that discards the IPI while this VMM is in root mode the INIT
     // handler waits for the vector in root mode instead and has already
     // applied it by now, so this exit never arrives there.
-    apply_start_up(context, vector);
+    apply_start_up(context, vector, "sipi exit");
 }
 
 std::uint64_t hypervisor::local_apic_id()
@@ -6363,7 +6365,8 @@ void hypervisor::start_up_on_this_processor(std::uint64_t slot)
 }
 
 void hypervisor::apply_start_up(arch::x86_64::context & context,
-                                std::uint64_t vector)
+                                std::uint64_t vector,
+                                const char * from)
 {
     auto & vmcs = this->vmcs;
 
@@ -6384,8 +6387,10 @@ void hypervisor::apply_start_up(arch::x86_64::context & context,
             // entry then rejects. Silently declining to apply start-up
             // state and silently failing to enter look identical from
             // outside, and one of them is this function's fault.
-            log("cpu {} start-up already applied, not applying again",
-                cpu);
+            log("cpu {} start-up already applied, not applying again, "
+                "asked by {}",
+                cpu,
+                from);
             return;
         }
         this->started_by_start_up_ipi[cpu] = true;
@@ -7983,7 +7988,8 @@ hypervisor::main(arch::x86_64::context & caller_context)
     // fields described the boot processor's firmware state and is
     // overwritten here - it was only ever a starting point.
     if (from_trampoline && (cpuid < max_cpus)) {
-        apply_start_up(caller_context, this->guest_start_up_vector[cpuid]);
+        apply_start_up(
+            caller_context, this->guest_start_up_vector[cpuid], "launch");
 
         // And, on a resume, at the exact address rather than at the page.
         //

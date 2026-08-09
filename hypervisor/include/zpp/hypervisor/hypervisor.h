@@ -1763,7 +1763,8 @@ private:
      * start-up IPI, and leaves it runnable at the vector.
      */
     void apply_start_up(arch::x86_64::context & context,
-                        std::uint64_t vector);
+                        std::uint64_t vector,
+                        const char * from = "?");
 
     /**
      * Handles an intercepted write to the x2APIC interrupt command
