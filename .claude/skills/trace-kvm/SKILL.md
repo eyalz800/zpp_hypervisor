@@ -32,9 +32,23 @@ Read every tracefs control with `sudo`. An empty answer is not "off", it
 is "you could not read it".
 
 Once armed as root, a fifteen second capture produced **3,281,493 lines**
-with ssh untouched and no D-state process. Use
-`vm/trace-capture.sh <seconds> <output>`, then collect the file with an
-ordinary read - a regular file cannot block the way a pipe can.
+with ssh untouched and no D-state process.
+
+**Nothing is written on the rig.** Its /tmp is a RAM disk shared with a
+guest that wants nearly all of memory, so the trace streams here instead:
+
+    ssh rig 'sudo vm/trace-stream.sh 120'
+    ssh rig 'timeout 130 cat /tmp/zpp-trace.fifo' > /tmp/kvm.log
+
+A FIFO is what reconciles the two rules that pull against each other. It
+stores nothing, so the RAM disk never grows; the process that touches
+tracefs is detached with setsid, so a blocked read takes no ssh session
+with it; and the session reads only the FIFO, whose blocking read is an
+ordinary interruptible one that can always be killed.
+
+Streaming to a netcat listener on the development machine does *not*
+work - the firewall there refuses inbound connections, and the rig's
+`nc` simply fails. The FIFO needs no inbound port.
 
 Four hypotheses were tested and are **wrong**; do not re-propose them:
 
