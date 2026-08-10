@@ -81,12 +81,43 @@ if [ "$LOCAL" != "$REMOTE" ]; then
 fi
 
 # --- boot -------------------------------------------------------------
+#
+# The guest's NVRAM is NOT reset here, and must not be. This used to run
+#     cp RELEASEX64_OVMF_VARS.fd.orig RELEASEX64_OVMF_VARS.fd
+# which is what selects whether this hypervisor runs at all. Checked on
+# every saved copy - .orig, .pristine, .mysynth, .beforetest, .kvmrun -
+# and not one of them carries a boot option naming \EFI\zpp\zpp_loader.efi.
+# Their BootOrder leads with a "Windows Boot Manager" option pointing
+# straight at \EFI\MICROSOFT\BOOT\BOOTMGFW.EFI, which is the genuine
+# Microsoft binary: 37 hits for "Microsoft" in it and none for "zpp".
+#
+# So resetting the NVRAM boots Windows perfectly well with nothing
+# underneath it, which is the worst shape a failure can take - every
+# counter read afterwards is a real number describing a machine this
+# hypervisor was never on. The tell is in the serial log, which ends at
+# `BdsDxe: starting Boot0003 "Windows Boot Manager"` and holds no `zpp:`
+# line anywhere. The check below is that tell, made fatal.
 rig 120 '
     cd /home/tc/vm
-    cp RELEASEX64_OVMF_VARS.fd.orig RELEASEX64_OVMF_VARS.fd
     export ZPP_QEMU_EXTRA="-monitor telnet:0.0.0.0:'"$MONITOR_PORT"',server,nowait"
     setsid nohup sudo -E ./boot-zpp.sh > /home/tc/zpp/boot.log 2>&1 < /dev/null &
     sleep 2' > /dev/null 2>&1 || true
+
+# Did this hypervisor run at all? Asked before anything is measured,
+# because "Windows reached its kernel" is true of a guest with nothing
+# underneath it, and that is the one failure a boot test must never
+# report as a pass. The loader says `zpp:` on serial long before the
+# firmware hands over, so an empty match is conclusive.
+if ! rig 30 'grep -ac "zpp:" /home/tc/zpp/serial.out' 2>/dev/null \
+     | grep -qE '^[1-9]'; then
+    say "SKIP: no 'zpp:' line on serial - the firmware booted something"
+    say "      other than the loader, so this run had no hypervisor in"
+    say "      it. Check the guest NVRAM's boot option before debugging"
+    say "      anything else."
+    rig 60 'sudo pkill -9 -x qemu-system-x86_64 2>/dev/null; true' \
+        > /dev/null 2>&1 || true
+    exit 125
+fi
 
 # Windows kernel addresses are fffff8..; sample until one shows up rather
 # than sleeping blind for the worst case.
