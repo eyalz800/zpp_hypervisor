@@ -1204,6 +1204,37 @@ static const semantic_case g_semantics[] = {
      .size = 8,
      .operand = 31},
 
+    // INC and DEC, whose whole difference from ADD and SUB of one is the
+    // carry flag surviving.
+    {.text = "incb (%rcx)",
+     .kind = model_kind::increment,
+     .size = 1,
+     .operand = 1},
+    {.text = "incw (%rcx)",
+     .kind = model_kind::increment,
+     .size = 2,
+     .operand = 1},
+    {.text = "incl (%rcx)",
+     .kind = model_kind::increment,
+     .size = 4,
+     .operand = 1},
+    {.text = "incq (%rcx)",
+     .kind = model_kind::increment,
+     .size = 8,
+     .operand = 1},
+    {.text = "decb (%rcx)",
+     .kind = model_kind::decrement,
+     .size = 1,
+     .operand = 1},
+    {.text = "decl (%rcx)",
+     .kind = model_kind::decrement,
+     .size = 4,
+     .operand = 1},
+    {.text = "decq (%rcx)",
+     .kind = model_kind::decrement,
+     .size = 8,
+     .operand = 1},
+
     // XADD, which writes a register as well as memory: the sum lands in
     // memory and what memory held lands in the register.
     {.text = "xaddb %dl, (%rcx)",
@@ -1397,6 +1428,20 @@ static void generate(code_size mode)
         }
     }
 
+    // INC and DEC, which are the only forms whose operation is entirely
+    // in the ModRM register field and whose operand is not in the
+    // instruction at all.
+    for (auto & width : widths) {
+        if (0 == width.count) {
+            continue;
+        }
+
+        for (std::size_t f{}; f < form_count; ++f) {
+            emit(std::string("inc") + width.suffix + " " + forms[f], mode);
+            emit(std::string("dec") + width.suffix + " " + forms[f], mode);
+        }
+    }
+
     // The same group with the offset in a register. The register has to
     // hold an offset inside the operand or the instruction names a
     // different word of memory and is refused, so these are the
@@ -1500,6 +1545,13 @@ static void generate_refusals()
     emit("btrl %r11d, (%rcx)", code_size::bits_64, expectation::refused);
     emit("btcw %r13w, (%rcx)", code_size::bits_64, expectation::refused);
     emit("btsq %r11, (%rcx)", code_size::bits_64, expectation::refused);
+
+    // Group 5's members that are not INC or DEC. Each reads its memory
+    // operand rather than modifying it, so emulating one as an increment
+    // would write memory the guest never asked to write and then run on
+    // from a control transfer that never happened.
+    emit("lcallq *(%rax)", code_size::bits_64, expectation::refused);
+    emit("ljmpq *(%rax)", code_size::bits_64, expectation::refused);
 
     // XADD reads and writes its register operand, so both guards apply.
     emit("xaddq %rsp, (%rcx)", code_size::bits_64, expectation::refused);

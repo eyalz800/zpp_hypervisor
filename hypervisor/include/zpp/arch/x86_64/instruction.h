@@ -261,6 +261,21 @@ struct decoded_instruction
     bool sign_extends{};
 
     /**
+     * Whether the carry flag survives the operation.
+     *
+     * INC and DEC are ADD and SUB of one in every respect but this one:
+     * "The CF flag is not affected. The OF, SF, ZF, AF, and PF flags are
+     * set according to the result" - `.references/sdm.txt:53379` for INC
+     * and `:45951` for DEC. The exception exists so that a loop counter
+     * can be updated "without disturbing the CF flag", which is the SDM's
+     * own reason for the instruction existing - so a guest using it is
+     * relying on the flag surviving. Clearing it changes the answer of an
+     * add-with-carry several instructions later, with nothing in between
+     * to point at.
+     */
+    bool preserves_carry{};
+
+    /**
      * Which kind of examination this is, for the forms that change nothing
      * but the flags. A compare subtracts; a test ands; a bit test reports
      * one bit in the carry flag. They are distinguished here rather than
@@ -1084,6 +1099,39 @@ decode(std::span<const std::byte> code,
             break;
         }
 
+        // INC and DEC, which are ADD and SUB of one everywhere except in
+        // the carry flag - see `preserves_carry`.
+        case 0xfe:
+        case 0xff: {
+            auto size =
+                instruction_detail::width_of(found, 0xfe == opcode);
+            fields = instruction_detail::read_modrm(at, found, mode);
+
+            if (fields.names_register()) {
+                return {};
+            }
+
+            // `/0` is INC and `/1` is DEC. `FE` defines nothing else at
+            // all, and `FF /2` through `/7` are CALL, far CALL, JMP, far
+            // JMP, PUSH and an invalid opcode. Every one of those reads
+            // the memory operand rather than modifying it, so emulating
+            // one as an increment would perform a write the guest never
+            // asked for *and* advance RIP past a control transfer that
+            // should have taken place - the guest would then run on from
+            // the instruction after a call it never made.
+            if (fields.reg > 1) {
+                return {};
+            }
+
+            result.what = memory_operation::combine;
+            result.how = (0 == fields.reg) ? combine_with::add
+                                           : combine_with::subtract;
+            result.size = size;
+            result.operand = 1;
+            result.preserves_carry = true;
+            break;
+        }
+
         // XCHG with memory, which is where a lock-free updater goes.
         case 0x86:
         case 0x87: {
@@ -1614,6 +1662,19 @@ flags_after(const decoded_instruction & instruction,
 
     auto cleared = before & ~status_flag::arithmetic;
 
+    // INC and DEC compute everything an ADD and a SUB of one do and then
+    // put the carry flag back as it was. Applied at the end rather than
+    // by not computing it, because the *other* five flags are the same
+    // ones and the arithmetic that produces them is the same arithmetic.
+    auto keep_carry = [&](std::uint64_t flags) {
+        if (!instruction.preserves_carry) {
+            return flags;
+        }
+
+        return (flags & ~status_flag::carry) |
+               (before & status_flag::carry);
+    };
+
     // A compare and a subtract set the same flags; a test and an AND
     // likewise. What differs is only whether the result is written back,
     // which is not this function's business.
@@ -1641,7 +1702,7 @@ flags_after(const decoded_instruction & instruction,
             flags |= status_flag::adjust;
         }
 
-        return flags;
+        return keep_carry(flags);
     }
 
     if (combine_with::add == instruction.how) {
@@ -1662,7 +1723,7 @@ flags_after(const decoded_instruction & instruction,
             flags |= status_flag::adjust;
         }
 
-        return flags;
+        return keep_carry(flags);
     }
 
     // The logical operations: carry and overflow cleared, the rest from
