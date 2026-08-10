@@ -9053,8 +9053,36 @@ hypervisor::main(arch::x86_64::context & caller_context)
                 arch::x86_64::cr4(cr4 | arch::x86_64::cr4_bits::os_xsave);
             }
 
-            arch::x86_64::xsetbv(context.rcx,
-                                 context.rax | (context.rdx << 32));
+            // CPL, which XSETBV requires to be zero. SDM: "#GP(0) If the
+            // current privilege level is not 0" - and CPL after a VM exit
+            // is bits 6:5 of the guest's SS access rights, since the
+            // segment registers themselves are the host's by then.
+            //
+            // Without this a ring-three thread in the guest could change
+            // XCR0, which no real processor permits.
+            constexpr std::uint64_t descriptor_privilege_shift = 5;
+            constexpr std::uint64_t descriptor_privilege_mask = 3;
+
+            auto cpl = (vmcs.guest_ss_access_rights() >>
+                        descriptor_privilege_shift) &
+                       descriptor_privilege_mask;
+
+            if (0 != cpl) {
+                inject_general_protection_fault();
+                advance_rip = false;
+                break;
+            }
+
+            // Masked to thirty-two bits each. SDM XSETBV: "the high-order
+            // 32 bits of each of RAX and RDX are ignored" - so the value
+            // is EDX:EAX, and ORing the whole of RAX in put whatever the
+            // guest left in its high half into XCR0. Every MSR path in
+            // this handler already masks; this one did not.
+            constexpr std::uint64_t low = 0xffffffffull;
+
+            arch::x86_64::xsetbv(context.rcx & low,
+                                 (context.rax & low) |
+                                     ((context.rdx & low) << 32));
             break;
         }
         case basic_reason::wrmsr:
