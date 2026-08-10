@@ -3661,6 +3661,33 @@ private:
      * @{
      */
     bool running_l2[max_cpus]{};
+
+    /**
+     * How many exits arrived with the interrupted-event field valid,
+     * split by which guest was running, and the first few raw values.
+     *
+     * The processor writes that field when a VM exit interrupts the
+     * *delivery* of an event it was in the middle of injecting, and the
+     * entry-interruption field it came from has already been cleared by
+     * then. So an event that is not re-queued from here is destroyed
+     * silently, and from the guest hypervisor's side that is
+     * indistinguishable from a delivery that succeeded.
+     *
+     * KVM re-queues it on every exit - `vmx_complete_interrupts`,
+     * `.references/kvm/vmx.c:7488` and `__vmx_complete_interrupts` at
+     * `:7105-7157`. This VMM reads the field in exactly two places and
+     * re-injects it in none, which is what these counters are here to
+     * measure rather than assume.
+     * @{
+     */
+    static constexpr std::size_t idt_vectoring_trace_capacity = 16;
+    std::uint64_t idt_vectoring_l1[max_cpus]{};
+    std::uint64_t idt_vectoring_l2[max_cpus]{};
+    std::uint64_t idt_vectoring_trace[idt_vectoring_trace_capacity]{};
+    std::uint64_t idt_vectoring_trace_count{};
+    /**
+     * @}
+     */
     bool vmcs02_launched[max_cpus]{};
     bool l2_entry_logged[max_cpus]{};
     /**

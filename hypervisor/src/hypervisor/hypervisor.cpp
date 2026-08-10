@@ -9074,6 +9074,35 @@ hypervisor::main(arch::x86_64::context & caller_context)
         // guest hypervisor asked for cannot happen, since the controls
         // that produced it are the union of the two, and everything not
         // named in the decision is reflected.
+        // Did this exit interrupt an event the processor was in the
+        // middle of delivering? One VMREAD, before anything decides what
+        // to do with the exit, because the answer is destroyed by the
+        // next entry.
+        if (auto slot = vmcs.vpid(); (0 != slot) && (slot <= max_cpus)) {
+            auto cpu = slot - 1;
+            constexpr std::uint64_t vectoring_valid = 1ull << 31;
+
+            if (auto vectoring =
+                    vmcs.read(arch::x86_64::vmx::vmcs::field::
+                                  idt_vectoring_information_field);
+                0 != (vectoring & vectoring_valid)) {
+                if (this->running_l2[cpu]) {
+                    this->idt_vectoring_l2[cpu] =
+                        this->idt_vectoring_l2[cpu] + 1;
+                } else {
+                    this->idt_vectoring_l1[cpu] =
+                        this->idt_vectoring_l1[cpu] + 1;
+                }
+
+                if (auto at = this->idt_vectoring_trace_count;
+                    at < idt_vectoring_trace_capacity) {
+                    this->idt_vectoring_trace[at] =
+                        vectoring | (full_reason.value() << 32);
+                    this->idt_vectoring_trace_count = at + 1;
+                }
+            }
+        }
+
         if constexpr (nested_vmx::enabled) {
             if (auto slot = vmcs.vpid(); (0 != slot) &&
                                          (slot <= max_cpus) &&

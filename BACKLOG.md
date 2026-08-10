@@ -5663,3 +5663,56 @@ its own state about that guest, and the part of that state this VMM
 touches is **vmcs12**. A field that is not written back after a
 second-level exit would leave Hyper-V reading a stale answer to exactly
 that question, on every processor, deterministically.
+
+### Found it: an interrupted event delivery is destroyed, never re-queued
+
+When a VM exit interrupts the *delivery* of an event the processor was
+injecting, the entry-interruption field has already been cleared by the
+hardware that failed to deliver it. The only record left is the
+interrupted-event field, and the next VM entry destroys that too. So an
+event that is not re-queued is gone, and from the guest hypervisor's
+side that is **indistinguishable from a delivery that succeeded**.
+
+KVM re-queues it on every single exit - `vmx_complete_interrupts`
+(`.references/kvm/vmx.c:7488`), `__vmx_complete_interrupts`
+(`vmx.c:7105-7157`), which restores the vector, the error code
+(`:7142-7146`) and the instruction length for a software event
+(`:7139`, `:7149`). **This VMM reads that field in two places and
+re-injects it in none.**
+
+Measured rather than argued. One VMREAD per exit, no behaviour change,
+four processors, read at the freeze:
+
+```
+idt_vectoring_l1[0..3] = 0, 0, 0, 0     the guest hypervisor: never
+idt_vectoring_l2[0..3] = 4, 2, 2, 1     the root partition: nine times
+```
+
+and every one of the nine was interrupted by an **EPT violation**:
+
+| vector | type | count |
+|---|---|---|
+| 47 (`0x2f`) | external interrupt | 2 |
+| 209 (`0xd1`) | external interrupt | 5 |
+| 14 | hardware exception, error code valid | 3 |
+
+Vector `0x2f` is the one the root partition sends through the synthetic
+interrupt command register to wake another processor - the wake-up whose
+disappearance this whole investigation has been circling. `0xd1` is its
+clock. And vector 14 is a **page fault**: the guest's own faults are
+being thrown away too.
+
+The mechanism is exactly why it is the second-level guest and never the
+guest hypervisor. `l0_wants_l2_exit` claims **every** EPT violation
+unconditionally (`nested_entry.cpp:1505-1512`), against a shadow table
+built lazily - 15,541 builds against 472,262 hits on one boot. So a
+delivery into the second-level guest that touches a not-yet-shadowed
+page faults to this VMM, which installs the leaf, returns `handled`, and
+resumes vmcs02 with the event already erased.
+
+That accounts for the whole failure in order: a halted processor's wake
+interrupt is destroyed, so it is never resumed; its clock is destroyed,
+so it does not wake on time either; Windows never gets far enough to
+configure the disk; every processor ends halted with nothing pending and
+nothing armed. And it is deterministic because the shadow table is cold
+at the same point in every boot.
