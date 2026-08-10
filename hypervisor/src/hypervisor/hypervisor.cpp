@@ -6846,7 +6846,31 @@ bool hypervisor::start_application_processor(std::size_t slot,
 
     this->guest_start_up_vector[slot] = guest_vector;
     this->started_by_trampoline[slot] = true;
-    this->start_up_launched[slot] = false;
+
+    // `start_up_launched[slot] = false` used to be here, and taking it
+    // out is the rest of the fix the re-test above only half made.
+    //
+    // The re-test narrows the window and cannot close it, because the
+    // target does not take this lock: it marks itself virtualized and
+    // then launched from inside `main`, so a sender can read "not
+    // virtualized", have the target mark itself in the gap, and then
+    // clear a flag belonging to a processor that is running. Measured in
+    // tests/ap_start_up as five rounds in four hundred with the clear
+    // still present, and none without it.
+    //
+    // Nothing needs it cleared. The flag is written true by `main` on the
+    // target and false only by `rewind_for_resume`, which runs on one
+    // processor with nothing else alive - so a processor that has never
+    // launched already reads false, and one that has reads true, which is
+    // the answer the wait below wants anyway. Removing the write makes
+    // the target the only writer of the "up" edge, which is what a flag
+    // that means "this processor is running the guest" has to be.
+    //
+    // It matters because of who else reads it:
+    // `wait_for_ept_acknowledgement` skips a processor whose flag is
+    // clear, on the argument that it holds no translation. Clearing it
+    // for a running processor takes that processor out of every extended
+    // page table rendezvous from then on, silently and for good.
 
     auto & area = *reinterpret_cast<arch::x86_64::ap_start_up_area *>(
         this->start_up_memory + arch::x86_64::ap_start_up_area_offset);

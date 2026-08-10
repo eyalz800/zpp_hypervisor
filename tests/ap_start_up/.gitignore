@@ -1,0 +1,8 @@
+# The built harness.
+apstart
+apstart.dSYM/
+
+# The function bodies build.sh cuts out of hypervisor.cpp. Generated on
+# every run, so committing it would let it drift from the source it is
+# supposed to be a copy of.
+real.cpp
