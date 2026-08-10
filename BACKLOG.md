@@ -5517,3 +5517,34 @@ That last point is where this stands: the interrupt is sent through an
 interface this VMM does not implement and does not intercept, to a
 processor this VMM has demonstrably started, and it is delivered at the
 level beneath - and the target still never runs.
+
+### All-context INVEPT: a real defect, and not this one
+
+`invalidate_ept_locally` built its descriptor from `epml4_physical` -
+**this VMM's own** extended page table root - and issued a
+**single-context** invalidation. Two of its callers change a *shadow*
+table whose root is a different address entirely: the slot recycled in
+`shadow_ept_pointer_for`, and the leaf installed on a second-level
+guest's fault. Naming one context while a different one changed
+invalidates nothing that moved.
+
+That is a genuine defect and the header's own description of the design
+already assumed a global invalidation that did not exist, so it is now
+all-context and stays that way. INVVPID could never have covered for it:
+SDM 31.4.3.2 says it "is not required to invalidate any guest-physical
+mappings", and KVM relies on the same rule
+(`nested.c:1209-1213`).
+
+**It does not fix the boot.** Measured on four processors with the
+change in: frozen at 82,143 second-level entries, application
+processors at 372 / 347 / 323 - the same signature to within the usual
+few dozen. Recorded so the fix is not mistaken for a cure, and so
+nobody re-runs it.
+
+That is now three plausible, well-argued, code-grounded candidates that
+changed nothing when tried: the start-up concurrency fixes, announcing
+the hypervisor-present bit, and this. The pattern is worth naming: every
+one of them was a defect found by reading, and none of them was the one
+the machine is actually dying of. **The measurements that narrowed the
+failure have all come from instrumenting the running machine, and none
+from reading the source.**

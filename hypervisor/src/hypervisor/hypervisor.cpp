@@ -906,9 +906,36 @@ void hypervisor::invalidate_ept_locally()
     // function ever performed failed with "invalid operand to
     // INVEPT/INVVPID" and left the mapping cached. The signature now takes
     // an integer so the mistake cannot be spelled.
-    constexpr std::uint64_t single_context = 1;
+    //
+    // All-context, not single-context, and the descriptor above is
+    // therefore ignored - SDM 31.4.3.1 says an all-context invalidation
+    // takes no EPTP from the operand.
+    //
+    // Single-context was wrong for most of the callers. The descriptor it
+    // builds names `epml4_physical`, which is *this VMM's own* extended
+    // page table root, but two of the callers change a **shadow** table
+    // whose root is a different address entirely - the one recycled in
+    // shadow_ept_pointer_for, and the leaf installed on a second-level
+    // guest's fault. Naming one context and changing another invalidates
+    // nothing that moved and leaves the stale translation cached, which
+    // is precisely the failure this cannot afford: a guest hypervisor
+    // whose flush appears to succeed and does not take effect retries it,
+    // and the boot measured on the rig ends in an escalating storm of
+    // flush hypercalls and inter-processor interrupts.
+    //
+    // INVVPID cannot cover for it. SDM 31.4.3.2: "The INVVPID instruction
+    // is not required to invalidate any guest-physical mappings", and
+    // KVM says the same where it relies on it - nested.c:1209-1213, "EPT
+    // is a special snowflake, as guest-physical mappings aren't flushed
+    // on VPID invalidations".
+    //
+    // The header's own description of this design already assumed a
+    // global invalidation; there simply was not one. All-context is what
+    // it claimed and costs nothing here, because every context this
+    // processor holds belongs to this VMM.
+    constexpr std::uint64_t all_context = 2;
 
-    if (0 != arch::x86_64::vmx::invept(single_context, &operand)) {
+    if (0 != arch::x86_64::vmx::invept(all_context, &operand)) {
         // Nothing useful to do with a failure here - the caller has
         // already changed the entry - but it must not pass silently,
         // because the symptom is a watch that never fires.
