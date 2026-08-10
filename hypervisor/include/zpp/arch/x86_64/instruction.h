@@ -1002,13 +1002,26 @@ decode(std::span<const std::byte> code,
             break;
         }
 
-        // TEST against a register, and against an immediate. Neither
-        // changes memory; both are worth decoding so that a watch sees the
-        // access rather than falling back to stepping.
+        // CMP and TEST against a register. Neither changes memory; both
+        // are worth decoding so that a watch sees the access rather than
+        // falling back to stepping. They differ only in the flags, which
+        // is what `compares` records: a compare subtracts where a test
+        // ands.
+        //
+        // CMP's 0x38 and 0x39 have the same direction as the
+        // read-modify-write group above - memory is the first operand -
+        // so the flags are those of `memory - register`, which is what
+        // the `subtracting` path in `flags_after` already computes for
+        // the immediate form `0x81 /7`. 0x3a and 0x3b are the reversed
+        // direction, where the register is the destination and the
+        // subtraction is the other way round; they are not offered, for
+        // the same reason 0x02 and 0x03 are not.
+        case 0x38:
+        case 0x39:
         case 0x84:
         case 0x85: {
-            auto size =
-                instruction_detail::width_of(found, 0x84 == opcode);
+            auto byte_form = (0 == (opcode & 1));
+            auto size = instruction_detail::width_of(found, byte_form);
             fields = instruction_detail::read_modrm(at, found, mode);
 
             if (fields.names_register()) {
@@ -1029,10 +1042,12 @@ decode(std::span<const std::byte> code,
                 return {};
             }
 
-            // TEST ands its operands without storing the result.
+            // TEST ands its operands without storing the result; CMP
+            // subtracts them without storing it.
             result.what = memory_operation::examine;
             result.size = size;
             result.operand = operand_of(index, size);
+            result.compares = (0x38 == opcode) || (0x39 == opcode);
             break;
         }
 

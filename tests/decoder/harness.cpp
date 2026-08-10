@@ -1138,6 +1138,22 @@ static const semantic_case g_semantics[] = {
      .kind = model_kind::compare,
      .size = 8,
      .operand = 0xffff'ffff'ffff'ffff},
+    {.text = "cmpb %dl, (%rcx)",
+     .kind = model_kind::compare,
+     .size = 1,
+     .operand = 0xbb},
+    {.text = "cmpl %edx, (%rcx)",
+     .kind = model_kind::compare,
+     .size = 4,
+     .operand = 0xbbbb'bbbb},
+    {.text = "cmpq %rdx, (%rcx)",
+     .kind = model_kind::compare,
+     .size = 8,
+     .operand = 0xaaaa'aaaa'bbbb'bbbb},
+    {.text = "cmpw %r9w, (%rcx)",
+     .kind = model_kind::compare,
+     .size = 2,
+     .operand = 0x0007},
     {.text = "testl %edx, (%rcx)",
      .kind = model_kind::test,
      .size = 4,
@@ -1235,7 +1251,7 @@ static void generate(code_size mode)
 
     // The read-modify-write group and the stores, register source.
     static const char * const to_memory[] = {
-        "add", "or", "and", "sub", "xor", "mov", "xchg", "test"};
+        "add", "or", "and", "sub", "xor", "mov", "xchg", "test", "cmp"};
 
     for (auto * mnemonic : to_memory) {
         for (auto & width : widths) {

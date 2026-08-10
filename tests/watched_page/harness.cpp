@@ -486,7 +486,7 @@ static void cmp_mem_imm()
 
 static void cmp_mem_reg32()
 {
-    set_code({0x39, 0x03}); // cmp [rbx], eax - refused, see below
+    set_code({0x39, 0x03}); // cmp [rbx], eax
 }
 
 static void test_mem_reg32()
@@ -1014,24 +1014,61 @@ static void test_carry_out()
               "cmp of equal operands sets the zero flag");
     }
 
-    // CMP with a *register* operand is not decoded at all. The group at
-    // instruction.h:906-915 carries ADD, OR, AND, SUB and XOR against a
-    // register but not 0x38/0x39, while the immediate form 0x83 /7 and
-    // TEST against a register are both handled. Refusing is safe - the
-    // caller steps - so this is coverage rather than a defect, recorded
-    // so the next person does not assume the group is complete.
+    // CMP with a *register* operand, which used to be refused: the
+    // register group carried ADD, OR, AND, SUB and XOR but not
+    // 0x38/0x39, while the immediate form 0x83 /7 and TEST against a
+    // register were both there. This asserted the refusal; it now
+    // asserts the emulation, end to end, and the flags are the
+    // interesting half - a compare that leaves RFLAGS alone sends the
+    // guest down the other branch.
     {
         reset();
         cmp_mem_reg32();
 
         context registers{};
         registers.rbx = base() + 0x40;
+        registers.rax = 0x12;
+        put32(0x40, 0x12);
+        write_field(field::guest_rflags, 0x2 | status_flag::carry);
 
-        check(!arch::x86_64::decode(std::as_bytes(std::span{g_code}),
-                                    registers,
-                                    g_code_size)
-                   .has_value(),
-              "cmp r/m32, r32 is refused by the decoder and stepped");
+        guest_write performed{};
+        auto changed = false;
+
+        check(run(registers, base() + 0x40, performed, changed),
+              "cmp against a register is carried out");
+        check(!changed, "cmp changes no memory");
+        check(0x12 == at32(0x40), "so memory is untouched");
+        check(0 != (hv().vmcs.guest_rflags() & status_flag::zero),
+              "cmp of equal operands sets the zero flag");
+        check(0 == (hv().vmcs.guest_rflags() & status_flag::carry),
+              "and clears the carry flag it was given");
+    }
+
+    // The same, with memory *below* the register, which is the case that
+    // tells the two directions apart: 0x38/0x39 subtract the register
+    // from memory, and getting it the other way round sets the carry and
+    // sign flags backwards.
+    {
+        reset();
+        cmp_mem_reg32();
+
+        context registers{};
+        registers.rbx = base() + 0x40;
+        registers.rax = 0x20;
+        put32(0x40, 0x10);
+        write_field(field::guest_rflags, 0x2);
+
+        guest_write performed{};
+        auto changed = false;
+
+        check(run(registers, base() + 0x40, performed, changed),
+              "cmp against a larger register is carried out");
+        check(0 != (hv().vmcs.guest_rflags() & status_flag::carry),
+              "memory below the register borrows");
+        check(0 != (hv().vmcs.guest_rflags() & status_flag::sign),
+              "and leaves a negative result");
+        check(0 == (hv().vmcs.guest_rflags() & status_flag::zero),
+              "and no zero flag");
     }
 
     {
