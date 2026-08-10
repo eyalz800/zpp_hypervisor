@@ -2184,8 +2184,24 @@ void hypervisor::reflect_l2_exit(std::size_t cpu,
     auto & shadow = this->guest_vmcs12[cpu];
 
     // The guest state first, while the VMCS that ran the second-level
-    // guest is still current.
-    save_l2_state(cpu);
+    // guest is still current - unless this is a VM-entry failure, which
+    // saves none of it.
+    //
+    // SDM 29.8 lists what an entry failure does *not* do, and the third
+    // item is "The guest-state area is not modified." KVM's is the same
+    // shape: `nested_vmx_enter_non_root_mode`'s `vmentry_fail_vmexit`
+    // label calls `load_vmcs12_host_state` and writes the exit reason,
+    // and reaches no `sync_vmcs02_to_vmcs12` on that path
+    // (.references/kvm/nested.c:3640-3651).
+    //
+    // Not a tidy-up. It is what makes an entry failure reflectable from
+    // a point where the second-level guest never ran and vmcs02 may not
+    // even be the current VMCS: save_l2_state reads whichever VMCS *is*
+    // current, so on that path it would copy the guest hypervisor's own
+    // registers into its guest's state area.
+    if (!reason.entry_failure()) {
+        save_l2_state(cpu);
+    }
 
     shadow.write(field::exit_reason, reason.value());
     shadow.write(field::exit_qualification, qualification);
@@ -2241,16 +2257,24 @@ void hypervisor::reflect_l2_exit(std::size_t cpu,
     // SDM 30.4: the VM-exit MSR-store area is processed after the guest
     // state is saved and before host state is loaded, so it reads the
     // values the second-level guest was running with.
+    //
+    // Skipped on an entry failure for the same reason the guest state is,
+    // and from the same list: SDM 29.8's "No MSRs are saved into the
+    // VM-exit MSR-store area." The MSR-*load* area below is not on that
+    // list - 29.8 step 4 performs it - so only this half moves.
     auto aborted = false;
 
-    if (auto stored = store_nested_msrs(
-            shadow.read(field::vm_exit_msr_store_address),
-            shadow.read(field::vm_exit_msr_store_count));
-        !stored) {
-        aborted = true;
-        log("cpu {} could not store the guest hypervisor's exit msrs: {}",
-            cpu,
-            stored.error().code());
+    if (!reason.entry_failure()) {
+        if (auto stored = store_nested_msrs(
+                shadow.read(field::vm_exit_msr_store_address),
+                shadow.read(field::vm_exit_msr_store_count));
+            !stored) {
+            aborted = true;
+            log("cpu {} could not store the guest hypervisor's exit "
+                "msrs: {}",
+                cpu,
+                stored.error().code());
+        }
     }
 
     // Back onto the VMCS that runs the guest hypervisor.
