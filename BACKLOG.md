@@ -813,7 +813,10 @@ A smaller adjacent finding, recorded so it is not mistaken for a defect:
 read-modify-write group, even though the immediate form `0x83 /7` and
 `TEST` against a register both are. Refusing is always safe — the caller
 steps — so this is missing coverage rather than a bug, and it costs one
-stepped write per occurrence.
+stepped write per occurrence. **Closed** — see the eighth review at the
+end of this file, which adds it along with BT/BTS/BTR/BTC against a
+register, XADD, INC, DEC and CMPXCHG, and records the defect found while
+adding them.
 
 ## Closed
 
@@ -4122,3 +4125,127 @@ machine were both suspected across multiple rounds and both were cleared
 by testing, while the two real bugs in this area - the reflection
 decision and the I/O rules - were found by the same tests within minutes
 of them existing. Reach for a harness before another reading.
+
+## Eighth review: the decoder's missing forms, added and proved
+
+The decoder's coverage is not a nicety. Every form it refuses takes the
+**stepping path** instead - make the page writable, arm the monitor trap
+flag, let the guest's own instruction run, close the page again - and
+that path still carries three open defects recorded above: a pending
+step destroyed by the next `build_vmcs02`, a close that invalidates only
+the local processor's EPT cache so any other processor can write the
+page unobserved, and a read-back that reports a write the instruction
+never performed. So a form learned here is not one access decoded
+instead of stepped, it is one access that stops being exposed to all
+three.
+
+Five families were recorded as absent. Four were added, one defect was
+found while adding them, and nothing was left refused for lack of
+effort - the two that needed new machinery got it.
+
+**CMP `r/m, r`, `0x38` and `0x39`.** Recorded above as "missing coverage
+rather than a bug", which it was. Nothing new was needed: memory is the
+first operand, so the flags are the ones `flags_after`'s `subtracting`
+path already computed for `0x81 /7`, and `compares` switches it on.
+`0x3a`/`0x3b` stay refused - the reversed direction subtracts the other
+way round and there is nowhere in `flags_after` to say which side is
+which.
+
+**BT, BTS, BTR, BTC with a register offset, `0F A3`/`AB`/`B3`/`BB`.**
+The immediate forms were already there, which was backwards: a constant
+bit number is what a compiler folds, and the offset a driver computes
+reaches a register.
+
+**XADD, `0F C0`/`C1`.** Eleven lines and no new machinery. The sum is
+`combine_with::add` and the register takes what memory held, which is
+exactly what `result_for_register` already returns.
+
+**INC and DEC, `FE`/`FF /0 /1`.** ADD and SUB of one everywhere except
+the carry flag, which is the whole reason the instruction exists -
+`.references/sdm.txt:53379`, "without disturbing the CF flag". A new
+`preserves_carry` puts it back. `FF /2` through `/7` stay refused, and
+this is where refusing matters most in the file: they are CALL, far
+CALL, JMP, far JMP, PUSH and an invalid opcode, every one of which reads
+the operand rather than modifying it, so emulating one as an increment
+would write a device register the guest never asked to write *and* run
+on from a control transfer that never happened.
+
+**CMPXCHG, `0F B0`/`B1`.** The one that needed thinking about, and the
+answer was still yes. Three things about it are unlike everything else:
+what memory ends up holding depends on a register the encoding never
+names, so the accumulator is captured at decode into `compare_value` and
+`apply` stays pure; the flags are those of `accumulator - memory`, the
+other way round from every other subtraction here, which the SDM does
+not state and Xen and Bochs both do; and the accumulator is written on
+the failing branch **only**, which is not the same as writing it what it
+already holds - a 4-byte write would clear the upper half of the 64-bit
+register. Memory is written on both branches, which is the SDM's own
+statement (`:42797`) and not a simplification.
+
+### The defect found on the way
+
+`0F BA /4-/7` took the immediate bit number **modulo the operand width**,
+citing the SDM's "the offset is taken modulo the operand size". That
+sentence is about a *register* bit base (`:38974`). A memory bit base has
+no such limit: the processor moves the access to `Effective Address + (4
+* (BitOffset DIV 32))` (`:38988`), which is also what Xen does, for the
+immediate form as well as the register one.
+
+So `btsl $40, (%rax)` sets bit 8 of the dword at `[rax+4]`, and this
+decoder set bit 8 of the dword at `[rax]` - the right bit of the wrong
+word, with the word the guest named left untouched. Silent in both
+directions, and on a watched page it is a write to a device register
+four bytes from the one that was asked for.
+
+Refused rather than followed, in both the immediate and the new register
+form. The caller cannot use a moved address: `on_ept_violation` keeps
+only the low twelve bits of what `effective_address` returns and pastes
+them onto the page the violation reported, so an adjustment that left
+the page would land back inside it. The architecture also says not to
+point this at a device at all (`:38992`).
+
+### What is still refused, and why - so it is not re-proposed
+
+- **`0x3a`/`0x3b`, and the whole `0x02`-style direction.** Memory is the
+  source and the register the destination. `apply` returns what memory
+  should hold and there is no register-destination arithmetic path;
+  adding one is a bigger change than the coverage is worth.
+- **ADC and SBB.** They need the incoming carry flag, which `apply` does
+  not receive. It could be threaded through - `flags_after` already takes
+  `before` - and that is the shape of the fix if a guest is ever measured
+  using them on a watched page.
+- **NOT, NEG, MUL, IMUL, DIV, IDIV (`F6`/`F7 /2-/7`).** NOT and NEG would
+  be easy; the rest write registers this decoder has no way to name.
+- **Bit offsets outside the operand,** for the reason above.
+- **Sixteen-bit code, and the address-size prefix in 32-bit code.** Both
+  move where the instruction ends, so the answer would be wrong rather
+  than incomplete.
+- **Anything naming encoding four without REX.B,** which is the *host*
+  stack pointer in the context handed to the decoder.
+
+### The harness, committed this time
+
+`tests/decoder/` - the differential comparison an earlier round ran and
+threw away. It generates a corpus as assembly text, assembles it with
+`llvm-mc` one ELF section per instruction, reads the bytes back out of
+`llvm-objdump`, and compares `decode`'s length against the section size
+and `effective_address` against the operand the disassembler printed.
+Semantics cannot be settled that way - LLVM does not execute and the
+host is arm64 - so `apply`, `flags_after` and `result_for_register` are
+compared against a model written from the SDM, deliberately derived the
+other way round: carry and overflow come from doing the arithmetic in
+128 bits and asking whether it fits.
+
+**7434 instructions, 53568 checks.** 7388 accepted with their lengths
+compared, 5832 effective addresses compared, 46 forms that must be
+refused, 1778 refused again as 16-bit code, and 52 instructions modelled
+over 17 memory values and 5 incoming flag words. Three mutations were
+run to show the checks bite: dropping CMPXCHG's conditional register
+write fails 10, reversing its comparison fails 400, clearing
+`preserves_carry` fails 257.
+
+`tests/watched_page/` asserted the *absence* of CMP against a register.
+That assertion is now the emulation, end to end, plus a second case with
+memory below the register - which is what tells the two directions
+apart, since a compare with the operands swapped sets carry and sign
+backwards and the guest branches on them immediately.
