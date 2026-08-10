@@ -183,6 +183,17 @@ define zppstat
       $i, $h->l2_entries[$i], $h->shadow_ept_leaves_filled[$i]
     set $i = $i + 1
   end
+  printf "watched writes: emulated %llu, stepped %llu, filtered %llu\n", \
+    $h->emulated_writes, $h->stepped_writes, $h->filtered_writes
+  printf "offset from: decoded %llu, unknown %llu\n", \
+    $h->access_offset_decoded, $h->access_offset_unknown
+  printf "physical offset: present %llu, agreed %llu, disagreed %llu\n", \
+    $h->physical_offset_present, $h->physical_offset_agreed, \
+    $h->physical_offset_disagreed
+  printf "length disagreement %llu (reported %llu, decoded %llu)\n", \
+    $h->emulated_length_disagreement, $h->emulated_length_reported, \
+    $h->emulated_length_decoded
+  printf "nmis reinjected %llu\n", $h->guest_nmis_reinjected
 end
 
 document zppstat

@@ -1024,6 +1024,46 @@ private:
      */
 
     /**
+     * Whether the guest-physical address's low twelve bits are the
+     * faulting offset, which decides whether any of the above is needed.
+     *
+     * SDM 30.2.1 says the field "receives the guest-physical address that
+     * caused the EPT violation", and gives exactly one case where bits
+     * 11:0 are cleared - an instruction executing in enclave mode. By
+     * that text the offset is always available and the decoder is never
+     * needed for it. Against that stands a measurement recorded in
+     * `on_ept_violation`: twenty-four consecutive accesses to the local
+     * APIC page all reporting offset zero.
+     *
+     * Both cannot be right, and the disagreement matters because the
+     * decoder's guess is what picks *which* device register a write
+     * lands on. It is also not a pure hardware question here: the rig
+     * runs this VMM as KVM's own guest, so these fields are KVM's
+     * construction rather than the processor's - `nested.c:460` assigns
+     * `vmcs12->guest_physical_address = fault->address` - which is a
+     * reason the answer could differ from bare metal and from the SDM
+     * both.
+     *
+     * So it is counted rather than argued about:
+     *
+     * - `physical_offset_present` counts violations whose guest-physical
+     *   address has any of bits 11:0 set. Zero over a whole boot means
+     *   this environment page-aligns the field and the decoder is load
+     *   bearing.
+     * - the `agreed`/`disagreed` pair is the direct test, taken only on
+     *   the exits that also report a valid guest-linear address, where
+     *   the two low halves must be equal. Any disagreement means one of
+     *   the two sources is wrong about the register being touched.
+     * @{
+     */
+    volatile std::uint64_t physical_offset_present{};
+    volatile std::uint64_t physical_offset_agreed{};
+    volatile std::uint64_t physical_offset_disagreed{};
+    /**
+     * @}
+     */
+
+    /**
      * What the rebuild read out of the controller before borrowing, and
      * how far the borrow got. Enough to tell "the queue was described
      * wrongly" from "the queue was described correctly and the controller

@@ -3398,6 +3398,28 @@ bool hypervisor::on_ept_violation(std::size_t cpu,
         auto address = guest_physical;
         auto address_known = reports_linear;
 
+        // Whether the processor - or, on the rig, KVM - answers this
+        // question itself. Counted before anything is decided, so the
+        // three counters describe every violation rather than the subset
+        // that took some branch. See the members for why this is in
+        // doubt.
+        if (auto physical_offset = guest_physical & page_offset_mask;
+            0 != physical_offset) {
+            this->physical_offset_present =
+                this->physical_offset_present + 1;
+
+            if (reports_linear) {
+                if (physical_offset == (this->vmcs.guest_linear_address() &
+                                        page_offset_mask)) {
+                    this->physical_offset_agreed =
+                        this->physical_offset_agreed + 1;
+                } else {
+                    this->physical_offset_disagreed =
+                        this->physical_offset_disagreed + 1;
+                }
+            }
+        }
+
         if (reports_linear) {
             address = page_base | (this->vmcs.guest_linear_address() &
                                    page_offset_mask);
