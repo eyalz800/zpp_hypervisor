@@ -1159,6 +1159,54 @@ decode(std::span<const std::byte> code,
             break;
         }
 
+        // XADD, which exchanges its two operands and then adds them:
+        // "TEMP := SRC + DEST; SRC := DEST; DEST := TEMP",
+        // `.references/sdm.txt:135936`. So memory takes the sum and the
+        // register takes what memory held, and the flags are ADD's -
+        // `:135940`, "set according to the result of the addition".
+        //
+        // Nothing new was needed for it. The sum is `combine_with::add`,
+        // which `apply` and `flags_after` already compute; the register
+        // result is what memory held, which is exactly what
+        // `result_for_register` returns for every form that writes one -
+        // including the 32-bit case zero-extending and the 8- and 16-bit
+        // cases preserving the rest of the register, which is what Xen's
+        // emulator writes out longhand at `x86_emulate.c`'s `xadd` case.
+        case 0xc0:
+        case 0xc1: {
+            auto byte_form = (0xc0 == opcode);
+            auto size = instruction_detail::width_of(found, byte_form);
+            fields = instruction_detail::read_modrm(at, found, mode);
+
+            if (fields.names_register()) {
+                return {};
+            }
+
+            if (instruction_detail::names_high_byte(
+                    size, found, fields.reg)) {
+                return {};
+            }
+
+            auto index =
+                static_cast<std::uint8_t>(fields.reg | found.extend_reg());
+
+            // This register is both read and written, so both halves of
+            // the guard apply: reading encoding four puts a hypervisor
+            // address into memory the guest is watching, and writing it
+            // pivots the host stack. See the load case above.
+            if (instruction_detail::names_host_stack_pointer(index)) {
+                return {};
+            }
+
+            result.what = memory_operation::combine;
+            result.how = combine_with::add;
+            result.size = size;
+            result.operand = operand_of(index, size);
+            result.destination = index;
+            result.writes_register = true;
+            break;
+        }
+
         // The bit group with the offset in a register: the same four
         // operations as the immediate form below, with the operation in
         // the opcode rather than in the ModRM register field.

@@ -1203,6 +1203,33 @@ static const semantic_case g_semantics[] = {
      .kind = model_kind::bit_test,
      .size = 8,
      .operand = 31},
+
+    // XADD, which writes a register as well as memory: the sum lands in
+    // memory and what memory held lands in the register.
+    {.text = "xaddb %dl, (%rcx)",
+     .kind = model_kind::exchange_add,
+     .size = 1,
+     .operand = 0xbb,
+     .writes_register = true,
+     .destination = 2},
+    {.text = "xaddw %r9w, (%rcx)",
+     .kind = model_kind::exchange_add,
+     .size = 2,
+     .operand = 0x0007,
+     .writes_register = true,
+     .destination = 9},
+    {.text = "xaddl %edx, (%rcx)",
+     .kind = model_kind::exchange_add,
+     .size = 4,
+     .operand = 0xbbbb'bbbb,
+     .writes_register = true,
+     .destination = 2},
+    {.text = "xaddq %rdx, (%rcx)",
+     .kind = model_kind::exchange_add,
+     .size = 8,
+     .operand = 0xaaaa'aaaa'bbbb'bbbb,
+     .writes_register = true,
+     .destination = 2},
 };
 
 // ------------------------------------------------------------- corpus
@@ -1273,8 +1300,16 @@ static void generate(code_size mode)
     };
 
     // The read-modify-write group and the stores, register source.
-    static const char * const to_memory[] = {
-        "add", "or", "and", "sub", "xor", "mov", "xchg", "test", "cmp"};
+    static const char * const to_memory[] = {"add",
+                                             "or",
+                                             "and",
+                                             "sub",
+                                             "xor",
+                                             "mov",
+                                             "xchg",
+                                             "test",
+                                             "cmp",
+                                             "xadd"};
 
     for (auto * mnemonic : to_memory) {
         for (auto & width : widths) {
@@ -1465,6 +1500,10 @@ static void generate_refusals()
     emit("btrl %r11d, (%rcx)", code_size::bits_64, expectation::refused);
     emit("btcw %r13w, (%rcx)", code_size::bits_64, expectation::refused);
     emit("btsq %r11, (%rcx)", code_size::bits_64, expectation::refused);
+
+    // XADD reads and writes its register operand, so both guards apply.
+    emit("xaddq %rsp, (%rcx)", code_size::bits_64, expectation::refused);
+    emit("xaddb %ah, (%rcx)", code_size::bits_64, expectation::refused);
 
     // And with the offset taken out of the host stack pointer's slot.
     emit("btsl %esp, (%rcx)", code_size::bits_64, expectation::refused);
