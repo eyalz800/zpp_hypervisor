@@ -4446,3 +4446,41 @@ the same state before calling anything a symptom.** Two of the strongest
 looking observations this session - this one, and the ratio of local APIC
 timer arming - dissolve once the comparison is made at the same phase
 rather than between a booting guest and a settled one.
+
+### The guest never resumes work after start-up, measured at the same phase
+
+Events per second either side of application-processor start-up, both
+captures, same event set:
+
+| | reference | behind zpp |
+|---|---|---|
+| first second | 44,978 | 202 |
+| next ten | 106,040 -> 233,475, then a steady 200,000-300,000 | a steady **100** |
+| after that | continues | **~0.5** |
+
+This is the comparison the earlier ones should have been. It is
+phase-aligned, it does not compare a booting guest against a settled one,
+and it survives: even during its busiest ten seconds the guest behind zpp
+runs at **100 events a second against the reference's 200,000**, a factor
+of about two thousand. A hundred a second is a bare timer tick and
+nothing else, and at ten seconds past start-up even that stops, leaving
+the ~2.4 s one-shot.
+
+So the guest does not slow down or wedge part way through work - **it
+never resumes work at all** once its application processors are started.
+That is a much narrower statement than "it goes idle", and it fits the
+other number that has been sitting in plain sight all along: each
+application processor enters second-level guest execution only ~350-420
+times before stopping, against ~500,000 each in the reference.
+
+The shape that predicts all of it is an **application-processor
+rendezvous**: the boot processor starts the others, waits for them to
+report ready, and they never finish reporting. Start-up itself is known
+good - the start-up IPI traffic is identical on both sides - so the
+failure would be in what an application processor does *after* it starts
+and before it checks in.
+
+That is what the exit-reason histogram and the MSR/hypercall recording on
+`diag/post-startup-window` exist to answer: on a frozen guest, what did
+an application processor spend its ~400 entries on, and what did it ask
+for last.
