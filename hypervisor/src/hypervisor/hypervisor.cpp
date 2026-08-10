@@ -3495,6 +3495,7 @@ bool hypervisor::on_ept_violation(std::size_t cpu,
             // question for a *store*, which is why a store still uses its
             // operand and never reads first.
             auto filter_consulted = false;
+            auto refused_rewrite = false;
 
             auto writes_memory =
                 (arch::x86_64::memory_operation::load != store->what) &&
@@ -3561,14 +3562,32 @@ bool hypervisor::on_ept_violation(std::size_t cpu,
                 // on every path, so the rewrite never fires. It is the
                 // next filter that would find this out.
                 if (*allowed != *intended_value) {
-                    if (arch::x86_64::memory_operation::store !=
-                        store->what) {
-                        return false;
+                    // A store and an exchange both leave their operand
+                    // in memory - `apply` returns it unchanged for
+                    // either - so replacing the operand honours the
+                    // rewrite exactly. Every other form derives what it
+                    // writes from what is already there and has nowhere
+                    // to put a value the operation would not have
+                    // produced.
+                    if ((arch::x86_64::memory_operation::store ==
+                         store->what) ||
+                        (arch::x86_64::memory_operation::exchange ==
+                         store->what)) {
+                        auto replaced = *store;
+                        replaced.operand = *allowed;
+                        store = replaced;
+                    } else {
+                        // Refused *emulation*, which is not the same as
+                        // refusing the access. This used to `return
+                        // false`, and the comment above claiming it took
+                        // the stepping path was simply wrong: false is
+                        // how on_ept_violation says "nothing had this
+                        // page watched", and the caller treats that as a
+                        // bug here and stops the processor. Letting the
+                        // condition below fail is what actually reaches
+                        // the stepping path.
+                        refused_rewrite = true;
                     }
-
-                    auto replaced = *store;
-                    replaced.operand = *allowed;
-                    store = replaced;
                 }
             }
 
@@ -3576,7 +3595,7 @@ bool hypervisor::on_ept_violation(std::size_t cpu,
 
             auto changed_memory = false;
 
-            if (!straddles &&
+            if (!straddles && !refused_rewrite &&
                 carry_out_guest_instruction(address,
                                             *store,
                                             context,
