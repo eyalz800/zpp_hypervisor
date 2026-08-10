@@ -826,6 +826,63 @@ do, and shut it down from inside Windows. Do not try to debug the
 hypervisor against a machine that is mid-repair - nothing measured there
 means anything.
 
+## A killed QEMU can leak its guest memory into the kernel, and only a reboot returns it
+
+This is the worst outcome on the rig short of losing the Windows
+installation, because it ends hardware testing for the session and the
+recovery needs someone at the machine.
+
+The signature, in the order it appears:
+
+```
+WARNING: zombie qemu <pid> still holds pinned guest memory   # rig-kill-qemu.sh says so
+free -m                 # 12 GB still "used" with no qemu alive
+AnonPages: 12171440 kB  # in /proc/meminfo, owned by no visible process
+/proc/<pid>             # state Z, no file descriptors, one thread in X (dead)
+/proc/modules           # kvm_intel and kvm still have non-zero refcounts
+```
+
+The refcounts are the diagnosis. No process holds the memory - the KVM
+VM object itself was never destroyed, so the pages VFIO pinned for DMA
+are never unpinned. Nothing in user space can release them.
+
+**Do not try to fix it by hand. Everything obvious makes it worse.** All
+of the following were tried in one session and all of them failed:
+
+- **Clearing PCI bus master** on the passed-through devices. The
+  `dmesg` flood of `DMAR: [DMA Read NO_PASID] ... fault reason 0x06`
+  from the GPU makes "the device is still mastering" look like the
+  blocker. It is not - the faults stop and the memory stays pinned.
+- **`echo <bdf> > /sys/bus/pci/drivers/vfio-pci/unbind`.** Blocks
+  for ever, and leaves the device bound to *nothing*, which is strictly
+  worse than leaving it with vfio-pci: the NVMe cannot then be bound
+  back to `nvme`, so the ESP cannot be mounted and **nothing can be
+  deployed**.
+- **`echo 1 > .../reset`** and binding to `nvme`. Both block for ever.
+
+Each blocking write leaves a `tee` in D state holding a dropbear
+session, and those never clear. Leak enough and ssh stops accepting
+connections, at which point the machine pings, the QEMU monitor answers,
+and the rig is unreachable. Bound every such write with `timeout` if you
+attempt one at all, and count the damage afterwards:
+
+```sh
+for p in /proc/[0-9]*; do
+  [ "$(awk '{print $3}' $p/stat 2>/dev/null)" = D ] && echo "$(basename $p) $(cat $p/comm)"
+done
+```
+
+**So: when the zombie warning appears, stop doing hardware work.** The
+rig needs a reboot and that is the user's call, not something to work
+around. Say so, leave the devices bound where they are, and spend the
+time on everything that does not need the machine - there is always a
+static review's worth of it.
+
+Prevention is the only real answer, and it is the graceful-shutdown rule
+two sections up. `system_powerdown` and *wait* for the screen to go
+black. Every one of these leaks has followed a `kill` of a QEMU that was
+mid-VFIO-teardown.
+
 ## Reserve a host core, so a wedge cannot cost you the connection
 
 `boot-zpp.sh` used to compute `cpus=$(grep -c ^processor /proc/cpuinfo)`
