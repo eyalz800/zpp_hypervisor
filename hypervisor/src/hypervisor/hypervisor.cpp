@@ -10651,7 +10651,38 @@ void hypervisor::resume_guest(arch::x86_64::context & context,
     // Not done where the exit is reflected: there the interrupted event
     // is copied into the guest hypervisor's own VMCS and becomes its
     // business, and putting it back here as well would deliver it twice.
-    if (auto slot = vmcs.vpid(); (0 != slot) && (slot <= max_cpus)) {
+    //
+    // SWITCHED OFF, and the switch is the whole point of this constant.
+    // `git bisect` over seven rig boots, good `1975400`, bad `02c747e` -
+    // the commit that added this - named it as the first commit at which
+    // the guest hypervisor stops bringing up its application processors.
+    // The verdict each boot was whether any of `cpu 0x1` .. `cpu 0x7`
+    // reaches `guest vmxon` within about three minutes: seven of them do
+    // at `1975400` and none does at `02c747e`, reproducibly, on the same
+    // launcher and the same Windows installation.
+    //
+    // Two defects are visible by inspection and either could be it, so
+    // neither is claimed as the cause without a measurement that
+    // separates them:
+    //
+    // - the write below is unconditional, so it overwrites an
+    //   entry-interruption field the exit handler had already staged for
+    //   this entry - an injected fault, say - rather than yielding to it;
+    // - `pending_event[cpu]` is cleared only when it is re-injected, so
+    //   an event deferred because it belonged to the other level is held
+    //   indefinitely and then delivered into some later unrelated entry.
+    //
+    // To switch it back on, fix both and re-run the same test. The
+    // problem it was written for is real and still open - `1975400`
+    // measured nine events destroyed in one boot - so this is a
+    // withdrawal of a fix that cost more than it bought, not a decision
+    // that the events do not matter.
+    constexpr bool requeue_interrupted_events = false;
+
+    if constexpr (!requeue_interrupted_events) {
+        (void)0;
+    } else if (auto slot = vmcs.vpid();
+               (0 != slot) && (slot <= max_cpus)) {
         auto cpu = slot - 1;
 
         // Only into the guest it was being delivered to. A guest
