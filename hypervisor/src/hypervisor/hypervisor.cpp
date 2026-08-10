@@ -9110,6 +9110,7 @@ hypervisor::main(arch::x86_64::context & caller_context)
                 constexpr std::uint64_t vectoring_error_valid = 1ull << 11;
 
                 this->pending_event[cpu] = vectoring;
+                this->pending_event_l2[cpu] = this->running_l2[cpu];
                 this->pending_event_error[cpu] =
                     (0 != (vectoring & vectoring_error_valid))
                         ? vmcs.read(arch::x86_64::vmx::vmcs::field::
@@ -10584,7 +10585,16 @@ void hypervisor::resume_guest(arch::x86_64::context & context,
     if (auto slot = vmcs.vpid(); (0 != slot) && (slot <= max_cpus)) {
         auto cpu = slot - 1;
 
-        if (auto event = this->pending_event[cpu]; 0 != event) {
+        // Only into the guest it was being delivered to. A guest
+        // hypervisor's VMLAUNCH is an exit like any other, so an exit
+        // that interrupted a delivery to it can be followed straight
+        // away by an entry into *its* guest - and putting the event back
+        // there would hand one level's interrupt to the other. Held
+        // instead until that guest runs again.
+        if (this->pending_event[cpu] &&
+            (this->pending_event_l2[cpu] != this->running_l2[cpu])) {
+            this->events_deferred[cpu] = this->events_deferred[cpu] + 1;
+        } else if (auto event = this->pending_event[cpu]; 0 != event) {
             constexpr std::uint64_t error_valid = 1ull << 11;
             constexpr std::uint64_t type_mask = 7ull << 8;
             constexpr std::uint64_t type_software_interrupt = 4ull << 8;

@@ -5761,3 +5761,24 @@ half-fixed. The obvious first question is why the application processors
 never enter their guest now, since that regressed against the
 pre-fix behaviour and a root partition waiting for processors that never
 arrive would look exactly like this.
+
+### The guard on re-injection never fires, and that is worth knowing
+
+The re-queue above puts an event back on the way into the guest, and
+there is a case where that could put it into the *wrong* guest: a guest
+hypervisor's VMLAUNCH is an exit like any other, so an exit that
+interrupted a delivery to it can be followed immediately by an entry
+into its own guest. Handing one level's interrupt to the other is worse
+than losing it, so the held event now records which guest it belongs to
+and is deferred until that guest runs again.
+
+**Measured: it never happens.** `events_deferred` stays at **zero** for
+a whole boot while `events_requeued` climbs past 30,000 - so on this
+workload the guest being resumed is always the guest the event was being
+delivered to. The guard is kept because it is cheap and the alternative
+is a silent cross-level injection, but it is a safety property rather
+than a fix, and the counter is what says so.
+
+It also rules the guard out as the explanation for the application
+processors: they still never enter their guest, deferral or no. That
+regression is real and unexplained, and it is not this.

@@ -3700,6 +3700,18 @@ private:
     std::uint64_t pending_event_error[max_cpus]{};
     std::uint64_t pending_event_length[max_cpus]{};
     std::uint64_t events_requeued[max_cpus]{};
+
+    /**
+     * Which guest the held event belongs to, so it is put back into that
+     * one and no other.
+     *
+     * A guest hypervisor's VMLAUNCH is itself an exit, so an exit that
+     * interrupted a delivery to *it* can be followed immediately by an
+     * entry into its guest. Injecting there would deliver one level's
+     * event to the other, which is worse than losing it.
+     */
+    bool pending_event_l2[max_cpus]{};
+    std::uint64_t events_deferred[max_cpus]{};
     /**
      * @}
      */
