@@ -3753,7 +3753,8 @@ private:
         const arch::x86_64::decoded_instruction & instruction,
         arch::x86_64::context & context,
         guest_write & performed,
-        bool & changed_memory);
+        bool & changed_memory,
+        std::optional<std::uint64_t> known_contents = {});
 
     static constexpr std::size_t instruction_window_pages_per_cpu = 2;
 

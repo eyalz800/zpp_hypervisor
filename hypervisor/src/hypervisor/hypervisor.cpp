@@ -3151,7 +3151,8 @@ bool hypervisor::carry_out_guest_instruction(
     const arch::x86_64::decoded_instruction & instruction,
     arch::x86_64::context & context,
     guest_write & performed,
-    bool & changed_memory)
+    bool & changed_memory,
+    std::optional<std::uint64_t> known_contents)
 {
     using arch::x86_64::memory_operation;
 
@@ -3163,12 +3164,23 @@ bool hypervisor::carry_out_guest_instruction(
 
     std::uint64_t old{};
     if (needs_old) {
-        auto read = read_guest_word(guest_physical, instruction.size);
-        if (!read) {
-            return false;
-        }
+        // The caller may already have read it, to show the filter what
+        // this instruction was going to leave behind. Reading again is
+        // not free and not even idempotent: these are device registers,
+        // and on the local APIC page a second read is a second access to
+        // hardware whose answer may differ from the first - so the two
+        // halves of one instruction would combine against different
+        // contents. Threaded through rather than re-read.
+        if (known_contents) {
+            old = *known_contents;
+        } else {
+            auto read = read_guest_word(guest_physical, instruction.size);
+            if (!read) {
+                return false;
+            }
 
-        old = *read;
+            old = *read;
+        }
     }
 
     auto replacement = arch::x86_64::apply(instruction, old);
@@ -3488,12 +3500,15 @@ bool hypervisor::on_ept_violation(std::size_t cpu,
                 (arch::x86_64::memory_operation::load != store->what) &&
                 (arch::x86_64::memory_operation::examine != store->what);
 
+            std::optional<std::uint64_t> known_contents;
             std::optional<std::uint64_t> intended_value;
             if (arch::x86_64::memory_operation::store == store->what) {
                 intended_value = store->operand;
             } else if (writes_memory) {
-                if (auto old = read_guest_word(address, store->size)) {
-                    intended_value = arch::x86_64::apply(*store, *old);
+                known_contents = read_guest_word(address, store->size);
+                if (known_contents) {
+                    intended_value =
+                        arch::x86_64::apply(*store, *known_contents);
                 }
             }
 
@@ -3502,6 +3517,7 @@ bool hypervisor::on_ept_violation(std::size_t cpu,
                 guest_write intended{
                     .address = address,
                     .value = *intended_value,
+                    .size = store->size,
                 };
 
                 auto allowed =
@@ -3561,8 +3577,12 @@ bool hypervisor::on_ept_violation(std::size_t cpu,
             auto changed_memory = false;
 
             if (!straddles &&
-                carry_out_guest_instruction(
-                    address, *store, context, written, changed_memory)) {
+                carry_out_guest_instruction(address,
+                                            *store,
+                                            context,
+                                            written,
+                                            changed_memory,
+                                            known_contents)) {
                 // Only an access that actually changed memory is reported.
                 //
                 // The decoder now answers loads and examinations as well
