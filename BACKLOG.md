@@ -3888,3 +3888,53 @@ vmcs12 field coverage is adequate, with read-only enforcement paired
 correctly against `IA32_VMX_MISC` bit 29; and `l1_wants_l2_exit`'s MSR
 case is right for this configuration, returning true immediately because
 vmcs12's MSR bitmaps are clear.
+
+## Sixth review: the nested VMX state machine is not broken, and now has a test
+
+`tests/nested_vmx/build.sh` compiles the real `vmcs12.h` and the real
+`nested_vmx.cpp` natively and runs **400 checks in about two seconds.
+Zero failures.** An exhaustive sweep of all 32768 field encodings gives
+420 accepted, 0 wrongly accepted, 0 wrongly refused, no aliasing in the
+`[width][type][index]` slot map, `read_only()` exactly equal to
+`type == exit_information`, and every Table 27-22 reservation enforced.
+Round trips, the launch-state machine against SDM 33.3's orderings and
+error numbers, the `#UD`/`#GP` preconditions, operand decode and
+effective addresses are all correct.
+
+**So the VMX emulation is not where the boot is being lost**, on the
+evidence available, and the same is now true of the instruction decoder.
+Both were suspected across multiple rounds and both were settled by
+testing rather than by reading. That is the technique to reach for
+first.
+
+Two things the sweep reports rather than fails: about 260 encodings are
+accepted for fields that exist on no processor (KVM refuses these with
+`VMXERR_UNSUPPORTED_VMCS_COMPONENT` via `get_vmcs12_field_offset`), and
+`index_capacity = 28` refuses four real Appendix B fields at index 28 or
+above with error 12, consistent with not advertising those features.
+
+**The launch state is set in `reflect_l2_exit`, not in
+`on_guest_vmlaunch`, and that is correct** - KVM's `prepare_vmcs12` sets
+`launch_state = 1` only for a non-entry-failure exit, and SDM
+`sdm.txt:207978` puts the transition after MSR loading. Checked because
+it looked wrong; it is not. Do not "fix" it.
+
+### Still open from the save/load audit
+
+- **`guest_ia32_pat` and `guest_ia32_efer` are saved into vmcs12 from
+  VMCS fields the processor never writes.** vmcs02's exit controls are
+  this VMM's verbatim and carry neither save control, so those fields
+  still hold what `build_vmcs02` wrote at entry - vmcs12's own values. A
+  guest hypervisor that sets either save control reads back what it
+  supplied rather than what its guest ran with. SDM
+  `.references/sdm.txt:204505`, `:204507`; KVM reads software state in
+  `sync_vmcs02_to_vmcs12`. Dormant: Hyper-V's `0x0003efff` has bits 18
+  and 20 clear.
+- **`guest_ia32_debugctl` is saved unconditionally**, being in
+  `guest_state_fields` as well as under the "save debug controls"
+  branch. SDM `:204502` makes DR7 *and* IA32_DEBUGCTL conditional on
+  that control; DR7 is handled right, this is not. KVM never syncs it
+  back at all. Dormant: Hyper-V sets the control.
+- `guest_ia32_bndcfgs` being saved unconditionally is **correct** - SDM
+  `:27276`, "VM exits always save IA32_BNDCFGS into BNDCFGS field of
+  VMCS". Do not change it.
