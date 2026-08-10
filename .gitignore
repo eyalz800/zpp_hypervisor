@@ -55,3 +55,7 @@ scratchpad/
 # Recorded by scripts/deploy-to-rig.sh so a confusing boot can be checked
 # against what was actually deployed. Per-machine, not per-tree.
 .rig-deployed-hash
+.rig-deployed-hypervisor.elf
+
+# Python leaves these beside any script imported as a module.
+__pycache__/

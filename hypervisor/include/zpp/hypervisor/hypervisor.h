@@ -3811,6 +3811,50 @@ private:
     std::uint64_t l2_exit_trace_count[max_cpus]{};
 
     /**
+     * Which VMCS fields the guest hypervisor reads and writes, and how
+     * often.
+     *
+     * Measured on the rig, VMREAD and VMWRITE together are **71% of every
+     * exit this VMM takes** - 35,444 and 12,355 out of 61,490 in the first
+     * minute of a Hyper-V boot, against 5,877 exits by the guest it is
+     * running. Roughly eight of them per second-level exit, each costing a
+     * full round trip through here.
+     *
+     * VMCS shadowing removes exactly those, but not for free: the fields
+     * it shadows have to be copied between this VMM's cached vmcs12 and a
+     * real shadow region, and a copy of everything would cost more
+     * instructions than it saves. So the set to shadow is the set the
+     * guest hypervisor actually touches, and this table is how that set is
+     * known rather than guessed - KVM's own list in vmcs_shadow_fields.h
+     * is a different hypervisor's measurement of a different guest.
+     *
+     * A linear table rather than an array indexed by encoding: the
+     * encodings are sparse across a 16-bit space, and the count that
+     * matters is small. Shared across processors and updated without
+     * atomics on purpose - this is a diagnostic, a lost increment costs a
+     * count and never correctness, and making it atomic would put a locked
+     * operation on the hottest path there is.
+     * @{
+     */
+    static constexpr std::size_t vmcs_field_use_capacity = 128;
+    std::uint64_t vmcs_field_read_encoding[vmcs_field_use_capacity]{};
+    std::uint64_t vmcs_field_read_count[vmcs_field_use_capacity]{};
+    std::uint64_t vmcs_field_write_encoding[vmcs_field_use_capacity]{};
+    std::uint64_t vmcs_field_write_count[vmcs_field_use_capacity]{};
+
+    /**
+     * Counts encodings that did not fit the table, so a full table reads
+     * as a full table rather than as a complete answer.
+     */
+    std::uint64_t vmcs_field_use_overflow{};
+
+    /**
+     * Records one use of a VMCS field by the guest hypervisor.
+     */
+    void record_vmcs_field_use(bool write, std::uint64_t encoding);
+    /** @} */
+
+    /**
      * The second-level guest's RCX at the moment its exit was reflected,
      * kept only long enough for the ring above to record it.
      *

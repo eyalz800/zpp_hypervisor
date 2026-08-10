@@ -83,6 +83,28 @@ if [ "$WANT" != "$GOT" ]; then
 fi
 
 echo "$WANT" > .rig-deployed-hash
+
+# Keep the hypervisor ELF this loader carries, because every later reading
+# of the running machine's state is computed against it.
+#
+# Member offsets inside the singleton move whenever a member is added, and
+# a stale offset does not fail - it reads a plausible number out of the
+# wrong place. That happened mid-run here: a rebuild between two samples
+# left the on-disk ELF four kilobytes wider than the one the guest was
+# running, and the shadow-EPT counters came back as 1,796,440,094 builds
+# and zero cache hits. The exit counters in the same dump were right,
+# because they sit *before* the members that were added - which is exactly
+# what makes this kind of wrong answer convincing.
+#
+# So the ELF is archived at deploy time and read-only afterwards. Point
+# scripts/rig-dump-state.py at this copy, never at out/, whenever the tree
+# has been touched since the boot under investigation.
+ELF=$(dirname "$LOADER")/zpp_hypervisor
+if [ -f "$ELF" ]; then
+    cp "$ELF" .rig-deployed-hypervisor.elf
+    echo "elf kept:  .rig-deployed-hypervisor.elf"
+fi
+
 echo "OK: deployed and verified from a fresh mount."
 echo "    hash recorded in .rig-deployed-hash - check any confusing boot"
 echo "    against it before debugging the failure itself."

@@ -1256,6 +1256,8 @@ bool hypervisor::on_guest_vmread(std::size_t cpu,
         return true;
     }
 
+    record_vmcs_field_use(false, encoding.value());
+
     auto value = this->guest_vmcs12[cpu].read(encoding);
 
     if (operand.is_register) {
@@ -1342,10 +1344,49 @@ bool hypervisor::on_guest_vmwrite(std::size_t cpu,
         return true;
     }
 
+    record_vmcs_field_use(true, encoding.value());
+
     this->guest_vmcs12[cpu].write(encoding, value);
 
     vmx_succeed();
     return true;
+}
+
+/**
+ * Records one use of a VMCS field by the guest hypervisor, for deciding
+ * which fields VMCS shadowing should cover.
+ *
+ * Linear, and that is deliberate: the table is scanned on the hottest
+ * path in the VMM, so the entries that matter have to be the ones found
+ * first. They are, because a table appended to in order of first use puts
+ * the fields a guest hypervisor touches every exit at the front - the
+ * scan for a hot field ends in a handful of comparisons, and only a field
+ * seen once pays for the whole walk.
+ */
+void hypervisor::record_vmcs_field_use(bool write, std::uint64_t encoding)
+{
+    auto encodings =
+        write ? this->vmcs_field_write_encoding : this->vmcs_field_read_encoding;
+    auto counts =
+        write ? this->vmcs_field_write_count : this->vmcs_field_read_count;
+
+    // Encoding zero is a real one - VPID - so an empty slot cannot be
+    // spelled as a zero encoding. It is spelled as a zero *count*, which
+    // no used slot ever has.
+    for (std::size_t slot{}; slot < vmcs_field_use_capacity; ++slot) {
+        if (0 == counts[slot]) {
+            encodings[slot] = encoding;
+            counts[slot] = 1;
+            return;
+        }
+
+        if (encoding == encodings[slot]) {
+            counts[slot] = counts[slot] + 1;
+            return;
+        }
+    }
+
+    this->vmcs_field_use_overflow = this->vmcs_field_use_overflow + 1;
 }
 
 bool hypervisor::on_guest_invept(std::size_t cpu,
