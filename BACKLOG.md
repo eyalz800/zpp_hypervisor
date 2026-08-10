@@ -4982,3 +4982,70 @@ not being stretched by us.
 
 The ratio to explain is about **1213**, and it is stable across builds:
 2,379,522,644 and 2,382,117,305 against the reference's 1,961,755.
+
+### The timer is not mis-scaled. It works, and the machine idles on purpose
+
+Instrumented `filter_local_apic_write` to keep the **first** 32 values
+written to the timer's initial count per processor, each with the time
+stamp counter as it was written. The earliest, not the latest, because a
+ring would hold the millionth arming and evict the one that mattered.
+Booted four processors and read it at the freeze.
+
+Deriving the clocks from the data itself rather than assuming them: the
+boot processor arms 2,381,14x,xxx repeatedly and the real gap between
+consecutive armings is 4,744,4xx,xxx counter ticks. If the bus is 1 GHz
+those armings are 2.381 s apart, which puts the time stamp counter at
+1.99 GHz - so the bus **is** 1 GHz, exactly as KVM emulates it, and
+every number below is self-consistent.
+
+Boot processor, abridged:
+
+| # | initial count | gap | period it implies |
+|---|---|---|---|
+| 1 | **2,000,000** | - | 2 ms |
+| 5-13 | ~2,381,14x,xxx | 2.381 s | 2.38 s |
+| 14-30 | ~14,4xx,xxx | ~15.6 ms | 14.4 ms |
+| 31 | 2,237,637,147 | - | 2.24 s |
+
+Three things follow, and together they end the hypothesis this tree has
+been chasing all afternoon:
+
+- **The guest computes a correct period under this VMM.** Its second
+  arming ever is 2,000,000 - the reference's 1,961,755 to within 2% -
+  so nothing about its calibration is off by 1213x or by anything else.
+- **The timer fires when armed.** In every band the gap between armings
+  matches the period the count asks for. 2.38e9 ticks arrive 2.381 s
+  apart; 14.4e6 ticks arrive ~15 ms apart. Delivery is working.
+- **So the varying counts are just deadlines.** A guest with nothing to
+  do arms a long one. 2.38e9 is not a mis-scaled tick, it is an idle
+  machine asking to be woken in a couple of seconds, and it is woken.
+
+Application processors write the register **five times in their entire
+lives**:
+
+| # | initial count | gap |
+|---|---|---|
+| 0 | 4,294,967,295 | - |
+| 1 | 0 | **136.7 s** |
+| 2 | ~15,4xx,xxx | ~1.5 s |
+| 3 | ~14,6xx,xxx | ~16 ms |
+| 4 | 0 | ~15 ms |
+
+They arm at maximum, do nothing for over two minutes, arm two ordinary
+deadlines, disarm, and halt for good - which is why `info lapic` reads
+`initial_count = 0` on them. Nothing is wrong with the values. There is
+simply no work.
+
+**So the earlier 1213x was a comparison between an idle deadline here
+and a busy tick there, and every conclusion drawn from it is withdrawn.**
+What the reference's 1,961,755 says is that its processors had work
+every 2 ms. What our 2.38e9 says is that ours had none. The timer was
+never the fault; it is the clearest possible evidence *of* the fault.
+
+The question is therefore what stops being runnable. Windows boots off
+the passed-through NVMe, and a root partition blocked on disk with no
+completion coming would look exactly like this - every processor idle,
+every timer honoured, nothing pending. `BACKLOG.md` already records that
+**the guest never programs a device interrupt route** and that a trace
+of the whole boot found **zero** real MSI routes. That was written down
+as a curiosity. It should be the next thing tested.

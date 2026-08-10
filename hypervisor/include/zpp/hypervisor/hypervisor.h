@@ -3301,6 +3301,43 @@ private:
     std::uint64_t exit_trace_count[max_cpus]{};
 
     /**
+     * How many of a processor's earliest timer armings to keep.
+     *
+     * The earliest, not the latest, and that is the whole design: the
+     * guest works out the local APIC timer's rate once, early, and every
+     * period it programs afterwards follows from that one measurement.
+     * A ring would hold the millionth arming and evict the calibration.
+     */
+    static constexpr std::size_t timer_arm_capacity = 32;
+
+    /**
+     * Every value the guest writes to the timer's initial count
+     * (`0x380`), with the processor's time stamp counter as it was
+     * written, for the first `timer_arm_capacity` writes per processor.
+     *
+     * This exists because `filter_local_apic_write` deliberately does not
+     * log that register - it is the hottest write on the page and the log
+     * ring cannot absorb it - and that exclusion is exactly what hides
+     * the calibration. Measured on the rig: this VMM's guest arms its
+     * timer to about 2.38e9 where the same guest with nothing underneath
+     * arms it to 1,961,755, a ratio near 1213 that is stable across
+     * builds, and nothing recorded so far says how it arrives at either.
+     *
+     * The time stamp is what makes the values interpretable rather than
+     * merely suggestive. A calibration is a pair - arm at a known count,
+     * wait, read back - so the real time between two armings is what says
+     * whether the guest measured a true interval and scaled it wrongly,
+     * or measured an interval this VMM had already stretched.
+     * @{
+     */
+    std::uint64_t timer_arm_value[max_cpus][timer_arm_capacity]{};
+    std::uint64_t timer_arm_tsc[max_cpus][timer_arm_capacity]{};
+    std::uint64_t timer_arm_count[max_cpus]{};
+    /**
+     * @}
+     */
+
+    /**
      * Exits taken per CPU, counting repeats. Together with the ring's
      * `repeated` counts this says how much of the history the window
      * covers.

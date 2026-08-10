@@ -6051,6 +6051,37 @@ std::optional<std::uint64_t> hypervisor::filter_local_apic_write(
                 write->value);
         }
 
+        // The initial count is excluded from the log above and recorded
+        // here instead, in a fixed per-processor array that keeps the
+        // *earliest* writes rather than the latest.
+        //
+        // Both halves of that matter. It cannot go in the log because it
+        // is the hottest write on the page and no two values repeat, so
+        // the deduplication that makes the log affordable does nothing
+        // for it and a boot's worth would evict everything else. And it
+        // must keep the earliest writes because the calibration is the
+        // first thing a guest does with this register - a ring would hold
+        // the millionth arming and throw away the one that decided it.
+        //
+        // The time stamp is what makes the values mean anything. A
+        // calibration is an arm, a wait and a read back, so the real time
+        // between two armings separates a guest that measured a true
+        // interval and scaled it wrongly from one that measured an
+        // interval this VMM had already stretched. Measured on the rig:
+        // this guest arms to about 2.38e9 where the same guest with
+        // nothing underneath arms to 1,961,755.
+        if (timer_initial_count == offset) {
+            if (auto cpu = self.vmcs.vpid() - 1; cpu < max_cpus) {
+                if (auto slot = self.timer_arm_count[cpu];
+                    slot < timer_arm_capacity) {
+                    self.timer_arm_value[cpu][slot] = write->value;
+                    self.timer_arm_tsc[cpu][slot] =
+                        arch::x86_64::rdtsc();
+                    self.timer_arm_count[cpu] = slot + 1;
+                }
+            }
+        }
+
         return write->value;
     }
 
