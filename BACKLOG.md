@@ -585,6 +585,112 @@ a VMCS left current across `vmxoff`, in an implementation specific
 state - would not point back here. Anyone adding an early return there
 should give the guard a `vmclear` first.
 
+### 16. The local APIC page has no access-width or alignment gate
+
+Found by `tests/watched_page/`, which drives the real
+`on_ept_violation` and `filter_local_apic_write` against a real page of
+memory. Nothing on the path — not the exit handler, not the filter —
+looks at how wide a watched-page access is or where it is aligned.
+
+The SDM is explicit: "All 32-bit registers should be accessed using
+128-bit aligned 32-bit loads or stores... Any FP/MMX/SSE access to an
+APIC register, or any access that touches bytes 4 through 15 of an APIC
+register may cause undefined behavior" (`sdm.txt:170419`, the paragraph
+under Table 13-1). KVM enforces exactly that and silently drops
+everything else — `apic_mmio_write`, `lapic.c:2440`,
+`if (len != 4 || (offset & 0xf)) return 0;`.
+
+What this VMM does instead, each reproduced by a check in the harness:
+
+- A **1-byte** write to offset `0x300` reaches `on_interrupt_command`
+  with a command composed from the byte alone: the vector is the byte
+  and the delivery mode, level and shorthand are all zero. An interrupt
+  is sent that the guest never wrote.
+- **2-byte** and **8-byte** writes to `0x300` likewise compose and send.
+- A **4-byte write at `0x2fe`** puts two of its bytes into the interrupt
+  command register while the filter is only ever asked about offset
+  `0x2fe`, which it passes straight through. That is the sharpest of
+  them: the register can be changed with the hook that exists to
+  intercept it never being consulted.
+- **4-byte writes at `0x302` and `0x304`** are applied to the page for
+  the same reason.
+
+Smallest fix, and it is small: return `write->value` unchanged from
+`filter_local_apic_write` whenever `write->size != 4` or
+`(offset & 0xf) != 0`. That makes the hook agree with KVM's dispatcher
+and with the SDM, and costs nothing on the traffic that matters, which
+is all aligned dwords.
+
+Rejected alternative: gating in `on_ept_violation` instead. It is the
+wrong place — the width rule belongs to the device, not to the
+emulation, and the controller pages watched beside the APIC have no such
+rule.
+
+Not yet measured on a running guest. No driver issues an unaligned APIC
+access deliberately, so the trigger is a guest doing something unusual
+rather than ordinary traffic — which is an argument for fixing it
+cheaply rather than for chasing a reproduction.
+
+Related, and folded in here because the fix touches the same three
+lines: the composed command keeps the delivery-status bit. KVM clears it
+before composing (`lapic.c:2326`, `val &= ~APIC_ICR_BUSY`) and then
+asserts it is never set (`lapic.c:1520`); the SDM makes it read only
+("Delivery Status (Read Only)", `sdm.txt:170910`). Harmless today
+because `on_interrupt_command` reads only the vector, the delivery mode
+and the shorthand.
+
+### 17. A filter that rewrites a non-store stops the processor
+
+Also from `tests/watched_page/`. `on_ept_violation` lets a
+`page_watch::filter` return a different value from the one the
+instruction would have written. For a plain store it replaces the
+operand, which is the whole of the rewrite. For every other form —
+`or`, `and`, `add`, a locked read-modify-write — there is nowhere to put
+a value the operation would not have produced, so the code refuses.
+
+It refuses by `return false` (`hypervisor.cpp:3564-3567`), and
+`hypervisor.cpp:9821` answers a false from `on_ept_violation` with
+`on_unhandled_exit`, which stops the CPU. The comment three lines above
+says the access "takes the stepping path instead", which is what it
+should do: refusing emulation is always safe, stopping never is.
+
+Smallest fix: leave the emulation block rather than returning, so
+control reaches the stepping code at `hypervisor.cpp:3669`.
+
+Unreachable today — the only filter armed is the local APIC's, and
+`on_interrupt_command` returns the command it was given on every path,
+so no rewrite ever fires. That is exactly why it is worth writing down:
+the next filter is what finds it, and it will find it as a halted
+processor rather than as a refused emulation.
+
+Two smaller things in the same guard, both asserted by the harness:
+
+- The guard tests `memory_operation::store` alone and so refuses
+  **exchange**, for no reason: `apply()` returns the operand for an
+  exchange exactly as it does for a store, so replacing `store->operand`
+  would honour a rewrite of one correctly.
+- `filter_local_apic_write` returns `write->value` whatever
+  `on_interrupt_command` answered, so a handler that *modifies* a
+  command is silently ignored on the emulated path. The stepped path
+  does honour it (`hypervisor.cpp:5942-5953`), so the two paths disagree
+  about what a handler's return value means. Smallest fix: return the
+  handler's value at `hypervisor.cpp:5826`.
+
+### 18. The stepped read-back is four bytes with no bound
+
+`on_monitor_trap_flag` reads four bytes from the offset the violation
+resolved (`hypervisor.cpp:3786-3792`) to report what the guest's own
+instruction wrote. Nothing bounds it to the page, so a step armed at
+page offset `0xffe` reads two bytes off the end of the watched page —
+the very straddle `on_ept_violation` refused to emulate eighty lines
+earlier.
+
+Harmless for the pages watched today, whose registers are dword aligned,
+and a wrong value handed to a handler if that ever stops being true.
+Smallest fix: clamp the read to the page, or decline to notify when
+`offset + 4 > page_size`. Reproduced by a check in
+`tests/watched_page/`.
+
 ## Concurrency
 
 Found by audit, not by a crash. The comment at
@@ -676,6 +782,38 @@ coincidence of two unrelated facts: the Windows and Linux loaders really
 do block per processor, while under UEFI `number_of_cpus()` returns 1 so
 only the boot processor is ever launched. A loader that launched
 concurrently would break it, which is item 10.
+
+### 19. `decode_watched_page_fully` is dead, and its comment is inverted
+
+`hypervisor/include/zpp/hypervisor/hypervisor.h:3754` declares
+`static constexpr bool decode_watched_page_fully = false` with fifty
+lines of comment explaining why the exit path uses the narrow
+store-only decoder rather than the full one, ending "the decoder itself
+is kept, tested, and unused by the exit path".
+
+Nothing anywhere reads that constant — `grep` over `hypervisor/`,
+`scripts/` and `tests/` finds only its own declaration.
+`on_ept_violation` calls `decode_guest_instruction` unconditionally,
+which calls the full `arch::x86_64::decode`. The narrow
+`decode_memory_store` in `decoder.h` is the one that is unused: its only
+caller is `scripts/ci/decoder-test.cpp`.
+
+So the comment describes the opposite of what the code does, and it
+describes it at length, which is worse than saying nothing — the triple
+fault it records was real and whatever fixed it is not recorded
+anywhere. `tests/watched_page/` proves the current state rather than
+asserting it: BTS is a form only the full decoder answers, and the
+harness emulates one end to end through `on_ept_violation`.
+
+Smallest fix: delete the constant, and move whatever of that comment is
+still true onto `decode_guest_instruction`.
+
+A smaller adjacent finding, recorded so it is not mistaken for a defect:
+`CMP r/m32, r32` (opcodes `0x38`/`0x39`) is not in the decoder's
+read-modify-write group, even though the immediate form `0x83 /7` and
+`TEST` against a register both are. Refusing is always safe — the caller
+steps — so this is missing coverage rather than a bug, and it costs one
+stepped write per occurrence.
 
 ## Closed
 
