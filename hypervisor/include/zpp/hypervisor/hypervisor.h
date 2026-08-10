@@ -1064,6 +1064,30 @@ private:
      */
 
     /**
+     * What a guest hypervisor was last told when a VMX instruction of
+     * its own failed, and how many times.
+     *
+     * These exist because their absence was mistaken for evidence. Only
+     * one of the refusal paths logs - the one where `build_vmcs02`
+     * rejects the controls - and the three early ones in
+     * `on_guest_vmlaunch` return a plain VMfail with nothing recorded
+     * anywhere. So "no VM entry is being refused" was read off a missing
+     * log line, and a guest hypervisor executing VMRESUME thousands of
+     * times a second and being told error 5 each time looked exactly
+     * like one that had stopped asking. Those have entirely different
+     * causes and the counters separate them.
+     *
+     * `nested_last_vmfail` holds the VM-instruction error number, or
+     * zero for a VMfailInvalid, which carries none.
+     * @{
+     */
+    volatile std::uint64_t nested_vmfail_count[max_cpus]{};
+    volatile std::uint64_t nested_last_vmfail[max_cpus]{};
+    /**
+     * @}
+     */
+
+    /**
      * What the rebuild read out of the controller before borrowing, and
      * how far the borrow got. Enough to tell "the queue was described
      * wrongly" from "the queue was described correctly and the controller

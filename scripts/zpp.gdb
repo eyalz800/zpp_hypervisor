@@ -195,6 +195,19 @@ define zppstat
     $h->emulated_length_decoded
   printf "nmis reinjected %llu\n", $h->guest_nmis_reinjected
 
+  # What a guest hypervisor was last told when its own VMX instruction
+  # failed. A non-zero count with l2 entries frozen means it is being
+  # refused, not declining to ask - and those have different causes.
+  # Error 5 is "VMRESUME with non-launched VMCS".
+  set $i = 0
+  while $i < 8
+    if $h->nested_vmfail_count[$i]
+      printf "cpu %d: %llu vmfails, last error %llu\n", \
+        $i, $h->nested_vmfail_count[$i], $h->nested_last_vmfail[$i]
+    end
+    set $i = $i + 1
+  end
+
   # A step that never completed. Any of these still set means the
   # monitor trap flag was armed and its exit never arrived, which leaves
   # the watched page - the local APIC's - writable for every processor
