@@ -1260,11 +1260,8 @@ decode(std::span<const std::byte> code,
         //     comparison is `accumulator - memory`, which is the other
         //     way round from the compare and the subtract beside it.
         //     `:42848` says only "set according to the results of the
-        //     comparison operation"; the direction is settled by Xen,
-        //     whose emulator writes `cmp: %%eax - dst ==> dst and src
-        //     swapped for macro invocation` at the failure path of its
-        //     own `0f b0`/`0f b1` case, and by Bochs, which computes
-        //     `AL - op1` in `CMPXCHG_EbGbM`.
+        //     comparison operation"; the direction is settled by
+        //     Bochs, which computes `AL - op1` in `CMPXCHG_EbGbM`.
         //
         //   - the accumulator is written on one branch only. On the
         //     equal branch the operation section assigns nothing to it,
@@ -1322,8 +1319,7 @@ decode(std::span<const std::byte> code,
         // result is what memory held, which is exactly what
         // `result_for_register` returns for every form that writes one -
         // including the 32-bit case zero-extending and the 8- and 16-bit
-        // cases preserving the rest of the register, which is what Xen's
-        // emulator writes out longhand at `x86_emulate.c`'s `xadd` case.
+        // cases preserving the rest of the register.
         case 0xc0:
         case 0xc1: {
             auto byte_form = (0xc0 == opcode);
@@ -1395,9 +1391,8 @@ decode(std::span<const std::byte> code,
             // than a different bit of this one - the processor moves the
             // access to `Effective Address + (4 * (BitOffset DIV 32))`
             // for a 32-bit operand, `.references/sdm.txt:38988`, and the
-            // modulo at `:38974` applies only to a register bit base.
-            // Xen does the same adjustment, `x86_emulate.c`, `case
-            // DstBitBase`.
+            // modulo at `:38974` applies only to a register bit
+            // base.
             //
             // Refused rather than followed, for the reason spelled out
             // on the immediate form below: the caller keeps only the low
@@ -1461,9 +1456,8 @@ decode(std::span<const std::byte> code,
             // offset operand". A memory bit base has no such limit. The
             // processor moves the access instead, to `Effective Address
             // + (4 * (BitOffset DIV 32))` for a 32-bit operand
-            // (`:38988`), which is also what Xen's emulator computes -
-            // `x86_emulate.c`, `case DstBitBase`, for the immediate form
-            // as well as the register one.
+            // (`:38988`), for the immediate form as well as the register
+            // one.
             //
             // So `btsl $40, (%rax)` sets bit 8 of the dword at
             // `[rax+4]`, and reducing 40 to 8 set the right bit of the
@@ -1834,9 +1828,8 @@ flags_after(const decoded_instruction & instruction,
     // other way round from the compare and the subtract below, which are
     // memory against the operand. `.references/sdm.txt:42848` says only
     // "set according to the results of the comparison operation"; the
-    // direction is settled by Xen's emulator, which writes `cmp: %%eax -
-    // dst ==> dst and src swapped for macro invocation`, and by Bochs,
-    // which computes `AL - op1` in `CMPXCHG_EbGbM`.
+    // direction is settled by Bochs, which computes `AL - op1` in
+    // `CMPXCHG_EbGbM`.
     //
     // The zero flag falls out of the same subtraction rather than being
     // set separately: the operands are equal exactly when it is zero,

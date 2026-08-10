@@ -1008,8 +1008,8 @@ static outcome model_of(const semantic_case & instruction,
         // ELSE ZF := 0; accumulator := TEMP; DEST := TEMP",
         // `.references/sdm.txt:42806`. The flags are those of the
         // comparison, accumulator against the destination -
-        // `.references/sdm.txt:42848`, and Xen's emulator says the same
-        // in one line: "cmp: %%eax - dst".
+        // `.references/sdm.txt:42848`, and Bochs computes `AL - op1`
+        // in `CMPXCHG_EbGbM`.
         auto accumulator = g_registers.rax & mask;
 
         result.flags = keep | model_sub_flags(accumulator, memory, size);

@@ -4176,7 +4176,7 @@ what memory ends up holding depends on a register the encoding never
 names, so the accumulator is captured at decode into `compare_value` and
 `apply` stays pure; the flags are those of `accumulator - memory`, the
 other way round from every other subtraction here, which the SDM does
-not state and Xen and Bochs both do; and the accumulator is written on
+not state and Bochs does; and the accumulator is written on
 the failing branch **only**, which is not the same as writing it what it
 already holds - a 4-byte write would clear the upper half of the 64-bit
 register. Memory is written on both branches, which is the SDM's own
@@ -4188,8 +4188,8 @@ statement (`:42797`) and not a simplification.
 citing the SDM's "the offset is taken modulo the operand size". That
 sentence is about a *register* bit base (`:38974`). A memory bit base has
 no such limit: the processor moves the access to `Effective Address + (4
-* (BitOffset DIV 32))` (`:38988`), which is also what Xen does, for the
-immediate form as well as the register one.
+* (BitOffset DIV 32))` (`:38988`), for the immediate form as well as
+the register one.
 
 So `btsl $40, (%rax)` sets bit 8 of the dword at `[rax+4]`, and this
 decoder set bit 8 of the dword at `[rax]` - the right bit of the wrong
