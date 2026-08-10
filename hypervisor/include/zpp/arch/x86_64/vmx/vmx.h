@@ -127,6 +127,10 @@ enum type : std::uint64_t
     // that: it begins in real mode.
     unrestricted_guest = (1ull << 7),
     enable_invpcid = (1ull << 12),
+    // Lets a guest hypervisor read and write the fields named by the
+    // VMREAD and VMWRITE bitmaps against a shadow region in memory,
+    // without an exit. SDM 26.2 and 27.3.
+    vmcs_shadowing = (1ull << 14),
     enable_xsaves_xrstors = (1ull << 20),
     mode_based_execute_control = (1ull << 22),
 };

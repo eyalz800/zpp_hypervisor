@@ -157,6 +157,26 @@ public:
     std::uint64_t guest_vmxon_pointer[max_cpus]{};
     std::uint64_t guest_current_vmcs[max_cpus]{};
     arch::x86_64::vmx::vmcs12 guest_vmcs12[max_cpus]{};
+
+    // VMCS shadowing, stubbed. There is no processor here to make a
+    // shadow region current on, so the copies are no-ops and the control
+    // is never enabled - which is also the behaviour on a processor that
+    // does not offer it, so the paths under test are the same ones.
+    void set_vmcs_shadowing(std::size_t, bool) {}
+    void copy_vmcs12_to_shadow(std::size_t) {}
+    void copy_shadow_to_vmcs12(std::size_t) {}
+    void initialize_vmcs_shadowing() {}
+
+    // The field-use table, which the harness does not read but the
+    // handlers under test write on every VMREAD and VMWRITE.
+    static constexpr std::size_t vmcs_field_use_capacity = 128;
+    std::uint64_t vmcs_field_read_encoding[vmcs_field_use_capacity]{};
+    std::uint64_t vmcs_field_read_count[vmcs_field_use_capacity]{};
+    std::uint64_t vmcs_field_write_encoding[vmcs_field_use_capacity]{};
+    std::uint64_t vmcs_field_write_count[vmcs_field_use_capacity]{};
+    std::uint64_t vmcs_field_use_overflow{};
+    void record_vmcs_field_use(bool write, std::uint64_t encoding);
+
     bool running_l2[max_cpus]{};
     bool l2_entry_logged[max_cpus]{};
     std::uint64_t l2_entries[max_cpus]{};

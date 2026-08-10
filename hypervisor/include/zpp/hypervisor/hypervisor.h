@@ -5292,6 +5292,80 @@ private:
      */
 
     /**
+     * VMCS shadowing: the region the guest hypervisor's own VMREADs and
+     * VMWRITEs are served from, and the bitmaps that decide which fields
+     * it may reach without an exit.
+     *
+     * This is the largest single cost this VMM imposes on a guest
+     * hypervisor. Measured on the rig across a four minute Hyper-V boot,
+     * 4,287,565 exits on the boot processor: VMREAD 2,070,621 and VMWRITE
+     * 765,747, which is **65.7% of every exit taken**, against 359,923
+     * exits by the guest that hypervisor was running. Nine of ours per one
+     * of its own, and every one of them a field it could have read out of
+     * memory.
+     *
+     * Shadowing is not free either, and the shape of the cost is what
+     * decides the field list. A shadowed field lives in a hardware-format
+     * region that only VMREAD and VMWRITE can touch, so keeping it and the
+     * cached vmcs12 agreeing costs a VMPTRLD, a copy, a VMCLEAR and a
+     * VMPTRLD back at each of the two points they can diverge. That is
+     * about six VMX instructions per second-level exit however many fields
+     * are copied - so the list wants to be *the fields the guest
+     * hypervisor actually uses*, and no more.
+     *
+     * Which is why record_vmcs_field_use exists rather than this list
+     * being KVM's. KVM's vmcs_shadow_fields.h is a real measurement, of a
+     * different guest under a different VMM.
+     * @{
+     */
+    alignas(page_size)
+        arch::x86_64::vmx::vmx_vmcs shadow_vmcs[nested_regions_per_cpu];
+    std::uint64_t shadow_vmcs_physical[nested_regions_per_cpu]{};
+
+    /**
+     * A set bit means "exit"; a clear bit means "the guest hypervisor may
+     * have this one out of the shadow region". Set to all ones and then
+     * punched through for the shadowed fields, so a field nobody thought
+     * about exits - which is the direction that stays correct.
+     *
+     * One pair for the whole VMM rather than one per processor: the
+     * contents do not depend on which processor is running, and the
+     * architecture indexes them by field encoding alone.
+     */
+    alignas(page_size) std::uint8_t
+        vmcs_shadow_read_bitmap[nested_vmx::enabled ? page_size : 1]{};
+    alignas(page_size) std::uint8_t
+        vmcs_shadow_write_bitmap[nested_vmx::enabled ? page_size : 1]{};
+    std::uint64_t vmcs_shadow_read_bitmap_physical{};
+    std::uint64_t vmcs_shadow_write_bitmap_physical{};
+
+    /**
+     * Whether the processor granted the control. Requested through
+     * adjust_msr like every other secondary control, so a processor
+     * without it simply runs the old way rather than failing VM entry -
+     * and this records which happened, because "the fix did nothing" and
+     * "the fix was not applied" look identical from the exit counts.
+     */
+    bool vmcs_shadowing_enabled{};
+
+    /**
+     * How many times each direction was copied, so the cost of the fix is
+     * visible beside the exits it removed.
+     * @{
+     */
+    std::uint64_t vmcs_shadow_loads[max_cpus]{};
+    std::uint64_t vmcs_shadow_stores[max_cpus]{};
+    /** @} */
+
+    void initialize_vmcs_shadowing();
+    void set_vmcs_shadowing(std::size_t cpu, bool enabled);
+    void copy_vmcs12_to_shadow(std::size_t cpu);
+    void copy_shadow_to_vmcs12(std::size_t cpu);
+    /**
+     * @}
+     */
+
+    /**
      * How many paging-structure pages each processor's shadow extended
      * page table may use.
      *

@@ -1018,6 +1018,11 @@ bool hypervisor::on_guest_vmxoff(std::size_t cpu)
     // corrupted".
     flush_guest_vmcs12(cpu);
 
+    // No VMCS of the guest hypervisor's is current any more, and the
+    // control may not stay on without one - VM entry checks the link
+    // pointer whenever it is set.
+    set_vmcs_shadowing(cpu, false);
+
     this->guest_in_vmx_operation[cpu] = false;
     this->guest_vmxon_pointer[cpu] = 0;
     this->guest_current_vmcs[cpu] = no_current_vmcs;
@@ -1041,6 +1046,11 @@ void hypervisor::flush_guest_vmcs12(std::size_t cpu)
     if (no_current_vmcs == this->guest_current_vmcs[cpu]) {
         return;
     }
+
+    // What reaches the guest's own region has to include the writes it
+    // made into the shadow without exiting, or a VMCS it reads back is
+    // missing everything it wrote since the last VM entry.
+    copy_shadow_to_vmcs12(cpu);
 
     auto & shadow = this->guest_vmcs12[cpu];
 
@@ -1101,6 +1111,7 @@ bool hypervisor::on_guest_vmclear(std::size_t cpu,
         // two steps at once, and keeps every field the guest wrote.
         this->guest_vmcs12[cpu].state(vmcs12::launch_state::clear);
         flush_guest_vmcs12(cpu);
+        set_vmcs_shadowing(cpu, false);
         this->guest_current_vmcs[cpu] = no_current_vmcs;
 
         vmx_succeed();
@@ -1201,6 +1212,11 @@ bool hypervisor::on_guest_vmptrld(std::size_t cpu,
 
     this->guest_vmcs12[cpu] = loaded;
     this->guest_current_vmcs[cpu] = *pointer;
+
+    // A VMCS of the guest hypervisor's is now current, which is the
+    // condition VMCS shadowing exists for and the condition the link
+    // pointer has to be valid under. Publishes the new contents too.
+    set_vmcs_shadowing(cpu, true);
 
     vmx_succeed();
     return true;
@@ -1550,6 +1566,12 @@ bool hypervisor::on_guest_vmlaunch(std::size_t cpu, basic_reason reason)
         vmx_fail_invalid();
         return true;
     }
+
+    // Everything below reads the cached vmcs12, and the guest hypervisor
+    // has had a chance to write the shadowed fields since this VMM last
+    // looked - silently, which is the point. So they are collected first.
+    // This is the same place KVM does it, in nested_vmx_run.
+    copy_shadow_to_vmcs12(cpu);
 
     auto & shadow = this->guest_vmcs12[cpu];
 

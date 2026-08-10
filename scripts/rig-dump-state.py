@@ -124,6 +124,68 @@ def monitor_reasons(monitor, instance, off, args, cpu=0, capacity=64):
             for i in range(capacity) if words.get(base + 8 * i, 0)}
 
 
+def dump_field_use(args, instance, off, capacity=128):
+    """The VMCS fields the guest hypervisor reads and writes.
+
+    This is what decides which fields VMCS shadowing should cover: a
+    shadowed field costs a copy in each direction at every second-level
+    exit, so a list longer than what the guest hypervisor touches makes
+    the fix slower than the problem.
+    """
+    monitor = Monitor(args.rig, args.port)
+    for name in ("vmcs_field_read_encoding", "vmcs_field_read_count",
+                 "vmcs_field_write_encoding", "vmcs_field_write_count"):
+        monitor.queue(instance + off[name], capacity)
+    monitor.queue(instance + off["vmcs_field_use_overflow"], 1)
+    words = monitor.run()
+
+    def table(kind):
+        rows = []
+        for i in range(capacity):
+            count = words.get(
+                instance + off[f"vmcs_field_{kind}_count"] + 8 * i, 0)
+            if not count:
+                continue
+            rows.append((count, words.get(
+                instance + off[f"vmcs_field_{kind}_encoding"] + 8 * i, 0)))
+        rows.sort(reverse=True)
+        return rows
+
+    for kind in ("read", "write"):
+        rows = table(kind)
+        total = sum(count for count, _ in rows) or 1
+        print(f"  --- vm{kind} ({total} total, {len(rows)} distinct) ---")
+        for count, encoding in rows:
+            print(f"    0x{encoding:04x} {VMCS_FIELD.get(encoding, ''):<44} "
+                  f"{count:>10}  {100.0 * count / total:5.1f}%")
+
+    overflow = words.get(instance + off["vmcs_field_use_overflow"], 0)
+    if overflow:
+        print(f"  table full, {overflow} uses not recorded")
+
+
+def load_field_names():
+    """Field encoding to name, straight out of the header.
+
+    Read rather than duplicated, because a name table that drifts from the
+    enum is worse than no names: it labels the wrong field confidently.
+    """
+    path = "hypervisor/include/zpp/arch/x86_64/vmx/vmcs_fields.h"
+    names = {}
+    try:
+        with open(path) as handle:
+            for line in handle:
+                m = re.match(r"\s*(\w+)\s*=\s*(0x[0-9a-fA-F]+),", line)
+                if m:
+                    names.setdefault(int(m.group(2), 16), m.group(1))
+    except OSError:
+        pass
+    return names
+
+
+VMCS_FIELD = load_field_names()
+
+
 def main():
     ap = argparse.ArgumentParser()
     # The archived copy first, because it is the binary the guest is
@@ -164,7 +226,11 @@ def main():
                "exit_reason_counts",
                "shadow_ept_builds", "shadow_ept_cache_hits",
                "shadow_ept_evictions", "shadow_ept_resets",
-               "shadow_ept_leaves_filled"]
+               "shadow_ept_leaves_filled",
+               "vmcs_shadow_loads", "vmcs_shadow_stores",
+               "vmcs_field_read_encoding", "vmcs_field_read_count",
+               "vmcs_field_write_encoding", "vmcs_field_write_count",
+               "vmcs_field_use_overflow"]
     off = gdb_offsets(args.elf, members)
     instance = base + gdb_symbol(
         args.elf, "zpp::hypervisor::hypervisor::instance()::instance")
@@ -179,7 +245,8 @@ def main():
                "l2_activity_state", "events_requeued", "events_deferred",
                "pending_event", "shadow_ept_builds", "shadow_ept_cache_hits",
                "shadow_ept_evictions", "shadow_ept_resets",
-               "shadow_ept_leaves_filled"]
+               "shadow_ept_leaves_filled", "vmcs_shadow_loads",
+               "vmcs_shadow_stores"]
     for name in scalars:
         monitor.queue(instance + off[name], args.cpus)
     monitor.queue(instance + off["running_l2"], (args.cpus + 7) // 8)
@@ -211,6 +278,14 @@ def main():
               f"{read('shadow_ept_evictions', cpu):-9d}  "
               f"{read('shadow_ept_resets', cpu):-6d}  "
               f"{read('shadow_ept_leaves_filled', cpu):-13d}")
+
+    print("\ncpu  shadow-loads  shadow-stores")
+    for cpu in range(args.cpus):
+        print(f"{cpu:3d}  {read('vmcs_shadow_loads', cpu):-12d}  "
+              f"{read('vmcs_shadow_stores', cpu):-13d}")
+
+    print("\nvmcs fields the guest hypervisor uses")
+    dump_field_use(args, instance, off)
 
     print("\ncpu 0 exit reasons")
     counts = monitor_reasons(monitor, instance, off, args)

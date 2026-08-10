@@ -2576,6 +2576,17 @@ void hypervisor::reflect_l2_exit(std::size_t cpu,
             static_cast<std::uint64_t>(basic_reason::triple_fault));
         this->guest_vmcs12[cpu].write(field::exit_qualification, 0);
     }
+
+    // Last, after every write above. The guest hypervisor is about to run
+    // its exit handler, and the whole point of shadowing is that it reads
+    // the exit information out of the shadow region without exiting - so
+    // that region has to hold what was just written, and this is the only
+    // moment between the writes and the reads.
+    //
+    // Safe to overwrite the region rather than merge into it: the guest
+    // hypervisor has not run since on_guest_vmlaunch collected its silent
+    // writes, so the shadow's writable fields and the cache agree.
+    copy_vmcs12_to_shadow(cpu);
 }
 
 hypervisor::l2_exit_outcome

@@ -7812,6 +7812,29 @@ void hypervisor::setup_vmcs(std::size_t cpu,
             if (arch::x86_64::vmx::vmclear(&this->vmcs02_physical[cpu])) {
                 log("cpu {} could not clear its second level vmcs", cpu);
             }
+
+            // The shadow region, which the guest hypervisor's own VMREADs
+            // and VMWRITEs are served from once a VMCS of its own is
+            // current. Bit 31 of the revision identifier is what makes it
+            // a *shadow* VMCS rather than an ordinary one - SDM 26.11.5,
+            // "VMCS Types: Ordinary and Shadow" - and a region without it
+            // is rejected by the VM-entry check on the link pointer.
+            auto & shadow = this->shadow_vmcs[cpu];
+
+            constexpr std::uint32_t shadow_indicator = 1u << 31;
+            shadow.revision_id =
+                static_cast<std::uint32_t>(
+                    this->cached_vmx_msr(vmx_msr::basic) & 0xffffffff) |
+                shadow_indicator;
+            shadow.abort_indicator = 0;
+
+            this->shadow_vmcs_physical[cpu] =
+                this->host_page_table.virtual_to_physical(&shadow);
+
+            if (arch::x86_64::vmx::vmclear(
+                    &this->shadow_vmcs_physical[cpu])) {
+                log("cpu {} could not clear its shadow vmcs", cpu);
+            }
         }
     }
 
@@ -7825,6 +7848,20 @@ void hypervisor::setup_vmcs(std::size_t cpu,
     // intercept_interrupt_command and intercept_io_port be called once
     // on the boot processor and take effect everywhere.
     vmcs.msr_bitmap(this->msr_bitmap_physical);
+
+    // The VMREAD and VMWRITE bitmaps are shared for the same reason, and
+    // are written here on every processor while their contents are built
+    // once. The control that consults them stays *off* until the guest
+    // hypervisor makes a VMCS of its own current, because VM entry
+    // requires a valid shadow region behind the link pointer whenever it
+    // is on - see set_vmcs_shadowing.
+    if constexpr (nested_vmx::enabled) {
+        initialize_vmcs_shadowing();
+        vmcs.vmread_bitmap_address(this->vmcs_shadow_read_bitmap_physical);
+        vmcs.vmwrite_bitmap_address(
+            this->vmcs_shadow_write_bitmap_physical);
+    }
+
     vmcs.write(arch::x86_64::vmx::vmcs::field::io_bitmap_a,
                this->io_bitmap_a_physical);
     vmcs.write(arch::x86_64::vmx::vmcs::field::io_bitmap_b,

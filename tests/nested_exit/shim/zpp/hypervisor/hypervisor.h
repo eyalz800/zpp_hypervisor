@@ -198,6 +198,12 @@ public:
     std::uint64_t l2_exit_trace_count[max_cpus]{};
     std::uint64_t l2_exit_detail[max_cpus]{};
     std::uint64_t pending_event[max_cpus]{};
+
+    // VMCS shadowing does nothing here: this harness has no processor and
+    // no shadow region, so publishing to one is a no-op that keeps the
+    // reflection path compiling unchanged.
+    void copy_vmcs12_to_shadow(std::size_t) {}
+    void copy_shadow_to_vmcs12(std::size_t) {}
     bool vmcs02_launched[max_cpus]{};
     std::uint64_t vmcs02_physical[max_cpus]{};
     std::uint64_t l2_entries[max_cpus]{};
