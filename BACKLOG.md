@@ -4843,3 +4843,27 @@ the APIC timer's rate from the TSC's is the first hypothesis to test.
 Both the read of `0x40000020` and a write of `0x40000071` - the
 synthetic ICR - appear in the stalled processors' exit rings, so the
 guest is using that interface.
+
+**A caveat on that, before anyone acts on it.** "The guest is told the
+wrong thing about time" is one reading of those numbers and not the only
+one. The other is that 2.38e9 is not a mis-scaled tick at all but an
+honest long timeout - about 2.4 seconds against a 1 GHz bus - which is
+what a hypervisor waiting on something that never arrives would arm. On
+that reading the missing timers are a *consequence* of Hyper-V never
+getting far enough to start scheduling, not the cause of it, and the
+1214x is a comparison between two different kinds of timer rather than
+the same one mis-programmed.
+
+Both switches that would hand the guest a frequency are off -
+`nested_vmx::pass_through_hypervisor_interface` and
+`announce_hypervisor`, `nested_vmx.h:78` and `:150` - so the guest's
+reads of `0x40000022` and `0x40000023` take the `#GP` this VMM gives any
+MSR it does not implement, and it must calibrate. The reference is
+simply told, because the rig runs `-cpu host,...,hv-passthrough`.
+
+What separates the two readings is cheap and has not been done: arm the
+KVM trace, boot both, and compare `kvm_apic_accept_irq` for vector
+`0xef` over the same phase of boot. If ours accepts them at 1/1214 of
+the reference's rate, the counts are the same timer mis-scaled. If ours
+stops accepting them entirely at a point, something else wedged first
+and the timer is downstream of it. Do that before changing a switch.
