@@ -2235,6 +2235,12 @@ hypervisor::l2_entry_outcome hypervisor::enter_or_park_l2(std::size_t cpu)
                             static_cast<std::uint64_t>(
                                 basic_reason::entry_invalid_guest_state),
                         0);
+
+        // After the reflection, never before it: save_l2_state writes
+        // this into vmcs12, and the record has to describe what the
+        // processor is doing *now*, which is running the guest
+        // hypervisor's own code.
+        this->l2_activity_state[cpu] = activity::active;
         return l2_entry_outcome::reflected;
     };
 
@@ -2339,6 +2345,14 @@ hypervisor::l2_entry_outcome hypervisor::enter_or_park_l2(std::size_t cpu)
             cpu,
             static_cast<std::uint64_t>(basic_reason::start_up_ipi),
             *vector);
+
+        // And the record goes back to describing this processor rather
+        // than the guest it was holding, again after the reflection so
+        // that vmcs12 keeps the wait-for-SIPI above. It is read by
+        // start_up_processor, which must not hand a second vector to a
+        // mailbox nobody is spinning on any more - the processor is
+        // running the guest hypervisor's exit handler now.
+        this->l2_activity_state[cpu] = activity::active;
         return l2_entry_outcome::reflected;
     }
 

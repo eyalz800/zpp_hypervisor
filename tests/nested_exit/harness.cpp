@@ -2606,6 +2606,13 @@ static void test_activity_state()
     check(activity::wait_for_start_up_ipi ==
               shadow.read(fields::guest_activity_state),
           "a start-up IPI exit must leave vmcs12 in wait-for-SIPI");
+
+    // And the software record goes back to describing this processor, so
+    // that start_up_processor stops offering it vectors through a mailbox
+    // nothing is spinning on.
+    check(activity::active == hv().l2_activity_state[cpu],
+          "a reflected start-up IPI left the processor recorded as still "
+          "parked");
     g_start_up_vector.reset();
 
     // The two checks the processor no longer makes, because the state it
