@@ -535,24 +535,24 @@ shell as a running guest wastes the session waiting for nothing.
 
 ## Afterwards
 
-Shut the guest down, do not just kill it while Windows is live. From the
-monitor:
+**Kill QEMU by PID, with the script. Do not ask Windows to shut itself
+down.**
 
 ```sh
-printf 'system_powerdown\n' | nc -w 5 192.168.1.199 4444
+./scripts/rig-kill-qemu.sh
 ```
 
-That is the ACPI power button and Windows takes it as a clean shutdown.
-**Then watch the screen, not the process.** On this rig the shutdown
+The ACPI power button is not used here. On this rig the shutdown
 regularly does not finish - the display goes black and QEMU keeps running
-indefinitely. Once the screen is off, Windows is down and
+indefinitely - so it costs tens of seconds, ends in the kill anyway, and
+holds the NVMe hostage in the meantime.
 
-```sh
-sudo pkill -x qemu-system-x86_64
-```
-
-is the right move. `pkill -x`, never `pkill -f`. Waiting longer does not help
-and only holds the NVMe hostage.
+The script is the supported way because of *how* it finds the process,
+not because it is shorter. It resolves the PID by reading
+`/proc/<pid>/comm`, which is the process name and cannot match a mention,
+then signals that PID: TERM first, KILL second. See `trace-kvm`'s
+"Killing the guest: by PID, by process NAME" for the three rules it
+encodes and what each one cost.
 
 Letting the process exit lets the script's restore path rebind the NVMe to the
 host: `/dev/nvme0n1*` reappear and
@@ -718,17 +718,24 @@ off removed code and moved the singleton from 0x1435000 to 0x1434000, and
 every static with it. Re-derive addresses from the binary you actually
 deployed, every time.
 
-## Do not `pkill -f qemu-system` over ssh
+## Never match QEMU by command line - use the PID
 
-The pattern matches the ssh session's own command line, so the shell kills
-itself before it launches anything. The failure is silent and confusing:
-no output, and the file you redirected to keeps its old timestamp, so it
-looks as though the previous run's log is the current one.
+`pkill -f qemu-system` matches the ssh session's own command line, so the
+shell kills itself before it launches anything. The failure is silent and
+confusing: no output, and the file you redirected to keeps its old
+timestamp, so it looks as though the previous run's log is the current
+one. `pkill -f boot-zpp.sh` did exactly this.
 
-    sudo pkill -9 -x qemu-system-x86_64     # exact name, no -f
+Use `./scripts/rig-kill-qemu.sh`, which finds the PID by reading
+`/proc/<pid>/comm` - the process name, which cannot match a mention - and
+signals that PID.
 
 For the same reason `ps aux | grep -c "[q]emu-system"` counts your own
-command line. Check the actual `ps` lines rather than the count.
+command line, and `ps -o args | grep "[q]emu-system"` matches the
+launcher, whose environment carries `ZPP_QEMU_EXTRA`. That made
+`ensure-traced-kvm.sh` refuse to load KVM with "REFUSING: 1 qemu still
+running" and the next boot die with `Could not access KVM kernel module`.
+Read `/proc/<pid>/comm`, never a command line.
 
 ## Check the config flags before blaming the code
 
@@ -797,28 +804,29 @@ The loader now calls `connect_all_controllers()` before the self test,
 which fixes the first. The second is a reason to keep booting the loader
 off the disk under test.
 
-## Do not kill a running Windows - ask it to shut down
+## Killing a running Windows costs something - know what, and do it anyway
 
-`pkill -9 qemu-system-x86_64` while Windows is up is an unclean shutdown
-every single time, and they accumulate: enough of them and Windows stops
-booting normally and comes up in recovery instead, which costs a repair
-cycle and someone sitting at the machine. That happened here after a long
-run of experiments, and it was entirely self-inflicted.
+An unclean shutdown is what it is, and they accumulate: enough of them
+and Windows comes up in recovery instead of booting, which costs a repair
+cycle and someone sitting at the machine. That has happened here.
 
-Ask first, kill only if it does not finish:
+It is still the rule, because the alternative is worse on this rig. The
+ACPI shutdown regularly never completes, so waiting on it burns tens of
+seconds and ends in the kill regardless.
 
-    # graceful: an ACPI power button event, which Windows honours
-    { printf "system_powerdown\n"; sleep 1; } | nc -w 6 <rig> 4446
-    # give it time - a real shutdown takes tens of seconds
-    # only then, if it has not exited:
-    sudo pkill -9 -x qemu-system-x86_64
+    ./scripts/rig-kill-qemu.sh
 
-Two bonuses for free. A graceful shutdown is the only way to exercise the
-`CC.SHN` path, where the guest sets shutdown-notification with `CC.EN`
-still set and the queues are still alive - which is the *easy* half of
-surviving a controller reset. And a Windows that shuts down cleanly boots
-cleanly next time, which is worth more than the seconds saved by killing
-it.
+What is genuinely lost is the `CC.SHN` path - a guest setting
+shutdown-notification with `CC.EN` still set and the queues alive, which
+is the easy half of surviving a controller reset. If that path ever needs
+exercising, it needs a deliberate experiment rather than being a side
+effect of tidying up after a run.
+
+If Windows does end up in recovery: let it boot **without** the
+hypervisor (`boot.sh` rather than `boot-zpp.sh`), let it finish whatever
+it wants to do, and shut it down from inside Windows. Do not debug the
+hypervisor against a machine that is mid-repair - nothing measured there
+means anything.
 
 If Windows does end up in recovery: let it boot **without** the hypervisor
 (`boot.sh` rather than `boot-zpp.sh`), let it finish whatever it wants to
@@ -878,10 +886,12 @@ around. Say so, leave the devices bound where they are, and spend the
 time on everything that does not need the machine - there is always a
 static review's worth of it.
 
-Prevention is the only real answer, and it is the graceful-shutdown rule
-two sections up. `system_powerdown` and *wait* for the screen to go
-black. Every one of these leaks has followed a `kill` of a QEMU that was
-mid-VFIO-teardown.
+There is no prevention that is worth its cost. Every one of these leaks
+has followed a kill of a QEMU that was mid-VFIO-teardown, and killing is
+the rule here - the ACPI shutdown does not reliably finish on this rig,
+so waiting on it buys nothing and ends in the same kill. Treat the leak
+as a possible price of every run, notice it immediately (the script says
+so), and stop rather than improvise.
 
 ## Reserve a host core, so a wedge cannot cost you the connection
 
