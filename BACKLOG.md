@@ -95,7 +95,32 @@ immediately before the hand-over); and the zpp boot option itself
 (`LOAD_OPTION_ACTIVE`, same attribute word as Windows Boot Manager's, same
 GPT partition signature, no `LOAD_OPTION_CATEGORY_APP`).
 
-## The guest is not stuck. It is 77 times too slow.
+## The guest is not stuck. It is 77 times too slow. — WITHDRAWN
+
+**Every number in this section was measured on a build carrying the
+`02c747e` regression, and the conclusion drawn from them is false.** Kept
+in full, because the numbers are real and because the way they misled is
+the point.
+
+The regression - `git bisect` over seven rig boots, fixed in `f68db84` -
+stopped the guest hypervisor from ever starting its application
+processors. So "every other processor is still parked in EDK2's wakeup
+loop at 107 exits each", below, is not a symptom of slowness. It is the
+regression's signature, and it is what produced both the 8x term and the
+seven-cores-burned table in item 3.
+
+With the regression fixed and all eight processors running second-level
+guests, the machine **still stops**, and stops completely: see "The
+machine is not slow. It stops, on a timer that never fires", below. So
+the reframing this section performed - "they should not be investigated
+as defects until the speed gap is closed" - had the effect of parking the
+real defect for a day behind a speed argument.
+
+The general lesson, which is the reason not to delete this: **a
+throughput measurement cannot distinguish slow from stopped**, and this
+section asserted that it could. A rate is only evidence about progress
+once something independent has established that progress is happening at
+all. The metric that would have caught it is in the new section.
 
 Measured 2026-08-10 on the rig, and it reframes everything above it that
 was written as "the root partition is blocked on X".
@@ -236,6 +261,106 @@ Two ways to cut it, both unmeasured:
 the target and expensive only because of the extra layer, so a change
 that helps here and costs there is the wrong trade.
 
+## The machine is not slow. It stops, on a timer that never fires
+
+Measured 2026-08-11 on the rig, on `f68db84` - the first build without
+the `02c747e` regression, so the first measurement in which all eight
+processors actually run second-level guests. It supersedes the withdrawn
+section above and answers item 3 below, which had guessed the opposite.
+
+**Where it stops.** Every one of the eight root-partition virtual
+processors ends on the same sequence, read from the second-level exit
+rings:
+
+```
+wrmsr 0x400000b0   HV_X64_MSR_STIMER0_CONFIG
+wrmsr 0x400000b1   HV_X64_MSR_STIMER0_COUNT     arms synthetic timer 0
+rdmsr 0x40000020   HV_X64_MSR_TIME_REF_COUNT    x6
+hlt
+```
+
+and never runs again. `l2_entries` was frozen at 82,399 on the boot
+processor and at 324-421 on the others across **fifty minutes** of
+wall clock, with two samples taken twenty minutes apart identical to the
+unit. The root partition arms Hyper-V's synthetic timer, halts on it, and
+the timer never expires.
+
+**What is still alive, which is what makes it a stop rather than a
+crash.** Hyper-V is up and healthy on all eight processors. The image was
+identified rather than assumed: a PE header scan of the guest address
+space through the QEMU monitor found exactly one image, at
+`0xfffff821faa00000`, `SizeOfImage 0x415000`, whose debug directory
+carries `RSDS` and the PDB name **`hvix64.pdb`**. All eight processors
+sample at the same RIP, `+0x3a6b5e` into it, which disassembles as
+
+```
+cli
+cmp  dword ptr gs:[0x340], 0     ; per-processor pending-work count
+jg   have_work
+sti
+hlt
+jmp  ...                          ; <- RIP is here, one past the hlt
+```
+
+- its idle loop. The boot processor's remaining exits are two EPT
+violations per tick on the local APIC page at `0xfee00000`, the timer's
+initial count and the end of interrupt, at **0.5 exits per second** - a
+tick roughly every four seconds, which is a tickless idle, not a spin.
+
+**It is not a lost wake-up.** An NMI injected from the QEMU monitor
+changed nothing: `l2_entries` stayed at 82,399 across the injection.
+Hyper-V does not resume its virtual processors when kicked, so it is not
+holding a runnable processor back - it believes nothing is due.
+
+**Four things it is not**, each checked rather than assumed, so they are
+not re-proposed:
+
+- *Not the exit-reflection path.* `l2_exits_reflected` equals
+  `l2_entries` exactly on all eight processors, so every second-level
+  entry ends in an exit handed back to Hyper-V.
+- *Not the synthetic MSRs being stolen.* `l1_wants_l2_exit` returns true
+  for any MSR outside `0-0x1fff` and `0xc0000000-0xc0001fff` (SDM
+  28.1.3), so the STIMER and reference-counter accesses are reflected to
+  Hyper-V, which is the only layer that can answer them.
+- *Not swallowed inter-processor interrupts.* `on_interrupt_command`
+  passes every fixed-mode command through unchanged. The log shows
+  Hyper-V's rendezvous IPIs with a logical destination mask growing
+  `0x1e` -> `0x3e` -> `0x7e` -> `0xfe`, which is all seven application
+  processors being added one at a time, and it completes.
+- *Not the timer calibration.* Read from `timer_arm_value` /
+  `timer_arm_tsc`, the boot processor arms `~2.38e9` ten times at `~4.745e9`
+  TSC apart, then switches to `~14.4e6` at `~31e6` TSC apart. Against
+  KVM's 1 GHz emulated APIC and a ~2.15 GHz TSC both phases are
+  *self-consistent to within a percent*: the timer fires when the count
+  says it should. The `2.38e9` arming recorded in
+  `on_local_apic_write`'s comment is a transient early phase, roughly 14 s
+  to 34 s in, that Hyper-V corrects itself.
+
+**What is left, and it is one question.** A synthetic timer deadline is
+expressed in reference-counter units, and both halves of the comparison -
+what the root partition reads from `TIME_REF_COUNT` and what Hyper-V
+compares its deadline against - are Hyper-V's, derived from the TSC it
+sees. Neither is visible here today: the reference-counter read is
+reflected, so the value that comes back is written into the second-level
+guest's registers by Hyper-V after the reflection, and nothing records
+it.
+
+So the next instrumentation is specific: **capture RAX:RDX at the
+second-level entry that follows a reflected `rdmsr 0x40000020`, and the
+value written by `wrmsr 0x400000b1`.** Two consecutive reference-counter
+reads and the real TSC between them give the rate the guest sees; the
+deadline against that rate gives how far away it is. That distinguishes
+"the deadline is enormous because the reference clock is wrong" from
+"the deadline is right and the expiry is never noticed", and nothing
+short of it does.
+
+**A metric that measures progress rather than throughput**, since the
+withdrawn section above shows a rate cannot: `l2_entries` per processor,
+sampled twice. It is monotonic, it is per-processor, and it can only be
+wrong in one direction - a frozen counter cannot mean "busy". Fifty
+minutes at a delta of exactly zero is not a slow boot under any
+constant.
+
 ### 3. The root partition is not slow, it is asleep on a timer
 
 Read with `scripts/rig-dump-state.py`, which now prints the exit trace's
@@ -301,6 +426,17 @@ The timer cycle above is therefore Hyper-V idling, not the cause. It
 remains the clearest picture of what the guest is doing and is why item 1
 and item 2 are the path: both cut VMX instructions per second-level exit,
 which is now the quantity that matters.
+
+**"Idling, not the cause" was wrong, and it was the cause.** Measured
+2026-08-11 on `f68db84`: the cycle does not repeat for ever, it *ends* -
+`wrmsr 0x400000b1`, six reference-counter reads, `hlt`, and then nothing
+on any of the eight processors for fifty minutes. See "The machine is not
+slow. It stops, on a timer that never fires" above for the whole of it.
+The mistake here was reading a sleep as harmless because sleeping is what
+an idle machine does; what makes it the defect is that nothing ever wakes
+it. The seven-cores-burned table above it is separately invalid - it was
+measured with the `02c747e` regression holding the application processors
+in firmware.
 
 Next, and unmeasured: whether `HV_X64_MSR_TIME_REF_COUNT` advances at the
 rate Hyper-V believes it does. It is a 100 ns counter, so it must advance
