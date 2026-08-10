@@ -1578,23 +1578,12 @@ static void test_filter_notify()
                        one.name));
         }
 
-        diverge((4 == stopped) && (0 == stepped),
-                text("all %d non-store forms whose value a filter "
-                     "rewrote returned false from on_ept_violation and "
-                     "none of them was stepped. hypervisor.cpp:9821 "
-                     "answers a false with on_unhandled_exit, which "
-                     "stops the processor - so a guest instruction can "
-                     "halt a CPU. The comment at hypervisor.cpp:3556 "
-                     "says instead that \"the access takes the stepping "
-                     "path\", which is what it should do: refusing "
-                     "emulation is safe, stopping is not. Smallest fix: "
-                     "leave the `if (auto store = ...)` block rather "
-                     "than returning, so control reaches the stepping "
-                     "code at hypervisor.cpp:3669. Unreachable today - "
-                     "the only filter is the local APIC's and it never "
-                     "rewrites - which is exactly why it is worth "
-                     "recording",
-                     stopped));
+        check((0 == stopped) && (4 == stepped),
+              text("all %d non-store forms whose value a filter rewrote "
+                   "take the stepping path rather than stopping the "
+                   "processor - refusing emulation is safe, stopping is "
+                   "not",
+                   stepped));
     }
 
     // xchg is the one non-store form whose rewrite *is* honoured, because
@@ -1619,13 +1608,10 @@ static void test_filter_notify()
              .physical = base()},
             registers);
 
-        diverge(!ours,
-                "xchg: apply() returns the operand for an exchange just "
-                "as it does for a store, so replacing store->operand "
-                "would honour a rewrite exactly - but the guard at "
-                "hypervisor.cpp:3564 tests for memory_operation::store "
-                "alone and refuses it. Smallest fix: admit exchange to "
-                "that guard");
+        check(ours,
+              "xchg: a filter's rewrite is honoured, because apply() "
+              "returns the operand for an exchange exactly as for a "
+              "store");
     }
 
     // before_write runs on every violation, whatever the form and
@@ -2279,35 +2265,27 @@ static void test_straddle_and_width()
                   registers);
 
             auto sent = g_commands.size();
-            auto kvm_would_take =
+            [[maybe_unused]] auto kvm_would_take =
                 (4 == one.size) && (0 == (one.offset & 0xf));
 
             if (0x300 == one.offset) {
-                diverge(1 == sent,
-                        text("%s (%u bytes at 0x%llx) composes and sends "
-                             "a command here; KVM's apic_mmio_write "
-                             "drops it without writing anything "
-                             "(lapic.c:2440, `if (len != 4 || (offset & "
-                             "0xf)) return 0;`) and SDM 13.4 "
-                             "(sdm.txt:170419) requires 128-bit aligned "
-                             "32-bit accesses. Smallest fix: return "
-                             "write->value unchanged from "
-                             "filter_local_apic_write when write->size "
-                             "!= 4 or (offset & 0xf) != 0",
-                             one.how,
-                             one.size,
-                             static_cast<unsigned long long>(one.offset)));
+                check(0 == sent,
+                      text("%s (%u bytes at 0x%llx) is not read as a "
+                           "command - SDM 13.4 (sdm.txt:170419) requires "
+                           "128-bit aligned 32-bit accesses and KVM's "
+                           "apic_mmio_write drops anything else "
+                           "(lapic.c:2440)",
+                           one.how,
+                           one.size,
+                           static_cast<unsigned long long>(one.offset)));
             } else {
-                diverge(
-                    (0 == sent) && !kvm_would_take,
-                    text("%s (%u bytes at 0x%llx) is applied to the page "
-                         "here; KVM drops it (lapic.c:2440) because it "
-                         "is not a 16-byte aligned dword. This one "
-                         "changes the ICR's bytes without the filter "
-                         "ever being asked about the ICR",
-                         one.how,
-                         one.size,
-                         static_cast<unsigned long long>(one.offset)));
+                check(0 == sent,
+                      text("%s (%u bytes at 0x%llx) is applied to the "
+                           "page but never read as a command, since it "
+                           "is not a 16-byte aligned dword",
+                           one.how,
+                           one.size,
+                           static_cast<unsigned long long>(one.offset)));
             }
         }
     }
@@ -2359,18 +2337,10 @@ static void test_straddle_and_width()
                .physical = base()},
               registers);
 
-        check(1 == g_commands.size(),
-              "a byte write at 0x300 still reaches on_interrupt_command");
-        if (1 == g_commands.size()) {
-            diverge(0x0000'0002'0000'0011ull == g_commands[0],
-                    "a 1-byte write to 0x300 composes the command from "
-                    "the byte alone - the vector is the byte and the "
-                    "delivery mode, level and shorthand are all zero - "
-                    "so a command is sent that the guest never wrote. "
-                    "KVM drops the access (lapic.c:2440) and the "
-                    "register keeps its previous contents. Same fix as "
-                    "above: gate on size == 4 and (offset & 0xf) == 0");
-        }
+        check(g_commands.empty(),
+              "a byte write at 0x300 no longer reaches "
+              "on_interrupt_command, so it cannot send a command the "
+              "guest never wrote");
     }
 }
 

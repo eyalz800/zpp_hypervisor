@@ -5776,6 +5776,39 @@ std::optional<std::uint64_t> hypervisor::filter_local_apic_write(
     constexpr std::uint64_t interrupt_command_high = 0x310;
     constexpr std::uint64_t page_offset_mask = page_size - 1;
 
+    // Only a 4-byte access on a 16-byte boundary is a register access at
+    // all, and anything else is passed through without being read as a
+    // command.
+    //
+    // SDM 13.4.1 (.references/sdm.txt:170419): "Registers are 32 bits,
+    // 64 bits, or 256 bits in width; all are aligned on 128-bit
+    // boundaries. All 32-bit registers should be accessed using 128-bit
+    // aligned 32-bit loads or stores ... any access that touches bytes 4
+    // through 15 of an APIC register may cause undefined behavior".
+    // KVM's apic_mmio_write (lapic.c) opens with exactly this test -
+    // `if (len != 4 || (offset & 0xf)) return 0;` - and drops the write.
+    //
+    // Without it the command register was composed from whatever a
+    // narrow or misaligned access happened to carry. `mov byte [apic +
+    // 0x300], 0x11` composed 0x0000000200000011 and **sent an interrupt
+    // the guest never wrote** - vector from the one byte, delivery mode,
+    // level and shorthand all zero, destination from a register the
+    // guest was not writing. A four-byte write at offset 0x2fe put two
+    // of its bytes into the command register while the filter was asked
+    // about offset 0x2fe and saw nothing.
+    //
+    // The write itself is still performed: this page is the processor's
+    // real local APIC, so what a narrow store does to it is the
+    // hardware's business and the same thing would happen without a VMM
+    // in the way. What is refused is *interpreting* it as a command.
+    constexpr std::uint64_t register_size = 4;
+    constexpr std::uint64_t register_alignment_mask = 0xf;
+
+    if ((register_size != write->size) ||
+        (0 != (write->address & register_alignment_mask))) {
+        return write->value;
+    }
+
     if (interrupt_command_low != (write->address & page_offset_mask)) {
         auto offset = write->address & page_offset_mask;
 
