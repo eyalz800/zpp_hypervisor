@@ -3527,3 +3527,43 @@ printf 'xp/8gx 0x6a85af20\n' | nc -w 6 <rig> 4446
 The `ptype` first is not optional - it expands the compilation unit, and
 without it the class name does not resolve and every offset query
 answers `No type "hypervisor" within class or namespace "zpp"`.
+
+### The next three measurements, in order
+
+Named here because the run they need was lost to a rig reboot, and
+because two of them are one command each.
+
+**1. Read `gs:[0x340]` on every processor.** This is the whole question.
+The idle loop is `cli; cmp dword ptr gs:[0x340], 0; jg done; sti; hlt`,
+so that counter is Hyper-V's "do I have work". If it is non-zero the
+processor never halts at all - it takes the branch, returns, finds the
+same value and comes straight back, which is a spin, not an idle. That
+would explain the measured `resume_activity_state` of 0 on all eight
+processors, since a guest that never halts never has an activity state
+other than active. If it is zero, the processor really is halting and
+something is waking it, and the question becomes what.
+
+`info registers -a` gives GS base per processor; the counter is at base
++ 0x340 and reads through the monitor's `x`.
+
+**2. Sample `exit_total` twice, not just `l2_entries`.** Tonight's dump
+established that `l2_entries` is frozen, which says the root partition
+is not being entered. It did *not* establish whether the boot processor
+is still taking exits, because `exit_total` was read once. The APIC
+ping-pong in the ring could be history rather than the present. The
+local APIC's `current_count` increasing between samples says the timer
+is being re-armed live, which is strong but indirect - `exit_total`
+twice settles it outright, and both reads are `xp` through the monitor
+with the offsets already recorded above.
+
+**3. Then, and only then, the reference boot.** `~/vm/boot-kvm.sh` boots
+the same Windows on the same hardware with no zpp in the path, using
+`RELEASEX64_OVMF_VARS.fd.kvmrun` and six processors. Two things worth
+comparing, both cheap: whether `/proc/interrupts` grows `vfio-msi`
+entries for the NVMe on a working boot - tonight's wedged run had none
+at all, only a flat INTx line - and what `kvm_apic_ipi` and
+`kvm_apic_accept_irq` look like across the equivalent phase.
+
+It is third rather than first because it costs a boot and answers a
+comparative question, while the two above are reads against a guest that
+is already in the state being asked about.
