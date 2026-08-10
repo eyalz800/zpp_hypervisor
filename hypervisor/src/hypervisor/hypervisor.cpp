@@ -7176,6 +7176,17 @@ void hypervisor::record_exit(arch::x86_64::vmx::exit_reason reason,
             (context.rcx & low_half_mask);
     }
 
+    // Counted before the ring is touched, because this is the count that
+    // has to be right whether or not the entry merges with the one before
+    // it. The bound is the array's rather than the architecture's: a
+    // reason past the end of Table C-1 is left uncounted rather than
+    // folded onto a neighbour, since a wrong non-zero count is worse than
+    // a missing one and the ring below records it either way.
+    if (basic < exit_reason_capacity) {
+        this->exit_reason_counts[cpu][basic] =
+            this->exit_reason_counts[cpu][basic] + 1;
+    }
+
     ++count;
 
     // A repeat grows the entry already there rather than taking a slot,

@@ -3299,6 +3299,43 @@ private:
     std::uint64_t exit_total[max_cpus]{};
 
     /**
+     * How many basic exit reasons are counted below.
+     *
+     * Sized past the architecture rather than to it: SDM Table C-1 ends at
+     * 85, WRMSRNS in its immediate form, so 96 covers every reason the
+     * manual defines today and leaves room before the bound below starts
+     * discarding. The reason field is sixteen bits, so a processor could
+     * in principle report more; anything at or above this is counted
+     * nowhere rather than over something else, and the ring beside this
+     * still records it in full.
+     */
+    static constexpr std::size_t exit_reason_capacity = 96;
+
+    /**
+     * Every exit this processor has taken, counted by basic exit reason.
+     *
+     * This answers "what was this processor doing" in one read, which the
+     * ring beside it cannot: thirty-two slots is a window on the last
+     * fraction of a second, and the question a frozen guest raises is
+     * about the minutes before that. A processor that took eighty
+     * thousand EPT violations and thirty external interrupts is described
+     * completely by two numbers here, and not at all by its ring.
+     *
+     * Counted in record_exit, which runs exactly once per exit - the
+     * paths that record before stopping do so instead of reaching the
+     * resume, since on_unhandled_exit does not return. So the row sums to
+     * exit_total for the same processor, and a disagreement between them
+     * means an exit reason at or above the bound above.
+     *
+     * Indexed by the basic reason, so the index is the number SDM Table
+     * C-1 gives: 0 exception or NMI, 1 external interrupt, 10 CPUID, 12
+     * HLT, 28 control register access, 30 I/O, 31 RDMSR, 32 WRMSR, 48 EPT
+     * violation, 52 VMX-preemption timer.
+     */
+    volatile std::uint64_t exit_reason_counts[max_cpus]
+                                             [exit_reason_capacity]{};
+
+    /**
      * Whether a start-up IPI has already started each processor, cleared
      * again by an INIT.
      *
