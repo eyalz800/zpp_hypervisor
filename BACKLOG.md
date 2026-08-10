@@ -3427,3 +3427,103 @@ page-fault filtering in `l1_wants_l2_exit` is truth-table identical to
 `nested_vmx_is_page_fault_vmexit`; `reflect_l2_exit`'s field set is
 complete against `prepare_vmcs12`; and `filter_local_apic_write`'s ICR
 composition matches `kvm_apic_send_ipi`.
+
+## What the quiesce actually is, measured
+
+Two independent boots stopped at the same place, with counters within a
+few percent of each other, so this is deterministic rather than a race.
+Everything below was read off a live wedged guest without restarting it.
+
+**The guest is idle, not wedged.** All eight processors sit at the
+instruction *after* a `hlt`, in Hyper-V's own idle loop:
+
+```
+cli
+cmp  dword ptr gs:[0x340], 0
+jg   done
+sti
+hlt
+jmp  done+1        <-- RIP is here, on all eight
+```
+
+`info lapic` on every processor: ISR empty, IRR empty, TPR 0, PPR 0. No
+stuck in-service vector, which was the first hypothesis and is wrong.
+
+**Hyper-V has stopped scheduling the root partition.** `l2_entries`
+freezes at ~82,000 on the boot processor and 320-420 on the other seven,
+and never moves again. The application processors' exit rings still hold
+the healthy shape - VMREAD, VMWRITE, VMRESUME, then a Windows kernel RIP
+at `fffff801c1......` - so the root partition did run, and then stopped
+being entered.
+
+**No interrupt reaches any processor.** KVM tracepoints
+(`kvm_apic_ipi`, `kvm_apic_accept_irq`, `kvm_inj_virq`,
+`kvm_msi_set_irq`) over twenty seconds on the wedged guest recorded
+*nothing*. Check the host's uptime against the trace timestamps before
+believing a capture: the first one here looked like it had events, and
+they were 110 minutes old, left in the ring buffer from an earlier run.
+
+**The passed-through NVMe has no MSI-X.** `/proc/interrupts` on the host
+shows no `vfio-msi` line for it at all, only a flat INTx count. So
+either Windows never finished bringing storage up, or it did and nothing
+has asked the disk for anything since.
+
+**The timer is armed for 2.4 seconds and re-armed every ~100
+microseconds.** `initial_count` 2,390,924,802 at divide-by-1, and
+`current_count` sampled three times *increases* between samples while
+`initial_count` stays put - which only happens if the register is being
+written again. The loop is: write the timer's initial count (0x380),
+write the end of interrupt (0xb0), repeat. 1.25 million exits on the
+boot processor, its whole exit ring, two alternating RIPs, both plain
+stores to the local APIC page:
+
+```
+mov  [r8+rax], edx          ; APIC[ecx] = edx     -> RIP ...457efe
+mov  dword [rax+0xb0], 0    ; end of interrupt    -> RIP ...457ae1
+```
+
+So the timer never expires; something else wakes the processor, it
+finds no work, acknowledges and re-arms. What that something is is not
+yet identified - it is not the local APIC, because nothing is ever
+pending in it, and it is not KVM, because KVM delivers nothing.
+
+Ruled out by measurement, so they need not be re-proposed:
+
+- **A stuck ISR vector blocking lower-priority delivery.** ISR is empty
+  on all eight.
+- **The TSC.** `tsc_offset` is zero in vmcs01 and the guest reads raw
+  hardware, so a mis-scaled deadline cannot be the cause.
+- **APIC virtualization being advertised and not implemented.** None of
+  the APICv secondary controls are offered - `supported_secondary_controls`
+  lists eleven bits and none of them is one - and the captured Hyper-V
+  vmcs12 has `secondary 0x00000000`, so it asks for none of them.
+- **Posted interrupts.** Same: the pin control is stripped in
+  `build_vmcs02`, and the capture shows `pin 0x1e`, which does not
+  include it. Note the capture also has **external-interrupt exiting
+  clear**, so Hyper-V expects device interrupts to be delivered straight
+  into whichever guest is running, through its own IDT.
+
+**Hyper-V sets HLT exiting for the root partition** - primary
+`0xa4206dfa`, bit 7 - so a halting Windows produces an exit Hyper-V
+handles, and it is reflected correctly. vmcs01 sets no HLT exiting at
+all, which is why `basic_reason::hlt` has no case in the main handler.
+
+### Reading a wedged guest without gdb
+
+`add-symbol-file` plus `$h->member` needs a processor inside the module,
+and a healthy guest spends its time outside it - thirty attaches in a
+row found none. The monitor's `xp` reads *physical* memory, bypassing
+EPT and paging entirely, and the module base printed on serial is a
+physical address, so any member can be read live with offsets computed
+offline:
+
+```sh
+x86_64-elf-gdb -q -batch out/debug/x86_64/zpp_hypervisor \
+  -ex "ptype 'zpp::hypervisor::hypervisor::record_exit'" \
+  -ex "print/x (long)&(('zpp::hypervisor::hypervisor' *)0)->l2_entries"
+printf 'xp/8gx 0x6a85af20\n' | nc -w 6 <rig> 4446
+```
+
+The `ptype` first is not optional - it expands the compilation unit, and
+without it the class name does not resolve and every offset query
+answers `No type "hypervisor" within class or namespace "zpp"`.
