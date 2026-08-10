@@ -2293,7 +2293,8 @@ private:
                           arch::x86_64::context & context);
     bool
     on_guest_vmlaunch(std::size_t cpu,
-                      arch::x86_64::vmx::exit_reason::basic_reason reason);
+                      arch::x86_64::vmx::exit_reason::basic_reason reason,
+                      arch::x86_64::context & context);
     bool on_guest_invept(std::size_t cpu, arch::x86_64::context & context);
     bool on_guest_invvpid(std::size_t cpu,
                           arch::x86_64::context & context);
@@ -3333,6 +3334,65 @@ private:
     std::uint64_t timer_arm_value[max_cpus][timer_arm_capacity]{};
     std::uint64_t timer_arm_tsc[max_cpus][timer_arm_capacity]{};
     std::uint64_t timer_arm_count[max_cpus]{};
+    /**
+     * @}
+     */
+
+    /**
+     * How many of the newest synthetic-timer samples to keep.
+     *
+     * A ring keeping the *newest*, which is the opposite of
+     * `timer_arm_capacity` above and for the opposite reason. That one
+     * holds a calibration, which happens once at the beginning. This one
+     * holds the last thing that happened before the machine stopped, and
+     * the stop is at the end.
+     */
+    static constexpr std::size_t reference_sample_capacity = 32;
+
+    /**
+     * What Hyper-V's synthetic timer is being compared against, both
+     * halves of it, for the newest `reference_sample_capacity` events.
+     *
+     * Measured 2026-08-11 on the rig: every root-partition virtual
+     * processor ends on `wrmsr 0x400000b0`, `wrmsr 0x400000b1`, six
+     * `rdmsr 0x40000020`, `hlt`, and is never entered again -
+     * `l2_entries` frozen on all eight processors across fifty minutes.
+     * So the machine stops on a synthetic timer deadline that never
+     * arrives, and the question is which half of the comparison is wrong.
+     *
+     * Neither half was visible before this. Both `HV_X64_MSR_STIMER0_
+     * COUNT` and `HV_X64_MSR_TIME_REF_COUNT` lie outside the MSR bitmap's
+     * two ranges, so they exit unconditionally and are reflected to
+     * Hyper-V, which is the only layer that implements them (SDM 28.1.3,
+     * and `l1_wants_l2_exit`). The write's value is in hand at the exit.
+     * **The read's answer is not**: Hyper-V supplies it after the
+     * reflection, into the second-level guest's registers.
+     *
+     * It becomes visible one step later. A VMM loads its guest's general
+     * purpose registers into the physical ones before executing VMRESUME
+     * - KVM does exactly this in `__vmx_vcpu_run` - so at the VMRESUME
+     * exit that follows the reflection, RAX and RDX already hold the
+     * value Hyper-V is about to give its guest. That is where this is
+     * captured, which is what `reference_read_pending` carries across.
+     *
+     * With the time stamp beside each sample, two consecutive reads give
+     * the rate the guest sees the reference counter advance at - it is a
+     * 100 ns counter, so it must be 10 MHz - and a deadline read against
+     * that rate says how far away it is. Those two numbers separate "the
+     * deadline is enormous because the reference clock is wrong" from
+     * "the deadline is right and its expiry is never noticed", and
+     * nothing short of both of them does.
+     * @{
+     */
+    std::uint64_t
+        reference_read_value[max_cpus][reference_sample_capacity]{};
+    std::uint64_t reference_read_tsc[max_cpus][reference_sample_capacity]{};
+    std::uint64_t reference_read_count[max_cpus]{};
+    std::uint64_t
+        stimer_arm_value[max_cpus][reference_sample_capacity]{};
+    std::uint64_t stimer_arm_tsc[max_cpus][reference_sample_capacity]{};
+    std::uint64_t stimer_arm_count[max_cpus]{};
+    bool reference_read_pending[max_cpus]{};
     /**
      * @}
      */

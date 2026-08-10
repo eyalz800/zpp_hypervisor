@@ -2928,6 +2928,34 @@ hypervisor::on_l2_exit(std::size_t cpu,
     // guest's registers are still the ones in hand.
     if (cpu < max_cpus) {
         this->l2_exit_detail[cpu] = context.rcx;
+
+        // The two halves of the synthetic timer comparison the machine
+        // stops on, taken on the way past. Both MSRs are outside the
+        // bitmap's ranges, so they exit unconditionally and are about to
+        // be reflected - this is the last point at which the
+        // second-level guest's registers are the ones in the processor.
+        //
+        // The write's value is here. The read's answer is not: Hyper-V
+        // produces it after the reflection, so all that can be done here
+        // is to note that one is owed, and `on_guest_vmlaunch` collects
+        // it from the registers Hyper-V loads before its VMRESUME.
+        constexpr std::uint32_t time_reference_count = 0x40000020;
+        constexpr std::uint32_t synthetic_timer0_count = 0x400000b1;
+
+        auto index = static_cast<std::uint32_t>(context.rcx);
+
+        if ((basic_reason::rdmsr == reason.basic()) &&
+            (time_reference_count == index)) {
+            this->reference_read_pending[cpu] = true;
+        } else if ((basic_reason::wrmsr == reason.basic()) &&
+                   (synthetic_timer0_count == index)) {
+            auto slot = this->stimer_arm_count[cpu] %
+                        reference_sample_capacity;
+            this->stimer_arm_value[cpu][slot] =
+                (context.rax & 0xffffffff) | (context.rdx << 32);
+            this->stimer_arm_tsc[cpu][slot] = arch::x86_64::rdtsc();
+            this->stimer_arm_count[cpu] = this->stimer_arm_count[cpu] + 1;
+        }
     }
 
     reflect_l2_exit(cpu, reason, this->vmcs.exit_qualification());

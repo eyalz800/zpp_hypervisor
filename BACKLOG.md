@@ -354,6 +354,54 @@ deadline against that rate gives how far away it is. That distinguishes
 "the deadline is right and the expiry is never noticed", and nothing
 short of it does.
 
+### It was run, and both halves are correct
+
+Built, deployed and booted 2026-08-11. `reference_read_value` /
+`reference_read_tsc` and `stimer_arm_value` / `stimer_arm_tsc` in
+`hypervisor.h`; `scripts/` reads them the same way as everything else.
+
+**The reference counter is right.** Thirty-odd consecutive reads on the
+boot processor give **0.005020 reference units per TSC cycle**, stable to
+0.1% over baselines from 2.5e6 to 8.8e8 cycles. The TSC rate, taken from
+the local APIC timer armings over their longest baseline, is 1.99 GHz.
+`0.005020 x 1.99e9` = **10.0 MHz**, which is exactly what a 100 ns
+counter must be. The factor-of-1213 suspicion that has been carried in
+this file since `208cdf9` is dead: it is not a clock-rate error.
+
+**The deadline is right.** Every processor arms synthetic timer 0 to
+**156,250** units - `156250 x 100 ns` = **15.625 ms**, which is Windows'
+default tick to the digit. The one other value seen is 17,400, or
+1.74 ms. Neither is enormous, and neither is a scaled version of the
+other clock.
+
+So the disjunction resolves to its second branch: **the deadline is
+correct and its expiry is never delivered.**
+
+**It was losing ticks long before it stopped.** While the machine was
+still running, consecutive reference-counter reads on the boot processor
+are 1.65e6 to 4.4e6 units apart - **165 ms to 440 ms** - against a timer
+period of 15.625 ms. The root partition was being run once per ten to
+twenty-eight periods, and then once per infinity. That makes the stop the
+end of a gradient rather than a discrete event, and it means the thing to
+look for is a delivery path that drops most of what it is given, not one
+that breaks once.
+
+**It is deterministic.** Two boots stopped at `l2_entries` of 82,399 and
+82,413 on the boot processor, and at 421/397/379/370/352/336/324 and
+421/397/378/370/351/336/324 on the other seven. Ending within a handful
+of entries of each other on eight processors is not a race, and it means
+an experiment here needs one boot to judge, not a distribution.
+
+Next, and narrowed by all of the above: the path from Hyper-V's own timer
+to the synthetic interrupt it must post to a halted virtual processor.
+Hyper-V drives that from its local APIC timer, and the application
+processors are seen writing a zero initial count - disarming it - just
+before they go quiet for good, while the boot processor's own tick decays
+to one every two to four seconds. Whether that decay is Hyper-V choosing
+a long idle deadline or being unable to arm a short one is the question,
+and `timer_arm_value` already records enough to answer it if the ring
+kept the newest armings as well as the earliest.
+
 **A metric that measures progress rather than throughput**, since the
 withdrawn section above shows a rate cannot: `l2_entries` per processor,
 sampled twice. It is monotonic, it is per-processor, and it can only be

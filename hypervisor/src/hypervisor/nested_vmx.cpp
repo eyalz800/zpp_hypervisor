@@ -609,7 +609,7 @@ bool hypervisor::on_vmx_instruction(arch::x86_64::vmx::exit_reason reason,
         return on_guest_vmwrite(cpu, context);
     case basic_reason::vmlaunch:
     case basic_reason::vmresume:
-        return on_guest_vmlaunch(cpu, basic);
+        return on_guest_vmlaunch(cpu, basic, context);
     case basic_reason::invept:
         return on_guest_invept(cpu, context);
     case basic_reason::invvpid:
@@ -1595,7 +1595,9 @@ bool hypervisor::on_guest_invvpid(std::size_t cpu,
     return true;
 }
 
-bool hypervisor::on_guest_vmlaunch(std::size_t cpu, basic_reason reason)
+bool hypervisor::on_guest_vmlaunch(std::size_t cpu,
+                                   basic_reason reason,
+                                   arch::x86_64::context & context)
 {
     // The launch-state checks first, because they are the ones the
     // architecture puts before any consistency check and the ones a
@@ -1743,6 +1745,33 @@ bool hypervisor::on_guest_vmlaunch(std::size_t cpu, basic_reason reason)
     this->running_l2[cpu] = true;
     this->nested_rip_settled[cpu] = true;
     this->l2_entries[cpu] = this->l2_entries[cpu] + 1;
+
+    // The answer to a reference-counter read this VMM reflected, which is
+    // readable here and nowhere else. Hyper-V has just loaded its guest's
+    // general purpose registers into the physical ones - that is what a
+    // VMM does before VMRESUME, and what KVM does in `__vmx_vcpu_run` -
+    // so RAX and RDX hold the value about to be given to the second-level
+    // guest.
+    //
+    // Taken after the entry is committed rather than before, so a
+    // VMRESUME that is refused does not record a value the second-level
+    // guest never saw. The flag is cleared either way: an owed read that
+    // is never collected must not attach itself to some later unrelated
+    // entry, which is the same failure the requeue switch in the exit
+    // handler was withdrawn for.
+    if (cpu < max_cpus) {
+        if (this->reference_read_pending[cpu]) {
+            this->reference_read_pending[cpu] = false;
+
+            auto slot =
+                this->reference_read_count[cpu] % reference_sample_capacity;
+            this->reference_read_value[cpu][slot] =
+                (context.rax & 0xffffffff) | (context.rdx << 32);
+            this->reference_read_tsc[cpu][slot] = arch::x86_64::rdtsc();
+            this->reference_read_count[cpu] =
+                this->reference_read_count[cpu] + 1;
+        }
+    }
 
     if (!this->l2_entry_logged[cpu]) {
         this->l2_entry_logged[cpu] = true;
