@@ -618,6 +618,18 @@ void hypervisor::vmx_fail_invalid()
     // VMCS to record one in.
     this->vmcs.guest_rflags(
         (this->vmcs.guest_rflags() & ~rflags_arithmetic) | rflags_carry);
+
+    // Counted, because until this existed "no VM entry is being refused"
+    // was not a measurement - it was the absence of one. A guest
+    // hypervisor being told the same error thousands of times a second
+    // and a guest hypervisor not executing the instruction at all
+    // produced identical evidence, and they have entirely different
+    // causes.
+    if (auto slot = this->vmcs.vpid(); (0 != slot) && (slot <= max_cpus)) {
+        this->nested_vmfail_count[slot - 1] =
+            this->nested_vmfail_count[slot - 1] + 1;
+        this->nested_last_vmfail[slot - 1] = 0;
+    }
 }
 
 void hypervisor::vmx_fail_valid(std::size_t cpu, instruction_error error)
@@ -631,6 +643,15 @@ void hypervisor::vmx_fail_valid(std::size_t cpu, instruction_error error)
     this->guest_vmcs12[cpu].write(
         arch::x86_64::vmx::vmcs::field::vm_instruction_error,
         static_cast<std::uint64_t>(error));
+
+    // As vmx_fail_invalid: the error number is kept so a wedged guest
+    // can be asked what it was last told, rather than inferred from a
+    // log line that only one of the refusal paths emits.
+    if (cpu < max_cpus) {
+        this->nested_vmfail_count[cpu] =
+            this->nested_vmfail_count[cpu] + 1;
+        this->nested_last_vmfail[cpu] = static_cast<std::uint64_t>(error);
+    }
 }
 
 void hypervisor::vmx_fail(std::size_t cpu, instruction_error error)
@@ -1084,10 +1105,45 @@ bool hypervisor::on_guest_vmptrld(std::size_t cpu,
         return true;
     }
 
-    // Already current, which the architecture makes a plain success: SDM
-    // 33.3, VMPTRLD, does not special-case it, so it re-reads. Skipping
-    // the reload would lose whatever a VMCLEAR from another processor put
-    // there.
+    // Already current, which is a success that changes nothing.
+    //
+    // This used to re-read the region, on the reasoning that SDM 33.3
+    // does not special-case it. SDM 27.1 does, by name:
+    // ".references/sdm.txt:199016" - "The figure does not illustrate
+    // operations that do not modify the VMCS state relative to these
+    // parameters (e.g., **execution of VMPTRLD X when X is already
+    // current**)." VMPTRLD's own effect on VMCS data is the pointer
+    // assignment and nothing else; a processor keeps the data in
+    // implementation-specific storage and only guarantees it is in
+    // memory after VMCLEAR, which is why SDM 27.1 also says software
+    // "should never access or modify the VMCS data of an active VMCS
+    // using ordinary memory operations".
+    //
+    // Re-reading was not harmless here, because in this VMM the *cache*
+    // is the authoritative copy and the region is stale: nothing flushes
+    // on VMWRITE, and reflect_l2_exit does not flush either, so from a
+    // guest hypervisor's first VMWRITE the region holds a revision
+    // identifier and zeroes. A redundant VMPTRLD therefore replaced the
+    // whole live vmcs12 with that - launch state back to clear, every
+    // control zero, and the second-level guest state save_l2_state had
+    // accumulated gone. The next VMRESUME then fails
+    // vmresume_with_non_launched_vmcs, and that virtual processor can
+    // never be entered again: even a VMCLEAR and VMLAUNCH would enter it
+    // at RIP zero.
+    //
+    // KVM guards exactly this - handle_vmptrld wraps the release and the
+    // read of cached_vmcs12 in `if (vmx->nested.current_vmptr != vmptr)`,
+    // so a redundant VMPTRLD is a no-op.
+    //
+    // The worry the old comment recorded - losing what a VMCLEAR from
+    // another processor put in the region - is a VMCLEAR of a VMCS
+    // active on this one, which the architecture does not permit and
+    // KVM does not defend against either.
+    if (*pointer == this->guest_current_vmcs[cpu]) {
+        vmx_succeed();
+        return true;
+    }
+
     vmcs12 loaded;
     auto read = read_guest_physical(
         *pointer,
@@ -1103,11 +1159,9 @@ bool hypervisor::on_guest_vmptrld(std::size_t cpu,
     }
 
     // Only now, once the new one is known good, is the old one written
-    // back. Doing it earlier would flush over a region that turned out to
-    // be the same one.
-    if (*pointer != this->guest_current_vmcs[cpu]) {
-        flush_guest_vmcs12(cpu);
-    }
+    // back. The pointers differ by the early return above, so there is no
+    // longer a case where this flushes over the region just read.
+    flush_guest_vmcs12(cpu);
 
     this->guest_vmcs12[cpu] = loaded;
     this->guest_current_vmcs[cpu] = *pointer;
