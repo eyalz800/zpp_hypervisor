@@ -655,7 +655,7 @@ static void trace_launch_context()
  * The vendor GUID the trace variable lives under. Anything but the global
  * one, so nothing here can collide with a firmware variable.
  */
-static EFI_GUID g_zpp_variable_guid = {
+[[maybe_unused]] static EFI_GUID g_zpp_variable_guid = {
     0x7a1c9e42,
     0x3b8d,
     0x4f16,
@@ -683,11 +683,60 @@ static EFI_GUID g_zpp_variable_guid = {
  * variable storage is finite and wears, so this is for the paths worth
  * recording.
  */
-static void write_trace_variable()
+/**
+ * Holds the screen long enough for a failure to be read.
+ *
+ * The only reason this is needed: on the development laptop the give-up
+ * paths print and return, the firmware redraws its boot menu immediately,
+ * and the message is gone before it can be read - "there was text but it
+ * was too fast" is the entire diagnosis a bare-metal attempt produced.
+ *
+ * Twenty seconds, not a key wait. A key wait needs the console input
+ * protocol to be the one the user is typing at, which is not true of
+ * every firmware, and a diagnostic that can hang the machine is worse
+ * than one that is merely slow.
+ */
+static void hold_screen()
 {
     if constexpr (!trace::enabled) {
         return;
     }
+
+    if (!g_boot_services) {
+        return;
+    }
+
+    trace::line("ZPP_TRACE holding the screen for 20 seconds");
+    g_boot_services->Stall(20 * 1000 * 1000);
+}
+
+static void write_trace_variable()
+{
+    // **Off for bare metal, deliberately.**
+    //
+    // Two reasons, and the second is the one that matters. The log runs
+    // to 92 KB on a real boot and firmware variable stores are typically
+    // tens of kilobytes in total, so SetVariable fails - and its return
+    // is ignored here, which is why a bare-metal attempt that took an
+    // early give-up path left no variable at all and looked as though the
+    // loader had never run. It had.
+    //
+    // The second: this writes a **non-volatile** variable to real
+    // firmware's variable store on every failed attempt. A store that
+    // fills up is a machine that will not boot, and a diagnostic must not
+    // be able to cause that. Under an emulator it was free; on the
+    // development laptop it is not, and the emulator is not the machine
+    // that matters.
+    //
+    // The screen and the file on the EFI system partition are the
+    // channels now. Kept rather than deleted because the variable is the
+    // only one that works before a file system is reachable, which is
+    // where it would earn its place again.
+    constexpr bool to_firmware_variable = false;
+
+    if constexpr (!trace::enabled || !to_firmware_variable) {
+        return;
+    } else {
 
     if (!g_runtime_services) {
         return;
@@ -706,6 +755,7 @@ static void write_trace_variable()
             EFI_VARIABLE_RUNTIME_ACCESS,
         log.size(),
         const_cast<char *>(log.data()));
+    }
 }
 
 /**
@@ -1526,6 +1576,7 @@ extern "C" EFI_STATUS EFIAPI uefi_main(EFI_HANDLE image_handle,
             trace::line(
                 "ZPP_HYPERVISOR_FAILED no EFI_MP_SERVICES_PROTOCOL");
             write_trace_variable();
+            hold_screen();
             return EFI_LOAD_ERROR;
         }
 
@@ -1729,6 +1780,7 @@ extern "C" EFI_STATUS EFIAPI uefi_main(EFI_HANDLE image_handle,
         *end = 0;
         trace::raw(buffer);
         write_trace_variable();
+        hold_screen();
         return EFI_LOAD_ERROR;
     }
 

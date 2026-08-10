@@ -8673,7 +8673,30 @@ hypervisor::main(arch::x86_64::context & caller_context)
     // are in host_exception and host_exception_cr2 for a debugger to read;
     // the caller only learns that a host exception happened.
     if (host_exception_occurred) {
-        return std::unexpected(zpp::error{error::host_exception});
+        // The vector travels in the code, because on the target there is
+        // nowhere else for it to go.
+        //
+        // host_exception and host_exception_cr2 hold the whole frame and
+        // a debugger can read them - on the rig. On bare metal there is
+        // no debugger, no serial port and no resident channel yet, and
+        // the loader's printed code is the only thing that leaves the
+        // machine. "code 6" says a fault happened in this VMM's own
+        // setup and nothing about which, and that is one boot spent to
+        // learn almost nothing.
+        //
+        // So the code becomes 0x60000 | vector << 8 | error code, which
+        // the loader prints as sixteen hex digits: 0x60d00 is a general
+        // protection fault, 0x60e00 a page fault, 0x60600 an invalid
+        // opcode. The low byte carries the exception's own error code,
+        // which for a #GP names the selector when it has one.
+        //
+        // Still `host_exception` in spirit and still positive, so it
+        // stays distinguishable from the loader's own -1.
+        constexpr std::uint64_t host_exception_tag = 0x60000;
+        return std::unexpected(zpp::error{static_cast<error>(
+            host_exception_tag |
+            ((this->host_exception.vector & 0xff) << 8) |
+            (this->host_exception.error_code & 0xff))});
     }
 
     // Perform only on first CPU load. Not on a resume - see first_launch.
