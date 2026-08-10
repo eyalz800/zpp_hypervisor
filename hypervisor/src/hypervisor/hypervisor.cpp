@@ -7121,7 +7121,8 @@ void hypervisor::apply_start_up(arch::x86_64::context & context,
     vmcs.guest_activity_state(arch::x86_64::vmx::activity_state::active);
 }
 
-void hypervisor::record_exit(arch::x86_64::vmx::exit_reason reason)
+void hypervisor::record_exit(arch::x86_64::vmx::exit_reason reason,
+                             const arch::x86_64::context & context)
 {
     auto & vmcs = this->vmcs;
 
@@ -7149,9 +7150,30 @@ void hypervisor::record_exit(arch::x86_64::vmx::exit_reason reason)
     constexpr std::uint64_t ept_misconfiguration = 49;
     constexpr std::uint64_t basic_reason_mask = 0xffff;
 
-    if (auto basic = recorded.reason & basic_reason_mask;
-        (ept_violation == basic) || (ept_misconfiguration == basic)) {
+    auto basic = recorded.reason & basic_reason_mask;
+
+    if ((ept_violation == basic) || (ept_misconfiguration == basic)) {
         recorded.guest_physical = vmcs.guest_physical_address();
+    }
+
+    // What the guest asked for, where the reason alone does not say it.
+    //
+    // Out of the context rather than the VMCS, so this reads no field and
+    // costs a compare and a move on the three reasons it applies to and
+    // nothing at all on the rest. See exit_trace_entry::detail for what
+    // each packing means and why VMCALL needs two registers.
+    constexpr std::uint64_t vmcall = 18;
+    constexpr std::uint64_t rdmsr = 31;
+    constexpr std::uint64_t wrmsr = 32;
+    constexpr std::uint64_t low_half_mask = 0xffffffff;
+    constexpr std::uint64_t high_half_shift = 32;
+
+    if ((rdmsr == basic) || (wrmsr == basic)) {
+        recorded.detail = context.rcx & low_half_mask;
+    } else if (vmcall == basic) {
+        recorded.detail =
+            ((context.rax & low_half_mask) << high_half_shift) |
+            (context.rcx & low_half_mask);
     }
 
     ++count;
@@ -7182,7 +7204,8 @@ void hypervisor::record_exit(arch::x86_64::vmx::exit_reason reason)
             (previous.activity_state == recorded.activity_state) &&
             (previous.cs_selector == recorded.cs_selector) &&
             (previous.rip == recorded.rip) &&
-            (previous.guest_physical == recorded.guest_physical)) {
+            (previous.guest_physical == recorded.guest_physical) &&
+            (previous.detail == recorded.detail)) {
             ++previous.repeated;
             --count;
             return;
@@ -9884,7 +9907,7 @@ hypervisor::main(arch::x86_64::context & caller_context)
             // and nothing else.
             bool re_execute = true;
             if (!on_io_instruction(context, re_execute)) {
-                record_exit(full_reason);
+                record_exit(full_reason, context);
                 on_unhandled_exit(full_reason);
                 break;
             }
@@ -9928,7 +9951,7 @@ hypervisor::main(arch::x86_64::context & caller_context)
             // register and to the shadow, and the guest reads back what
             // it wrote.
             if (((0 != number) && (4 != number)) || (0 != access)) {
-                record_exit(full_reason);
+                record_exit(full_reason, context);
                 on_unhandled_exit(full_reason);
                 break;
             }
@@ -10052,7 +10075,7 @@ hypervisor::main(arch::x86_64::context & caller_context)
                 // put there by something that is not going to handle the
                 // fault - which is a bug here rather than a guest error,
                 // and resuming would fault identically forever.
-                record_exit(full_reason);
+                record_exit(full_reason, context);
                 on_unhandled_exit(full_reason);
             }
             advance_rip = false;
@@ -10065,7 +10088,7 @@ hypervisor::main(arch::x86_64::context & caller_context)
                 // The flag is only ever armed by the watch above, so an
                 // MTF exit with no step in progress means someone else
                 // set it and there is no correct way to continue.
-                record_exit(full_reason);
+                record_exit(full_reason, context);
                 on_unhandled_exit(full_reason);
             }
             advance_rip = false;
@@ -10222,7 +10245,7 @@ hypervisor::main(arch::x86_64::context & caller_context)
             // Recorded and stopped on rather than resumed from, because
             // the resume below would advance RIP past an instruction that
             // never took effect.
-            record_exit(full_reason);
+            record_exit(full_reason, context);
             on_unhandled_exit(full_reason);
         }
         }
@@ -10334,7 +10357,7 @@ void hypervisor::resume_guest(arch::x86_64::context & context,
 
     // Record what is about to be resumed, now that the handlers have
     // had their say.
-    record_exit(full_reason);
+    record_exit(full_reason, context);
 
     // Counted here, at the last point before control leaves this
     // handler, so a frozen exit count can be read two ways round.

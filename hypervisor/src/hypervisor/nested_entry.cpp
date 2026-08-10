@@ -2694,7 +2694,7 @@ hypervisor::on_l2_ept_fault(std::size_t cpu,
                     access_write ? "write" : "access",
                     guest_physical,
                     guest_walk.physical_address);
-                record_exit(reason);
+                record_exit(reason, context);
                 on_unhandled_exit(reason);
             }
 
@@ -2736,7 +2736,7 @@ hypervisor::on_l2_ept_fault(std::size_t cpu,
                 cpu,
                 guest_physical,
                 pointer.error().code());
-            record_exit(reason);
+            record_exit(reason, context);
             on_unhandled_exit(reason);
             return l2_exit_outcome::handled;
         }
@@ -2753,7 +2753,7 @@ hypervisor::on_l2_ept_fault(std::size_t cpu,
                 cpu,
                 page,
                 installed.error().code());
-            record_exit(reason);
+            record_exit(reason, context);
             on_unhandled_exit(reason);
             return l2_exit_outcome::handled;
         }
@@ -2800,7 +2800,7 @@ hypervisor::on_l2_ept_fault(std::size_t cpu,
                 cpu,
                 guest_physical,
                 guest_walk.physical_address);
-            record_exit(reason);
+            record_exit(reason, context);
             on_unhandled_exit(reason);
         }
 

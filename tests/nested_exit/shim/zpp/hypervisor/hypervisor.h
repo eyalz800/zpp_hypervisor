@@ -152,7 +152,8 @@ public:
                      std::uint64_t shift);
     arch::x86_64::vmx::ept_walk_result
     host_ept_lookup(std::uint64_t physical_address);
-    void record_exit(arch::x86_64::vmx::exit_reason reason);
+    void record_exit(arch::x86_64::vmx::exit_reason reason,
+                     const arch::x86_64::context & context);
     std::uint64_t own_vmcs_region_physical();
     bool on_ept_violation(std::size_t cpu,
                           arch::x86_64::context & context,

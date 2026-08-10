@@ -1938,9 +1938,16 @@ private:
 
     /**
      * Append the exit that is about to be resumed from to this CPU's ring
-     * in exit_trace.
+     * in exit_trace, and count it in exit_reason_counts.
+     *
+     * The context is taken because the exit reason alone does not say what
+     * the guest asked for: an RDMSR exit names no MSR and a VMCALL exit no
+     * hypercall, and both are in the guest's registers rather than in the
+     * VMCS. Passed by reference from the exit handler, which already holds
+     * it, so nothing is read out of the VMCS for this.
      */
-    void record_exit(arch::x86_64::vmx::exit_reason reason);
+    void record_exit(arch::x86_64::vmx::exit_reason reason,
+                     const arch::x86_64::context & context);
 
     /**
      * Ask the processor to deliver a general protection fault to the guest
@@ -3207,6 +3214,51 @@ private:
          * added. The log ring carries [times=N] for the same reason.
          */
         std::uint64_t repeated{};
+
+        /**
+         * What the guest asked for, where the exit reason alone does not
+         * say and the guest's own registers do. Zero for every other
+         * reason.
+         *
+         * Read out of the context the handler already holds, so this costs
+         * no VMREAD - which is why it can sit on a path taken by every
+         * exit at all.
+         *
+         * Three reasons fill it in, and each means something different:
+         *
+         * - RDMSR and WRMSR: the MSR index, ECX. The one thing that tells
+         *   an absent architectural MSR from a synthetic one the guest was
+         *   invited to ask for, and the difference CLAUDE.md records as
+         *   having cost an afternoon - a skipped `rdmsr` of 0x40000022
+         *   that Windows reported as 0xc000000d, blaming its own boot
+         *   configuration.
+         *
+         * - VMCALL: EAX in the high half, ECX in the low half. Two
+         *   registers rather than one because the exit does not say which
+         *   calling convention the caller used, and the two interfaces a
+         *   guest here might be speaking disagree: KVM's own takes the
+         *   call number in RAX (`kvm_emulate_hypercall` in
+         *   .references/kvm/x86.c reads `nr = kvm_rax_read(vcpu)`), while
+         *   the interface this VMM announces through the hypercall page
+         *   MSR takes its input value in RCX. Both call codes fit in 32
+         *   bits, so packing them keeps this one word rather than two and
+         *   loses nothing that identifies a leaf.
+         *
+         * Deliberately not filled in for CPUID, which has a ring of its
+         * own in cpuid_trace with the answers as well as the leaves.
+         *
+         * Sampled after the exit was handled, like every other field
+         * here, so it is the register the guest is about to be resumed
+         * with rather than the one it exited with. Those are the same
+         * value today and it is worth knowing why, because the day they
+         * stop being is the day this reads as the answer instead of the
+         * question: nothing on the MSR paths writes RCX - the read half
+         * answers into RAX and RDX - and VMCALL is refused with an
+         * invalid-opcode exception rather than answered, so nothing
+         * writes RAX either. A hypercall implementation that returned a
+         * status in RAX would make the high half its own.
+         */
+        std::uint64_t detail{};
     };
 
     /**
