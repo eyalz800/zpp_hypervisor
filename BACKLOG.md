@@ -4387,3 +4387,31 @@ interrupts by definition - so the open question is unchanged and the
 value here is the timestamp: the two runs are indistinguishable up to
 start-up and separate immediately after it. That is the window to
 instrument.
+
+### Vector 0xef is the local APIC timer, and it is the thing that stops
+
+Counted over the whole reference capture: vector `0xef` is accepted
+**244,167** times and carried by **zero** interrupt commands, so it is not
+an IPI - it is the local APIC timer. The same capture writes
+`APIC_TMICT` **539,169** times, about 1,500 a second, which is a one-shot
+timer being re-armed on every tick, and `APIC_TDCR` 49,558 times.
+
+Behind zpp, a sixty second capture of the settled guest holds **30**
+`APIC_TMICT` writes. Roughly three thousand times fewer.
+
+Injected vectors in the reference, for whoever needs to recognise them
+later: `0xef` 249,279, `0x20` 123,951, `0xff` 70,693, `0x2f` 35,622,
+`0xd1` 23,383, `0x60` 3,936.
+
+This is **not yet a cause**. A guest that has gone tickless-idle stops
+re-arming its timer by construction, and the boot processor does still
+hold a ~2.386 s one-shot, wakes on it, finds `gs:0x340` zero and halts
+again. What it settles is which mechanism the working boot leans on, and
+it names two questions the instrumented build should answer directly:
+
+- which MSRs the guest touches in the window, and whether it ever asks
+  for **TSC-deadline mode** (`IA32_TSC_DEADLINE`, MSR `0x6e0`) rather
+  than `TMICT`. zpp answers MSRs behind its own bitmap, so KVM's trace
+  can never see this and every capture so far has been blind to it;
+- whether any timer arming the guest performs is being lost rather than
+  declined.
