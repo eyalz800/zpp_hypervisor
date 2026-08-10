@@ -1465,9 +1465,48 @@ bool hypervisor::on_guest_invept(std::size_t cpu,
     //
     // Discarding rather than rebuilding, because the next VM entry needs
     // the shadow and nothing between now and then reads it.
+    // Refreshing rather than discarding **works and is wrong**, and both
+    // halves are measured, so it is switched off here rather than
+    // deleted.
+    //
+    // The idea: either way every mapping composed from these tables has
+    // to be composed again, since the descriptor names the pointer and
+    // not what changed - so do the walks in root operation, four memory
+    // reads each, instead of making the guest fault each one back. On the
+    // rig discarding cost 464,815 EPT violations against 15,896 INVEPTs,
+    // 58% of every exit this VMM took, for a guest hypervisor changing
+    // one page per call.
+    //
+    // It delivered exactly that. Shadow leaves filled per second-level
+    // exit went from 4.5 to 0.01 - 109 fills across 9,455 exits, against
+    // 444,292 across 99,345 before - and shadow rebuilds went to two.
+    //
+    // And then Hyper-V executed VMXOFF after those 9,455 exits and the
+    // machine reset, eight times in one boot where a working build loads
+    // the loader twice. A guest hypervisor that stands down has been told
+    // something it cannot reconcile, so the refresh is installing a
+    // mapping that should have faulted - it recomposes from the guest
+    // hypervisor's tables and this VMM's, and one of those answers is
+    // conditional on state the composition does not capture. The fault
+    // path knows that and deliberately leaves such entries absent, which
+    // is the note install_shadow_leaf already carries: "the table holds
+    // only what is unconditionally true".
+    //
+    // What would settle it: a ring that freezes on the guest's VMXOFF, so
+    // the exits leading to it survive. Everything read here was after the
+    // fact and after a reset. BACKLOG.md carries this.
+    constexpr bool refresh_shadow_on_invept = false;
+
     if (single_context == type) {
-        discard_shadow_ept_for(
-            cpu, operand_value.eptp & (((1ull << 52) - 1) & ~0xfffull));
+        if constexpr (refresh_shadow_on_invept) {
+            refresh_shadow_ept_for(
+                cpu,
+                operand_value.eptp & (((1ull << 52) - 1) & ~0xfffull));
+        } else {
+            discard_shadow_ept_for(
+                cpu,
+                operand_value.eptp & (((1ull << 52) - 1) & ~0xfffull));
+        }
     } else {
         discard_shadow_ept(cpu);
     }

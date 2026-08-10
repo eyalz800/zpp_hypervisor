@@ -5564,6 +5564,47 @@ private:
      * resumed unchanged and faulted again for ever.
      */
     std::uint64_t shadow_ept_leaves_filled[max_cpus]{};
+
+    /**
+     * The mappings a shadow held when the guest hypervisor invalidated
+     * it, so they can be re-walked instead of re-faulted.
+     *
+     * INVEPT was 58% of every exit this VMM took, second hand: 464,815
+     * EPT violations against 15,896 INVEPTs, one shadow thrown away per
+     * INVEPT and twenty-eight faults to fill it back in. The guest
+     * hypervisor is applying VTL protections one page at a time and
+     * invalidates after each, so it changed *one* mapping and this VMM
+     * discarded every mapping it had.
+     *
+     * Re-walking costs the same twenty-eight walks of the guest
+     * hypervisor's tables - but in root operation, where a walk is four
+     * memory reads and not a VM exit. That is the whole trade.
+     *
+     * Bounded, and the bound is the safety property rather than a
+     * limitation. Once shadows stop being wiped they grow, and a refresh
+     * costs proportional to the shadow rather than to the change; past
+     * this many mappings the old behaviour - discard, and let them fault
+     * back - is cheaper. Overflow is counted, so a bound set too low
+     * shows up as a number rather than as a mystery.
+     * @{
+     */
+    static constexpr std::size_t shadow_ept_refresh_capacity = 2048;
+
+    struct shadow_ept_leaf
+    {
+        std::uint64_t guest_physical{};
+        std::uint64_t shift{};
+    };
+
+    shadow_ept_leaf
+        shadow_ept_refresh_list[max_cpus][shadow_ept_refresh_capacity]{};
+    std::uint64_t shadow_ept_refreshes[max_cpus]{};
+    std::uint64_t shadow_ept_refresh_leaves[max_cpus]{};
+    std::uint64_t shadow_ept_refresh_overflows[max_cpus]{};
+
+    void refresh_shadow_ept_for(std::size_t cpu, std::uint64_t root);
+    std::size_t collect_shadow_leaves(std::size_t cpu, std::size_t slot);
+    /** @} */
     /**
      * @}
      */

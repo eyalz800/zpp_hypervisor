@@ -148,7 +148,41 @@ So the rig understates this VMM and always will. What it can still
 measure honestly is **exits per unit of guest work**, which is
 machine-independent, and that is what the fixes below are aimed at.
 
-### 1. Every INVEPT throws the whole shadow away - OPEN
+### 1. Every INVEPT throws the whole shadow away - TRIED, REVERTED
+
+Refreshing the shadow instead of discarding it **works and is wrong**,
+and it is switched off in `nested_vmx.cpp` behind
+`refresh_shadow_on_invept` rather than deleted, because both halves are
+worth keeping.
+
+It works: shadow leaves filled per second-level exit went from 4.5 to
+0.01 - 109 fills across 9,455 exits against 444,292 across 99,345 - and
+rebuilds went to two. The 58% of exits this was aimed at is gone.
+
+It is wrong: Hyper-V then executed VMXOFF after those 9,455 exits and
+the machine reset, **eight loader runs on serial in one boot** where a
+working build shows two. A guest hypervisor that stands down has been
+told something it cannot reconcile. The mechanism is not established,
+but the shape is: the refresh recomposes every mapping from the guest
+hypervisor's tables and this VMM's, and installs whatever composes -
+where the fault path deliberately leaves conditional entries absent so
+that the decision is made per access. `install_shadow_leaf` already says
+so: "the table holds only what is unconditionally true". Recomposing in
+bulk breaks that promise for every entry whose right answer depends on
+state at the time of access - a watched page being the obvious class.
+
+**What is needed before trying again is an instrument, not another
+idea.** Everything read here was after the fact and after a reset: the
+exit rings had turned over and the log ring held only APIC writes. A
+ring that *freezes on the guest hypervisor's VMXOFF* would carry the
+exits that led to it, which is the one thing nothing here can currently
+see. That is the same "keep the earliest, not the latest" trick that
+made the timer-arming instrument decisive.
+
+Do not re-derive the idea and re-land it. It has been measured, it is
+fast, and it breaks the guest.
+
+### 1b. The original problem, still open
 
 The largest remaining item, at 58% of all exits: 464,815 EPT violations
 against 15,863 shadow rebuilds and 15,896 INVEPTs from the guest

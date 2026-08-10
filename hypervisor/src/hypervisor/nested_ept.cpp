@@ -530,6 +530,171 @@ void hypervisor::release_shadow_slot(std::size_t cpu, std::size_t slot)
     this->shadow_ept_tables_used[cpu][slot] = 0;
 }
 
+/**
+ * Records every mapping a shadow currently holds, so a refresh knows what
+ * to walk.
+ *
+ * Four levels, iterated with an explicit position per level rather than
+ * recursed, because there is no stack here worth spending and the depth
+ * is fixed by the capability MSR reporting a page-walk length of four.
+ *
+ * Returns the number collected, or the capacity if it overflowed - the
+ * caller checks against the capacity rather than being told twice.
+ */
+std::size_t hypervisor::collect_shadow_leaves(std::size_t cpu,
+                                              std::size_t slot)
+{
+    std::size_t found{};
+    std::size_t index[4]{};
+    epte * table[4]{};
+
+    table[3] = this->shadow_epml4[cpu][slot];
+
+    for (auto level = 3;;) {
+        if (index[level] >= entries_per_table) {
+            if (3 == level) {
+                return found;
+            }
+            ++level;
+            ++index[level];
+            continue;
+        }
+
+        auto & entry = table[level][index[level]];
+        auto shift = std::uint64_t{12} + (9 * level);
+
+        if (!ept_permissions::of(entry).present()) {
+            ++index[level];
+            continue;
+        }
+
+        // A leaf is a large entry, or anything at the lowest level. The
+        // page-walk length being four means level zero is always 4 KB.
+        if (entry.large() || (0 == level)) {
+            if (found >= shadow_ept_refresh_capacity) {
+                return shadow_ept_refresh_capacity;
+            }
+
+            std::uint64_t guest_physical{};
+            for (auto i = 3; i >= level; --i) {
+                guest_physical |= static_cast<std::uint64_t>(index[i])
+                                  << (12 + (9 * i));
+            }
+
+            this->shadow_ept_refresh_list[cpu][found] = {guest_physical,
+                                                         shift};
+            ++found;
+            ++index[level];
+            continue;
+        }
+
+        auto next = entry.page_number() << 12;
+        auto located = this->module_physical_to_virtual.find(next);
+        if (this->module_physical_to_virtual.end() == located) {
+            // A table this VMM cannot find is one it did not allocate, so
+            // the tree is not what it is assumed to be. Refusing to walk
+            // further is the safe direction: the caller falls back to
+            // discarding, which needs to understand nothing.
+            return shadow_ept_refresh_capacity;
+        }
+
+        --level;
+        table[level] = reinterpret_cast<epte *>(located->second);
+        index[level] = 0;
+    }
+}
+
+/**
+ * Answers INVEPT by re-walking what the shadow already maps rather than
+ * throwing it away.
+ *
+ * The guest hypervisor changed something in its tables and said so. What
+ * it did *not* say is what, and the single-context descriptor names only
+ * the pointer - so every mapping composed from those tables is suspect
+ * and every one has to be composed again. The difference from discarding
+ * is only where that work happens: here, in root operation, four memory
+ * reads per mapping; or in the guest, one VM exit per mapping, which is
+ * what 464,815 EPT violations against 15,896 INVEPTs measured.
+ *
+ * Falls back to discarding when the shadow is larger than the refresh
+ * bound, which is the case where faulting them back is genuinely cheaper.
+ */
+void hypervisor::refresh_shadow_ept_for(std::size_t cpu,
+                                        std::uint64_t root)
+{
+    auto previous = this->shadow_ept_current_slot[cpu];
+
+    for (std::size_t slot{}; slot < shadow_ept_slots; ++slot) {
+        if (root != this->shadow_ept_source[cpu][slot]) {
+            continue;
+        }
+
+        auto count = collect_shadow_leaves(cpu, slot);
+        if (count >= shadow_ept_refresh_capacity) {
+            this->shadow_ept_refresh_overflows[cpu] =
+                this->shadow_ept_refresh_overflows[cpu] + 1;
+            release_shadow_slot(cpu, slot);
+            continue;
+        }
+
+        // Emptied before anything is put back, because a mapping the
+        // guest hypervisor has just removed must not survive, and the
+        // only way to know it was removed is that the walk below declines
+        // to compose it. Keeping the tables would leave the old entry in
+        // place for exactly those.
+        release_shadow_slot(cpu, slot);
+        std::memset(this->shadow_epml4[cpu][slot],
+                    0,
+                    sizeof(epte) * entries_per_table);
+        this->shadow_ept_source[cpu][slot] = root;
+        this->shadow_ept_generation_seen[cpu][slot] =
+            this->ept_generation.load(std::memory_order_acquire);
+
+        // install_shadow_leaf writes through the *current* slot, so this
+        // is which slot it means. Restored below.
+        this->shadow_ept_current_slot[cpu] = slot;
+
+        for (std::size_t i{}; i < count; ++i) {
+            auto leaf = this->shadow_ept_refresh_list[cpu][i];
+
+            auto walk = arch::x86_64::vmx::walk_ept(
+                root,
+                leaf.guest_physical,
+                physical_address_bits(),
+                execute_only_translations_offered,
+                [&](std::uint64_t at)
+                    -> std::optional<arch::x86_64::vmx::epte> {
+                    std::uint64_t value{};
+                    auto read = read_guest_physical(
+                        at,
+                        std::span(reinterpret_cast<std::byte *>(&value),
+                                  sizeof(value)));
+                    if (!read) {
+                        return std::nullopt;
+                    }
+                    return arch::x86_64::vmx::epte(value);
+                });
+
+            // A failure here leaves the mapping absent, which is the same
+            // answer the fault path would reach and needs no other
+            // handling: the next access to it faults and is decided then.
+            static_cast<void>(fill_shadow_leaf(
+                cpu, leaf.guest_physical, walk, leaf.shift));
+        }
+
+        this->shadow_ept_refreshes[cpu] =
+            this->shadow_ept_refreshes[cpu] + 1;
+        this->shadow_ept_refresh_leaves[cpu] =
+            this->shadow_ept_refresh_leaves[cpu] + count;
+    }
+
+    this->shadow_ept_current_slot[cpu] = previous;
+
+    // The entries just rewritten replace ones this processor may still
+    // have cached.
+    invalidate_ept_locally();
+}
+
 void hypervisor::discard_shadow_ept_for(std::size_t cpu,
                                         std::uint64_t root)
 {

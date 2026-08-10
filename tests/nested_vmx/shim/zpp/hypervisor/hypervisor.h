@@ -132,6 +132,7 @@ public:
                          std::span<const std::byte> from);
     void discard_shadow_ept(std::size_t cpu);
     void discard_shadow_ept_for(std::size_t cpu, std::uint64_t root);
+    void refresh_shadow_ept_for(std::size_t cpu, std::uint64_t root);
     void nested_transition_flush();
     std::expected<void, zpp::error> build_vmcs02(std::size_t cpu);
     l2_entry_outcome enter_or_park_l2(std::size_t cpu);
@@ -194,6 +195,8 @@ public:
     std::uint64_t ept_discards{};
     std::uint64_t ept_discards_for{};
     std::uint64_t last_discard_root{};
+    std::uint64_t ept_refreshes_for{};
+    std::uint64_t last_refresh_root{};
     bool build_vmcs02_fails{};
     l2_entry_outcome enter_or_park_l2_outcome{l2_entry_outcome::entered};
     std::uint64_t enter_or_park_l2_calls{};

@@ -145,6 +145,17 @@ void hypervisor::discard_shadow_ept_for(std::size_t, std::uint64_t root)
     this->last_discard_root = root;
 }
 
+// The refresh replaced the discard on the single-context path. Modelled
+// separately rather than folded into the counter above, because the two
+// differ in what survives - a refresh keeps the mappings the guest
+// hypervisor did not change - and a test that could not tell them apart
+// would pass either way.
+void hypervisor::refresh_shadow_ept_for(std::size_t, std::uint64_t root)
+{
+    this->ept_refreshes_for = this->ept_refreshes_for + 1;
+    this->last_refresh_root = root;
+}
+
 void hypervisor::nested_transition_flush()
 {
     this->flushes = this->flushes + 1;
@@ -1111,11 +1122,15 @@ static void test_invalidation()
            outcome::fail_valid, 28);
     expect("INVEPT type 3", invalidate(basic_reason::invept, 3),
            outcome::fail_valid, 28);
+    // Discard, because refresh_shadow_on_invept is off in nested_vmx.cpp
+    // - this harness compiles that file, so it follows the switch rather
+    // than describing an intention. Flip both together, and the refresh
+    // counters below are here so that flip is one line.
     auto before = hv().ept_discards_for;
     expect("INVEPT single-context", invalidate(basic_reason::invept, 1),
            outcome::succeed);
     check(hv().ept_discards_for == before + 1,
-          "INVEPT single-context did not discard the named shadow");
+          "INVEPT single-context did not invalidate the named shadow");
     check(hv().last_discard_root == 0x1000,
           "INVEPT single-context named the wrong root");
     expect("INVEPT all-context", invalidate(basic_reason::invept, 2),
