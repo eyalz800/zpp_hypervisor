@@ -1158,11 +1158,41 @@ decode(std::span<const std::byte> code,
 
             result.size = size;
 
-            // The bit number is taken modulo the operand width for the
-            // immediate form - SDM, BT: "the offset is taken modulo the
-            // operand size".
-            result.operand =
-                bit & ((static_cast<std::uint64_t>(size) * 8u) - 1u);
+            // An offset outside the operand is refused, not reduced.
+            //
+            // The modulo this used to take applies only where the bit
+            // base is a *register* - `.references/sdm.txt:38974`: "if
+            // the bit base operand specifies a register, the
+            // instruction takes the modulo 16, 32, or 64 of the bit
+            // offset operand". A memory bit base has no such limit. The
+            // processor moves the access instead, to `Effective Address
+            // + (4 * (BitOffset DIV 32))` for a 32-bit operand
+            // (`:38988`), which is also what Xen's emulator computes -
+            // `x86_emulate.c`, `case DstBitBase`, for the immediate form
+            // as well as the register one.
+            //
+            // So `btsl $40, (%rax)` sets bit 8 of the dword at
+            // `[rax+4]`, and reducing 40 to 8 set the right bit of the
+            // *wrong* dword - on a watched page, a write to a device
+            // register four bytes from the one the guest named, with the
+            // named one left alone. Silent both ways.
+            //
+            // Refused rather than followed, because the caller cannot
+            // use a moved address: `on_ept_violation` takes the low
+            // twelve bits of what `effective_address` returns and pastes
+            // them onto the page the violation reported, so an
+            // adjustment that left the page would land back inside it.
+            // The architecture says not to aim this at a device at all -
+            // `:38992`, software "should avoid references to
+            // memory-mapped I/O registers" with this bit addressing and
+            // should use MOV instead - so the form now refused is one
+            // that should never be pointed at a watched page, and the
+            // cost of refusing it is one stepped access.
+            if (bit >= (static_cast<std::uint64_t>(size) * 8u)) {
+                return {};
+            }
+
+            result.operand = bit;
 
             if (4 == fields.reg) {
                 result.what = memory_operation::examine;

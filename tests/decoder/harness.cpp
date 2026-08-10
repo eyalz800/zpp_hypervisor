@@ -1387,6 +1387,18 @@ static void generate_refusals()
     emit("andl (%rcx), %edx", code_size::bits_64, expectation::refused);
     emit("cmpl (%rcx), %edx", code_size::bits_64, expectation::refused);
 
+    // A bit offset outside the operand names a different word of
+    // memory, not a different bit of this one - the modulo the SDM
+    // describes applies only to a register bit base
+    // (`.references/sdm.txt:38974`). `btsl $40, (%rcx)` sets bit 8 of
+    // the dword at `[rcx+4]`.
+    emit("btsl $40, (%rcx)", code_size::bits_64, expectation::refused);
+    emit("btl $32, (%rcx)", code_size::bits_64, expectation::refused);
+    emit("btrw $20, (%rcx)", code_size::bits_64, expectation::refused);
+    emit("btcq $64, (%rcx)", code_size::bits_64, expectation::refused);
+    emit("btsl $200, (%rcx)", code_size::bits_64, expectation::refused);
+    emit("btsl $40, (%ecx)", code_size::bits_32, expectation::refused);
+
     // An address-size prefix in 32-bit code selects 16-bit addressing,
     // which moves where the instruction ends.
     emit("movl %edx, (%bx,%si)", code_size::bits_32, expectation::refused);
