@@ -4528,3 +4528,32 @@ That is not a correctness bug and it is not the hang - the freeze lands on
 the same `l2_entries` value across boots, which slowness alone would not
 do - but it should be measured before anything concludes the guest is
 merely slow, and VMCS shadowing is the obvious lever if it ever matters.
+
+### The hang is processor-count dependent
+
+`ZPP_CPUS` now overrides the guest's processor count in both launchers,
+so this is a single-variable experiment. Booted on **two** instead of
+eight:
+
+| | eight processors | two processors |
+|---|---|---|
+| boot processor `l2_entries` | 82,315, frozen | 82,036, frozen |
+| application processor `l2_entries` | ~405, frozen | 2,199 -> 24,610 -> 45,165 -> **75,620**, still climbing |
+
+The boot processor stops at the same place either way - within 300 of the
+same count, across every boot measured - but with two processors the
+application processor **keeps working indefinitely** instead of stopping
+at a few hundred entries. Sampled mid-run its RIP is inside zpp's own
+module (base + 0xe3b3) in root operation, so it is genuinely executing
+rather than parked.
+
+That is the first variable found that changes the outcome, and it points
+back at the application processors after all - which the identical
+start-up IPI traffic had seemed to rule out. The two are compatible:
+*starting* a processor works, and something about running **eight** of
+them does not. Worth testing 4 and 6 to find where it breaks, since a
+threshold would say a great deal about which resource runs out.
+
+Do not read this as "two processors boots Windows" until it has been seen
+to reach the login screen - at the time of writing it is progressing, not
+finished.
