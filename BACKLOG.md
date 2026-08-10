@@ -3567,3 +3567,32 @@ at all, only a flat INTx line - and what `kvm_apic_ipi` and
 It is third rather than first because it costs a boot and answers a
 comparative question, while the two above are reads against a guest that
 is already in the state being asked about.
+
+### What is *not* waking the boot processor, by elimination
+
+Worth writing down because it narrows measurement 1 above to the only
+remaining candidate.
+
+The boot processor is demonstrably still doing something at about ten
+thousand iterations a second. It is not being woken by:
+
+- **the local APIC**, which has an empty ISR and IRR on every processor;
+- **KVM**, which delivered no interrupt of any kind in a twenty second
+  capture;
+- **the VMX-preemption timer**, and this is the interesting one. It
+  cannot be firing on any processor that has entered L2. `build_vmcs02`
+  masks the timer out of the *union* of both sides' pin controls
+  (`nested_entry.cpp:1089-1092`), so vmcs02 does not have the control;
+  and `arm_controller_poll` reads and writes whichever VMCS is current,
+  so from the exit tail it arms **vmcs02** and latches `armed_here`,
+  never arming vmcs01 again. Both halves are already recorded above as
+  the reason the exit-driven log channel dies; the consequence here is
+  that the timer stops firing entirely once a processor runs a
+  second-level guest.
+
+Which leaves the guest's own code. The idle loop only reaches its `hlt`
+when `gs:[0x340]` is zero; otherwise it branches straight to the return
+and the caller comes back round. A processor that never executes the
+`hlt` needs nothing to wake it, is never in a non-active activity state,
+and burns a core - which is exactly the set of things measured. That is
+why reading that counter is the first thing to do.
