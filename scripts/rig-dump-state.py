@@ -59,6 +59,36 @@ def gdb_offsets(elf, members):
     return dict(zip(members, (int(v, 16) for v in values)))
 
 
+def gdb_lengths(elf, members):
+    """Ask the ELF how long each per-processor row is, in entries.
+
+    The same argument as `gdb_offsets`, for the same reason and after the
+    same failure: a capacity carried here is a second copy of a constant
+    that lives in the header, and when the header moved this did not.
+    `exit_reason_capacity` went to 96 while this said 64, and the effect
+    was invisible for cpu 0 - whose row starts at offset zero, so a wrong
+    stride cancels - and wrong for every other processor.  It did not
+    fail; it reported `rdrand`, `encls` and `xsaves` exits for a guest
+    that executes none of them, which reads as a bizarre finding rather
+    than as a bug in the reader.
+
+    `sizeof(row) / sizeof(row[0])` cannot drift the same way, because
+    both halves come from the type being read.
+    """
+    args = []
+    for m in members:
+        args += ["-ex",
+                 f"print (int)(sizeof(('zpp::hypervisor::hypervisor' *)0)"
+                 f"->{m}[0] / sizeof(('zpp::hypervisor::hypervisor' *)0)"
+                 f"->{m}[0][0])"]
+    out = subprocess.run(["x86_64-elf-gdb", "-q", "-batch", elf] + args,
+                         capture_output=True, text=True).stdout
+    values = re.findall(r"^\$\d+ = (\d+)$", out, re.M)
+    if len(values) != len(members):
+        sys.exit(f"could not read all lengths from {elf}: got {values}")
+    return dict(zip(members, (int(v) for v in values)))
+
+
 def gdb_symbol(elf, symbol):
     out = subprocess.run(["x86_64-elf-gdb", "-q", "-batch", elf,
                           "-ex", f"print/x &'{symbol}'"],
@@ -109,7 +139,7 @@ def name_reason(value):
     return tag
 
 
-def monitor_reasons(monitor, instance, off, args, cpu=0, capacity=64):
+def monitor_reasons(monitor, instance, off, args, cpu, capacity):
     """The whole-run histogram, which the 32-entry ring cannot give.
 
     The ring answers "what was it doing when it stopped"; this answers
@@ -235,7 +265,16 @@ def main():
     instance = base + gdb_symbol(
         args.elf, "zpp::hypervisor::hypervisor::instance()::instance")
     entry_size = 0x40
-    ring = 32
+    lengths = gdb_lengths(args.elf, ["exit_trace", "l2_exit_trace",
+                                     "exit_reason_counts"])
+    ring = lengths["exit_trace"]
+    l2ring = lengths["l2_exit_trace"]
+    reason_capacity = lengths["exit_reason_counts"]
+
+    # A processor named by --l2 must have its scalars read even when it is
+    # outside --cpus, or `l2_exit_trace_count` comes back as None and the
+    # dump dies in arithmetic rather than saying what it wanted.
+    scalar_cpus = max(args.cpus, 0 if args.l2 is None else args.l2 + 1)
 
     print(f"module base 0x{base:x}, singleton 0x{instance:x}")
 
@@ -248,8 +287,8 @@ def main():
                "shadow_ept_leaves_filled", "vmcs_shadow_loads",
                "vmcs_shadow_stores"]
     for name in scalars:
-        monitor.queue(instance + off[name], args.cpus)
-    monitor.queue(instance + off["running_l2"], (args.cpus + 7) // 8)
+        monitor.queue(instance + off[name], scalar_cpus)
+    monitor.queue(instance + off["running_l2"], (scalar_cpus + 7) // 8)
     monitor.queue(instance + off["unhandled_exit"], 6)
     monitor.queue(instance + off["vm_entry_failure"], 6)
     for cpu in range(args.cpus):
@@ -287,12 +326,19 @@ def main():
     print("\nvmcs fields the guest hypervisor uses")
     dump_field_use(args, instance, off)
 
-    print("\ncpu 0 exit reasons")
-    counts = monitor_reasons(monitor, instance, off, args)
-    total = sum(counts.values()) or 1
-    for reason, value in sorted(counts.items(), key=lambda kv: -kv[1]):
-        print(f"  {EXIT_REASON.get(reason, reason):<18} {value:>10}  "
-              f"{100.0 * value / total:5.1f}%")
+    # Every processor, not only the boot processor.  The application
+    # processors are where "did this one participate at all" is decided,
+    # and a per-processor histogram answers it in one line each - cpu 0
+    # busy and the rest holding a few thousand cpuid exits is a different
+    # machine from all eight holding the same shape.
+    for cpu in range(args.cpus):
+        counts = monitor_reasons(monitor, instance, off, args, cpu,
+                                 reason_capacity)
+        total = sum(counts.values()) or 1
+        print(f"\ncpu {cpu} exit reasons (total {total:,})")
+        for reason, value in sorted(counts.items(), key=lambda kv: -kv[1]):
+            print(f"  {EXIT_REASON.get(reason, reason):<18} {value:>10}  "
+                  f"{100.0 * value / total:5.1f}%")
 
     for cpu in range(args.cpus):
         count = read("exit_trace_count", cpu)
@@ -314,7 +360,6 @@ def main():
 
     if args.l2 is not None:
         cpu = args.l2
-        l2ring = 256
         count = read("l2_exit_trace_count", cpu)
         show = min(args.l2_entries, count, l2ring)
         print(f"\n--- cpu {cpu}: last {show} second-level exits "
