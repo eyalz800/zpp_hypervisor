@@ -1,0 +1,9 @@
+# The built harness.
+decoder
+decoder.dSYM/
+
+# The corpus, which is generated on every run - assembly text, the object
+# llvm-mc makes of it, and the listing llvm-objdump makes of that.
+corpus-*.s
+corpus-*.o
+corpus-*.dis
