@@ -5338,3 +5338,54 @@ the guest's own instruction run under the monitor trap flag. Whether a
 store issued that way reaches the emulated local APIC underneath, or is
 absorbed somewhere that never becomes an interrupt command, is exactly
 what has to be measured next.
+
+### Withdrawn again: the interrupts are sent, delivered, and evenly spread
+
+The section above is **wrong**, and a live capture with the tracepoint
+actually armed for this build is what says so. It was written from the
+kept capture, which is an older build and a window that did not cover
+this, and "vector 0x2f never appears" was an artefact of that file
+rather than a fact about this VMM.
+
+Armed `kvm_apic_ipi` and `kvm_apic_accept_irq` for one boot and bucketed
+by the minute. During the boot:
+
+| minute | vector 0x2f sent | accepted |
+|---|---|---|
+| first  | 5,858 | 5,858 |
+| second | 31,204 | 31,206 |
+| third  | 64,997 | 64,997 |
+| after the freeze | 3 | 3 |
+
+Sent and accepted match one for one, and the accepted ones are spread
+evenly across every processor - apic id 1 takes 27,824, id 0 takes
+25,646, id 2 takes 25,048, id 3 takes 23,543. **Targeting works,
+delivery works, and every processor receives them.** Nothing is being
+swallowed.
+
+What the numbers do show is a **storm**. The reference sends 35,053 of
+this vector across a whole boot that reaches a login screen. Ours sends
+over a hundred thousand in three minutes, escalating steeply, and then
+falls to three a minute when everything stops. That is the shape of a
+retry loop - a rendezvous or a shootdown that never completes, retried
+harder and harder, and then abandoned.
+
+It also resolves an apparent contradiction worth writing down, because
+it looks like a bug and is not: an application processor accepts ~25,000
+of these while this VMM records only 27 external-interrupt exits on it.
+Both are true. The interrupts are delivered to the guest hypervisor
+directly without exiting to us, so our own exit counters cannot see
+them and their absence there means nothing.
+
+**So four things are now measured to work**: the local APIC timer arms
+correctly and fires when armed, application processors start and are
+adopted, inter-processor interrupts are sent, and they are delivered
+where they were aimed. The failure is none of them.
+
+What remains true and unexplained is the shape of the stop itself: the
+boot processor reaches **~82,100** second-level entries in every
+configuration from two processors to eight and in every build measured
+today, the application processors reach a few hundred, and there is an
+escalating storm of one vector immediately before everything settles.
+The determinism is the strongest clue available - a race would not stop
+at the same number - and it should be the thing driven at next.
