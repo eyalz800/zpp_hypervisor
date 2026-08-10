@@ -506,6 +506,22 @@ std::expected<void, zpp::error> hypervisor::check_nested_msr_area(
             !msr_area_index_handled(entry.index) ||
             (loading &&
              !msr_area_value_writable(entry.index, entry.value))) {
+            // Which MSR, because the caller only gets an error code.
+            //
+            // The list this checks against is closed, the areas are guest
+            // memory a guest hypervisor rewrites with no exit, and the
+            // check is stateless and runs on every entry - so the first
+            // index it does not know refuses that virtual processor's
+            // every subsequent entry, permanently and silently. Without
+            // this line the refusal names no MSR and the next boot
+            // answers nothing; with it, the fix is to add whatever it
+            // names to msr_area_index_handled.
+            log("msr area at {} ({}) refuses index {}, value {}",
+                address,
+                loading ? "load" : "store",
+                entry.index,
+                entry.value);
+
             return std::unexpected(
                 zpp::error{error::nested_msr_area_unsupported});
         }

@@ -3666,3 +3666,62 @@ preemption-timer poll, NVMe borrow and wake-NMI machinery is behind the
 disk sink and therefore dead in this build; and a stuck monitor trap
 flag is excluded because an MTF exit with no step in progress reaches
 `on_unhandled_exit`, which never fired.
+
+## Third static review: one correction and two more
+
+**Correction to the vmcs12 capture decode, and it matters.** `exit12 =
+0x0003efff` has **bit 15 set**, which is "acknowledge interrupt on
+exit". So Hyper-V *does* ask for it, this VMM advertises it in
+`supported_exit_controls` and drops it. That was already recorded as a
+gap; what was wrong was the reason it is latent. It is latent because
+`pin12 = 0x1e` has bit 0 clear, so no external-interrupt exit ever
+reaches the reflection path for *this* vmcs12 - and it stops being
+latent the moment Hyper-V builds a vmcs12 for a child partition. Also
+confirmed from the same tables: `entry12 = 0x13ff` is default-1 plus
+IA-32e mode guest only, so `build_vmcs02`'s unconditional copies of the
+PAT, EFER and PERF_GLOBAL_CTRL guest fields are inert here.
+
+**The shadow EPT is not involved and can stop being looked at.**
+`build_vmcs02` gates the whole shadow on `secondary12 & enable_ept`, and
+the capture has `secondary12 == 0`, so vmcs02 gets EPT01's own root and
+`on_l2_ept_fault` returns `deferred` on its first test. `build_shadow_ept`,
+`compose_ept`, `shadow_ept_entry`, the slot pool and the eviction
+machinery are all unreachable in the configuration that was measured.
+
+The consequence is the useful part: **with no second-level EPT, the root
+partition runs directly on EPT01 - including this VMM's write protection
+of the local APIC page.** So the timer programming in the exit ring is
+*Windows'*, decoded by this VMM, not Hyper-V's. That is the same
+decoder question as before, one level further down than it looked.
+
+**`IA32_BNDCFGS` is advertised and not implemented.** Exit-control bit
+23, "clear IA32_BNDCFGS", is in `supported_exit_controls`, and
+`load_l1_host_state` never writes the MSR. KVM's
+`load_vmcs12_host_state` has `if (vmcs12->vm_exit_controls &
+VM_EXIT_CLEAR_BNDCFGS) vmcs_write64(GUEST_BNDCFGS, 0)`. Latent - the
+capture has bit 23 clear - and left alone for now rather than
+implemented, because the honest fix is a `wrmsr` of an MSR that only
+exists where MPX does, and a `#GP` on it in the host reaches the halt
+loop with no recovery. **Either implement it or stop advertising it;
+half-answering an interface is what this file is full of.**
+
+**A refused MSR area now names the MSR.** The whitelist in
+`msr_area_index_handled` is closed, the areas are guest memory a guest
+hypervisor rewrites with no exit, and the check runs on every entry - so
+the first index it does not know refuses that virtual processor's every
+subsequent entry, permanently, with VM-instruction error 7 and nothing
+faulting. That is indistinguishable from the boot being chased, and
+until now the refusal named no MSR. Candidates a Windows host plausibly
+autoloads and this list does not carry: `0x38f` PERF_GLOBAL_CTRL,
+`0x1c4`/`0x1c5` XFD and XFD_ERR, `0x6a0`/`0x6a2` U_CET and S_CET, the
+`0x6a4`-`0x6a8` shadow-stack set, `0x6e1` PKRS, `0x122` TSX_CTRL, `0xe1`
+UMWAIT_CONTROL, `0x570`/`0x571` RTIT_CTL and STATUS.
+
+**`on_nested_vmx_msr_read`/`write` index per-processor state with
+`vmcs.vpid() - 1`, and vmcs02 carries vpid01.** So an access made by the
+*second-level* guest is answered out of the first level's slot: the root
+partition reading `0x3a` gets Hyper-V's `guest_feature_control`, and
+writing it takes a `#GP` because Hyper-V's lock bit is set. Wrong level
+in both directions. Part of the same family as `l0_wants_l2_exit`
+claiming MSR exits without reflecting them, and it disappears with the
+same fix.
