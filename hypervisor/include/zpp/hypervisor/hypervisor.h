@@ -3685,6 +3685,24 @@ private:
     std::uint64_t idt_vectoring_l2[max_cpus]{};
     std::uint64_t idt_vectoring_trace[idt_vectoring_trace_capacity]{};
     std::uint64_t idt_vectoring_trace_count{};
+
+    /**
+     * The event whose delivery the last VM exit interrupted, held until
+     * the next entry to the same guest puts it back.
+     *
+     * Everything the architecture needs to re-deliver it: the
+     * interruption information, the error code when its valid bit says
+     * there is one, and the instruction length, which a software
+     * interrupt or exception needs and a hardware one ignores.
+     * @{
+     */
+    std::uint64_t pending_event[max_cpus]{};
+    std::uint64_t pending_event_error[max_cpus]{};
+    std::uint64_t pending_event_length[max_cpus]{};
+    std::uint64_t events_requeued[max_cpus]{};
+    /**
+     * @}
+     */
     /**
      * @}
      */

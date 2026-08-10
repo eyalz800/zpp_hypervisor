@@ -22,4 +22,13 @@ inline void capture_context(context *)
 std::uint64_t rdmsr(std::uint32_t index);
 void wrmsr(std::uint32_t index, std::uint64_t value);
 
+// The time stamp counter, which the local APIC filter samples alongside
+// every timer arming. Monotonic rather than real: a harness cares that
+// successive readings differ and increase, not what they mean.
+inline std::uint64_t rdtsc()
+{
+    static std::uint64_t ticks{};
+    return ticks += 1000;
+}
+
 } // namespace zpp::arch::x86_64

@@ -178,6 +178,25 @@ public:
 
     arch::x86_64::vmx::vmcs12 guest_vmcs12[max_cpus]{};
     bool running_l2[max_cpus]{};
+
+    // Instrumentation the real source writes to. Present here so the
+    // harness compiles the real reflection path unmodified.
+    static constexpr std::size_t exit_trace_capacity = 32;
+    struct exit_trace_entry
+    {
+        std::uint64_t reason;
+        std::uint64_t qualification;
+        std::uint64_t activity_state;
+        std::uint64_t cs_selector;
+        std::uint64_t rip;
+        std::uint64_t guest_physical;
+        std::uint64_t repeated;
+        std::uint64_t detail;
+    };
+    exit_trace_entry l2_exit_trace[max_cpus][exit_trace_capacity]{};
+    std::uint64_t l2_exit_trace_count[max_cpus]{};
+    std::uint64_t l2_exit_detail[max_cpus]{};
+    std::uint64_t pending_event[max_cpus]{};
     bool vmcs02_launched[max_cpus]{};
     std::uint64_t vmcs02_physical[max_cpus]{};
     std::uint64_t l2_entries[max_cpus]{};

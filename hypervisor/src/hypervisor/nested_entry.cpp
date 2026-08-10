@@ -2423,6 +2423,17 @@ void hypervisor::reflect_l2_exit(std::size_t cpu,
         this->l2_exit_detail[cpu] = 0;
     }
 
+    // The interrupted event becomes the guest hypervisor's, not ours.
+    //
+    // Below, this reflection copies the interrupted-event field into its
+    // VMCS, which is the architecture's way of telling it that a delivery
+    // it started did not finish - so it is the one that decides what
+    // happens next. Re-injecting it here as well would deliver the same
+    // event twice, once by each level.
+    if (cpu < max_cpus) {
+        this->pending_event[cpu] = 0;
+    }
+
     // The guest state first, while the VMCS that ran the second-level
     // guest is still current - unless this is a VM-entry failure, which
     // saves none of it.

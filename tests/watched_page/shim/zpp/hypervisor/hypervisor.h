@@ -199,6 +199,13 @@ public:
     std::uint8_t last_fetched_code[8]{};
 
     volatile std::uint64_t emulated_writes{};
+
+    // Instrumentation the real source writes to, so the harness can
+    // compile the real local APIC filter unmodified.
+    static constexpr std::size_t timer_arm_capacity = 32;
+    std::uint64_t timer_arm_value[max_cpus][timer_arm_capacity]{};
+    std::uint64_t timer_arm_tsc[max_cpus][timer_arm_capacity]{};
+    std::uint64_t timer_arm_count[max_cpus]{};
     volatile std::uint64_t filtered_writes{};
     volatile std::uint64_t stepped_writes{};
     volatile std::uint64_t emulated_length_disagreement{};

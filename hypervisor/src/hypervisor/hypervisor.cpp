@@ -9100,6 +9100,23 @@ hypervisor::main(arch::x86_64::context & caller_context)
                         vectoring | (full_reason.value() << 32);
                     this->idt_vectoring_trace_count = at + 1;
                 }
+
+                // Held for the entry that follows. The error code is
+                // only meaningful when its own valid bit says so, and
+                // the length only for the three software types - but
+                // both are read here rather than at re-injection,
+                // because the next entry destroys the fields they come
+                // from.
+                constexpr std::uint64_t vectoring_error_valid = 1ull << 11;
+
+                this->pending_event[cpu] = vectoring;
+                this->pending_event_error[cpu] =
+                    (0 != (vectoring & vectoring_error_valid))
+                        ? vmcs.read(arch::x86_64::vmx::vmcs::field::
+                                        idt_vectoring_error_code)
+                        : 0;
+                this->pending_event_length[cpu] =
+                    vmcs.vm_exit_instruction_length();
             }
         }
 
@@ -10539,6 +10556,67 @@ void hypervisor::resume_guest(arch::x86_64::context & context,
                               bool advance_rip)
 {
     auto & vmcs = this->vmcs;
+
+    // Put back the event whose delivery the exit interrupted.
+    //
+    // The processor clears the entry-interruption field as it begins a
+    // delivery, so an exit taken *during* one leaves nothing to resume
+    // from: the only record is the interrupted-event field, and the next
+    // entry overwrites that too. An event not put back here is destroyed
+    // silently, and the guest that injected it cannot tell the difference
+    // from one that arrived.
+    //
+    // Measured on the rig before this existed: nine events destroyed in a
+    // single boot, every one of them interrupted by an EPT violation
+    // against the second-level guest's lazily built shadow table - two
+    // inter-processor interrupts at vector 0x2f, five clock interrupts at
+    // 0xd1, and three page faults. The two at 0x2f are how a halted
+    // virtual processor is woken, which is why the machine stopped with
+    // every processor halted and nothing pending.
+    //
+    // KVM does the same thing in `vmx_complete_interrupts`
+    // (.references/kvm/vmx.c:7488), which re-queues the vector, the error
+    // code (:7142-7146) and the software-event length (:7139, :7149).
+    //
+    // Not done where the exit is reflected: there the interrupted event
+    // is copied into the guest hypervisor's own VMCS and becomes its
+    // business, and putting it back here as well would deliver it twice.
+    if (auto slot = vmcs.vpid(); (0 != slot) && (slot <= max_cpus)) {
+        auto cpu = slot - 1;
+
+        if (auto event = this->pending_event[cpu]; 0 != event) {
+            constexpr std::uint64_t error_valid = 1ull << 11;
+            constexpr std::uint64_t type_mask = 7ull << 8;
+            constexpr std::uint64_t type_software_interrupt = 4ull << 8;
+            constexpr std::uint64_t type_privileged_software = 5ull << 8;
+            constexpr std::uint64_t type_software_exception = 6ull << 8;
+
+            if (0 != (event & error_valid)) {
+                vmcs.write(arch::x86_64::vmx::vmcs::field::
+                               vm_entry_exception_error_code,
+                           this->pending_event_error[cpu]);
+            }
+
+            // A software event resumes at the instruction after the one
+            // that raised it, so the processor has to be told how long
+            // that instruction was. A hardware one ignores the field.
+            if (auto type = event & type_mask;
+                (type_software_interrupt == type) ||
+                (type_privileged_software == type) ||
+                (type_software_exception == type)) {
+                vmcs.write(arch::x86_64::vmx::vmcs::field::
+                               vm_entry_instruction_length,
+                           this->pending_event_length[cpu]);
+            }
+
+            vmcs.write(arch::x86_64::vmx::vmcs::field::
+                           vm_entry_interruption_information_field,
+                       event);
+
+            this->pending_event[cpu] = 0;
+            this->events_requeued[cpu] = this->events_requeued[cpu] + 1;
+        }
+    }
 
     // Move a few records out of the ring on the way back to the
     // guest.
