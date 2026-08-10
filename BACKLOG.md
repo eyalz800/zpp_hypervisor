@@ -95,6 +95,113 @@ immediately before the hand-over); and the zpp boot option itself
 (`LOAD_OPTION_ACTIVE`, same attribute word as Windows Boot Manager's, same
 GPT partition signature, no `LOAD_OPTION_CATEGORY_APP`).
 
+## The guest is not stuck. It is 77 times too slow.
+
+Measured 2026-08-10 on the rig, and it reframes everything above it that
+was written as "the root partition is blocked on X".
+
+The reference - the same machine, the same disk, the same Windows with
+virtualisation based security on, booting Hyper-V on KVM with nothing
+underneath it - sustains **101,000 second-level exits per second across
+eight processors**. Two ten-second captures of `kvm_nested_vmexit`,
+forty-five seconds and two and a half minutes into the boot: 1,011,315
+and 1,025,863 events, all eight virtual processors present in both.
+
+This VMM, at the same point, sustains **1,316 per second on one
+processor**. Every other processor is still parked in EDK2's wakeup loop
+at 107 exits each.
+
+So the split is:
+
+| | reference | here | factor |
+|---|---|---|---|
+| second-level exits per second, machine | 101,000 | 1,316 | 77x |
+| second-level exits per second, per processor | ~12,600 | 1,316 | 9.6x |
+| processors running the guest | 8 | 1 | 8x |
+
+**What this says about every "it is blocked on X" conclusion.** At 77x,
+the point the reference reaches in forty-five seconds is an hour away
+here. The application processors sitting in firmware, the devices never
+enumerated, the MSI-X capability never written - all of them are
+consistent with a boot that simply has not got there yet, and none of
+them needs a fault to explain it. They should not be investigated as
+defects until the speed gap is closed, because a slow boot and a stalled
+one look identical from any single sample.
+
+The exit *mix* is also broadly the same on both sides, which is the other
+half of the evidence that nothing is behaving differently in kind. The
+reference's second-level exits are 43% EPT violation, 39% MSR read, 7%
+VMCALL; this VMM's second-level ring is dominated by the same VMCALLs
+(HvCallVtlCall, HvCallModifyVtlProtectionMask, HvCallVtlReturn) and the
+same reference-time MSR reads.
+
+### How much of the 9.6x is the rig, and how much is ours
+
+Not all of it is a defect. The reference is one virtualisation level
+shallower: KVM is the bottom layer there, whereas here KVM runs this VMM
+which runs Hyper-V. Every exit taken here is a *nested* exit KVM must
+reflect, and every VMX instruction executed here in root operation is
+itself an exit to KVM. On bare metal, which is the target, those are a
+few hundred cycles each and this penalty does not exist.
+
+So the rig understates this VMM and always will. What it can still
+measure honestly is **exits per unit of guest work**, which is
+machine-independent, and that is what the fixes below are aimed at.
+
+### 1. Every INVEPT throws the whole shadow away - OPEN
+
+The largest remaining item, at 58% of all exits: 464,815 EPT violations
+against 15,863 shadow rebuilds and 15,896 INVEPTs from the guest
+hypervisor. One rebuild per INVEPT, and 28 faults to fill each one back
+in.
+
+The guest hypervisor is applying VTL protections one page at a time -
+`HvCallModifyVtlProtectionMask` with a rep count of one - and issues
+INVEPT after each. It changed one page; this VMM discards every mapping
+it had.
+
+KVM frees only the *root* on INVEPT and finds the levels below it in
+`mmu_page_hash`, so a single fault relinks the tree. It can do that
+because it write-tracks the guest's own EPT pages, so a guest edit
+updates the shadow entry directly and INVEPT has nothing left to do.
+This VMM already has page-watch machinery, so that route is open.
+
+A cheaper shape worth measuring first: on INVEPT, **refresh the shadow in
+place** rather than discarding it - walk the leaves currently installed,
+re-walk the guest's tables for each, rewrite or clear. That trades 28 VM
+exits for 28 in-root page walks, which cost no exit at all. Its risk is
+the opposite one: once shadows stop being wiped they grow, and a refresh
+then costs proportional to the shadow rather than to the change. Cap it
+and count the cap.
+
+### 2. The shadow-VMCS sync is now the dominant hidden cost on the rig
+
+Keeping the shadow region and the cached vmcs12 in agreement costs a
+VMPTRLD, a copy, a VMCLEAR and a VMPTRLD back, at each of two points -
+148,758 of each per 102,913 second-level exits. On bare metal those are a
+few hundred cycles. **On this rig each one is an exit to KVM**, so the
+sync is roughly six hidden exits per second-level exit against the 2.19
+visible ones, and it is why the visible exit count fell 7x while
+throughput only rose 2.5x.
+
+Two ways to cut it, both unmeasured:
+
+- 46,064 of the 148,758 come from the guest hypervisor's own VMPTRLD -
+  it alternates between two VMCSs, one per VTL, 0.45 times per
+  second-level exit. A **shadow region cached per guest VMCS pointer**,
+  exactly as `shadow_ept_pointer_for` already caches per guest EPT
+  pointer, makes that switch a change of the link pointer and no copy at
+  all. The obstacle is that `guest_vmcs12` is a single cache per
+  processor and would have to be cached per slot too.
+- The VMCLEAR is one of the three pointer operations. KVM does it;
+  whether it is required when the region is only ever accessed from the
+  processor that wrote it is not established here, and guessing is not
+  worth a third of the sync cost.
+
+**Do not optimise this for the rig alone.** The sync is nearly free on
+the target and expensive only because of the extra layer, so a change
+that helps here and costs there is the wrong trade.
+
 ## Measured
 
 These were observed in real state. They are not inferences.
