@@ -5588,3 +5588,45 @@ synthetic reference time counter, and halts. On the boot processor that
 halt is permanent. On the surviving application processor, in the
 two-processor case, the same guest keeps running - so whatever fails to
 wake it is specific to that processor rather than to the guest.
+
+### Both processors end the same way, and the memory types are right
+
+With two processors, the surviving processor's reflected ring at the
+freeze, newest first:
+
+```
+ age  reason   rcx
+   0  HLT
+   1  RDMSR    0x40000020   HV_X64_MSR_TIME_REF_COUNT
+   2  RDMSR    0x40000020
+   3  RDMSR    0x40000020
+   4  RDMSR    0x40000020
+   5  WRMSR    0x40000071   HV_X64_MSR_ICR
+   6  WRMSR    0x40000071
+   7  WRMSR    0x40000071
+   8  RDMSR    0x40000020
+  12  external int
+```
+
+Identical to the boot processor's: poll the synthetic reference time
+counter, write the synthetic interrupt command register - here three
+times in a row - poll again, halt. **Both virtual processors are sending
+wake-ups to each other and neither ever wakes.** Note also that the
+survivor is not reliably a survivor: an earlier two-processor boot had
+it climbing at 900 entries a second indefinitely, this one had it stop
+at 356. The aftermath varies; the boot processor's stop does not.
+
+Extended page table memory types were checked at the same freeze and are
+**correct**, so that is eliminated:
+
+| guest range | entry | memory type |
+|---|---|---|
+| 0-1 GB | `…04b7` | write-back |
+| 1-2 GB | `…04b7` | write-back |
+| 2-4 GB | `…0487` | uncacheable |
+| 4-5 GB | `…04b7` | write-back |
+
+2-4 GB uncacheable looks alarming and is right: that is the memory
+mapped I/O hole, which the emulator places at `0x80000000` to
+`0x100000000`, with memory below and above it write-back. No page of
+real memory is uncacheable and nothing is mapped two ways.
