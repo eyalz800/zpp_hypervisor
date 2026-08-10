@@ -5630,3 +5630,36 @@ Extended page table memory types were checked at the same freeze and are
 mapped I/O hole, which the emulator places at `0x80000000` to
 `0x100000000`, with memory below and above it write-back. No page of
 real memory is uncacheable and nothing is mapped two ways.
+
+### The wake-ups arrive. They carry no work
+
+One discrepancy left over from the interrupt measurements is now closed,
+and closing it sharpens what is left.
+
+The layer beneath accepted about 25,000 interrupts per processor during
+the storm while this VMM recorded only 42 external-interrupt exits on
+the boot processor for a whole boot. That is not a contradiction:
+**external-interrupt exiting is off here.** The pin-based controls set
+NMI exiting and nothing else (`hypervisor.cpp:7861-7863`), deliberately,
+because the guest owns the interrupt controller. So an interrupt goes
+straight to the guest hypervisor with no exit to this VMM, and the 42
+that *are* counted are the second-level guest's, reflected because
+Hyper-V sets the control for its own guest.
+
+Which means the physical interrupts really do reach Hyper-V, and reach
+it while it is halted - an unmasked external interrupt takes a processor
+out of a halt in non-root operation. **Hyper-V is woken thousands of
+times and never resumes the root partition.**
+
+So the wake-up is not lost. It arrives and carries no work with it. And
+the end state follows: each virtual processor sends its interrupt and
+halts, the target wakes, finds nothing to run, and halts too - after
+which nobody is left to send anything, which is why interrupt traffic
+falls from 65,000 a minute to three.
+
+That moves the question off delivery entirely. What Hyper-V looks at
+after being woken - to decide whether its guest has become runnable - is
+its own state about that guest, and the part of that state this VMM
+touches is **vmcs12**. A field that is not written back after a
+second-level exit would leave Hyper-V reading a stale answer to exactly
+that question, on every processor, deterministically.
