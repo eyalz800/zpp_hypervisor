@@ -322,12 +322,48 @@ std::uint64_t hypervisor::nested_vmx_capability_msr(std::size_t msr)
         // through because the areas are processed in software here, one
         // guest memory read per entry, and a list a processor would
         // happily walk is time this VMM spends inside a VM exit.
+        // And bit 7, the shutdown activity state. SDM A.6 makes bits 8:6
+        // the bitmap of supported activity states - 6 for HLT, 7 for
+        // shutdown, 8 for wait-for-SIPI - and "If an activity state is
+        // not supported, the implementation causes a VM entry to fail if
+        // it attempts to establish that activity state", which
+        // `enter_or_park_l2` is what does here.
+        //
+        // Three states are kept and the reasons differ:
+        //
+        // - HLT, bit 6, because it is entered in hardware and costs
+        //   nothing to honour. SDM 29.7.2 has the active state and the
+        //   HLT state block the same events - start-up IPIs - so a
+        //   second-level guest in it still takes the external interrupts
+        //   and NMIs its hypervisor gets it back with.
+        // - Wait-for-SIPI, bit 8, because it is honoured in software:
+        //   `enter_or_park_l2` holds the processor in VMX root operation
+        //   and gives its hypervisor the start-up IPI exit when one
+        //   arrives. Withdrawing it instead would refuse an entry every
+        //   hypervisor makes - parking a virtual processor it has not
+        //   started yet is the ordinary use of the state.
+        // - Shutdown, bit 7, is withdrawn, and it is the one of the three
+        //   that could not be honoured either way. SDM 29.7.2 has it
+        //   block external interrupts as well as start-up IPIs, so a
+        //   processor entered in it takes no exits at all and nothing
+        //   here ends it; and there is no software stand-in, because the
+        //   architectural way out is an NMI or a reset, neither of which
+        //   this VMM manufactures. KVM accepts exactly the same three,
+        //   in `nested_check_guest_non_reg_state`
+        //   (.references/kvm/nested.c:3117-3119).
+        //
+        // What would have to change to offer it: something that ends a
+        // shutdown - INIT emulation reaching a second-level guest - and a
+        // way to hold the processor meanwhile, which is what
+        // `enter_or_park_l2` does for wait-for-SIPI.
         constexpr std::uint64_t vmwrite_to_exit_information = 1ull << 29;
         constexpr std::uint64_t cr3_target_count = 0x1ffull << 16;
         constexpr std::uint64_t msr_list_capacity = 0x7ull << 25;
+        constexpr std::uint64_t shutdown_activity_state = 1ull << 7;
 
-        return hardware & ~(vmwrite_to_exit_information |
-                            cr3_target_count | msr_list_capacity);
+        return hardware &
+               ~(vmwrite_to_exit_information | cr3_target_count |
+                 msr_list_capacity | shutdown_activity_state);
     }
 
     case vmx_msr::cr0_fixed_0:

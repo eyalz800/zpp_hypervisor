@@ -1171,6 +1171,22 @@ static void test_capability_msrs()
     check(0 == ((misc >> 16) & 0x1ff),
           "IA32_VMX_MISC reports a non-zero CR3-target count");
 
+    // The activity-state bitmap, SDM A.6 bits 8:6. The set offered has to
+    // be exactly the set enter_or_park_l2 accepts, and it is KVM's -
+    // active, HLT and wait-for-SIPI, in nested_check_guest_non_reg_state
+    // (.references/kvm/nested.c:3117-3119). Shutdown is the one withheld:
+    // SDM 29.7.2 has it block external interrupts as well as start-up
+    // IPIs, so nothing here could end it.
+    check(0 != (misc & (1ull << 6)),
+          "IA32_VMX_MISC withholds the HLT activity state, which is "
+          "entered in hardware");
+    check(0 == (misc & (1ull << 7)),
+          "IA32_VMX_MISC offers the shutdown activity state, which "
+          "nothing here can end");
+    check(0 != (misc & (1ull << 8)),
+          "IA32_VMX_MISC withholds the wait-for-SIPI activity state, "
+          "which enter_or_park_l2 honours");
+
     // Every control the narrowing offers must be one within_capability
     // would accept; and allowed-0 must always be a subset of allowed-1.
     struct
