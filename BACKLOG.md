@@ -4333,11 +4333,18 @@ waiting for one. The two branches, and neither is settled:
 - or it programs it and the write never reaches the emulation behind
   VFIO, in which case the route is never created.
 
-`kvm_msi_set_irq` distinguishes them and costs one boot: real vectors
-appearing and then stopping dates the fault; none ever appearing points
-at the programming path. Note the reference programs its first real route
-**13 s after** application-processor start-up, so a capture must run well
-past that before its absence means anything.
+**Settled, from a capture started at power-on rather than part way in.**
+The first branch is the right one: the guest never programs a route at
+all. That capture spans 468 s, application-processor start-up begins
+234 s before its end and finishes 77 s before it, and no real route ever
+appears. The reference programs its first one **13 s after**
+application-processor start-up, so this ran roughly eighteen times longer
+than needed for an absence to mean something.
+
+So the missing device interrupts are a **symptom**. The guest stops
+somewhere between starting its application processors and initialising
+storage, and it is that stop which has to be found - not the interrupt
+path, which nothing has yet shown to be broken.
 
 ### Two cheap instruments that would have saved a day
 
