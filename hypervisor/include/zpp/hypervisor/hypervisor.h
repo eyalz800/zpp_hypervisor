@@ -983,10 +983,10 @@ private:
      * makes its freshness load bearing rather than cosmetic:
      * `start_up_processor` gates a guest's start-up IPI on it. The exit
      * path samples it on the way out, so it describes the *previous* exit
-     * for the whole of any wait a handler takes - and `emulate_init_signal`
-     * takes one that is up to two million iterations long. It therefore
-     * writes this field itself before it waits, exactly as
-     * `enter_or_park_l2` writes `l2_activity_state` before parking. Any
+     * for the whole of any wait a handler takes - and
+     * `emulate_init_signal` takes one that is up to two million iterations
+     * long. It therefore writes this field itself before it waits, exactly
+     * as `enter_or_park_l2` writes `l2_activity_state` before parking. Any
      * future handler that waits in root mode owes the same.
      */
     volatile std::uint64_t resume_activity_state[max_cpus]{};
@@ -3780,6 +3780,16 @@ private:
      *
      * One is enough, and shared on purpose: only one processor is ever
      * being started at a time, which start_up_lock is what guarantees.
+     *
+     * Worth being exact about the extent of that guarantee, because the
+     * lock is held on the *other* processor. A target stops using this
+     * stack inside `launch_on_cpu`, which copies its context onto the
+     * per-processor stack and switches - long before `start_up_launched`
+     * is set and therefore well inside the window the sender holds the
+     * lock for. The success path is covered with room to spare. The two
+     * that are not: the sender's bounded wait can expire while a slow
+     * target is still on this stack, and a target whose `main` *fails*
+     * returns onto this frame to log and halt.
      */
     alignas(page_size) std::uint8_t start_up_stack[0x4000]{};
 
@@ -3806,6 +3816,25 @@ private:
      * through shared state - the stack index, the virtual processor
      * counter, and the VMX region pointers - that is only correct for one
      * processor at a time.
+     *
+     * It is held by the *sender* across the target's entire launch, which
+     * is what makes it cover the target too: `start_application_processor`
+     * does not release it until `start_up_launched[slot]` is set, and that
+     * is written at the very end of `main`, after the target has left the
+     * shared trampoline stack, taken its stack index and read
+     * `vmx_physical` and `vmcs_physical`. The serialisation is therefore
+     * real but **indirect**, and it has exactly one hole: the wait is
+     * bounded, so a target that is only slow is still using all of that
+     * when the lock is released. See the note on the timeout in
+     * `start_application_processor`.
+     *
+     * It also guards `processor_slot`, which hands out the index every
+     * per-processor array is addressed by. That is the same resource, not
+     * a second one - a slot must not be handed out while somebody is
+     * launching into it.
+     *
+     * Not recursive. Nothing that holds it may reach `processor_slot` or
+     * `start_application_processor`, and today nothing does.
      */
     spin_lock start_up_lock{};
 

@@ -6197,6 +6197,37 @@ void hypervisor::on_local_apic_write(void * context,
 std::optional<std::size_t>
 hypervisor::processor_slot(std::uint64_t apic_id)
 {
+    // Under the same lock that guards a launch, because this is the other
+    // half of the same resource: it hands out the index every per
+    // processor array is addressed by, including the VMXON and VMCS
+    // regions and the VPID.
+    //
+    // Unsynchronised it is a scan followed by an append, and every
+    // processor reaches it from its own exit handler - `on_interrupt
+    // _command` calls it for any start-up IPI with a physical
+    // destination. Two processors asking about two *different* unknown
+    // identifiers both read the same `number_of_known_processors`, both
+    // take that slot, and the second overwrites the first's `apic_id`
+    // entry. The result is two physical processors sharing one slot, and
+    // a slot is not a label: `setup_vmcs` writes `vpid(cpu + 1)`, and
+    // `initialize_vmx`'s own comment says why that is fatal - "a VMCS may
+    // not be active on more than one logical processor".
+    //
+    // It cannot happen with one application processor, because there is
+    // one identifier to allocate and the scan finds it. It becomes
+    // possible with two, which is where the processor-count bisect in
+    // BACKLOG.md puts the boundary.
+    //
+    // `start_up_lock` rather than a lock of its own, so that nothing new
+    // has to be forced open after an S3 resume - see
+    // `resume_from_sleep_on_this_processor`. No caller holds it already:
+    // `on_interrupt_command`, `start_up_broadcast` and
+    // `start_up_processor` each call this before `start_application
+    // _processor` takes it, never inside. It is not recursive, so that
+    // has to stay true.
+    this->start_up_lock.lock();
+    scope_exit unlock{[&] { this->start_up_lock.unlock(); }};
+
     for (std::size_t slot{}; slot < this->number_of_known_processors;
          ++slot) {
         if (this->apic_id[slot] == apic_id) {
@@ -6766,6 +6797,39 @@ bool hypervisor::start_application_processor(std::size_t slot,
     this->start_up_lock.lock();
     scope_exit unlock{[&] { this->start_up_lock.unlock(); }};
 
+    // Asked again, now that this is exclusive. The test that sent us here
+    // is in `start_up_processor` and is made *outside* the lock, so
+    // between it and this line another processor can have started this
+    // one - two senders answering the same broadcast is enough, and
+    // `processor_virtualized[slot]` is written by the target itself from
+    // inside its own launch.
+    //
+    // Going on anyway is not merely wasted work, it is destructive, and
+    // the worst of it is one line: `start_up_launched[slot] = false`
+    // below. That flag is what `wait_for_ept_acknowledgement` uses to
+    // decide which processors must answer an extended page table change -
+    // a processor whose flag is clear is skipped, on the argument that it
+    // holds no translation. Clearing it for a processor that is running
+    // the guest removes it from every rendezvous from then on, silently
+    // and permanently, because only `main` ever sets it again. The rest
+    // follows: the shared trampoline area is rewritten under a processor
+    // that may still be climbing it, and a start-up IPI goes out to one
+    // that is executing.
+    //
+    // Answered as adopted rather than refused, because it is true: the
+    // processor is up and virtualized, at the vector the first sender
+    // recorded. That is the same answer `start_up_processor` gives a
+    // duplicate start-up IPI aimed at a running processor, and SDM 29.7.2
+    // says the hardware discards one too - "the active state blocks
+    // start-up IPIs (SIPIs)".
+    if (this->processor_virtualized[slot]) {
+        log("cpu {} was started while this start-up ipi waited for the "
+            "lock, vector {} not re-applied",
+            slot,
+            guest_vector);
+        return true;
+    }
+
     this->guest_start_up_vector[slot] = guest_vector;
     this->started_by_trampoline[slot] = true;
     this->start_up_launched[slot] = false;
@@ -6859,7 +6923,24 @@ bool hypervisor::start_application_processor(std::size_t slot,
         slot,
         this->apic_id[slot],
         start_up_trampoline_stage());
-    this->started_by_trampoline[slot] = false;
+
+    // `started_by_trampoline[slot]` is deliberately **left set**.
+    //
+    // Clearing it here was the "the trampoline timeout races the processor
+    // it is timing out" item in BACKLOG.md, and this is the whole of that
+    // race: giving up does not stop the target, it only stops waiting for
+    // it. A processor that is merely slow arrives afterwards and reads
+    // this flag in `main`, where it decides three things - whether to
+    // capture the operating system's registers, whether to build an
+    // intermediate GDT by reading the OS descriptor table, and whether to
+    // put the OS page table back on the way out. All three are wrong for a
+    // processor that came out of the trampoline, and the second one reads
+    // through a page table that no longer maps what it names.
+    //
+    // So the flag describes how this processor arrived, which the timeout
+    // does not change. Nothing reads it for a processor that never
+    // arrives, and a later attempt sets it again at the top of this
+    // function, so leaving it costs nothing and closes the window.
     return false;
 }
 
