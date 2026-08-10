@@ -1015,12 +1015,34 @@ bool hypervisor::on_guest_vmclear(std::size_t cpu,
         return true;
     }
 
+    // VMCLEAR does not discard a VMCS, it *saves* one. SDM 33.3's
+    // operation is three steps - "ensure that data for VMCS referenced by
+    // the operand is in memory; initialize implementation-specific data
+    // in VMCS region; launch state of VMCS referenced by the operand :=
+    // clear" - and the description says it "initializes parts of the VMCS
+    // region (for example, it sets the launch state of that VMCS to
+    // clear)". The data fields survive, which is the entire premise of
+    // SDM 27.1's advice to VMCLEAR a VMCS before using it "on another
+    // logical processor": the region has to still be a VMCS afterwards.
+    //
+    // Both branches here used to zero all 3584 bytes of field storage.
+    // That is not a small divergence: the standard way to move a virtual
+    // processor between logical processors is VMCLEAR on the old one,
+    // VMPTRLD and VMLAUNCH on the new one, and against a wiped region the
+    // VMLAUNCH cannot succeed - `within_capability` rejects all-zero pin
+    // controls, because adjust_msr returns the allowed-0 bits and those
+    // are never zero - so that virtual processor could never be entered
+    // again, on any processor, for the life of the boot.
+    //
+    // KVM's handle_vmclear is the shape to match: it flushes the cached
+    // vmcs12 to guest memory whole and then writes *four bytes* of zero
+    // at offsetof(struct vmcs12, launch_state).
     if (*pointer == this->guest_current_vmcs[cpu]) {
-        // The current one: clear the cache and write the cleared state
-        // out, then stop it being current. SDM 33.3, VMCLEAR: "IF addr =
-        // current-VMCS pointer THEN current-VMCS pointer :=
-        // FFFFFFFF_FFFFFFFFH".
-        this->guest_vmcs12[cpu].clear();
+        // The current one. The cache is this processor's copy and may be
+        // ahead of the region, so the launch state is set in the cache
+        // and the whole thing written out - which is both of the first
+        // two steps at once, and keeps every field the guest wrote.
+        this->guest_vmcs12[cpu].state(vmcs12::launch_state::clear);
         flush_guest_vmcs12(cpu);
         this->guest_current_vmcs[cpu] = no_current_vmcs;
 
@@ -1028,18 +1050,17 @@ bool hypervisor::on_guest_vmclear(std::size_t cpu,
         return true;
     }
 
-    // Not current, so its region is the only copy of it. VMCLEAR's whole
-    // effect on such a VMCS is to set its launch state to clear, which is
-    // why the launch state lives in the region rather than beside the
-    // cache: a VMCLEAR of a VMCS this processor has never loaded still has
-    // to reach it.
-    vmcs12 cleared;
-    cleared.clear();
+    // Not current, so its region is the only copy of it and there is
+    // nothing to flush. Only the launch state is written, which is why it
+    // lives in the region rather than beside the cache: a VMCLEAR of a
+    // VMCS this processor has never loaded still has to reach it.
+    auto cleared_state =
+        static_cast<std::uint32_t>(vmcs12::launch_state::clear);
 
     static_cast<void>(write_guest_physical(
-        *pointer,
-        std::span(reinterpret_cast<const std::byte *>(&cleared),
-                  sizeof(cleared))));
+        *pointer + vmcs12::launch_state_offset,
+        std::span(reinterpret_cast<const std::byte *>(&cleared_state),
+                  sizeof(cleared_state))));
 
     vmx_succeed();
     return true;

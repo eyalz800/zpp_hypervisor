@@ -380,8 +380,24 @@ public:
 
     constexpr void state(launch_state value)
     {
+        static_assert(offsetof(vmcs12, m_launch_state) ==
+                          launch_state_offset,
+                      "the launch state has moved within the region");
+
         this->m_launch_state = value;
     }
+
+    /**
+     * Where the launch state sits in the region, in bytes.
+     *
+     * For the caller that has to write *only* this - VMCLEAR of a VMCS
+     * this processor has never loaded. The architecture requires such a
+     * VMCS to keep its data, so the write has to be this narrow; KVM
+     * writes the same four bytes at `offsetof(struct vmcs12,
+     * launch_state)` in `handle_vmclear`. Checked against the real
+     * offset in `state` above, where the class is complete.
+     */
+    static constexpr std::size_t launch_state_offset = 8;
     /**
      * @}
      */
