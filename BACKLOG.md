@@ -4867,3 +4867,36 @@ KVM trace, boot both, and compare `kvm_apic_accept_irq` for vector
 the reference's rate, the counts are the same timer mis-scaled. If ours
 stops accepting them entirely at a point, something else wedged first
 and the timer is downstream of it. Do that before changing a switch.
+
+### The discriminator ran, and it says mis-scaled rather than downstream
+
+The measurement named above was taken: `kvm_apic_accept_irq` streamed
+across a four-processor boot under this VMM, bucketed by ten seconds.
+
+Vector `0xef` arrives at **4 to 5 per ten seconds - about 0.42 Hz** and
+does so for the *entire* live window, including the stretch where the
+boot processor was climbing normally from zero to its 82,000 second-level
+entries. It is not a rate that was healthy and then collapsed when
+something wedged.
+
+That number closes the loop with the register:
+
+- programmed count 2.38e9 at divide-by-1 against KVM's 1 GHz bus is a
+  period of 2.38 s, so **0.42 Hz** - exactly what was counted;
+- the reference's 1.95e6 is 1.95 ms, so **512 Hz** per processor;
+- **512 / 0.42 = 1219**, which is the same 1214x the counts gave.
+
+Two independent measurements - a register read and an interrupt count -
+agreeing on the same ratio. So of the two readings offered above, the
+mis-scaled one is right and the "honest long timeout armed after
+something else wedged" one is wrong: the timer was never running at the
+correct rate, from early boot onward, well before anything stopped.
+
+One honesty note on the comparison: the reference's 512 Hz is derived
+from the count it programs, not counted in a trace of its own. The
+tracing was armed after the reference run had finished, and the ring
+still held stale events from earlier captures - timestamps spanning
+4316 to 10804 - so the bulk of that file's vector `0xef` lines belong to
+older boots and must not be counted. Only the live window
+(10350 onward) is this boot. A reference capture over the same
+tracepoint would make the comparison direct and has not been done.
