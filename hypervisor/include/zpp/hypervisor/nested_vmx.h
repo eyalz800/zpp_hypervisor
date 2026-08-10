@@ -157,6 +157,38 @@ inline constexpr bool enabled =
 #endif
 
 /**
+ * Whether the guest hypervisor's own VMREADs and VMWRITEs are served from
+ * a shadow VMCS region instead of exiting.
+ *
+ * On, and the measurement it is on for: VMREAD and VMWRITE were 65.7% of
+ * every exit this VMM took while Hyper-V booted Windows on the rig -
+ * 2,070,621 and 765,747 out of 4,287,565 - and shadowing took them to six
+ * and 411, with the guest hypervisor's own guest running 2.5 times
+ * faster.
+ *
+ * A plain constant and **deliberately not a CMake option**. A build
+ * switch that changes how the processor is programmed persists in a cache
+ * and is inherited silently by every later build; that is exactly how
+ * `ZPP_VERIFY_HYPERVISOR` cost a day, and the resulting hang was
+ * indistinguishable from a hypervisor bug through seven bisected causes.
+ * Flipping this one requires editing a file that appears in the diff.
+ *
+ * Off restores the previous behaviour exactly rather than approximately:
+ * the control is never requested, the link pointer is never written, the
+ * bitmaps are never installed, and every copy between the cached vmcs12
+ * and the region becomes a no-op - so the guest hypervisor exits for
+ * every field access, which is what the handlers have always done. That
+ * matters most where there is no other channel: on bare metal a boot
+ * either works or it does not, and this is the one variable to move
+ * between two such boots.
+ *
+ * Note the *processor* can still refuse: the control is requested through
+ * adjust_msr, and `hypervisor::vmcs_shadowing_enabled` records whether it
+ * was granted. On is a request, not an assertion.
+ */
+inline constexpr bool shadow_vmcs_enabled = false;
+
+/**
  * The value the guest's current-VMCS pointer takes when there is none.
  *
  * All ones rather than zero, because zero names physical page zero. SDM

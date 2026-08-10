@@ -107,7 +107,8 @@ constexpr field shadow_read_write_fields[] = {
  * below it, so a value that is not is a mistake rather than a case to
  * handle, and it is left set.
  */
-constexpr void permit_field(std::uint8_t * bitmap, std::uint64_t encoding)
+[[maybe_unused]] constexpr void permit_field(std::uint8_t * bitmap,
+                                             std::uint64_t encoding)
 {
     if (encoding >= 0x8000) {
         return;
@@ -130,7 +131,13 @@ constexpr void permit_field(std::uint8_t * bitmap, std::uint64_t encoding)
  */
 void hypervisor::initialize_vmcs_shadowing()
 {
-    if constexpr (!nested_vmx::enabled) {
+    if constexpr (!nested_vmx::enabled || !nested_vmx::shadow_vmcs_enabled) {
+        // Left false, so set_vmcs_shadowing and both copies are no-ops
+        // and the guest hypervisor exits for every field as it always
+        // did. Said out loud, because a run that was meant to have this
+        // on and did not must not be read as the feature failing.
+        this->vmcs_shadowing_enabled = false;
+        log("vmcs shadowing switched off in this build");
         return;
     } else {
         if (0 != this->vmcs_shadow_read_bitmap_physical) {

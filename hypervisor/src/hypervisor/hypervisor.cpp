@@ -7857,9 +7857,18 @@ void hypervisor::setup_vmcs(std::size_t cpu,
     // is on - see set_vmcs_shadowing.
     if constexpr (nested_vmx::enabled) {
         initialize_vmcs_shadowing();
-        vmcs.vmread_bitmap_address(this->vmcs_shadow_read_bitmap_physical);
-        vmcs.vmwrite_bitmap_address(
-            this->vmcs_shadow_write_bitmap_physical);
+
+        // Only when the feature is on. With it off these fields are never
+        // consulted - the control that reads them is never set - but
+        // leaving them unwritten is what makes "off" mean the VMCS is
+        // programmed exactly as it was before shadowing existed, which is
+        // the property a bare-metal bisection depends on.
+        if constexpr (nested_vmx::shadow_vmcs_enabled) {
+            vmcs.vmread_bitmap_address(
+                this->vmcs_shadow_read_bitmap_physical);
+            vmcs.vmwrite_bitmap_address(
+                this->vmcs_shadow_write_bitmap_physical);
+        }
     }
 
     vmcs.write(arch::x86_64::vmx::vmcs::field::io_bitmap_a,
