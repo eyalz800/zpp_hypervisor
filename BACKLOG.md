@@ -4355,3 +4355,35 @@ path, which nothing has yet shown to be broken.
 - **Count device-vector deliveries.** Everything above was inferred from
   KVM's trace because the hypervisor itself says nothing about interrupts
   arriving at the guest.
+
+### The divergence point, measured against the reference
+
+The same forty seconds after application-processor start-up, in both
+runs, counted through KVM's own APIC so the two are comparable (unlike
+MSR or CPUID exits, which zpp answers itself and KVM therefore never
+sees):
+
+| vector | reference, boots | behind zpp, hangs |
+|---|---|---|
+| SIPI 159 / INIT 0 | 56 / 49 | **56 / 49** |
+| **239 (0xef)** | **84,286** | **29** |
+| 255 (0xff) | 18,501 | 0 |
+| 47 (0x2f) | 15,479 | 0 |
+| 96 (a device vector) | 3,261 | 0 |
+| 32 (0x20) | 511 | 1,002 |
+
+Start-up traffic is **identical on both sides**, which settles from a
+third direction that application-processor start-up is not where these
+diverge. What differs is everything after it: the moment the reference
+has its processors, its interrupt traffic climbs to roughly 2,100 a
+second on vector `0xef` and stays there, while behind zpp that vector is
+delivered twenty-nine times in forty seconds and vectors `0xff`, `0x2f`
+and `0x60` never arrive at all.
+
+So the divergence is not in *starting* the processors but in whatever the
+guest does with them immediately afterwards. Note this is still an
+observation about the symptom - a guest that has gone idle delivers few
+interrupts by definition - so the open question is unchanged and the
+value here is the timestamp: the two runs are indistinguishable up to
+start-up and separate immediately after it. That is the window to
+instrument.
