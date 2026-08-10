@@ -978,6 +978,16 @@ private:
      * does that is the activity state - 2 for shutdown, 3 for
      * wait-for-SIPI. Nothing outside can read the field, so it is
      * recorded here at the moment it matters.
+     *
+     * The activity state is **consumed** as well as read, which is what
+     * makes its freshness load bearing rather than cosmetic:
+     * `start_up_processor` gates a guest's start-up IPI on it. The exit
+     * path samples it on the way out, so it describes the *previous* exit
+     * for the whole of any wait a handler takes - and `emulate_init_signal`
+     * takes one that is up to two million iterations long. It therefore
+     * writes this field itself before it waits, exactly as
+     * `enter_or_park_l2` writes `l2_activity_state` before parking. Any
+     * future handler that waits in root mode owes the same.
      */
     volatile std::uint64_t resume_activity_state[max_cpus]{};
     volatile std::uint64_t resume_guest_rip[max_cpus]{};

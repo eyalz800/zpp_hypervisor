@@ -4165,6 +4165,38 @@ void hypervisor::emulate_init_signal(arch::x86_64::context & context)
     // decision has to have agreed with.
     auto waited = x2apic && nested;
 
+    // Both facts about this processor are published *before* the wait
+    // below, and that ordering is the whole of this fix.
+    //
+    // The sender does not look at the mailbox first. `start_up_processor`
+    // gates on the activity state and only then compare-exchanges into
+    // `start_up_handoff`, so a target whose activity record still says
+    // "active" has its start-up IPI dropped - and returned as `adopted`,
+    // which swallows the guest's write to the interrupt command register.
+    // The vector is destroyed rather than delivered.
+    //
+    // That record is `resume_activity_state`, written by the exit path at
+    // the *end* of the handler (see the tail of the exit handler, where it
+    // is sampled off vmcs01). So for the entire length of the software
+    // wait - up to two million iterations - it holds the value from the
+    // exit before the INIT, which is `active`. The window is not a race of
+    // instructions: it is the whole wait, and it covers both of the two
+    // start-up IPIs SDM 11.4.4.1 step 15 has a guest send.
+    //
+    // `enter_or_park_l2` already had this right: it writes
+    // `l2_activity_state[cpu]` before calling `wait_for_l2_start_up_ipi`,
+    // which is why the second-level hand-off works and this one did not.
+    // The asymmetry was the bug.
+    //
+    // Written to the VMCS as well as to the record, and it costs nothing
+    // to do it here rather than after: the field is consumed at VM entry,
+    // which is far away, and `apply_start_up` puts it back to `active` on
+    // every path that delivers a vector.
+    vmcs.guest_activity_state(
+        arch::x86_64::vmx::activity_state::wait_for_start_up_ipi);
+    this->resume_activity_state[cpu] =
+        arch::x86_64::vmx::activity_state::wait_for_start_up_ipi;
+
     if (waited) {
         // Published before the first attempt, so a sender that arrives
         // during the wait finds this processor listening.
@@ -4219,9 +4251,6 @@ void hypervisor::emulate_init_signal(arch::x86_64::context & context)
         // to swallow the IPI this processor is now waiting for.
         handoff.store(start_up_handoff_state::hardware_wait);
     }
-
-    vmcs.guest_activity_state(
-        arch::x86_64::vmx::activity_state::wait_for_start_up_ipi);
 
     // One log line, and the placement is deliberate: the activity state is
     // written first, so nothing about the diagnostic delays the write the
