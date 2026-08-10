@@ -2111,6 +2111,37 @@ void hypervisor::load_l1_host_state(std::size_t cpu)
         arch::x86_64::wrmsr(
             arch::x86_64::msr::ia32_extended_feature_enable,
             shadow.read(field::host_ia32_efer));
+    } else {
+        // LMA and LME are not part of that control's remit. SDM 30.5,
+        // ".references/sdm.txt:204822": "The LMA and LME bits in the
+        // IA32_EFER MSR are each loaded with the setting of the 'host
+        // address-space size' VM-exit control" - unconditionally, on
+        // every VM exit, whether or not the whole MSR is being loaded.
+        //
+        // Today this is masked by an accident: vmcs02 inherits this
+        // VMM's own exit controls, which do carry host address-space
+        // size, so the hardware exit has already put both bits back to
+        // one before this runs. It breaks for a 32-bit guest hypervisor
+        // - one whose vmcs12 clears the control - which would be
+        // resumed in long mode with a host state that says otherwise.
+        //
+        // KVM writes the same three ways round in load_vmcs12_host_state:
+        // the load control if set, otherwise LMA|LME from the
+        // host-address-space-size bit, otherwise cleared.
+        constexpr std::uint64_t efer_lme = 1ull << 8;
+        constexpr std::uint64_t efer_lma = 1ull << 10;
+
+        auto efer = arch::x86_64::rdmsr(
+            arch::x86_64::msr::ia32_extended_feature_enable);
+
+        if (0 != (exit12 & exit_host_address_space_size)) {
+            efer |= (efer_lme | efer_lma);
+        } else {
+            efer &= ~(efer_lme | efer_lma);
+        }
+
+        arch::x86_64::wrmsr(
+            arch::x86_64::msr::ia32_extended_feature_enable, efer);
     }
 }
 
