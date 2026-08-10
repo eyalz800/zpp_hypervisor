@@ -2389,6 +2389,36 @@ void hypervisor::reflect_l2_exit(std::size_t cpu,
     auto & vmcs = this->vmcs;
     auto & shadow = this->guest_vmcs12[cpu];
 
+    // Recorded here, first, and for the same reason the guest state is
+    // read here: this is the last moment the VMCS that ran the
+    // second-level guest is current, so the instruction pointer below is
+    // that guest's own and not the guest hypervisor's.
+    //
+    // A separate ring from the one every exit goes into, because that one
+    // cannot answer this. The guest hypervisor's own traffic drowns it -
+    // at the freeze on the rig every one of the boot processor's newest
+    // sixteen entries was a write to its local APIC page - so what the
+    // root partition was doing has always been evicted by the time there
+    // is anything to read.
+    if (cpu < max_cpus) {
+        auto & count = this->l2_exit_trace_count[cpu];
+        auto & slot =
+            this->l2_exit_trace[cpu][count % exit_trace_capacity];
+
+        slot = exit_trace_entry{
+            .reason = reason.value(),
+            .qualification = qualification,
+            .activity_state = vmcs.guest_activity_state(),
+            .cs_selector = vmcs.guest_cs_selector(),
+            .rip = vmcs.guest_rip(),
+            .guest_physical = 0,
+            .repeated = 1,
+            .detail = this->l2_entries[cpu],
+        };
+
+        count = count + 1;
+    }
+
     // The guest state first, while the VMCS that ran the second-level
     // guest is still current - unless this is a VM-entry failure, which
     // saves none of it.

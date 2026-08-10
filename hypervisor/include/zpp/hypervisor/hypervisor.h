@@ -3719,6 +3719,33 @@ private:
      */
     std::uint64_t vmcs02_physical[max_cpus]{};
     std::uint64_t l2_entries[max_cpus]{};
+
+    /**
+     * The most recent exits taken *while the second-level guest was
+     * running*, per processor, recorded where the reflection happens so
+     * the instruction pointer is the second-level guest's own.
+     *
+     * The ring above cannot answer this. It records every exit at both
+     * levels, and the guest hypervisor's own traffic - the VMREADs, the
+     * VMWRITEs, the writes to its local APIC page - outnumbers the
+     * second-level guest's by enough that by the time a boot has settled
+     * the newest thirty-two entries are all the guest hypervisor's.
+     * Measured: at the freeze on the rig, every one of the boot
+     * processor's newest sixteen entries was a write to the APIC page,
+     * and what the *root partition* was doing had long been evicted.
+     *
+     * Which is the question that matters, because the count of
+     * second-level entries stops at about 82,100 in every configuration
+     * from two processors to eight and in every build tried, and a stop
+     * that reproducible is the second-level guest reaching the same place
+     * every time rather than a race.
+     * @{
+     */
+    exit_trace_entry l2_exit_trace[max_cpus][exit_trace_capacity]{};
+    std::uint64_t l2_exit_trace_count[max_cpus]{};
+    /**
+     * @}
+     */
     std::uint64_t l2_exits_reflected[max_cpus]{};
     std::uint64_t l2_exits_handled[max_cpus]{};
     /**

@@ -5389,3 +5389,80 @@ today, the application processors reach a few hundred, and there is an
 escalating storm of one vector immediately before everything settles.
 The determinism is the strongest clue available - a race would not stop
 at the same number - and it should be the thing driven at next.
+
+### Where it actually stops: the root partition halts and is never resumed
+
+Added a second ring that records **only** exits taken while the
+second-level guest was running, written at the reflection point while
+that guest's VMCS is still current so the instruction pointer is its
+own, and carrying the second-level entry count with each entry. The
+existing ring cannot answer this - the guest hypervisor's own traffic
+drowns it, and at the freeze its newest sixteen entries were all writes
+to the local APIC page.
+
+Boot processor, newest first, at the freeze:
+
+```
+ age  reason        L2 rip              entry#
+   0  HLT           fffff805800a6f8e     82135
+   1  RDMSR         fffff8057fda597c     82134
+   2  RDMSR         fffff8057fda597c     82133
+   3  WRMSR         fffff8057fe2890b     82132
+   5  VMCALL        fffff8050eed0032     82130
+   6  VMCALL        fffff8050eed0000     82129
+  14  CPUID         fffff80580561f3b     82121
+  18  external int  fffff8057fdefa3c     82117
+```
+
+An application processor, newest first, at its 372nd and last entry:
+
+```
+   0  HLT           fffff805800a6f8e       372
+   1  RDMSR         fffff8057fda597c       371
+   2  WRMSR         fffff8057fe2890b       370
+   4  VMCALL        fffff8050eed0032       368
+```
+
+**Every root-partition processor stops at the same instruction** -
+`fffff805800a6f8e` - and the two instructions before it are the same on
+both: a read and a write of some model-specific register at
+`fffff8057fe2890b`. That is the shape of *arm the next deadline, then
+halt*. Nothing before it is abnormal: hypercalls into the guest
+hypervisor's hypercall page at `fffff8050eed0000` with the usual +0x19
+and +0x32 stubs, register reads, CPUID, an external interrupt taken.
+
+So the root partition is not stuck, crashed, or spinning. **It idles
+correctly and is never woken**, and everything above it idles because
+of that.
+
+Eliminated at the same freeze by reading counters that already existed,
+no code and no extra boot:
+
+| candidate | counter | value |
+|---|---|---|
+| shadow EPT root recycled with stale mappings | `shadow_ept_evictions[0]` | **0** |
+| shadow EPT table pool exhausted | `shadow_ept_reclaims`/`resets[0]` | **0**, **0** |
+| the stepping latch stuck | `stepping_watch[0..7]` | all **0** |
+| a processor parked in wait-for-SIPI | `l2_activity_state[0..3]` | all **0** |
+| nested entry refused | `nested_entry_failed[0..3]` | all **0** |
+| an MSR refused to the guest | `faulted_msr_count` | **0** |
+| a synthetic MSR touched | `synthetic_msr_accesses` | **0** |
+
+For scale, the boot processor took 472,262 shadow cache hits and 15,541
+builds without ever evicting or reclaiming once, so neither shadow
+structure is anywhere near its limits.
+
+Also measured and dead: announcing the hypervisor-present bit in
+CPUID.1:ECX[31] alone, with no interface claimed, changes nothing -
+frozen at 82,127 with an application processor at 374, the same as
+without it.
+
+**The next thing to identify is which register is written at
+`fffff8057fe2890b`.** If it is the deadline the processor arms before
+halting, then what has to be explained is why the guest hypervisor
+never delivers that deadline - and the pin-based controls are the place
+to look, because the VMX-preemption timer is deliberately withheld from
+the guest hypervisor here (`nested_entry.cpp:1101-1109`, masked out of
+vmcs02, and `:1514` claims every one of its exits for this VMM), so a
+guest hypervisor that would have used it to schedule a wake-up has to
+be using something else instead.
