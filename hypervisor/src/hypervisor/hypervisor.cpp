@@ -1194,6 +1194,29 @@ void hypervisor::arm_controller_poll(bool armed)
         return;
     }
 
+    // And only against this VMM's own VMCS, because that is the only one
+    // the control means anything in.
+    //
+    // Called unconditionally from resume_guest, which runs with vmcs02
+    // current whenever a second-level guest is about to be resumed - so
+    // without this it read and wrote *vmcs02's* pin-based controls.
+    // build_vmcs02 strips the preemption timer from vmcs02 on every entry
+    // (it is this VMM's alone and the capability MSRs do not offer it to
+    // a guest hypervisor), so the arm was discarded at the next entry
+    // while `controller_poll_armed` recorded it as done - and the early
+    // return above then never re-armed it on vmcs01. The processor's own
+    // millisecond poll died there and stayed dead.
+    //
+    // Skipped rather than redirected: vmcs01's control is untouched while
+    // a second-level guest runs, so `controller_poll_armed` still
+    // describes it truthfully and the next exit that returns to the guest
+    // hypervisor re-evaluates.
+    if constexpr (nested_vmx::enabled) {
+        if (this->running_l2[slot - 1]) {
+            return;
+        }
+    }
+
     auto & armed_here = this->controller_poll_armed[slot - 1];
 
     if (armed == armed_here) {
@@ -10287,8 +10310,31 @@ void hypervisor::resume_guest(arch::x86_64::context & context,
     if (auto slot = vmcs.vpid(); (0 != slot) && (slot <= max_cpus)) {
         this->resumes_reached[slot - 1] =
             this->resumes_reached[slot - 1] + 1;
-        this->resume_activity_state[slot - 1] =
-            vmcs.guest_activity_state();
+
+        // The activity state only from this VMM's own VMCS, because it is
+        // consumed rather than merely read: start_up_processor decides
+        // whether to deliver a guest's start-up IPI by it, and a
+        // second-level guest's activity state answers a different
+        // question about a different virtual processor. Left at vmcs01's
+        // last value while one runs, which is the first-level guest's
+        // state and is what the guest hypervisor's own processor is
+        // actually in. A second-level guest waiting for a start-up IPI is
+        // held by enter_or_park_l2 and recorded in `l2_activity_state`,
+        // which is the record start_up_processor asks alongside this one.
+        //
+        // RIP and CS are not gated, deliberately: nothing consumes them,
+        // they exist to be read from a debugger, and the address a
+        // second-level guest is at is the more useful of the two answers.
+        auto in_l2 = false;
+        if constexpr (nested_vmx::enabled) {
+            in_l2 = this->running_l2[slot - 1];
+        }
+
+        if (!in_l2) {
+            this->resume_activity_state[slot - 1] =
+                vmcs.guest_activity_state();
+        }
+
         this->resume_guest_rip[slot - 1] = vmcs.guest_rip();
         this->resume_guest_cs[slot - 1] = vmcs.guest_cs_selector();
     }
