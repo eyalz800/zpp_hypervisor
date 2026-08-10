@@ -4569,3 +4569,42 @@ only the application processor doing the work. That is itself odd for a
 healthy two-processor Windows and should not be waved away: it may mean
 the same fault still bites the boot processor and Windows simply
 schedules around it when there is another processor to use.
+
+### The threshold is between one and three application processors
+
+Bisected with `ZPP_CPUS`, same binary and same guest each time:
+
+| processors | application processors | outcome |
+|---|---|---|
+| 2 | 1 | boot processor frozen at 82,036; the application processor passes **312,000** entries and keeps going |
+| 4 | 3 | boot processor frozen at 82,134; application processors frozen at **375 / 348 / 323** |
+| 8 | 7 | boot processor frozen at 82,315; application processors frozen at **~405 / 396 / 378** |
+
+The boot processor stops at the same count in all three - within 300 of
+82,300 - so whatever stops *it* is independent of how many processors
+exist. What depends on the count is whether the application processors
+keep running, and the boundary lies between one and three of them.
+
+**That reopens a finding from the local APIC audit that had been set
+aside.** `start_up_lock` (`hypervisor.cpp:6605`) serialises the
+*callers* of the start-up path rather than its *targets*, and the
+trampoline has a single, non-reentrant stack (`:6650`). One application
+processor can never collide with another; two or more can. The bisect and
+that code agree, which is a good deal more than either says alone.
+
+Not yet confirmed, and the honest gaps:
+
+- three processors (two application processors) is the case that would
+  pin the boundary exactly, and the run attempted for it was far slower
+  than the others - 37,000 entries in eighteen minutes against the usual
+  82,000 in five - and had not started its application processors when
+  last read. Inconclusive, needs repeating.
+- the two-processor guest was never confirmed on the screen, so "it
+  works" means "it keeps doing work", not "it reaches the login screen".
+- the boot processor freezing at the same count regardless is
+  **unexplained by any of this** and may be a second, separate fault.
+
+A note on the harness rather than the hypervisor: an odd `ZPP_CPUS`
+originally produced a fractional `smp.cores` and qemu refused to start,
+which is why both launchers now drop to one thread per core when the
+count will not divide evenly.
