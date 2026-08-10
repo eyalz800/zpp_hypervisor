@@ -5466,3 +5466,54 @@ the guest hypervisor here (`nested_entry.cpp:1101-1109`, masked out of
 vmcs02, and `:1514` claims every one of its exits for this VMM), so a
 guest hypervisor that would have used it to schedule a wake-up has to
 be using something else instead.
+
+### What the root partition does immediately before it halts
+
+Extended the second-level ring to carry that guest's RCX, which for a
+model-specific register access is the register number - the one thing
+the exit reason does not carry. The last exits before the halt, on the
+boot processor and identically on an application processor:
+
+```
+age  reason   L2 rip              rcx
+  0  HLT      fffff800a72a6f8e
+  1  RDMSR    ...a6fa597c         0x40000020   HV_X64_MSR_TIME_REF_COUNT
+  2  RDMSR    ...a6fa597c         0x40000020   HV_X64_MSR_TIME_REF_COUNT
+  3  WRMSR    ...a702890b         0x40000071   HV_X64_MSR_ICR
+  4  RDMSR    ...a6fa597c         0x40000020   HV_X64_MSR_TIME_REF_COUNT
+  5  VMCALL   ...34ec0032         hypercall, code 0x12
+  6  VMCALL   ...34ec0000         hypercall, code 0x03, fast, rep 1
+```
+
+So the guess in the previous section was wrong in an interesting way.
+It is **not** arming a deadline. It **sends an inter-processor interrupt
+through the synthetic interrupt command register and then halts** - the
+ordinary "wake somebody else, then idle" - and it polls the synthetic
+reference time counter hard while doing it: eight of the last twenty
+exits are reads of `0x40000020`.
+
+Three things follow, and all three are new:
+
+- **The root partition uses the synthetic interface heavily.** Those
+  registers are the guest hypervisor's to implement, not this VMM's,
+  and they land outside both ranges an MSR bitmap can describe, so they
+  exit unconditionally and are reflected. They are reaching the guest
+  hypervisor - they appear in the reflected ring, which is only written
+  where a reflection happens - and `faulted_msr_count` is zero, so this
+  VMM refused none of them.
+- **Reading the reference counter through a register at all is the slow
+  path.** A guest given a working reference time page reads time from
+  memory without exiting. Reading `0x40000020` eight times in twenty
+  exits says that page is not serving it, which is worth understanding
+  on its own even though it is a cost rather than a hang.
+- **The halt follows an interrupt it just sent to somebody else.** Every
+  processor doing that, and none of them ever running again, is the
+  shape of a wake-up that is issued and never arrives - but the layer
+  beneath processes 100,000 interrupt commands and accepts them one for
+  one, so whatever is lost is lost above that, between the synthetic
+  register and the target processor actually being resumed.
+
+That last point is where this stands: the interrupt is sent through an
+interface this VMM does not implement and does not intercept, to a
+processor this VMM has demonstrably started, and it is delivered at the
+level beneath - and the target still never runs.

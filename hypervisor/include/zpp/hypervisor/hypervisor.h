@@ -3743,6 +3743,19 @@ private:
      */
     exit_trace_entry l2_exit_trace[max_cpus][exit_trace_capacity]{};
     std::uint64_t l2_exit_trace_count[max_cpus]{};
+
+    /**
+     * The second-level guest's RCX at the moment its exit was reflected,
+     * kept only long enough for the ring above to record it.
+     *
+     * For a model-specific register access that is the register number,
+     * which is the one thing the exit reason does not carry and the whole
+     * question at the point this was added: every root-partition
+     * processor halts immediately after a write at the same instruction,
+     * and which register that write names decides whether it is arming a
+     * deadline it is never given.
+     */
+    std::uint64_t l2_exit_detail[max_cpus]{};
     /**
      * @}
      */

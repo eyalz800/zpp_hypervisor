@@ -2411,12 +2411,16 @@ void hypervisor::reflect_l2_exit(std::size_t cpu,
             .activity_state = vmcs.guest_activity_state(),
             .cs_selector = vmcs.guest_cs_selector(),
             .rip = vmcs.guest_rip(),
-            .guest_physical = 0,
+            .guest_physical = this->l2_exit_detail[cpu],
             .repeated = 1,
             .detail = this->l2_entries[cpu],
         };
 
         count = count + 1;
+
+        // Cleared, so an exit that carries no register number shows zero
+        // rather than the last one that did.
+        this->l2_exit_detail[cpu] = 0;
     }
 
     // The guest state first, while the VMCS that ran the second-level
@@ -2896,6 +2900,12 @@ hypervisor::on_l2_exit(std::size_t cpu,
         // answers them the same way it does for any guest.
         this->l2_exits_handled[cpu] = this->l2_exits_handled[cpu] + 1;
         return l2_exit_outcome::deferred;
+    }
+
+    // Carried into the ring, and only here, where the second-level
+    // guest's registers are still the ones in hand.
+    if (cpu < max_cpus) {
+        this->l2_exit_detail[cpu] = context.rcx;
     }
 
     reflect_l2_exit(cpu, reason, this->vmcs.exit_qualification());
