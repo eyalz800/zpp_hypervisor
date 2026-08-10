@@ -236,6 +236,61 @@ Two ways to cut it, both unmeasured:
 the target and expensive only because of the extra layer, so a change
 that helps here and costs there is the wrong trade.
 
+### 3. The root partition is not slow, it is asleep on a timer
+
+Read with `scripts/rig-dump-state.py`, which now prints the exit trace's
+`detail` word - the MSR index the exit carried. That word is what turned
+"a hot RDMSR at one RIP" into a diagnosis, and it had been in the trace
+for a day without ever being printed.
+
+The second-level guest cycles, identically, for 4,193,522 second-level
+exits:
+
+| MSR | Name | Share |
+|---|---|---|
+| `0x40000020` | `HV_X64_MSR_TIME_REF_COUNT` | 2,481,680 reads, 26% of all exits |
+| `0x400000b1` | `HV_X64_MSR_STIMER0_COUNT` | one write per cycle |
+| `0x40000070` | `HV_X64_MSR_EOI` | one write per cycle |
+| `0x40000071` | `HV_X64_MSR_ICR` | one write per cycle |
+| `0x40000084` | `HV_X64_MSR_SINT4` | one write per cycle |
+
+Poll the reference counter five or six times, re-arm synthetic timer 0,
+end-of-interrupt, wait. That is an operating system sleeping, not one
+working.
+
+**The arithmetic is what settles it.** 1,326 second-level exits per
+second is 754 microseconds per exit. Everything this VMM executes per
+exit - two VMPTRLDs, two VMCLEARs, about seventy VMREAD/VMWRITEs, the
+reflection - is order ten thousand cycles, about three microseconds even
+with the rig's extra layer folded in. Two orders of magnitude short. The
+time is not being spent in our code, so **the 77x is not a cost we are
+paying, it is a wait the guest is choosing**, and shaving exits cannot
+reach it.
+
+What that means for the two items above: item 1 and item 2 are still real
+costs and still worth having, but neither is on the path to a boot. Do
+not spend another run on them before this is settled.
+
+Next, and unmeasured: whether `HV_X64_MSR_TIME_REF_COUNT` advances at the
+rate Hyper-V believes it does. It is a 100 ns counter, so it must advance
+at 10 MHz. Hyper-V derives it from the timestamp counter it is shown, and
+this VMM decides what that is. `208cdf9` measured the reference arming
+every timer to 1.95e6 where we arm one to 2.38e9 - a factor of 1220 - and
+`0258ee5` withdrew that as not surviving a test. The withdrawal was of a
+*mis-scaled tick* argued from a different measurement; it did not touch
+the reference counter, and this trace is direct evidence that a time
+source is what the guest is stuck on. Re-open it there.
+
+The seven application processors are **not** part of this. They came up
+on the trampoline at the firmware's own start-up IPI, ran 107 exits of
+EDK2 `MpInitLib` (`cs=0x0038`, `rip=0x7ed5xxxx`), and parked in its wait
+loop, which is exactly right. The guest's second start-up IPI being
+dropped for all seven - `activity 0x0 is not wait-for-sipi` - is also
+right: a processor that started on the first SIPI ignores the second, and
+KVM's `kvm_apic_accept_events` drops it on the same test. They are
+waiting for the operating system's own start-up sequence, which has not
+happened because the boot processor never gets that far.
+
 ## Measured
 
 These were observed in real state. They are not inferences.

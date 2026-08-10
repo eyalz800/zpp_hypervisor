@@ -303,9 +303,10 @@ def main():
         for i in range(start, count):
             slot = i % ring
             a = instance + off["exit_trace"] + (cpu * ring + slot) * entry_size
-            reason, qual, activity, cs, rip, phys, repeat = (
-                words.get(a + 8 * k, 0) for k in range(7))
+            reason, qual, activity, cs, rip, phys, repeat, detail = (
+                words.get(a + 8 * k, 0) for k in range(8))
             extra = f" phys=0x{phys:x}" if phys else ""
+            extra += f" detail=0x{detail:x}" if detail else ""
             times = f" x{repeat}" if repeat > 1 else ""
             print(f"  [{i:6d}] {name_reason(reason):<16} "
                   f"qual=0x{qual:<12x} {ACTIVITY.get(activity, activity)} "
@@ -329,12 +330,14 @@ def main():
             slot = i % l2ring
             a = (instance + off["l2_exit_trace"]
                  + (cpu * l2ring + slot) * entry_size)
-            reason, qual, activity, cs, rip, phys, repeat = (
-                w2.get(a + 8 * k, 0) for k in range(7))
+            reason, qual, activity, cs, rip, phys, repeat, detail = (
+                w2.get(a + 8 * k, 0) for k in range(8))
             times = f" x{repeat}" if repeat > 1 else ""
+            extra = f" phys=0x{phys:x}" if phys else ""
+            extra += f" detail=0x{detail:x}" if detail else ""
             print(f"  [{i:6d}] {name_reason(reason):<16} "
                   f"qual=0x{qual:<12x} {ACTIVITY.get(activity, activity)} "
-                  f"cs=0x{cs:04x} rip=0x{rip:x} detail=0x{phys:x}{times}")
+                  f"cs=0x{cs:04x} rip=0x{rip:x}{extra}{times}")
 
 
 if __name__ == "__main__":
