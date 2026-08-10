@@ -868,6 +868,19 @@ decode(std::span<const std::byte> code,
             result.size = size;
             result.destination =
                 static_cast<std::uint8_t>(fields.reg | found.extend_reg());
+
+            // The same guard the stores carry, and for a worse reason.
+            // Reading that field hands a host address to the guest;
+            // *writing* it pivots the host stack, because the exit stub
+            // stores the context's address there and restore_context pops
+            // it and iretqs onto whatever it holds. So an emulated
+            // `mov rsp, [watched]` would resume the host on an address the
+            // guest chose.
+            if (instruction_detail::names_host_stack_pointer(
+                    result.destination)) {
+                return {};
+            }
+
             result.writes_register = true;
             break;
         }
@@ -989,12 +1002,24 @@ decode(std::span<const std::byte> code,
                 return {};
             }
 
+            auto index =
+                static_cast<std::uint8_t>(fields.reg | found.extend_reg());
+
+            // Both guards, which this case was missing entirely. The high
+            // byte registers alias differently without REX, and encoding
+            // four is the *host* stack pointer - reading it computes the
+            // flags against a hypervisor address and leaves it in the
+            // guest's RFLAGS.
+            if (instruction_detail::names_high_byte(
+                    size, found, fields.reg) ||
+                instruction_detail::names_host_stack_pointer(index)) {
+                return {};
+            }
+
             // TEST ands its operands without storing the result.
             result.what = memory_operation::examine;
             result.size = size;
-            result.operand = operand_of(
-                static_cast<std::uint8_t>(fields.reg | found.extend_reg()),
-                size);
+            result.operand = operand_of(index, size);
             break;
         }
 
@@ -1082,6 +1107,14 @@ decode(std::span<const std::byte> code,
                 instruction_detail::width_of(found, false);
             result.destination =
                 static_cast<std::uint8_t>(fields.reg | found.extend_reg());
+
+            // As for the plain loads above: this writes a register, and
+            // encoding four is the host stack pointer.
+            if (instruction_detail::names_host_stack_pointer(
+                    result.destination)) {
+                return {};
+            }
+
             result.writes_register = true;
             result.sign_extends = (0xbe == opcode) || (0xbf == opcode);
             break;
