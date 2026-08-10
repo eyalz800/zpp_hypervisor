@@ -5159,3 +5159,72 @@ would catch a device interrupt if one happened.
 The host can settle it without any trace at all, and should: the
 passed-through disk's interrupts are counted by the machine itself in
 `/proc/interrupts` under its `vfio-msix` lines while the guest owns it.
+
+### What a review against KVM closed off, and one correction it forced
+
+Three directions are now shut by code rather than by argument, and one
+of this file's own measurements has to be read differently.
+
+**This VMM cannot hide the guest's device programming. Stop proposing
+that it does.** The idea that our extended page tables let a
+message-signalled-interrupt enable or table write land without the layer
+beneath seeing it is impossible, twice over:
+
+- `arch/x86/kvm/vmx/nested.c:2385-2389`, in `prepare_vmcs02_early`,
+  **discards L1's I/O bitmaps and forces unconditional I/O exiting**:
+  `exec_control |= CPU_BASED_UNCOND_IO_EXITING;` then
+  `exec_control &= ~CPU_BASED_USE_IO_BITMAPS;`. Our all-zero I/O bitmaps
+  are therefore irrelevant to whether a configuration cycle at
+  `0xcf8`/`0xcfc` reaches the layer below - it always does. It follows
+  that our "10 I/O exits on the boot processor for a whole boot" is the
+  *expected* number and says nothing at all: those exits go to L0, not
+  to us.
+- `nested_vmx_l0_wants_exit` (`nested.c:6360-6375`) takes **every** EPT
+  violation and misconfiguration at L0, with the comment that L2 never
+  uses L1's tables directly but a merged one L0 built. A guest-physical
+  page with no memory slot below - the memory-mapped configuration
+  window, and the interrupt table page which the pass-through layer
+  deliberately carves out of its mapping - faults to L0 however
+  permissively we map it.
+
+**We do not touch the disk controller in this configuration.** The whole
+storage channel is behind `diag::sink::esp_blocks`, which
+`diag/include/zpp/diag/config.h:700` reports absent, and that switch is
+what guards the controller-register watch, the doorbell watch and the
+only assignment of `channel_bar`. **The only page this VMM watches in a
+normal build is the local APIC page.** So "we broke the controller" is
+dead by construction, and `scripts/ci/check-diag-absent.sh` already
+proves it from the binary without a boot.
+
+**The message-signalled interrupt cannot be perturbed by our APIC
+watch.** Its address is `0xfeexxxxx`, which looks alarming next to a
+watch on `0xfee00000`, but the message is a DMA write from the device:
+it never walks extended page tables and cannot fault to us. The watch
+also leaves reads permitted (`hypervisor.cpp:2489`).
+
+**The correction.** The `dst 0 vec 0` events counted above are **not
+deliveries**. The only vCPU-context caller of that tracepoint is
+`kvm_scan_ioapic_routes` (`irq_comm.c:405-434`), which enumerates only
+the IOAPIC pin range; message-signalled routes live above it and are
+never enumerated there. So 28,581 against 3,888 measures how often the
+interrupt controller was re-scanned and nothing else, and that column
+must be discarded. **Only the hard-interrupt-context split is real** -
+5,142 against zero - and it answers exactly one question, "did the
+device ever fire", with no information about whether a route was ever
+installed.
+
+**A platform difference worth its own line.** This VMM clears
+CPUID.1:ECX[31], the hypervisor-present bit
+(`hypervisor.cpp:9313-9317`, unless `announce_hypervisor` or
+`pass_through_hypervisor_interface` is on), while the layer underneath
+sets it unconditionally. **So the reference's guest knows it is
+virtualized and ours does not.** This tree has already paid once for
+that exact bit sending Windows down a bare-metal-only path. Whether it
+reaches device or DMA setup is not shown by any code read so far, and it
+is recorded as the difference rather than as the mechanism.
+
+**Two build switches are live in the cache and neither is the default.**
+`ZPP_NESTED_VMX:BOOL=ON` - the option defaults `OFF`, and it is what
+makes this guest able to run a hypervisor at all - and
+`ZPP_SEARCH_ALL_DEVICES:BOOL=ON`. A stale cache entry has cost this
+project a full day before. Read them before reading a failure.
