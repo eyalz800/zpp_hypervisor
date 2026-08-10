@@ -2360,6 +2360,56 @@ private:
     };
 
     /**
+     * What becomes of a VM entry into a second-level guest once vmcs02 is
+     * built, which is not always "it happens".
+     */
+    enum class l2_entry_outcome
+    {
+        /**
+         * vmcs02 is current and describes a runnable guest. The caller
+         * enters it.
+         */
+        entered,
+
+        /**
+         * The entry did not happen and the guest hypervisor has already
+         * been given the VM exit that says so - either a VM-entry failure
+         * for a guest-state area this VMM cannot honour, or the start-up
+         * IPI its parked virtual processor was waiting for. Its own VMCS
+         * is current again.
+         */
+        reflected,
+
+        /**
+         * The entry did not happen and the guest hypervisor has not been
+         * told anything. Its own VMCS is current with RIP still on the
+         * VMLAUNCH or VMRESUME, so it executes the instruction again and
+         * the decision is taken afresh. This is how a second-level guest
+         * that is waiting for a start-up IPI is held without the physical
+         * processor sitting in an activity state nothing can end.
+         */
+        retry,
+    };
+
+    /**
+     * Decides whether the second-level guest vmcs12 describes may be
+     * entered at all, and what to do instead when it may not.
+     *
+     * Called with vmcs02 current and fully built, which is where SDM 29.3
+     * puts the checks on the guest-state area: after the VM-execution
+     * controls and the host-state area have passed.
+     */
+    l2_entry_outcome enter_or_park_l2(std::size_t cpu);
+
+    /**
+     * Wait, in VMX root operation, for a start-up IPI aimed at a
+     * second-level guest that vmcs12 says is in the wait-for-SIPI activity
+     * state. Returns the vector once one is handed over, and nothing if
+     * the wait gave up.
+     */
+    std::optional<std::uint64_t> wait_for_l2_start_up_ipi(std::size_t cpu);
+
+    /**
      * Decides what becomes of an exit the second-level guest took, and
      * either gives it to the guest hypervisor, answers it, or leaves it to
      * the exit handler's own cases.
@@ -3481,6 +3531,30 @@ private:
     /**
      * @}
      */
+
+    /**
+     * The activity state each processor's second-level guest is in, held
+     * here rather than read back out of vmcs02.
+     *
+     * It has to be held somewhere, because vmcs02 is not entered in every
+     * state vmcs12 may ask for. The wait-for-SIPI state blocks external
+     * interrupts, NMIs, INIT signals and SMIs (SDM 29.7.2,
+     * .references/sdm.txt:203152) - only a start-up IPI ends it - so a
+     * processor entered in it is one this VMM cannot get back by any means
+     * of its own, and its own diagnostic clock is not even in vmcs02 to
+     * try with. `enter_or_park_l2` therefore holds that state here and
+     * waits for the IPI in root operation instead.
+     *
+     * KVM keeps the same fact outside the VMCS, in `mp_state`, and
+     * reconstructs the field from it on the way out
+     * (`sync_vmcs02_to_vmcs12`, .references/kvm/nested.c:4539-4544).
+     * `save_l2_state` does the same with this.
+     *
+     * Read by `start_up_processor`, which is the whole point: it decides
+     * whether to hand a guest's start-up IPI over through memory, and a
+     * processor parked here is exactly one that is waiting for one.
+     */
+    volatile std::uint64_t l2_activity_state[max_cpus]{};
 
     /**
      * Where each processor's second-level VMCS is, by physical address,

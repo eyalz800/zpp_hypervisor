@@ -185,6 +185,23 @@ void hypervisor::record_exit(arch::x86_64::vmx::exit_reason)
 {
 }
 
+/**
+ * The start-up IPI hand-off, reduced to whatever the test armed. The real
+ * one spins in VMX root operation on a mailbox another processor writes,
+ * which is not something one process can have.
+ */
+} // namespace zpp::hypervisor
+
+std::optional<std::uint64_t> g_start_up_vector{};
+
+namespace zpp::hypervisor
+{
+std::optional<std::uint64_t>
+hypervisor::wait_for_l2_start_up_ipi(std::size_t)
+{
+    return g_start_up_vector;
+}
+
 void hypervisor::on_unhandled_exit(arch::x86_64::vmx::exit_reason)
 {
     __builtin_trap();
@@ -2465,6 +2482,154 @@ static void test_l0_precedence()
 }
 
 // ---------------------------------------------------------------- main
+// -------------------------------------------- 7. the activity state
+/**
+ * What a VM entry may establish in the second-level guest's activity
+ * state, which is `enter_or_park_l2`'s decision.
+ *
+ * The expected column is KVM's. `nested_check_guest_non_reg_state`
+ * (.references/kvm/nested.c:3117-3119) accepts active, HLT and
+ * wait-for-SIPI and nothing else, and a rejection there becomes
+ * EXIT_REASON_INVALID_STATE with ENTRY_FAIL_DEFAULT
+ * (nested.c:3568-3572), which is SDM 29.8's reason 33 with bit 31 set and
+ * a zero qualification.
+ *
+ * The one place this VMM answers differently from KVM is HLT, and it is
+ * asserted rather than left implied - see the divergence note below.
+ */
+static void test_activity_state()
+{
+    std::printf("the activity state a second-level VM entry may "
+                "establish\n");
+
+    using entry_outcome = zpp::hypervisor::hypervisor::l2_entry_outcome;
+    namespace activity = zpp::arch::x86_64::vmx::activity_state;
+
+    constexpr std::uint64_t entry_failure_bit = 1ull << 31;
+    constexpr std::uint64_t invalid_guest_state = 33;
+    constexpr std::uint64_t sentinel_rip = 0xfeedfacecafe0000ull;
+
+    auto & shadow = hv().guest_vmcs12[cpu];
+
+    auto arm = [&](std::uint64_t state) {
+        context registers{};
+        reset(registers);
+        controls(0, 0, 0);
+        hv().running_l2[cpu] = false;
+        hv().l2_activity_state[cpu] = activity::active;
+        g_start_up_vector.reset();
+        shadow.write(fields::guest_activity_state, state);
+        shadow.write(fields::guest_rip, sentinel_rip);
+        shadow.write(fields::exit_reason, 0);
+        shadow.write(fields::exit_qualification, 0);
+    };
+
+    auto refused = [&](std::uint64_t state, const char * what) {
+        arm(state);
+        check(entry_outcome::reflected == hv().enter_or_park_l2(cpu),
+              text("activity state %s must not be entered", what));
+        check((entry_failure_bit | invalid_guest_state) ==
+                  shadow.read(fields::exit_reason),
+              text("activity state %s must fail the entry with reason 33 "
+                   "and bit 31",
+                   what));
+        check(0 == shadow.read(fields::exit_qualification),
+              text("activity state %s must fail with a zero "
+                   "qualification",
+                   what));
+
+        // SDM 29.8: "The guest-state area is not modified." A refusal
+        // that saved vmcs02 over it would move the guest hypervisor's own
+        // guest, which is what save_l2_state does when the second-level
+        // guest never ran.
+        check(sentinel_rip == shadow.read(fields::guest_rip),
+              text("activity state %s modified vmcs12's guest state on a "
+                   "VM-entry failure",
+                   what));
+    };
+
+    // Active, which every implementation supports (SDM A.6).
+    arm(activity::active);
+    check(entry_outcome::entered == hv().enter_or_park_l2(cpu),
+          "the active state must be entered");
+    check(activity::active == hv().vmcs.read(field::guest_activity_state),
+          "the active state must reach vmcs02");
+
+    // HLT, entered in hardware. KVM does not: `kvm_emulate_halt_noskip`
+    // blocks the vCPU thread instead (nested.c:3766-3779). This VMM has no
+    // scheduler and root operation cannot observe or deliver the physical
+    // interrupt that ends a halt, and SDM 29.7.2's own list says nothing
+    // is lost by letting the processor sit there - the active state and
+    // the HLT state block exactly the same events, start-up IPIs.
+    arm(activity::hlt);
+    check(entry_outcome::entered == hv().enter_or_park_l2(cpu),
+          "the HLT state must be entered");
+    check(activity::hlt == hv().vmcs.read(field::guest_activity_state),
+          "the HLT state must reach vmcs02");
+    diverge(true,
+            "guest activity state 1 (HLT): KVM emulates the halt and "
+            "keeps hardware active; this VMM enters hardware in the HLT "
+            "state, which SDM 29.7.2 blocks exactly what the active "
+            "state does. It has no scheduler to block a virtual "
+            "processor on, and forcing active would make a halted guest "
+            "execute instructions.");
+
+    // Shutdown, which this VMM does not report in IA32_VMX_MISC and KVM
+    // does not accept either.
+    refused(activity::shutdown, "2 (shutdown)");
+    refused(4, "4 (out of range)");
+
+    // Wait-for-SIPI is held rather than entered, because SDM 29.7.2 has
+    // it block external interrupts, NMIs, INIT and SMIs.
+    arm(activity::wait_for_start_up_ipi);
+    check(entry_outcome::retry == hv().enter_or_park_l2(cpu),
+          "wait-for-SIPI with no IPI to give must not be entered");
+    check(activity::wait_for_start_up_ipi == hv().l2_activity_state[cpu],
+          "wait-for-SIPI must be recorded where start_up_processor reads "
+          "it");
+    check(activity::wait_for_start_up_ipi !=
+              hv().vmcs.read(field::guest_activity_state),
+          "wait-for-SIPI reached vmcs02, which nothing can then end");
+
+    // And when one arrives, the guest hypervisor gets the exit hardware
+    // would have given it. KVM synthesises the identical one from
+    // mp_state, in `vmx_check_nested_events` (nested.c:4240-4243).
+    arm(activity::wait_for_start_up_ipi);
+    g_start_up_vector = 0x8a;
+    check(entry_outcome::reflected == hv().enter_or_park_l2(cpu),
+          "a start-up IPI for a parked second-level guest must reflect");
+    check(static_cast<std::uint64_t>(basic_reason::start_up_ipi) ==
+              shadow.read(fields::exit_reason),
+          "a start-up IPI must reflect as exit reason 4");
+    check(0x8a == shadow.read(fields::exit_qualification),
+          "a start-up IPI must carry its vector in the qualification");
+    check(activity::wait_for_start_up_ipi ==
+              shadow.read(fields::guest_activity_state),
+          "a start-up IPI exit must leave vmcs12 in wait-for-SIPI");
+    g_start_up_vector.reset();
+
+    // The two checks the processor no longer makes, because the state it
+    // would have made them about is not the one vmcs02 is entered with.
+    // SDM 29.3.1.5, "Checks on Guest Non-Register State".
+    arm(activity::wait_for_start_up_ipi);
+    // Blocking by STI.
+    shadow.write(fields::guest_interruptibility_state, 1);
+    check(entry_outcome::reflected == hv().enter_or_park_l2(cpu),
+          "wait-for-SIPI with blocking by STI must fail the entry");
+    check((entry_failure_bit | invalid_guest_state) ==
+              shadow.read(fields::exit_reason),
+          "wait-for-SIPI with blocking by STI must give reason 33");
+
+    arm(activity::wait_for_start_up_ipi);
+    shadow.write(fields::vm_entry_interruption_information_field,
+                 1ull << 31);
+    check(entry_outcome::reflected == hv().enter_or_park_l2(cpu),
+          "wait-for-SIPI with an event to inject must fail the entry");
+    check((entry_failure_bit | invalid_guest_state) ==
+              shadow.read(fields::exit_reason),
+          "wait-for-SIPI with an event to inject must give reason 33");
+}
+
 int main()
 {
     test_reason_table();
@@ -2473,6 +2638,7 @@ int main()
     test_exceptions();
     test_io();
     test_l0_precedence();
+    test_activity_state();
 
     std::printf("\n%d checks, %d failures\n", g_checks, g_failures);
 

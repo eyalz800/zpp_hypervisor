@@ -379,8 +379,10 @@ constexpr field host_state_fields[] = {
  * their read shadows, because the masks make them a computation rather
  * than a copy; RIP, RSP and RFLAGS, which are saved back but loaded from
  * the guest hypervisor's own values; DR7, IA32_PAT and IA32_EFER, whose
- * save-back is conditional on the guest hypervisor's exit controls; and
- * the interruptibility state, which the entry-event path also writes.
+ * save-back is conditional on the guest hypervisor's exit controls; the
+ * interruptibility state, which the entry-event path also writes; and the
+ * activity state, which is not a copy in either direction because vmcs02
+ * is not entered in every state vmcs12 may name - see `enter_or_park_l2`.
  */
 constexpr field guest_state_fields[] = {
     field::guest_es_selector,
@@ -424,7 +426,6 @@ constexpr field guest_state_fields[] = {
     field::guest_ia32_sysenter_esp,
     field::guest_ia32_sysenter_eip,
     field::guest_ia32_sysenter_cs,
-    field::guest_activity_state,
     field::guest_ia32_debugctl,
     field::guest_pdpte_0,
     field::guest_pdpte_1,
@@ -1337,6 +1338,20 @@ std::expected<void, zpp::error> hypervisor::build_vmcs02(std::size_t cpu)
         vmcs.write(guest_field, shadow.read(guest_field));
     }
 
+    // The activity state is decided, never copied.
+    //
+    // Active until `enter_or_park_l2` says otherwise, so that vmcs02 is
+    // never left holding a state nothing here chose. That matters because
+    // this function runs on every entry attempt while the decision below
+    // it may end in the entry not happening at all: a leftover
+    // wait-for-SIPI here would be entered by any later resume that skipped
+    // the decision, and a processor entered in that state blocks external
+    // interrupts, NMIs, INIT and SMIs (SDM 29.7.2) with nothing in vmcs02
+    // able to end it - not even this VMM's preemption timer, which
+    // build_vmcs02 strips.
+    vmcs.write(field::guest_activity_state,
+               arch::x86_64::vmx::activity_state::active);
+
     vmcs.guest_rip(shadow.read(field::guest_rip));
     vmcs.guest_rsp(shadow.read(field::guest_rsp));
     vmcs.guest_rflags(shadow.read(field::guest_rflags));
@@ -1922,6 +1937,28 @@ void hypervisor::save_l2_state(std::size_t cpu)
     shadow.write(field::guest_interruptibility_state,
                  vmcs.read(field::guest_interruptibility_state));
 
+    // The activity state is reconstructed rather than read back, for the
+    // states this VMM holds outside the VMCS.
+    //
+    // A second-level guest that ran is described by the field, and SDM
+    // 30.3 saves it there; one that never ran is described only by
+    // `l2_activity_state`, because `enter_or_park_l2` held it in root
+    // operation instead of entering. `running_l2` is exactly that
+    // distinction: it is set by the entry and cleared below.
+    //
+    // KVM composes the same field the same way and from the same kind of
+    // record - `sync_vmcs02_to_vmcs12` writes HLT or wait-for-SIPI out of
+    // `mp_state` and active otherwise
+    // (.references/kvm/nested.c:4539-4544) - never out of hardware. It
+    // can afford to: the only values it ever writes into the real field
+    // are active, at reset and to undo a HLT hardware entered on its own
+    // (.references/kvm/vmx.c:4922 and 1827, which are the only writes in
+    // the tree).
+    shadow.write(field::guest_activity_state,
+                 this->running_l2[cpu]
+                     ? vmcs.read(field::guest_activity_state)
+                     : this->l2_activity_state[cpu]);
+
     // The control registers, put back through the same masks they were
     // built with. What the second-level guest owns is the real register;
     // what its hypervisor owns is what it last wrote into vmcs12, and
@@ -2174,6 +2211,155 @@ void hypervisor::load_l1_host_state(std::size_t cpu)
         arch::x86_64::wrmsr(
             arch::x86_64::msr::ia32_extended_feature_enable, efer);
     }
+}
+
+hypervisor::l2_entry_outcome hypervisor::enter_or_park_l2(std::size_t cpu)
+{
+    namespace activity = arch::x86_64::vmx::activity_state;
+
+    auto & vmcs = this->vmcs;
+    auto & shadow = this->guest_vmcs12[cpu];
+
+    // SDM 29.8 gives 33 for "VM-entry failure due to invalid guest state"
+    // and sets bit 31 of the exit reason to say a VM entry failed. The
+    // qualification is zero: 29.8 lists the four non-zero values and none
+    // of them is the activity state, so "In most cases, the exit
+    // qualification is cleared to 0" applies. KVM writes the same pair -
+    // EXIT_REASON_INVALID_STATE with ENTRY_FAIL_DEFAULT, which is 0
+    // (.references/kvm/nested.c:3568-3572).
+    constexpr std::uint64_t entry_failure = 1ull << 31;
+    auto refuse = [&](const char * why, std::uint64_t what) {
+        log("cpu {} second level entry refused: {} ({})", cpu, why, what);
+        reflect_l2_exit(cpu,
+                        entry_failure |
+                            static_cast<std::uint64_t>(
+                                basic_reason::entry_invalid_guest_state),
+                        0);
+        return l2_entry_outcome::reflected;
+    };
+
+    auto activity12 = shadow.read(field::guest_activity_state);
+
+    // The first check of SDM 29.3.1.5, "Checks on Guest Non-Register
+    // State": the field must name an activity state the implementation
+    // supports, and IA32_VMX_MISC is where software is told which those
+    // are. This VMM reports HLT and wait-for-SIPI and not shutdown - see
+    // nested_vmx_capability_msr - so those three plus active are the
+    // whole of what may be accepted. KVM's set is identical, in
+    // `nested_check_guest_non_reg_state`
+    // (.references/kvm/nested.c:3117-3119).
+    if ((activity::active != activity12) &&
+        (activity::hlt != activity12) &&
+        (activity::wait_for_start_up_ipi != activity12)) {
+        return refuse("activity state not supported", activity12);
+    }
+
+    this->l2_activity_state[cpu] = activity12;
+
+    if (activity::wait_for_start_up_ipi != activity12) {
+        // Active and HLT are entered in hardware, and HLT deliberately so.
+        //
+        // Forcing HLT to active would be worse than wrong, it would be
+        // loud: a halted second-level guest would start executing
+        // instructions at whatever RIP its hypervisor left in vmcs12.
+        // KVM can force it because it has somewhere to put the vCPU -
+        // `kvm_emulate_halt_noskip` blocks the thread until an event
+        // arrives (.references/kvm/nested.c:3766-3779). This VMM has no
+        // scheduler and nothing to block on: the event that ends a halt
+        // is a physical interrupt or NMI, its host runs with interrupts
+        // disabled and sets no "external-interrupt exiting", so root
+        // operation can neither observe one nor deliver it.
+        //
+        // Nothing is lost by letting the processor sit there, and SDM
+        // 29.7.2's own list is why: the active state and the HLT state
+        // block exactly the same events - start-up IPIs and nothing else.
+        // A processor in HLT still takes external interrupts and NMIs,
+        // which is precisely how its hypervisor gets it back. That is not
+        // true of the other two inactive states, which is why only they
+        // are refused or held.
+        vmcs.write(field::guest_activity_state, activity12);
+        return l2_entry_outcome::entered;
+    }
+
+    // Wait-for-SIPI, which is the one this VMM must not hand to hardware.
+    //
+    // SDM 29.7.2: it "blocks external interrupts, non-maskable interrupts
+    // (NMIs), INIT signals, and system-management interrupts (SMIs). Such
+    // events do not cause VM exits if they arrive while a logical
+    // processor is in the wait-for-SIPI state and in VMX non-root
+    // operation" (.references/sdm.txt:203152). Only a start-up IPI ends
+    // it. So a processor entered in it is gone as far as this VMM is
+    // concerned - and unlike bare metal there is no guarantee it will
+    // ever be sent one, because this VMM intercepts the guest's write to
+    // the interrupt command register and may answer it itself.
+    //
+    // Two checks first, and they exist *because* the state is not handed
+    // to hardware: the processor would have made them, and forcing the
+    // field means it no longer does. Both are SDM 29.3.1.5 - "The
+    // activity-state field must indicate the active state if the
+    // interruptibility-state field indicates blocking by either MOV-SS or
+    // by STI", and, for an entry that is injecting, "Wait-for-SIPI. No
+    // events are allowed."
+    constexpr std::uint64_t blocking_by_sti_or_mov_ss = 0x3;
+
+    if (0 != (shadow.read(field::guest_interruptibility_state) &
+              blocking_by_sti_or_mov_ss)) {
+        return refuse("wait-for-sipi with blocking by sti or mov ss",
+                      shadow.read(field::guest_interruptibility_state));
+    }
+
+    if (0 != (shadow.read(field::vm_entry_interruption_information_field) &
+              interruption_valid)) {
+        return refuse(
+            "wait-for-sipi with an event to inject",
+            shadow.read(field::vm_entry_interruption_information_field));
+    }
+
+    // Waited for in root operation instead, on the hand-off this VMM
+    // already uses for its own processors coming out of an INIT. Reusing
+    // it is the point: a sender that sees a target listening there
+    // swallows the guest's write and hands the vector over, which is the
+    // only delivery that works while the target is in root mode.
+    if (auto vector = wait_for_l2_start_up_ipi(cpu)) {
+        // What the hardware would have given the guest hypervisor: SDM
+        // 28.2 makes a start-up IPI arriving in the wait-for-SIPI state a
+        // VM exit, with the vector in the exit qualification. KVM
+        // synthesises the identical exit from its own record of the same
+        // state - `vmx_check_nested_events` reflects
+        // EXIT_REASON_SIPI_SIGNAL with `apic->sipi_vector & 0xFF` when
+        // mp_state is KVM_MP_STATE_INIT_RECEIVED
+        // (.references/kvm/nested.c:4240-4243).
+        //
+        // vmcs12's activity state stays at wait-for-SIPI across it, which
+        // save_l2_state does out of l2_activity_state above - and is what
+        // KVM saves too, since the exit does not clear mp_state.
+        log("cpu {} second level start-up ipi, vector {}", cpu, *vector);
+
+        reflect_l2_exit(
+            cpu,
+            static_cast<std::uint64_t>(basic_reason::start_up_ipi),
+            *vector);
+        return l2_entry_outcome::reflected;
+    }
+
+    // Nothing yet. Back to the guest hypervisor with its own VMCS current
+    // and RIP still on the VMLAUNCH, so it executes it again and this
+    // decision is taken afresh.
+    //
+    // Not a spin that goes nowhere. It is what keeps this processor
+    // reachable: every pass runs the exit handler, so the diagnostic
+    // channel is fed, the poll is re-armed and the log records that this
+    // processor is parked rather than lost. The alternative - waiting
+    // here for ever - is the same darkness the hardware state produces,
+    // only in root mode.
+    auto region = own_vmcs_region_physical();
+    if ((0 == region) || arch::x86_64::vmx::vmptrld(&region)) {
+        // Same reasoning as reflect_l2_exit: without its own VMCS there is
+        // no guest hypervisor left to go back to.
+        __builtin_trap();
+    }
+
+    return l2_entry_outcome::retry;
 }
 
 void hypervisor::reflect_l2_exit(std::size_t cpu,

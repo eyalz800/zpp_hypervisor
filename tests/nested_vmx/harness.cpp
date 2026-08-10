@@ -159,6 +159,12 @@ std::expected<void, zpp::error> hypervisor::build_vmcs02(std::size_t)
     return {};
 }
 
+hypervisor::l2_entry_outcome hypervisor::enter_or_park_l2(std::size_t)
+{
+    this->enter_or_park_l2_calls = this->enter_or_park_l2_calls + 1;
+    return this->enter_or_park_l2_outcome;
+}
+
 void hypervisor::reflect_l2_exit(std::size_t,
                                  arch::x86_64::vmx::exit_reason,
                                  std::uint64_t)
@@ -364,6 +370,9 @@ static void reset_cpu(std::size_t cpu)
     hv().running_l2[cpu] = false;
     hv().l2_entries[cpu] = 0;
     hv().build_vmcs02_fails = false;
+    hv().enter_or_park_l2_outcome =
+        hypervisor_t::l2_entry_outcome::entered;
+    hv().enter_or_park_l2_calls = 0;
     arm_guest(cpu);
 }
 
@@ -862,6 +871,34 @@ static void test_launch_state_machine()
                         vmcs12::launch_state::launched
                     ? "launched"
                     : "clear");
+
+    check(1 == hv().enter_or_park_l2_calls,
+          "VMLAUNCH did not ask whether the guest may be entered");
+
+    // The guest-state decision is asked after the controls and the host
+    // state, and neither of its two "not entered" answers may leave the
+    // processor marked as running a second-level guest. Both are a
+    // VMsucceed as far as the guest hypervisor's flags go: an entry that
+    // fails on guest state is a VM exit, not a VMfail (SDM 29.8), and a
+    // retry has not happened at all.
+    for (auto outcome_case : {hypervisor_t::l2_entry_outcome::reflected,
+                              hypervisor_t::l2_entry_outcome::retry}) {
+        hv().running_l2[cpu] = false;
+        hv().nested_rip_settled[cpu] = false;
+        hv().guest_vmcs12[cpu].state(vmcs12::launch_state::clear);
+        hv().enter_or_park_l2_outcome = outcome_case;
+
+        expect("VMLAUNCH the guest-state decision declined",
+               run(basic_reason::vmlaunch, regs, 0),
+               outcome::succeed);
+        check(!hv().running_l2[cpu],
+              "a declined VM entry left the processor running L2");
+        check(hv().nested_rip_settled[cpu],
+              "a declined VM entry let the caller advance RIP");
+    }
+
+    hv().enter_or_park_l2_outcome =
+        hypervisor_t::l2_entry_outcome::entered;
 
     // A refused build_vmcs02 must leave the launch state alone and tell
     // the guest hypervisor its entry did not happen.

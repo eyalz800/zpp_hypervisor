@@ -26,6 +26,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <expected>
+#include <optional>
 #include <span>
 
 namespace zpp::hypervisor
@@ -74,6 +75,16 @@ public:
     };
 
     /**
+     * Same three outcomes as the real header.
+     */
+    enum class l2_entry_outcome
+    {
+        entered,
+        reflected,
+        retry,
+    };
+
+    /**
      * The host page table, reduced to the one query merge_nested_bitmaps
      * makes of it. The harness maps virtual to physical identically.
      */
@@ -99,6 +110,7 @@ public:
     bool own_io_port_intercepted(std::uint16_t port) const;
     std::expected<void, zpp::error> merge_nested_bitmaps(std::size_t cpu);
     std::expected<void, zpp::error> build_vmcs02(std::size_t cpu);
+    l2_entry_outcome enter_or_park_l2(std::size_t cpu);
     void nested_transition_flush();
     bool l0_wants_l2_exit(std::size_t cpu,
                           arch::x86_64::vmx::exit_reason reason,
@@ -121,6 +133,7 @@ public:
                                bool & advance_rip);
 
     // Defined by the harness.
+    std::optional<std::uint64_t> wait_for_l2_start_up_ipi(std::size_t cpu);
     std::uint64_t cached_vmx_msr(std::size_t msr);
     std::uint64_t nested_vmx_capability_msr(std::size_t msr);
     std::uint64_t physical_address_bits();
@@ -175,6 +188,7 @@ public:
     std::atomic<bool> nested_entry_failed[max_cpus]{};
     bool nested_msr_load_failed[max_cpus]{};
     std::uint64_t nested_msr_failure_entry[max_cpus]{};
+    volatile std::uint64_t l2_activity_state[max_cpus]{};
 
     volatile std::uint64_t vmcs12_controls_captured{};
     volatile std::uint64_t vmcs12_pin_controls{};

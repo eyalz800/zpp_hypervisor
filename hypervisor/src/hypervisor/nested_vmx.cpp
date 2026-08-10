@@ -1575,6 +1575,27 @@ bool hypervisor::on_guest_vmlaunch(std::size_t cpu, basic_reason reason)
         return true;
     }
 
+    // The guest-state area is checked here rather than in build_vmcs02,
+    // because SDM 29.3 puts those checks after the VM-execution controls
+    // and the host-state area - which is exactly what build_vmcs02 has
+    // just passed. The answer is not always "enter": a guest-state area
+    // this VMM cannot honour is refused with a VM-entry failure, and a
+    // second-level guest waiting for a start-up IPI is held without being
+    // entered at all.
+    //
+    // Either way RIP is settled by the callee and must not be advanced -
+    // a reflection has already put the guest hypervisor at its own host
+    // RIP, and a retry leaves it on the VMLAUNCH deliberately.
+    switch (enter_or_park_l2(cpu)) {
+    case l2_entry_outcome::entered:
+        break;
+
+    case l2_entry_outcome::reflected:
+    case l2_entry_outcome::retry:
+        this->nested_rip_settled[cpu] = true;
+        return true;
+    }
+
     // From here vmcs02 is current and the tail of the exit handler enters
     // it rather than resuming the guest hypervisor. Its RIP must not be
     // advanced: it still names the VMLAUNCH, which is where it stays until

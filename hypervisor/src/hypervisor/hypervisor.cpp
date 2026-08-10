@@ -4186,6 +4186,67 @@ void hypervisor::emulate_init_signal(arch::x86_64::context & context)
         waited);
 }
 
+std::optional<std::uint64_t>
+hypervisor::wait_for_l2_start_up_ipi(std::size_t cpu)
+{
+    if (cpu >= max_cpus) {
+        return std::nullopt;
+    }
+
+    auto & handoff = this->start_up_handoff[cpu];
+
+    // Publish that this processor is listening, unless a vector is
+    // already sitting there.
+    //
+    // A compare-exchange rather than a store, for the reason
+    // emulate_init_signal gives at the other end of the same mailbox: a
+    // sender may be handing a vector over at this instant, and a store
+    // would drop it while the sender had already swallowed the guest's
+    // write that would have produced another.
+    auto state = handoff.load();
+    for (;;) {
+        if (start_up_handoff_state::is_delivered(state)) {
+            handoff.store(start_up_handoff_state::none);
+            return start_up_handoff_state::vector(state);
+        }
+
+        if (handoff.compare_exchange_strong(
+                state, start_up_handoff_state::software_wait)) {
+            break;
+        }
+    }
+
+    // Bounded, and the bound is not a fallback - there is nothing to fall
+    // back to. It is how often this processor returns to its exit
+    // handler while it waits: the diagnostic channel is pumped there, the
+    // poll is re-armed there, and a processor that never gets there is
+    // indistinguishable from the wedged one this whole path exists to
+    // prevent. `enter_or_park_l2` comes straight back on the guest
+    // hypervisor's next VMLAUNCH.
+    constexpr std::uint32_t start_up_wait_attempts = 200000;
+
+    for (std::uint32_t attempt{}; attempt < start_up_wait_attempts;
+         ++attempt) {
+        if (auto delivered = handoff.load();
+            start_up_handoff_state::is_delivered(delivered)) {
+            handoff.store(start_up_handoff_state::none);
+            return start_up_handoff_state::vector(delivered);
+        }
+
+        zpp::spin_hint();
+    }
+
+    // Left published on purpose. The mailbox holds a value rather than an
+    // edge, so a vector deposited during the microseconds this processor
+    // spends in its exit handler is still there when it comes back - and
+    // reverting to hardware_wait would open a window in which a sender
+    // issued a real start-up IPI to a processor sitting in root mode,
+    // where it is discarded. What ends the publication is leaving this
+    // state at all, which `enter_or_park_l2` does by entering or by
+    // reflecting.
+    return std::nullopt;
+}
+
 void hypervisor::emulate_start_up_ipi(arch::x86_64::context & context,
                                       std::uint64_t vector)
 {
@@ -6385,11 +6446,28 @@ hypervisor::start_up_result hypervisor::start_up_processor(
         // in wait-for-SIPI is waiting for precisely this message.
         constexpr std::uint64_t wait_for_sipi = 3;
 
-        if (wait_for_sipi != this->resume_activity_state[*slot]) {
+        // Two records to ask, because there are two levels a virtual
+        // processor can be waiting at and only one of them is in a VMCS
+        // this VMM enters.
+        //
+        // `resume_activity_state` is the first-level guest's, read off
+        // vmcs01 on the way out of the exit handler. `l2_activity_state`
+        // is a second-level guest's, and it exists precisely because
+        // wait-for-SIPI is never handed to hardware - see
+        // `enter_or_park_l2`, which holds the processor in root operation
+        // and is listening on the hand-off below at exactly this moment.
+        // Asking only the first would drop every start-up IPI a guest
+        // hypervisor's own guest sends, since the processor running it
+        // reports its hypervisor's activity state, which is active.
+        auto activity = (wait_for_sipi == this->l2_activity_state[*slot])
+                            ? wait_for_sipi
+                            : this->resume_activity_state[*slot];
+
+        if (wait_for_sipi != activity) {
             log("guest start-up ipi for cpu {}, activity {} is not "
                 "wait-for-sipi, dropped",
                 *slot,
-                this->resume_activity_state[*slot]);
+                activity);
             return start_up_result::adopted;
         }
 

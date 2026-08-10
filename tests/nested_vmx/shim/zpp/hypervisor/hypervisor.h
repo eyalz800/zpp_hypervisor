@@ -56,6 +56,18 @@ public:
         std::uint64_t value{};
     };
 
+    /**
+     * Same three outcomes as the real header. The decision itself lives in
+     * nested_entry.cpp, which this binary does not compile, so the harness
+     * answers it - see enter_or_park_l2_outcome below.
+     */
+    enum class l2_entry_outcome
+    {
+        entered,
+        reflected,
+        retry,
+    };
+
     static hypervisor & instance();
 
     // Defined in nested_vmx.cpp - the code under test.
@@ -122,6 +134,7 @@ public:
     void discard_shadow_ept_for(std::size_t cpu, std::uint64_t root);
     void nested_transition_flush();
     std::expected<void, zpp::error> build_vmcs02(std::size_t cpu);
+    l2_entry_outcome enter_or_park_l2(std::size_t cpu);
     void reflect_l2_exit(std::size_t cpu,
                          arch::x86_64::vmx::exit_reason reason,
                          std::uint64_t qualification);
@@ -162,6 +175,8 @@ public:
     std::uint64_t ept_discards_for{};
     std::uint64_t last_discard_root{};
     bool build_vmcs02_fails{};
+    l2_entry_outcome enter_or_park_l2_outcome{l2_entry_outcome::entered};
+    std::uint64_t enter_or_park_l2_calls{};
 };
 
 /**
