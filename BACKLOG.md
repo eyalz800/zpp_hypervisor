@@ -4900,3 +4900,48 @@ still held stale events from earlier captures - timestamps spanning
 older boots and must not be counted. Only the live window
 (10350 onward) is this boot. A reference capture over the same
 tracepoint would make the comparison direct and has not been done.
+
+### Correction: handing the guest the interface changes nothing
+
+The commit above concluded, from the accepted-interrupt rate agreeing
+with the programmed count, that the timer is mis-scaled and the freeze
+follows from it. **That conclusion is wrong, and the experiment that
+overturns it is one boot.**
+
+`nested_vmx::pass_through_hypervisor_interface` was turned on, which
+stops this VMM answering the hypervisor CPUID range at all - the guest
+sees the outer layer's full Hyper-V enlightenments - and forwards every
+synthetic MSR down, including the frequency MSRs whose absence was the
+proposed cause. Booted on four processors:
+
+- during boot the application processors now arm their timers to
+  `0xFFFFFFFF` at divide-by-2, which is the arm-at-max-and-read-TMCCT
+  shape of a calibration, so they get further than before;
+- **the end state is identical.** Boot processor frozen at 82,124,
+  application processors at 374 / 351 / 323, every processor parked one
+  byte past the `hlt` in the idle loop, `IRR` and `ISR` empty, the
+  application processors' timers back to `initial_count = 0` and the
+  boot processor's at 2,382,117,305 - the *same* count as without the
+  interface.
+
+The same count with and without the frequency MSRs available is the
+point: that count is not a calibration artefact. So 2.38e9 is more
+likely an honest ~2.4 s wait armed by a hypervisor that has stopped
+having work to do, and **the timer state is downstream of the freeze
+rather than its cause** - which is exactly the alternative reading
+recorded two commits ago and then dismissed too early.
+
+What still stands, because it was measured rather than inferred: every
+processor is halted with nothing pending and nothing armed to wake it,
+no lock is held, no exit is unhandled, no entry failed, and the
+application processors each stop mid-cycle after about 350 second-level
+entries. What does not stand is the claim about *why*.
+
+**Direction, and a constraint on it.** This has to work with no
+`hv-passthrough` underneath and no forwarding to an outer layer -
+`pass_through_hypervisor_interface` is therefore not a candidate fix and
+has been turned back off. Whatever the guest needs has to be implemented
+here. But this experiment says the missing interface is not what stops
+the boot, so the next question is the one the exit rings pose directly:
+what is Hyper-V waiting for when it stops scheduling on an application
+processor after ~350 entries.
