@@ -824,7 +824,7 @@ static memory_operation expected_operation(model_kind kind)
     case model_kind::bit_test:
         return memory_operation::examine;
     case model_kind::compare_exchange:
-        return memory_operation::exchange;
+        return memory_operation::compare_exchange;
     default:
         return memory_operation::combine;
     }
@@ -1261,6 +1261,42 @@ static const semantic_case g_semantics[] = {
      .operand = 0xaaaa'aaaa'bbbb'bbbb,
      .writes_register = true,
      .destination = 2},
+
+    // CMPXCHG, whose memory result depends on a register the encoding
+    // never names. The accumulator holds 0x1111'1111'2222'2222, which is
+    // one of the memory samples below - so both branches are taken at
+    // every width, including the one where the equal branch must leave
+    // the whole 64-bit accumulator alone.
+    {.text = "cmpxchgb %dl, (%rcx)",
+     .kind = model_kind::compare_exchange,
+     .size = 1,
+     .operand = 0xbb,
+     .writes_register = true,
+     .destination = 0},
+    {.text = "cmpxchgw %r9w, (%rcx)",
+     .kind = model_kind::compare_exchange,
+     .size = 2,
+     .operand = 0x0007,
+     .writes_register = true,
+     .destination = 0},
+    {.text = "cmpxchgl %edx, (%rcx)",
+     .kind = model_kind::compare_exchange,
+     .size = 4,
+     .operand = 0xbbbb'bbbb,
+     .writes_register = true,
+     .destination = 0},
+    {.text = "cmpxchgq %rdx, (%rcx)",
+     .kind = model_kind::compare_exchange,
+     .size = 8,
+     .operand = 0xaaaa'aaaa'bbbb'bbbb,
+     .writes_register = true,
+     .destination = 0},
+    {.text = "cmpxchgl %r13d, (%rcx)",
+     .kind = model_kind::compare_exchange,
+     .size = 4,
+     .operand = 0x0000'001f,
+     .writes_register = true,
+     .destination = 0},
 };
 
 // ------------------------------------------------------------- corpus
@@ -1340,7 +1376,8 @@ static void generate(code_size mode)
                                              "xchg",
                                              "test",
                                              "cmp",
-                                             "xadd"};
+                                             "xadd",
+                                             "cmpxchg"};
 
     for (auto * mnemonic : to_memory) {
         for (auto & width : widths) {
@@ -1553,9 +1590,13 @@ static void generate_refusals()
     emit("lcallq *(%rax)", code_size::bits_64, expectation::refused);
     emit("ljmpq *(%rax)", code_size::bits_64, expectation::refused);
 
-    // XADD reads and writes its register operand, so both guards apply.
+    // XADD and CMPXCHG read their register operand and XADD writes it,
+    // so both guards apply to both.
     emit("xaddq %rsp, (%rcx)", code_size::bits_64, expectation::refused);
     emit("xaddb %ah, (%rcx)", code_size::bits_64, expectation::refused);
+    emit(
+        "cmpxchgq %rsp, (%rcx)", code_size::bits_64, expectation::refused);
+    emit("cmpxchgb %ah, (%rcx)", code_size::bits_64, expectation::refused);
 
     // And with the offset taken out of the host stack pointer's slot.
     emit("btsl %esp, (%rcx)", code_size::bits_64, expectation::refused);

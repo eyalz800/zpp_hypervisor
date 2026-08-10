@@ -111,6 +111,25 @@ enum class memory_operation : std::uint8_t
      * being disturbed.
      */
     examine,
+
+    /**
+     * The old contents are compared against the accumulator, and the
+     * operand replaces them only if the two were equal. CMPXCHG, and
+     * the only form here whose effect on memory depends on a register.
+     *
+     * Distinct from `combine` rather than folded into it because all
+     * three of `apply`, `flags_after` and `result_for_register` need to
+     * know: the memory result is conditional, the flags are those of a
+     * subtraction whose operands are the other way round from every
+     * other subtraction in this file, and the register is written on one
+     * branch and left alone on the other.
+     *
+     * Memory is written either way, which is not an approximation: "the
+     * destination operand receives a write cycle without regard to the
+     * result of the comparison. The destination operand is written back
+     * if the comparison fails" - `.references/sdm.txt:42797`.
+     */
+    compare_exchange,
 };
 
 /**
@@ -241,6 +260,18 @@ struct decoded_instruction
      * Zero-extended to 64 bits and already truncated to `size`.
      */
     std::uint64_t operand{};
+
+    /**
+     * The accumulator as of the faulting instruction, already truncated
+     * to `size`. Meaningful only for `compare_exchange`, which is the
+     * one form whose result depends on a register the encoding never
+     * names.
+     *
+     * Captured at decode rather than read later, so that `apply` and
+     * `result_for_register` cannot disagree about which branch was
+     * taken.
+     */
+    std::uint64_t compare_value{};
 
     /**
      * Where a result goes, for the forms that leave one in a register.
@@ -1207,6 +1238,79 @@ decode(std::span<const std::byte> code,
             break;
         }
 
+        // CMPXCHG, which compares memory against the accumulator and
+        // replaces it with the source register only where the two were
+        // equal:
+        //
+        //   TEMP := DEST
+        //   IF accumulator = TEMP
+        //     THEN ZF := 1; DEST := SRC;
+        //     ELSE ZF := 0; accumulator := TEMP; DEST := TEMP;
+        //
+        // `.references/sdm.txt:42806`. Three things about it are unlike
+        // everything else in this decoder, which is why it has a
+        // `memory_operation` of its own rather than being a `combine`:
+        //
+        //   - what memory ends up holding depends on a register the
+        //     encoding does not name. That register is captured here,
+        //     into `compare_value`, so `apply` stays a pure function of
+        //     the instruction and the old contents.
+        //
+        //   - the flags are those of the *comparison*, and the
+        //     comparison is `accumulator - memory`, which is the other
+        //     way round from the compare and the subtract beside it.
+        //     `:42848` says only "set according to the results of the
+        //     comparison operation"; the direction is settled by Xen,
+        //     whose emulator writes `cmp: %%eax - dst ==> dst and src
+        //     swapped for macro invocation` at the failure path of its
+        //     own `0f b0`/`0f b1` case, and by Bochs, which computes
+        //     `AL - op1` in `CMPXCHG_EbGbM`.
+        //
+        //   - the accumulator is written on one branch only. On the
+        //     equal branch the operation section assigns nothing to it,
+        //     and that is *not* the same as assigning it the value it
+        //     already has: a 32-bit write clears the upper half of the
+        //     64-bit register, and the architecture does not.
+        //
+        // Memory is written on both branches, which is the SDM's own
+        // statement rather than a simplification - `:42797`, "the
+        // destination operand receives a write cycle without regard to
+        // the result of the comparison".
+        case 0xb0:
+        case 0xb1: {
+            auto byte_form = (0xb0 == opcode);
+            auto size = instruction_detail::width_of(found, byte_form);
+            fields = instruction_detail::read_modrm(at, found, mode);
+
+            if (fields.names_register()) {
+                return {};
+            }
+
+            if (instruction_detail::names_high_byte(
+                    size, found, fields.reg)) {
+                return {};
+            }
+
+            auto index =
+                static_cast<std::uint8_t>(fields.reg | found.extend_reg());
+
+            if (instruction_detail::names_host_stack_pointer(index)) {
+                return {};
+            }
+
+            result.what = memory_operation::compare_exchange;
+            result.size = size;
+            result.operand = operand_of(index, size);
+            result.compare_value = operand_of(0, size);
+
+            // The accumulator, which is encoding zero at every width and
+            // is never extended by REX - so neither guard can fire on
+            // it, and AL is AL with or without a REX byte.
+            result.destination = 0;
+            result.writes_register = true;
+            break;
+        }
+
         // XADD, which exchanges its two operands and then adds them:
         // "TEMP := SRC + DEST; SRC := DEST; DEST := TEMP",
         // `.references/sdm.txt:135936`. So memory takes the sum and the
@@ -1502,6 +1606,18 @@ constexpr std::uint64_t apply(const decoded_instruction & instruction,
     case memory_operation::examine:
         return old;
 
+    case memory_operation::compare_exchange:
+        // `IF accumulator = TEMP THEN DEST := SRC ELSE DEST := TEMP`,
+        // `.references/sdm.txt:42806`. The failing branch writes the
+        // contents back unchanged rather than leaving memory alone, and
+        // that is deliberate here as well as there: on a watched page
+        // the guest's own instruction would take the write cycle, so an
+        // emulation that skipped it would be a different instruction.
+        return (instruction_detail::truncate(instruction.compare_value,
+                                             size) == old)
+                   ? operand
+                   : old;
+
     case memory_operation::combine:
         break;
     }
@@ -1602,6 +1718,43 @@ constexpr std::uint64_t common_flags(std::uint64_t result,
     return flags;
 }
 
+/**
+ * The flags of `left - right`.
+ *
+ * A function rather than three copies because three instructions need
+ * it and one of them needs it with the operands the other way round: a
+ * subtract and a compare both compute `memory - operand`, while
+ * CMPXCHG's comparison is `accumulator - memory`. Written out at the
+ * call site each time, that difference is one word deep in a branch.
+ */
+constexpr std::uint64_t subtract_flags(std::uint64_t left,
+                                       std::uint64_t right,
+                                       std::uint8_t size)
+{
+    left = truncate(left, size);
+    right = truncate(right, size);
+
+    auto result = truncate(left - right, size);
+    auto flags = common_flags(result, size);
+
+    // Borrow, and signed overflow, both from the operands' signs.
+    if (left < right) {
+        flags |= status_flag::carry;
+    }
+
+    if (sign_of(left, size) != sign_of(right, size)) {
+        if (sign_of(result, size) != sign_of(left, size)) {
+            flags |= status_flag::overflow;
+        }
+    }
+
+    if ((left & 0xf) < (right & 0xf)) {
+        flags |= status_flag::adjust;
+    }
+
+    return flags;
+}
+
 } // namespace instruction_detail
 
 /**
@@ -1633,6 +1786,7 @@ flags_after(const decoded_instruction & instruction,
 
     case memory_operation::combine:
     case memory_operation::examine:
+    case memory_operation::compare_exchange:
         break;
     }
 
@@ -1675,6 +1829,23 @@ flags_after(const decoded_instruction & instruction,
                (before & status_flag::carry);
     };
 
+    // CMPXCHG's flags are those of the comparison it performs, and the
+    // comparison is the *accumulator* against what memory held - the
+    // other way round from the compare and the subtract below, which are
+    // memory against the operand. `.references/sdm.txt:42848` says only
+    // "set according to the results of the comparison operation"; the
+    // direction is settled by Xen's emulator, which writes `cmp: %%eax -
+    // dst ==> dst and src swapped for macro invocation`, and by Bochs,
+    // which computes `AL - op1` in `CMPXCHG_EbGbM`.
+    //
+    // The zero flag falls out of the same subtraction rather than being
+    // set separately: the operands are equal exactly when it is zero,
+    // which is the branch `apply` takes.
+    if (memory_operation::compare_exchange == instruction.what) {
+        return cleared |
+               subtract_flags(instruction.compare_value, old, size);
+    }
+
     // A compare and a subtract set the same flags; a test and an AND
     // likewise. What differs is only whether the result is written back,
     // which is not this function's business.
@@ -1684,25 +1855,7 @@ flags_after(const decoded_instruction & instruction,
          (combine_with::none == instruction.how) && instruction.compares);
 
     if (subtracting) {
-        auto result = truncate(old - operand, size);
-        auto flags = cleared | common_flags(result, size);
-
-        // Borrow, and signed overflow, both from the operands' signs.
-        if (old < operand) {
-            flags |= status_flag::carry;
-        }
-
-        if (sign_of(old, size) != sign_of(operand, size)) {
-            if (sign_of(result, size) != sign_of(old, size)) {
-                flags |= status_flag::overflow;
-            }
-        }
-
-        if ((old & 0xf) < (operand & 0xf)) {
-            flags |= status_flag::adjust;
-        }
-
-        return keep_carry(flags);
+        return keep_carry(cleared | subtract_flags(old, operand, size));
     }
 
     if (combine_with::add == instruction.how) {
@@ -1751,6 +1904,26 @@ result_for_register(const decoded_instruction & instruction,
                     std::uint64_t current_register)
 {
     auto read = instruction.size;
+
+    // CMPXCHG writes the accumulator only where the comparison failed.
+    // The operation section assigns to it in the ELSE branch alone -
+    // `.references/sdm.txt:42806` - and leaving it alone is *not* the
+    // same as writing it the value it already holds: the equal branch
+    // compares only the low `size` bytes, and a 4-byte write would clear
+    // the upper half of the 64-bit register, which the architecture does
+    // not do here.
+    //
+    // The comparison is made against `compare_value` rather than against
+    // `current_register` so that this and `apply` cannot take opposite
+    // branches. They hold the same value today; that is a property of
+    // the caller, and this does not depend on it.
+    if (memory_operation::compare_exchange == instruction.what) {
+        if (instruction_detail::truncate(instruction.compare_value,
+                                         read) ==
+            instruction_detail::truncate(current_memory, read)) {
+            return current_register;
+        }
+    }
 
     // Where the two differ, the *destination* width decides how much of
     // the register the result occupies, and the access width decides only
