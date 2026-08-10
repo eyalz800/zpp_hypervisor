@@ -660,6 +660,37 @@ void hypervisor::initialize_mtrrs()
         mtrrs.fixed_ranges_in_use(),
         mtrrs.default_type.type(),
         mtrrs.variable_count);
+
+    // And each variable range in full, because the summary above says how
+    // many there are and nothing about what they cover.
+    //
+    // What that costs: eight lines once, at start-up, in a ring of four
+    // thousand. What its absence cost: the coverage of these ranges had to
+    // be recovered by reading EPT entries back out of physical memory by
+    // hand, and the memory type in an EPT entry is the *derived* answer -
+    // so a wrong range and a wrong derivation from a right range are
+    // indistinguishable from it. These are the input, and the input is the
+    // half that was never readable.
+    //
+    // The valid bit is the interesting one and is the reason `size` alone
+    // will not do. SDM 14.11.2.3, "Variable Range MTRRs", gives bit 11 of
+    // the mask register as the "V (valid) flag - Enables the register pair
+    // when set; disables register pair when clear", so an invalid pair
+    // still has a base and a mask in it,
+    // decodes to a plausible range, and covers nothing at all. Firmware
+    // leaves the unused pairs behind rather than zeroing them, so a run
+    // with three ranges in use out of ten looks like ten unless this says
+    // otherwise.
+    for (std::size_t i{}; i < mtrrs.variable_count; ++i) {
+        const auto & range = mtrrs.variable[i];
+
+        log("mtrr {} base {} size {} type {} valid {}",
+            i,
+            range.physical_base,
+            range.size,
+            range.type,
+            range.valid);
+    }
 }
 
 std::expected<void, zpp::error> hypervisor::initialize_ept()
