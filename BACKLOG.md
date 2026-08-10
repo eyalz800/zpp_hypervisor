@@ -5228,3 +5228,49 @@ is recorded as the difference rather than as the mechanism.
 makes this guest able to run a hypervisor at all - and
 `ZPP_SEARCH_ALL_DEVICES:BOOL=ON`. A stale cache entry has cost this
 project a full day before. Read them before reading a failure.
+
+### The guest never even touches the interrupt capability
+
+The experiment the review asked for, with its own control, and it needs
+no interpretation.
+
+QEMU has trace events on exactly this path. Armed identically on both
+runs - `msix_write_config`, `vfio_msix_enable`,
+`vfio_msix_vector_do_use`, `vfio_msix_vector_release` - and written to a
+file the emulator creates either way.
+
+Reference, whole boot: **52 events**, and the chain is the textbook one -
+
+```
+msix_write_config dev vfio-pci enabled 0 masked 0
+msix_write_config dev vfio-pci enabled 1 masked 0
+vfio_msix_vector_do_use  (0000:02:00.0) vector 0 used
+... 37 of them ...
+```
+
+37 `vfio_msix_vector_do_use` on **0000:02:00.0, the disk**, 9
+`msix_write_config`, 2 `vfio_msix_enable`, and 33 live vectors in the
+host's own `/proc/interrupts`.
+
+Ours, whole boot to the freeze: **zero events of any kind**, and zero
+`vfio-msix` lines on the host. The file was created and left empty, so
+the tracing was armed and nothing fired.
+
+`msix_write_config` fires on *any* guest write to the capability,
+including one that leaves it disabled. So this is not "the guest enabled
+interrupts and the enable was lost". **The guest never writes the
+capability at all.** Taken with the review's finding that this VMM
+cannot hide a configuration cycle - KVM forces unconditional I/O exiting
+for L2 and takes every extended-page-table fault at L0 - the writes are
+not being swallowed. They are never made.
+
+**So the interrupt famine is a symptom, exactly as the timer was.** The
+guest stops before it ever configures the disk. Two symptoms now point
+the same way: nothing to schedule, and nothing configured. The fault is
+upstream of both, in whatever Windows is doing - or failing to do -
+before its storage stack comes up.
+
+Worth keeping in view while chasing it: the boot processor reaches
+~82,100 second-level entries in *every* configuration measured, from two
+processors to eight, before this happens. That number has been stable
+across every build today. Whatever stops, stops at the same place.
