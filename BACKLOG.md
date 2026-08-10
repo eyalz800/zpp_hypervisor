@@ -5548,3 +5548,43 @@ one of them was a defect found by reading, and none of them was the one
 the machine is actually dying of. **The measurements that narrowed the
 failure have all come from instrumenting the running machine, and none
 from reading the source.**
+
+### "One application processor works" was wrong. The boot processor is the bug
+
+Booted two processors and watched the disk's interrupt vectors on the
+host at the same time, which is the thing that says whether Windows
+ever reached device initialisation:
+
+```
+18:21:37  boot 82,034 (frozen)   application  35,260   msix vectors 0
+18:22:59  boot 82,034 (frozen)   application 110,712   msix vectors 0
+18:25:02  boot 82,034 (frozen)   application 220,127   msix vectors 0
+```
+
+The boot processor stops at **82,034** - the same place it stops with
+three, four and eight - and the single application processor climbs
+steadily at about 900 second-level entries a second and never stops.
+**No interrupt vector is ever created**, so Windows never configures the
+disk here either.
+
+So the bisect's conclusion recorded above - "one application processor
+works, two or more fail" - **is withdrawn**. Nothing works. What differs
+is only the *shape* of the failure after the boot processor dies: with
+one application processor the survivor spins indefinitely, and with two
+or more they all stop within a few hundred entries. A processor running
+220,000 entries while the machine makes no progress is a spin, not
+progress, and it was read as progress because nothing was measuring
+whether the boot had actually got anywhere.
+
+**The invariant across every configuration ever measured is the boot
+processor stopping between 82,034 and 82,143 second-level entries.**
+That is the failure. Everything else - the idle timers, the missing
+device interrupts, the application processors, the interrupt storm - is
+downstream of one virtual processor halting and never being resumed.
+
+And what it does immediately before is known, from the reflected ring:
+it writes the synthetic interrupt command register, having polled the
+synthetic reference time counter, and halts. On the boot processor that
+halt is permanent. On the surviving application processor, in the
+two-processor case, the same guest keeps running - so whatever fails to
+wake it is specific to that processor rather than to the guest.
