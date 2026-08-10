@@ -3938,3 +3938,49 @@ it looked wrong; it is not. Do not "fix" it.
 - `guest_ia32_bndcfgs` being saved unconditionally is **correct** - SDM
   `:27276`, "VM exits always save IA32_BNDCFGS into BNDCFGS field of
   VMCS". Do not change it.
+
+## Seventh review: the exit reflection decision, tested — and four defects fixed
+
+`tests/nested_exit/build.sh` compiles the whole of `nested_entry.cpp`
+natively and drives `l0_wants_l2_exit` and `l1_wants_l2_exit` the way a
+VM exit would. **733 checks.** It covers every basic exit reason 0-69
+with its gate both ways *and* a cross-talk pass that sets every other
+control bit and leaves only the gate clear - which is what catches a case
+reading the wrong bit number and a two-setting test cannot. Also all four
+MSR bitmap quadrants and the eight range boundaries, the CR decision in
+full, all 31 non-page-fault vectors, both SDM 28.2 page-fault worked
+examples, and the I/O bitmaps including the A/B boundary at 0x8000.
+
+**It executed this session's CR0/CR4/CLTS/LMSW read-shadow fixes for the
+first time. They pass.**
+
+Four real divergences, all now fixed:
+
+- **`l0_wants_l2_exit` swallowed MSR and I/O exits the guest hypervisor
+  had also asked for.** It consulted this VMM's own bitmap first and kept
+  the exit, so a second-level guest touching IA32_APIC_BASE,
+  IA32_FEATURE_CONTROL, the VMX capability range or the ACPI sleep port
+  was answered here and Hyper-V never learned. That set is exactly what a
+  guest hypervisor presenting VMX to its own guest intercepts, so it was
+  not a corner. KVM names none of them in `nested_vmx_l0_wants_exit`.
+  This was on the open list for several rounds; the test is what made it
+  concrete enough to fix confidently.
+- **"Unconditional I/O exiting" is ignored when "use I/O bitmaps" is
+  set** - SDM 28.1.3, `.references/sdm.txt:200725`, in parentheses. This
+  tested unconditional first, so a guest hypervisor setting both got
+  every I/O instruction reflected including ports it had cleared.
+- **A wrapping I/O access exits** - same SDM sentence, `:200724`. A
+  four-byte access at port 0xffff broke out of the loop and answered
+  "not intercepted".
+
+Differences from KVM that are *not* defects are asserted rather than
+ignored, so one that stops reproducing fails the suite: the seven exit
+reasons whose controls this VMM does not offer, and the three MOV-from-CR
+forms where the architecture delivers no exit at all.
+
+**Two harnesses now, 1133 checks, and neither needs the rig.** That is
+the lesson worth carrying: the instruction decoder and the VMX state
+machine were both suspected across multiple rounds and both were cleared
+by testing, while the two real bugs in this area - the reflection
+decision and the I/O rules - were found by the same tests within minutes
+of them existing. Reach for a harness before another reading.
