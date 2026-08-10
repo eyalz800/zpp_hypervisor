@@ -4415,3 +4415,34 @@ it names two questions the instrumented build should answer directly:
   can never see this and every capture so far has been blind to it;
 - whether any timer arming the guest performs is being lost rather than
   declined.
+
+### Correction: being halted in that idle loop is not the symptom
+
+The reference was read the same way, at the login screen, and looks the
+same:
+
+```
+5 x RIP=fffff86f211a6b5e   <- the same address, one past the HLT
+2 x RIP=fffff86f211a8544
+1 x RIP=fffff86f211311c2
+```
+
+So a **healthy** Windows parks most of its processors on exactly the
+instruction the failing one does. "All eight halted in the guest
+hypervisor's idle loop with its pending-work word zero" describes *idle*,
+and idle is the correct state for a machine with nothing to run. It is
+not evidence of a fault, and the entry above should be read that way -
+what distinguishes the two is only that the reference goes on to do work
+and the other never does.
+
+That also settles a live worry: the Windows installation is healthy.
+After roughly eight hard kills in a session it was reasonable to suspect
+the recovery path, which is single-processor and would mimic a
+hypervisor failure. It boots normally without the hypervisor, so it is
+not that.
+
+The lesson generalises past this bug: **compare against the reference in
+the same state before calling anything a symptom.** Two of the strongest
+looking observations this session - this one, and the ratio of local APIC
+timer arming - dissolve once the comparison is made at the same phase
+rather than between a booting guest and a settled one.
