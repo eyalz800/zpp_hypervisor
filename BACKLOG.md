@@ -5274,3 +5274,67 @@ Worth keeping in view while chasing it: the boot processor reaches
 ~82,100 second-level entries in *every* configuration measured, from two
 processors to eight, before this happens. That number has been stable
 across every build today. Whatever stops, stops at the same place.
+
+### The guest's inter-processor interrupts are seen and then never sent
+
+Dumped the **boot** processor's exit ring at the freeze - the ring that
+had never been read, on the processor that actually reaches the stable
+~82,100 second-level entries. Its newest sixteen entries are all the
+same thing:
+
+```
+age  reason           qual  rip                gpa
+  0  EPT violation      2b  fffff8242be57efe   fee00000
+  1  EPT violation      2b  fffff8242be57ae1   fee00000
+  ... alternating, sixteen deep ...
+ 25  HLT                 0  fffff8242bfa843d
+```
+
+Qualification `0x2b` is a **write** to a page that is readable and
+executable but not writable - this VMM's own watch on the local APIC
+page - and two RIPs alternating on that page is the high and low halves
+of an interrupt command being written. The boot processor is sending
+inter-processor interrupts.
+
+It is not spinning on them: measured 18 exits in 21 seconds, about
+**0.86 per second**, while every application processor's exit count is
+frozen exactly. So it wakes on the idle deadline it armed, sends a
+burst, gets nothing back, and halts again.
+
+**And the interrupts are never sent.** Counting what the layer beneath
+saw, across whole boots:
+
+| | reference | ours |
+|---|---|---|
+| interrupt commands processed | **71,408** | **171** |
+| of them vector `0x2f` (47) | **35,053** | **0** |
+| vector `0x2f` accepted | 35,052 | **1** |
+
+Vector `0x2f` is the one the log ring shows this guest writing -
+`guest ipi command 0x40000082f` - over and over. This VMM logs the
+write, and the layer beneath never processes an interrupt command for
+that vector at all.
+
+**So the write is observed here and then goes nowhere.** That single
+fact accounts for every symptom collected today, in the right order:
+
+- application processors receive nothing, so they never wake - which is
+  why their timers read `initial_count = 0`, their interrupt request
+  registers are empty, and their exit counts are frozen;
+- the boot processor has nobody to hand work to, so it idles, which is
+  why it arms multi-second deadlines rather than millisecond ticks;
+- Windows therefore never gets far enough to bring up its storage
+  stack, which is why the disk's interrupt capability is never written
+  and no device interrupt is ever delivered.
+
+Both of the things chased earlier today - the timer and the missing
+device interrupts - are downstream of this one.
+
+The mechanism is the next thing to establish, not to guess. Note that
+`emulate_watched_page_writes` is a single global
+`static constexpr bool = true` (`hypervisor.h:3933`), so a watched write
+is **performed by this VMM from host context** rather than by letting
+the guest's own instruction run under the monitor trap flag. Whether a
+store issued that way reaches the emulated local APIC underneath, or is
+absorbed somewhere that never becomes an interrupt command, is exactly
+what has to be measured next.
