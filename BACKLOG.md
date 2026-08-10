@@ -5716,3 +5716,48 @@ so it does not wake on time either; Windows never gets far enough to
 configure the disk; every processor ends halted with nothing pending and
 nothing armed. And it is deterministic because the shadow table is cold
 at the same point in every boot.
+
+### After the fix: alive and ticking, and still not booting
+
+The re-queue fix is a real advance and it is not the whole story. Both
+halves, measured on four processors.
+
+**What it moved.** The boot processor passed **870,000** second-level
+entries and was still climbing at about 830 a second when the run was
+stopped. The ceiling it broke - 82,034 to 82,143 - had held in every
+configuration from two processors to eight and in every build tried in a
+full day of work. Of 38,039 interrupted deliveries every one was
+re-queued, and that counter then **stopped growing** while entries kept
+climbing, so the re-delivery settles rather than churning.
+
+**What the guest does now**, from the reflected ring, which it had never
+done before:
+
+```
+ ext int    ...7d9a597e                      871261
+ RDMSR      ...7d9a597c   0x40000020         871262   reference time
+ WRMSR      ...7dca768c   0x40000070         871264   synthetic EOI
+ WRMSR      ...7da2890b   0x40000071         871266   synthetic ICR
+ int window ...7dcb3692                      871267
+ WRMSR      ...7d9100e4   0x40000084         871269   synthetic interrupt controller
+ WRMSR      ...7d9a57f8   0x400000b1         871259   synthetic timer count
+```
+
+It takes external interrupts, **acknowledges them** with the synthetic
+end-of-interrupt register, and re-arms synthetic timers. Before the fix
+it never serviced a single interrupt.
+
+**What it has not moved.** The passed-through disk is still not driven:
+no interrupt vector is ever created, and the legacy interrupt line stays
+frozen at 276 counts for the whole run. The application processors never
+run their guest at all - `l2_entries[1..3]` stay at **zero**, where
+before the fix they at least reached a few hundred.
+
+So the failure has changed shape rather than gone: from a machine that
+halted with nothing pending, to a machine that is alive, interrupt
+driven, ticking, and going nowhere. That is a different problem and it
+deserves its own investigation rather than being treated as this one
+half-fixed. The obvious first question is why the application processors
+never enter their guest now, since that regressed against the
+pre-fix behaviour and a root partition waiting for processors that never
+arrive would look exactly like this.
