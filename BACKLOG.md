@@ -3596,3 +3596,73 @@ and the caller comes back round. A processor that never executes the
 `hlt` needs nothing to wake it, is never in a non-active activity state,
 and burns a core - which is exactly the set of things measured. That is
 why reading that counter is the first thing to do.
+
+## Second static review: what it adds
+
+Ranked by how well each explains the quiesce. The first item changes how
+every other measurement here should be read.
+
+**The local APIC values in this document are this VMM's decode, not
+observations.** `watch_local_apic` write-protects the page, so every
+guest write faults, and `on_ept_violation` resolves the register offset
+from three sources - the guest-linear address when qualification bit 7
+is set, otherwise the instruction's own addressing bytes, otherwise
+nothing. The comment there records that on this machine *every* such
+violation arrives with bit 7 clear. So "Hyper-V armed its timer for 2.39
+billion counts" is a reading of an instruction, and both the register
+and the value depend on the decoder being right about it. The only
+existing guard is the instruction-length cross-check, and it is skipped
+whenever the VMCS reports length zero, which SDM 30.2.5 permits.
+
+If the decode is wrong the failure writes itself: a wrong value in the
+timer's initial count is a scheduler tick that never arrives, which is
+exactly "Hyper-V stops scheduling the root partition" with nothing
+faulting. `physical_offset_present`, `physical_offset_agreed` and
+`physical_offset_disagreed` were added to settle it - see the commit for
+why the SDM and the recorded measurement disagree, and why running under
+KVM means neither is decisive on its own.
+
+**This VMM cannot be swallowing an interrupt that was raised.** vmcs01's
+pin controls are NMI exiting and nothing else, vmcs02's are
+`(pin01|pin12) & ~(preemption|posted)`, and the captured pin12 `0x1e`
+has bit 0 clear - so at every level an external interrupt goes straight
+into the running guest's IDT with no exit, and nothing in the tree
+touches IRR, ISR or TPR. Zero KVM interrupt events over twenty seconds
+therefore means **no interrupt is ever raised**, not that one is lost.
+That is a much stronger statement than the capture alone supports and it
+redirects the search entirely.
+
+**`l0_wants_l2_exit` claims exits the guest hypervisor also asked for,
+and never reflects them.** `intercept_msr(ia32_apic_base, true, true)`
+is armed unconditionally, so every root-partition access to `0x1b` is
+answered here - a read with the raw physical register, a write against
+the real APIC - and Hyper-V, which certainly has `0x1b` in its own MSR
+bitmap, is never told. KVM's `nested_vmx_l0_wants_exit`
+(`.references/kvm/nested.c:6330-6395`) names no MSR and no I/O case at
+all; those fall through to `nested_vmx_l1_wants_exit`. The same shape
+covers the ACPI sleep port and MSR `0x830`. Fix: claim only where
+`!l1_wants_l2_exit(...)`, and where the notification is needed *and* L1
+wants the exit, observe and still reflect.
+
+**vmcs02 shares vmcs01's VPID**, so `nested_transition_flush` issues a
+single-context INVVPID on that VPID on every entry and every exit - SDM
+31.4.3.1 makes that invalidate all PCIDs and all EPTRTAs, so Hyper-V's
+own mappings go with the root partition's, twice per transition, and
+under KVM each INVVPID is itself an exit. Not a wedge; a large
+multiplier on the cost of the state Hyper-V is trying to make progress
+from, and worth knowing before any timing argument is made.
+
+**The diagnostic pump is not on the critical path** with only
+`sink::counter` present - four records into a per-processor ring, no
+lock. The expensive one was `zpp::hypervisor::log`, now excluded for the
+three per-tick APIC registers, and still called for every IPI the guest
+sends.
+
+Checked and cleared by this review, so they need not be looked at again:
+no `tsc_offset` is ever written to vmcs01; vmcs01 sets no RDTSC, HLT,
+MWAIT or MONITOR exiting; only the ACPI sleep port is in the I/O
+bitmaps, so there is no PCI-configuration interception; the whole
+preemption-timer poll, NVMe borrow and wake-NMI machinery is behind the
+disk sink and therefore dead in this build; and a stuck monitor trap
+flag is excluded because an MTF exit with no step in progress reaches
+`on_unhandled_exit`, which never fired.

@@ -51,9 +51,22 @@ extern "C" {
  * have historically been graphics and USB. RESERVED-REGION.md says what
  * was proven and what is still argued.
  *
- * Debug only, gated on the disk sink being compiled in, exactly as
- * `nvme_selftest.h` is and for the same reason: "the channel is compiled
- * in" and "make the channel's DMA reach" are the same decision.
+ * Debug only, and gated on `diag::reserve_controller_window` - which is
+ * its own switch, not the disk sink's. This used to say it followed the
+ * sink, and it does not: `diag/config.h` separated them deliberately so
+ * that declaring the window and borrowing the controller's admin queue
+ * could be exercised one at a time, and the sink has since been turned
+ * off while this stayed on. So on a `-DZPP_DIAG=ON` build the loader
+ * still edits the guest's DMAR and shrinks its EFI system partition with
+ * no channel to use either for.
+ *
+ * Left on rather than switched off with the sink, because
+ * `DIAGNOSTICS.md` measured what it does: in every configuration
+ * `GSTS.TES` is clear and `RTADDR` is zero, so Windows never enables DMA
+ * translation here and the reserved region is inert. It is still the
+ * only thing this loader tells the guest about its platform that names
+ * the boot storage controller, so it is the switch to turn off first if
+ * storage behaviour is ever under suspicion.
  */
 namespace zpp
 {
