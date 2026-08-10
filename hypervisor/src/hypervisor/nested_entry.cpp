@@ -2403,7 +2403,7 @@ void hypervisor::reflect_l2_exit(std::size_t cpu,
     if (cpu < max_cpus) {
         auto & count = this->l2_exit_trace_count[cpu];
         auto & slot =
-            this->l2_exit_trace[cpu][count % exit_trace_capacity];
+            this->l2_exit_trace[cpu][count % l2_exit_trace_capacity];
 
         slot = exit_trace_entry{
             .reason = reason.value(),

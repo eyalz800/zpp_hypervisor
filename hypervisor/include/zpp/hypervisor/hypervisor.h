@@ -3798,7 +3798,16 @@ private:
      * every time rather than a race.
      * @{
      */
-    exit_trace_entry l2_exit_trace[max_cpus][exit_trace_capacity]{};
+    /**
+     * Deeper than the ring above, because the second-level guest's
+     * traffic is periodic: measured on the rig, a blocked root partition
+     * repeats a seventeen-exit timer cycle - arm, acknowledge, send an
+     * interrupt, end the message - and thirty-two slots show one turn of
+     * it and nothing else. What is wanted is the part that is *not* the
+     * cycle, which only a longer window contains.
+     */
+    static constexpr std::size_t l2_exit_trace_capacity = 256;
+    exit_trace_entry l2_exit_trace[max_cpus][l2_exit_trace_capacity]{};
     std::uint64_t l2_exit_trace_count[max_cpus]{};
 
     /**

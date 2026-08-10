@@ -5813,3 +5813,48 @@ device enumeration"**. The reflected ring is already the right
 instrument for it - it now shows a live guest making hypercalls and
 servicing interrupts, so the next step is to characterise what it
 repeats and what it never does, rather than what it never receives.
+
+### The post-fix loop, characterised: an idle kernel with a healthy clock
+
+Widened the reflected ring to 256 entries, because at 32 it showed one
+turn of a periodic cycle and nothing else. Over 256 consecutive
+second-level exits on the boot processor:
+
+| | |
+|---|---|
+| `RDMSR` reference time counter | **167** (65%) |
+| `WRMSR` synthetic timer count | 18 |
+| `WRMSR` synthetic end of interrupt | 17 |
+| `WRMSR` synthetic interrupt command | 17 |
+| `WRMSR` synthetic end of message | 16 |
+| interrupt window | 15 |
+| external interrupt | 6 |
+| **hypercalls** | **0** |
+| **distinct instruction pointers** | **7** |
+
+No hypercall, no extended page table fault, no CPUID, no access to
+anything else - seven instruction pointers and a clock. The root
+partition is **idle with a working timer**: it takes its tick,
+acknowledges it, sends the tick onward, ends the message, re-arms, and
+polls the reference counter in between. That is a kernel with nothing to
+schedule, not one spinning on a lock.
+
+Meanwhile the physical picture: the boot processor has taken 1,942,388
+exits, and the application processors **107 each and frozen** - their
+start-up count and nothing since. So the guest hypervisor is idle on
+every processor but one, because the root partition never starts its
+other virtual processors, because its boot thread is blocked.
+
+Eliminated while here, by reading: **time-stamp counter scaling is not
+in play.** It is never offered in the capability MSRs, and the captured
+vmcs12 shows the guest hypervisor setting **no secondary control at
+all** - so there is no multiplier to propagate and no way for the two
+levels to disagree about the rate of time.
+
+**What this needs next is a different window, not a different theory.**
+The ring holds the steady state, and the steady state is idle - the
+information is in the transition *into* it, which has long been
+overwritten by the time anything can be read. The instrument to build is
+one that records the first N second-level exits after a chosen entry
+count and then freezes, so the moment the boot thread blocks is captured
+instead of the millions of ticks that follow it.

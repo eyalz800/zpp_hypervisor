@@ -193,7 +193,8 @@ public:
         std::uint64_t repeated;
         std::uint64_t detail;
     };
-    exit_trace_entry l2_exit_trace[max_cpus][exit_trace_capacity]{};
+    static constexpr std::size_t l2_exit_trace_capacity = 256;
+    exit_trace_entry l2_exit_trace[max_cpus][l2_exit_trace_capacity]{};
     std::uint64_t l2_exit_trace_count[max_cpus]{};
     std::uint64_t l2_exit_detail[max_cpus]{};
     std::uint64_t pending_event[max_cpus]{};
