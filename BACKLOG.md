@@ -4594,11 +4594,13 @@ that code agree, which is a good deal more than either says alone.
 
 Not yet confirmed, and the honest gaps:
 
-- three processors (two application processors) is the case that would
-  pin the boundary exactly, and the run attempted for it was far slower
-  than the others - 37,000 entries in eighteen minutes against the usual
-  82,000 in five - and had not started its application processors when
-  last read. Inconclusive, needs repeating.
+- **Three processors settled it: two application processors also fail.**
+  Boot processor frozen at 82,068, the two application processors at
+  **365** and **331** - the same few hundred entries as four and eight.
+  So the boundary is exact: **one application processor works, two or
+  more do not.** That is the signature of a shared resource with no
+  mutual exclusion between *targets*, which is precisely what the audit
+  described.
 - the two-processor guest was never confirmed on the screen, so "it
   works" means "it keeps doing work", not "it reaches the login screen".
 - the boot processor freezing at the same count regardless is
