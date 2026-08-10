@@ -194,6 +194,20 @@ define zppstat
     $h->emulated_length_disagreement, $h->emulated_length_reported, \
     $h->emulated_length_decoded
   printf "nmis reinjected %llu\n", $h->guest_nmis_reinjected
+
+  # A step that never completed. Any of these still set means the
+  # monitor trap flag was armed and its exit never arrived, which leaves
+  # the watched page - the local APIC's - writable for every processor
+  # and this VMM blind to every write on it from that moment. It also
+  # invalidates any later claim about what the guest wrote to it.
+  set $i = 0
+  while $i < 8
+    if $h->stepping_watch[$i]
+      printf "cpu %d: STEP STILL PENDING, offset 0x%llx\n", \
+        $i, $h->stepping_offset[$i]
+    end
+    set $i = $i + 1
+  end
 end
 
 document zppstat

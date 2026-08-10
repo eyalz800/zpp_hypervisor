@@ -3725,3 +3725,81 @@ writing it takes a `#GP` because Hyper-V's lock bit is set. Wrong level
 in both directions. Part of the same family as `l0_wants_l2_exit`
 claiming MSR exits without reflecting them, and it disappears with the
 same fix.
+
+## Fourth static review: the decoder is not the problem, and a correction
+
+**The decoder is correct, and this was tested rather than read.** A
+differential harness compiled `instruction.h` natively and compared it
+against LLVM on a generated corpus: **10,251 accepted instructions with
+zero length mismatches**, and **18,798 with a memory operand and zero
+effective-address mismatches**, including SIB base=101 with no base,
+index=100 meaning no index, REX.X and REX.B on those, RIP-relative, and
+the `0x67` 32-bit truncation. The two forms in the exit ring were also
+checked by hand: `41 89 14 00` is `mov [r8+rax], edx`, length 4; `c7 80
+b0 00 00 00 00 00 00 00` is `mov dword [rax+0xb0], 0`, length 10. Both
+exact.
+
+So "a decode picks the wrong register or the wrong value" is **refuted**
+for 64-bit code, and the `physical_offset_*` counters added earlier
+answer a narrower question than they were added for - whether the offset
+*source* is sound, not whether the decode is.
+
+**Correction, and it matters more than the finding.** The previous
+section said this VMM's decoder sits in the path of *the root
+partition's* local APIC accesses. That cannot be what the live ping-pong
+on the boot processor is: `l2_entries` is frozen, so the second level is
+not being entered at all, so the APIC writes happening *now* - proved
+live by the timer's current count rising between samples - are **Hyper-V's
+own idle tick, at the first level**. The root partition's APIC traffic
+is history in the ring. Every statement about "what the guest wrote"
+has to say which guest.
+
+**A pending step is destroyed by the next `build_vmcs02`** - fixed, see
+the commit. The reason it is worth reading twice is the failure mode: it
+leaves the local APIC page **writable for every processor**, so no
+further violation is taken on it, nothing re-closes it, and this VMM
+goes blind to every interrupt command, INIT and start-up IPI from that
+moment, with no counter moving and nothing recorded. `zppstat` now
+prints any processor whose step is still pending, because that is the
+one-read measurement that settles whether it fired.
+
+Evidence against its having fired on the boot measured so far: the boot
+processor's exit ring is still full of violations on the APIC page, and
+those only happen while the page is closed.
+
+### Still open from this review, in order
+
+**An MTF exit does not mean the stepped instruction retired.**
+`on_monitor_trap_flag` assumes it did, closes the page, reads the
+register back and reports a write. SDM `sdm.txt:201479-201481` and
+`:201493-201497`: a monitor-trap-flag exit is also pending on the
+boundary following delivery of a pending event, and following delivery
+of a *fault* the instruction took - in both cases the guest's write has
+not happened. On the APIC page that hands `on_interrupt_command` a stale
+interrupt command register, which can adopt a start-up IPI nobody sent;
+and when the instruction re-faults and is handled again, the same write
+is processed twice. Fix: record `guest_rip` when arming the step and
+report nothing if it has not moved.
+
+**The close after a step invalidates only the local processor.**
+`invalidate_ept`'s "safe direction" argument covers *arming* a watch - a
+stale permissive entry means a missed observation, never a wrong one -
+and does not cover the step, which makes the page writable and then
+read-only again with a local INVEPT each time. Between the two, any of
+the other seven processors can cache a writable translation and write
+the APIC page with no exit at all. SDM `sdm.txt:206480-206484` requires
+the shootdown; KVM does it with an IPI to every vCPU
+(`kvm_flush_remote_tlbs`). The `ept_generation` counter to hang it on
+already exists.
+
+**Emulated APIC accesses are performed at widths KVM discards.** The
+decoder accepts 1-, 2- and 8-byte stores and nothing checks width or
+alignment. SDM `sdm.txt:170419-170424`: APIC registers "should be
+accessed using 128-bit aligned 32-bit loads or stores", and any access
+touching bytes 4 through 15 of a register "may cause undefined
+behavior". KVM's `apic_mmio_write` drops anything that is not a 4-byte
+aligned access, silently - while this VMM performs it and advances RIP.
+Reads are worse: `kvm_lapic_reg_read` refuses any register outside
+`kvm_lapic_readable_reg_mask`, `apic_mmio_read` ignores the refusal and
+leaves the buffer untouched, and the end-of-interrupt register at 0xb0
+is not in that mask - so reading it yields undefined data on this rig.
