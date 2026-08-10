@@ -5782,3 +5782,34 @@ than a fix, and the counter is what says so.
 It also rules the guard out as the explanation for the application
 processors: they still never enter their guest, deferral or no. That
 regression is real and unexplained, and it is not this.
+
+### The new state, characterised: it stops before it enumerates anything
+
+Traced the emulator's own view of the device's configuration space
+across a post-fix boot, alongside the second-level entry count:
+
+```
+19:39  entries  10,049   config reads 2,187   msix capability writes 0
+19:43  entries 156,883   config reads 2,207   msix capability writes 0
+19:45  entries 240,292   config reads 2,207   msix capability writes 0
+```
+
+The 2,187 reads are the firmware enumerating, and they stop. Across a
+quarter of a million second-level entries afterwards the guest reads
+configuration space **twenty more times** and never writes the interrupt
+capability at all - not even a write that leaves it disabled.
+
+So the root partition is not stalling *inside* device initialisation. It
+never reaches it. Combined with the application processors never
+entering their guest, the picture after the fix is a kernel that is up,
+serviced by interrupts, arming its timers, and not advancing through
+start-up - rather than one that is dying at a particular instruction,
+which is what it was before.
+
+That is a different investigation and should start from a different
+question: not "what is being lost", which is answered, but **"what is
+the root partition waiting for between the firmware handing over and
+device enumeration"**. The reflected ring is already the right
+instrument for it - it now shows a live guest making hypercalls and
+servicing interrupts, so the next step is to characterise what it
+repeats and what it never does, rather than what it never receives.
