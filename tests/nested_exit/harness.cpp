@@ -2587,6 +2587,9 @@ static void test_activity_state()
     check(activity::wait_for_start_up_ipi == hv().l2_activity_state[cpu],
           "wait-for-SIPI must be recorded where start_up_processor reads "
           "it");
+    check(0 != hv().l2_start_up_waits[cpu],
+          "a held second-level guest must be counted, or a parked "
+          "processor cannot be told from a frozen one");
     check(activity::wait_for_start_up_ipi !=
               hv().vmcs.read(field::guest_activity_state),
           "wait-for-SIPI reached vmcs02, which nothing can then end");

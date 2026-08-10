@@ -2373,6 +2373,12 @@ hypervisor::l2_entry_outcome hypervisor::enter_or_park_l2(std::size_t cpu)
         __builtin_trap();
     }
 
+    // Counted rather than logged. A log line per pass would be thousands
+    // a second and would evict everything else in the ring; a count says
+    // the same thing and says it about every pass. See the declaration
+    // for what reading it settles.
+    this->l2_start_up_waits[cpu] = this->l2_start_up_waits[cpu] + 1;
+
     return l2_entry_outcome::retry;
 }
 

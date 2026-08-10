@@ -189,6 +189,7 @@ public:
     bool nested_msr_load_failed[max_cpus]{};
     std::uint64_t nested_msr_failure_entry[max_cpus]{};
     volatile std::uint64_t l2_activity_state[max_cpus]{};
+    volatile std::uint64_t l2_start_up_waits[max_cpus]{};
 
     volatile std::uint64_t vmcs12_controls_captured{};
     volatile std::uint64_t vmcs12_pin_controls{};

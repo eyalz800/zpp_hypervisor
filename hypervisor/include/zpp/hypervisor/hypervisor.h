@@ -3557,6 +3557,22 @@ private:
     volatile std::uint64_t l2_activity_state[max_cpus]{};
 
     /**
+     * How many times this processor has held a second-level guest that
+     * was waiting for a start-up IPI rather than entering it.
+     *
+     * The one number that tells "parked, correctly, and still reachable"
+     * apart from "frozen", which is the distinction the bug this exists
+     * for could not be read either way round: an application processor
+     * with `l2_entries` stuck in the hundreds and no exits looked exactly
+     * the same whether it was waiting for something that would come or
+     * had been entered in a state nothing could end. A rising count here
+     * says the processor is alive and its guest hypervisor's virtual
+     * processor is not started yet; a still one beside a still
+     * `l2_entries` says something else is wrong.
+     */
+    volatile std::uint64_t l2_start_up_waits[max_cpus]{};
+
+    /**
      * Where each processor's second-level VMCS is, by physical address,
      * and how many times it has entered and left one.
      *
