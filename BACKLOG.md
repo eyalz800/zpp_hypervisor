@@ -5101,3 +5101,35 @@ message-signalled interrupt table and installs them. Find what makes
 that observation not happen with this VMM in between - whether the
 guest's writes to that table never reach whoever installs the route, or
 reach it carrying zeroes.
+
+**Sharper, from the same two captures: the device never signals.**
+Splitting the routing events by the context they fired in - ftrace's
+flag field, where `d.h` is hard interrupt context and therefore a real
+interrupt arriving from physical hardware through the pass-through
+layer:
+
+| | reference | ours |
+|---|---|---|
+| in hard interrupt context | **5,142** | **0** |
+| in vCPU context, all `dst 0 vec 0` | 28,581 | 3,888 |
+
+So it is not that the guest's interrupts are routed nowhere. **Nothing
+is ever raised.** The passed-through disk signals five thousand times
+during a working boot and not once during ours, which moves the question
+one step earlier: not "why is the route empty" but "why does the device
+never interrupt".
+
+Three possibilities, and the guest booting *from* that disk rules none
+of them out, because the firmware drives it by polling:
+
+- the guest never programs or never enables message-signalled
+  interrupts on it,
+- it programs them and the writes do not reach the device,
+- it never submits the work whose completion would interrupt.
+
+The 3,888 events ours does produce are all in vCPU context with a zero
+address and data, several processors reporting the same instant, which
+is not a device at all - it is something the guest writes being taken
+for a message-signalled interrupt. Worth understanding separately; the
+reference produces 28,581 of the same shape, so on its own it is not the
+fault.
