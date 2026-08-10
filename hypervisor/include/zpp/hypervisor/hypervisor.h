@@ -1538,14 +1538,13 @@ private:
 
     /**
      * The physical address of this processor's own VMXON and VMCS regions,
-     * derived from the VPID rather than read out of vmx_physical and
-     * vmcs_physical.
+     * derived from the VPID.
      *
-     * Those two are single scalars that initialize_vmx overwrites on every
-     * processor it runs on, so by the time any guest is running they name
-     * whichever processor was virtualized last. That is correct where they
-     * are used - between initialize_vmx and the launch on one processor,
-     * under start_up_lock - and wrong anywhere reached from a VM exit.
+     * There used to be two shared scalars naming "the current" regions,
+     * and these existed because those named whichever processor was
+     * virtualized last. They are gone - enter_root_mode derives its own
+     * from its slot - so these are now the only way to ask the question,
+     * which is what they should always have been.
      * @{
      */
     std::uint64_t own_vmxon_region_physical();
@@ -1803,7 +1802,7 @@ private:
     /**
      * Enter root mode on the current CPU.
      */
-    std::expected<void, zpp::error> enter_root_mode();
+    std::expected<void, zpp::error> enter_root_mode(std::size_t cpu);
 
     /**
      * Emulate an INIT signal, which in VMX non-root operation causes a VM
@@ -3821,12 +3820,14 @@ private:
      * is what makes it cover the target too: `start_application_processor`
      * does not release it until `start_up_launched[slot]` is set, and that
      * is written at the very end of `main`, after the target has left the
-     * shared trampoline stack, taken its stack index and read
-     * `vmx_physical` and `vmcs_physical`. The serialisation is therefore
-     * real but **indirect**, and it has exactly one hole: the wait is
-     * bounded, so a target that is only slow is still using all of that
-     * when the lock is released. See the note on the timeout in
-     * `start_application_processor`.
+     * shared trampoline stack and taken its stack index. The
+     * serialisation is therefore real but **indirect**, and it has
+     * exactly one hole: the wait is bounded, so a target that is only
+     * slow is still using all of that when the lock is released. See the
+     * note on the timeout in `start_application_processor`. Nothing new
+     * may be handed between processors this way - the VMXON and VMCS
+     * region addresses were, and that is the defect this note exists to
+     * stop being repeated.
      *
      * It also guards `processor_slot`, which hands out the index every
      * per-processor array is addressed by. That is the same resource, not
@@ -5330,15 +5331,13 @@ private:
      * @}
      */
 
-    /**
-     * The physical address of the current VMX region to be assigned.
-     */
-    std::uint64_t vmx_physical{};
-
-    /**
-     * The physical address of the current VMCS region to be assigned.
-     */
-    std::uint64_t vmcs_physical{};
+    // The VMXON and VMCS region addresses used to live here, written by
+    // initialize_vmx and read back by enter_root_mode. They are locals of
+    // enter_root_mode now, derived from its own slot. Every other member
+    // below is one value shared by every processor by design; those two
+    // were per-processor state kept in a shared place, and the window
+    // between the write and the VMXON belonged to whichever processor
+    // wrote last. Do not put them back.
 
     /**
      * The physical address of the hardware page table level 4.

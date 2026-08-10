@@ -3973,9 +3973,24 @@ void hypervisor::initialize_vmx(std::size_t cpu)
 
     // The processor reaches all of these by physical address, through no
     // page table of ours.
-    this->vmx_physical = this->host_page_table.virtual_to_physical(&vmx);
-    this->vmcs_physical =
-        this->host_page_table.virtual_to_physical(&vmx_vmcs);
+    //
+    // The VMXON and VMCS regions used to be published here too, in two
+    // shared members that `enter_root_mode` read back. That is the one
+    // piece of this launch that is *not* per processor, and it was
+    // handed between two functions through class state - so a second
+    // processor reaching this line between another's write and its
+    // VMXON put its own regions there, and the first one entered VMX
+    // operation on somebody else's. One VMCS on two logical processors
+    // is exactly what the comment above says must not happen.
+    //
+    // Nothing published it that did not immediately consume it, so the
+    // members are gone rather than made per processor:
+    // `enter_root_mode` derives both from its own slot, which is the
+    // same thing `own_vmxon_region_physical` and
+    // `own_vmcs_region_physical` already do for the sleep path. The rest
+    // below stays, because every processor computes the same value for
+    // it - one extended page table root, one MSR bitmap, one pair of I/O
+    // bitmaps, shared by every VMCS by design.
     this->epml4_physical =
         this->host_page_table.virtual_to_physical(&this->epml4);
     this->msr_bitmap_physical =
@@ -4797,8 +4812,7 @@ std::expected<void, zpp::error> hypervisor::quiesce_and_sleep(
     std::uint16_t port, std::uint32_t value, std::uint8_t bytes)
 {
     // Which regions this processor is actually using, derived from the
-    // VPID. vmx_physical and vmcs_physical cannot answer this - see
-    // own_vmcs_region_physical.
+    // VPID - see own_vmcs_region_physical.
     auto vmxon_region = own_vmxon_region_physical();
     auto vmcs_region = own_vmcs_region_physical();
     if ((0 == vmxon_region) || (0 == vmcs_region)) {
@@ -7529,8 +7543,40 @@ void hypervisor::on_vm_entry_failure(arch::x86_64::vmx::exit_reason reason)
     }
 }
 
-std::expected<void, zpp::error> hypervisor::enter_root_mode()
+std::expected<void, zpp::error>
+hypervisor::enter_root_mode(std::size_t cpu)
 {
+    // This processor's own regions, as locals, and that is a fix rather
+    // than a tidy-up.
+    //
+    // They used to be two members `initialize_vmx` wrote and this
+    // function read back. Everything else about a launch is indexed by
+    // the slot; these two were a hand-off through shared state, and the
+    // window between the write and the VMXON below is not protected by
+    // anything on this processor - `start_up_lock` is held by the
+    // *starter*, and it is released on its own timeout as well as on
+    // success. A second processor entering `initialize_vmx` inside that
+    // window overwrote both, and this one then executed VMPTRLD on the
+    // other's VMCS. SDM 25.1 and the comment in `initialize_vmx`: a VMCS
+    // may not be active on more than one logical processor.
+    //
+    // Derived here rather than passed in, so there is no way to call this
+    // with a slot that disagrees with the regions - the same shape
+    // `own_vmxon_region_physical` and `own_vmcs_region_physical` already
+    // have for the sleep path. They cannot be reused: both read the slot
+    // out of `vmcs.vpid()`, and no VMCS is current yet.
+    //
+    // Addressable because VMXON, VMCLEAR and VMPTRLD take the address of
+    // a physical address rather than the address itself.
+    if (cpu >= max_cpus) {
+        return std::unexpected(zpp::error{error::too_many_processors});
+    }
+
+    auto vmx_physical =
+        this->host_page_table.virtual_to_physical(&this->vmx[cpu]);
+    auto vmcs_physical =
+        this->host_page_table.virtual_to_physical(&this->vmx_vmcs[cpu]);
+
     // Into the state VMX requires, each behind a guard: every step below
     // can fail, and a failure has to leave the loader the machine it was
     // still running on.
@@ -7552,7 +7598,7 @@ std::expected<void, zpp::error> hypervisor::enter_root_mode()
         return result;
     }
 
-    if (arch::x86_64::vmx::vmxon(&this->vmx_physical)) {
+    if (arch::x86_64::vmx::vmxon(&vmx_physical)) {
         return std::unexpected(zpp::error{error::vmxon_failed});
     }
     scope_exit turn_off_vmx{arch::x86_64::vmx::vmxoff};
@@ -7560,11 +7606,11 @@ std::expected<void, zpp::error> hypervisor::enter_root_mode()
     // VMCLEAR is the only thing that sets the launch state to clear, and
     // VMLAUNCH requires clear (SDM 27.1). The state lives in the region
     // itself and cannot be read back, so it has to be set here.
-    if (arch::x86_64::vmx::vmclear(&this->vmcs_physical)) {
+    if (arch::x86_64::vmx::vmclear(&vmcs_physical)) {
         return std::unexpected(zpp::error{error::vmclear_failed});
     }
 
-    if (arch::x86_64::vmx::vmptrld(&this->vmcs_physical)) {
+    if (arch::x86_64::vmx::vmptrld(&vmcs_physical)) {
         return std::unexpected(zpp::error{error::vmptrld_failed});
     }
 
@@ -8748,7 +8794,7 @@ hypervisor::main(arch::x86_64::context & caller_context)
         initialize_start_up_memory(start_up_memory);
     }
 
-    if (auto result = enter_root_mode(); !result) {
+    if (auto result = enter_root_mode(cpuid); !result) {
         return result;
     }
 
