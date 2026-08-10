@@ -4484,3 +4484,47 @@ That is what the exit-reason histogram and the MSR/hypercall recording on
 `diag/post-startup-window` exist to answer: on a frozen guest, what did
 an application processor spend its ~400 entries on, and what did it ask
 for last.
+
+### What the processors actually spend their exits on
+
+First read of the per-processor exit-reason histogram, taken at the
+freeze (`l2_entries` 82,315 on the boot processor, 420/396/378 on the
+first three application processors).
+
+Boot processor, 1,267,558 exits:
+
+| reason | count |
+|---|---|
+| 23 VMREAD | 462,566 |
+| 48 EPT violation | 375,461 |
+| 25 VMWRITE | 111,853 |
+| 24 VMRESUME | 74,066 |
+| 18 VMCALL | 73,306 |
+| 21 VMPTRLD | 36,794 |
+| 50 INVEPT | 14,499 |
+| 10 CPUID | 6,431 |
+| 31 RDMSR / 32 WRMSR | 1,151 / 60 |
+
+VMRESUME (74,066) matches `l2_entries` (74,069 when read) to three
+counts, and VMCALL is nearly the same again - so essentially every entry
+into the second-level guest ends in a hypercall from Windows to its
+hypervisor, which is what a healthy root partition does.
+
+An application processor, 5,225 exits: 417 VMRESUME, 2,169 VMREAD, 1,261
+VMWRITE, 2,866 CPUID, 646 EPT violations, 89 RDMSR, 58 WRMSR, 2 HLT, and
+exactly **one INIT and one start-up IPI**. Its last four exits are an
+alternating VMREAD/VMWRITE pair at two fixed instruction addresses, with
+the new detail field zero, after which it halts - and a halt leaves no
+exit, because vmcs01 does not set HLT exiting. Nothing faults, nothing is
+refused, and no unusual MSR or hypercall appears at the end.
+
+**The overhead this exposes is worth recording on its own.** VMREAD and
+VMWRITE together are 574,419 exits, **45% of everything the boot
+processor does**, because this tree does not enable VMCS shadowing - so
+every field a guest hypervisor touches in its own VMCS traps. Add the
+375,461 EPT violations, most of them the write-protected local APIC page,
+and three quarters of all exits are the cost of nesting rather than work.
+That is not a correctness bug and it is not the hang - the freeze lands on
+the same `l2_entries` value across boots, which slowness alone would not
+do - but it should be measured before anything concludes the guest is
+merely slow, and VMCS shadowing is the obvious lever if it ever matters.
