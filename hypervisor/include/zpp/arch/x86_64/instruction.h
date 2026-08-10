@@ -815,6 +815,19 @@ decode(std::span<const std::byte> code,
                 return {};
             }
 
+            // C6 and C7 are group 11, which defines only `/0`. With a
+            // memory operand every other value of the ModRM `reg` field
+            // is an invalid opcode on hardware, so emulating one as a MOV
+            // store performs a write the guest never asked for and then
+            // advances RIP past an instruction that should have raised
+            // #UD. The `reg` field is not part of the encoding for the
+            // two MOV opcodes beside them, which is why this is only
+            // asked of C6 and C7.
+            if (((0xc6 == opcode) || (0xc7 == opcode)) &&
+                (0 != fields.reg)) {
+                return {};
+            }
+
             result.what = memory_operation::store;
             result.size = size;
 
@@ -1036,12 +1049,23 @@ decode(std::span<const std::byte> code,
                 return {};
             }
 
+            auto value = at.next_immediate(
+                instruction_detail::immediate_width(size));
+
+            // Sign extended for the 64-bit form, as the group-one path
+            // above does and for the same reason: `immediate_width(8)` is
+            // 4, so `test qword [m], -1` encodes 0xffffffff and must
+            // become 0xffffffffffffffff before the AND. Without this it
+            // was compared against 0x00000000ffffffff, which sets ZF for
+            // any value whose only bits are in the high half - and the
+            // guest branches on that flag immediately.
+            if (8 == size) {
+                value = instruction_detail::sign_extend(value, 4);
+            }
+
             result.what = memory_operation::examine;
             result.size = size;
-            result.operand = instruction_detail::truncate(
-                at.next_immediate(
-                    instruction_detail::immediate_width(size)),
-                size);
+            result.operand = instruction_detail::truncate(value, size);
             break;
         }
 
