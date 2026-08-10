@@ -1118,6 +1118,35 @@ std::expected<void, zpp::error> hypervisor::build_vmcs02(std::size_t cpu)
         (primary01 & ~(primary_interrupt_window | primary_nmi_window)) |
         primary12;
 
+    // A step in progress survives the rebuild.
+    //
+    // The monitor trap flag is armed on whichever VMCS is current, and
+    // with no second-level extended page tables a watched-page violation
+    // taken by a second-level guest is handled with **vmcs02** current -
+    // so that is where the bit lands. It is not in `primary01`, and a
+    // guest hypervisor has no reason to set it in `primary12`, so this
+    // recomputation drops it. Anything reflected to the guest hypervisor
+    // before the step completes rebuilds these controls, and then:
+    //
+    // - the trap exit never arrives, so `on_monitor_trap_flag` never
+    //   runs and never closes the page;
+    // - `stepping_watch[cpu]` stays set for ever, so `l0_wants_l2_exit`
+    //   claims every later trap exit;
+    // - and the watched page - the local APIC's - is left **writable for
+    //   every processor**, because that is what opening it did. No
+    //   further violation is taken on it and nothing re-closes it, so
+    //   this VMM stops seeing local APIC writes entirely: every
+    //   interrupt command, INIT and start-up IPI after that point is
+    //   invisible, with nothing recorded anywhere.
+    //
+    // KVM does not lose it either: `vmx_update_emulated_instruction`
+    // records `nested.mtf_pending` and `vmx_check_nested_events`
+    // delivers it as a monitor-trap-flag VM exit, so it survives round
+    // trips through L1 and is even part of migration state.
+    if (this->stepping_watch[cpu]) {
+        primary |= primary_monitor_trap_flag;
+    }
+
     // The TPR shadow, decided above. Three branches, and the difference
     // between them is which of them is allowed to leave the second-level
     // guest's `mov cr8` reaching the physical control register.
