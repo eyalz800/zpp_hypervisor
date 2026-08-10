@@ -68,7 +68,13 @@ def monitor_read(commands):
         ["ssh", "-o", "StrictHostKeyChecking=no",
          "-o", "UserKnownHostsFile=/dev/null", "-o", "ConnectTimeout=15",
          rig, f"printf %s {monitor!r} >/dev/null; cat | nc -w 25 127.0.0.1 {monitor}"],
-        input=script, capture_output=True, text=True)
+        # errors="replace": the monitor is a telnet socket and answers
+        # with IAC (0xff) negotiation bytes, which are not valid UTF-8.
+        # With the default strict decoding the whole dump dies on
+        # "can't decode byte 0xff in position 0" before a single line is
+        # read - and the failure looks like the module being gone.
+        input=script, capture_output=True, text=True,
+        errors="replace")
     words = {}
     for line in proc.stdout.replace("\r", "").split("\n"):
         line = re.sub(r"\x1b\[[0-9;]*[A-Za-z]", "", line)

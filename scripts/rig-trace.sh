@@ -65,6 +65,15 @@ RIG=${ZPP_TARGET:-tc@192.168.1.199}
 RIG_HOST=${RIG#*@}
 PORT=${ZPP_TRACE_PORT:-5555}
 OUT=${ZPP_TRACE_OUT:-/tmp/kvm.log}
+# A hard ceiling on one capture. The interesting event sets run at tens
+# of MB/s - the reference boot alone was 3.5 GB in 90 s - so an
+# unattended 900 s stream would be tens of GB.
+#
+# 8 GB rather than something larger because these captures are written to
+# **flash**, and a habit of leaving a verbose stream running costs write
+# endurance for data nobody reads. Stop the stream as soon as the
+# question is answered; do not leave one running "in case".
+MAX_BYTES=${ZPP_TRACE_MAX_BYTES:-8000000000}
 SSH="ssh -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o ConnectTimeout=15 $RIG"
 T=/sys/kernel/tracing
 
@@ -81,16 +90,28 @@ DEFAULT_EVENTS="kvm_apic_ipi kvm_apic_accept_irq kvm_vcpu_wakeup kvm_msi_set_irq
 # Kill any previous listener before starting another. trace_pipe admits
 # **one** reader, and a leftover one silently drains everything the next
 # is waiting for - which reads as "the capture came back empty".
+#
+# Match on the **port** and on fd 0, not on the command line containing
+# "trace_pipe". It does not: trace_pipe is a redirect, so the cmdline is
+# just `nc -l -p 5555` and a grep for the path matches nothing. That left
+# a previous run's listener alive holding trace_pipe, and the next
+# attempt died with "Device or resource busy" while the guest was already
+# booting - the capture came back empty and the run was wasted.
 stop_listener()
 {
-    $SSH 'for p in /proc/[0-9]*; do
-            c=$(cat $p/comm 2>/dev/null) || continue
-            case "$c" in
-                nc|timeout)
-                    tr "\0" " " < $p/cmdline 2>/dev/null | grep -q trace_pipe &&
-                        sudo kill ${p#/proc/} 2>/dev/null ;;
+    $SSH "for p in /proc/[0-9]*; do
+            c=\$(cat \$p/comm 2>/dev/null) || continue
+            case \"\$c\" in
+                nc|timeout) ;;
+                *) continue ;;
             esac
-          done; exit 0'
+            if tr '\\0' ' ' < \$p/cmdline 2>/dev/null | grep -q -- '-p $PORT' ||
+               [ \"\$(readlink \$p/fd/0 2>/dev/null)\" = $T/trace_pipe ]; then
+                sudo kill \${p#/proc/} 2>/dev/null
+            fi
+          done
+          sleep 1
+          exit 0"
 }
 
 # Start the detached listener. stdin is the file itself: `exec` replaces
@@ -168,9 +189,15 @@ stream)
     seconds=${1:-600}
     stop_listener
     start_listener "$seconds"
-    echo "draining to $OUT (live; tail -f it)"
-    nc "$RIG_HOST" "$PORT" > "$OUT"
-    echo "stream ended, $(wc -l < "$OUT") lines in $OUT"
+    echo "draining to $OUT (live; tail -f it), capped at $MAX_BYTES bytes"
+    # Capped, because a verbose set is far louder than it looks: the
+    # reference boot wrote 3.5 GB in 90 s, so a 900 s run at that rate
+    # would be ~35 GB and a busier event set more. `head` exiting closes
+    # the socket, nc sees EPIPE and the rig-side listener exits with it,
+    # so the cap tears the whole path down rather than just truncating
+    # here. The pipe is local - the corruption was the rig's kernel.
+    nc "$RIG_HOST" "$PORT" | head -c "$MAX_BYTES" > "$OUT"
+    echo "stream ended, $(wc -l < "$OUT") lines, $(du -h "$OUT" | cut -f1) in $OUT"
     ;;
 status)
     $SSH "sudo sh -c '
