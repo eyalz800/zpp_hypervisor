@@ -4249,3 +4249,102 @@ That assertion is now the emulation, end to end, plus a second case with
 memory below the register - which is what tells the two directions
 apart, since a compare with the operands swapped sets carry and sign
 backwards and the guest branches on them immediately.
+
+## The boot stops because every processor is idle, not because anything fails
+
+Measured 2026-08-10 on the rig, across four boots, three of them with the
+same binary. **Nothing in the hypervisor is failing.** The done-condition
+work has been looking for a broken mechanism and there is not one.
+
+All eight processors sit in Hyper-V's own idle loop, halted:
+
+```
+cli
+cmpl  $0x0, %gs:0x340     ; any pending work?
+jg    done                ; yes -> return
+sti
+hlt                       ; no -> halt until an interrupt
+b5e:  jmp  ...            ; <-- RIP sits here on all eight
+```
+
+Read out of a live guest: every vCPU has `RIP = ...a6b5e`, CPL 0,
+`RFL = 0x246` (IF set), different CR3s, and that RIP is the instruction
+*after* the `HLT` - which is where a processor rests in the HLT activity
+state. `gs:0x340` is Hyper-V's per-processor pending-work word and it is
+zero. The seven application processors wrote `TMICT = 0` within 37 ms of
+each other and so have no timer left; the boot processor keeps a 2.4 s
+tick, wakes, finds no work, and halts again.
+
+So the machine is **idle with no wakeup source**, not deadlocked and not
+spinning. The only thing that can restart it is a device interrupt, and
+**not one is ever delivered**: every vector the guest accepts is its own
+IPI or timer traffic (255, 239, 236, 237, INIT, SIPI, 47), and all 3,888
+`kvm_msi_set_irq` events are the all-zero placeholder `dst 0 vec 0`. A
+reference boot of the same guest directly on KVM, to the login screen,
+programs 7,121 real routes (`vec 96` to each of dst 0-7, plus 162, 80,
+81, 176).
+
+The freeze is exactly reproducible: `l2_entries` on the boot processor
+stops at ~82,300 and each application processor at ~405-421, against
+~500,000 per processor in the reference.
+
+### Eliminated by measurement, so do not re-propose
+
+Each of these was a live hypothesis and each is dead. The measurement is
+given so it does not have to be re-derived.
+
+- **Application-processor start-up is not broken.** 7 start-up IPIs go to
+  hardware and 14 are dropped as `activity 0x0 is not wait-for-sipi` -
+  and those drops are *correct*: hardware ignores a start-up IPI to a
+  processor that is not in wait-for-SIPI. Identical counts before and
+  after the activity-state series, which changed nothing observable.
+- **Interrupt commands are delivered.** The last four IPI commands in the
+  log ring map one-to-one onto KVM's `kvm_apic_ipi` with the right
+  destinations, each followed by `kvm_apic_accept_irq` on the right APIC
+  ids. An earlier session reached the same conclusion; see the stash
+  named `icr-interception: premise refuted, SIPI is delivered`.
+- **The monitor-trap single-step path never runs.** `stepped_writes` 0,
+  `apic_writes_undecoded` 0, `watched_accesses` all zero. Anything that
+  needs a stepped local-APIC write - a doubly-acted interrupt command, or
+  the shared page opened during the step - cannot be firing.
+- **Nested entries are not refused.** `nested_vmfail_count` 0 on all
+  eight.
+- **EPT memory types are right.** Read live: NVMe BAR0 `0x7011108000` ->
+  `0x7011000487` and GPU BAR0 `0x7010000000` -> `0x7010000487`, bits 5:3
+  = 0, uncacheable; DRAM `0x100000000` -> `0x1000004b7`, bits 5:3 = 6,
+  write-back. `63a5d17` is what makes that true. Cached writes to the
+  MSI-X table are therefore not the mechanism.
+
+  The comment in `initialize_ept` is still wrong about *why*: it credits
+  `IA32_MTRR_DEF_TYPE` being UC, and this firmware sets it to **WB**
+  (`def type 0xc06`, type 6). The BARs come out UC because a variable
+  MTRR covers the 64-bit aperture, not because of the default.
+- **The TPR shadow and the xAPIC/x2APIC transition are implemented
+  correctly** - audited against `lapic.c` and `vmx.c`, no divergence that
+  can lose an interrupt.
+
+### Where to look next
+
+Why no device interrupt is ever delivered, given the guest is idle and
+waiting for one. The two branches, and neither is settled:
+
+- the guest never programs MSI-X at all, in which case the absence is a
+  symptom of stopping earlier and the question is what it stopped for;
+- or it programs it and the write never reaches the emulation behind
+  VFIO, in which case the route is never created.
+
+`kvm_msi_set_irq` distinguishes them and costs one boot: real vectors
+appearing and then stopping dates the fault; none ever appearing points
+at the programming path. Note the reference programs its first real route
+**13 s after** application-processor start-up, so a capture must run well
+past that before its absence means anything.
+
+### Two cheap instruments that would have saved a day
+
+- **Log the eight variable MTRRs**, not just the summary at
+  `hypervisor.cpp:655`. Their coverage had to be recovered by reading EPT
+  entries out of physical memory by hand; one line each costs eight ring
+  slots at boot.
+- **Count device-vector deliveries.** Everything above was inferred from
+  KVM's trace because the hypervisor itself says nothing about interrupts
+  arriving at the guest.
