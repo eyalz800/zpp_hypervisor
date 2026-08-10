@@ -3803,3 +3803,88 @@ Reads are worse: `kvm_lapic_reg_read` refuses any register outside
 `kvm_lapic_readable_reg_mask`, `apic_mmio_read` ignores the refusal and
 leaves the buffer untouched, and the end-of-interrupt register at 0xb0
 is not in that mask - so reading it yields undefined data on this rig.
+
+## Fifth static review: two corrections to what was believed measured
+
+Both of these are retractions of statements made above on the strength
+of counters that do not say what they were read as saying.
+
+**"No VM entry is being refused" was not a measurement.** Only one
+refusal path logs - the `build_vmcs02` branch at `nested_vmx.cpp:1510` -
+and the three early returns in `on_guest_vmlaunch` hand back a plain
+VMfail with nothing recorded at all: no log line, and
+`vmx_instructions_refused` counts only the `#UD` path. So the absence of
+a "guest vmlaunch refused" line is consistent with a guest hypervisor
+being told error 5 thousands of times a second. Counters added; until
+they have been read, treat "Hyper-V stopped asking" as unproven.
+
+**`resume_activity_state == 0` does not mean the halt is not sticking.**
+`resume_guest` samples it from whichever VMCS is current, and vmcs01
+sets no HLT exiting - so a first-level `HLT` produces **no exit and no
+resume**, and nothing ever writes the field for a halted L1. The value
+read was left over from before the halt. Worse, on the successful
+VMLAUNCH path `resume_guest` runs with vmcs02 current, so all four
+resume fields and `record_exit` describe **L2** while the reason says
+`vmlaunch` - the same defect as `record_exit` reading vmcs01 on a
+reflect, in the other direction. The elimination argument recorded above
+therefore rests on one leg fewer than it appeared to.
+
+### The strongest single explanation found so far
+
+**`VMPTRLD` of the VMCS that is already current used to destroy the
+cached vmcs12** - fixed, see the commit. Worth restating because it fits
+the evidence better than anything else and it explains the *absence* of
+a log line rather than being contradicted by it:
+
+- Here the cache is authoritative and the guest's region is stale.
+  Nothing flushes on `VMWRITE` and `reflect_l2_exit` does not flush
+  either, so from a guest hypervisor's first `VMWRITE` the region holds
+  a revision identifier and 3584 bytes of zero.
+- A redundant `VMPTRLD` replaced the live vmcs12 with that: launch state
+  back to clear, every control zero, and the saved second-level guest
+  state gone.
+- The next `VMRESUME` then fails `vmresume_with_non_launched_vmcs`,
+  which is one of the *silent* paths. `l2_entries` never moves again,
+  nothing is logged, no counter moves, and that virtual processor can
+  never be entered again - even `VMCLEAR` and `VMLAUNCH` would enter it
+  at RIP zero, because the state was in the cache.
+
+**The confirmation needs no rebuild and no reboot beyond getting the rig
+back.** Read the cached vmcs12 out of the wedged guest with `xp`, using
+the offsets `16 + ((width * 4 + type) * 28 + index) * 8`: offset 8 is
+the launch state, `0x710` the pin controls, `0x718` the primary
+controls, `0xCC8` the guest RIP. Zeroes there on a processor whose
+`l2_entries` is non-zero mean the cache was wiped; `0x1e` and
+`0xa4206dfa` mean it was not and this is refuted.
+
+### Also open from this review
+
+- **The deferred control-register handler applies L1's VMX state to
+  L2.** Reached with vmcs02 current whenever `l1_wants_l2_exit` declines
+  a CR0/CR4 access, it refuses a CR4 write clearing VMXE on the strength
+  of `guest_in_vmx_operation[cpu]` - which is *Hyper-V's* flag - and
+  injects `#GP` into the root partition for an architecturally legal
+  write. It also writes `guest_cr0`/`guest_cr4` from the raw L2 value;
+  KVM merges L1's owned bits back in `handle_set_cr0`/`handle_set_cr4`
+  (`vmx.c:5428-5469`) for exactly this case. Narrow trigger - vmcs01's
+  masks are only CR0.NE and CR4.VMXE - but wrong.
+- **Exceptions this VMM injects into L2 bypass vmcs12's exception
+  bitmap.** `inject_general_protection_fault` and
+  `inject_invalid_opcode_exception` write vmcs02's entry-interruption
+  field directly, so a vector L1 asked to intercept is delivered into
+  L2's IDT with L1 never told. KVM routes injected exceptions through
+  `nested_vmx_is_exception_vmexit` first.
+- **`merge_nested_bitmaps` does 12 KB of byte-wise work per entry for
+  nothing** when vmcs12's MSR-bitmap and unconditional-I/O controls are
+  clear, which the capture says they are: the MSR page it builds is then
+  discarded by `build_vmcs02` clearing the control, and the two I/O
+  pages are bit-for-bit copies of this VMM's own. Point vmcs02 at the
+  originals instead.
+
+Checked and clean, so they need not be looked at again: `vmx_succeed`,
+`vmx_fail` and `vmx_fail_invalid` match SDM 33.2 exactly and write
+vmcs01's guest RFLAGS rather than the captured context, which is right;
+vmcs12 field coverage is adequate, with read-only enforcement paired
+correctly against `IA32_VMX_MISC` bit 29; and `l1_wants_l2_exit`'s MSR
+case is right for this configuration, returning true immediately because
+vmcs12's MSR bitmaps are clear.
