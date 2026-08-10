@@ -4945,3 +4945,40 @@ here. But this experiment says the missing interface is not what stops
 the boot, so the next question is the one the exit rings pose directly:
 what is Hyper-V waiting for when it stops scheduling on an application
 processor after ~350 entries.
+
+### And a correction to the correction: that experiment proved less than claimed
+
+The rig **does not pass `hv-passthrough`**. Checked on both launchers on
+2026-08-10: each runs plain `-cpu host,kvm=on,topoext`, and neither
+mentions `hv-` anywhere. `CLAUDE.md` asserted otherwise and has been
+fixed.
+
+That matters twice over.
+
+**It weakens the experiment above.** Turning on
+`pass_through_hypervisor_interface` stops this VMM answering the
+hypervisor CPUID range and forwards synthetic MSRs downward - but with
+no Hyper-V enlightenments underneath, what the guest then saw was the
+outer layer's *own* interface, and the frequency MSRs it was supposed to
+gain were never implemented down there either. So "the same count with
+and without those MSRs" is not something that run established: the MSRs
+were absent in both arms. What the run does establish is narrower and
+still useful - replacing our answers with the outer layer's changes
+application-processor behaviour slightly and changes the end state not
+at all.
+
+**It strengthens the calibration hypothesis rather than killing it.**
+The reference boots on this rig with no hypervisor interface worth
+having underneath it, which is to say with *the same information this
+VMM gives its guest*, and its processors come out at 1.95e6. Ours come
+out at 2.38e9 from the same starting position. Whatever the guest uses
+to work that number out, it is not a frequency MSR in either case, and
+the difference is therefore something this VMM does to the measurement.
+
+Ruled out immediately, by reading rather than by booting: this VMM sets
+no TSC offset and no TSC scaling - there is no write to either field
+anywhere - so the guest's time base is the raw physical counter and is
+not being stretched by us.
+
+The ratio to explain is about **1213**, and it is stable across builds:
+2,379,522,644 and 2,382,117,305 against the reference's 1,961,755.

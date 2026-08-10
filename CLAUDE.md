@@ -297,11 +297,21 @@ somewhere else entirely.
   exist first; the short version is nested EPT.
 - **The whole hypervisor CPUID range is answered**, `0x40000000`–`0x4fffffff`,
   not just the leaf holding the signature. Unanswered leaves fall through to
-  whatever is underneath, and underneath is not nothing: the QEMU test rig runs
-  `-cpu host,...,hv-passthrough`, which exposes a full set of Hyper-V
-  enlightenments. A guest that reads vendor `ZppZppZppZpp` from one leaf and a
-  Hyper-V interface from the next acts on the more specific claim, and starts
-  using synthetic MSRs that do not exist here.
+  whatever is underneath, and underneath is not nothing. A guest that reads
+  vendor `ZppZppZppZpp` from one leaf and another interface from the next acts
+  on the more specific claim, and starts using synthetic MSRs that do not exist
+  here.
+
+  **Checked on 2026-08-10: the rig does not pass `hv-passthrough`.** Both
+  launchers run plain `-cpu host,kvm=on,topoext` and neither mentions `hv-` at
+  all, so what is underneath advertises its own interface rather than a
+  Hyper-V one. This paragraph used to assert the opposite, and asserting it
+  cost a boot and a wrong conclusion: an experiment that forwarded the whole
+  range downward was read as "the guest was given the Hyper-V frequency MSRs
+  and still failed", when those MSRs were never there to give. **Read the
+  launcher before arguing from what is underneath it.** The goal is to need
+  nothing under us at all, so anything that only works while something else
+  implements it is not a fix.
 - **Unimplemented MSRs fault.** An access outside the two ranges the MSR bitmap
   covers, `0`–`0x1fff` and `0xc0000000`–`0xc0001fff`, exits *unconditionally* —
   no bitmap can stop it, which is why an all-zeroes bitmap does not. Nothing
