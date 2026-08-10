@@ -4610,3 +4610,119 @@ A note on the harness rather than the hypervisor: an odd `ZPP_CPUS`
 originally produced a fractional `smp.cores` and qemu refused to start,
 which is why both launchers now drop to one thread per core when the
 count will not divide evenly.
+
+### Four concurrency defects on the start-up path, and what is left
+
+Found by reading the path the bisect above implicates, and pinned by
+`tests/ap_start_up`. In the order they matter:
+
+1. **The VMXON and VMCS region addresses were handed from
+   `initialize_vmx` to `enter_root_mode` through two shared members.**
+   That is the only piece of a launch that was not indexed by the slot,
+   and the window between the write and the VMXON is protected by
+   nothing on the executing processor - `start_up_lock` is held by the
+   *starter*, and it is released on its own timeout as well as on
+   success. A second processor arriving inside the window sent the
+   first one's VMPTRLD at its region. One VMCS on two logical
+   processors is undefined, not merely racy: SDM 25.1 says software
+   must not do it and the processor does not check. Fixed by deleting
+   the members - `enter_root_mode` takes its slot and derives both as
+   locals.
+
+   This is the one that fits the measurement. Two processors sharing a
+   VMCS do not fail to start; they start, run, and then corrupt each
+   other's guest state on every exit, which is exactly "adopted, and
+   then stopped after a few hundred second-level entries".
+
+2. **The target published its wait-for-SIPI activity state after its
+   wait instead of before it.** `start_up_processor` gates a guest's
+   start-up IPI on `resume_activity_state[slot]` and only then
+   compare-exchanges into the mailbox, so a target whose record still
+   says `active` has its IPI dropped - and dropped is returned as
+   `adopted`, which swallows the guest's write. That record is written
+   by the exit path on the way *out* of the handler, so for the whole
+   of `emulate_init_signal`'s software wait - up to two million
+   iterations - it held the value from before the INIT. The software
+   hand-off was therefore unreachable from `start_up_processor`, which
+   is the one path a guest's own INIT-SIPI-SIPI takes.
+   `enter_or_park_l2` already published `l2_activity_state` before
+   waiting, which is why the second-level hand-off worked and this one
+   did not.
+
+3. **`processor_slot` was an unsynchronised allocator.** Scan then
+   append, reachable from every processor's exit handler. Two
+   processors asking about two different unknown identifiers both took
+   the same slot - and a slot is the VPID, the VMXON region and the
+   VMCS region. 6,149 collisions over 400 rounds of 8 in the harness
+   without a lock, 0 with one.
+
+4. **`start_application_processor` cleared `start_up_launched[slot]` for
+   a processor that could already be running.** That flag is what
+   `wait_for_ept_acknowledgement` uses to decide who must answer an
+   extended page table change; a processor whose flag is clear is
+   skipped on the argument that it holds no translation. Clearing it
+   for a running processor removes it from every rendezvous from then
+   on, silently and for good, because only `main` sets it again. The
+   first attempt at the fix - re-testing `processor_virtualized` under
+   the lock - was **not enough**, and the harness said so: 5 rounds in
+   400 still cleared it, because the target marks itself without taking
+   that lock. The clear is gone entirely instead.
+
+#### The two-million-iteration spin, since it was asked about directly
+
+It is not the defect, and it costs more than it looks.
+`start_application_processor` sends the start-up IPI and then spins up
+to 2,000,000 times waiting for `start_up_launched[slot]`, inside a VM
+exit, holding `start_up_lock`. What that buys and what it costs:
+
+- **It does serialise the targets**, indirectly and by accident of
+  where the flag is written: the target has left the shared trampoline
+  stack and taken its stack index long before `main` sets the flag. So
+  on the success path the single trampoline and the single stack really
+  are safe. That is worth knowing, because it is not what the comment
+  claimed and it is not what the lock's name suggests.
+- **The hole is the timeout, not the lock.** Giving up does not stop
+  the target. A processor that is merely slow is still on that stack
+  and still inside the VMX region window when the lock is released.
+  Closing that needs the target to acknowledge - a second flag it sets
+  once it is off the shared stack, which the starter waits on before
+  releasing - and is a bigger change than any of the four above.
+- **It can starve another processor's start-up.** A second sender
+  blocks on `start_up_lock` inside *its own* VM exit, in VMX root mode,
+  and a layer below discards start-up IPIs and blocks INIT for every
+  instant a processor is in root mode (KVM's
+  `vmx_apic_init_signal_blocked` is `nested.vmxon && !is_guest_mode`).
+  So a sender waiting on the lock is a processor that cannot itself be
+  started. With one application processor there is no second sender;
+  with three there are. It is a plausible second-order contributor and
+  it was not measured.
+- It is also `pause` in root mode, which is non-root to the layer
+  below, so pause-loop exiting fires and the vCPU is descheduled
+  repeatedly. Two million of those is not a short delay.
+
+Reducing the bound is not obviously right - it trades a rare hang for a
+more frequent unadopted processor - so it is left alone and written
+down.
+
+#### Reading a boot for these
+
+- **Fix 1**: every processor should reach `launching guest on virtual
+  processor N` with a distinct N, and `exit_reason_counts[cpu]` should
+  keep rising for each. The failure it fixes shows as two processors
+  whose exit rings interleave nonsense - a slot reporting exits that
+  belong to another - or as a `vm_entry_failure` on a VMCS a processor
+  did not build.
+- **Fix 2**: `guest start-up ipi for cpu N, vector V, handed over` is
+  the line that was never printed before. Its absence, next to
+  `cpu N init: ... software wait 1`, is the defect. One of those per
+  application processor per INIT-SIPI-SIPI is the fixed state.
+- **Fix 3**: `number_of_known_processors` should equal the processor
+  count, and `apic_id[]` should hold each identifier exactly once.
+- **Fix 4**: `unresponsive_processors` should stay at whatever it was;
+  a processor silently dropped from the rendezvous makes it *not* rise
+  when it should have.
+
+The number the bisect reads - second-level entries per application
+processor - is the one to compare. Fixed means they keep rising past
+the few hundred they stop at now, toward the ~500,000 of a healthy run,
+rather than any particular value.
