@@ -1456,9 +1456,14 @@ void hypervisor::nested_transition_flush()
     }
 }
 
+// The captured context is no longer read - the two cases that needed a
+// guest register, the MSR number in ECX and the I/O port, are gone. It
+// stays in the signature because this and `l1_wants_l2_exit` are a pair
+// called from one place with one set of arguments, and because the next
+// case to need it will.
 bool hypervisor::l0_wants_l2_exit(std::size_t cpu,
                                   arch::x86_64::vmx::exit_reason reason,
-                                  const arch::x86_64::context & context)
+                                  const arch::x86_64::context &)
 {
     auto & vmcs = this->vmcs;
 
@@ -1502,21 +1507,34 @@ bool hypervisor::l0_wants_l2_exit(std::size_t cpu,
         // controls it is offered - and then the exit is its own.
         return this->stepping_watch[cpu];
 
-    case basic_reason::rdmsr:
-    case basic_reason::wrmsr:
-        // The MSR number is in ECX, which is a guest register and
-        // therefore in the captured context rather than in the VMCS.
-        return own_msr_intercepted(static_cast<std::uint32_t>(context.rcx),
-                                   basic_reason::wrmsr == reason.basic());
-
-    case basic_reason::io_instruction: {
-        // The port is in the exit qualification, bits 31:16. SDM Table
-        // 28-5, "Exit Qualification for I/O Instructions".
-        auto port =
-            static_cast<std::uint16_t>(vmcs.exit_qualification() >> 16);
-
-        return own_io_port_intercepted(port);
-    }
+        // MSR accesses and I/O are deliberately absent, and that is a
+        // change from what this used to do.
+        //
+        // They used to be claimed here whenever *this VMM's* bitmap named
+        // them, which took them away from a guest hypervisor that had
+        // asked for them too. The ones this VMM arms are exactly the set a
+        // guest hypervisor presenting VMX to its own guest also arms:
+        // IA32_APIC_BASE unconditionally, and IA32_FEATURE_CONTROL with
+        // the whole VMX capability range when nested VMX is on. So a
+        // second-level guest touching one of those was answered here and
+        // its own hypervisor never learned it had - which is the shape of
+        // a guest hypervisor that stops making progress with nothing
+        // faulting.
+        //
+        // KVM names neither in `nested_vmx_l0_wants_exit`; the decision is
+        // `nested_vmx_l1_wants_exit`'s and the exit is reflected. L0's own
+        // interest is served a moment later, when the guest hypervisor
+        // performs the access itself and exits from *its* context - which
+        // is the right order, because the machine the second-level guest
+        // sees is the guest hypervisor's, not this one's.
+        //
+        // Nothing else is needed to keep this VMM's own interest:
+        // `on_l2_exit` already routes an exit neither side asked for to
+        // the ordinary handler, so an access only this VMM wanted still
+        // lands there.
+        //
+        // Both were found by tests/nested_exit, which exercises this
+        // decision against KVM's for every exit reason.
 
     default:
         return false;
@@ -1781,12 +1799,16 @@ bool hypervisor::l1_wants_l2_exit(std::size_t cpu,
     case basic_reason::io_instruction: {
         // SDM Table 28-5: bits 2:0 the size, bit 3 the direction, bit 4
         // string, bit 5 REP, bit 6 operand encoding, bits 31:16 the port.
-        if (primary_set(primary_unconditional_io)) {
-            return true;
-        }
-
+        // The bitmaps win when both are set. SDM 28.1.3
+        // (.references/sdm.txt:200725) puts it in parentheses: "the
+        // 'unconditional I/O exiting' VM-execution control is ignored if
+        // the 'use I/O bitmaps' VM-execution control is 1". Testing
+        // unconditional first reflected every I/O instruction to a guest
+        // hypervisor that had set both - including the ports it had
+        // explicitly cleared in its own bitmap - and both controls are
+        // offered, so that is a configuration it can reach.
         if (!primary_set(primary_io_bitmaps)) {
-            return false;
+            return primary_set(primary_unconditional_io);
         }
 
         auto qualification = vmcs.exit_qualification();
@@ -1798,8 +1820,17 @@ bool hypervisor::l1_wants_l2_exit(std::size_t cpu,
         // `nested_vmx_exit_handled_io` walks the same range.
         for (std::uint32_t i{}; i < size; ++i) {
             auto at = port + i;
+
+            // A wrapping access exits, it does not stop being checked.
+            // SDM 28.1.3 (.references/sdm.txt:200724): "If an I/O
+            // operation 'wraps around' the 16-bit I/O-port space
+            // (accesses ports FFFFH and 0000H), the I/O instruction
+            // causes a VM exit." Breaking out of the loop answered
+            // "not intercepted" for a four-byte access at port 0xffff
+            // against an empty bitmap; KVM returns true the moment the
+            // port reaches 0x10000.
             if (at > 0xffff) {
-                break;
+                return true;
             }
 
             auto base = (at < 0x8000) ? shadow.read(field::io_bitmap_a)
