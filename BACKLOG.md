@@ -4807,3 +4807,39 @@ afterwards was a real number describing a machine this VMM was never on.
 Removed, and the tell is now checked and fatal before anything is
 measured: the loader says `zpp:` on serial long before the firmware hands
 over.
+
+### The reference settles it: 1214x, and the application processors get none
+
+The same guest, the same four processors, booted by `boot-kvm.sh` with
+nothing of ours underneath, read the same way once it had settled:
+
+| processor | reference `initial_count` | under this VMM |
+|---|---|---|
+| boot        | 1,961,755 | 2,379,522,644 |
+| application | 1,957,062 | 0 |
+| application | 1,944,081 | 0 |
+
+Every processor's timer is armed in the reference, all to about
+1.95e6 - roughly a 2 ms tick against KVM's 1 GHz APIC bus, which is
+what a scheduler tick should look like. Under this VMM the boot
+processor's count is **1214x larger** and the application processors
+have **no timer armed at all**.
+
+The reference also parks three of its four processors at the *same*
+`a6b5e` idle-loop address, which is the second time that address has
+been misread here as a symptom. It is not. Idling there is what a
+healthy machine does; what distinguishes the failure is that our
+processors idle there with nothing armed to wake them.
+
+So the defect is in what the guest is told about time, not in how it is
+started. The next thing to read is the synthetic MSR path
+(`hypervisor.cpp:9778`), which passes the whole `0x40000000`-`0x4fffffff`
+range straight through to the layer underneath when
+`nested_vmx::pass_through_hypervisor_interface` is on - including
+`0x40000020` `TIME_REF_COUNT`, `0x40000022` `TSC_FREQUENCY` and
+`0x40000023` `APIC_FREQUENCY`. A count of ~2.38e9 against a plausible
+~2.4 GHz TSC is suspiciously exactly one second, so the guest deriving
+the APIC timer's rate from the TSC's is the first hypothesis to test.
+Both the read of `0x40000020` and a write of `0x40000071` - the
+synthetic ICR - appear in the stalled processors' exit rings, so the
+guest is using that interface.
