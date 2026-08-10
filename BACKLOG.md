@@ -4557,3 +4557,15 @@ threshold would say a great deal about which resource runs out.
 Do not read this as "two processors boots Windows" until it has been seen
 to reach the login screen - at the time of writing it is progressing, not
 finished.
+
+The two-processor guest kept going: 2,199 -> 24,610 -> 45,165 -> 75,620
+-> 233,249 -> 262,651 second-level entries on the application processor,
+at roughly 260 a second while working and settling to about 100 a second
+- which is the shape of a guest that has finished booting and gone idle,
+though that was not confirmed on the screen at the time of writing.
+
+The boot processor stays frozen at 82,036 throughout, so even here it is
+only the application processor doing the work. That is itself odd for a
+healthy two-processor Windows and should not be waved away: it may mean
+the same fault still bites the boot processor and Windows simply
+schedules around it when there is another processor to use.
