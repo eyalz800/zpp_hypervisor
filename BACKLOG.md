@@ -4726,3 +4726,84 @@ The number the bisect reads - second-level entries per application
 processor - is the one to compare. Fixed means they keep rising past
 the few hundred they stop at now, toward the ~500,000 of a healthy run,
 rather than any particular value.
+
+## The freeze is a lost wake-up, not a start-up race
+
+Measured on 2026-08-10, four processors, and then measured again on a
+second build with the start-up concurrency fixes in. **The two readings
+are identical**, so those fixes - real defects, with a harness that
+counts 6,149 slot collisions in 400 rounds without them - are not this
+failure. Recorded here so the next person does not re-derive them as a
+candidate.
+
+What the frozen machine actually holds, read through the QEMU monitor
+with no debugger attached:
+
+- **Every processor is halted in Hyper-V's idle loop**, at the same
+  offset `a6b5e` in both boots, and the bytes there settle what that
+  means:
+
+      b50: fa                          cli
+      b51: 65 83 3c 25 40 03 00 00 00  cmpl $0x0, %gs:0x340
+      b5a: 7f 04                       jg   b60
+      b5c: fb                          sti
+      b5d: f4                          hlt
+      b5e: eb 01                       jmp  b61      <-- RIP is here
+
+  RIP one past the `hlt`, `RFL=0x246` so interrupts are enabled, and
+  `HLT=0` from the monitor because the halt is in non-root operation
+  rather than in KVM's own halt path. `HLT` exits number 1 or 2 per
+  processor for the whole boot, so halting is not being trapped: the
+  processor really is stopped, waiting for an interrupt.
+
+- **Nothing will ever wake them.** `info lapic` per processor:
+
+      cpu0  LVTT one-shot vec 0xef   initial_count = 2,379,522,644
+      cpu1  LVTT one-shot vec 0xef   initial_count = 0
+      cpu2  LVTT one-shot vec 0xef   initial_count = 0
+      all   IRR (none)   ISR (none)
+
+  The application processors have **no timer armed at all** and nothing
+  pending. The boot processor's is armed with ~2.38e9 at divide-by-1,
+  which against KVM's 1 GHz APIC bus is a period of about **2.4 seconds**
+  where a scheduler tick should be near a millisecond. It is re-armed to
+  the same value every time it fires, so cpu0 limps at roughly one
+  exit per second - 20 exits in 24 s, measured - while the others are
+  frozen exactly.
+
+**That is the 2000x timer-arming rate gap from the earlier phase-aligned
+comparison, seen from the other end.** It was recorded then as a rate;
+this is the register it comes out of.
+
+So the question to answer is no longer "what stops the application
+processors" but **"why does the guest compute an APIC timer count three
+orders of magnitude too large, and why do the application processors
+never get one at all"**. A count of ~2.38e9 at a plausible ~2.4 GHz TSC
+is suspiciously exactly one second, which points at the guest deriving
+the APIC timer's rate from the TSC's.
+
+Eliminated while getting here, none of them worth re-testing:
+
+- not a deadlock in this VMM - `start_up_lock` and
+  `mapping_window_lock` both read 0, and `unhandled_exit` and
+  `vm_entry_failure` are all-zero;
+- not a failure to adopt - all four `start_up_launched` bytes read 1,
+  and the application processors each run ~350 second-level entries and
+  ~4,500 exits before stopping;
+- not an unhandled exit - the last thing in every stalled processor's
+  exit ring is an ordinary `VMWRITE` in the middle of Hyper-V's normal
+  `VMRESUME -> exit -> VMREAD x4 -> VMWRITE -> VMRESUME` cycle;
+- not lost TMICT observation - writes to `0x380` are deliberately not
+  logged (`hypervisor.cpp:6002`), so their absence from the log ring
+  says nothing.
+
+### A boot that reaches no hypervisor looks exactly like a hypervisor bug
+
+`scripts/rig-boot-test.sh` reset the guest's NVRAM from
+`RELEASEX64_OVMF_VARS.fd.orig` before every run. No saved copy of that
+file carries a boot option naming `\EFI\zpp\zpp_loader.efi`, so the reset
+booted Windows with nothing underneath it - and every counter read
+afterwards was a real number describing a machine this VMM was never on.
+Removed, and the tell is now checked and fatal before anything is
+measured: the loader says `zpp:` on serial long before the firmware hands
+over.
