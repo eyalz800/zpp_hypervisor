@@ -5,6 +5,13 @@ description: Use when you need to see what a guest hypervisor asked KVM for on t
 
 # Tracing KVM on the rig
 
+> **Read "The FIFO capture crashes this kernel" before running any of
+> this.** The recipe below corrupts kernel memory on `6.12.11-zpptrace`
+> and ends with the rig needing a reboot. It is kept because the events
+> it names are still the right ones and nothing else answers what it
+> answers - but taking a capture currently costs the machine, so decide
+> that deliberately rather than by habit.
+
 The rig runs `6.12.11-zpptrace` with `kvm-trace.ko` / `kvm-intel-trace.ko`.
 It answers what nothing else can: **what the guest hypervisor asked the
 layer underneath for, and what that layer did.** That is how a broadcast
@@ -81,6 +88,56 @@ insmod and start the stream before the firmware hands over.
 | `events/kvm` missing | The tracepoints exist only while `kvm.ko` is loaded, and the launcher rmmods/insmods it — arm *after* its insmod. |
 | ssh dies mid-capture | A reader was an ssh child. Never `ssh $RIG 'cat trace_pipe'`. |
 
+## The FIFO capture crashes this kernel
+
+**Measured, twice, with the kernel saying so itself.** The
+`trace_pipe` → FIFO pipeline this skill recommends writes trace text over
+kernel page tables on `6.12.11-zpptrace`. It is not a flaky capture; it is
+memory corruption, and it ends the session.
+
+The tell is **ASCII where a pointer belongs**. Decode the address before
+believing it is an address:
+
+```
+Oops: Bad pagetable: 0009        PMD 2e2e2e2e2e205d31   ← "1] ....."
+Oops: general protection fault, probably for non-canonical
+      address 0x656363615f636970                        ← "pic_acce"
+Fixing recursive fault but reboot is needed!
+```
+
+`2e2e2e2e2e205d31` is `1] .....` and `656363615f636970` is `pic_acce`,
+the middle of `kvm_apic_accept_irq`. Both faulting tasks were `Comm: cat`
+- the FIFO feeder and its reader - not QEMU and not `rmmod`.
+
+What it looks like from outside, in the order it appears:
+
+| What you see | What it actually is |
+|---|---|
+| `cat: read error: Bad address` | EFAULT from the corrupted read. The capture is over. |
+| A capture holding only the *previous* run's events | The reader died in its first seconds; you drained the stale ring. |
+| `tracing_on` reads 0 with every event still `enable=1` | `tracing_off()` from the oops path. Nothing disarmed it on purpose. |
+| Zombie QEMU, ~12 GB pinned, `kvm` refcount stuck | The teardown afterwards, on a kernel that already said "reboot is needed". |
+
+**So the zombie leak is caused by the capture, not by killing QEMU.** The
+`boot-windows-rig` skill blamed the kill for two sessions and that was
+wrong - the kill is just the last event before the symptom is noticed.
+Both leaks had a capture running; the one clean teardown measured had
+none.
+
+Check `dmesg` before drawing any conclusion from a failed capture, and
+before blaming a hypervisor bug for a hang:
+
+```sh
+ssh $RIG 'sudo dmesg | grep -iE "oops|bad pagetable|reboot is needed"'
+```
+
+**Until this is fixed, treat a KVM trace as costing the machine.** Take
+the run without a capture unless the trace is the whole point of the run,
+and expect to end the session when you do take one. A capture is not
+worth spending a reboot on a question the hypervisor's own log ring can
+answer - see `dump-log-physical`, which reads memory and cannot wedge
+anything.
+
 ## Verify before trusting a run
 
 Enable `sched_switch`, stream five seconds, confirm bytes arrive, then
@@ -108,12 +165,13 @@ a run:
   and the GPU back from vfio-pci *after* QEMU exits. Kill the launcher and
   the devices stay with vfio-pci: no `/dev/nvme0n1p2`, so the next deploy
   fails and the next run cannot claim the devices.
-- **TERM first, KILL second.** A QEMU killed mid-VFIO-teardown becomes a
-  zombie whose last thread sits in D state in the kernel holding every
-  pinned guest page - measured twice at 12-13 GB. Nothing reaps it, it
-  does not clear on its own, and the only fix found is a reboot. The
-  script reports the zombie explicitly, because the next symptom is a
-  launch that mysteriously cannot allocate guest memory.
+- **TERM first, KILL second.** The zombie that holds 12-13 GB of pinned
+  guest pages does not clear on its own and needs a reboot, and the script
+  reports it explicitly because the next symptom is a launch that
+  mysteriously cannot allocate guest memory. **It is not caused by the
+  kill** - see "The FIFO capture crashes this kernel" above, and read
+  `dmesg` before concluding otherwise. TERM first remains right on its own
+  merits; it just does not buy immunity from this.
 
 ## The rig has no display of its own
 

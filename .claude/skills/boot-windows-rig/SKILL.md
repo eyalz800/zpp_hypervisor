@@ -193,9 +193,34 @@ and from the Mac, which has `x86_64-elf-gdb`:
 x86_64-elf-gdb -ex 'target remote 192.168.1.199:1234'
 ```
 
-Add `-monitor telnet:0.0.0.0:4444,server,nowait` the same way for a channel
-that inspects state **without perturbing it** - `info registers -a`, `xp`,
-`screendump`. Reach it with `nc 192.168.1.199 4444`.
+### The launcher has no monitor. Add it before you boot, not after
+
+`boot-zpp.sh` passes `-nographic` and **no `-monitor`**, so a run started
+without `ZPP_QEMU_EXTRA` has no monitor at all. Every recipe that reads
+resident state goes through it - `info status`, `info cpus`,
+`info registers -a`, `xp`, and the whole of `dump-log-physical`, whose
+script hard-codes the port. Without it a boot yields serial output and
+nothing else, and the only way to add one is to kill the guest and start
+again, which costs the run and (see the zombie section) can cost the
+session.
+
+**Use 4446.** That is the port `scripts/rig-dump-log-physical.sh` and the
+skills already assume; 4444 appears in older notes and matches nothing.
+
+```sh
+ZPP_QEMU_EXTRA='-monitor telnet:0.0.0.0:4446,server,nowait' \
+  sudo -E ./boot-zpp.sh
+```
+
+Confirm it answers **before** spending the boot - an empty reply from
+`nc` means no monitor, not a busy guest:
+
+```sh
+printf 'info status\n' | nc -w 6 192.168.1.199 4446
+```
+
+It inspects state **without perturbing it**, which is why it is preferred
+over the gdb stub for anything that can be read rather than stepped.
 
 ### Reading the disk channel's state while the guest runs
 
@@ -886,12 +911,30 @@ around. Say so, leave the devices bound where they are, and spend the
 time on everything that does not need the machine - there is always a
 static review's worth of it.
 
-There is no prevention that is worth its cost. Every one of these leaks
-has followed a kill of a QEMU that was mid-VFIO-teardown, and killing is
-the rule here - the ACPI shutdown does not reliably finish on this rig,
-so waiting on it buys nothing and ends in the same kill. Treat the leak
-as a possible price of every run, notice it immediately (the script says
-so), and stop rather than improvise.
+**The kill is not what causes this, and blaming it cost two reboots.**
+This section used to say every leak followed a kill of a QEMU that was
+mid-VFIO-teardown, that killing is unavoidable here, and that the leak is
+therefore a price of every run. That was pattern matching on the wrong
+event: the kill is simply the last thing that happens before the symptom
+is noticed.
+
+The precondition is **a kernel that has already oopsed**, and on this rig
+what oopses it is the trace capture - see `trace-kvm`, "The FIFO capture
+crashes this kernel". Check `dmesg` before concluding anything:
+
+```sh
+ssh $RIG 'sudo dmesg | grep -iE "oops|bad pagetable|reboot is needed"'
+```
+
+If that answers, the leak was decided before the kill and no change to
+how QEMU is stopped would have avoided it. Two observations fit and none
+contradict: both leaks happened with a capture running, and the one clean
+teardown measured - NVMe rebound automatically, 15,470 MB free - had no
+capture running.
+
+So the prevention is real and cheap: **do not stream a trace during a run
+you intend to kill.** Take the run without a capture, or accept that the
+session ends with it.
 
 ## Reserve a host core, so a wedge cannot cost you the connection
 
