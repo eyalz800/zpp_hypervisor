@@ -5133,3 +5133,29 @@ is not a device at all - it is something the guest writes being taken
 for a message-signalled interrupt. Worth understanding separately; the
 reference produces 28,581 of the same shape, so on its own it is not the
 fault.
+
+**What those two captures can and cannot support.** They were not armed
+identically - the reference's events are dominated by
+`kvm_userspace_exit` and carries no nested tracepoints, ours is
+dominated by `kvm_nested_vmexit` - and neither carries `kvm_pio` or
+`kvm_mmio`, so there is no port or address detail in either. Our guest
+also freezes part way through a boot the reference completes.
+
+So **rates between the two captures are not comparable** and nothing
+should be concluded from one being larger. In particular, the reference
+showing 472,565 port-I/O exits in its first ten seconds against a steady
+99 per ten seconds in ours is *not* evidence: that burst is the firmware
+enumerating PCI, which happens before this VMM is resident at all and
+would look the same either way, so our capture simply started later.
+That comparison was made here and is withdrawn.
+
+What they do support is presence against absence of a specific vector
+across a whole boot, which is not a rate: vectors 96, 162 and 80 appear
+4,787, 1,034 and 520 times in the reference and **never** in ours, and
+hard-interrupt-context routing appears 5,142 times against **none**.
+A capture that catches 3,888 routing events and 383 accepted interrupts
+would catch a device interrupt if one happened.
+
+The host can settle it without any trace at all, and should: the
+passed-through disk's interrupts are counted by the machine itself in
+`/proc/interrupts` under its `vfio-msix` lines while the guest owns it.
