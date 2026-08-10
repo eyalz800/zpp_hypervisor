@@ -5049,3 +5049,55 @@ every timer honoured, nothing pending. `BACKLOG.md` already records that
 **the guest never programs a device interrupt route** and that a trace
 of the whole boot found **zero** real MSI routes. That was written down
 as a curiosity. It should be the next thing tested.
+
+### No device interrupt is ever delivered, and that is the fault
+
+Compared the two kept whole-boot captures - the reference with nothing
+of ours underneath, and a run of ours - counting what KVM actually
+routed and what the guest actually accepted. Neither capture needed a
+boot to produce; both were already on disk.
+
+Message-signalled routes KVM was asked to deliver:
+
+| | reference (boots) | ours (freezes) |
+|---|---|---|
+| `kvm_msi_set_irq` total | 33,723 | 3,888 |
+| `dst 0 vec 0`, i.e. unprogrammed | 26,603 | **3,888 - all of them** |
+| real routes | dst 2/4/6 vec 96, dst ff vec 162, dst 0 vec 80 | **none** |
+
+And what each guest accepted:
+
+| vector | reference | ours |
+|---|---|---|
+| 239 local APIC timer | 244,167 | 138 |
+| 255, 47, 236, 237 | present | present |
+| **96 device** | 4,787 | **0** |
+| **162 device** | 1,034 | **0** |
+| **80 device** | 520 | **0** |
+
+**Not one device interrupt reaches the guest under this VMM.** It gets
+its timer and it gets inter-processor interrupts; it never gets a
+completion from anything. Windows boots off the passed-through NVMe, so
+a root partition that has issued disk reads and will never be told they
+finished is exactly the machine measured in the section above - every
+processor halted, every timer honoured and firing on schedule, nothing
+pending, no work to schedule.
+
+This also explains the shape that made the earlier bisect so misleading.
+The application processors are not broken; they are started, they run a
+few hundred second-level entries of real work, and then there is nothing
+left to give them because the root partition is blocked. A boot with
+fewer processors gets further only because there is less waiting to do.
+
+The observation that "the guest never programs a device interrupt route"
+was already written down here, from a trace, and filed as a curiosity
+next to a note that the same trace found zero real routes. It was the
+answer. **Do not file a zero as a curiosity when the working reference
+has thousands.**
+
+The next question is mechanical and specific: the routes exist in the
+reference because something observes the guest programming the device's
+message-signalled interrupt table and installs them. Find what makes
+that observation not happen with this VMM in between - whether the
+guest's writes to that table never reach whoever installs the route, or
+reach it carrying zeroes.
