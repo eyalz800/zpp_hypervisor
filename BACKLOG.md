@@ -258,18 +258,49 @@ Poll the reference counter five or six times, re-arm synthetic timer 0,
 end-of-interrupt, wait. That is an operating system sleeping, not one
 working.
 
-**The arithmetic is what settles it.** 1,326 second-level exits per
-second is 754 microseconds per exit. Everything this VMM executes per
-exit - two VMPTRLDs, two VMCLEARs, about seventy VMREAD/VMWRITEs, the
-reflection - is order ten thousand cycles, about three microseconds even
-with the rig's extra layer folded in. Two orders of magnitude short. The
-time is not being spent in our code, so **the 77x is not a cost we are
-paying, it is a wait the guest is choosing**, and shaving exits cannot
-reach it.
+**An arithmetic argument was made here that the wait, not our cost,
+explained the 754 microseconds per second-level exit. It was wrong, and
+the way it was wrong is worth keeping.** The per-exit work - two
+VMPTRLDs, two VMCLEARs, about seventy VMREAD/VMWRITEs, all of
+`build_vmcs02` - was costed at bare-metal instruction rates, order ten
+thousand cycles, and dismissed as two orders of magnitude short. On this
+rig none of those are instructions: **every VMX instruction this VMM
+executes is itself an exit to KVM and is emulated there**, which is
+exactly what item 2 above already said. Order a hundred emulated VMX
+instructions per second-level exit, at microseconds each, lands on the
+measured 754 rather than below it. So the cost is ours after all, and the
+thing to count is not exits but **VMX instructions per second-level
+exit**.
 
-What that means for the two items above: item 1 and item 2 are still real
-costs and still worth having, but neither is on the path to a boot. Do
-not spend another run on them before this is settled.
+Measured with `ps`-equivalent thread accounting, 30 second window, host
+has 8 cores:
+
+| thread | share of a core |
+|---|---|
+| `CPU 1/KVM` .. `CPU 7/KVM` | 100.0% each |
+| `CPU 0/KVM` | 65.6% |
+
+**Seven of the eight host cores are burned by application processors
+spinning in the firmware's wait loop.** EDK2's `MpInitLib` parks an
+application processor in a `CpuPause` busy loop, which takes no VM exit
+at all - which is why their exit counters are frozen at 107 while each
+consumes a whole core. On real hardware that costs nothing. Here it
+leaves the boot processor, which is doing all of the work, at 65.6% of
+one core.
+
+That is a measured handicap of at least 1.5x on top of everything else,
+and it is a rig artefact rather than a defect: it exists only because the
+boot is slow enough that the operating system never reaches its own
+start-up sequence, so the firmware's parked processors never get taken
+over. It does mean **a rig measurement of the boot processor understates
+the target by more than the 9.6x already recorded**, and that any
+experiment run with fewer virtual processors is not comparable to one run
+with eight.
+
+The timer cycle above is therefore Hyper-V idling, not the cause. It
+remains the clearest picture of what the guest is doing and is why item 1
+and item 2 are the path: both cut VMX instructions per second-level exit,
+which is now the quantity that matters.
 
 Next, and unmeasured: whether `HV_X64_MSR_TIME_REF_COUNT` advances at the
 rate Hyper-V believes it does. It is a 100 ns counter, so it must advance
