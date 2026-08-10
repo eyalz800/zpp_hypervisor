@@ -1180,6 +1180,29 @@ static const semantic_case g_semantics[] = {
      .kind = model_kind::bit_flip,
      .size = 2,
      .operand = 9},
+
+    // The bit group with the offset in a register, which is the same
+    // four operations reading their offset out of the register file.
+    {.text = "btl %r14d, (%rcx)",
+     .kind = model_kind::bit_test,
+     .size = 4,
+     .operand = 2},
+    {.text = "btsl %r13d, (%rcx)",
+     .kind = model_kind::bit_set,
+     .size = 4,
+     .operand = 31},
+    {.text = "btrq %r15, (%rcx)",
+     .kind = model_kind::bit_clear,
+     .size = 8,
+     .operand = 8},
+    {.text = "btcw %r14w, (%rcx)",
+     .kind = model_kind::bit_flip,
+     .size = 2,
+     .operand = 2},
+    {.text = "btq %r13, (%rcx)",
+     .kind = model_kind::bit_test,
+     .size = 8,
+     .operand = 31},
 };
 
 // ------------------------------------------------------------- corpus
@@ -1339,6 +1362,24 @@ static void generate(code_size mode)
         }
     }
 
+    // The same group with the offset in a register. The register has to
+    // hold an offset inside the operand or the instruction names a
+    // different word of memory and is refused, so these are the
+    // registers the file above gives small values to.
+    for (auto * mnemonic : bit_ops) {
+        for (std::size_t f{}; f < form_count; ++f) {
+            if (sixty_four) {
+                emit(std::string(mnemonic) + "w %r14w, " + forms[f], mode);
+                emit(std::string(mnemonic) + "l %r13d, " + forms[f], mode);
+                emit(std::string(mnemonic) + "l %r14d, " + forms[f], mode);
+                emit(std::string(mnemonic) + "q %r15, " + forms[f], mode);
+            } else {
+                emit(std::string(mnemonic) + "w %si, " + forms[f], mode);
+                emit(std::string(mnemonic) + "l %esi, " + forms[f], mode);
+            }
+        }
+    }
+
     // Prefixes, on forms that carry them in the wild.
     for (std::size_t f{}; f < form_count; ++f) {
         emit(std::string("lock addl %edx, ") + forms[f], mode);
@@ -1414,6 +1455,20 @@ static void generate_refusals()
     emit("btcq $64, (%rcx)", code_size::bits_64, expectation::refused);
     emit("btsl $200, (%rcx)", code_size::bits_64, expectation::refused);
     emit("btsl $40, (%ecx)", code_size::bits_32, expectation::refused);
+
+    // The same, with the offset in a register - where the value rather
+    // than the encoding decides. RDI holds -1, R11 holds 0x40 and R13
+    // holds 0x1f, so each of these is outside the operand it is applied
+    // to and each names a word this decoder cannot address.
+    emit("btl %edi, (%rcx)", code_size::bits_64, expectation::refused);
+    emit("btsq %rdi, (%rcx)", code_size::bits_64, expectation::refused);
+    emit("btrl %r11d, (%rcx)", code_size::bits_64, expectation::refused);
+    emit("btcw %r13w, (%rcx)", code_size::bits_64, expectation::refused);
+    emit("btsq %r11, (%rcx)", code_size::bits_64, expectation::refused);
+
+    // And with the offset taken out of the host stack pointer's slot.
+    emit("btsl %esp, (%rcx)", code_size::bits_64, expectation::refused);
+    emit("btq %rsp, (%rcx)", code_size::bits_64, expectation::refused);
 
     // An address-size prefix in 32-bit code selects 16-bit addressing,
     // which moves where the instruction ends.

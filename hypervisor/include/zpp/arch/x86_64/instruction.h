@@ -1159,6 +1159,85 @@ decode(std::span<const std::byte> code,
             break;
         }
 
+        // The bit group with the offset in a register: the same four
+        // operations as the immediate form below, with the operation in
+        // the opcode rather than in the ModRM register field.
+        //
+        // Worth having even though the immediate form covers a constant
+        // bit number, because the offset a driver computes lands in a
+        // register - and every form this decoder answers is one that
+        // stops taking the stepping path, which is where the open
+        // defects are.
+        case 0xa3:
+        case 0xab:
+        case 0xb3:
+        case 0xbb: {
+            auto size = instruction_detail::width_of(found, false);
+            fields = instruction_detail::read_modrm(at, found, mode);
+
+            if (fields.names_register()) {
+                return {};
+            }
+
+            auto index =
+                static_cast<std::uint8_t>(fields.reg | found.extend_reg());
+
+            // Encoding four is the *host* stack pointer in the context
+            // handed here, and taking a bit number out of it would test
+            // a bit of a hypervisor address. There is no byte form of
+            // any of these, so `names_high_byte` cannot apply.
+            if (instruction_detail::names_host_stack_pointer(index)) {
+                return {};
+            }
+
+            // The offset is signed and is not bounded by the operand.
+            // With a memory bit base it names a *different word* rather
+            // than a different bit of this one - the processor moves the
+            // access to `Effective Address + (4 * (BitOffset DIV 32))`
+            // for a 32-bit operand, `.references/sdm.txt:38988`, and the
+            // modulo at `:38974` applies only to a register bit base.
+            // Xen does the same adjustment, `x86_emulate.c`, `case
+            // DstBitBase`.
+            //
+            // Refused rather than followed, for the reason spelled out
+            // on the immediate form below: the caller keeps only the low
+            // twelve bits of the address and pastes them onto the page
+            // the violation reported, so a moved address would land back
+            // inside the same page.
+            auto offset =
+                static_cast<std::int64_t>(instruction_detail::sign_extend(
+                    registers.*register_of(index), size));
+
+            if ((offset < 0) ||
+                (offset >= (static_cast<std::int64_t>(size) * 8))) {
+                return {};
+            }
+
+            result.size = size;
+            result.operand = static_cast<std::uint64_t>(offset);
+
+            if (0xa3 == opcode) {
+                result.what = memory_operation::examine;
+                result.tests_bit = true;
+                break;
+            }
+
+            result.what = memory_operation::combine;
+
+            switch (opcode) {
+            case 0xab:
+                result.how = combine_with::set_bit;
+                break;
+            case 0xb3:
+                result.how = combine_with::clear_bit;
+                break;
+            default:
+                result.how = combine_with::flip_bit;
+                break;
+            }
+            break;
+        }
+
         // The bit group with an immediate bit number: test, and the three
         // that change the bit.
         case 0xba: {
