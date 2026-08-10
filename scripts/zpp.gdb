@@ -193,7 +193,8 @@ define zppstat
   printf "length disagreement %llu (reported %llu, decoded %llu)\n", \
     $h->emulated_length_disagreement, $h->emulated_length_reported, \
     $h->emulated_length_decoded
-  printf "nmis reinjected %llu\n", $h->guest_nmis_reinjected
+  printf "nmis reinjected %llu, steps that did not retire %llu\n", \
+    $h->guest_nmis_reinjected, $h->stepped_not_retired
 
   # What a guest hypervisor was last told when its own VMX instruction
   # failed. A non-zero count with l2 entries frozen means it is being

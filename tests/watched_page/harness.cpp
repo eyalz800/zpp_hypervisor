@@ -285,6 +285,17 @@ static void write_field(field which, std::uint64_t value)
     arch::x86_64::vmx::g_vmcs[static_cast<std::uint64_t>(which)] = value;
 }
 
+/**
+ * Models the stepped instruction retiring: a real single step leaves RIP
+ * past the instruction, and `on_monitor_trap_flag` now uses that to tell
+ * a step that ran from one whose instruction faulted instead - SDM
+ * 26.5.2, sdm.txt:201495.
+ */
+static void retire_stepped_instruction(std::uint64_t length = 3)
+{
+    write_field(field::guest_rip, hv().vmcs.guest_rip() + length);
+}
+
 static void reset()
 {
     auto & self = hv();
@@ -1665,6 +1676,7 @@ static void test_filter_notify()
 
         // The guest's own instruction retires here.
         put32(0x300, 0x0c0ffee0);
+        retire_stepped_instruction();
 
         check(hv().on_monitor_trap_flag(0), "the step completes");
         check(1 == g_notified.size(), "and the notify runs from the step");
@@ -2210,21 +2222,14 @@ static void test_straddle_and_width()
 
         std::memset(g_memory + 0xffe, 0x11, 2);
         std::memset(g_memory + 0x1000, 0x22, 2);
+        retire_stepped_instruction();
 
         hv().on_monitor_trap_flag(0);
 
-        check(1 == g_notified.size(), "and notifies after the step");
-        diverge(
-            (1 == g_notified.size()) &&
-                (0x22221111 == g_notified[0].value),
-            "on_monitor_trap_flag reads four bytes from the stepped "
-            "offset with no bound, so a step armed at page offset 0xffe "
-            "reads two bytes off the end of the watched page - the very "
-            "straddle the emulation refused at hypervisor.cpp:3471. "
-            "Harmless for the pages watched today (device registers are "
-            "dword aligned) and a wrong value reported to a handler if "
-            "it ever is not. Smallest fix: clamp the read to the page, "
-            "or refuse to notify when offset + 4 > page_size");
+        check(g_notified.empty(),
+              "a step resolved to the last bytes of the page notifies "
+              "nothing, rather than reading past the end of the very "
+              "page the emulation refused to straddle");
     }
 
     // Now the widths and alignments, against a real filter and against

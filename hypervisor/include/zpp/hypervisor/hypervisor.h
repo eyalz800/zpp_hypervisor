@@ -4749,6 +4749,38 @@ private:
     std::uint64_t stepping_offset[max_cpus]{};
 
     /**
+     * Where the guest was when the step was armed, so the trap exit can
+     * tell whether the instruction actually retired.
+     *
+     * A monitor-trap-flag exit does not mean the stepped instruction
+     * ran. SDM 26.5.2 (.references/sdm.txt:201495): "If the instruction
+     * causes a fault, an MTF VM exit is pending on the instruction
+     * boundary following delivery of the fault (or any nested
+     * exception)", and the paragraph above it says the same of a pending
+     * event delivered before the instruction can execute. In both cases
+     * the guest's write has not happened and RIP is inside a handler
+     * rather than past the instruction.
+     *
+     * The step exists to report a write to a device register, so
+     * reporting one that did not happen is worse than reporting nothing:
+     * on the local APIC page it hands `on_interrupt_command` a stale
+     * command register, which can adopt a start-up IPI nobody sent.
+     * @{
+     */
+    std::uint64_t stepping_rip[max_cpus]{};
+
+    /**
+     * Steps whose instruction did not retire, so nothing was reported.
+     * Counted rather than passed over, because a non-zero value means
+     * writes to a watched register are being missed and the reason is
+     * not visible any other way.
+     */
+    volatile std::uint64_t stepped_not_retired{};
+    /**
+     * @}
+     */
+
+    /**
      * How many of this module's pages a guest has touched. One per
      * page rather than one per access, since a page is redirected
      * permanently on the first touch and never faults again.

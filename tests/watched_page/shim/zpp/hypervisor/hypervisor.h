@@ -167,6 +167,8 @@ public:
     bool stepping_watch[max_cpus]{};
     std::uint64_t stepping_page[max_cpus]{};
     std::uint64_t stepping_offset[max_cpus]{};
+    std::uint64_t stepping_rip[max_cpus]{};
+    volatile std::uint64_t stepped_not_retired{};
 
     struct watched_access
     {

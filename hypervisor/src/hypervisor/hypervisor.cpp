@@ -3699,6 +3699,10 @@ bool hypervisor::on_ept_violation(std::size_t cpu,
         // answered it. Reaching here means the instruction could not be
         // carried out, not that the address is unknown.
         this->stepping_offset[cpu] = address & page_offset_mask;
+
+        // Where the guest is now, so the trap exit can tell whether the
+        // instruction retired. See stepping_rip.
+        this->stepping_rip[cpu] = this->vmcs.guest_rip();
         monitor_trap_flag(true);
         return true;
     }
@@ -3764,9 +3768,11 @@ bool hypervisor::on_monitor_trap_flag(std::size_t cpu)
 
     auto page = this->stepping_page[cpu];
     auto offset = this->stepping_offset[cpu];
+    auto armed_at = this->stepping_rip[cpu];
     this->stepping_watch[cpu] = false;
     this->stepping_page[cpu] = {};
     this->stepping_offset[cpu] = {};
+    this->stepping_rip[cpu] = {};
     monitor_trap_flag(false);
 
     // Close the page again before the handler runs, so that a handler
@@ -3774,6 +3780,44 @@ bool hypervisor::on_monitor_trap_flag(std::size_t cpu)
     if (auto entry = epte_for(page << 12)) {
         (*entry)->write(false);
         invalidate_ept();
+    }
+
+    // Whether the instruction actually ran.
+    //
+    // A monitor-trap-flag exit does not say that it did. SDM 26.5.2
+    // (.references/sdm.txt:201495): "If the instruction causes a fault,
+    // an MTF VM exit is pending on the instruction boundary following
+    // delivery of the fault (or any nested exception)", and the case
+    // above it is the same for a pending event delivered before the
+    // instruction can execute. In both the guest's write has not
+    // happened and RIP is inside a handler, not past the instruction.
+    //
+    // An instruction that retired left RIP between one and fifteen bytes
+    // on - fifteen being the architectural maximum length - and it
+    // cannot have branched, because the only forms stepped here are the
+    // ones that faulted writing a watched page. Anything else means a
+    // handler was entered instead.
+    //
+    // Reporting nothing is the safe answer, because the alternative is
+    // reporting a write that never happened: on the local APIC page that
+    // hands on_interrupt_command a stale command register, which can
+    // adopt a start-up IPI nobody sent. Counted, so that writes being
+    // missed this way is visible rather than silent.
+    //
+    // Also bounded to the page. The read below is four bytes, and an
+    // access resolved to the last three bytes of the page would read
+    // past the end of the very page the emulation refused to straddle.
+    constexpr std::uint64_t maximum_instruction_length = 15;
+    constexpr std::uint64_t page_offset_mask = page_size - 1;
+
+    auto advanced = this->vmcs.guest_rip() - armed_at;
+    auto retired =
+        (0 != advanced) && (advanced <= maximum_instruction_length);
+    auto within_page = offset <= ((page_offset_mask + 1) - 4);
+
+    if (!retired || !within_page) {
+        this->stepped_not_retired = this->stepped_not_retired + 1;
+        return true;
     }
 
     // What the step accomplished, in the shape an emulated write arrives
