@@ -186,6 +186,40 @@ fi
 # emulation actually answers - but two of the pairings span headers the
 # harness replaces with a shim, so they can only be checked here, against
 # the real sources.
+# The two controls the coverage suite turns on, and the case that answers
+# them. Both are off in any build anyone deploys - a UEFI firmware parks
+# its application processors in `monitor; mwait; jmp` and this VMM adopts
+# them, which measured 1,190,000 exits per processor in under two minutes
+# - so the handler case for them cannot execute in a deployed build.
+#
+# That is exactly why the case has to keep existing: turning the constant
+# back on is one line, and a case that has never executed is not a case.
+# ZPP_GUEST_TESTS turns the controls on so the coverage suite executes it.
+# This asserts the three parts stay attached to each other.
+echo "== monitor and mwait: the controls, the switch and the case"
+
+if grep -q 'trap_monitor_and_mwait = ZPP_GUEST_TESTS' "$handler"; then
+    echo "  ok    the controls are keyed on ZPP_GUEST_TESTS"
+elif grep -q 'trap_monitor_and_mwait = false' "$handler"; then
+    echo "  FAIL  trap_monitor_and_mwait is hardcoded false again, so" >&2
+    echo "        the monitor/mwait case cannot execute in any build and" >&2
+    echo "        the coverage suite cannot reach exit reasons 36 or 39." >&2
+    status=1
+else
+    echo "  FAIL  trap_monitor_and_mwait is neither false nor keyed on" >&2
+    echo "        ZPP_GUEST_TESTS - if it is now unconditionally true," >&2
+    echo "        every idle guest processor pays two exits per loop." >&2
+    status=1
+fi
+
+if has_case "monitor" && has_case "mwait"; then
+    echo "  ok    the handler answers both"
+else
+    echo "  FAIL  the monitor/mwait case was removed while the controls" >&2
+    echo "        can still be turned on - they would reach default:." >&2
+    status=1
+fi
+
 echo "== a capability offered is a capability implemented"
 
 nested="$root/hypervisor/include/zpp/hypervisor/nested_vmx.h"

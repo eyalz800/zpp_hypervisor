@@ -50,6 +50,30 @@ option(ZPP_NESTED_VMX
     "Report VMX to the guest and emulate the VMX instructions"
     OFF)
 
+# The guest-side coverage suite: uefi_loader/include/zpp/guest_tests.h, run
+# from inside the guest once the hypervisor is live, reporting one line per
+# case on serial. scripts/ci/bochs-exit-coverage.sh grades the result.
+#
+# Off, and off is the decision rather than a convenience. It is a test
+# facility and has no place in a loader that boots anything: it installs an
+# interrupt descriptor table of its own, deliberately faults thirteen
+# instructions, writes the local APIC's task priority register and then
+# stops instead of chainloading. None of that destroys state the way
+# ZPP_VERIFY_HYPERVISOR does - every register it writes is put back and no
+# other processor is touched - but a build carrying it never reaches an
+# operating system, which is the failure mode CLAUDE.md records as costing
+# a full day when it was a stale cache entry rather than a deliberate
+# choice. scripts/check-bootable.sh refuses one.
+#
+# Declared here rather than beside the loader's other switches because the
+# *hypervisor* reads it too: two VM-execution controls whose handler cases
+# would otherwise never execute are turned on under it. See
+# `trap_monitor_and_mwait` in hypervisor.cpp for why that is the only sound
+# way to test them.
+option(ZPP_GUEST_TESTS
+    "Compile the guest-side VM-exit, EPT and emulation coverage suite"
+    OFF)
+
 # === Hypervisor (freestanding x86_64 PIE ELF) ===
 ExternalProject_Add(hypervisor
     SOURCE_DIR "${CMAKE_CURRENT_SOURCE_DIR}/cmake/hypervisor"
@@ -63,6 +87,7 @@ ExternalProject_Add(hypervisor
         -DZPP_HYPERVISOR_WAIT_FOR_DEBUGGER=${ZPP_HYPERVISOR_WAIT_FOR_DEBUGGER}
         -DZPP_DIAG=${ZPP_DIAG}
         -DZPP_NESTED_VMX=${ZPP_NESTED_VMX}
+        -DZPP_GUEST_TESTS=${ZPP_GUEST_TESTS}
     INSTALL_COMMAND ""
     BUILD_ALWAYS ON
 )
@@ -123,9 +148,6 @@ option(ZPP_TRACE
 # operating system, which is the failure mode CLAUDE.md records as costing
 # a full day when it was a stale cache entry rather than a deliberate
 # choice. scripts/check-bootable.sh refuses one.
-option(ZPP_GUEST_TESTS
-    "Compile the guest-side VM-exit, EPT and emulation coverage suite"
-    OFF)
 
 ExternalProject_Add(uefi_loader
     SOURCE_DIR "${CMAKE_CURRENT_SOURCE_DIR}/cmake/uefi-loader"

@@ -7979,7 +7979,20 @@ void hypervisor::setup_vmcs(std::size_t cpu,
     // Turn it on to ask questions about a guest's idle path - whether it
     // reaches MWAIT, on which processor, and whether its monitor arms -
     // and turn it off again afterwards.
-    constexpr bool trap_monitor_and_mwait = false;
+    //
+    // On under ZPP_GUEST_TESTS, and that is the only sound way to test
+    // the two cases. The exit handler has had a `monitor`/`mwait` case
+    // since before the controls were turned off, and with them off it is
+    // code that cannot execute - so it is neither exercised by any test
+    // nor removed. Turning the controls on in the test build makes the
+    // two reasons reachable and the case live, and costs a deployed
+    // build nothing, because a hypervisor compiled with this switch is
+    // only ever embedded in a loader check-bootable.sh refuses.
+    //
+    // It does not make the measurement above wrong: those exits are still
+    // two per idle-loop iteration, and the coverage suite executes each
+    // instruction a handful of times rather than parking in one.
+    constexpr bool trap_monitor_and_mwait = ZPP_GUEST_TESTS;
 
     auto monitor_controls =
         trap_monitor_and_mwait

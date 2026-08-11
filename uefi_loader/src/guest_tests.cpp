@@ -274,6 +274,116 @@ void probe_store_dword()
     *g_probe_dword = static_cast<std::uint32_t>(g_probe_value);
 }
 
+void probe_rdtsc()
+{
+    std::uint32_t low{};
+    std::uint32_t high{};
+    asm volatile("rdtsc" : "=a"(low), "=d"(high));
+    g_probe_value = (static_cast<std::uint64_t>(high) << 32) | low;
+}
+
+void probe_rdtscp()
+{
+    std::uint32_t low{};
+    std::uint32_t high{};
+    std::uint32_t aux{};
+    asm volatile("rdtscp" : "=a"(low), "=d"(high), "=c"(aux));
+    g_probe_value = (static_cast<std::uint64_t>(high) << 32) | low;
+}
+
+void probe_invlpg()
+{
+    // Against this suite's own operand, which is mapped by construction -
+    // the alternative is an unmapped address, and INVLPG on one is
+    // architecturally a no-op rather than a fault, so it would prove
+    // nothing about the address and everything about the instruction.
+    asm volatile("invlpg %0" : : "m"(g_operand) : "memory");
+}
+
+void probe_pause()
+{
+    asm volatile("pause");
+}
+
+void probe_mov_from_dr()
+{
+    std::uint64_t value{};
+    asm volatile("mov %%dr0, %0" : "=r"(value));
+    g_probe_value = value;
+}
+
+void probe_rdpmc()
+{
+    // Counter zero. On a processor with no architectural performance
+    // counters this raises #GP, which the fault catcher records - the
+    // claim being made is about the exit, not about the counter.
+    std::uint32_t low{};
+    std::uint32_t high{};
+    asm volatile("rdpmc" : "=a"(low), "=d"(high) : "c"(0u));
+    g_probe_value = (static_cast<std::uint64_t>(high) << 32) | low;
+}
+
+void probe_wbinvd()
+{
+    asm volatile("wbinvd" : : : "memory");
+}
+
+void probe_invpcid()
+{
+    // Type 2, all-context, which needs no PCID in the descriptor and no
+    // CR4.PCIDE. #UD where the instruction is not supported, which the
+    // fault catcher records.
+    asm volatile("invpcid %1, %0"
+                 :
+                 : "r"(std::uint64_t{2}), "m"(g_operand)
+                 : "cc", "memory");
+}
+
+void probe_rdrand()
+{
+    std::uint64_t value{};
+    asm volatile("rdrand %0" : "=r"(value) : : "cc");
+    g_probe_value = value;
+}
+
+void probe_rdseed()
+{
+    std::uint64_t value{};
+    asm volatile("rdseed %0" : "=r"(value) : : "cc");
+    g_probe_value = value;
+}
+
+void probe_xgetbv()
+{
+    std::uint32_t low{};
+    std::uint32_t high{};
+    asm volatile("xgetbv" : "=a"(low), "=d"(high) : "c"(0u));
+    g_probe_value = (static_cast<std::uint64_t>(high) << 32) | low;
+}
+
+void probe_monitor()
+{
+    // MONITOR arms an address-range monitor on the address in RAX, with
+    // extensions and hints zero. Pointed at this suite's own operand,
+    // which is writable memory of ours - the instruction is intercepted
+    // and never reaches hardware, but pointing it somewhere real is what
+    // keeps that true of the code rather than of the operand.
+    asm volatile("monitor"
+                 :
+                 : "a"(&g_operand[0]), "c"(0u), "d"(0u)
+                 : "memory");
+}
+
+void probe_mwait()
+{
+    // MWAIT with no extensions and hint zero. Intercepted, so the
+    // handler logs it and resumes past it - the processor never enters
+    // the wait, which is what makes this safe to run with interrupts
+    // disabled. Without the interception this instruction would park the
+    // processor with nothing able to wake it.
+    asm volatile("mwait" : : "a"(0u), "c"(0u) : "memory");
+}
+
 void probe_in_16()
 {
     std::uint16_t value{};
@@ -1084,6 +1194,27 @@ bool guest_tests::run(EFI_SYSTEM_TABLE * system_table)
         // instruction raises #UD before any exit is considered. The host
         // side of this VMM sets its own OSXSAVE before executing the
         // guest's request, which is a different register.
+        //
+        // Turned on here rather than skipped when the firmware left it
+        // off. OSXSAVE is not in this VMM's CR4 guest/host mask, so the
+        // write lands in the real register without exiting, and turning
+        // it on is what makes exit reason 55 reachable at all - it was a
+        // skip on every run before this. Restored below, so the firmware
+        // gets back the CR4 it had.
+        auto cr4_before_xsetbv = read_cr4();
+        auto osxsave_supported = [] {
+            std::uint32_t registers[4]{};
+            cpuid(1, 0, registers);
+            // Leaf 1 ECX bit 26 is XSAVE, which is what OSXSAVE enables
+            // an operating system's use of. Without it CR4.OSXSAVE is a
+            // reserved bit and setting it raises #GP.
+            return 0 != (registers[2] & (1u << 26));
+        }();
+
+        if (osxsave_supported && !(cr4_before_xsetbv & cr4_os_xsave)) {
+            write_cr4(cr4_before_xsetbv | cr4_os_xsave);
+        }
+
         if (read_cr4() & cr4_os_xsave) {
             auto xsetbv = probe(probe_xsetbv);
             check_equal(state,
@@ -1100,10 +1231,141 @@ bool guest_tests::run(EFI_SYSTEM_TABLE * system_table)
             emit(state,
                  "exit.xsetbv",
                  outcome::skip,
-                 "guest_cr4_osxsave_clear",
+                 "no_xsave_in_cpuid_so_osxsave_is_reserved",
                  exit_xsetbv,
                  0);
         }
+
+        // CR4 back exactly as the firmware had it.
+        if (read_cr4() != cr4_before_xsetbv) {
+            write_cr4(cr4_before_xsetbv);
+        }
+        check_equal(state,
+                    "cr4.osxsave_restored",
+                    "cr4",
+                    cr4_before_xsetbv,
+                    read_cr4());
+    }
+
+    // === Instructions that must NOT exit ===============================
+    //
+    // The other half of exit-reason coverage, and the half a
+    // reached-reason count cannot show.
+    //
+    // Every instruction below exits *conditionally*, on a VM-execution
+    // control this VMM does not set - and for every one of them the exit
+    // handler has no case, so turning the control on would send the
+    // instruction to `default:` and stop the processor. CLAUDE.md states
+    // that as a rule: nothing a guest can execute may reach `default:`.
+    //
+    // check-exit-handler.sh states the rule at the source. These state it
+    // at the machine: the configuration really is what the source says,
+    // on a processor really running under this VMM. A control turned on
+    // by accident - forced through `adjust_msr` by a capability MSR, say,
+    // which is exactly how 5531fdc's preemption timer arrived - fails
+    // here cleanly instead of wedging a processor on a rig.
+    //
+    // Some of these fault instead on a processor that does not implement
+    // them. A fault is not a failure of the claim: the claim is only that
+    // no VM exit was taken.
+    //
+    // HLT is deliberately absent. HLT exiting is off, so the instruction
+    // would do what a guest asked and halt - and these run with
+    // interrupts disabled, so nothing would end it. The one instruction
+    // whose negative cannot be asserted from inside the guest that would
+    // be stopped by asserting it.
+    {
+        struct negative_case
+        {
+            const char * name;
+            void (*body)();
+            const char * control;
+        };
+
+        const negative_case cases[]{
+            {"rdtsc", probe_rdtsc, "primary_bit_12_rdtsc_exiting"},
+            {"rdtscp", probe_rdtscp, "primary_bit_12_rdtsc_exiting"},
+            {"invlpg", probe_invlpg, "primary_bit_9_invlpg_exiting"},
+            {"pause", probe_pause, "primary_bit_30_pause_exiting"},
+            {"mov_from_dr",
+             probe_mov_from_dr,
+             "primary_bit_23_mov_dr_exiting"},
+            {"rdpmc", probe_rdpmc, "primary_bit_11_rdpmc_exiting"},
+            {"wbinvd", probe_wbinvd, "secondary_bit_6_wbinvd_exiting"},
+            {"invpcid", probe_invpcid, "secondary_bit_12_enable_invpcid"},
+            {"rdrand", probe_rdrand, "secondary_bit_11_rdrand_exiting"},
+            {"rdseed", probe_rdseed, "secondary_bit_16_rdseed_exiting"},
+            {"xgetbv", probe_xgetbv, "no_control_xgetbv_never_exits"},
+        };
+
+        for (const auto & entry : cases) {
+            auto measured = probe(entry.body);
+
+            char name[80]{};
+            auto at = trace::append_text(name, "quiet.");
+            at = trace::append_text(at, entry.name);
+            at = trace::append_text(at, ".does_not_exit");
+            *at = 0;
+
+            emit(state,
+                 name,
+                 (no_exit_reason == measured.reason) ? outcome::pass
+                                                     : outcome::fail,
+                 entry.control,
+                 no_exit_reason,
+                 measured.reason);
+        }
+    }
+
+    // === MONITOR and MWAIT =============================================
+    //
+    // The only two exit reasons in this suite that are reachable *because
+    // the test build asks for them*. Both controls are off in a deployed
+    // build, and the measurement that turned them off is in setup_vmcs:
+    // a UEFI firmware parks its application processors in
+    // `monitor; mwait; jmp`, and this VMM adopts those processors, so all
+    // seven sat in that loop taking 1,190,000 exits each in under two
+    // minutes.
+    //
+    // The handler's case for them therefore cannot execute in any build
+    // anyone deploys - it is neither exercised nor removed. Turning the
+    // controls on under ZPP_GUEST_TESTS makes it live for exactly as long
+    // as this suite runs, which is the only sound way to test it: the
+    // alternative is a case that has never once executed protecting a
+    // path a guest can reach the moment somebody flips the constant back.
+    //
+    // SDM 28.1.3 lists both as conditional on their controls, so with the
+    // controls off these two would join the negatives above - which is
+    // what they were before this.
+    {
+        auto monitor = probe(probe_monitor);
+        check_equal(
+            state, "exit.monitor", "reason", exit_monitor, monitor.reason);
+        check_equal(state,
+                    "monitor.does_not_fault",
+                    "vector",
+                    static_cast<std::uint64_t>(no_fault),
+                    static_cast<std::uint64_t>(monitor.vector));
+
+        auto mwait = probe(probe_mwait);
+        check_equal(
+            state, "exit.mwait", "reason", exit_mwait, mwait.reason);
+        check_equal(state,
+                    "mwait.does_not_fault",
+                    "vector",
+                    static_cast<std::uint64_t>(no_fault),
+                    static_cast<std::uint64_t>(mwait.vector));
+
+        // And the thing that makes running MWAIT with interrupts disabled
+        // survivable: the handler resumed *past* it rather than letting
+        // the processor enter the wait. If it had not, nothing below this
+        // line would run and the harness would report no DONE line.
+        emit(state,
+             "mwait.resumed_past",
+             outcome::pass,
+             "reaching_this_line_is_the_assertion",
+             1,
+             1);
     }
 
     // === EPT and the store emulation ===================================

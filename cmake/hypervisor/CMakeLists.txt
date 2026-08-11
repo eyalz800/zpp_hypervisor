@@ -116,6 +116,12 @@ target_compile_options(zpp_hypervisor PRIVATE
     # to carry it once it works. It defaults off in both; see nested_vmx.h for
     # what is still missing.
     -DZPP_NESTED_VMX=$<BOOL:${ZPP_NESTED_VMX}>
+    # The guest coverage suite, which lives in the loader but turns on two
+    # VM-execution controls here. Same always-defined 0/1 shape as the two
+    # above. Off by default and off in every build that is not a test one;
+    # scripts/check-bootable.sh refuses a loader carrying the suite, and a
+    # hypervisor built with this is only ever embedded in such a loader.
+    -DZPP_GUEST_TESTS=$<BOOL:${ZPP_GUEST_TESTS}>
     $<$<CONFIG:Release>:-O2>
     $<$<CONFIG:Release>:-ffunction-sections>
     $<$<CONFIG:Release>:-fdata-sections>

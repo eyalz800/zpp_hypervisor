@@ -209,6 +209,8 @@ private:
     static constexpr std::uint32_t exit_io_instruction = 30;
     static constexpr std::uint32_t exit_rdmsr = 31;
     static constexpr std::uint32_t exit_wrmsr = 32;
+    static constexpr std::uint32_t exit_mwait = 36;
+    static constexpr std::uint32_t exit_monitor = 39;
     static constexpr std::uint32_t exit_ept_violation = 48;
     static constexpr std::uint32_t exit_invept = 50;
     static constexpr std::uint32_t exit_invvpid = 53;
