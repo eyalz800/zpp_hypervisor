@@ -106,8 +106,23 @@ std::uint64_t hypervisor::cached_vmx_msr(std::size_t msr)
     case 0x48d:
         return 0x7f00000016ull;
     case 0x482:
-    case 0x48e:
         return 0xfff9fffe0401e172ull;
+
+        // The TRUE primary MSR, which was returning the non-TRUE value
+        // and so kept bits 15 and 16 - CR3-load exiting and CR3-store
+        // exiting - in the allowed-0 half. SDM 27.6.2 lists them among
+        // the controls the TRUE MSRs relax, and a real guest hypervisor
+        // was measured with **both clear**: primary 0xa4206dfa. With the
+        // wrong half the fixture forced them on and that capture could
+        // not be replayed here at all.
+        //
+        // Third fixture value of this shape found by this suite, after
+        // the TRUE exit and entry MSRs. They share one cause: the
+        // non-TRUE values were reused for the TRUE indices, and every
+        // question about a control a guest hypervisor *clears* was
+        // answered by `adjust_msr` before the code under test saw it.
+    case 0x48e:
+        return 0xfff9fffe04006172ull;
     case 0x483:
         return 0x07ffffff00036dffull;
     case 0x484:
@@ -3636,7 +3651,7 @@ static constexpr std::uint64_t entry_load_ia32_bndcfgs = 1ull << 16;
  * @{
  */
 static constexpr std::uint64_t pin_default1 = 0x16;
-static constexpr std::uint64_t primary_default1 = 0x0401e172;
+static constexpr std::uint64_t primary_default1 = 0x04006172;
 static constexpr std::uint64_t exit_default1 = 0x00036dfb;
 static constexpr std::uint64_t entry_default1 = 0x000011fb;
 /**
@@ -4701,6 +4716,186 @@ static void test_the_rest_of_vmcs02()
     }
 }
 
+// -------------- 13. the control words a real guest hypervisor asked for
+/**
+ * Hyper-V's own vmcs12, replayed.
+ *
+ * BACKLOG.md records the capture, read out of a real guest hypervisor at
+ * the first `build_vmcs02` on the run where it engaged:
+ *
+ *     pin       0x0000001e
+ *     primary   0xa4206dfa
+ *     secondary 0x00000000
+ *     exit      0x0003efff
+ *     entry     0x000013ff
+ *
+ * Until now the only thing that compared what it asked for against what
+ * it was granted was a pair of runtime counters read out of a wedged
+ * machine, `vmcs12_*_asked` and `vmcs02_*_written`. That comparison is
+ * the one this project keeps getting wrong - a control offered, taken up
+ * and quietly dropped is the recurring failure - and it took a boot to
+ * run.
+ *
+ * Here it is a test. Every bit in the capture is either a default1 bit,
+ * or a bit `build_vmcs02` must grant, and the suite says which and
+ * checks it. If a later change withdraws a capability or narrows a
+ * union, this fails on a laptop rather than on the rig.
+ *
+ * What it settles, and the reason it was written now: **the exit and
+ * entry control groups are fully accounted for on the measured values.**
+ * Against the default1 sets, the capture asks for exactly three
+ * non-default controls in the two groups - host address-space size,
+ * acknowledge interrupt on exit, and IA-32e mode guest - and all three
+ * are granted. So none of the four composition defects this suite
+ * records can be the boot failure: every one of them is reached only by
+ * a control this guest hypervisor does not set.
+ */
+static void test_the_measured_control_words()
+{
+    std::printf("the control words a real guest hypervisor asked for\n");
+
+    context registers{};
+
+    asked_controls asked;
+    asked.pin = 0x0000001e;
+    asked.primary = 0xa4206dfa;
+    asked.secondary = 0x00000000;
+    asked.exit_controls = 0x0003efff;
+    asked.entry_controls = 0x000013ff;
+
+    // The capture has bit 31 set - "activate secondary controls" - with
+    // the secondary field reading zero, which nested_vmx.h explains: the
+    // field was read before the guest hypervisor had written it. Replayed
+    // as captured, because a fixture that tidied it up would stop being
+    // the measurement.
+    check(0 != (asked.primary & primary_secondary_controls),
+          "the capture activates the secondary controls");
+
+    // The capture is the five control words and nothing else, and one of
+    // them - the TPR shadow - has a field behind it. Replaying the words
+    // alone leaves the virtual-APIC address zero, which `build_vmcs02`
+    // refuses on purpose: a shadow VMCS starts zeroed, so zero is what a
+    // guest hypervisor that set the control and never wrote the field
+    // leaves behind, and page zero holds the real-mode interrupt vector
+    // table. Accepting it would have the processor write VTPR over the
+    // guest's own IVT.
+    //
+    // Worth stating rather than quietly filling in: this is the one part
+    // of the measured configuration that the capture does not pin, so a
+    // plausible page is supplied and the refusal is asserted beside it.
+    check(!compose(asked, registers).has_value(),
+          "the capture's control words with the virtual-APIC address left "
+          "at zero are refused - a shadow VMCS starts zeroed, and page "
+          "zero is the real-mode interrupt vector table");
+
+    auto with_page = [&]() {
+        auto result = compose(asked, registers);
+        static_cast<void>(result);
+        hv().guest_vmcs12[cpu].write(field::virtual_apic_address, 0x70000);
+        hv().vmcs12_controls_captured = 0;
+        return hv().build_vmcs02(cpu);
+    };
+
+    auto built = with_page();
+    check(built.has_value(),
+          "the control words a real guest hypervisor was measured asking "
+          "for are accepted - every bit beyond the default1 sets is one "
+          "this VMM offers, and a capability withdrawn later would refuse "
+          "the launch outright");
+
+    if (!built) {
+        return;
+    }
+
+    // Asked against granted, per group, which is what the runtime
+    // counters do on the rig.
+    auto granted_pin =
+        hv().vmcs.read(field::pin_based_vm_execution_controls);
+    auto granted_primary = hv().vmcs.read(
+        field::primary_processor_based_vm_execution_controls);
+    auto granted_exit = vmcs02_exit_controls();
+    auto granted_entry = vmcs02_entry_controls();
+
+    // Pin: the capture asks for NMI exiting beyond the default1 set, and
+    // nothing else.
+    check(0x8 == (asked.pin & ~pin_default1),
+          "the capture's only non-default1 pin control is NMI exiting");
+    check(0x8 == (granted_pin & 0x8), "and vmcs02 grants it");
+
+    // Primary: seven controls beyond the default1 set.
+    constexpr std::uint64_t expected_primary_beyond =
+        (1ull << 3) | (1ull << 7) | (1ull << 10) | (1ull << 11) |
+        (1ull << 21) | (1ull << 29) | (1ull << 31);
+
+    check(expected_primary_beyond == (asked.primary & ~primary_default1),
+          "the capture's non-default1 primary controls are TSC "
+          "offsetting, HLT exiting, MWAIT exiting, RDPMC exiting, the "
+          "TPR shadow, MONITOR exiting and the secondary controls");
+    check(expected_primary_beyond ==
+              (granted_primary & expected_primary_beyond),
+          "and vmcs02 grants every one of them - the TPR shadow is the "
+          "one this VMM once withheld, which BACKLOG.md records as "
+          "seventeen second-level entries and a boot loop");
+
+    // Exit: two controls beyond the default1 set, and both are granted
+    // now. The second of them is what `86d4560` fixed.
+    constexpr std::uint64_t expected_exit_beyond =
+        exit_save_debug_controls | exit_host_address_space_size |
+        exit_acknowledge_interrupt;
+
+    check(expected_exit_beyond == (asked.exit_controls & ~exit_default1),
+          "the capture's non-default1 exit controls are save debug "
+          "controls, host address-space size and acknowledge interrupt "
+          "on exit - measured against the *TRUE* allowed-0 half, where "
+          "bit 2 is a control a guest hypervisor chooses rather than a "
+          "reserved 1");
+    check(0 != (granted_exit & exit_save_debug_controls),
+          "and vmcs02 grants the save, which is what makes "
+          "`save_l2_state`'s DR7 and IA32_DEBUGCTL copy-back read "
+          "something the processor wrote");
+    check(0 == (asked.exit_controls &
+                (exit_save_ia32_pat | exit_save_ia32_efer |
+                 exit_load_ia32_pat | exit_load_ia32_efer |
+                 exit_clear_ia32_bndcfgs)),
+          "and it asks for none of the four controls this suite records "
+          "as composed wrongly - which is why none of them can be the "
+          "boot failure");
+
+    // Granted only where the exit is reflected, which the capture also
+    // satisfies: its pin controls do not set external-interrupt exiting
+    // at the moment of this first launch, so the acknowledgement is
+    // correctly withheld here and granted later, once they do.
+    check(0 == (asked.pin & pin_external_interrupt),
+          "the capture's first launch does not yet set "
+          "external-interrupt exiting");
+    check(0 == (granted_exit & exit_acknowledge_interrupt),
+          "so vmcs02 does not acknowledge yet - the exit would not be "
+          "reflected, and 324 external-interrupt exits later in the same "
+          "boot say the control does arrive");
+
+    asked.pin = 0x0000001e | pin_external_interrupt;
+    check(with_page().has_value(),
+          "the same capture, once it asks for external-interrupt exiting");
+    check(0 != (vmcs02_exit_controls() & exit_acknowledge_interrupt),
+          "acknowledges, and the vector reaches the guest hypervisor");
+
+    // Entry: one control beyond the default1 set.
+    check((entry_load_debug_controls | entry_ia32e_mode_guest) ==
+              (asked.entry_controls & ~entry_default1),
+          "the capture's non-default1 entry controls are load debug "
+          "controls and IA-32e mode guest");
+    check(0 != (granted_entry & entry_load_debug_controls),
+          "and vmcs02 grants the load, so the second-level guest gets "
+          "the DR7 and IA32_DEBUGCTL vmcs12 names");
+    check(0 != (granted_entry & entry_ia32e_mode_guest),
+          "and vmcs02 grants it, so the second-level guest runs in long "
+          "mode");
+    check(0 != (asked.entry_controls & entry_load_debug_controls),
+          "the capture *sets* load debug controls, which is the other "
+          "reason the entry-control defect this suite records cannot be "
+          "the boot failure - it is reached only by clearing it");
+}
+
 int main()
 {
     test_reason_table();
@@ -4715,6 +4910,7 @@ int main()
     test_halt_then_wake();
     test_exit_and_entry_control_composition();
     test_the_rest_of_vmcs02();
+    test_the_measured_control_words();
 
     std::printf("\n%d checks, %d failures\n", g_checks, g_failures);
 
