@@ -3220,6 +3220,48 @@ private:
     /**
      * @}
      */
+
+    /**
+     * The second-level guest's instruction pointer after **one**
+     * instruction following an injected `0xd1`, and the exit that
+     * reported it.
+     *
+     * `injection_to_rip` could not answer the question it was added for,
+     * and the reason is worth keeping: both explanations predicted the
+     * same observation. A handler that ran read the message page - an
+     * ordinary memory read, causing no exit - and returned by `IRET` to
+     * the resume point, so the next exit is the next iteration of the
+     * guest's loop. A handler that never ran leaves the guest at the
+     * resume point, so the next exit is also the next iteration of its
+     * loop. Nothing the handler does before the end-of-message write
+     * exits, and that write is already known never to happen.
+     *
+     * So this forces an exit instead of waiting for one. The monitor
+     * trap flag exits after a single retired instruction, which makes
+     * the answer unambiguous:
+     *
+     * - a RIP at the interrupt descriptor table's handler for `0xd1`
+     *   means the vector was taken, and the defect is inside the
+     *   handler's path rather than in the hand-over,
+     * - a RIP at or beside the resume point means the vector was
+     *   injected and **not taken**, which would be a defect here, since
+     *   VM-entry injection is not gated on `RFLAGS.IF` or on the
+     *   interruptibility state.
+     *
+     * `injection_step_reason` is kept beside it because a delivery that
+     * faults exits with the fault rather than with the trap flag, and
+     * that is a third answer rather than a failure to measure.
+     * @{
+     */
+    volatile std::uint64_t
+        injection_step_rip[max_cpus][injection_landing_capacity]{};
+    volatile std::uint64_t
+        injection_step_reason[max_cpus][injection_landing_capacity]{};
+    volatile std::uint64_t injection_step_count[max_cpus]{};
+    volatile std::uint64_t injection_step_armed[max_cpus]{};
+    /**
+     * @}
+     */
     volatile std::uint64_t vmcs12_exit_controls{};
     volatile std::uint64_t vmcs12_entry_controls{};
     volatile std::uint64_t vmcs12_controls_captured{};

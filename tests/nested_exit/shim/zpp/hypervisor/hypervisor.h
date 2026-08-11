@@ -263,6 +263,21 @@ public:
     std::uint64_t l2_exits_handled[max_cpus]{};
     std::uint64_t shadow_ept_leaves_filled[max_cpus]{};
     bool stepping_watch[max_cpus]{};
+
+    // The real one lives in local_apic.cpp, which this harness does not
+    // compile. Recorded rather than ignored: whether the trap flag is
+    // taken back out on the exit that consumes it is a property worth
+    // being able to assert, and a silently empty stub would make the
+    // question unaskable.
+    void monitor_trap_flag(bool value)
+    {
+        this->monitor_trap_flag_writes =
+            this->monitor_trap_flag_writes + 1;
+        this->monitor_trap_flag_last = value;
+    }
+
+    std::uint64_t monitor_trap_flag_writes{};
+    bool monitor_trap_flag_last{};
     arch::x86_64::context nested_entry_recovery[max_cpus]{};
     std::atomic<bool> nested_entry_failed[max_cpus]{};
     bool nested_msr_load_failed[max_cpus]{};
@@ -291,6 +306,12 @@ public:
         injection_to_reason[max_cpus][injection_landing_capacity]{};
     volatile std::uint64_t injection_landing_count[max_cpus]{};
     volatile std::uint64_t injection_landing_armed[max_cpus]{};
+    volatile std::uint64_t
+        injection_step_rip[max_cpus][injection_landing_capacity]{};
+    volatile std::uint64_t
+        injection_step_reason[max_cpus][injection_landing_capacity]{};
+    volatile std::uint64_t injection_step_count[max_cpus]{};
+    volatile std::uint64_t injection_step_armed[max_cpus]{};
     volatile std::uint64_t vmcs12_exit_controls{};
     volatile std::uint64_t vmcs12_entry_controls{};
 
