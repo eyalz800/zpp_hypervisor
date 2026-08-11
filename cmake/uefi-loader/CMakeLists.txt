@@ -36,9 +36,10 @@ option(ZPP_GUEST_TESTS
 # exists, so the cases asserting it is hidden are asserting the *other*
 # build's answer. Without this the suite tested one build's rule against
 # the other's binary and failed for a reason that was not a defect.
+# ON, matching the root project. See the comment there for why.
 option(ZPP_NESTED_VMX
     "The embedded hypervisor reports VMX to its guest"
-    OFF)
+    ON)
 
 option(ZPP_DIAG
     "Compile the diagnostic log, its ring and its sinks (debug builds only)"

@@ -58,9 +58,20 @@ option(ZPP_DIAG
 # tables. A guest hypervisor therefore fails at launch instead of standing down
 # cleanly, which is worse. hypervisor/include/zpp/hypervisor/nested_vmx.h
 # carries the full list of what has to exist before this can default on.
+# On by default. The whole objective of this tree is booting Hyper-V
+# nested, so a build with it off cannot exercise the thing being worked
+# on - and an afternoon was lost to exactly that: a clean reconfigure
+# dropped the cached ON, the loader booted Windows with VMX concealed,
+# Hyper-V stood down, and the result was briefly read as a milestone.
+#
+# Turning it off is still expressible and still useful - it is how you
+# ask "is this failure nested at all" in one boot - but it has to be
+# asked for now rather than arrived at by losing a cache entry.
+# scripts/check-bootable.sh refuses a rig deploy of a loader built
+# without it, so the bytes cannot reach the machine by accident.
 option(ZPP_NESTED_VMX
     "Report VMX to the guest and emulate the VMX instructions"
-    OFF)
+    ON)
 
 # The interrupted-event re-queue. On by default: without it an event whose
 # delivery an exit interrupted is destroyed, which is what stopped Hyper-V's

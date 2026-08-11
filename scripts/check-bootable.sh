@@ -110,5 +110,78 @@ if [ "${ZPP_ALLOW_CHAINLOAD_ONLY:-0}" != "1" ]; then
     fi
 fi
 
-echo "ok: $loader launches the hypervisor and carries no destructive"\
-     "self check"
+# The switch that wastes time rather than machines, and the reason this
+# section exists at all.
+#
+# ZPP_NESTED_VMX off hides VMX from the guest. Windows then boots, Hyper-V
+# finds no VMX and stands down cleanly, and **nothing about the boot looks
+# wrong** - which is worse than a hang, because a hang is investigated. An
+# afternoon went into a run read as a milestone that was a build with
+# nested off: a clean reconfigure had dropped the cached ON, and the
+# screen showed Windows coming up exactly as it would have with it on.
+#
+# The default is ON now, so this cannot be arrived at by losing a cache
+# entry. This is the second line of defence, at the only point that
+# matters - before the bytes reach the machine - because the first line
+# is a default and defaults are what clean reconfigures reset.
+if [ "${ZPP_ALLOW_NO_NESTED:-0}" != "1" ]; then
+    if ! LC_ALL=C grep -qa 'nested vmx: reporting vmx to the guest' \
+        "$loader"; then
+        echo "REFUSING: $loader was built without ZPP_NESTED_VMX." >&2
+        echo "" >&2
+        echo "VMX is hidden from the guest, so Hyper-V will find none and" >&2
+        echo "stand down. Windows boots and the screen looks right - which" >&2
+        echo "is why this is refused rather than warned about." >&2
+        echo "" >&2
+        echo "Rebuild with it on before deploying:" >&2
+        echo "  cmake --preset debug -DZPP_NESTED_VMX=ON" >&2
+        echo "  cmake --build --preset debug" >&2
+        echo "" >&2
+        echo "It is the default. If it is off, something turned it off -" >&2
+        echo "most likely a clean reconfigure that dropped the cache." >&2
+        echo "" >&2
+        echo "To deploy one deliberately - asking 'is this failure nested" >&2
+        echo "at all' is a fair question, and one boot answers it:" >&2
+        echo "  ZPP_ALLOW_NO_NESTED=1 $0 $loader" >&2
+        exit 1
+    fi
+fi
+
+# The same class again: without the loader trace there is no module base
+# on serial, and without a module base nothing in scripts/rig-dump-state.py
+# or rig-dump-log-physical.sh can read a single member. The boot still
+# happens and still tells you nothing, which costs a boot to discover.
+#
+# ZPP_TRACE defaults to ZPP_VERIFY_HYPERVISOR, which is off - so unlike
+# nested VMX this one is off unless asked for, and a clean reconfigure
+# silently produces a blind loader.
+if [ "${ZPP_ALLOW_NO_TRACE:-0}" != "1" ]; then
+    if ! LC_ALL=C grep -qa 'ZPP_TRACE' "$loader"; then
+        echo "REFUSING: $loader was built without ZPP_TRACE." >&2
+        echo "" >&2
+        echo "The loader prints its module base on serial and nothing" >&2
+        echo "else does. Without it every diagnostic that reads a member" >&2
+        echo "by offset is blind, and the boot has to be repeated." >&2
+        echo "" >&2
+        echo "Rebuild with it on before deploying:" >&2
+        echo "  cmake --preset debug -DZPP_TRACE=ON" >&2
+        echo "  cmake --build --preset debug" >&2
+        echo "" >&2
+        echo "To deploy one deliberately:" >&2
+        echo "  ZPP_ALLOW_NO_TRACE=1 $0 $loader" >&2
+        exit 1
+    fi
+fi
+
+# Says what was actually established rather than what the checks are
+# named after: an escape hatch that was used must not be reported as a
+# property that holds.
+summary="ok: $loader launches the hypervisor and carries no destructive"
+summary="$summary self check"
+[ "${ZPP_ALLOW_NO_NESTED:-0}" = "1" ] &&
+    summary="$summary; nested VMX NOT checked"
+[ "${ZPP_ALLOW_NO_TRACE:-0}" = "1" ] &&
+    summary="$summary; serial trace NOT checked"
+[ "${ZPP_ALLOW_CHAINLOAD_ONLY:-0}" = "1" ] &&
+    summary="$summary; chainload-only NOT checked"
+echo "$summary"
