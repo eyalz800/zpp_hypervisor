@@ -2207,19 +2207,21 @@ void hypervisor::load_l1_host_state(std::size_t cpu)
     vmcs.guest_rip(shadow.read(field::host_rip));
     vmcs.guest_rsp(shadow.read(field::host_rsp));
 
-    // SDM 30.5.4: "RFLAGS is cleared, except bit 1, which is always set".
+    // SDM 30.5.3 (.references/sdm.txt:204918): "RFLAGS is cleared,
+    // except bit 1, which is always set".
     constexpr std::uint64_t rflags_reserved_one = 1ull << 1;
     vmcs.guest_rflags(rflags_reserved_one);
 
-    // SDM 30.5.4 again: no blocking by STI or MOV SS, and the activity
-    // state is active. A hypervisor arriving at its own exit handler is
-    // running.
+    // SDM 30.5.5 (.references/sdm.txt:204944): "There is no blocking by
+    // STI or by MOV SS after a VM exit", and the activity state is
+    // active. A hypervisor arriving at its own exit handler is running.
     vmcs.write(field::guest_interruptibility_state, 0);
     vmcs.write(field::guest_activity_state,
                arch::x86_64::vmx::activity_state::active);
     vmcs.write(field::guest_pending_debug_exceptions, 0);
 
-    // SDM 30.5.3, "Loading Host Segment and Descriptor-Table Registers".
+    // SDM 30.5.2, "Loading Host Segment and Descriptor-Table Registers"
+    // (.references/sdm.txt:204861).
     // The selectors come from the host-state area; everything else about
     // each segment is fixed by the architecture rather than stored, which
     // is why these are constants rather than copies.
@@ -2319,7 +2321,8 @@ void hypervisor::load_l1_host_state(std::size_t cpu)
     vmcs.write(field::guest_ia32_sysenter_eip,
                shadow.read(field::host_ia32_sysenter_eip));
 
-    // SDM 30.5.4: DR7 is set to 400H and IA32_DEBUGCTL to 0.
+    // SDM 30.5.1 (.references/sdm.txt:204807): "DR7 is set to 400H", and
+    // IA32_DEBUGCTL to 0 two lines below it.
     constexpr std::uint64_t dr7_after_exit = 0x400;
     vmcs.guest_dr7(dr7_after_exit);
     vmcs.write(field::guest_ia32_debugctl, 0);
@@ -2346,7 +2349,7 @@ void hypervisor::load_l1_host_state(std::size_t cpu)
             arch::x86_64::msr::ia32_extended_feature_enable,
             shadow.read(field::host_ia32_efer));
     } else {
-        // LMA and LME are not part of that control's remit. SDM 30.5,
+        // LMA and LME are not part of that control's remit. SDM 30.5.1,
         // ".references/sdm.txt:204822": "The LMA and LME bits in the
         // IA32_EFER MSR are each loaded with the setting of the 'host
         // address-space size' VM-exit control" - unconditionally, on
