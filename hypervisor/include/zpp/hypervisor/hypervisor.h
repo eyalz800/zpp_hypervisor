@@ -2631,6 +2631,21 @@ private:
     main(arch::x86_64::context & caller_context);
 
     /**
+     * The VM exit dispatch: the switch on the basic exit reason, and the
+     * whole of what this VMM tells its guest. Defined in
+     * hypervisor/src/hypervisor/exit_dispatch.cpp.
+     *
+     * `cpuid` is the processor index `main` was launched with. It keeps
+     * that name because it was a lambda inside `main` until the move and
+     * this was the one thing it captured - see that file for why the name
+     * was not improved along the way.
+     *
+     * Called once per exit from the lambda `main` hands to `vm_launch`,
+     * and it always ends by resuming the guest.
+     */
+    void on_vm_exit(std::uint64_t cpuid, arch::x86_64::context & context);
+
+    /**
      * Launches the main function of the hypervisor, updates the rax
      * context value to the returned value from the main function, and
      * restores the context to the caller context..

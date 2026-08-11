@@ -26,12 +26,20 @@
 set -u
 
 root="$(cd "$(dirname "$0")/../.." && pwd)"
-handler="$root/hypervisor/src/hypervisor/hypervisor.cpp"
+# The exit dispatch moved into a translation unit of its own, so what
+# used to be one file is two: the switch on the basic exit reason and
+# everything it answers is in exit_dispatch.cpp, and what builds the VMCS
+# in the first place is still in hypervisor.cpp. Both are read, and which
+# check reads which is named at each check rather than here.
+handler="$root/hypervisor/src/hypervisor/exit_dispatch.cpp"
+launcher="$root/hypervisor/src/hypervisor/hypervisor.cpp"
 
-[ -f "$handler" ] || {
-    echo "missing $handler" >&2
-    exit 2
-}
+for file in "$handler" "$launcher"; do
+    [ -f "$file" ] || {
+        echo "missing $file" >&2
+        exit 2
+    }
+done
 
 status=0
 
@@ -128,7 +136,8 @@ done
 # its own VMXON. BACKLOG.md item 1.
 echo "== CR4.VMXE and CPUID leaf 1 ECX[5] agree"
 
-if grep -q 'cr4_guest_host_mask(cr4_vmxe | cr4_smxe)' "$handler"; then
+# setup_vmcs, which is in hypervisor.cpp rather than in the dispatch.
+if grep -q 'cr4_guest_host_mask(cr4_vmxe | cr4_smxe)' "$launcher"; then
     echo "  ok    CR4.VMXE is owned in the guest/host mask"
 else
     echo "  FAIL  CR4.VMXE is not in the CR4 guest/host mask, so the" >&2
@@ -139,7 +148,7 @@ else
 fi
 
 if grep -q 'cr4_read_shadow(this->guest_cr4 & ~(cr4_vmxe | cr4_smxe))' \
-    "$handler"; then
+    "$launcher"; then
     echo "  ok    the read shadow starts with VMXE and SMXE clear"
 else
     echo "  FAIL  the CR4 read shadow does not start with VMXE and" >&2
@@ -171,7 +180,7 @@ else
     status=1
 fi
 
-if grep -q 'vmcs.guest_cr4(this->host_cr4 & ~cr4_smxe)' "$handler"; then
+if grep -q 'vmcs.guest_cr4(this->host_cr4 & ~cr4_smxe)' "$launcher"; then
     echo "  ok    SMXE is kept out of the real guest CR4"
 else
     echo "  FAIL  the guest CR4 is no longer built with SMXE cleared." >&2
@@ -389,9 +398,9 @@ fi
 # This asserts the three parts stay attached to each other.
 echo "== monitor and mwait: the controls, the switch and the case"
 
-if grep -q 'trap_monitor_and_mwait = ZPP_GUEST_TESTS' "$handler"; then
+if grep -q 'trap_monitor_and_mwait = ZPP_GUEST_TESTS' "$launcher"; then
     echo "  ok    the controls are keyed on ZPP_GUEST_TESTS"
-elif grep -q 'trap_monitor_and_mwait = false' "$handler"; then
+elif grep -q 'trap_monitor_and_mwait = false' "$launcher"; then
     echo "  FAIL  trap_monitor_and_mwait is hardcoded false again, so" >&2
     echo "        the monitor/mwait case cannot execute in any build and" >&2
     echo "        the coverage suite cannot reach exit reasons 36 or 39." >&2

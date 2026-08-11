@@ -29,7 +29,23 @@ from a typo except by reading. Printing them is what makes a typo
 visible: a misspelled member silently becomes "harness-only" and appears
 in a list that is otherwise short and familiar.
 
-Run from scripts/ci/run-host-tests.sh. Needs no build.
+Why this is not a static_assert, since that is the obvious question and
+it has now been asked twice. A compile-time check comparing the two
+declarations needs both classes in one translation unit, and they have
+the same fully qualified name on purpose - the shim exists precisely so
+that `zpp::hypervisor::hypervisor` means something different while a
+harness is being compiled. There is no arrangement of includes that puts
+both in front of the compiler at once, so the comparison has to happen
+outside the compiler. It stays a script.
+
+The one drift it cannot see is a *nested* struct's members, skipped
+deliberately below. That is why `start_up_handoff_state` moved into a
+header of its own instead: there is one definition now and nothing to
+compare. The same move is the answer for anything else nested that a
+test asserts exact values of.
+
+Registered as the `check-shim-members` test in tests/CMakeLists.txt.
+Needs no build.
 """
 import os
 import re
