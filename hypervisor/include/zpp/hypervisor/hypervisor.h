@@ -3519,6 +3519,60 @@ private:
      */
 
     /**
+     * The state the newest reflected `hlt` handed to the guest
+     * hypervisor, per processor.
+     *
+     * This is the last decision point left. Every virtual processor stops
+     * on a `hlt`, and because the guest hypervisor sets HLT exiting that
+     * `hlt` is a VM exit rather than a halt - so the processor is parked
+     * in *its* software, and whether it is ever woken is decided from the
+     * state `save_l2_state` wrote into vmcs12 at that moment and from
+     * nothing else.
+     *
+     * Why it has come down to this: the timer message is written and
+     * pending, no interrupt is pending on any local APIC, nothing is in
+     * service, TPR and PPR are zero everywhere, and this VMM has never
+     * refused an entry - VMLAUNCH plus VMRESUME equals `l2_entries`
+     * exactly on every processor. So the guest hypervisor is declining to
+     * run a processor it has work for, and what it decides from is here.
+     *
+     * `rflags` matters for bit 9: a processor whose saved RFLAGS has
+     * interrupts disabled cannot be woken by one, so a wrongly cleared IF
+     * would produce exactly this and would look like nothing at all.
+     * `interruptibility` matters for blocking by STI and by MOV SS.
+     * `activity` is what the guest hypervisor is told it was doing.
+     * @{
+     */
+    std::uint64_t hlt_reflect_rflags[max_cpus]{};
+    std::uint64_t hlt_reflect_interruptibility[max_cpus]{};
+    std::uint64_t hlt_reflect_activity[max_cpus]{};
+    std::uint64_t hlt_reflect_rip[max_cpus]{};
+    std::uint64_t hlt_reflect_tsc[max_cpus]{};
+    std::uint64_t hlt_reflect_count[max_cpus]{};
+    /**
+     * @}
+     */
+
+    /**
+     * Which branch of the TPR shadow decision in `build_vmcs02` ran.
+     *
+     * Three outcomes and, until now, no record of which: honoured, asked
+     * for and refused with CR8 exiting forced in its place, or never
+     * asked for. The middle one changes how the guest hypervisor learns
+     * about interrupt priority, and a guest hypervisor that believes it
+     * has a virtualized task priority register when it does not is the
+     * shape of partial answer this project's failures are usually made
+     * of.
+     * @{
+     */
+    std::uint64_t tpr_shadow_honoured[max_cpus]{};
+    std::uint64_t tpr_shadow_refused[max_cpus]{};
+    std::uint64_t tpr_shadow_absent[max_cpus]{};
+    /**
+     * @}
+     */
+
+    /**
      * Exits taken per CPU, counting repeats. Together with the ring's
      * `repeated` counts this says how much of the history the window
      * covers.

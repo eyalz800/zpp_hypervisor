@@ -1152,6 +1152,9 @@ std::expected<void, zpp::error> hypervisor::build_vmcs02(std::size_t cpu)
     // between them is which of them is allowed to leave the second-level
     // guest's `mov cr8` reaching the physical control register.
     if (honour_tpr_shadow) {
+        this->tpr_shadow_honoured[cpu] =
+            this->tpr_shadow_honoured[cpu] + 1;
+
         // Honoured. The control stays set - it is already in `primary`
         // from the union - and the two fields behind it are written from
         // vmcs12: the page the processor will virtualize VTPR in, and the
@@ -1181,6 +1184,7 @@ std::expected<void, zpp::error> hypervisor::build_vmcs02(std::size_t cpu)
         // Both exits reflect to the guest hypervisor, because
         // `l1_wants_l2_exit` answers CR8 accesses against exactly these
         // two controls and this branch requires both of them set.
+        this->tpr_shadow_refused[cpu] = this->tpr_shadow_refused[cpu] + 1;
         primary &= ~primary_tpr_shadow;
         primary |= primary_cr8_load_exiting | primary_cr8_store_exiting;
     } else {
@@ -1196,6 +1200,7 @@ std::expected<void, zpp::error> hypervisor::build_vmcs02(std::size_t cpu)
         // asked for, which `l1_wants_l2_exit` would decline and the
         // ordinary control-register handler would stop the processor on -
         // it answers MOV to CR4 and nothing else.
+        this->tpr_shadow_absent[cpu] = this->tpr_shadow_absent[cpu] + 1;
         primary &= ~primary_tpr_shadow;
     }
 
@@ -2963,6 +2968,23 @@ hypervisor::on_l2_exit(std::size_t cpu,
                 this->synthetic_msr_last_value[cpu][offset] =
                     (context.rax & 0xffffffff) | (context.rdx << 32);
             }
+        }
+
+        // The state a reflected `hlt` hands over, taken while vmcs02 is
+        // still current so these are the second-level guest's own values
+        // - the same ones `save_l2_state` is about to write into vmcs12,
+        // read from the same place it reads them.
+        if (basic_reason::hlt == reason.basic()) {
+            this->hlt_reflect_rflags[cpu] = this->vmcs.guest_rflags();
+            this->hlt_reflect_interruptibility[cpu] =
+                this->vmcs.read(arch::x86_64::vmx::vmcs::field::
+                                    guest_interruptibility_state);
+            this->hlt_reflect_activity[cpu] = this->vmcs.read(
+                arch::x86_64::vmx::vmcs::field::guest_activity_state);
+            this->hlt_reflect_rip[cpu] = this->vmcs.guest_rip();
+            this->hlt_reflect_tsc[cpu] = arch::x86_64::rdtsc();
+            this->hlt_reflect_count[cpu] =
+                this->hlt_reflect_count[cpu] + 1;
         }
 
         if ((basic_reason::rdmsr == reason.basic()) &&

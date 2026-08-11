@@ -608,8 +608,78 @@ itself, no interrupt is pending on any processor, no processor is blocked
 by priority, and Hyper-V never schedules the virtual processor that would
 consume the message.
 
-Next, and this is now a narrow question: what the reflected `hlt` exit
-leaves in vmcs12. Hyper-V parks the processor from that exit and decides
+### What the reflected `hlt` hands over, and two more suspicions cleared
+
+Measured 2026-08-11 from `hlt_reflect_*` and `tpr_shadow_*`, taken while
+vmcs02 is still current so they are the values `save_l2_state` writes into
+vmcs12 - read from the same place it reads them.
+
+Identical on all eight processors:
+
+```
+rflags = 0x00040286   IF = 1
+interruptibility = 0x0001   (blocking by STI)
+activity = 0 (active)
+tpr shadow: honoured 82,429 / 421 / 396 / ...   refused 0   absent 0
+```
+
+**The TPR shadow is honoured on every single entry.** Refused and absent
+are zero on every processor, so the branch that drops the control and
+forces CR8 exiting has never run and cannot be involved. That suspicion
+is closed.
+
+**Interrupts are enabled at the halt.** `RFLAGS.IF` is 1, so nothing is
+masked, which agrees with the local APICs showing `TPR` and `PPR` zero.
+
+**And blocking by STI is set - which looked like the whole answer and is
+not.** The reasoning is worth keeping because it was a good hypothesis
+and the references killed it:
+
+The idle idiom is `sti; hlt`, so the STI shadow is in effect at the
+`hlt`. SDM 29.3.1.5 makes that decisive-looking: "Bit 0 (blocking by STI)
+and bit 1 (blocking by MOV-SS) must both be 0 if the valid bit ... in the
+injected-event identification field is 1 and the event type ... has value
+0, indicating external interrupt, or value 2, indicating non-maskable
+interrupt" (`sdm.txt:202627`). A VMM holding a vmcs12 with that bit set
+therefore *cannot* inject an external interrupt at all - the entry checks
+reject it - and since the virtual processor never runs another
+instruction, nothing would ever clear it. A permanent refusal to inject
+is exactly the observed deadlock.
+
+It is still correct behaviour. SDM 30.4 lists the VM exits "considered to
+happen after an instruction is executed" - debug traps, some machine
+checks, trap-like MOV to CR8, trap-like WRMSR, APIC-write emulation - and
+says of them "If there had been blocking by MOV SS, POP SS, or STI before
+the instruction executed, such blocking is no longer in effect"
+(`sdm.txt:203489-203501`). **HLT exiting is not in that list.** It is
+fault-like: the exit occurs before the instruction completes, so the STI
+shadow is still in effect and saving it set is what bare metal does.
+
+The VMM above is expected to deal with it, and that is exactly what KVM
+does: `vmx_skip_emulated_instruction` clears both shadow bits through
+`vmx_set_interrupt_shadow` (`kvm/vmx.c:1607-1621`) at the same moment it
+advances RIP past the instruction. Hyper-V does the same on real
+hardware, which is why it boots there. And on the reflection path this
+VMM matches the reference exactly - KVM's `sync_vmcs02_to_vmcs12` copies
+`GUEST_INTERRUPTIBILITY_INFO` straight through with no adjustment
+(`kvm/nested.c:4536-4537`), which is what `save_l2_state` does.
+
+So: not a defect, and it also confirms `advance_rip = false` on the
+reflection path is right, since a fault-like exit must leave RIP on the
+`hlt`.
+
+Two things this leaves worth checking next, in order. First, the same
+measurement against the reference configuration - Hyper-V on KVM with
+nothing underneath - since every "is this normal?" question in this
+section would be answered in one boot by having the same numbers from a
+machine that works. Second, `activity = 0` is saved where KVM would write
+`GUEST_ACTIVITY_HLT`: `sync_vmcs02_to_vmcs12` sets `vmcs12->guest_
+activity_state = GUEST_ACTIVITY_HLT` when its `mp_state` is
+`KVM_MP_STATE_HALTED` (`kvm/nested.c:4540-4545`), whereas this VMM
+reflects the `hlt` and saves the activity state the hardware had, which
+is active. Those are not obviously the same thing, and which is right
+depends on whether the exit is reflected or handled - worth settling
+before anything else is built on it. Hyper-V parks the processor from that exit and decides
 from the state saved there whether it may ever be woken - so the guest
 RFLAGS, the interruptibility state and the activity state that
 `save_l2_state` writes back are the candidates, in that order. Worth
