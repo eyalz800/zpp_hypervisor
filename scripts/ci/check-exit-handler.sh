@@ -411,6 +411,66 @@ else
     status=1
 fi
 
+# === The entry-interruption triple reaches vmcs02 ======================
+#
+# The three fields are how a guest hypervisor delivers anything at all to
+# its own guest: the information field's valid bit, the exception error
+# code and the instruction length. SDM 27.8.3 makes them a set - the valid
+# bit decides whether the other two are read.
+#
+# If the information field never reaches vmcs02, every injection a guest
+# hypervisor makes is silently dropped. That is not a subtle failure and
+# it has no diagnostic: SDM 30.2 clears the valid bit on every VM exit, so
+# by the time the guest hypervisor looks again its own record of the
+# injection is gone too. A halted virtual processor is never woken and
+# nothing anywhere reports a fault - which is the shape of the failure
+# being chased on the rig.
+#
+# Checked here because the copy is inside build_vmcs02, past the vmptrld
+# that makes vmcs02 current, and from that point nothing may fail - so no
+# hosted harness can drive it. tests/nested_exit covers the decision that
+# leads to it; this covers the copy itself.
+echo "== the entry-interruption triple reaches vmcs02"
+
+if grep -q 'vmcs.write(field::vm_entry_interruption_information_field, injection)' \
+    "$entry_source"; then
+    echo "  ok    the information field is copied from vmcs12"
+else
+    echo "  FAIL  the entry-interruption information field is no longer" >&2
+    echo "        copied into vmcs02. Every injection a guest hypervisor" >&2
+    echo "        makes is dropped, and SDM 30.2 clears its own record" >&2
+    echo "        of it on the next exit, so it cannot find out." >&2
+    status=1
+fi
+
+for field in vm_entry_exception_error_code vm_entry_instruction_length; do
+    if grep -A6 'vmcs.write(field::vm_entry_interruption_information_field, injection)' \
+        "$entry_source" | grep -q "shadow.read(field::$field)"; then
+        echo "  ok    $field travels with it"
+    else
+        echo "  FAIL  $field is no longer copied beside the" >&2
+        echo "        information field. SDM 27.8.3 makes the three a" >&2
+        echo "        set: an exception injected without its error code" >&2
+        echo "        pushes whatever vmcs02 last held." >&2
+        status=1
+    fi
+done
+
+# And the two are read only when the valid bit is set, which is the
+# other half of 27.8.3. Reading them unconditionally is harmless; writing
+# them unconditionally is not, because a stale error code left in vmcs02
+# is what the next injected exception would push.
+if grep -B2 'shadow.read(field::vm_entry_exception_error_code)' \
+    "$entry_source" | grep -q 'injection & interruption_valid'; then
+    echo "  ok    and only when the valid bit says they mean anything"
+else
+    echo "  FAIL  the error code and instruction length are copied" >&2
+    echo "        without testing the valid bit - SDM 27.8.3 makes the" >&2
+    echo "        information field decide whether the other two are" >&2
+    echo "        read at all." >&2
+    status=1
+fi
+
 echo
 if [ "$status" = "0" ]; then
     echo "exit handler invariants hold"

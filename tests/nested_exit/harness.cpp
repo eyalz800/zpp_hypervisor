@@ -3242,6 +3242,234 @@ static void test_injection_into_a_parked_guest()
     }
 }
 
+// ------------------- 10. a second-level guest halts, and is woken
+/**
+ * The sequence the rig is failing in, run end to end through the real
+ * functions in the real order.
+ *
+ * Every case before this one drives a single decision with the state
+ * arranged around it. This one does not arrange anything: it starts with
+ * a running second-level guest, executes the steps a halt and a wake-up
+ * actually take, and carries the state each step leaves into the next.
+ * That is the only way to catch the class of defect where every step is
+ * individually right and the sequence still does not work - which is what
+ * "Hyper-V writes a timer-expired message, sets message-pending, and then
+ * never enters the virtual processor" looks like from outside.
+ *
+ * The five steps, and which real function performs each:
+ *
+ *   1. The second-level guest executes HLT. Its hypervisor asked for that
+ *      exit, so it is reflected rather than handled - `l1_wants_l2_exit`.
+ *   2. The exit is saved into vmcs12 - `save_l2_state`. What it writes is
+ *      what the guest hypervisor will read, and the two fields that
+ *      decide everything after this are the activity state and the
+ *      interruptibility.
+ *   3. The guest hypervisor emulates the halt: it records its virtual
+ *      processor as halted by writing HLT into vmcs12's activity state,
+ *      and does not resume it. Nothing of ours runs here; the case
+ *      performs the writes it would.
+ *   4. Its timer expires. It composes an interrupt into vmcs12's
+ *      entry-interruption field and resumes.
+ *   5. The entry has to happen - `enter_or_park_l2`. This is the step
+ *      that turns an injected interrupt into a running processor, and the
+ *      one where a wrong answer is silent: a parked processor takes no
+ *      event, and SDM 30.2 has already cleared the guest hypervisor's own
+ *      record of the injection, so it cannot find out.
+ */
+static void test_halt_then_wake()
+{
+    std::printf("a second-level guest halts and its hypervisor wakes "
+                "it\n");
+
+    using entry_outcome = zpp::hypervisor::hypervisor::l2_entry_outcome;
+    namespace activity = zpp::arch::x86_64::vmx::activity_state;
+
+    constexpr std::uint64_t interruption_valid = 1ull << 31;
+    constexpr std::uint64_t entry_failure_bit = 1ull << 31;
+    constexpr std::uint64_t primary_hlt_exiting = 1ull << 7;
+    constexpr std::uint64_t blocking_by_sti = 1ull << 0;
+    constexpr std::uint64_t hlt_exit_reason = 12;
+
+    // The idle idiom, because it is what a guest actually executes and
+    // because the STI shadow it leaves is the thing that made this
+    // sequence interesting in the first place.
+    constexpr std::uint64_t rip_of_the_hlt = 0xfffff80001234560ull;
+    constexpr std::uint64_t timer_vector = 0xd1;
+
+    auto & shadow = hv().guest_vmcs12[cpu];
+
+    context registers{};
+    reset(registers);
+
+    // --- Step 1: the guest hypervisor asked for HLT exits -------------
+    controls(0, primary_hlt_exiting, 0);
+
+    check(l1_wants(hlt_exit_reason, registers),
+          "the guest hypervisor asked for HLT exits, so its guest's halt "
+          "is its business and not ours");
+    check(!l0_wants(hlt_exit_reason, registers),
+          "and this VMM does not claim it - a halt claimed here would be "
+          "a halt the layer that has a scheduler never hears about");
+
+    // --- Step 2: the exit is saved into vmcs12 ------------------------
+    //
+    // The second-level guest was running, executed `sti; hlt`, and the
+    // exit was taken instead of the halt. So hardware presents: active,
+    // because SDM 30.3.4 saves the state *before* the exit and an
+    // HLT-exiting exit happens instead of the halt; and the STI shadow,
+    // because SDM 30.4 does not list HLT among the exits that happen
+    // after an instruction executes.
+    hv().running_l2[cpu] = true;
+    hv().vmcs.write(field::guest_activity_state, activity::active);
+    hv().vmcs.write(field::guest_interruptibility_state, blocking_by_sti);
+    hv().vmcs.guest_rip(rip_of_the_hlt);
+
+    hv().save_l2_state(cpu);
+
+    check(activity::active == shadow.read(fields::guest_activity_state),
+          "the halt is reported with the processor active - it had not "
+          "halted yet, the exit happened instead");
+    check(blocking_by_sti ==
+              shadow.read(fields::guest_interruptibility_state),
+          "with the STI shadow intact, which is how the guest "
+          "hypervisor can tell this was `sti; hlt` and not a bare one");
+    check(rip_of_the_hlt == shadow.read(fields::guest_rip),
+          "and RIP still on the HLT, which is the guest hypervisor's to "
+          "advance");
+
+    // --- Step 3: the guest hypervisor records the halt ----------------
+    //
+    // What Hyper-V does here is its own business, and this is the shape
+    // of it: mark the virtual processor halted and stop resuming it. The
+    // pair it writes has to be a legal one, and it is - SDM 29.3.1.5
+    // requires the active state alongside STI blocking, so a hypervisor
+    // recording a halt clears the shadow, exactly as the processor would
+    // have when the halt took effect.
+    shadow.write(fields::guest_activity_state, activity::hlt);
+    shadow.write(fields::guest_interruptibility_state, 0);
+    shadow.write(fields::guest_rip, rip_of_the_hlt + 1);
+
+    // --- Step 4: the timer expires and it injects ---------------------
+    shadow.write(fields::vm_entry_interruption_information_field,
+                 interruption_valid | (0ull << 8) | timer_vector);
+    shadow.write(fields::vm_entry_exception_error_code, 0);
+    shadow.write(fields::exit_reason, 0);
+
+    // --- Step 5: the entry has to happen ------------------------------
+    hv().running_l2[cpu] = false;
+    hv().l2_activity_state[cpu] = activity::active;
+
+    auto outcome = hv().enter_or_park_l2(cpu);
+
+    check(entry_outcome::entered == outcome,
+          "**the halted second-level guest is entered.** This is the "
+          "step the whole sequence exists for: SDM 29.4 makes an "
+          "injecting entry leave the processor active whatever the "
+          "activity-state field says, so this is how a halted virtual "
+          "processor is woken. Parking or refusing here loses the "
+          "interrupt and the guest hypervisor cannot find out");
+    check(0 == (shadow.read(fields::exit_reason) & entry_failure_bit),
+          "and it was not turned into a VM-entry failure");
+    check(activity::hlt == hv().vmcs.read(field::guest_activity_state),
+          "vmcs02 carries the HLT state the guest hypervisor wrote - the "
+          "field says what the guest *was*, and the injection is what "
+          "makes it run. Substituting active here would be this VMM "
+          "deciding something that is the processor's to decide");
+    check(activity::hlt == hv().l2_activity_state[cpu],
+          "and the record agrees, so a later exit saved out of it "
+          "reports the same thing");
+
+    // --- And the same sequence with the interrupt withheld ------------
+    //
+    // The control: with nothing to inject, the entry still happens and
+    // the processor sits in the HLT state on hardware. That is what
+    // makes the case above a test of the *injection* rather than of the
+    // entry - if a halted guest were refused outright, the two would be
+    // indistinguishable.
+    {
+        shadow.write(fields::vm_entry_interruption_information_field, 0);
+        shadow.write(fields::exit_reason, 0);
+        hv().running_l2[cpu] = false;
+        hv().l2_activity_state[cpu] = activity::active;
+
+        check(entry_outcome::entered == hv().enter_or_park_l2(cpu),
+              "a halted guest with nothing to inject is entered too, and "
+              "waits on hardware - so the case above is a test of the "
+              "injection and not of the entry");
+    }
+
+    // --- The failure mode, stated as the thing that must not happen ---
+    //
+    // If step 5 ever answers anything but `entered`, the interrupt is
+    // gone. Swept over the events SDM 29.3.1.5 allows into the HLT state,
+    // because a wake-up can be any of them - a timer is an external
+    // interrupt, but a guest hypervisor delivering an NMI or a debug
+    // exception to a halted processor is the same sequence.
+    {
+        struct
+        {
+            std::uint64_t type;
+            std::uint64_t vector;
+            const char * name;
+        } wake_ups[]{
+            {0, timer_vector, "an external interrupt (a timer)"},
+            {2, 2, "an NMI"},
+            {3, 1, "#DB"},
+            {3, 18, "#MC"},
+        };
+
+        for (auto & wake : wake_ups) {
+            shadow.write(fields::guest_activity_state, activity::hlt);
+            shadow.write(fields::guest_interruptibility_state, 0);
+            shadow.write(fields::vm_entry_interruption_information_field,
+                         interruption_valid | (wake.type << 8) |
+                             wake.vector);
+            shadow.write(fields::exit_reason, 0);
+            hv().running_l2[cpu] = false;
+            hv().l2_activity_state[cpu] = activity::active;
+
+            check(entry_outcome::entered == hv().enter_or_park_l2(cpu),
+                  text("a halted second-level guest is woken by %s",
+                       wake.name));
+        }
+    }
+
+    // --- What the guest hypervisor must not be handed ----------------
+    //
+    // The other half of step 3, and the reason c0b6d78 exists: a guest
+    // hypervisor that recorded the halt *without* clearing the STI
+    // shadow has written a vmcs12 SDM 29.3.1.5 forbids. That is its own
+    // mistake, and it has to be reported rather than repaired - the
+    // processor would have reported it, and this VMM hands HLT to
+    // hardware precisely so that it still does.
+    //
+    // Asserted as "not silently entered as though nothing were wrong":
+    // whether the refusal comes from here or from the processor, what
+    // must not happen is the pair being quietly fixed up, because then
+    // the guest hypervisor never learns its own record was inconsistent.
+    {
+        shadow.write(fields::guest_activity_state, activity::hlt);
+        shadow.write(fields::guest_interruptibility_state,
+                     blocking_by_sti);
+        shadow.write(fields::vm_entry_interruption_information_field,
+                     interruption_valid | timer_vector);
+        shadow.write(fields::exit_reason, 0);
+        hv().running_l2[cpu] = false;
+        hv().l2_activity_state[cpu] = activity::active;
+
+        static_cast<void>(hv().enter_or_park_l2(cpu));
+
+        check(blocking_by_sti ==
+                  shadow.read(fields::guest_interruptibility_state),
+              "a guest hypervisor's own illegal pair is left as it wrote "
+              "it, for the processor to refuse - repairing it here would "
+              "hide a bug in the layer above and hand it a processor in "
+              "a state it did not ask for");
+        check(activity::hlt == shadow.read(fields::guest_activity_state),
+              "and its activity state likewise");
+    }
+}
+
 int main()
 {
     test_reason_table();
@@ -3253,6 +3481,7 @@ int main()
     test_activity_state();
     test_reflected_activity_and_interruptibility();
     test_injection_into_a_parked_guest();
+    test_halt_then_wake();
 
     std::printf("\n%d checks, %d failures\n", g_checks, g_failures);
 
