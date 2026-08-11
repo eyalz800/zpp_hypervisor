@@ -182,10 +182,30 @@ namespace vm_entry_interruption
 enum type : std::uint64_t
 {
     /**
-     * The event type, in bits 10:8. Hardware exception is the kind a
-     * faulting instruction would have raised on its own.
+     * The vector, in bits 7:0.
      */
+    vector_mask = 0xffull,
+
+    /**
+     * The event type, in bits 10:8, and each of the values it takes.
+     * SDM Table 27-18, and the same encoding the original-event
+     * identification field uses on the way out - SDM Table 27-21, which
+     * is why an interrupted event can be put back through this field at
+     * all.
+     *
+     * Values 1 and 7 are deliberately absent. SDM 29.2.1.3 makes 1
+     * reserved on every processor and 7 reserved on any that supports
+     * neither the monitor trap flag nor FRED, and SDM Table 27-21 marks
+     * both "not used" on the way out - so an event coming back through
+     * here can never legitimately carry one.
+     */
+    type_mask = (7ull << 8),
+    external_interrupt = (0ull << 8),
+    non_maskable_interrupt = (2ull << 8),
     hardware_exception = (3ull << 8),
+    software_interrupt = (4ull << 8),
+    privileged_software_exception = (5ull << 8),
+    software_exception = (6ull << 8),
 
     /**
      * Set when the vector pushes an error code, which the processor takes
@@ -198,8 +218,121 @@ enum type : std::uint64_t
      * once the event has been delivered.
      */
     valid = (1ull << 31),
+
+    /**
+     * Every bit the architecture defines in this field, for a value
+     * copied from somewhere else.
+     *
+     * SDM 29.2.1.3 requires bits 30:14 and 12 to be 0 and permits bit 13
+     * only where IA32_VMX_BASIC[58] says FRED transitions exist, so a
+     * word carrying anything outside this mask fails VM entry rather than
+     * delivering anything. It exists because the one value ever copied
+     * into this field comes from the original-event identification field,
+     * whose bit 13 the architecture *does* define - see SDM Table 27-21 -
+     * and whose undefined bits are only guaranteed zero on the
+     * processors of today. KVM never faces the question because it
+     * rebuilds the event out of its vector and type rather than copying
+     * the word (`__vmx_complete_interrupts`,
+     * .references/kvm/vmx.c:7105); masking is the same answer at one
+     * instruction.
+     */
+    defined_bits = vector_mask | type_mask | deliver_error_code | valid,
 };
+
+/**
+ * Whether an event may be injected into a guest in a given activity
+ * state, which VM entry checks and fails rather than ignores.
+ *
+ * SDM 29.3.1.5, "Checks on Guest Non-Register State": "the event to be
+ * delivered (as defined by event type and vector) must not be one that
+ * would normally be blocked while a logical processor is in the activity
+ * state corresponding to the contents of the activity-state field", and
+ * then enumerates them state by state. The three that are not `active`
+ * are the ones that matter here: a processor parked by an emulated INIT
+ * is in wait-for-SIPI, which permits nothing at all.
+ *
+ * Written against the field rather than against a vector and a type
+ * separately, because that is the shape the value has wherever it comes
+ * from - the entry field on the way in and the original-event field on
+ * the way out use the same encoding.
+ */
+constexpr bool allowed_in(std::uint64_t activity, std::uint64_t event)
+{
+    // The debug exception and the machine-check exception, which are the
+    // two hardware exceptions a halted processor is still able to take.
+    constexpr std::uint64_t debug_exception_vector = 1;
+    constexpr std::uint64_t machine_check_vector = 18;
+
+    if (0 == (event & valid)) {
+        return true;
+    }
+
+    auto event_type = event & type_mask;
+    auto event_vector = event & vector_mask;
+
+    switch (activity) {
+    case activity_state::active:
+        // "Active. Any event is allowed."
+        return true;
+
+    case activity_state::hlt:
+        // "HLT. The only events allowed are the following: those with
+        // event type external interrupt or non-maskable interrupt (NMI);
+        // those with event type hardware exception and vector 1 (debug
+        // exception) or vector 18 (machine-check exception); those with
+        // event type other event and vector 0 (pending MTF VM exit)."
+        //
+        // The last of those is absent deliberately: nothing in this VMM
+        // injects a pending monitor trap flag exit, and type 7 cannot
+        // arrive through the original-event field at all.
+        return (external_interrupt == event_type) ||
+               (non_maskable_interrupt == event_type) ||
+               ((hardware_exception == event_type) &&
+                ((debug_exception_vector == event_vector) ||
+                 (machine_check_vector == event_vector)));
+
+    case activity_state::shutdown:
+        // "Shutdown. Only NMIs and machine-check exceptions are allowed."
+        return (non_maskable_interrupt == event_type) ||
+               ((hardware_exception == event_type) &&
+                (machine_check_vector == event_vector));
+
+    case activity_state::wait_for_start_up_ipi:
+        // "Wait-for-SIPI. No events are allowed."
+        return false;
+
+    default:
+        // An activity state this architecture does not define. SDM
+        // 29.3.1.5 fails the entry on the state itself, so whatever is
+        // answered here the entry is already lost; refusing keeps this
+        // side from being the reason.
+        return false;
+    }
+}
 } // namespace vm_entry_interruption
+
+/**
+ * The guest interruptibility-state field, SDM Table 27-3.
+ */
+namespace interruptibility_state
+{
+enum type : std::uint64_t
+{
+    blocking_by_sti = (1ull << 0),
+    blocking_by_mov_ss = (1ull << 1),
+    blocking_by_smi = (1ull << 2),
+
+    /**
+     * Blocking by NMI, which VM entry refuses to see set alongside an
+     * injected NMI whenever the "virtual NMIs" VM-execution control is 1.
+     * SDM 29.3.1.5: "Bit 3 (blocking by NMI) must be 0 if the 'virtual
+     * NMIs' VM-execution control is 1, the valid bit (bit 31) in the
+     * injected-event identification field is 1, and the event type (bits
+     * 10:8) in that field has value 2 (indicating NMI)."
+     */
+    blocking_by_nmi = (1ull << 3),
+};
+} // namespace interruptibility_state
 
 /**
  * The VM entry controls.
