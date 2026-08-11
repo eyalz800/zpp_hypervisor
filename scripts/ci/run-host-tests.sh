@@ -79,7 +79,8 @@ for harness in \
     nested_exit \
     watched_page \
     ap_start_up \
-    nested_vmx
+    nested_vmx \
+    mtrr
 do
     if [ ! -x "$root/tests/$harness/build.sh" ]; then
         echo "-- tests/$harness/build.sh missing or not executable" >&2
