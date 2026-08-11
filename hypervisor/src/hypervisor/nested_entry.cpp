@@ -1939,8 +1939,8 @@ void hypervisor::save_l2_state(std::size_t cpu)
     shadow.write(field::guest_rip, vmcs.guest_rip());
     shadow.write(field::guest_rsp, vmcs.guest_rsp());
     shadow.write(field::guest_rflags, vmcs.guest_rflags());
-    shadow.write(field::guest_interruptibility_state,
-                 vmcs.read(field::guest_interruptibility_state));
+    auto interruptibility12 =
+        vmcs.read(field::guest_interruptibility_state);
 
     // The activity state is reconstructed rather than read back, for the
     // states this VMM holds outside the VMCS.
@@ -1959,10 +1959,49 @@ void hypervisor::save_l2_state(std::size_t cpu)
     // are active, at reset and to undo a HLT hardware entered on its own
     // (.references/kvm/vmx.c:4922 and 1827, which are the only writes in
     // the tree).
-    shadow.write(field::guest_activity_state,
-                 this->running_l2[cpu]
-                     ? vmcs.read(field::guest_activity_state)
-                     : this->l2_activity_state[cpu]);
+    auto activity12 = this->running_l2[cpu]
+                          ? vmcs.read(field::guest_activity_state)
+                          : this->l2_activity_state[cpu];
+
+    // The two fields above are a pair, and until this they were composed
+    // as though they were not.
+    //
+    // SDM 29.3.1.5: "The activity-state field must indicate the active
+    // state if the interruptibility-state field indicates blocking by
+    // either MOV-SS or by STI (if either bit 0 or bit 1 in that field is
+    // 1)" (.references/sdm.txt:202605). It is a check on VM *entry*, and
+    // the entry that would fail it is the guest hypervisor's own next
+    // VMRESUME of the vmcs12 being written here - so the cost of getting
+    // it wrong lands one layer up, on an entry whose state the guest
+    // hypervisor did not compose and cannot diagnose. That is the worst
+    // shape a fault can have in this tree, and it is why this is a guard
+    // rather than an analysis.
+    //
+    // The two came from unrelated places. Interruptibility is always
+    // hardware's. Activity is hardware's only while `running_l2`, and
+    // `l2_activity_state`'s otherwise - and that one is written by
+    // `enter_or_park_l2` *before* it decides whether to enter, so a pass
+    // that records a state and then holds the processor in root operation
+    // leaves the two free to disagree. Hardware alone cannot produce the
+    // forbidden pair, since VM entry applied this same rule and a
+    // processor that is halted or waiting for a start-up IPI executes
+    // nothing that could raise a shadow.
+    //
+    // Resolved by clearing the blocking bits rather than by forcing the
+    // activity state to active, because only one of those is true: a
+    // processor in HLT or wait-for-SIPI has retired no instruction, so it
+    // has no shadow, and the stale value read out of vmcs02 is the half
+    // that is wrong. Forcing activity to active would instead tell the
+    // guest hypervisor its processor was running, which is the thing
+    // `enter_or_park_l2` exists to avoid saying.
+    constexpr std::uint64_t blocking_by_sti_or_mov_ss = 0x3;
+
+    if (arch::x86_64::vmx::activity_state::active != activity12) {
+        interruptibility12 &= ~blocking_by_sti_or_mov_ss;
+    }
+
+    shadow.write(field::guest_interruptibility_state, interruptibility12);
+    shadow.write(field::guest_activity_state, activity12);
 
     // The control registers, put back through the same masks they were
     // built with. What the second-level guest owns is the real register;
