@@ -79,6 +79,55 @@ extern "C" inline void __attribute__((naked)) zpp_probe_l2_entry()
                  ".att_syntax prefix");
 }
 
+/**
+ * How many times the injected interrupt's handler has run inside the
+ * second-level guest.
+ *
+ * This is the whole of the measurement `launch`'s injection argument
+ * exists for, and it is worth saying why it needs a counter rather than a
+ * flag: an entry that injects delivers the event *before* the first
+ * instruction at the guest's RIP, so a handler that ran means the
+ * injection retired into the guest, and one that did not means it was
+ * accepted by every check and then dropped. Those two are
+ * indistinguishable from the guest hypervisor's side - SDM 30.2 clears
+ * the valid bit of the entry-interruption field on every VM exit, so its
+ * own record of the injection is gone by the time it looks - which is
+ * exactly why nothing above this layer can measure it.
+ */
+extern "C" inline volatile std::uint64_t zpp_probe_l2_injections{};
+
+/**
+ * The interrupt handler the injected vector lands in, running as the
+ * second-level guest.
+ *
+ * It records the arrival and returns, and returning is the important
+ * half: IRET puts the guest back at its own RIP, which is the CPUID
+ * above, so the run continues to the exit the harness was already
+ * checking for. A handler that halted instead would prove the delivery
+ * and lose everything after it.
+ *
+ * The second-level guest is entered with the *current* IDTR - `launch`
+ * copies it out of this processor - so this has to be reachable through
+ * whatever interrupt descriptor table is installed when the launch
+ * happens. The caller installs one.
+ *
+ * No error code: the vector injected is an external interrupt, and SDM
+ * 27.8.3 lists external interrupts among the event types that push none.
+ */
+extern "C" inline volatile std::uint64_t zpp_probe_l2_interrupted_rip{};
+
+extern "C" inline void __attribute__((naked)) zpp_probe_l2_interrupt()
+{
+    asm volatile(".intel_syntax noprefix\n\t"
+                 "inc qword ptr [rip + zpp_probe_l2_injections]\n\t"
+                 "push rax\n\t"
+                 "mov rax, [rsp + 8]\n\t"
+                 "mov [rip + zpp_probe_l2_interrupted_rip], rax\n\t"
+                 "pop rax\n\t"
+                 "iretq\n\t"
+                 ".att_syntax prefix");
+}
+
 namespace zpp
 {
 /**
@@ -619,7 +668,8 @@ struct verify_nested
                        bool with_ept,
                        Line && line,
                        Say && say,
-                       Step && step)
+                       Step && step,
+                       std::uint64_t injection = 0)
     {
         // A clear launch state each time, so both runs can use VMLAUNCH.
         // SDM 29.1: VMLAUNCH requires clear and VMRESUME requires
@@ -770,7 +820,18 @@ struct verify_nested
         write(field_entry_msr_load_count, 0);
         write(field_exit_msr_load_count, 0);
         write(field_exit_msr_store_count, 0);
-        write(field_entry_interruption_information, 0);
+        // The event the guest hypervisor asks the processor to deliver
+        // to its guest on this entry, and normally none.
+        //
+        // SDM 29.4 (.references/sdm.txt:203155): "If the VM entry is
+        // injecting, the logical processor is in the active state after
+        // VM entry ... the contents of the activity-state field do not
+        // determine the activity state after VM entry." The delivery
+        // happens before the first instruction at the guest's RIP, so a
+        // handler that runs is proof the injection retired - which is the
+        // one thing about this path that cannot be established from
+        // outside the guest.
+        write(field_entry_interruption_information, injection);
         write(field_vmcs_link_pointer, ~std::uint64_t{});
 
         write(field_cr0_guest_host_mask, 0);
@@ -1352,6 +1413,134 @@ struct verify_nested
         passed &=
             launch(system_table, vmcs_region, false, line, say, step);
         passed &= launch(system_table, vmcs_region, true, line, say, step);
+
+        // And a third, which is the only one that answers a question no
+        // layer above this can.
+        //
+        // Everything else about injection is checkable from outside: that
+        // the entry decision is made, that vmcs12's triple is copied into
+        // vmcs02, that a halted guest is entered rather than parked. All
+        // of it is checked, hosted, in tests/nested_exit and
+        // check-exit-handler.sh. **None of it establishes that the
+        // injected event actually retires into the second-level guest**,
+        // and the two outcomes are indistinguishable from the guest
+        // hypervisor's side: SDM 30.2 clears the valid bit of the
+        // entry-interruption field on every VM exit, so an injection that
+        // was delivered and one that was silently dropped leave the same
+        // vmcs12 behind.
+        //
+        // The only witness is the guest itself. An entry that injects
+        // delivers the event *before* the first instruction at the
+        // guest's RIP (SDM 29.4, .references/sdm.txt:203155), so the
+        // second-level guest starts inside its interrupt handler rather
+        // than at its entry point. That handler counts and returns, and
+        // the run then continues to the CPUID exit the two launches above
+        // already check - so the injection costs one extra exit-free step
+        // and proves itself.
+        //
+        // Vector 0x20 as an external interrupt: type 0 in bits 10:8, and
+        // SDM 27.8.3 puts no error code on that type, so the two fields
+        // beside the information one stay untouched. Above the
+        // architecturally defined exceptions, so nothing else claims it.
+        constexpr std::uint64_t interruption_valid = 1ull << 31;
+        constexpr std::uint64_t interruption_external = 0ull << 8;
+        constexpr std::uint64_t injected_vector = 0x20;
+
+        // The gate the injected vector lands in, installed here rather
+        // than asked of the caller.
+        //
+        // The second-level guest runs with *this* processor's interrupt
+        // descriptor table - `launch` copies the IDTR out of it, so
+        // whatever is installed when the launch happens is what an
+        // injected event is delivered through. Depending on the caller to
+        // have put a handler there would make this probe silently useless
+        // whenever it did not: the injection would land in the firmware's
+        // own handler, which prints and hangs, and the run would time out
+        // rather than report.
+        //
+        // One entry, saved and put back immediately afterwards. The
+        // guest's own RFLAGS is 0x2, so interrupts are disabled inside it,
+        // and injection ignores RFLAGS.IF in any case - so nothing else
+        // can arrive on this vector while it is borrowed.
+        struct gate
+        {
+            std::uint16_t offset_low;
+            std::uint16_t selector;
+            std::uint16_t attributes;
+            std::uint16_t offset_middle;
+            std::uint32_t offset_high;
+            std::uint32_t reserved;
+        };
+
+        auto idtr_now = read_idtr();
+        auto * gates = reinterpret_cast<gate *>(idtr_now.base);
+
+        if (idtr_now.limit <
+            (((injected_vector + 1) * sizeof(gate)) - 1)) {
+            line("zpp: nested SKIP the idt is too small to borrow a "
+                 "vector from\r\n");
+            return passed;
+        }
+
+        // Interrupts off from here until the gate is put back.
+        //
+        // Not a precaution - a correction. The first run of this measured
+        // one delivery and the entry had *failed*, which cannot both be
+        // true: a refused entry runs no guest. What incremented the
+        // counter was a real interrupt on this vector arriving in the
+        // guest hypervisor's own world, through the gate this borrows,
+        // while the probe was running with interrupts enabled. The
+        // counter has to mean "the second-level guest took it" and
+        // nothing else, so nothing else may reach the handler.
+        asm volatile("cli" : : : "memory");
+
+        auto saved = gates[injected_vector];
+
+        auto handler =
+            reinterpret_cast<std::uint64_t>(&zpp_probe_l2_interrupt);
+
+        gate borrowed{};
+        borrowed.offset_low = static_cast<std::uint16_t>(handler);
+        borrowed.selector = read_cs();
+        // Present, DPL 0, 64-bit interrupt gate, no interrupt stack
+        // table: type 0xe in bits 11:8, P in bit 15.
+        borrowed.attributes = 0x8e00;
+        borrowed.offset_middle = static_cast<std::uint16_t>(handler >> 16);
+        borrowed.offset_high = static_cast<std::uint32_t>(handler >> 32);
+        gates[injected_vector] = borrowed;
+
+        auto before = zpp_probe_l2_injections;
+
+        passed &= launch(system_table,
+                         vmcs_region,
+                         false,
+                         line,
+                         say,
+                         step,
+                         interruption_valid | interruption_external |
+                             injected_vector);
+
+        auto delivered = zpp_probe_l2_injections - before;
+        say("injections delivered to the second-level guest", delivered);
+
+        // Where it fired, which is what tells a delivery into the
+        // second-level guest from one into the guest hypervisor's own
+        // world. The second-level guest's only RIP is its entry point.
+        say("the rip the handler interrupted",
+            zpp_probe_l2_interrupted_rip);
+        say("the second-level guest's entry point",
+            reinterpret_cast<std::uint64_t>(&zpp_probe_l2_entry));
+
+        // One, not "at least one". More than one would mean the event was
+        // re-delivered on a re-entry nobody asked for, which is its own
+        // defect and would show as a guest taking an interrupt storm.
+        gates[injected_vector] = saved;
+        asm volatile("sti" : : : "memory");
+
+        passed &= step("second-level guest took the injected interrupt",
+                       (1 == delivered) ? outcome::succeeded
+                                        : outcome::failed_valid,
+                       outcome::succeeded);
 
         // And back out, leaving the processor as it was found. VMXOFF
         // first, because clearing CR4.VMXE while in VMX operation is a

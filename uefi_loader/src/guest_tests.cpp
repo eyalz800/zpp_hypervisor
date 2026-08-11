@@ -13,6 +13,7 @@
 #include "zpp/guest_tests.h"
 #include "zpp/sleep_control.h"
 #include "zpp/trace.h"
+#include "zpp/verify_nested.h"
 
 namespace zpp
 {
@@ -719,11 +720,24 @@ bool guest_tests::run(EFI_SYSTEM_TABLE * system_table)
         auto ecx = registers[2];
 
         // ECX[5] is VMX. SDM Vol. 2A, CPUID, Table 3-8.
-        check_equal(state,
-                    "cpuid.leaf1_vmx_hidden",
-                    "leaf=1_ecx_bit5",
-                    0,
-                    (ecx >> 5) & 1);
+        // Only with the nested machinery compiled out. With it in, the
+        // guest is deliberately told VMX exists - that is the whole point
+        // of the switch - so this asserts the default build's answer and
+        // reports a skip on the other, rather than being written twice or
+        // failing for a reason that is not a defect.
+        if constexpr (!ZPP_NESTED_VMX) {
+            check_equal(state,
+                        "cpuid.leaf1_vmx_hidden",
+                        "leaf=1_ecx_bit5",
+                        0,
+                        (ecx >> 5) & 1);
+        } else {
+            check_equal(state,
+                        "cpuid.leaf1_vmx_offered_with_nesting",
+                        "leaf=1_ecx_bit5",
+                        1,
+                        (ecx >> 5) & 1);
+        }
 
         // ECX[6] is SMX, concealed for the same reason.
         check_equal(state,
@@ -865,11 +879,24 @@ bool guest_tests::run(EFI_SYSTEM_TABLE * system_table)
         // must have it - and clearing it in the shadow, so the guest's
         // view keeps agreeing with the CPUID leaf.
         auto after = read_cr4();
-        check_equal(state,
-                    "cr4.vmxe_still_clear_after_write",
-                    "cr4_bit13",
-                    0,
-                    (after & cr4_vmxe) ? 1 : 0);
+
+        // The other half of the pair, and it moves with the same switch.
+        // With nesting out the guest reads VMXE back clear, so its view
+        // agrees with the CPUID leaf above. With nesting in it is
+        // entitled to turn VMX on and see that it did.
+        if constexpr (!ZPP_NESTED_VMX) {
+            check_equal(state,
+                        "cr4.vmxe_still_clear_after_write",
+                        "cr4_bit13",
+                        0,
+                        (after & cr4_vmxe) ? 1 : 0);
+        } else {
+            check_equal(state,
+                        "cr4.vmxe_reads_back_set_with_nesting",
+                        "cr4_bit13",
+                        1,
+                        (after & cr4_vmxe) ? 1 : 0);
+        }
 
         // Everything else the guest wrote must have survived.
         check_equal(state,
@@ -1619,11 +1646,97 @@ bool guest_tests::run(EFI_SYSTEM_TABLE * system_table)
         }
     }
 
-    // Firmware's own table back, before anything else in this image
-    // runs. A fault taken after this point is the firmware's to report,
-    // which is what it would have been without this suite.
+    // === Nested VMX, and the one thing only a guest can witness ======
+    //
+    // Run outside the window below, with the firmware's own interrupt
+    // descriptor table back and interrupts enabled, because
+    // `verify_nested::present` allocates pages through boot services -
+    // and a firmware call made with a foreign IDT installed and
+    // interrupts disabled is what stopped an earlier version of this
+    // suite part way through its fourth result line.
+    //
+    // It installs its own gate for the vector it injects, so it does not
+    // need this suite's table and does not care that it has been put
+    // back.
+    //
+    // Compiled in unconditionally and self-gating: with ZPP_NESTED_VMX
+    // off the guest is told there is no VMX, `present` says so and
+    // returns true. So this reports a skip on the build CI runs by
+    // default, and a real answer on the one built with nesting on.
     write_idtr(firmware_idtr);
     asm volatile("sti" : : : "memory");
+
+    {
+        std::uint32_t registers[4]{};
+        cpuid(1, 0, registers);
+        auto vmx_offered = 0 != (registers[2] & (1u << 5));
+
+        if (!vmx_offered) {
+            emit(state,
+                 "nested.injection_retires",
+                 outcome::skip,
+                 "vmx_not_offered_build_with_ZPP_NESTED_VMX_ON",
+                 1,
+                 0);
+        } else {
+            auto before = ::zpp_probe_l2_injections;
+            auto ok = zpp::verify_nested::present(system_table);
+            auto delivered = ::zpp_probe_l2_injections - before;
+
+            // **The measurement.** Everything else about injection is
+            // checkable from outside the guest and is checked, hosted, in
+            // tests/nested_exit and check-exit-handler.sh: the entry
+            // decision, the triple copied from vmcs12 into vmcs02, a
+            // halted guest entered rather than parked. None of it
+            // establishes that the injected event *retires*, and the two
+            // outcomes leave the same vmcs12 behind - SDM 30.2 clears the
+            // valid bit on every exit, so a delivery and a silent drop
+            // are indistinguishable to the layer that asked for it.
+            //
+            // The only witness is the second-level guest. An injecting
+            // entry delivers before the first instruction at its RIP,
+            // so a handler that ran is proof.
+            // A count alone is not the measurement, and taking it for
+            // one gave a wrong pass on the first run. The handler is
+            // reached through the guest hypervisor's own interrupt
+            // descriptor table - the second-level guest is entered with
+            // this processor's IDTR - so anything delivered on that
+            // vector in *either* world reaches it. The witness has to be
+            // where it fired.
+            //
+            // The second-level guest has exactly one RIP: its entry
+            // point. An injecting entry delivers before the first
+            // instruction there, so a handler that interrupted that
+            // address ran inside the guest and one that interrupted any
+            // other address did not.
+            auto entry_point =
+                reinterpret_cast<std::uint64_t>(&zpp_probe_l2_entry);
+            auto retired = (1 == delivered) &&
+                           (::zpp_probe_l2_interrupted_rip == entry_point);
+
+            emit(state,
+                 "nested.injection_retires",
+                 retired ? outcome::unexpected_pass
+                         : outcome::expected_failure,
+                 "injected_interrupt_reaches_the_second_level_guest",
+                 entry_point,
+                 ::zpp_probe_l2_interrupted_rip);
+
+            // The probe as a whole, which fails today for the same
+            // reason: its third launch is the injecting one.
+            emit(state,
+                 "nested.probe_passed",
+                 ok ? outcome::unexpected_pass : outcome::expected_failure,
+                 "verify_nested_present_fails_on_the_injecting_launch",
+                 1,
+                 ok ? 1 : 0);
+        }
+    }
+
+    // The firmware's table and interrupts were already put back above,
+    // before the nested probe, because that one calls into boot services
+    // and must not do it through this suite's table. Nothing between
+    // there and here needs them.
 
     {
         char line[trace::line_capacity]{};

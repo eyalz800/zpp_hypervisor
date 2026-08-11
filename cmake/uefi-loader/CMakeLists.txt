@@ -30,6 +30,16 @@ option(ZPP_GUEST_TESTS
     "Compile the guest-side VM-exit, EPT and emulation coverage suite"
     OFF)
 
+# Whether the hypervisor this loader embeds was built with the nested
+# machinery. The loader does not act on it except in the coverage suite,
+# which has to know: with nesting on the guest is deliberately told VMX
+# exists, so the cases asserting it is hidden are asserting the *other*
+# build's answer. Without this the suite tested one build's rule against
+# the other's binary and failed for a reason that was not a defect.
+option(ZPP_NESTED_VMX
+    "The embedded hypervisor reports VMX to its guest"
+    OFF)
+
 option(ZPP_DIAG
     "Compile the diagnostic log, its ring and its sinks (debug builds only)"
     ON)
@@ -189,6 +199,9 @@ target_compile_definitions(zpp_loader_efi PRIVATE
     # this suite then reported would be attributed to it rather than to
     # the state verify::present had already left behind.
     "ZPP_GUEST_TESTS=$<AND:$<BOOL:${ZPP_GUEST_TESTS}>,$<NOT:$<BOOL:${ZPP_CHAINLOAD_ONLY}>>,$<NOT:$<BOOL:${ZPP_VERIFY_HYPERVISOR}>>>"
+    # Always defined, never tested with #ifdef, matching the shape the
+    # hypervisor's own build uses for the same switch.
+    "ZPP_NESTED_VMX=$<BOOL:${ZPP_NESTED_VMX}>"
     # Serial tracing, controlled on its own so it can be enabled or disabled
     # independently of the check above. Defaults to the same value.
     "ZPP_TRACE=$<BOOL:${ZPP_TRACE}>"
