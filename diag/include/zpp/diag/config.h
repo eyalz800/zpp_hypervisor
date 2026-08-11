@@ -64,8 +64,24 @@ inline constexpr bool enabled = ZPP_DIAG;
  * independent ways of going wrong, and a boot that changes both at once
  * cannot say which one did anything. They shared one switch until a boot
  * was needed that exercised exactly one of them.
+ *
+ * **Off by default**, and no longer merely following `enabled`. Tying it
+ * to the facility meant it was on for every build that carried any
+ * diagnostics at all - which is every rig build - so a boot that wanted
+ * only a log ring also rewrote the guest's DMAR table, reserved a tail
+ * of the EFI system partition, and restarted the machine to pick the
+ * reservation up. None of that is free and none of it was asked for.
+ *
+ * `-DZPP_DIAG_RESERVE_WINDOW=ON` asks for it. That it needs asking is
+ * the point: it edits firmware tables the guest reads and takes space
+ * from a real partition on a real disk.
  */
-inline constexpr bool reserve_controller_window = enabled;
+inline constexpr bool reserve_controller_window =
+#if defined(ZPP_DIAG_RESERVE_WINDOW) && ZPP_DIAG_RESERVE_WINDOW
+    enabled;
+#else
+    false;
+#endif
 
 /**
  * How much of the EFI system partition to take for the log, in

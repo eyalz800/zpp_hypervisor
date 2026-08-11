@@ -82,6 +82,19 @@ option(ZPP_REQUEUE_INTERRUPTED_EVENTS
     "Put back an event whose delivery a VM exit interrupted"
     ON)
 
+# The loader's edit of the guest's DMAR table to declare a reserved
+# window for the storage controller, plus the EFI system partition
+# reservation and the restart that picks it up.
+#
+# Off, and no longer following ZPP_DIAG. Tying it to the facility put it
+# in every build carrying any diagnostics - which is every rig build - so
+# a boot that wanted a log ring also rewrote firmware tables and took a
+# tail of a real partition on a real disk. It edits what the guest reads
+# and it writes to the medium, so it is asked for rather than inherited.
+option(ZPP_DIAG_RESERVE_WINDOW
+    "Declare a reserved memory window for the storage controller"
+    OFF)
+
 # The guest-side coverage suite: uefi_loader/include/zpp/guest_tests.h, run
 # from inside the guest once the hypervisor is live, reporting one line per
 # case on serial. scripts/ci/bochs-exit-coverage.sh grades the result.
@@ -118,6 +131,7 @@ ExternalProject_Add(hypervisor
         -DZPP_OUTPUT_DIR=${ZPP_OUTPUT_DIR}
         -DZPP_HYPERVISOR_WAIT_FOR_DEBUGGER=${ZPP_HYPERVISOR_WAIT_FOR_DEBUGGER}
         -DZPP_DIAG=${ZPP_DIAG}
+        -DZPP_DIAG_RESERVE_WINDOW=${ZPP_DIAG_RESERVE_WINDOW}
         -DZPP_NESTED_VMX=${ZPP_NESTED_VMX}
         -DZPP_REQUEUE_INTERRUPTED_EVENTS=${ZPP_REQUEUE_INTERRUPTED_EVENTS}
         -DZPP_GUEST_TESTS=${ZPP_GUEST_TESTS}
@@ -200,6 +214,7 @@ ExternalProject_Add(uefi_loader
         -DZPP_CHAINLOAD_ONLY=${ZPP_CHAINLOAD_ONLY}
         -DZPP_SEARCH_ALL_DEVICES=${ZPP_SEARCH_ALL_DEVICES}
         -DZPP_DIAG=${ZPP_DIAG}
+        -DZPP_DIAG_RESERVE_WINDOW=${ZPP_DIAG_RESERVE_WINDOW}
     INSTALL_COMMAND ""
     BUILD_ALWAYS ON
     DEPENDS hypervisor

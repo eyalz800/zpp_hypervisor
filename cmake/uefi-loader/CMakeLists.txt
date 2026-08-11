@@ -37,6 +37,9 @@ option(ZPP_GUEST_TESTS
 # build's answer. Without this the suite tested one build's rule against
 # the other's binary and failed for a reason that was not a defect.
 # ON, matching the root project. See the comment there for why.
+option(ZPP_DIAG_RESERVE_WINDOW
+    "Declare a reserved memory window for the storage controller"
+    OFF)
 option(ZPP_NESTED_VMX
     "The embedded hypervisor reports VMX to its guest"
     ON)
@@ -211,6 +214,7 @@ target_compile_definitions(zpp_loader_efi PRIVATE
     # #ifdef, and hardcoded to zero in release for the reason the option's own
     # comment gives.
     "ZPP_DIAG=$<IF:$<CONFIG:Release>,0,$<BOOL:${ZPP_DIAG}>>"
+    "ZPP_DIAG_RESERVE_WINDOW=$<IF:$<CONFIG:Release>,0,$<BOOL:${ZPP_DIAG_RESERVE_WINDOW}>>"
     # Skips the hypervisor launch so the same loader can produce a control
     # run. See the option's own comment for why the UEFI shell cannot.
     "ZPP_CHAINLOAD_ONLY=$<BOOL:${ZPP_CHAINLOAD_ONLY}>"

@@ -54,8 +54,11 @@ scratchpad/
 
 # Recorded by scripts/deploy-to-rig.sh so a confusing boot can be checked
 # against what was actually deployed. Per-machine, not per-tree.
-.rig-deployed-hash
-.rig-deployed-hypervisor.elf
+# Everything deploy-to-rig.sh leaves behind, as a pattern rather than a
+# list. The list was the bug: it named the hash and the ELF, missed the
+# loader, and a 2 MB binary was then committed and re-committed with new
+# contents on every deploy. A prefix cannot miss the next one.
+.rig-deployed*
 
 # Python leaves these beside any script imported as a module.
 __pycache__/

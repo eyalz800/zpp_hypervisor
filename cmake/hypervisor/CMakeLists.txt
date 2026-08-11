@@ -1,3 +1,6 @@
+option(ZPP_DIAG_RESERVE_WINDOW
+    "Declare a reserved memory window for the storage controller"
+    OFF)
 option(ZPP_REQUEUE_INTERRUPTED_EVENTS
     "Put back an event whose delivery a VM exit interrupted"
     ON)
@@ -112,6 +115,8 @@ target_compile_options(zpp_hypervisor PRIVATE
     # entry and no command line can put diagnostics into a release binary.
     $<$<CONFIG:Debug>:-DZPP_DIAG=$<BOOL:${ZPP_DIAG}>>
     $<$<CONFIG:Release>:-DZPP_DIAG=0>
+    $<$<CONFIG:Debug>:-DZPP_DIAG_RESERVE_WINDOW=$<BOOL:${ZPP_DIAG_RESERVE_WINDOW}>>
+    $<$<CONFIG:Release>:-DZPP_DIAG_RESERVE_WINDOW=0>
     # Nested VMX. Same shape as the diagnostic switch - an always defined 0/1
     # macro turned into a constexpr bool by nested_vmx.h - and defined for both
     # configurations rather than debug only, because unlike diagnostics this is
