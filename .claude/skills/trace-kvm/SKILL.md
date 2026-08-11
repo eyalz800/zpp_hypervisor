@@ -5,7 +5,7 @@ description: Use when you need to see what a guest hypervisor asked KVM for on t
 
 # Tracing KVM on the rig
 
-> **Read "The FIFO capture crashes this kernel" before running any of
+> **Read "Never let a tracefs reader be an ssh child" before running any of
 > this.** The recipe below corrupts kernel memory on `6.12.11-zpptrace`
 > and ends with the rig needing a reboot. It is kept because the events
 > it names are still the right ones and nothing else answers what it
@@ -30,50 +30,49 @@ Two constraints hold at once and pull opposite ways:
   times out during banner exchange. It looks exactly like sshd dying
   under load.
 
-**A FIFO reconciles them.** It stores nothing. The process touching
-tracefs is `setsid`-detached, so a blocked read takes no session with it.
-The ssh session reads only the FIFO — an ordinary interruptible read.
+**Netcat reconciles them.** It stores nothing on the rig: the trace text
+goes straight out over a socket. The process touching tracefs is
+`setsid`-detached and listens with `nc -l`, so a blocked read takes no
+ssh session with it, and this side connects and writes the file locally.
+
+Do not route this through a file or a rendezvous on the rig. Its `/tmp`
+is a RAM disk shared with a guest that wants nearly all of memory, and
+anything landing there competes with the thing being measured.
 
 ## Recipe
 
-```sh
-# 1. Arm AS ROOT, tracing_on last. kvm.ko must already be loaded.
-#    Each write is its own `sudo sh -c` with the path spelled out: a
-#    shell variable does not survive into a sudo subshell, and a loop
-#    that lost $T silently wrote to /events/... while the check below
-#    still reported 1 from a previous arming.
-ssh $RIG 'T=/sys/kernel/tracing
-  [ -d $T/events ] || sudo mount -t tracefs nodev $T
-  sudo sh -c "echo 0 > /sys/kernel/tracing/buffer_percent"
-  for e in kvm_apic_ipi kvm_apic_accept_irq kvm_nested_vmenter_failed; do
-    sudo sh -c "echo 1 > /sys/kernel/tracing/events/kvm/$e/enable"
-  done
-  sudo sh -c "echo 1 > /sys/kernel/tracing/tracing_on"
-  echo "armed: $(sudo cat $T/events/kvm/kvm_apic_ipi/enable) \
-    accept: $(sudo cat $T/events/kvm/kvm_apic_accept_irq/enable) \
-    on: $(sudo cat $T/tracing_on)"'
+**Use `scripts/rig-trace.sh`. Do not hand-roll a capture.** It exists
+because the obvious pipeline corrupts kernel memory on this rig, and it
+encodes the transport that does not:
 
-# 2. All three must read 1. An empty answer means you read it
-#    unprivileged. Check all of them - one reading 1 proves nothing about
-#    the others, and may be left over from an earlier run.
-
-# 3. Feed the FIFO, then stream it here. START THIS BEFORE THE GUEST
-#    BOOTS, and run it long enough to span what you are looking for.
-ssh $RIG 'sudo vm/trace-stream.sh 300'
-ssh $RIG 'timeout 310 cat /tmp/zpp-trace.fifo' > /tmp/kvm.log
+```
+rig:   nc -l -p PORT < trace_pipe      stdin IS the file - no pipe
+here:  nc rig PORT > /tmp/kvm.log      appended live, continuously
 ```
 
-**Start the capture before the boot, not after.** The events worth having
-arrive minutes in - a guest hypervisor starts its application processors
-long after the firmware has finished - and a capture armed at a fixed
-sleep after boot samples an arbitrary window. Three captures came back
-with nothing but end-of-interrupt traffic for exactly this reason, and
-each cost a full boot to discover.
+`nc` reads fd 0 with `read()` and writes the socket with `write()`. No
+rendezvous file, no shell `|`, nothing spliced, and nothing stored on the
+rig - whose `/tmp` is a RAM disk shared with a guest that wants nearly all
+of memory.
 
-The ordering constraint that makes this awkward is real: `events/kvm`
-only exists once `kvm.ko` is loaded, and the launcher reloads it. So arm
-within the launcher (as `boot-ipi.sh` does), or arm immediately after the
-insmod and start the stream before the firmware hands over.
+```sh
+./scripts/rig-trace.sh verify                 # stress test, then read dmesg
+./scripts/rig-trace.sh arm [events...]        # tracing_on last, checked
+./scripts/rig-trace.sh stream [seconds]       # to /tmp/kvm.log
+./scripts/rig-trace.sh status
+./scripts/rig-trace.sh stop
+```
+
+**Run `verify` after any kernel change and before the first capture of a
+session.** It streams `sched_switch` - 3.2 M lines in 15 s - and then
+reads dmesg, so the transport is stress tested before a real run depends
+on it.
+
+**Arm before the guest boots.** The events worth having arrive minutes
+in, and `events/kvm` only exists once `kvm.ko` is loaded - which the
+launcher reloads. So arm immediately after its insmod and start the
+stream before the firmware hands over.
+
 
 ## Traps
 
@@ -82,16 +81,16 @@ insmod and start the stream before the firmware hands over.
 | "armed: " with nothing after it | tracefs answers an **unprivileged read with an empty string**, not an error. Every control must be read with `sudo`. Five captures came back empty before this was noticed — the events were never enabled. |
 | Trace empty, everything reports enabled | `tracing_on` reads 0. **Writing `buffer_size_kb` sets it back to 0** — set `tracing_on` last, after any resize and after the enables. |
 | Trace empty, live reader, sparse events | `buffer_percent` defaults to 50: `trace_pipe` will not wake its reader until the buffer is half full. Set it to 0. |
-| Reader gets `Device or resource busy` | `trace_pipe` admits one reader. A leftover one silently drains everything the next is waiting for. |
+| Reader gets `Device or resource busy` | `trace_pipe` admits one reader. A leftover one silently drains everything the next is waiting for. Kill any stale `nc -l` first. |
 | Event enabled but drops everything | A filter that fails to parse leaves the event in an error state, still reporting enabled. ftrace has no bitwise predicate — `icr_low & 0x700 != 0` did this. Clear filters; streaming off-box removes the reason to filter. |
 | Host OOMs, QEMU killed | `buffer_size_kb` is **per CPU**. 65536 on eight processors is 512 MB against a host left ~800 MB. |
 | `events/kvm` missing | The tracepoints exist only while `kvm.ko` is loaded, and the launcher rmmods/insmods it — arm *after* its insmod. |
-| ssh dies mid-capture | A reader was an ssh child. Never `ssh $RIG 'cat trace_pipe'`. |
+| ssh dies mid-capture | A reader was an ssh child. Never `ssh $RIG 'cat trace_pipe'` - detach it with `setsid` and reach it over `nc`. |
 
-## The FIFO capture crashes this kernel
+## Never let a tracefs reader be an ssh child
 
 **Measured, twice, with the kernel saying so itself.** The
-`trace_pipe` → FIFO pipeline this skill recommends writes trace text over
+`trace_pipe` pipeline this skill recommends writes trace text over
 kernel page tables on `6.12.11-zpptrace`. It is not a flaky capture; it is
 memory corruption, and it ends the session.
 
@@ -107,7 +106,7 @@ Fixing recursive fault but reboot is needed!
 
 `2e2e2e2e2e205d31` is `1] .....` and `656363615f636970` is `pic_acce`,
 the middle of `kvm_apic_accept_irq`. Both faulting tasks were `Comm: cat`
-- the FIFO feeder and its reader - not QEMU and not `rmmod`.
+- the tracefs reader and its socket - not QEMU and not `rmmod`.
 
 What it looks like from outside, in the order it appears:
 
@@ -169,7 +168,7 @@ a run:
   guest pages does not clear on its own and needs a reboot, and the script
   reports it explicitly because the next symptom is a launch that
   mysteriously cannot allocate guest memory. **It is not caused by the
-  kill** - see "The FIFO capture crashes this kernel" above, and read
+  kill** - see "Never let a tracefs reader be an ssh child" above, and read
   `dmesg` before concluding otherwise. TERM first remains right on its own
   merits; it just does not buy immunity from this.
 

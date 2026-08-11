@@ -7239,8 +7239,8 @@ What to measure, in order:
 1. Whether the interrupts exist at all below us. The rig's traced KVM can
    answer it: `kvm_apic_accept_irq` and the MSI-X injection tracepoints,
    captured across a boot, say whether the layer underneath ever delivers
-   an NVMe completion. See the trace-kvm skill, and note the FIFO
-   discipline it insists on.
+   an NVMe completion. Use `scripts/rig-trace.sh` - the trace-kvm skill
+   explains why a hand-rolled capture must not be used here.
 2. Whether the guest ever programs the device to send them - the MSI-X
    capability writes are configuration-space accesses and BACKLOG's own
    channel notes already describe reading them.

@@ -919,7 +919,7 @@ event: the kill is simply the last thing that happens before the symptom
 is noticed.
 
 The precondition is **a kernel that has already oopsed**, and on this rig
-what oopses it is the trace capture - see `trace-kvm`, "The FIFO capture
+what oopses it is a hand-rolled trace capture - see `trace-kvm`, "Never let a tracefs reader be an ssh child"
 crashes this kernel". Check `dmesg` before concluding anything:
 
 ```sh
