@@ -1589,16 +1589,26 @@ void large_entries_are_translated_too_high()
                 "a processor translates the 2 MB page from bits 51:21 "
                 "of the entry (SDM Table 5-18, sdm.txt:157243)");
 
+    // These two used to assert the defect: virtual_to_physical answered
+    // `page_number() << 21`, and `page_number()` is already bits 51:12,
+    // so the answer was the true base shifted left by nine. 566a633
+    // added `large_page_number()` to pte.h - the accessor ept.h had all
+    // along, which is the whole reason the two sides disagreed - and the
+    // pair is now stated the right way round.
+    //
+    // The first of the two is the one that matters: the class and a
+    // processor have to give the same answer. It is asserted against
+    // `hardware_walk`'s result rather than against a literal, so it
+    // cannot be satisfied by both of them being wrong the same way.
     auto answered = table->virtual_to_physical(address + 0x1234);
-    check(answered != walk.physical,
-          "and virtual_to_physical disagrees with it, which is the "
-          "defect this pair of checks exists to pin");
-    check_equal((physical << 9) + 0x1234,
+    check_equal(walk.physical,
                 answered,
-                "it answers the base shifted nine bits too far - "
-                "page_number() << 21, where page_number() is already "
-                "bits 51:12. DEFECT: invert this check when pte gains a "
-                "large_page_number() like vmx/ept.h's");
+                "virtual_to_physical agrees with a processor's own walk "
+                "of the 2 MB page - 566a633");
+    check_equal(physical + 0x1234,
+                answered,
+                "which is bits 51:21 of the entry plus bits 20:0 of the "
+                "address, not page_number() << 21");
 
     // page_table_entry stops at the entry that terminates the walk,
     // which for a large page is the directory entry itself. Descending
@@ -1625,10 +1635,10 @@ void large_entries_are_translated_too_high()
                 hardware_walk(*huge, address + 0x1234).physical,
                 "a processor translates the 1 GB page from bits 51:30 "
                 "of the entry");
-    check_equal((huge_page_size << 18) + 0x1234,
+    check_equal(huge_page_size + 0x1234,
                 huge->virtual_to_physical(address + 0x1234),
-                "but virtual_to_physical answers it eighteen bits too "
-                "far. DEFECT, the same one");
+                "and virtual_to_physical agrees with it - bits 51:30 of "
+                "the entry, not page_number() << 30");
     check(&huge->page_table_entry(address) == &pdpte,
           "and page_table_entry stops at the 1 GB entry");
 }
@@ -1835,22 +1845,25 @@ void the_os_walk_handles_large_pages()
     os_page_table table(fake_physical_of(pml4_page),
                         fake_physical_to_virtual);
 
-    // Defect 1 in the other walker - and this is the copy that is live,
-    // because the Windows and Linux loaders pass a real
-    // physical_to_virtual and the tables they hand over do use 2 MB
-    // leaves.
+    // This is the copy of the walk that was live: the Windows and Linux
+    // loaders pass a real physical_to_virtual, and the tables they hand
+    // over do use 2 MB leaves. Under UEFI the callback is null and the
+    // walk returns its argument untouched, which is why the rig - which
+    // boots only UEFI - never produced a wrong answer here.
+    //
+    // Asserted the right way round since 566a633. Stated as base plus
+    // bits 20:0 rather than as any shift of the entry, because that is
+    // what SDM Table 5-18 says the processor computes, and a check
+    // written in terms of `page_number()` would be agreeing with the
+    // accessor rather than with the architecture.
     auto answered = table.virtual_to_physical(walked_address);
-    check(answered != large_base + structure.large_offset(),
-          "the 2 MB walk does not answer base plus bits 20:0, which is "
-          "what the SDM computes");
+    check_equal(large_base + structure.large_offset(),
+                answered,
+                "the 2 MB walk answers base plus bits 20:0, which is "
+                "what the SDM computes - 566a633");
     check_equal(large_base + 0x4123,
                 large_base + structure.large_offset(),
                 "(and bits 20:0 of the address are 0x4123)");
-    check_equal((large_base << 9) + 0x4123,
-                answered,
-                "it answers the base shifted nine bits too far. DEFECT: "
-                "live on the Windows and Linux loaders; invert this "
-                "check when it is fixed");
 
     // A 1 GB leaf at the page directory pointer table, off by eighteen
     // bits for the same reason.
@@ -1860,10 +1873,9 @@ void the_os_walk_handles_large_pages()
 
     os_page_table huge(fake_physical_of(pml4_page),
                        fake_physical_to_virtual);
-    check_equal((huge_base << 18) + structure.huge_offset(),
+    check_equal(huge_base + structure.huge_offset(),
                 huge.virtual_to_physical(walked_address),
-                "and the 1 GB page eighteen bits too far. DEFECT, the "
-                "same one");
+                "and the 1 GB page answers base plus bits 29:0");
     check_equal(0x604123,
                 structure.huge_offset(),
                 "(and bits 29:0 of the address are 0x604123)");
