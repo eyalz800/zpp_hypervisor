@@ -7250,3 +7250,66 @@ What to measure, in order:
 The third is the cheapest and should come first: if all 324 are timer or
 IPI vectors and none is a device vector, the disease is named without a
 trace capture.
+
+### The guest hypervisor asks to acknowledge interrupts on exit, and does not get it
+
+**This is the strongest candidate the investigation has produced, and it
+is a defect by inspection regardless of whether it is the boot bug.**
+
+`vmcs12_exit_controls` is `0x3efff`. **Bit 15 is set** - "acknowledge
+interrupt on exit". `build_vmcs02` writes `exit01`, this VMM's own exit
+controls, into vmcs02, and those are only `host_address_space_size |
+save_debug_controls`. **Bit 15 is not among them.**
+
+What that control decides, SDM 27.9.2 (`sdm.txt:200330-200341`):
+event-specific information is provided for "external interrupts that
+occur while the 'acknowledge interrupt on exit' VM-exit control is 1",
+and that information is the exiting-event identification field - what
+older revisions called VM-exit interruption information - whose bits 7:0
+are the "Vector of interrupt or exception".
+
+So with the control clear, **an external-interrupt VM exit carries no
+vector.** The interrupt is not acknowledged at the interrupt controller
+and the field is not valid.
+
+The guest hypervisor is asking for it and reading it. Counted over one
+boot: **324 external-interrupt exits** across eight processors, and
+`vm_exit_interruption_information` **VMREAD 323 times**. One read per
+external interrupt, give or take the one in flight. It takes the exit,
+reads the field to learn which interrupt fired, and the field has never
+been valid.
+
+A guest hypervisor that cannot learn which interrupt fired cannot
+dispatch a device interrupt. That is the whole of the disk path.
+
+This is this project's recurring failure stated exactly, and the comment
+that allowed it is in the tree: "Exit controls are this VMM's, unchanged.
+The exit comes here." The first half is true and the second is the wrong
+conclusion - the exit does come here, and then it is *reflected*, and a
+reflected exit must carry what the guest hypervisor's own controls would
+have produced. Nothing in the union logic that carefully composes the
+pin, primary and secondary controls is applied to the exit controls at
+all.
+
+**What a fix has to do**, and it is not a one-line change, which is why
+this is written down rather than attempted at the end of a long session:
+
+- Set the control in vmcs02 when vmcs12 asks for it, so the processor
+  acknowledges the interrupt and supplies the vector.
+- Carry the vector into vmcs12's exiting-event identification field on
+  reflection, since that is where the guest hypervisor reads it.
+- Decide what happens when *this* VMM wants the exit and the guest
+  hypervisor does not, or the reverse: acknowledging an interrupt
+  consumes it, so the control cannot simply be the union the way the
+  execution controls are. Whoever acknowledges owns delivery.
+- Check the same question for every other exit control. The exit controls
+  have never been composed, so this may not be the only bit that differs.
+
+**Not yet confirmed as the boot bug**, and the evidence that argues
+against it should be recorded beside the evidence for: every local APIC
+read at the freeze showed `IRR` and `ISR` empty, where an interrupt taken
+but never acknowledged should have left something pending. That may mean
+the interrupts stop arriving for a different reason, or that the emulated
+controller behaves differently, or that the 324 that did arrive were all
+IPIs and timer ticks - which the vector, once available, would say
+immediately.
