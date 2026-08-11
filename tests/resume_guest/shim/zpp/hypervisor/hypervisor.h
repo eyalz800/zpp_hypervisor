@@ -1,3 +1,7 @@
+#ifndef ZPP_REQUEUE_INTERRUPTED_EVENTS
+// The harness exercises the path itself, so it is always on here.
+#define ZPP_REQUEUE_INTERRUPTED_EVENTS 1
+#endif
 #pragma once
 // A stand-in for the real hypervisor.h, carrying only what
 // `hypervisor::resume_guest` touches. Everything the extracted source

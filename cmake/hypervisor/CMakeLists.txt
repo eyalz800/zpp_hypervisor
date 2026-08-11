@@ -1,3 +1,6 @@
+option(ZPP_REQUEUE_INTERRUPTED_EVENTS
+    "Put back an event whose delivery a VM exit interrupted"
+    ON)
 cmake_minimum_required(VERSION 3.28)
 project(zpp_hypervisor LANGUAGES CXX ASM)
 
@@ -116,6 +119,7 @@ target_compile_options(zpp_hypervisor PRIVATE
     # to carry it once it works. It defaults off in both; see nested_vmx.h for
     # what is still missing.
     -DZPP_NESTED_VMX=$<BOOL:${ZPP_NESTED_VMX}>
+    -DZPP_REQUEUE_INTERRUPTED_EVENTS=$<BOOL:${ZPP_REQUEUE_INTERRUPTED_EVENTS}>
     # The guest coverage suite, which lives in the loader but turns on two
     # VM-execution controls here. Same always-defined 0/1 shape as the two
     # above. Off by default and off in every build that is not a test one;

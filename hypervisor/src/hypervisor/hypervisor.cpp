@@ -10582,7 +10582,13 @@ void hypervisor::resume_guest(arch::x86_64::context & context,
     // That is the same failure the paragraph above measured from the
     // other end - "five clock interrupts at 0xd1" - found again months
     // later by a different measurement.
-    constexpr bool requeue_interrupted_events = true;
+    // Expressible as a build option, `-DZPP_REQUEUE_INTERRUPTED_EVENTS`,
+    // for the same reason the launcher makes the processor count one:
+    // "did this come from the re-queue" then costs one boot instead of an
+    // argument. It defaulted to `false` for a long time and the comment
+    // above says why; it is `true` now and BACKLOG.md says why.
+    constexpr bool requeue_interrupted_events =
+        (0 != ZPP_REQUEUE_INTERRUPTED_EVENTS);
 
     if constexpr (!requeue_interrupted_events) {
         (void)0;

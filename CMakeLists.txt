@@ -50,6 +50,15 @@ option(ZPP_NESTED_VMX
     "Report VMX to the guest and emulate the VMX instructions"
     OFF)
 
+# The interrupted-event re-queue. On by default: without it an event whose
+# delivery an exit interrupted is destroyed, which is what stopped Hyper-V's
+# synthetic timer dead - see BACKLOG.md. Off is kept expressible because the
+# path has a history of costing more than it bought, and because "does this
+# change come from the re-queue" is then one boot rather than an argument.
+option(ZPP_REQUEUE_INTERRUPTED_EVENTS
+    "Put back an event whose delivery a VM exit interrupted"
+    ON)
+
 # The guest-side coverage suite: uefi_loader/include/zpp/guest_tests.h, run
 # from inside the guest once the hypervisor is live, reporting one line per
 # case on serial. scripts/ci/bochs-exit-coverage.sh grades the result.
@@ -87,6 +96,7 @@ ExternalProject_Add(hypervisor
         -DZPP_HYPERVISOR_WAIT_FOR_DEBUGGER=${ZPP_HYPERVISOR_WAIT_FOR_DEBUGGER}
         -DZPP_DIAG=${ZPP_DIAG}
         -DZPP_NESTED_VMX=${ZPP_NESTED_VMX}
+        -DZPP_REQUEUE_INTERRUPTED_EVENTS=${ZPP_REQUEUE_INTERRUPTED_EVENTS}
         -DZPP_GUEST_TESTS=${ZPP_GUEST_TESTS}
     INSTALL_COMMAND ""
     BUILD_ALWAYS ON
@@ -162,6 +172,7 @@ ExternalProject_Add(uefi_loader
         -DZPP_VERIFY_HYPERVISOR=${ZPP_VERIFY_HYPERVISOR}
         -DZPP_GUEST_TESTS=${ZPP_GUEST_TESTS}
         -DZPP_NESTED_VMX=${ZPP_NESTED_VMX}
+        -DZPP_REQUEUE_INTERRUPTED_EVENTS=${ZPP_REQUEUE_INTERRUPTED_EVENTS}
         -DZPP_TRACE=${ZPP_TRACE}
         -DZPP_CHAINLOAD_ONLY=${ZPP_CHAINLOAD_ONLY}
         -DZPP_SEARCH_ALL_DEVICES=${ZPP_SEARCH_ALL_DEVICES}
