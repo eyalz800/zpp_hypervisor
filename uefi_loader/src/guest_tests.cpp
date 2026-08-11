@@ -2525,21 +2525,25 @@ bool guest_tests::run(EFI_SYSTEM_TABLE * system_table)
             // another processor, of which there is one.
             {12,
              "hlt",
-             "out-of-scope:asserting_it_requires_halting_the_processor_"
-             "the_assertion_runs_on"},
+             "plan:request_primary.hlt_exiting_in_the_guest_test_build_a"
+             "nd_give_the_reason_a_case__today_out_of_scope_asserting_it"
+             "_requires_halting_the_processor_the_assertion_runs_on"},
             {13, "invd", "covered:exit.invd"},
             {14,
              "invlpg",
-             "unreachable-here:quiet.invlpg.does_not_exit_measures_"
-             "invlpg_exiting_off"},
+             "plan:request_primary.invlpg_exiting_in_the_guest_test_buil"
+             "d_and_give_the_reason_a_case__today_unreachable_here_quiet"
+             ".invlpg.does_not_exit_measures_invlpg_exiting_off"},
             {15,
              "rdpmc",
-             "unreachable-here:quiet.rdpmc.does_not_exit_measures_rdpmc_"
-             "exiting_off"},
+             "plan:request_primary.rdpmc_exiting_in_the_guest_test_build"
+             "_and_give_the_reason_a_case__today_unreachable_here_quiet."
+             "rdpmc.does_not_exit_measures_rdpmc_exiting_off"},
             {16,
              "rdtsc",
-             "unreachable-here:quiet.rdtsc.does_not_exit_measures_rdtsc_"
-             "exiting_off"},
+             "plan:request_primary.rdtsc_exiting_in_the_guest_test_build"
+             "_and_give_the_reason_a_case__today_unreachable_here_quiet."
+             "rdtsc.does_not_exit_measures_rdtsc_exiting_off"},
             {17,
              "rsm",
              "unreachable-here:quiet.rsm.invalid_opcode_measures_the_ud_"
@@ -2559,8 +2563,9 @@ bool guest_tests::run(EFI_SYSTEM_TABLE * system_table)
              "covered:exit.control_register_access"},
             {29,
              "mov_debug_register",
-             "unreachable-here:quiet.mov_from_dr.does_not_exit_measures_"
-             "mov_dr_exiting_off"},
+             "plan:request_primary.mov_dr_exiting_in_the_guest_test_buil"
+             "d_and_give_the_reason_a_case__today_unreachable_here_quiet"
+             ".mov_from_dr.does_not_exit_measures_mov_dr_exiting_off"},
             {30, "io_instruction", "covered:exit.io_instruction"},
             {31, "rdmsr", "covered:msr.rdmsr.hyperv_frequency"},
             {32, "wrmsr", "covered:msr.wrmsr.hyperv_frequency"},
@@ -2582,8 +2587,9 @@ bool guest_tests::run(EFI_SYSTEM_TABLE * system_table)
             {39, "monitor", "covered:exit.monitor"},
             {40,
              "pause",
-             "unreachable-here:quiet.pause.does_not_exit_measures_pause_"
-             "exiting_off"},
+             "plan:request_primary.pause_exiting_in_the_guest_test_build"
+             "_and_give_the_reason_a_case__today_unreachable_here_quiet."
+             "pause.does_not_exit_measures_pause_exiting_off"},
             // Reason 43 needs "use TPR shadow", and 44 needs "virtualize
             // APIC accesses". The second is measured rather than argued:
             // a store to the local APIC page took reason 48, and SDM
@@ -2592,12 +2598,16 @@ bool guest_tests::run(EFI_SYSTEM_TABLE * system_table)
             // (.references/sdm.txt:224345).
             {43,
              "tpr_below_threshold",
-             "unreachable-here:use_tpr_shadow_off_and_the_apic_page_took_"
-             "reason_48_not_44"},
+             "plan:request_primary.use_tpr_shadow_and_a_tpr_threshold_in"
+             "_the_guest_test_build_and_give_the_reason_a_case__today_un"
+             "reachable_here_use_tpr_shadow_off_and_the_apic_page_took_r"
+             "eason_48_not_44"},
             {44,
              "apic_access",
-             "unreachable-here:exit.ept_violation_measured_reason_48_on_"
-             "the_apic_page_so_it_is_not_virtualized"},
+             "plan:request_secondary.virtualize_apic_accesses_in_the_gue"
+             "st_test_build_and_give_the_reason_a_case__today_unreachabl"
+             "e_here_exit.ept_violation_measured_reason_48_on_the_apic_p"
+             "age_so_it_is_not_virtualized"},
             // Virtualized EOI is performed by virtual-interrupt delivery,
             // and SDM 29.2.1.1 requires "external-interrupt exiting" to
             // be 1 whenever that control is 1
@@ -2605,16 +2615,22 @@ bool guest_tests::run(EFI_SYSTEM_TABLE * system_table)
             // -interrupt exiting off, so this follows from it.
             {45,
              "virtualized_eoi",
-             "unreachable-here:virtual_interrupt_delivery_requires_"
-             "external_interrupt_exiting_which_is_off"},
+             "plan:request_secondary.virtual_interrupt_delivery_in_the_g"
+             "uest_test_build_and_give_the_reason_a_case__today_unreacha"
+             "ble_here_virtual_interrupt_delivery_requires_external_inte"
+             "rrupt_exiting_which_is_off"},
             {46,
              "gdtr_or_idtr",
-             "unreachable-here:quiet.sgdt_and_quiet.sidt_measure_"
-             "descriptor_table_exiting_off"},
+             "plan:request_secondary.descriptor_table_exiting_in_the_gue"
+             "st_test_build_and_give_the_reason_a_case__today_unreachabl"
+             "e_here_quiet.sgdt_and_quiet.sidt_measure_descriptor_table_"
+             "exiting_off"},
             {47,
              "ldtr_or_tr",
-             "unreachable-here:quiet.sldt_and_quiet.str_measure_"
-             "descriptor_table_exiting_off"},
+             "plan:request_secondary.descriptor_table_exiting_in_the_gue"
+             "st_test_build_and_give_the_reason_a_case__today_unreachabl"
+             "e_here_quiet.sldt_and_quiet.str_measure_descriptor_table_e"
+             "xiting_off"},
             {48, "ept_violation", "covered:exit.ept_violation"},
             // Only this VMM writes an EPT entry, so a guest has no way to
             // construct a misconfigured one. Reaching this reason would
@@ -2628,8 +2644,10 @@ bool guest_tests::run(EFI_SYSTEM_TABLE * system_table)
             {50, "invept", "covered:vmx.invept.exit_reason"},
             {51,
              "rdtscp",
-             "unreachable-here:quiet.rdtscp.does_not_exit_measures_rdtsc_"
-             "exiting_off"},
+             "plan:request_primary.rdtsc_exiting_which_covers_rdtscp_too"
+             "_in_the_guest_test_build_and_give_the_reason_a_case__today"
+             "_unreachable_here_quiet.rdtscp.does_not_exit_measures_rdts"
+             "c_exiting_off"},
             // Armed by this VMM alone, for its own log polling, and never
             // by anything a guest executes. diag.exit_count_step measures
             // that none arrives: two consecutive readings differ by
@@ -2641,8 +2659,9 @@ bool guest_tests::run(EFI_SYSTEM_TABLE * system_table)
             {53, "invvpid", "covered:vmx.invvpid.exit_reason"},
             {54,
              "wbinvd",
-             "unreachable-here:quiet.wbinvd.does_not_exit_measures_"
-             "wbinvd_exiting_off"},
+             "plan:request_secondary.wbinvd_exiting_in_the_guest_test_bu"
+             "ild_and_give_the_reason_a_case__today_unreachable_here_qui"
+             "et.wbinvd.does_not_exit_measures_wbinvd_exiting_off"},
             {55, "xsetbv", "covered:exit.xsetbv"},
             // APIC-register virtualization and virtualize-x2APIC mode are
             // the two controls that produce reason 56, and SDM 29.2.1.1
@@ -2650,28 +2669,37 @@ bool guest_tests::run(EFI_SYSTEM_TABLE * system_table)
             // (.references/sdm.txt:202132).
             {56,
              "apic_write",
-             "unreachable-here:apic_register_virtualization_requires_use_"
-             "tpr_shadow_which_is_off"},
+             "plan:request_secondary.apic_register_virtualization_in_the"
+             "_guest_test_build_and_give_the_reason_a_case__today_unreac"
+             "hable_here_apic_register_virtualization_requires_use_tpr_s"
+             "hadow_which_is_off"},
             {57,
              "rdrand",
-             "unreachable-here:quiet.rdrand.does_not_exit_measures_"
-             "rdrand_exiting_off"},
+             "plan:request_secondary.rdrand_exiting_in_the_guest_test_bu"
+             "ild_and_give_the_reason_a_case__today_unreachable_here_qui"
+             "et.rdrand.does_not_exit_measures_rdrand_exiting_off"},
             {58,
              "invpcid",
-             "unreachable-here:quiet.invpcid.does_not_exit_measures_"
-             "invlpg_exiting_off"},
+             "plan:request_secondary.invpcid_exiting_in_the_guest_test_b"
+             "uild_and_give_the_reason_a_case__today_unreachable_here_qu"
+             "iet.invpcid.does_not_exit_measures_invlpg_exiting_off"},
             {59,
              "vmfunc",
-             "unreachable-here:vmx.vmfunc.does_not_exit_measures_enable_"
-             "vm_functions_off_so_the_processor_faults"},
+             "plan:request_secondary.enable_vm_functions_in_the_guest_te"
+             "st_build_and_give_the_reason_a_case__today_unreachable_her"
+             "e_vmx.vmfunc.does_not_exit_measures_enable_vm_functions_of"
+             "f_so_the_processor_faults"},
             {60,
              "encls",
-             "unreachable-here:quiet.encls.invalid_opcode_measures_that_"
-             "the_instruction_cannot_execute_here"},
+             "plan:request_secondary.enable_encls_exiting_in_the_guest_t"
+             "est_build_and_give_the_reason_a_case__today_unreachable_he"
+             "re_quiet.encls.invalid_opcode_measures_that_the_instructio"
+             "n_cannot_execute_here"},
             {61,
              "rdseed",
-             "unreachable-here:quiet.rdseed.does_not_exit_measures_"
-             "rdseed_exiting_off"},
+             "plan:request_secondary.rdseed_exiting_in_the_guest_test_bu"
+             "ild_and_give_the_reason_a_case__today_unreachable_here_qui"
+             "et.rdseed.does_not_exit_measures_rdseed_exiting_off"},
             // No instruction produces these two, so the only guest-side
             // statement available is whether the processor offers the
             // control at all - which the run reads out of
@@ -2679,20 +2707,28 @@ bool guest_tests::run(EFI_SYSTEM_TABLE * system_table)
             // it does not. What stands otherwise is weaker and says so.
             {62,
              "page_modification_log_full",
-             "unreachable-here:enable_pml_not_requested_and_reason_62_"
-             "has_no_case_so_the_run_would_have_stopped"},
+             "plan:request_secondary.enable_pml_and_fill_the_log_in_the_"
+             "guest_test_build_and_give_the_reason_a_case__today_unreach"
+             "able_here_enable_pml_not_requested_and_reason_62_has_no_ca"
+             "se_so_the_run_would_have_stopped"},
             {63,
              "xsaves",
-             "unreachable-here:quiet.xsaves.does_not_exit_measures_the_"
-             "xss_exiting_bitmap_being_zero"},
+             "plan:request_secondary.enable_xsaves_xrstors_and_a_nonzero"
+             "_xss_bitmap_in_the_guest_test_build_and_give_the_reason_a_"
+             "case__today_unreachable_here_quiet.xsaves.does_not_exit_me"
+             "asures_the_xss_exiting_bitmap_being_zero"},
             {64,
              "xrstors",
-             "unreachable-here:quiet.xrstors.does_not_exit_measures_the_"
-             "xss_exiting_bitmap_being_zero"},
+             "plan:request_secondary.enable_xsaves_xrstors_and_a_nonzero"
+             "_xss_bitmap_in_the_guest_test_build_and_give_the_reason_a_"
+             "case__today_unreachable_here_quiet.xrstors.does_not_exit_m"
+             "easures_the_xss_exiting_bitmap_being_zero"},
             {66,
              "spp_related_event",
-             "unreachable-here:sub_page_write_permissions_not_requested_"
-             "and_no_ept_entry_asks_for_them"},
+             "plan:request_secondary.sub_page_write_permissions_in_the_g"
+             "uest_test_build_and_give_the_reason_a_case__today_unreacha"
+             "ble_here_sub_page_write_permissions_not_requested_and_no_e"
+             "pt_entry_asks_for_them"},
         };
 
         for (const auto & entry : names) {
