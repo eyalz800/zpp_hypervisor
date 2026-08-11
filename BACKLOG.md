@@ -6808,3 +6808,119 @@ which address was wrong instead of leaving an entry-failure code.
 
 Not started. It wants a decision about whether to do it in one change or
 to add a checked accessor beside the unchecked one and migrate.
+
+## Nested INIT-SIPI-SIPI: what is pinned and what is not
+
+Several attempted fixes in this area have been made and reverted, each
+killed by a measurement, and each reverted for a reason that is easier to
+re-derive wrongly than to remember. `tests/ap_start_up` now compiles
+**both ends** of the start-up hand-off - `emulate_init_signal` and
+`on_interrupt_command` beside the sender's own `start_up_processor` - so
+the reasons can be asserted rather than only written down. 147 checks
+before, 219 after.
+
+This section is the honest half of that: which reverted attempt is now
+guarded, which is not, and what the ones that are not would need.
+
+### Guarded, and each proved to go red
+
+Every claim below was measured by putting the defect back into
+`hypervisor.cpp` and re-running, not by reading the test.
+
+- **f949649, publish before wait.** The activity record is written before
+  either wait begins, so a sender arriving mid-wait passes the gate. The
+  harness runs the real INIT handler on one thread and the sender on
+  another, and samples the record *while the target is still inside its
+  wait* - which is the only time it proves anything. Moving the write back
+  below the wait fails 7 checks, and the one that names it is "no round
+  lost it (16 did)": sixteen of twenty-four rounds swallowed the guest's
+  write with nothing left to start the processor.
+- **439abb5, a flag carries no ordering.** What replaced the flag is an
+  exchange: a sender may deliver only *out of* `software_wait`, and the
+  target leaves that state by the same indivisible operation, so the two
+  cannot both succeed and cannot both fail. Pinned as a value property -
+  a target in any other state has its mailbox left byte-identical - and as
+  an exactly-once count across a race. Making the hand-over a plain store
+  fails 13 checks, 8 rounds of which lose the vector outright.
+  The second measured fault of that change is pinned separately: an INIT,
+  **including a level de-assert**, is forwarded and marks no
+  per-processor state. Flagging the destination in `on_interrupt_command`
+  fails 2 checks, one of them the de-assert - the form that flagged a
+  processor for an INIT the guest had not sent.
+- **c65f8f7 and 95d9759, the firmware's start-up is not the guest's.** A
+  firmware phase applies a start-up to every application processor, which
+  is what sets the flag the guard used to trust; the guest phase then
+  broadcasts its own. Two runs differ only in the activity state, with the
+  flags identical, and give opposite answers - which is the assertion that
+  the decision is the architectural fact and not the flag. Reading
+  `started_by_start_up_ipi` instead fails 4 checks, reporting the original
+  measurement: 0 of the guest's 7 start-up IPIs sent.
+- **2685265, one sender branching on the APIC mode.** Reachable from the
+  harness, so it is asserted rather than described: in x2APIC mode one MSR
+  write and nothing through the APIC page; in xAPIC mode two 32-bit
+  writes, the high half first, and **no** MSR write at all. Writing it
+  unconditionally fails 8 checks. The ordering of the two halves is
+  checked by a recorded sequence number, which is the half a two-field
+  comparison cannot see.
+- **1efec42**, already pinned before this work, and **c6349a4**: a
+  start-up IPI in logical destination mode is passed through *and*
+  allocates no slot, which is the part of that one that cost - a slot
+  spent on a processor that does not exist hands the rest of the decision
+  an index naming the wrong one.
+
+### Not guarded, and what each would need
+
+- **That a queue would fix what the flag could not.** 439abb5's revert
+  message says restoring the deferred INIT needs a queue holding the INIT
+  and the start-up IPI in the order the guest wrote them, which is what
+  KVM's `apic->pending_events` is. Nothing here can assert that, because
+  there is no queue in the tree to assert against. What the harness pins
+  is the property the flag broke, so a flag re-introduced under any name
+  fails. A queue would need its own tests, and they would be tests of a
+  new mechanism rather than of this one.
+- **The window between the guest's INIT and the target's INIT exit.** A
+  start-up IPI processed by the sender in that window finds an activity
+  record that still says `active`, is dropped, and the drop is returned as
+  `adopted` - which swallows the guest's write. This is the same shape as
+  f949649 and is *not* fixed by it: the record cannot be written before
+  the exit that writes it. Windows leaves about 210 microseconds between
+  the INIT and the first start-up IPI (SDM 11.4.4.1 step 15 sends two, 200
+  microseconds apart), so the window is covered in practice by timing
+  alone. Reproducing it would need a sender that runs while the target has
+  taken an INIT exit and not yet reached the handler, which is a point
+  host threads cannot be placed at because the target's exit is not an
+  event this harness has. **The race test deliberately does not assert
+  over it** - it waits for the target to publish before sending, and says
+  so - because asserting over it would be asserting a known window is
+  closed when it is not.
+- **The instant the two compare-exchanges collide.** The target's timeout
+  and the sender's delivery race on one word. Every ordering either side
+  of the collision is exercised - inside the wait, at its end, after it -
+  and the invariant they share is asserted. The collision itself is not
+  reproducible from host threads with any reliability; what would settle
+  it is a model checker over the two exchanges, or a processor.
+- **That the software wait is *needed*** - that the layer below discards a
+  start-up IPI while this VMM is in root mode. That is KVM's behaviour
+  (`vmx_apic_init_signal_blocked` is `nested.vmxon && !is_guest_mode`) and
+  the whole reason the software hand-off exists. The harness drives the
+  choice by answering CPUID's hypervisor-present bit, so it tests that the
+  choice is made and published - not that it is the right choice. Only the
+  rig can say that.
+- **Anything that needs a second processor to be real.** The harness's
+  threads interleave the same shared memory the same way, which is the
+  part the defects live in, but a host thread can be descheduled where a
+  logical processor cannot, and none of them can be in the wait-for-SIPI
+  activity state. So "the hardware delivered the IPI as a VM exit" is
+  asserted as far as "the VMCS was parked in wait-for-SIPI and the mailbox
+  says hardware", and no further.
+
+### Found while doing this, not fixed
+
+`started_by_guest_start_up_ipi` is written in two places -
+`on_interrupt_command` and `start_up_broadcast` - and **read nowhere**.
+It is what c65f8f7 added as the second half of the duplicate guard, and
+95d9759 replaced the whole guard with the activity state without removing
+it. Left alone here rather than deleted on suspicion, since it is
+per-processor state a future guard might want and its absence would be a
+silent change to what a boot records. The harness asserts that an INIT
+does not set it, which is the only property anything currently depends on.

@@ -15,6 +15,8 @@
 #include "zpp/arch/x86_64/ap_start_up.h"
 #include "zpp/arch/x86_64/asm.h"
 #include "zpp/arch/x86_64/context.h"
+#include "zpp/arch/x86_64/mmio.h"
+#include "zpp/arch/x86_64/msr.h"
 #include "zpp/arch/x86_64/segment_descriptor.h"
 #include "zpp/arch/x86_64/vmx/asm.h"
 #include "zpp/arch/x86_64/vmx/vmcs.h"
@@ -134,9 +136,44 @@ public:
                         const char * from = "?",
                         bool first_launch = false);
 
-    // ------------------------------------------ defined by the harness
+    /**
+     * The other end of the hand-off mailbox: the INIT handler, which
+     * publishes what this processor is waiting on and then waits on it.
+     *
+     * Compiled here rather than stood in for, because the ordering
+     * *inside* it is the thing under test - f949649 is a reordering of
+     * two writes against a wait, and no stand-in can be wrong in the same
+     * way the original was.
+     */
+    void emulate_init_signal(arch::x86_64::context & context);
+
+    /**
+     * The intercepted write to the interrupt command register, which is
+     * where a guest starting a processor is caught. Returns the command to
+     * actually issue, or nothing when the write is swallowed.
+     */
+    std::optional<std::uint64_t>
+    on_interrupt_command(std::uint64_t command);
+
+    /**
+     * Resolves a broadcast start-up IPI against the platform's roster.
+     * Windows sends no other kind, so the guest phase of the firmware
+     * -then-guest sequence goes through here.
+     */
+    bool start_up_broadcast(std::uint64_t vector);
+
+    /**
+     * One sender for both APIC modes. The harness records what it wrote
+     * and in what order rather than letting it reach memory - see
+     * shim/zpp/arch/x86_64/mmio.h.
+     */
     void send_start_up_ipi(std::uint64_t apic, std::uint64_t vector);
 
+    static bool x2apic_enabled();
+
+    static std::uint64_t local_apic_id();
+
+    // ------------------------------------------ defined by the harness
     std::uint32_t start_up_trampoline_stage() const;
 
     std::expected<void, zpp::error> enable_vmx_in_feature_control();
@@ -163,8 +200,26 @@ public:
     bool started_by_start_up_ipi[max_cpus]{};
     std::atomic<bool> start_up_launched[max_cpus]{};
 
+    // Written by `start_up_broadcast` and by `on_interrupt_command`, and
+    // read by nothing - see the harness's note on c65f8f7, whose guard
+    // this was for and which 95d9759 replaced with the activity state.
+    bool started_by_guest_start_up_ipi[max_cpus]{};
+
     std::uint64_t guest_start_up_vector[max_cpus]{};
     std::uint64_t start_up_memory{};
+
+    // The platform's roster, which is the only thing a broadcast - the
+    // form that names no destination - can be resolved against.
+    std::size_t number_of_platform_processors{};
+    std::uint64_t platform_apic_id[max_cpus]{};
+
+    // What the guest asked for, as counters, which is all the log has to
+    // say about a command it decided not to act on.
+    volatile std::uint64_t ipi_init_seen{};
+    volatile std::uint64_t ipi_start_up_seen{};
+    volatile std::uint64_t ipi_refused_shorthand{};
+    volatile std::uint64_t ipi_refused_logical{};
+    volatile std::uint64_t ipi_last_command{};
 
     std::uint64_t host_cr0{};
     std::uint64_t host_cr4{};

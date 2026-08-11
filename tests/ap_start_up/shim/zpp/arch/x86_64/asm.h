@@ -5,6 +5,7 @@
 // at once on host threads - so they are thread_local, standing in for
 // four logical processors' worth of state.
 #include "zpp/arch/x86_64/context.h"
+#include <atomic>
 #include <cstdint>
 
 namespace zpp::arch::x86_64
@@ -62,13 +63,34 @@ inline void dr6(std::uint64_t value)
  */
 inline constexpr std::uint32_t identification_leaf_1_eax = 0x000806ec;
 
+/**
+ * Leaf 1's ECX bit 31, which is reserved on real hardware and is the
+ * conventional way for a hypervisor to announce itself - SDM Vol. 2A,
+ * "CPUID.01H:ECX Feature Information".
+ *
+ * Settable because `emulate_init_signal` decides which of the two
+ * hand-offs to wait on by asking whether something is virtualizing *us*.
+ * Both answers are a real configuration this VMM runs in: clear is bare
+ * metal and Bochs, set is the rig, and the two take different paths
+ * through the whole INIT handler.
+ */
+inline constexpr std::uint32_t hypervisor_present_bit = (1u << 31);
+inline std::uint32_t g_leaf_1_ecx{};
+
+/**
+ * The initial APIC id leaf 1 reports in EBX bits 31:24, which is what
+ * `local_apic_id` falls back to when neither topology leaf is answered -
+ * this shim reports leaf 0 as zero, so that is the path it takes.
+ */
+inline std::uint32_t g_initial_apic_id{};
+
 inline void cpuid(std::uint64_t leaf,
                   std::uint64_t,
                   std::uint32_t (&out)[4])
 {
     out[0] = (1 == leaf) ? identification_leaf_1_eax : 0;
-    out[1] = 0;
-    out[2] = 0;
+    out[1] = (1 == leaf) ? (g_initial_apic_id << 24) : 0;
+    out[2] = (1 == leaf) ? g_leaf_1_ecx : 0;
     out[3] = 0;
 }
 
@@ -83,5 +105,21 @@ inline void capture_context(context *)
 
 std::uint64_t rdmsr(std::uint32_t index);
 void wrmsr(std::uint32_t index, std::uint64_t value);
+
+/**
+ * IA32_APIC_BASE, as this harness answers it. Bit 10 is EXTD, which is
+ * what `x2apic_enabled` reads, and the frame is what the xAPIC branch of
+ * `send_start_up_ipi` builds its register addresses out of.
+ */
+inline std::atomic<std::uint64_t> g_apic_base{};
+
+/**
+ * The last write to the x2APIC interrupt command MSR, and how many there
+ * have been. That MSR does not exist in xAPIC mode, so "how many" is the
+ * question 2685265 turns on - an unconditional write to it faulted in the
+ * host, with no recovery point, and halted the boot processor.
+ */
+inline std::atomic<unsigned> g_x2apic_icr_writes{};
+inline std::atomic<std::uint64_t> g_x2apic_icr_last{};
 
 } // namespace zpp::arch::x86_64
