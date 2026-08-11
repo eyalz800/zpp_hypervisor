@@ -4920,6 +4920,241 @@ static void test_the_measured_control_words()
           "the boot failure - it is reached only by clearing it");
 }
 
+// ------------- 14. an event to inject, against the activity state
+/**
+ * SDM 27.3.1.5's injection matrix, which is a check this VMM makes in
+ * *software* for one activity state and defers to hardware for the rest -
+ * so exactly one column of it is ours to get wrong.
+ *
+ * The rule, quoted (.references/sdm.txt:202607-202619): "If the valid bit
+ * (bit 31) in the injected-event identification field is 1, the event to
+ * be delivered ... must not be one that would normally be blocked while a
+ * logical processor is in the activity state corresponding to the
+ * contents of the activity-state field", and then:
+ *
+ *   Active        Any event is allowed.
+ *   HLT           external interrupt, NMI, hardware exception with
+ *                 vector 1 or 18, other event with vector 0.
+ *   Shutdown      only NMIs and machine-check exceptions.
+ *   Wait-for-SIPI No events are allowed.
+ *
+ * Which of those this VMM has to enforce follows from whether the
+ * activity state reaches the processor:
+ *
+ * - Active and HLT are written into vmcs02 and entered, so the processor
+ *   applies the rule to vmcs02's own fields. Deferring is correct and the
+ *   cases below assert the *deferral* - that `enter_or_park_l2` does not
+ *   invent a refusal hardware has not made.
+ * - Shutdown is never accepted at all: IA32_VMX_MISC withholds bit 7, so
+ *   the state is refused before any injection question arises.
+ * - **Wait-for-SIPI is held in VMX root operation and never handed over**,
+ *   so the processor never sees it and never applies the rule. That check
+ *   is this VMM's alone, and an error in it lands on the guest
+ *   hypervisor's own next entry rather than here.
+ *
+ * The interruptibility half of the same section is checked alongside, for
+ * the same reason and in the same column (.references/sdm.txt:202605):
+ * "The activity-state field must indicate the active state if the
+ * interruptibility-state field indicates blocking by either MOV-SS or by
+ * STI".
+ */
+static void test_injection_against_activity_state()
+{
+    std::printf("an event to inject, against the activity state\n");
+
+    constexpr std::uint64_t interruption_valid = 1ull << 31;
+    constexpr std::uint64_t entry_failure_bit = 1ull << 31;
+    constexpr std::uint64_t invalid_guest_state = 33;
+    constexpr std::uint64_t sentinel_rip = 0xfeedfacecafe0000ull;
+
+    // SDM Table 27-18, "Format of the VM-Entry Interruption-Information
+    // Field": bits 7:0 vector, bits 10:8 type, bit 11 deliver error
+    // code, bit 31 valid.
+    constexpr std::uint64_t type_external_interrupt = 0ull << 8;
+    constexpr std::uint64_t type_nmi = 2ull << 8;
+    constexpr std::uint64_t type_hardware_exception = 3ull << 8;
+    constexpr std::uint64_t type_software_interrupt = 4ull << 8;
+    constexpr std::uint64_t type_privileged_software = 5ull << 8;
+    constexpr std::uint64_t type_software_exception = 6ull << 8;
+    constexpr std::uint64_t type_other_event = 7ull << 8;
+
+    auto & shadow = hv().guest_vmcs12[cpu];
+
+    auto arm = [&](std::uint64_t state,
+                   std::uint64_t injection,
+                   std::uint64_t interruptibility) {
+        context registers{};
+        reset(registers);
+        controls(0, 0, 0);
+        hv().running_l2[cpu] = false;
+        hv().l2_activity_state[cpu] =
+            zpp::arch::x86_64::vmx::activity_state::active;
+        g_start_up_vector.reset();
+        shadow.write(fields::guest_activity_state, state);
+        shadow.write(fields::guest_interruptibility_state,
+                     interruptibility);
+        shadow.write(fields::vm_entry_interruption_information_field,
+                     injection);
+        shadow.write(fields::guest_rip, sentinel_rip);
+        shadow.write(fields::exit_reason, 0);
+        shadow.write(fields::exit_qualification, 0);
+    };
+
+    // Every event type SDM Table 27-18 defines, so the wait-for-SIPI
+    // column is asserted across the whole of "no events are allowed"
+    // rather than at one example. A refusal written as "not an external
+    // interrupt" would pass a single-case test and let every other type
+    // through.
+    struct event_type
+    {
+        std::uint64_t bits;
+        const char * name;
+    };
+
+    const event_type types[]{
+        {type_external_interrupt, "external interrupt"},
+        {type_nmi, "NMI"},
+        {type_hardware_exception, "hardware exception"},
+        {type_software_interrupt, "software interrupt"},
+        {type_privileged_software, "privileged software exception"},
+        {type_software_exception, "software exception"},
+        {type_other_event, "other event"},
+    };
+
+    for (const auto & entry : types) {
+        arm(zpp::arch::x86_64::vmx::activity_state::wait_for_start_up_ipi,
+            interruption_valid | entry.bits | 0x30,
+            0);
+
+        check(zpp::hypervisor::hypervisor::l2_entry_outcome::reflected ==
+                  hv().enter_or_park_l2(cpu),
+              text("wait-for-SIPI with a valid %s to inject must be "
+                   "refused - SDM 27.3.1.5 allows no event in that "
+                   "state, and this VMM holds the state in root "
+                   "operation so the processor never applies the rule",
+                   entry.name));
+        check((entry_failure_bit | invalid_guest_state) ==
+                  shadow.read(fields::exit_reason),
+              text("and the refusal is reason 33 with bit 31, for a %s",
+                   entry.name));
+        check(0 == shadow.read(fields::exit_qualification),
+              text("with a zero qualification, for a %s", entry.name));
+        check(sentinel_rip == shadow.read(fields::guest_rip),
+              text("and vmcs12's guest state is untouched, for a %s - "
+                   "SDM 29.8, an entry failure saves none of it",
+                   entry.name));
+    }
+
+    // Only bit 31 decides. An information field with a plausible vector
+    // and type but the valid bit clear describes no event at all, and
+    // refusing on it would stop a guest hypervisor parking a processor it
+    // has not started - which is the ordinary use of the state.
+    arm(zpp::arch::x86_64::vmx::activity_state::wait_for_start_up_ipi,
+        type_external_interrupt | 0x30,
+        0);
+    auto without_valid = hv().enter_or_park_l2(cpu);
+    check((zpp::hypervisor::hypervisor::l2_entry_outcome::reflected !=
+           without_valid) ||
+              ((entry_failure_bit | invalid_guest_state) !=
+               shadow.read(fields::exit_reason)),
+          "wait-for-SIPI with the valid bit clear is not refused for the "
+          "injection - the field describes no event, and only bit 31 "
+          "says so");
+
+    // The interruptibility half, same state and same reason: the
+    // processor never sees the field, so the rule is this VMM's.
+    constexpr std::uint64_t blocking_by_sti = 1ull << 0;
+    constexpr std::uint64_t blocking_by_mov_ss = 1ull << 1;
+
+    for (auto blocking : {blocking_by_sti, blocking_by_mov_ss}) {
+        arm(zpp::arch::x86_64::vmx::activity_state::wait_for_start_up_ipi,
+            0,
+            blocking);
+        check(
+            zpp::hypervisor::hypervisor::l2_entry_outcome::reflected ==
+                hv().enter_or_park_l2(cpu),
+            text("wait-for-SIPI with blocking %s must be refused - SDM "
+                 "27.3.1.5 requires the active state whenever either "
+                 "blocking bit is set",
+                 (blocking_by_sti == blocking) ? "by STI" : "by MOV-SS"));
+        check((entry_failure_bit | invalid_guest_state) ==
+                  shadow.read(fields::exit_reason),
+              "and that refusal is reason 33 with bit 31 too");
+    }
+
+    // Blocking by NMI is *not* one of the two. SDM 27.3.1.5 names only
+    // bits 0 and 1 in the rule about the activity state, and a processor
+    // parked before it ever ran can legitimately carry NMI blocking from
+    // whatever its hypervisor last recorded. Refusing on it would refuse
+    // an entry the architecture permits.
+    constexpr std::uint64_t blocking_by_nmi = 1ull << 3;
+
+    arm(zpp::arch::x86_64::vmx::activity_state::wait_for_start_up_ipi,
+        0,
+        blocking_by_nmi);
+    auto with_nmi_blocking = hv().enter_or_park_l2(cpu);
+    check((zpp::hypervisor::hypervisor::l2_entry_outcome::reflected !=
+           with_nmi_blocking) ||
+              ((entry_failure_bit | invalid_guest_state) !=
+               shadow.read(fields::exit_reason)),
+          "wait-for-SIPI with blocking by NMI is not refused for the "
+          "blocking - SDM 27.3.1.5's activity-state rule names bits 0 "
+          "and 1 only");
+
+    // The two states that are handed to hardware. The assertion is the
+    // deferral: `enter_or_park_l2` must not manufacture a refusal, both
+    // because the processor is about to make the check properly and
+    // because a refusal here is reported to the guest hypervisor as its
+    // own mistake.
+    for (const auto & entry : types) {
+        arm(zpp::arch::x86_64::vmx::activity_state::active,
+            interruption_valid | entry.bits | 0x30,
+            0);
+        check(zpp::hypervisor::hypervisor::l2_entry_outcome::entered ==
+                  hv().enter_or_park_l2(cpu),
+              text("the active state with a %s to inject is entered - "
+                   "SDM 27.3.1.5: Active, any event is allowed",
+                   entry.name));
+    }
+
+    // HLT, where the architecture allows only four kinds and this VMM
+    // checks none of them - correctly, because the state reaches vmcs02
+    // and the processor applies the rule to it. Asserted so that the
+    // deferral is a decision on the record: if `enter_or_park_l2` ever
+    // stops writing the activity state into vmcs02, these become checks
+    // this VMM has to make itself, and this is where that shows up.
+    for (const auto & entry : types) {
+        arm(zpp::arch::x86_64::vmx::activity_state::hlt,
+            interruption_valid | entry.bits | 0x30,
+            0);
+        check(zpp::hypervisor::hypervisor::l2_entry_outcome::entered ==
+                  hv().enter_or_park_l2(cpu),
+              text("the HLT state with a %s to inject is entered rather "
+                   "than refused here - the state reaches vmcs02, so the "
+                   "processor makes SDM 27.3.1.5's check on the real "
+                   "fields",
+                   entry.name));
+        check(zpp::arch::x86_64::vmx::activity_state::hlt ==
+                  hv().vmcs.read(field::guest_activity_state),
+              text("and the HLT state reaches vmcs02, which is what "
+                   "makes deferring correct, for a %s",
+                   entry.name));
+    }
+
+    // Shutdown, refused before the injection question can arise.
+    // IA32_VMX_MISC bit 7 is withheld - SDM A.6 makes bits 8:6 the bitmap
+    // of supported activity states - so a guest hypervisor was told it
+    // may not name this one.
+    arm(zpp::arch::x86_64::vmx::activity_state::shutdown,
+        interruption_valid | type_nmi | 2,
+        0);
+    check(zpp::hypervisor::hypervisor::l2_entry_outcome::reflected ==
+              hv().enter_or_park_l2(cpu),
+          "the shutdown state is refused even for an NMI, which SDM "
+          "27.3.1.5 would allow into it - the state itself is not "
+          "offered, and IA32_VMX_MISC says so");
+}
+
 int main()
 {
     test_reason_table();
@@ -4935,6 +5170,7 @@ int main()
     test_exit_and_entry_control_composition();
     test_the_rest_of_vmcs02();
     test_the_measured_control_words();
+    test_injection_against_activity_state();
 
     std::printf("\n%d checks, %d failures\n", g_checks, g_failures);
 
