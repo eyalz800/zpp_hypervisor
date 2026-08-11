@@ -3339,6 +3339,51 @@ private:
      */
 
     /**
+     * The *newest* timer armings, in a ring, with what they meant.
+     *
+     * The array above answers "how did the guest calibrate" and keeps the
+     * earliest for that reason. This answers "what deadline was it
+     * waiting on when it stopped", and the two cannot share storage: by
+     * the time a boot freezes, the earliest thirty-two armings are
+     * minutes old and the ones being asked about have long since been
+     * refused a slot.
+     *
+     * `lvt` and `divide` are the local APIC's `0x320` and `0x3e0` as they
+     * stood at each arming, because a count means nothing without them.
+     * `0x320` carries the mask bit, the mode - one-shot, periodic or TSC
+     * deadline - and the vector; `0x3e0` carries the divisor. Measured on
+     * the rig, the guest hypervisor changes all three mid-boot: it starts
+     * periodic at vector 5, then switches to **one-shot at vector 0xef
+     * with divide-by-one**, arming and disarming once per processor it
+     * brings up, and the last thing it ever writes to `0x320` leaves the
+     * timer armed rather than masked.
+     *
+     * What this is for: the root partition arms Hyper-V's synthetic timer
+     * 0 to 15.625 ms and halts on it, and Hyper-V then wakes only every
+     * two to four seconds. In one-shot mode that decay is a *choice of
+     * count*, so the counts say which of two things is happening -
+     * Hyper-V deliberately sleeping long because it believes nothing is
+     * due, or unable to program the short deadline the synthetic timer
+     * needs. Nothing else distinguishes them.
+     * @{
+     */
+    std::uint64_t timer_arm_recent_value[max_cpus][timer_arm_capacity]{};
+    std::uint64_t timer_arm_recent_tsc[max_cpus][timer_arm_capacity]{};
+    std::uint64_t timer_arm_recent_lvt[max_cpus][timer_arm_capacity]{};
+    std::uint64_t timer_arm_recent_divide[max_cpus][timer_arm_capacity]{};
+    std::uint64_t timer_arm_recent_count[max_cpus]{};
+
+    /**
+     * The last `0x320` and `0x3e0` the guest wrote, per processor, so an
+     * arming can be recorded with the mode and divisor in force.
+     */
+    std::uint64_t timer_lvt[max_cpus]{};
+    std::uint64_t timer_divide[max_cpus]{};
+    /**
+     * @}
+     */
+
+    /**
      * How many of the newest synthetic-timer samples to keep.
      *
      * A ring keeping the *newest*, which is the opposite of
@@ -3391,6 +3436,11 @@ private:
     std::uint64_t
         stimer_arm_value[max_cpus][reference_sample_capacity]{};
     std::uint64_t stimer_arm_tsc[max_cpus][reference_sample_capacity]{};
+
+    /** 1 for `STIMER0_COUNT`, 2 for `STIMER0_CONFIG`, 0 for an empty
+     * slot. Both go in one ring so their order survives, and the order is
+     * what says whether a count is a period or an absolute deadline. */
+    std::uint64_t stimer_arm_kind[max_cpus][reference_sample_capacity]{};
     std::uint64_t stimer_arm_count[max_cpus]{};
     bool reference_read_pending[max_cpus]{};
     /**

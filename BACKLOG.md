@@ -392,6 +392,77 @@ that breaks once.
 of entries of each other on eight processors is not a race, and it means
 an experiment here needs one boot to judge, not a distribution.
 
+### The deadline Hyper-V programs, and the one it should
+
+Measured 2026-08-11, from `timer_arm_recent_*` - a second ring holding the
+*newest* armings with the mode and divisor in force, because the original
+array keeps the earliest and is minutes stale by the time anything
+freezes.
+
+The boot processor settles on **2,379,8xx,xxx counts = 2.3798 s**,
+one-shot, vector `0xef`, divide-by-one, thirty-two times in a row, each
+exactly 4,740,8xx,xxx TSC apart. That is a stable deliberate sleep, not a
+runaway.
+
+The application processors show what a *correct* deadline looks like, and
+show it right before they die:
+
+```
+cpu 1  [2] count=15,167,055 = 15.167 ms  armed one-shot vec=0xef
+cpu 1  [3] count=13,125,317 = 13.125 ms  armed one-shot vec=0xef
+cpu 1  [4] count=         0 =  0.000 ms  <- disarmed, never armed again
+```
+
+So Hyper-V *can* derive the ~15 ms deadline the synthetic timer needs. It
+does, twice, and then decides nothing is pending and disarms.
+
+**The root partition's side is correct, and now proven so rather than
+assumed.** Every `STIMER0_CONFIG` write reads `enable=0 periodic=1
+lazy=0 auto_enable=1 sintx=0x3`, followed by `STIMER0_COUNT = 156,250`.
+`AutoEnable=1` is the interface's documented idiom - the timer enables
+itself when a non-zero count is written - so this is a periodic 15.625 ms
+timer posting to synthetic interrupt 3, and `wrmsr 0x40000093` (SINT3)
+immediately precedes it. It is armed about 3 s into the boot and, being
+periodic, correctly never touched again. Hyper-V then slept 2.38 s at a
+time for the next 155 seconds.
+
+**What the root partition does last.** From the second-level ring, it is
+making real hypercalls right up to the halt - `HvCallVtlCall` (0x11),
+`HvCallVtlReturn` (0x12), `HvCallModifyVtlProtectionMask` (0x0c),
+address-list flushes (0x03) - so virtualisation based security is live
+and working. Then:
+
+```
+[82399] wrmsr 0x40000071   HV_X64_MSR_ICR    <- wake another processor
+[82400] rdmsr 0x40000020   x2
+[82402] hlt
+```
+
+It sends a synthetic inter-processor interrupt to another virtual
+processor and sleeps. Every other processor is also halted, so that wake
+went nowhere. **The stop is a lost wake-up between virtual processors,
+not a mis-set deadline.**
+
+**Checked and cleared this round**, so they are not re-proposed:
+
+- *The pin controls.* `vmcs12_pin_controls` is `0x1e`, so the first
+  vmcs12 does not ask for external-interrupt exiting, and our own vmcs01
+  sets only NMI exiting. The ~325 external-interrupt exits are therefore
+  Hyper-V's own on later VMCSes, and `l1_wants_l2_exit` reflects them.
+  Their per-processor gradient - 37, 83, 67, 55, 41, 28, 13, 1 - is
+  monotonic in start order, which is what it should be.
+- *Event injection.* `build_vmcs02` copies vmcs12's
+  `vm_entry_interruption_information_field` and, when its valid bit is
+  set, the error code and instruction length, per SDM 27.8.3.
+
+**One defect found in passing, in the diagnostics themselves.**
+`vmcs12_secondary_controls` records `0x0` while `vmcs12_primary_controls`
+is `0xa4206dfa`, whose bit 31 activates the secondary controls - and the
+shadow-EPT machinery proves EPT was on. So the capture reads the shadow
+before the guest hypervisor has written that field. It is captured once,
+on the first entry, and the first entry is too early. Not load bearing,
+but it means no conclusion may be drawn from that field's zero.
+
 Next, and narrowed by all of the above: the path from Hyper-V's own timer
 to the synthetic interrupt it must post to a halted virtual processor.
 Hyper-V drives that from its local APIC timer, and the application

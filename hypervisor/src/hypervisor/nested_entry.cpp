@@ -2940,6 +2940,7 @@ hypervisor::on_l2_exit(std::size_t cpu,
         // is to note that one is owed, and `on_guest_vmlaunch` collects
         // it from the registers Hyper-V loads before its VMRESUME.
         constexpr std::uint32_t time_reference_count = 0x40000020;
+        constexpr std::uint32_t synthetic_timer0_config = 0x400000b0;
         constexpr std::uint32_t synthetic_timer0_count = 0x400000b1;
 
         auto index = static_cast<std::uint32_t>(context.rcx);
@@ -2947,14 +2948,49 @@ hypervisor::on_l2_exit(std::size_t cpu,
         if ((basic_reason::rdmsr == reason.basic()) &&
             (time_reference_count == index)) {
             this->reference_read_pending[cpu] = true;
-        } else if ((basic_reason::wrmsr == reason.basic()) &&
-                   (synthetic_timer0_count == index)) {
-            auto slot = this->stimer_arm_count[cpu] %
-                        reference_sample_capacity;
-            this->stimer_arm_value[cpu][slot] =
-                (context.rax & 0xffffffff) | (context.rdx << 32);
-            this->stimer_arm_tsc[cpu][slot] = arch::x86_64::rdtsc();
-            this->stimer_arm_count[cpu] = this->stimer_arm_count[cpu] + 1;
+        } else if (basic_reason::wrmsr == reason.basic()) {
+            // The count and the configuration in one ring, tagged, so
+            // their *order* survives - which is the whole reason to
+            // record the configuration at all.
+            //
+            // A count means two different things depending on it: the
+            // Hyper-V interface defines the count of a periodic timer as
+            // a period in 100 ns units, and the count of a one-shot timer
+            // as an absolute expiration time in reference-counter units.
+            // Measured on the rig, the root partition writes 156,250 -
+            // 15.625 ms as a period, and a time nine hours in the past as
+            // an absolute deadline, when the reference counter stands at
+            // about 1.5e9. Those are not the same claim and nothing
+            // recorded so far distinguishes them.
+            //
+            // The configuration also carries the enable bit and the
+            // synthetic interrupt source the expiry is posted to, and
+            // "enabled" is the specific thing in question: the guest
+            // hypervisor settles on a 2.38 second one-shot deadline on
+            // its own local APIC while a 15.625 ms synthetic timer is
+            // supposedly armed, which is what a hypervisor does when it
+            // believes nothing is due.
+            //
+            // Two configuration writes precede each count write, so the
+            // ring holds triples and the tag is what makes them readable.
+            auto tag = std::uint64_t{};
+
+            if (synthetic_timer0_count == index) {
+                tag = 1;
+            } else if (synthetic_timer0_config == index) {
+                tag = 2;
+            }
+
+            if (0 != tag) {
+                auto slot = this->stimer_arm_count[cpu] %
+                            reference_sample_capacity;
+                this->stimer_arm_value[cpu][slot] =
+                    (context.rax & 0xffffffff) | (context.rdx << 32);
+                this->stimer_arm_tsc[cpu][slot] = arch::x86_64::rdtsc();
+                this->stimer_arm_kind[cpu][slot] = tag;
+                this->stimer_arm_count[cpu] =
+                    this->stimer_arm_count[cpu] + 1;
+            }
         }
     }
 

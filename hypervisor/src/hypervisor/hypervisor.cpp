@@ -6078,6 +6078,27 @@ std::optional<std::uint64_t> hypervisor::filter_local_apic_write(
                 write->value);
         }
 
+        // The two registers that decide what an initial count *means*,
+        // remembered so the count can be recorded with them rather than
+        // on its own. A count says nothing by itself: 0x320 carries the
+        // mask bit, the mode - one-shot, periodic or TSC deadline - and
+        // the vector, and 0x3e0 carries the divisor the count is scaled
+        // by. Measured on the rig, the guest hypervisor uses all of it:
+        // it starts periodic at vector 5 and then switches to one-shot at
+        // vector 0xef with divide-by-one, arming and disarming once per
+        // processor it brings up. A ring of bare counts recorded across
+        // that switch would be two different quantities in one column.
+        constexpr std::uint64_t lvt_timer = 0x320;
+        constexpr std::uint64_t divide_configuration = 0x3e0;
+
+        if (auto cpu = self.vmcs.vpid() - 1; cpu < max_cpus) {
+            if (lvt_timer == offset) {
+                self.timer_lvt[cpu] = write->value;
+            } else if (divide_configuration == offset) {
+                self.timer_divide[cpu] = write->value;
+            }
+        }
+
         // The initial count is excluded from the log above and recorded
         // here instead, in a fixed per-processor array that keeps the
         // *earliest* writes rather than the latest.
@@ -6106,6 +6127,31 @@ std::optional<std::uint64_t> hypervisor::filter_local_apic_write(
                         arch::x86_64::rdtsc();
                     self.timer_arm_count[cpu] = slot + 1;
                 }
+
+                // And the newest, in a ring, which is a different
+                // question from the one the array above answers.
+                //
+                // That one holds the calibration and must not be evicted
+                // by it. This one holds the last deadline the guest
+                // hypervisor programmed before the machine stopped, and
+                // the stop is at the end - so the array above is
+                // guaranteed to have been full for minutes by the time
+                // anything interesting happens, and reading it after a
+                // freeze shows the first thirty-two armings of a boot
+                // whose last thirty-two are the ones being asked about.
+                //
+                // Recorded with the mode and divisor as they stood, since
+                // a count is meaningless without them.
+                auto slot =
+                    self.timer_arm_recent_count[cpu] % timer_arm_capacity;
+                self.timer_arm_recent_value[cpu][slot] = write->value;
+                self.timer_arm_recent_tsc[cpu][slot] =
+                    arch::x86_64::rdtsc();
+                self.timer_arm_recent_lvt[cpu][slot] = self.timer_lvt[cpu];
+                self.timer_arm_recent_divide[cpu][slot] =
+                    self.timer_divide[cpu];
+                self.timer_arm_recent_count[cpu] =
+                    self.timer_arm_recent_count[cpu] + 1;
             }
         }
 
