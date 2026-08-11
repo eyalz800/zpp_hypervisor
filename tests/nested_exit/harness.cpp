@@ -2988,6 +2988,260 @@ static void test_reflected_activity_and_interruptibility()
     }
 }
 
+// ------------- 9. delivering an interrupt to a parked second-level guest
+/**
+ * What happens when a guest hypervisor has an event to deliver and the
+ * second-level guest it is delivering to is not running.
+ *
+ * This is the path a halted virtual processor is woken through, and it is
+ * the one worth pinning hardest, because a defect in it does not look
+ * like a defect: the guest hypervisor believes it delivered an interrupt,
+ * the second-level guest never runs, and what is observed from outside is
+ * a machine that has simply stopped making progress.
+ *
+ * The architecture is in two sentences, and they pull in opposite
+ * directions, which is why the code has to get both right.
+ *
+ * **Injecting wakes the guest.** SDM 29.4 (.references/sdm.txt:203155):
+ * "If the VM entry is injecting, the logical processor is in the active
+ * state after VM entry. While the consistency checks described in Section
+ * 29.3.1.5 on the activity-state field do apply in this case, the
+ * contents of the activity-state field do not determine the activity
+ * state after VM entry." So an entry that injects into a vmcs12 saying
+ * HLT is exactly how a halted processor is restarted - the activity state
+ * is what it *was*, not what it will be.
+ *
+ * **But not every event may be injected into every state.** SDM 29.3.1.5
+ * (.references/sdm.txt:202609-202622) lists what each inactive state
+ * accepts: HLT takes external interrupts, NMIs, #DB, #MC and a pending
+ * MTF VM exit and nothing else; wait-for-SIPI takes nothing at all.
+ *
+ * The consequence for this VMM is a split, and it is deliberate:
+ *
+ * - HLT **is** handed to hardware, so the processor makes 29.3.1.5's
+ *   checks itself and this VMM must not make them again. A pre-refusal
+ *   here would turn an entry the architecture accepts into an entry
+ *   failure, and the interrupt would be lost - which is the failure this
+ *   whole section exists to catch.
+ *
+ * - wait-for-SIPI is **not** handed to hardware; `enter_or_park_l2` holds
+ *   the processor in root operation instead. So the processor never makes
+ *   the checks, and this VMM has to - which it does, refusing an entry
+ *   that injects.
+ *
+ * The single sentence the cases below are all forms of: **an entry that
+ * is injecting must never be silently turned into a park.** Parking one
+ * loses the event, and the layer above has no way to find out.
+ */
+static void test_injection_into_a_parked_guest()
+{
+    std::printf("delivering an interrupt to a parked second-level "
+                "guest\n");
+
+    using entry_outcome = zpp::hypervisor::hypervisor::l2_entry_outcome;
+    namespace activity = zpp::arch::x86_64::vmx::activity_state;
+
+    constexpr std::uint64_t interruption_valid = 1ull << 31;
+    constexpr std::uint64_t entry_failure_bit = 1ull << 31;
+    constexpr std::uint64_t invalid_guest_state = 33;
+
+    // SDM Table 27-18, the interruption type field, bits 10:8.
+    constexpr std::uint64_t type_external_interrupt = 0;
+    constexpr std::uint64_t type_nmi = 2;
+    constexpr std::uint64_t type_hardware_exception = 3;
+    constexpr std::uint64_t type_software_interrupt = 4;
+    constexpr std::uint64_t type_other_event = 7;
+
+    auto injection = [&](std::uint64_t type, std::uint64_t vector) {
+        return interruption_valid | (type << 8) | (vector & 0xff);
+    };
+
+    auto & shadow = hv().guest_vmcs12[cpu];
+
+    auto arm = [&](std::uint64_t state, std::uint64_t event) {
+        context registers{};
+        reset(registers);
+        controls(0, 0, 0);
+        hv().running_l2[cpu] = false;
+        hv().l2_activity_state[cpu] = activity::active;
+        g_start_up_vector.reset();
+        shadow.write(fields::guest_activity_state, state);
+        shadow.write(fields::guest_interruptibility_state, 0);
+        shadow.write(fields::vm_entry_interruption_information_field,
+                     event);
+        shadow.write(fields::exit_reason, 0);
+        shadow.write(fields::exit_qualification, 0);
+    };
+
+    // === HLT: every event the architecture allows must enter ==========
+    //
+    // These five are SDM 29.3.1.5's own list for the HLT state. Each has
+    // to reach hardware, because hardware is what turns the injection
+    // into a running processor.
+    struct
+    {
+        std::uint64_t type;
+        std::uint64_t vector;
+        const char * name;
+    } allowed_in_hlt[]{
+        {type_external_interrupt, 0xd1, "an external interrupt"},
+        {type_nmi, 2, "an NMI"},
+        {type_hardware_exception, 1, "#DB"},
+        {type_hardware_exception, 18, "#MC"},
+        {type_other_event, 0, "a pending MTF VM exit"},
+    };
+
+    for (auto & entry : allowed_in_hlt) {
+        arm(activity::hlt, injection(entry.type, entry.vector));
+
+        check(entry_outcome::entered == hv().enter_or_park_l2(cpu),
+              text("a halted second-level guest with %s to inject is "
+                   "entered - SDM 29.4 makes the processor active after "
+                   "an injecting entry, which is how a halted virtual "
+                   "processor is woken at all",
+                   entry.name));
+        check(activity::hlt == hv().vmcs.read(field::guest_activity_state),
+              text("and vmcs02 carries the HLT state vmcs12 asked for, "
+                   "not an active state substituted for it - the field "
+                   "says what the guest *was*, and the injection is what "
+                   "makes it run (%s)",
+                   entry.name));
+        check(0 == (shadow.read(fields::exit_reason) & entry_failure_bit),
+              text("and nothing was refused (%s)", entry.name));
+    }
+
+    // An event the architecture does *not* allow into HLT - a page fault
+    // - is still handed to hardware rather than pre-refused here.
+    //
+    // That is the deliberate half of the split. The processor applies
+    // 29.3.1.5 to a state it was given, and duplicating the check would
+    // buy nothing and cost the one thing that matters: a check written
+    // twice is a check that can disagree with itself, and the copy that
+    // is wrong would refuse entries the architecture accepts.
+    {
+        arm(activity::hlt, injection(type_hardware_exception, 14));
+        check(entry_outcome::entered == hv().enter_or_park_l2(cpu),
+              "#PF into a halted guest is handed to hardware, not "
+              "pre-refused - the processor makes SDM 29.3.1.5's checks "
+              "for a state it was given, and a second copy of them here "
+              "could only disagree");
+    }
+
+    // And with nothing to inject, a halted guest is still entered - it
+    // sits in the HLT state on hardware until an interrupt or NMI ends
+    // it, which is what `enter_or_park_l2`'s own comment says and is why
+    // HLT is not treated like wait-for-SIPI.
+    {
+        arm(activity::hlt, 0);
+        check(entry_outcome::entered == hv().enter_or_park_l2(cpu),
+              "a halted guest with nothing to inject is still entered, "
+              "and waits on hardware");
+    }
+
+    // === wait-for-SIPI: nothing may be injected =======================
+    //
+    // The other half. This state is held in root operation, so the
+    // processor never sees it and never makes the check - and SDM
+    // 29.3.1.5's entry for it is "No events are allowed."
+    //
+    // Refusing is the whole of what is available: there is no way to
+    // deliver an event to a processor that is not running and cannot be
+    // made to run by anything except a start-up IPI.
+    struct
+    {
+        std::uint64_t type;
+        std::uint64_t vector;
+        const char * name;
+    } refused_in_wait_for_sipi[]{
+        {type_external_interrupt, 0xd1, "an external interrupt"},
+        {type_nmi, 2, "an NMI"},
+        {type_hardware_exception, 1, "#DB"},
+        {type_hardware_exception, 18, "#MC"},
+        {type_software_interrupt, 0x80, "a software interrupt"},
+        {type_other_event, 0, "a pending MTF VM exit"},
+    };
+
+    for (auto & entry : refused_in_wait_for_sipi) {
+        arm(activity::wait_for_start_up_ipi,
+            injection(entry.type, entry.vector));
+
+        check(entry_outcome::reflected == hv().enter_or_park_l2(cpu),
+              text("wait-for-SIPI with %s to inject is refused - SDM "
+                   "29.3.1.5 allows no events in that state, and this "
+                   "VMM has to make the check because the processor "
+                   "never sees the state",
+                   entry.name));
+        check((entry_failure_bit | invalid_guest_state) ==
+                  shadow.read(fields::exit_reason),
+              text("and refused as a VM-entry failure with reason 33 "
+                   "(%s)",
+                   entry.name));
+        check(!g_start_up_vector.has_value(),
+              text("and no processor was handed a start-up vector by a "
+                   "refused entry (%s)",
+                   entry.name));
+    }
+
+    // With nothing to inject it parks instead, which is the case the
+    // whole mechanism exists for.
+    {
+        arm(activity::wait_for_start_up_ipi, 0);
+        auto outcome = hv().enter_or_park_l2(cpu);
+        check(entry_outcome::entered != outcome,
+              "wait-for-SIPI with nothing to inject is not entered - "
+              "SDM 29.7.2 makes the state block everything except a "
+              "start-up IPI, so a processor entered in it is gone");
+        check(0 == (shadow.read(fields::exit_reason) & entry_failure_bit),
+              "and is not a VM-entry failure either - it is held, which "
+              "is a third outcome and the reason l2_entry_outcome has "
+              "more than two values");
+    }
+
+    // === The sentence all of the above is a form of ===================
+    //
+    // An entry that is injecting must never be turned into a park. A
+    // parked processor takes no event, so the event is lost - and the
+    // guest hypervisor has already cleared its own record of it, because
+    // SDM 30.2 clears the valid bit of the VM-entry
+    // interruption-information field on every VM exit.
+    //
+    // Swept across every activity state and every interruption type, so
+    // the claim is about the *shape* of the decision rather than about
+    // the five cases above.
+    {
+        for (auto state : {activity::active,
+                           activity::hlt,
+                           activity::wait_for_start_up_ipi}) {
+            for (std::uint64_t type = 0; type <= 7; ++type) {
+                if (1 == type || 6 == type) {
+                    // Type 1 is reserved and type 6 is a software
+                    // exception, which needs an instruction length this
+                    // sweep does not set. Neither says anything about
+                    // the property being asserted.
+                    continue;
+                }
+
+                arm(state, injection(type, 0x20));
+                auto outcome = hv().enter_or_park_l2(cpu);
+
+                auto parked = (entry_outcome::entered != outcome) &&
+                              (0 == (shadow.read(fields::exit_reason) &
+                                     entry_failure_bit));
+
+                check(!parked,
+                      text("activity %llu with interruption type %llu: "
+                           "an injecting entry was parked. The event is "
+                           "lost and the guest hypervisor cannot find "
+                           "out - SDM 30.2 clears the valid bit on every "
+                           "exit, so its own record of the injection is "
+                           "gone too",
+                           (unsigned long long)state,
+                           (unsigned long long)type));
+            }
+        }
+    }
+}
+
 int main()
 {
     test_reason_table();
@@ -2998,6 +3252,7 @@ int main()
     test_l0_precedence();
     test_activity_state();
     test_reflected_activity_and_interruptibility();
+    test_injection_into_a_parked_guest();
 
     std::printf("\n%d checks, %d failures\n", g_checks, g_failures);
 
