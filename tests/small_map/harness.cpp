@@ -55,10 +55,8 @@ void check_equal(std::uint64_t expected,
         return;
     }
     ++g_failures;
-    std::println("FAIL: {}\n  expected {}\n  actual   {}",
-                 what,
-                 expected,
-                 actual);
+    std::println(
+        "FAIL: {}\n  expected {}\n  actual   {}", what, expected, actual);
 }
 
 /**
@@ -92,13 +90,13 @@ void an_empty_map_ends_where_it_begins()
 
     check(empty.begin() == empty.end(),
           "an empty map's begin() and end() are the same pointer");
-    check_equal(0,
-                static_cast<std::uint64_t>(empty.end() - empty.begin()),
-                "and the distance between them is zero, which is what "
-                "`begin() + m_size` gives and what `value(m_size - 1) + 1` "
-                "gave only by wrapping through SIZE_MAX first");
-    check(empty.cbegin() == empty.cend(),
-          "the const iterators agree");
+    check_equal(
+        0,
+        static_cast<std::uint64_t>(empty.end() - empty.begin()),
+        "and the distance between them is zero, which is what "
+        "`begin() + m_size` gives and what `value(m_size - 1) + 1` "
+        "gave only by wrapping through SIZE_MAX first");
+    check(empty.cbegin() == empty.cend(), "the const iterators agree");
 
     const map & constant = empty;
     check(constant.begin() == constant.end(),
@@ -127,8 +125,7 @@ void an_empty_map_iterates_over_nothing()
 
     check(empty.find(0) == empty.end(),
           "find on an empty map answers end()");
-    check(empty.find(0xdeadbeef) == empty.end(),
-          "for any key at all");
+    check(empty.find(0xdeadbeef) == empty.end(), "for any key at all");
 }
 
 /**
@@ -200,9 +197,8 @@ void every_key_is_found_and_no_others()
         check(found != built.end(),
               "a key that was inserted is found: " + std::to_string(key));
         if (found != built.end()) {
-            check_equal(key * 10,
-                        found->second,
-                        "and carries its own value");
+            check_equal(
+                key * 10, found->second, "and carries its own value");
         }
     }
 
@@ -288,7 +284,8 @@ void erasing_an_empty_range_does_nothing()
 
     map empty;
     empty.erase(empty.begin(), empty.end());
-    check_equal(0, empty.size(),
+    check_equal(0,
+                empty.size(),
                 "erasing the whole of an empty map is a no-op rather "
                 "than a wrap");
 }
@@ -329,10 +326,9 @@ void the_map_holds_its_capacity()
     }
 
     check_equal(8, built.size(), "eight entries fit in a capacity of 8");
-    check_equal(
-        8,
-        static_cast<std::uint64_t>(built.end() - built.begin()),
-        "and end() - begin() is the size at full capacity too");
+    check_equal(8,
+                static_cast<std::uint64_t>(built.end() - built.begin()),
+                "and end() - begin() is the size at full capacity too");
     check_equal(0, built.front().first, "front is the smallest");
     check_equal(7, built.back().first, "back is the largest");
 
