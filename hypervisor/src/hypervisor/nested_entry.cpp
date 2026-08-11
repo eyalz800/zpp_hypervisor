@@ -2960,6 +2960,8 @@ hypervisor::on_l2_exit(std::size_t cpu,
                     this->synthetic_msr_writes[cpu][offset] + 1;
                 this->synthetic_msr_last_write_tsc[cpu][offset] =
                     arch::x86_64::rdtsc();
+                this->synthetic_msr_last_value[cpu][offset] =
+                    (context.rax & 0xffffffff) | (context.rdx << 32);
             }
         }
 

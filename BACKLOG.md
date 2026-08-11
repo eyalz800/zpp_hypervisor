@@ -507,8 +507,65 @@ partition reads `TSC_FREQUENCY` (`0x40000022`) and `APIC_FREQUENCY`
 (`0x40000023`) exactly once each, and both are reflected to Hyper-V,
 which is the layer that implements them.
 
-Next, and narrowed by all of the above: the path from Hyper-V's own timer
-to the synthetic interrupt it must post to a halted virtual processor.
+### The message is written. The interrupt is never delivered.
+
+Measured 2026-08-11. `synthetic_msr_last_value` records what the root
+partition writes to each synthetic MSR, which turns the counts above into
+an address that can be followed: `SIMP` (`0x40000083`) holds the guest
+physical address of the synthetic message page, sixteen 256-byte slots,
+one per interrupt source.
+
+Read through the monitor's `xp` at `SIMP + 3 * 256`, on three processors:
+
+```
+cpu 0  SIMP 0x117a3e000  slot 3  type=0x80000010 HvMessageTimerExpired  payload=24 flags=0x01
+cpu 1  SIMP 0x13ed8e000  slot 3  type=0x80000010 HvMessageTimerExpired  payload=24 flags=0x01
+cpu 2  SIMP 0x13edc8000  slot 3  type=0x80000010 HvMessageTimerExpired  payload=24 flags=0x01
+```
+
+**Hyper-V wrote the timer message.** `flags=0x01` is message-pending - a
+second expiry arrived and found the slot still occupied - which is
+independently the same "exactly two expiries" the APIC timer armings
+showed. The two measurements agree and neither was derived from the
+other.
+
+So the failure is not the clock, not the deadline, not the message. It is
+that **synthetic interrupt 3 is never taken by the root partition.**
+`SINT3` reads `0xd1`: vector `0xd1`, unmasked, and auto-EOI *clear* -
+unlike `SINT0`, `SINT1` and `SINT4`, which all read `0x20030`-style
+values with auto-EOI set. A timer message therefore requires the guest to
+run, take vector `0xd1`, and write the end-of-message register. It never
+takes it.
+
+**And Hyper-V never even tries to enter the processor to deliver it.**
+This is the measurement that localises the defect, and it is exact:
+
+| cpu | vmlaunch | vmresume | sum | `l2_entries` |
+|---|---|---|---|---|
+| 0 | 3 | 82,398 | 82,401 | 82,401 |
+| 1 | 3 | 417 | 420 | 420 |
+| 2 | 3 | 393 | 396 | 396 |
+
+Every VMLAUNCH and VMRESUME the guest hypervisor executed produced an
+entry. **This VMM has never refused one**, and the log ring confirms it -
+no `second level entry refused` line in a whole boot, and the only
+`dropped` lines are the second start-up IPI of each pair, which a started
+processor must ignore.
+
+That rules out an entire class of explanation. The defect is not in what
+this VMM does with the guest hypervisor's entries; it is in **what the
+guest hypervisor has been told**, because its own scheduler is deciding a
+virtual processor with a pending message and an unmasked interrupt source
+is not runnable.
+
+Next, and this is now a narrow question: what the reflected `hlt` exit
+leaves in vmcs12. Hyper-V parks the processor from that exit and decides
+from the state saved there whether it may ever be woken - so the guest
+RFLAGS, the interruptibility state and the activity state that
+`save_l2_state` writes back are the candidates, in that order. Worth
+recording alongside them: whether `honour_tpr_shadow` was true, since the
+false branch changes how the guest hypervisor learns about interrupt
+priority and nothing currently records which branch ran.
 Hyper-V drives that from its local APIC timer, and the application
 processors are seen writing a zero initial count - disarming it - just
 before they go quiet for good, while the boot processor's own tick decays

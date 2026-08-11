@@ -3493,6 +3493,27 @@ private:
     std::uint64_t synthetic_msr_writes[max_cpus][synthetic_msr_capacity]{};
     std::uint64_t synthetic_msr_last_write_tsc[max_cpus]
                                               [synthetic_msr_capacity]{};
+
+    /**
+     * The newest value written to each, which is what turns the counts
+     * above into addresses that can be followed.
+     *
+     * The one that matters is `SIMP`, `0x40000083`: it holds the guest
+     * physical address of the synthetic message page, and that page is
+     * sixteen 256-byte slots, one per interrupt source. Slot 3 is where a
+     * timer configured to post to SINT3 puts its expiry message.
+     *
+     * Reading it settles what counting cannot. The counts say no message
+     * is ever acknowledged; they do not say whether one was ever
+     * *written*. If slot 3 holds a message - type `0x80000010`,
+     * "timer expired" - then Hyper-V wrote it and only the interrupt that
+     * announces it failed to arrive. If the slot is empty, Hyper-V never
+     * got as far as writing, and the fault is earlier. Those are
+     * different bugs in different layers and nothing recorded so far
+     * separates them.
+     */
+    std::uint64_t synthetic_msr_last_value[max_cpus]
+                                          [synthetic_msr_capacity]{};
     /**
      * @}
      */
