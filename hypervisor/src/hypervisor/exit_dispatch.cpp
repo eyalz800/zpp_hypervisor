@@ -438,27 +438,25 @@ void hypervisor::on_vm_exit(std::uint64_t cpuid,
         // never lands on this one.
         constexpr std::uint32_t diagnostic_leaf = 0x40000100;
 
-        // "Is this VMM underneath?", and nothing else.
+        // A presence leaf was added at 0x40000101 and **removed again**,
+        // for two independent reasons that both say the same thing about
+        // claiming leaves inside this range.
         //
-        // The diagnostic leaf beside it cannot answer that. It reports a
-        // processor's most recent exit, so every field is dynamic and
-        // every value it can return - including all zeroes, for a
-        // processor that has not exited - is also what a machine this
-        // VMM is *not* underneath would return. A question worth asking
-        // needs an answer that cannot be produced by accident.
+        // It did not work: a guest running under Hyper-V reads
+        // "Microsoft Hv" at 0x40000101 as well as at 0x40000000, because
+        // Hyper-V claims the whole range and answers every leaf in it -
+        // exactly as this VMM does, for the reason stated below.
         //
-        // So this one is a constant, and deliberately the same twelve
-        // characters as the vendor at `hypervisor_leaf_first`, because
-        // any tool that renders a hypervisor leaf as text will show it
-        // without being taught to.
+        // And it broke the invariant that rule exists to keep. The guest
+        // suite's `cpuid.range_answered_whole` asserts every leaf in
+        // 0x40000000..0x4fffffff outside the advertised block answers
+        // zero; a leaf answering its own signature is precisely the
+        // "answered part of an interface" failure this file warns about
+        // everywhere else. The suite caught it on the first run.
         //
-        // Worth knowing before relying on it: a guest running under a
-        // *second* hypervisor above this one cannot see it. CPUID from
-        // that guest is answered by the hypervisor immediately above,
-        // and only a hypervisor that passes unknown leaves down to the
-        // processor will let this reach it. So a hit proves presence;
-        // a miss proves nothing.
-        constexpr std::uint32_t presence_leaf = 0x40000101;
+        // `deep_presence_leaf` below replaces it and is strictly better:
+        // outside the range, so it neither breaks the invariant nor gets
+        // swallowed by a hypervisor above.
 
         // The same question asked from *two* levels up, which the leaf
         // above cannot answer.
@@ -687,15 +685,6 @@ void hypervisor::on_vm_exit(std::uint64_t cpuid,
                 cpuid_result[1] = 0;
                 cpuid_result[2] = 0;
                 cpuid_result[3] = 0;
-            } else if (presence_leaf == leaf) {
-                // Version, so a later layout can be told from this one
-                // by something that has already found the signature.
-                cpuid_result[0] = 1;
-
-                // "ZppZppZppZpp", the same spelling as the vendor.
-                cpuid_result[1] = 0x5a70705a;
-                cpuid_result[2] = 0x705a7070;
-                cpuid_result[3] = 0x70705a70;
             } else if (diagnostic_leaf == leaf) {
                 // Reports another processor's most recent exit.
                 //

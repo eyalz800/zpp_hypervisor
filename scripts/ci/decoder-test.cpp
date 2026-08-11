@@ -11,7 +11,7 @@ constexpr context make_registers()
     r.rcx = 0x3333333344444444ull;
     r.rdx = 0xaaaaaaaabbbbbbbbull;
     r.rbx = 0x5555555566666666ull;
-    r.r8  = 0x99999999eeeeeeeeull;
+    r.r8 = 0x99999999eeeeeeeeull;
     return r;
 }
 
@@ -46,7 +46,8 @@ static_assert(run(mov_m8_dl)->size == 1);
 static_assert(run(mov_m8_dl)->value == 0xbbull);
 
 // mov dword [rcx], 0x12345678
-constexpr std::uint8_t mov_m32_imm[] = {0xc7, 0x01, 0x78, 0x56, 0x34, 0x12};
+constexpr std::uint8_t mov_m32_imm[] = {
+    0xc7, 0x01, 0x78, 0x56, 0x34, 0x12};
 static_assert(run(mov_m32_imm)->size == 4);
 static_assert(run(mov_m32_imm)->value == 0x12345678ull);
 
@@ -61,17 +62,20 @@ static_assert(run(mov_r8d)->size == 4);
 static_assert(run(mov_r8d)->value == 0xeeeeeeeeull);
 
 // mov dword [rcx+0x10], 0x1  (imm after disp8)
-constexpr std::uint8_t mov_disp8_imm[] = {0xc7, 0x41, 0x10, 0x01, 0x00, 0x00, 0x00};
+constexpr std::uint8_t mov_disp8_imm[] = {
+    0xc7, 0x41, 0x10, 0x01, 0x00, 0x00, 0x00};
 static_assert(run(mov_disp8_imm)->size == 4);
 static_assert(run(mov_disp8_imm)->value == 1);
 
 // mov qword [rcx], -1  (imm32 sign extended)
-constexpr std::uint8_t mov_m64_imm[] = {0x48, 0xc7, 0x01, 0xff, 0xff, 0xff, 0xff};
+constexpr std::uint8_t mov_m64_imm[] = {
+    0x48, 0xc7, 0x01, 0xff, 0xff, 0xff, 0xff};
 static_assert(run(mov_m64_imm)->size == 8);
 static_assert(run(mov_m64_imm)->value == 0xffffffffffffffffull);
 
 // mov [rsp+disp32], eax  -> SIB present
-constexpr std::uint8_t mov_sib[] = {0x89, 0x84, 0x24, 0x00, 0x01, 0x00, 0x00};
+constexpr std::uint8_t mov_sib[] = {
+    0x89, 0x84, 0x24, 0x00, 0x01, 0x00, 0x00};
 static_assert(run(mov_sib)->size == 4);
 static_assert(run(mov_sib)->value == 0x22222222ull);
 
@@ -112,16 +116,16 @@ static_assert(run(mov_from_r12)->length == 3);
 
 // --- the instruction length, which the VMCS does not supply for an EPT
 // --- violation, so a wrong one here is a guest resumed mid-instruction
-static_assert(run(mov_m32_edx)->length == 2);      // opcode, modrm
-static_assert(run(mov_m64_rdx)->length == 3);      // rex, opcode, modrm
-static_assert(run(mov_m16_dx)->length == 3);       // 0x66, opcode, modrm
-static_assert(run(mov_m32_imm)->length == 6);      // + imm32
-static_assert(run(mov_disp8_eax)->length == 3);    // + disp8
-static_assert(run(mov_r8d)->length == 3);          // rex, opcode, modrm
-static_assert(run(mov_disp8_imm)->length == 7);    // + disp8 + imm32
-static_assert(run(mov_m64_imm)->length == 7);      // rex + imm32
-static_assert(run(mov_sib)->length == 7);          // sib + disp32
-static_assert(run(mov_riprel)->length == 6);       // + disp32
+static_assert(run(mov_m32_edx)->length == 2);   // opcode, modrm
+static_assert(run(mov_m64_rdx)->length == 3);   // rex, opcode, modrm
+static_assert(run(mov_m16_dx)->length == 3);    // 0x66, opcode, modrm
+static_assert(run(mov_m32_imm)->length == 6);   // + imm32
+static_assert(run(mov_disp8_eax)->length == 3); // + disp8
+static_assert(run(mov_r8d)->length == 3);       // rex, opcode, modrm
+static_assert(run(mov_disp8_imm)->length == 7); // + disp8 + imm32
+static_assert(run(mov_m64_imm)->length == 7);   // rex + imm32
+static_assert(run(mov_sib)->length == 7);       // sib + disp32
+static_assert(run(mov_riprel)->length == 6);    // + disp32
 
 // mov word [rcx], 0x1234 -> prefix, opcode, modrm, imm16
 constexpr std::uint8_t mov_imm16[] = {0x66, 0xc7, 0x01, 0x34, 0x12};

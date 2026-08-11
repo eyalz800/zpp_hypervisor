@@ -144,8 +144,8 @@ inline constexpr bool pass_through_hypervisor_interface = false;
  * reference counter, reference TSC or frequency MSR is offered, and
  * those still fault - which is the honest answer while nothing here
  * implements them. A guest hypervisor has not armed yet
- * (`guest_vmxon_count` zero), so the next question is what else virtualization
- * based security wants before it will.
+ * (`guest_vmxon_count` zero), so the next question is what else
+ * virtualization based security wants before it will.
  */
 inline constexpr bool announce_hypervisor = false;
 
@@ -309,85 +309,86 @@ constexpr std::uint64_t supported_primary_controls =
                    // The pair above is what a guest hypervisor is given
                    // *instead* of the TPR shadow, and that is deliberate.
                    //
-    (1ull << 21) | // Use TPR shadow - OFFERED, experiment in progress.
-                   //
-                   // **Re-offered because the stall that withdrew it is now
-                   // suspected to have been a different bug entirely.** The
-                   // symptom recorded both times it was withdrawn was seven
-                   // application processors left in the firmware's wait loop
-                   // and the boot processor spinning for them - which is the
-                   // *identical* symptom to a failure since traced to the
-                   // emulator being told to offer interrupt remapping that
-                   // the host kernel does not implement, and fixed by
-                   // turning that off. Every run that withdrew this bit was
-                   // made with the broken setting in place, so the stall was
-                   // never attributable to the bit on its own.
-                   //
-                   // What to read after this boot, in order: guest_vmxon_count
-                   // (never once read in a run with this bit offered), then
-                   // vmcs12_controls_captured and l2_entries. Zero vmxon means
-                   // the capability set is still being refused and the answer
-                   // is elsewhere; non-zero means a guest hypervisor entered
-                   // VMX operation here for the first time.
-                   //
-                   // Bit 21, use TPR shadow, was previously **not** offered, and
-                   // that is the one thing standing between this VMM and
-                   // a guest hypervisor.
-                   //
-                   // **This is the bit a guest hypervisor refuses on,
-                   // and that is now established from its own code
-                   // rather than inferred.** The guest's loader gathers
-                   // the capability MSRs and compares them against a
-                   // required table it carries as immediates; the
-                   // primary-controls requirement is 0xe7f9fffe. Against
-                   // the 0xffd9fffe this VMM reported, `required &
-                   // ~offered` is 0x00200000 - bit 21, and nothing else.
-                   // Every other comparison in that table passes. The
-                   // refusal is silent: it returns a status meaning
-                   // invalid device request and never opens the
-                   // hypervisor image at all, which is exactly the
-                   // measurement this tree had - the capability MSRs read
-                   // 28 times and VMXON executed zero times.
-                   //
-                   // It was offered once before and withdrawn, because
-                   // advertising it deterministically stalled the guest's
-                   // own application-processor start-up: seven processors
-                   // left in the firmware's wait loop, measured twice,
-                   // with `build_vmcs02` never running in either - so the
-                   // advertisement alone, not the honouring of it.
-                   //
-                   // Offering it again has now been tried, with all
-                   // three of the local-APIC defects below fixed, and
-                   // **the stall came back**: the guest bounced between
-                   // two addresses for seven minutes and never reached
-                   // the Windows kernel. So the APIC repairs were not
-                   // the whole of it, and the bit stays off until the
-                   // stall is understood rather than hoped away.
-                   //
-                   // What had changed since the first withdrawal is the
-                   // local APIC path it stalled in, and all of it was
-                   // defective at the time:
-                   // the interrupt command register's handler tested a
-                   // read-only delivery-status bit and so refused every
-                   // xAPIC command; a write that had to be stepped rather
-                   // than emulated reached the handler with no address,
-                   // and 149 of them were dropped on one boot; and the
-                   // APIC mode was not followed across a write of
-                   // IA32_APIC_BASE. A start-up sequence losing its
-                   // interrupts explains the stall exactly, and none of
-                   // those three defects existed to be ruled out when the
-                   // bit was withdrawn.
-                   //
-                   // The alternative remains recorded rather than
-                   // deleted, because it is what to fall back to if the
-                   // stall returns: SDM 27.6.8 makes CR8-load and
-                   // CR8-store exiting the architectural substitute, and
-                   // KVM's nested_get_vmcs12_pages makes the same
-                   // substitution when it cannot map the virtual-APIC
-                   // page. That path costs only reflected exits, which
-                   // `l1_wants_l2_exit` already answers - but it is not
-                   // what the guest hypervisor asks for, and it will not
-                   // launch without the bit.
+    (1ull
+     << 21) | // Use TPR shadow - OFFERED, experiment in progress.
+              //
+              // **Re-offered because the stall that withdrew it is now
+              // suspected to have been a different bug entirely.** The
+              // symptom recorded both times it was withdrawn was seven
+              // application processors left in the firmware's wait loop
+              // and the boot processor spinning for them - which is the
+              // *identical* symptom to a failure since traced to the
+              // emulator being told to offer interrupt remapping that
+              // the host kernel does not implement, and fixed by
+              // turning that off. Every run that withdrew this bit was
+              // made with the broken setting in place, so the stall was
+              // never attributable to the bit on its own.
+              //
+              // What to read after this boot, in order: guest_vmxon_count
+              // (never once read in a run with this bit offered), then
+              // vmcs12_controls_captured and l2_entries. Zero vmxon means
+              // the capability set is still being refused and the answer
+              // is elsewhere; non-zero means a guest hypervisor entered
+              // VMX operation here for the first time.
+              //
+              // Bit 21, use TPR shadow, was previously **not** offered,
+              // and that is the one thing standing between this VMM and a
+              // guest hypervisor.
+              //
+              // **This is the bit a guest hypervisor refuses on,
+              // and that is now established from its own code
+              // rather than inferred.** The guest's loader gathers
+              // the capability MSRs and compares them against a
+              // required table it carries as immediates; the
+              // primary-controls requirement is 0xe7f9fffe. Against
+              // the 0xffd9fffe this VMM reported, `required &
+              // ~offered` is 0x00200000 - bit 21, and nothing else.
+              // Every other comparison in that table passes. The
+              // refusal is silent: it returns a status meaning
+              // invalid device request and never opens the
+              // hypervisor image at all, which is exactly the
+              // measurement this tree had - the capability MSRs read
+              // 28 times and VMXON executed zero times.
+              //
+              // It was offered once before and withdrawn, because
+              // advertising it deterministically stalled the guest's
+              // own application-processor start-up: seven processors
+              // left in the firmware's wait loop, measured twice,
+              // with `build_vmcs02` never running in either - so the
+              // advertisement alone, not the honouring of it.
+              //
+              // Offering it again has now been tried, with all
+              // three of the local-APIC defects below fixed, and
+              // **the stall came back**: the guest bounced between
+              // two addresses for seven minutes and never reached
+              // the Windows kernel. So the APIC repairs were not
+              // the whole of it, and the bit stays off until the
+              // stall is understood rather than hoped away.
+              //
+              // What had changed since the first withdrawal is the
+              // local APIC path it stalled in, and all of it was
+              // defective at the time:
+              // the interrupt command register's handler tested a
+              // read-only delivery-status bit and so refused every
+              // xAPIC command; a write that had to be stepped rather
+              // than emulated reached the handler with no address,
+              // and 149 of them were dropped on one boot; and the
+              // APIC mode was not followed across a write of
+              // IA32_APIC_BASE. A start-up sequence losing its
+              // interrupts explains the stall exactly, and none of
+              // those three defects existed to be ruled out when the
+              // bit was withdrawn.
+              //
+              // The alternative remains recorded rather than
+              // deleted, because it is what to fall back to if the
+              // stall returns: SDM 27.6.8 makes CR8-load and
+              // CR8-store exiting the architectural substitute, and
+              // KVM's nested_get_vmcs12_pages makes the same
+              // substitution when it cannot map the virtual-APIC
+              // page. That path costs only reflected exits, which
+              // `l1_wants_l2_exit` already answers - but it is not
+              // what the guest hypervisor asks for, and it will not
+              // launch without the bit.
     (1ull << 22) | // NMI-window exiting.
     (1ull << 23) | // MOV-DR exiting.
     (1ull << 24) | // Unconditional I/O exiting.

@@ -1381,8 +1381,8 @@ bool hypervisor::on_guest_vmwrite(std::size_t cpu,
  */
 void hypervisor::record_vmcs_field_use(bool write, std::uint64_t encoding)
 {
-    auto encodings =
-        write ? this->vmcs_field_write_encoding : this->vmcs_field_read_encoding;
+    auto encodings = write ? this->vmcs_field_write_encoding
+                           : this->vmcs_field_read_encoding;
     auto counts =
         write ? this->vmcs_field_write_count : this->vmcs_field_read_count;
 
@@ -1499,13 +1499,13 @@ bool hypervisor::on_guest_invept(std::size_t cpu,
 
     if (single_context == type) {
         if constexpr (refresh_shadow_on_invept) {
-            refresh_shadow_ept_for(
-                cpu,
-                operand_value.eptp & (((1ull << 52) - 1) & ~0xfffull));
+            refresh_shadow_ept_for(cpu,
+                                   operand_value.eptp &
+                                       (((1ull << 52) - 1) & ~0xfffull));
         } else {
-            discard_shadow_ept_for(
-                cpu,
-                operand_value.eptp & (((1ull << 52) - 1) & ~0xfffull));
+            discard_shadow_ept_for(cpu,
+                                   operand_value.eptp &
+                                       (((1ull << 52) - 1) & ~0xfffull));
         }
     } else {
         discard_shadow_ept(cpu);
@@ -1763,8 +1763,8 @@ bool hypervisor::on_guest_vmlaunch(std::size_t cpu,
         if (this->reference_read_pending[cpu]) {
             this->reference_read_pending[cpu] = false;
 
-            auto slot =
-                this->reference_read_count[cpu] % reference_sample_capacity;
+            auto slot = this->reference_read_count[cpu] %
+                        reference_sample_capacity;
             this->reference_read_value[cpu][slot] =
                 (context.rax & 0xffffffff) | (context.rdx << 32);
             this->reference_read_tsc[cpu][slot] = arch::x86_64::rdtsc();
