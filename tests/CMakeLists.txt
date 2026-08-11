@@ -73,15 +73,20 @@ add_custom_target(zpp_tests
 #   INCLUDES  directories ahead of hypervisor/include, shims first
 #   DEFINES   compile definitions, e.g. ZPP_NESTED_VMX=1
 #   TEST_NAME the name ctest reports, when it differs from the target's
+#   DIAG      ZPP_DIAG for this harness, when ZPP_TEST_DIAG will not do
 function(zpp_add_host_test name)
     cmake_parse_arguments(HARNESS
         ""
-        "TEST_NAME"
+        "TEST_NAME;DIAG"
         "SOURCES;INCLUDES;DEFINES"
         ${ARGN})
 
     if(NOT HARNESS_TEST_NAME)
         set(HARNESS_TEST_NAME "tests/${name}")
+    endif()
+
+    if(NOT DEFINED HARNESS_DIAG)
+        set(HARNESS_DIAG ${ZPP_TEST_DIAG})
     endif()
 
     # EXCLUDE_FROM_ALL, so `cmake --build --preset <config>` still builds
@@ -102,7 +107,7 @@ function(zpp_add_host_test name)
         "${ZPP_DIAG_INCLUDE}")
     target_compile_definitions(${name} PRIVATE
         ${HARNESS_DEFINES}
-        ZPP_DIAG=${ZPP_TEST_DIAG})
+        ZPP_DIAG=${HARNESS_DIAG})
 
     add_dependencies(zpp_tests ${name})
 
@@ -275,19 +280,37 @@ zpp_add_host_test(watched_page
         "${CMAKE_CURRENT_SOURCE_DIR}/watched_page")
 
 # The interrupted-event re-queue on the way back to a guest: the real
-# resume_guest and event_allowed_on_entry out of resume.cpp, against a
-# stand-in carrying the per-processor event state and the VMCS. The shim's
-# restore_context comes back instead of trapping, because resume_guest is
-# [[noreturn]] and everything worth reading is written just before it.
+# resume_guest and event_allowed_on_entry out of resume.cpp, against the
+# real hypervisor class. The shim's restore_context comes back instead
+# of trapping, because resume_guest is [[noreturn]] and everything worth
+# reading is written just before it.
+#
+# DIAG=1, alone in this file. The resume path's diagnostic half - the
+# pump and the block sink's readiness - is under test here, and with
+# ZPP_DIAG=0 it would compile away and this harness would pin nothing
+# about it. Four stand-in headers used to supply that half; the real
+# zpp/diag/config.h, log.h, pump.h, sinks.h and sinks/esp_blocks.h are
+# on the path instead, so what answers `esp_block_sink::ready()` is the
+# sink itself.
 zpp_add_host_test(resume_guest
     SOURCES
         resume_guest/harness.cpp
+        support/host_heap.cpp
         "${ZPP_HYPERVISOR_SRC}/hypervisor/resume.cpp"
+        "${ZPP_HYPERVISOR_SRC}/diag/platform.cpp"
+        "${ZPP_HYPERVISOR_SRC}/crt/heap.cpp"
     INCLUDES
-        "${CMAKE_CURRENT_SOURCE_DIR}/resume_guest/shim"
         "${CMAKE_CURRENT_SOURCE_DIR}/shim"
         "${CMAKE_CURRENT_SOURCE_DIR}/resume_guest"
-    DEFINES ZPP_NESTED_VMX=1)
+    DEFINES
+        ZPP_NESTED_VMX=1
+        ZPP_HOSTED_TESTS=1
+        # The path under test is the one behind this switch, so it is on
+        # here whatever the cross build defaults it to. It used to be
+        # `#define`d at the top of the stand-in hypervisor.h, which put a
+        # build option inside a header - the reason it moved.
+        ZPP_REQUEUE_INTERRUPTED_EVENTS=1
+    DIAG 1)
 
 # === Compile-only checks ==================================================
 #

@@ -86,36 +86,42 @@
 #include <memory>
 #include <string>
 
-namespace zpp::diag
+/**
+ * What this harness records about the two calls the resume path makes
+ * into the rest of the VMM.
+ *
+ * Namespace scope, because they are the harness's counters and not the
+ * hypervisor's. They were members of a stand-in class that is gone; the
+ * real class has no place for them, which is right.
+ *
+ * `zpp::diag::pump::run` and `zpp::diag::esp_block_sink::ready` used to
+ * be counted here too, through four stand-in diag headers. Those are
+ * gone: both are defined inline in the real headers, which are on the
+ * path now, and `ready()` answers false because nothing configured the
+ * channel - the same false a boot with no diagnostic medium gets. The
+ * count of pump runs was never asserted, so nothing is lost; the call
+ * itself is still observed, through `controller_polls`, which the
+ * resume path reaches on the same line.
+ */
+struct observations
 {
-namespace
-{
-std::uint64_t g_pump_runs{};
-} // namespace
+    std::uint64_t record_exits{};
+    std::uint64_t controller_polls{};
+};
 
-void pump::run()
-{
-    g_pump_runs += 1;
-}
-
-bool esp_block_sink::ready()
-{
-    return true;
-}
-
-} // namespace zpp::diag
+static observations g_observed;
 
 namespace zpp::hypervisor
 {
 void hypervisor::record_exit(arch::x86_64::vmx::exit_reason,
                              const arch::x86_64::context &)
 {
-    this->record_exit_count += 1;
+    g_observed.record_exits += 1;
 }
 
 void hypervisor::arm_controller_poll(bool)
 {
-    this->controller_poll_count += 1;
+    g_observed.controller_polls += 1;
 }
 
 } // namespace zpp::hypervisor
@@ -336,6 +342,11 @@ machine make()
                 sizeof(zpp::arch::x86_64::vmx::g_vmcs));
     zpp::arch::x86_64::vmx::g_vmcs_valid = true;
     zpp::arch::x86_64::g_restore_count = 0;
+
+    // The observations are namespace scope now rather than members of a
+    // stand-in class, so a fresh machine has to clear them explicitly -
+    // a new hypervisor object no longer does it by construction.
+    g_observed = observations{};
 
     machine built{std::make_unique<zpp::hypervisor::hypervisor>()};
 
@@ -1136,7 +1147,7 @@ void the_resume_records_where_it_left_the_guest()
                 built.state->resume_guest_cs[cpu],
                 "and in which segment");
     check_equal(1,
-                built.state->record_exit_count,
+                g_observed.record_exits,
                 "and the exit is recorded once, after the handlers have "
                 "had their say");
     check_equal(1,
