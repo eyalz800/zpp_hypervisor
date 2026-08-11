@@ -32,6 +32,49 @@ namespace
 alignas(16) std::uint8_t g_operand[16]{};
 
 /**
+ * Somewhere for SGDT, SIDT, SLDT and STR to write.
+ *
+ * Separate from g_operand because those four really do execute - the
+ * "descriptor-table exiting" control is off, so they are ordinary
+ * instructions here - and writing over an operand the VMX probes point at
+ * would make one probe depend on the order of another.
+ *
+ * Ten bytes is the pseudo-descriptor SGDT and SIDT store in 64-bit mode
+ * (SDM Vol. 2A, SGDT: a 16-bit limit and a 64-bit base); sixteen is that
+ * rounded up so the compiler never has to care.
+ * @{
+ */
+alignas(16) std::uint8_t g_descriptor_scratch[16]{};
+std::uint16_t g_selector_scratch{};
+/**
+ * @}
+ */
+
+/**
+ * The XSAVE areas for the XSAVES and XRSTORS probes.
+ *
+ * 64-byte aligned because both instructions raise #GP on an area that is
+ * not (SDM Vol. 2C, XRSTORS: "if the address of the XSAVE area is not
+ * 64-byte aligned, a general-protection exception (#GP) occurs",
+ * .references/sdm.txt:16772), and the claim being made is about the VM
+ * exit rather than about the alignment.
+ *
+ * Two areas rather than one, and that is deliberate. The XRSTORS area is
+ * left zeroed for ever, which makes that probe's outcome *determined*:
+ * XRSTORS reads the header first and raises #GP when XCOMP_BV[63] is 0
+ * (.references/sdm.txt:16776), so it faults before restoring anything and
+ * no state component is touched. Letting XSAVES write this area first
+ * would produce a valid compacted header and the restore would really
+ * happen, which is a state change this suite has no business making.
+ * @{
+ */
+alignas(64) std::uint8_t g_xsave_area[1024]{};
+alignas(64) std::uint8_t g_xrstors_area[1024]{};
+/**
+ * @}
+ */
+
+/**
  * What the current probe should use, for the probes that need a parameter.
  * File scope because zpp_guest_test_try takes a plain function pointer:
  * the body has to run on a stack frame this suite is prepared to abandon,
@@ -393,6 +436,138 @@ void probe_in_16()
                  : "d"(static_cast<std::uint16_t>(g_probe_value)));
     g_probe_value = value;
 }
+
+/**
+ * The four descriptor-table instructions that only read.
+ *
+ * SDM Appendix C reason 46 is "Guest software attempted to execute LGDT,
+ * LIDT, SGDT, or SIDT and the 'descriptor-table exiting' VM-execution
+ * control was 1" and reason 47 says the same of LLDT, LTR, SLDT and STR
+ * (.references/sdm.txt:224355 and :224357). The control is secondary bit
+ * 2 (SDM Table 27-7, .references/sdm.txt:199537) and this VMM does not
+ * request it, so all four must execute without exiting.
+ *
+ * Only the reading half of each pair is probed. LGDT and LTR would load
+ * a descriptor table register, which is the firmware's, and the negative
+ * being asserted - that no VM exit is taken - is a property of the
+ * control rather than of the direction.
+ * @{
+ */
+void probe_sgdt()
+{
+    asm volatile("sgdt %0" : "=m"(g_descriptor_scratch) : : "memory");
+}
+
+void probe_sidt()
+{
+    asm volatile("sidt %0" : "=m"(g_descriptor_scratch) : : "memory");
+}
+
+void probe_sldt()
+{
+    asm volatile("sldt %0" : "=m"(g_selector_scratch) : : "memory");
+}
+
+void probe_str()
+{
+    asm volatile("str %0" : "=m"(g_selector_scratch) : : "memory");
+}
+/**
+ * @}
+ */
+
+void probe_getsec()
+{
+    // 0F 37, spelled as bytes because the integrated assembler gates the
+    // mnemonic on a target feature this translation unit does not enable.
+    //
+    // **This probe is only safe while CR4.SMXE is clear, and the case
+    // checks that before running it.** GETSEC is in SDM Appendix C's
+    // unconditional group - reason 11 is "Guest software attempted to
+    // execute GETSEC" with no control named (.references/sdm.txt:224290)
+    // - and this VMM's exit handler has no case for it, so an exit would
+    // reach `default:` and stop the processor. What stands between a
+    // guest and that today is the fault: "#UD If CR4.SMXE = 0"
+    // (.references/sdm.txt:138229), and SDM 28.1.1 puts an invalid-opcode
+    // exception above the exit.
+    //
+    // Leaf 0 is CAPABILITIES, which reads nothing and changes nothing -
+    // the one leaf that would be harmless if the fault ever stopped
+    // happening.
+    asm volatile(".byte 0x0f, 0x37"
+                 :
+                 : "a"(0u)
+                 : "rbx", "rcx", "rdx", "cc", "memory");
+}
+
+void probe_rsm()
+{
+    // 0F AA. RSM is reason 17, and Appendix C is explicit that it is
+    // "RSM. Guest software attempted to execute RSM in SMM"
+    // (.references/sdm.txt:224296) - so outside SMM there is no exit to
+    // take, and the instruction raises #UD instead: "#UD If an attempt is
+    // made to execute this instruction when the processor is not in SMM"
+    // (.references/sdm.txt:88519). A guest is never in SMM, which is what
+    // makes this measurable rather than dangerous.
+    asm volatile(".byte 0x0f, 0xaa" : : : "cc", "memory");
+}
+
+void probe_encls()
+{
+    // 0F 01 CF, leaf 0, with the register operands the SGX leaves take
+    // set to zero rather than left as clobbers - if the instruction ever
+    // did execute here, it should execute on nothing.
+    asm volatile(".byte 0x0f, 0x01, 0xcf"
+                 :
+                 : "a"(0ull), "b"(0ull), "c"(0ull), "d"(0ull)
+                 : "cc", "memory");
+}
+
+void probe_xsaves()
+{
+    // 0F C7 /5 with RDI as the base: ModRM 0x2f is mod 00, reg 5, rm 7.
+    //
+    // EDX:EAX is the requested-feature bitmap and is zero, so the
+    // instruction saves no state component at all and writes only the
+    // XSAVE header. That is what makes running it in the middle of a
+    // firmware's life safe.
+    asm volatile(".byte 0x0f, 0xc7, 0x2f"
+                 :
+                 : "D"(&g_xsave_area[0]), "a"(0u), "d"(0u)
+                 : "memory");
+}
+
+void probe_xrstors()
+{
+    // 0F C7 /3, ModRM 0x1f. Against the area that is never written, so
+    // the header's XCOMP_BV[63] is 0 and the instruction raises #GP
+    // before restoring anything - see g_xrstors_area.
+    asm volatile(".byte 0x0f, 0xc7, 0x1f"
+                 :
+                 : "D"(&g_xrstors_area[0]), "a"(0u), "d"(0u)
+                 : "memory");
+}
+
+void probe_store_dword_stos()
+{
+    // The same store as probe_store_dword, in a form the instruction
+    // decoder refuses.
+    //
+    // STOSD is the one-byte opcode AB, and the decoder in
+    // zpp/arch/x86_64/instruction.h answers no string instruction at all
+    // - its one-byte table is the MOV, arithmetic, XCHG and group forms.
+    // So a watched page written this way cannot be emulated, and the VMM
+    // has to fall back to opening the page and stepping the guest's own
+    // instruction over it, which is what makes exit reason 37 reachable.
+    //
+    // The direction flag is clear on entry to any function under the
+    // Microsoft x64 ABI, so this stores forwards and RDI ends one dword
+    // on. Nothing reads it back, which is why RDI is an in-out operand
+    // rather than an output that matters.
+    auto address = reinterpret_cast<std::uint64_t>(g_probe_dword);
+    auto value = static_cast<std::uint32_t>(g_probe_value);
+    asm volatile("stosl" : "+D"(address) : "a"(value) : "memory");
+}
 } // namespace
 /**
  * @}
@@ -420,10 +595,33 @@ struct session
      */
     bool observed_exit[72]{};
 
+    /**
+     * Why a reason that was *not* reached was not reached, when the run
+     * itself settled the question.
+     *
+     * The coverage table below carries a disposition for every reason,
+     * written down once and reviewed like any other constant. A few of
+     * them cannot be decided until the run happens - whether the firmware
+     * offered an ACPI sleep control port, whether this processor has
+     * XSAVE, whether the local APIC is in xAPIC mode - and for those the
+     * case that discovers it writes the answer here and the table's
+     * static disposition is overridden.
+     *
+     * Null means "the table's answer stands", which is the normal case.
+     */
+    const char * why[72]{};
+
     void note_exit(std::uint32_t reason)
     {
         if (reason < (sizeof(observed_exit) / sizeof(observed_exit[0]))) {
             observed_exit[reason] = true;
+        }
+    }
+
+    void note_why(std::uint32_t reason, const char * text)
+    {
+        if (reason < (sizeof(why) / sizeof(why[0]))) {
+            why[reason] = text;
         }
     }
 };
@@ -603,6 +801,27 @@ bool guest_tests::run(EFI_SYSTEM_TABLE * system_table)
         std::uint32_t reason{};
         std::uint32_t qualification{};
         long long vector{};
+
+        /**
+         * How far the exit count actually moved, and what the newest ring
+         * entry says, both unfolded.
+         *
+         * `reason` answers the common question - "did this instruction
+         * exit, and with what" - and deliberately refuses to answer when
+         * the count moved by anything other than two. One case needs more
+         * than that: an instruction that produces *two* exits, which is
+         * what a write the decoder refuses does. It takes an EPT
+         * violation, is stepped over, and takes a monitor-trap-flag exit
+         * after it, so the count moves by three and the newest entry is
+         * the second of the two. Reading that out of `reason`'s encoding
+         * would be reading a diagnostic as a value.
+         * @{
+         */
+        std::uint32_t delta{};
+        std::uint32_t newest{};
+        /**
+         * @}
+         */
     };
 
     auto probe = [&](void (*body)()) {
@@ -613,6 +832,8 @@ bool guest_tests::run(EFI_SYSTEM_TABLE * system_table)
         probe_result result{};
         result.vector = vector;
         result.qualification = after.qualification;
+        result.delta = after.count - before.count;
+        result.newest = after.reason & basic_reason_mask;
         // The low half of a "no exit" answer carries how far the count
         // actually moved, so a failing case says whether nothing exited
         // or something unexpected also did.
@@ -777,7 +998,7 @@ bool guest_tests::run(EFI_SYSTEM_TABLE * system_table)
         // of it stops answering the instrument itself. Both are kept: one
         // is the direct statement of the rule, the other is what actually
         // fails on an emulator with nothing behind it.
-        constexpr std::uint32_t sampled[]{
+        static constexpr std::uint32_t sampled[]{
             0x40000001,
             0x40000002,
             0x40000003,
@@ -966,7 +1187,11 @@ bool guest_tests::run(EFI_SYSTEM_TABLE * system_table)
             std::uint32_t reason;
         };
 
-        const vmx_case cases[]{
+        // Static so it does not land on `run`'s stack frame: at
+        // -O0 every local table here is copied there on entry, and
+        // the total went past 4 KB, which makes the Microsoft ABI
+        // ask for `__chkstk` - see the note on `names` below.
+        static const vmx_case cases[]{
             {"vmxon", probe_vmxon, exit_vmxon},
             {"vmxoff", probe_vmxoff, exit_vmxoff},
             {"vmclear", probe_vmclear, exit_vmclear},
@@ -1076,7 +1301,11 @@ bool guest_tests::run(EFI_SYSTEM_TABLE * system_table)
         // frequency, and is the exact MSR whose silently-skipped read
         // cost an afternoon and produced a boot screen blaming Windows'
         // own boot configuration data.
-        const msr_case faulting[]{
+        // Static so it does not land on `run`'s stack frame: at
+        // -O0 every local table here is copied there on entry, and
+        // the total went past 4 KB, which makes the Microsoft ABI
+        // ask for `__chkstk` - see the note on `names` below.
+        static const msr_case faulting[]{
             {"hyperv_frequency", 0x40000022},
             {"hyperv_identity", 0x40000000},
             {"just_above_low_range", 0x00002000},
@@ -1261,6 +1490,14 @@ bool guest_tests::run(EFI_SYSTEM_TABLE * system_table)
                  "no_xsave_in_cpuid_so_osxsave_is_reserved",
                  exit_xsetbv,
                  0);
+
+            // The coverage table says this reason is covered by a case.
+            // On a processor with no XSAVE the case cannot run, so the
+            // table would be reporting a regression that is really an
+            // absent feature. Corrected here rather than weakened there.
+            state.note_why(exit_xsetbv,
+                           "unreachable-here:no_xsave_in_cpuid_so_"
+                           "cr4_osxsave_cannot_be_set");
         }
 
         // CR4 back exactly as the firmware had it.
@@ -1272,6 +1509,111 @@ bool guest_tests::run(EFI_SYSTEM_TABLE * system_table)
                     "cr4",
                     cr4_before_xsetbv,
                     read_cr4());
+    }
+
+    // === Instructions that fault before they can exit ==================
+    //
+    // Three exit reasons whose instruction is in SDM Appendix C's
+    // *unconditional* group - no VM-execution control turns them off -
+    // and which this exit handler nevertheless has no case for. An exit
+    // from any of them reaches `default:` and stops the processor, which
+    // is the thing CLAUDE.md forbids a guest instruction from being able
+    // to do.
+    //
+    // What stops it today is an exception with priority over the exit
+    // (SDM 28.1.1, .references/sdm.txt:200675). Each case below measures
+    // *that*, not the absence of the exit: the absence follows from the
+    // fault, and it is the fault that would stop being true if the
+    // conditions changed. So each asserts the vector as well as the
+    // silence, and the conditions each one depends on are read from the
+    // guest first.
+    {
+        struct faulting_case
+        {
+            const char * name;
+            void (*body)();
+            long long vector;
+            const char * why;
+        };
+
+        // GETSEC is only probed while CR4.SMXE is clear, because that is
+        // the whole of what makes it safe. With SMXE set the instruction
+        // stops faulting, exits, and stops the processor - see
+        // probe_getsec. The bit is read here rather than assumed, since
+        // the firmware ran before this suite did.
+        //
+        // Note what this does *not* establish: CR4.SMXE is not in this
+        // VMM's CR4 guest/host mask, so a guest on hardware that
+        // implements SMX can set it for itself even though CPUID says
+        // there is no SMX. That is a defect in the VMM rather than in the
+        // test, and it is reported as one.
+        constexpr std::uint64_t cr4_smxe = 1ull << 14;
+        auto smx_enabled = 0 != (read_cr4() & cr4_smxe);
+
+        // Static so it does not land on `run`'s stack frame: at
+        // -O0 every local table here is copied there on entry, and
+        // the total went past 4 KB, which makes the Microsoft ABI
+        // ask for `__chkstk` - see the note on `names` below.
+        static const faulting_case cases[]{
+            {"rsm", probe_rsm, vector_invalid_opcode, "rsm_outside_smm"},
+            {"encls",
+             probe_encls,
+             vector_invalid_opcode,
+             "encls_without_sgx"},
+        };
+
+        for (const auto & entry : cases) {
+            auto measured = probe(entry.body);
+
+            char name[80]{};
+            auto at = trace::append_text(name, "quiet.");
+            at = trace::append_text(at, entry.name);
+            at = trace::append_text(at, ".does_not_exit");
+            *at = 0;
+            emit(state,
+                 name,
+                 (no_exit_reason == measured.reason) ? outcome::pass
+                                                     : outcome::fail,
+                 entry.why,
+                 no_exit_reason,
+                 measured.reason);
+
+            at = trace::append_text(name, "quiet.");
+            at = trace::append_text(at, entry.name);
+            at = trace::append_text(at, ".invalid_opcode");
+            *at = 0;
+            check_equal(state,
+                        name,
+                        "vector",
+                        entry.vector,
+                        static_cast<std::uint64_t>(measured.vector));
+        }
+
+        if (smx_enabled) {
+            // Nothing here set it, so something else did, and running
+            // GETSEC in that state would take the processor away.
+            emit(state,
+                 "quiet.getsec.does_not_exit",
+                 outcome::skip,
+                 "cr4_smxe_is_set_and_getsec_would_exit_to_default",
+                 no_exit_reason,
+                 1);
+            state.note_why(exit_getsec, "UNEXPLAINED");
+        } else {
+            auto measured = probe(probe_getsec);
+            emit(state,
+                 "quiet.getsec.does_not_exit",
+                 (no_exit_reason == measured.reason) ? outcome::pass
+                                                     : outcome::fail,
+                 "getsec_with_cr4_smxe_clear",
+                 no_exit_reason,
+                 measured.reason);
+            check_equal(state,
+                        "quiet.getsec.invalid_opcode",
+                        "vector",
+                        vector_invalid_opcode,
+                        static_cast<std::uint64_t>(measured.vector));
+        }
     }
 
     // === Instructions that must NOT exit ===============================
@@ -1309,7 +1651,11 @@ bool guest_tests::run(EFI_SYSTEM_TABLE * system_table)
             const char * control;
         };
 
-        const negative_case cases[]{
+        // Static so it does not land on `run`'s stack frame: at
+        // -O0 every local table here is copied there on entry, and
+        // the total went past 4 KB, which makes the Microsoft ABI
+        // ask for `__chkstk` - see the note on `names` below.
+        static const negative_case cases[]{
             {"rdtsc", probe_rdtsc, "primary_bit_12_rdtsc_exiting"},
             {"rdtscp", probe_rdtscp, "primary_bit_12_rdtsc_exiting"},
             {"invlpg", probe_invlpg, "primary_bit_9_invlpg_exiting"},
@@ -1323,6 +1669,32 @@ bool guest_tests::run(EFI_SYSTEM_TABLE * system_table)
             {"rdrand", probe_rdrand, "secondary_bit_11_rdrand_exiting"},
             {"rdseed", probe_rdseed, "secondary_bit_16_rdseed_exiting"},
             {"xgetbv", probe_xgetbv, "no_control_xgetbv_never_exits"},
+
+            // The four descriptor-table instructions, which are reasons
+            // 46 and 47 and share one control - secondary bit 2, SDM
+            // Table 27-7 (.references/sdm.txt:199537). Both halves are
+            // probed because the two reasons are separate: SGDT and SIDT
+            // produce 46, SLDT and STR produce 47, and a control turned
+            // on would send both to `default:`.
+            {"sgdt", probe_sgdt, "secondary_bit_2_descriptor_table"},
+            {"sidt", probe_sidt, "secondary_bit_2_descriptor_table"},
+            {"sldt", probe_sldt, "secondary_bit_2_descriptor_table"},
+            {"str", probe_str, "secondary_bit_2_descriptor_table"},
+
+            // XSAVES and XRSTORS, reasons 63 and 64. Their control -
+            // "enable XSAVES/XRSTORS", secondary bit 20 - *is* requested
+            // by setup_vmcs, so unlike everything else here the
+            // instruction is enabled rather than disabled. What keeps it
+            // from exiting is the second condition: an exit needs a bit
+            // set in the logical AND of EDX:EAX, IA32_XSS and the
+            // XSS-exiting bitmap (.references/sdm.txt:201349), and this
+            // VMM never writes that bitmap, so it is zero.
+            //
+            // A fault here is not a failure of the claim - on a processor
+            // without XSAVES, or with CR4.OSXSAVE clear, both raise #UD -
+            // and the claim is only that no VM exit was taken.
+            {"xsaves", probe_xsaves, "xss_exiting_bitmap_is_zero"},
+            {"xrstors", probe_xrstors, "xss_exiting_bitmap_is_zero"},
         };
 
         for (const auto & entry : cases) {
@@ -1431,6 +1803,17 @@ bool guest_tests::run(EFI_SYSTEM_TABLE * system_table)
                  "apic_not_in_xapic_mode",
                  exit_ept_violation,
                  apic_base);
+
+            // Both reasons this block is the only source of. Neither is a
+            // regression when there is no page to fault on, so the
+            // coverage table's "a case covers this" is corrected to what
+            // actually happened.
+            state.note_why(exit_ept_violation,
+                           "unreachable-here:apic_not_in_xapic_mode_so_"
+                           "there_is_no_watched_page");
+            state.note_why(exit_monitor_trap_flag,
+                           "unreachable-here:apic_not_in_xapic_mode_so_"
+                           "nothing_is_stepped");
         } else {
             auto * page = reinterpret_cast<volatile std::uint8_t *>(
                 apic_base & apic_base_mask);
@@ -1468,6 +1851,91 @@ bool guest_tests::run(EFI_SYSTEM_TABLE * system_table)
                         "task_priority",
                         0x20,
                         *priority & 0xff);
+
+            // The same store in a form the decoder refuses, which is the
+            // only way a guest can reach exit reason 37.
+            //
+            // The VMM has two answers to a write it has taken permission
+            // away for. Where it can decode the instruction it carries
+            // the write out itself and advances RIP - that is the case
+            // above, and it costs one exit. Where it cannot, it opens the
+            // page, sets the monitor trap flag, lets the guest's own
+            // instruction run, and takes a second exit one instruction
+            // later to close the page again. That second path is live in
+            // every deployed build, its handler stops the processor if it
+            // is ever entered without a step in progress, and until this
+            // case nothing in the tree executed it.
+            //
+            // STOSD is the refusal: the decoder answers no string
+            // instruction (see probe_store_dword_stos). So the same
+            // dword, to the same register, takes a *different* route
+            // through the VMM, and the two routes are told apart by how
+            // far the exit count moved - two for the decoded store, three
+            // for the stepped one.
+            //
+            // SDM Appendix C reason 37 is "A VM exit occurred due to the
+            // 1-setting of the 'monitor trap flag' VM-execution control"
+            // (.references/sdm.txt:224338), and the flag is set by
+            // nothing here except that fallback.
+            g_probe_dword = priority;
+            g_probe_value = 0x30;
+            auto stepped = probe(probe_store_dword_stos);
+
+            // Three exits: this probe's opening reading, the EPT
+            // violation the store took, and the monitor-trap-flag exit
+            // after the step. A delta of two would mean the decoder
+            // answered STOSD after all and the case is measuring the
+            // wrong path.
+            check_equal(state,
+                        "ept.stos_store_is_stepped",
+                        "exit_count_delta",
+                        3,
+                        stepped.delta);
+
+            // And the newest of the three is the trap, not the
+            // violation, which is what says the step completed rather
+            // than the guest being left on the faulting instruction.
+            emit(state,
+                 "exit.monitor_trap_flag",
+                 ((3 == stepped.delta) &&
+                  (exit_monitor_trap_flag == stepped.newest))
+                     ? outcome::pass
+                     : outcome::fail,
+                 "newest_reason_after_a_stepped_store",
+                 exit_monitor_trap_flag,
+                 stepped.newest);
+
+            if ((3 == stepped.delta) &&
+                (exit_monitor_trap_flag == stepped.newest)) {
+                // Measured, so recorded. `probe` only records a reason
+                // for a delta of two, deliberately - the encoding it
+                // hands back for anything else is a diagnostic rather
+                // than a reason - so this one is noted by the case that
+                // knows what the three exits were.
+                state.note_exit(exit_monitor_trap_flag);
+            }
+
+            // The step has to have retired the instruction, not just
+            // taken the trap. on_monitor_trap_flag reports nothing to the
+            // watch when RIP did not advance past the store, so a value
+            // that did not land is the shape of that failure, and it is
+            // the shape a guest would see as a device register that
+            // silently ignored a write.
+            check_equal(state,
+                        "ept.stos_store_applied",
+                        "task_priority",
+                        0x30,
+                        *priority & 0xff);
+
+            // Nothing faulted. The page was opened and closed around one
+            // instruction, and a guest that took a fault out of that
+            // sequence would be a guest whose own store had been turned
+            // into an exception by a VMM it cannot see.
+            check_equal(state,
+                        "ept.stos_store_does_not_fault",
+                        "vector",
+                        static_cast<std::uint64_t>(no_fault),
+                        static_cast<std::uint64_t>(stepped.vector));
 
             // A one-byte store to the same register is *not* attempted,
             // and the reason is the emulator rather than the VMM.
@@ -1549,100 +2017,85 @@ bool guest_tests::run(EFI_SYSTEM_TABLE * system_table)
                  "no_acpi_sleep_control_port_found",
                  exit_io_instruction,
                  0);
+
+            // Exactly one port is armed in the I/O bitmaps, and it is the
+            // one the FADT names. Where there is no FADT there is no
+            // armed port, and with "use I/O bitmaps" set and every bit
+            // clear no I/O instruction exits at all - SDM Appendix C
+            // reason 30 (.references/sdm.txt:224310) makes the bitmap the
+            // only condition once unconditional I/O exiting is off.
+            state.note_why(exit_io_instruction,
+                           "unreachable-here:no_pm1a_control_port_in_the_"
+                           "fadt_so_no_port_is_armed");
         }
     }
 
-    // === What was and was not reached ==================================
+    // === Controls the processor does not even offer ====================
     //
-    // Printed from what the run measured rather than from the list of
-    // cases above, so a case whose instruction quietly stopped exiting
-    // shows up as a gap instead of as a pass.
+    // Two exit reasons have no instruction behind them: 62, the
+    // page-modification log filling up, and 66, an SPP miss or
+    // misconfiguration. Nothing a guest executes can produce either, so
+    // the only honest thing a guest-side suite can say about them is
+    // whether the machinery exists at all - and that is readable, because
+    // the VMX capability MSRs are architectural and this guest can read
+    // them.
+    //
+    // IA32_VMX_PROCBASED_CTLS2's high half is the allowed-1 settings of
+    // the secondary controls (SDM Appendix A.3.3). Bit 17 is "Enable
+    // PML" and bit 23 is "Sub-page write permissions for EPT" (SDM Table
+    // 27-7, .references/sdm.txt:199589 and :199603), so bits 49 and 55 of
+    // the MSR say whether this processor allows them to be set at all.
+    //
+    // A processor that does not allow the control settles the question
+    // outright. One that does leaves the weaker answer - that setup_vmcs
+    // does not ask for it - and the table below says so rather than
+    // claiming more than was measured.
     {
-        struct reason_name
-        {
-            std::uint32_t reason;
-            const char * name;
-        };
+        constexpr std::uint32_t ia32_vmx_procbased_ctls2 = 0x48b;
+        constexpr std::uint64_t allowed_enable_pml = 1ull << 49;
+        constexpr std::uint64_t allowed_sub_page_write = 1ull << 55;
 
-        // SDM Vol. 3D Appendix C, "VMX Basic Exit Reasons". Every reason
-        // this VMM's handler has a case for, plus the ones it does not,
-        // because the list of what is not covered is the point.
-        constexpr reason_name names[]{
-            {0, "exception_or_nmi"},
-            {1, "external_interrupt"},
-            {2, "triple_fault"},
-            {3, "init_signal"},
-            {4, "start_up_ipi"},
-            {7, "interrupt_window"},
-            {8, "nmi_window"},
-            {9, "task_switch"},
-            {10, "cpuid"},
-            {11, "getsec"},
-            {12, "hlt"},
-            {13, "invd"},
-            {14, "invlpg"},
-            {15, "rdpmc"},
-            {16, "rdtsc"},
-            {17, "rsm"},
-            {18, "vmcall"},
-            {19, "vmclear"},
-            {20, "vmlaunch"},
-            {21, "vmptrld"},
-            {22, "vmptrst"},
-            {23, "vmread"},
-            {24, "vmresume"},
-            {25, "vmwrite"},
-            {26, "vmxoff"},
-            {27, "vmxon"},
-            {28, "control_register_access"},
-            {29, "mov_debug_register"},
-            {30, "io_instruction"},
-            {31, "rdmsr"},
-            {32, "wrmsr"},
-            {33, "entry_invalid_guest_state"},
-            {34, "entry_failure_msr_loading"},
-            {36, "mwait"},
-            {37, "monitor_trap_flag"},
-            {39, "monitor"},
-            {40, "pause"},
-            {43, "tpr_below_threshold"},
-            {44, "apic_access"},
-            {45, "virtualized_eoi"},
-            {46, "gdtr_or_idtr"},
-            {47, "ldtr_or_tr"},
-            {48, "ept_violation"},
-            {49, "ept_misconfiguration"},
-            {50, "invept"},
-            {51, "rdtscp"},
-            {52, "vmx_preemption_timer"},
-            {53, "invvpid"},
-            {54, "wbinvd"},
-            {55, "xsetbv"},
-            {56, "apic_write"},
-            {57, "rdrand"},
-            {58, "invpcid"},
-            {59, "vmfunc"},
-            {60, "encls"},
-            {61, "rdseed"},
-            {62, "page_modification_log_full"},
-            {63, "xsaves"},
-            {64, "xrstors"},
-            {66, "spp_related_event"},
-        };
+        g_probe_msr = ia32_vmx_procbased_ctls2;
+        auto capability = probe(probe_rdmsr);
 
-        for (const auto & entry : names) {
-            char line[trace::line_capacity]{};
-            auto at = trace::append_text(line, "ZPPCOVER ");
-            at = trace::append_decimal(at, entry.reason);
-            at = trace::append_text(at, " ");
-            at = trace::append_text(at, entry.name);
-            at = trace::append_text(at,
-                                    state.observed_exit[entry.reason]
-                                        ? " observed"
-                                        : " absent");
-            at = trace::append_text(at, "\r\n");
-            *at = 0;
-            trace::raw(line);
+        if (no_fault != capability.vector) {
+            // No secondary controls at all on this processor, which is a
+            // stronger statement than either bit would have been: every
+            // secondary control is unavailable, PML and SPP included.
+            emit(state,
+                 "vmx.procbased_ctls2.readable",
+                 outcome::skip,
+                 "no_secondary_controls_on_this_processor",
+                 0,
+                 static_cast<std::uint64_t>(capability.vector));
+
+            state.note_why(exit_page_modification_log_full,
+                           "unreachable-here:this_processor_has_no_"
+                           "secondary_vm_execution_controls");
+            state.note_why(exit_spp_related_event,
+                           "unreachable-here:this_processor_has_no_"
+                           "secondary_vm_execution_controls");
+        } else {
+            auto allowed = g_probe_value;
+
+            emit(state,
+                 "vmx.procbased_ctls2.readable",
+                 allowed ? outcome::pass : outcome::fail,
+                 "ia32_vmx_procbased_ctls2",
+                 1,
+                 allowed);
+
+            if (!(allowed & allowed_enable_pml)) {
+                state.note_why(exit_page_modification_log_full,
+                               "unreachable-here:ia32_vmx_procbased_"
+                               "ctls2_bit49_enable_pml_is_not_allowed");
+            }
+
+            if (!(allowed & allowed_sub_page_write)) {
+                state.note_why(exit_spp_related_event,
+                               "unreachable-here:ia32_vmx_procbased_"
+                               "ctls2_bit55_sub_page_write_not_allowed");
+            }
         }
     }
 
@@ -1750,6 +2203,22 @@ bool guest_tests::run(EFI_SYSTEM_TABLE * system_table)
             auto refused_by_us =
                 vmlaunch_reason == (::zpp_probe_ring_reason & 0xffff);
 
+            // The one place in this suite where an entry-failure reason
+            // is *observed* rather than reasoned about. The exit ring
+            // carries 0x80000021 - bit 31 plus basic reason 33 - and the
+            // coverage table's out-of-scope note for 33 says a failed
+            // entry means the guest does not run, which is exactly why
+            // this reading had to come from the VMM's own ring rather
+            // than from a probe. Recorded so a ZPP_NESTED_VMX build's
+            // coverage report tells the truth about it; the default build
+            // never gets here, so the note stands there.
+            if (refused_by_hardware) {
+                state.note_exit(exit_entry_invalid_guest_state);
+                state.note_why(
+                    exit_entry_invalid_guest_state,
+                    "covered:nested.injection_refused_by_hardware");
+            }
+
             emit(state,
                  "nested.injection_refused_by_hardware",
                  refused_by_hardware ? outcome::pass : outcome::fail,
@@ -1775,6 +2244,380 @@ bool guest_tests::run(EFI_SYSTEM_TABLE * system_table)
         }
     }
 
+    // === Nothing else exits ============================================
+    //
+    // Three exit reasons this suite cannot produce on purpose, and the
+    // reason it does not have to: none of them has a case in the exit
+    // handler, so a single one of them would reach `default:`, stop this
+    // processor, and there would be no verdict at all.
+    //
+    // Reaching this line is therefore the measurement, and it is a strong
+    // one, because of *where* the line is. Interrupts have been enabled
+    // since the nested probe above, which called into boot services -
+    // firmware that services timer interrupts and waits on events. So the
+    // run has spent real time with RFLAGS.IF set and interrupts arriving:
+    //
+    // - External-interrupt exiting would have produced reason 1 at the
+    //   first tick. SDM Appendix C: "External interrupt. An external
+    //   interrupt arrived and the 'external-interrupt exiting'
+    //   VM-execution control was 1" (.references/sdm.txt:224276 area).
+    // - Interrupt-window exiting produces reason 7 "before execution of
+    //   any instruction if RFLAGS.IF = 1 and there is no blocking of
+    //   events by STI or by MOV SS" (.references/sdm.txt:200976), which
+    //   with interrupts enabled is nearly every instruction.
+    // - NMI-window exiting produces reason 8 "before execution of any
+    //   instruction if there is no virtual-NMI blocking"
+    //   (.references/sdm.txt:200983), which does not even need interrupts
+    //   enabled - it would have ended the run before its first case.
+    //
+    // A negative asserted by having survived is worth less than one
+    // asserted by a measurement, and these are the two places in this
+    // suite where that is the only assertion available: an exit whose
+    // handler stops the processor cannot be probed for, because probing
+    // for it is what stops the processor.
+    {
+        emit(state,
+             "quiet.external_interrupt.control_off",
+             outcome::pass,
+             "reached_with_interrupts_enabled_and_reason_1_has_no_case",
+             0,
+             state.observed_exit[exit_external_interrupt] ? 1 : 0);
+
+        emit(state,
+             "quiet.interrupt_window.control_off",
+             outcome::pass,
+             "reached_with_interrupts_enabled_and_reason_7_has_no_case",
+             0,
+             state.observed_exit[exit_interrupt_window] ? 1 : 0);
+
+        emit(state,
+             "quiet.nmi_window.control_off",
+             outcome::pass,
+             "the_whole_run_completed_and_reason_8_has_no_case",
+             0,
+             state.observed_exit[exit_nmi_window] ? 1 : 0);
+    }
+
+    // === What was and was not reached ==================================
+    //
+    // Printed from what the run measured rather than from the list of
+    // cases above, so a case whose instruction quietly stopped exiting
+    // shows up as a gap instead of as a pass.
+    //
+    // Every reason carries a **disposition** beside it, and that is the
+    // durable half of this report. A list of reasons that were not
+    // reached is a question; a list of reasons that were not reached,
+    // each with the recorded reason it could not be, is an answer that
+    // stays answered. Three dispositions are allowed:
+    //
+    //   covered:<case>          a case in this suite reaches it, and the
+    //                           case is named. Absent means a regression:
+    //                           something that used to exit stopped, and
+    //                           the harness fails the run.
+    //   unreachable-here:<why>  it cannot be produced in this
+    //                           environment, and the run measured the
+    //                           thing that makes it so. The measurement
+    //                           is named, not the conclusion.
+    //   out-of-scope:<why>      it is reachable and this suite
+    //                           deliberately does not reach it, with the
+    //                           reasoning.
+    //
+    // and one that is not allowed:
+    //
+    //   UNEXPLAINED             nobody has said. The harness fails on it,
+    //                           which is the whole mechanism: the list
+    //                           cannot grow silently, because a new
+    //                           reason with no disposition is a red run.
+    //
+    // A few dispositions cannot be decided until the run happens - see
+    // session::why - and those are written by the case that discovers
+    // them. The static text below is what stands otherwise.
+    {
+        struct reason_name
+        {
+            std::uint32_t reason;
+            const char * name;
+            const char * disposition;
+        };
+
+        // SDM Vol. 3D Appendix C, "VMX Basic Exit Reasons"
+        // (.references/sdm.txt:224280 onwards). Every reason this VMM's
+        // handler has a case for, plus the ones it does not, because the
+        // list of what is not covered is the point.
+        // Static, and that is a build constraint rather than a style
+        // choice: at -O0 a non-static local array is materialised on the
+        // stack every time the function is entered, and this one is
+        // sixty entries of three pointers. Adding the dispositions took
+        // `run`'s frame past 4 KB, which on the Microsoft ABI makes the
+        // compiler emit a call to `__chkstk` - a stack probe helper that
+        // comes from a C runtime this loader does not link. The link
+        // fails with an undefined symbol rather than anything that points
+        // at a frame size, so it is worth naming here.
+        static constexpr reason_name names[]{
+            // The only NMI source a single-processor guest has is an IPI
+            // to itself, and this VMM emulates the interrupt command
+            // register write from *root* operation - so the NMI it
+            // produces is delivered to the host, not to the guest, and no
+            // reason 0 is taken. Driving it down the stepping path
+            // instead would deliver in non-root operation, but then the
+            // NMI arrives asynchronously: guest_tests.S disarms its
+            // recovery point on the way out of every probe and parks the
+            // processor on a fault taken outside one, so an NMI landing a
+            // few instructions late ends the run rather than reporting.
+            {0,
+             "exception_or_nmi",
+             "out-of-scope:the_only_self_nmi_route_is_an_icr_write_this_"
+             "vmm_emulates_in_root_operation"},
+            {1,
+             "external_interrupt",
+             "unreachable-here:no_case_so_the_run_reaching_its_end_with_"
+             "interrupts_enabled_is_the_measurement"},
+            // Reachable, and reaching it ends everything: a triple fault
+            // has no case either, so it stops the processor - which is
+            // the right answer to a guest that has destroyed itself, and
+            // the wrong thing for a suite that has cases left to report.
+            {2,
+             "triple_fault",
+             "out-of-scope:reaching_it_ends_the_run_it_would_be_reported_"
+             "in"},
+            // An INIT is only observable by the processor receiving it,
+            // and this suite has one processor. Sending it to itself is
+            // the emulated reset of the guest that is running the suite.
+            {3,
+             "init_signal",
+             "out-of-scope:an_init_to_this_processor_resets_the_guest_"
+             "running_the_suite"},
+            // SDM Appendix C reason 4 is a start-up IPI, which a
+            // processor only accepts in the wait-for-SIPI activity state
+            // (.references/sdm.txt:163861). A processor executing this
+            // suite is by definition not in it.
+            {4,
+             "start_up_ipi",
+             "unreachable-here:only_delivered_in_the_wait_for_sipi_state_"
+             "which_a_running_processor_is_not_in"},
+            {7,
+             "interrupt_window",
+             "unreachable-here:no_case_so_the_run_reaching_its_end_with_"
+             "interrupts_enabled_is_the_measurement"},
+            {8,
+             "nmi_window",
+             "unreachable-here:no_case_and_it_fires_every_instruction_so_"
+             "the_run_completing_is_the_measurement"},
+            // "Hardware task switches are not supported in IA-32e mode"
+            // (.references/sdm.txt:153161), and this guest is in it -
+            // msr.ia32_efer.long_mode_active measures LMA directly.
+            // Leaving long mode to reach the reason is a guest this
+            // suite is not.
+            {9,
+             "task_switch",
+             "unreachable-here:no_hardware_task_switch_in_long_mode_and_"
+             "msr.ia32_efer.long_mode_active_measures_it"},
+            {10, "cpuid", "covered:exit.cpuid"},
+            {11,
+             "getsec",
+             "unreachable-here:quiet.getsec.invalid_opcode_measures_the_"
+             "ud_that_cr4_smxe_being_clear_produces"},
+            // HLT exiting is off, so the instruction does what a guest
+            // asked and halts. Asserting that from inside the guest means
+            // executing it, and the only things that end a halt are an
+            // interrupt - which this suite disables - or an NMI from
+            // another processor, of which there is one.
+            {12,
+             "hlt",
+             "out-of-scope:asserting_it_requires_halting_the_processor_"
+             "the_assertion_runs_on"},
+            {13, "invd", "covered:exit.invd"},
+            {14,
+             "invlpg",
+             "unreachable-here:quiet.invlpg.does_not_exit_measures_"
+             "invlpg_exiting_off"},
+            {15,
+             "rdpmc",
+             "unreachable-here:quiet.rdpmc.does_not_exit_measures_rdpmc_"
+             "exiting_off"},
+            {16,
+             "rdtsc",
+             "unreachable-here:quiet.rdtsc.does_not_exit_measures_rdtsc_"
+             "exiting_off"},
+            {17,
+             "rsm",
+             "unreachable-here:quiet.rsm.invalid_opcode_measures_the_ud_"
+             "rsm_takes_outside_smm"},
+            {18, "vmcall", "covered:vmx.vmcall.exit_reason"},
+            {19, "vmclear", "covered:vmx.vmclear.exit_reason"},
+            {20, "vmlaunch", "covered:vmx.vmlaunch.exit_reason"},
+            {21, "vmptrld", "covered:vmx.vmptrld.exit_reason"},
+            {22, "vmptrst", "covered:vmx.vmptrst.exit_reason"},
+            {23, "vmread", "covered:vmx.vmread.exit_reason"},
+            {24, "vmresume", "covered:vmx.vmresume.exit_reason"},
+            {25, "vmwrite", "covered:vmx.vmwrite.exit_reason"},
+            {26, "vmxoff", "covered:vmx.vmxoff.exit_reason"},
+            {27, "vmxon", "covered:vmx.vmxon.exit_reason"},
+            {28,
+             "control_register_access",
+             "covered:exit.control_register_access"},
+            {29,
+             "mov_debug_register",
+             "unreachable-here:quiet.mov_from_dr.does_not_exit_measures_"
+             "mov_dr_exiting_off"},
+            {30, "io_instruction", "covered:exit.io_instruction"},
+            {31, "rdmsr", "covered:msr.rdmsr.hyperv_frequency"},
+            {32, "wrmsr", "covered:msr.wrmsr.hyperv_frequency"},
+            // A VM entry that fails leaves the guest not running, so
+            // there is nothing inside it to report the failure. The one
+            // place this suite sees reason 33 at all is the nested probe,
+            // which reads the VMM's own ring after a launch it made on
+            // the guest's behalf - and that is a ZPP_NESTED_VMX build.
+            {33,
+             "entry_invalid_guest_state",
+             "out-of-scope:a_failed_entry_means_the_guest_does_not_run_"
+             "see_nested.injection_refused_by_hardware"},
+            {34,
+             "entry_failure_msr_loading",
+             "out-of-scope:the_vm_entry_msr_load_count_is_zero_and_a_"
+             "failed_entry_stops_the_processor"},
+            {36, "mwait", "covered:exit.mwait"},
+            {37, "monitor_trap_flag", "covered:exit.monitor_trap_flag"},
+            {39, "monitor", "covered:exit.monitor"},
+            {40,
+             "pause",
+             "unreachable-here:quiet.pause.does_not_exit_measures_pause_"
+             "exiting_off"},
+            // Reason 43 needs "use TPR shadow", and 44 needs "virtualize
+            // APIC accesses". The second is measured rather than argued:
+            // a store to the local APIC page took reason 48, and SDM
+            // Appendix C says that with the control set the same access
+            // would have taken reason 44 instead
+            // (.references/sdm.txt:224345).
+            {43,
+             "tpr_below_threshold",
+             "unreachable-here:use_tpr_shadow_off_and_the_apic_page_took_"
+             "reason_48_not_44"},
+            {44,
+             "apic_access",
+             "unreachable-here:exit.ept_violation_measured_reason_48_on_"
+             "the_apic_page_so_it_is_not_virtualized"},
+            // Virtualized EOI is performed by virtual-interrupt delivery,
+            // and SDM 29.2.1.1 requires "external-interrupt exiting" to
+            // be 1 whenever that control is 1
+            // (.references/sdm.txt:202136). The run measured external
+            // -interrupt exiting off, so this follows from it.
+            {45,
+             "virtualized_eoi",
+             "unreachable-here:virtual_interrupt_delivery_requires_"
+             "external_interrupt_exiting_which_is_off"},
+            {46,
+             "gdtr_or_idtr",
+             "unreachable-here:quiet.sgdt_and_quiet.sidt_measure_"
+             "descriptor_table_exiting_off"},
+            {47,
+             "ldtr_or_tr",
+             "unreachable-here:quiet.sldt_and_quiet.str_measure_"
+             "descriptor_table_exiting_off"},
+            {48, "ept_violation", "covered:exit.ept_violation"},
+            // Only this VMM writes an EPT entry, so a guest has no way to
+            // construct a misconfigured one. Reaching this reason would
+            // mean the tables this VMM built are wrong, which is a defect
+            // rather than a case - and it has no handler, so it stops the
+            // processor, which is the correct answer to that defect.
+            {49,
+             "ept_misconfiguration",
+             "out-of-scope:only_this_vmm_writes_ept_entries_so_a_guest_"
+             "cannot_construct_one"},
+            {50, "invept", "covered:vmx.invept.exit_reason"},
+            {51,
+             "rdtscp",
+             "unreachable-here:quiet.rdtscp.does_not_exit_measures_rdtsc_"
+             "exiting_off"},
+            // Armed by this VMM alone, for its own log polling, and never
+            // by anything a guest executes. diag.exit_count_step measures
+            // that none arrives: two consecutive readings differ by
+            // exactly one, which a free-running timer would break.
+            {52,
+             "vmx_preemption_timer",
+             "unreachable-here:armed_by_this_vmm_only_and_diag.exit_"
+             "count_step_measures_none_arriving"},
+            {53, "invvpid", "covered:vmx.invvpid.exit_reason"},
+            {54,
+             "wbinvd",
+             "unreachable-here:quiet.wbinvd.does_not_exit_measures_"
+             "wbinvd_exiting_off"},
+            {55, "xsetbv", "covered:exit.xsetbv"},
+            // APIC-register virtualization and virtualize-x2APIC mode are
+            // the two controls that produce reason 56, and SDM 29.2.1.1
+            // requires both to be 0 when "use TPR shadow" is 0
+            // (.references/sdm.txt:202132).
+            {56,
+             "apic_write",
+             "unreachable-here:apic_register_virtualization_requires_use_"
+             "tpr_shadow_which_is_off"},
+            {57,
+             "rdrand",
+             "unreachable-here:quiet.rdrand.does_not_exit_measures_"
+             "rdrand_exiting_off"},
+            {58,
+             "invpcid",
+             "unreachable-here:quiet.invpcid.does_not_exit_measures_"
+             "invlpg_exiting_off"},
+            {59,
+             "vmfunc",
+             "unreachable-here:vmx.vmfunc.does_not_exit_measures_enable_"
+             "vm_functions_off_so_the_processor_faults"},
+            {60,
+             "encls",
+             "unreachable-here:quiet.encls.invalid_opcode_measures_that_"
+             "the_instruction_cannot_execute_here"},
+            {61,
+             "rdseed",
+             "unreachable-here:quiet.rdseed.does_not_exit_measures_"
+             "rdseed_exiting_off"},
+            // No instruction produces these two, so the only guest-side
+            // statement available is whether the processor offers the
+            // control at all - which the run reads out of
+            // IA32_VMX_PROCBASED_CTLS2 and writes into session::why when
+            // it does not. What stands otherwise is weaker and says so.
+            {62,
+             "page_modification_log_full",
+             "unreachable-here:enable_pml_not_requested_and_reason_62_"
+             "has_no_case_so_the_run_would_have_stopped"},
+            {63,
+             "xsaves",
+             "unreachable-here:quiet.xsaves.does_not_exit_measures_the_"
+             "xss_exiting_bitmap_being_zero"},
+            {64,
+             "xrstors",
+             "unreachable-here:quiet.xrstors.does_not_exit_measures_the_"
+             "xss_exiting_bitmap_being_zero"},
+            {66,
+             "spp_related_event",
+             "unreachable-here:sub_page_write_permissions_not_requested_"
+             "and_no_ept_entry_asks_for_them"},
+        };
+
+        for (const auto & entry : names) {
+            char line[trace::line_capacity]{};
+            auto at = trace::append_text(line, "ZPPCOVER ");
+            at = trace::append_decimal(at, entry.reason);
+            at = trace::append_text(at, " ");
+            at = trace::append_text(at, entry.name);
+            at = trace::append_text(at,
+                                    state.observed_exit[entry.reason]
+                                        ? " observed "
+                                        : " absent ");
+
+            // What the run discovered wins over what the table assumed.
+            // Only a handful of reasons ever have one - see session::why
+            // - and every one of them is a case that could not run rather
+            // than a claim being softened after the fact.
+            auto discovered = state.why[entry.reason];
+            at = trace::append_text(
+                at, discovered ? discovered : entry.disposition);
+
+            at = trace::append_text(at, "\r\n");
+            *at = 0;
+            trace::raw(line);
+        }
+    }
     // The firmware's table and interrupts were already put back above,
     // before the nested probe, because that one calls into boot services
     // and must not do it through this suite's table. Nothing between

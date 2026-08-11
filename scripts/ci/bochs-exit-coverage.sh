@@ -191,21 +191,52 @@ xpass=$(grep -c ' XPASS ' cases.txt || true)
     printf '\n  ]\n}\n'
 } > results.json
 
-# The coverage report. The list of reasons NOT reached is the point of it,
-# so it is printed in full and never filtered - a reason that stopped being
-# reachable is a regression that no individual case would report.
-observed=$(grep -c ' observed$' cover.txt || true)
+# The coverage report.
+#
+# Every line the suite emits carries four fields:
+#
+#   ZPPCOVER <reason> <name> <observed|absent> <disposition>
+#
+# and the disposition is the point of the whole thing. This report used to
+# print the reasons that were not reached under a heading saying why was a
+# question for whoever read it, and the answer was nobody: the list sat at
+# 39 of 60 for as long as it existed, and a reason joining it was
+# indistinguishable from a reason that had always been there.
+#
+# So the suite now records a disposition per reason and this grades it:
+#
+#   covered:<case>          a case reaches it. Absent is a REGRESSION.
+#   unreachable-here:<why>  cannot be produced here, and the run measured
+#                           the thing that makes it so. Observed is a
+#                           CONTRADICTION - the record is wrong.
+#   out-of-scope:<why>      reachable, deliberately not reached.
+#   UNEXPLAINED             nobody has said. Fails the job.
+#
+# The last is the durable part. A new reason with no disposition, or one
+# whose disposition was deleted, turns the job red instead of quietly
+# lengthening a list nobody reads.
+observed=$(grep -c ' observed ' cover.txt || true)
 total=$(wc -l < cover.txt | tr -d ' ')
+
+# The three gradings, each as a file so they can be counted and printed
+# without re-running the greps.
+grep ' absent .*UNEXPLAINED' cover.txt > unexplained.txt 2>/dev/null \
+    || : > unexplained.txt
+grep ' absent covered:' cover.txt > regressed.txt 2>/dev/null \
+    || : > regressed.txt
+grep -E ' observed (unreachable-here|out-of-scope):' cover.txt \
+    > contradicted.txt 2>/dev/null || : > contradicted.txt
+
 {
     echo "VM exit reasons reached by the guest coverage suite"
     echo "  reached : $observed"
     echo "  listed  : $total  (SDM Vol. 3D Appendix C)"
     echo
     echo "REACHED"
-    grep ' observed$' cover.txt | sed 's/^ZPPCOVER /  /' || true
+    grep ' observed ' cover.txt | sed 's/^ZPPCOVER /  /' || true
     echo
-    echo "NOT REACHED - and why is a question for whoever reads this"
-    grep ' absent$' cover.txt | sed 's/^ZPPCOVER /  /' || true
+    echo "NOT REACHED - with the recorded reason it was not"
+    grep ' absent ' cover.txt | sed 's/^ZPPCOVER /  /' || true
 } > coverage.txt
 
 echo "=== cases ==="
@@ -224,6 +255,37 @@ if [ "$fail" != "0" ]; then
     echo >&2
     echo "FAILING CASES" >&2
     grep ' FAIL ' cases.txt >&2 || true
+    status=1
+fi
+
+if [ -s unexplained.txt ]; then
+    echo >&2
+    echo "UNEXPLAINED EXIT REASONS - a reason was not reached and" >&2
+    echo "nothing in the suite says why. Give it a disposition in the" >&2
+    echo "coverage table in uefi_loader/src/guest_tests.cpp: a case that" >&2
+    echo "reaches it, a measurement showing it cannot be reached here," >&2
+    echo "or the reasoning for leaving it out of scope." >&2
+    sed 's/^ZPPCOVER /  /' unexplained.txt >&2
+    status=1
+fi
+
+if [ -s regressed.txt ]; then
+    echo >&2
+    echo "REASONS THAT STOPPED BEING REACHED - a case in the suite is" >&2
+    echo "written to produce each of these and none of them arrived, so" >&2
+    echo "either the case stopped running or the instruction stopped" >&2
+    echo "exiting. Both are regressions no individual case reports:" >&2
+    sed 's/^ZPPCOVER /  /' regressed.txt >&2
+    status=1
+fi
+
+if [ -s contradicted.txt ]; then
+    echo >&2
+    echo "REASONS RECORDED UNREACHABLE THAT WERE REACHED - the record" >&2
+    echo "is wrong, which is worse than no record: it is what the next" >&2
+    echo "person reads instead of checking. Promote it to a covered" >&2
+    echo "case, or correct the reasoning:" >&2
+    sed 's/^ZPPCOVER /  /' contradicted.txt >&2
     status=1
 fi
 
