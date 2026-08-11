@@ -3138,6 +3138,26 @@ private:
      * were indistinguishable while the vector was unavailable.
      */
     volatile std::uint32_t l2_external_vector[max_cpus][256]{};
+
+    /**
+     * Every event a guest hypervisor asked VM entry to inject into its
+     * guest, counted by vector.
+     *
+     * The counterpart of `l2_external_vector`, at the other end of the
+     * same question. That one says what arrives at the guest hypervisor;
+     * this says what it hands on. Together they separate two failures
+     * that look identical from outside: an interrupt the guest
+     * hypervisor never delivers, and one it delivers that never lands.
+     *
+     * The vector to look for is `0xd1`. The root partition configures
+     * `SINT3` on it and arms a periodic synthetic timer against it,
+     * Hyper-V writes `HvMessageTimerExpired` into the message page, and
+     * the end-of-message register is never written on any processor -
+     * so the message is never read, and the whole machine stops behind
+     * it. Whether `0xd1` appears here at all decides which side of the
+     * hand-over is at fault, and nothing else measured so far can.
+     */
+    volatile std::uint32_t l2_injected_vector[max_cpus][256]{};
     volatile std::uint64_t vmcs12_exit_controls{};
     volatile std::uint64_t vmcs12_entry_controls{};
     volatile std::uint64_t vmcs12_controls_captured{};

@@ -39,12 +39,25 @@ case "$BASE" in
 esac
 
 # Where the list head is, link time, from the binary that was deployed.
-HEAD_OFFSET=$(x86_64-elf-gdb -q -batch "$ELF" \
-    -ex "print/x &'zpp::hypervisor::log_storage::m_lines'" 2>/dev/null \
-    | sed -n 's/^\$1 = //p')
+#
+# From the symbol table, not from gdb. This used to ask gdb for
+# `&'zpp::hypervisor::log_storage::m_lines'` and gdb answered 0x1456250
+# where the symbol table says 0x1459250 - a different DIE of the same
+# name, three pages off. The wrong address read as four zero quadwords,
+# which the check below reports as "list head unreadable - wrong base, or
+# the module is gone", so a whole boot's log looked like a module that had
+# vanished. The right one read next, prev and a size of 0x2c9.
+#
+# CLAUDE.md already warns about this for `llvm-dwarfdump --name=`; it is
+# the same failure and gdb is not immune to it. A mangled name has exactly
+# one definition, so ask for that instead.
+MANGLED='_ZN3zpp10hypervisor11log_storage7m_linesE'
+HEAD_OFFSET=0x$(llvm-nm --defined-only "$ELF" \
+    | sed -n "s/^0*\([0-9a-f][0-9a-f]*\) [A-Za-z] $MANGLED\$/\1/p" \
+    | head -1)
 case "$HEAD_OFFSET" in
-    0x*) ;;
-    *)   echo "could not find log_storage::m_lines in $ELF" >&2; exit 1 ;;
+    0x?*) ;;
+    *)   echo "could not find $MANGLED in $ELF" >&2; exit 1 ;;
 esac
 
 echo "module base $BASE, list head offset $HEAD_OFFSET"

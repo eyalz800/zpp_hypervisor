@@ -1529,6 +1529,17 @@ std::expected<void, zpp::error> hypervisor::build_vmcs02(std::size_t cpu)
                    shadow.read(field::vm_entry_exception_error_code));
         vmcs.write(field::vm_entry_instruction_length,
                    shadow.read(field::vm_entry_instruction_length));
+
+        // Counted by vector, the same shape as `l2_external_vector` and
+        // for the same reason: to name what is arriving rather than
+        // infer it. See the declaration - the one vector this is here
+        // to look for is `0xd1`, the synthetic interrupt the root
+        // partition's timer messages are delivered on.
+        if (cpu < max_cpus) {
+            auto vector = injection & interruption_vector_mask;
+            this->l2_injected_vector[cpu][vector] =
+                this->l2_injected_vector[cpu][vector] + 1;
+        }
     }
 
     // The processor is given no MSR areas of its own. The three the guest
