@@ -7623,3 +7623,91 @@ OR-ing bit 27 into the primary controls **without going through
 underneath does not offer MTF the next VM entry fails with no exit at
 all. Fix that before arming it, or the experiment wedges the machine in
 a way indistinguishable from what is being investigated.
+
+## The interrupt is injected, interrupted by an EPT violation, and destroyed
+
+**Measured 2026-08-11. This is the boot bug.** Freeze at 82,505
+second-level entries, unchanged, so nothing about the measurement
+disturbed it.
+
+The monitor trap flag armed on every entry that injects `0xd1` — one
+retired instruction and then an exit, so the answer cannot be ambiguous.
+Every processor's first landing:
+
+```
+cpu 0   resume 0xfffff8016b25001c -> after 1 insn 0xfffff8016b25001c   delta 0   reason 48 ept-violation
+cpu 1   resume 0xfffff8016b250003 -> after 1 insn 0xfffff8016b250003   delta 0   reason 48 ept-violation
+cpu 2-7 resume 0xfffff801dd4a6f8f -> after 1 insn 0xfffff801dd4a6f8f   delta 0   reason 48 ept-violation
+```
+
+**Delta zero on all eight.** The instruction never retired and the RIP
+never moved. An EPT violation arrived *during event delivery* — the
+processor reads the interrupt descriptor table and pushes five words on
+the guest's stack before it reaches the handler, and both go through the
+extended page tables.
+
+An exit during delivery **cancels the injection**. The processor records
+what it was delivering in `idt_vectoring_information_field` and the VMM
+must put it back on the next entry. This VMM does not:
+`requeue_interrupted_events` in `hypervisor.cpp` is `false`.
+
+**The comment above that constant already predicted this exactly**, and
+it was written before any of the present investigation:
+
+> "Measured on the rig before this existed: nine events destroyed in a
+> single boot, every one of them interrupted by an EPT violation against
+> the second-level guest's lazily built shadow table — two
+> inter-processor interrupts at vector 0x2f, **five clock interrupts at
+> 0xd1**, and three page faults. The two at 0x2f are how a halted virtual
+> processor is woken, which is why the machine stopped with every
+> processor halted and nothing pending."
+
+Five clock interrupts at `0xd1` destroyed in a boot — the same vector,
+found from the other end, months apart, by a different measurement.
+`events_requeued` reads 0 on every processor because the path is off.
+
+That closes the chain completely, every link measured:
+
+1. The root partition arms a periodic synthetic timer on `SINT3`,
+   vector `0xd1`.
+2. Hyper-V writes `HvMessageTimerExpired` into the message page, which
+   its own extended page tables map identity, so the guest can read it.
+3. Hyper-V injects `0xd1` — sixteen times on the boot processor.
+4. **Delivery takes an EPT violation against the lazily built shadow
+   table before it reaches the handler, and the event is destroyed
+   rather than re-queued.**
+5. The handler never runs, the end-of-message register is never written,
+   Hyper-V will not deliver into an occupied slot and drops the timer.
+6. The root partition halts. The two inter-processor interrupts that
+   would wake it are destroyed the same way.
+
+### Why it is off, and what has to be fixed before it goes back on
+
+`git bisect` over seven rig boots — good `1975400`, bad `02c747e`, the
+commit that added the re-queue — named it as the first commit at which
+the guest hypervisor stops bringing up its application processors. So
+the re-queue as written cost more than it bought. Its comment names two
+defects, either of which could be it, and neither was separated by
+measurement:
+
+- the write is **unconditional**, so it overwrites an
+  entry-interruption field the exit handler had already staged for this
+  entry — an injected fault, say — rather than yielding to it;
+- `pending_event[cpu]` is cleared only when it is re-injected, so an
+  event deferred because it belonged to the other level is held
+  indefinitely and then delivered into some later unrelated entry.
+
+Both must be fixed, and the same seven-boot test re-run. **The
+verdict is whether any of `cpu 0x1` … `cpu 0x7` reaches `guest vmxon`
+within about three minutes** — `scripts/rig-check-vmxon.sh` now answers
+exactly that, which is what it was written for.
+
+KVM does the re-queue in `vmx_complete_interrupts`
+(`.references/kvm/vmx.c:7488`), carrying the vector, the error code and
+the software-event length. It is not optional there either.
+
+**The lesson, which cost this investigation weeks:** the answer was
+written down in the tree, in the comment on the switch that disabled it,
+naming the exact vector. It was not found by reading, because "five
+clock interrupts at 0xd1" means nothing until `0xd1` is known to be
+`SINT3`. Two independent measurements had to meet.
