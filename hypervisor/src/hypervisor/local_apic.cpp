@@ -5,6 +5,7 @@
 #include "zpp/arch/x86_64/vmx/vmcs.h"
 #include "zpp/diag/log.h"
 #include "zpp/hypervisor/hypervisor.h"
+#include "zpp/scope_exit.h"
 #include <cstdint>
 #include <optional>
 
@@ -187,6 +188,37 @@ void hypervisor::note_apic_mode(std::size_t cpu)
     } else if (0 != (base & apic_base_enabled)) {
         mode = apic_mode::xapic;
     }
+
+    // Everything below is one processor's decision about machine-wide
+    // state, so it is taken under a lock.
+    //
+    // The state is machine-wide twice over: `observed_apic_mode` is read
+    // across every processor, and the MSR bitmap is a **single page**
+    // that every processor's VMCS points at - `msr_bitmap` is one array
+    // in this class, not one per processor. So `intercept_interrupt_
+    // command` is a read-modify-write of a byte another processor may be
+    // reading, writing, or having its own VMX operation consult, and it
+    // was performed in root operation with nothing holding anything.
+    //
+    // The case that breaks without this is the one the survey below was
+    // written for, and the comment on it named the hazard without
+    // covering it: a guest switches its processors to x2APIC one at a
+    // time. Two processors doing that at once each write their own slot
+    // and then survey, and a processor whose survey ran before the other
+    // processor's store became visible computes `any_x2apic` false and
+    // *disarms* the interception the other one has just armed. Which of
+    // the two unsynchronised writes to the shared byte lands last decides
+    // the outcome, and the losing outcome is a processor in x2APIC mode
+    // whose interrupt command register is not intercepted - so its
+    // start-up IPIs are never seen and the processors it starts are never
+    // adopted.
+    //
+    // The lock is not recursive and nothing under it takes another, which
+    // is what makes it safe to hold across `watch_local_apic`: that path
+    // reaches the extended page tables, and the page-watch code takes no
+    // lock of its own.
+    this->apic_mode_lock.lock();
+    zpp::scope_exit unlock{[&] { this->apic_mode_lock.unlock(); }};
 
     if (cpu < max_cpus) {
         this->observed_apic_mode[cpu] = mode;

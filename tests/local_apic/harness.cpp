@@ -35,10 +35,12 @@
  */
 #include "zpp/hypervisor/hypervisor.h"
 
+#include <atomic>
 #include <cstdio>
 #include <cstring>
 #include <memory>
 #include <string>
+#include <thread>
 #include <vector>
 
 namespace zpp::hypervisor
@@ -108,7 +110,52 @@ void hypervisor::send_start_up_ipi(std::uint64_t apic,
     }
 }
 
+/*
+ * The page watch, reduced to a recorder.
+ *
+ * See the note on the declaration in the shim for why this one is not
+ * cut out of local_apic.cpp with the two beside it.
+ */
+void hypervisor::watch_local_apic(bool watch)
+{
+    this->watch_calls += 1;
+    this->watch_last = watch;
+}
+
 } // namespace zpp::hypervisor
+
+namespace zpp::arch::x86_64
+{
+namespace
+{
+/**
+ * IA32_APIC_BASE as the processor running `note_apic_mode` reads it.
+ *
+ * Thread-local, because a processor reads *its own*. The concurrency
+ * case below has half its processors in one mode and half in another at
+ * the same moment, and a single global here would make the harness the
+ * thing that races rather than the code under test.
+ */
+thread_local std::uint64_t g_apic_base{};
+} // namespace
+
+std::uint64_t rdmsr(std::uint32_t index)
+{
+    // The only model-specific register this path reads. Trapping rather
+    // than answering anything else keeps a future caller from being
+    // silently handed an APIC base for something else entirely.
+    if (msr::ia32_apic_base != index) {
+        __builtin_trap();
+    }
+    return g_apic_base;
+}
+
+void wrmsr(std::uint32_t, std::uint64_t)
+{
+    __builtin_trap();
+}
+
+} // namespace zpp::arch::x86_64
 
 namespace
 {
@@ -795,6 +842,289 @@ void slot_allocation_is_bounded()
                 "and the count does not grow past the table");
 }
 
+// === The two mechanisms, and which one is armed ========================
+//
+// A local APIC answers at a page in memory or through model-specific
+// registers, never both, and which one it uses is IA32_APIC_BASE's two
+// top bits. SDM 13.12.5.1 reads the pair as four states
+// (.references/sdm.txt), and the interception this VMM needs is
+// different for each of the two live ones: the page is watched through
+// the extended page tables, the register through the MSR bitmap.
+//
+// Nothing tested any of this. Two fixes landed on it pinned only by
+// source rules in check-exit-handler.sh, which cannot see a wrong bit
+// index or a wrong survey.
+
+/**
+ * IA32_APIC_BASE, SDM Figure 13-5. Only the two mode bits and the base
+ * matter here.
+ */
+constexpr std::uint64_t apic_base_extended = 1ull << 10;
+constexpr std::uint64_t apic_base_enabled = 1ull << 11;
+
+/**
+ * Where the x2APIC interrupt command register's bit lives in the MSR
+ * bitmap.
+ *
+ * The bitmap is four 1024-byte bitmaps in one page: reads of
+ * 0x00000000-0x00001fff, reads of 0xc0000000-0xc0001fff, then writes of
+ * each. SDM 25.6.9. The interrupt command register is MSR 0x830, which
+ * is in the low range, and it is *writes* that send an interrupt - so
+ * the byte is 0x800 + 0x830/8 and the bit is 0x830 % 8.
+ *
+ * Computed here from the register number rather than taken from the
+ * source, because a wrong byte index is exactly the defect this can
+ * catch and reading it back from `intercept_interrupt_command` would
+ * catch nothing.
+ */
+constexpr std::uint64_t x2apic_icr_msr = 0x830;
+constexpr std::size_t write_low_bitmap = 0x800;
+constexpr std::size_t icr_byte = write_low_bitmap + (x2apic_icr_msr / 8);
+constexpr std::uint8_t icr_bit =
+    static_cast<std::uint8_t>(1u << (x2apic_icr_msr % 8));
+
+bool interception_armed(const hypervisor & state)
+{
+    return 0 != (state.msr_bitmap[icr_byte] & icr_bit);
+}
+
+/**
+ * Put a processor's local APIC into a mode and let the real code notice.
+ */
+void observe(hypervisor & state, std::size_t cpu, std::uint64_t base)
+{
+    zpp::arch::x86_64::g_apic_base = base;
+    state.note_apic_mode(cpu);
+}
+
+constexpr std::uint64_t apic_page = 0xfee0'0000;
+constexpr std::uint64_t xapic_base = apic_page | apic_base_enabled;
+constexpr std::uint64_t x2apic_base =
+    apic_page | apic_base_enabled | apic_base_extended;
+constexpr std::uint64_t disabled_base = apic_page;
+
+void the_bitmap_bit_is_the_one_the_architecture_names()
+{
+    auto state = make();
+
+    state->intercept_interrupt_command(true);
+    check(interception_armed(*state),
+          "arming sets the write bit for MSR 0x830 in the low-range "
+          "write bitmap");
+
+    std::size_t others{};
+    for (std::size_t at{}; at < hypervisor::page_size; ++at) {
+        if (at == icr_byte) {
+            continue;
+        }
+        others += (0 != state->msr_bitmap[at]) ? 1 : 0;
+    }
+    check_equal(0,
+                others,
+                "and sets nothing anywhere else in the page, which is "
+                "shared with every other intercept in the machine");
+
+    state->intercept_interrupt_command(false);
+    check(!interception_armed(*state), "and disarming clears it again");
+}
+
+/**
+ * The three states IA32_APIC_BASE can actually be in, and what each
+ * arms.
+ *
+ * The register is an MSR only in x2APIC mode - SDM 13.12.1 - so a guest
+ * in xAPIC mode writing it should take #GP, and an armed bit would
+ * instead exit and have this VMM perform the write in the host, where
+ * the #GP has no recovery point and stops the processor.
+ */
+void each_mode_arms_its_own_mechanism()
+{
+    auto disabled = make();
+    observe(*disabled, 0, disabled_base);
+    check(!interception_armed(*disabled),
+          "a disabled local APIC arms no MSR interception");
+    check(!disabled->watch_last,
+          "and no page watch, because there is nothing to watch");
+
+    auto xapic = make();
+    observe(*xapic, 0, xapic_base);
+    check(!interception_armed(*xapic),
+          "xAPIC mode arms no MSR interception - the register is not an "
+          "MSR in that mode and intercepting it would exit into a host "
+          "WRMSR that faults");
+    check(xapic->watch_last, "and watches the page instead");
+
+    auto x2apic = make();
+    observe(*x2apic, 0, x2apic_base);
+    check(interception_armed(*x2apic),
+          "x2APIC mode arms the MSR interception");
+    check(!x2apic->watch_last,
+          "and unwatches the page, which that mode does not use");
+}
+
+/**
+ * The case the survey exists for, and the reason it is a survey rather
+ * than a look at the caller.
+ *
+ * A guest switches its processors to x2APIC one at a time, so during the
+ * switch both mechanisms are genuinely in use at once. Disarming either
+ * loses interrupt commands from the processors that have not moved.
+ */
+void a_half_switched_machine_arms_both()
+{
+    auto state = make();
+
+    observe(*state, 0, xapic_base);
+    observe(*state, 1, xapic_base);
+
+    // The first processor moves.
+    observe(*state, 0, x2apic_base);
+
+    check(interception_armed(*state),
+          "the processor that moved has its interrupt command register "
+          "intercepted");
+    check(state->watch_last,
+          "and the page stays watched for the one that has not");
+
+    // And the second.
+    observe(*state, 1, x2apic_base);
+
+    check(interception_armed(*state),
+          "with both moved the interception stays armed");
+    check(!state->watch_last, "and the page is finally given back");
+}
+
+/**
+ * And the way back, which is the same survey read the other way.
+ */
+void the_last_processor_to_leave_disarms()
+{
+    auto state = make();
+
+    observe(*state, 0, x2apic_base);
+    observe(*state, 1, x2apic_base);
+    check(interception_armed(*state), "both processors in x2APIC mode");
+
+    observe(*state, 0, disabled_base);
+    check(interception_armed(*state),
+          "one leaving does not disarm the other's interception");
+
+    observe(*state, 1, disabled_base);
+    check(!interception_armed(*state), "the last one leaving does");
+}
+
+/**
+ * A processor index outside the table writes nothing.
+ *
+ * `note_apic_mode` is called with a slot derived from the VPID, and the
+ * arrays it indexes are `max_cpus` long.
+ */
+void a_processor_outside_the_table_is_not_recorded()
+{
+    auto state = make();
+
+    observe(*state, hypervisor::max_cpus, x2apic_base);
+
+    check(!interception_armed(*state),
+          "an index past the table records no mode, so the survey finds "
+          "nothing and arms nothing");
+}
+
+/**
+ * The survey and the arming are one decision about machine-wide state.
+ *
+ * `msr_bitmap` is a single page that every processor's VMCS points at,
+ * and `observed_apic_mode` is read across every processor - so
+ * `note_apic_mode` is a read-modify-write of shared state performed in
+ * root operation. Two processors switching to x2APIC at once each write
+ * their own slot and then survey, and a survey that ran before the other
+ * store became visible computes "no processor is in x2APIC mode" and
+ * disarms what the other has just armed.
+ *
+ * The assertion is the invariant rather than a schedule: half the
+ * processors end in x2APIC mode, so the interception must be armed.
+ *
+ * **A witness, not a proof, and it is worth being exact about which.**
+ * Run against a copy of local_apic.cpp with `apic_mode_lock` removed,
+ * this case did not reproduce the window in 2000 attempts on this host -
+ * `note_apic_mode` is short enough that eight threads released together
+ * mostly do not overlap inside it. What settles the defect is the code
+ * rather than the schedule: `msr_bitmap` is a plain `std::uint8_t` array
+ * read and written from several processors with no synchronisation,
+ * which is a data race by the language's own definition and a byte the
+ * processor itself consults on every guest MSR access. The case is kept
+ * because it costs milliseconds, because a pass is never wrong, and
+ * because the next person to remove the lock may be luckier with the
+ * timing than this run was.
+ *
+ * The threads are not a stand-in for a processor in every respect - the
+ * same caveat tests/ap_start_up records - but they share the one thing
+ * that matters here: unsynchronised access to the same bytes.
+ */
+void the_survey_and_the_arming_are_one_decision()
+{
+    // Enough attempts that an unguarded window is met rather than
+    // stepped over, and few enough that the harness stays fast.
+    constexpr std::size_t attempts = 2000;
+    constexpr std::size_t processors = 8;
+    constexpr std::size_t entering = processors / 2;
+
+    std::size_t left_disarmed{};
+
+    for (std::size_t attempt{}; attempt < attempts; ++attempt) {
+        auto state = make();
+
+        // Everything starts in xAPIC mode, which is where a machine is
+        // before its guest moves any of it.
+        for (std::size_t cpu{}; cpu < processors; ++cpu) {
+            state->observed_apic_mode[cpu] = hypervisor::apic_mode::xapic;
+        }
+
+        std::atomic<bool> go{false};
+        std::vector<std::thread> threads;
+
+        for (std::size_t cpu{}; cpu < processors; ++cpu) {
+            threads.emplace_back([&, cpu] {
+                // Half move into x2APIC and half switch their local APIC
+                // off. Both halves at once is what makes this a race
+                // rather than a repetition: a survey run by a leaving
+                // processor before an entering one's store is visible
+                // computes "nobody is in x2APIC mode" and disarms what
+                // the entering processor has just armed. With every
+                // thread doing the same thing there is nothing to lose,
+                // which is why the first version of this case found
+                // nothing.
+                auto base = (cpu < entering) ? x2apic_base : disabled_base;
+
+                while (!go.load(std::memory_order_acquire)) {
+                }
+
+                // Its own register, not a shared one - see the note on
+                // g_apic_base.
+                zpp::arch::x86_64::g_apic_base = base;
+                state->note_apic_mode(cpu);
+            });
+        }
+
+        go.store(true, std::memory_order_release);
+        for (auto & thread : threads) {
+            thread.join();
+        }
+
+        if (!interception_armed(*state)) {
+            ++left_disarmed;
+        }
+    }
+
+    check_equal(0,
+                left_disarmed,
+                "half the processors ended in x2APIC mode, so the "
+                "interrupt command register must be intercepted - " +
+                    std::to_string(left_disarmed) + " of " +
+                    std::to_string(attempts) +
+                    " concurrent switches left it disarmed");
+}
+
 } // namespace
 
 int main()
@@ -815,6 +1145,12 @@ int main()
     every_shorthand_takes_the_broadcast_path();
     slot_allocation();
     slot_allocation_is_bounded();
+    the_bitmap_bit_is_the_one_the_architecture_names();
+    each_mode_arms_its_own_mechanism();
+    a_half_switched_machine_arms_both();
+    the_last_processor_to_leave_disarms();
+    a_processor_outside_the_table_is_not_recorded();
+    the_survey_and_the_arming_are_one_decision();
 
     std::printf(
         "local_apic: %zu checks, %zu failures\n", g_checks, g_failures);

@@ -1804,6 +1804,24 @@ private:
     apic_mode observed_apic_mode[max_cpus]{};
 
     /**
+     * Serialises `note_apic_mode`, which is one processor's decision
+     * about state that belongs to all of them.
+     *
+     * Two pieces of state, and the second is the one that makes a lock
+     * necessary rather than tidy: the survey reads `observed_apic_mode`
+     * across every processor, and the arming it leads to is a
+     * read-modify-write of `msr_bitmap`, which is a **single page** every
+     * processor's VMCS points at. Without this, two processors switching
+     * to x2APIC at once can leave the interception disarmed while one of
+     * them is in x2APIC mode - see note_apic_mode for the interleaving.
+     *
+     * Not `start_up_lock`: that one is held across a start-up hand-over
+     * and this is taken from a WRMSR exit, so sharing them would make an
+     * unrelated MSR write wait on a processor being started.
+     */
+    zpp::spin_lock apic_mode_lock{};
+
+    /**
      * Remove protection for unprotected guest memory.
      * We mainly need to use this memory from guest on UEFI boot.
      */

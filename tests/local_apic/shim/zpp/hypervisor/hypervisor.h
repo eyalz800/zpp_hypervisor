@@ -14,6 +14,8 @@
 //
 // zpp/diag/log.h, asm.h and vmx/asm.h come from tests/nested_vmx/shim,
 // which is on the include path after this directory.
+#include "zpp/arch/x86_64/asm.h"
+#include "zpp/arch/x86_64/msr.h"
 #include "zpp/error.h"
 #include "zpp/scope_exit.h"
 #include "zpp/spin_lock.h"
@@ -58,6 +60,19 @@ class hypervisor
 {
 public:
     static constexpr std::size_t max_cpus = 32;
+    static constexpr std::size_t page_size = 0x1000;
+
+    /**
+     * Which of the two mechanisms a processor's local APIC is using, and
+     * the fourth value that says nothing has looked yet.
+     */
+    enum class apic_mode : std::uint8_t
+    {
+        unknown,
+        disabled,
+        xapic,
+        x2apic,
+    };
 
     /**
      * What a start-up attempt did. Same two values and the same meaning
@@ -75,6 +90,8 @@ public:
     std::optional<std::uint64_t>
     on_interrupt_command(std::uint64_t command);
     bool start_up_broadcast(std::uint64_t vector);
+    void note_apic_mode(std::size_t cpu);
+    void intercept_interrupt_command(bool intercept);
 
     // === Supplied by the harness =======================================
     //
@@ -86,6 +103,21 @@ public:
     start_up_result start_up_processor(std::uint64_t destination,
                                        std::uint64_t vector);
     void send_start_up_ipi(std::uint64_t apic, std::uint64_t vector);
+
+    /**
+     * Deliberately *not* cut out of local_apic.cpp, though it lives
+     * beside the two that are.
+     *
+     * It reaches the extended page tables through
+     * `watch_guest_page_writes`, whose signature drags in the whole
+     * `page_watch` vocabulary and a `guest_write`, and none of that is
+     * what `note_apic_mode` is being asked about here: the question is
+     * which of the two mechanisms it arms for a given roster of
+     * processors, and a recorder answers that exactly. What
+     * `watch_local_apic` decides on its own - refusing a relocated page
+     * - is a separate harness's to make.
+     */
+    void watch_local_apic(bool watch);
 
     // === State the decode reads and writes =============================
     volatile std::uint64_t ipi_init_seen{};
@@ -103,6 +135,10 @@ public:
 
     zpp::spin_lock start_up_lock{};
 
+    alignas(page_size) std::uint8_t msr_bitmap[page_size]{};
+    apic_mode observed_apic_mode[max_cpus]{};
+    zpp::spin_lock apic_mode_lock{};
+
     // === Harness observation ===========================================
     //
     // Not in the real class. Everything below records what the functions
@@ -118,6 +154,13 @@ public:
 
     attempt hardware_ipis[64]{};
     std::size_t hardware_ipi_count{};
+
+    /**
+     * What `note_apic_mode` asked of the page watch, which is half of
+     * what it decides - the other half is the bit in the MSR bitmap.
+     */
+    std::uint64_t watch_calls{};
+    bool watch_last{};
 
     std::uint64_t self_apic_id{};
 
