@@ -338,6 +338,31 @@ zpp_add_host_test(watched_page
         "${CMAKE_CURRENT_SOURCE_DIR}/watched_page"
     DEFINES ZPP_HOSTED_TESTS=1)
 
+# Guest memory: the real read_guest_physical, write_guest_physical and
+# guest_linear_to_physical out of guest_memory.cpp, against the real
+# hypervisor class.
+#
+# One stand-in, `map_window_at`, defined by the harness over an array of
+# host memory. It cannot run here for the same reason the two asm.h
+# headers cannot: it writes host paging structures and issues `invlpg`.
+# Everything else is the real code - the bounds arithmetic, the
+# page-at-a-time loop, and the whole four-level walk.
+#
+# Why it earns a harness: everything nested reads a guest hypervisor's
+# memory through these - vmcs12, the VMXON region, the guest's own
+# extended page tables - and a wrong answer is not a crash but a
+# *plausible* address belonging to the wrong page.
+zpp_add_host_test(guest_memory
+    SOURCES
+        guest_memory/harness.cpp
+        support/host_heap.cpp
+        "${ZPP_HYPERVISOR_SRC}/hypervisor/guest_memory.cpp"
+        "${ZPP_HYPERVISOR_SRC}/crt/heap.cpp"
+    INCLUDES
+        "${CMAKE_CURRENT_SOURCE_DIR}/shim"
+        "${CMAKE_CURRENT_SOURCE_DIR}/guest_memory"
+    DEFINES ZPP_HOSTED_TESTS=1)
+
 # The interrupted-event re-queue on the way back to a guest: the real
 # resume_guest and event_allowed_on_entry out of resume.cpp, against the
 # real hypervisor class. The shim's restore_context comes back instead
