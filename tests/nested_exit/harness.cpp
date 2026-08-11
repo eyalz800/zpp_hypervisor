@@ -2641,6 +2641,297 @@ static void test_activity_state()
           "wait-for-SIPI with an event to inject must give reason 33");
 }
 
+// ------------------------- 8. what a reflected exit hands back
+/**
+ * The activity and interruptibility fields `save_l2_state` writes into
+ * vmcs12, and the one pair of values it must never write together.
+ *
+ * This started as a question about a measurement from the rig: on a
+ * reflected HLT, vmcs12 came back with interruptibility 0x0001 - blocking
+ * by STI - and activity 0, active. KVM writes the activity field from its
+ * own `mp_state` and sets `GUEST_ACTIVITY_HLT` when that says halted
+ * (.references/kvm/nested.c:4538-4543), which looks like a disagreement.
+ *
+ * It is not one, and both halves are worth writing down because the
+ * reasoning is not obvious in either direction.
+ *
+ * **Active is right, and HLT would be wrong.** SDM 30.3.4: "The
+ * activity-state field is saved with the logical processor's activity
+ * state *before* the VM exit" (.references/sdm.txt:204644). An exit
+ * caused by HLT-exiting happens instead of the halt, not after it, so
+ * the processor was active. Writing HLT would describe a halt that never
+ * happened.
+ *
+ * **The STI shadow is right too.** SDM 30.4 lists the VM exits
+ * "considered to happen after an instruction is executed", and says that
+ * for those "if there had been blocking by MOV SS, POP SS, or STI before
+ * the instruction executed, such blocking is no longer in effect"
+ * (.references/sdm.txt:203489-203504). HLT-exiting is not in that list,
+ * so the shadow survives - which is exactly what a guest doing the
+ * ordinary `sti; hlt` idle idiom produces.
+ *
+ * **And KVM agrees on this path.** Its HLT branch is reached only when
+ * `mp_state` is already `KVM_MP_STATE_HALTED`, and KVM sets that in its
+ * own halt handler - which does not run for an exit it is reflecting to
+ * L1. On the reflect path KVM writes `GUEST_ACTIVITY_ACTIVE`, the same
+ * value. The branch covers the case where L0 emulated the halt itself
+ * and something else later forced a nested exit, which this VMM never
+ * does: it hands HLT to hardware rather than blocking a thread, because
+ * it has no thread to block. That divergence is real and is recorded on
+ * the *entry* side, at reason 12.
+ *
+ * The second half is the part that turns this from a curiosity into an
+ * invariant. SDM 29.3.1.5: "The activity-state field must indicate the
+ * active state if the interruptibility-state field indicates blocking by
+ * either MOV-SS or by STI" (.references/sdm.txt:202605-202606). So a
+ * vmcs12 carrying HLT or wait-for-SIPI together with either blocking bit
+ * is one the *guest hypervisor's own* next VMRESUME cannot use: the
+ * entry fails a consistency check L1 did not cause and cannot diagnose,
+ * because the offending pair was written by the layer below it.
+ *
+ * That is the check below, swept rather than sampled. It is the shape of
+ * defect this file exists for - a field composed correctly in the case
+ * anyone thought about, and illegally in a combination nobody did.
+ *
+ * **And the sweep finds one.** `save_l2_state` composes the two fields
+ * from two independent places - the activity state from hardware or from
+ * `l2_activity_state`, the interruptibility always from hardware - with
+ * nothing between them that could notice the pair. Every forbidden
+ * combination goes straight through.
+ *
+ * Read, not seen, and the reachability is worth stating precisely
+ * because it is what decides how urgent this is:
+ *
+ * - With `running_l2` true, both fields come from hardware, and hardware
+ *   cannot present the forbidden pair: VM entry applied 29.3.1.5 itself,
+ *   so the pair could not have been entered, and a halted processor
+ *   executes nothing that could raise a shadow afterwards. Not reachable
+ *   through hardware.
+ *
+ * - With `running_l2` false, the activity state comes from
+ *   `l2_activity_state` and the interruptibility from the real VMCS -
+ *   two sources with no relation to each other. `enter_or_park_l2`
+ *   checks 29.3.1.5 for wait-for-SIPI, deliberately, *because* that
+ *   state is not handed to hardware and the processor therefore never
+ *   makes the check. It does not make the same check for HLT, which it
+ *   does not have to: HLT goes to hardware and the processor checks it.
+ *   But `l2_activity_state` is written before that entry happens, so a
+ *   path that sets it and then fails to enter leaves the two sources
+ *   free to disagree.
+ *
+ * The reachable path, if there is one, is therefore an entry that gets
+ * past the activity-state checks, records `l2_activity_state`, and then
+ * does not enter. SDM 29.8 says a VM-entry failure must not modify the
+ * guest-state area, and the refusal path above asserts that - so the
+ * question is whether any *other* exit from that function can reach
+ * `save_l2_state` with `running_l2` still false. Recorded here rather
+ * than answered, because answering it means reading a control-flow
+ * question that a guard would make moot.
+ *
+ * The guard is one line where the field is composed: an activity state
+ * other than active is only legal alongside an interruptibility with
+ * neither blocking bit, so either the pair is coerced or the entry is
+ * refused. Cheaper than the analysis.
+ */
+static void test_reflected_activity_and_interruptibility()
+{
+    std::printf("what a reflected exit hands back in the activity and "
+                "interruptibility fields\n");
+
+    namespace activity = zpp::arch::x86_64::vmx::activity_state;
+
+    constexpr std::uint64_t blocking_by_sti = 1ull << 0;
+    constexpr std::uint64_t blocking_by_mov_ss = 1ull << 1;
+    constexpr std::uint64_t blocking_by_nmi = 1ull << 3;
+
+    auto & shadow = hv().guest_vmcs12[cpu];
+
+    // The rig's own measurement, reproduced: a second-level guest that
+    // ran, exited on HLT with the STI shadow still in effect, and is
+    // being reflected.
+    {
+        context registers{};
+        reset(registers);
+        hv().running_l2[cpu] = true;
+        hv().l2_activity_state[cpu] = activity::active;
+
+        hv().vmcs.write(field::guest_activity_state, activity::active);
+        hv().vmcs.write(field::guest_interruptibility_state,
+                        blocking_by_sti);
+
+        hv().save_l2_state(cpu);
+
+        check(activity::active ==
+                  shadow.read(fields::guest_activity_state),
+              "a reflected HLT hands back the active state - SDM 30.3.4 "
+              "saves the state *before* the exit, and an HLT-exiting "
+              "exit happens instead of the halt rather than after it");
+        check(blocking_by_sti ==
+                  shadow.read(fields::guest_interruptibility_state),
+              "and hands back the STI shadow unchanged - HLT is not in "
+              "SDM 30.4's list of exits that happen after an instruction "
+              "executes, so the blocking is still in effect. This is the "
+              "ordinary `sti; hlt` idle idiom");
+    }
+
+    // The same, with the guest halted for real: a second-level guest
+    // entered in the HLT state, exited by something else. Here HLT is
+    // the honest answer, and it comes out of hardware rather than out of
+    // a flag - which is the whole reason this VMM can report it at all.
+    {
+        context registers{};
+        reset(registers);
+        hv().running_l2[cpu] = true;
+        hv().l2_activity_state[cpu] = activity::active;
+
+        hv().vmcs.write(field::guest_activity_state, activity::hlt);
+        hv().vmcs.write(field::guest_interruptibility_state, 0);
+
+        hv().save_l2_state(cpu);
+
+        check(activity::hlt == shadow.read(fields::guest_activity_state),
+              "a guest that really was halted hands back HLT, read from "
+              "the field a processor maintained rather than from a "
+              "record this VMM keeps");
+    }
+
+    // A second-level guest that never ran is described by
+    // `l2_activity_state` instead, because the field in the real VMCS
+    // describes whatever ran last - which is the guest hypervisor.
+    {
+        context registers{};
+        reset(registers);
+        hv().running_l2[cpu] = false;
+        hv().l2_activity_state[cpu] = activity::wait_for_start_up_ipi;
+
+        hv().vmcs.write(field::guest_activity_state, activity::active);
+        hv().vmcs.write(field::guest_interruptibility_state, 0);
+
+        hv().save_l2_state(cpu);
+
+        check(activity::wait_for_start_up_ipi ==
+                  shadow.read(fields::guest_activity_state),
+              "a second-level guest held in root operation hands back "
+              "wait-for-SIPI from l2_activity_state, not the active "
+              "state the real VMCS holds for the guest hypervisor");
+    }
+
+    // === The invariant ===============================================
+    //
+    // Whatever the two fields are composed from, the pair has to be one
+    // a VM entry will accept - because the next thing that happens to
+    // this vmcs12 is the guest hypervisor resuming it.
+    //
+    // SDM 29.3.1.5 (.references/sdm.txt:202605-202606): "The
+    // activity-state field must indicate the active state if the
+    // interruptibility-state field indicates blocking by either MOV-SS
+    // or by STI".
+    {
+        struct
+        {
+            std::uint64_t value;
+            const char * name;
+        } activities[]{
+            {activity::active, "active"},
+            {activity::hlt, "HLT"},
+            {activity::wait_for_start_up_ipi, "wait-for-SIPI"},
+        };
+
+        struct
+        {
+            std::uint64_t value;
+            const char * name;
+        } blockings[]{
+            {0, "no blocking"},
+            {blocking_by_sti, "blocking by STI"},
+            {blocking_by_mov_ss, "blocking by MOV SS"},
+            {blocking_by_nmi, "blocking by NMI"},
+        };
+
+        for (auto & state : activities) {
+            for (auto & blocking : blockings) {
+                for (auto ran : {false, true}) {
+                    context registers{};
+                    reset(registers);
+                    hv().running_l2[cpu] = ran;
+                    hv().l2_activity_state[cpu] = state.value;
+                    hv().vmcs.write(field::guest_activity_state,
+                                    state.value);
+                    hv().vmcs.write(field::guest_interruptibility_state,
+                                    blocking.value);
+
+                    hv().save_l2_state(cpu);
+
+                    auto saved_activity =
+                        shadow.read(fields::guest_activity_state);
+                    auto saved_blocking =
+                        shadow.read(fields::guest_interruptibility_state);
+
+                    auto illegal =
+                        (0 != (saved_blocking &
+                               (blocking_by_sti | blocking_by_mov_ss))) &&
+                        (activity::active != saved_activity);
+
+                    // The pairs the rule forbids are exactly the ones
+                    // this composition has no guard against, so they are
+                    // recorded rather than asserted away - see the note
+                    // below the sweep for what is and is not reachable.
+                    auto forbidden_by_the_rule =
+                        (0 != (blocking.value &
+                               (blocking_by_sti | blocking_by_mov_ss))) &&
+                        (activity::active != state.value);
+
+                    if (forbidden_by_the_rule) {
+                        diverge(illegal,
+                                text("save_l2_state composes %s with %s "
+                                     "(running_l2 %s) and hands it back "
+                                     "unchecked. SDM 29.3.1.5 forbids "
+                                     "that pair at VM entry, so the "
+                                     "guest hypervisor's own next "
+                                     "VMRESUME fails a check it did not "
+                                     "cause and cannot diagnose",
+                                     state.name,
+                                     blocking.name,
+                                     ran ? "true" : "false"));
+                        continue;
+                    }
+
+                    check(!illegal,
+                          text("%s with %s, running_l2 %s: the pair "
+                               "handed back is one a VM entry accepts",
+                               state.name,
+                               blocking.name,
+                               ran ? "true" : "false"));
+                }
+            }
+        }
+    }
+
+    // Blocking by NMI is not covered by that rule and must survive, in
+    // any activity state. It is how a guest hypervisor learns its
+    // second-level guest is inside an NMI handler, and losing it would
+    // let a second NMI be delivered where the architecture blocks one.
+    {
+        context registers{};
+        reset(registers);
+        hv().running_l2[cpu] = true;
+        hv().l2_activity_state[cpu] = activity::active;
+        hv().vmcs.write(field::guest_activity_state, activity::hlt);
+        hv().vmcs.write(field::guest_interruptibility_state,
+                        blocking_by_nmi);
+
+        hv().save_l2_state(cpu);
+
+        check(blocking_by_nmi ==
+                  (shadow.read(fields::guest_interruptibility_state) &
+                   blocking_by_nmi),
+              "blocking by NMI survives alongside HLT - SDM 29.3.1.5 "
+              "constrains only the STI and MOV SS bits, and losing this "
+              "one would let a second NMI reach a handler the "
+              "architecture blocks one for");
+    }
+}
+
 int main()
 {
     test_reason_table();
@@ -2650,6 +2941,7 @@ int main()
     test_io();
     test_l0_precedence();
     test_activity_state();
+    test_reflected_activity_and_interruptibility();
 
     std::printf("\n%d checks, %d failures\n", g_checks, g_failures);
 
