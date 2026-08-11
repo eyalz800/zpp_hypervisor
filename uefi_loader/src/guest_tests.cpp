@@ -1722,6 +1722,48 @@ bool guest_tests::run(EFI_SYSTEM_TABLE * system_table)
                  entry_point,
                  ::zpp_probe_l2_interrupted_rip);
 
+            // **Which layer refused it.**
+            //
+            // Reason 33 with bit 31 is what `enter_or_park_l2`'s
+            // `refuse` synthesises *and* what a processor produces for a
+            // guest state it rejects, so the reason reflected into
+            // vmcs12 cannot tell them apart - and they want opposite
+            // fixes. What separates them is the VMM's own exit ring,
+            // sampled the instant the launch came back: a refusal made
+            // in software leaves the VMLAUNCH itself as the last exit,
+            // reason 20, because the VMM never entered. A refusal made
+            // by the processor means the VMM's *own* VM entry failed,
+            // and its last exit carries bit 31.
+            //
+            // Measured: 0x80000021. **The processor refused vmcs02.**
+            // The VMM's reflection of it to the guest hypervisor is
+            // therefore correct - the entry really did fail - and what
+            // is wrong is the guest state built into vmcs02, which the
+            // injection exposes rather than causes. All three `refuse`
+            // sites are activity-state conditions and this vmcs12 says
+            // active, so the code agrees with the measurement.
+            constexpr std::uint32_t entry_failure_bit = 1u << 31;
+            constexpr std::uint32_t vmlaunch_reason = 20;
+
+            auto refused_by_hardware =
+                0 != (::zpp_probe_ring_reason & entry_failure_bit);
+            auto refused_by_us =
+                vmlaunch_reason == (::zpp_probe_ring_reason & 0xffff);
+
+            emit(state,
+                 "nested.injection_refused_by_hardware",
+                 refused_by_hardware ? outcome::pass : outcome::fail,
+                 "the_vmms_own_entry_of_vmcs02_failed",
+                 entry_failure_bit,
+                 ::zpp_probe_ring_reason);
+
+            emit(state,
+                 "nested.injection_not_refused_in_software",
+                 refused_by_us ? outcome::fail : outcome::pass,
+                 "enter_or_park_l2_did_not_refuse",
+                 0,
+                 refused_by_us ? vmlaunch_reason : 0);
+
             // The probe as a whole, which fails today for the same
             // reason: its third launch is the injecting one.
             emit(state,

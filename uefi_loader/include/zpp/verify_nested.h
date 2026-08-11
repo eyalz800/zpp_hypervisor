@@ -116,6 +116,23 @@ extern "C" inline volatile std::uint64_t zpp_probe_l2_injections{};
  */
 extern "C" inline volatile std::uint64_t zpp_probe_l2_interrupted_rip{};
 
+/**
+ * The VMM's own newest exit, sampled the instant a launch comes back.
+ *
+ * Written by `launch` through CPUID leaf 0x40000100, which the VMM
+ * answers with the newest entry of its per-processor exit ring - and
+ * which it answers inside the CPUID handler, before that CPUID is itself
+ * recorded, so what comes back is the exit *before* it.
+ * @{
+ */
+extern "C" inline std::uint32_t zpp_probe_ring_count{};
+extern "C" inline std::uint32_t zpp_probe_ring_reason{};
+extern "C" inline std::uint32_t zpp_probe_ring_qualification{};
+extern "C" inline std::uint32_t zpp_probe_ring_flags{};
+/**
+ * @}
+ */
+
 extern "C" inline void __attribute__((naked)) zpp_probe_l2_interrupt()
 {
     asm volatile(".intel_syntax noprefix\n\t"
@@ -1019,6 +1036,30 @@ struct verify_nested
                        "cc",
                        "memory");
 
+        // What the VMM's own exit ring holds *now*, before this probe
+        // executes anything else that exits.
+        //
+        // This is what separates a refusal made in software from one made
+        // by the processor, and it has to be sampled here: reason 33 with
+        // bit 31 is what `enter_or_park_l2`'s `refuse` synthesises and
+        // also what hardware produces for a guest state it rejects, so
+        // the reflected reason cannot tell them apart - but the two leave
+        // different last exits behind. A software refusal means the VMM's
+        // last exit is the VMLAUNCH itself, reason 20, because it never
+        // entered. A hardware refusal means its own VM entry failed and
+        // the last exit carries bit 31.
+        //
+        // The first attempt at this read was made after the VMREADs
+        // below and reported reason 23 - this probe's own VMREAD - which
+        // is the ring working correctly and the reading being taken too
+        // late.
+        asm volatile("cpuid"
+                     : "=a"(zpp_probe_ring_count),
+                       "=b"(zpp_probe_ring_reason),
+                       "=c"(zpp_probe_ring_qualification),
+                       "=d"(zpp_probe_ring_flags)
+                     : "a"(0x40000100u), "c"(0u));
+
         if (0 == zpp_probe_exit_taken) {
             step("vmlaunch", outcome_of(flags), outcome::succeeded);
 
@@ -1519,6 +1560,11 @@ struct verify_nested
                          step,
                          interruption_valid | interruption_external |
                              injected_vector);
+
+        // Sampled inside `launch`, the instant it came back.
+        say("the vmm's newest exit at the injecting launch",
+            zpp_probe_ring_reason);
+        say("its qualification", zpp_probe_ring_qualification);
 
         auto delivered = zpp_probe_l2_injections - before;
         say("injections delivered to the second-level guest", delivered);
