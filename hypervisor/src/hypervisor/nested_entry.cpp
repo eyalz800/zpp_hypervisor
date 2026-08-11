@@ -124,6 +124,7 @@ constexpr std::uint64_t secondary_mode_based_execute = 1ull << 22;
  */
 constexpr std::uint64_t exit_save_debug_controls = 1ull << 2;
 constexpr std::uint64_t exit_host_address_space_size = 1ull << 9;
+constexpr std::uint64_t exit_acknowledge_interrupt = 1ull << 15;
 constexpr std::uint64_t exit_save_ia32_pat = 1ull << 18;
 constexpr std::uint64_t exit_load_ia32_pat = 1ull << 19;
 constexpr std::uint64_t exit_save_ia32_efer = 1ull << 20;
@@ -162,6 +163,7 @@ constexpr std::uint64_t interruption_type_shift = 8;
 constexpr std::uint64_t interruption_type_mask = 0x7;
 constexpr std::uint64_t interruption_type_nmi = 2;
 constexpr std::uint64_t interruption_vector_mask = 0xff;
+constexpr std::uint64_t interruption_information_valid = 1ull << 31;
 /**
  * @}
  */
@@ -1339,8 +1341,65 @@ std::expected<void, zpp::error> hypervisor::build_vmcs02(std::size_t cpu)
     this->vmcs12_primary_asked = this->vmcs12_primary_asked | primary12;
     this->vmcs12_pin_asked = this->vmcs12_pin_asked | pin12;
 
-    // Exit controls are this VMM's, unchanged. The exit comes here.
-    vmcs.vm_exit_controls(exit01);
+    // Exit controls are this VMM's, because the exit comes here - with
+    // one exception, and the exception is the point.
+    //
+    // The controls divide into three groups and only one of them can be
+    // delegated. The *load* group - host address-space size, load
+    // IA32_PAT, load IA32_EFER - describes what a VM exit loads into
+    // host state, and vmcs02's host state is this VMM's, so composing
+    // them would load the guest hypervisor's host state into this VMM on
+    // an exit that is not going there. The *save* group is emulated
+    // instead of delegated: `save_l2_state` reads exit12 itself and
+    // writes the guest hypervisor's guest-state area conditionally, so
+    // the hardware does not need to be told.
+    //
+    // "Acknowledge interrupt on exit" is in neither group, and it is the
+    // one thing here that cannot be emulated at all. SDM 30.2: "An
+    // external interrupt does not acknowledge the interrupt controller
+    // and the interrupt remains pending, unless the 'acknowledge
+    // interrupt on exit' VM-exit control is 1. In such a case, the
+    // interrupt controller is acknowledged and the interrupt is no
+    // longer pending." SDM 27.9.2 adds the other half: the exiting-event
+    // identification field - the vector, in bits 7:0 - is provided for
+    // external interrupts only while that control is 1.
+    //
+    // Only the processor can take a vector from the interrupt
+    // controller. So a guest hypervisor that asked for the control and
+    // was given an exit without it learns nothing: the reason says an
+    // external interrupt arrived, the vector field is not valid, and the
+    // interrupt is still pending behind it. It cannot dispatch the
+    // interrupt, and this VMM is not going to either.
+    //
+    // KVM makes the same control mandatory for itself -
+    // KVM_REQUIRED_VMX_VM_EXIT_CONTROLS in vmx-internal.h - and reads
+    // vmcs12's copy in `nested_exit_intr_ack_set`.
+    //
+    // Conditioned on the exit being one that will be reflected, because
+    // acknowledging *consumes* the interrupt and an acknowledgement on
+    // an exit this VMM keeps would drop it. `l1_wants_l2_exit` decides
+    // that for an external interrupt on pin12's external-interrupt
+    // exiting alone, and this VMM never sets that control itself - see
+    // the case there - so the two conditions below are the whole of it.
+    // If pin01 ever sets it, this needs a third: and not pin01's.
+    auto exit02 = exit01;
+
+    if ((0 != (exit12 & exit_acknowledge_interrupt)) &&
+        (0 != (pin12 & pin_external_interrupt))) {
+        exit02 = exit02 | exit_acknowledge_interrupt;
+    }
+
+    exit02 = arch::x86_64::vmx::adjust_msr(
+        this->cached_vmx_msr(vmx_msr::true_exit_controls), exit02);
+
+    vmcs.vm_exit_controls(exit02);
+
+    // Same comparison as the execution controls above, for the group
+    // that has never had one. A bit set in `asked` and clear in
+    // `written` is an exit control the guest hypervisor requested and
+    // did not get.
+    this->vmcs12_exit_asked = this->vmcs12_exit_asked | exit12;
+    this->vmcs02_exit_written = this->vmcs02_exit_written | exit02;
 
     // Entry controls are the guest hypervisor's, unchanged. They describe
     // what VM entry loads into *its* guest, which is a decision it owns
@@ -3035,6 +3094,24 @@ hypervisor::on_l2_exit(std::size_t cpu,
     // guest's registers are still the ones in hand.
     if (cpu < max_cpus) {
         this->l2_exit_detail[cpu] = context.rcx;
+
+        // The vector of an external interrupt on its way to the guest
+        // hypervisor. Available only because "acknowledge interrupt on
+        // exit" now reaches vmcs02 - see build_vmcs02 - and read here
+        // rather than in `reflect_l2_exit` because the valid bit has to
+        // be tested against the reason that produced it.
+        //
+        // SDM 27.9.2: bits 7:0 are the vector, bit 31 is validity.
+        if (basic_reason::external_interrupt == reason.basic()) {
+            auto information =
+                this->vmcs.read(field::vm_exit_interruption_information);
+
+            if (0 != (information & interruption_information_valid)) {
+                auto vector = information & interruption_vector_mask;
+                this->l2_external_vector[cpu][vector] =
+                    this->l2_external_vector[cpu][vector] + 1;
+            }
+        }
 
         // The two halves of the synthetic timer comparison the machine
         // stops on, taken on the way past. Both MSRs are outside the

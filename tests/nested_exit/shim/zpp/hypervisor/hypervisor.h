@@ -278,6 +278,9 @@ public:
     volatile std::uint64_t vmcs02_secondary_written{};
     volatile std::uint64_t vmcs12_primary_asked{};
     volatile std::uint64_t vmcs12_pin_asked{};
+    volatile std::uint64_t vmcs12_exit_asked{};
+    volatile std::uint64_t vmcs02_exit_written{};
+    volatile std::uint32_t l2_external_vector[max_cpus][256]{};
     volatile std::uint64_t vmcs12_exit_controls{};
     volatile std::uint64_t vmcs12_entry_controls{};
 

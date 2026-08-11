@@ -3115,9 +3115,29 @@ private:
     volatile std::uint64_t vmcs02_secondary_written{};
     volatile std::uint64_t vmcs12_primary_asked{};
     volatile std::uint64_t vmcs12_pin_asked{};
+    volatile std::uint64_t vmcs12_exit_asked{};
+    volatile std::uint64_t vmcs02_exit_written{};
     /**
      * @}
      */
+
+    /**
+     * Every external interrupt reflected to a guest hypervisor, counted
+     * by the vector the processor reported.
+     *
+     * Empty until "acknowledge interrupt on exit" reaches vmcs02, which
+     * is why the two arrived together: SDM 27.9.2 provides the vector
+     * only while that control is 1, so before it there was nothing to
+     * count and the field read as invalid on every one of them.
+     *
+     * What it discriminates is which interrupts a guest hypervisor is
+     * being handed. A boot in which every vector is a timer or an
+     * inter-processor interrupt and none belongs to a device says the
+     * device interrupts are not arriving at all, which is a different
+     * fault from their arriving and being mis-dispatched, and the two
+     * were indistinguishable while the vector was unavailable.
+     */
+    volatile std::uint32_t l2_external_vector[max_cpus][256]{};
     volatile std::uint64_t vmcs12_exit_controls{};
     volatile std::uint64_t vmcs12_entry_controls{};
     volatile std::uint64_t vmcs12_controls_captured{};
