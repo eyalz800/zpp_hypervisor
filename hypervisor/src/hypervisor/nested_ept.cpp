@@ -431,9 +431,6 @@ hypervisor::shadow_ept_pointer_for(std::size_t cpu, std::uint64_t eptp12)
     // of the address space the second-level guest would touch, and the
     // answer was "far less than all of it".
     release_shadow_slot(cpu, chosen);
-    std::memset(this->shadow_epml4[cpu][chosen],
-                0,
-                sizeof(epte) * entries_per_table);
 
     arch::x86_64::vmx::ept_pointer pointer;
     pointer.memory_type(memory_type::write_back);
@@ -501,9 +498,6 @@ std::expected<void, zpp::error> hypervisor::fill_shadow_leaf(
     // because one of these means the pool is too small for a single
     // shadow and no amount of slot juggling will help.
     release_shadow_slot(cpu, current);
-    std::memset(this->shadow_epml4[cpu][current],
-                0,
-                sizeof(epte) * entries_per_table);
 
     this->shadow_ept_resets[cpu] = this->shadow_ept_resets[cpu] + 1;
 
@@ -528,6 +522,20 @@ void hypervisor::release_shadow_slot(std::size_t cpu, std::size_t slot)
     }
 
     this->shadow_ept_tables_used[cpu][slot] = 0;
+
+    // And the root, which the two callers used to clear on the line after
+    // this one.
+    //
+    // Releasing the tables without clearing the root leaves a PML4 naming
+    // tables the pool has just marked free, so a walk through it follows
+    // entries into tables another slot is now filling - two shadows
+    // sharing a subtree, with no fault anywhere to say so. It was safe
+    // only because both callers memset it immediately afterwards, which
+    // is a contract kept by convention in two places with nothing saying
+    // so. Moved in here so releasing a slot means the whole of it.
+    std::memset(this->shadow_epml4[cpu][slot],
+                0,
+                sizeof(epte) * entries_per_table);
 }
 
 /**

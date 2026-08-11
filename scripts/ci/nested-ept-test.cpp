@@ -1973,21 +1973,45 @@ void releasing_a_slot_returns_its_tables()
                   "a released slot reports no tables in use");
             check(0 == of.shadow_ept_source[0][slot],
                   "a released slot reports no source");
+
+            // And its root is empty.
+            //
+            // A released slot's PML4 named tables the pool has just
+            // marked free, so a walk through it would follow entries
+            // into tables another slot is now filling. Safe until now
+            // only because both callers memset the root on the very next
+            // line - which is a contract kept by convention, in two
+            // places, with nothing saying so. A third caller that
+            // released a slot without knowing that would get a shadow
+            // sharing tables with its neighbour and no fault anywhere.
+            auto * root = of.shadow_epml4[0][slot];
+            auto root_is_empty = true;
+            for (std::size_t i{}; i < 512; ++i) {
+                if (0 != root[i].value()) {
+                    root_is_empty = false;
+                }
+            }
+            check(root_is_empty,
+                  "a released slot's root is empty - it must not still "
+                  "name tables the pool has handed back");
         }
 
-        // Releasing does *not* empty the root, and that is a property of
-        // the design rather than an oversight: the root is never
-        // recycled, so the EPT pointer stays stable across rebuilds.
-        // What it means is that a released slot's root still names pool
-        // tables that are now free, and every caller of
-        // release_shadow_slot zeroes the root itself before the slot is
-        // used again - shadow_ept_pointer_for and
-        // refresh_shadow_ept_for both memset it on the next line.
-        // discard_shadow_ept does not, and is safe only because it also
-        // clears the source, so nothing can reach the slot before a
-        // rebuild. Do here what those callers do.
-        check(ept_permissions::of(of.shadow_epml4[0][0][1]).present(),
-              "release leaves the root alone, as its callers expect");
+        // Releasing empties the root, and the EPT pointer still stays
+        // stable across rebuilds - the root's *address* is never
+        // recycled, which is what the pointer names, and clearing its
+        // contents does not move it.
+        //
+        // This used to be the other way round, with the clearing left to
+        // the callers: `shadow_ept_pointer_for` and
+        // `refresh_shadow_ept_for` both memset the root on the line after
+        // releasing, and `discard_shadow_ept` did not, being safe only
+        // because it also cleared the source so nothing could reach the
+        // slot before a rebuild. Three callers, two conventions and one
+        // exception, with nothing saying so - which is a contract waiting
+        // for a fourth caller.
+        check(!ept_permissions::of(of.shadow_epml4[0][0][1]).present(),
+              "releasing a slot empties its root, so no caller has to "
+              "remember to");
 
         std::memset(of.shadow_epml4[0], 0, sizeof(of.shadow_epml4[0]));
     }

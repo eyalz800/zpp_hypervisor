@@ -7082,7 +7082,10 @@ transcription would go on passing while testing itself.
   2:0 and 5:3. The test asserts the behaviour as it is rather than as it
   should be, with the divergence written beside it, so fixing it is a
   deliberate change to a named assertion rather than a surprise.
-- **`release_shadow_slot` does not empty the slot's root**, so a released
+- ~~**`release_shadow_slot` does not empty the slot's root**~~ **Fixed**:
+  the clear moved inside the release and both callers dropped their own.
+  The original account follows, because three callers with two conventions
+  and one exception is the shape worth remembering. So a released
   slot's page-map level-4 table still names pool tables that are now
   marked free. Safe today, and only just: `shadow_ept_pointer_for` and
   `refresh_shadow_ept_for` both `memset` the root on the line after
