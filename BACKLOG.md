@@ -7504,3 +7504,63 @@ never delivered" was recorded as established for a whole investigation
 on the strength of an absent end-of-message write, and it was an
 inference from a downstream absence, not a measurement of the thing it
 named. One counter settled it in one boot.
+
+### The second-level guest can see the message. That is now ruled out too
+
+Measured 2026-08-11, same run. The candidate at the top of the section
+above — that the root partition reads the message page and finds nothing,
+because `SIMP` is a second-level physical address and every dump of it so
+far was a first-level physical read — is **wrong**, and the walk that
+settles it is worth keeping because the first attempt at it produced a
+confident wrong answer.
+
+**First attempt, and why it proved nothing.** `shadow_epml4` is the
+shadow extended page table this VMM composes the two levels into, so
+walking it for the boot processor's `SIMP` address looks like the
+question. It came back absent at level 3 — apparently decisive. It is
+not: the shadow is a lazily filled cache that is rebuilt wholesale
+(15,624 rebuilds on the boot processor, no evictions), so an absent entry
+means "not faulted in since the last rebuild" and nothing else.
+
+The control that caught it: walk pages the second-level guest certainly
+touched. Low RAM at 1 MB, RAM at 1 GB, the local APIC page and the RAM
+around `SIMP` are **all absent as well**. An empty table cannot
+distinguish anything. **Probe a lazily populated structure with something
+known present before reading an absence as evidence.**
+
+**Second attempt, authoritative.** `shadow_ept_source[cpu][slot]` records
+bits 51:12 of the guest hypervisor's *own* extended page-table pointer,
+which is not a cache. The boot processor's active slot names root
+`0x101b38000`. Walking that:
+
+```
+SIMP        0x117a3f000 -> 0x117a3f000   (4 kb)
+low ram 1M  0x000100000 -> 0x000100000   (4 kb)
+local apic  0x0fee00000 -> ABSENT, entry 0x160000000000000
+```
+
+**Hyper-V maps the message page identity.** The second-level guest fetches
+from exactly the first-level physical address every previous dump read,
+and both views show the same header — `type=0x80000010`
+`HvMessageTimerExpired`, `len=24`, `flags=0x01` message-pending, with
+`MessageType` still uncleared. So the guest can see the message, and it
+does not consume it.
+
+Worth noting in passing: Hyper-V's own extended page tables leave the
+local APIC page **not present**, with software-available bits 53, 54 and
+56 set on the absent entry. It virtualises the APIC for its guest the
+same way this VMM watches it, so both levels trap that page.
+
+So of the three candidates listed above, the first is dead and the third
+never discriminated. What remains is the second — **the handler runs and
+does not reach the end-of-message write** — plus a possibility the first
+two crowded out: that it never runs at all, despite the vector being
+injected.
+
+Nothing measured so far separates those, because every counter in this
+investigation observes the hand-over and none observes what the guest
+does after it. The next measurement has to be the guest's own instruction
+pointer immediately after an entry that injected `0xd1`: a RIP inside an
+interrupt handler says the handler ran and the failure is inside it, and
+a RIP at the instruction the guest was already on says the vector was
+injected and not taken, which would be a defect here.
