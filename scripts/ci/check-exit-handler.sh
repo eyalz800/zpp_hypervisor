@@ -64,7 +64,13 @@ vmlaunch vmptrld vmptrst vmresume vmxoff vmxon vmread vmwrite"
 # and left, and the reason travels with it. A reason that is missing and
 # *not* named here fails this check; a reason named here that has since
 # gained a case also fails it, so the list cannot outlive the gap.
-known_gaps="getsec"
+#
+# Empty, and it should stay that way. GETSEC was the last entry: it is
+# fixed rather than recorded now, and the XPASS branch below is what
+# emptied the list - the case appeared, the script refused, and the entry
+# had to go. That is the mechanism working, so do not add an entry here
+# in preference to adding a case.
+known_gaps=""
 
 echo "== nothing a guest can execute may reach default:"
 
@@ -94,26 +100,6 @@ for reason in $required; do
     fi
 done
 
-# The known gap, spelled out where anyone reading the output will see it.
-cat <<'GAP'
-
-  GETSEC, exit reason 11, has no case.
-    SDM 28.1.2 lists it among the instructions that exit
-    unconditionally, so on the face of it a guest can stop a processor
-    with one instruction. What stands between the two is CR4.SMXE:
-    GETSEC raises #UD with it clear, and this VMM conceals safer mode
-    extensions from the guest by clearing CPUID leaf 1 ECX[6].
-    But CR4.SMXE is *not* in the CR4 guest/host mask - only VMXE is -
-    so on a processor that has SMX a guest can set the bit anyway,
-    against a CPUID that says it does not exist, and then execute
-    GETSEC. Concealing a feature in CPUID is not the same as making it
-    unreachable.
-    The fix is one case that injects #UD, exactly as the thirteen VMX
-    instructions do, and it is not made here because this script's job
-    is to report the invariant rather than to change the handler.
-
-GAP
-
 # The other half of the CR4/CPUID pair, which CLAUDE.md says are "keyed on
 # the same constant so they cannot drift apart". Checked because the
 # combination they exist to prevent - no VMX in CPUID, VMXE set in CR4 -
@@ -121,7 +107,7 @@ GAP
 # its own VMXON. BACKLOG.md item 1.
 echo "== CR4.VMXE and CPUID leaf 1 ECX[5] agree"
 
-if grep -q 'cr4_guest_host_mask(cr4_vmxe)' "$handler"; then
+if grep -q 'cr4_guest_host_mask(cr4_vmxe | cr4_smxe)' "$handler"; then
     echo "  ok    CR4.VMXE is owned in the guest/host mask"
 else
     echo "  FAIL  CR4.VMXE is not in the CR4 guest/host mask, so the" >&2
@@ -131,10 +117,55 @@ else
     status=1
 fi
 
-if grep -q 'cr4_read_shadow(this->guest_cr4 & ~cr4_vmxe)' "$handler"; then
-    echo "  ok    the read shadow starts with VMXE clear"
+if grep -q 'cr4_read_shadow(this->guest_cr4 & ~(cr4_vmxe | cr4_smxe))' \
+    "$handler"; then
+    echo "  ok    the read shadow starts with VMXE and SMXE clear"
 else
-    echo "  FAIL  the CR4 read shadow does not start with VMXE clear" >&2
+    echo "  FAIL  the CR4 read shadow does not start with VMXE and" >&2
+    echo "        SMXE clear" >&2
+    status=1
+fi
+
+# === CR4.SMXE and CPUID leaf 1 ECX[6] agree ===========================
+#
+# The same pairing one bit over, and the one that was missing. `073bc83`
+# concealed safer mode extensions in CPUID and left CR4.SMXE unmasked, so
+# a guest could set the bit against a CPUID saying the feature does not
+# exist - and then execute GETSEC, which SDM 28.1.2 makes exit
+# unconditionally with that bit set, into a handler that had no case for
+# it. Two instructions to stop a physical processor.
+#
+# Three things now have to hold together, which is why they are checked
+# together rather than one per section: the bit is concealed in CPUID, it
+# is refused in CR4, and GETSEC faults if it is ever reached anyway.
+echo "== CR4.SMXE and CPUID leaf 1 ECX[6] agree"
+
+if grep -q 'cpuid_result\[2\] &= ~(1u << 6)' "$handler"; then
+    echo "  ok    CPUID leaf 1 ECX[6] conceals safer mode extensions"
+else
+    echo "  FAIL  safer mode extensions are no longer concealed in" >&2
+    echo "        CPUID leaf 1. If the feature is now advertised, the" >&2
+    echo "        CR4 mask and the GETSEC case have to move with it -" >&2
+    echo "        and nothing here implements a measured launch." >&2
+    status=1
+fi
+
+if grep -q 'vmcs.guest_cr4(this->host_cr4 & ~cr4_smxe)' "$handler"; then
+    echo "  ok    SMXE is kept out of the real guest CR4"
+else
+    echo "  FAIL  the guest CR4 is no longer built with SMXE cleared." >&2
+    echo "        Unlike VMXE, nothing here needs the bit set - and" >&2
+    echo "        with it set GETSEC exits (SDM 28.1.2) instead of" >&2
+    echo "        raising the #UD a processor without SMX would." >&2
+    status=1
+fi
+
+if grep -q 'vmcs.guest_cr4((value | cr4_vmxe) & ~cr4_smxe)' "$handler"; then
+    echo "  ok    and out of what a guest writes to CR4"
+else
+    echo "  FAIL  the MOV to CR4 handler no longer strips SMXE, so a" >&2
+    echo "        guest that sets it reaches the register and can then" >&2
+    echo "        exit on GETSEC." >&2
     status=1
 fi
 

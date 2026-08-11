@@ -1159,6 +1159,96 @@ bool guest_tests::run(EFI_SYSTEM_TABLE * system_table)
         static_cast<void>(probe(probe_write_cr4));
     }
 
+    // === CR4.SMXE, the same pairing one bit over ========================
+    //
+    // This is the regression case for a bug a guest could have used to
+    // stop a physical processor with two instructions.
+    //
+    // Safer mode extensions are concealed in CPUID leaf 1 ECX[6], and for
+    // a long time that was the whole of it: CR4.SMXE was **not** in the
+    // CR4 guest/host mask, so on a processor that implements SMX a guest
+    // could set the bit against a CPUID saying the feature does not
+    // exist. SDM 28.1.2 (.references/sdm.txt:200727) then makes GETSEC
+    // exit unconditionally - "regardless of the value of CPL or RAX" -
+    // and the exit handler had no case for reason 11, so it reached
+    // `default:`, which does not resume.
+    //
+    // Concealing a feature in CPUID is not the same as making it
+    // unreachable, and this case is what says so. It asserts the whole
+    // chain rather than the fix: the bit reads clear, a write setting it
+    // does not take, and GETSEC still raises #UD afterwards.
+    {
+        constexpr std::uint64_t cr4_smxe = 1ull << 14;
+
+        auto cr4 = read_cr4();
+
+        check_equal(state,
+                    "cr4.smxe_reads_clear",
+                    "cr4_bit14",
+                    0,
+                    (cr4 & cr4_smxe) ? 1 : 0);
+
+        // SMXE is in the mask and clear in the read shadow, so setting it
+        // exits for the same reason VMXE does
+        // (.references/sdm.txt:200770).
+        g_probe_value = cr4 | cr4_smxe;
+        auto measured = probe(probe_write_cr4);
+        check_equal(state,
+                    "exit.control_register_access_smxe",
+                    "mov_to_cr4_reason",
+                    exit_control_register,
+                    measured.reason);
+
+        // And the bit does not take, in the shadow the guest reads. The
+        // real register does not get it either, which no guest-side test
+        // can see directly - what it *can* see is the consequence, which
+        // is the GETSEC case below.
+        auto after = read_cr4();
+
+        check_equal(state,
+                    "cr4.smxe_still_clear_after_write",
+                    "cr4_bit14",
+                    0,
+                    (after & cr4_smxe) ? 1 : 0);
+
+        check_equal(state,
+                    "cr4.other_bits_preserved_across_smxe_write",
+                    "cr4_without_smxe",
+                    cr4 & ~cr4_smxe,
+                    after & ~cr4_smxe);
+
+        // The consequence, and the reason the mask matters. GETSEC is
+        // executed *after* an attempt to enable it, which is exactly the
+        // sequence a guest would use to reach the missing case. It must
+        // still take #UD and it must not exit: with CR4.SMXE clear the
+        // invalid-opcode exception has priority over the VM exit (SDM
+        // 28.1.1, .references/sdm.txt:200675), so the instruction never
+        // reaches the handler at all.
+        //
+        // If this ever reports an exit rather than a fault, the mask has
+        // been lost and the handler's GETSEC case is the only thing
+        // standing between a guest and a stopped processor. That case
+        // exists, so the run would survive to report it - which is the
+        // whole reason it was added alongside the mask rather than
+        // instead of it.
+        auto after_getsec = probe(probe_getsec);
+
+        check_equal(state,
+                    "quiet.getsec.still_faults_after_setting_smxe",
+                    "vector",
+                    vector_invalid_opcode,
+                    static_cast<std::uint64_t>(after_getsec.vector));
+
+        check_equal(state,
+                    "quiet.getsec.takes_no_exit_after_setting_smxe",
+                    "reason",
+                    no_exit_reason,
+                    after_getsec.reason);
+
+        g_probe_value = cr4;
+        static_cast<void>(probe(probe_write_cr4));
+    }
+
     // === The VMX instructions ==========================================
     //
     // All thirteen exit, and every one must come back as #UD rather than
@@ -1590,14 +1680,25 @@ bool guest_tests::run(EFI_SYSTEM_TABLE * system_table)
         }
 
         if (smx_enabled) {
-            // Nothing here set it, so something else did, and running
-            // GETSEC in that state would take the processor away.
+            // Unreachable now, and left in place as an alarm.
+            //
+            // CR4.SMXE is in the guest/host mask and answered clear in
+            // the read shadow, so a guest cannot see the bit set - not
+            // from the firmware, which the VMM strips it from, and not
+            // from its own write, which the handler refuses. Reaching
+            // here means one of those two stopped being true, and the
+            // disposition below fails the job rather than letting the
+            // suite skip quietly past it.
             emit(state,
                  "quiet.getsec.does_not_exit",
                  outcome::skip,
                  "cr4_smxe_is_set_and_getsec_would_exit_to_default",
                  no_exit_reason,
                  1);
+            // UNEXPLAINED rather than a reason, deliberately: the
+            // suite genuinely does not know why the bit is set, and
+            // saying anything else would be inventing one. The report
+            // fails on it.
             state.note_why(exit_getsec, "UNEXPLAINED");
         } else {
             auto measured = probe(probe_getsec);
@@ -2415,8 +2516,8 @@ bool guest_tests::run(EFI_SYSTEM_TABLE * system_table)
             {10, "cpuid", "covered:exit.cpuid"},
             {11,
              "getsec",
-             "unreachable-here:quiet.getsec.invalid_opcode_measures_the_"
-             "ud_that_cr4_smxe_being_clear_produces"},
+             "unreachable-here:cr4_smxe_is_masked_and_answered_clear_so_"
+             "quiet.getsec.invalid_opcode_measures_the_ud_instead"},
             // HLT exiting is off, so the instruction does what a guest
             // asked and halts. Asserting that from inside the guest means
             // executing it, and the only things that end a halt are an

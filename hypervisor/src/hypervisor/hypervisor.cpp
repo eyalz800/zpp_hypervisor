@@ -8206,10 +8206,33 @@ void hypervisor::setup_vmcs(std::size_t cpu,
     //
     // So: the guest sees VMXE clear, and any attempt to write the bit
     // exits to us rather than reaching the register we need it in.
+    //
+    // SMXE is here for the same reason and with the opposite sign, and it
+    // is the half that was missing. `073bc83` concealed safer mode
+    // extensions from the guest by clearing CPUID leaf 1 ECX[6], and
+    // stopped there - so on a processor that implements SMX the guest
+    // could set CR4.SMXE against a CPUID saying the feature does not
+    // exist. Concealing a feature in CPUID is not the same as making it
+    // unreachable.
+    //
+    // What it cost: SDM 28.1.2 (.references/sdm.txt:200727) says "An
+    // execution of GETSEC in VMX non-root operation causes a VM exit if
+    // CR4.SMXE[Bit 14] = 1 regardless of the value of CPL or RAX", and
+    // the exit handler had no case for reason 11 - so the exit reached
+    // `default:` and stopped the processor. Two instructions, one of them
+    // a MOV, and a guest could halt a physical CPU.
+    //
+    // The bit is therefore masked, answered clear in the read shadow, and
+    // - unlike VMXE - kept out of the *real* register as well, since
+    // nothing here needs it. With CR4.SMXE clear GETSEC raises #UD in
+    // hardware and takes no exit at all, which is both the architecture's
+    // answer and the cheapest one. The case added beside this is what
+    // catches the day that stops being true.
     constexpr std::uint64_t cr4_vmxe = 1ull << 13;
-    vmcs.cr4_guest_host_mask(cr4_vmxe);
-    vmcs.cr4_read_shadow(this->guest_cr4 & ~cr4_vmxe);
-    vmcs.guest_cr4(this->host_cr4);
+    constexpr std::uint64_t cr4_smxe = 1ull << 14;
+    vmcs.cr4_guest_host_mask(cr4_vmxe | cr4_smxe);
+    vmcs.cr4_read_shadow(this->guest_cr4 & ~(cr4_vmxe | cr4_smxe));
+    vmcs.guest_cr4(this->host_cr4 & ~cr4_smxe);
     vmcs.host_cr4(this->host_cr4);
 
     // These take effect only because "load debug controls" is set in the
@@ -10204,6 +10227,43 @@ hypervisor::main(arch::x86_64::context & caller_context)
             advance_rip = false;
             break;
         }
+        case basic_reason::getsec: {
+            // Unreachable today, and a case anyway.
+            //
+            // GETSEC exits unconditionally in VMX non-root operation -
+            // SDM 28.1.2 (.references/sdm.txt:200727): "An execution of
+            // GETSEC in VMX non-root operation causes a VM exit if
+            // CR4.SMXE[Bit 14] = 1 regardless of the value of CPL or
+            // RAX". With that bit clear the instruction raises #UD in
+            // hardware instead and no exit is taken at all, and the CR4
+            // guest/host mask now keeps it clear for every guest - so on
+            // a correctly built VMCS this case cannot execute.
+            //
+            // It exists because "cannot execute" was exactly the state of
+            // affairs the day a guest could stop a processor with two
+            // instructions. CPUID leaf 1 ECX[6] was cleared and CR4.SMXE
+            // was not masked, so a guest that ignored the CPUID - or that
+            // simply set the bit without asking - reached this exit, and
+            // this exit reached `default:`, which does not resume.
+            // CLAUDE.md states the rule the miss broke: nothing a guest
+            // can execute may reach `default:`, and a case that faults is
+            // always available and always better.
+            //
+            // #UD is the honest answer rather than an arbitrary one. It is
+            // what a processor without SMX gives, it is what CPUID leaf 1
+            // ECX[6] already told the guest to expect, and it is the same
+            // answer the thirteen VMX instructions get from the case below
+            // for the same reason (8412b76). Emulating GETSEC is not an
+            // option worth weighing: its leaves enter an authenticated
+            // code module and a measured launch environment, neither of
+            // which survives a hypervisor underneath.
+            //
+            // RIP stays on the instruction, because a fault is reported at
+            // the instruction that caused it.
+            inject_invalid_opcode_exception();
+            advance_rip = false;
+            break;
+        }
         case basic_reason::invd: {
             // Deliberately not executed, and not passed through either.
             //
@@ -10355,6 +10415,7 @@ hypervisor::main(arch::x86_64::context & caller_context)
             // register keeps VMXE - without which the next VM entry
             // fails, since a processor in root mode must have it set.
             constexpr std::uint64_t cr4_vmxe = 1ull << 13;
+            constexpr std::uint64_t cr4_smxe = 1ull << 14;
 
             auto qualification = vmcs.exit_qualification();
             auto number = qualification & 0xf;
@@ -10484,8 +10545,28 @@ hypervisor::main(arch::x86_64::context & caller_context)
                 break;
             }
 
+            // SMXE goes the other way from VMXE, and unconditionally:
+            // it is refused in the shadow *and* in the register.
+            //
+            // CPUID leaf 1 ECX[6] is cleared for every build, so unlike
+            // VMX there is no configuration in which the guest is
+            // entitled to see this feature - and unlike VMXE nothing here
+            // needs the bit set. Dropping it from both keeps the two
+            // answers agreeing: the guest reads the CR4 it would have on
+            // a processor without SMX, and GETSEC raises #UD there rather
+            // than exiting to a handler.
+            //
+            // Silently rather than with a fault, which is the same choice
+            // the CR0 case above makes: a write to a reserved or
+            // unsupported CR4 bit is the guest's own to get wrong, and on
+            // a processor without SMX it would #GP - but this VMM is not
+            // emulating a processor without SMX, it is hiding one bit of
+            // a processor that has it. Faulting would announce the
+            // concealment.
+            shadow &= ~cr4_smxe;
+
             vmcs.cr4_read_shadow(shadow);
-            vmcs.guest_cr4(value | cr4_vmxe);
+            vmcs.guest_cr4((value | cr4_vmxe) & ~cr4_smxe);
             break;
         }
         case basic_reason::ept_violation: {

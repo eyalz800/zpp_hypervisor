@@ -148,6 +148,7 @@ constexpr std::uint64_t entry_ia32e_mode_guest = 1ull << 9;
  * see set unless it put it there itself.
  */
 constexpr std::uint64_t cr4_vmxe = 1ull << 13;
+constexpr std::uint64_t cr4_smxe = 1ull << 14;
 
 /**
  * The valid bit of an interruption-information field, SDM Table 25-19.
@@ -1459,7 +1460,16 @@ std::expected<void, zpp::error> hypervisor::build_vmcs02(std::size_t cpu)
     // operation, so a guest-state area without it fails VM entry. The read
     // shadow above answers for the bit, so nothing sees it.
     vmcs.guest_cr0(cr0_12);
-    vmcs.guest_cr4(cr4_12 | cr4_vmxe);
+
+    // VMXE forced in, SMXE forced out, for the two reasons stated where
+    // vmcs01 does the same: a processor in VMX operation must have VMXE
+    // (IA32_VMX_CR4_FIXED0), and nothing here implements SMX. A
+    // second-level guest running with CR4.SMXE set would exit on GETSEC -
+    // SDM 28.1.2 - and that exit belongs to neither level: this VMM does
+    // not offer the feature and a guest hypervisor was never told its
+    // guest had it either, since the CPUID concealment applies to every
+    // level below this one.
+    vmcs.guest_cr4((cr4_12 | cr4_vmxe) & ~cr4_smxe);
 
     for (auto guest_field : guest_state_fields) {
         vmcs.write(guest_field, shadow.read(guest_field));

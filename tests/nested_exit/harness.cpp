@@ -4654,6 +4654,30 @@ static void test_the_rest_of_vmcs02()
                   hv().vmcs.read(field::cr4_read_shadow),
               "and CR4's the same way");
 
+        constexpr std::uint64_t cr4_smxe = 1ull << 14;
+
+        // The nested half of the GETSEC fix. A second-level guest running
+        // with CR4.SMXE set exits on GETSEC - SDM 28.1.2
+        // (.references/sdm.txt:200727) - and that exit belongs to neither
+        // level: this VMM does not implement safer mode extensions, and
+        // the CPUID concealment applies to every level below it, so a
+        // guest hypervisor was never told its own guest had the feature
+        // either.
+        //
+        // vmcs12's guest CR4 is written by the guest hypervisor and is
+        // not something this VMM can talk it out of, so the bit is
+        // stripped on the way into vmcs02 rather than refused. The case
+        // sets it in vmcs12 to prove the stripping happens, because a
+        // union would carry it straight through.
+        hv().guest_vmcs12[cpu].write(field::guest_cr4, 0x20 | cr4_smxe);
+        hv().vmcs12_controls_captured = 0;
+        check(hv().build_vmcs02(cpu).has_value(),
+              "vmcs12 may name a guest CR4 with SMXE set");
+        check(0 == (hv().vmcs.read(field::guest_cr4) & cr4_smxe),
+              "SMXE is stripped from vmcs02's guest CR4, so a "
+              "second-level guest's GETSEC raises #UD in hardware rather "
+              "than exiting to a level that does not implement it");
+
         constexpr std::uint64_t cr4_vmxe = 1ull << 13;
         check(0 != (hv().vmcs.read(field::guest_cr4) & cr4_vmxe),
               "VMXE is forced into the real CR4, because "
