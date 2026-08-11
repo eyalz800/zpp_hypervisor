@@ -199,6 +199,40 @@ public:
     }
 
     /**
+     * Returns the page number field of a 2 MB entry, counted in 2 MB
+     * pages, and of a 1 GB entry counted in 1 GB pages.
+     *
+     * These exist because their absence was a bug rather than because
+     * the expression is long. `page_number()` counts in 4 KB pages -
+     * `m_value >> 12` - so the physical address is `page_number() << 12`,
+     * which is what the 4 KB paths do. A 2 MB path that writes
+     * `page_number() << 21` is not converting a 4 KB count into a 2 MB
+     * one, it is `m_value << 9`: the true base shifted left by nine bits.
+     * The 1 GB form is out by eighteen. A 2 MB page based at
+     * `0x40000000` answered `0x8000000000000`.
+     *
+     * `ept.h` has had `large_page_number()` since it was written and
+     * `epte_for` uses it correctly, which is exactly why the two
+     * diverged - the shape that reads correctly was available on one side
+     * of the tree and not the other. SDM 5.5.4 gives the fields: bits
+     * 51:21 for a 2 MB PDE, bits 51:30 for a 1 GB PDPTE, with the bits
+     * below reserved and required to be zero.
+     * @{
+     */
+    constexpr std::uint64_t large_page_number() const
+    {
+        return ((m_value >> 21) & 0x7fffffffull);
+    }
+
+    constexpr std::uint64_t huge_page_number() const
+    {
+        return ((m_value >> 30) & 0x3fffffull);
+    }
+    /**
+     * @}
+     */
+
+    /**
      * Returns the protection key field.
      */
     constexpr std::uint64_t protection_key() const

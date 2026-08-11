@@ -40,7 +40,7 @@ std::uint64_t os_page_table::virtual_to_physical(std::uint64_t value) const
     // OS put there and call it a page table. No such case at the pml4
     // level - SDM 5.5.4 makes PS reserved in a PML4E.
     if (pdpte.large()) {
-        return (pdpte.page_number() << 30) +
+        return (pdpte.huge_page_number() << 30) +
                address_structure.huge_offset();
     }
 
@@ -50,7 +50,7 @@ std::uint64_t os_page_table::virtual_to_physical(std::uint64_t value) const
     auto pde = pte(pd[address_structure.pde()]);
 
     if (pde.large()) {
-        return (pde.page_number() << 21) +
+        return (pde.large_page_number() << 21) +
                address_structure.large_offset();
     }
 

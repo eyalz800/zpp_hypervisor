@@ -24,7 +24,7 @@ std::uint64_t page_table::virtual_to_physical(std::uint64_t value) const
     auto pdpte = pdpt[address_structure.pdpte()];
 
     if (pdpte.large()) {
-        return (pdpte.page_number() << 30) +
+        return (pdpte.huge_page_number() << 30) +
                address_structure.huge_offset();
     }
 
@@ -39,7 +39,7 @@ std::uint64_t page_table::virtual_to_physical(std::uint64_t value) const
     auto pde = pd[address_structure.pde()];
 
     if (pde.large()) {
-        return (pde.page_number() << 21) +
+        return (pde.large_page_number() << 21) +
                address_structure.large_offset();
     }
 
