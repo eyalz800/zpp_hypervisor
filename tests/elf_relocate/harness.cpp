@@ -46,8 +46,6 @@
 
 namespace
 {
-using elf_file = zpp::elf_file;
-
 std::size_t g_checks{};
 std::size_t g_failures{};
 
@@ -152,20 +150,17 @@ image build(bool use_rela,
             const std::uintptr_t (&types)[image::entry_count],
             const std::uintptr_t (&initial_targets)[image::entry_count])
 {
-    using elf_header = elf_file::elf_header;
-    using elf_phdr = elf_file::elf_phdr;
-    using elf_dyn = elf_file::elf_dyn;
-    using elf_rel = elf_file::elf_rel;
-    using elf_rela = elf_file::elf_rela;
-
-    auto entry_size = use_rela ? sizeof(elf_rela) : sizeof(elf_rel);
+    auto entry_size = use_rela ? sizeof(zpp::elf_file::elf_rela)
+                               : sizeof(zpp::elf_file::elf_rel);
 
     image result{};
-    result.phdr_offset = sizeof(elf_header);
-    result.dynamic_offset = result.phdr_offset + (2 * sizeof(elf_phdr));
+    result.phdr_offset = sizeof(zpp::elf_file::elf_header);
+    result.dynamic_offset =
+        result.phdr_offset + (2 * sizeof(zpp::elf_file::elf_phdr));
     // Six dynamic entries is room for a table pointer, a table size and
     // the terminating DT_NULL, with slack.
-    result.table_offset = result.dynamic_offset + (6 * sizeof(elf_dyn));
+    result.table_offset =
+        result.dynamic_offset + (6 * sizeof(zpp::elf_file::elf_dyn));
     result.targets_offset =
         result.table_offset + (image::entry_count * entry_size);
 
@@ -173,7 +168,7 @@ image build(bool use_rela,
                  (image::entry_count * sizeof(std::uintptr_t));
     result.bytes.assign(total, 0);
 
-    auto & header = *result.at<elf_header>(0);
+    auto & header = *result.at<zpp::elf_file::elf_header>(0);
     std::memcpy(header.e_ident,
                 "\x7f"
                 "ELF\x02\x01\x01",
@@ -183,17 +178,18 @@ image build(bool use_rela,
     header.e_version = 1;
     header.e_entry = preferred_base;
     header.e_phoff = result.phdr_offset;
-    header.e_ehsize = sizeof(elf_header);
-    header.e_phentsize = sizeof(elf_phdr);
+    header.e_ehsize = sizeof(zpp::elf_file::elf_header);
+    header.e_phentsize = sizeof(zpp::elf_file::elf_phdr);
     header.e_phnum = 2;
 
     // One PT_LOAD covering the whole image, so p_offset and p_vaddr
     // differ by exactly the preferred base and every offset here doubles
     // as an address.
-    auto * program_headers = result.at<elf_phdr>(result.phdr_offset);
+    auto * program_headers =
+        result.at<zpp::elf_file::elf_phdr>(result.phdr_offset);
     program_headers[0] = {};
     program_headers[0].p_type =
-        static_cast<std::uint32_t>(elf_phdr::type::load);
+        static_cast<std::uint32_t>(zpp::elf_file::elf_phdr::type::load);
     program_headers[0].p_flags = 6; // read | write.
     program_headers[0].p_offset = 0;
     program_headers[0].p_vaddr = preferred_base;
@@ -204,34 +200,40 @@ image build(bool use_rela,
 
     program_headers[1] = {};
     program_headers[1].p_type =
-        static_cast<std::uint32_t>(elf_phdr::type::dynamic);
+        static_cast<std::uint32_t>(zpp::elf_file::elf_phdr::type::dynamic);
     program_headers[1].p_flags = 6;
     program_headers[1].p_offset = result.dynamic_offset;
     program_headers[1].p_vaddr = preferred_base + result.dynamic_offset;
     program_headers[1].p_paddr = program_headers[1].p_vaddr;
-    program_headers[1].p_filesz = 6 * sizeof(elf_dyn);
+    program_headers[1].p_filesz = 6 * sizeof(zpp::elf_file::elf_dyn);
     program_headers[1].p_memsz = program_headers[1].p_filesz;
     program_headers[1].p_align = 8;
 
     result.declared_table_size = image::entry_count * entry_size;
 
-    auto * dynamic = result.at<elf_dyn>(result.dynamic_offset);
+    auto * dynamic =
+        result.at<zpp::elf_file::elf_dyn>(result.dynamic_offset);
     dynamic[0].d_tag = static_cast<std::uintptr_t>(
-        use_rela ? elf_dyn::tag::rela : elf_dyn::tag::rel);
+        use_rela ? zpp::elf_file::elf_dyn::tag::rela
+                 : zpp::elf_file::elf_dyn::tag::rel);
     dynamic[0].d_ptr = preferred_base + result.table_offset;
     dynamic[1].d_tag = static_cast<std::uintptr_t>(
-        use_rela ? elf_dyn::tag::rela_size : elf_dyn::tag::rel_size);
+        use_rela ? zpp::elf_file::elf_dyn::tag::rela_size
+                 : zpp::elf_file::elf_dyn::tag::rel_size);
     dynamic[1].d_val = result.declared_table_size;
-    dynamic[2].d_tag = static_cast<std::uintptr_t>(elf_dyn::tag::null);
+    dynamic[2].d_tag =
+        static_cast<std::uintptr_t>(zpp::elf_file::elf_dyn::tag::null);
 
     for (std::size_t i{}; i < image::entry_count; ++i) {
         if (use_rela) {
-            auto & entry = result.at<elf_rela>(result.table_offset)[i];
+            auto & entry =
+                result.at<zpp::elf_file::elf_rela>(result.table_offset)[i];
             entry.r_offset = result.target_address(i);
             entry.r_info = types[i];
             entry.r_addend = addends[i];
         } else {
-            auto & entry = result.at<elf_rel>(result.table_offset)[i];
+            auto & entry =
+                result.at<zpp::elf_file::elf_rel>(result.table_offset)[i];
             entry.r_offset = result.target_address(i);
             entry.r_info = types[i];
         }
@@ -252,7 +254,8 @@ image build(bool use_rela,
  */
 unsigned char * load(image & source, std::vector<unsigned char> & memory)
 {
-    elf_file file(source.bytes.data(), elf_file::state::unloaded);
+    zpp::elf_file file(source.bytes.data(),
+                       zpp::elf_file::state::unloaded);
 
     // Sized by the loader itself, so a change to how it computes the
     // image size is followed rather than duplicated here.
@@ -261,7 +264,7 @@ unsigned char * load(image & source, std::vector<unsigned char> & memory)
             memory.assign(size, 0xcd);
             return memory.data();
         },
-        [](void *, std::size_t, elf_file::memory_protection) {}));
+        [](void *, std::size_t, zpp::elf_file::memory_protection) {}));
 
     return base;
 }
@@ -276,17 +279,17 @@ unsigned char * load(image & source, std::vector<unsigned char> & memory)
  */
 void trait_spelling()
 {
-    using rela_pointer = const elf_file::elf_rela *;
+    using rela_pointer = const zpp::elf_file::elf_rela *;
 
     using correct = std::remove_cv_t<std::remove_pointer_t<rela_pointer>>;
     using wrong = std::remove_pointer_t<std::remove_cv_t<rela_pointer>>;
 
-    check(std::is_same_v<correct, elf_file::elf_rela>,
+    check(std::is_same_v<correct, zpp::elf_file::elf_rela>,
           "pointer stripped first, cv second, names elf_rela");
-    check(!std::is_same_v<wrong, elf_file::elf_rela>,
+    check(!std::is_same_v<wrong, zpp::elf_file::elf_rela>,
           "cv stripped first names const elf_rela, which is NOT elf_rela "
           "- this is the comparison the bug turned false");
-    check(std::is_same_v<wrong, const elf_file::elf_rela>,
+    check(std::is_same_v<wrong, const zpp::elf_file::elf_rela>,
           "and it is const elf_rela specifically");
 
     // Same sizeof, which is why the stride, the count and every r_offset
@@ -449,9 +452,9 @@ void size_is_bytes_not_entries()
     auto source = build(true, addends, types, initial);
 
     // Declare half the table. Two entries of four.
-    using elf_dyn = elf_file::elf_dyn;
-    auto * dynamic = source.at<elf_dyn>(source.dynamic_offset);
-    dynamic[1].d_val = 2 * sizeof(elf_file::elf_rela);
+    auto * dynamic =
+        source.at<zpp::elf_file::elf_dyn>(source.dynamic_offset);
+    dynamic[1].d_val = 2 * sizeof(zpp::elf_file::elf_rela);
 
     std::vector<unsigned char> memory;
     auto * base = load(source, memory);
@@ -494,10 +497,10 @@ void dynamic_segment_found_by_type()
 
     auto source = build(true, addends, types, initial);
 
-    using elf_phdr = elf_file::elf_phdr;
-    auto * program_headers = source.at<elf_phdr>(source.phdr_offset);
-    check(elf_phdr::type::load ==
-              elf_phdr::type(program_headers[0].p_type),
+    auto * program_headers =
+        source.at<zpp::elf_file::elf_phdr>(source.phdr_offset);
+    check(zpp::elf_file::elf_phdr::type::load ==
+              zpp::elf_file::elf_phdr::type(program_headers[0].p_type),
           "the first program header is PT_LOAD, so PT_DYNAMIC is not "
           "reachable by taking the first one");
 
@@ -534,8 +537,8 @@ void bss_tail_is_zeroed()
 
     auto source = build(true, addends, types, initial);
 
-    using elf_phdr = elf_file::elf_phdr;
-    auto * program_headers = source.at<elf_phdr>(source.phdr_offset);
+    auto * program_headers =
+        source.at<zpp::elf_file::elf_phdr>(source.phdr_offset);
     auto file_size = program_headers[0].p_filesz;
     program_headers[0].p_memsz = file_size + 0x100;
 

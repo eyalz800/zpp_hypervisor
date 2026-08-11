@@ -117,8 +117,6 @@ void check_equal(std::uint64_t expected,
                  actual);
 }
 
-using init_function = zpp::crt::init::array_entry;
-
 /*
  * Stand-ins for the three linker-synthesized arrays.
  *
@@ -135,9 +133,9 @@ using init_function = zpp::crt::init::array_entry;
  * CLAUDE.md claim about the preinit bounds gets stated further down: the
  * walk is bounded by the range and by nothing else.
  */
-std::span<const init_function> g_preinit_array{};
-std::span<const init_function> g_init_array{};
-std::span<const init_function> g_fini_array{};
+std::span<const zpp::crt::init::array_entry> g_preinit_array{};
+std::span<const zpp::crt::init::array_entry> g_init_array{};
+std::span<const zpp::crt::init::array_entry> g_fini_array{};
 
 } // namespace
 
@@ -1328,13 +1326,14 @@ void fini_third()
     record(1000003);
 }
 
-init_function g_preinit_storage[] = {preinit_must_not_run};
-init_function g_init_storage[] = {init_first,
-                                  init_second,
-                                  init_third,
-                                  init_past_the_end_first,
-                                  init_past_the_end_second};
-init_function g_fini_storage[] = {fini_first, fini_second, fini_third};
+zpp::crt::init::array_entry g_preinit_storage[] = {preinit_must_not_run};
+zpp::crt::init::array_entry g_init_storage[] = {init_first,
+                                                init_second,
+                                                init_third,
+                                                init_past_the_end_first,
+                                                init_past_the_end_second};
+zpp::crt::init::array_entry g_fini_storage[] = {
+    fini_first, fini_second, fini_third};
 
 void the_init_arrays_run_forward()
 {

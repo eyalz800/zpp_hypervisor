@@ -109,14 +109,6 @@
 
 namespace
 {
-using zpp::arch::x86_64::memory_type;
-using zpp::arch::x86_64::os_page_table;
-using zpp::arch::x86_64::page_table;
-using zpp::arch::x86_64::pte;
-using zpp::arch::x86_64::virtual_address;
-
-using protection = page_table::protection;
-
 std::size_t g_checks{};
 std::size_t g_failures{};
 
@@ -207,46 +199,70 @@ struct address_field
     const char * name;
     unsigned low;
     unsigned high;
-    std::uint64_t (*read)(const virtual_address &);
-    void (*write)(virtual_address &, std::uint64_t);
+    std::uint64_t (*read)(const zpp::arch::x86_64::virtual_address &);
+    void (*write)(zpp::arch::x86_64::virtual_address &, std::uint64_t);
 };
 
 constexpr address_field address_fields[]{
     {"offset",
      0,
      11,
-     [](const virtual_address & a) { return a.offset(); },
-     [](virtual_address & a, std::uint64_t v) { a.offset(v); }},
+     [](const zpp::arch::x86_64::virtual_address & a) {
+         return a.offset();
+     },
+     [](zpp::arch::x86_64::virtual_address & a, std::uint64_t v) {
+         a.offset(v);
+     }},
     {"large_offset",
      0,
      20,
-     [](const virtual_address & a) { return a.large_offset(); },
-     [](virtual_address & a, std::uint64_t v) { a.large_offset(v); }},
+     [](const zpp::arch::x86_64::virtual_address & a) {
+         return a.large_offset();
+     },
+     [](zpp::arch::x86_64::virtual_address & a, std::uint64_t v) {
+         a.large_offset(v);
+     }},
     {"huge_offset",
      0,
      29,
-     [](const virtual_address & a) { return a.huge_offset(); },
-     [](virtual_address & a, std::uint64_t v) { a.huge_offset(v); }},
+     [](const zpp::arch::x86_64::virtual_address & a) {
+         return a.huge_offset();
+     },
+     [](zpp::arch::x86_64::virtual_address & a, std::uint64_t v) {
+         a.huge_offset(v);
+     }},
     {"pte",
      12,
      20,
-     [](const virtual_address & a) { return a.pte(); },
-     [](virtual_address & a, std::uint64_t v) { a.pte(v); }},
+     [](const zpp::arch::x86_64::virtual_address & a) { return a.pte(); },
+     [](zpp::arch::x86_64::virtual_address & a, std::uint64_t v) {
+         a.pte(v);
+     }},
     {"pde",
      21,
      29,
-     [](const virtual_address & a) { return a.pde(); },
-     [](virtual_address & a, std::uint64_t v) { a.pde(v); }},
+     [](const zpp::arch::x86_64::virtual_address & a) { return a.pde(); },
+     [](zpp::arch::x86_64::virtual_address & a, std::uint64_t v) {
+         a.pde(v);
+     }},
     {"pdpte",
      30,
      38,
-     [](const virtual_address & a) { return a.pdpte(); },
-     [](virtual_address & a, std::uint64_t v) { a.pdpte(v); }},
+     [](const zpp::arch::x86_64::virtual_address & a) {
+         return a.pdpte();
+     },
+     [](zpp::arch::x86_64::virtual_address & a, std::uint64_t v) {
+         a.pdpte(v);
+     }},
     {"pml4e",
      39,
      47,
-     [](const virtual_address & a) { return a.pml4e(); },
-     [](virtual_address & a, std::uint64_t v) { a.pml4e(v); }},
+     [](const zpp::arch::x86_64::virtual_address & a) {
+         return a.pml4e();
+     },
+     [](zpp::arch::x86_64::virtual_address & a, std::uint64_t v) {
+         a.pml4e(v);
+     }},
 };
 
 /**
@@ -256,7 +272,8 @@ constexpr address_field address_fields[]{
  * the class and are covered instead by the sweep below, which shows that
  * nothing reads them.
  */
-constexpr std::uint64_t low_48_of(const virtual_address & address)
+constexpr std::uint64_t
+low_48_of(const zpp::arch::x86_64::virtual_address & address)
 {
     return (address.pml4e() << 39) | (address.pdpte() << 30) |
            (address.pde() << 21) | (address.pte() << 12) |
@@ -278,7 +295,8 @@ constexpr bool address_bits_land_where_the_sdm_says()
 {
     for (const auto & field : address_fields) {
         for (unsigned bit{}; bit < 64; ++bit) {
-            virtual_address address{std::uint64_t{1} << bit};
+            zpp::arch::x86_64::virtual_address address{std::uint64_t{1}
+                                                       << bit};
 
             std::uint64_t expected{};
             if ((bit >= field.low) && (bit <= field.high)) {
@@ -307,13 +325,13 @@ constexpr bool address_setters_touch_only_their_field()
     for (const auto & field : address_fields) {
         auto mask = mask_of(field.low, field.high);
 
-        virtual_address set{seed};
+        zpp::arch::x86_64::virtual_address set{seed};
         field.write(set, ~std::uint64_t{});
         if (low_48_of(set) != ((seed | mask) & mask_of(0, 47))) {
             return false;
         }
 
-        virtual_address cleared{seed};
+        zpp::arch::x86_64::virtual_address cleared{seed};
         field.write(cleared, 0);
         if (low_48_of(cleared) != ((seed & ~mask) & mask_of(0, 47))) {
             return false;
@@ -331,7 +349,8 @@ void virtual_address_decomposition()
     // message.
     for (const auto & field : address_fields) {
         for (unsigned bit{}; bit < 64; ++bit) {
-            virtual_address address{std::uint64_t{1} << bit};
+            zpp::arch::x86_64::virtual_address address{std::uint64_t{1}
+                                                       << bit};
             std::uint64_t expected{};
             if ((bit >= field.low) && (bit <= field.high)) {
                 expected = std::uint64_t{1} << (bit - field.low);
@@ -343,7 +362,7 @@ void virtual_address_decomposition()
         }
 
         auto mask = mask_of(field.low, field.high);
-        virtual_address cleared{~std::uint64_t{}};
+        zpp::arch::x86_64::virtual_address cleared{~std::uint64_t{}};
         field.write(cleared, 0);
         check_equal(mask_of(0, 47) & ~mask,
                     low_48_of(cleared),
@@ -435,7 +454,7 @@ void virtual_address_decomposition()
     };
 
     for (const auto & test : boundaries) {
-        virtual_address address{test.address};
+        zpp::arch::x86_64::virtual_address address{test.address};
         check_equal(test.pml4e,
                     address.pml4e(),
                     std::string("pml4e of ") + test.what);
@@ -453,7 +472,7 @@ void virtual_address_decomposition()
 
     // The two larger offsets, which are what the large-page branches of
     // both walkers add to the page base.
-    virtual_address inside{0x1234ab7ffull};
+    zpp::arch::x86_64::virtual_address inside{0x1234ab7ffull};
     check_equal(0x7ff, inside.offset(), "offset within a 4 KB page");
     check_equal(0xab7ff,
                 inside.large_offset(),
@@ -495,68 +514,92 @@ struct entry_field
     const char * name;
     unsigned low;
     unsigned high;
-    std::uint64_t (*read)(const pte &);
-    void (*write)(pte &, std::uint64_t);
+    std::uint64_t (*read)(const zpp::arch::x86_64::pte &);
+    void (*write)(zpp::arch::x86_64::pte &, std::uint64_t);
 };
 
 constexpr entry_field entry_fields[]{
     {"present",
      0,
      0,
-     [](const pte & e) -> std::uint64_t { return e.present(); },
-     [](pte & e, std::uint64_t v) { e.present(v); }},
+     [](const zpp::arch::x86_64::pte & e) -> std::uint64_t {
+         return e.present();
+     },
+     [](zpp::arch::x86_64::pte & e, std::uint64_t v) { e.present(v); }},
     {"write",
      1,
      1,
-     [](const pte & e) -> std::uint64_t { return e.write(); },
-     [](pte & e, std::uint64_t v) { e.write(v); }},
+     [](const zpp::arch::x86_64::pte & e) -> std::uint64_t {
+         return e.write();
+     },
+     [](zpp::arch::x86_64::pte & e, std::uint64_t v) { e.write(v); }},
     {"user",
      2,
      2,
-     [](const pte & e) -> std::uint64_t { return e.user(); },
-     [](pte & e, std::uint64_t v) { e.user(v); }},
+     [](const zpp::arch::x86_64::pte & e) -> std::uint64_t {
+         return e.user();
+     },
+     [](zpp::arch::x86_64::pte & e, std::uint64_t v) { e.user(v); }},
     {"write_through",
      3,
      3,
-     [](const pte & e) -> std::uint64_t { return e.write_through(); },
-     [](pte & e, std::uint64_t v) { e.write_through(v); }},
+     [](const zpp::arch::x86_64::pte & e) -> std::uint64_t {
+         return e.write_through();
+     },
+     [](zpp::arch::x86_64::pte & e, std::uint64_t v) {
+         e.write_through(v);
+     }},
     {"page_level_cache_disable",
      4,
      4,
-     [](const pte & e) -> std::uint64_t {
+     [](const zpp::arch::x86_64::pte & e) -> std::uint64_t {
          return e.page_level_cache_disable();
      },
-     [](pte & e, std::uint64_t v) { e.page_level_cache_disable(v); }},
+     [](zpp::arch::x86_64::pte & e, std::uint64_t v) {
+         e.page_level_cache_disable(v);
+     }},
     {"access",
      5,
      5,
-     [](const pte & e) -> std::uint64_t { return e.access(); },
-     [](pte & e, std::uint64_t v) { e.access(v); }},
+     [](const zpp::arch::x86_64::pte & e) -> std::uint64_t {
+         return e.access();
+     },
+     [](zpp::arch::x86_64::pte & e, std::uint64_t v) { e.access(v); }},
     {"dirty",
      6,
      6,
-     [](const pte & e) -> std::uint64_t { return e.dirty(); },
-     [](pte & e, std::uint64_t v) { e.dirty(v); }},
+     [](const zpp::arch::x86_64::pte & e) -> std::uint64_t {
+         return e.dirty();
+     },
+     [](zpp::arch::x86_64::pte & e, std::uint64_t v) { e.dirty(v); }},
     {"pat",
      7,
      7,
-     [](const pte & e) -> std::uint64_t { return e.pat(); },
-     [](pte & e, std::uint64_t v) { e.pat(v); }},
+     [](const zpp::arch::x86_64::pte & e) -> std::uint64_t {
+         return e.pat();
+     },
+     [](zpp::arch::x86_64::pte & e, std::uint64_t v) { e.pat(v); }},
     {"large",
      7,
      7,
-     [](const pte & e) -> std::uint64_t { return e.large(); },
-     [](pte & e, std::uint64_t v) { e.large(v); }},
+     [](const zpp::arch::x86_64::pte & e) -> std::uint64_t {
+         return e.large();
+     },
+     [](zpp::arch::x86_64::pte & e, std::uint64_t v) { e.large(v); }},
     {"global",
      8,
      8,
-     [](const pte & e) -> std::uint64_t { return e.global(); },
-     [](pte & e, std::uint64_t v) { e.global(v); }},
+     [](const zpp::arch::x86_64::pte & e) -> std::uint64_t {
+         return e.global();
+     },
+     [](zpp::arch::x86_64::pte & e, std::uint64_t v) { e.global(v); }},
     {"page_number",
      12,
      51,
-     [](const pte & e) { return e.page_number(); },
-     [](pte & e, std::uint64_t v) { e.page_number(v); }},
+     [](const zpp::arch::x86_64::pte & e) { return e.page_number(); },
+     [](zpp::arch::x86_64::pte & e, std::uint64_t v) {
+         e.page_number(v);
+     }},
 
     // 58 and not 59, deliberately. See defect 3 in the header comment:
     // the SDM puts the protection key at bits 62:59 (sdm.txt:157313) and
@@ -565,20 +608,26 @@ constexpr entry_field entry_fields[]{
     {"protection_key",
      58,
      61,
-     [](const pte & e) { return e.protection_key(); },
-     [](pte & e, std::uint64_t v) { e.protection_key(v); }},
+     [](const zpp::arch::x86_64::pte & e) { return e.protection_key(); },
+     [](zpp::arch::x86_64::pte & e, std::uint64_t v) {
+         e.protection_key(v);
+     }},
     {"execute_disable",
      63,
      63,
-     [](const pte & e) -> std::uint64_t { return e.execute_disable(); },
-     [](pte & e, std::uint64_t v) { e.execute_disable(v); }},
+     [](const zpp::arch::x86_64::pte & e) -> std::uint64_t {
+         return e.execute_disable();
+     },
+     [](zpp::arch::x86_64::pte & e, std::uint64_t v) {
+         e.execute_disable(v);
+     }},
 };
 
 constexpr bool entry_bits_land_where_the_sdm_says()
 {
     for (const auto & field : entry_fields) {
         for (unsigned bit{}; bit < 64; ++bit) {
-            pte entry{std::uint64_t{1} << bit};
+            zpp::arch::x86_64::pte entry{std::uint64_t{1} << bit};
 
             std::uint64_t expected{};
             if ((bit >= field.low) && (bit <= field.high)) {
@@ -606,13 +655,13 @@ constexpr bool entry_setters_touch_only_their_field()
     for (const auto & field : entry_fields) {
         auto mask = mask_of(field.low, field.high);
 
-        pte from_zero{};
+        zpp::arch::x86_64::pte from_zero{};
         field.write(from_zero, ~std::uint64_t{});
         if (from_zero.value() != mask) {
             return false;
         }
 
-        pte from_ones{~std::uint64_t{}};
+        zpp::arch::x86_64::pte from_ones{~std::uint64_t{}};
         field.write(from_ones, 0);
         if (from_ones.value() != ~mask) {
             return false;
@@ -641,7 +690,7 @@ constexpr bool page_numbers_round_trip()
     };
 
     for (auto value : values) {
-        pte entry{};
+        zpp::arch::x86_64::pte entry{};
         entry.page_number(value);
         if (entry.page_number() != value) {
             return false;
@@ -651,7 +700,7 @@ constexpr bool page_numbers_round_trip()
         }
     }
 
-    pte entry{};
+    zpp::arch::x86_64::pte entry{};
     entry.page_number(0x10000000000ull);
     return (entry.page_number() == 0) && (entry.value() == 0);
 }
@@ -662,7 +711,7 @@ void entry_accessors()
 {
     for (const auto & field : entry_fields) {
         for (unsigned bit{}; bit < 64; ++bit) {
-            pte entry{std::uint64_t{1} << bit};
+            zpp::arch::x86_64::pte entry{std::uint64_t{1} << bit};
             std::uint64_t expected{};
             if ((bit >= field.low) && (bit <= field.high)) {
                 expected = std::uint64_t{1} << (bit - field.low);
@@ -675,7 +724,7 @@ void entry_accessors()
 
         auto mask = mask_of(field.low, field.high);
 
-        pte from_zero{};
+        zpp::arch::x86_64::pte from_zero{};
         field.write(from_zero, ~std::uint64_t{});
         check_equal(mask,
                     from_zero.value(),
@@ -683,7 +732,7 @@ void entry_accessors()
                         " written into an empty entry sets exactly its "
                         "own bits");
 
-        pte from_ones{~std::uint64_t{}};
+        zpp::arch::x86_64::pte from_ones{~std::uint64_t{}};
         field.write(from_ones, 0);
         check_equal(~mask,
                     from_ones.value(),
@@ -695,7 +744,7 @@ void entry_accessors()
     // Every flag set in turn, cumulatively, and read back. The sweep
     // above proves each accessor's position in isolation; this proves
     // they coexist, which is the shape map_page_from actually writes.
-    pte entry{};
+    zpp::arch::x86_64::pte entry{};
     entry.page_number(0xabcde);
     entry.present(true);
     entry.write(true);
@@ -738,7 +787,7 @@ void entry_accessors()
     // Table 5-18 (sdm.txt:157235) makes bit 7 the PS flag there. So the
     // alias is only wrong for the PAT bit of a large page, which nothing
     // in this tree sets and no accessor here can reach.
-    pte aliased{};
+    zpp::arch::x86_64::pte aliased{};
     aliased.pat(true);
     check(aliased.large(),
           "pat() and large() are the same bit 7 - correct for a 4 KB PTE "
@@ -746,7 +795,7 @@ void entry_accessors()
     check_equal(0x80, aliased.value(), "and that bit is bit 7");
 
     // Defect 3, asserted as it behaves.
-    pte keyed{};
+    zpp::arch::x86_64::pte keyed{};
     keyed.protection_key(0xf);
     check_equal(0x3c00000000000000ull,
                 keyed.value(),
@@ -829,7 +878,7 @@ struct walk_result
     int level{}; // 4 = pml4e, 3 = pdpte, 2 = pde, 1 = pte
     bool present{};
     bool large{};
-    pte entry{};
+    zpp::arch::x86_64::pte entry{};
     std::uint64_t physical{};
 };
 
@@ -843,9 +892,10 @@ struct walk_result
  * table would do, computed from the SDM's own rules (sdm.txt:157006
  * onwards), and the walker under test is compared against it.
  */
-walk_result hardware_walk(const page_table & table, std::uint64_t address)
+walk_result hardware_walk(const zpp::arch::x86_64::page_table & table,
+                          std::uint64_t address)
 {
-    virtual_address structure{address};
+    zpp::arch::x86_64::virtual_address structure{address};
 
     // head() is pml4[0] and the rest of the array follows it, which is
     // exactly how initialize_host_page_table uses it to compose
@@ -857,8 +907,8 @@ walk_result hardware_walk(const page_table & table, std::uint64_t address)
         return {4, false, false, pml4e, 0};
     }
 
-    const auto * pdpt =
-        reinterpret_cast<const pte *>(pml4e.page_number() << 12);
+    const auto * pdpt = reinterpret_cast<const zpp::arch::x86_64::pte *>(
+        pml4e.page_number() << 12);
     const auto & pdpte = pdpt[structure.pdpte()];
     if (!pdpte.present()) {
         return {3, false, false, pdpte, 0};
@@ -874,8 +924,8 @@ walk_result hardware_walk(const page_table & table, std::uint64_t address)
                     structure.huge_offset()};
     }
 
-    const auto * pd =
-        reinterpret_cast<const pte *>(pdpte.page_number() << 12);
+    const auto * pd = reinterpret_cast<const zpp::arch::x86_64::pte *>(
+        pdpte.page_number() << 12);
     const auto & pde = pd[structure.pde()];
     if (!pde.present()) {
         return {2, false, false, pde, 0};
@@ -891,8 +941,8 @@ walk_result hardware_walk(const page_table & table, std::uint64_t address)
                     structure.large_offset()};
     }
 
-    const auto * pt =
-        reinterpret_cast<const pte *>(pde.page_number() << 12);
+    const auto * pt = reinterpret_cast<const zpp::arch::x86_64::pte *>(
+        pde.page_number() << 12);
     const auto & entry = pt[structure.pte()];
     if (!entry.present()) {
         return {1, false, false, entry, 0};
@@ -960,10 +1010,11 @@ constexpr test_range test_ranges[]{
  * directory granularity rather than page granularity because two of the
  * tests overwrite a whole directory entry.
  */
-bool storage_collides_with_a_test_address(const page_table & table)
+bool storage_collides_with_a_test_address(
+    const zpp::arch::x86_64::page_table & table)
 {
     auto base = reinterpret_cast<std::uint64_t>(&table.head());
-    auto end = base + sizeof(page_table);
+    auto end = base + sizeof(zpp::arch::x86_64::page_table);
 
     for (auto page = base & ~(large_page_size - 1); page < end;
          page += large_page_size) {
@@ -972,8 +1023,8 @@ bool storage_collides_with_a_test_address(const page_table & table)
                  address < range.base + range.size;
                  address += page_size) {
                 if ((directory_of(page) == directory_of(address)) &&
-                    (virtual_address(page).pde() ==
-                     virtual_address(address).pde())) {
+                    (zpp::arch::x86_64::virtual_address(page).pde() ==
+                     zpp::arch::x86_64::virtual_address(address).pde())) {
                     return true;
                 }
             }
@@ -986,7 +1037,7 @@ bool storage_collides_with_a_test_address(const page_table & table)
  * Rejected allocations, kept alive so the allocator cannot hand the same
  * address back on the next attempt.
  */
-std::vector<std::unique_ptr<page_table>> g_rejected;
+std::vector<std::unique_ptr<zpp::arch::x86_64::page_table>> g_rejected;
 
 /**
  * A page table on the host heap, already mapped into itself, whose
@@ -1000,10 +1051,10 @@ std::vector<std::unique_ptr<page_table>> g_rejected;
  * through the aligned operator new - the same requirement the processor
  * has of the real thing.
  */
-std::unique_ptr<page_table> fresh_table()
+std::unique_ptr<zpp::arch::x86_64::page_table> fresh_table()
 {
     for (int attempt{}; attempt < 32; ++attempt) {
-        auto table = std::make_unique<page_table>();
+        auto table = std::make_unique<zpp::arch::x86_64::page_table>();
         if (storage_collides_with_a_test_address(*table)) {
             g_rejected.push_back(std::move(table));
             continue;
@@ -1016,7 +1067,7 @@ std::unique_ptr<page_table> fresh_table()
           "no allocation in 32 attempts placed the table clear of the "
           "test addresses - this is a harness problem, not a page table "
           "one");
-    return std::make_unique<page_table>();
+    return std::make_unique<zpp::arch::x86_64::page_table>();
 }
 
 /**
@@ -1030,8 +1081,8 @@ std::unique_ptr<page_table> fresh_table()
  * every address outside that aliases onto one inside it. There is no
  * allocation anywhere in page_table, so this is the whole of it.
  */
-static_assert(sizeof(page_table) == 1028 * 4096);
-static_assert(alignof(page_table) == 4096);
+static_assert(sizeof(zpp::arch::x86_64::page_table) == 1028 * 4096);
+static_assert(alignof(zpp::arch::x86_64::page_table) == 4096);
 
 void mapping_round_trips()
 {
@@ -1052,8 +1103,9 @@ void mapping_round_trips()
 
     table->map_from(base,
                     size,
-                    protection::read | protection::write |
-                        protection::execute,
+                    zpp::arch::x86_64::page_table::protection::read |
+                        zpp::arch::x86_64::page_table::protection::write |
+                        zpp::arch::x86_64::page_table::protection::execute,
                     source);
 
     for (std::uint64_t offset{}; offset < size; offset += page_size) {
@@ -1094,7 +1146,7 @@ void mapping_round_trips()
           "and executable when execute was asked for");
     check(!leaf.large(), "and it is a 4 KB leaf, never a large page");
 
-    virtual_address structure{base};
+    zpp::arch::x86_64::virtual_address structure{base};
     const auto * pml4 = &table->head();
     const auto & pml4e = pml4[structure.pml4e()];
     check(pml4e.present() && pml4e.write() && !pml4e.execute_disable(),
@@ -1102,14 +1154,14 @@ void mapping_round_trips()
           "executable - SDM 5.6.1 makes rights the conjunction over the "
           "walk, so a restriction here would cost 512 GB of mappings");
 
-    const auto * pdpt =
-        reinterpret_cast<const pte *>(pml4e.page_number() << 12);
+    const auto * pdpt = reinterpret_cast<const zpp::arch::x86_64::pte *>(
+        pml4e.page_number() << 12);
     const auto & pdpte = pdpt[structure.pdpte()];
     check(pdpte.present() && pdpte.write() && !pdpte.execute_disable(),
           "and so is the PDPT entry");
 
-    const auto * pd =
-        reinterpret_cast<const pte *>(pdpte.page_number() << 12);
+    const auto * pd = reinterpret_cast<const zpp::arch::x86_64::pte *>(
+        pdpte.page_number() << 12);
     const auto & pde = pd[structure.pde()];
     check(pde.present() && pde.write() && !pde.execute_disable(),
           "and so is the page directory entry");
@@ -1117,7 +1169,10 @@ void mapping_round_trips()
     // A read-only, non-executable mapping - the shape the APIC page and
     // the controller register pages get.
     constexpr std::uint64_t read_only = 0x50000000;
-    table->map_from(read_only, page_size, protection::read, source);
+    table->map_from(read_only,
+                    page_size,
+                    zpp::arch::x86_64::page_table::protection::read,
+                    source);
 
     auto & restricted = table->page_table_entry(read_only);
     check(restricted.present(), "a read-only mapping is present");
@@ -1134,8 +1189,11 @@ void mapping_round_trips()
     // outside EPT, which is why protection::read has no effect of its
     // own here.
     constexpr std::uint64_t writable = 0x50000000;
-    table->map_from(
-        writable, page_size, protection::read | protection::write, source);
+    table->map_from(writable,
+                    page_size,
+                    zpp::arch::x86_64::page_table::protection::read |
+                        zpp::arch::x86_64::page_table::protection::write,
+                    source);
     check(table->page_table_entry(writable).write(),
           "remapping the same page writable sets R/W back");
 }
@@ -1150,7 +1208,8 @@ void scattered_sources_are_translated_per_page()
 
     table->map_from(base,
                     pages * page_size,
-                    protection::read | protection::write,
+                    zpp::arch::x86_64::page_table::protection::read |
+                        zpp::arch::x86_64::page_table::protection::write,
                     scattered);
 
     for (std::size_t i{}; i < pages; ++i) {
@@ -1209,7 +1268,8 @@ void unmapped_addresses_are_not_refused()
     constexpr std::uint64_t mapped_low = 0x70000000;
     table->map_from(mapped_low,
                     page_size,
-                    protection::read | protection::write,
+                    zpp::arch::x86_64::page_table::protection::read |
+                        zpp::arch::x86_64::page_table::protection::write,
                     scatter_source{});
     table->page_table_entry(mapped_low).page_number(0);
     check(hardware_walk(*table, mapped_low).present,
@@ -1245,10 +1305,12 @@ void boundaries_between_levels()
         auto table = fresh_table();
         identity_source source;
 
-        table->map_from(test.base,
-                        2 * page_size,
-                        protection::read | protection::write,
-                        source);
+        table->map_from(
+            test.base,
+            2 * page_size,
+            zpp::arch::x86_64::page_table::protection::read |
+                zpp::arch::x86_64::page_table::protection::write,
+            source);
 
         auto low = test.base;
         auto high = test.base + page_size;
@@ -1278,8 +1340,8 @@ void boundaries_between_levels()
         // The two pages really are in different structures at the level
         // the boundary names, which is what makes this a boundary test
         // rather than two mappings that happen to work.
-        virtual_address a{low};
-        virtual_address b{high};
+        zpp::arch::x86_64::virtual_address a{low};
+        zpp::arch::x86_64::virtual_address b{high};
         switch (test.level) {
         case 2:
             check(a.pde() != b.pde(),
@@ -1318,12 +1380,18 @@ void repeated_and_overlapping_mappings()
     // maps the four controller register addresses a page at a time and
     // says so: "The four usually share one page ... so this is normally
     // a single mapping done four times, and map_from is idempotent."
-    table->map_from(
-        base, page_size, protection::read | protection::write, source);
+    table->map_from(base,
+                    page_size,
+                    zpp::arch::x86_64::page_table::protection::read |
+                        zpp::arch::x86_64::page_table::protection::write,
+                    source);
     auto first = table->page_table_entry(base).value();
 
-    table->map_from(
-        base, page_size, protection::read | protection::write, source);
+    table->map_from(base,
+                    page_size,
+                    zpp::arch::x86_64::page_table::protection::read |
+                        zpp::arch::x86_64::page_table::protection::write,
+                    source);
     check_equal(first,
                 table->page_table_entry(base).value(),
                 "mapping the same page twice the same way changes "
@@ -1331,7 +1399,10 @@ void repeated_and_overlapping_mappings()
 
     // Overlapping ranges: the later mapping wins, whole entry, including
     // the protection. There is no merge and no refusal.
-    table->map_from(base, 2 * page_size, protection::read, source);
+    table->map_from(base,
+                    2 * page_size,
+                    zpp::arch::x86_64::page_table::protection::read,
+                    source);
     auto & leaf = table->page_table_entry(base);
     check(!leaf.write(),
           "an overlapping mapping replaces the protection of the pages "
@@ -1345,7 +1416,8 @@ void repeated_and_overlapping_mappings()
     // And a remap to a different physical page takes effect at once.
     table->map_from(base,
                     page_size,
-                    protection::read | protection::write,
+                    zpp::arch::x86_64::page_table::protection::read |
+                        zpp::arch::x86_64::page_table::protection::write,
                     scatter_source{});
     check_equal(scatter_source::physical_of(base),
                 table->virtual_to_physical(base),
@@ -1361,20 +1433,27 @@ void alignment_of_the_address_and_the_size()
     // Size rounds up: the page count is ceil(size / 4096), so one byte
     // maps one page and one byte over a page maps two.
     constexpr std::uint64_t single = 0x30000000;
-    table->map_from(single, 1, protection::read, source);
+    table->map_from(single,
+                    1,
+                    zpp::arch::x86_64::page_table::protection::read,
+                    source);
     check(hardware_walk(*table, single).present,
           "a one byte range maps the page containing it");
     check(!hardware_walk(*table, single + page_size).present,
           "and not the page after it");
 
     constexpr std::uint64_t two = 0x31000000;
-    table->map_from(two, page_size + 1, protection::read, source);
+    table->map_from(two,
+                    page_size + 1,
+                    zpp::arch::x86_64::page_table::protection::read,
+                    source);
     check(hardware_walk(*table, two).present &&
               hardware_walk(*table, two + page_size).present,
           "a range one byte over a page maps two pages");
 
     constexpr std::uint64_t none = 0x32000000;
-    table->map_from(none, 0, protection::read, source);
+    table->map_from(
+        none, 0, zpp::arch::x86_64::page_table::protection::read, source);
     check(!hardware_walk(*table, none).present,
           "a zero length range maps nothing");
 
@@ -1384,7 +1463,10 @@ void alignment_of_the_address_and_the_size()
     // own offset discarded by the shift. That is the shape elf_file's
     // preferred-base rounding depends on elsewhere in the tree.
     constexpr std::uint64_t unaligned = 0x33000800;
-    table->map_from(unaligned, page_size, protection::read, source);
+    table->map_from(unaligned,
+                    page_size,
+                    zpp::arch::x86_64::page_table::protection::read,
+                    source);
     auto walk = hardware_walk(*table, unaligned);
     check(walk.present,
           "an unaligned base still covers the page it starts in");
@@ -1426,22 +1508,28 @@ void the_structure_aliases_and_that_is_the_bound()
     constexpr std::uint64_t first = 1 * huge_page_size;
     constexpr std::uint64_t second = 2 * huge_page_size;
 
-    virtual_address a{first};
-    virtual_address b{second};
+    zpp::arch::x86_64::virtual_address a{first};
+    zpp::arch::x86_64::virtual_address b{second};
     check(a.pdpte() != b.pdpte(),
           "the two addresses differ in their PDPT index");
     check((a.pde() == b.pde()) && (a.pte() == b.pte()) &&
               (directory_of(first) == directory_of(second)),
           "and agree in bit 38 and in everything below the PDPT index");
 
-    table->map_from(
-        first, page_size, protection::read | protection::write, source);
+    table->map_from(first,
+                    page_size,
+                    zpp::arch::x86_64::page_table::protection::read |
+                        zpp::arch::x86_64::page_table::protection::write,
+                    source);
     check_equal(first,
                 table->virtual_to_physical(first),
                 "the first of the two maps");
 
-    table->map_from(
-        second, page_size, protection::read | protection::write, source);
+    table->map_from(second,
+                    page_size,
+                    zpp::arch::x86_64::page_table::protection::read |
+                        zpp::arch::x86_64::page_table::protection::write,
+                    source);
     check_equal(second,
                 table->virtual_to_physical(second),
                 "and so does the second");
@@ -1463,8 +1551,11 @@ void the_structure_aliases_and_that_is_the_bound()
     // so.
     constexpr std::uint64_t low_half = 0x1000;
     constexpr std::uint64_t high_half = pml4e_span + 0x1000;
-    table->map_from(
-        low_half, page_size, protection::read | protection::write, source);
+    table->map_from(low_half,
+                    page_size,
+                    zpp::arch::x86_64::page_table::protection::read |
+                        zpp::arch::x86_64::page_table::protection::write,
+                    source);
     check_equal(low_half,
                 table->virtual_to_physical(low_half),
                 "a page in the first 512 GB maps");
@@ -1488,7 +1579,8 @@ void the_structure_aliases_and_that_is_the_bound()
     // aliased answer.
     table->map_from(high_half,
                     page_size,
-                    protection::read | protection::write,
+                    zpp::arch::x86_64::page_table::protection::read |
+                        zpp::arch::x86_64::page_table::protection::write,
                     source);
     check_equal(high_half,
                 hardware_walk(*table, high_half).physical,
@@ -1505,7 +1597,7 @@ void the_structure_aliases_and_that_is_the_bound()
     // preference here, it is the size of the structure: there is no
     // allocation in page_table and nothing to grow.
     check_equal(1028ull * page_size,
-                sizeof(page_table),
+                sizeof(zpp::arch::x86_64::page_table),
                 "the whole structure is 1028 pages, which is 2 GB of "
                 "distinct mappings and no more");
 }
@@ -1520,12 +1612,15 @@ void map_page_before_map_self_is_wrong()
     // first thing initialize_host_page_table does; it is stated here so
     // that a caller which gets the order wrong has something to
     // recognise.
-    auto table = std::make_unique<page_table>();
-    table->map_page(
-        0x40000000, 0x40000000, protection::read | protection::write);
+    auto table = std::make_unique<zpp::arch::x86_64::page_table>();
+    table->map_page(0x40000000,
+                    0x40000000,
+                    zpp::arch::x86_64::page_table::protection::read |
+                        zpp::arch::x86_64::page_table::protection::write);
 
     const auto * pml4 = &table->head();
-    const auto & pml4e = pml4[virtual_address(0x40000000).pml4e()];
+    const auto & pml4e =
+        pml4[zpp::arch::x86_64::virtual_address(0x40000000).pml4e()];
     check(pml4e.present(),
           "map_page on a table that has not mapped itself does produce a "
           "present PML4 entry");
@@ -1565,19 +1660,23 @@ void large_entries_are_translated_too_high()
     constexpr std::uint64_t address = 0x40000000;
     constexpr std::uint64_t physical = 0x80000000;
 
-    table->map_from(
-        address, page_size, protection::read | protection::write, source);
+    table->map_from(address,
+                    page_size,
+                    zpp::arch::x86_64::page_table::protection::read |
+                        zpp::arch::x86_64::page_table::protection::write,
+                    source);
 
-    virtual_address structure{address};
+    zpp::arch::x86_64::virtual_address structure{address};
     const auto * pml4 = &table->head();
     const auto & pml4e = pml4[structure.pml4e()];
     const auto * const_pdpt =
-        reinterpret_cast<const pte *>(pml4e.page_number() << 12);
-    auto * pd = reinterpret_cast<pte *>(
+        reinterpret_cast<const zpp::arch::x86_64::pte *>(
+            pml4e.page_number() << 12);
+    auto * pd = reinterpret_cast<zpp::arch::x86_64::pte *>(
         const_pdpt[structure.pdpte()].page_number() << 12);
     auto & pde = pd[structure.pde()];
 
-    pde = pte{physical | 0x83}; // PS | R/W | P
+    pde = zpp::arch::x86_64::pte{physical | 0x83}; // PS | R/W | P
     check(pde.large(), "the hand-installed PDE is a 2 MB entry");
 
     auto walk = hardware_walk(*table, address + 0x1234);
@@ -1619,14 +1718,17 @@ void large_entries_are_translated_too_high()
     // a 1 GB page's address in bits 51:30, so the error is eighteen bits
     // rather than nine.
     auto huge = fresh_table();
-    huge->map_from(
-        address, page_size, protection::read | protection::write, source);
+    huge->map_from(address,
+                   page_size,
+                   zpp::arch::x86_64::page_table::protection::read |
+                       zpp::arch::x86_64::page_table::protection::write,
+                   source);
 
     const auto * huge_pml4 = &huge->head();
-    auto * huge_pdpt = reinterpret_cast<pte *>(
+    auto * huge_pdpt = reinterpret_cast<zpp::arch::x86_64::pte *>(
         huge_pml4[structure.pml4e()].page_number() << 12);
     auto & pdpte = huge_pdpt[structure.pdpte()];
-    pdpte = pte{huge_page_size | 0x83};
+    pdpte = zpp::arch::x86_64::pte{huge_page_size | 0x83};
 
     check_equal(huge_page_size + 0x1234,
                 hardware_walk(*huge, address + 0x1234).physical,
@@ -1732,7 +1834,7 @@ void build_fake_table()
         }
     }
 
-    virtual_address structure{walked_address};
+    zpp::arch::x86_64::virtual_address structure{walked_address};
 
     g_physical_memory[pml4_page][structure.pml4e()] =
         fake_physical_of(pdpt_page) | 0x67;
@@ -1769,8 +1871,8 @@ void the_os_walk_finds_the_right_page()
 {
     build_fake_table();
 
-    os_page_table table(fake_physical_of(pml4_page),
-                        fake_physical_to_virtual);
+    zpp::arch::x86_64::os_page_table table(fake_physical_of(pml4_page),
+                                           fake_physical_to_virtual);
 
     check(bool(table),
           "an os_page_table built with a callback is initialized");
@@ -1801,7 +1903,7 @@ void the_os_walk_finds_the_right_page()
 
     // Every index is used, and used at the right level: moving one index
     // moves the answer to a slot that was never filled in.
-    virtual_address elsewhere{walked_address};
+    zpp::arch::x86_64::virtual_address elsewhere{walked_address};
     elsewhere.pde(elsewhere.pde() + 1);
     check(table.virtual_to_physical(low_48_of(elsewhere) | (1ull << 39)) !=
               fake_physical_of(data_page) + 0x123,
@@ -1811,8 +1913,8 @@ void the_os_walk_finds_the_right_page()
     // twelve bits are PCID, or PWT and PCD, depending on CR4.PCIDE, and
     // never part of the address.
     g_last_translation = 0;
-    os_page_table with_pcid(fake_physical_of(pml4_page) | 0xfff,
-                            fake_physical_to_virtual);
+    zpp::arch::x86_64::os_page_table with_pcid(
+        fake_physical_of(pml4_page) | 0xfff, fake_physical_to_virtual);
     check_equal(fake_physical_of(pml4_page),
                 g_last_translation,
                 "the constructor masks the low twelve bits out of CR3 "
@@ -1829,7 +1931,7 @@ void the_os_walk_finds_the_right_page()
 
 void the_os_walk_handles_large_pages()
 {
-    virtual_address structure{walked_address};
+    zpp::arch::x86_64::virtual_address structure{walked_address};
 
     // A 2 MB leaf at the page directory. Its address field is bits 51:21
     // (SDM Table 5-18, sdm.txt:157243), so the page it names is 2 MB
@@ -1839,8 +1941,8 @@ void the_os_walk_handles_large_pages()
     constexpr std::uint64_t large_base = 0x200000;
     g_physical_memory[pd_page][structure.pde()] = large_base | 0xe7;
 
-    os_page_table table(fake_physical_of(pml4_page),
-                        fake_physical_to_virtual);
+    zpp::arch::x86_64::os_page_table table(fake_physical_of(pml4_page),
+                                           fake_physical_to_virtual);
 
     // This is the copy of the walk that was live: the Windows and Linux
     // loaders pass a real physical_to_virtual, and the tables they hand
@@ -1868,8 +1970,8 @@ void the_os_walk_handles_large_pages()
     constexpr std::uint64_t huge_base = 0x40000000;
     g_physical_memory[pdpt_page][structure.pdpte()] = huge_base | 0xe7;
 
-    os_page_table huge(fake_physical_of(pml4_page),
-                       fake_physical_to_virtual);
+    zpp::arch::x86_64::os_page_table huge(fake_physical_of(pml4_page),
+                                          fake_physical_to_virtual);
     check_equal(huge_base + structure.huge_offset(),
                 huge.virtual_to_physical(walked_address),
                 "and the 1 GB page answers base plus bits 29:0");
@@ -1883,8 +1985,8 @@ void the_os_walk_handles_large_pages()
     // which is the behaviour os_page_table.cpp's comment claims.
     build_fake_table();
     g_physical_memory[pml4_page][structure.pml4e()] |= 0x80;
-    os_page_table ignored(fake_physical_of(pml4_page),
-                          fake_physical_to_virtual);
+    zpp::arch::x86_64::os_page_table ignored(fake_physical_of(pml4_page),
+                                             fake_physical_to_virtual);
     check_equal(fake_physical_of(data_page) + 0x123,
                 ignored.virtual_to_physical(walked_address),
                 "PS in a PML4 entry is reserved, and the walk descends "
@@ -1893,7 +1995,7 @@ void the_os_walk_handles_large_pages()
 
 void a_not_present_entry_is_not_refused()
 {
-    virtual_address structure{walked_address};
+    zpp::arch::x86_64::virtual_address structure{walked_address};
 
     // Defect 2, in the walker where it is most dangerous. There is no
     // present check at any level and no failure value in the return
@@ -1920,8 +2022,8 @@ void a_not_present_entry_is_not_refused()
         build_fake_table();
         g_physical_memory[test.page][test.index] = 0;
 
-        os_page_table table(fake_physical_of(pml4_page),
-                            fake_physical_to_virtual);
+        zpp::arch::x86_64::os_page_table table(fake_physical_of(pml4_page),
+                                               fake_physical_to_virtual);
 
         auto answer = table.virtual_to_physical(walked_address);
 
@@ -1943,8 +2045,8 @@ void a_not_present_entry_is_not_refused()
     // aligned, which is defect 2 again from the other end.
     build_fake_table();
     g_physical_memory[pt_page][structure.pte()] = 0;
-    os_page_table table(fake_physical_of(pml4_page),
-                        fake_physical_to_virtual);
+    zpp::arch::x86_64::os_page_table table(fake_physical_of(pml4_page),
+                                           fake_physical_to_virtual);
     check_equal(0x123,
                 table.virtual_to_physical(walked_address),
                 "a not-present leaf answers the offset within the page");
@@ -1956,7 +2058,7 @@ void the_uefi_case_has_no_callback()
     // own answer - the UEFI case, per zpp_loader_parameters, and the
     // reason initialize_host_page_table can walk the OS table there at
     // all.
-    os_page_table table(0x1234000, nullptr);
+    zpp::arch::x86_64::os_page_table table(0x1234000, nullptr);
 
     check_equal(0xdeadbeef,
                 table.virtual_to_physical(std::uint64_t{0xdeadbeef}),
@@ -1978,7 +2080,7 @@ void the_uefi_case_has_no_callback()
           "pointer to hold - operator bool means 'has a callback', not "
           "'usable'");
 
-    os_page_table empty;
+    zpp::arch::x86_64::os_page_table empty;
     check(!bool(empty),
           "a default constructed os_page_table is false too");
 }
@@ -2004,36 +2106,50 @@ void the_uefi_case_has_no_callback()
 // SDM Vol. 3A Table 14-8, "Memory Types That Can Be Encoded in MTRRs"
 // (sdm.txt:173830), and Table 14-10, "Memory Types That Can Be Encoded
 // With PAT" (sdm.txt:174665), which agree on all five of these.
-static_assert(static_cast<int>(memory_type::uncachable) == 0);
-static_assert(static_cast<int>(memory_type::write_combining) == 1);
-static_assert(static_cast<int>(memory_type::write_through) == 4);
-static_assert(static_cast<int>(memory_type::write_protected) == 5);
-static_assert(static_cast<int>(memory_type::write_back) == 6);
+static_assert(
+    static_cast<int>(zpp::arch::x86_64::memory_type::uncachable) == 0);
+static_assert(static_cast<int>(
+                  zpp::arch::x86_64::memory_type::write_combining) == 1);
+static_assert(
+    static_cast<int>(zpp::arch::x86_64::memory_type::write_through) == 4);
+static_assert(static_cast<int>(
+                  zpp::arch::x86_64::memory_type::write_protected) == 5);
+static_assert(
+    static_cast<int>(zpp::arch::x86_64::memory_type::write_back) == 6);
 
 void memory_type_encodings()
 {
-    check_equal(0,
-                static_cast<int>(memory_type::uncachable),
-                "UC is 00H (SDM Table 14-8, sdm.txt:173832)");
     check_equal(
-        1, static_cast<int>(memory_type::write_combining), "WC is 01H");
-    check_equal(4,
-                static_cast<int>(memory_type::write_through),
-                "WT is 04H - 02H and 03H are reserved, which is why "
-                "there is no enumerator between them");
+        0,
+        static_cast<int>(zpp::arch::x86_64::memory_type::uncachable),
+        "UC is 00H (SDM Table 14-8, sdm.txt:173832)");
     check_equal(
-        5, static_cast<int>(memory_type::write_protected), "WP is 05H");
-    check_equal(6, static_cast<int>(memory_type::write_back), "WB is 06H");
+        1,
+        static_cast<int>(zpp::arch::x86_64::memory_type::write_combining),
+        "WC is 01H");
+    check_equal(
+        4,
+        static_cast<int>(zpp::arch::x86_64::memory_type::write_through),
+        "WT is 04H - 02H and 03H are reserved, which is why "
+        "there is no enumerator between them");
+    check_equal(
+        5,
+        static_cast<int>(zpp::arch::x86_64::memory_type::write_protected),
+        "WP is 05H");
+    check_equal(
+        6,
+        static_cast<int>(zpp::arch::x86_64::memory_type::write_back),
+        "WB is 06H");
 
     // 07H is UC- in the PAT (Table 14-10, sdm.txt:174672) and reserved
     // in an MTRR. This enum is used for MTRRs and for EPT entries as
     // well as for reasoning about the PAT, so it has no enumerator for
     // it, and every value it does have is legal in all three.
-    for (auto type : {memory_type::uncachable,
-                      memory_type::write_combining,
-                      memory_type::write_through,
-                      memory_type::write_protected,
-                      memory_type::write_back}) {
+    for (auto type : {zpp::arch::x86_64::memory_type::uncachable,
+                      zpp::arch::x86_64::memory_type::write_combining,
+                      zpp::arch::x86_64::memory_type::write_through,
+                      zpp::arch::x86_64::memory_type::write_protected,
+                      zpp::arch::x86_64::memory_type::write_back}) {
         auto value = static_cast<int>(type);
         check((value != 2) && (value != 3) && (value != 7),
               "no memory_type enumerator carries an encoding that would "
@@ -2044,13 +2160,13 @@ void memory_type_encodings()
     // The three bits that index the PAT, in a page table entry. Their
     // positions are the whole of what a page table entry says about the
     // memory type of the page it maps.
-    pte entry{};
+    zpp::arch::x86_64::pte entry{};
     entry.write_through(true);
     check_equal(1ull << 3, entry.value(), "PWT is bit 3");
-    entry = pte{};
+    entry = zpp::arch::x86_64::pte{};
     entry.page_level_cache_disable(true);
     check_equal(1ull << 4, entry.value(), "PCD is bit 4");
-    entry = pte{};
+    entry = zpp::arch::x86_64::pte{};
     entry.pat(true);
     check_equal(1ull << 7,
                 entry.value(),
@@ -2060,7 +2176,7 @@ void memory_type_encodings()
     // trip together, over all eight indices, and independently of each
     // other.
     for (unsigned index{}; index < 8; ++index) {
-        pte typed{};
+        zpp::arch::x86_64::pte typed{};
         typed.write_through(index & 1);
         typed.page_level_cache_disable((index >> 1) & 1);
         typed.pat((index >> 2) & 1);

@@ -131,8 +131,6 @@
 #include <thread>
 #include <vector>
 
-using zpp::hypervisor::hypervisor;
-
 // ------------------------------------------------------------- checking
 static int g_failures = 0;
 static int g_checks = 0;
@@ -223,12 +221,12 @@ void wrmsr(std::uint32_t index, std::uint64_t value)
  * A fresh hypervisor for each test. Big enough that one on the stack is
  * unwise, so it lives here and is reset between tests.
  */
-static hypervisor g_vmm;
+static zpp::hypervisor::hypervisor g_vmm;
 
 static void reset()
 {
     g_vmm.~hypervisor();
-    ::new (&g_vmm) hypervisor();
+    ::new (&g_vmm) zpp::hypervisor::hypervisor();
     g_vmm.start_up_memory = reinterpret_cast<std::uint64_t>(g_trampoline);
 
     // The real host page table, over the two per-processor regions
@@ -353,7 +351,7 @@ static void test_one_vmcs_per_processor()
 
     // Out of range is refused rather than indexed, since the slot now
     // reaches an array directly.
-    check(!g_vmm.enter_root_mode(hypervisor::max_cpus),
+    check(!g_vmm.enter_root_mode(zpp::hypervisor::hypervisor::max_cpus),
           "a slot past max_cpus is refused rather than indexed");
 }
 
@@ -504,7 +502,6 @@ static void test_handoff_is_obeyed()
 {
     std::println("\nthe hand-off is obeyed, not guessed");
 
-    using handoff = hypervisor::start_up_handoff_state;
     constexpr std::uint64_t wait_for_sipi = 3;
     constexpr std::uint64_t active = 0;
 
@@ -514,14 +511,21 @@ static void test_handoff_is_obeyed()
     g_vmm.number_of_known_processors = 2;
     g_vmm.processor_virtualized[1] = true;
     g_vmm.resume_activity_state[1] = wait_for_sipi;
-    g_vmm.start_up_handoff[1].store(handoff::software_wait);
+    g_vmm.start_up_handoff[1].store(
+        zpp::hypervisor::hypervisor::start_up_handoff_state::
+            software_wait);
 
     auto answered = g_vmm.start_up_processor(7, 0x42);
-    check(hypervisor::start_up_result::adopted == answered,
+    check(zpp::hypervisor::hypervisor::start_up_result::adopted ==
+              answered,
           "a target listening on the software hand-off is adopted");
-    check(handoff::is_delivered(g_vmm.start_up_handoff[1].load()) &&
-              (0x42 == handoff::vector(g_vmm.start_up_handoff[1].load())),
-          "and the vector it asked for is in the mailbox");
+    check(
+        zpp::hypervisor::hypervisor::start_up_handoff_state::is_delivered(
+            g_vmm.start_up_handoff[1].load()) &&
+            (0x42 ==
+             zpp::hypervisor::hypervisor::start_up_handoff_state::vector(
+                 g_vmm.start_up_handoff[1].load())),
+        "and the vector it asked for is in the mailbox");
 
     // The same, published by a second-level guest's park instead, which
     // records it in l2_activity_state.
@@ -531,12 +535,17 @@ static void test_handoff_is_obeyed()
     g_vmm.processor_virtualized[1] = true;
     g_vmm.resume_activity_state[1] = active;
     g_vmm.l2_activity_state[1] = wait_for_sipi;
-    g_vmm.start_up_handoff[1].store(handoff::software_wait);
+    g_vmm.start_up_handoff[1].store(
+        zpp::hypervisor::hypervisor::start_up_handoff_state::
+            software_wait);
 
     answered = g_vmm.start_up_processor(7, 0x30);
-    check(hypervisor::start_up_result::adopted == answered,
+    check(zpp::hypervisor::hypervisor::start_up_result::adopted ==
+              answered,
           "a second-level guest parked in wait-for-SIPI is adopted too");
-    check(0x30 == handoff::vector(g_vmm.start_up_handoff[1].load()),
+    check(0x30 ==
+              zpp::hypervisor::hypervisor::start_up_handoff_state::vector(
+                  g_vmm.start_up_handoff[1].load()),
           "and gets its own vector");
 
     // A target waiting on hardware is *not* swallowed. This is the case
@@ -547,13 +556,17 @@ static void test_handoff_is_obeyed()
     g_vmm.number_of_known_processors = 2;
     g_vmm.processor_virtualized[1] = true;
     g_vmm.resume_activity_state[1] = wait_for_sipi;
-    g_vmm.start_up_handoff[1].store(handoff::hardware_wait);
+    g_vmm.start_up_handoff[1].store(
+        zpp::hypervisor::hypervisor::start_up_handoff_state::
+            hardware_wait);
 
     answered = g_vmm.start_up_processor(7, 0x20);
-    check(hypervisor::start_up_result::needs_hardware == answered,
+    check(zpp::hypervisor::hypervisor::start_up_result::needs_hardware ==
+              answered,
           "a target waiting on hardware gets a real start-up IPI, not a "
           "swallowed one");
-    check(handoff::hardware_wait == g_vmm.start_up_handoff[1].load(),
+    check(zpp::hypervisor::hypervisor::start_up_handoff_state::
+                  hardware_wait == g_vmm.start_up_handoff[1].load(),
           "and its mailbox is left alone");
 
     // A running processor's duplicate start-up IPI is dropped. SDM 29.7.2:
@@ -563,12 +576,15 @@ static void test_handoff_is_obeyed()
     g_vmm.number_of_known_processors = 2;
     g_vmm.processor_virtualized[1] = true;
     g_vmm.resume_activity_state[1] = active;
-    g_vmm.start_up_handoff[1].store(handoff::none);
+    g_vmm.start_up_handoff[1].store(
+        zpp::hypervisor::hypervisor::start_up_handoff_state::none);
 
     answered = g_vmm.start_up_processor(7, 0x10);
-    check(hypervisor::start_up_result::adopted == answered,
+    check(zpp::hypervisor::hypervisor::start_up_result::adopted ==
+              answered,
           "a duplicate start-up IPI to a running processor is dropped");
-    check(handoff::none == g_vmm.start_up_handoff[1].load(),
+    check(zpp::hypervisor::hypervisor::start_up_handoff_state::none ==
+              g_vmm.start_up_handoff[1].load(),
           "and nothing is written into its mailbox");
 
     // **The defect.** A target that is listening on the software hand-off
@@ -588,13 +604,17 @@ static void test_handoff_is_obeyed()
     g_vmm.processor_virtualized[1] = true;
     g_vmm.resume_activity_state[1] = active;
     g_vmm.l2_activity_state[1] = active;
-    g_vmm.start_up_handoff[1].store(handoff::software_wait);
+    g_vmm.start_up_handoff[1].store(
+        zpp::hypervisor::hypervisor::start_up_handoff_state::
+            software_wait);
 
     answered = g_vmm.start_up_processor(7, 0x08);
-    check(hypervisor::start_up_result::adopted == answered,
+    check(zpp::hypervisor::hypervisor::start_up_result::adopted ==
+              answered,
           "a listener whose activity record says active is dropped - so "
           "a target must publish that record before it waits");
-    check(handoff::software_wait == g_vmm.start_up_handoff[1].load(),
+    check(zpp::hypervisor::hypervisor::start_up_handoff_state::
+                  software_wait == g_vmm.start_up_handoff[1].load(),
           "and its mailbox is untouched, which is what makes the drop "
           "silent and the ordering load bearing");
 }
@@ -610,24 +630,41 @@ static void test_handoff_state_machine()
 {
     std::println("\nthe hand-off state machine");
 
-    using handoff = hypervisor::start_up_handoff_state;
-
-    check((handoff::none != handoff::software_wait) &&
-              (handoff::none != handoff::hardware_wait) &&
-              (handoff::software_wait != handoff::hardware_wait),
+    check((zpp::hypervisor::hypervisor::start_up_handoff_state::none !=
+           zpp::hypervisor::hypervisor::start_up_handoff_state::
+               software_wait) &&
+              (zpp::hypervisor::hypervisor::start_up_handoff_state::none !=
+               zpp::hypervisor::hypervisor::start_up_handoff_state::
+                   hardware_wait) &&
+              (zpp::hypervisor::hypervisor::start_up_handoff_state::
+                   software_wait !=
+               zpp::hypervisor::hypervisor::start_up_handoff_state::
+                   hardware_wait),
           "the three non-delivered states are distinct");
 
-    check(!handoff::is_delivered(handoff::none) &&
-              !handoff::is_delivered(handoff::software_wait) &&
-              !handoff::is_delivered(handoff::hardware_wait),
-          "none of them carries a vector - is_delivered is false for all "
-          "three, which is what lets one word answer both questions");
+    check(
+        !zpp::hypervisor::hypervisor::start_up_handoff_state::is_delivered(
+            zpp::hypervisor::hypervisor::start_up_handoff_state::none) &&
+            !zpp::hypervisor::hypervisor::start_up_handoff_state::
+                is_delivered(zpp::hypervisor::hypervisor::
+                                 start_up_handoff_state::software_wait) &&
+            !zpp::hypervisor::hypervisor::start_up_handoff_state::
+                is_delivered(zpp::hypervisor::hypervisor::
+                                 start_up_handoff_state::hardware_wait),
+        "none of them carries a vector - is_delivered is false for all "
+        "three, which is what lets one word answer both questions");
 
-    check((handoff::none < handoff::delivered) &&
-              (handoff::software_wait < handoff::delivered) &&
-              (handoff::hardware_wait < handoff::delivered),
-          "and all three sort below the first delivered state, which is "
-          "the whole of why is_delivered can be a comparison");
+    check(
+        (zpp::hypervisor::hypervisor::start_up_handoff_state::none <
+         zpp::hypervisor::hypervisor::start_up_handoff_state::delivered) &&
+            (zpp::hypervisor::hypervisor::start_up_handoff_state::
+                 software_wait < zpp::hypervisor::hypervisor::
+                                     start_up_handoff_state::delivered) &&
+            (zpp::hypervisor::hypervisor::start_up_handoff_state::
+                 hardware_wait < zpp::hypervisor::hypervisor::
+                                     start_up_handoff_state::delivered),
+        "and all three sort below the first delivered state, which is "
+        "the whole of why is_delivered can be a comparison");
 
     // Every vector, not a sample. A start-up IPI's vector is eight bits
     // (SDM 11.6.1, the interrupt command register's vector field), so the
@@ -636,17 +673,24 @@ static void test_handoff_state_machine()
     auto collided = 0;
     auto not_delivered = 0;
     for (std::uint64_t vector{}; vector < 256; ++vector) {
-        auto state = handoff::deliver(vector);
+        auto state =
+            zpp::hypervisor::hypervisor::start_up_handoff_state::deliver(
+                vector);
 
-        if (!handoff::is_delivered(state)) {
+        if (!zpp::hypervisor::hypervisor::start_up_handoff_state::
+                is_delivered(state)) {
             ++not_delivered;
         }
-        if (handoff::vector(state) != vector) {
+        if (zpp::hypervisor::hypervisor::start_up_handoff_state::vector(
+                state) != vector) {
             ++round_tripped;
         }
-        if ((handoff::none == state) ||
-            (handoff::software_wait == state) ||
-            (handoff::hardware_wait == state)) {
+        if ((zpp::hypervisor::hypervisor::start_up_handoff_state::none ==
+             state) ||
+            (zpp::hypervisor::hypervisor::start_up_handoff_state::
+                 software_wait == state) ||
+            (zpp::hypervisor::hypervisor::start_up_handoff_state::
+                 hardware_wait == state)) {
             ++collided;
         }
     }
@@ -667,11 +711,19 @@ static void test_handoff_state_machine()
     // Said separately because it is the case the comment in the header
     // exists for, and the one an "is the mailbox non-zero" test would get
     // wrong: a guest may legitimately start a processor at vector zero.
-    check(handoff::is_delivered(handoff::deliver(0)) &&
-              (0 == handoff::vector(handoff::deliver(0))) &&
-              (handoff::none != handoff::deliver(0)),
-          "a hand-off of vector zero is delivered, reads back as zero, "
-          "and is not the same word as no hand-off at all");
+    check(
+        zpp::hypervisor::hypervisor::start_up_handoff_state::is_delivered(
+            zpp::hypervisor::hypervisor::start_up_handoff_state::deliver(
+                0)) &&
+            (0 ==
+             zpp::hypervisor::hypervisor::start_up_handoff_state::vector(
+                 zpp::hypervisor::hypervisor::start_up_handoff_state::
+                     deliver(0))) &&
+            (zpp::hypervisor::hypervisor::start_up_handoff_state::none !=
+             zpp::hypervisor::hypervisor::start_up_handoff_state::deliver(
+                 0)),
+        "a hand-off of vector zero is delivered, reads back as zero, "
+        "and is not the same word as no hand-off at all");
 }
 
 // ------------------- 6. the hand-off is exchanged, never stored
@@ -701,7 +753,6 @@ static void test_handoff_is_exchanged_not_stored()
 {
     std::println("\nthe hand-off is exchanged, never stored");
 
-    using handoff = hypervisor::start_up_handoff_state;
     constexpr std::uint64_t wait_for_sipi = 3;
     constexpr std::uint64_t active = 0;
 
@@ -713,9 +764,14 @@ static void test_handoff_is_exchanged_not_stored()
         const char * name;
         std::uint64_t state;
     } states[]{
-        {"no hand-off at all", handoff::none},
-        {"waiting on hardware", handoff::hardware_wait},
-        {"already holding a delivered vector", handoff::deliver(0x11)},
+        {"no hand-off at all",
+         zpp::hypervisor::hypervisor::start_up_handoff_state::none},
+        {"waiting on hardware",
+         zpp::hypervisor::hypervisor::start_up_handoff_state::
+             hardware_wait},
+        {"already holding a delivered vector",
+         zpp::hypervisor::hypervisor::start_up_handoff_state::deliver(
+             0x11)},
     };
 
     for (auto & entry : states) {
@@ -728,10 +784,12 @@ static void test_handoff_is_exchanged_not_stored()
 
         auto answered = g_vmm.start_up_processor(7, 0x33);
 
-        check(hypervisor::start_up_result::needs_hardware == answered,
-              std::string("a target ") + entry.name +
-                  " is not handed a vector - the guest's own write goes "
-                  "out instead");
+        check(
+            zpp::hypervisor::hypervisor::start_up_result::needs_hardware ==
+                answered,
+            std::string("a target ") + entry.name +
+                " is not handed a vector - the guest's own write goes "
+                "out instead");
         check(entry.state == g_vmm.start_up_handoff[1].load(),
               std::string("and its mailbox is left exactly as it was, "
                           "which a plain store would not have done (") +
@@ -750,15 +808,20 @@ static void test_handoff_is_exchanged_not_stored()
     g_vmm.number_of_known_processors = 2;
     g_vmm.processor_virtualized[1] = true;
     g_vmm.resume_activity_state[1] = wait_for_sipi;
-    g_vmm.start_up_handoff[1].store(handoff::software_wait);
+    g_vmm.start_up_handoff[1].store(
+        zpp::hypervisor::hypervisor::start_up_handoff_state::
+            software_wait);
 
-    auto expected = handoff::software_wait;
+    auto expected =
+        zpp::hypervisor::hypervisor::start_up_handoff_state::software_wait;
     check(g_vmm.start_up_handoff[1].compare_exchange_strong(
-              expected, handoff::hardware_wait),
+              expected,
+              zpp::hypervisor::hypervisor::start_up_handoff_state::
+                  hardware_wait),
           "a target can leave the software wait, and leaving it is an "
           "exchange out of software_wait rather than a store");
 
-    check(hypervisor::start_up_result::needs_hardware ==
+    check(zpp::hypervisor::hypervisor::start_up_result::needs_hardware ==
               g_vmm.start_up_processor(7, 0x44),
           "and a sender arriving one instant later must issue the real "
           "start-up IPI - exactly one of the two happens, which is what a "
@@ -774,23 +837,26 @@ static void test_handoff_is_exchanged_not_stored()
     g_vmm.apic_id[1] = 7;
     g_vmm.number_of_known_processors = 2;
     g_vmm.vmcs.vpid(2);
-    g_vmm.start_up_handoff[1].store(handoff::deliver(0x2));
+    g_vmm.start_up_handoff[1].store(
+        zpp::hypervisor::hypervisor::start_up_handoff_state::deliver(0x2));
 
     auto context = zpp::arch::x86_64::context{};
     g_vmm.apply_start_up(context, 0x2, "sipi exit");
     g_vmm.processor_virtualized[1] = true;
     g_vmm.resume_activity_state[1] = active;
 
-    check(handoff::none == g_vmm.start_up_handoff[1].load(),
+    check(zpp::hypervisor::hypervisor::start_up_handoff_state::none ==
+              g_vmm.start_up_handoff[1].load(),
           "a processor that has accepted its start-up IPI holds no "
           "hand-off - apply_start_up clears the mailbox however the "
           "vector arrived");
-    check(hypervisor::start_up_result::adopted ==
+    check(zpp::hypervisor::hypervisor::start_up_result::adopted ==
               g_vmm.start_up_processor(7, 0x2),
           "and the INIT-SIPI pair's second half, arriving late, is "
           "dropped rather than re-applied - 439abb5's flag arrived here "
           "instead and sent a running processor back to its entry point");
-    check(handoff::none == g_vmm.start_up_handoff[1].load(),
+    check(zpp::hypervisor::hypervisor::start_up_handoff_state::none ==
+              g_vmm.start_up_handoff[1].load(),
           "leaving the mailbox empty, so nothing is waiting to be found "
           "by the next INIT either");
 }
@@ -827,8 +893,6 @@ static void test_handoff_is_exchanged_not_stored()
 
 namespace
 {
-namespace fields = zpp::arch::x86_64::vmx::vmcs_fields;
-
 std::uint64_t vmcs_field(std::uint64_t encoding)
 {
     return zpp::arch::x86_64::vmx::g_vmcs[encoding];
@@ -1044,33 +1108,33 @@ void test_apply_start_up_state()
         std::uint64_t limit;
     } segments[]{
         {"SS",
-         fields::guest_ss_selector,
-         fields::guest_ss_base,
-         fields::guest_ss_limit},
+         zpp::arch::x86_64::vmx::vmcs_fields::guest_ss_selector,
+         zpp::arch::x86_64::vmx::vmcs_fields::guest_ss_base,
+         zpp::arch::x86_64::vmx::vmcs_fields::guest_ss_limit},
         {"DS",
-         fields::guest_ds_selector,
-         fields::guest_ds_base,
-         fields::guest_ds_limit},
+         zpp::arch::x86_64::vmx::vmcs_fields::guest_ds_selector,
+         zpp::arch::x86_64::vmx::vmcs_fields::guest_ds_base,
+         zpp::arch::x86_64::vmx::vmcs_fields::guest_ds_limit},
         {"ES",
-         fields::guest_es_selector,
-         fields::guest_es_base,
-         fields::guest_es_limit},
+         zpp::arch::x86_64::vmx::vmcs_fields::guest_es_selector,
+         zpp::arch::x86_64::vmx::vmcs_fields::guest_es_base,
+         zpp::arch::x86_64::vmx::vmcs_fields::guest_es_limit},
         {"FS",
-         fields::guest_fs_selector,
-         fields::guest_fs_base,
-         fields::guest_fs_limit},
+         zpp::arch::x86_64::vmx::vmcs_fields::guest_fs_selector,
+         zpp::arch::x86_64::vmx::vmcs_fields::guest_fs_base,
+         zpp::arch::x86_64::vmx::vmcs_fields::guest_fs_limit},
         {"GS",
-         fields::guest_gs_selector,
-         fields::guest_gs_base,
-         fields::guest_gs_limit},
+         zpp::arch::x86_64::vmx::vmcs_fields::guest_gs_selector,
+         zpp::arch::x86_64::vmx::vmcs_fields::guest_gs_base,
+         zpp::arch::x86_64::vmx::vmcs_fields::guest_gs_limit},
         {"LDTR",
-         fields::guest_ldtr_selector,
-         fields::guest_ldtr_base,
-         fields::guest_ldtr_limit},
+         zpp::arch::x86_64::vmx::vmcs_fields::guest_ldtr_selector,
+         zpp::arch::x86_64::vmx::vmcs_fields::guest_ldtr_base,
+         zpp::arch::x86_64::vmx::vmcs_fields::guest_ldtr_limit},
         {"TR",
-         fields::guest_tr_selector,
-         fields::guest_tr_base,
-         fields::guest_tr_limit},
+         zpp::arch::x86_64::vmx::vmcs_fields::guest_tr_selector,
+         zpp::arch::x86_64::vmx::vmcs_fields::guest_tr_base,
+         zpp::arch::x86_64::vmx::vmcs_fields::guest_tr_limit},
     };
 
     for (auto & segment : segments) {
@@ -1115,14 +1179,38 @@ void test_apply_start_up_state()
         std::uint64_t type;
         bool system;
     } rights[]{
-        {"CS", fields::guest_cs_access_rights, 0xb, false},
-        {"SS", fields::guest_ss_access_rights, 0x3, false},
-        {"DS", fields::guest_ds_access_rights, 0x3, false},
-        {"ES", fields::guest_es_access_rights, 0x3, false},
-        {"FS", fields::guest_fs_access_rights, 0x3, false},
-        {"GS", fields::guest_gs_access_rights, 0x3, false},
-        {"LDTR", fields::guest_ldtr_access_rights, 0x2, true},
-        {"TR", fields::guest_tr_access_rights, 0xb, true},
+        {"CS",
+         zpp::arch::x86_64::vmx::vmcs_fields::guest_cs_access_rights,
+         0xb,
+         false},
+        {"SS",
+         zpp::arch::x86_64::vmx::vmcs_fields::guest_ss_access_rights,
+         0x3,
+         false},
+        {"DS",
+         zpp::arch::x86_64::vmx::vmcs_fields::guest_ds_access_rights,
+         0x3,
+         false},
+        {"ES",
+         zpp::arch::x86_64::vmx::vmcs_fields::guest_es_access_rights,
+         0x3,
+         false},
+        {"FS",
+         zpp::arch::x86_64::vmx::vmcs_fields::guest_fs_access_rights,
+         0x3,
+         false},
+        {"GS",
+         zpp::arch::x86_64::vmx::vmcs_fields::guest_gs_access_rights,
+         0x3,
+         false},
+        {"LDTR",
+         zpp::arch::x86_64::vmx::vmcs_fields::guest_ldtr_access_rights,
+         0x2,
+         true},
+        {"TR",
+         zpp::arch::x86_64::vmx::vmcs_fields::guest_tr_access_rights,
+         0xb,
+         true},
     };
 
     for (auto & entry : rights) {
@@ -1185,7 +1273,7 @@ void test_apply_start_up_state()
           "processor that never starts");
 
     // --- The hand-off is over, however it arrived -----------------
-    check(hypervisor::start_up_handoff_state::none ==
+    check(zpp::hypervisor::hypervisor::start_up_handoff_state::none ==
               g_vmm.start_up_handoff[cpu].load(),
           "the software hand-off mailbox is cleared - a delivered vector "
           "left behind would let the next INIT find a start-up nobody "
@@ -1367,7 +1455,6 @@ static void test_init_publishes_before_it_waits()
 {
     std::println("\nthe INIT handler publishes before it waits");
 
-    using handoff = hypervisor::start_up_handoff_state;
     constexpr std::uint64_t wait_for_sipi = 3;
     constexpr std::size_t cpu = 1;
 
@@ -1385,8 +1472,8 @@ static void test_init_publishes_before_it_waits()
     std::thread thread{[&] { target.run(); }};
 
     auto listening = eventually([&] {
-        return handoff::software_wait ==
-               g_vmm.start_up_handoff[cpu].load();
+        return zpp::hypervisor::hypervisor::start_up_handoff_state::
+                   software_wait == g_vmm.start_up_handoff[cpu].load();
     });
     check(listening,
           "the target publishes that it is listening on the software "
@@ -1407,7 +1494,8 @@ static void test_init_publishes_before_it_waits()
     // Now the sender, from its own exit handler, exactly as
     // on_interrupt_command reaches it.
     auto answered = g_vmm.start_up_processor(7, 0x30);
-    check(hypervisor::start_up_result::adopted == answered,
+    check(zpp::hypervisor::hypervisor::start_up_result::adopted ==
+              answered,
           "a start-up IPI arriving mid-wait is adopted, and adopted here "
           "means delivered rather than dropped");
 
@@ -1423,7 +1511,8 @@ static void test_init_publishes_before_it_waits()
               target.activity_left.load(),
           "and the target is runnable again, not left parked in "
           "wait-for-SIPI");
-    check(handoff::none == g_vmm.start_up_handoff[cpu].load(),
+    check(zpp::hypervisor::hypervisor::start_up_handoff_state::none ==
+              g_vmm.start_up_handoff[cpu].load(),
           "with the mailbox cleared behind it");
 }
 
@@ -1436,7 +1525,6 @@ static void test_handoff_race_is_exactly_once()
 {
     std::println("\nthe hand-off consumes a vector exactly once");
 
-    using handoff = hypervisor::start_up_handoff_state;
     constexpr std::size_t cpu = 1;
     constexpr int rounds = 24;
 
@@ -1461,7 +1549,8 @@ static void test_handoff_race_is_exactly_once()
         // close and the guest's own 210 microseconds covers - see the
         // BACKLOG section this file is cited from.
         eventually([&] {
-            return handoff::software_wait ==
+            return zpp::hypervisor::hypervisor::start_up_handoff_state::
+                           software_wait ==
                        g_vmm.start_up_handoff[cpu].load() ||
                    target.returned.load();
         });
@@ -1489,8 +1578,8 @@ static void test_handoff_race_is_exactly_once()
         thread.join();
 
         auto applied = g_vmm.started_by_start_up_ipi[cpu];
-        auto hardware =
-            (hypervisor::start_up_result::needs_hardware == answered);
+        auto hardware = (zpp::hypervisor::hypervisor::start_up_result::
+                             needs_hardware == answered);
 
         if (applied && hardware) {
             ++both;
@@ -1531,7 +1620,6 @@ static void test_init_chooses_and_publishes_a_handoff()
 {
     std::println("\nthe INIT handler chooses a hand-off and says which");
 
-    using handoff = hypervisor::start_up_handoff_state;
     constexpr std::uint64_t wait_for_sipi = 3;
     constexpr std::size_t cpu = 1;
 
@@ -1560,7 +1648,8 @@ static void test_init_chooses_and_publishes_a_handoff()
         init_target target{cpu};
         target.run();
 
-        check(handoff::hardware_wait == g_vmm.start_up_handoff[cpu].load(),
+        check(zpp::hypervisor::hypervisor::start_up_handoff_state::
+                      hardware_wait == g_vmm.start_up_handoff[cpu].load(),
               std::string(entry.name) +
                   " waits on hardware, and says so - a sender that assumed"
                   " otherwise is what used to swallow the IPI");
@@ -1592,14 +1681,15 @@ static void test_init_chooses_and_publishes_a_handoff()
     init_target target{cpu};
     target.run();
 
-    check(handoff::hardware_wait == g_vmm.start_up_handoff[cpu].load(),
+    check(zpp::hypervisor::hypervisor::start_up_handoff_state::
+                  hardware_wait == g_vmm.start_up_handoff[cpu].load(),
           "a software wait nobody answered gives up and falls back to the "
           "hardware path, which is correct on real hardware and no worse "
           "than what came before anywhere else");
     check(!g_vmm.started_by_start_up_ipi[cpu], "having applied nothing");
 
     g_vmm.resume_activity_state[cpu] = wait_for_sipi;
-    check(hypervisor::start_up_result::needs_hardware ==
+    check(zpp::hypervisor::hypervisor::start_up_result::needs_hardware ==
               g_vmm.start_up_processor(7, 0x30),
           "and a sender arriving after the fall-back issues the guest's "
           "own start-up IPI rather than swallowing it");
@@ -1624,7 +1714,6 @@ static void test_firmware_start_up_is_not_the_guest_s()
 {
     std::println("\nthe firmware's start-up is not the guest's");
 
-    using handoff = hypervisor::start_up_handoff_state;
     constexpr std::uint64_t wait_for_sipi = 3;
     constexpr std::uint64_t active = 0;
     constexpr std::size_t processors = 8;
@@ -1670,7 +1759,9 @@ static void test_firmware_start_up_is_not_the_guest_s()
     // form it sends.
     for (std::size_t slot = 1; slot < processors; ++slot) {
         g_vmm.resume_activity_state[slot] = wait_for_sipi;
-        g_vmm.start_up_handoff[slot].store(handoff::hardware_wait);
+        g_vmm.start_up_handoff[slot].store(
+            zpp::hypervisor::hypervisor::start_up_handoff_state::
+                hardware_wait);
     }
 
     zpp::arch::x86_64::g_x2apic_icr_writes.store(0);
@@ -1691,7 +1782,9 @@ static void test_firmware_start_up_is_not_the_guest_s()
     firmware_phase();
     for (std::size_t slot = 1; slot < processors; ++slot) {
         g_vmm.resume_activity_state[slot] = active;
-        g_vmm.start_up_handoff[slot].store(handoff::hardware_wait);
+        g_vmm.start_up_handoff[slot].store(
+            zpp::hypervisor::hypervisor::start_up_handoff_state::
+                hardware_wait);
     }
 
     zpp::arch::x86_64::g_x2apic_icr_writes.store(0);
@@ -1709,7 +1802,9 @@ static void test_firmware_start_up_is_not_the_guest_s()
     firmware_phase();
     for (std::size_t slot = 1; slot < processors; ++slot) {
         g_vmm.resume_activity_state[slot] = wait_for_sipi;
-        g_vmm.start_up_handoff[slot].store(handoff::software_wait);
+        g_vmm.start_up_handoff[slot].store(
+            zpp::hypervisor::hypervisor::start_up_handoff_state::
+                software_wait);
     }
 
     zpp::arch::x86_64::g_x2apic_icr_writes.store(0);
@@ -1718,10 +1813,14 @@ static void test_firmware_start_up_is_not_the_guest_s()
     auto handed = 0;
     for (std::size_t slot = 1; slot < processors; ++slot) {
         auto state = g_vmm.start_up_handoff[slot].load();
-        handed += (handoff::is_delivered(state) &&
-                   (0x8 == handoff::vector(state)))
-                      ? 1
-                      : 0;
+        handed +=
+            (zpp::hypervisor::hypervisor::start_up_handoff_state::
+                 is_delivered(state) &&
+             (0x8 ==
+              zpp::hypervisor::hypervisor::start_up_handoff_state::vector(
+                  state)))
+                ? 1
+                : 0;
     }
     check((processors - 1) == static_cast<std::size_t>(handed),
           "a broadcast to processors listening on the software hand-off "
@@ -1834,8 +1933,6 @@ static void test_init_is_forwarded_and_nothing_more()
 {
     std::println("\nan INIT is forwarded and nothing more");
 
-    using handoff = hypervisor::start_up_handoff_state;
-
     // Delivery mode 101b is INIT. Bit 14 is level assert and bit 15 is
     // trigger mode; the destination is in 63:32, physical mode.
     constexpr std::uint64_t init_assert = 0x100004500;
@@ -1866,7 +1963,8 @@ static void test_init_is_forwarded_and_nothing_more()
                   " is passed through as the guest wrote it - it is what "
                   "leaves the target waiting for a start-up IPI, and "
                   "there is nothing here that improves on it");
-        check(handoff::none == g_vmm.start_up_handoff[1].load(),
+        check(zpp::hypervisor::hypervisor::start_up_handoff_state::none ==
+                  g_vmm.start_up_handoff[1].load(),
               std::string(entry.name) +
                   " hands nothing to the target's mailbox");
         check(!g_vmm.started_by_start_up_ipi[1] &&

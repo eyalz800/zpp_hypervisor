@@ -204,8 +204,6 @@ void wrmsr(std::uint32_t, std::uint64_t)
 
 namespace
 {
-using zpp::hypervisor::hypervisor;
-
 std::size_t g_checks{};
 std::size_t g_failures{};
 
@@ -287,7 +285,7 @@ constexpr std::uint64_t shorthand_all_excluding_self = 3;
  * `number_of_known_processors` starts at 1 because the real one does:
  * slot 0 is the boot processor, which is running this code.
  */
-void configure(hypervisor & state,
+void configure(zpp::hypervisor::hypervisor & state,
                std::uint64_t self,
                std::initializer_list<std::uint32_t> roster)
 {
@@ -315,11 +313,11 @@ void configure(hypervisor & state,
  * `zpp::spin_lock`, which is deliberately not copyable, and it is
  * 46,383,104 bytes, which is not a thing to put on a stack.
  */
-std::unique_ptr<hypervisor>
+std::unique_ptr<zpp::hypervisor::hypervisor>
 make(std::uint64_t self = 0,
      std::initializer_list<std::uint32_t> roster = {})
 {
-    auto state = std::make_unique<hypervisor>();
+    auto state = std::make_unique<zpp::hypervisor::hypervisor>();
     configure(*state, self, roster);
     return state;
 }
@@ -457,7 +455,7 @@ void init_level_de_assert_starts_nothing()
     check_equal(0,
                 g_observed.hardware_ipi_count,
                 "init level de-assert sends no hardware ipi");
-    for (std::size_t i{}; i < hypervisor::max_cpus; ++i) {
+    for (std::size_t i{}; i < zpp::hypervisor::hypervisor::max_cpus; ++i) {
         check(!state->started_by_guest_start_up_ipi[i],
               "init level de-assert flags no processor as started");
     }
@@ -876,13 +874,14 @@ void slot_allocation_is_bounded()
 {
     auto state = make(0, {});
 
-    for (std::uint64_t id = 1; id < hypervisor::max_cpus; ++id) {
+    for (std::uint64_t id = 1; id < zpp::hypervisor::hypervisor::max_cpus;
+         ++id) {
         auto slot = state->processor_slot(id);
         check(slot.has_value(),
               "id " + std::to_string(id) + " fits in the table");
     }
 
-    check_equal(hypervisor::max_cpus,
+    check_equal(zpp::hypervisor::hypervisor::max_cpus,
                 state->number_of_known_processors,
                 "the table is exactly full");
 
@@ -890,7 +889,7 @@ void slot_allocation_is_bounded()
     check(!overflow.has_value(),
           "the identifier past the last slot is refused rather than "
           "folded onto an existing one");
-    check_equal(hypervisor::max_cpus,
+    check_equal(zpp::hypervisor::hypervisor::max_cpus,
                 state->number_of_known_processors,
                 "and the count does not grow past the table");
 }
@@ -936,7 +935,7 @@ constexpr std::size_t icr_byte = write_low_bitmap + (x2apic_icr_msr / 8);
 constexpr std::uint8_t icr_bit =
     static_cast<std::uint8_t>(1u << (x2apic_icr_msr % 8));
 
-bool interception_armed(const hypervisor & state)
+bool interception_armed(const zpp::hypervisor::hypervisor & state)
 {
     return 0 != (state.msr_bitmap[icr_byte] & icr_bit);
 }
@@ -944,7 +943,9 @@ bool interception_armed(const hypervisor & state)
 /**
  * Put a processor's local APIC into a mode and let the real code notice.
  */
-void observe(hypervisor & state, std::size_t cpu, std::uint64_t base)
+void observe(zpp::hypervisor::hypervisor & state,
+             std::size_t cpu,
+             std::uint64_t base)
 {
     zpp::arch::x86_64::g_apic_base = base;
     state.note_apic_mode(cpu);
@@ -966,7 +967,8 @@ void the_bitmap_bit_is_the_one_the_architecture_names()
           "write bitmap");
 
     std::size_t others{};
-    for (std::size_t at{}; at < hypervisor::page_size; ++at) {
+    for (std::size_t at{}; at < zpp::hypervisor::hypervisor::page_size;
+         ++at) {
         if (at == icr_byte) {
             continue;
         }
@@ -1076,7 +1078,7 @@ void a_processor_outside_the_table_is_not_recorded()
 {
     auto state = make();
 
-    observe(*state, hypervisor::max_cpus, x2apic_base);
+    observe(*state, zpp::hypervisor::hypervisor::max_cpus, x2apic_base);
 
     check(!interception_armed(*state),
           "an index past the table records no mode, so the survey finds "
@@ -1130,7 +1132,8 @@ void the_survey_and_the_arming_are_one_decision()
         // Everything starts in xAPIC mode, which is where a machine is
         // before its guest moves any of it.
         for (std::size_t cpu{}; cpu < processors; ++cpu) {
-            state->observed_apic_mode[cpu] = hypervisor::apic_mode::xapic;
+            state->observed_apic_mode[cpu] =
+                zpp::hypervisor::hypervisor::apic_mode::xapic;
         }
 
         std::atomic<bool> go{false};

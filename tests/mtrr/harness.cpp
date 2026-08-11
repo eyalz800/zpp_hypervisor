@@ -54,20 +54,6 @@
 
 namespace
 {
-using zpp::arch::x86_64::is_valid;
-using zpp::arch::x86_64::make_mtrr;
-using zpp::arch::x86_64::memory_type;
-using zpp::arch::x86_64::mtrr;
-using zpp::arch::x86_64::mtrr_capabilities;
-using zpp::arch::x86_64::mtrr_default_type;
-using zpp::arch::x86_64::mtrr_fixed_range;
-using zpp::arch::x86_64::mtrr_fixed_ranges;
-using zpp::arch::x86_64::mtrr_state;
-using zpp::arch::x86_64::mtrr_variable_base;
-using zpp::arch::x86_64::mtrr_variable_mask;
-
-namespace msr = zpp::arch::x86_64::msr;
-
 std::size_t g_checks{};
 std::size_t g_failures{};
 
@@ -101,26 +87,26 @@ void check_equal(std::uint64_t expected,
  * everything else - a reserved value is exactly what
  * valid_or_uncachable() exists to catch, so it has to be printable.
  */
-const char * name_of(memory_type type)
+const char * name_of(zpp::arch::x86_64::memory_type type)
 {
     switch (type) {
-    case memory_type::uncachable:
+    case zpp::arch::x86_64::memory_type::uncachable:
         return "UC";
-    case memory_type::write_combining:
+    case zpp::arch::x86_64::memory_type::write_combining:
         return "WC";
-    case memory_type::write_through:
+    case zpp::arch::x86_64::memory_type::write_through:
         return "WT";
-    case memory_type::write_protected:
+    case zpp::arch::x86_64::memory_type::write_protected:
         return "WP";
-    case memory_type::write_back:
+    case zpp::arch::x86_64::memory_type::write_back:
         return "WB";
     default:
         return "reserved";
     }
 }
 
-void check_type(memory_type expected,
-                memory_type actual,
+void check_type(zpp::arch::x86_64::memory_type expected,
+                zpp::arch::x86_64::memory_type actual,
                 const std::string & what)
 {
     ++g_checks;
@@ -141,9 +127,10 @@ void check_type(memory_type expected,
  * a failure but a *result*: it is what tells the EPT builder to split a
  * 2 MB region into 4 KB entries.
  */
-void check_optional_type(std::optional<memory_type> expected,
-                         std::optional<memory_type> actual,
-                         const std::string & what)
+void check_optional_type(
+    std::optional<zpp::arch::x86_64::memory_type> expected,
+    std::optional<zpp::arch::x86_64::memory_type> actual,
+    const std::string & what)
 {
     ++g_checks;
     if (expected == actual) {
@@ -167,25 +154,25 @@ constexpr std::uint64_t gigabyte = 0x40000000;
  * sub-range to sub-range, so an off-by-one in the byte index cannot be
  * mistaken for a pass.
  */
-constexpr memory_type legal_types[]{
-    memory_type::uncachable,
-    memory_type::write_combining,
-    memory_type::write_through,
-    memory_type::write_protected,
-    memory_type::write_back,
+constexpr zpp::arch::x86_64::memory_type legal_types[]{
+    zpp::arch::x86_64::memory_type::uncachable,
+    zpp::arch::x86_64::memory_type::write_combining,
+    zpp::arch::x86_64::memory_type::write_through,
+    zpp::arch::x86_64::memory_type::write_protected,
+    zpp::arch::x86_64::memory_type::write_back,
 };
 
 /**
  * A state with the MTRRs on, the fixed ranges present and enabled, and
  * nothing programmed. Every builder below starts here.
  */
-constexpr mtrr_state empty_state()
+constexpr zpp::arch::x86_64::mtrr_state empty_state()
 {
-    mtrr_state state{};
+    zpp::arch::x86_64::mtrr_state state{};
     state.capabilities.fixed_range_registers_supported(true);
     state.capabilities.write_combining(true);
     state.capabilities.variable_range_register_count(10);
-    state.default_type.type(memory_type::uncachable);
+    state.default_type.type(zpp::arch::x86_64::memory_type::uncachable);
     state.default_type.fixed_range_enabled(true);
     state.default_type.enabled(true);
     return state;
@@ -200,21 +187,21 @@ constexpr mtrr_state empty_state()
  * mtrr::physical_base and mtrr::size by hand would never exercise the
  * encoding, and the encoding is where 63a5d17's masking defect lived.
  */
-constexpr void add_variable(mtrr_state & state,
+constexpr void add_variable(zpp::arch::x86_64::mtrr_state & state,
                             std::uint64_t base,
                             std::uint64_t size,
-                            memory_type type)
+                            zpp::arch::x86_64::memory_type type)
 {
-    mtrr_variable_base physical_base{};
+    zpp::arch::x86_64::mtrr_variable_base physical_base{};
     physical_base.page_number(base >> 12);
     physical_base.memory_type(type);
 
-    mtrr_variable_mask physical_mask{};
+    zpp::arch::x86_64::mtrr_variable_mask physical_mask{};
     physical_mask.valid(true);
     physical_mask.physical_mask((~(size - 1) & 0xffffffffff000ull) >> 12);
 
     state.variable[state.variable_count++] =
-        make_mtrr(physical_base, physical_mask);
+        zpp::arch::x86_64::make_mtrr(physical_base, physical_mask);
 }
 
 /**
@@ -223,10 +210,13 @@ constexpr void add_variable(mtrr_state & state,
  * Table 14-9 reads.
  */
 constexpr std::uint64_t
-fixed_register(const memory_type (&types)[mtrr_fixed_range::sub_ranges])
+fixed_register(const zpp::arch::x86_64::memory_type (
+    &types)[zpp::arch::x86_64::mtrr_fixed_range::sub_ranges])
 {
     std::uint64_t value{};
-    for (std::size_t i{}; i < mtrr_fixed_range::sub_ranges; ++i) {
+    for (std::size_t i{};
+         i < zpp::arch::x86_64::mtrr_fixed_range::sub_ranges;
+         ++i) {
         value |= std::uint64_t(static_cast<unsigned>(types[i])) << (i * 8);
     }
     return value;
@@ -235,10 +225,13 @@ fixed_register(const memory_type (&types)[mtrr_fixed_range::sub_ranges])
 /**
  * Gives every sub-range of one fixed-range register the same type.
  */
-constexpr std::uint64_t fixed_register_of(memory_type type)
+constexpr std::uint64_t
+fixed_register_of(zpp::arch::x86_64::memory_type type)
 {
     std::uint64_t value{};
-    for (std::size_t i{}; i < mtrr_fixed_range::sub_ranges; ++i) {
+    for (std::size_t i{};
+         i < zpp::arch::x86_64::mtrr_fixed_range::sub_ranges;
+         ++i) {
         value |= std::uint64_t(static_cast<unsigned>(type)) << (i * 8);
     }
     return value;
@@ -251,23 +244,30 @@ constexpr std::uint64_t fixed_register_of(memory_type type)
  * pattern does not repeat with any power of two, so a wrong shift or a
  * wrong register index lands on a different answer.
  */
-constexpr memory_type painted_type(std::size_t reg, std::size_t sub)
+constexpr zpp::arch::x86_64::memory_type painted_type(std::size_t reg,
+                                                      std::size_t sub)
 {
-    return legal_types[((reg * mtrr_fixed_range::sub_ranges) + sub) % 5];
+    return legal_types
+        [((reg * zpp::arch::x86_64::mtrr_fixed_range::sub_ranges) + sub) %
+         5];
 }
 
-constexpr mtrr_state painted_fixed_state()
+constexpr zpp::arch::x86_64::mtrr_state painted_fixed_state()
 {
     auto state = empty_state();
 
     // Write-back everywhere the variable ranges reach, so that anything
     // the fixed ranges are supposed to answer for cannot accidentally
     // agree with what would happen if they were skipped.
-    state.default_type.type(memory_type::write_back);
+    state.default_type.type(zpp::arch::x86_64::memory_type::write_back);
 
-    for (std::size_t reg{}; reg < mtrr_state::fixed_range_count; ++reg) {
-        memory_type types[mtrr_fixed_range::sub_ranges]{};
-        for (std::size_t sub{}; sub < mtrr_fixed_range::sub_ranges;
+    for (std::size_t reg{};
+         reg < zpp::arch::x86_64::mtrr_state::fixed_range_count;
+         ++reg) {
+        zpp::arch::x86_64::memory_type
+            types[zpp::arch::x86_64::mtrr_fixed_range::sub_ranges]{};
+        for (std::size_t sub{};
+             sub < zpp::arch::x86_64::mtrr_fixed_range::sub_ranges;
              ++sub) {
             types[sub] = painted_type(reg, sub);
         }
@@ -299,7 +299,7 @@ constexpr std::uint64_t top_of_dram = 0xa0000000;
  * not inside a variable range - the whole MMIO hole included - was given
  * write-back.
  */
-constexpr mtrr_state realistic_machine()
+constexpr zpp::arch::x86_64::mtrr_state realistic_machine()
 {
     auto state = empty_state();
 
@@ -307,28 +307,39 @@ constexpr mtrr_state realistic_machine()
     // 173872-173874: "Intel recommends the use of the UC (uncached)
     // memory type for all physical memory addresses where memory does
     // not exist."
-    state.default_type.type(memory_type::uncachable);
+    state.default_type.type(zpp::arch::x86_64::memory_type::uncachable);
 
     // 0x00000-0x80000 and 0x80000-0xa0000: conventional memory.
-    state.fixed[0] = fixed_register_of(memory_type::write_back);
-    state.fixed[1] = fixed_register_of(memory_type::write_back);
+    state.fixed[0] =
+        fixed_register_of(zpp::arch::x86_64::memory_type::write_back);
+    state.fixed[1] =
+        fixed_register_of(zpp::arch::x86_64::memory_type::write_back);
 
     // 0xa0000-0xc0000: the legacy VGA aperture.
-    state.fixed[2] = fixed_register_of(memory_type::uncachable);
+    state.fixed[2] =
+        fixed_register_of(zpp::arch::x86_64::memory_type::uncachable);
 
     // 0xc0000-0x100000: the option ROM and BIOS shadow region, which
     // this machine leaves uncacheable throughout.
-    for (std::size_t i{3}; i < mtrr_state::fixed_range_count; ++i) {
-        state.fixed[i] = fixed_register_of(memory_type::uncachable);
+    for (std::size_t i{3};
+         i < zpp::arch::x86_64::mtrr_state::fixed_range_count;
+         ++i) {
+        state.fixed[i] =
+            fixed_register_of(zpp::arch::x86_64::memory_type::uncachable);
     }
 
     // DRAM, as the two power-of-two ranges a real firmware needs to
     // describe 2.5 GB: a variable range's size must be a power of two
     // and its base aligned to it. SDM Vol. 3A 14.11.4,
     // .references/sdm.txt:174370-174375.
-    add_variable(state, 0, 2 * gigabyte, memory_type::write_back);
-    add_variable(
-        state, 2 * gigabyte, gigabyte / 2, memory_type::write_back);
+    add_variable(state,
+                 0,
+                 2 * gigabyte,
+                 zpp::arch::x86_64::memory_type::write_back);
+    add_variable(state,
+                 2 * gigabyte,
+                 gigabyte / 2,
+                 zpp::arch::x86_64::memory_type::write_back);
 
     return state;
 }
@@ -340,15 +351,22 @@ constexpr auto g_realistic = realistic_machine();
  * rather than inside a function so a change that makes any of them
  * non-constant - or non-terminating - fails the build outright.
  */
-static_assert(memory_type::write_back == g_realistic.type_of(0));
-static_assert(memory_type::write_back == g_realistic.type_of(0x9ffff));
-static_assert(memory_type::uncachable == g_realistic.type_of(0xa0000));
-static_assert(memory_type::uncachable == g_realistic.type_of(0xfffff));
-static_assert(memory_type::write_back == g_realistic.type_of(megabyte));
-static_assert(memory_type::write_back ==
+static_assert(zpp::arch::x86_64::memory_type::write_back ==
+              g_realistic.type_of(0));
+static_assert(zpp::arch::x86_64::memory_type::write_back ==
+              g_realistic.type_of(0x9ffff));
+static_assert(zpp::arch::x86_64::memory_type::uncachable ==
+              g_realistic.type_of(0xa0000));
+static_assert(zpp::arch::x86_64::memory_type::uncachable ==
+              g_realistic.type_of(0xfffff));
+static_assert(zpp::arch::x86_64::memory_type::write_back ==
+              g_realistic.type_of(megabyte));
+static_assert(zpp::arch::x86_64::memory_type::write_back ==
               g_realistic.type_of(top_of_dram - 1));
-static_assert(memory_type::uncachable == g_realistic.type_of(top_of_dram));
-static_assert(memory_type::uncachable == g_realistic.type_of(0xfee00000));
+static_assert(zpp::arch::x86_64::memory_type::uncachable ==
+              g_realistic.type_of(top_of_dram));
+static_assert(zpp::arch::x86_64::memory_type::uncachable ==
+              g_realistic.type_of(0xfee00000));
 
 /**
  * 83012e7, stated where it cannot be got wrong again.
@@ -361,8 +379,9 @@ static_assert(memory_type::uncachable == g_realistic.type_of(0xfee00000));
  * .references/sdm.txt:225388: "7:0 VCNT: The number of variable memory
  * type ranges in the processor."
  */
-constexpr mtrr_state g_probe{};
-static_assert(255 <= mtrr_state::maximum_variable_ranges,
+constexpr zpp::arch::x86_64::mtrr_state g_probe{};
+static_assert(255 <=
+                  zpp::arch::x86_64::mtrr_state::maximum_variable_ranges,
               "the variable array must hold every count VCNT can "
               "report, not the count one machine happens to report - "
               "83012e7 sized it 8 where real parts say 10");
@@ -375,10 +394,11 @@ static_assert(255 <= std::size(g_probe.variable),
  * and without an overlap. SDM Vol. 3A 14.11.2.2, .references/sdm.txt
  * 173942-173950.
  */
-static_assert(0x100000 == mtrr_state::fixed_range_limit);
-static_assert(11 == std::size(mtrr_fixed_ranges));
-static_assert(0 == mtrr_fixed_ranges[0].base);
-static_assert(0x100000 == mtrr_fixed_ranges[10].end());
+static_assert(0x100000 ==
+              zpp::arch::x86_64::mtrr_state::fixed_range_limit);
+static_assert(11 == std::size(zpp::arch::x86_64::mtrr_fixed_ranges));
+static_assert(0 == zpp::arch::x86_64::mtrr_fixed_ranges[0].base);
+static_assert(0x100000 == zpp::arch::x86_64::mtrr_fixed_ranges[10].end());
 
 /**
  * A zero PhysMask with the valid bit set is declined, and the assertion
@@ -392,17 +412,17 @@ static_assert(0x100000 == mtrr_fixed_ranges[10].end());
  * leaves a mask at zero with the valid bit set is not hypothetical: it
  * is what a partially initialised pair looks like.
  */
-constexpr mtrr zero_mask_range()
+constexpr zpp::arch::x86_64::mtrr zero_mask_range()
 {
-    mtrr_variable_base base{};
+    zpp::arch::x86_64::mtrr_variable_base base{};
     base.page_number(0x40000);
-    base.memory_type(memory_type::write_back);
+    base.memory_type(zpp::arch::x86_64::memory_type::write_back);
 
-    mtrr_variable_mask mask{};
+    zpp::arch::x86_64::mtrr_variable_mask mask{};
     mask.valid(true);
     mask.physical_mask(0);
 
-    return make_mtrr(base, mask);
+    return zpp::arch::x86_64::make_mtrr(base, mask);
 }
 
 static_assert(!zero_mask_range().valid,
@@ -420,14 +440,25 @@ static_assert(!zero_mask_range().valid,
  */
 void legal_memory_types()
 {
-    check(is_valid(memory_type::uncachable), "UC is a legal type");
-    check(is_valid(memory_type::write_combining), "WC is a legal type");
-    check(is_valid(memory_type::write_through), "WT is a legal type");
-    check(is_valid(memory_type::write_protected), "WP is a legal type");
-    check(is_valid(memory_type::write_back), "WB is a legal type");
+    check(zpp::arch::x86_64::is_valid(
+              zpp::arch::x86_64::memory_type::uncachable),
+          "UC is a legal type");
+    check(zpp::arch::x86_64::is_valid(
+              zpp::arch::x86_64::memory_type::write_combining),
+          "WC is a legal type");
+    check(zpp::arch::x86_64::is_valid(
+              zpp::arch::x86_64::memory_type::write_through),
+          "WT is a legal type");
+    check(zpp::arch::x86_64::is_valid(
+              zpp::arch::x86_64::memory_type::write_protected),
+          "WP is a legal type");
+    check(zpp::arch::x86_64::is_valid(
+              zpp::arch::x86_64::memory_type::write_back),
+          "WB is a legal type");
 
     for (auto value : {2, 3, 7, 8, 0xff}) {
-        check(!is_valid(memory_type(value)),
+        check(!zpp::arch::x86_64::is_valid(
+                  zpp::arch::x86_64::memory_type(value)),
               "type " + std::to_string(value) +
                   " is reserved, and writing it into an EPT entry is an "
                   "EPT misconfiguration on the first access");
@@ -437,11 +468,13 @@ void legal_memory_types()
     // on one - so this only fires on firmware that broke the rule. It is
     // handled anyway because the alternative is an unhandled exit that
     // stops the CPU.
-    check_type(memory_type::uncachable,
-               mtrr_state::valid_or_uncachable(memory_type(3)),
+    check_type(zpp::arch::x86_64::memory_type::uncachable,
+               zpp::arch::x86_64::mtrr_state::valid_or_uncachable(
+                   zpp::arch::x86_64::memory_type(3)),
                "a reserved type is answered as uncacheable");
-    check_type(memory_type::write_back,
-               mtrr_state::valid_or_uncachable(memory_type::write_back),
+    check_type(zpp::arch::x86_64::memory_type::write_back,
+               zpp::arch::x86_64::mtrr_state::valid_or_uncachable(
+                   zpp::arch::x86_64::memory_type::write_back),
                "a legal type is answered unchanged");
 
     // And through the whole derivation, from each of the three places a
@@ -449,21 +482,22 @@ void legal_memory_types()
     // default.
     auto variable = empty_state();
     variable.default_type.fixed_range_enabled(false);
-    add_variable(variable, 0, large_page_size, memory_type(3));
-    check_type(memory_type::uncachable,
+    add_variable(
+        variable, 0, large_page_size, zpp::arch::x86_64::memory_type(3));
+    check_type(zpp::arch::x86_64::memory_type::uncachable,
                variable.type_of(0x1000),
                "a reserved type in a variable range comes out UC");
 
     auto fixed = empty_state();
-    fixed.fixed[0] = fixed_register_of(memory_type(7));
-    check_type(memory_type::uncachable,
+    fixed.fixed[0] = fixed_register_of(zpp::arch::x86_64::memory_type(7));
+    check_type(zpp::arch::x86_64::memory_type::uncachable,
                fixed.type_of(0x1000),
                "a reserved type in a fixed range comes out UC");
 
     auto def = empty_state();
     def.default_type.fixed_range_enabled(false);
-    def.default_type.type(memory_type(2));
-    check_type(memory_type::uncachable,
+    def.default_type.type(zpp::arch::x86_64::memory_type(2));
+    check_type(zpp::arch::x86_64::memory_type::uncachable,
                def.type_of(4 * gigabyte),
                "a reserved default type comes out UC");
 }
@@ -481,7 +515,7 @@ void legal_memory_types()
  */
 void register_encodings()
 {
-    mtrr_capabilities capabilities{};
+    zpp::arch::x86_64::mtrr_capabilities capabilities{};
     capabilities.variable_range_register_count(10);
     check_equal(
         10, capabilities.variable_range_register_count(), "VCNT of 10");
@@ -503,14 +537,14 @@ void register_encodings()
               capabilities.system_management_range_register(),
           "and all three read back");
 
-    mtrr_default_type default_type{};
-    default_type.type(memory_type::write_back);
+    zpp::arch::x86_64::mtrr_default_type default_type{};
+    default_type.type(zpp::arch::x86_64::memory_type::write_back);
     check_equal(6, default_type.value(), "the default type is bits 7:0");
     default_type.fixed_range_enabled(true);
     check_equal(0x406, default_type.value(), "FE is bit 10");
     default_type.enabled(true);
     check_equal(0xc06, default_type.value(), "E is bit 11");
-    check_type(memory_type::write_back,
+    check_type(zpp::arch::x86_64::memory_type::write_back,
                default_type.type(),
                "the type field survives both enables being set");
 
@@ -521,16 +555,16 @@ void register_encodings()
     check(default_type.enabled() && !default_type.fixed_range_enabled(),
           "clearing FE leaves E alone");
 
-    mtrr_variable_base base{};
+    zpp::arch::x86_64::mtrr_variable_base base{};
     base.page_number(0xdeadb);
-    base.memory_type(memory_type::write_combining);
+    base.memory_type(zpp::arch::x86_64::memory_type::write_combining);
     check_equal(0xdeadb, base.page_number(), "PhysBase is bits 51:12");
-    check_type(memory_type::write_combining,
+    check_type(zpp::arch::x86_64::memory_type::write_combining,
                base.memory_type(),
                "the type is bits 7:0 of PHYSBASE");
     check_equal(0xdeadb001, base.value(), "and the two do not collide");
 
-    mtrr_variable_mask mask{};
+    zpp::arch::x86_64::mtrr_variable_mask mask{};
     mask.physical_mask(0xfffff80000);
     check_equal(
         0xfffff80000, mask.physical_mask(), "PhysMask is bits 51:12");
@@ -557,20 +591,25 @@ void fixed_ranges_take_precedence()
 {
     // The table itself: contiguous, in address order, ending exactly at
     // the limit the derivation uses.
-    check_equal(mtrr_state::fixed_range_count,
-                std::size(mtrr_fixed_ranges),
+    check_equal(zpp::arch::x86_64::mtrr_state::fixed_range_count,
+                std::size(zpp::arch::x86_64::mtrr_fixed_ranges),
                 "eleven fixed-range registers");
-    check_equal(
-        0, mtrr_fixed_ranges[0].base, "the table starts at address zero");
-    check_equal(mtrr_state::fixed_range_limit,
-                mtrr_fixed_ranges[std::size(mtrr_fixed_ranges) - 1].end(),
+    check_equal(0,
+                zpp::arch::x86_64::mtrr_fixed_ranges[0].base,
+                "the table starts at address zero");
+    check_equal(zpp::arch::x86_64::mtrr_state::fixed_range_limit,
+                zpp::arch::x86_64::mtrr_fixed_ranges
+                    [std::size(zpp::arch::x86_64::mtrr_fixed_ranges) - 1]
+                        .end(),
                 "and stops at exactly 1 MB - the limit type_of compares "
                 "against, so a gap between the two would be governed by "
                 "neither");
 
-    for (std::size_t i{1}; i < std::size(mtrr_fixed_ranges); ++i) {
-        check_equal(mtrr_fixed_ranges[i - 1].end(),
-                    mtrr_fixed_ranges[i].base,
+    for (std::size_t i{1};
+         i < std::size(zpp::arch::x86_64::mtrr_fixed_ranges);
+         ++i) {
+        check_equal(zpp::arch::x86_64::mtrr_fixed_ranges[i - 1].end(),
+                    zpp::arch::x86_64::mtrr_fixed_ranges[i].base,
                     "fixed range " + std::to_string(i) + " begins where " +
                         std::to_string(i - 1) + " ends, with no gap");
     }
@@ -579,30 +618,35 @@ void fixed_ranges_take_precedence()
     // .references/sdm.txt:173942 (64 KB), 173945 (16 KB) and 173948
     // (4 KB).
     check_equal(0x10000,
-                mtrr_fixed_ranges[0].sub_range_size,
+                zpp::arch::x86_64::mtrr_fixed_ranges[0].sub_range_size,
                 "FIX64K_00000 maps eight 64 KB sub-ranges");
-    check_equal(msr::mtrr::fix64k_00000,
-                mtrr_fixed_ranges[0].msr,
+    check_equal(zpp::arch::x86_64::msr::mtrr::fix64k_00000,
+                zpp::arch::x86_64::mtrr_fixed_ranges[0].msr,
                 "and it is MSR 0x250");
-    check_equal(
-        0x80000, mtrr_fixed_ranges[0].end(), "so it covers 0 to 0x7ffff");
+    check_equal(0x80000,
+                zpp::arch::x86_64::mtrr_fixed_ranges[0].end(),
+                "so it covers 0 to 0x7ffff");
     check_equal(0x4000,
-                mtrr_fixed_ranges[1].sub_range_size,
+                zpp::arch::x86_64::mtrr_fixed_ranges[1].sub_range_size,
                 "FIX16K_80000 maps eight 16 KB sub-ranges");
-    check_equal(0x80000, mtrr_fixed_ranges[1].base, "from 0x80000");
+    check_equal(0x80000,
+                zpp::arch::x86_64::mtrr_fixed_ranges[1].base,
+                "from 0x80000");
     check_equal(0xa0000,
-                mtrr_fixed_ranges[2].base,
+                zpp::arch::x86_64::mtrr_fixed_ranges[2].base,
                 "FIX16K_A0000 covers the legacy VGA aperture, which "
                 "firmware marks UC");
-    check_equal(0xc0000, mtrr_fixed_ranges[2].end(), "up to 0xc0000");
+    check_equal(0xc0000,
+                zpp::arch::x86_64::mtrr_fixed_ranges[2].end(),
+                "up to 0xc0000");
     check_equal(0x1000,
-                mtrr_fixed_ranges[3].sub_range_size,
+                zpp::arch::x86_64::mtrr_fixed_ranges[3].sub_range_size,
                 "the eight FIX4K registers map 4 KB sub-ranges");
     check_equal(0xc0000,
-                mtrr_fixed_ranges[3].base,
+                zpp::arch::x86_64::mtrr_fixed_ranges[3].base,
                 "starting at 0xc0000, the option ROM region");
-    check_equal(msr::mtrr::fix4k_f8000,
-                mtrr_fixed_ranges[10].msr,
+    check_equal(zpp::arch::x86_64::msr::mtrr::fix4k_f8000,
+                zpp::arch::x86_64::mtrr_fixed_ranges[10].msr,
                 "and the last of them is MSR 0x26f");
 
     // Every sub-range of every register, at both ends of the sub-range,
@@ -610,11 +654,17 @@ void fixed_ranges_take_precedence()
     // different type. Anything that consulted the variable range, or
     // took the wrong byte out of the register, disagrees here.
     auto state = painted_fixed_state();
-    add_variable(state, 0, 4 * megabyte, memory_type::write_combining);
+    add_variable(state,
+                 0,
+                 4 * megabyte,
+                 zpp::arch::x86_64::memory_type::write_combining);
 
-    for (std::size_t reg{}; reg < mtrr_state::fixed_range_count; ++reg) {
-        const auto & range = mtrr_fixed_ranges[reg];
-        for (std::size_t sub{}; sub < mtrr_fixed_range::sub_ranges;
+    for (std::size_t reg{};
+         reg < zpp::arch::x86_64::mtrr_state::fixed_range_count;
+         ++reg) {
+        const auto & range = zpp::arch::x86_64::mtrr_fixed_ranges[reg];
+        for (std::size_t sub{};
+             sub < zpp::arch::x86_64::mtrr_fixed_range::sub_ranges;
              ++sub) {
             auto first = range.base + (sub * range.sub_range_size);
             auto last = first + range.sub_range_size - 1;
@@ -657,7 +707,7 @@ void fixed_ranges_take_precedence()
     // And exactly where they stop. One byte past the table the variable
     // range governs, which is the WC one added above rather than
     // anything the fixed registers say.
-    check_type(memory_type::write_combining,
+    check_type(zpp::arch::x86_64::memory_type::write_combining,
                state.type_of(megabyte),
                "at 1 MB the fixed ranges stop and the variable ranges "
                "take over");
@@ -682,11 +732,15 @@ void the_two_enables()
 {
     // E clear. Everything says write-back and the answer is still UC.
     auto disabled = empty_state();
-    disabled.default_type.type(memory_type::write_back);
+    disabled.default_type.type(zpp::arch::x86_64::memory_type::write_back);
     for (auto & value : disabled.fixed) {
-        value = fixed_register_of(memory_type::write_back);
+        value =
+            fixed_register_of(zpp::arch::x86_64::memory_type::write_back);
     }
-    add_variable(disabled, 0, 4 * gigabyte, memory_type::write_back);
+    add_variable(disabled,
+                 0,
+                 4 * gigabyte,
+                 zpp::arch::x86_64::memory_type::write_back);
     disabled.default_type.enabled(false);
 
     for (auto address : {std::uint64_t{},
@@ -695,7 +749,7 @@ void the_two_enables()
                          gigabyte,
                          top_of_dram,
                          std::uint64_t{1} << 40}) {
-        check_type(memory_type::uncachable,
+        check_type(zpp::arch::x86_64::memory_type::uncachable,
                    disabled.type_of(address),
                    "with E clear every address is UC, including 0x" +
                        std::to_string(address));
@@ -704,39 +758,44 @@ void the_two_enables()
     // One type for all of physical memory means there is no boundary at
     // all - and that is what lets uniform_type_of answer a 512 GB
     // question in a single step instead of walking it.
-    check_equal(mtrr_state::no_boundary,
+    check_equal(zpp::arch::x86_64::mtrr_state::no_boundary,
                 disabled.next_boundary_after(0),
                 "with E clear there is no boundary above zero");
-    check_equal(mtrr_state::no_boundary,
+    check_equal(zpp::arch::x86_64::mtrr_state::no_boundary,
                 disabled.next_boundary_after(top_of_dram),
                 "nor above anything else");
     check_optional_type(
-        memory_type::uncachable,
+        zpp::arch::x86_64::memory_type::uncachable,
         disabled.uniform_type_of(0, std::uint64_t{512} * gigabyte),
         "and a 512 GB range is uniformly UC, in one step");
 
     // FE clear. The fixed registers still say UC and the region below
     // 1 MB is governed by the variable ranges and the default type.
     auto fixed_off = empty_state();
-    fixed_off.default_type.type(memory_type::write_back);
+    fixed_off.default_type.type(
+        zpp::arch::x86_64::memory_type::write_back);
     for (auto & value : fixed_off.fixed) {
-        value = fixed_register_of(memory_type::uncachable);
+        value =
+            fixed_register_of(zpp::arch::x86_64::memory_type::uncachable);
     }
-    check_type(memory_type::uncachable,
+    check_type(zpp::arch::x86_64::memory_type::uncachable,
                fixed_off.type_of(0x1000),
                "with FE set the fixed registers govern below 1 MB");
 
     fixed_off.default_type.fixed_range_enabled(false);
-    check_type(memory_type::write_back,
+    check_type(zpp::arch::x86_64::memory_type::write_back,
                fixed_off.type_of(0x1000),
                "with FE clear the default type governs below 1 MB");
-    check_type(memory_type::write_back,
+    check_type(zpp::arch::x86_64::memory_type::write_back,
                fixed_off.type_of(0xa0000),
                "including the legacy aperture the fixed registers "
                "marked UC");
 
-    add_variable(fixed_off, 0, 0x80000, memory_type::write_combining);
-    check_type(memory_type::write_combining,
+    add_variable(fixed_off,
+                 0,
+                 0x80000,
+                 zpp::arch::x86_64::memory_type::write_combining);
+    check_type(zpp::arch::x86_64::memory_type::write_combining,
                fixed_off.type_of(0x1000),
                "and a variable range may map the region the fixed "
                "registers ordinarily cover");
@@ -749,7 +808,7 @@ void the_two_enables()
                 fixed_off.next_boundary_after(0x1000),
                 "the only boundary below 1 MB here is the variable "
                 "range's own end");
-    check_equal(mtrr_state::no_boundary,
+    check_equal(zpp::arch::x86_64::mtrr_state::no_boundary,
                 fixed_off.next_boundary_after(0x80000),
                 "and 1 MB itself is not a boundary when FE is clear");
 
@@ -760,9 +819,11 @@ void the_two_enables()
     // .references/sdm.txt:174468: "IF IA32_MTRRCAP.FIX AND
     // MTRRdefType.FE".
     auto unsupported = empty_state();
-    unsupported.default_type.type(memory_type::write_back);
+    unsupported.default_type.type(
+        zpp::arch::x86_64::memory_type::write_back);
     for (auto & value : unsupported.fixed) {
-        value = fixed_register_of(memory_type::uncachable);
+        value =
+            fixed_register_of(zpp::arch::x86_64::memory_type::uncachable);
     }
     check(unsupported.fixed_ranges_in_use(),
           "FIX set and FE set means the fixed ranges are in use");
@@ -770,7 +831,7 @@ void the_two_enables()
     unsupported.capabilities.fixed_range_registers_supported(false);
     check(!unsupported.fixed_ranges_in_use(),
           "FIX clear means they are not, whatever FE says");
-    check_type(memory_type::write_back,
+    check_type(zpp::arch::x86_64::memory_type::write_back,
                unsupported.type_of(0x1000),
                "so their contents are not consulted");
 }
@@ -812,10 +873,12 @@ void overlap_precedence()
     // Two ranges over the same 2 MB, in the given order, with the fixed
     // ranges out of the way and a default nothing else uses so an
     // unmatched address is obvious.
-    auto overlap = [](memory_type first, memory_type second) {
+    auto overlap = [](zpp::arch::x86_64::memory_type first,
+                      zpp::arch::x86_64::memory_type second) {
         auto state = empty_state();
         state.default_type.fixed_range_enabled(false);
-        state.default_type.type(memory_type::write_protected);
+        state.default_type.type(
+            zpp::arch::x86_64::memory_type::write_protected);
         add_variable(state, gigabyte, large_page_size, first);
         add_variable(state, gigabyte, large_page_size, second);
         return state.type_of(gigabyte + 0x1000);
@@ -824,9 +887,11 @@ void overlap_precedence()
     // One match.
     auto single = empty_state();
     single.default_type.fixed_range_enabled(false);
-    add_variable(
-        single, gigabyte, large_page_size, memory_type::write_combining);
-    check_type(memory_type::write_combining,
+    add_variable(single,
+                 gigabyte,
+                 large_page_size,
+                 zpp::arch::x86_64::memory_type::write_combining);
+    check_type(zpp::arch::x86_64::memory_type::write_combining,
                single.type_of(gigabyte),
                "one matching range answers with its own type");
 
@@ -840,28 +905,30 @@ void overlap_precedence()
 
     // UC wins, from either side, against every other type.
     for (auto type : legal_types) {
-        if (memory_type::uncachable == type) {
+        if (zpp::arch::x86_64::memory_type::uncachable == type) {
             continue;
         }
-        check_type(memory_type::uncachable,
-                   overlap(memory_type::uncachable, type),
-                   std::string("UC then ") + name_of(type) + " is UC");
-        check_type(memory_type::uncachable,
-                   overlap(type, memory_type::uncachable),
-                   std::string(name_of(type)) +
-                       " then UC is UC - this is the clause KVM's "
-                       "implementation is order-dependent on");
+        check_type(
+            zpp::arch::x86_64::memory_type::uncachable,
+            overlap(zpp::arch::x86_64::memory_type::uncachable, type),
+            std::string("UC then ") + name_of(type) + " is UC");
+        check_type(
+            zpp::arch::x86_64::memory_type::uncachable,
+            overlap(type, zpp::arch::x86_64::memory_type::uncachable),
+            std::string(name_of(type)) +
+                " then UC is UC - this is the clause KVM's "
+                "implementation is order-dependent on");
     }
 
     // WT and WB give WT, either way round.
-    check_type(
-        memory_type::write_through,
-        overlap(memory_type::write_through, memory_type::write_back),
-        "WT then WB is WT");
-    check_type(
-        memory_type::write_through,
-        overlap(memory_type::write_back, memory_type::write_through),
-        "WB then WT is WT");
+    check_type(zpp::arch::x86_64::memory_type::write_through,
+               overlap(zpp::arch::x86_64::memory_type::write_through,
+                       zpp::arch::x86_64::memory_type::write_back),
+               "WT then WB is WT");
+    check_type(zpp::arch::x86_64::memory_type::write_through,
+               overlap(zpp::arch::x86_64::memory_type::write_back,
+                       zpp::arch::x86_64::memory_type::write_through),
+               "WB then WT is WT");
 
     // Everything else is an overlap the SDM leaves undefined, and this
     // implementation answers uncacheable. mtrr.h states why, and it is
@@ -884,21 +951,24 @@ void overlap_precedence()
             if (first == second) {
                 continue;
             }
-            if (memory_type::uncachable == first ||
-                memory_type::uncachable == second) {
+            if (zpp::arch::x86_64::memory_type::uncachable == first ||
+                zpp::arch::x86_64::memory_type::uncachable == second) {
                 continue;
             }
 
-            auto write_through_or_back = [](memory_type type) {
-                return memory_type::write_through == type ||
-                       memory_type::write_back == type;
-            };
+            auto write_through_or_back =
+                [](zpp::arch::x86_64::memory_type type) {
+                    return zpp::arch::x86_64::memory_type::write_through ==
+                               type ||
+                           zpp::arch::x86_64::memory_type::write_back ==
+                               type;
+                };
             if (write_through_or_back(first) &&
                 write_through_or_back(second)) {
                 continue;
             }
 
-            check_type(memory_type::uncachable,
+            check_type(zpp::arch::x86_64::memory_type::uncachable,
                        overlap(first, second),
                        std::string("the undefined overlap ") +
                            name_of(first) + " with " + name_of(second) +
@@ -912,13 +982,19 @@ void overlap_precedence()
     // pairwise decision, so a UC anywhere in the set wins.
     auto three = empty_state();
     three.default_type.fixed_range_enabled(false);
-    add_variable(
-        three, gigabyte, large_page_size, memory_type::write_through);
-    add_variable(
-        three, gigabyte, large_page_size, memory_type::uncachable);
-    add_variable(
-        three, gigabyte, large_page_size, memory_type::write_back);
-    check_type(memory_type::uncachable,
+    add_variable(three,
+                 gigabyte,
+                 large_page_size,
+                 zpp::arch::x86_64::memory_type::write_through);
+    add_variable(three,
+                 gigabyte,
+                 large_page_size,
+                 zpp::arch::x86_64::memory_type::uncachable);
+    add_variable(three,
+                 gigabyte,
+                 large_page_size,
+                 zpp::arch::x86_64::memory_type::write_back);
+    check_type(zpp::arch::x86_64::memory_type::uncachable,
                three.type_of(gigabyte),
                "UC in the middle of three matching ranges still wins");
 
@@ -926,46 +1002,56 @@ void overlap_precedence()
     // WT rather than becoming an undefined overlap.
     auto accumulate = empty_state();
     accumulate.default_type.fixed_range_enabled(false);
-    add_variable(
-        accumulate, gigabyte, large_page_size, memory_type::write_back);
-    add_variable(
-        accumulate, gigabyte, large_page_size, memory_type::write_through);
-    add_variable(
-        accumulate, gigabyte, large_page_size, memory_type::write_back);
-    check_type(memory_type::write_through,
+    add_variable(accumulate,
+                 gigabyte,
+                 large_page_size,
+                 zpp::arch::x86_64::memory_type::write_back);
+    add_variable(accumulate,
+                 gigabyte,
+                 large_page_size,
+                 zpp::arch::x86_64::memory_type::write_through);
+    add_variable(accumulate,
+                 gigabyte,
+                 large_page_size,
+                 zpp::arch::x86_64::memory_type::write_back);
+    check_type(zpp::arch::x86_64::memory_type::write_through,
                accumulate.type_of(gigabyte),
                "WB, WT and WB together are WT");
 
     // Rule 3: no match at all.
     auto unmatched = empty_state();
     unmatched.default_type.fixed_range_enabled(false);
-    unmatched.default_type.type(memory_type::write_combining);
-    add_variable(
-        unmatched, gigabyte, large_page_size, memory_type::write_back);
-    check_type(memory_type::write_combining,
+    unmatched.default_type.type(
+        zpp::arch::x86_64::memory_type::write_combining);
+    add_variable(unmatched,
+                 gigabyte,
+                 large_page_size,
+                 zpp::arch::x86_64::memory_type::write_back);
+    check_type(zpp::arch::x86_64::memory_type::write_combining,
                unmatched.type_of(2 * gigabyte),
                "an address no range matches gets the default type");
-    check_type(memory_type::write_combining,
+    check_type(zpp::arch::x86_64::memory_type::write_combining,
                unmatched.type_of(gigabyte - 1),
                "including one byte below a range");
-    check_type(memory_type::write_combining,
+    check_type(zpp::arch::x86_64::memory_type::write_combining,
                unmatched.type_of(gigabyte + large_page_size),
                "and one byte past its end");
 
     // A pair whose valid bit is clear takes no part in any of it.
     auto invalid = empty_state();
     invalid.default_type.fixed_range_enabled(false);
-    invalid.default_type.type(memory_type::write_back);
-    mtrr_variable_base base{};
+    invalid.default_type.type(zpp::arch::x86_64::memory_type::write_back);
+    zpp::arch::x86_64::mtrr_variable_base base{};
     base.page_number(gigabyte >> 12);
-    base.memory_type(memory_type::uncachable);
-    mtrr_variable_mask mask{};
+    base.memory_type(zpp::arch::x86_64::memory_type::uncachable);
+    zpp::arch::x86_64::mtrr_variable_mask mask{};
     mask.physical_mask((~(large_page_size - 1) & 0xffffffffff000ull) >>
                        12);
-    invalid.variable[invalid.variable_count++] = make_mtrr(base, mask);
+    invalid.variable[invalid.variable_count++] =
+        zpp::arch::x86_64::make_mtrr(base, mask);
     check(!invalid.variable[0].valid,
           "a pair with V clear decodes as invalid");
-    check_type(memory_type::write_back,
+    check_type(zpp::arch::x86_64::memory_type::write_back,
                invalid.type_of(gigabyte),
                "and is skipped by the derivation");
 }
@@ -988,16 +1074,16 @@ void variable_range_encoding()
     // [0x40000000, 0x40200000) because the low bits are masked out of
     // the comparison, so the derivation must name that range and not
     // [0x40001000, 0x40201000).
-    mtrr_variable_base base{};
+    zpp::arch::x86_64::mtrr_variable_base base{};
     base.page_number(0x40001000 >> 12);
-    base.memory_type(memory_type::uncachable);
+    base.memory_type(zpp::arch::x86_64::memory_type::uncachable);
 
-    mtrr_variable_mask mask{};
+    zpp::arch::x86_64::mtrr_variable_mask mask{};
     mask.valid(true);
     mask.physical_mask((~(large_page_size - 1) & 0xffffffffff000ull) >>
                        12);
 
-    auto range = make_mtrr(base, mask);
+    auto range = zpp::arch::x86_64::make_mtrr(base, mask);
     check(range.valid, "a mask with V set decodes as valid");
     check_equal(0x40000000,
                 range.physical_base,
@@ -1006,28 +1092,28 @@ void variable_range_encoding()
     check_equal(large_page_size,
                 range.size,
                 "and its size is the run of zeroes below the mask");
-    check_type(memory_type::uncachable,
+    check_type(zpp::arch::x86_64::memory_type::uncachable,
                range.type,
                "the type comes from the base register");
 
     auto state = empty_state();
     state.default_type.fixed_range_enabled(false);
-    state.default_type.type(memory_type::write_back);
+    state.default_type.type(zpp::arch::x86_64::memory_type::write_back);
     state.variable[state.variable_count++] = range;
 
     // Both ends, and both ends of what the unmasked reading would have
     // produced. An implementation that started at PhysBase answers WB at
     // the first of these and UC at the last.
-    check_type(memory_type::uncachable,
+    check_type(zpp::arch::x86_64::memory_type::uncachable,
                state.type_of(0x40000000),
                "the aligned base is inside the range");
-    check_type(memory_type::uncachable,
+    check_type(zpp::arch::x86_64::memory_type::uncachable,
                state.type_of(0x401fffff),
                "and so is its last byte");
-    check_type(memory_type::write_back,
+    check_type(zpp::arch::x86_64::memory_type::write_back,
                state.type_of(0x3fffffff),
                "one byte below is outside");
-    check_type(memory_type::write_back,
+    check_type(zpp::arch::x86_64::memory_type::write_back,
                state.type_of(0x40200000),
                "and so is the first byte past the aligned end - an "
                "unmasked base would have run 0x1000 further");
@@ -1037,19 +1123,20 @@ void variable_range_encoding()
     // doubles it.
     for (std::size_t shift{12}; shift <= 32; ++shift) {
         auto size = std::uint64_t{1} << shift;
-        mtrr_variable_base sized_base{};
+        zpp::arch::x86_64::mtrr_variable_base sized_base{};
         sized_base.page_number(0);
-        sized_base.memory_type(memory_type::write_back);
+        sized_base.memory_type(zpp::arch::x86_64::memory_type::write_back);
 
-        mtrr_variable_mask sized_mask{};
+        zpp::arch::x86_64::mtrr_variable_mask sized_mask{};
         sized_mask.valid(true);
         sized_mask.physical_mask((~(size - 1) & 0xffffffffff000ull) >> 12);
 
-        check_equal(size,
-                    make_mtrr(sized_base, sized_mask).size,
-                    "a mask with " + std::to_string(shift - 12) +
-                        " zeroes below its run names a range of 0x" +
-                        std::to_string(size) + " bytes");
+        check_equal(
+            size,
+            zpp::arch::x86_64::make_mtrr(sized_base, sized_mask).size,
+            "a mask with " + std::to_string(shift - 12) +
+                " zeroes below its run names a range of 0x" +
+                std::to_string(size) + " bytes");
     }
 
     // A zero PhysMask with V set. The match rule is satisfied for every
@@ -1060,32 +1147,33 @@ void variable_range_encoding()
     // the second reason: the range used to be left valid with a size of
     // zero, and a zero-size range still matched any address at or above
     // its base under a comparison written as (address >= base + size).
-    mtrr_variable_base wide_base{};
+    zpp::arch::x86_64::mtrr_variable_base wide_base{};
     wide_base.page_number(0x40000);
-    wide_base.memory_type(memory_type::uncachable);
+    wide_base.memory_type(zpp::arch::x86_64::memory_type::uncachable);
 
-    mtrr_variable_mask zero_mask{};
+    zpp::arch::x86_64::mtrr_variable_mask zero_mask{};
     zero_mask.valid(true);
     zero_mask.physical_mask(0);
 
-    auto declined = make_mtrr(wide_base, zero_mask);
+    auto declined = zpp::arch::x86_64::make_mtrr(wide_base, zero_mask);
     check(!declined.valid, "a zero PhysMask is declined, not honoured");
     check_equal(0, declined.size, "and names nothing");
 
     auto with_declined = empty_state();
     with_declined.default_type.fixed_range_enabled(false);
-    with_declined.default_type.type(memory_type::write_back);
+    with_declined.default_type.type(
+        zpp::arch::x86_64::memory_type::write_back);
     with_declined.variable[with_declined.variable_count++] = declined;
     for (auto address : {std::uint64_t{},
                          std::uint64_t{0x40000000},
                          std::uint64_t{0x40001000},
                          std::uint64_t{1} << 40}) {
-        check_type(memory_type::write_back,
+        check_type(zpp::arch::x86_64::memory_type::write_back,
                    with_declined.type_of(address),
                    "a declined range matches nothing, at or above its "
                    "base alike");
     }
-    check_equal(mtrr_state::no_boundary,
+    check_equal(zpp::arch::x86_64::mtrr_state::no_boundary,
                 with_declined.next_boundary_after(0),
                 "and contributes no boundary");
 }
@@ -1103,7 +1191,8 @@ void variable_range_encoding()
  */
 void boundaries_are_strictly_increasing()
 {
-    auto sweep = [](const mtrr_state & state, const char * what) {
+    auto sweep = [](const zpp::arch::x86_64::mtrr_state & state,
+                    const char * what) {
         // Dense across the fixed ranges, where the sub-range sizes are
         // 4 KB and an off-by-one is expressible.
         for (std::uint64_t address{}; address < 0x110000;
@@ -1154,23 +1243,32 @@ void boundaries_are_strictly_increasing()
     // A pathological set: many ranges, overlapping, unaligned bases,
     // touching the top of the address space, plus a declined pair.
     auto pathological = empty_state();
-    pathological.default_type.type(memory_type::write_back);
-    add_variable(pathological, 0, 4 * gigabyte, memory_type::write_back);
-    add_variable(pathological, 0, page_size, memory_type::uncachable);
-    add_variable(
-        pathological, 0xfee00000, page_size, memory_type::uncachable);
+    pathological.default_type.type(
+        zpp::arch::x86_64::memory_type::write_back);
+    add_variable(pathological,
+                 0,
+                 4 * gigabyte,
+                 zpp::arch::x86_64::memory_type::write_back);
+    add_variable(pathological,
+                 0,
+                 page_size,
+                 zpp::arch::x86_64::memory_type::uncachable);
+    add_variable(pathological,
+                 0xfee00000,
+                 page_size,
+                 zpp::arch::x86_64::memory_type::uncachable);
     add_variable(pathological,
                  gigabyte + page_size,
                  large_page_size,
-                 memory_type::write_through);
-    mtrr_variable_base top_base{};
+                 zpp::arch::x86_64::memory_type::write_through);
+    zpp::arch::x86_64::mtrr_variable_base top_base{};
     top_base.page_number(0xffffffffff);
-    top_base.memory_type(memory_type::uncachable);
-    mtrr_variable_mask top_mask{};
+    top_base.memory_type(zpp::arch::x86_64::memory_type::uncachable);
+    zpp::arch::x86_64::mtrr_variable_mask top_mask{};
     top_mask.valid(true);
     top_mask.physical_mask(0xffffffffff);
     pathological.variable[pathological.variable_count++] =
-        make_mtrr(top_base, top_mask);
+        zpp::arch::x86_64::make_mtrr(top_base, top_mask);
     sweep(pathological, "pathological range set");
 
     // A range at the very top of the physical address space, where a
@@ -1182,13 +1280,13 @@ void boundaries_are_strictly_increasing()
                 "a full mask names a single page at the top of the "
                 "52 bit physical address space");
     check_equal(page_size, top.size, "of 4 KB");
-    check_type(memory_type::uncachable,
+    check_type(zpp::arch::x86_64::memory_type::uncachable,
                pathological.type_of(0xffffffffff000),
                "and that page is matched without the end wrapping");
 
     // Nothing above it can change the answer, so there is no boundary.
     check_equal(
-        mtrr_state::no_boundary,
+        zpp::arch::x86_64::mtrr_state::no_boundary,
         pathological.next_boundary_after(0xffffffffff000 + page_size),
         "past the highest range end there is no boundary");
 }
@@ -1235,11 +1333,11 @@ void boundaries_of_a_real_machine()
     check_equal(top_of_dram,
                 state.next_boundary_after(2 * gigabyte),
                 "then the top of DRAM");
-    check_equal(mtrr_state::no_boundary,
+    check_equal(zpp::arch::x86_64::mtrr_state::no_boundary,
                 state.next_boundary_after(top_of_dram),
                 "above which nothing can change the answer - the MMIO "
                 "hole and everything past it is the default type");
-    check_equal(mtrr_state::no_boundary,
+    check_equal(zpp::arch::x86_64::mtrr_state::no_boundary,
                 state.next_boundary_after(std::uint64_t{1} << 40),
                 "including a terabyte up");
 }
@@ -1256,20 +1354,22 @@ void uniform_ranges()
     // interesting alignment is expressible against it.
     auto state = empty_state();
     state.default_type.fixed_range_enabled(false);
-    state.default_type.type(memory_type::write_back);
-    add_variable(
-        state, gigabyte, large_page_size, memory_type::uncachable);
+    state.default_type.type(zpp::arch::x86_64::memory_type::write_back);
+    add_variable(state,
+                 gigabyte,
+                 large_page_size,
+                 zpp::arch::x86_64::memory_type::uncachable);
 
     check_optional_type(
-        memory_type::write_back,
+        zpp::arch::x86_64::memory_type::write_back,
         state.uniform_type_of(gigabyte - large_page_size, large_page_size),
         "a 2 MB region ending exactly at the boundary is uniform");
     check_optional_type(
-        memory_type::uncachable,
+        zpp::arch::x86_64::memory_type::uncachable,
         state.uniform_type_of(gigabyte, large_page_size),
         "a 2 MB region starting exactly at the boundary is uniform");
     check_optional_type(
-        memory_type::write_back,
+        zpp::arch::x86_64::memory_type::write_back,
         state.uniform_type_of(gigabyte + large_page_size, large_page_size),
         "and the region after it is uniform again");
 
@@ -1285,10 +1385,10 @@ void uniform_ranges()
 
     // The exact boundary cases at both ends, at page granularity.
     check_optional_type(
-        memory_type::write_back,
+        zpp::arch::x86_64::memory_type::write_back,
         state.uniform_type_of(gigabyte - page_size, page_size),
         "the last page below the boundary is WB");
-    check_optional_type(memory_type::uncachable,
+    check_optional_type(zpp::arch::x86_64::memory_type::uncachable,
                         state.uniform_type_of(gigabyte, page_size),
                         "the first page at the boundary is UC");
     check_optional_type(
@@ -1296,7 +1396,7 @@ void uniform_ranges()
         state.uniform_type_of(gigabyte - page_size, 2 * page_size),
         "two pages spanning the boundary are not uniform");
     check_optional_type(
-        memory_type::uncachable,
+        zpp::arch::x86_64::memory_type::uncachable,
         state.uniform_type_of(gigabyte + large_page_size - page_size,
                               page_size),
         "the last page of the range is UC");
@@ -1310,9 +1410,9 @@ void uniform_ranges()
     // must terminate on the no_boundary answer rather than stepping.
     auto flat = empty_state();
     flat.default_type.fixed_range_enabled(false);
-    flat.default_type.type(memory_type::write_back);
+    flat.default_type.type(zpp::arch::x86_64::memory_type::write_back);
     check_optional_type(
-        memory_type::write_back,
+        zpp::arch::x86_64::memory_type::write_back,
         flat.uniform_type_of(0, std::uint64_t{512} * gigabyte),
         "with no MTRRs at all a 512 GB range is uniformly the default "
         "type");
@@ -1349,8 +1449,8 @@ void uniform_agrees_with_a_naive_walk()
 {
     auto state = realistic_machine();
 
-    auto naive = [&](std::uint64_t address,
-                     std::uint64_t size) -> std::optional<memory_type> {
+    auto naive = [&](std::uint64_t address, std::uint64_t size)
+        -> std::optional<zpp::arch::x86_64::memory_type> {
         auto type = state.type_of(address);
         for (std::uint64_t offset{}; offset < size; offset += page_size) {
             if (state.type_of(address + offset) != type) {
@@ -1417,7 +1517,7 @@ void the_ept_builder_splits_where_expected()
             ++mixed;
             continue;
         }
-        if (memory_type::uncachable == *type) {
+        if (zpp::arch::x86_64::memory_type::uncachable == *type) {
             ++uncacheable_regions;
         }
     }
@@ -1441,15 +1541,15 @@ void the_ept_builder_splits_where_expected()
 
     // The hole's ends, named rather than counted.
     check_optional_type(
-        memory_type::write_back,
+        zpp::arch::x86_64::memory_type::write_back,
         state.uniform_type_of(top_of_dram - large_page_size,
                               large_page_size),
         "the last 2 MB of DRAM is write-back");
     check_optional_type(
-        memory_type::uncachable,
+        zpp::arch::x86_64::memory_type::uncachable,
         state.uniform_type_of(top_of_dram, large_page_size),
         "the first 2 MB of the MMIO hole is uncacheable");
-    check_type(memory_type::uncachable,
+    check_type(zpp::arch::x86_64::memory_type::uncachable,
                state.type_of(0xfee00000),
                "and so is the local APIC page, which sits in it");
 
@@ -1461,7 +1561,7 @@ void the_ept_builder_splits_where_expected()
     for (std::size_t k{}; k < 512; ++k) {
         auto address = k * page_size;
         auto type = state.type_of(address);
-        if (memory_type::uncachable == type) {
+        if (zpp::arch::x86_64::memory_type::uncachable == type) {
             ++uncacheable_pages;
             check(address >= 0xa0000 && address < megabyte,
                   "the only uncacheable pages of the first 2 MB are in "
@@ -1472,7 +1572,7 @@ void the_ept_builder_splits_where_expected()
     check_equal((megabyte - 0xa0000) / page_size,
                 uncacheable_pages,
                 "0xa0000 to 1 MB is uncacheable, 96 pages of it");
-    check_type(memory_type::write_back,
+    check_type(zpp::arch::x86_64::memory_type::write_back,
                state.type_of(0),
                "and the rest of the first 2 MB is write-back DRAM a "
                "guest runs code out of - which is why the region is "
@@ -1491,7 +1591,7 @@ void every_variable_range_is_consulted()
 {
     auto state = empty_state();
     state.default_type.fixed_range_enabled(false);
-    state.default_type.type(memory_type::write_back);
+    state.default_type.type(zpp::arch::x86_64::memory_type::write_back);
 
     // Ten ranges, which is what a real Intel client part reports and
     // what overran an array sized 8. The last two are the ones that were
@@ -1500,12 +1600,12 @@ void every_variable_range_is_consulted()
         add_variable(state,
                      gigabyte + (i * large_page_size),
                      large_page_size,
-                     memory_type::uncachable);
+                     zpp::arch::x86_64::memory_type::uncachable);
     }
     check_equal(10, state.variable_count, "ten variable ranges");
 
     for (std::size_t i{}; i < 10; ++i) {
-        check_type(memory_type::uncachable,
+        check_type(zpp::arch::x86_64::memory_type::uncachable,
                    state.type_of(gigabyte + (i * large_page_size)),
                    "range " + std::to_string(i) +
                        " of ten is consulted - the ninth and tenth are "
@@ -1516,25 +1616,31 @@ void every_variable_range_is_consulted()
     // that stopped early or an index that wrapped is visible.
     auto full = empty_state();
     full.default_type.fixed_range_enabled(false);
-    full.default_type.type(memory_type::write_back);
-    for (std::size_t i{}; i < mtrr_state::maximum_variable_ranges; ++i) {
+    full.default_type.type(zpp::arch::x86_64::memory_type::write_back);
+    for (std::size_t i{};
+         i < zpp::arch::x86_64::mtrr_state::maximum_variable_ranges;
+         ++i) {
         add_variable(full,
                      gigabyte + (i * large_page_size),
                      large_page_size,
-                     memory_type::uncachable);
+                     zpp::arch::x86_64::memory_type::uncachable);
     }
-    check_equal(mtrr_state::maximum_variable_ranges,
+    check_equal(zpp::arch::x86_64::mtrr_state::maximum_variable_ranges,
                 full.variable_count,
                 "the array holds every range VCNT can report");
-    check_type(memory_type::uncachable,
-               full.type_of(gigabyte +
-                            ((mtrr_state::maximum_variable_ranges - 1) *
-                             large_page_size)),
-               "and the last of them is consulted");
     check_type(
-        memory_type::write_back,
-        full.type_of(gigabyte + (mtrr_state::maximum_variable_ranges *
-                                 large_page_size)),
+        zpp::arch::x86_64::memory_type::uncachable,
+        full.type_of(
+            gigabyte +
+            ((zpp::arch::x86_64::mtrr_state::maximum_variable_ranges - 1) *
+             large_page_size)),
+        "and the last of them is consulted");
+    check_type(
+        zpp::arch::x86_64::memory_type::write_back,
+        full.type_of(
+            gigabyte +
+            (zpp::arch::x86_64::mtrr_state::maximum_variable_ranges *
+             large_page_size)),
         "with nothing past it");
 
     // The capabilities member is what the overrun corrupted, by sitting
