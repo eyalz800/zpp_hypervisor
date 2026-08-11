@@ -71,6 +71,11 @@ public:
     std::uint64_t events_requeued[max_cpus]{};
     bool pending_event_l2[max_cpus]{};
     std::uint64_t events_deferred[max_cpus]{};
+    std::uint64_t events_yielded[max_cpus]{};
+    std::uint64_t events_discarded[max_cpus]{};
+    std::uint64_t events_refused_by_state[max_cpus]{};
+    std::uint64_t pending_event_vmcs[max_cpus]{};
+    bool event_allowed_on_entry(std::uint64_t event) const;
 
     /**
      * Which VMCS the guest hypervisor has current, which is the only

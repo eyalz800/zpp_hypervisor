@@ -360,6 +360,14 @@ void interrupt_the_delivery_of(machine & built,
     built.state->pending_event_l2[cpu] = belongs_to_l2;
     built.state->pending_event_error[cpu] = captured_error_code;
     built.state->pending_event_length[cpu] = captured_instruction_length;
+
+    // Which second-level guest it was captured under, exactly as the
+    // capture side records it. That code is inside the exit-dispatch
+    // lambda and cannot be cut out by name, so this stands in for it -
+    // and it has to record the *current* guest, or every case here would
+    // look like an event whose guest had been torn down.
+    built.state->pending_event_vmcs[cpu] =
+        built.state->guest_current_vmcs[cpu];
 }
 
 /**

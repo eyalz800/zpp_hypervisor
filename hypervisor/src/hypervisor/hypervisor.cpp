@@ -10477,6 +10477,14 @@ bool hypervisor::event_allowed_on_entry(std::uint64_t event) const
 
     case activity::wait_for_start_up_ipi:
         // "Wait-for-SIPI. No events are allowed."
+        //
+        // The caller drops rather than holds on this one, and the
+        // distinction is not arbitrary: the only thing that parks a
+        // processor in wait-for-SIPI is an INIT, and an INIT destroys
+        // what was pending. KVM's `kvm_vcpu_reset` clears the exception
+        // and interrupt queues on the same event. Holding here would
+        // deliver, into a processor that has just been reset, an event
+        // its previous life was owed.
         return false;
 
     default:
@@ -10675,19 +10683,36 @@ void hypervisor::resume_guest(arch::x86_64::context & context,
             // is guest state this VMM did not write, and holding costs
             // only a later entry. An STI shadow lasts one instruction.
             //
-            // Held, not dropped: the state that refuses the event is the
-            // state the guest is in now, and the reason to keep the
-            // event is that the guest will leave it.
+            // Held, not dropped - with one exception, below. The state
+            // that refuses the event is the state the guest is in now,
+            // and the reason to keep the event is that the guest will
+            // leave it.
+            //
+            // Wait-for-SIPI is the exception, and it is dropped rather
+            // than held. The only thing that parks a processor there is
+            // an INIT, and an INIT **destroys what was pending** - KVM's
+            // `kvm_vcpu_reset` clears the exception and interrupt queues
+            // on the same event. Holding would deliver, into a processor
+            // that has just been reset, an event its previous life was
+            // owed.
         } else if (this->pending_event[cpu] &&
                    !event_allowed_on_entry(this->pending_event[cpu])) {
             this->events_refused_by_state[cpu] =
                 this->events_refused_by_state[cpu] + 1;
+
+            if (arch::x86_64::vmx::activity_state::wait_for_start_up_ipi ==
+                vmcs.guest_activity_state()) {
+                this->pending_event[cpu] = 0;
+                this->events_discarded[cpu] =
+                    this->events_discarded[cpu] + 1;
+            }
         } else if (auto event = this->pending_event[cpu]; 0 != event) {
             constexpr std::uint64_t error_valid = 1ull << 11;
             constexpr std::uint64_t type_mask = 7ull << 8;
             constexpr std::uint64_t type_software_interrupt = 4ull << 8;
             constexpr std::uint64_t type_privileged_software = 5ull << 8;
             constexpr std::uint64_t type_software_exception = 6ull << 8;
+            constexpr std::uint64_t type_nmi = 2ull << 8;
 
             if (0 != (event & error_valid)) {
                 vmcs.write(arch::x86_64::vmx::vmcs::field::
@@ -10707,9 +10732,38 @@ void hypervisor::resume_guest(arch::x86_64::context & context,
                            this->pending_event_length[cpu]);
             }
 
+            // An NMI put back has to be put back into a state that
+            // accepts it. SDM 29.3.1.5: blocking by NMI must be 0 when
+            // the injected event is an NMI and the "virtual NMIs"
+            // VM-execution control is 1. This VMM does not ask for that
+            // control, but `build_vmcs02` merges it from a guest
+            // hypervisor that does - so the entry it would refuse is a
+            // second-level one, and refusing it produces no exit at all.
+            //
+            // Cleared rather than held, unlike the STI shadow above, and
+            // for a reason that does not apply there: the blocking is
+            // the architecture's record that an NMI is *in progress*,
+            // and the NMI being put back is that same one. Waiting for
+            // it to clear is waiting for the IRET of a handler that
+            // never ran. KVM clears it unconditionally on this path,
+            // `vmx.c:7130`.
+            if (type_nmi == (event & type_mask)) {
+                vmcs.guest_interruptibility_state(
+                    vmcs.guest_interruptibility_state() &
+                    ~arch::x86_64::vmx::interruptibility_state::
+                        blocking_by_nmi);
+            }
+
+            // Masked, not copied. The interrupted-event field this was
+            // read from carries bit 13, "nested exception", which SDM
+            // 29.2.1.3 makes legal in the *entry* field only on a
+            // processor enumerating FRED. Copying the word verbatim
+            // hands the processor a reserved bit and the entry is
+            // refused - silently, like every other failed check here.
             vmcs.write(arch::x86_64::vmx::vmcs::field::
                            vm_entry_interruption_information_field,
-                       event);
+                       event & arch::x86_64::vmx::vm_entry_interruption::
+                                   defined_bits);
 
             this->pending_event[cpu] = 0;
             this->events_requeued[cpu] = this->events_requeued[cpu] + 1;
