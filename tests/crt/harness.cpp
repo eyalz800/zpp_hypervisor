@@ -68,6 +68,7 @@
 #include <cstring>
 #include <expected>
 #include <new>
+#include <print>
 #include <span>
 #include <string>
 #include <string_view>
@@ -95,7 +96,7 @@ void check(bool condition, const std::string & what)
         return;
     }
     ++g_failures;
-    std::printf("FAIL: %s\n", what.c_str());
+    std::println("FAIL: {}", what);
 }
 
 void check_equal(std::uint64_t expected,
@@ -107,13 +108,13 @@ void check_equal(std::uint64_t expected,
         return;
     }
     ++g_failures;
-    std::printf("FAIL: %s\n  expected %llu (0x%llx)\n  actual   %llu "
-                "(0x%llx)\n",
-                what.c_str(),
-                static_cast<unsigned long long>(expected),
-                static_cast<unsigned long long>(expected),
-                static_cast<unsigned long long>(actual),
-                static_cast<unsigned long long>(actual));
+    std::println("FAIL: {}\n  expected {} (0x{:x})\n  actual   {} "
+                 "(0x{:x})",
+                 what,
+                 expected,
+                 expected,
+                 actual,
+                 actual);
 }
 
 using init_function = zpp::crt::init::array_entry;
@@ -1517,8 +1518,8 @@ void a_full_destructor_registry_traps()
                   std::to_string(signal_number));
     }
 #else
-    std::printf("note: no fork(), the registry overflow trap is not "
-                "stated on this platform\n");
+    std::println("note: no fork(), the registry overflow trap is not "
+                 "stated on this platform");
 #endif
 }
 
@@ -1654,6 +1655,6 @@ int main()
     a_full_destructor_registry_traps();
     cleanup_runs_destructors_then_the_fini_array_in_reverse();
 
-    std::printf("crt: %zu checks, %zu failures\n", g_checks, g_failures);
+    std::println("crt: {} checks, {} failures", g_checks, g_failures);
     return g_failures ? 1 : 0;
 }

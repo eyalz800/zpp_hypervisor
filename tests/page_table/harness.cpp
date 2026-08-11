@@ -101,7 +101,9 @@
 #include <cstddef>
 #include <cstdint>
 #include <cstdio>
+#include <format>
 #include <memory>
+#include <print>
 #include <string>
 #include <vector>
 
@@ -125,7 +127,7 @@ void check(bool condition, const std::string & what)
         return;
     }
     ++g_failures;
-    std::printf("FAIL: %s\n", what.c_str());
+    std::println("FAIL: {}", what);
 }
 
 void check_equal(std::uint64_t expected,
@@ -137,20 +139,15 @@ void check_equal(std::uint64_t expected,
         return;
     }
     ++g_failures;
-    std::printf("FAIL: %s\n  expected 0x%llx\n  actual   0x%llx\n",
-                what.c_str(),
-                static_cast<unsigned long long>(expected),
-                static_cast<unsigned long long>(actual));
+    std::println("FAIL: {}\n  expected 0x{:x}\n  actual   0x{:x}",
+                 what,
+                 expected,
+                 actual);
 }
 
 std::string hex(std::uint64_t value)
 {
-    char text[32]{};
-    std::snprintf(text,
-                  sizeof(text),
-                  "0x%llx",
-                  static_cast<unsigned long long>(value));
-    return text;
+    return std::format("0x{:x}", value);
 }
 
 constexpr std::uint64_t page_size = 0x1000;
@@ -2117,7 +2114,7 @@ int main()
 
     memory_type_encodings();
 
-    std::printf(
-        "page_table: %zu checks, %zu failures\n", g_checks, g_failures);
+    std::println(
+        "page_table: {} checks, {} failures", g_checks, g_failures);
     return g_failures ? 1 : 0;
 }

@@ -38,7 +38,9 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <format>
 #include <iterator>
+#include <print>
 #include <string>
 #include <vector>
 
@@ -54,21 +56,16 @@ static void check(bool condition, const std::string & what)
     if (!condition) {
         ++g_failures;
         if (g_failures <= 40) {
-            std::printf("FAIL: %s\n", what.c_str());
+            std::println("FAIL: {}", what);
         } else if (41 == g_failures) {
-            std::printf("FAIL: ... further failures suppressed\n");
+            std::println("FAIL: ... further failures suppressed");
         }
     }
 }
 
 static std::string hex(std::uint64_t value)
 {
-    char buffer[32];
-    std::snprintf(buffer,
-                  sizeof(buffer),
-                  "0x%llx",
-                  static_cast<unsigned long long>(value));
-    return buffer;
+    return std::format("0x{:x}", value);
 }
 
 // ------------------------------------------------------- the registers
@@ -183,7 +180,7 @@ static void run(const std::string & command)
 {
     auto status = std::system(command.c_str());
     if (0 != status) {
-        std::printf("command failed: %s\n", command.c_str());
+        std::println("command failed: {}", command);
         std::exit(1);
     }
 }
@@ -197,7 +194,7 @@ static std::string read_file(const std::string & path)
 {
     auto * file = std::fopen(path.c_str(), "rb");
     if (nullptr == file) {
-        std::printf("cannot open %s\n", path.c_str());
+        std::println("cannot open {}", path);
         std::exit(1);
     }
 
@@ -257,7 +254,7 @@ static void assemble(code_size mode, const char * name)
 
     auto * file = std::fopen(assembly.c_str(), "wb");
     if (nullptr == file) {
-        std::printf("cannot write %s\n", assembly.c_str());
+        std::println("cannot write {}", assembly);
         std::exit(1);
     }
     std::fwrite(source.data(), 1, source.size(), file);
@@ -1700,12 +1697,12 @@ static void check_lengths_and_addresses()
         }
     }
 
-    std::printf("  %d accepted, %d with a memory operand, %d addresses "
-                "compared, %d refused\n",
-                accepted,
-                with_memory,
-                compared,
-                refused);
+    std::println("  {} accepted, {} with a memory operand, {} addresses "
+                 "compared, {} refused",
+                 accepted,
+                 with_memory,
+                 compared,
+                 refused);
 }
 
 /**
@@ -1733,7 +1730,7 @@ static void check_sixteen_bit_refusal()
               "16-bit code must be refused: " + item.text);
     }
 
-    std::printf("  %d instructions refused in 16-bit code\n", tried);
+    std::println("  {} instructions refused in 16-bit code", tried);
 }
 
 static const std::uint64_t g_memory_samples[] = {
@@ -1844,7 +1841,7 @@ static void check_semantics()
         }
     }
 
-    std::printf("  %d instructions modelled against the SDM\n", cases);
+    std::println("  {} instructions modelled against the SDM", cases);
 }
 
 // -------------------------------------------------------------- main
@@ -1864,17 +1861,17 @@ int main()
     assemble(code_size::bits_64, "64");
     assemble(code_size::bits_32, "32");
 
-    std::printf("%zu instructions in the corpus\n", g_corpus.size());
+    std::println("{} instructions in the corpus", g_corpus.size());
 
-    std::printf("lengths and effective addresses, against LLVM:\n");
+    std::println("lengths and effective addresses, against LLVM:");
     check_lengths_and_addresses();
 
-    std::printf("sixteen-bit code:\n");
+    std::println("sixteen-bit code:");
     check_sixteen_bit_refusal();
 
-    std::printf("semantics, against a model of the SDM:\n");
+    std::println("semantics, against a model of the SDM:");
     check_semantics();
 
-    std::printf("\n%d checks, %d failures\n", g_checks, g_failures);
+    std::println("\n{} checks, {} failures", g_checks, g_failures);
     return (0 == g_failures) ? 0 : 1;
 }

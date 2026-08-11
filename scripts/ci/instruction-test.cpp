@@ -6,7 +6,7 @@
 // on an assembler agreeing with the decoder about what it meant.
 #include "zpp/arch/x86_64/instruction.h"
 
-#include <cstdio>
+#include <print>
 
 using namespace zpp::arch::x86_64;
 
@@ -539,6 +539,7 @@ static_assert(*address_of(combine_disp32) ==
 
 int main()
 {
-    std::printf("all instruction decoder static_asserts passed\n");
+    std::println(
+        "all instruction decoder static_asserts passed");
     return 0;
 }

@@ -36,9 +36,9 @@
 #include "zpp/hypervisor/hypervisor.h"
 
 #include <atomic>
-#include <cstdio>
 #include <cstring>
 #include <memory>
+#include <print>
 #include <string>
 #include <thread>
 #include <vector>
@@ -216,7 +216,7 @@ void check(bool condition, const std::string & what)
         return;
     }
     ++g_failures;
-    std::printf("FAIL: %s\n", what.c_str());
+    std::println("FAIL: {}", what);
 }
 
 void check_equal(std::uint64_t expected,
@@ -228,10 +228,10 @@ void check_equal(std::uint64_t expected,
         return;
     }
     ++g_failures;
-    std::printf("FAIL: %s\n  expected 0x%llx\n  actual   0x%llx\n",
-                what.c_str(),
-                static_cast<unsigned long long>(expected),
-                static_cast<unsigned long long>(actual));
+    std::println("FAIL: {}\n  expected 0x{:x}\n  actual   0x{:x}",
+                 what,
+                 expected,
+                 actual);
 }
 
 /*
@@ -1205,7 +1205,7 @@ int main()
     a_processor_outside_the_table_is_not_recorded();
     the_survey_and_the_arming_are_one_decision();
 
-    std::printf(
-        "local_apic: %zu checks, %zu failures\n", g_checks, g_failures);
+    std::println(
+        "local_apic: {} checks, {} failures", g_checks, g_failures);
     return g_failures ? 1 : 0;
 }

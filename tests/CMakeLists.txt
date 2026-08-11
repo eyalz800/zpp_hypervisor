@@ -37,6 +37,45 @@ set(ZPP_TEST_COMPILE_OPTIONS
     -fno-exceptions
     -fno-rtti)
 
+# <print> is what these harnesses report through, so the standard library
+# behind the host compiler has to have it. Probed rather than assumed,
+# because the two libraries disagree about when it arrived: libc++ has it
+# from 18, libstdc++ only from 14, and a clang on a distribution whose
+# default g++ is 13 picks up that 13's headers and fails on the include
+# alone.
+#
+# So: try it bare, and if that fails try again asking for libc++, which
+# CI already installs beside the clang it names. Asking for libc++ is not
+# a workaround either - the hypervisor sources these harnesses compile are
+# built against libc++ headers in the cross build, so a harness using it
+# is instantiating the same templates the target does.
+#
+# A hard error if neither works, rather than a fallback to std::printf.
+# A suite that silently reports through a different mechanism on one
+# machine is a suite whose output cannot be compared across machines.
+include(CheckCXXSourceCompiles)
+
+set(ZPP_PRINT_PROGRAM "#include <print>\nint main() { std::println(\"{}\", 1); }\n")
+
+set(CMAKE_REQUIRED_FLAGS "-std=c++2c")
+check_cxx_source_compiles("${ZPP_PRINT_PROGRAM}" ZPP_HAVE_PRINT)
+
+if(NOT ZPP_HAVE_PRINT)
+    set(CMAKE_REQUIRED_FLAGS "-std=c++2c -stdlib=libc++")
+    check_cxx_source_compiles("${ZPP_PRINT_PROGRAM}" ZPP_HAVE_PRINT_LIBCXX)
+    if(NOT ZPP_HAVE_PRINT_LIBCXX)
+        message(FATAL_ERROR
+            "the host compiler has no <print>, with or without "
+            "-stdlib=libc++. The hosted suite reports through "
+            "std::println; a compiler without it cannot build it. "
+            "Install libc++ for this clang, or use a newer libstdc++.")
+    endif()
+    list(APPEND ZPP_TEST_COMPILE_OPTIONS -stdlib=libc++)
+    set(ZPP_TEST_LINK_OPTIONS -stdlib=libc++)
+endif()
+
+unset(CMAKE_REQUIRED_FLAGS)
+
 set(ZPP_HYPERVISOR_INCLUDE "${ZPP_SOURCE_DIR}/hypervisor/include")
 set(ZPP_DIAG_INCLUDE "${ZPP_SOURCE_DIR}/diag/include")
 
@@ -97,6 +136,9 @@ function(zpp_add_host_test name)
     # compile_commands.json either way, which is what clangd needs.
     add_executable(${name} EXCLUDE_FROM_ALL ${HARNESS_SOURCES})
     target_compile_options(${name} PRIVATE ${ZPP_TEST_COMPILE_OPTIONS})
+    if(ZPP_TEST_LINK_OPTIONS)
+        target_link_options(${name} PRIVATE ${ZPP_TEST_LINK_OPTIONS})
+    endif()
     # diag/include last, and unconditionally: the hypervisor sources
     # include zpp/diag/log.h, whose real header is header-only and
     # compiles natively, so there is nothing here for a harness to

@@ -29,6 +29,7 @@
 #include <cstdio>
 #include <cstring>
 #include <initializer_list>
+#include <print>
 #include <string>
 #include <vector>
 
@@ -187,7 +188,7 @@ static void check(bool ok, const std::string & what)
     ++g_checks;
     if (!ok) {
         ++g_failures;
-        std::printf("  FAIL %s\n", what.c_str());
+        std::println("  FAIL {}", what);
         g_findings.push_back(what);
     }
 }
@@ -209,11 +210,11 @@ static void diverge(bool current_answer_holds, const std::string & what)
     g_findings.push_back(what);
     if (!current_answer_holds) {
         ++g_failures;
-        std::printf("  FAIL a recorded divergence no longer reproduces, "
-                    "so the record is stale: %s\n",
-                    what.c_str());
+        std::println("  FAIL a recorded divergence no longer reproduces, "
+                     "so the record is stale: {}",
+                     what);
     } else {
-        std::printf("  DIVERGES %s\n", what.c_str());
+        std::println("  DIVERGES {}", what);
     }
 }
 
@@ -537,8 +538,7 @@ static decoded_instruction decoded(const context & registers)
     auto answer = arch::x86_64::decode(
         std::as_bytes(std::span{g_code}), registers, g_code_size);
     if (!answer) {
-        std::printf(
-            "  FAIL the harness wrote bytes the decoder refuses\n");
+        std::println("  FAIL the harness wrote bytes the decoder refuses");
         ++g_failures;
         return {};
     }
@@ -558,7 +558,7 @@ static decoded_instruction decoded(const context & registers)
 //      emulated at all, because address_known stays clear.
 static void test_offset_resolution()
 {
-    std::printf("\noffset resolution\n");
+    std::println("\noffset resolution");
 
     // 1. The linear address answers it, and the page-granular physical
     //    address contributes only the page.
@@ -832,7 +832,7 @@ static void test_offset_resolution()
 // carry_out_guest_instruction
 static void test_carry_out()
 {
-    std::printf("\ncarry_out_guest_instruction\n");
+    std::println("\ncarry_out_guest_instruction");
 
     auto run = [](context & registers,
                   std::uint64_t address,
@@ -1430,7 +1430,7 @@ static void test_carry_out()
 //     refuses emulation for any other form.
 static void test_filter_notify()
 {
-    std::printf("\nfilter and notify contract\n");
+    std::println("\nfilter and notify contract");
 
     struct form
     {
@@ -1855,7 +1855,7 @@ static std::uint64_t kvm_command(std::uint32_t low, std::uint32_t high)
 
 static void test_local_apic()
 {
-    std::printf("\nlocal APIC filter and notify\n");
+    std::println("\nlocal APIC filter and notify");
 
     auto filter =
         [](std::uint64_t offset, std::uint64_t value, std::uint8_t size) {
@@ -2185,7 +2185,7 @@ static void test_local_apic()
 //   `if (len != 4 || (offset & 0xf)) return 0;`
 static void test_straddle_and_width()
 {
-    std::printf("\nstraddling and access width\n");
+    std::println("\nstraddling and access width");
 
     // A store crossing the end of the watched page is refused and
     // stepped, rather than applied whole at the faulting address.
@@ -2414,7 +2414,7 @@ static void test_straddle_and_width()
  */
 static void test_apic_timer()
 {
-    std::printf("\n-- the local apic timer, and what a count means\n");
+    std::println("\n-- the local apic timer, and what a count means");
 
     constexpr std::uint64_t lvt_timer = 0x320;
     constexpr std::uint64_t divide_configuration = 0x3e0;
@@ -2616,12 +2616,12 @@ int main()
     test_straddle_and_width();
     test_apic_timer();
 
-    std::printf("\n%d checks, %d failures\n", g_checks, g_failures);
+    std::println("\n{} checks, {} failures", g_checks, g_failures);
 
     if (!g_findings.empty()) {
-        std::printf("\nfindings (%zu):\n", g_findings.size());
+        std::println("\nfindings ({}):", g_findings.size());
         for (auto & finding : g_findings) {
-            std::printf("  - %s\n", finding.c_str());
+            std::println("  - {}", finding);
         }
     }
 

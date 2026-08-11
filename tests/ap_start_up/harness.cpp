@@ -125,8 +125,8 @@
 #include "zpp/arch/x86_64/asm.h"
 #include "zpp/hypervisor/hypervisor.h"
 #include <atomic>
-#include <cstdio>
 #include <cstring>
+#include <print>
 #include <string>
 #include <thread>
 #include <vector>
@@ -142,9 +142,9 @@ static void check(bool ok, const std::string & what)
     ++g_checks;
     if (!ok) {
         ++g_failures;
-        std::printf("  FAIL  %s\n", what.c_str());
+        std::println("  FAIL  {}", what);
     } else {
-        std::printf("  ok    %s\n", what.c_str());
+        std::println("  ok    {}", what);
     }
 }
 
@@ -296,7 +296,7 @@ static void together(std::size_t count, Work work)
 // on more than one logical processor."
 static void test_one_vmcs_per_processor()
 {
-    std::printf("\none VMCS per processor\n");
+    std::println("\none VMCS per processor");
 
     constexpr std::size_t processors = 8;
     constexpr int rounds = 200;
@@ -367,7 +367,7 @@ static void test_one_vmcs_per_processor()
 // the second overwrites the first's entry.
 static void test_slot_allocation()
 {
-    std::printf("\na slot names one processor\n");
+    std::println("\na slot names one processor");
 
     constexpr std::size_t askers = 8;
     constexpr int rounds = 400;
@@ -440,7 +440,7 @@ static void test_slot_allocation()
 // decide who must answer an extended page table change.
 static void test_running_processor_stays_launched()
 {
-    std::printf("\na running processor stays launched\n");
+    std::println("\na running processor stays launched");
 
     constexpr int rounds = 400;
     auto cleared = 0;
@@ -502,7 +502,7 @@ static void test_running_processor_stays_launched()
 // returned as adopted, which swallows the guest's write.
 static void test_handoff_is_obeyed()
 {
-    std::printf("\nthe hand-off is obeyed, not guessed\n");
+    std::println("\nthe hand-off is obeyed, not guessed");
 
     using handoff = hypervisor::start_up_handoff_state;
     constexpr std::uint64_t wait_for_sipi = 3;
@@ -608,7 +608,7 @@ static void test_handoff_is_obeyed()
 // be if the state were the vector.
 static void test_handoff_state_machine()
 {
-    std::printf("\nthe hand-off state machine\n");
+    std::println("\nthe hand-off state machine");
 
     using handoff = hypervisor::start_up_handoff_state;
 
@@ -699,7 +699,7 @@ static void test_handoff_state_machine()
 // here as the value property - a store would satisfy none of it.
 static void test_handoff_is_exchanged_not_stored()
 {
-    std::printf("\nthe hand-off is exchanged, never stored\n");
+    std::println("\nthe hand-off is exchanged, never stored");
 
     using handoff = hypervisor::start_up_handoff_state;
     constexpr std::uint64_t wait_for_sipi = 3;
@@ -925,7 +925,7 @@ zpp::arch::x86_64::context poisoned_context()
 
 void test_apply_start_up_state()
 {
-    std::printf("\n-- the state an INIT leaves behind\n");
+    std::println("\n-- the state an INIT leaves behind");
     reset();
 
     constexpr std::size_t cpu = 0;
@@ -1197,7 +1197,7 @@ void test_apply_start_up_state()
  */
 void test_apply_start_up_vectors()
 {
-    std::printf("\n-- the start-up vector scales to a real-mode CS\n");
+    std::println("\n-- the start-up vector scales to a real-mode CS");
 
     for (std::uint64_t vector : {std::uint64_t{0},
                                  std::uint64_t{1},
@@ -1224,7 +1224,7 @@ void test_apply_start_up_vectors()
  */
 void test_apply_start_up_duplicate_guard()
 {
-    std::printf("\n-- the duplicate start-up guard\n");
+    std::println("\n-- the duplicate start-up guard");
 
     // The first start-up IPI of an INIT-SIPI-SIPI applies.
     reset();
@@ -1365,7 +1365,7 @@ static void nested_and_x2apic()
 
 static void test_init_publishes_before_it_waits()
 {
-    std::printf("\nthe INIT handler publishes before it waits\n");
+    std::println("\nthe INIT handler publishes before it waits");
 
     using handoff = hypervisor::start_up_handoff_state;
     constexpr std::uint64_t wait_for_sipi = 3;
@@ -1434,7 +1434,7 @@ static void test_init_publishes_before_it_waits()
  */
 static void test_handoff_race_is_exactly_once()
 {
-    std::printf("\nthe hand-off consumes a vector exactly once\n");
+    std::println("\nthe hand-off consumes a vector exactly once");
 
     using handoff = hypervisor::start_up_handoff_state;
     constexpr std::size_t cpu = 1;
@@ -1529,7 +1529,7 @@ static void test_handoff_race_is_exactly_once()
  */
 static void test_init_chooses_and_publishes_a_handoff()
 {
-    std::printf("\nthe INIT handler chooses a hand-off and says which\n");
+    std::println("\nthe INIT handler chooses a hand-off and says which");
 
     using handoff = hypervisor::start_up_handoff_state;
     constexpr std::uint64_t wait_for_sipi = 3;
@@ -1622,7 +1622,7 @@ static void test_init_chooses_and_publishes_a_handoff()
 // started" flag anywhere in it.
 static void test_firmware_start_up_is_not_the_guest_s()
 {
-    std::printf("\nthe firmware's start-up is not the guest's\n");
+    std::println("\nthe firmware's start-up is not the guest's");
 
     using handoff = hypervisor::start_up_handoff_state;
     constexpr std::uint64_t wait_for_sipi = 3;
@@ -1749,7 +1749,7 @@ static void test_firmware_start_up_is_not_the_guest_s()
 // writing the low half is what sends the interrupt.
 static void test_start_up_ipi_follows_the_apic_mode()
 {
-    std::printf("\none sender, branching on the APIC mode\n");
+    std::println("\none sender, branching on the APIC mode");
 
     constexpr std::uint64_t delivery_mode_start_up = 0x6ull << 8;
     constexpr std::uint64_t level_assert = 1ull << 14;
@@ -1832,7 +1832,7 @@ static void test_start_up_ipi_follows_the_apic_mode()
 // fail these rather than pass them silently.
 static void test_init_is_forwarded_and_nothing_more()
 {
-    std::printf("\nan INIT is forwarded and nothing more\n");
+    std::println("\nan INIT is forwarded and nothing more");
 
     using handoff = hypervisor::start_up_handoff_state;
 
@@ -1935,6 +1935,6 @@ int main()
     test_start_up_ipi_follows_the_apic_mode();
     test_init_is_forwarded_and_nothing_more();
 
-    std::printf("\n%d checks, %d failures\n", g_checks, g_failures);
+    std::println("\n{} checks, {} failures", g_checks, g_failures);
     return (0 == g_failures) ? 0 : 1;
 }

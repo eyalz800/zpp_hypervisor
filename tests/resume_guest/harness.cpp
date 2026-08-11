@@ -81,9 +81,9 @@
 #include "zpp/diag/sinks/esp_blocks.h"
 #include "zpp/hypervisor/hypervisor.h"
 
-#include <cstdio>
 #include <cstring>
 #include <memory>
+#include <print>
 #include <string>
 
 /**
@@ -138,7 +138,7 @@ void check(bool condition, const std::string & what)
         return;
     }
     ++g_failures;
-    std::printf("FAIL: %s\n", what.c_str());
+    std::println("FAIL: {}", what);
 }
 
 void check_equal(std::uint64_t expected,
@@ -150,10 +150,10 @@ void check_equal(std::uint64_t expected,
         return;
     }
     ++g_failures;
-    std::printf("FAIL: %s\n  expected 0x%llx\n  actual   0x%llx\n",
-                what.c_str(),
-                static_cast<unsigned long long>(expected),
-                static_cast<unsigned long long>(actual));
+    std::println("FAIL: {}\n  expected 0x{:x}\n  actual   0x{:x}",
+                 what,
+                 expected,
+                 actual);
 }
 
 /*
@@ -1182,7 +1182,7 @@ int main()
     the_entry_is_chosen_by_launch_state();
     the_resume_records_where_it_left_the_guest();
 
-    std::printf(
-        "resume_guest: %zu checks, %zu failures\n", g_checks, g_failures);
+    std::println(
+        "resume_guest: {} checks, {} failures", g_checks, g_failures);
     return g_failures ? 1 : 0;
 }

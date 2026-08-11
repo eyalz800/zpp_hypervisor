@@ -47,9 +47,9 @@
 #include "zpp/arch/x86_64/mtrr.h"
 
 #include <cstdint>
-#include <cstdio>
 #include <iterator>
 #include <optional>
+#include <print>
 #include <string>
 
 namespace
@@ -78,7 +78,7 @@ void check(bool condition, const std::string & what)
         return;
     }
     ++g_failures;
-    std::printf("FAIL: %s\n", what.c_str());
+    std::println("FAIL: {}", what);
 }
 
 void check_equal(std::uint64_t expected,
@@ -90,10 +90,10 @@ void check_equal(std::uint64_t expected,
         return;
     }
     ++g_failures;
-    std::printf("FAIL: %s\n  expected 0x%llx\n  actual   0x%llx\n",
-                what.c_str(),
-                static_cast<unsigned long long>(expected),
-                static_cast<unsigned long long>(actual));
+    std::println("FAIL: {}\n  expected 0x{:x}\n  actual   0x{:x}",
+                 what,
+                 expected,
+                 actual);
 }
 
 /**
@@ -128,12 +128,12 @@ void check_type(memory_type expected,
         return;
     }
     ++g_failures;
-    std::printf("FAIL: %s\n  expected %s (%d)\n  actual   %s (%d)\n",
-                what.c_str(),
-                name_of(expected),
-                static_cast<int>(expected),
-                name_of(actual),
-                static_cast<int>(actual));
+    std::println("FAIL: {}\n  expected {} ({})\n  actual   {} ({})",
+                 what,
+                 name_of(expected),
+                 static_cast<int>(expected),
+                 name_of(actual),
+                 static_cast<int>(actual));
 }
 
 /**
@@ -150,10 +150,10 @@ void check_optional_type(std::optional<memory_type> expected,
         return;
     }
     ++g_failures;
-    std::printf("FAIL: %s\n  expected %s\n  actual   %s\n",
-                what.c_str(),
-                expected ? name_of(*expected) : "nothing",
-                actual ? name_of(*actual) : "nothing");
+    std::println("FAIL: {}\n  expected {}\n  actual   {}",
+                 what,
+                 expected ? name_of(*expected) : "nothing",
+                 actual ? name_of(*actual) : "nothing");
 }
 
 constexpr std::uint64_t page_size = 0x1000;
@@ -1565,6 +1565,6 @@ int main()
     the_ept_builder_splits_where_expected();
     every_variable_range_is_consulted();
 
-    std::printf("mtrr: %zu checks, %zu failures\n", g_checks, g_failures);
+    std::println("mtrr: {} checks, {} failures", g_checks, g_failures);
     return g_failures ? 1 : 0;
 }

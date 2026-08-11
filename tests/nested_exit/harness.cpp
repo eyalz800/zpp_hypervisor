@@ -24,6 +24,7 @@
 #include <cstdio>
 #include <cstring>
 #include <map>
+#include <print>
 #include <string>
 #include <utility>
 #include <vector>
@@ -418,7 +419,7 @@ static void check(bool ok, const std::string & what)
     ++g_checks;
     if (!ok) {
         ++g_failures;
-        std::printf("  FAIL %s\n", what.c_str());
+        std::println("  FAIL {}", what);
         g_findings.push_back(what);
     }
 }
@@ -440,11 +441,11 @@ static void diverge(bool current_answer_holds, const std::string & what)
     g_findings.push_back(what);
     if (!current_answer_holds) {
         ++g_failures;
-        std::printf("  FAIL a recorded divergence no longer reproduces, "
-                    "so the record is stale: %s\n",
-                    what.c_str());
+        std::println("  FAIL a recorded divergence no longer reproduces, "
+                     "so the record is stale: {}",
+                     what);
     } else {
-        std::printf("  DIVERGES %s\n", what.c_str());
+        std::println("  DIVERGES {}", what);
     }
 }
 
@@ -1548,7 +1549,7 @@ static void arm(const reason_case & entry, bool on, context & registers)
 
 static void test_reason_table()
 {
-    std::printf("exit reason table, 0 through 69\n");
+    std::println("exit reason table, 0 through 69");
 
     for (auto & entry : g_reasons) {
         for (auto on : {false, true}) {
@@ -1719,7 +1720,7 @@ static void set_bit(std::uint64_t base, std::size_t bit)
 
 static void test_msr_bitmap()
 {
-    std::printf("MSR bitmap consultation\n");
+    std::println("MSR bitmap consultation");
 
     struct quadrant
     {
@@ -1842,7 +1843,7 @@ static constexpr std::uint64_t access_lmsw = 3;
 
 static void test_cr_access()
 {
-    std::printf("control register access\n");
+    std::println("control register access");
 
     auto & shadow = hv().guest_vmcs12[cpu];
 
@@ -2185,7 +2186,7 @@ static void test_cr_access()
 // ------------------------------------------------- the exception suite
 static void test_exceptions()
 {
-    std::printf("exception bitmap and page-fault filtering\n");
+    std::println("exception bitmap and page-fault filtering");
 
     auto & shadow = hv().guest_vmcs12[cpu];
 
@@ -2334,7 +2335,7 @@ static void test_exceptions()
 // -------------------------------------------------------- the I/O suite
 static void test_io()
 {
-    std::printf("I/O instructions\n");
+    std::println("I/O instructions");
 
     auto io_qualification = [](std::uint64_t port, std::uint64_t size) {
         // SDM Table 28-5: bits 2:0 the size minus one, bits 31:16 the
@@ -2529,8 +2530,8 @@ static void test_io()
 // ------------------------------------------ the L0-before-L1 precedence
 static void test_l0_precedence()
 {
-    std::printf("what this VMM keeps before the guest hypervisor is "
-                "asked\n");
+    std::println("what this VMM keeps before the guest hypervisor is "
+                 "asked");
 
     auto own_msr = [](std::uint32_t index, bool write) {
         std::size_t base = write ? 0x800 : 0x000;
@@ -2679,8 +2680,8 @@ static void test_l0_precedence()
  */
 static void test_activity_state()
 {
-    std::printf("the activity state a second-level VM entry may "
-                "establish\n");
+    std::println("the activity state a second-level VM entry may "
+                 "establish");
 
     using entry_outcome = zpp::hypervisor::hypervisor::l2_entry_outcome;
     namespace activity = zpp::arch::x86_64::vmx::activity_state;
@@ -2918,8 +2919,8 @@ static void test_activity_state()
  */
 static void test_reflected_activity_and_interruptibility()
 {
-    std::printf("what a reflected exit hands back in the activity and "
-                "interruptibility fields\n");
+    std::println("what a reflected exit hands back in the activity and "
+                 "interruptibility fields");
 
     namespace activity = zpp::arch::x86_64::vmx::activity_state;
 
@@ -3214,8 +3215,8 @@ static void test_reflected_activity_and_interruptibility()
  */
 static void test_injection_into_a_parked_guest()
 {
-    std::printf("delivering an interrupt to a parked second-level "
-                "guest\n");
+    std::println("delivering an interrupt to a parked second-level "
+                 "guest");
 
     using entry_outcome = zpp::hypervisor::hypervisor::l2_entry_outcome;
     namespace activity = zpp::arch::x86_64::vmx::activity_state;
@@ -3457,8 +3458,8 @@ static void test_injection_into_a_parked_guest()
  */
 static void test_halt_then_wake()
 {
-    std::printf("a second-level guest halts and its hypervisor wakes "
-                "it\n");
+    std::println("a second-level guest halts and its hypervisor wakes "
+                 "it");
 
     using entry_outcome = zpp::hypervisor::hypervisor::l2_entry_outcome;
     namespace activity = zpp::arch::x86_64::vmx::activity_state;
@@ -3796,7 +3797,7 @@ static std::uint64_t vmcs02_entry_controls()
  */
 static void test_exit_and_entry_control_composition()
 {
-    std::printf("what vmcs02 carries in its exit and entry controls\n");
+    std::println("what vmcs02 carries in its exit and entry controls");
 
     context registers{};
 
@@ -4340,7 +4341,7 @@ static void test_exit_and_entry_control_composition()
  */
 static void test_the_rest_of_vmcs02()
 {
-    std::printf("the rest of what build_vmcs02 composes into vmcs02\n");
+    std::println("the rest of what build_vmcs02 composes into vmcs02");
 
     context registers{};
 
@@ -4810,7 +4811,7 @@ static void test_the_rest_of_vmcs02()
  */
 static void test_the_measured_control_words()
 {
-    std::printf("the control words a real guest hypervisor asked for\n");
+    std::println("the control words a real guest hypervisor asked for");
 
     context registers{};
 
@@ -4994,7 +4995,7 @@ static void test_the_measured_control_words()
  */
 static void test_injection_against_activity_state()
 {
-    std::printf("an event to inject, against the activity state\n");
+    std::println("an event to inject, against the activity state");
 
     constexpr std::uint64_t interruption_valid = 1ull << 31;
     constexpr std::uint64_t entry_failure_bit = 1ull << 31;
@@ -5228,26 +5229,26 @@ int main()
     test_the_measured_control_words();
     test_injection_against_activity_state();
 
-    std::printf("\n%d checks, %d failures\n", g_checks, g_failures);
+    std::println("\n{} checks, {} failures", g_checks, g_failures);
 
     // The differences the table records, which are all of the form "KVM
     // handles a feature this VMM does not offer". Each is asserted above,
     // so one that stops reproducing fails the run; printing them is what
     // makes the run say what it settled rather than only what it broke.
-    std::printf("\ndifferences from KVM that are not defects:\n");
+    std::println("\ndifferences from KVM that are not defects:");
     for (auto & entry : g_reasons) {
         if (nullptr != entry.divergence) {
-            std::printf("  - reason %u (%s): %s\n",
-                        entry.reason,
-                        entry.name,
-                        entry.divergence);
+            std::println("  - reason {} ({}): {}",
+                         entry.reason,
+                         entry.name,
+                         entry.divergence);
         }
     }
 
     if (!g_findings.empty()) {
-        std::printf("\nfindings:\n");
+        std::println("\nfindings:");
         for (auto & finding : g_findings) {
-            std::printf("  - %s\n", finding.c_str());
+            std::println("  - {}", finding);
         }
     }
 

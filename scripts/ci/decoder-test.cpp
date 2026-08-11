@@ -1,6 +1,6 @@
 #include "zpp/arch/x86_64/decoder.h"
 #include <array>
-#include <cstdio>
+#include <print>
 
 using namespace zpp::arch::x86_64;
 
@@ -141,6 +141,6 @@ static_assert(run(mov_m64_imm)->length <= sizeof(mov_m64_imm));
 
 int main()
 {
-    std::printf("all decoder static_asserts passed\n");
+    std::println("all decoder static_asserts passed");
     return 0;
 }

@@ -9,9 +9,10 @@
 // tests/shim/zpp/arch/x86_64/asm.h and .../vmx/asm.h, which exist
 // because a Mac cannot execute `vmread`.
 #include "zpp/hypervisor/hypervisor.h"
-#include <cstdio>
 #include <cstring>
+#include <format>
 #include <map>
+#include <print>
 #include <string>
 #include <vector>
 
@@ -257,7 +258,7 @@ static void check(bool ok, const std::string & what)
     ++g_checks;
     if (!ok) {
         ++g_failures;
-        std::printf("  FAIL %s\n", what.c_str());
+        std::println("  FAIL {}", what);
         g_findings.push_back(what);
     }
 }
@@ -384,17 +385,14 @@ static void expect(const char * what,
     ++g_checks;
     if (!ok) {
         ++g_failures;
-        char buffer[512];
-        std::snprintf(buffer,
-                      sizeof(buffer),
-                      "%s: got %s(%llu), wanted %s(%llu)",
-                      what,
-                      name(got.what),
-                      (unsigned long long)got.error,
-                      name(want),
-                      (unsigned long long)want_error);
-        std::printf("  FAIL %s\n", buffer);
-        g_findings.push_back(buffer);
+        auto message = std::format("{}: got {}({}), wanted {}({})",
+                                   what,
+                                   name(got.what),
+                                   got.error,
+                                   name(want),
+                                   want_error);
+        std::println("  FAIL {}", message);
+        g_findings.push_back(message);
     }
 }
 
@@ -452,7 +450,7 @@ static void enter_vmx([[maybe_unused]] std::size_t cpu)
     auto r = do_pointer_instruction(
         basic_reason::vmxon, operand_slot, vmxon_region);
     if (r.what != outcome::succeed) {
-        std::printf("  setup: vmxon failed (%s)\n", name(r.what));
+        std::println("  setup: vmxon failed ({})", name(r.what));
     }
 }
 
@@ -489,7 +487,7 @@ static result vmread_result(std::uint64_t encoding, std::uint64_t & out)
 
 static void test_field_round_trip()
 {
-    std::printf("[1] VMWRITE/VMREAD round trip over vmcs_fields.h\n");
+    std::println("[1] VMWRITE/VMREAD round trip over vmcs_fields.h");
     std::size_t cpu = 0;
     reset_cpu(cpu);
     enter_vmx(cpu);
@@ -516,21 +514,18 @@ static void test_field_round_trip()
         }
 
         if (w.what != outcome::succeed) {
-            char buffer[256];
-            std::snprintf(
-                buffer,
-                sizeof(buffer),
-                "VMWRITE %s (encoding %#llx, index %llu) refused: "
-                "%s(%llu)",
+            auto message = std::format(
+                "VMWRITE {} (encoding {:#x}, index {}) refused: "
+                "{}({})",
                 f.text,
-                (unsigned long long)f.encoding,
-                (unsigned long long)e.index(),
+                f.encoding,
+                e.index(),
                 name(w.what),
-                (unsigned long long)w.error);
+                w.error);
             ++g_checks;
             ++g_failures;
-            std::printf("  FAIL %s\n", buffer);
-            g_findings.push_back(buffer);
+            std::println("  FAIL {}", message);
+            g_findings.push_back(message);
             continue;
         }
 
@@ -557,21 +552,18 @@ static void test_field_round_trip()
         }
 
         if (got != want) {
-            char buffer[256];
-            std::snprintf(
-                buffer,
-                sizeof(buffer),
-                "%s (%#llx): wrote %#llx read back %#llx, wanted "
-                "%#llx",
+            auto message = std::format(
+                "{} ({:#x}): wrote {:#x} read back {:#x}, wanted "
+                "{:#x}",
                 f.text,
-                (unsigned long long)f.encoding,
-                (unsigned long long)pattern,
-                (unsigned long long)got,
-                (unsigned long long)want);
+                f.encoding,
+                pattern,
+                got,
+                want);
             ++g_checks;
             ++g_failures;
-            std::printf("  FAIL %s\n", buffer);
-            g_findings.push_back(buffer);
+            std::println("  FAIL {}", message);
+            g_findings.push_back(message);
         } else {
             ++g_checks;
         }
@@ -608,7 +600,7 @@ static void test_field_round_trip()
 // ------------------------------------------------ 2. encoding validation
 static void test_encoding_validation()
 {
-    std::printf("[2] encoding validation and width/type decode\n");
+    std::println("[2] encoding validation and width/type decode");
     std::size_t cpu = 0;
     reset_cpu(cpu);
     enter_vmx(cpu);
@@ -684,21 +676,21 @@ static void test_encoding_validation()
         std::uint64_t unused{};
         auto w = vmwrite_field(b.encoding, 1);
         auto r = vmread_result(b.encoding, unused);
-        std::printf("      %-46s index %2llu -> VMWRITE %s(%llu) VMREAD "
-                    "%s(%llu)\n",
-                    b.text,
-                    (unsigned long long)e.index(),
-                    name(w.what),
-                    (unsigned long long)w.error,
-                    name(r.what),
-                    (unsigned long long)r.error);
+        std::println("      {:<46} index {:2} -> VMWRITE {}({}) VMREAD "
+                     "{}({})",
+                     b.text,
+                     e.index(),
+                     name(w.what),
+                     w.error,
+                     name(r.what),
+                     r.error);
     }
 }
 
 // ---------------------------------------------------- 3. launch machine
 static void test_launch_state_machine()
 {
-    std::printf("[3] the launch state machine\n");
+    std::println("[3] the launch state machine");
     std::size_t cpu = 0;
     reset_cpu(cpu);
 
@@ -921,11 +913,11 @@ static void test_launch_state_machine()
     // SDM 33.3 VMLAUNCH sets the launch state as step 5 of VM entry.
     // This VMM sets it in reflect_l2_exit instead, which is what KVM
     // does too - recorded rather than asserted.
-    std::printf("      launch state after a successful VMLAUNCH: %s\n",
-                hv().guest_vmcs12[cpu].state() ==
-                        vmcs12::launch_state::launched
-                    ? "launched"
-                    : "clear");
+    std::println("      launch state after a successful VMLAUNCH: {}",
+                 hv().guest_vmcs12[cpu].state() ==
+                         vmcs12::launch_state::launched
+                     ? "launched"
+                     : "clear");
 
     check(1 == g_observed.enter_or_park_l2_calls,
           "VMLAUNCH did not ask whether the guest may be entered");
@@ -971,7 +963,7 @@ static void test_launch_state_machine()
 // ------------------------------------------ 4. VMCLEAR / migration cycle
 static void test_vmclear_and_migration()
 {
-    std::printf("[4] VMCLEAR, and the migration cycle it exists for\n");
+    std::println("[4] VMCLEAR, and the migration cycle it exists for");
     std::size_t cpu = 0;
     reset_cpu(cpu);
     enter_vmx(cpu);
@@ -1047,7 +1039,7 @@ static void test_vmclear_and_migration()
 // --------------------------------------------- 5. VMREAD/VMWRITE memory
 static void test_memory_operands()
 {
-    std::printf("[5] the memory forms of VMREAD and VMWRITE\n");
+    std::println("[5] the memory forms of VMREAD and VMWRITE");
     std::size_t cpu = 0;
     reset_cpu(cpu);
     enter_vmx(cpu);
@@ -1138,7 +1130,7 @@ static void test_memory_operands()
 // ------------------------------------------------- 6. INVEPT and INVVPID
 static void test_invalidation()
 {
-    std::printf("[6] INVEPT and INVVPID operand checking\n");
+    std::println("[6] INVEPT and INVVPID operand checking");
     std::size_t cpu = 0;
     reset_cpu(cpu);
     enter_vmx(cpu);
@@ -1212,7 +1204,7 @@ static void test_invalidation()
 // ------------------------------------- 7. the capability MSRs and VMXON
 static void test_capability_msrs()
 {
-    std::printf("[7] the capability MSRs\n");
+    std::println("[7] the capability MSRs");
     std::size_t cpu = 0;
     reset_cpu(cpu);
 
@@ -1315,7 +1307,7 @@ static void test_capability_msrs()
 // ------------------------------------ 8. per-CPU indexing under a live L2
 static void test_cpu_indexing()
 {
-    std::printf("[8] per-processor state indexing\n");
+    std::println("[8] per-processor state indexing");
     // Slot 0 is unreachable: cpu = vpid - 1 and vpid 0 wraps.
     reset_cpu(0);
     hv().vmcs.vpid(0);
@@ -1330,7 +1322,7 @@ static void test_cpu_indexing()
 // space
 static void test_encoding_sweep()
 {
-    std::printf("[9] exhaustive sweep of the 15-bit encoding space\n");
+    std::println("[9] exhaustive sweep of the 15-bit encoding space");
     std::size_t cpu = 0;
     reset_cpu(cpu);
     enter_vmx(cpu);
@@ -1369,11 +1361,11 @@ static void test_encoding_sweep()
             (((e >> 1) & 0x1ff) < vmcs_field_encoding::index_capacity)) {
             if (w.what != outcome::fail_valid || w.error != 13) {
                 ++wrongly_accepted;
-                std::printf("      encoding %#06llx: read-only field not "
-                            "refused with error 13 (%s %llu)\n",
-                            (unsigned long long)e,
-                            name(w.what),
-                            (unsigned long long)w.error);
+                std::println("      encoding {:#06x}: read-only field not "
+                             "refused with error 13 ({} {})",
+                             e,
+                             name(w.what),
+                             w.error);
             }
             continue;
         }
@@ -1381,9 +1373,10 @@ static void test_encoding_sweep()
         if (!structurally_valid(e)) {
             if (taken) {
                 ++wrongly_accepted;
-                std::printf("      encoding %#06llx: structurally invalid "
-                            "but accepted\n",
-                            (unsigned long long)e);
+                std::println(
+                    "      encoding {:#06x}: structurally invalid "
+                    "but accepted",
+                    e);
             }
             continue;
         }
@@ -1399,11 +1392,11 @@ static void test_encoding_sweep()
 
         if (!taken) {
             ++wrongly_refused;
-            std::printf("      encoding %#06llx: structurally valid and "
-                        "within capacity but refused (%s %llu)\n",
-                        (unsigned long long)e,
-                        name(w.what),
-                        (unsigned long long)w.error);
+            std::println("      encoding {:#06x}: structurally valid and "
+                         "within capacity but refused ({} {})",
+                         e,
+                         name(w.what),
+                         w.error);
             continue;
         }
         ++accepted;
@@ -1444,23 +1437,22 @@ static void test_encoding_sweep()
         if (got != want) {
             ++aliases;
             if (aliases < 8) {
-                std::printf("      encoding %#06llx aliases: read %#llx "
-                            "wanted %#llx\n",
-                            (unsigned long long)e,
-                            (unsigned long long)got,
-                            (unsigned long long)want);
+                std::println("      encoding {:#06x} aliases: read {:#x} "
+                             "wanted {:#x}",
+                             e,
+                             got,
+                             want);
             }
         }
     }
 
-    std::printf(
-        "      %zu accepted, %zu refused only by index_capacity, "
-        "%zu wrongly accepted, %zu wrongly refused, %zu aliasing\n",
-        accepted,
-        refused_by_capacity,
-        wrongly_accepted,
-        wrongly_refused,
-        aliases);
+    std::println("      {} accepted, {} refused only by index_capacity, "
+                 "{} wrongly accepted, {} wrongly refused, {} aliasing",
+                 accepted,
+                 refused_by_capacity,
+                 wrongly_accepted,
+                 wrongly_refused,
+                 aliases);
     check(wrongly_accepted == 0,
           "encodings accepted that Table 27-22 "
           "reserves");
@@ -1471,7 +1463,7 @@ static void test_encoding_sweep()
 // ------------------------------------------- 10. read-only field handling
 static void test_read_only_fields()
 {
-    std::printf("[10] read-only VM-exit information fields\n");
+    std::println("[10] read-only VM-exit information fields");
     std::size_t cpu = 0;
     reset_cpu(cpu);
     enter_vmx(cpu);
@@ -1510,7 +1502,7 @@ static void test_read_only_fields()
 // --------------------------------- 11. operand size outside IA-32e mode
 static void test_operand_size()
 {
-    std::printf("[11] the 32-bit operand size outside IA-32e mode\n");
+    std::println("[11] the 32-bit operand size outside IA-32e mode");
     std::size_t cpu = 0;
     reset_cpu(cpu);
     enter_vmx(cpu);
@@ -1546,7 +1538,7 @@ static void test_operand_size()
 // ------------------------------ 12. the effective address of the operand
 static void test_effective_address()
 {
-    std::printf("[12] the effective address of a memory operand\n");
+    std::println("[12] the effective address of a memory operand");
     std::size_t cpu = 0;
     reset_cpu(cpu);
     enter_vmx(cpu);
@@ -1619,7 +1611,7 @@ static void test_effective_address()
 // only way this class of defect ever arrives.
 static void test_advertised_versus_implemented()
 {
-    std::printf("[13] what is advertised versus what is implemented\n");
+    std::println("[13] what is advertised versus what is implemented");
     std::size_t cpu = 0;
     reset_cpu(cpu);
 
@@ -1947,11 +1939,11 @@ int main()
     test_effective_address();
     test_advertised_versus_implemented();
 
-    std::printf("\n%d checks, %d failures\n", g_checks, g_failures);
+    std::println("\n{} checks, {} failures", g_checks, g_failures);
     if (!g_findings.empty()) {
-        std::printf("\nfindings:\n");
+        std::println("\nfindings:");
         for (auto & f : g_findings) {
-            std::printf("  - %s\n", f.c_str());
+            std::println("  - {}", f);
         }
     }
     return g_failures != 0;

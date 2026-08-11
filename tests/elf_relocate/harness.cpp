@@ -38,8 +38,8 @@
  */
 #include "zpp/elf_file.h"
 
-#include <cstdio>
 #include <cstring>
+#include <print>
 #include <string>
 #include <type_traits>
 #include <vector>
@@ -58,7 +58,7 @@ void check(bool condition, const std::string & what)
         return;
     }
     ++g_failures;
-    std::printf("FAIL: %s\n", what.c_str());
+    std::println("FAIL: {}", what);
 }
 
 void check_equal(std::uintptr_t expected,
@@ -70,10 +70,10 @@ void check_equal(std::uintptr_t expected,
         return;
     }
     ++g_failures;
-    std::printf("FAIL: %s\n  expected 0x%llx\n  actual   0x%llx\n",
-                what.c_str(),
-                static_cast<unsigned long long>(expected),
-                static_cast<unsigned long long>(actual));
+    std::println("FAIL: {}\n  expected 0x{:x}\n  actual   0x{:x}",
+                 what,
+                 expected,
+                 actual);
 }
 
 /**
@@ -566,7 +566,7 @@ int main()
     dynamic_segment_found_by_type();
     bss_tail_is_zeroed();
 
-    std::printf(
-        "elf_relocate: %zu checks, %zu failures\n", g_checks, g_failures);
+    std::println(
+        "elf_relocate: {} checks, {} failures", g_checks, g_failures);
     return g_failures ? 1 : 0;
 }
