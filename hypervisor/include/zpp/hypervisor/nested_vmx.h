@@ -166,6 +166,20 @@ inline constexpr bool enabled =
  * and 411, with the guest hypervisor's own guest running 2.5 times
  * faster.
  *
+ * It was left `false` after a one-variable bare-metal boot and stayed
+ * that way, with this comment still saying "On" - which is the drift the
+ * switch's own design was meant to prevent, arriving by a route it did
+ * not anticipate. The value is the thing that runs; a comment that
+ * disagrees with it is worse than no comment, because it is read as the
+ * configuration.
+ *
+ * Measured again on 2026-08-12 with it off, on one processor, Hyper-V
+ * booting Windows: **15,522,446 VMREADs**, of which `exit_reason` and
+ * `vm_exit_instruction_length` were 2,846,294 each - one apiece per
+ * reflected exit, so the guest hypervisor was paying four exits and more
+ * simply to *look at* every exit handed to it, and the second-level
+ * guest advanced about 890 entries a second.
+ *
  * A plain constant and **deliberately not a CMake option**. A build
  * switch that changes how the processor is programmed persists in a cache
  * and is inherited silently by every later build; that is exactly how
@@ -186,7 +200,7 @@ inline constexpr bool enabled =
  * adjust_msr, and `hypervisor::vmcs_shadowing_enabled` records whether it
  * was granted. On is a request, not an assertion.
  */
-inline constexpr bool shadow_vmcs_enabled = false;
+inline constexpr bool shadow_vmcs_enabled = true;
 
 /**
  * The value the guest's current-VMCS pointer takes when there is none.

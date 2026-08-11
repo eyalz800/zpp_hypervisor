@@ -231,6 +231,11 @@ zpp_add_host_test(nested_vmx
         support/host_heap.cpp
         "${ZPP_HYPERVISOR_SRC}/hypervisor/nested_vmx.cpp"
         "${ZPP_HYPERVISOR_SRC}/hypervisor/nested_shadow_vmcs.cpp"
+        # initialize_vmcs_shadowing resolves the shadow region's physical
+        # address, and only on the path taken when shadowing is on - so
+        # while it was off this link succeeded without the walker and the
+        # gap was invisible. Turning the switch on is what found it.
+        "${ZPP_HYPERVISOR_SRC}/arch/x86_64/page_table.cpp"
         "${ZPP_HYPERVISOR_SRC}/crt/heap.cpp"
     INCLUDES
         "${CMAKE_CURRENT_SOURCE_DIR}/shim"
