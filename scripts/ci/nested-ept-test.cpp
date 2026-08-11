@@ -2197,25 +2197,33 @@ void the_eptp_checks_hold()
 {
     auto & of = zpp::hypervisor::instance();
     of.reported_physical_address_bits = 46;
-    of.reported_ept_capability = 0;
+
+    // A realistic report: uncacheable and write-back paging structures
+    // and a four-level walk, which is what this VMM's own
+    // `supported_ept_vpid_capabilities` offers on hardware that has them.
+    //
+    // Set rather than left at zero, and that is the change: these checks
+    // now *depend* on it. SDM 29.2.1.1 (sdm.txt:202156) says "The EPT
+    // memory type (bits 2:0) must be a value supported by the processor
+    // as indicated in the IA32_VMX_EPT_VPID_CAP MSR", and the line below
+    // says the same of the walk length. Both used to be tested against
+    // constants, so a capability of zero admitted both anyway - the
+    // asymmetry e4e7e96 removed for bit 6 and left beside it. The
+    // capability-driven cases at the end of this function are what pin
+    // the fix.
+    constexpr std::uint64_t capability_walk_length_4 = 1ull << 6;
+    constexpr std::uint64_t capability_uncacheable = 1ull << 8;
+    constexpr std::uint64_t capability_write_back = 1ull << 14;
+
+    of.reported_ept_capability = capability_walk_length_4 |
+                                 capability_uncacheable |
+                                 capability_write_back;
 
     auto write_back = static_cast<std::uint64_t>(memory_type::write_back);
     auto uncachable = static_cast<std::uint64_t>(memory_type::uncachable);
 
     auto plain = eptp_with(write_back, eptp_walk_length_4, 0);
 
-    // Note what these two do *not* depend on. The capability MSR is zero
-    // here, so this VMM is reporting neither uncacheable nor write-back
-    // EPT paging structures - IA32_VMX_EPT_VPID_CAP bits 8 and 14 - and
-    // both pointers are accepted anyway. SDM 29.2.1.1 (sdm.txt:202156)
-    // says "The EPT memory type (bits 2:0) must be a value supported by
-    // the processor as indicated in the IA32_VMX_EPT_VPID_CAP MSR", and
-    // KVM checks exactly that in `nested_vmx_check_eptp`
-    // (.references/kvm/nested.c:2794, VMX_EPTP_UC_BIT / VMX_EPTP_WB_BIT).
-    // The check here is written against a constant instead, so it is the
-    // asymmetry e4e7e96 removed for bit 6 and left in place for bits 2:0
-    // and 5:3. Asserted as it is rather than as it should be, so the
-    // divergence is recorded rather than hidden - BACKLOG.md carries it.
     check(of.eptp_accepted(plain).has_value(),
           "a write-back four-level pointer is accepted");
     check(of.eptp_accepted(eptp_with(uncachable, eptp_walk_length_4, 0))
@@ -2240,6 +2248,9 @@ void the_eptp_checks_hold()
     }
 
     // Bit 6 with the capability withheld, which is the whole of e4e7e96.
+    // The other three stay reported, or the refusal below would be for
+    // the wrong reason - which is exactly the trap a capability of zero
+    // used to hide.
     check(!of.eptp_accepted(eptp_with(write_back,
                                       eptp_walk_length_4,
                                       eptp_accessed_and_dirty))
@@ -2249,13 +2260,95 @@ void the_eptp_checks_hold()
     // And accepted once reported, so the check follows the capability
     // rather than a constant - which is what lets the bit be implemented
     // without this becoming wrong.
-    of.reported_ept_capability = ept_capability_accessed_and_dirty;
+    of.reported_ept_capability = ept_capability_accessed_and_dirty |
+                                 capability_walk_length_4 |
+                                 capability_write_back;
     check(of.eptp_accepted(eptp_with(write_back,
                                      eptp_walk_length_4,
                                      eptp_accessed_and_dirty))
               .has_value(),
           "accessed and dirty flags are accepted once reported");
     of.reported_ept_capability = 0;
+
+    // === The memory type and the walk length follow the capability ===
+    //
+    // SDM 29.2.1.1 (sdm.txt:202156): "The EPT memory type (bits 2:0) must
+    // be a value supported by the processor as indicated in the
+    // IA32_VMX_EPT_VPID_CAP MSR", and the line below it says the same of
+    // the walk length. Appendix A.10 gives the bits: 8 for uncacheable
+    // (sdm.txt:223503), 14 for write-back (:223505), 6 for a page-walk
+    // length of 4 (:223501).
+    //
+    // Bit 6 of the *pointer* was made to follow the capability by
+    // e4e7e96. These two were left testing constants, which is the same
+    // asymmetry one line over - and it is a promise broken in the
+    // direction that matters: this VMM reports
+    // `hardware & supported_ept_vpid_capabilities`, so on a processor
+    // that does not report uncacheable paging structures it would tell a
+    // guest hypervisor so and then accept a pointer asking for them.
+    //
+    // KVM tests the reported bits - VMX_EPTP_UC_BIT, VMX_EPTP_WB_BIT and
+    // VMX_EPT_PAGE_WALK_4_BIT in `nested_vmx_check_eptp`
+    // (.references/kvm/nested.c:2794, v6.12).
+    {
+        constexpr std::uint64_t capability_uncacheable = 1ull << 8;
+        constexpr std::uint64_t capability_write_back = 1ull << 14;
+        constexpr std::uint64_t capability_walk_length_4 = 1ull << 6;
+
+        of.reported_ept_capability = capability_walk_length_4;
+        check(
+            !of.eptp_accepted(eptp_with(write_back, eptp_walk_length_4, 0))
+                 .has_value(),
+            "write-back is refused while the capability does not report "
+            "it");
+        check(
+            !of.eptp_accepted(eptp_with(uncachable, eptp_walk_length_4, 0))
+                 .has_value(),
+            "and uncacheable likewise");
+
+        of.reported_ept_capability =
+            capability_walk_length_4 | capability_write_back;
+        check(
+            of.eptp_accepted(eptp_with(write_back, eptp_walk_length_4, 0))
+                .has_value(),
+            "write-back is accepted once reported");
+        check(
+            !of.eptp_accepted(eptp_with(uncachable, eptp_walk_length_4, 0))
+                 .has_value(),
+            "and reporting write-back does not admit uncacheable");
+
+        of.reported_ept_capability =
+            capability_walk_length_4 | capability_uncacheable;
+        check(
+            of.eptp_accepted(eptp_with(uncachable, eptp_walk_length_4, 0))
+                .has_value(),
+            "uncacheable is accepted once reported");
+        check(
+            !of.eptp_accepted(eptp_with(write_back, eptp_walk_length_4, 0))
+                 .has_value(),
+            "and reporting uncacheable does not admit write-back");
+
+        of.reported_ept_capability = capability_write_back;
+        check(
+            !of.eptp_accepted(eptp_with(write_back, eptp_walk_length_4, 0))
+                 .has_value(),
+            "a four-level walk is refused while the capability does not "
+            "report one");
+
+        of.reported_ept_capability =
+            capability_write_back | capability_walk_length_4;
+        check(
+            of.eptp_accepted(eptp_with(write_back, eptp_walk_length_4, 0))
+                .has_value(),
+            "and accepted once reported");
+
+        // Put back the realistic report, because the cases after this
+        // one are about the reserved bits and the address width and
+        // would otherwise be refused for a reason they are not testing.
+        of.reported_ept_capability = capability_walk_length_4 |
+                                     capability_uncacheable |
+                                     capability_write_back;
+    }
 
     // Reserved bits 11:7, one at a time (sdm.txt:202163). Bit 7 is
     // supervisor shadow-stack control, which is why exit qualification bit

@@ -7067,8 +7067,11 @@ transcription would go on passing while testing itself.
   through this class. Left alone because fixing it is a change to a class
   nothing uses, and the interesting question is whether the accessor
   should exist at all given the shadow sets neither flag.
-- **The EPT-pointer memory type and walk length are checked against
-  constants, not against the reported capability.** `build_vmcs02` accepts
+- ~~**The EPT-pointer memory type and walk length are checked against
+  constants, not against the reported capability.**~~ **Fixed**: all
+  three now read IA32_VMX_EPT_VPID_CAP, so the capability MSR and the
+  check describe one machine. Eight cases went in first and five failed.
+  The original account follows. `build_vmcs02` accepts
   uncacheable or write-back and a walk length of four, whatever
   `IA32_VMX_EPT_VPID_CAP` says. SDM 29.2.1.1 (`sdm.txt:202156`) makes both
   "a value supported by the processor as indicated in the

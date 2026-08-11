@@ -917,22 +917,54 @@ std::expected<void, zpp::error> hypervisor::build_vmcs02(std::size_t cpu)
         // if set, should be supported".
         constexpr std::uint64_t ept_cap_access_and_dirty = 1ull << 21;
 
+        // The other three capability bits, from the same appendix, and
+        // they were the asymmetry left beside the one above: the memory
+        // type and the walk length were checked against constants while
+        // accessed-and-dirty was checked against the capability.
+        //
+        // SDM 29.2.1.1 (.references/sdm.txt:202156): "The EPT memory type
+        // (bits 2:0) must be a value supported by the processor as
+        // indicated in the IA32_VMX_EPT_VPID_CAP MSR", and the line below
+        // says the same of the walk length. Appendix A.10 gives the bits:
+        // 8 for uncacheable (.references/sdm.txt:223503), 14 for
+        // write-back (:223505), 6 for a page-walk length of 4 (:223501).
+        //
+        // It is a promise broken in the direction that matters. What this
+        // VMM reports is `hardware & supported_ept_vpid_capabilities`, so
+        // on a processor that does not report uncacheable paging
+        // structures it told a guest hypervisor exactly that and then
+        // accepted a pointer asking for them - the capability MSR and the
+        // check disagreeing about the same machine.
+        //
+        // KVM tests the reported bits: VMX_EPTP_UC_BIT, VMX_EPTP_WB_BIT
+        // and VMX_EPT_PAGE_WALK_4_BIT in `nested_vmx_check_eptp`
+        // (.references/kvm/nested.c:2794, v6.12).
+        constexpr std::uint64_t ept_cap_walk_length_4 = 1ull << 6;
+        constexpr std::uint64_t ept_cap_uncachable = 1ull << 8;
+        constexpr std::uint64_t ept_cap_write_back = 1ull << 14;
+
+        auto capability =
+            nested_vmx_capability_msr(vmx_msr::vpid_ept_capability);
+
         auto memory_type = eptp12 & eptp_memory_type_mask;
         auto is_uncachable =
-            memory_type == static_cast<std::uint64_t>(
-                               arch::x86_64::memory_type::uncachable);
+            (memory_type == static_cast<std::uint64_t>(
+                                arch::x86_64::memory_type::uncachable)) &&
+            (0 != (capability & ept_cap_uncachable));
         auto is_write_back =
-            memory_type == static_cast<std::uint64_t>(
-                               arch::x86_64::memory_type::write_back);
+            (memory_type == static_cast<std::uint64_t>(
+                                arch::x86_64::memory_type::write_back)) &&
+            (0 != (capability & ept_cap_write_back));
+        auto walk_length_supported =
+            0 != (capability & ept_cap_walk_length_4);
 
         auto address_mask =
             ((1ull << physical_address_bits()) - 1) & ~0xfffull;
 
         auto access_and_dirty_offered =
-            0 != (nested_vmx_capability_msr(vmx_msr::vpid_ept_capability) &
-                  ept_cap_access_and_dirty);
+            0 != (capability & ept_cap_access_and_dirty);
 
-        if ((!is_uncachable && !is_write_back) ||
+        if ((!is_uncachable && !is_write_back) || !walk_length_supported ||
             (eptp_walk_length_4 != (eptp12 & eptp_walk_length_mask)) ||
             (!access_and_dirty_offered &&
              (0 != (eptp12 & eptp_access_and_dirty))) ||
