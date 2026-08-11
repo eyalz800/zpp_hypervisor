@@ -6123,8 +6123,7 @@ std::optional<std::uint64_t> hypervisor::filter_local_apic_write(
                 if (auto slot = self.timer_arm_count[cpu];
                     slot < timer_arm_capacity) {
                     self.timer_arm_value[cpu][slot] = write->value;
-                    self.timer_arm_tsc[cpu][slot] =
-                        arch::x86_64::rdtsc();
+                    self.timer_arm_tsc[cpu][slot] = arch::x86_64::rdtsc();
                     self.timer_arm_count[cpu] = slot + 1;
                 }
 

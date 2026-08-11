@@ -3429,12 +3429,12 @@ private:
      * nothing short of both of them does.
      * @{
      */
-    std::uint64_t
-        reference_read_value[max_cpus][reference_sample_capacity]{};
-    std::uint64_t reference_read_tsc[max_cpus][reference_sample_capacity]{};
+    std::uint64_t reference_read_value[max_cpus]
+                                      [reference_sample_capacity]{};
+    std::uint64_t reference_read_tsc[max_cpus]
+                                    [reference_sample_capacity]{};
     std::uint64_t reference_read_count[max_cpus]{};
-    std::uint64_t
-        stimer_arm_value[max_cpus][reference_sample_capacity]{};
+    std::uint64_t stimer_arm_value[max_cpus][reference_sample_capacity]{};
     std::uint64_t stimer_arm_tsc[max_cpus][reference_sample_capacity]{};
 
     /** 1 for `STIMER0_COUNT`, 2 for `STIMER0_CONFIG`, 0 for an empty
@@ -3489,12 +3489,10 @@ private:
      * far distinguishes them.
      * @{
      */
-    std::uint64_t
-        synthetic_msr_reads[max_cpus][synthetic_msr_capacity]{};
-    std::uint64_t
-        synthetic_msr_writes[max_cpus][synthetic_msr_capacity]{};
-    std::uint64_t
-        synthetic_msr_last_write_tsc[max_cpus][synthetic_msr_capacity]{};
+    std::uint64_t synthetic_msr_reads[max_cpus][synthetic_msr_capacity]{};
+    std::uint64_t synthetic_msr_writes[max_cpus][synthetic_msr_capacity]{};
+    std::uint64_t synthetic_msr_last_write_tsc[max_cpus]
+                                              [synthetic_msr_capacity]{};
     /**
      * @}
      */
@@ -5480,8 +5478,8 @@ private:
      * different guest under a different VMM.
      * @{
      */
-    alignas(page_size)
-        arch::x86_64::vmx::vmx_vmcs shadow_vmcs[nested_regions_per_cpu];
+    alignas(page_size) arch::x86_64::vmx::vmx_vmcs
+        shadow_vmcs[nested_regions_per_cpu];
     std::uint64_t shadow_vmcs_physical[nested_regions_per_cpu]{};
 
     /**
@@ -5758,8 +5756,8 @@ private:
         std::uint64_t shift{};
     };
 
-    shadow_ept_leaf
-        shadow_ept_refresh_list[max_cpus][shadow_ept_refresh_capacity]{};
+    shadow_ept_leaf shadow_ept_refresh_list[max_cpus]
+                                           [shadow_ept_refresh_capacity]{};
     std::uint64_t shadow_ept_refreshes[max_cpus]{};
     std::uint64_t shadow_ept_refresh_leaves[max_cpus]{};
     std::uint64_t shadow_ept_refresh_overflows[max_cpus]{};
