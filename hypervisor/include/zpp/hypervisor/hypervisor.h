@@ -19,6 +19,7 @@
 #include "zpp/error.h"
 #include "zpp/hypervisor/log.h"
 #include "zpp/hypervisor/nested_vmx.h"
+#include "zpp/hypervisor/start_up_handoff.h"
 #include "zpp/nvme/admin_borrow.h"
 #include "zpp/small_map.h"
 #include "zpp/spin_lock.h"
@@ -3900,61 +3901,17 @@ private:
      * sender to consume an IPI the target is expecting from hardware,
      * which is precisely how one used to be lost.
      */
-    struct start_up_handoff_state
-    {
-        /**
-         * No hand-off in progress. Either this processor has never taken
-         * an INIT exit, or its last start-up has already been applied. A
-         * sender must let the hardware deliver.
-         */
-        static constexpr std::uint64_t none = 0;
-
-        /**
-         * The target is spinning in its INIT handler, in VMX root mode,
-         * waiting for a vector to be handed to it. Only in this state may
-         * a sender swallow the guest's write to the interrupt command
-         * register.
-         */
-        static constexpr std::uint64_t software_wait = 1;
-
-        /**
-         * The target is parked in the wait-for-SIPI activity state and is
-         * waiting on hardware. A sender must issue the guest's start-up
-         * IPI, because nothing this VMM does will wake it.
-         */
-        static constexpr std::uint64_t hardware_wait = 2;
-
-        /**
-         * A vector has been handed over. The state is this plus the
-         * vector, so that vector zero is still distinguishable from no
-         * hand-off at all.
-         */
-        static constexpr std::uint64_t delivered = 3;
-
-        /**
-         * The state that carries the given start-up vector.
-         */
-        static constexpr std::uint64_t deliver(std::uint64_t vector)
-        {
-            return delivered + vector;
-        }
-
-        /**
-         * Whether the given state carries a vector.
-         */
-        static constexpr bool is_delivered(std::uint64_t state)
-        {
-            return state >= delivered;
-        }
-
-        /**
-         * The vector such a state carries.
-         */
-        static constexpr std::uint64_t vector(std::uint64_t state)
-        {
-            return state - delivered;
-        }
-    };
+    /**
+     * The states a processor's start-up hand-off takes, held in
+     * start_up_handoff below.
+     *
+     * Defined once in zpp/hypervisor/start_up_handoff.h rather than here,
+     * and aliased in. tests/ap_start_up asserts claims about these exact
+     * numbers and replaces this header with a shim, so a nested copy is
+     * somewhere a silent disagreement can live - see that header for what
+     * the copy used to cost and for the invariants it now static_asserts.
+     */
+    using start_up_handoff_state = zpp::hypervisor::start_up_handoff_state;
 
     /**
      * Which hand-off each processor's next start-up IPI is to arrive

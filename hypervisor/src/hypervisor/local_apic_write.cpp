@@ -1,22 +1,24 @@
-// What this VMM does when a guest writes the local APIC page.
+// Watching the local APIC page.
 //
-// Two functions, split out of local_apic.cpp beside it:
+// Three functions, split out of local_apic.cpp beside it:
+// `watch_local_apic` takes write permission away from the page and
+// registers the two below with the watched-page machinery,
 // `filter_local_apic_write` decides what a write means and whether the
-// guest's own store should still go out, and `on_local_apic_write` is the
-// handler `watch_local_apic` registers with the watched-page machinery.
+// guest's own store should still go out, and `on_local_apic_write` acts
+// on it.
 //
-// The line the split follows is arming against emulation. What stays in
-// local_apic.cpp is how the interception is set up and what mode the APIC
-// is in - `watch_local_apic`, `note_apic_mode`, `x2apic_enabled`,
-// `intercept_interrupt_command`, `monitor_trap_flag` - which is a
-// different question from what a write does, and the two halves share no
-// state directly: these two reach the interrupt command decode and the
-// page contents, and nothing in the half left behind.
+// The line the split follows is the page against the processor. What
+// stays in local_apic.cpp is what is true of the APIC itself and of this
+// processor's interception of it - `x2apic_enabled`, `note_apic_mode`,
+// `intercept_interrupt_command` and `monitor_trap_flag`, which are read
+// and written through model specific registers and VMCS controls. What
+// comes here is everything that goes through the *page*: arming the
+// watch on it, and the two handlers that fire when it is written.
 //
 // The practical evidence for that being a real seam rather than a
 // convenient one is that tests/watched_page compiles this file whole and
-// needs nothing from the other half at all, where before the split it cut
-// exactly these two bodies out of local_apic.cpp by name.
+// needs nothing from the half left behind, where before the split it cut
+// two bodies out of local_apic.cpp by name.
 #include "zpp/arch/x86_64/asm.h"
 #include "zpp/arch/x86_64/mmio.h"
 #include "zpp/arch/x86_64/vmx/asm.h"
@@ -349,4 +351,81 @@ void hypervisor::on_local_apic_write(void * context,
                               static_cast<std::uint32_t>(*issue));
     }
 }
+void hypervisor::watch_local_apic(bool watch)
+{
+    // Where the page is, from the guest's own view of it. The base is
+    // not architecturally fixed - IA32_APIC_BASE can relocate it - so it
+    // is read rather than assumed to be 0xfee00000.
+    constexpr std::uint64_t base_mask = 0xffffff000ull;
+    auto base =
+        arch::x86_64::rdmsr(arch::x86_64::msr::ia32_apic_base) & base_mask;
+
+    if (!watch) {
+        if (this->watched_apic_page) {
+            unwatch_guest_page(this->watched_apic_page);
+            this->watched_apic_page = 0;
+        }
+        return;
+    }
+
+    if (this->watched_apic_page == base) {
+        return;
+    }
+    if (this->watched_apic_page) {
+        unwatch_guest_page(this->watched_apic_page);
+    }
+
+    // A page this VMM's own table does not map is one the watch must not
+    // be armed on, and refusing is the whole of the answer.
+    //
+    // `filter_local_apic_write` and `on_local_apic_write` both reach the
+    // page by dereferencing `page << 12` as a **host virtual address**,
+    // and the host page table maps exactly one local APIC page - read
+    // from IA32_APIC_BASE once, before any guest ran. Relocating the
+    // local APIC is a guest's to do: IA32_APIC_BASE[35:12] is writable
+    // and `note_apic_mode` follows the move, so before this the watch
+    // was armed on the new page and the guest's next interrupt-command
+    // store took an EPT violation into a filter that read an unmapped
+    // address. That is a #PF in the exit handler, where there is no
+    // recovery point left to unwind to, so the processor simply stops -
+    // the failure the comment at that dereference already describes, and
+    // one that leaves nothing behind to say what happened.
+    //
+    // Mapping the new page instead was the obvious repair and does not
+    // work: `map_from` walks the loader's OS page table through a
+    // callback that stops resolving once a processor has switched to this
+    // table, which is why the controller register pages beside it are
+    // mapped before the switch rather than when they are first used.
+    //
+    // So the choice is between losing sight of the interrupt command
+    // register and stopping the processor. Losing sight of it costs the
+    // start-up IPI interception, which is real - but it is a degradation
+    // the log names, where the alternative is a processor that vanishes
+    // with nothing recorded anywhere.
+    if (base != this->mapped_apic_page) {
+        this->watched_apic_page = 0;
+        log("refusing to watch a relocated local apic page at {}, this "
+            "vmm maps {}",
+            base,
+            this->mapped_apic_page);
+        return;
+    }
+
+    if (auto armed = watch_guest_page_writes(
+            base,
+            &hypervisor::on_local_apic_write,
+            this,
+            page_watch::mode::notify,
+            nullptr,
+            &hypervisor::filter_local_apic_write)) {
+        this->watched_apic_page = base;
+        log("watching the local apic page at {}", base);
+    } else {
+        // Refused rather than left half armed. Missing an IPI is bad;
+        // believing one is being watched when it is not is worse.
+        this->watched_apic_page = 0;
+        log("could not watch the local apic page at {}", base);
+    }
+}
+
 } // namespace zpp::hypervisor

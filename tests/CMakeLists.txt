@@ -146,6 +146,35 @@ zpp_add_host_test(nested_vmx
         "${CMAKE_CURRENT_SOURCE_DIR}/nested_vmx"
     DEFINES ZPP_NESTED_VMX=1)
 
+# Application-processor start-up and adoption, with host threads standing
+# in for logical processors: the real slot allocator, the real interrupt
+# command decode and the real INIT and start-up state, out of start_up.cpp
+# and local_apic.cpp.
+zpp_add_host_test(ap_start_up
+    SOURCES
+        ap_start_up/harness.cpp
+        "${ZPP_HYPERVISOR_SRC}/hypervisor/start_up.cpp"
+        "${ZPP_HYPERVISOR_SRC}/hypervisor/interrupt_command.cpp"
+        "${ZPP_HYPERVISOR_SRC}/hypervisor/local_apic.cpp"
+    INCLUDES
+        "${CMAKE_CURRENT_SOURCE_DIR}/ap_start_up/shim"
+        "${CMAKE_CURRENT_SOURCE_DIR}/nested_vmx/shim"
+        "${CMAKE_CURRENT_SOURCE_DIR}/ap_start_up")
+
+# The interrupt command register's decode path: the real processor_slot,
+# on_interrupt_command and start_up_broadcast out of interrupt_command.cpp
+# and the real note_apic_mode and intercept_interrupt_command out of
+# local_apic.cpp, against a fake roster and fake hardware.
+zpp_add_host_test(local_apic
+    SOURCES
+        local_apic/harness.cpp
+        "${ZPP_HYPERVISOR_SRC}/hypervisor/interrupt_command.cpp"
+        "${ZPP_HYPERVISOR_SRC}/hypervisor/local_apic.cpp"
+    INCLUDES
+        "${CMAKE_CURRENT_SOURCE_DIR}/local_apic/shim"
+        "${CMAKE_CURRENT_SOURCE_DIR}/nested_vmx/shim"
+        "${CMAKE_CURRENT_SOURCE_DIR}/local_apic")
+
 # The watched-page write path: the real watch_guest_page_writes,
 # on_ept_violation, carry_out_guest_instruction and on_monitor_trap_flag
 # out of watched_page.cpp, and the real filter_local_apic_write and
@@ -232,7 +261,7 @@ endif()
 # the functions it wants become a translation unit a harness can compile.
 #
 # Nothing else should be added to this list.
-foreach(_generated local_apic ap_start_up crt)
+foreach(_generated crt)
     add_test(NAME "tests/${_generated}"
         COMMAND "${CMAKE_CURRENT_SOURCE_DIR}/${_generated}/build.sh")
     set_tests_properties("tests/${_generated}" PROPERTIES

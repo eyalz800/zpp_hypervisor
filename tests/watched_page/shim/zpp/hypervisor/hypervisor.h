@@ -16,6 +16,7 @@
 #include "zpp/arch/x86_64/decoder.h"
 #include "zpp/arch/x86_64/instruction.h"
 #include "zpp/arch/x86_64/mmio.h"
+#include "zpp/arch/x86_64/msr.h"
 #include "zpp/arch/x86_64/vmx/ept.h"
 #include "zpp/arch/x86_64/vmx/vmcs.h"
 #include "zpp/diag/log.h"
@@ -144,6 +145,23 @@ public:
     static std::optional<std::uint64_t> filter_local_apic_write(
         void * context, std::uint64_t page, const guest_write * write);
 
+    /**
+     * Compiled but not exercised, and here for a reason worth stating.
+     *
+     * This harness compiles two whole translation units -
+     * watched_page.cpp and local_apic_write.cpp - rather than function
+     * bodies cut out of them by name, so it gets everything those files
+     * define whether it asks a question about it or not. This is the
+     * arming half of the APIC page watch, and what it decides on its own
+     * - refusing a page the host page table does not map - is checked by
+     * scripts/ci/check-exit-handler.sh against the source instead.
+     *
+     * Declaring it is cheaper than the alternative, which is splitting a
+     * translation unit along the line one test happens to want. The cost
+     * is the two members below that only it touches.
+     */
+    void watch_local_apic(bool watch);
+
     // ------------------------------------------ defined by the harness
     std::optional<arch::x86_64::decoded_instruction>
     decode_guest_instruction(std::size_t cpu,
@@ -160,6 +178,14 @@ public:
     // ------------------------------------------------------------ state
     arch::x86_64::vmx::vmcs vmcs{};
     page_table_stub host_page_table{};
+
+    /**
+     * Where the APIC page is watched, and where the host page table maps
+     * it. Reached only by `watch_local_apic` above, which this harness
+     * compiles and does not exercise.
+     */
+    std::uint64_t watched_apic_page{};
+    std::uint64_t mapped_apic_page{};
 
     static constexpr std::size_t watch_capacity = 8;
     page_watch watches[watch_capacity]{};

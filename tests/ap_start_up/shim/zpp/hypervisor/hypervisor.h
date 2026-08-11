@@ -22,6 +22,7 @@
 #include "zpp/arch/x86_64/vmx/vmcs.h"
 #include "zpp/arch/x86_64/vmx/vmx.h"
 #include "zpp/error.h"
+#include "zpp/hypervisor/start_up_handoff.h"
 #include "zpp/scope_exit.h"
 #include "zpp/spin_lock.h"
 #include <atomic>
@@ -73,33 +74,17 @@ public:
     };
 
     /**
-     * The hand-off states, copied from the real header because they are
-     * declared inside the class there and this shim replaces the class.
-     * The values are asserted against the real ones by the harness, which
-     * reads them out of hypervisor.h, so a change to either fails here.
+     * The hand-off states, aliased from the real header rather than
+     * copied. This shim replaces the class the alias used to live inside,
+     * and the harness asserts claims about these exact numbers - "a
+     * hand-off of vector zero is delivered and is not the same word as no
+     * hand-off at all" is a claim about the hypervisor's values, not
+     * about a transcription of them.
+     *
+     * There was a transcription here, compared against hypervisor.h by
+     * `sed` from build.sh. There is no copy to compare now.
      */
-    struct start_up_handoff_state
-    {
-        static constexpr std::uint64_t none = 0;
-        static constexpr std::uint64_t software_wait = 1;
-        static constexpr std::uint64_t hardware_wait = 2;
-        static constexpr std::uint64_t delivered = 3;
-
-        static constexpr std::uint64_t deliver(std::uint64_t vector)
-        {
-            return delivered + vector;
-        }
-
-        static constexpr bool is_delivered(std::uint64_t state)
-        {
-            return state >= delivered;
-        }
-
-        static constexpr std::uint64_t vector(std::uint64_t state)
-        {
-            return state - delivered;
-        }
-    };
+    using start_up_handoff_state = zpp::hypervisor::start_up_handoff_state;
 
     /**
      * The host page table, reduced to the one query these paths make of
@@ -173,14 +158,57 @@ public:
 
     static std::uint64_t local_apic_id();
 
+    /**
+     * Compiled but not exercised, and here for a reason worth stating.
+     *
+     * This harness compiles three whole translation units - start_up.cpp,
+     * interrupt_command.cpp and local_apic.cpp - rather than function
+     * bodies cut out of them by name, so it gets everything those files
+     * define whether it asks a question about it or not. These three come
+     * from local_apic.cpp, which it compiles for `x2apic_enabled` alone.
+     *
+     * Declaring them is cheaper than the alternative, which is splitting
+     * a translation unit along the line one test happens to want. The
+     * cost is the four members below that only these three touch, and
+     * `watch_local_apic`, which the harness defines because the file that
+     * defines it for real is not compiled here.
+     */
+    void monitor_trap_flag(bool value);
+    void intercept_interrupt_command(bool intercept);
+    void note_apic_mode(std::size_t cpu);
+
+    /**
+     * Which of the two mechanisms a processor's local APIC is using, and
+     * the fourth value that says nothing has looked yet.
+     */
+    enum class apic_mode : std::uint8_t
+    {
+        unknown,
+        disabled,
+        xapic,
+        x2apic,
+    };
+
     // ------------------------------------------ defined by the harness
     std::uint32_t start_up_trampoline_stage() const;
 
     std::expected<void, zpp::error> enable_vmx_in_feature_control();
 
+    void watch_local_apic(bool watch);
+
+    std::uint64_t & cached_vmx_msr(std::size_t msr);
+
     // ------------------------------------------------------------ state
     arch::x86_64::vmx::vmcs vmcs{};
     page_table_stub host_page_table{};
+
+    /**
+     * Reached only by the three functions above that this harness
+     * compiles and does not exercise.
+     */
+    alignas(page_size) std::uint8_t msr_bitmap[page_size]{};
+    apic_mode observed_apic_mode[max_cpus]{};
+    zpp::spin_lock apic_mode_lock{};
 
     std::size_t number_of_known_processors = 1;
     std::uint64_t apic_id[max_cpus]{};

@@ -312,13 +312,16 @@ fi
 # unmapped address - a #PF in the exit handler, where there is no recovery
 # point, so the processor stops with nothing recorded anywhere.
 #
-# Checked at the source because no harness compiles `watch_local_apic`,
-# and because the two halves live in different translation units: the
-# record is written where the mapping is made in hypervisor.cpp, and read
-# where the watch is armed in local_apic.cpp. A grep is what spans them.
+# Checked at the source because the two halves live in different
+# translation units: the record is written where the mapping is made in
+# hypervisor.cpp, and read where the watch is armed in
+# local_apic_write.cpp. A grep is what spans them.
+#
+# tests/watched_page compiles `watch_local_apic` now and asks nothing of
+# it, so this is still the only thing checking the refusal.
 echo "== the watched local APIC page is one the host page table maps"
 
-apic="$root/hypervisor/src/hypervisor/local_apic.cpp"
+apic="$root/hypervisor/src/hypervisor/local_apic_write.cpp"
 setup="$root/hypervisor/src/hypervisor/hypervisor.cpp"
 
 if grep -q 'this->mapped_apic_page = apic_base;' "$setup"; then

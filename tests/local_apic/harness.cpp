@@ -122,6 +122,17 @@ void hypervisor::watch_local_apic(bool watch)
     this->watch_last = watch;
 }
 
+/**
+ * The cached VMX capability MSRs, reached only by `monitor_trap_flag`,
+ * which this harness compiles out of local_apic.cpp and asks nothing of.
+ * One slot, shared by every index: nothing here reads it back.
+ */
+std::uint64_t & hypervisor::cached_vmx_msr(std::size_t)
+{
+    static std::uint64_t unused{};
+    return unused;
+}
+
 } // namespace zpp::hypervisor
 
 namespace zpp::arch::x86_64

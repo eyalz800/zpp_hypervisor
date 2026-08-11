@@ -165,6 +165,26 @@ std::expected<void, zpp::error> hypervisor::enable_vmx_in_feature_control()
 {
     return {};
 }
+
+/**
+ * Reached only by `note_apic_mode`, which this harness compiles out of
+ * local_apic.cpp and asks nothing of. The real one lives in
+ * local_apic_write.cpp, which is not compiled here.
+ */
+void hypervisor::watch_local_apic(bool)
+{
+}
+
+/**
+ * The cached VMX capability MSRs, reached only by `monitor_trap_flag`,
+ * which this harness compiles and asks nothing of. One slot, shared by
+ * every index: nothing here reads it back.
+ */
+std::uint64_t & hypervisor::cached_vmx_msr(std::size_t)
+{
+    static std::uint64_t unused{};
+    return unused;
+}
 } // namespace zpp::hypervisor
 
 namespace zpp::arch::x86_64

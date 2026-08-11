@@ -16,6 +16,7 @@
 // which is on the include path after this directory.
 #include "zpp/arch/x86_64/asm.h"
 #include "zpp/arch/x86_64/msr.h"
+#include "zpp/arch/x86_64/vmx/vmcs.h"
 #include "zpp/error.h"
 #include "zpp/scope_exit.h"
 #include "zpp/spin_lock.h"
@@ -93,6 +94,23 @@ public:
     void note_apic_mode(std::size_t cpu);
     void intercept_interrupt_command(bool intercept);
 
+    /**
+     * Compiled but not exercised, and here for a reason worth stating.
+     *
+     * This harness compiles two whole translation units -
+     * interrupt_command.cpp and local_apic.cpp - rather than function
+     * bodies cut out of them by name, so it gets everything those files
+     * define whether it asks a question about it or not. `x2apic_enabled`
+     * and `monitor_trap_flag` are the two it does not: the first is a
+     * single MSR read, the second arms a VM-execution control.
+     *
+     * Declaring them is cheaper than the alternative, which is splitting
+     * a translation unit along the line one test happens to want. The
+     * cost is the two members below that only these two touch.
+     */
+    static bool x2apic_enabled();
+    void monitor_trap_flag(bool value);
+
     // === Supplied by the harness =======================================
     //
     // Each of these reaches hardware in the real VMM. Here they record
@@ -105,17 +123,17 @@ public:
     void send_start_up_ipi(std::uint64_t apic, std::uint64_t vector);
 
     /**
-     * Deliberately *not* cut out of local_apic.cpp, though it lives
-     * beside the two that are.
+     * Deliberately not compiled here, though `note_apic_mode` calls it.
      *
-     * It reaches the extended page tables through
+     * It lives in local_apic_write.cpp, which this harness does not
+     * build: it reaches the extended page tables through
      * `watch_guest_page_writes`, whose signature drags in the whole
      * `page_watch` vocabulary and a `guest_write`, and none of that is
-     * what `note_apic_mode` is being asked about here: the question is
+     * what `note_apic_mode` is being asked about here. The question is
      * which of the two mechanisms it arms for a given roster of
      * processors, and a recorder answers that exactly. What
-     * `watch_local_apic` decides on its own - refusing a relocated page
-     * - is a separate harness's to make.
+     * `watch_local_apic` decides on its own - refusing a relocated page -
+     * is checked by scripts/ci/check-exit-handler.sh against the source.
      */
     void watch_local_apic(bool watch);
 
@@ -138,6 +156,15 @@ public:
     alignas(page_size) std::uint8_t msr_bitmap[page_size]{};
     apic_mode observed_apic_mode[max_cpus]{};
     zpp::spin_lock apic_mode_lock{};
+
+    /**
+     * Reached only by `monitor_trap_flag` above, which this harness
+     * compiles and does not exercise. The VMCS is the in-memory one from
+     * tests/nested_vmx/shim's vmx/asm.h; the capability MSR is answered
+     * by the harness.
+     */
+    arch::x86_64::vmx::vmcs vmcs{};
+    std::uint64_t & cached_vmx_msr(std::size_t msr);
 
     // === Harness observation ===========================================
     //
