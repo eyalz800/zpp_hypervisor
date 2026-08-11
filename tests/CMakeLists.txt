@@ -73,7 +73,13 @@ function(zpp_add_host_test name)
         set(HARNESS_TEST_NAME "tests/${name}")
     endif()
 
-    add_executable(${name} ${HARNESS_SOURCES})
+    # EXCLUDE_FROM_ALL, so `cmake --build --preset <config>` still builds
+    # exactly the four cross targets it always did. This suite is native
+    # and the rest of the tree is not, and a harness that fails to compile
+    # must not be able to stop a deploy - build `zpp_tests` for it, which
+    # is what scripts/ci/run-host-tests.sh and ci.yml both do. It stays in
+    # compile_commands.json either way, which is what clangd needs.
+    add_executable(${name} EXCLUDE_FROM_ALL ${HARNESS_SOURCES})
     target_compile_options(${name} PRIVATE ${ZPP_TEST_COMPILE_OPTIONS})
     target_include_directories(${name} PRIVATE
         ${HARNESS_INCLUDES}
