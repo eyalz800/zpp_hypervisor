@@ -7437,3 +7437,70 @@ The chain is now closed end to end, every link measured:
 
 **Step 3 is the only one still unexplained, and it is now the whole
 question.** Everything on either side of it has been measured directly.
+
+### The interrupt *is* delivered. "Never delivered" was wrong
+
+Measured 2026-08-11, on the boot after `f842291` added
+`l2_injected_vector` — every event a guest hypervisor asks VM entry to
+inject into its guest, counted by vector, the mirror of
+`l2_external_vector`.
+
+| cpu | injected |
+|---|---|
+| 0 | **0xd1 × 16**, 0x40 × 4 |
+| 1 | 0xd1 × 1, 0xf0 × 8, 0x2f × 1, 0x40 × 1 |
+| 2–7 | 0xd1 × 1, 0xf0 × 8 each |
+
+**Hyper-V injects vector `0xd1` on every processor, and sixteen times on
+the boot processor.** `0xd1` is the vector the root partition programmed
+into `SINT3`, the source its synthetic timer messages are delivered on.
+
+This falsifies the section above titled "The message is written. The
+interrupt is never delivered." It is now the opposite: the message is
+written, **and so is the interrupt**, and the root partition still never
+writes the end-of-message register. The freeze is unchanged at 82,405
+second-level entries, so nothing about the measurement disturbed it.
+
+Two consequences, and the second is the one that matters.
+
+First, VM-entry event injection is **not** gated on `RFLAGS.IF` or on the
+interruptibility state — that is why SDM 27.3.1.5 (`sdm.txt:202627`)
+makes blocking by STI and by MOV SS *required to be zero* when the
+injection is valid, rather than merely advisory, and why
+`sdm.txt:203115` says there is no such blocking after an injecting entry
+regardless of what the field held. So the boot processor's second-level
+guest took vector `0xd1` sixteen times. It cannot have been suppressed.
+
+Second, **the failure has moved from delivery to what happens after
+it.** The root partition's `SINT3` handler runs and does not complete
+the message protocol. The candidates are now:
+
+1. The handler reads the message page and finds nothing there. `SIMP`
+   holds a *second-level* physical address; Hyper-V's write went through
+   its own extended page tables to a first-level physical address, and
+   the guest's read comes back through the shadow the two are composed
+   into. The earlier SIMP dump read the message at the `SIMP` value
+   directly through `xp`, which is a *first-level* physical read — so it
+   confirms Hyper-V's write and says nothing whatever about what the
+   second-level guest sees at the same address. **That distinction was
+   not made when the dump was taken, and it is the whole question.**
+2. The handler faults before reaching the end-of-message write. Nothing
+   would show it: an exception the guest hypervisor's bitmap does not
+   trap is delivered inside the second level and never exits.
+3. Sixteen injections against two timer expiries means Hyper-V is
+   retrying. A source that is re-armed and re-delivered is one whose
+   acknowledgement never arrived, which is consistent with either of the
+   two above and does not choose between them.
+
+The cheapest discriminator is the first, and it is a read rather than a
+boot: resolve the boot processor's `SIMP` value through vmcs12's
+extended page tables and then through the shadow, and compare the bytes
+the second level would fetch against the bytes `xp` shows at the same
+address. If they differ, the shadow composition is the defect and every
+other symptom follows from it.
+
+**Do not repeat the mistake this section corrects.** "The interrupt is
+never delivered" was recorded as established for a whole investigation
+on the strength of an absent end-of-message write, and it was an
+inference from a downstream absence, not a measurement of the thing it
+named. One counter settled it in one boot.
