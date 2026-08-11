@@ -197,7 +197,40 @@ arm)
         echo 1 > $T/tracing_on
         echo \"armed: on=\$(cat $T/tracing_on) events=\$(cat $T/set_event | tr \"\\n\" \" \")\"'"
     ;;
+# Refuses a capture whose boot is not the one you think it is.
+#
+# Windows reasserts its own boot option at the front of BootOrder every
+# time it completes a boot, so the firmware silently stops reaching our
+# loader - and a capture taken then is a *control* run wearing the label
+# of a test run. That has already invalidated one measurement and the
+# retraction of it: both readings were taken from boots with no
+# hypervisor, and both looked like evidence.
+#
+# Serial is the only thing that knows. Checked here rather than left to
+# the caller, because the caller is the one who is already convinced.
+require_hypervisor_booted()
+{
+    booted=$($SSH "grep -ac ZPP_TRACE /home/tc/zpp/serial.out" 2>/dev/null)
+    option=$($SSH "grep -a 'starting Boot' /home/tc/zpp/serial.out | tail -1" 2>/dev/null)
+
+    if [ "${booted:-0}" -eq 0 ] 2>/dev/null; then
+        echo "REFUSING: no ZPP_TRACE on serial - the hypervisor did not run." >&2
+        echo "  firmware started: $option" >&2
+        echo "" >&2
+        echo "A capture from this boot is a control run, not a test run." >&2
+        echo "Windows reasserts Boot0004 at the front of BootOrder on" >&2
+        echo "every completed boot; rewrite the varstore with one option" >&2
+        echo "before measuring anything." >&2
+        echo "" >&2
+        echo "To capture a deliberate control run:" >&2
+        echo "  ZPP_ALLOW_NO_HYPERVISOR=1 $0 stream ..." >&2
+        exit 1
+    fi
+    echo "confirmed: hypervisor booted ($booted trace lines)"
+}
+
 stream)
+    [ "${ZPP_ALLOW_NO_HYPERVISOR:-0}" = "1" ] || require_hypervisor_booted
     seconds=${1:-600}
     stop_listener
     start_listener "$seconds"
