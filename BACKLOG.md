@@ -7564,3 +7564,62 @@ pointer immediately after an entry that injected `0xd1`: a RIP inside an
 interrupt handler says the handler ran and the failure is inside it, and
 a RIP at the instruction the guest was already on says the vector was
 injected and not taken, which would be a defect here.
+
+### Where the guest goes after `0xd1`, and why one more measurement is needed
+
+Measured 2026-08-11, boot with `injection_from_rip` / `injection_to_rip`.
+Freeze unchanged at 82,428 second-level entries, so the three exit-handler
+fixes that landed the same afternoon changed nothing about it either.
+
+Seventeen landings on the boot processor, one on each of the others:
+
+```
+cpu 0   from 0xfffff804ca9a597e -> 0xfffff804ca9a597c   reason 31 rdmsr
+        (sixteen of seventeen land on that same address)
+cpu 1   from 0xfffff804585a0003 -> 0xfffff804585a0000   reason 18 vmcall
+cpu 2-7 from 0xfffff804caca6f8f -> 0xfffff804caca6f8e   reason 12 hlt
+```
+
+Each `from` is one instruction *past* its `to`. That is not a rewind: it
+is Hyper-V advancing the guest's instruction pointer past the instruction
+it just emulated and then injecting, so `from` is the resume point and
+`to` is where the guest exited next.
+
+What each row says:
+
+- **The application processors go round their idle loop exactly once.**
+  Hyper-V resumed them past the `hlt` at `…6f8e` with `0xd1` injected, and
+  the next thing each did was execute the same `hlt` again.
+- **The boot processor is in a timed spin**, not halted: sixteen of its
+  seventeen landings end at `…597c`, which is the `rdmsr` of
+  `0x40000020`, `HV_X64_MSR_TIME_REF_COUNT`. It is polling the reference
+  clock. The `from` addresses that are not that instruction are the
+  hypercall page at `0xfffff804585a00xx`.
+
+**This does not yet separate the two remaining explanations, and saying
+why is worth more than the data.** If the handler *did* run, it read the
+message page — an ordinary memory read, no exit — and returned by `IRET`
+to the same resume point, and the next exit would be the next iteration
+of the loop. Which is exactly what was recorded. If the handler did *not*
+run, the guest continued from the resume point and the next exit is the
+next iteration of the loop. Also exactly what was recorded. **The two
+predict the same observation**, because nothing the handler does before
+the end-of-message write causes an exit.
+
+The one instruction inside that window that would exit is the
+end-of-message write itself, `wrmsr 0x40000084`, and that is already
+known not to happen.
+
+So the next measurement has to force an exit rather than wait for one:
+**arm the Monitor Trap Flag on the entry that injects `0xd1`.** MTF
+exits after a single retired instruction, so the RIP it reports is
+unambiguous — the interrupt descriptor table's handler entry if the
+vector was taken, or the resume point if it was not. CLAUDE.md already
+names this as the way to answer "is it executing?" without a debugger.
+
+One hazard to clear first: `monitor_trap_flag()` sets the control by
+OR-ing bit 27 into the primary controls **without going through
+`adjust_msr`**, which is `5531fdc`'s defect recurring. If the processor
+underneath does not offer MTF the next VM entry fails with no exit at
+all. Fix that before arming it, or the experiment wedges the machine in
+a way indistinguishable from what is being investigated.
