@@ -19,6 +19,7 @@
 // carries the reason in `divergence` - which is *asserted*, so a
 // divergence that silently disappears fails the test just as a new one
 // does.
+#include "support/identity_page_table.h"
 #include "zpp/hypervisor/hypervisor.h"
 #include <cstdio>
 #include <cstring>
@@ -5190,6 +5191,28 @@ static void test_injection_against_activity_state()
 
 int main()
 {
+    // The real host page table, filled with an identity mapping over the
+    // hypervisor object itself. `merge_nested_bitmaps` translates the
+    // merged bitmaps through it and writes the answers into vmcs02, and
+    // the assertions on those fields are only about a physical address
+    // if the translation is real: against the `page_table_stub` this
+    // harness used to carry they compared zero against zero.
+    zpp::tests::map_identity(hv().host_page_table, &hv(), sizeof(hv()));
+
+    // Asserted rather than assumed, because both a working translation
+    // and a table that answers zero for everything let the assertions
+    // downstream pass: they compare the translated address against the
+    // vmcs02 field written from it, and zero equals zero.
+    check(reinterpret_cast<std::uint64_t>(hv().nested_msr_bitmap[cpu]) ==
+              hv().host_page_table.virtual_to_physical(
+                  hv().nested_msr_bitmap[cpu]),
+          "the host page table translates the merged MSR bitmap to "
+          "itself");
+    check(reinterpret_cast<std::uint64_t>(hv().nested_io_bitmap[cpu]) ==
+              hv().host_page_table.virtual_to_physical(
+                  hv().nested_io_bitmap[cpu]),
+          "and the merged I/O bitmap to itself");
+
     test_reason_table();
     test_msr_bitmap();
     test_cr_access();

@@ -23,6 +23,7 @@
 // disagree carries the reason in a `diverge` entry - which is
 // *asserted*, so a divergence that silently disappears fails the test
 // just as a new one does.
+#include "support/identity_page_table.h"
 #include "zpp/hypervisor/hypervisor.h"
 #include <cstdarg>
 #include <cstdio>
@@ -101,16 +102,6 @@ hypervisor & hypervisor::instance()
 {
     static hypervisor the;
     return the;
-}
-
-std::uint64_t hypervisor::page_table_stub::virtual_to_physical(
-    const void * address) const
-{
-    auto at = reinterpret_cast<std::uint64_t>(address);
-    if ((at < base()) || (at >= (base() + sizeof(g_memory)))) {
-        return 0;
-    }
-    return at;
 }
 
 /**
@@ -2600,6 +2591,24 @@ static void test_apic_timer()
 
 int main()
 {
+    // The real host page table, filled with an identity mapping over the
+    // guest's pages and over the hypervisor object - the decoy page an
+    // EPT violation redirects to is a member of it.
+    //
+    // The two reads and the two writes `carry_out_guest_instruction`
+    // makes are gated on this translation answering: a page the host
+    // table does not map is refused, which is what stops this VMM
+    // dereferencing an address the guest chose. Against the
+    // `page_table_stub` this harness used to carry - a nested class of a
+    // copy of the hypervisor, whose translation returned its argument -
+    // that gate was answered by the test rather than by the code.
+    zpp::tests::map_identity(
+        hv().host_page_table, g_memory, sizeof(g_memory));
+    zpp::tests::map_identity(hv().host_page_table, &hv(), sizeof(hv()));
+
+    check(base() == hv().host_page_table.virtual_to_physical(g_memory),
+          "the host page table translates the guest's page to itself");
+
     test_offset_resolution();
     test_carry_out();
     test_filter_notify();

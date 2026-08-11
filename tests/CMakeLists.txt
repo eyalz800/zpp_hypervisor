@@ -103,6 +103,7 @@ function(zpp_add_host_test name)
     # choose between.
     target_include_directories(${name} PRIVATE
         ${HARNESS_INCLUDES}
+        "${CMAKE_CURRENT_SOURCE_DIR}"
         "${ZPP_HYPERVISOR_INCLUDE}"
         "${ZPP_DIAG_INCLUDE}")
     target_compile_definitions(${name} PRIVATE
@@ -271,16 +272,20 @@ zpp_add_host_test(local_apic
 # The watched-page write path: the real watch_guest_page_writes,
 # on_ept_violation, carry_out_guest_instruction and on_monitor_trap_flag
 # out of watched_page.cpp, and the real filter_local_apic_write and
-# on_local_apic_write out of local_apic_write.cpp.
+# on_local_apic_write out of local_apic_write.cpp, against the real
+# hypervisor class.
 zpp_add_host_test(watched_page
     SOURCES
         watched_page/harness.cpp
+        support/host_heap.cpp
         "${ZPP_HYPERVISOR_SRC}/hypervisor/watched_page.cpp"
         "${ZPP_HYPERVISOR_SRC}/hypervisor/local_apic_write.cpp"
+        "${ZPP_HYPERVISOR_SRC}/arch/x86_64/page_table.cpp"
+        "${ZPP_HYPERVISOR_SRC}/crt/heap.cpp"
     INCLUDES
-        "${CMAKE_CURRENT_SOURCE_DIR}/watched_page/shim"
         "${CMAKE_CURRENT_SOURCE_DIR}/shim"
-        "${CMAKE_CURRENT_SOURCE_DIR}/watched_page")
+        "${CMAKE_CURRENT_SOURCE_DIR}/watched_page"
+    DEFINES ZPP_HOSTED_TESTS=1)
 
 # The interrupted-event re-queue on the way back to a guest: the real
 # resume_guest and event_allowed_on_entry out of resume.cpp, against the
