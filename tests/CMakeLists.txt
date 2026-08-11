@@ -146,6 +146,20 @@ zpp_add_host_test(nested_vmx
         "${CMAKE_CURRENT_SOURCE_DIR}/nested_vmx"
     DEFINES ZPP_NESTED_VMX=1)
 
+# The watched-page write path: the real watch_guest_page_writes,
+# on_ept_violation, carry_out_guest_instruction and on_monitor_trap_flag
+# out of watched_page.cpp, and the real filter_local_apic_write and
+# on_local_apic_write out of local_apic_write.cpp.
+zpp_add_host_test(watched_page
+    SOURCES
+        watched_page/harness.cpp
+        "${ZPP_HYPERVISOR_SRC}/hypervisor/watched_page.cpp"
+        "${ZPP_HYPERVISOR_SRC}/hypervisor/local_apic_write.cpp"
+    INCLUDES
+        "${CMAKE_CURRENT_SOURCE_DIR}/watched_page/shim"
+        "${CMAKE_CURRENT_SOURCE_DIR}/nested_vmx/shim"
+        "${CMAKE_CURRENT_SOURCE_DIR}/watched_page")
+
 # The interrupted-event re-queue on the way back to a guest: the real
 # resume_guest and event_allowed_on_entry out of resume.cpp, against a
 # stand-in carrying the per-processor event state and the VMCS. The shim's
@@ -218,7 +232,7 @@ endif()
 # the functions it wants become a translation unit a harness can compile.
 #
 # Nothing else should be added to this list.
-foreach(_generated local_apic watched_page ap_start_up crt)
+foreach(_generated local_apic ap_start_up crt)
     add_test(NAME "tests/${_generated}"
         COMMAND "${CMAKE_CURRENT_SOURCE_DIR}/${_generated}/build.sh")
     set_tests_properties("tests/${_generated}" PROPERTIES
