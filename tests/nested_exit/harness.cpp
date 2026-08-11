@@ -2693,45 +2693,49 @@ static void test_activity_state()
  * defect this file exists for - a field composed correctly in the case
  * anyone thought about, and illegally in a combination nobody did.
  *
- * **And the sweep finds one.** `save_l2_state` composes the two fields
- * from two independent places - the activity state from hardware or from
- * `l2_activity_state`, the interruptibility always from hardware - with
- * nothing between them that could notice the pair. Every forbidden
- * combination goes straight through.
+ * **The sweep found one, and c0b6d78 fixed it.** `save_l2_state`
+ * composed the two fields from two independent places - the activity
+ * state from hardware or from `l2_activity_state`, the interruptibility
+ * always from hardware - with nothing between them that could notice the
+ * pair, and every forbidden combination went straight through.
  *
- * Read, not seen, and the reachability is worth stating precisely
- * because it is what decides how urgent this is:
+ * The reachability was the interesting part and is worth keeping,
+ * because it is the argument for guarding rather than analysing:
  *
  * - With `running_l2` true, both fields come from hardware, and hardware
  *   cannot present the forbidden pair: VM entry applied 29.3.1.5 itself,
  *   so the pair could not have been entered, and a halted processor
- *   executes nothing that could raise a shadow afterwards. Not reachable
- *   through hardware.
+ *   executes nothing that could raise a shadow afterwards.
  *
- * - With `running_l2` false, the activity state comes from
- *   `l2_activity_state` and the interruptibility from the real VMCS -
- *   two sources with no relation to each other. `enter_or_park_l2`
- *   checks 29.3.1.5 for wait-for-SIPI, deliberately, *because* that
- *   state is not handed to hardware and the processor therefore never
- *   makes the check. It does not make the same check for HLT, which it
- *   does not have to: HLT goes to hardware and the processor checks it.
- *   But `l2_activity_state` is written before that entry happens, so a
- *   path that sets it and then fails to enter leaves the two sources
- *   free to disagree.
+ * - With `running_l2` false, the two sources are unrelated.
+ *   `enter_or_park_l2` checks 29.3.1.5 for wait-for-SIPI deliberately,
+ *   *because* that state is not handed to hardware and the processor
+ *   therefore never makes the check; it does not make the same check for
+ *   HLT, which it does not have to, since HLT goes to hardware. But
+ *   `l2_activity_state` is written before the entry decision, so a pass
+ *   that records a state and then holds the processor in root operation
+ *   leaves the two free to disagree.
  *
- * The reachable path, if there is one, is therefore an entry that gets
- * past the activity-state checks, records `l2_activity_state`, and then
- * does not enter. SDM 29.8 says a VM-entry failure must not modify the
- * guest-state area, and the refusal path above asserts that - so the
- * question is whether any *other* exit from that function can reach
- * `save_l2_state` with `running_l2` still false. Recorded here rather
- * than answered, because answering it means reading a control-flow
- * question that a guard would make moot.
+ * Whether any path actually reached it was left unanswered on purpose: a
+ * proof of unreachability has to be redone every time `enter_or_park_l2`
+ * changes, and the failure lands one layer up, on an entry the guest
+ * hypervisor did not compose and cannot diagnose.
  *
- * The guard is one line where the field is composed: an activity state
- * other than active is only legal alongside an interruptibility with
- * neither blocking bit, so either the pair is coerced or the entry is
- * refused. Cheaper than the analysis.
+ * **Which half to fix was a real choice**, and the cases below assert
+ * it: the blocking bits are cleared, not the activity state forced to
+ * active. Only one of those is true. A processor in HLT or wait-for-SIPI
+ * has retired no instruction, so it has no shadow, and the stale
+ * interruptibility read out of vmcs02 is the wrong half. Forcing
+ * activity to active would tell the guest hypervisor its processor was
+ * running - the one thing `enter_or_park_l2` exists to avoid saying.
+ *
+ * The two mechanisms this leaves are asserted below to be distinct
+ * rather than redundant: `enter_or_park_l2` refuses an *incoming* vmcs12
+ * that carries the forbidden pair, which is the guest hypervisor's
+ * mistake, and `save_l2_state` coerces the *outgoing* one, which is this
+ * VMM's. Neither substitutes for the other, and the refusal has to keep
+ * happening or a guest hypervisor's own bad vmcs12 would be silently
+ * repaired instead of reported.
  */
 static void test_reflected_activity_and_interruptibility()
 {
@@ -2872,38 +2876,90 @@ static void test_reflected_activity_and_interruptibility()
                                (blocking_by_sti | blocking_by_mov_ss))) &&
                         (activity::active != saved_activity);
 
-                    // The pairs the rule forbids are exactly the ones
-                    // this composition has no guard against, so they are
-                    // recorded rather than asserted away - see the note
-                    // below the sweep for what is and is not reachable.
-                    auto forbidden_by_the_rule =
-                        (0 != (blocking.value &
-                               (blocking_by_sti | blocking_by_mov_ss))) &&
-                        (activity::active != state.value);
-
-                    if (forbidden_by_the_rule) {
-                        diverge(illegal,
-                                text("save_l2_state composes %s with %s "
-                                     "(running_l2 %s) and hands it back "
-                                     "unchecked. SDM 29.3.1.5 forbids "
-                                     "that pair at VM entry, so the "
-                                     "guest hypervisor's own next "
-                                     "VMRESUME fails a check it did not "
-                                     "cause and cannot diagnose",
-                                     state.name,
-                                     blocking.name,
-                                     ran ? "true" : "false"));
-                        continue;
-                    }
-
                     check(!illegal,
                           text("%s with %s, running_l2 %s: the pair "
                                "handed back is one a VM entry accepts",
                                state.name,
                                blocking.name,
                                ran ? "true" : "false"));
+
+                    // And the half that was coerced is the right half.
+                    // c0b6d78 clears the blocking bits rather than
+                    // forcing the activity state to active, because only
+                    // one of those is true: a processor in HLT or
+                    // wait-for-SIPI has retired no instruction and
+                    // therefore has no shadow, so the stale
+                    // interruptibility is the wrong half. Forcing
+                    // activity to active would tell the guest hypervisor
+                    // its processor was running, which is the one thing
+                    // `enter_or_park_l2` exists to avoid saying.
+                    if (activity::active != state.value) {
+                        check(state.value == saved_activity,
+                              text("%s with %s: the activity state "
+                                   "survives - it is the half that is "
+                                   "true",
+                                   state.name,
+                                   blocking.name));
+                        check(0 == (saved_blocking & (blocking_by_sti |
+                                                      blocking_by_mov_ss)),
+                              text("%s with %s: the blocking bits are "
+                                   "the half that is cleared",
+                                   state.name,
+                                   blocking.name));
+                    }
                 }
             }
+        }
+    }
+
+    // === The two mechanisms are distinct ==============================
+    //
+    // c0b6d78 coerces the pair on the way *out*. `enter_or_park_l2`
+    // refuses it on the way *in*. Asked directly whether the second is
+    // now redundant, the answer is no, and the difference is whose
+    // mistake each one is about:
+    //
+    // - An incoming vmcs12 carrying the forbidden pair is the guest
+    //   hypervisor's own error, and it has to be reported as an entry
+    //   failure - silently repairing it would hide a bug in the layer
+    //   above and hand it a processor in a state it did not ask for.
+    // - An outgoing one is this VMM's error, and there is nobody to
+    //   report it to: the guest hypervisor did not compose it.
+    //
+    // So the refusal has to keep happening, and this asserts it does.
+    // SDM 29.3.1.5's wait-for-SIPI checks are made by `enter_or_park_l2`
+    // itself precisely because that state is never handed to hardware,
+    // so the processor never makes them - which means nothing else
+    // would notice if they stopped.
+    {
+        constexpr std::uint64_t entry_failure_bit = 1ull << 31;
+        constexpr std::uint64_t invalid_guest_state = 33;
+        using entry_outcome =
+            zpp::hypervisor::hypervisor::l2_entry_outcome;
+
+        for (auto blocking : {blocking_by_sti, blocking_by_mov_ss}) {
+            context registers{};
+            reset(registers);
+            controls(0, 0, 0);
+            hv().running_l2[cpu] = false;
+            hv().l2_activity_state[cpu] = activity::active;
+            shadow.write(fields::guest_activity_state,
+                         activity::wait_for_start_up_ipi);
+            shadow.write(fields::guest_interruptibility_state, blocking);
+            shadow.write(fields::vm_entry_interruption_information_field,
+                         0);
+            shadow.write(fields::exit_reason, 0);
+
+            check(entry_outcome::reflected == hv().enter_or_park_l2(cpu),
+                  text("wait-for-SIPI with blocking %llu is still "
+                       "refused on entry, not silently repaired - the "
+                       "outgoing guard does not make the incoming check "
+                       "redundant",
+                       (unsigned long long)blocking));
+            check((entry_failure_bit | invalid_guest_state) ==
+                      shadow.read(fields::exit_reason),
+                  text("and refused as a VM-entry failure with reason "
+                       "33, which is what SDM 29.3.1.5 makes it"));
         }
     }
 
