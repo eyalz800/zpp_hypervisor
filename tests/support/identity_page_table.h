@@ -22,6 +22,7 @@
 
 #include <cstddef>
 #include <cstdint>
+#include <initializer_list>
 
 namespace zpp::tests
 {
@@ -64,6 +65,42 @@ inline void map_identity(zpp::arch::x86_64::page_table & table,
                    zpp::arch::x86_64::page_table::protection::read |
                        zpp::arch::x86_64::page_table::protection::write,
                    identity);
+}
+
+/**
+ * One address range to map.
+ */
+struct identity_range
+{
+    const void * base{};
+    std::size_t size{};
+};
+
+/**
+ * Maps several ranges, mapping the table into itself once rather than
+ * once per range.
+ *
+ * `map_self` walks four megabytes of page tables - a thousand pages -
+ * so a harness that rebuilds its hypervisor between cases and maps two
+ * ranges each time pays for that walk twice per case rather than once.
+ * Not the dominant cost in any harness here, which is zeroing the 46 MB
+ * object itself, but it is free to avoid.
+ */
+inline void map_identity(zpp::arch::x86_64::page_table & table,
+                         std::initializer_list<identity_range> ranges)
+{
+    identity_page_table identity;
+
+    table.map_self(identity);
+
+    for (const auto & range : ranges) {
+        table.map_from(
+            range.base,
+            range.size,
+            zpp::arch::x86_64::page_table::protection::read |
+                zpp::arch::x86_64::page_table::protection::write,
+            identity);
+    }
 }
 
 } // namespace zpp::tests

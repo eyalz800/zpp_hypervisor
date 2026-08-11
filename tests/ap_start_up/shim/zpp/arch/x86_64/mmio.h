@@ -55,4 +55,28 @@ inline std::uint32_t read32(const volatile void *)
     return 0;
 }
 
+/**
+ * The two fences, copied from the real header rather than reduced.
+ *
+ * Nothing on the start-up path uses them; they are here because the real
+ * hypervisor.h reaches zpp/nvme/admin_borrow.h, which does, and this
+ * file shadows the real mmio.h for the whole translation unit. Copied
+ * because they are not hardware in any sense this harness has to stand
+ * in for - `std::atomic_thread_fence` is exactly what the real ones
+ * call, on any architecture.
+ * @{
+ */
+inline void order_stores()
+{
+    std::atomic_thread_fence(std::memory_order_release);
+}
+
+inline void order_loads()
+{
+    std::atomic_thread_fence(std::memory_order_acquire);
+}
+/**
+ * @}
+ */
+
 } // namespace zpp::arch::x86_64

@@ -117,6 +117,12 @@
 // `on_interrupt_command` flagging the destination of an INIT: 2 checks,
 // one of them for the level de-assert, which is the form that flagged a
 // processor for an INIT the guest had not sent.
+#include "support/identity_page_table.h"
+// By name, because the real hypervisor.h does not include it and the
+// stand-in this harness used to compile against did. Everything below
+// that reads a control register, an APIC base or a CPUID leaf reads it
+// out of tests/ap_start_up/shim/zpp/arch/x86_64/asm.h.
+#include "zpp/arch/x86_64/asm.h"
 #include "zpp/hypervisor/hypervisor.h"
 #include <atomic>
 #include <cstdio>
@@ -224,6 +230,16 @@ static void reset()
     g_vmm.~hypervisor();
     ::new (&g_vmm) hypervisor();
     g_vmm.start_up_memory = reinterpret_cast<std::uint64_t>(g_trampoline);
+
+    // The real host page table, over the two per-processor regions
+    // `enter_root_mode` translates: `vmxon` and `vmptrld` take the
+    // address of a physical address, and what this harness asserts is
+    // that each processor named *its own*. Re-mapped here rather than
+    // once in main, because the reconstruction above wipes the table
+    // along with the rest of the object.
+    zpp::tests::map_identity(g_vmm.host_page_table,
+                             {{&g_vmm.vmx, sizeof(g_vmm.vmx)},
+                              {&g_vmm.vmx_vmcs, sizeof(g_vmm.vmx_vmcs)}});
 
     // xAPIC at the conventional frame, and nothing under us. That is bare
     // metal, which is what every test that says nothing about the mode

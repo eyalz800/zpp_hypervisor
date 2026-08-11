@@ -244,13 +244,17 @@ zpp_add_host_test(nested_vmx
 zpp_add_host_test(ap_start_up
     SOURCES
         ap_start_up/harness.cpp
+        support/host_heap.cpp
         "${ZPP_HYPERVISOR_SRC}/hypervisor/start_up.cpp"
         "${ZPP_HYPERVISOR_SRC}/hypervisor/interrupt_command.cpp"
         "${ZPP_HYPERVISOR_SRC}/hypervisor/local_apic.cpp"
+        "${ZPP_HYPERVISOR_SRC}/arch/x86_64/page_table.cpp"
+        "${ZPP_HYPERVISOR_SRC}/crt/heap.cpp"
     INCLUDES
         "${CMAKE_CURRENT_SOURCE_DIR}/ap_start_up/shim"
         "${CMAKE_CURRENT_SOURCE_DIR}/shim"
-        "${CMAKE_CURRENT_SOURCE_DIR}/ap_start_up")
+        "${CMAKE_CURRENT_SOURCE_DIR}/ap_start_up"
+    DEFINES ZPP_HOSTED_TESTS=1)
 
 # The interrupt command register's decode path: the real processor_slot,
 # on_interrupt_command and start_up_broadcast out of interrupt_command.cpp
@@ -399,13 +403,13 @@ add_test(NAME check-exit-handler
 
 find_package(Python3 COMPONENTS Interpreter)
 if(Python3_Interpreter_FOUND)
-    # The harness shims against the class they stand in for. A member the
-    # real source uses and a shim lacks is a compile error and needs no
-    # help; a member present in both with a *different* declaration
-    # compiles and tests the wrong thing, which is what this catches - it
-    # has already caught a uint64_t that a shim spelled uint32_t.
-    add_test(NAME check-shim-members
-        COMMAND "${Python3_EXECUTABLE}" "${ZPP_CI_DIR}/check-shim-members.py")
+    # What this suite is allowed to stand in for. Replaces
+    # check-shim-members.py, which compared six copies of the hypervisor
+    # class against the real header - there are no copies left, so the
+    # compiler makes that comparison now. This guards the rule those
+    # copies broke instead: shim the hardware, not the code under test.
+    add_test(NAME check-shims
+        COMMAND "${Python3_EXECUTABLE}" "${ZPP_CI_DIR}/check-shims.py")
 
     # The Python readers under scripts/, against the C++ they transcribe.
     # Those scripts are the one place a wrong constant produces *plausible*
@@ -417,7 +421,7 @@ if(Python3_Interpreter_FOUND)
             -t "${CMAKE_CURRENT_SOURCE_DIR}/python_layout")
 else()
     message(WARNING
-        "no Python 3 interpreter - check-shim-members and "
+        "no Python 3 interpreter - check-shims and "
         "tests/python_layout will not run")
 endif()
 
