@@ -254,16 +254,19 @@ zpp_add_host_test(ap_start_up
 # The interrupt command register's decode path: the real processor_slot,
 # on_interrupt_command and start_up_broadcast out of interrupt_command.cpp
 # and the real note_apic_mode and intercept_interrupt_command out of
-# local_apic.cpp, against a fake roster and fake hardware.
+# local_apic.cpp, against the real hypervisor class, a fake roster and
+# fake hardware.
 zpp_add_host_test(local_apic
     SOURCES
         local_apic/harness.cpp
+        support/host_heap.cpp
         "${ZPP_HYPERVISOR_SRC}/hypervisor/interrupt_command.cpp"
         "${ZPP_HYPERVISOR_SRC}/hypervisor/local_apic.cpp"
+        "${ZPP_HYPERVISOR_SRC}/crt/heap.cpp"
     INCLUDES
-        "${CMAKE_CURRENT_SOURCE_DIR}/local_apic/shim"
         "${CMAKE_CURRENT_SOURCE_DIR}/shim"
-        "${CMAKE_CURRENT_SOURCE_DIR}/local_apic")
+        "${CMAKE_CURRENT_SOURCE_DIR}/local_apic"
+    DEFINES ZPP_HOSTED_TESTS=1)
 
 # The watched-page write path: the real watch_guest_page_writes,
 # on_ept_violation, carry_out_guest_instruction and on_monitor_trap_flag
