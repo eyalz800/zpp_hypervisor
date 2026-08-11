@@ -10,7 +10,13 @@ elf="$root/out/$config/x86_64/zpp_hypervisor"
 nm="${NM:-llvm-nm}"
 readelf="${READELF:-llvm-readelf}"
 
-[ -f "$elf" ] || { echo "missing $elf" >&2; exit 1; }
+# 77 rather than 1 when there is nothing to grade. It is ctest's
+# conventional skip code and tests/CMakeLists.txt registers it as this
+# test's SKIP_RETURN_CODE, so a suite run before the cross build reports
+# this as skipped instead of failed - which is what the runner this
+# replaced did by testing for the file itself. Still nonzero, so a caller
+# that expects the binary to be there, like ci.yml's build job, fails.
+[ -f "$elf" ] || { echo "missing $elf" >&2; exit 77; }
 
 status=0
 

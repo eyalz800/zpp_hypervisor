@@ -5,8 +5,8 @@
 #
 # Tier one is static_asserts over nested_ept.h - the walker, the
 # permission composition, the reflected exit qualification. Those are
-# pure, so the compile *is* the run, the same arrangement as
-# check-decoder.sh beside it.
+# pure, so the compile *is* the run, the same arrangement as the
+# check-decoder and check-instruction targets in tests/CMakeLists.txt.
 #
 # Tier two is the shadow table pool, the shadow walk, the second-level
 # fault decision and the EPT-pointer check. Those are members of

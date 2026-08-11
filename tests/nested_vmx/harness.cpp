@@ -388,7 +388,10 @@ static void reset_cpu(std::size_t cpu)
     arm_guest(cpu);
 }
 
-static void enter_vmx(std::size_t cpu)
+// The processor is named by the caller for the same reason every other
+// step is, but vmxon needs no index: it acts on whichever processor
+// `arm_guest` has already made current.
+static void enter_vmx([[maybe_unused]] std::size_t cpu)
 {
     make_region(vmxon_region, vmcs12::revision);
     auto r = do_pointer_instruction(
@@ -408,20 +411,6 @@ struct named_field
 static const named_field g_fields[] = {
 #include "fields.inc"
 };
-
-static std::uint64_t vmread_field(std::size_t cpu, std::uint64_t encoding)
-{
-    context regs{};
-    regs.rcx = encoding; // reg2 = rcx (1)
-    auto r = run(basic_reason::vmread,
-                 regs,
-                 register_operand_information(0 /*rax*/, 1 /*rcx*/));
-    if (r.what != outcome::succeed) {
-        return ~std::uint64_t(0);
-    }
-    (void)cpu;
-    return regs.rax;
-}
 
 static result vmwrite_field(std::uint64_t encoding, std::uint64_t value)
 {

@@ -26,6 +26,14 @@ The audit's finding is at the top of the next section and it reframes every
   the eleven did not compile when it was first written - three harness shims
   had drifted from `hypervisor.cpp` and one decoder assertion was still
   asserting behaviour the decoder had deliberately stopped having.
+- The suite is a CMake project rather than a set of `build.sh` scripts, so
+  there is a `ctest` registration now: `tests/CMakeLists.txt` gives each
+  harness its own target and each check its own `add_test`, and
+  `run-host-tests.sh` is a wrapper over configure, build and `ctest`. The
+  per-test bound, the one-process-per-test isolation and the report naming
+  which tests failed are all ctest's now. `check-decoder.sh` and
+  `check-instruction.sh` are gone - they compiled one file with one include
+  directory, which is what a target does.
 - `tests/elf_relocate/` covers the `elf_file::relocate` trait bug (entry 1 of
   the ranked list below), plus `DT_RELASZ` as a byte count, `PT_DYNAMIC`
   found by type, and the zeroed `.bss` tail. A `static_assert` in
@@ -119,7 +127,7 @@ Two further caveats inside the coverage that does exist:
 | `tests/watched_page/` (2408 lines, 1594 checks) | `build.sh` cuts nine functions out of `hypervisor.cpp` **by name** | Offset resolution from three sources and its counters; `carry_out_guest_instruction` at every width; the filter/notify contract; the local APIC's two handlers; straddle refusal; access width and alignment; MTF retirement modelling and the bounded read-back. |
 | `tests/nested_vmx/` (1573 lines, 410 checks) | compiles the real `vmcs12.h` + `nested_vmx.cpp` | VMREAD/VMWRITE round trips for all 156 encodings at every width; exhaustive sweep of all 32768 encodings; the launch-state machine with SDM Table 33-1 error numbers; `#UD`/`#GP` preconditions; the migration cycle including the redundant-VMPTRLD regression (`f6580af`) and VMCLEAR preserving field storage; operand decode; the capability MSRs. |
 | `tests/ap_start_up/` (521 lines, 17 checks) | cuts `processor_slot`, `start_up_processor`, `start_application_processor`, `enter_root_mode` out by name; host threads stand in for logical processors | Slot allocator has no collisions under the lock (6,149 without it); `start_up_launched` is never cleared for a running processor; one VMCS per processor (regression pin only); the hand-off contract. |
-| `scripts/ci/check-decoder.sh`, `check-instruction.sh`, `check-nested-ept.sh` | hosted compile of `decoder-test.cpp` / `instruction-test.cpp` / `nested-ept-test.cpp` | The compile **is** the test — all assertions are `static_assert`. Covers the narrow store decoder, the full instruction decoder's compile-time cases, `walk_ept` / `compose_ept` / `reflected_ept_violation_qualification` over all 225 permission pairs. |
+| `check-decoder`, `check-instruction` (targets in `tests/CMakeLists.txt`), `scripts/ci/check-nested-ept.sh` | hosted compile of `decoder-test.cpp` / `instruction-test.cpp` / `nested-ept-test.cpp` | The compile **is** the test — all assertions are `static_assert`. Covers the narrow store decoder, the full instruction decoder's compile-time cases, `walk_ept` / `compose_ept` / `reflected_ept_violation_qualification` over all 225 permission pairs. |
 | `scripts/ci/check-invariants.sh` | `llvm-nm`, `llvm-readelf` on the built ELF | No undefined symbols (hard); `.init_array` size (WARN); no hosted C runtime entry points. |
 | `scripts/ci/check-nested-absent.sh` | strings + sha256 of the `ZPP_NESTED_VMX=OFF` release binary | Every release compile got `ZPP_NESTED_VMX=0`; three sentinel strings absent; the binary matches `nested-off-baseline`; and each sentinel must still exist in `hypervisor/src` (added after `2ed7730` found a sentinel that existed nowhere and so passed unconditionally). |
 | `scripts/ci/check-diag-absent.sh` | release objects | No `zpp::diag` symbol and no ring storage in a `ZPP_DIAG=0` build. |

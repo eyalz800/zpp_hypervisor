@@ -7,6 +7,18 @@ set(ZPP_SOURCE_DIR "${CMAKE_CURRENT_SOURCE_DIR}")
 string(TOLOWER "${CMAKE_BUILD_TYPE}" ZPP_CONFIG_LOWER)
 set(ZPP_OUTPUT_DIR "${ZPP_SOURCE_DIR}/out/${ZPP_CONFIG_LOWER}/x86_64")
 
+# The hosted test suite is the one thing in this project built for the
+# machine running the build rather than for the target, so it is a normal
+# subdirectory rather than a fifth ExternalProject. That is what lets
+# `ctest` see it: an ExternalProject's tests belong to a project of its
+# own and the top level knows nothing about them.
+#
+# The compile database is exported for the same reason it is for each
+# sub-build - tests/CMakeLists.txt copies it into tests/ so clangd resolves
+# the shim directories, which no editor can guess.
+set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
+enable_testing()
+
 set(FREESTANDING_TOOLCHAIN "${CMAKE_CURRENT_SOURCE_DIR}/cmake/toolchain-x86_64-freestanding.cmake")
 
 # Debugging only: makes the hypervisor spin at its entry point until a
@@ -210,6 +222,9 @@ add_custom_target(linux_loader_ko
     DEPENDS linux_loader
     COMMENT "Building linux kernel module (.ko) via Podman kbuild"
 )
+
+# === Hosted test suite (native, for the machine running the build) ===
+add_subdirectory(tests)
 
 # Copy each sub-build's compile_commands.json into the corresponding source
 # directory after build so clangd picks up the correct flags automatically.

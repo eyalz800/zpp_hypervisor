@@ -54,7 +54,8 @@ jobs:
   # were not run at all. Six harnesses under tests/ and several
   # compile-only checks under scripts/ci/ - together about eleven thousand
   # lines of assertions - and this workflow invoked two of them. Nothing
-  # else did either: no ctest, no Makefile, no runner.
+  # else did either: no ctest, no Makefile, no runner. There is a ctest
+  # now, which is what the wrapper below drives.
   #
   # It was not a theoretical gap. When the runner was first written, four
   # of the eleven did not even compile: three harness shims had drifted
@@ -70,19 +71,31 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+      # ninja-build as well as the compiler, because the suite is a CMake
+      # project now and the presets name Ninja as the generator.
       - name: Install LLVM ${{ env.LLVM_VERSION }}
         run: |
           wget -qO- https://apt.llvm.org/llvm.sh | sudo bash -s -- "$LLVM_VERSION"
           sudo apt-get install -y --no-install-recommends \
-            "libc++-$LLVM_VERSION-dev" "libc++abi-$LLVM_VERSION-dev"
+            "libc++-$LLVM_VERSION-dev" "libc++abi-$LLVM_VERSION-dev" \
+            ninja-build
           echo "/usr/lib/llvm-$LLVM_VERSION/bin" >> "$GITHUB_PATH"
-      # The decoder harness is a differential against LLVM's own
-      # assembler and disassembler, so it needs those two by name.
+      # CXX names the compiler CMake probes with. Left as clang++ rather
+      # than defaulted: the default on this runner is gcc, and these
+      # harnesses are written against the same clang the rest of the tree
+      # is cross-compiled with.
+      #
+      # The decoder harness is a differential against LLVM's own assembler
+      # and disassembler; tests/CMakeLists.txt finds those two itself and
+      # hands their paths to that test, so they need no naming here beyond
+      # being on PATH, which the step above puts them on.
+      #
+      # This builds only the zpp_tests target, never the cross builds - no
+      # emulator, no target and no cross toolchain, which is what makes
+      # this the cheapest job in the workflow.
       - name: Run every hosted test
         env:
           CXX: clang++
-          LLVM_MC: llvm-mc
-          LLVM_OBJDUMP: llvm-objdump
         run: ./scripts/ci/run-host-tests.sh
 
   # The 75 column limit in .clang-format is not enforced by the build.
