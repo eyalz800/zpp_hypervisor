@@ -558,6 +558,56 @@ guest hypervisor has been told**, because its own scheduler is deciding a
 virtual processor with a pending message and an unmasked interrupt source
 is not runnable.
 
+### What the emulated local APICs say, including one hypothesis killed
+
+`info lapic <n>` on the QEMU monitor reads the emulated local APIC
+without perturbing the guest, and it is the cheapest confirmation in this
+whole file. Taken at the freeze:
+
+```
+cpu 0  LVTT 0x000000ef one-shot vec 239   DCR=0xb (divide by 1)
+       initial_count = 2,374,865,566   current_count = 2,372,899,445
+       ICR 0x082f logical  ICR2 0x02000000    ISR (none)  IRR (none)
+       TPR 0x00  PPR 0x00  DFR 0x0f  LDR 0x01  SPIV 0x11df (enabled)
+cpu 1  initial_count = 0   ICR 0x082f logical  ICR2 0x04000000
+       ISR (none)  IRR (none)  TPR 0x00  DFR 0x0f  LDR 0x02
+cpu 2  initial_count = 0   ICR 0x00ec physical ICR2 0x00000000
+       ISR (none)  IRR (none)  TPR 0x00  DFR 0x0f  LDR 0x04
+```
+
+Four things, three confirmations and one correction.
+
+- **The 2.38 second sleep is real at the hardware level.** The boot
+  processor's timer is armed one-shot to 2,374,865,566 and counting down,
+  divide-by-one, vector `0xef` - exactly what `timer_arm_recent_*`
+  recorded from the other side.
+- **The application processors' timers are disarmed**, `initial_count =
+  0`, confirming independently what the arming ring showed.
+- **Nothing is pending anywhere.** Every `IRR` is empty, every `ISR` is
+  empty, `TPR` and `PPR` are zero on all three. So no interrupt is
+  waiting, none is in service, and none is being held back by priority.
+  The machine is quiescent, not blocked.
+- **A hypothesis died here, and it deserves recording because it was
+  wrong for a plausible reason.** The last two commands in the log are
+  fixed-mode IPIs in *logical* destination mode, vector `0x2f`, to
+  destinations `0x02` and `0x04`, and earlier bursts repeat one logical
+  command up to ten times - which reads exactly like a retry loop for an
+  IPI that is never delivered, especially since every *successful*
+  processor bring-up used physical mode. It is not. `DFR` is `0x0f`, the
+  flat model, and `LDR` is `0x01`, `0x02`, `0x04` on processors 0, 1 and
+  2, so logical addressing is programmed correctly - and the ICR contents
+  show a *chain*: processor 0 sent `0x2f` to logical `0x02`, which is
+  processor 1, and processor 1 then sent `0x2f` to logical `0x04`, which
+  is processor 2. Processor 1 could only have sent it by having woken and
+  run. **The logical IPIs are delivered and propagate.** They are not the
+  fault, and the repetition is not a retry.
+
+So every mechanism examined works and the machine still stops. The
+picture that survives all of it: Hyper-V holds a timer message it wrote
+itself, no interrupt is pending on any processor, no processor is blocked
+by priority, and Hyper-V never schedules the virtual processor that would
+consume the message.
+
 Next, and this is now a narrow question: what the reflected `hlt` exit
 leaves in vmcs12. Hyper-V parks the processor from that exit and decides
 from the state saved there whether it may ever be woken - so the guest
