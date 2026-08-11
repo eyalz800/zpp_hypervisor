@@ -6669,3 +6669,86 @@ Recorded as an expected failure in `tests/python_layout`, not asserted at
 and skipping says nothing. The decorator comes off when the script is
 fixed. `REGRESSION-COVERAGE.md` lists fourteen more constants of the same
 kind across `scripts/`, three of which are wrong or degraded today.
+
+## Tenth review: three in the page tables, found by testing them
+
+The host page table and the walker for the operating system's own table
+had no test. `tests/page_table` is 1560 checks against both real
+translation units, and it found three things. All are recorded here and
+asserted at their current behaviour in the harness, each case saying in
+its own message that it must be inverted when the defect is fixed.
+
+### Large-page translation is shifted, in both walkers
+
+`pte::page_number()` returns bits 51:12 - already scaled by a 4 KB page.
+Both walkers then compute a large page's base from it:
+
+    // os_page_table.cpp:43 and :53, page_table.cpp:27 and :42
+    if (pdpte.large()) {
+        return (pdpte.page_number() << 30) + huge_offset();
+    }
+    if (pde.large()) {
+        return (pde.page_number() << 21) + large_offset();
+    }
+
+`page_number()` has already divided by 4 KB, so shifting by 21 multiplies
+by 2 MB a value that is counted in 4 KB pages. **The answer is the true
+base shifted left by 9**, and by 18 for the 1 GB case. A 2 MB page based
+at 0x40000000 answers 0x8000000000000.
+
+The accessor this wants exists, in the other file: `ept.h` has
+`large_page_number()`, shifting by 21, and `epte_for` uses it correctly.
+`pte.h` has no equivalent, which is how the two came to disagree.
+
+**Read, not seen, and the reason it has not been seen is worth stating.**
+`os_page_table::virtual_to_physical` is what `initialize_host_page_table`
+translates the module, the local APIC page and the start-up trampoline
+through. Under UEFI `physical_to_virtual` is null and the walk returns
+its argument unchanged, so the whole path is dead - and UEFI is the only
+loader the rig boots. Under the Windows and Linux loaders the callback is
+non-null and the operating system's tables do use 2 MB leaves, so
+whether this fires depends on whether the pages being translated happen
+to fall inside one. Pool allocations are 4 KB mapped, which is the most
+likely reason a Windows boot has not produced a garbage host page table.
+
+Smallest fix: add `large_page_number()` and `huge_page_number()` to
+`pte.h` beside `page_number()`, mirroring `ept.h`, and use them at the
+four sites. Verified by making it and watching the two harness cases flip
+to failures that name the shift.
+
+### An unmapped address is not refused, and cannot be
+
+There is no present check at any level of either walker and no failure
+value in the signature. Three consequences, and the first is the one that
+matters:
+
+- For `page_table` the answer for an unmapped address is its page offset.
+  `read_guest_word` and `apply_guest_store` both test the result as a
+  boolean before dereferencing it, so **that guard passes for any
+  unmapped address whose low twelve bits are non-zero** - which is most
+  of them. The guard reads as a null check and is not one.
+- It runs the other way too: a page legitimately mapped to physical zero
+  is refused by the same guard.
+- In `os_page_table` a not-present entry sends the walk into physical
+  page zero and returns a plausible wrong address rather than an error.
+
+And `page_table::virtual_to_physical` never reads the PML4 at all, so it
+answers for an address whose PML4 entry was never written - where a
+processor faults.
+
+This one wants a decision rather than an edit: the return type has to
+grow a failure, which is a change at every call site, and CLAUDE.md's
+rule is `std::expected<T, zpp::error>`. Worth doing, because the current
+shape means the two guest-memory accessors have a bug-shaped hole in
+exactly the case they exist to guard.
+
+### `pte::protection_key()` is one bit low
+
+Bits 61:58, where SDM Table 5-20 (`.references/sdm.txt:157311-157313`)
+says 62:59. Latent - nothing calls it and CR4.PKE is never set - and one
+line to fix.
+
+Checked and *not* a defect, because it looks like one: `pat()` and
+`large()` sharing bit 7 is correct per SDM 14.12.3 and Tables 5-18 and
+5-20. Only a large page's PAT bit, at 12, has no accessor, and nothing
+sets it.
