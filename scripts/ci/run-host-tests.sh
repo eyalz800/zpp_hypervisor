@@ -82,7 +82,8 @@ for harness in \
     nested_vmx \
     mtrr \
     crt \
-    page_table
+    page_table \
+    resume_guest
 do
     if [ ! -x "$root/tests/$harness/build.sh" ]; then
         echo "-- tests/$harness/build.sh missing or not executable" >&2
