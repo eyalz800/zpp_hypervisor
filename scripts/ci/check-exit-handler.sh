@@ -341,6 +341,76 @@ else
     status=1
 fi
 
+# === The window controls come from the guest hypervisor alone =========
+#
+# A window exit says "the guest can take an interrupt now". It is an
+# answer to a question, and only whoever asked it can act on the answer -
+# so vmcs02 takes the interrupt-window and NMI-window controls from
+# vmcs12 and not from the union with this VMM's own.
+#
+# Both directions cost something, and the second is the expensive one:
+#
+# - Inheriting this VMM's bits would produce window exits with nothing to
+#   do, on a path taken once per interrupt.
+# - **Dropping the guest hypervisor's bits is worse.** A guest hypervisor
+#   that has an interrupt to deliver to a second-level guest with
+#   interrupts blocked sets interrupt-window exiting and waits for the
+#   exit that says it may inject. If that bit never reaches vmcs02 the
+#   exit never happens, the guest hypervisor never injects, and the
+#   second-level guest never runs again - with nothing anywhere reporting
+#   a fault. From outside it is a virtual processor that has stopped.
+#
+# KVM composes it the same way in `prepare_vmcs02_early`.
+#
+# Checked at the source because the composition is inside build_vmcs02,
+# which the harnesses cannot reach: it makes vmcs02 current, and from
+# that point nothing may fail.
+echo "== the interrupt and NMI window controls come from vmcs12"
+
+entry_source="$root/hypervisor/src/hypervisor/nested_entry.cpp"
+
+if grep -q 'primary01 & ~(primary_interrupt_window | primary_nmi_window)' \
+    "$entry_source"; then
+    echo "  ok    this VMM's own window bits are masked out of the union"
+else
+    echo "  FAIL  vmcs02's primary controls no longer take the window" >&2
+    echo "        controls from the guest hypervisor alone. If its bits" >&2
+    echo "        are being dropped, a guest hypervisor waiting for an" >&2
+    echo "        interrupt-window exit never gets one, never injects," >&2
+    echo "        and its second-level guest never runs again - with no" >&2
+    echo "        fault reported anywhere." >&2
+    status=1
+fi
+
+# The guest hypervisor's half has to be ORed in **whole**. Masking the
+# window bits out of it as well would compile, read as symmetry, and lose
+# exactly the request this is about - so the line is matched on its own
+# rather than by looking for the identifier anywhere nearby, which the
+# masked form would also satisfy.
+if grep -A2 'primary01 & ~(primary_interrupt_window | primary_nmi_window)' \
+    "$entry_source" | grep -qE '^\s*primary12;\s*$'; then
+    echo "  ok    and the guest hypervisor's are ORed in whole"
+else
+    echo "  FAIL  the guest hypervisor's primary controls are no longer" >&2
+    echo "        ORed into vmcs02's, so its window request is lost." >&2
+    status=1
+fi
+
+# And the bit has to be offered in the first place. A capability MSR that
+# withholds interrupt-window exiting would make a guest hypervisor unable
+# to ask the question at all, which fails the same way one step earlier.
+if grep -A4 'supported_primary_controls' "$nested" \
+    | grep -qE '^\s*\(1ull << 2\)'; then
+    echo "  ok    interrupt-window exiting is offered to a guest"\
+         "hypervisor"
+else
+    echo "  FAIL  primary control bit 2, interrupt-window exiting, is" >&2
+    echo "        not offered. A guest hypervisor cannot then ask when" >&2
+    echo "        it may inject into a second-level guest with" >&2
+    echo "        interrupts blocked, and has no way to deliver one." >&2
+    status=1
+fi
+
 echo
 if [ "$status" = "0" ]; then
     echo "exit handler invariants hold"
