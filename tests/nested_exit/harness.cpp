@@ -17,6 +17,7 @@
 #include <cstring>
 #include <map>
 #include <string>
+#include <utility>
 #include <vector>
 
 using namespace zpp;
@@ -41,15 +42,42 @@ static std::vector<std::byte> & page_of(std::uint64_t physical)
 }
 
 // ------------------------------------------------------- shim definitions
+// The machine's MSRs, and every write to one recorded in order.
+//
+// `load_l1_host_state` is the only place in nested_entry.cpp that reaches
+// a real MSR, and it is where three of the guest hypervisor's VM-exit
+// controls are *emulated* rather than handed to the processor - "load
+// IA32_PAT", "load IA32_EFER" and the LMA/LME rule that applies whether
+// or not the whole MSR is loaded. Emulation that writes nowhere the test
+// can see is emulation nothing checks, which is how a control gets
+// offered and quietly dropped.
+static std::map<std::uint32_t, std::uint64_t> g_msr;
+static std::vector<std::pair<std::uint32_t, std::uint64_t>> g_msr_writes;
+
+/**
+ * Per-MSR overrides for the VMX capability values the fixture reports.
+ *
+ * The fixed set is a plausible processor and every existing case wants it
+ * unchanged, so this defaults to empty and only the control composition
+ * suite writes it. It exists because that suite has to ask what happens
+ * when a control the *guest hypervisor* set is one the hardware
+ * underneath does not allow - which cannot be expressed while the
+ * allowed-1 half is a constant.
+ */
+static std::map<std::size_t, std::uint64_t> g_vmx_msr_override;
+
 namespace zpp::arch::x86_64
 {
-std::uint64_t rdmsr(std::uint32_t)
+std::uint64_t rdmsr(std::uint32_t index)
 {
-    return 0;
+    auto it = g_msr.find(index);
+    return (it == g_msr.end()) ? 0 : it->second;
 }
 
-void wrmsr(std::uint32_t, std::uint64_t)
+void wrmsr(std::uint32_t index, std::uint64_t value)
 {
+    g_msr[index] = value;
+    g_msr_writes.emplace_back(index, value);
 }
 } // namespace zpp::arch::x86_64
 
@@ -63,6 +91,11 @@ hypervisor & hypervisor::instance()
 
 std::uint64_t hypervisor::cached_vmx_msr(std::size_t msr)
 {
+    if (auto it = g_vmx_msr_override.find(msr);
+        it != g_vmx_msr_override.end()) {
+        return it->second;
+    }
+
     switch (msr) {
     case 0x480:
         return 0x00da040000000000ull;
@@ -73,11 +106,43 @@ std::uint64_t hypervisor::cached_vmx_msr(std::size_t msr)
     case 0x48e:
         return 0xfff9fffe0401e172ull;
     case 0x483:
-    case 0x48f:
         return 0x07ffffff00036dffull;
     case 0x484:
+        // Allowed-1 widened from 0x3fff to 0x1f3ff so that bits 14, 15
+        // and 16 - load IA32_PAT, load IA32_EFER and load IA32_BNDCFGS -
+        // are offered by the fixture's processor. All three are in
+        // nested_vmx::supported_entry_controls, so with the narrower
+        // value the harness described a machine on which this VMM's own
+        // capability set could never be exercised: the narrowing takes
+        // the intersection with the hardware, and the intersection was
+        // empty for exactly the three controls a guest hypervisor is
+        // measured setting.
+        return 0x0001f3ff000011ffull;
+
+        // The two TRUE MSRs, which are not the same value as the pair
+        // above and were returning it.
+        //
+        // SDM 27.8.1 (.references/sdm.txt:200133): "The first
+        // processors to support the virtual-machine extensions supported
+        // only the 1-settings of bits 0-8 and 12 ... Logical processors
+        // that support the 0-settings of any of these bits will support
+        // the VMX capability MSR IA32_VMX_TRUE_ENTRY_CTLS". Bit 2 is one
+        // of them in both fields - "load debug controls" on entry and
+        // "save debug controls" on exit - so on a processor that relaxes
+        // them the allowed-0 halves are 11FBH and 36DFBH rather than
+        // 11FFH and 36DFFH.
+        //
+        // With bit 2 wrongly in the allowed-0 half, `adjust_msr` forced
+        // it on and the question "what does vmcs02 do when a guest
+        // hypervisor *clears* load debug controls" could not be asked at
+        // all - the fixture answered it before `build_vmcs02` saw it.
+        // The value is not invented: BACKLOG.md records the emulator's
+        // own IA32_VMX_TRUE_ENTRY_CTLS underneath the rig as
+        // 0x0001d3ff000011fb.
+    case 0x48f:
+        return 0x07ffffff00036dfbull;
     case 0x490:
-        return 0x0003fff000011ffull;
+        return 0x0001f3ff000011fbull;
     case 0x485:
         return 0x7004c1e7ull;
     case 0x48b:
@@ -89,9 +154,55 @@ std::uint64_t hypervisor::cached_vmx_msr(std::size_t msr)
     }
 }
 
+/**
+ * What a guest hypervisor is *told* it may set, which is the hardware's
+ * set narrowed to what this VMM honours.
+ *
+ * This used to return the hardware's value unchanged, and that made the
+ * harness unable to ask the one question the capability MSRs exist to
+ * answer: whether a control this VMM offers is a control `build_vmcs02`
+ * then composes into vmcs02. With no narrowing, "offered" and "the
+ * processor has it" were the same statement and the difference between
+ * them - which is where the defects are - could not be written down.
+ *
+ * The narrowing is transcribed from nested_vmx.cpp's `narrow` rather than
+ * shared with it, deliberately, for the same reason the control bit
+ * numbers above are: a change there that this does not follow is a test
+ * failure rather than a silent agreement.
+ */
 std::uint64_t hypervisor::nested_vmx_capability_msr(std::size_t msr)
 {
-    return cached_vmx_msr(msr);
+    namespace vmx_msr = arch::x86_64::vmx::msr;
+
+    auto hardware = cached_vmx_msr(msr);
+
+    auto narrow = [&](std::uint64_t supported) {
+        auto allowed_0 = hardware & 0xffffffff;
+        auto allowed_1 = (hardware >> 32) & 0xffffffff;
+        allowed_1 = (allowed_1 & supported) | allowed_0;
+        return allowed_0 | (allowed_1 << 32);
+    };
+
+    switch (msr) {
+    case vmx_msr::pin_based_controls:
+    case vmx_msr::true_pin_based_controls:
+        return narrow(nested_vmx::supported_pin_based_controls);
+    case vmx_msr::processor_based_contorls:
+    case vmx_msr::true_processor_based_controls:
+        return narrow(nested_vmx::supported_primary_controls);
+    case vmx_msr::processor_based_contorls_2:
+        return narrow(nested_vmx::supported_secondary_controls);
+    case vmx_msr::exit_controls:
+    case vmx_msr::true_exit_controls:
+        return narrow(nested_vmx::supported_exit_controls);
+    case vmx_msr::entry_controls:
+    case vmx_msr::true_entry_controls:
+        return narrow(nested_vmx::supported_entry_controls);
+    case vmx_msr::vpid_ept_capability:
+        return hardware & nested_vmx::supported_ept_vpid_capabilities;
+    default:
+        return hardware;
+    }
 }
 
 std::uint64_t hypervisor::physical_address_bits()
@@ -352,6 +463,9 @@ static void reset(context & registers)
     hv().stepping_watch[cpu] = false;
     g_pages.clear();
     g_unreadable.clear();
+    g_msr.clear();
+    g_msr_writes.clear();
+    g_vmx_msr_override.clear();
 
     registers = context{};
     registers.rcx = 0x1234; // An MSR neither side's bitmap names.
@@ -3470,6 +3584,611 @@ static void test_halt_then_wake()
     }
 }
 
+// ------------- 11. what vmcs02 carries in its exit and entry controls
+/**
+ * The VM-exit and VM-entry control bits this suite names, from SDM Tables
+ * 25-13 and 25-15. Spelled again here for the same reason the execution
+ * control bits above are: a change to nested_entry.cpp's anonymous
+ * namespace that renumbers one must be a test failure, not a silent
+ * agreement.
+ * @{
+ */
+static constexpr std::uint64_t exit_save_debug_controls = 1ull << 2;
+static constexpr std::uint64_t exit_host_address_space_size = 1ull << 9;
+static constexpr std::uint64_t exit_acknowledge_interrupt = 1ull << 15;
+static constexpr std::uint64_t exit_save_ia32_pat = 1ull << 18;
+static constexpr std::uint64_t exit_load_ia32_pat = 1ull << 19;
+static constexpr std::uint64_t exit_save_ia32_efer = 1ull << 20;
+static constexpr std::uint64_t exit_load_ia32_efer = 1ull << 21;
+static constexpr std::uint64_t exit_clear_ia32_bndcfgs = 1ull << 23;
+
+static constexpr std::uint64_t entry_load_debug_controls = 1ull << 2;
+static constexpr std::uint64_t entry_ia32e_mode_guest = 1ull << 9;
+static constexpr std::uint64_t entry_load_ia32_pat = 1ull << 14;
+static constexpr std::uint64_t entry_load_ia32_efer = 1ull << 15;
+static constexpr std::uint64_t entry_load_ia32_bndcfgs = 1ull << 16;
+/**
+ * @}
+ */
+
+/**
+ * The reserved bits each control field must hold as 1, which SDM A.4 and
+ * A.5 put in the allowed-0 half of the capability MSR. Taken from the
+ * fixture's own MSRs above rather than written twice, and checked against
+ * them, so a fixture that stops describing a real processor is caught
+ * here rather than producing refusals the tests would read as answers.
+ * @{
+ */
+static constexpr std::uint64_t pin_default1 = 0x16;
+static constexpr std::uint64_t primary_default1 = 0x0401e172;
+static constexpr std::uint64_t exit_default1 = 0x00036dfb;
+static constexpr std::uint64_t entry_default1 = 0x000011fb;
+/**
+ * @}
+ */
+
+/**
+ * vmcs01's own controls, which are what `hypervisor.cpp` writes at launch:
+ * `nmi_exiting` alone in the pin controls, the secondary controls plus
+ * both bitmaps in the primary, `host_address_space_size |
+ * save_debug_controls` in the exit controls and `ia_32e_mode_guest |
+ * load_debug_controls` in the entry controls.
+ * @{
+ */
+static constexpr std::uint64_t own_pin = pin_default1 | (1ull << 3);
+static constexpr std::uint64_t own_primary =
+    primary_default1 | (1ull << 31) | (1ull << 28) | (1ull << 25);
+static constexpr std::uint64_t own_exit = exit_default1 |
+                                          exit_host_address_space_size |
+                                          exit_save_debug_controls;
+static constexpr std::uint64_t own_entry =
+    entry_default1 | entry_ia32e_mode_guest | entry_load_debug_controls;
+/**
+ * @}
+ */
+
+/**
+ * What a guest hypervisor asked for, with every field defaulted to the
+ * smallest legal value so a case names only the bit it is about.
+ */
+struct asked_controls
+{
+    std::uint64_t pin = pin_default1;
+    std::uint64_t primary = primary_default1;
+    std::uint64_t secondary = 0;
+    std::uint64_t exit_controls =
+        exit_default1 | exit_host_address_space_size;
+    std::uint64_t entry_controls = entry_default1;
+};
+
+/**
+ * Puts vmcs01 and vmcs12 in place and runs the real `build_vmcs02`.
+ *
+ * The fake VMCS is one flat array, so vmcs02 lands on top of vmcs01 -
+ * which is exactly what the harness wants: `build_vmcs02` reads everything
+ * it needs out of vmcs01 before its `vmptrld`, so after the call every
+ * field in the array is vmcs02's.
+ */
+static std::expected<void, zpp::error>
+compose(const asked_controls & asked, context & registers)
+{
+    reset(registers);
+
+    auto & vmcs = hv().vmcs;
+    vmcs.write(field::pin_based_vm_execution_controls, own_pin);
+    vmcs.write(field::primary_processor_based_vm_execution_controls,
+               own_primary);
+    vmcs.write(field::secondary_processor_based_vm_execution_controls, 0);
+    vmcs.write(field::vm_exit_controls, own_exit);
+    vmcs.write(field::vm_entry_controls, own_entry);
+    vmcs.write(field::vpid, cpu + 1);
+
+    auto & shadow = hv().guest_vmcs12[cpu];
+    shadow.write(field::pin_based_vm_execution_controls, asked.pin);
+    shadow.write(field::primary_processor_based_vm_execution_controls,
+                 asked.primary);
+    shadow.write(field::secondary_processor_based_vm_execution_controls,
+                 asked.secondary);
+    shadow.write(field::vm_exit_controls, asked.exit_controls);
+    shadow.write(field::vm_entry_controls, asked.entry_controls);
+
+    // Fresh per case: `build_vmcs02` keeps only the first entry's values,
+    // and a suite that shares the flag across cases would record the
+    // first one and assert about the rest.
+    hv().vmcs12_controls_captured = 0;
+
+    return hv().build_vmcs02(cpu);
+}
+
+static std::uint64_t vmcs02_exit_controls()
+{
+    return hv().vmcs.read(field::vm_exit_controls);
+}
+
+static std::uint64_t vmcs02_entry_controls()
+{
+    return hv().vmcs.read(field::vm_entry_controls);
+}
+
+/**
+ * What vmcs02 must carry in the two control fields nothing has ever
+ * composed.
+ *
+ * The pin, primary and secondary controls are unioned, bit by bit, with
+ * every correction argued in `build_vmcs02`. The exit and entry controls
+ * are not: vmcs02 gets `exit01` verbatim and `entry12` verbatim, and
+ * neither line has a reason beside it that survives the question "and
+ * what happens to the bits the other side set".
+ *
+ * The expectations below are written from SDM 30.2, 30.3.1 and 30.5 and
+ * from KVM's `prepare_vmcs02_early` (.references/kvm/nested.c:2451-2486),
+ * **before** reading what this VMM does, which is the only way a test
+ * like this can find anything: an expectation derived from the
+ * implementation pins in whatever is there.
+ *
+ * Three of them fail today, and each is recorded as a divergence with
+ * what a fix has to do.
+ */
+static void test_exit_and_entry_control_composition()
+{
+    std::printf("what vmcs02 carries in its exit and entry controls\n");
+
+    context registers{};
+
+    // The fixture agrees with the processor it claims to be. Everything
+    // below is a refusal or an acceptance decided by these halves, so a
+    // fixture that drifted would produce answers that mean nothing.
+    check(pin_default1 == (hv().cached_vmx_msr(0x48d) & 0xffffffff),
+          "the fixture's pin-control allowed-0 half is the default1 set");
+    check(exit_default1 == (hv().cached_vmx_msr(0x48f) & 0xffffffff),
+          "the fixture's exit-control allowed-0 half is the default1 "
+          "set - SDM A.4");
+    check(entry_default1 == (hv().cached_vmx_msr(0x490) & 0xffffffff),
+          "the fixture's entry-control allowed-0 half is the default1 "
+          "set - SDM A.5");
+
+    // Everything this VMM offers is offered through the *narrowed*
+    // capability MSRs, so the suite asserts the offer before asserting
+    // what happens to a control taken up. An offer that disappears turns
+    // every case below into a vacuous pass, which is the failure mode a
+    // capability-driven suite has.
+    auto offered_exit =
+        (hv().nested_vmx_capability_msr(0x48f) >> 32) & 0xffffffff;
+    auto offered_entry =
+        (hv().nested_vmx_capability_msr(0x490) >> 32) & 0xffffffff;
+
+    check(0 != (offered_exit & exit_acknowledge_interrupt),
+          "'acknowledge interrupt on exit' is offered to a guest "
+          "hypervisor");
+    check(0 != (offered_exit & exit_save_ia32_pat),
+          "'save IA32_PAT' is offered to a guest hypervisor");
+    check(0 != (offered_exit & exit_save_ia32_efer),
+          "'save IA32_EFER' is offered to a guest hypervisor");
+    check(0 != (offered_exit & exit_clear_ia32_bndcfgs),
+          "'clear IA32_BNDCFGS' is offered to a guest hypervisor");
+    check(0 != (offered_entry & entry_load_ia32_pat),
+          "'load IA32_PAT' is offered to a guest hypervisor");
+    check(0 != (offered_entry & entry_load_ia32_efer),
+          "'load IA32_EFER' is offered to a guest hypervisor");
+
+    // ------------------------------------------------------------------
+    // The controls a VM exit performs *in hardware*, on the exit that
+    // takes a second-level guest out. Those cannot be emulated after the
+    // fact, because the thing they govern has already happened by the
+    // time any code here runs - so vmcs02 has to carry them.
+    // ------------------------------------------------------------------
+
+    {
+        asked_controls asked;
+        asked.pin = pin_default1 | pin_external_interrupt;
+        asked.exit_controls = exit_default1 |
+                              exit_host_address_space_size |
+                              exit_acknowledge_interrupt;
+
+        auto built = compose(asked, registers);
+        check(built.has_value(),
+              "a guest hypervisor may ask to acknowledge interrupts on "
+              "exit");
+
+        // SDM 30.2 (.references/sdm.txt:203416): "An external interrupt
+        // does not acknowledge the interrupt controller and the interrupt
+        // remains pending, unless the 'acknowledge interrupt on exit'
+        // VM-exit control is 1. In such a case, the interrupt controller
+        // is acknowledged and the interrupt is no longer pending."
+        //
+        // SDM 30.2.2 (:203973): "For other VM exits (including those due
+        // to external interrupts when the 'acknowledge interrupt on
+        // exit' VM-exit control is 0), the field is marked invalid (by
+        // clearing bit 31) and the remainder of the field is undefined."
+        //
+        // Both halves of that are the processor's work on the exit
+        // itself. Nothing after the exit can acknowledge the interrupt
+        // the guest hypervisor was about to be told about, and nothing
+        // after the exit can recover a vector the processor never
+        // latched. So the only implementation is the control in vmcs02.
+        //
+        // KVM does it the other way round - it keeps vmcs01's exit
+        // controls and *synthesises* the field, because it owns an
+        // emulated local APIC it can take the vector from
+        // (.references/kvm/nested.c:4335-4366: `nested_exit_intr_ack_set`
+        // then `kvm_cpu_get_extint` and `kvm_apic_ack_interrupt`). This
+        // VMM has no emulated APIC: the guest owns the real one. So the
+        // processor has to do it, and that means the bit.
+        diverge(0 == (vmcs02_exit_controls() & exit_acknowledge_interrupt),
+                "DEFECT: vmcs12 sets 'acknowledge interrupt on exit' and "
+                "vmcs02 does not - `build_vmcs02` writes `exit01` "
+                "verbatim, and this VMM's own exit controls are only "
+                "host_address_space_size | save_debug_controls. Every "
+                "external-interrupt exit reflected to the guest "
+                "hypervisor therefore carries an invalid "
+                "interruption-information field (SDM 30.2.2) and leaves "
+                "the interrupt pending at the controller (SDM 30.2). "
+                "Measured on the rig: 324 external-interrupt exits in "
+                "one boot and 323 VMREADs of the field. Fix: set the bit "
+                "in vmcs02 when vmcs12 asks");
+    }
+
+    {
+        // The two "save on exit" controls, which have the same shape and
+        // the same answer. SDM 30.3.1 (.references/sdm.txt:204506 and
+        // :204508): "If the 'save IA32_PAT' VM-exit control is 1, the
+        // contents of the IA32_PAT MSR are saved into the corresponding
+        // field", and the same sentence for IA32_EFER.
+        //
+        // `save_l2_state` honours both - it tests `exit12` and copies
+        // vmcs02's guest field into vmcs12's. But the field it copies
+        // *from* is only written by the processor when **vmcs02's** own
+        // control says so, and vmcs02 has neither. So the copy reads back
+        // exactly what `build_vmcs02` put there out of vmcs12 on the way
+        // in, and the emulation is a round trip that cannot observe
+        // anything the second-level guest did.
+        //
+        // Not academic: a second-level guest whose WRMSR to IA32_EFER is
+        // intercepted by neither level changes the real MSR, and the next
+        // entry writes vmcs12's stale value back into vmcs02 - so with
+        // "load IA32_EFER" also set the guest's own write is undone.
+        //
+        // Two fixes work and both are acceptable, which is why the check
+        // is on the observable rather than on one of them: put the save
+        // bits in vmcs02 so the processor fills the fields, or have
+        // `save_l2_state` read the live MSRs instead of the fields. KVM
+        // takes the second (`vmcs12->guest_ia32_efer = vcpu->arch.efer`,
+        // .references/kvm/nested.c:4583) and says so explicitly of
+        // vmcs01: "Not used by KVM and never set in vmcs01 or vmcs02, but
+        // emulated for nested virtualization and thus allowed to be set
+        // in vmcs12" (.references/kvm/vmx.c:4436-4440).
+        asked_controls asked;
+        asked.exit_controls = exit_default1 |
+                              exit_host_address_space_size |
+                              exit_save_ia32_pat | exit_save_ia32_efer;
+
+        auto built = compose(asked, registers);
+        check(built.has_value(),
+              "a guest hypervisor may ask to save IA32_PAT and IA32_EFER "
+              "on exit");
+
+        auto in_vmcs02 = vmcs02_exit_controls();
+
+        diverge(0 == (in_vmcs02 & exit_save_ia32_pat),
+                "DEFECT: vmcs12 sets 'save IA32_PAT' and vmcs02 does not, "
+                "so the guest field `save_l2_state` copies back is never "
+                "written by the processor (SDM 30.3.1) and the guest "
+                "hypervisor is handed the value it supplied on entry");
+        diverge(0 == (in_vmcs02 & exit_save_ia32_efer),
+                "DEFECT: vmcs12 sets 'save IA32_EFER' and vmcs02 does "
+                "not, same shape as IA32_PAT above - the emulation in "
+                "`save_l2_state` reads a field nothing updates");
+    }
+
+    {
+        // "Save debug controls" is the one exit control that works, and
+        // it works by accident rather than by composition: vmcs01 carries
+        // it, so vmcs02 inherits it through the verbatim copy. Asserted
+        // so that a change to this VMM's own exit controls - which has no
+        // apparent connection to nested VMX - cannot silently take
+        // `save_l2_state`'s DR7 and IA32_DEBUGCTL away.
+        asked_controls asked;
+        asked.exit_controls = exit_default1 |
+                              exit_host_address_space_size |
+                              exit_save_debug_controls;
+
+        auto built = compose(asked, registers);
+        check(built.has_value(),
+              "a guest hypervisor may ask to save the debug controls");
+        check(0 != (vmcs02_exit_controls() & exit_save_debug_controls),
+              "vmcs12's 'save debug controls' reaches vmcs02, which is "
+              "what makes `save_l2_state`'s DR7 and IA32_DEBUGCTL "
+              "copy-back read something the processor wrote - SDM 30.3.1");
+    }
+
+    // ------------------------------------------------------------------
+    // The controls a VM exit performs on *host* state, which this VMM
+    // emulates in `load_l1_host_state` because the hardware exit loads
+    // its own host state and not the guest hypervisor's.
+    // ------------------------------------------------------------------
+
+    {
+        constexpr std::uint32_t ia32_pat = 0x277;
+        constexpr std::uint32_t ia32_efer = 0xc0000080;
+        constexpr std::uint32_t ia32_bndcfgs = 0xd90;
+
+        asked_controls asked;
+        asked.exit_controls = exit_default1 |
+                              exit_host_address_space_size |
+                              exit_load_ia32_pat | exit_load_ia32_efer;
+
+        auto built = compose(asked, registers);
+        check(built.has_value(),
+              "a guest hypervisor may ask to load IA32_PAT and IA32_EFER "
+              "on exit");
+
+        auto & shadow = hv().guest_vmcs12[cpu];
+        shadow.write(field::host_ia32_pat, 0x0007040600070406ull);
+        shadow.write(field::host_ia32_efer, 0xd01);
+
+        g_msr_writes.clear();
+        hv().load_l1_host_state(cpu);
+
+        check(0x0007040600070406ull == g_msr[ia32_pat],
+              "'load IA32_PAT on exit' puts vmcs12's host IA32_PAT into "
+              "the register - SDM 30.5 loads the MSR, and this VMM's own "
+              "exit controls do not, so it has to be written here");
+        check(0xd01 == g_msr[ia32_efer],
+              "'load IA32_EFER on exit' puts vmcs12's host IA32_EFER "
+              "into the register");
+
+        // SDM 30.5 (.references/sdm.txt:204840): "If the 'clear
+        // IA32_BNDCFGS' VM-exit control is 1, the IA32_BNDCFGS MSR is
+        // cleared to 0000000000000000H." The control is in
+        // `supported_exit_controls`, so a guest hypervisor is told it may
+        // set it; nothing anywhere honours it.
+        //
+        // The MSR is carried in both directions already - `build_vmcs02`
+        // writes vmcs12's guest value into vmcs02 and `save_l2_state`
+        // reads it back - so the guest hypervisor's *guest's* bounds
+        // configuration survives. What does not is the guest
+        // hypervisor's own: it resumes running with whatever its guest
+        // left in the register.
+        g_msr[ia32_bndcfgs] = 0x1234;
+        asked.exit_controls = exit_default1 |
+                              exit_host_address_space_size |
+                              exit_clear_ia32_bndcfgs;
+        auto with_clear = compose(asked, registers);
+        check(with_clear.has_value(),
+              "a guest hypervisor may ask to clear IA32_BNDCFGS on exit");
+
+        g_msr[ia32_bndcfgs] = 0x1234;
+        g_msr_writes.clear();
+        hv().load_l1_host_state(cpu);
+
+        diverge(0x1234 == g_msr[ia32_bndcfgs],
+                "DEFECT: vmcs12 sets 'clear IA32_BNDCFGS' on exit and "
+                "nothing clears it - the control is offered in "
+                "`supported_exit_controls` and honoured nowhere, so the "
+                "guest hypervisor resumes with its guest's bounds "
+                "configuration in the register (SDM 30.5)");
+    }
+
+    {
+        // The half of "load IA32_EFER" that applies whether or not the
+        // control is set. SDM 30.5: LMA and LME are each loaded with the
+        // setting of the "host address-space size" VM-exit control, on
+        // every VM exit. `load_l1_host_state` implements it, and it is
+        // asserted here because the assertion is cheap and the path is
+        // otherwise reachable only from a 32-bit guest hypervisor - which
+        // `build_vmcs02` refuses outright, one case below.
+        constexpr std::uint32_t ia32_efer = 0xc0000080;
+        constexpr std::uint64_t efer_lme = 1ull << 8;
+        constexpr std::uint64_t efer_lma = 1ull << 10;
+
+        asked_controls asked;
+        asked.exit_controls = exit_default1 | exit_host_address_space_size;
+
+        auto built = compose(asked, registers);
+        check(built.has_value(), "the 64-bit guest hypervisor case");
+
+        g_msr[ia32_efer] = 0;
+        hv().load_l1_host_state(cpu);
+
+        check((efer_lme | efer_lma) ==
+                  (g_msr[ia32_efer] & (efer_lme | efer_lma)),
+              "with 'host address-space size' set and 'load IA32_EFER' "
+              "clear, LMA and LME are still put back - SDM 30.5 loads "
+              "them from the control unconditionally");
+    }
+
+    {
+        // A 32-bit guest hypervisor. `build_vmcs02` refuses rather than
+        // composing something it cannot put back, and the refusal is
+        // asserted so that it stays a refusal: the failure mode it
+        // replaces is a guest hypervisor resumed in long mode with a
+        // host-state area that describes a 32-bit host.
+        asked_controls asked;
+        asked.exit_controls = exit_default1;
+
+        auto built = compose(asked, registers);
+        check(!built.has_value(),
+              "an exit-control field without 'host address-space size' is "
+              "refused - the exit comes here and the guest hypervisor is "
+              "resumed in whatever its own host-state area describes, and "
+              "a 32-bit one is not something this VMM can put back");
+    }
+
+    // ------------------------------------------------------------------
+    // The entry controls, which describe what VM entry loads into the
+    // second-level guest. vmcs02 gets vmcs12's verbatim.
+    // ------------------------------------------------------------------
+
+    {
+        asked_controls asked;
+        asked.entry_controls = entry_default1 | entry_ia32e_mode_guest |
+                               entry_load_ia32_pat | entry_load_ia32_efer |
+                               entry_load_ia32_bndcfgs;
+
+        auto built = compose(asked, registers);
+        check(built.has_value(),
+              "a guest hypervisor may ask for every entry control this "
+              "VMM offers");
+
+        auto in_vmcs02 = vmcs02_entry_controls();
+
+        // Each of these has its guest-state field written from vmcs12 by
+        // `build_vmcs02`, so the control reaching vmcs02 is the whole of
+        // honouring it.
+        check(0 != (in_vmcs02 & entry_ia32e_mode_guest),
+              "'IA-32e mode guest' reaches vmcs02");
+        check(0 != (in_vmcs02 & entry_load_ia32_pat),
+              "'load IA32_PAT' reaches vmcs02, where guest_ia32_pat is "
+              "written from vmcs12");
+        check(0 != (in_vmcs02 & entry_load_ia32_efer),
+              "'load IA32_EFER' reaches vmcs02, where guest_ia32_efer is "
+              "written from vmcs12");
+        check(0 != (in_vmcs02 & entry_load_ia32_bndcfgs),
+              "'load IA32_BNDCFGS' reaches vmcs02, where "
+              "guest_ia32_bndcfgs is written from vmcs12 - the one entry "
+              "control a real guest hypervisor was measured refusing to "
+              "launch without");
+    }
+
+    {
+        // And the direction nothing composes. A guest hypervisor that
+        // clears "load debug controls" is saying its guest inherits the
+        // debug registers as they are - which on real hardware means
+        // *its own*, because no VM exit happened between its VMRESUME and
+        // its guest running.
+        //
+        // Under this VMM one did. The exit that brought control here set
+        // DR7 to 400H and IA32_DEBUGCTL to 0 (SDM 30.5.4), and nothing
+        // puts the guest hypervisor's values back before vmcs02 is
+        // entered. So the second-level guest runs with 400H rather than
+        // with what its hypervisor had.
+        //
+        // KVM's composition does not lose it: `prepare_vmcs02_early`
+        // starts from `__vm_entry_controls_get(vmcs01)` and *ors* vmcs12's
+        // in (.references/kvm/nested.c:2465-2472), so vmcs01's "load debug
+        // controls" survives a vmcs12 that cleared it - and vmcs01's
+        // guest DR7 is L1's own.
+        asked_controls asked;
+        asked.entry_controls = entry_default1;
+
+        auto built = compose(asked, registers);
+        check(built.has_value(),
+              "a guest hypervisor may clear 'load debug controls'");
+
+        diverge(0 == (vmcs02_entry_controls() & entry_load_debug_controls),
+                "DEFECT: vmcs12 clears 'load debug controls' and vmcs02 "
+                "clears it too, so the second-level guest runs with the "
+                "DR7 of 400H and the IA32_DEBUGCTL of 0 that the VM exit "
+                "into this VMM left behind (SDM 30.5.4) instead of the "
+                "guest hypervisor's own. KVM ors vmcs01's entry controls "
+                "in for exactly this reason "
+                "(.references/kvm/nested.c:2465). Fix: set the control in "
+                "vmcs02 and write vmcs01's guest DR7 and IA32_DEBUGCTL "
+                "into vmcs02 when vmcs12 does not ask for the load");
+    }
+
+    // ------------------------------------------------------------------
+    // The adjust-MSR path: a control the guest hypervisor sets that the
+    // hardware underneath does not allow.
+    // ------------------------------------------------------------------
+
+    {
+        // Withdrawn from the *hardware*, not from this VMM's offer, which
+        // is the case that matters: `nested_vmx_capability_msr` narrows
+        // the hardware's set, so a bit the hardware lacks is a bit the
+        // guest hypervisor was never offered, and `within_capability`
+        // must refuse it rather than let the composition hand it to a
+        // processor that will fail the entry.
+        //
+        // SDM 29.2.1.1 makes this the first check on the controls, and
+        // `adjust_msr` applied to the narrowed MSR is exactly it: a value
+        // that satisfies both halves is its own fixed point.
+        asked_controls asked;
+        asked.exit_controls = exit_default1 |
+                              exit_host_address_space_size |
+                              exit_acknowledge_interrupt;
+
+        auto ok = compose(asked, registers);
+        check(ok.has_value(),
+              "the control is accepted while the hardware offers it");
+
+        g_vmx_msr_override[0x48f] =
+            ((0x07ffffffull & ~exit_acknowledge_interrupt) << 32) |
+            exit_default1;
+        g_vmx_msr_override[0x483] = g_vmx_msr_override[0x48f];
+
+        auto refused = hv().build_vmcs02(cpu);
+        check(!refused.has_value(),
+              "an exit control the hardware does not allow is refused, "
+              "not silently dropped - a guest hypervisor told 'no' at the "
+              "capability MSR and then accepted here would rely on a "
+              "control nothing set");
+        g_vmx_msr_override.clear();
+    }
+
+    {
+        // The other half of the same MSR. A bit in the allowed-0 set must
+        // be 1, so a vmcs12 that clears one is refused.
+        asked_controls asked;
+        asked.entry_controls = entry_default1 & ~(1ull << 12);
+
+        auto built = compose(asked, registers);
+        check(!built.has_value(),
+              "an entry-control field missing a reserved-1 bit is "
+              "refused - SDM A.5 puts them in the allowed-0 half");
+    }
+
+    // ------------------------------------------------------------------
+    // What a reflected external-interrupt exit hands the guest
+    // hypervisor.
+    // ------------------------------------------------------------------
+
+    {
+        // The end of the chain the first case starts, asserted on the
+        // field the guest hypervisor actually reads rather than on the
+        // control. This is what 323 VMREADs a boot were looking at.
+        //
+        // The harness cannot acknowledge an interrupt, so it models the
+        // processor: with the control clear in vmcs02 the hardware leaves
+        // the interruption-information field invalid, which is a zero
+        // here, and `reflect_l2_exit` copies it into vmcs12.
+        asked_controls asked;
+        asked.pin = pin_default1 | pin_external_interrupt;
+        asked.exit_controls = exit_default1 |
+                              exit_host_address_space_size |
+                              exit_acknowledge_interrupt;
+
+        auto built = compose(asked, registers);
+        check(built.has_value(), "the ack-on-exit configuration builds");
+
+        constexpr unsigned external_interrupt = 1;
+        constexpr std::uint64_t interruption_valid = 1ull << 31;
+
+        check(l1_wants(external_interrupt, registers),
+              "an external interrupt is the guest hypervisor's when it "
+              "set external-interrupt exiting");
+
+        hv().running_l2[cpu] = true;
+        hv().vmcs.write(field::vm_exit_interruption_information, 0);
+        hv().reflect_l2_exit(
+            cpu,
+            zpp::arch::x86_64::vmx::exit_reason(external_interrupt),
+            0);
+
+        auto reported = hv().guest_vmcs12[cpu].read(
+            fields::vm_exit_interruption_information);
+
+        diverge(0 == (reported & interruption_valid),
+                "DEFECT: an external-interrupt exit reflected to a guest "
+                "hypervisor that asked to acknowledge interrupts on exit "
+                "carries an invalid interruption-information field, so "
+                "it cannot learn which interrupt fired. SDM 30.2.2 makes "
+                "the field valid exactly when the control is 1, and this "
+                "is the field a real guest hypervisor was measured "
+                "reading 323 times in one boot");
+    }
+}
+
 int main()
 {
     test_reason_table();
@@ -3482,6 +4201,7 @@ int main()
     test_reflected_activity_and_interruptibility();
     test_injection_into_a_parked_guest();
     test_halt_then_wake();
+    test_exit_and_entry_control_composition();
 
     std::printf("\n%d checks, %d failures\n", g_checks, g_failures);
 
