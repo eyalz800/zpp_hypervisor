@@ -98,10 +98,41 @@ struct exit_state
     std::uint32_t b{};
     std::uint32_t c{};
     std::uint32_t d{};
+
+    // Three no-ops, and they are the whole point of this function being
+    // separate rather than a second call to the one above.
+    //
+    // noinline keeps the compiler from folding the two. It does not keep
+    // the *linker* from folding them: lld-link enables identical COMDAT
+    // folding for a release build, and two byte-identical functions
+    // become one address. Measured - release reported a delta of one for
+    // every instruction that demonstrably exited, exactly the symptom the
+    // shared reader had at -O0, while debug was correct.
+    //
+    // Three rather than one because one nop is a byte a peephole pass
+    // might still remove, and because a run of three is recognisable in a
+    // disassembly as deliberate.
+    asm volatile("nop; nop; nop");
+
     asm volatile("cpuid"
                  : "=a"(a), "=b"(b), "=c"(c), "=d"(d)
                  : "a"(0x40000100u), "c"(0u));
     return exit_state{a, b, c, d};
+}
+
+/**
+ * Whether the two readers really are two.
+ *
+ * Through a volatile pointer so the comparison survives to run time: the
+ * folding this detects happens at link time, and a compile-time compare
+ * of two function addresses is answered before the linker has had its
+ * say.
+ */
+bool readers_are_distinct()
+{
+    exit_state (*volatile first)() = read_exits_before;
+    exit_state (*volatile second)() = read_exits_after;
+    return first != second;
 }
 /**
  * @}
@@ -494,6 +525,18 @@ bool guest_tests::run(EFI_SYSTEM_TABLE * system_table)
     // failure of the thing under test, which is worse than reporting
     // nothing.
     {
+        // The two readers have to be two, or every delta below is one
+        // short. Checked first, because a folded pair still lets the
+        // three cases under it pass - the first pair of readings in a run
+        // has nothing before it to merge with, so it measures correctly
+        // once and then poisons everything after it.
+        emit(state,
+             "diag.readers_are_distinct",
+             readers_are_distinct() ? outcome::pass : outcome::fail,
+             "linker_folded_the_two_exit_readers",
+             1,
+             readers_are_distinct() ? 1 : 0);
+
         auto first = read_exits_before();
         auto second = read_exits_after();
 
