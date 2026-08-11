@@ -2623,6 +2623,7 @@ void hypervisor::reflect_l2_exit(std::size_t cpu,
     // root partition was doing has always been evicted by the time there
     // is anything to read.
     if (cpu < max_cpus) {
+        auto msr_index = this->l2_exit_detail[cpu];
         auto & count = this->l2_exit_trace_count[cpu];
         auto & slot =
             this->l2_exit_trace[cpu][count % l2_exit_trace_capacity];
@@ -2639,6 +2640,43 @@ void hypervisor::reflect_l2_exit(std::size_t cpu,
         };
 
         count = count + 1;
+
+        // The same record again, in a ring the idle loop cannot reach.
+        //
+        // The ring above is 256 deep and that is not deep enough for the
+        // question that matters now. A second-level guest waiting for
+        // something spins its idle loop at about a hundred exits a
+        // second - the reference-clock read, the end-of-interrupt, the
+        // end-of-message, the timer re-arm - so whatever it did *before*
+        // it started waiting is evicted within seconds, and the failure
+        // being chased is minutes old by the time anything reads it.
+        //
+        // Filtered by what the loop is made of rather than by where it
+        // is: the addresses move with every boot, the synthetic MSR
+        // indices do not. What is left is the work.
+        constexpr std::uint32_t reference_count_msr = 0x40000020;
+        constexpr std::uint32_t synthetic_eoi_msr = 0x40000070;
+        constexpr std::uint32_t synthetic_icr_msr = 0x40000071;
+        constexpr std::uint32_t end_of_message_msr = 0x40000084;
+        constexpr std::uint32_t synthetic_timer_count_msr = 0x400000b1;
+
+        auto index = static_cast<std::uint32_t>(msr_index);
+        auto is_idle_msr = ((basic_reason::rdmsr == reason.basic()) ||
+                            (basic_reason::wrmsr == reason.basic())) &&
+                           ((reference_count_msr == index) ||
+                            (synthetic_eoi_msr == index) ||
+                            (synthetic_icr_msr == index) ||
+                            (end_of_message_msr == index) ||
+                            (synthetic_timer_count_msr == index));
+
+        if (!is_idle_msr &&
+            (basic_reason::interrupt_window != reason.basic())) {
+            auto & working = this->l2_working_trace_count[cpu];
+
+            this->l2_working_trace[cpu][working %
+                                        l2_working_trace_capacity] = slot;
+            working = working + 1;
+        }
 
         // Cleared, so an exit that carries no register number shows zero
         // rather than the last one that did.

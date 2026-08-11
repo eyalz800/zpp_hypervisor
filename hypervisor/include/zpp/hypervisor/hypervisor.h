@@ -4306,7 +4306,28 @@ private:
      * cycle, which only a longer window contains.
      */
     static constexpr std::size_t l2_exit_trace_capacity = 256;
+
+    /**
+     * How many *working* second-level exits are kept.
+     *
+     * A second-level guest that is waiting rather than working spins its
+     * idle loop at about a hundred exits a second, so the ring above
+     * holds two or three seconds of history and the interesting moment
+     * is minutes old. This one drops the loop and keeps everything else,
+     * which turns the same depth into hours.
+     */
+    static constexpr std::size_t l2_working_trace_capacity = 256;
     exit_trace_entry l2_exit_trace[max_cpus][l2_exit_trace_capacity]{};
+
+    /**
+     * The same records with the idle loop filtered out, so the last
+     * thing a waiting guest actually *did* survives long enough to be
+     * read. Filtered on the synthetic MSR indices rather than on
+     * instruction pointers, which move with every boot.
+     */
+    exit_trace_entry l2_working_trace[max_cpus]
+                                     [l2_working_trace_capacity]{};
+    std::uint64_t l2_working_trace_count[max_cpus]{};
     std::uint64_t l2_exit_trace_count[max_cpus]{};
 
     /**
