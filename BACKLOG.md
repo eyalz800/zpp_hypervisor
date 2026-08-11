@@ -7313,3 +7313,127 @@ the interrupts stop arriving for a different reason, or that the emulated
 controller behaves differently, or that the 324 that did arrive were all
 IPIs and timer ticks - which the vector, once available, would say
 immediately.
+
+### It was fixed, and it was not the boot bug — but it named the disease
+
+Fixed in `86d4560`, run on the rig the same afternoon, 2026-08-11. The
+control now reaches vmcs02: `vmcs12_exit_asked` reads `0x23efff` and
+`vmcs02_exit_written` reads `0x3efff`, so bit 15 is granted. The one bit
+still asked and not written is **21, load IA32_EFER**, and that one is
+correct — `load_l1_host_state` honours it in software, along with load
+IA32_PAT. The accumulator cannot tell "refused" from "emulated", which
+is worth remembering before reading a future difference as a defect.
+
+**The freeze is unchanged.** `l2_entries` on the boot processor stopped
+at 82,417, against 82,399 / 82,401 / 82,413 / 82,429 on the four boots
+before it. So acknowledgement was a real defect and not this one.
+
+What it bought is the measurement it was written to make. Every external
+interrupt reflected to Hyper-V, by vector, across a whole boot:
+
+| cpu | 0xef | 0xff | total |
+|---|---|---|---|
+| 0 | 35 | 2 | 37 |
+| 1 | | 81 | 81 |
+| 2 | | 68 | 68 |
+| 3 | | 54 | 54 |
+| 4 | | 42 | 42 |
+| 5 | | 28 | 28 |
+| 6 | | 13 | 13 |
+| 7 | | 1 | 1 |
+
+324 in total, which is the same 324 counted before the fix — so nothing
+about the fix changed how many arrived, only that their vectors became
+readable.
+
+`info lapic 0` names both: `LVTT 0x000000ef ... one-shot Fixed (vec
+239)`, so **`0xef` is the boot processor's own APIC timer**, and `SPIV
+0x000011df` puts the spurious vector at `0xdf`, so **`0xff` is not
+spurious** — it is an inter-processor interrupt, and its descending
+staircase across the application processors is a bring-up cascade.
+
+**Not one device vector in 324, on any processor, in a whole boot.** The
+question the vector was recorded to answer is answered: device
+interrupts are not being mis-dispatched, they are not arriving at all.
+
+### The boot processor is idle-ticking, and the other seven are dead
+
+Two samples 25 seconds apart, same run:
+
+```
+exits t0: [1244281, 5147, 4830, 4645, 4572, 4367, 4211, 4063]
+exits t1: [1244309, 5147, 4830, 4645, 4572, 4367, 4211, 4063]
+```
+
+The boot processor takes about **1.1 exits per second**; the other seven
+take **none at all**. `l2_entries` does not move on any of them.
+
+Its whole exit ring is two alternating instruction pointers, both EPT
+violations on `0xfee00000` — the local APIC page, which this VMM watches
+deliberately — with qualification `0x2b`: a read and a write to a page
+that is readable and executable and not writable, which is what a
+watched page is supposed to produce.
+
+Read out through the monitor and disassembled, they are:
+
+```
+0xfffff87365857ae1   movl  $0, 176(%rax)        ; APIC offset 0xb0 = EOI
+0xfffff87365857efe   movl  %edx, (%r8,%rax)     ; generic APIC register write
+```
+
+So the pair is **a register write followed by an end-of-interrupt**, once
+every 1.8 seconds, against an `LVTT` armed one-shot at 2,356,125,175
+counts with divide-by-1. That is not a livelock and it is not a stuck
+poll: it is Hyper-V idling on a **two-second** deadline. The 15.625 ms
+periodic synthetic timer is gone from its schedule entirely.
+
+`IRR` reads 0 and `ISR` reads none, which is the same emptiness recorded
+before the fix — and now it means something different. It is not an
+interrupt taken and never acknowledged. There is nothing to take.
+
+The last second-level exit ever recorded on the boot processor is a
+`hlt` at `0xfffff800d96a6f8e`, preceded by ordinary idle traffic —
+`rdmsr 0x40000020` repeatedly, a `wrmsr 0x40000071` synthetic ICR, and
+hypercalls 0x11 and 0x12. The root partition went idle in the normal
+way. Nothing ever woke it, and Hyper-V stopped asking.
+
+### Every processor arms the timer. Not one ever acknowledges a message
+
+The synthetic MSR counters, read per processor with the correct
+eight-byte stride — the first attempt read them at four and produced a
+table in which every index was doubled, which looked plausible and was
+entirely wrong:
+
+| MSR | cpu 0 | cpu 1 |
+|---|---|---|
+| `0x40000020` TIME_REF_COUNT | 314 r | 5 r |
+| `0x40000073` APIC_ASSIST | 2 r, 1 w | 1 r, 1 w |
+| `0x40000083` SIMP | 6 r, 2 w | 5 r, 2 w |
+| `0x40000084` EOM | **1 w** | **never** |
+| `0x40000093` SINT3 | 2 w | 2 w |
+| `0x400000b0` STIMER0_CONFIG | 6 w | 5 w |
+| `0x400000b1` STIMER0_COUNT | 2 w | 1 w |
+
+Every virtual processor configures `SINT3` and arms `STIMER0`. **Not one
+of them ever writes the end-of-message register after a timer message** —
+the boot processor's single `EOM` was written before `SINT3` existed, and
+the second processor never writes one at all.
+
+This is the same conclusion the SIMP page dump reached from the other
+end, and neither was derived from the other: the message is written, the
+slot stays pending, and the protocol never completes a single round.
+
+The chain is now closed end to end, every link measured:
+
+1. The root partition arms a 15.625 ms periodic synthetic timer on `SINT3`.
+2. Hyper-V honours two expiries, writes `HvMessageTimerExpired` into
+   `SIMP` slot 3, and sets message-pending on the second.
+3. The root partition never takes vector `0xd1` and never writes `EOM`.
+4. Hyper-V will not deliver a third into an occupied slot, and drops the
+   periodic timer from its schedule.
+5. The root partition halts. Nothing is left that could wake it.
+6. Hyper-V idles on a two-second deadline on the boot processor and
+   halts outright on the other seven.
+
+**Step 3 is the only one still unexplained, and it is now the whole
+question.** Everything on either side of it has been measured directly.
