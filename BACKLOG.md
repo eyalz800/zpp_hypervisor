@@ -7891,3 +7891,78 @@ thousand entries. Removed rather than switched.
 CLAUDE.md carries this lesson pointing outward - "when a hang survives
 every code change you can think of, suspect the build". This is the same
 trap pointing inward: **suspect the instrument.**
+
+## Where the hosted suite stands after the class copies were removed
+
+Six harnesses under `tests/` carried a hand-written copy of
+`zpp::hypervisor::hypervisor` - 1463 lines against a 6246-line original.
+They are gone, and the harnesses compile the real class behind
+`ZPP_HOSTED_TESTS`. What follows is the part that shapes future work: the
+measurement that made it possible, what is still stood in for, and the
+per-harness verdict on moving a case into the Bochs guest suite.
+
+### The layout argument for keeping the copies was false
+
+The stated reason for not using the real header was that the class is
+196,608 bytes against the shim VMX headers and roughly 46 MB against the
+real ones, so the shims must change its layout.
+
+They do not. The 196,608 figure comes from a probe compiled with
+`-I tests/nested_vmx/shim` *ahead of* `-I hypervisor/include`, so the
+header it opened was the stand-in - `clang++ -H` names it in one line.
+Against the real header with only the two `asm.h` shims on the path,
+`sizeof` is 46,383,104 on an arm64 Mac; `llvm-dwarfdump --name=hypervisor`
+on the built x86_64 binary reports `DW_AT_byte_size 0x02c3c000`, the same
+number. `-Xclang -fdump-record-layouts-complete` with and without
+`ZPP_HOSTED_TESTS` produces byte-identical output.
+
+**Read what the compiler opened before concluding anything about what it
+compiled.** Every later step in this exercise followed from that one
+command.
+
+### What is still stood in for, and why each one is not removable today
+
+Five headers, listed with their reasons in `scripts/ci/check-shims.py`,
+which fails on anything not listed:
+
+- `tests/shim/zpp/arch/x86_64/asm.h` and `.../vmx/asm.h` - naked x86-64
+  and the VMX instructions, on an arm64 development host.
+- `tests/ap_start_up/shim/` versions of both - the same, `thread_local`,
+  because that harness runs four host threads as four logical processors.
+- `tests/ap_start_up/shim/zpp/arch/x86_64/mmio.h` - the one that is not
+  forced by the architecture. The real `mmio.h` is portable
+  (`std::atomic_thread_fence` and volatile accesses), so pointing the
+  harness's `IA32_APIC_BASE` at a real buffer would let the real
+  accessors run. **That was considered and rejected**: the question the
+  shim exists to ask is whether the *high* half of the interrupt command
+  is written before the low half - writing the low half is what sends the
+  interrupt - and two volatile stores into a buffer leave no record of
+  which came first. Removing it means losing the ordering assertion, and
+  the ordering assertion is the regression.
+
+### Moving cases to Bochs: the verdict per harness
+
+The guest suite (`uefi_loader/include/zpp/guest_tests.h`) needs no shims
+at all - it is x86, the real binary, the real headers. But it is
+**black-box from inside the guest**: it executes instructions and grades
+the answers. It cannot read a hypervisor member, and the hypervisor
+exposes no channel that would let it.
+
+So a host harness moves there only if its question can be re-asked as
+"what does a guest observe". Where that is not true, the case would have
+to be rewritten rather than moved, and rewritten as a weaker test:
+
+| Harness | Verdict |
+|---|---|
+| `decoder`, `mtrr`, `elf_relocate`, `page_table`, `crt` | Stay. Pure functions over the standard library; no shim, no processor state, and the decoder's differential needs LLVM's assembler, which the guest does not have. |
+| `nested_exit` | Stay. The reflection decision is graded against KVM's `nested_vmx_l0_wants_exit` case by case; the value is the differential, and a guest cannot see which way the decision went. |
+| `nested_vmx` | Stay for now. It drives the VMX instruction emulation directly. A guest *can* execute those instructions, so a subset is expressible there - but the harness asserts on the shadow vmcs12, which a guest cannot read. |
+| `local_apic` | Stay. It asserts which processors were adopted and which commands were passed through; a guest sees neither. |
+| `resume_guest` | Stay. It asserts what the VMCS held at the moment before entry. |
+| `watched_page` | **Candidate.** An EPT violation on a watched page, the single-step, and the write landing are all observable from a guest that writes to the page it was given. Would need the VMM to expose what it did, or the guest to infer it from the value it reads back. |
+| `ap_start_up` | **Candidate, and the strongest one.** It runs host threads as logical processors; Bochs has real ones. The INIT-SIPI-SIPI sequence and the adoption decision are exactly what a multiprocessor guest exercises for real, and the emulator makes the concurrency real rather than modelled. |
+
+Neither candidate is a move - both are new cases in the guest suite, with
+the host harness kept until the guest one asserts as much. Recorded here
+rather than done, because each needs an answer to "what does the guest
+observe", and that answer is a change to what this VMM tells its guest.

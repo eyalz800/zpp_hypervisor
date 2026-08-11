@@ -63,9 +63,14 @@ ALLOWED = {
         "as above, thread_local for the same reason - one shared VMCS "
         "would let one thread read back another's VMWRITEs",
     "ap_start_up/shim/zpp/arch/x86_64/mmio.h":
-        "records a register write instead of performing it. The real "
-        "accessors dereference the address, and the address is derived "
-        "from an IA32_APIC_BASE this harness answers out of a variable",
+        "records a register write instead of performing it, keeping its "
+        "address and its position in a sequence. Pointing the harness's "
+        "IA32_APIC_BASE at a real buffer and using the real accessors "
+        "was considered and does not work: the question that shim "
+        "exists to ask is whether the *high* half of the interrupt "
+        "command is written before the low half - writing the low half "
+        "is what sends the interrupt - and two volatile stores into a "
+        "buffer leave no record of which came first",
 }
 
 # Files that must never be stood in for, with what it cost when they
