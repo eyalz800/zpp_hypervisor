@@ -97,24 +97,45 @@ endfunction()
 
 # === Harnesses that compile a header or a whole source file ==============
 
-# The ELF relocation regression. zpp/elf_file.h is freestanding and depends
-# on nothing but the standard library, so the header under test compiles
-# here exactly as the loader compiles it. What it pins: every relocated
-# slot coming out as the module base, which was silent until .init_array
-# became the first slot anything dereferenced.
+# The ELF relocation regression. zpp/elf_file.h is freestanding and
+# depends on nothing but the standard library, so the header under test
+# compiles here exactly as the loader compiles it.
+#
+# What it pins: every relocated slot coming out as the module base, which
+# was silent until .init_array became the first slot anything
+# dereferenced. Native, no emulator and no target, and that is the point -
+# the cheapest possible way to catch it is to relocate an image in host
+# memory and read the words back.
 zpp_add_host_test(elf_relocate
     SOURCES elf_relocate/harness.cpp)
 
-# The MTRR memory-type derivation. Pure and constexpr, so most of the
-# assertions are made at compile time and the compile is itself the test;
-# the runtime half exists so a failure names the address that disagreed.
+# The MTRR memory-type derivation. zpp/arch/x86_64/mtrr.h depends on
+# memory_type.h, msr.h and the standard library and on nothing else, so
+# the header under test compiles here exactly as the hypervisor compiles
+# it. Pure and constexpr, so most of the assertions are made at compile
+# time and the compile is itself the test; the runtime half exists so a
+# failure names the address that disagreed.
+#
+# What it pins: 63a5d17, where every range no variable MTRR covered got
+# write-back including the MMIO hole above the top of DRAM, and 83012e7,
+# where the variable-range array was sized 8 while real Intel client
+# parts report a VCNT of 10.
 zpp_add_host_test(mtrr
     SOURCES mtrr/harness.cpp)
 
 # The host page table, the OS page table walker and the paging-structure
 # helpers underneath both. The two translation units are the real ones,
 # compiled rather than copied, so a change to either is a change to what
-# runs here.
+# runs here. If a future page_table starts calling invlpg or reading CR3
+# this build breaks, which is the right moment to add a shim rather than
+# to weaken the test.
+#
+# What it pins, all three found by writing it and none fixed by it: a
+# large-page translation shifted nine bits too far in both walkers, an
+# unmapped address answered with its own page offset instead of being
+# refused, and a protection key read one bit low. The harness asserts what
+# the code does today and says so in each message, so a fix turns a named
+# check red.
 zpp_add_host_test(page_table
     SOURCES
         page_table/harness.cpp
@@ -122,9 +143,17 @@ zpp_add_host_test(page_table
         "${ZPP_HYPERVISOR_SRC}/arch/x86_64/os_page_table.cpp")
 
 # The instruction decoder, differentially against LLVM's own assembler and
-# disassembler. The corpus is generated, assembled and parsed by the
-# harness itself, so every entry keeps its expectations in the same object
-# that carries its bytes.
+# disassembler. instruction.h and context.h are freestanding headers that
+# depend on nothing but the standard library, so the header under test is
+# compiled here exactly as the hypervisor compiles it.
+#
+# The corpus is generated, assembled and parsed by the harness itself
+# rather than by the build, so every entry keeps its expectations in the
+# same object that carries its bytes. An earlier round of this comparison
+# was run and thrown away, and its result - ten thousand accepted
+# instructions with no length mismatch - had to be taken on trust
+# afterwards because nothing was left to re-run. That is why this one is
+# committed.
 zpp_add_host_test(decoder
     SOURCES decoder/harness.cpp)
 
@@ -143,6 +172,19 @@ zpp_add_host_test(nested_exit
 # The nested VMX state machine: the real nested_vmx.cpp and the real
 # vmcs12.h against stand-ins for hypervisor.h, the log and the two asm.h
 # headers.
+#
+# nested_vmx/fields.inc is every encoding in vmcs_fields.h, and this is
+# the only record of how it was made. Regenerate it after editing that
+# header with:
+#
+#   python3 - <<'EOF'
+#   import re
+#   src = open(SRC + '/zpp/arch/x86_64/vmx/vmcs_fields.h').read()
+#   body = src.split('{',2)[2]
+#   print('\n'.join('    {"%s", %s},' % m.groups()
+#         for m in re.finditer(r'^\s*(\w+)\s*=\s*(0x[0-9a-fA-F]+),',
+#                              body, re.M)))
+#   EOF
 zpp_add_host_test(nested_vmx
     SOURCES
         nested_vmx/harness.cpp
