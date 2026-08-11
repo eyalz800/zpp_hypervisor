@@ -16,9 +16,46 @@
 # should appear in the diff.
 #
 # Measured under Bochs 3.0 built --enable-vmx=2, one processor, debug and
-# release both, on 2026-08-11: 22 of the 60 reasons in SDM Vol. 3D
-# Appendix C. The other 38 carry a disposition in the coverage table in
-# uefi_loader/src/guest_tests.cpp saying why, and reaching them is open
-# work rather than a closed question - see that table.
+# release both, on 2026-08-11: 22 reasons reached. The rest carry a
+# disposition in the coverage table in uefi_loader/src/guest_tests.cpp
+# saying why, and reaching them is open work rather than a closed
+# question - see that table.
+#
+# The denominator used to be written here as 60, and it was wrong: the
+# table had sixty rows and Appendix C defines seventy-nine. 22 of 60 was
+# never the number.
 
 floor=22
+
+# The number of rows the coverage table must have, and it is exact rather
+# than a floor.
+#
+# The floor above grades the numerator and nothing grades the
+# denominator, which leaves one way to make the report look better
+# without improving anything: delete a row. A reason with a `plan:`
+# disposition costs nothing to remove, no check above notices - the
+# disposition gate only reads rows that exist, and `observed` is
+# unchanged - and the printed fraction goes from 22 of 60 to 22 of 59,
+# which reads as progress. The same edit is how a genuinely new reason
+# gets lost: SDM Vol. 3D Appendix C grows, the table does not, and
+# nothing says so.
+#
+# So this is exact in both directions. A row added deliberately raises
+# it in the same diff; a row that vanished turns the job red and names
+# the count it expected.
+#
+# Writing this down is what found the bug it exists for. The table had
+# sixty rows against a report that called them "the 60 reasons in SDM
+# Vol. 3D Appendix C"; counting Appendix C gives seventy-nine, and the
+# nineteen missing ones were 5, 6, 41, 65, 67, 68, 69, 72-81, 84 and 85.
+# Nothing in the job noticed, because every check reads the rows that
+# exist. Worse, `session::observed_exit` was 72 wide and `note_exit`
+# dropped anything above that, so reasons 72 and up could not have been
+# recorded even if a processor produced one - and bus lock (74) is an
+# ordinary exit on current hardware.
+#
+# 79 rows, counted from the `names` table in
+# uefi_loader/src/guest_tests.cpp on 2026-08-12: reasons 0-4, 5-34,
+# 36, 37, 39, 40, 41, 43-69, 72-81, 84 and 85. The gaps are encodings
+# Appendix C does not define (35, 38, 42, 70, 71, 82, 83), not omissions.
+rows=79

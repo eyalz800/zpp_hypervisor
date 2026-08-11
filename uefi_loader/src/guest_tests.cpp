@@ -588,12 +588,30 @@ struct session
     std::size_t unexpected_passes{};
 
     /**
+     * One past the highest basic exit reason SDM Vol. 3D Appendix C
+     * defines, which is 85, "WRMSRNS (immediate form)"
+     * (.references/sdm.txt:224447).
+     *
+     * This was 72, written as a bare array bound in two places, and 72
+     * is below the top of the table: every reason from 72 upwards -
+     * ENQCMD and ENQCMDS PASID translation failure, bus lock,
+     * instruction timeout, SEAMCALL, TDCALL, the MSR list and immediate
+     * forms - was dropped by `note_exit`'s bounds test rather than
+     * recorded. A reason that arrived would have been reported as
+     * absent, which is the one answer worse than no answer.
+     *
+     * Named rather than repeated, so the two arrays and the table below
+     * cannot drift apart again.
+     */
+    static constexpr std::size_t exit_reason_bound = 86;
+
+    /**
      * Which basic exit reasons this run actually observed, indexed by the
      * reason. The coverage report is built from this rather than from the
      * list of cases, so a case that was written but whose instruction
      * silently stopped exiting shows up as a gap.
      */
-    bool observed_exit[72]{};
+    bool observed_exit[exit_reason_bound]{};
 
     /**
      * Why a reason that was *not* reached was not reached, when the run
@@ -609,18 +627,18 @@ struct session
      *
      * Null means "the table's answer stands", which is the normal case.
      */
-    const char * why[72]{};
+    const char * why[exit_reason_bound]{};
 
     void note_exit(std::uint32_t reason)
     {
-        if (reason < (sizeof(observed_exit) / sizeof(observed_exit[0]))) {
+        if (reason < exit_reason_bound) {
             observed_exit[reason] = true;
         }
     }
 
     void note_why(std::uint32_t reason, const char * text)
     {
-        if (reason < (sizeof(why) / sizeof(why[0]))) {
+        if (reason < exit_reason_bound) {
             why[reason] = text;
         }
     }
@@ -2496,6 +2514,26 @@ bool guest_tests::run(EFI_SYSTEM_TABLE * system_table)
              "start_up_ipi",
              "unreachable-here:only_delivered_in_the_wait_for_sipi_state_"
              "which_a_running_processor_is_not_in"},
+            // Reasons 5 and 6 are SMM VM exits (.references/sdm.txt:
+            // 224274 and :224276), and both say "caused an SMM VM exit
+            // (see Section 34.15.2)". Those arrive at the SMM-transfer
+            // monitor, not at an ordinary VMM, and there is one only
+            // after the dual-monitor treatment has been activated - by a
+            // VMCALL executed in SMM against an SMM-monitor VMCS. This
+            // VMM executes no such VMCALL and writes no such VMCS, which
+            // is a fact about this source rather than about the
+            // emulator: grep finds no write of IA32_SMM_MONITOR_CTL
+            // anywhere in the tree.
+            {5,
+             "io_system_management_interrupt",
+             "out-of-scope:an_smm_vm_exit_reaches_the_smm_transfer_"
+             "monitor_and_this_vmm_never_activates_the_dual_monitor_"
+             "treatment"},
+            {6,
+             "other_system_management_interrupt",
+             "out-of-scope:an_smm_vm_exit_reaches_the_smm_transfer_"
+             "monitor_and_this_vmm_never_activates_the_dual_monitor_"
+             "treatment"},
             {7,
              "interrupt_window",
              "unreachable-here:no_case_so_the_run_reaching_its_end_with_"
@@ -2584,6 +2622,15 @@ bool guest_tests::run(EFI_SYSTEM_TABLE * system_table)
              "pause",
              "unreachable-here:quiet.pause.does_not_exit_measures_pause_"
              "exiting_off"},
+            // "A machine-check event occurred during VM entry"
+            // (.references/sdm.txt:224340). The same shape as 33 and 34
+            // above: the guest did not run, so there is nothing inside
+            // it to report with - and unlike those two, nothing a guest
+            // executes can arrange the event at all.
+            {41,
+             "entry_failure_machine_check",
+             "out-of-scope:a_failed_entry_means_the_guest_does_not_run_"
+             "and_no_guest_instruction_produces_a_machine_check_event"},
             // Reason 43 needs "use TPR shadow", and 44 needs "virtualize
             // APIC accesses". The second is measured rather than argued:
             // a store to the local APIC page took reason 48, and SDM
@@ -2689,10 +2736,109 @@ bool guest_tests::run(EFI_SYSTEM_TABLE * system_table)
              "xrstors",
              "unreachable-here:quiet.xrstors.does_not_exit_measures_the_"
              "xss_exiting_bitmap_being_zero"},
+            {65,
+             "pconfig",
+             "plan:secondary.enable_pconfig_and_a_quiet.pconfig_case_"
+             "shaped_like_quiet.encls_to_say_whether_the_instruction_"
+             "exists_here"},
             {66,
              "spp_related_event",
              "unreachable-here:sub_page_write_permissions_not_requested_"
              "and_no_ept_entry_asks_for_them"},
+            // === Everything above 66 ================================
+            //
+            // These nineteen rows were missing, and the report said "60
+            // listed (SDM Vol. 3D Appendix C)" while Appendix C defines
+            // seventy-nine. Two things followed from that, and the second
+            // is why they are here rather than left as a rounding error:
+            //
+            //  - the fraction flattered itself. 22 of 60 is not the
+            //    number; 22 of 79 is.
+            //  - `session::observed_exit` was sixty-odd entries wide and
+            //    `note_exit` dropped anything at or above it, so reasons
+            //    72 and up could not have been *recorded* even if they
+            //    arrived. Bus lock (74) and instruction timeout (75) are
+            //    ordinary VM exits on a current processor. See
+            //    `exit_reason_bound`.
+            //
+            // Every one of them carries `plan:` rather than a reason it
+            // cannot happen, and that is deliberate: none of them has
+            // been measured here, and "nobody has requested the control"
+            // is open work, not a closed question - the argument
+            // `50dc614` made for the other twenty-three. The shape of
+            // the work is the same in each case: request the control in
+            // the ZPP_GUEST_TESTS build only, add the handler case
+            // unconditionally, and assert what the handler did.
+            //
+            // The instruction-shaped ones name `quiet.encls` because it
+            // is the pattern that already works for an instruction the
+            // processor may not implement: execute it inside a recovery
+            // point and record whether it faulted, which answers "was it
+            // the control or the opcode" without guessing.
+            {67,
+             "umwait",
+             "plan:secondary.enable_user_wait_and_pause_with_primary."
+             "rdtsc_exiting_both_1_sdm_line_224393"},
+            {68,
+             "tpause",
+             "plan:secondary.enable_user_wait_and_pause_with_primary."
+             "rdtsc_exiting_both_1_sdm_line_224395"},
+            {69,
+             "loadiwkey",
+             "plan:tertiary.loadiwkey_exiting_and_a_quiet.loadiwkey_case_"
+             "sdm_line_224397"},
+            {72,
+             "enqcmd_pasid_translation_failure",
+             "plan:tertiary.enqcmd_pasid_translation_and_a_pasid_table_"
+             "entry_with_the_present_bit_clear_sdm_line_224399"},
+            {73,
+             "enqcmds_pasid_translation_failure",
+             "plan:tertiary.enqcmds_pasid_translation_and_a_pasid_table_"
+             "entry_with_the_present_bit_clear_sdm_line_224407"},
+            {74,
+             "bus_lock",
+             "plan:secondary.bus_lock_detection_and_a_locked_access_"
+             "crossing_a_cache_line_sdm_line_224409"},
+            {75,
+             "instruction_timeout",
+             "plan:tertiary.instruction_timeout_with_a_timeout_short_"
+             "enough_to_expire_sdm_line_224411"},
+            {76,
+             "seamcall",
+             "plan:a_quiet.seamcall_case_shaped_like_quiet.encls_since_"
+             "the_exit_is_unconditional_where_the_opcode_exists_sdm_line_"
+             "224414"},
+            {77,
+             "tdcall",
+             "plan:a_quiet.tdcall_case_shaped_like_quiet.encls_since_the_"
+             "exit_is_unconditional_where_the_opcode_exists_sdm_line_"
+             "224415"},
+            {78,
+             "rdmsrlist",
+             "plan:a_quiet.rdmsrlist_case_the_msr_bitmap_covers_nothing_"
+             "outside_its_two_ranges_so_the_exit_is_the_same_bitmap_"
+             "decision_as_reason_31_sdm_line_224416"},
+            {79,
+             "wrmsrlist",
+             "plan:a_quiet.wrmsrlist_case_the_msr_bitmap_covers_nothing_"
+             "outside_its_two_ranges_so_the_exit_is_the_same_bitmap_"
+             "decision_as_reason_32_sdm_line_224423"},
+            {80,
+             "urdmsr",
+             "plan:a_quiet.urdmsr_case_any_address_in_2000h_3fffh_exits_"
+             "whatever_the_bitmap_says_sdm_line_224430"},
+            {81,
+             "uwrmsr",
+             "plan:a_quiet.uwrmsr_case_any_address_in_2000h_3fffh_exits_"
+             "whatever_the_bitmap_says_sdm_line_224435"},
+            {84,
+             "rdmsr_immediate",
+             "plan:an_msr.rdmsr_immediate_case_beside_msr.rdmsr.hyperv_"
+             "frequency_which_already_reaches_reason_31_sdm_line_224440"},
+            {85,
+             "wrmsr_immediate",
+             "plan:an_msr.wrmsr_immediate_case_beside_msr.wrmsr.hyperv_"
+             "frequency_which_already_reaches_reason_32_sdm_line_224447"},
         };
 
         for (const auto & entry : names) {

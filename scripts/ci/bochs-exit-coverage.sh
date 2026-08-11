@@ -282,6 +282,39 @@ status=0
 floor_file="$root/scripts/ci/exit-coverage-floor.txt"
 floor=$(sed -n 's/^floor=\([0-9]*\).*/\1/p' "$floor_file" 2>/dev/null)
 
+rows=$(sed -n 's/^rows=\([0-9]*\).*/\1/p' "$floor_file" 2>/dev/null)
+
+# The denominator, graded exactly.
+#
+# The floor below grades how many reasons were reached and nothing
+# grades how many there are to reach, which leaves one way to improve
+# the report without improving anything: delete a row. A reason carrying
+# `plan:` costs nothing to remove, no check here notices - the
+# disposition gate only reads rows that exist, and `observed` does not
+# move - and the printed fraction goes from 22 of 79 to 22 of 78, which
+# reads as progress.
+#
+# The same edit is how a real reason gets lost, and that had already
+# happened: nineteen of Appendix C's reasons had no row at all and the
+# report called the remaining sixty "the 60 reasons in Appendix C". See
+# the comment on `rows=` in the floor file.
+if [ -z "$rows" ]; then
+    echo >&2
+    echo "FAIL: no rows= in $floor_file - the coverage denominator" >&2
+    echo "cannot be graded if nothing records what it should be." >&2
+    status=1
+elif [ "$total" != "$rows" ]; then
+    echo >&2
+    echo "COVERAGE TABLE ROW COUNT CHANGED - the run reported $total" >&2
+    echo "rows and $floor_file records $rows. A row that vanished is a" >&2
+    echo "reason nothing grades any more, and deleting one raises the" >&2
+    echo "printed fraction without reaching anything. Add the row back," >&2
+    echo "or record the new count in the same commit that changes the" >&2
+    echo "table:" >&2
+    echo "  $floor_file" >&2
+    status=1
+fi
+
 if [ -z "$floor" ]; then
     echo >&2
     echo "FAIL: no floor in $floor_file - coverage cannot regress if" >&2
