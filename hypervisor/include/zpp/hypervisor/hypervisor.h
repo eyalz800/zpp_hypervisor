@@ -4313,10 +4313,16 @@ private:
      * A second-level guest that is waiting rather than working spins its
      * idle loop at about a hundred exits a second, so the ring above
      * holds two or three seconds of history and the interesting moment
-     * is minutes old. This one drops the loop and keeps everything else,
-     * which turns the same depth into hours.
+     * is minutes old. This one drops the loop and keeps everything else.
+     *
+     * 4096 rather than the 256 beside it, and the arithmetic is the
+     * reason: the guest takes about 3,500 device interrupts across the
+     * whole of early kernel initialisation before it stops, so a ring
+     * that holds fewer records than that cannot contain the phase being
+     * investigated. It costs 4096 * 48 bytes per processor - 1.5 MB
+     * across eight - against a class this VMM already spends 46 MB on.
      */
-    static constexpr std::size_t l2_working_trace_capacity = 256;
+    static constexpr std::size_t l2_working_trace_capacity = 4096;
     exit_trace_entry l2_exit_trace[max_cpus][l2_exit_trace_capacity]{};
 
     /**
