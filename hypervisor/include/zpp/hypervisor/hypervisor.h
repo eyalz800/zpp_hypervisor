@@ -3448,6 +3448,58 @@ private:
      */
 
     /**
+     * How much of the synthetic MSR space is counted, from
+     * `0x40000000`. The interface's registers all live in the first
+     * couple of hundred, and the range that matters here -
+     * `0x40000080`-`0x40000084` for the synthetic interrupt controller,
+     * `0x40000090`-`0x4000009f` for the interrupt sources,
+     * `0x400000b0`-`0x400000b1` for the timers - is well inside it.
+     */
+    static constexpr std::size_t synthetic_msr_capacity = 256;
+
+    /**
+     * Every second-level access to a synthetic MSR, counted per index and
+     * per processor, with the time stamp of the newest write.
+     *
+     * This exists to settle one question, and the question is worth
+     * stating because a count is otherwise a weak thing to add.
+     *
+     * Measured on the rig: the root partition arms synthetic timer 0
+     * periodic at 15.625 ms, and Hyper-V responds by arming its own local
+     * APIC timer to 15.167 ms and then 13.125 ms - honouring it exactly
+     * twice - and then writes a zero initial count, disarming, and never
+     * arms again. Every virtual processor then halts for ever.
+     *
+     * Two expiries and then silence is the shape of the interface's own
+     * message protocol stalling rather than of a timer being
+     * mis-programmed. A timer expiry is posted as a message and a
+     * synthetic interrupt; the guest must acknowledge it by writing the
+     * end-of-message register before the next can be delivered. So a
+     * first expiry that is posted, a second that finds the slot still
+     * occupied, and no acknowledgement ever, produces exactly this and
+     * nothing else does.
+     *
+     * The acknowledgement is `0x40000084` and the interrupt source the
+     * timer posts to is `0x40000093` - both second-level accesses, both
+     * outside the MSR bitmap's ranges, so both are seen here. Counting
+     * them says which of two things is true: the guest acknowledged for a
+     * while and then stopped, meaning delivery decayed, or it never
+     * acknowledged at all, meaning the very first synthetic interrupt
+     * never arrived. Those want different fixes and nothing recorded so
+     * far distinguishes them.
+     * @{
+     */
+    std::uint64_t
+        synthetic_msr_reads[max_cpus][synthetic_msr_capacity]{};
+    std::uint64_t
+        synthetic_msr_writes[max_cpus][synthetic_msr_capacity]{};
+    std::uint64_t
+        synthetic_msr_last_write_tsc[max_cpus][synthetic_msr_capacity]{};
+    /**
+     * @}
+     */
+
+    /**
      * Exits taken per CPU, counting repeats. Together with the ring's
      * `repeated` counts this says how much of the history the window
      * covers.

@@ -2945,6 +2945,24 @@ hypervisor::on_l2_exit(std::size_t cpu,
 
         auto index = static_cast<std::uint32_t>(context.rcx);
 
+        // Every synthetic MSR the second-level guest touches, counted.
+        // See the declaration for what this settles; the short version is
+        // that the end-of-message register at 0x40000084 is the one thing
+        // that says whether the interface's message protocol ever
+        // completed a round.
+        if (auto offset = index - 0x40000000u;
+            (index >= 0x40000000u) && (offset < synthetic_msr_capacity)) {
+            if (basic_reason::rdmsr == reason.basic()) {
+                this->synthetic_msr_reads[cpu][offset] =
+                    this->synthetic_msr_reads[cpu][offset] + 1;
+            } else if (basic_reason::wrmsr == reason.basic()) {
+                this->synthetic_msr_writes[cpu][offset] =
+                    this->synthetic_msr_writes[cpu][offset] + 1;
+                this->synthetic_msr_last_write_tsc[cpu][offset] =
+                    arch::x86_64::rdtsc();
+            }
+        }
+
         if ((basic_reason::rdmsr == reason.basic()) &&
             (time_reference_count == index)) {
             this->reference_read_pending[cpu] = true;

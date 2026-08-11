@@ -463,6 +463,50 @@ before the guest hypervisor has written that field. It is captured once,
 on the first entry, and the first entry is too early. Not load bearing,
 but it means no conclusion may be drawn from that field's zero.
 
+### Not one synthetic timer message is ever acknowledged
+
+Measured 2026-08-11 from `synthetic_msr_reads` / `synthetic_msr_writes` /
+`synthetic_msr_last_write_tsc`, which count every second-level access to
+the `0x40000000`-`0x400000ff` range per processor.
+
+**The end-of-message register `0x40000084` is written exactly once in a
+whole boot, on the boot processor, and never on any of the other seven.**
+That single write is at TSC `0x47d5045841`, which is *before* SINT3 is
+configured (`0x47d5465413`) and before synthetic timer 0 is armed
+(`0x47d5a996b8`). So it belongs to some earlier message and **no timer
+message has ever been acknowledged, on any processor**.
+
+Every processor otherwise does its half correctly and identically:
+`SIMP` written, `SINT0`, `SINT1`, `SINT4` and `SINT3` written, `STIMER0_
+CONFIG` five or six times and `STIMER0_COUNT` once. The setup is complete
+and then nothing comes back.
+
+That closes the disjunction the counter was added for. Delivery did not
+decay from working to broken - **the very first synthetic timer message
+never arrives.** It also explains the two-expiry number exactly: Hyper-V
+posts the first message and raises SINT3, the second expiry finds the
+slot still occupied because no acknowledgement came, and the timer stalls
+there for ever. Two is what an unacknowledged slot produces and nothing
+else produces it.
+
+Worth noting for whoever picks this up, and *not* concluded from:
+`SCONTROL` (`0x40000080`) does not appear in the counts at all, on any
+processor, while `SIMP` and the `SINT` registers do. The interface
+defines `SCONTROL` bit 0 as what enables the synthetic interrupt
+controller. Its absence may mean it is written somewhere this counter
+does not see rather than not written - the counter only sees *second
+level* accesses, so anything the root partition did before Hyper-V
+launched it is invisible here - and that has not been checked. Check it
+before building on it.
+
+Also visible and unremarkable, recorded so nobody re-derives it: the
+reference TSC page is enabled (`0x40000021` written twice), which is why
+`TIME_REF_COUNT` reads are only a few hundred rather than millions - the
+guest reads time from a shared page and falls back to the MSR. The root
+partition reads `TSC_FREQUENCY` (`0x40000022`) and `APIC_FREQUENCY`
+(`0x40000023`) exactly once each, and both are reflected to Hyper-V,
+which is the layer that implements them.
+
 Next, and narrowed by all of the above: the path from Hyper-V's own timer
 to the synthetic interrupt it must post to a halted virtual processor.
 Hyper-V drives that from its local APIC timer, and the application
