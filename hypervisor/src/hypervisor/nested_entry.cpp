@@ -1183,18 +1183,20 @@ std::expected<void, zpp::error> hypervisor::build_vmcs02(std::size_t cpu)
         primary |= primary_monitor_trap_flag;
     }
 
-    // The same bit, armed for a different reason: to watch a single
-    // instruction of the second-level guest after an event is injected
-    // into it. See `injection_step_rip` for what it settles.
+    // A second user of this bit was added here to single step the guest
+    // after an injected event, and **removed again**. It answered the
+    // question it was written for - the first landing after every
+    // injection of 0xd1 was an EPT violation with the instruction
+    // pointer unmoved, which named the boot bug - and then it kept
+    // firing: 30,968 times on the boot processor in one boot, against
+    // the sixteen it was meant to take.
     //
-    // Armed only when the stepper above is not, and disarmed only by the
-    // handler that consumes it, so the two cannot take each other's
-    // exits. The stepper wins the tie because it is holding a watched
-    // page open and losing its trap exit leaves that page writable for
-    // ever - the paragraph above spells out what that costs.
-    if (this->injection_step_armed[cpu] && !this->stepping_watch[cpu]) {
-        primary |= primary_monitor_trap_flag;
-    }
+    // At that rate it is not a measurement, it is a behaviour change in
+    // the shipped path, and it landed in the same window that took
+    // `guest vmxon` from eight processors of eight to one. Diagnostics
+    // that perturb what they measure belong behind a switch or not at
+    // all; this one is not needed again, so it is gone rather than
+    // switched. The passive counters it came with stay.
 
     // The TPR shadow, decided above. Three branches, and the difference
     // between them is which of them is allowed to leave the second-level
@@ -1578,7 +1580,6 @@ std::expected<void, zpp::error> hypervisor::build_vmcs02(std::size_t cpu)
                     shadow.read(field::guest_rip);
                 this->injection_to_rip[cpu][slot] = 0;
                 this->injection_landing_armed[cpu] = 1;
-                this->injection_step_armed[cpu] = 1;
             }
         }
     }
@@ -3097,40 +3098,6 @@ hypervisor::on_l2_exit(std::size_t cpu,
     // VMLAUNCH again.
     if (!reason.entry_failure()) {
         this->vmcs02_launched[cpu] = true;
-    }
-
-    // The single stepped instruction after an injected `0xd1`, consumed
-    // here before anything else can route it.
-    //
-    // Taken on the *first* exit after the arming entry whatever that
-    // exit is, not only on a monitor-trap-flag exit: an event whose
-    // delivery itself faults exits with the fault instead, and reading
-    // that as "the step never happened" would be the same mistake this
-    // measurement exists to avoid making.
-    if (this->injection_step_armed[cpu] && !this->stepping_watch[cpu] &&
-        (cpu < max_cpus)) {
-        auto slot =
-            this->injection_step_count[cpu] % injection_landing_capacity;
-
-        this->injection_step_rip[cpu][slot] = this->vmcs.guest_rip();
-        this->injection_step_reason[cpu][slot] = reason.value();
-        this->injection_step_count[cpu] =
-            this->injection_step_count[cpu] + 1;
-        this->injection_step_armed[cpu] = 0;
-
-        // vmcs02 is current and is not rebuilt on a resume, so the bit
-        // has to be taken out by hand or every following instruction
-        // traps as well.
-        monitor_trap_flag(false);
-
-        // A trap exit is this VMM's own and the guest hypervisor never
-        // asked for it, so it is consumed rather than routed. RIP is not
-        // advanced: the instruction the flag stopped after has already
-        // retired, and the one it stopped *on* has not run.
-        if (basic_reason::monitor_trap_flag == reason.basic()) {
-            advance_rip = false;
-            return l2_exit_outcome::handled;
-        }
     }
 
     if (reason.entry_failure()) {
