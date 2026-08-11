@@ -7767,3 +7767,63 @@ addresses in the `0x7ed5xxxx` range), and every one of the five event
 outcome counters reads **zero** on all seven — so the re-queue path never
 ran on them and is not what is holding them. That is a different
 question, and it is the next one.
+
+### One processor boots. The remaining failure is multiprocessor only
+
+Measured 2026-08-11, `ZPP_CPUS=1` on the same launcher, same build, same
+installation. The launcher's own comment says the variable exists so
+processor count is a single-variable experiment; this is the first time
+it has been used to separate the nested logic from the start-up path.
+
+| | 8 processors | 1 processor |
+|---|---|---|
+| `guest vmxon` | 1 of 8 — **FAIL** | 1 of 1 — **OK** |
+| `l2_entries` | climbs, then the guest resets | climbs continuously |
+| EOM writes | 13,159 | 2,794 |
+| STIMER0_COUNT | 13,161 | 2,796 |
+| synthetic EOI | 13,172 | 2,801 |
+
+**The nested path, the shadow tables, the re-queue and the whole
+synthetic timer protocol are correct.** On one processor the machine
+runs and keeps running. Everything still failing is a property of having
+more than one.
+
+And the eight-processor run does not merely stall — it **resets**. Two
+samples of the same module base showed the counters going *backwards*,
+1,810,029 exits down to 846,644 and 314,674 second-level entries down to
+56,254. Windows boots, runs with its timer working, and then bug-checks
+and restarts, which is what a kernel does when its application
+processors never arrive.
+
+What the log says about why, and it is not what the counters suggested:
+
+```
+17 launching guest on virtual processor 0x1
+26 cpu 0x1 came up on the trampoline after 0x1229 attempts, guest vector 0x87
+   ... all seven, and all eight virtual processors launched ...
+55 guest start-up ipi for cpu 0x1, activity 0x0 is not wait-for-sipi, dropped
+   ... all seven ...
+```
+
+**This VMM's own application processors all start.** What is refused is
+Windows' *own* start-up IPI, arriving at a processor this VMM has
+already adopted and left in the active state, so the wait-for-SIPI test
+that gates the hand-off fails and the IPI is dropped.
+
+The comparison against a pre-re-queue boot is the measurement that
+matters, because both logs contain drops and only one contains
+hand-offs:
+
+| | before | after |
+|---|---|---|
+| `guest init ipi` | 15 | 1 |
+| start-up IPI dropped | 13 | 7 |
+| start-up IPI **to hardware** | **8** | **0** |
+
+Not one start-up IPI is handed to hardware any more. That is the whole
+regression, stated in one row, and it is where the next work goes.
+
+**Do not read the drops as the defect on their own.** A started
+processor must ignore the second IPI of a pair, so drops are expected
+and were present in the working boot too. The number that changed is the
+hand-offs.
