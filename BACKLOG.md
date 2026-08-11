@@ -7154,3 +7154,50 @@ injection written into vmcs02 actually *retires* into the second-level
 guest. A count of entries carrying a valid entry-interruption field
 against interrupts the second-level guest is observed to take would close
 it, and nothing records either today.
+
+### The injected entry fails under Bochs and does not fail on the rig
+
+Two measurements that must be read together, because separately each
+points somewhere the other forbids.
+
+**Under Bochs** (`df500e8`, `8a7741d`): an entry carrying an external
+interrupt injection fails with `0x80000021`, where the identical vmcs12
+without the injection enters and exits cleanly. Settled as the
+*processor's* refusal rather than ours, two ways independently - the
+VMM's own newest exit at that instant is `0x80000021`, where a software
+refusal would have left the VMLAUNCH itself as the last exit; and all
+three `refuse()` sites are activity-state conditions while that vmcs12
+says active, so none can fire.
+
+The architecture permits the entry. SDM 29.3.1.5 enumerates injection by
+activity state and says of the active state "Active. Any event is
+allowed" (`sdm.txt:202607-202612`), and 29.2.1.3's injection checks
+(`:202225-202260`) are about type, vector, error code and instruction
+length - **nothing requires `RFLAGS.IF` to be 1**, so the `RFLAGS = 0x2`
+in that vmcs12 is not the cause. A control-field failure would also be
+VMfail rather than an exit, so reason 33 with bit 31 is specifically a
+guest-state rejection.
+
+**On the rig it does not happen.** The boot processor's whole-run
+histogram has **no `entry-fail-state` exits at all** and
+`vm_entry_failure` never occurred, across a run of 1,263,834 exits. And
+the guest hypervisor does inject: it writes
+`vm_entry_interruption_information_field` 109 times, and manages the
+interrupt shadow heavily - `guest_interruptibility_state` is its second
+most written field at 42,813 writes, 32.4% of all of them, and its sixth
+most read at 43,078.
+
+So **injection works on the hardware path and the rig stall is not an
+entry failure.** The Bochs result is a real defect and a different one -
+most likely in the guest state `build_vmcs02` composes for a synthetic
+vmcs12, or in Bochs' own checks - and it must not be treated as the boot
+bug. Chasing it as the boot bug would be the "77 times too slow" mistake
+again: a real measurement, correctly taken, answering a question nobody
+asked.
+
+What it does retire is the last structural suspicion about injection.
+The guest hypervisor asks for no APIC virtualization, receives every
+capability it asks for, injects successfully 109 times, clears and sets
+the interrupt shadow tens of thousands of times, and has every entry it
+attempts succeed. It is not being prevented from injecting. It stops
+choosing to.
