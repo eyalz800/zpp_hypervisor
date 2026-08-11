@@ -211,7 +211,7 @@ public:
     // The platform's roster, which is the only thing a broadcast - the
     // form that names no destination - can be resolved against.
     std::size_t number_of_platform_processors{};
-    std::uint64_t platform_apic_id[max_cpus]{};
+    std::uint32_t platform_apic_id[max_cpus]{};
 
     // What the guest asked for, as counters, which is all the log has to
     // say about a command it decided not to act on.

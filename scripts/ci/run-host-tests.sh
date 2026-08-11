@@ -101,6 +101,12 @@ run "check-nested-ept" "$root/scripts/ci/check-nested-ept.sh"
 # The source-level invariants, which need no build at all.
 run "check-exit-handler" "$root/scripts/ci/check-exit-handler.sh"
 
+# The harness shims against the class they stand in for. A member the
+# real source uses and a shim lacks is a compile error and needs no help;
+# a member present in both with a *different* declaration compiles and
+# tests the wrong thing, which is what this catches.
+run "check-shim-members" python3 "$root/scripts/ci/check-shim-members.py"
+
 # The Python readers under scripts/, against the C++ they transcribe.
 # There were no Python tests of any kind in this tree, and those scripts
 # are the one place a wrong constant produces *plausible* output rather
