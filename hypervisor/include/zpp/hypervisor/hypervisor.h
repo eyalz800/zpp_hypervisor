@@ -3158,6 +3158,47 @@ private:
      * hand-over is at fault, and nothing else measured so far can.
      */
     volatile std::uint32_t l2_injected_vector[max_cpus][256]{};
+
+    /**
+     * How many landings the ring below holds.
+     */
+    static constexpr std::size_t injection_landing_capacity = 16;
+
+    /**
+     * Where the second-level guest was when vector `0xd1` was injected
+     * into it, and where it was at the very next exit.
+     *
+     * Every other counter in this investigation observes the hand-over
+     * between the two hypervisors. This observes the **guest**, and it
+     * is the only thing that separates the two explanations left for a
+     * synthetic timer message that is delivered and never acknowledged:
+     *
+     * - `to_rip` inside an interrupt handler, far from `from_rip`, means
+     *   the vector was taken and the handler failed somewhere after it.
+     *   The defect is then inside the guest's own path and what this VMM
+     *   did wrong is upstream of the handler's inputs.
+     * - `to_rip` still at or beside `from_rip` means the vector was
+     *   injected and **not taken**, which would be a defect here -
+     *   VM-entry injection is not gated on `RFLAGS.IF` or on the
+     *   interruptibility state, so nothing about the guest may refuse it.
+     *
+     * `to_reason` is kept with them because the two readings above are
+     * only distinguishable if the exit that produced `to_rip` is known:
+     * an exit taken *during* delivery lands at the handler's first
+     * instruction and looks like neither.
+     * @{
+     */
+    volatile std::uint64_t
+        injection_from_rip[max_cpus][injection_landing_capacity]{};
+    volatile std::uint64_t injection_to_rip[max_cpus]
+                                           [injection_landing_capacity]{};
+    volatile std::uint64_t
+        injection_to_reason[max_cpus][injection_landing_capacity]{};
+    volatile std::uint64_t injection_landing_count[max_cpus]{};
+    volatile std::uint64_t injection_landing_armed[max_cpus]{};
+    /**
+     * @}
+     */
     volatile std::uint64_t vmcs12_exit_controls{};
     volatile std::uint64_t vmcs12_entry_controls{};
     volatile std::uint64_t vmcs12_controls_captured{};

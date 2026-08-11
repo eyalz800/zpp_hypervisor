@@ -282,6 +282,15 @@ public:
     volatile std::uint64_t vmcs02_exit_written{};
     volatile std::uint32_t l2_external_vector[max_cpus][256]{};
     volatile std::uint32_t l2_injected_vector[max_cpus][256]{};
+    static constexpr std::size_t injection_landing_capacity = 16;
+    volatile std::uint64_t
+        injection_from_rip[max_cpus][injection_landing_capacity]{};
+    volatile std::uint64_t injection_to_rip[max_cpus]
+                                           [injection_landing_capacity]{};
+    volatile std::uint64_t
+        injection_to_reason[max_cpus][injection_landing_capacity]{};
+    volatile std::uint64_t injection_landing_count[max_cpus]{};
+    volatile std::uint64_t injection_landing_armed[max_cpus]{};
     volatile std::uint64_t vmcs12_exit_controls{};
     volatile std::uint64_t vmcs12_entry_controls{};
 

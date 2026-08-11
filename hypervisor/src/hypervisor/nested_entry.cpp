@@ -1549,6 +1549,23 @@ std::expected<void, zpp::error> hypervisor::build_vmcs02(std::size_t cpu)
             auto vector = injection & interruption_vector_mask;
             this->l2_injected_vector[cpu][vector] =
                 this->l2_injected_vector[cpu][vector] + 1;
+
+            // Where the guest was when the event was injected, and a
+            // flag for the exit handler to fill in where it went. See
+            // the declarations: this is the first thing in the
+            // investigation that observes the guest rather than the
+            // hand-over, and it is the only way to tell a handler that
+            // ran and failed from a vector that was never taken.
+            constexpr std::uint64_t synthetic_interrupt_3 = 0xd1;
+
+            if (synthetic_interrupt_3 == vector) {
+                auto slot = this->injection_landing_count[cpu] %
+                            injection_landing_capacity;
+                this->injection_from_rip[cpu][slot] =
+                    shadow.read(field::guest_rip);
+                this->injection_to_rip[cpu][slot] = 0;
+                this->injection_landing_armed[cpu] = 1;
+            }
         }
     }
 
@@ -3125,6 +3142,20 @@ hypervisor::on_l2_exit(std::size_t cpu,
         // rather than in `reflect_l2_exit` because the valid bit has to
         // be tested against the reason that produced it.
         //
+        // Where the guest went after an entry that injected `0xd1`, at
+        // the first exit after it. Taken here because this is the last
+        // point at which the second-level guest's own VMCS is current,
+        // so the instruction pointer is its own.
+        if (0 != this->injection_landing_armed[cpu]) {
+            auto slot = this->injection_landing_count[cpu] %
+                        injection_landing_capacity;
+            this->injection_to_rip[cpu][slot] = this->vmcs.guest_rip();
+            this->injection_to_reason[cpu][slot] = reason.value();
+            this->injection_landing_count[cpu] =
+                this->injection_landing_count[cpu] + 1;
+            this->injection_landing_armed[cpu] = 0;
+        }
+
         // SDM 27.9.2: bits 7:0 are the vector, bit 31 is validity.
         if (basic_reason::external_interrupt == reason.basic()) {
             auto information =
