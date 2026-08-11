@@ -7711,3 +7711,59 @@ written down in the tree, in the comment on the switch that disabled it,
 naming the exact vector. It was not found by reading, because "five
 clock interrupts at 0xd1" means nothing until `0xd1` is known to be
 `SINT3`. Two independent measurements had to meet.
+
+## FIXED. The message protocol completes thirteen thousand times
+
+Measured 2026-08-11, after `54fdde9` and the entry-state check that
+followed it. Same launcher, same Windows installation, same rig.
+
+The boot processor's synthetic MSR writes, which were the whole
+diagnosis:
+
+| MSR | before | after |
+|---|---|---|
+| `0x40000084` EOM | **1** (before `SINT3` existed) | **13,159** |
+| `0x400000b1` STIMER0_COUNT | 2 | **13,161** |
+| `0x40000070` EOI | **never** | **13,172** |
+| `0x40000071` ICR | 2 | 13,171 |
+
+One to one to one. **Every timer message is now delivered, read,
+acknowledged and the timer re-armed.** Not one round completed before.
+
+And the freeze is gone. `l2_entries` on the boot processor ran 241,300 →
+314,674 in ninety seconds and kept going, about 815 entries a second,
+where every previous boot stopped dead at 82,4xx and stayed there for
+fifty minutes. Its second-level exit ring is ordinary live traffic:
+`wrmsr 0x400000b1` arming the timer, `wrmsr 0x40000070` acknowledging
+the interrupt, `ext-int`, `int-window`, and the reference-clock reads
+between them.
+
+`events_requeued` reads **37,062** on the boot processor. That is how
+many events were being destroyed.
+
+### What the first re-run taught, which inspection had not
+
+Turning the path back on with only the two defects named on the switch
+fixed reproduced the original regression exactly — one processor of
+eight reaching `guest vmxon`, the same verdict `git bisect` recorded
+against `02c747e` over seven boots. There was a **third** defect: a
+re-queue writes the entry-interruption field after the rest of the entry
+is settled, so nothing has checked the state it lands in, and SDM
+29.3.1.5 makes three of those a consistency check. "Wait-for-SIPI. No
+events are allowed" is the one that matters, because an application
+processor waiting for its start-up IPI is exactly a processor in that
+state.
+
+**Seven boots of bisection had localised the commit and not the defect.**
+One boot with the path on and a counter per outcome localised the defect,
+because a failure that is reproduced on purpose can be measured, and one
+that is only avoided cannot.
+
+### Still open
+
+The application processors have not been started by Windows in this run.
+They sit at 107 exits each, all of them in firmware (`cs=0x0038`,
+addresses in the `0x7ed5xxxx` range), and every one of the five event
+outcome counters reads **zero** on all seven — so the re-queue path never
+ran on them and is not what is holding them. That is a different
+question, and it is the next one.
