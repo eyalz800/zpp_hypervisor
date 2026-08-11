@@ -35,8 +35,18 @@ cmake --build --preset "$config" --target zpp_tests
 # HOST_TEST_TIMEOUT overrides the per-test bound compiled into the test
 # properties, which is what the environment variable of the same name did
 # before. Unset means the tree's own value applies.
+# --no-tests=error, because "no tests ran" is ctest's default *success*.
+#
+# The suite is registered by tests/CMakeLists.txt, and that file can now
+# decline to register the compiled harnesses - it does so on a host
+# compiler with no C++23 <print>, rather than failing the configure of a
+# cross build that never touches them. The `zpp_tests` build above is what
+# turns that into a red job, and this is the second lock on the same door:
+# if the registration ever falls away for a reason nobody predicted, a run
+# with nothing in it must not report success.
 if [ -n "${HOST_TEST_TIMEOUT:-}" ]; then
-    exec ctest --preset "$config" --timeout "$HOST_TEST_TIMEOUT"
+    exec ctest --preset "$config" --no-tests=error \
+        --timeout "$HOST_TEST_TIMEOUT"
 fi
 
-exec ctest --preset "$config"
+exec ctest --preset "$config" --no-tests=error

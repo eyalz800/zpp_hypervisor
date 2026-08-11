@@ -159,7 +159,6 @@ void check_equal(std::uint64_t expected,
 
 std::vector<std::string> g_findings;
 
-
 /*
  * The original-event identification field, SDM Table 27-21. Values 1 and
  * 7 of the type are "not used" and so have no name here.

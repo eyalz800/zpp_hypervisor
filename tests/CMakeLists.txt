@@ -50,9 +50,35 @@ set(ZPP_TEST_COMPILE_OPTIONS
 # built against libc++ headers in the cross build, so a harness using it
 # is instantiating the same templates the target does.
 #
-# A hard error if neither works, rather than a fallback to std::printf.
-# A suite that silently reports through a different mechanism on one
-# machine is a suite whose output cannot be compared across machines.
+# There is no fallback to std::printf, and there will not be one: a suite
+# that reports through a different mechanism depending on the machine is a
+# suite whose output cannot be compared across machines, which is the
+# property the whole conversion was verified by.
+#
+# **Where the failure is raised matters, and getting that wrong broke
+# three CI jobs that do not compile a single harness.** This was a
+# `FATAL_ERROR`, which stops *configure* - and the root project always
+# does `add_subdirectory(tests)`, so `cmake --preset debug` failed
+# outright on any machine whose default compiler is older than this
+# needs. That is exactly the runner the `build debug`, `build release`
+# and `linux .ko` jobs use: they name clang only in the toolchain files
+# their ExternalProjects use, so CMake probes the distribution's `c++`,
+# which is GNU 13.3.0, which has no <print>. Every harness here is
+# EXCLUDE_FROM_ALL and none of those jobs builds one. The suite had made
+# itself a dependency of builds that never use it.
+#
+# So the requirement is unchanged and only its timing moved: a compiler
+# that cannot build the suite now fails when the suite is *asked for*,
+# not when a project containing it is configured. `zpp_tests` becomes a
+# target that fails with the reason, and `zpp_add_host_test` registers
+# nothing - so there is no silently-skipped harness and no ctest entry
+# that would pass by not existing. scripts/ci/run-host-tests.sh builds
+# `zpp_tests` before it runs ctest, so the host-tests job still goes red
+# rather than green-with-nothing-run.
+#
+# The checks below that need no C++ compiler at all - check-nested-ept,
+# check-exit-handler, check-shims, python_layout, check-invariants - stay
+# registered either way. They were never what the probe was about.
 include(CheckCXXSourceCompiles)
 
 set(ZPP_PRINT_PROGRAM "#include <print>\nint main() { std::println(\"{}\", 1); }\n")
@@ -63,18 +89,27 @@ check_cxx_source_compiles("${ZPP_PRINT_PROGRAM}" ZPP_HAVE_PRINT)
 if(NOT ZPP_HAVE_PRINT)
     set(CMAKE_REQUIRED_FLAGS "-std=c++2c -stdlib=libc++")
     check_cxx_source_compiles("${ZPP_PRINT_PROGRAM}" ZPP_HAVE_PRINT_LIBCXX)
-    if(NOT ZPP_HAVE_PRINT_LIBCXX)
-        message(FATAL_ERROR
-            "the host compiler has no <print>, with or without "
-            "-stdlib=libc++. The hosted suite reports through "
-            "std::println; a compiler without it cannot build it. "
-            "Install libc++ for this clang, or use a newer libstdc++.")
+    if(ZPP_HAVE_PRINT_LIBCXX)
+        list(APPEND ZPP_TEST_COMPILE_OPTIONS -stdlib=libc++)
+        set(ZPP_TEST_LINK_OPTIONS -stdlib=libc++)
     endif()
-    list(APPEND ZPP_TEST_COMPILE_OPTIONS -stdlib=libc++)
-    set(ZPP_TEST_LINK_OPTIONS -stdlib=libc++)
 endif()
 
 unset(CMAKE_REQUIRED_FLAGS)
+
+if(ZPP_HAVE_PRINT OR ZPP_HAVE_PRINT_LIBCXX)
+    set(ZPP_HOST_HARNESSES_BUILDABLE TRUE)
+else()
+    set(ZPP_HOST_HARNESSES_BUILDABLE FALSE)
+    message(WARNING
+        "${CMAKE_CXX_COMPILER_ID} ${CMAKE_CXX_COMPILER_VERSION} has no "
+        "<print>, with or without -stdlib=libc++, so the compiled "
+        "harnesses under tests/ cannot be built by this configuration. "
+        "Configuring anyway, because the cross builds do not use them. "
+        "Building the `zpp_tests` target will fail with this reason. "
+        "Install libc++ for this clang, or point CXX at a newer "
+        "compiler.")
+endif()
 
 set(ZPP_HYPERVISOR_INCLUDE "${ZPP_SOURCE_DIR}/hypervisor/include")
 set(ZPP_DIAG_INCLUDE "${ZPP_SOURCE_DIR}/diag/include")
@@ -102,8 +137,29 @@ set(ZPP_HOST_TEST_TIMEOUT_SECONDS 900 CACHE STRING
 # Builds every harness and runs none of them, which is what a check of
 # "does the suite still compile" wants and what CI's host-tests job builds
 # before handing over to ctest.
-add_custom_target(zpp_tests
-    COMMENT "Building every hosted test harness")
+if(ZPP_HOST_HARNESSES_BUILDABLE)
+    add_custom_target(zpp_tests
+        COMMENT "Building every hosted test harness")
+else()
+    # The same target, and it fails. Not absent: a missing target makes
+    # `cmake --build --target zpp_tests` fail with "no rule to make
+    # target", which says nothing about why, and it would make anyone
+    # reading the job think the suite had been removed rather than that
+    # this compiler cannot build it.
+    #
+    # The message says "the C++23 print header" rather than spelling it
+    # in angle brackets, and that is not fussiness: `cmake -E echo` runs
+    # its arguments through a shell, which reads the brackets as a
+    # redirection and turns the explanation into
+    # "/bin/sh: print: No such file or directory".
+    add_custom_target(zpp_tests
+        COMMAND ${CMAKE_COMMAND} -E echo
+            "the hosted harnesses report through std::println, and the C++23 print header is not available with ${CMAKE_CXX_COMPILER_ID} ${CMAKE_CXX_COMPILER_VERSION}, with or without -stdlib=libc++"
+        COMMAND ${CMAKE_COMMAND} -E echo
+            "install libc++ for this clang, or point CXX at a newer compiler, and re-run cmake"
+        COMMAND ${CMAKE_COMMAND} -E false
+        COMMENT "The hosted harnesses cannot be built by this compiler")
+endif()
 
 # Declares one harness: an executable of the same name, a ctest entry that
 # runs it, and a dependency edge from zpp_tests.
@@ -114,6 +170,14 @@ add_custom_target(zpp_tests
 #   TEST_NAME the name ctest reports, when it differs from the target's
 #   DIAG      ZPP_DIAG for this harness, when ZPP_TEST_DIAG will not do
 function(zpp_add_host_test name)
+    # Registers nothing where the compiler cannot build a harness, so
+    # there is no ctest entry that would pass by not running. The loud
+    # part is the `zpp_tests` target above, which fails; this half only
+    # makes sure the failure cannot be mistaken for a pass.
+    if(NOT ZPP_HOST_HARNESSES_BUILDABLE)
+        return()
+    endif()
+
     cmake_parse_arguments(HARNESS
         ""
         "TEST_NAME;DIAG"
@@ -434,7 +498,9 @@ find_program(ZPP_LLVM_MC llvm-mc HINTS "${ZPP_BREW_LLVM_PREFIX}/bin")
 find_program(ZPP_LLVM_OBJDUMP llvm-objdump
     HINTS "${ZPP_BREW_LLVM_PREFIX}/bin")
 
-if(ZPP_LLVM_MC AND ZPP_LLVM_OBJDUMP)
+if(NOT ZPP_HOST_HARNESSES_BUILDABLE)
+    # There is no tests/decoder to give an environment to.
+elseif(ZPP_LLVM_MC AND ZPP_LLVM_OBJDUMP)
     set_tests_properties("tests/decoder" PROPERTIES
         ENVIRONMENT
             "LLVM_MC=${ZPP_LLVM_MC};LLVM_OBJDUMP=${ZPP_LLVM_OBJDUMP}")
@@ -514,8 +580,10 @@ endforeach()
 # way the root CMakeLists.txt does it for each sub-build. This is the whole
 # reason clangd works in this directory: the shims are on the include path
 # ahead of hypervisor/include, and no editor can guess that.
-add_custom_command(TARGET elf_relocate POST_BUILD
-    COMMAND ${CMAKE_COMMAND} -E copy_if_different
-        "${CMAKE_BINARY_DIR}/compile_commands.json"
-        "${CMAKE_CURRENT_SOURCE_DIR}/compile_commands.json"
-    COMMENT "Copying compile_commands.json to tests/")
+if(ZPP_HOST_HARNESSES_BUILDABLE)
+    add_custom_command(TARGET elf_relocate POST_BUILD
+        COMMAND ${CMAKE_COMMAND} -E copy_if_different
+            "${CMAKE_BINARY_DIR}/compile_commands.json"
+            "${CMAKE_CURRENT_SOURCE_DIR}/compile_commands.json"
+        COMMENT "Copying compile_commands.json to tests/")
+endif()

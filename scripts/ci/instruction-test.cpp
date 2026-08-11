@@ -610,7 +610,6 @@ static_assert(*address_of(combine_disp32) ==
 
 int main()
 {
-    std::println(
-        "all instruction decoder static_asserts passed");
+    std::println("all instruction decoder static_asserts passed");
     return 0;
 }
