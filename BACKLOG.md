@@ -8024,3 +8024,50 @@ known way. What this measurement adds is that it is now **the** cost
 rather than one of several: with shadowing on, EPT violations are a third
 of all exits and every one of the 15,966 rebuilds behind them is
 self-inflicted.
+
+### The RFLAGS.IF defect is real and is *not* the boot bug
+
+2026-08-12. The check added for SDM 29.3.1.4 is required and the case
+that found it was written the right way round - from the SDM against the
+code. But the commit that added it claimed it was the boot bug, and the
+first boot with it in says otherwise:
+
+```
+events_requeued          6215
+events_yielded              0
+events_refused_by_state     0     <-- the new check has never fired
+events_discarded            0
+```
+
+**Not one re-queued event has ever met a guest with interrupts
+disabled.** The path it guards is not being taken on this machine, so
+nothing it would have destroyed was being destroyed. Keep the fix - the
+entry it prevents is one the processor refuses, silently, and a machine
+that has not hit it yet is not a machine that cannot - but do not credit
+it with anything.
+
+The claim was made before the measurement, in a commit message, on the
+strength of the defect fitting the symptom. It fits the symptom exactly
+and is still not the cause. **A mechanism that would explain the
+observation is not evidence that it did.**
+
+What the same boot shows, with every event outcome accounted for and
+none lost:
+
+| | |
+|---|---|
+| `0xd1` synthetic timer into the guest | **97.3 /sec, continuous** |
+| `0x40` device interrupt into the guest | **frozen at 3,497** |
+| `0x2f` | frozen at 7 |
+| guest instruction pointers | six idle-loop addresses, unchanged |
+
+So the guest receives about 3,500 device interrupts, stops receiving
+them, and idles for ever with a healthy 97 Hz tick. With `requeued` at
+6,215 and every other outcome zero, **this VMM is not losing them** -
+they stop arriving.
+
+That leaves two readings and nothing measured so far separates them:
+Windows is blocked on an I/O completion the device never raises, or
+Windows has finished as much as it intends to and is idle at something
+that needs input. The display distinguishes them in one glance and no
+counter here does.
