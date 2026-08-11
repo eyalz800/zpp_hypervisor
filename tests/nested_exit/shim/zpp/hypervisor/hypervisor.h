@@ -232,6 +232,21 @@ public:
     std::uint64_t synthetic_msr_last_write_tsc[max_cpus]
                                               [synthetic_msr_capacity]{};
 
+    // What a reflected HLT handed over, and what the TPR shadow did with
+    // a guest hypervisor's vmcs12. Third drift caught by
+    // run-host-tests.sh in as many days: the members arrive with the
+    // diagnostic commits and this shim is written by hand, so the runner
+    // is the only thing that notices.
+    std::uint64_t hlt_reflect_rflags[max_cpus]{};
+    std::uint64_t hlt_reflect_interruptibility[max_cpus]{};
+    std::uint64_t hlt_reflect_activity[max_cpus]{};
+    std::uint64_t hlt_reflect_rip[max_cpus]{};
+    std::uint64_t hlt_reflect_tsc[max_cpus]{};
+    std::uint64_t hlt_reflect_count[max_cpus]{};
+    std::uint64_t tpr_shadow_honoured[max_cpus]{};
+    std::uint64_t tpr_shadow_refused[max_cpus]{};
+    std::uint64_t tpr_shadow_absent[max_cpus]{};
+
     // VMCS shadowing does nothing here: this harness has no processor and
     // no shadow region, so publishing to one is a no-op that keeps the
     // reflection path compiling unchanged.
