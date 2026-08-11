@@ -59,6 +59,19 @@ The audit's finding is at the top of the next section and it reframes every
   including the CR0 footnote that CLAUDE.md records three positions being
   held on in one afternoon, and the duplicate-SIPI guard with the launch
   exemption that cost one processor of eight per boot.
+- `tests/crt/` covers the heap, the string and memory primitives,
+  `scope_exit`, the allocator and containers, `zpp::error`, and the
+  init/fini-array and `__cxa_atexit` ordering CLAUDE.md records being run
+  under Bochs once with a probe that was then deleted.
+- `tests/page_table/` covers the host page table and the walker for the
+  operating system's own, and **found three defects** - see BACKLOG.md's
+  tenth review. The largest is that both walkers compute a large page's
+  base from `page_number()`, which has already divided by 4 KB, so the
+  answer is the true base shifted left by nine. Reachable from the
+  Windows and Linux loaders and dead under UEFI, which is the only loader
+  the rig boots.
+
+Sixteen hosted checks now run in one command, about 8,500 assertions.
 
 Everything else below is still open. The ranked list at the end is the order
 to take it in.
