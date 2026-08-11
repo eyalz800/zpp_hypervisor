@@ -6752,3 +6752,59 @@ Checked and *not* a defect, because it looks like one: `pat()` and
 `large()` sharing bit 7 is correct per SDM 14.12.3 and Tables 5-18 and
 5-20. Only a large page's PAT bit, at 12, has no accessor, and nothing
 sets it.
+
+### What refusing an unmapped address would cost, sketched
+
+Asked for rather than implemented, because the shape of the change is the
+decision and there are fifty call sites.
+
+**The signature.** House style is `std::expected<T, zpp::error>`, so:
+
+    std::expected<std::uint64_t, zpp::error>
+    virtual_to_physical(std::uint64_t value) const;
+
+    std::expected<std::uint64_t, zpp::error>
+    virtual_to_physical(const void * value) const;
+
+on both `page_table` and `os_page_table`, with a new enumerator - one is
+enough, `not_mapped`, since a walk that stops has nothing more to say
+about which level it stopped at that a caller could act on. The pointer
+overload keeps forwarding to the integral one.
+
+**Where the failure comes from.** Four places in each walker: the PML4
+entry, which `page_table::virtual_to_physical` does not read at all
+today, and then the three below it. The test is `present()` on the entry
+before it is followed or its address taken. `os_page_table`'s null
+callback stays what it is - an identity translation is not a walk and
+cannot fail.
+
+**What it buys, and this is the argument for doing it.** The two
+guest-memory accessors are the reason it matters:
+
+    auto physical = this->host_page_table.virtual_to_physical(address);
+    if (!physical) { ... }
+
+reads as a null check and is not one. For an unmapped address the walk
+answers the *page offset*, so the guard passes for any address whose low
+twelve bits are non-zero - which is most of them - and the caller goes on
+to use a physical address that is a page offset. It also runs the other
+way: a page legitimately mapped to physical zero is refused. Both
+disappear the moment the failure is in the type rather than in the value.
+
+**What it costs.** Fifty call sites. Most are in `initialize_*`, where
+the enclosing function already returns `std::expected<void, zpp::error>`
+and the change is `if (auto p = ...; !p) { return std::unexpected(...); }`
+- mechanical. The ones that need thought are the few on the VM-exit path,
+where there is no error to return to: `apply_guest_store` and
+`read_guest_word` already answer with a bool and would answer with the
+same bool for a better reason, and the exit handler's callers of those
+already have a "could not reach guest memory" branch.
+
+**The one that is not mechanical** is `setup_vmcs` and the EPT pointer
+construction, where a failure has nowhere to go but a refused launch.
+That is the right answer - a host CR3 or EPT pointer built from a page
+offset would fail VM entry anyway, and failing at the translation says
+which address was wrong instead of leaving an entry-failure code.
+
+Not started. It wants a decision about whether to do it in one change or
+to add a checked accessor beside the unchecked one and migrate.
