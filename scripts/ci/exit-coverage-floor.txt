@@ -1,0 +1,24 @@
+# The number of VM exit reasons the guest coverage suite must reach.
+#
+# scripts/ci/bochs-exit-coverage.sh fails when a run reaches fewer than
+# this, and says so when a run reaches more. Coverage may go up and may
+# not go down.
+#
+# Why a floor and not an exact count: a run that reaches *more* than this
+# is a run somebody has improved, and failing it would make improving
+# coverage cost a second commit before the first one could be green.
+# Raising it is the second commit, and the message above is the reminder.
+#
+# Why a file and not a constant in the script: raising it is then a diff
+# that says what it raised and by how much, in a file whose whole content
+# is that number. The same argument nested_vmx.h makes for a plain
+# constant over a CMake option - a switch that changes what is graded
+# should appear in the diff.
+#
+# Measured under Bochs 3.0 built --enable-vmx=2, one processor, debug and
+# release both, on 2026-08-11: 22 of the 60 reasons in SDM Vol. 3D
+# Appendix C. The other 38 carry a disposition in the coverage table in
+# uefi_loader/src/guest_tests.cpp saying why, and reaching them is open
+# work rather than a closed question - see that table.
+
+floor=22

@@ -206,11 +206,21 @@ xpass=$(grep -c ' XPASS ' cases.txt || true)
 # So the suite now records a disposition per reason and this grades it:
 #
 #   covered:<case>          a case reaches it. Absent is a REGRESSION.
+#   plan:<what_would_reach_it>
+#                           not reached, and the work that would reach it
+#                           is named. Open work, not a closed question.
 #   unreachable-here:<why>  cannot be produced here, and the run measured
 #                           the thing that makes it so. Observed is a
 #                           CONTRADICTION - the record is wrong.
 #   out-of-scope:<why>      reachable, deliberately not reached.
 #   UNEXPLAINED             nobody has said. Fails the job.
+#
+# `plan:` exists because the other two non-covered dispositions read as
+# closed and are not. "Unreachable in this environment" is a reason to
+# change the environment; "out of scope because this VMM does not request
+# the control" is reachable the moment a test fixture requests it. A
+# disposition that explains is not coverage, and the report below counts
+# the planned ones separately so the remaining work has a number.
 #
 # The last is the durable part. A new reason with no disposition, or one
 # whose disposition was deleted, turns the job red instead of quietly
@@ -224,8 +234,9 @@ grep ' absent .*UNEXPLAINED' cover.txt > unexplained.txt 2>/dev/null \
     || : > unexplained.txt
 grep ' absent covered:' cover.txt > regressed.txt 2>/dev/null \
     || : > regressed.txt
-grep -E ' observed (unreachable-here|out-of-scope):' cover.txt \
+grep -E ' observed (unreachable-here|out-of-scope|plan):' cover.txt \
     > contradicted.txt 2>/dev/null || : > contradicted.txt
+planned=$(grep -c ' absent plan:' cover.txt || true)
 
 {
     echo "VM exit reasons reached by the guest coverage suite"
@@ -235,8 +246,12 @@ grep -E ' observed (unreachable-here|out-of-scope):' cover.txt \
     echo "REACHED"
     grep ' observed ' cover.txt | sed 's/^ZPPCOVER /  /' || true
     echo
+    echo "NOT REACHED - with a plan to reach it"
+    grep ' absent plan:' cover.txt | sed 's/^ZPPCOVER /  /' || true
+    echo
     echo "NOT REACHED - with the recorded reason it was not"
-    grep ' absent ' cover.txt | sed 's/^ZPPCOVER /  /' || true
+    grep ' absent ' cover.txt | grep -v ' absent plan:' \
+        | sed 's/^ZPPCOVER /  /' || true
 } > coverage.txt
 
 echo "=== cases ==="
@@ -248,8 +263,46 @@ echo
 echo "=== summary ==="
 echo "pass=$pass fail=$fail skip=$skip xfail=$xfail xpass=$xpass"
 echo "exit reasons reached: $observed of $total listed"
+echo "exit reasons with a plan to reach them: $planned"
 
 status=0
+
+# The floor. Coverage may go up and may not go down.
+#
+# The disposition gate above catches a reason that loses its *reason*; it
+# says nothing about a reason that loses its *case*, because rewriting
+# `covered:exit.foo` to `unreachable-here:...` satisfies every check here
+# while the coverage number falls. That is the failure mode this exists
+# for, and it is not hypothetical: the list sat at 39 of 60 for as long as
+# it existed precisely because nothing measured the number.
+#
+# Kept in a file rather than in this script so that raising it is a diff
+# that says what it raised - the same argument nested_vmx.h makes for a
+# constant over a CMake option.
+floor_file="$root/scripts/ci/exit-coverage-floor.txt"
+floor=$(sed -n 's/^floor=\([0-9]*\).*/\1/p' "$floor_file" 2>/dev/null)
+
+if [ -z "$floor" ]; then
+    echo >&2
+    echo "FAIL: no floor in $floor_file - coverage cannot regress if" >&2
+    echo "nothing records what it was." >&2
+    status=1
+elif [ "$observed" -lt "$floor" ]; then
+    echo >&2
+    echo "COVERAGE REGRESSED - $observed exit reasons were reached and" >&2
+    echo "the recorded floor is $floor. A case that stopped reaching its" >&2
+    echo "reason is a case that stopped testing anything, and the" >&2
+    echo "individual case can still pass while it happens. Restore it," >&2
+    echo "or lower the floor in a commit that says why:" >&2
+    echo "  $floor_file" >&2
+    status=1
+elif [ "$observed" -gt "$floor" ]; then
+    # Not a failure - but it is the moment the floor is cheapest to
+    # raise, and the only moment anybody is looking.
+    echo
+    echo "COVERAGE ROSE - $observed reached against a floor of $floor."
+    echo "Raise it in $floor_file so the new reasons cannot be lost."
+fi
 
 if [ "$fail" != "0" ]; then
     echo >&2
