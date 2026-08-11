@@ -7201,3 +7201,52 @@ capability it asks for, injects successfully 109 times, clears and sets
 the interrupt shadow tens of thousands of times, and has every entry it
 attempts succeed. It is not being prevented from injecting. It stops
 choosing to.
+
+### The next lead: 324 external interrupts in an entire boot
+
+Counted 2026-08-11 across all eight processors, whole run: 38, 81, 67,
+54, 41, 29, 13, 1 - **324 external-interrupt exits in total.**
+
+This number has been visible in every histogram taken today and was
+explained away twice, first as a start-order artefact and then as
+"Hyper-V's own, correctly reflected". Both are true and neither accounts
+for the magnitude. The guest hypervisor sets external-interrupt exiting -
+its accumulated pin controls are `0x3f`, bit 0 included - so **every**
+device interrupt arriving while a second-level guest runs takes one of
+these exits and is reflected to it. A Windows that has loaded a
+hypervisor, started eight virtual processors and mounted its system
+volume has done a great deal of disk work, and a passed-through NVMe
+under load produces interrupts in the thousands per second, not 324 in a
+whole boot.
+
+So the reframing worth testing next is that **the synthetic timer is a
+symptom and not the disease**. The sequence would be: the root partition
+issues disk work and waits; the completion interrupt never arrives; every
+processor goes idle; the synthetic timer's first expiry posts a message
+that nothing is running to collect; the message-pending flag latches; and
+the timer stops re-arming. That produces every observation in this
+section - including the two-expiry number - without requiring anything in
+the injection path to be wrong, which matters because the injection path
+has now been checked five separate ways and is not wrong.
+
+It also fits the one thing the reference comparison singled out. On the
+control the application processors hold a ~1.92 ms deadline and keep
+counting; under this VMM they disarm. A processor with outstanding I/O
+keeps a short deadline. A processor with nothing outstanding does not.
+
+What to measure, in order:
+
+1. Whether the interrupts exist at all below us. The rig's traced KVM can
+   answer it: `kvm_apic_accept_irq` and the MSI-X injection tracepoints,
+   captured across a boot, say whether the layer underneath ever delivers
+   an NVMe completion. See the trace-kvm skill, and note the FIFO
+   discipline it insists on.
+2. Whether the guest ever programs the device to send them - the MSI-X
+   capability writes are configuration-space accesses and BACKLOG's own
+   channel notes already describe reading them.
+3. What the 324 that *did* arrive were, by vector. Nothing records the
+   vector of an external-interrupt exit today, and it is one field.
+
+The third is the cheapest and should come first: if all 324 are timer or
+IPI vectors and none is a device vector, the disease is named without a
+trace capture.
