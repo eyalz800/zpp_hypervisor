@@ -438,6 +438,28 @@ void hypervisor::on_vm_exit(std::uint64_t cpuid,
         // never lands on this one.
         constexpr std::uint32_t diagnostic_leaf = 0x40000100;
 
+        // "Is this VMM underneath?", and nothing else.
+        //
+        // The diagnostic leaf beside it cannot answer that. It reports a
+        // processor's most recent exit, so every field is dynamic and
+        // every value it can return - including all zeroes, for a
+        // processor that has not exited - is also what a machine this
+        // VMM is *not* underneath would return. A question worth asking
+        // needs an answer that cannot be produced by accident.
+        //
+        // So this one is a constant, and deliberately the same twelve
+        // characters as the vendor at `hypervisor_leaf_first`, because
+        // any tool that renders a hypervisor leaf as text will show it
+        // without being taught to.
+        //
+        // Worth knowing before relying on it: a guest running under a
+        // *second* hypervisor above this one cannot see it. CPUID from
+        // that guest is answered by the hypervisor immediately above,
+        // and only a hypervisor that passes unknown leaves down to the
+        // processor will let this reach it. So a hit proves presence;
+        // a miss proves nothing.
+        constexpr std::uint32_t presence_leaf = 0x40000101;
+
         // Leaf 1, the feature bits, where two of them are cleared
         // and a third is deliberately left alone.
         if (1 == leaf) {
@@ -634,6 +656,15 @@ void hypervisor::on_vm_exit(std::uint64_t cpuid,
                 cpuid_result[1] = 0;
                 cpuid_result[2] = 0;
                 cpuid_result[3] = 0;
+            } else if (presence_leaf == leaf) {
+                // Version, so a later layout can be told from this one
+                // by something that has already found the signature.
+                cpuid_result[0] = 1;
+
+                // "ZppZppZppZpp", the same spelling as the vendor.
+                cpuid_result[1] = 0x5a70705a;
+                cpuid_result[2] = 0x705a7070;
+                cpuid_result[3] = 0x70705a70;
             } else if (diagnostic_leaf == leaf) {
                 // Reports another processor's most recent exit.
                 //
