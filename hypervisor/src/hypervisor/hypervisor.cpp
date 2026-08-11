@@ -10417,6 +10417,93 @@ hypervisor::main(arch::x86_64::context & caller_context)
     return {};
 }
 
+bool hypervisor::event_allowed_on_entry(std::uint64_t event) const
+{
+    // SDM 29.3.1.5, the activity-state and interruptibility-state checks
+    // on VM entry (.references/sdm.txt:202612-202628). Transcribed as a
+    // predicate rather than open-coded at the one call site, because it
+    // is a property of the architecture and the next thing that wants to
+    // inject has to ask the same question.
+    //
+    // Answering "no" is not an error. It means the guest is in a state
+    // the event may not be delivered into *yet* - a processor waiting
+    // for its start-up IPI, or one inside an STI shadow - and the caller
+    // holds the event for a later entry.
+    namespace activity = arch::x86_64::vmx::activity_state;
+
+    constexpr std::uint64_t type_shift = 8;
+    constexpr std::uint64_t type_mask = 7;
+    constexpr std::uint64_t type_external_interrupt = 0;
+    constexpr std::uint64_t type_nmi = 2;
+    constexpr std::uint64_t type_hardware_exception = 3;
+    constexpr std::uint64_t type_other_event = 7;
+    constexpr std::uint64_t vector_mask = 0xff;
+    constexpr std::uint64_t vector_debug = 1;
+    constexpr std::uint64_t vector_machine_check = 18;
+    constexpr std::uint64_t vector_pending_mtf = 0;
+    constexpr std::uint64_t blocking_by_sti_or_mov_ss = 0x3;
+
+    auto type = (event >> type_shift) & type_mask;
+    auto vector = event & vector_mask;
+    auto activity_state = this->vmcs.guest_activity_state();
+
+    switch (activity_state) {
+    case activity::active:
+        // "Active. Any event is allowed."
+        break;
+
+    case activity::hlt:
+        // "HLT. The only events allowed are ... external interrupt or
+        // NMI ... hardware exception and vector 1 or 18 ... other event
+        // and vector 0."
+        if ((type_external_interrupt != type) && (type_nmi != type) &&
+            !((type_hardware_exception == type) &&
+              ((vector_debug == vector) ||
+               (vector_machine_check == vector))) &&
+            !((type_other_event == type) &&
+              (vector_pending_mtf == vector))) {
+            return false;
+        }
+        break;
+
+    case activity::shutdown:
+        // "Shutdown. Only NMIs and machine-check exceptions are
+        // allowed."
+        if ((type_nmi != type) && !((type_hardware_exception == type) &&
+                                    (vector_machine_check == vector))) {
+            return false;
+        }
+        break;
+
+    case activity::wait_for_start_up_ipi:
+        // "Wait-for-SIPI. No events are allowed."
+        return false;
+
+    default:
+        // A state the architecture does not define. Refusing is the safe
+        // answer: the alternative is an entry the processor rejects,
+        // which produces no exit and stops the processor silently.
+        return false;
+    }
+
+    // "Bit 0 (blocking by STI) and bit 1 (blocking by MOV-SS) must both
+    // be 0 if the valid bit ... is 1 and the event type ... has value 0,
+    // indicating external interrupt, or value 2, indicating
+    // non-maskable interrupt."
+    //
+    // Note the type restriction, which is easy to lose: an exception may
+    // be injected into an STI shadow, and only these two may not.
+    if ((type_external_interrupt == type) || (type_nmi == type)) {
+        if (0 != (this->vmcs.read(arch::x86_64::vmx::vmcs::field::
+                                      guest_interruptibility_state) &
+                  blocking_by_sti_or_mov_ss)) {
+            return false;
+        }
+    }
+
+    return true;
+}
+
 void hypervisor::resume_guest(arch::x86_64::context & context,
                               arch::x86_64::vmx::exit_reason full_reason,
                               bool advance_rip)
@@ -10549,6 +10636,52 @@ void hypervisor::resume_guest(arch::x86_64::context & context,
                     this->guest_current_vmcs[cpu])) {
             this->pending_event[cpu] = 0;
             this->events_discarded[cpu] = this->events_discarded[cpu] + 1;
+            // Defect 3, which neither of the two named on the switch
+            // covered and which is what the first re-run of this found:
+            // **the entry state has to allow the event at all.**
+            //
+            // A re-queue writes the entry-interruption field after the
+            // rest of the entry has been decided, so unlike an injection
+            // the handler chose, nothing above it has checked the state
+            // it is landing in. SDM 29.3.1.5 (`sdm.txt:202612-202621`)
+            // makes three of those a consistency check, and a failed
+            // check is a VM entry failure - which produces **no exit at
+            // all** and is exactly as silent as the destruction this
+            // path exists to prevent.
+            //
+            // - "Wait-for-SIPI. No events are allowed." This is the one
+            //   that matters: an application processor waiting for its
+            //   start-up IPI is precisely a processor in that state, and
+            //   re-queueing into it fails every entry. Turning this path
+            //   on without the check reproduced the original regression
+            //   exactly - one processor of eight reaching `guest vmxon`,
+            //   which is the same verdict `git bisect` recorded against
+            //   `02c747e` over seven boots.
+            // - "Shutdown. Only NMIs and machine-check exceptions are
+            //   allowed."
+            // - "HLT. The only events allowed are ... external interrupt
+            //   or NMI ... hardware exception and vector 1 or 18 ...
+            //   other event and vector 0."
+            //
+            // And SDM 29.3.1.5 again (`sdm.txt:202627`): blocking by STI
+            // and by MOV SS must both be 0 when the injected event is an
+            // external interrupt or an NMI.
+            //
+            // Held rather than forced in every case. Clearing the
+            // interruptibility bits would also satisfy the processor -
+            // SDM 27.3.1.5 (`sdm.txt:203115`) says an injecting entry
+            // leaves no such blocking regardless, and KVM's
+            // `vmx_clear_interrupt_shadow` does exactly that - but that
+            // is guest state this VMM did not write, and holding costs
+            // only a later entry. An STI shadow lasts one instruction.
+            //
+            // Held, not dropped: the state that refuses the event is the
+            // state the guest is in now, and the reason to keep the
+            // event is that the guest will leave it.
+        } else if (this->pending_event[cpu] &&
+                   !event_allowed_on_entry(this->pending_event[cpu])) {
+            this->events_refused_by_state[cpu] =
+                this->events_refused_by_state[cpu] + 1;
         } else if (auto event = this->pending_event[cpu]; 0 != event) {
             constexpr std::uint64_t error_valid = 1ull << 11;
             constexpr std::uint64_t type_mask = 7ull << 8;

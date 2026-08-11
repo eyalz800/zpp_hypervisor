@@ -2590,6 +2590,18 @@ private:
      * second-level exit reflected into the guest hypervisor, which has
      * nothing left to do below and must not fall through the switch.
      */
+    /**
+     * Whether an event may be delivered by the next VM entry, given the
+     * guest activity state and interruptibility state that entry will
+     * carry. SDM 29.3.1.5.
+     *
+     * Answering false is not an error. It means the guest is in a state
+     * the event may not be delivered into *yet* - a processor waiting
+     * for its start-up IPI, or one inside an STI shadow - and the caller
+     * holds the event for a later entry rather than dropping it.
+     */
+    bool event_allowed_on_entry(std::uint64_t event) const;
+
     [[noreturn]] void resume_guest(arch::x86_64::context & context,
                                    arch::x86_64::vmx::exit_reason reason,
                                    bool advance_rip);
@@ -4179,6 +4191,7 @@ private:
      * @{
      */
     std::uint64_t events_yielded[max_cpus]{};
+    std::uint64_t events_refused_by_state[max_cpus]{};
     std::uint64_t events_discarded[max_cpus]{};
     /**
      * @}
