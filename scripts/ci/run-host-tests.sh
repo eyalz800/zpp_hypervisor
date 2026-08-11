@@ -74,6 +74,7 @@ run() {
 # hypervisor.cpp by name when it does.
 for harness in \
     elf_relocate \
+    local_apic \
     decoder \
     nested_exit \
     watched_page \
