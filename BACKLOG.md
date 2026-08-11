@@ -8071,3 +8071,69 @@ Windows is blocked on an I/O completion the device never raises, or
 Windows has finished as much as it intends to and is idle at something
 that needs input. The display distinguishes them in one glance and no
 counter here does.
+
+## The device's MSI-X vectors are never programmed under us
+
+2026-08-12. A differential KVM trace, one processor, two minutes each,
+same launcher and same installation, the only variable being whether the
+hypervisor launches (`ZPP_CHAINLOAD_ONLY`).
+
+| `kvm_msi_set_irq` | with us | without us |
+|---|---|---|
+| total | 1,152 | 29,266 |
+| vector 80 | - | 21,615 |
+| vector 81 | - | 6,079 |
+| vectors 96, 97, 145 | - | ~1,065 |
+| **vector 0** | **1,152, all of them** | 278 |
+
+**Without us the NVMe raises interrupts on real vectors. With us every
+MSI fires with vector 0**, which is not a deliverable vector - it is what
+an MSI-X table entry reads when it has never been programmed.
+
+So the disk signals and nothing is routed. Windows issues the read, the
+completion interrupt is raised into an empty routing entry, and it waits
+for ever. That is the whole of "before the spinner": the guest reaches
+the point where it drives the disk itself and gets no completions.
+
+It also explains, exactly, every guest-side number that has been
+collected all day and could not be reconciled:
+
+- `l2_external_vector` recording **only** `0xef`, the local APIC timer,
+  and no device vector in any boot;
+- vector `0x40` injected 3,579 times and then frozen for ever - the
+  interrupts Hyper-V forwarded while the routing still worked;
+- the second-level guest sitting in six idle-loop addresses with a
+  perfectly healthy 97 Hz tick.
+
+None of those were the timer, the re-queue, the clock rate, priority, or
+cost. Each was a symptom of a device that cannot deliver.
+
+### What has to be wrong
+
+Windows programs a passed-through device's MSI-X table by writing MMIO in
+the device's own BAR. QEMU traps those writes to build the interrupt
+routing; that is how the vectors above reach `kvm_msi_set_irq` in the
+control run. Under this VMM the writes do not produce that effect, so the
+routing stays empty.
+
+Not yet established, and the next thing to find out: whether the guest's
+writes reach the table at all, whether they reach it but land at an
+address QEMU is not watching, or whether they trap to this VMM and are
+completed in a way that never reaches QEMU's emulation. The extended page
+tables this VMM builds cover the whole guest-physical space, and an MMIO
+page that QEMU needs to *see* written is exactly the kind of page a
+faithful identity map gets wrong.
+
+### On method
+
+Four hypotheses died before this one, each of which fitted the symptom:
+the cost of nested exits, a stuck task-priority register, the guest's
+clock running slow, and an RFLAGS.IF defect that was real, was fixed, and
+turned out never to fire on this machine. Every one was argued from the
+guest side, where the evidence is incomplete by construction -
+`l2_external_vector` can only see interrupts that arrive while the
+second-level guest is running.
+
+**The control run settled it in one comparison.** A measurement of the
+machine with the variable removed was worth more than four measurements
+of the machine with it in.
