@@ -220,6 +220,18 @@ public:
     std::uint64_t stimer_arm_count[max_cpus]{};
     bool reference_read_pending[max_cpus]{};
 
+    // The synthetic-MSR histogram nested_entry.cpp writes into. Added
+    // after a rebase onto a develop that had grown it - the second time
+    // run-host-tests.sh has caught this shim drifting, which is the
+    // whole argument for the runner existing.
+    static constexpr std::size_t synthetic_msr_capacity = 256;
+    std::uint64_t synthetic_msr_reads[max_cpus][synthetic_msr_capacity]{};
+    std::uint64_t synthetic_msr_writes[max_cpus][synthetic_msr_capacity]{};
+    std::uint64_t synthetic_msr_last_value[max_cpus]
+                                          [synthetic_msr_capacity]{};
+    std::uint64_t synthetic_msr_last_write_tsc[max_cpus]
+                                              [synthetic_msr_capacity]{};
+
     // VMCS shadowing does nothing here: this harness has no processor and
     // no shadow region, so publishing to one is a no-op that keeps the
     // reflection path compiling unchanged.
