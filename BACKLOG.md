@@ -7966,3 +7966,61 @@ Neither candidate is a move - both are new cases in the guest suite, with
 the host harness kept until the guest one asserts as much. Recorded here
 rather than done, because each needs an answer to "what does the guest
 observe", and that answer is a change to what this VMM tells its guest.
+
+## VMCS shadowing on: the measurement, and what became dominant instead
+
+2026-08-12, one processor, Hyper-V booting Windows on the rig.
+
+`nested_vmx::shadow_vmcs_enabled` had been left `false` after a
+one-variable bare-metal boot, with its own comment still reading "On".
+Turned back on:
+
+| | off | on |
+|---|---|---|
+| VMREAD | **15,522,446** | **6** |
+| VMWRITE | ~765,000 | **411** |
+| second-level entries per second | ~890 | **~1,470** |
+
+The VMREAD figures reproduce the original measurement in the comment
+exactly - "six and 411" - so the mechanism works as designed, and a 65%
+gain on the second-level guest's rate is on top of a boot that also
+stopped spending 18.3% of its exits reading `exit_reason` and another
+18.3% reading `vm_exit_instruction_length`, one apiece for every exit
+reflected to it.
+
+**Turning it on immediately found a gap it had been hiding.**
+`initialize_vmcs_shadowing` resolves the shadow region's physical address
+through `page_table::virtual_to_physical`, and only on the path taken
+when shadowing is on - so with it off the `tests/nested_vmx` link
+succeeded without the walker. A switch never exercised in one position
+hides whatever only that position needs.
+
+### The new dominant cost, and the number that names it
+
+```
+ept-violation   550,517  33.9%      shadow-builds  15,966
+vmresume        496,534  30.6%      invept         15,966
+rdmsr           271,256  16.7%      leaves-filled 458,295
+wrmsr           102,254   6.3%      cache-hits    937,203
+vmcall           88,669   5.5%
+vmptrld          56,376   3.5%
+```
+
+**`shadow-builds` equals `invept` exactly, 15,966 either way.** Every
+INVEPT the guest hypervisor executes discards the whole shadow, and the
+550,517 extended-page-table violations above are largely the cost of
+refilling what was just thrown away - 458,295 leaves.
+
+That is the item already in this file as "Every INVEPT throws the whole
+shadow away - TRIED, REVERTED", and the reverted attempt's own numbers
+said the same thing from the other side: refreshing instead of discarding
+took leaves-filled per second-level exit from 4.5 to 0.01 and rebuilds
+per boot from 15,863 to 2 - and then Hyper-V executed VMXOFF and the
+machine reset, because a bulk refresh installs entries whose right answer
+depends on state at the time of access.
+
+So the direction is right and the previous implementation was wrong in a
+known way. What this measurement adds is that it is now **the** cost
+rather than one of several: with shadowing on, EPT violations are a third
+of all exits and every one of the 15,966 rebuilds behind them is
+self-inflicted.
