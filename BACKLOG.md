@@ -6561,3 +6561,111 @@ overwritten by the time anything can be read. The instrument to build is
 one that records the first N second-level exits after a chosen entry
 count and then freezes, so the moment the boot thread blocks is captured
 instead of the millions of ticks that follow it.
+
+## Ninth review: what the guest suite measured, and three things it found
+
+The exit handler, the extended page tables and the store emulation are
+now asked their questions from inside the guest and graded against the
+SDM - `uefi_loader/include/zpp/guest_tests.h`, run by
+`scripts/ci/bochs-exit-coverage.sh`. Everything below was measured on
+Bochs 3.0 with emulated VT-x, one processor, debug and release, rather
+than read out of the source.
+
+Verdict: 87 cases pass, 3 skip, 1 is a known divergence, and **18 of the
+60 exit reasons in SDM Appendix C are reached**. The 42 that are not are
+printed in full on every run, because the list of what is not covered is
+the half that decays silently.
+
+### GETSEC has no case, and CPUID concealment does not close it
+
+`scripts/ci/check-exit-handler.sh` states CLAUDE.md's rule - nothing a
+guest can execute may reach `default:` - rather than its instances, and
+found the one instruction it does not hold for.
+
+SDM 28.1.2 (`.references/sdm.txt:200699`) lists GETSEC among the
+instructions that "cause VM exits when they are executed in VMX non-root
+operation", unconditionally. There is no case for exit reason 11, so it
+reaches `default:`, and `on_unhandled_exit` stops the processor.
+
+What stands between a guest and stopping a processor with one
+instruction is CR4.SMXE: GETSEC raises #UD with it clear. This VMM
+conceals safer mode extensions by clearing CPUID leaf 1 ECX[6] - see the
+`cpuid` case, which does it deliberately and says why. But **CR4.SMXE is
+not in the CR4 guest/host mask.** Only VMXE is. So on a processor that
+has SMX, a guest can set the bit against a CPUID that says the feature
+does not exist, and then execute GETSEC.
+
+Read rather than seen: no guest here has done it, and Windows has no
+reason to. It is recorded because the argument that it cannot happen is
+the same argument BACKLOG item 1 records failing for VMXE - concealing a
+feature in CPUID is not the same as making it unreachable, and a guest
+that trusts CR4 over CPUID is exactly the case that rule exists for.
+
+The fix is one case that injects #UD, beside the thirteen VMX
+instructions that already do. It is not made here because the check that
+found it is a reporting instrument, and a defect fixed in the same
+change that found it leaves no record of the finding.
+
+Closing it: `check-exit-handler.sh` names GETSEC in a `known_gaps` list
+and fails when a gap gains a case, so adding the case turns the check red
+until the entry is deleted.
+
+### VMFUNC never reaches this VMM, so its case is dead code
+
+Measured, not deduced: the guest suite executes VMFUNC and reads the exit
+ring afterwards, and the count does not move. It takes #UD directly.
+
+SDM 28.5.7.2 (`.references/sdm.txt:201627`): "The VMFUNC instruction
+causes an invalid-opcode exception (#UD) if the 'enable VM functions'
+VM-execution controls is 0 ... Otherwise, the instruction causes a VM
+exit if the bit at position EAX is 0 in the VM-function controls".
+`setup_vmcs` never requests that control, so exit reason 59 is
+unreachable and the `vmfunc` label in the VMX-instruction case is dead.
+
+Not a defect and not to be removed. The guest gets the same answer either
+way - #UD - and the case becomes live the moment the control is enabled,
+which is the cheap direction to be wrong in. Recorded so the next reader
+does not conclude from the label that the exit happens.
+
+The same reasoning is worth applying to the rest of that case: the suite
+measured VMREAD and VMWRITE *do* exit, since VMCS shadowing is off, so
+those two labels are live.
+
+### CR4.VMXE is accepted where KVM and hardware fault
+
+A guest told there is no VMX that executes `mov cr4, <cr4 | VMXE>` gets
+exit reason 28, the write is accepted, and the bit reads back clear
+through the read shadow. Nothing faults.
+
+KVM refuses the write. `__kvm_is_valid_cr4` rejects a CR4 carrying any
+bit in `cr4_guest_rsvd_bits`, which is derived from the guest's own CPUID
+(`.references/kvm/x86.c:1317-1326`), and `kvm_set_cr4` returns failure
+(`:1381`), which its caller turns into #GP. So does a real processor
+without VMX, where the bit is reserved - SDM Vol. 3A 2.5
+(`.references/sdm.txt:153994`) defines it only as the enable for a
+feature that is not there.
+
+This is the *less* harmful of the two wrong answers available. A guest
+reading its own write back as refused learns something true; a guest that
+faults on a bit it was never offered learns the same thing louder. But it
+is still a write neither hardware nor the reference implementation would
+have allowed, and the pair this VMM is careful about - "no VMX in CPUID,
+VMXE in CR4" - is careful in one direction only.
+
+Carried as an expected failure in the guest suite
+(`cr4.vmxe_write_faults`) with the citation attached, so it is a known
+divergence rather than an untested one. Fixing it turns the case into an
+unexpected pass, which fails the run until the entry is promoted.
+
+### And one in the readers rather than the hypervisor
+
+`scripts/rig-dump-state.py` queues the `vm_entry_failure` record as **6
+words. It has 18.** Harmless today only because nothing reads past the
+sixth - which is exactly the state the exit-reason stride in `ecc4b70`
+was in before somebody looked at a second processor.
+
+Recorded as an expected failure in `tests/python_layout`, not asserted at
+6: writing the wrong number into a test makes a second copy of the bug,
+and skipping says nothing. The decorator comes off when the script is
+fixed. `REGRESSION-COVERAGE.md` lists fourteen more constants of the same
+kind across `scripts/`, three of which are wrong or degraded today.
