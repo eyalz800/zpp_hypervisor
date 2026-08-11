@@ -1,15 +1,36 @@
-// Tests for the nested EPT walker and the permission composition, as
-// static_asserts - so the compile is the test run, exactly as with
-// decoder-test.cpp beside it.
+// Tests for the nested EPT walker, the permission composition, the shadow
+// table pool and the two places a guest hypervisor's own extended page
+// tables are judged.
 //
-// Hosted rather than freestanding for the same reason: walk_ept is pure.
-// It reaches memory only through the callable it is handed, so a table can
-// be an array in this file and no target is needed to check the
-// architectural rules.
+// Two tiers, and which tier a rule lands in is decided by the code under
+// test rather than by preference:
+//
+//  1. Everything in nested_ept.h is pure - walk_ept reaches memory only
+//     through the callable it is handed, and compose_ept touches none at
+//     all - so those rules are `static_assert`s and the compile *is* the
+//     run, exactly as with decoder-test.cpp beside it.
+//
+//  2. The shadow table pool, the shadow walk, the second-level fault
+//     decision and the EPT-pointer check are members of `hypervisor`,
+//     writing into arrays that are megabytes of that class. They cannot be
+//     constant-evaluated, so they run from `main` and report a count.
+//     Nothing about them is modelled: check-nested-ept.sh cuts the real
+//     bodies out of nested_ept.cpp and nested_entry.cpp by name and by
+//     anchor, and this file supplies a stand-in `hypervisor` carrying only
+//     the members they touch - the same arrangement tests/watched_page
+//     uses, and for the same reason. A renamed function or a moved
+//     fragment fails the extraction rather than silently testing nothing.
 //
 // This is the only verification of any of nested VMX that does not need
 // hardware, which is why it is worth having: every rule below is one this
 // VMM would otherwise only have read.
+//
+// Every SDM citation here was looked up in `.references/sdm.txt` and
+// carries the line it was read at, so the next person can check it in one
+// command rather than trusting a section number. Note the table numbering:
+// this revision calls the EPT-violation exit qualification **Table 30-7**
+// (sdm.txt:203865). Older revisions number it 28-7; if a citation here
+// does not land, the revision moved, not the rule.
 #include "zpp/arch/x86_64/vmx/nested_ept.h"
 #include <array>
 #include <cstdio>
@@ -17,6 +38,14 @@
 
 using namespace zpp::arch::x86_64;
 using namespace zpp::arch::x86_64::vmx;
+
+// The sixteen permission sets, indexed by the four bits in the order
+// `ept_permissions` takes them: read, write, execute, execute_user.
+constexpr ept_permissions permissions_number(int i)
+{
+    return ept_permissions(
+        0 != (i & 1), 0 != (i & 2), 0 != (i & 4), 0 != (i & 8));
+}
 
 // ---------------------------------------------------------------------------
 // ept_permissions: intersection and normalisation.
@@ -122,6 +151,279 @@ constexpr bool always_legal()
 }
 
 static_assert(always_legal());
+
+// ---------------------------------------------------------------------------
+// Normalisation, exhaustively, against the two SDM rules spelled out one
+// at a time rather than as a property.
+//
+// SDM 31.3.3.1 (sdm.txt:205511) lists the misconfiguration conditions:
+// "Bit 0 of the entry is clear (indicating that data reads are not
+// allowed) and any of the following hold: Bit 1 is set", then
+// (sdm.txt:205515) "The processor does not support execute-only
+// translations and either of the following hold: Bit 2 is set ... the
+// 'mode-based execute control for EPT' VM-execution control is 1 and bit
+// 10 is set".
+//
+// Written as sixteen cells so a failure names the rule it broke, which the
+// property-shaped checks above cannot: `always_legal()` failing says only
+// that some cell is wrong.
+// ---------------------------------------------------------------------------
+
+// Rule one: read clear implies write clear, whatever the processor
+// supports. There is no capability that makes write-without-read legal.
+constexpr bool write_needs_read_everywhere()
+{
+    for (int i = 0; i < 16; ++i) {
+        for (auto execute_only : {false, true}) {
+            auto after = permissions_number(i).normalised(execute_only);
+            if (!after.read() && after.write()) {
+                return false;
+            }
+        }
+    }
+    return true;
+}
+
+static_assert(write_needs_read_everywhere());
+
+// Rule two: read clear implies both execute bits clear *unless*
+// execute-only translations are supported, which SDM 31.3.3.1 makes
+// IA32_VMX_EPT_VPID_CAP bit 0 (sdm.txt:223498, "If bit 0 is read as 1, the
+// processor supports execute-only translations by EPT").
+constexpr bool execute_needs_read_without_the_capability()
+{
+    for (int i = 0; i < 16; ++i) {
+        auto after = permissions_number(i).normalised(false);
+        if (!after.read() && (after.execute() || after.execute_user())) {
+            return false;
+        }
+    }
+    return true;
+}
+
+static_assert(execute_needs_read_without_the_capability());
+
+// And with the capability, execute-without-read is kept exactly as it was
+// - both halves of it, since bit 10 is named in the same sentence as bit
+// 2. Only the write goes.
+constexpr bool execute_only_is_kept_with_the_capability()
+{
+    for (int i = 0; i < 16; ++i) {
+        auto before = permissions_number(i);
+        auto after = before.normalised(true);
+
+        if (before.read()) {
+            continue;
+        }
+
+        if ((after.execute() != before.execute()) ||
+            (after.execute_user() != before.execute_user())) {
+            return false;
+        }
+    }
+    return true;
+}
+
+static_assert(execute_only_is_kept_with_the_capability());
+
+// Normalisation is idempotent. Worth pinning because `walk_ept` uses "the
+// normalised form differs from what is there" as its misconfiguration
+// test, which is only the same test spelled once if applying it twice
+// changes nothing.
+constexpr bool normalisation_is_idempotent()
+{
+    for (int i = 0; i < 16; ++i) {
+        for (auto execute_only : {false, true}) {
+            auto once = permissions_number(i).normalised(execute_only);
+            if (once.normalised(execute_only) != once) {
+                return false;
+            }
+        }
+    }
+    return true;
+}
+
+static_assert(normalisation_is_idempotent());
+
+// ---------------------------------------------------------------------------
+// Composition across the two levels, all sixteen by sixteen.
+//
+// The permission bits of a translation are a logical-AND across every
+// entry used - SDM Table 30-7 bit 3 (sdm.txt:203870), "The logical-AND of
+// bit 0 in the EPT paging-structure entries used to translate the
+// guest-physical address" - and a shadow's entries stand for both levels
+// at once. So the composition has to be the intersection and nothing else.
+//
+// Each rule below is separate, so a failure names which one broke. The
+// four together are the whole of what `compose_ept` may do with
+// permissions: intersect, normalise, never widen, and never invent a
+// mapping.
+// ---------------------------------------------------------------------------
+
+constexpr ept_walk_result mapped_with(ept_permissions permissions,
+                                      std::uint64_t shift = 12)
+{
+    ept_walk_result result;
+    result.status = ept_walk_status::mapped;
+    result.page_shift = shift;
+    result.permissions = permissions;
+    result.type = memory_type::write_back;
+    return result;
+}
+
+// Rule one: where anything is composed at all, it is exactly the
+// intersection of the two levels with the processor's own rules applied
+// after - not before, which would let a level's illegal-looking half
+// survive into the shadow.
+//
+// The wanted value is built out of the index bits rather than by calling
+// `intersected_with`, deliberately. Composing the answer with the same
+// helper the implementation composes it with makes the check agree with
+// whatever that helper does, which is exactly the shape of a test that
+// passes while the code is wrong - and it was, until an experiment
+// replaced the intersection with a union and this cell stayed green.
+constexpr bool composition_is_the_normalised_intersection()
+{
+    for (int i = 0; i < 16; ++i) {
+        for (int j = 0; j < 16; ++j) {
+            auto guest = permissions_number(i);
+            auto host = permissions_number(j);
+
+            for (auto execute_only : {false, true}) {
+                auto composed = compose_ept(mapped_with(guest),
+                                            mapped_with(host, 21),
+                                            execute_only);
+
+                auto wanted =
+                    permissions_number(i & j).normalised(execute_only);
+
+                if (!wanted.present()) {
+                    // Nothing left to install. Never `composed`, and
+                    // never reflected either - see the outcome rule
+                    // below.
+                    if (ept_compose_outcome::composed ==
+                        composed.outcome) {
+                        return false;
+                    }
+                    continue;
+                }
+
+                if (ept_compose_outcome::composed != composed.outcome) {
+                    return false;
+                }
+
+                if (composed.permissions != wanted) {
+                    return false;
+                }
+            }
+        }
+    }
+    return true;
+}
+
+static_assert(composition_is_the_normalised_intersection());
+
+// Rule two: the intersection is symmetric, so composing the two levels the
+// other way round produces the same permissions. Not a tautology about
+// `intersected_with` - it is the check that `compose_ept` has not started
+// preferring one side's bits, which is exactly what "take the leaf's
+// permissions" would look like.
+constexpr bool composition_is_symmetric_in_permissions()
+{
+    for (int i = 0; i < 16; ++i) {
+        for (int j = 0; j < 16; ++j) {
+            for (auto execute_only : {false, true}) {
+                auto forward =
+                    compose_ept(mapped_with(permissions_number(i)),
+                                mapped_with(permissions_number(j), 21),
+                                execute_only);
+                auto backward =
+                    compose_ept(mapped_with(permissions_number(j)),
+                                mapped_with(permissions_number(i), 21),
+                                execute_only);
+
+                if (forward.outcome != backward.outcome) {
+                    return false;
+                }
+
+                if (forward.permissions != backward.permissions) {
+                    return false;
+                }
+            }
+        }
+    }
+    return true;
+}
+
+static_assert(composition_is_symmetric_in_permissions());
+
+// Rule three: composition never grants what a level withheld. Stated per
+// bit and over the whole square including the empty sets, which the
+// earlier `composition_never_widens` skips - it starts at 1 because it is
+// about the composed cases, and this one is about all of them.
+constexpr bool composition_grants_nothing_new()
+{
+    for (int i = 0; i < 16; ++i) {
+        for (int j = 0; j < 16; ++j) {
+            auto guest = permissions_number(i);
+            auto host = permissions_number(j);
+
+            for (auto execute_only : {false, true}) {
+                auto got = compose_ept(mapped_with(guest),
+                                       mapped_with(host, 21),
+                                       execute_only)
+                               .permissions;
+
+                if (got.read() && !(guest.read() && host.read())) {
+                    return false;
+                }
+                if (got.write() && !(guest.write() && host.write())) {
+                    return false;
+                }
+                if (got.execute() &&
+                    !(guest.execute() && host.execute())) {
+                    return false;
+                }
+                if (got.execute_user() &&
+                    !(guest.execute_user() && host.execute_user())) {
+                    return false;
+                }
+            }
+        }
+    }
+    return true;
+}
+
+static_assert(composition_grants_nothing_new());
+
+// Rule four: an entry either level left absent is never composed into a
+// present one, and an empty overlap is never reflected. Both walks
+// succeeded, so saying the guest hypervisor's tables refused the access
+// would be false - see `compose_ept`'s own note.
+constexpr bool an_empty_side_is_never_reflected()
+{
+    for (int i = 0; i < 16; ++i) {
+        for (int j = 0; j < 16; ++j) {
+            for (auto execute_only : {false, true}) {
+                auto composed =
+                    compose_ept(mapped_with(permissions_number(i)),
+                                mapped_with(permissions_number(j), 21),
+                                execute_only);
+
+                if (ept_compose_outcome::composed == composed.outcome) {
+                    continue;
+                }
+
+                if (ept_compose_outcome::host_denied != composed.outcome) {
+                    return false;
+                }
+            }
+        }
+    }
+    return true;
+}
+
+static_assert(an_empty_side_is_never_reflected());
 
 // ---------------------------------------------------------------------------
 // A tiny extended page table to walk, built in this file.
@@ -393,6 +695,80 @@ constexpr tree absent_with_reserved_bit = [] {
 
 static_assert(walk(absent_with_reserved_bit).status ==
               ept_walk_status::not_present);
+
+// A permission set the walker rejects is exactly one normalisation would
+// have changed, over all sixteen and both capability settings. The two are
+// the same rule, and `ept_walk::misconfigured` spelling it as "the
+// normalised form differs from what is there" is only correct while they
+// agree.
+constexpr bool normalised_agrees_with_misconfigured()
+{
+    for (int i = 1; i < 16; ++i) {
+        for (auto execute_only : {false, true}) {
+            auto before = permissions_number(i);
+
+            epte entry;
+            before.apply_to(entry);
+            entry.page_number(1);
+            entry.type(memory_type::write_back);
+
+            auto rejected = ept_walk::misconfigured(
+                entry, 0, true, physical_address_bits, execute_only);
+
+            if (rejected != (before != before.normalised(execute_only))) {
+                return false;
+            }
+        }
+    }
+    return true;
+}
+
+static_assert(normalised_agrees_with_misconfigured());
+
+// The same square driven through the whole walker rather than through the
+// one predicate: a leaf carrying each permission set, and the walk's
+// verdict. `mapped` exactly where the set is legal and present,
+// `not_present` where it is empty, `misconfigured` otherwise - and the
+// permissions reported are the set itself, since every entry above the
+// leaf grants everything.
+constexpr bool the_walk_agrees_with_the_rules()
+{
+    for (int i = 0; i < 16; ++i) {
+        for (auto execute_only : {false, true}) {
+            auto wanted = permissions_number(i);
+
+            tree of;
+            wanted.apply_to(of.pte);
+
+            auto result = walk(of, translated, execute_only);
+
+            if (!wanted.present()) {
+                if (ept_walk_status::not_present != result.status) {
+                    return false;
+                }
+                continue;
+            }
+
+            if (wanted != wanted.normalised(execute_only)) {
+                if (ept_walk_status::misconfigured != result.status) {
+                    return false;
+                }
+                continue;
+            }
+
+            if (ept_walk_status::mapped != result.status) {
+                return false;
+            }
+
+            if (result.permissions != wanted) {
+                return false;
+            }
+        }
+    }
+    return true;
+}
+
+static_assert(the_walk_agrees_with_the_rules());
 
 // ---------------------------------------------------------------------------
 // compose_ept: who owns the fault, and what gets installed.
@@ -672,8 +1048,1342 @@ static_assert(0 ==
               reflected_ept_violation_qualification(
                   0, failed_with(ept_walk_status::not_present), true));
 
+// ---------------------------------------------------------------------------
+// The same qualification, exhaustively: every access type against every
+// permission set, both with and without mode-based execute control.
+//
+// SDM Table 30-7 (sdm.txt:203865) row by row, and each row below names the
+// line it was read at:
+//
+//  bits 2:0 - "Set if the access causing the EPT violation was a data
+//             read / a data write / an instruction fetch"
+//             (sdm.txt:203867-203869). Hardware's, and kept.
+//  bits 5:3 - "The logical-AND of bit 0 / bit 1 / bit 2 in the EPT
+//             paging-structure entries used" (sdm.txt:203870-203878).
+//             Synthesised from the walk of the guest hypervisor's tables,
+//             because the entries hardware used were the shadow's.
+//  bit 6    - "If the 'mode-based execute control' VM-execution control is
+//             0, the value of this bit is undefined" (sdm.txt:203879).
+// ---------------------------------------------------------------------------
+
+// The three access bits, kept exactly as hardware reported them and never
+// derived from anything else. Driven with every permission set so that a
+// synthesis reaching into bits 2:0 shows up here rather than as a guest
+// hypervisor being told the wrong access faulted.
+constexpr bool the_access_bits_are_hardware_s()
+{
+    for (int access = 0; access < 8; ++access) {
+        for (int i = 0; i < 16; ++i) {
+            for (auto mode_based : {false, true}) {
+                auto got = reflected_ept_violation_qualification(
+                    std::uint64_t(access),
+                    mapped_at(0, 12, permissions_number(i)),
+                    mode_based);
+
+                if (std::uint64_t(access) != (got & 0x7)) {
+                    return false;
+                }
+            }
+        }
+    }
+    return true;
+}
+
+static_assert(the_access_bits_are_hardware_s());
+
+// Bits 5:3 are the guest hypervisor's own permissions, bit for bit, and
+// bit 6 is its user-execute permission only where mode-based execute
+// control is on. Driven with an incoming qualification of all ones, so a
+// bit that is forwarded rather than synthesised reads as set and is
+// caught.
+constexpr bool the_permission_bits_are_the_guest_s()
+{
+    for (int i = 0; i < 16; ++i) {
+        auto permissions = permissions_number(i);
+
+        for (auto mode_based : {false, true}) {
+            auto got = reflected_ept_violation_qualification(
+                every_bit, mapped_at(0, 12, permissions), mode_based);
+
+            if (permissions.read() != (0 != (got & (1ull << 3)))) {
+                return false;
+            }
+            if (permissions.write() != (0 != (got & (1ull << 4)))) {
+                return false;
+            }
+            if (permissions.execute() != (0 != (got & (1ull << 5)))) {
+                return false;
+            }
+
+            auto wanted_user = mode_based && permissions.execute_user();
+            if (wanted_user != (0 != (got & (1ull << 6)))) {
+                return false;
+            }
+        }
+    }
+    return true;
+}
+
+static_assert(the_permission_bits_are_the_guest_s());
+
+// Nothing outside the bits named above ever survives, whatever hardware
+// reported. Stated as a mask rather than bit by bit so that a bit added to
+// the "keep" set has to be added here too - which is the point, since
+// every bit not listed is one whose meaning depends on a capability this
+// VMM does not report.
+constexpr std::uint64_t carried_bits =
+    (0x7ull << 0) | (1ull << 3) | (1ull << 4) | (1ull << 5) | (1ull << 6) |
+    (1ull << 7) | (1ull << 8) | (1ull << 12) | (1ull << 13) | (1ull << 16);
+
+constexpr bool nothing_outside_the_carried_bits()
+{
+    for (int i = 0; i < 16; ++i) {
+        for (auto mode_based : {false, true}) {
+            auto got = reflected_ept_violation_qualification(
+                every_bit,
+                mapped_at(0, 12, permissions_number(i)),
+                mode_based);
+
+            if (0 != (got & ~carried_bits)) {
+                return false;
+            }
+        }
+    }
+    return true;
+}
+
+static_assert(nothing_outside_the_carried_bits());
+
+// The withheld bits, named one at a time, because "cleared by a mask" and
+// "cleared on purpose" are different claims and only the second survives
+// somebody widening the mask.
+//
+// Bits 11:9 need "advanced VM-exit information for EPT violations", which
+// Note 4 to Table 30-7 (sdm.txt:203945) makes a bit of
+// IA32_VMX_EPT_VPID_CAP. This VMM does not report it, so the SDM leaves
+// all three undefined and forwarding one is how a guest comes to depend
+// on it.
+static_assert(0 == (reflected_all_granted & (0x7ull << 9)));
+
+// Bit 14 is defined only "if supervisor shadow-stack control is enabled
+// (by setting bit 7 of EPTP)" (sdm.txt:203925), and bit 7 of the EPT
+// pointer is refused outright - see the eptp checks below, which make
+// bits 11:7 reserved.
+static_assert(0 == (reflected_all_granted & (1ull << 14)));
+
+// Bit 15 needs guest-paging verification (sdm.txt:203929), which is a
+// secondary control this VMM neither sets nor offers.
+static_assert(0 == (reflected_all_granted & (1ull << 15)));
+
+// Bit 22 in particular, which the shadow-EPT audit recorded as withheld.
+// It is not a defined bit in this SDM revision at all - Table 30-7 ends
+// "63:17 Not currently defined" (sdm.txt:203934) - and the reason it is
+// worth an assertion of its own rather than being left to the mask is that
+// it was *reported* as deliberately withheld, and a bit somebody believes
+// is a decision must be one.
+static_assert(0 == (reflected_all_granted & (1ull << 22)));
+
+// The whole of 63:17, for the same reason and in one line.
+static_assert(0 == (reflected_all_granted >> 17));
+
+// Note 2 to Table 30-7 (sdm.txt:203939): "Bits 5:3 are cleared to 0 if
+// either (1) any of EPT paging-structure entries used to translate the
+// guest-physical address of the access causing the EPT violation is not
+// present; or (2) 4-level EPT is in use and the guest-physical address
+// sets any bits in the range 51:48". Note 3 (sdm.txt:203942) says the same
+// of bit 6. Both fall out of the walker having cleared its accumulated
+// permissions, which is what makes them a property of the walk rather than
+// a case here - so both walk failures are driven through, with mode-based
+// execute control on and off.
+constexpr bool a_failed_walk_reports_no_permissions()
+{
+    for (auto status : {ept_walk_status::not_present,
+                        ept_walk_status::address_out_of_range,
+                        ept_walk_status::misconfigured}) {
+        for (auto mode_based : {false, true}) {
+            auto got = reflected_ept_violation_qualification(
+                every_bit, failed_with(status), mode_based);
+
+            if (0 != (got & (0xfull << 3))) {
+                return false;
+            }
+        }
+    }
+    return true;
+}
+
+static_assert(a_failed_walk_reports_no_permissions());
+
+// ---------------------------------------------------------------------------
+// Which level's refusal produces which exit, as a table over every access
+// type and every pair of permissions.
+//
+// This is the shape of the rule `9d9c525` fixed. The permissions alone do
+// not decide it: `compose_ept` reports `composed` whenever the
+// intersection is non-empty, and a page the guest hypervisor *watches* -
+// write cleared, read and execute kept - intersects to a perfectly valid
+// read-and-execute mapping. So a write to it arrives as `composed` and
+// looks exactly like a fault on a page only this VMM protects.
+//
+// The rule is that the guest hypervisor's own tables are consulted first.
+// The two statements below are the specification of that, and neither is
+// derived from the order the implementation uses:
+//
+//   - if the guest hypervisor's own permissions refuse the access, the
+//     exit is *its* business and must be reflected, whatever ours say,
+//   - if only ours refuse it, it is ours and must not be reflected.
+//
+// The decision itself is not pure - it writes the guest hypervisor's VMCS
+// and reaches the watched-page machinery - so it is driven from `main`
+// against the real body, cut out of nested_entry.cpp. What can be settled
+// here is the classification the rows are graded against.
+// ---------------------------------------------------------------------------
+
+// Which access an exit qualification describes, in the bits SDM Table 30-7
+// gives them (sdm.txt:203867).
+constexpr std::uint64_t access_bit_read = 1ull << 0;
+constexpr std::uint64_t access_bit_write = 1ull << 1;
+constexpr std::uint64_t access_bit_fetch = 1ull << 2;
+
+constexpr bool permits(const ept_permissions & permissions,
+                       std::uint64_t access)
+{
+    return ((0 == (access & access_bit_read)) || permissions.read()) &&
+           ((0 == (access & access_bit_write)) || permissions.write()) &&
+           ((0 == (access & access_bit_fetch)) || permissions.execute());
+}
+
+// The named case, and the reason the ordering exists at all: a page the
+// guest hypervisor watches composes to a *valid* mapping, so its own fault
+// is invisible in the outcome and visible only in its permissions.
+constexpr auto watched_by_the_guest_hypervisor =
+    ept_permissions(true, false, true, true);
+
+constexpr auto guest_watched_page =
+    compose_ept(mapped_with(watched_by_the_guest_hypervisor),
+                mapped_with(rwx, 21),
+                false);
+
+static_assert(guest_watched_page.outcome == ept_compose_outcome::composed);
+static_assert(guest_watched_page.permissions.read());
+static_assert(guest_watched_page.permissions.execute());
+static_assert(!guest_watched_page.permissions.write());
+
+// So the composition permits a read and refuses a write, and the level
+// that refused it is the guest hypervisor's - which is exactly what the
+// composition cannot say and the walk of its tables can.
+static_assert(permits(guest_watched_page.permissions, access_bit_read));
+static_assert(!permits(guest_watched_page.permissions, access_bit_write));
+static_assert(!permits(watched_by_the_guest_hypervisor, access_bit_write));
+
+// The mirror image, which must go the other way: a page *this VMM* watches
+// over tables that grant everything. Same composition, opposite owner.
+constexpr auto watched_here = ept_permissions(true, false, true, true);
+
+constexpr auto host_watched_page =
+    compose_ept(mapped_with(rwx), mapped_with(watched_here, 21), false);
+
+static_assert(host_watched_page.outcome == ept_compose_outcome::composed);
+static_assert(!permits(host_watched_page.permissions, access_bit_write));
+static_assert(permits(rwx, access_bit_write));
+
+// The qualification a reflected fault carries says which permission the
+// guest hypervisor removed, which is the whole of what it needs. A write
+// to a page it watches reports readable and executable and *not* writable,
+// even though hardware reported every bit set.
+constexpr auto reflected_for_the_watched_page =
+    reflected_ept_violation_qualification(
+        every_bit | access_bit_write,
+        mapped_at(0, 12, watched_by_the_guest_hypervisor),
+        false);
+
+static_assert(0 != (reflected_for_the_watched_page & access_bit_write));
+static_assert(0 != (reflected_for_the_watched_page & (1ull << 3)));
+static_assert(0 == (reflected_for_the_watched_page & (1ull << 4)));
+static_assert(0 != (reflected_for_the_watched_page & (1ull << 5)));
+
+// And the classification itself, over every access type and every pair:
+// each cell belongs to exactly one of three owners, and no cell is
+// unowned. The runtime rows below grade the real decision against this.
+enum class fault_owner
+{
+    // The guest hypervisor's own tables refuse it.
+    reflect_to_the_guest_hypervisor,
+
+    // Its tables permit it and the composition does not.
+    ours,
+
+    // Both permit it, so nothing refused it and the shadow is behind.
+    install,
+};
+
+constexpr fault_owner owner_of(ept_permissions guest,
+                               ept_permissions host,
+                               std::uint64_t access,
+                               bool execute_only)
+{
+    if (!permits(guest, access)) {
+        return fault_owner::reflect_to_the_guest_hypervisor;
+    }
+
+    auto composed = compose_ept(
+        mapped_with(guest), mapped_with(host, 21), execute_only);
+
+    if (ept_compose_outcome::composed != composed.outcome) {
+        return fault_owner::ours;
+    }
+
+    if (!permits(composed.permissions, access)) {
+        return fault_owner::ours;
+    }
+
+    return fault_owner::install;
+}
+
+// The property that makes the ordering right, stated without reference to
+// any ordering: a cell the guest hypervisor's tables refuse is never ours,
+// no matter what ours say about it. Getting this wrong absorbs a fault the
+// guest hypervisor is waiting for.
+constexpr bool a_guest_hypervisor_gap_is_never_absorbed()
+{
+    for (auto access :
+         {access_bit_read, access_bit_write, access_bit_fetch}) {
+        for (int i = 0; i < 16; ++i) {
+            for (int j = 0; j < 16; ++j) {
+                auto guest = permissions_number(i);
+                if (permits(guest, access)) {
+                    continue;
+                }
+
+                for (auto execute_only : {false, true}) {
+                    if (fault_owner::reflect_to_the_guest_hypervisor !=
+                        owner_of(guest,
+                                 permissions_number(j),
+                                 access,
+                                 execute_only)) {
+                        return false;
+                    }
+                }
+            }
+        }
+    }
+    return true;
+}
+
+static_assert(a_guest_hypervisor_gap_is_never_absorbed());
+
+// And the converse: a cell only *we* refuse is never reflected. Telling a
+// guest hypervisor its own tables denied an access they permit sends it
+// looking for a bug in them.
+constexpr bool our_own_gap_is_never_reflected()
+{
+    for (auto access :
+         {access_bit_read, access_bit_write, access_bit_fetch}) {
+        for (int i = 0; i < 16; ++i) {
+            for (int j = 0; j < 16; ++j) {
+                auto guest = permissions_number(i);
+                auto host = permissions_number(j);
+
+                if (!permits(guest, access)) {
+                    continue;
+                }
+
+                for (auto execute_only : {false, true}) {
+                    auto owner =
+                        owner_of(guest, host, access, execute_only);
+
+                    if (fault_owner::reflect_to_the_guest_hypervisor ==
+                        owner) {
+                        return false;
+                    }
+
+                    auto wanted = permits(host, access)
+                                      ? fault_owner::install
+                                      : fault_owner::ours;
+
+                    // Normalisation can remove a permission the
+                    // intersection kept - execute without read, where
+                    // execute-only translations are not offered - so a
+                    // cell both levels permit can still be ours. That is
+                    // a legal answer and the only one; it is never the
+                    // guest hypervisor's.
+                    if ((owner != wanted) &&
+                        (fault_owner::ours != owner)) {
+                        return false;
+                    }
+                }
+            }
+        }
+    }
+    return true;
+}
+
+static_assert(our_own_gap_is_never_reflected());
+
+// ===========================================================================
+// Tier two: the real bodies, cut out of the hypervisor's own sources.
+//
+// Everything below runs rather than compiling, because everything below
+// writes into arrays that are members of `hypervisor` and are megabytes
+// long. Nothing here re-implements what it checks: the four fragments in
+// `nested-ept-extracted.inc` are cut verbatim out of nested_ept.cpp and
+// nested_entry.cpp by check-nested-ept.sh, and the class below is a
+// stand-in carrying only the members those fragments name - the
+// tests/watched_page arrangement, which exists so a renamed function or a
+// moved fragment fails the extraction instead of silently testing nothing.
+//
+// Two deliberate divergences from the real class, both of which would
+// otherwise be invisible:
+//
+//   - `on_unhandled_exit` is [[noreturn]] in the real header and returns
+//     here. The fragments only reach it after a log and a record, and
+//     giving it a return lets the row that provokes it be graded rather
+//     than ending the process.
+//   - `shadow_ept_tables_per_cpu` and `shadow_ept_slots` are spelled as
+//     constants here rather than derived from `nested_vmx::enabled`.
+//     check-nested-ept.sh greps hypervisor.h for both values, so the two
+//     cannot drift apart quietly.
+// ===========================================================================
+
+#include "zpp/arch/x86_64/vmx/msr.h"
+#include "zpp/arch/x86_64/vmx/vmx_exit_reason.h"
+#include "zpp/error.h"
+#include <cstddef>
+#include <cstring>
+#include <expected>
+#include <map>
+
+#if !__has_include("nested-ept-extracted.inc")
+#error "nested-ept-extracted.inc is generated by check-nested-ept.sh"
+#endif
+
+namespace zpp::hypervisor
+{
+using basic_reason = arch::x86_64::vmx::exit_reason::basic_reason;
+
+/**
+ * The log, reduced to a sink. Same shape as the real one - constructed as
+ * a temporary at the call site - so the extracted bodies compile against
+ * the source the hypervisor does.
+ */
+template <typename... Types>
+struct log
+{
+    log(const char *, Types &&...)
+    {
+    }
+};
+
+template <typename... Types>
+log(const char *, Types &&...) -> log<Types...>;
+
+/**
+ * Stands in for `arch::x86_64::context`, which the fault decision only
+ * passes through.
+ */
+struct guest_context
+{
+};
+
+class hypervisor
+{
+public:
+    enum class error
+    {
+        success = 0,
+        physical_to_virtual_capacity_error = 4,
+        out_of_shadow_ept_tables = 20,
+        nested_controls_unsupported = 21,
+    };
+
+    enum class l2_exit_outcome
+    {
+        reflected,
+        handled,
+
+        // Reached only by falling off the end of the extracted fragment,
+        // which in the real function is where the mapping is installed.
+        deferred,
+    };
+
+    static constexpr std::size_t max_cpus = 2;
+    static constexpr std::size_t page_size = 0x1000;
+
+    static constexpr std::size_t shadow_ept_tables_per_cpu = 96;
+    static constexpr std::size_t shadow_ept_slots = 4;
+    static constexpr std::uint8_t shadow_table_free = 0;
+    static constexpr bool execute_only_translations_offered = false;
+
+    // --------------------------------------------- the code under test
+    std::expected<arch::x86_64::vmx::epte *, zpp::error>
+    shadow_ept_table(std::size_t cpu);
+
+    std::expected<arch::x86_64::vmx::epte *, zpp::error>
+    shadow_ept_entry(std::size_t cpu,
+                     std::uint64_t guest_physical,
+                     std::uint64_t shift);
+
+    void release_shadow_slot(std::size_t cpu, std::size_t slot);
+
+    /**
+     * The composed branch of `on_l2_ept_fault`, wrapped so it can be
+     * called: everything before it decides nothing about ownership, and
+     * everything after it installs a mapping.
+     */
+    l2_exit_outcome l2_fault_decision(
+        std::size_t cpu,
+        std::uint64_t reason,
+        guest_context & context,
+        std::uint64_t guest_physical,
+        std::uint64_t qualification,
+        const arch::x86_64::vmx::ept_walk_result & guest_walk,
+        const arch::x86_64::vmx::ept_composition & composition);
+
+    /**
+     * The checks `build_vmcs02` puts on the guest hypervisor's own EPT
+     * pointer, wrapped the same way.
+     */
+    std::expected<void, zpp::error> eptp_accepted(std::uint64_t eptp12);
+
+    // ------------------------------------------- defined by the harness
+    std::uint64_t physical_address_bits();
+    std::uint64_t nested_vmx_capability_msr(std::size_t msr);
+
+    void reflect_l2_exit(std::size_t cpu,
+                         std::uint64_t reason,
+                         std::uint64_t qualification);
+
+    bool on_ept_violation(std::size_t cpu,
+                          guest_context & context,
+                          std::uint64_t physical_address);
+
+    void record_exit(std::uint64_t reason, guest_context & context);
+    void on_unhandled_exit(std::uint64_t reason);
+
+    struct page_table_stub
+    {
+        std::uint64_t virtual_to_physical(const void * address) const;
+    };
+
+    // --------------------------------------------------------- state
+    page_table_stub host_page_table{};
+    std::map<std::uint64_t, std::uint64_t> module_physical_to_virtual{};
+
+    alignas(page_size) arch::x86_64::vmx::epte
+        shadow_epml4[max_cpus][shadow_ept_slots][512]{};
+    alignas(page_size) arch::x86_64::vmx::epte
+        shadow_ept_tables[max_cpus][shadow_ept_tables_per_cpu][512]{};
+
+    std::uint8_t shadow_ept_table_slot[max_cpus]
+                                      [shadow_ept_tables_per_cpu]{};
+    std::size_t shadow_ept_current_slot[max_cpus]{};
+    std::size_t shadow_ept_tables_used[max_cpus][shadow_ept_slots]{};
+    std::uint64_t shadow_ept_source[max_cpus][shadow_ept_slots]{};
+    std::uint64_t shadow_ept_generation_seen[max_cpus][shadow_ept_slots]{};
+
+    // ------------------------------------------------ instrumentation
+    std::uint64_t reported_physical_address_bits{46};
+    std::uint64_t reported_ept_capability{};
+
+    std::uint64_t reflections{};
+    std::uint64_t last_reflected_reason{};
+    std::uint64_t last_reflected_qualification{};
+
+    std::uint64_t ept_violations{};
+    std::uint64_t last_ept_violation_address{};
+    bool something_here_watches{true};
+
+    std::uint64_t unhandled_exits{};
+};
+
+/**
+ * The hypervisor error category, so zpp::error can carry the codes above.
+ */
+inline const zpp::error_category & category(hypervisor::error)
+{
+    constexpr static auto error_category = zpp::make_error_category(
+        "hypervisor",
+        hypervisor::error::success,
+        [](auto) -> std::string_view { return "hypervisor"; });
+    return error_category;
+}
+
+/**
+ * The pool's physical addresses, invented here. Nothing dereferences them
+ * - the shadow walk goes back through `module_physical_to_virtual`, which
+ * is the reverse map the real one uses because the module is not identity
+ * mapped.
+ */
+constexpr std::uint64_t pool_physical_base = 0x200000;
+
+hypervisor & instance();
+
+std::uint64_t hypervisor::physical_address_bits()
+{
+    return this->reported_physical_address_bits;
+}
+
+std::uint64_t hypervisor::nested_vmx_capability_msr(std::size_t msr)
+{
+    return (arch::x86_64::vmx::msr::vpid_ept_capability == msr)
+               ? this->reported_ept_capability
+               : 0;
+}
+
+void hypervisor::reflect_l2_exit(std::size_t,
+                                 std::uint64_t reason,
+                                 std::uint64_t qualification)
+{
+    ++this->reflections;
+    this->last_reflected_reason = reason;
+    this->last_reflected_qualification = qualification;
+}
+
+bool hypervisor::on_ept_violation(std::size_t,
+                                  guest_context &,
+                                  std::uint64_t physical_address)
+{
+    ++this->ept_violations;
+    this->last_ept_violation_address = physical_address;
+    return this->something_here_watches;
+}
+
+void hypervisor::record_exit(std::uint64_t, guest_context &)
+{
+}
+
+void hypervisor::on_unhandled_exit(std::uint64_t)
+{
+    ++this->unhandled_exits;
+}
+
+std::uint64_t hypervisor::page_table_stub::virtual_to_physical(
+    const void * address) const
+{
+    auto & self = instance();
+
+    for (std::size_t cpu{}; cpu < max_cpus; ++cpu) {
+        for (std::size_t i{}; i < shadow_ept_tables_per_cpu; ++i) {
+            if (address == &self.shadow_ept_tables[cpu][i][0]) {
+                return pool_physical_base +
+                       (((cpu * shadow_ept_tables_per_cpu) + i) *
+                        page_size);
+            }
+        }
+    }
+
+    return 0;
+}
+
+} // namespace zpp::hypervisor
+
+#include "nested-ept-extracted.inc"
+
+// ---------------------------------------------------------------------------
+// The harness.
+// ---------------------------------------------------------------------------
+
+namespace zpp::hypervisor
+{
+namespace
+{
+hypervisor the_hypervisor;
+} // namespace
+
+hypervisor & instance()
+{
+    return the_hypervisor;
+}
+
+} // namespace zpp::hypervisor
+
+using zpp::hypervisor::guest_context;
+using zpp::hypervisor::hypervisor;
+
+namespace
+{
+std::size_t checks{};
+std::size_t failures{};
+
+void check(bool condition, const char * what)
+{
+    ++checks;
+    if (!condition) {
+        ++failures;
+        std::printf("nested_ept: FAILED %s\n", what);
+    }
+}
+
+/**
+ * Puts the pool back to the state a freshly constructed hypervisor has,
+ * and rebuilds the reverse map the shadow walk reaches its own tables
+ * through.
+ */
+void reset_pool(hypervisor & of)
+{
+    std::memset(of.shadow_epml4, 0, sizeof(of.shadow_epml4));
+    std::memset(of.shadow_ept_tables, 0, sizeof(of.shadow_ept_tables));
+    std::memset(of.shadow_ept_table_slot,
+                hypervisor::shadow_table_free,
+                sizeof(of.shadow_ept_table_slot));
+    std::memset(
+        of.shadow_ept_current_slot, 0, sizeof(of.shadow_ept_current_slot));
+    std::memset(
+        of.shadow_ept_tables_used, 0, sizeof(of.shadow_ept_tables_used));
+    std::memset(of.shadow_ept_source, 0, sizeof(of.shadow_ept_source));
+    std::memset(of.shadow_ept_generation_seen,
+                0,
+                sizeof(of.shadow_ept_generation_seen));
+
+    of.module_physical_to_virtual.clear();
+
+    for (std::size_t cpu{}; cpu < hypervisor::max_cpus; ++cpu) {
+        for (std::size_t i{}; i < hypervisor::shadow_ept_tables_per_cpu;
+             ++i) {
+            auto physical =
+                zpp::hypervisor::pool_physical_base +
+                (((cpu * hypervisor::shadow_ept_tables_per_cpu) + i) *
+                 hypervisor::page_size);
+
+            of.module_physical_to_virtual[physical] =
+                reinterpret_cast<std::uint64_t>(
+                    &of.shadow_ept_tables[cpu][i][0]);
+        }
+    }
+}
+
+std::size_t free_tables(const hypervisor & of, std::size_t cpu)
+{
+    std::size_t count{};
+    for (std::size_t i{}; i < hypervisor::shadow_ept_tables_per_cpu; ++i) {
+        if (hypervisor::shadow_table_free ==
+            of.shadow_ept_table_slot[cpu][i]) {
+            ++count;
+        }
+    }
+    return count;
+}
+
+/**
+ * The shadow's own entry for an address at a level, followed the way the
+ * hypervisor follows it - through the reverse map, because the module is
+ * not identity mapped.
+ */
+epte * shadow_entry_at(hypervisor & of,
+                       std::size_t cpu,
+                       std::size_t slot,
+                       std::uint64_t guest_physical,
+                       std::uint64_t level)
+{
+    auto * table = &of.shadow_epml4[cpu][slot][0];
+
+    for (auto walking = std::uint64_t{3};; --walking) {
+        auto index = (guest_physical >> (12 + (9 * walking))) & 0x1ff;
+        auto & entry = table[index];
+
+        if (walking == level) {
+            return &entry;
+        }
+
+        if (!ept_permissions::of(entry).present() || entry.large()) {
+            return nullptr;
+        }
+
+        auto found =
+            of.module_physical_to_virtual.find(entry.page_number() << 12);
+        if (of.module_physical_to_virtual.end() == found) {
+            return nullptr;
+        }
+
+        table = reinterpret_cast<epte *>(found->second);
+    }
+}
+
+// The address every shadow test below is built around, chosen so each
+// level's index is different and none is zero.
+constexpr std::uint64_t shadow_address =
+    (1ull << 39) | (2ull << 30) | (3ull << 21);
+
+// -------------------------------------------------------------------------
+// `23bdddc`: a large shadow mapping standing where a smaller one is
+// needed.
+//
+// The walk descended whenever an entry at a level was *present*, with no
+// test for whether it was a leaf. That could not happen while the shadow
+// was built top down in one pass, and is routine once it is filled a fault
+// at a time: a 2 MB mapping goes in first, and a later fault inside it
+// needs 4 KB because this VMM's own tables split that region or watch a
+// page of it. The walk then took the leaf's *guest frame number* for a
+// table address, failed to find it among the module's pages, and returned
+// physical_to_virtual_capacity_error - which reads as "the module's page
+// map is too small" and was nothing of the kind.
+//
+// Measured then: `could not install a shadow leaf for 0x11c4c9000: error
+// 0x4`, followed by an unhandled EPT violation. Error 4 is what this test
+// asserts against, so a regression reproduces the reported symptom exactly
+// rather than merely failing.
+// -------------------------------------------------------------------------
+void a_large_leaf_is_dropped_for_a_smaller_one()
+{
+    auto & of = zpp::hypervisor::instance();
+    reset_pool(of);
+    of.shadow_ept_current_slot[0] = 0;
+
+    auto large = of.shadow_ept_entry(0, shadow_address, 21);
+    check(large.has_value(), "a 2 MB shadow entry can be reached at all");
+    if (!large) {
+        return;
+    }
+
+    // Two tables above a page-directory entry: the page-directory-pointer
+    // table and the page directory itself.
+    check(free_tables(of, 0) ==
+              (hypervisor::shadow_ept_tables_per_cpu - 2),
+          "reaching a 2 MB entry takes two tables from the pool");
+
+    epte leaf;
+    rwx.apply_to(leaf);
+    leaf.large(true);
+    leaf.type(memory_type::write_back);
+    leaf.large_page_number(0x8000);
+    **large = leaf;
+
+    auto guest_frame = (*large)->page_number();
+    check(0 != guest_frame, "the large leaf names a page");
+    check(of.module_physical_to_virtual.end() ==
+              of.module_physical_to_virtual.find(guest_frame << 12),
+          "the large leaf's frame is guest RAM, not one of ours");
+
+    auto before = free_tables(of, 0);
+
+    auto small = of.shadow_ept_entry(0, shadow_address + 0x3000, 12);
+
+    if (!small) {
+        ++checks;
+        ++failures;
+        std::printf("nested_ept: FAILED a 4 KB entry inside a 2 MB leaf, "
+                    "error %d\n",
+                    small.error().code());
+        return;
+    }
+
+    check(true, "a 4 KB entry can be reached inside a 2 MB leaf");
+
+    auto * page_directory_entry =
+        shadow_entry_at(of, 0, 0, shadow_address, 1);
+    check(nullptr != page_directory_entry,
+          "the page-directory entry is still reachable");
+    if (nullptr == page_directory_entry) {
+        return;
+    }
+
+    check(!page_directory_entry->large(),
+          "the large entry was dropped rather than descended into");
+    check(ept_permissions::of(*page_directory_entry).present(),
+          "a table entry replaced it");
+    check(of.module_physical_to_virtual.end() !=
+              of.module_physical_to_virtual.find(
+                  page_directory_entry->page_number() << 12),
+          "the replacement names a table this VMM allocated");
+
+    check(free_tables(of, 0) == (before - 1),
+          "exactly one table was taken to replace the large entry");
+
+    // The returned entry is inside the table that was just created, and is
+    // absent - a table is zeroed on being handed out, and an entry of all
+    // zeroes is not present per SDM 31.3.2 (sdm.txt:205446).
+    auto found = of.module_physical_to_virtual.find(
+        page_directory_entry->page_number() << 12);
+    auto * created = reinterpret_cast<epte *>(found->second);
+
+    check(*small == (created + 3),
+          "the 4 KB entry is the right slot of the new table");
+    check(!ept_permissions::of(**small).present(),
+          "the new table is handed out empty");
+
+    // And the mappings the large entry covered are gone rather than
+    // silently retained, which is what makes them fault back in one at a
+    // time.
+    for (std::size_t i{}; i < 512; ++i) {
+        if (ept_permissions::of(created[i]).present()) {
+            check(false, "the dropped 2 MB region left a mapping behind");
+            return;
+        }
+    }
+    check(true, "the dropped 2 MB region left no mapping behind");
+}
+
+// -------------------------------------------------------------------------
+// `e49ec9f`: releasing a shadow slot must return its tables to the shared
+// pool.
+//
+// A slot that kept them while reporting it held nothing owned pages no
+// build could reach and no build would reclaim, and four of those exhaust
+// a ninety-six table pool with no shadow live at all. It had not bitten
+// yet only because a discarded slot was always the next one rebuilt.
+// -------------------------------------------------------------------------
+void releasing_a_slot_returns_its_tables()
+{
+    auto & of = zpp::hypervisor::instance();
+    reset_pool(of);
+
+    auto empty = free_tables(of, 0);
+    check(hypervisor::shadow_ept_tables_per_cpu == empty,
+          "the pool starts wholly free");
+
+    // Four cycles, because the leak this pins showed up only once the
+    // pool had been round several times: one cycle leaves plenty free.
+    for (std::size_t cycle{}; cycle < 4; ++cycle) {
+        for (std::size_t slot{}; slot < hypervisor::shadow_ept_slots;
+             ++slot) {
+            of.shadow_ept_current_slot[0] = slot;
+            of.shadow_ept_source[0][slot] = 0x1000 + slot;
+
+            for (std::size_t page{}; page < 3; ++page) {
+                auto address = shadow_address + (slot * (1ull << 30)) +
+                               (page * (1ull << 21));
+
+                auto entry = of.shadow_ept_entry(0, address, 12);
+                check(entry.has_value(),
+                      "a shadow entry can be reached in every slot");
+                if (!entry) {
+                    return;
+                }
+            }
+
+            check(0 != of.shadow_ept_tables_used[0][slot],
+                  "a slot that was built into reports tables in use");
+        }
+
+        check(free_tables(of, 0) < empty,
+              "building four shadows takes tables from the pool");
+
+        for (std::size_t slot{}; slot < hypervisor::shadow_ept_slots;
+             ++slot) {
+            of.release_shadow_slot(0, slot);
+        }
+
+        check(free_tables(of, 0) == empty,
+              "releasing every slot returns every table to the pool");
+
+        for (std::size_t slot{}; slot < hypervisor::shadow_ept_slots;
+             ++slot) {
+            check(0 == of.shadow_ept_tables_used[0][slot],
+                  "a released slot reports no tables in use");
+            check(0 == of.shadow_ept_source[0][slot],
+                  "a released slot reports no source");
+        }
+
+        // Releasing does *not* empty the root, and that is a property of
+        // the design rather than an oversight: the root is never
+        // recycled, so the EPT pointer stays stable across rebuilds.
+        // What it means is that a released slot's root still names pool
+        // tables that are now free, and every caller of
+        // release_shadow_slot zeroes the root itself before the slot is
+        // used again - shadow_ept_pointer_for and
+        // refresh_shadow_ept_for both memset it on the next line.
+        // discard_shadow_ept does not, and is safe only because it also
+        // clears the source, so nothing can reach the slot before a
+        // rebuild. Do here what those callers do.
+        check(ept_permissions::of(of.shadow_epml4[0][0][1]).present(),
+              "release leaves the root alone, as its callers expect");
+
+        std::memset(of.shadow_epml4[0], 0, sizeof(of.shadow_epml4[0]));
+    }
+
+    // Releasing one slot must not take another's tables with it. The
+    // ownership byte is the slot's index plus one for exactly this
+    // reason.
+    reset_pool(of);
+
+    for (std::size_t slot{}; slot < 2; ++slot) {
+        of.shadow_ept_current_slot[0] = slot;
+        static_cast<void>(of.shadow_ept_entry(
+            0, shadow_address + (slot * (1ull << 30)), 12));
+    }
+
+    auto both = free_tables(of, 0);
+    of.release_shadow_slot(0, 0);
+
+    check(free_tables(of, 0) > both, "releasing one slot frees something");
+    check(free_tables(of, 0) < empty,
+          "releasing one slot does not free the other's tables");
+    check(0 != of.shadow_ept_tables_used[0][1],
+          "the other slot still owns its tables");
+
+    // And the whole pool is usable again afterwards, which is the property
+    // the leak destroyed: a pool that reports free tables it cannot hand
+    // out fails as "out of shadow ept tables" with nothing live.
+    reset_pool(of);
+    of.shadow_ept_current_slot[0] = 0;
+
+    std::size_t handed_out{};
+    for (std::size_t i{}; i < hypervisor::shadow_ept_tables_per_cpu; ++i) {
+        if (of.shadow_ept_table(0)) {
+            ++handed_out;
+        }
+    }
+
+    check(hypervisor::shadow_ept_tables_per_cpu == handed_out,
+          "every table in the pool can be handed out");
+    check(!of.shadow_ept_table(0).has_value(),
+          "the pool refuses rather than overruns");
+
+    of.release_shadow_slot(0, 0);
+    check(free_tables(of, 0) == empty,
+          "releasing returns a wholly consumed pool");
+}
+
+// -------------------------------------------------------------------------
+// `e4e7e96`: the guest hypervisor's own EPT pointer.
+//
+// SDM 29.2.1.1 (sdm.txt:202154) gives the checks, and KVM applies the same
+// five in the same order in `nested_vmx_check_eptp`
+// (.references/kvm/nested.c:2790). The one that was missing is bit 6:
+// "Bit 6 (enable bit for accessed and dirty flags for EPT) must be 0 if
+// bit 21 of the IA32_VMX_EPT_VPID_CAP MSR ... is read as 0"
+// (sdm.txt:202160), which is KVM's "AD, if set, should be supported"
+// (.references/kvm/nested.c:2826). The shadow sets neither flag, the
+// capability MSR withholds the bit, and without this check the pointer was
+// accepted and the promise quietly broken.
+// -------------------------------------------------------------------------
+constexpr std::uint64_t eptp_walk_length_4 = 3ull << 3;
+constexpr std::uint64_t eptp_accessed_and_dirty = 1ull << 6;
+constexpr std::uint64_t ept_capability_accessed_and_dirty = 1ull << 21;
+
+std::uint64_t eptp_with(std::uint64_t memory_type_value,
+                        std::uint64_t walk_length_field,
+                        std::uint64_t extra,
+                        std::uint64_t root = 0x100000)
+{
+    return memory_type_value | walk_length_field | extra | root;
+}
+
+void the_eptp_checks_hold()
+{
+    auto & of = zpp::hypervisor::instance();
+    of.reported_physical_address_bits = 46;
+    of.reported_ept_capability = 0;
+
+    auto write_back = static_cast<std::uint64_t>(memory_type::write_back);
+    auto uncachable = static_cast<std::uint64_t>(memory_type::uncachable);
+
+    auto plain = eptp_with(write_back, eptp_walk_length_4, 0);
+
+    // Note what these two do *not* depend on. The capability MSR is zero
+    // here, so this VMM is reporting neither uncacheable nor write-back
+    // EPT paging structures - IA32_VMX_EPT_VPID_CAP bits 8 and 14 - and
+    // both pointers are accepted anyway. SDM 29.2.1.1 (sdm.txt:202156)
+    // says "The EPT memory type (bits 2:0) must be a value supported by
+    // the processor as indicated in the IA32_VMX_EPT_VPID_CAP MSR", and
+    // KVM checks exactly that in `nested_vmx_check_eptp`
+    // (.references/kvm/nested.c:2794, VMX_EPTP_UC_BIT / VMX_EPTP_WB_BIT).
+    // The check here is written against a constant instead, so it is the
+    // asymmetry e4e7e96 removed for bit 6 and left in place for bits 2:0
+    // and 5:3. Asserted as it is rather than as it should be, so the
+    // divergence is recorded rather than hidden - BACKLOG.md carries it.
+    check(of.eptp_accepted(plain).has_value(),
+          "a write-back four-level pointer is accepted");
+    check(of.eptp_accepted(eptp_with(uncachable, eptp_walk_length_4, 0))
+              .has_value(),
+          "an uncacheable four-level pointer is accepted");
+
+    // The three memory types the SDM permits in an EPT entry but which
+    // the pointer may not carry, plus the reserved ones.
+    for (auto refused : {1ull, 2ull, 3ull, 4ull, 5ull, 7ull}) {
+        check(!of.eptp_accepted(eptp_with(refused, eptp_walk_length_4, 0))
+                   .has_value(),
+              "a pointer with an unreported memory type is refused");
+    }
+
+    // Bits 5:3 hold the walk length minus one. Only four is reported, so
+    // three and five are both refused - and five in particular, because a
+    // 5-level walk is the one a processor might really support.
+    for (auto field : {0ull, 1ull, 2ull, 4ull, 5ull, 6ull, 7ull}) {
+        check(!of.eptp_accepted(eptp_with(write_back, field << 3, 0))
+                   .has_value(),
+              "a pointer with an unreported walk length is refused");
+    }
+
+    // Bit 6 with the capability withheld, which is the whole of e4e7e96.
+    check(!of.eptp_accepted(eptp_with(write_back,
+                                      eptp_walk_length_4,
+                                      eptp_accessed_and_dirty))
+               .has_value(),
+          "accessed and dirty flags are refused while unreported");
+
+    // And accepted once reported, so the check follows the capability
+    // rather than a constant - which is what lets the bit be implemented
+    // without this becoming wrong.
+    of.reported_ept_capability = ept_capability_accessed_and_dirty;
+    check(of.eptp_accepted(eptp_with(write_back,
+                                     eptp_walk_length_4,
+                                     eptp_accessed_and_dirty))
+              .has_value(),
+          "accessed and dirty flags are accepted once reported");
+    of.reported_ept_capability = 0;
+
+    // Reserved bits 11:7, one at a time (sdm.txt:202163). Bit 7 is
+    // supervisor shadow-stack control, which is why exit qualification bit
+    // 14 above can never be meaningful here.
+    for (auto bit = 7; bit <= 11; ++bit) {
+        check(
+            !of.eptp_accepted(
+                   eptp_with(write_back, eptp_walk_length_4, 1ull << bit))
+                 .has_value(),
+            "a pointer with a reserved bit set is refused");
+    }
+
+    // The address width. Bit 45 is inside 46 bits and bit 46 is not.
+    check(of.eptp_accepted(
+                eptp_with(write_back, eptp_walk_length_4, 0, 1ull << 45))
+              .has_value(),
+          "a root inside the address width is accepted");
+    check(!of.eptp_accepted(
+                 eptp_with(write_back, eptp_walk_length_4, 0, 1ull << 46))
+               .has_value(),
+          "a root past the address width is refused");
+    check(!of.eptp_accepted(
+                 eptp_with(write_back, eptp_walk_length_4, 0, 1ull << 63))
+               .has_value(),
+          "a root with bit 63 set is refused");
+
+    // And the width is the processor's rather than a constant.
+    of.reported_physical_address_bits = 39;
+    check(!of.eptp_accepted(
+                 eptp_with(write_back, eptp_walk_length_4, 0, 1ull << 45))
+               .has_value(),
+          "the address check follows the reported width");
+    of.reported_physical_address_bits = 46;
+
+    check(!of.eptp_accepted(0).has_value(),
+          "an all-zero pointer is refused, its walk length being one");
+}
+
+// -------------------------------------------------------------------------
+// `9d9c525`: which level's refusal produces which exit.
+//
+// Every access type against every pair of permissions, driven through the
+// real decision. The classification each row is graded against is
+// `owner_of` above, which says only *which level lacks the permission* -
+// it knows nothing about the order the implementation consults them in,
+// which is the point.
+// -------------------------------------------------------------------------
+void the_owner_of_every_fault()
+{
+    auto & of = zpp::hypervisor::instance();
+    guest_context context;
+
+    // Something here watches every page, so a fault attributed to this VMM
+    // is answered rather than stopping the processor. The row that checks
+    // the other way round is below.
+    of.something_here_watches = true;
+
+    constexpr std::uint64_t first_level_address = 0x40000;
+    constexpr std::uint64_t second_level_address = 0x123000;
+
+    for (auto access :
+         {access_bit_read, access_bit_write, access_bit_fetch}) {
+        for (int i = 0; i < 16; ++i) {
+            for (int j = 0; j < 16; ++j) {
+                auto guest = permissions_number(i);
+                auto host = permissions_number(j);
+
+                auto guest_walk = mapped_with(guest);
+                guest_walk.physical_address = first_level_address;
+
+                auto composition =
+                    compose_ept(guest_walk, mapped_with(host, 21), false);
+
+                // Only the composed branch is under test here. The other
+                // outcomes are decided before it and are covered by the
+                // static assertions above.
+                if (ept_compose_outcome::composed != composition.outcome) {
+                    continue;
+                }
+
+                of.reflections = 0;
+                of.ept_violations = 0;
+                of.unhandled_exits = 0;
+
+                auto outcome = of.l2_fault_decision(0,
+                                                    48,
+                                                    context,
+                                                    second_level_address,
+                                                    access,
+                                                    guest_walk,
+                                                    composition);
+
+                char what[160];
+                std::snprintf(what,
+                              sizeof(what),
+                              "access %llu, guest %d, host %d",
+                              static_cast<unsigned long long>(access),
+                              i,
+                              j);
+
+                switch (owner_of(guest, host, access, false)) {
+                case fault_owner::reflect_to_the_guest_hypervisor:
+                    check(hypervisor::l2_exit_outcome::reflected ==
+                                  outcome &&
+                              (1 == of.reflections) &&
+                              (0 == of.ept_violations),
+                          what);
+
+                    // The qualification it is given says which permission
+                    // it removed, from the walk of its own tables.
+                    check(guest.read() ==
+                              (0 != (of.last_reflected_qualification &
+                                     (1ull << 3))),
+                          "a reflected qualification reports L1's read");
+                    check(guest.write() ==
+                              (0 != (of.last_reflected_qualification &
+                                     (1ull << 4))),
+                          "a reflected qualification reports L1's write");
+                    check(guest.execute() ==
+                              (0 != (of.last_reflected_qualification &
+                                     (1ull << 5))),
+                          "a reflected qualification reports L1's "
+                          "execute");
+                    check(access ==
+                              (of.last_reflected_qualification & 0x7),
+                          "a reflected qualification keeps the access");
+                    check(static_cast<std::uint64_t>(
+                              zpp::hypervisor::basic_reason::
+                                  ept_violation) ==
+                              of.last_reflected_reason,
+                          "a reflected fault is an EPT violation");
+                    break;
+
+                case fault_owner::ours:
+                    check(hypervisor::l2_exit_outcome::handled ==
+                                  outcome &&
+                              (0 == of.reflections) &&
+                              (1 == of.ept_violations),
+                          what);
+                    check(first_level_address ==
+                              of.last_ept_violation_address,
+                          "the watch is keyed on the first-level "
+                          "address");
+                    break;
+
+                case fault_owner::install:
+                    check(hypervisor::l2_exit_outcome::deferred ==
+                                  outcome &&
+                              (0 == of.reflections) &&
+                              (0 == of.ept_violations),
+                          what);
+                    break;
+                }
+            }
+        }
+    }
+}
+
+// The two named cases, spelled out rather than left inside the sweep,
+// because they are the ones that motivated the ordering and the ones a
+// reader will look for.
+void a_page_the_guest_hypervisor_watches()
+{
+    auto & of = zpp::hypervisor::instance();
+    guest_context context;
+    of.something_here_watches = true;
+
+    auto guest_walk = mapped_with(watched_by_the_guest_hypervisor);
+    guest_walk.physical_address = 0x40000;
+
+    auto composition =
+        compose_ept(guest_walk, mapped_with(rwx, 21), false);
+
+    check(ept_compose_outcome::composed == composition.outcome,
+          "a page L1 watches composes to a valid mapping");
+
+    of.reflections = 0;
+    of.ept_violations = 0;
+
+    auto outcome = of.l2_fault_decision(0,
+                                        48,
+                                        context,
+                                        0x123000,
+                                        access_bit_write,
+                                        guest_walk,
+                                        composition);
+
+    check(hypervisor::l2_exit_outcome::reflected == outcome,
+          "a write to a page L1 watches is reflected to L1");
+    check(1 == of.reflections, "and it is reflected exactly once");
+    check(0 == of.ept_violations,
+          "and it never reaches the watched-page machinery here");
+    check(0 == (of.last_reflected_qualification & (1ull << 4)),
+          "and L1 is told its own tables refused the write");
+}
+
+void a_page_this_vmm_watches()
+{
+    auto & of = zpp::hypervisor::instance();
+    guest_context context;
+    of.something_here_watches = true;
+
+    auto guest_walk = mapped_with(rwx);
+    guest_walk.physical_address = 0x40000;
+
+    auto composition =
+        compose_ept(guest_walk, mapped_with(watched_here, 21), false);
+
+    check(ept_compose_outcome::composed == composition.outcome,
+          "a page we watch composes to a valid mapping too");
+
+    of.reflections = 0;
+    of.ept_violations = 0;
+
+    auto outcome = of.l2_fault_decision(0,
+                                        48,
+                                        context,
+                                        0x123000,
+                                        access_bit_write,
+                                        guest_walk,
+                                        composition);
+
+    check(hypervisor::l2_exit_outcome::handled == outcome,
+          "a write to a page we watch is answered here");
+    check(0 == of.reflections,
+          "and L1 is never told its own tables refused it");
+    check(1 == of.ept_violations, "and the watch is consulted");
+
+    // A page nothing here watches stops the processor rather than being
+    // resumed from, which is the "which nothing here watches" path.
+    of.something_here_watches = false;
+    of.unhandled_exits = 0;
+    of.reflections = 0;
+
+    static_cast<void>(of.l2_fault_decision(0,
+                                           48,
+                                           context,
+                                           0x123000,
+                                           access_bit_write,
+                                           guest_walk,
+                                           composition));
+
+    check(1 == of.unhandled_exits,
+          "a page nothing here watches stops the processor");
+    check(0 == of.reflections, "and is still never blamed on L1's tables");
+
+    of.something_here_watches = true;
+}
+
+} // namespace
+
 int main()
 {
-    std::printf("all nested ept static_asserts passed\n");
-    return 0;
+    a_large_leaf_is_dropped_for_a_smaller_one();
+    releasing_a_slot_returns_its_tables();
+    the_eptp_checks_hold();
+    the_owner_of_every_fault();
+    a_page_the_guest_hypervisor_watches();
+    a_page_this_vmm_watches();
+
+    std::printf(
+        "nested_ept: %zu checks, %zu failures\n", checks, failures);
+
+    return (0 == failures) ? 0 : 1;
 }

@@ -6924,3 +6924,166 @@ it. Left alone here rather than deleted on suspicion, since it is
 per-processor state a future guard might want and its absence would be a
 silent change to what a boot records. The harness asserts that an INIT
 does not set it, which is the only property anything currently depends on.
+
+## Shadow EPT: what is pinned and what is not
+
+The shadow extended page tables are the least-tested part of nesting and
+sit on the busiest path in it. Measured on the rig for one Windows boot
+under Hyper-V, boot processor only: **383,000 EPT violations against
+15,600 shadow builds and 442,000 cache hits**, all on the local APIC page.
+Every one of those went through the composition, the fault decision and
+the table pool, and until now the only one of the three with a test was
+the composition - 89 assertions over `nested_ept.h`, and nothing at all
+over the three source files that use it.
+
+`scripts/ci/nested-ept-test.cpp` now carries 123 `static_assert`s and 710
+runtime checks. The runtime half is not a model: `check-nested-ept.sh`
+cuts `shadow_ept_table`, `shadow_ept_entry` and `release_shadow_slot` out
+of `nested_ept.cpp` by name, and the EPT-pointer checks and the composed
+branch of `on_l2_ept_fault` out of `nested_entry.cpp` by anchor, and
+compiles them against a stand-in class carrying only the members they
+name. This is tests/watched_page's arrangement and it is used for
+tests/watched_page's reason: a rename fails the extraction, where a
+transcription would go on passing while testing itself.
+
+### Pinned
+
+- **The composition, over all 16 x 16 permission pairs and both settings
+  of the execute-only capability.** The composed value is the
+  intersection, normalised after; it is symmetric; it never grants what a
+  level withheld; and an empty overlap is never reflected. The first of
+  those builds its expected value out of the loop indices rather than by
+  calling `intersected_with`, which is not fussiness - the first version
+  called the helper, and an experiment that replaced the intersection with
+  a union left that cell green.
+- **The four SDM 31.3.3.1 permission rules one at a time**, so a failure
+  names the rule rather than saying "some cell is wrong". Plus the
+  identity that lets `walk_ept` spell the misconfiguration test once: the
+  set of permission combinations the walker rejects is exactly the set
+  normalisation would have changed.
+- **Whose gap each fault is, over every access type and every permission
+  pair, through the real decision.** 192 rows reach the composed branch,
+  and each is graded against a classification that knows only which level
+  lacks the permission - not the order the implementation consults them
+  in. The two properties asserted are the specification `9d9c525` fixed: a
+  gap in the guest hypervisor's own tables is never absorbed here, and a
+  gap only ours have is never reflected to it. The named case is pinned
+  separately, because it is the one that motivated the ordering and the
+  one a reader will look for: a page the guest hypervisor *watches* -
+  write cleared, read and execute kept - composes to a perfectly valid
+  mapping, so a write to it arrives as `composed` and is indistinguishable
+  from a fault on a page only this VMM protects. It must reflect, and the
+  qualification it reflects with must report the write as denied.
+- **The reflected exit qualification, bit by bit against SDM Table 30-7**
+  (`.references/sdm.txt:203865`). The access bits are hardware's and
+  survive; bits 5:3 and bit 6 are synthesised from the walk of the guest
+  hypervisor's own tables and nothing else; bits 11:9, 14, 15 and
+  everything from 17 up are cleared. Bit 22 has an assertion of its own,
+  even though it is inside "63:17 Not currently defined"
+  (`sdm.txt:203934`), because it was *reported* as deliberately withheld
+  and a bit somebody believes is a decision has to be one.
+- **`23bdddc`**, the large shadow leaf standing where a smaller one is
+  wanted. Install a 2 MB leaf, ask for 4 KB inside it, and the large entry
+  is dropped, a table is created in its place, exactly one table leaves
+  the pool, and the region it covered is left holding nothing. The test
+  asserts against the *reported symptom* - error 4,
+  `physical_to_virtual_capacity_error` - so a regression reproduces the
+  run rather than merely failing.
+- **`e49ec9f`**, releasing a slot returning its tables. Four allocate and
+  release cycles, because one cycle leaves plenty of pool free and the
+  leak only bites once it has been round; plus that releasing one slot
+  does not free another's, and that a wholly consumed pool comes back.
+- **`e4e7e96`**, the accessed-and-dirty bit of the guest hypervisor's EPT
+  pointer, refused while `IA32_VMX_EPT_VPID_CAP` bit 21 is withheld and
+  accepted the moment it is reported - so the check follows the capability
+  rather than a constant. The walk length, the reserved bits 11:7 and the
+  address width are driven with it, one bit at a time, and the address
+  check is driven twice to show it follows the processor's reported width.
+
+### Not pinned, and what each would need
+
+- **That any of it is what the processor does.** Every rule above is
+  checked against the SDM's text and KVM's implementation, and neither is
+  a processor. `walk_ept` in particular has never been run against
+  hardware's own answer for the same tables; a differential would need a
+  machine and a way to ask it, which is the same problem the rest of
+  nested VMX has.
+- **The shadow in place.** These tests reach `shadow_ept_entry` and
+  `release_shadow_slot`; they never load a shadow into a VMCS and let a
+  processor walk it. So "the tables this builds are tables an EPT pointer
+  can be aimed at" is unasserted, and a misconfiguration written into a
+  shadow is the failure with no exit qualification to explain it - SDM
+  30.2.1 does not save one for EPT misconfiguration.
+- **`host_ept_lookup`.** It indexes this VMM's own tables by hand rather
+  than walking them, so it needs `epml4`, `epdpt` and the 512 page
+  directories `initialize_ept` builds - megabytes of a class whose
+  constructor blows the compiler's constexpr budget, which is why
+  `instance()` is a lazy local static in the first place. Extracting it
+  would mean standing in for the whole identity map, and a stand-in
+  identity map tests the stand-in.
+- **Eviction, reclaim and reset.** `shadow_ept_pointer_for` picks a victim
+  and `fill_shadow_leaf` drops the other slots and then its own; all three
+  paths need the EPT pointer, `virtual_to_physical` over the real host
+  page table, and `invalidate_ept_locally`. The counters exist so those
+  paths show up as numbers on the rig - `shadow_ept_resets` is the one
+  that means "the pool is too small for a single shadow" - and reading
+  those numbers is currently the only check they have.
+- **`refresh_shadow_ept_for` and `collect_shadow_leaves`.** The refresh
+  reads the guest hypervisor's tables out of guest memory, which is the
+  one thing the extraction cannot stand in for cheaply, and its bound -
+  2048 mappings before it gives up and discards - is a tuning number
+  measured on the rig rather than a rule.
+- **Concurrency.** Everything here runs on one processor with one slot
+  current. The pool is per processor and the generation counter is shared,
+  and `shadow_ept_generation_seen` against `ept_generation` is the one
+  cross-processor interaction in the file. A host thread is not a logical
+  processor, and this is not a race the harnesses under `tests/` could
+  reproduce either.
+- **That the pool constants are the real ones.** The stand-in spells 96
+  and 4 as literals, because deriving them needs `nested_vmx::enabled` and
+  the build switch. `check-nested-ept.sh` greps `hypervisor.h` for both,
+  which catches a change to the numbers and would not catch a change to
+  their shape.
+
+### Found while doing this, not fixed
+
+- **`ept_pointer::access_and_dirty` reads the wrong bit and its setter
+  writes garbage.** The getter is `m_value & (1 << 8)`; the accessed and
+  dirty enable is **bit 6** of the EPT pointer - SDM 29.2.1.1's "Bit 6
+  (enable bit for accessed and dirty flags for EPT)"
+  (`.references/sdm.txt:202160`), and Table 31-7 says the per-entry flags
+  are meaningful only "If bit 6 of EPTP is 1" (`sdm.txt:205542`). The
+  setter is worse: it was copied from `page_walk_length`, which legitimately
+  stores its value minus one, so `access_and_dirty(true)` evaluates
+  `((1 - 1) & 0x7) << 8` and **clears** three bits, while
+  `access_and_dirty(false)` evaluates `((0 - 1) & 0x7) << 8` and **sets**
+  bits 10:8 - which are reserved, and which `build_vmcs02` refuses in a
+  guest hypervisor's own pointer. Latent: nothing in the tree calls
+  either, and `build_vmcs02` tests bit 6 with a literal `0x40` rather than
+  through this class. Left alone because fixing it is a change to a class
+  nothing uses, and the interesting question is whether the accessor
+  should exist at all given the shadow sets neither flag.
+- **The EPT-pointer memory type and walk length are checked against
+  constants, not against the reported capability.** `build_vmcs02` accepts
+  uncacheable or write-back and a walk length of four, whatever
+  `IA32_VMX_EPT_VPID_CAP` says. SDM 29.2.1.1 (`sdm.txt:202156`) makes both
+  "a value supported by the processor as indicated in the
+  IA32_VMX_EPT_VPID_CAP MSR", and KVM tests exactly the reported bits -
+  `VMX_EPTP_UC_BIT`, `VMX_EPTP_WB_BIT`, `VMX_EPT_PAGE_WALK_4_BIT`
+  (`.references/kvm/nested.c:2794`, KVM v6.12). This VMM's own report is
+  `hardware & supported_ept_vpid_capabilities`, so on a machine that does
+  not report uncacheable paging structures it would tell a guest
+  hypervisor so and then accept a pointer asking for them. That is the
+  same asymmetry `e4e7e96` removed for bit 6 and left in place for bits
+  2:0 and 5:3. The test asserts the behaviour as it is rather than as it
+  should be, with the divergence written beside it, so fixing it is a
+  deliberate change to a named assertion rather than a surprise.
+- **`release_shadow_slot` does not empty the slot's root**, so a released
+  slot's page-map level-4 table still names pool tables that are now
+  marked free. Safe today, and only just: `shadow_ept_pointer_for` and
+  `refresh_shadow_ept_for` both `memset` the root on the line after
+  releasing, and `discard_shadow_ept` does not but clears the source too,
+  so nothing can reach the slot before a rebuild. The test asserts the
+  root survives the release, which pins the arrangement the callers depend
+  on - a future caller that releases and then fills without zeroing would
+  build a shadow out of tables another slot has since been handed.
