@@ -193,7 +193,11 @@ private:
      * Reasons". Only the ones a case below expects to see.
      * @{
      */
+    static constexpr std::uint32_t exit_external_interrupt = 1;
+    static constexpr std::uint32_t exit_interrupt_window = 7;
+    static constexpr std::uint32_t exit_nmi_window = 8;
     static constexpr std::uint32_t exit_cpuid = 10;
+    static constexpr std::uint32_t exit_getsec = 11;
     static constexpr std::uint32_t exit_invd = 13;
     static constexpr std::uint32_t exit_vmcall = 18;
     static constexpr std::uint32_t exit_vmclear = 19;
@@ -209,13 +213,17 @@ private:
     static constexpr std::uint32_t exit_io_instruction = 30;
     static constexpr std::uint32_t exit_rdmsr = 31;
     static constexpr std::uint32_t exit_wrmsr = 32;
+    static constexpr std::uint32_t exit_entry_invalid_guest_state = 33;
     static constexpr std::uint32_t exit_mwait = 36;
+    static constexpr std::uint32_t exit_monitor_trap_flag = 37;
     static constexpr std::uint32_t exit_monitor = 39;
     static constexpr std::uint32_t exit_ept_violation = 48;
     static constexpr std::uint32_t exit_invept = 50;
     static constexpr std::uint32_t exit_invvpid = 53;
     static constexpr std::uint32_t exit_xsetbv = 55;
     static constexpr std::uint32_t exit_vmfunc = 59;
+    static constexpr std::uint32_t exit_page_modification_log_full = 62;
+    static constexpr std::uint32_t exit_spp_related_event = 66;
     /**
      * @}
      */
