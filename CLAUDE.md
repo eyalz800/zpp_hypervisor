@@ -51,9 +51,14 @@ modules — this is why `cmake_minimum_required` is 3.28.
 
 The hypervisor has no OS, no libc, no C++ runtime library. It uses:
 - libc++ **headers only** (no linking) with custom `__config_site` (no threads/locale/filesystem)
-- Custom CRT: `crt.cpp` (memcpy/memmove/memset/memcmp/strlen, the `__cxa_*` ABI, every
-  `operator new`/`operator delete` overload — plain, `nothrow`, `align_val_t` — plus the
-  global heap instance and `zpp::crt::init`), `heap.cpp` (the `heap` type only)
+- Custom CRT: `crt.cpp` (memcpy/memmove/memset/memcmp/strlen, the `__cxa_*` ABI, the
+  global heap instance, the over-alignment helpers and `zpp::crt::init`),
+  `operators.cpp` (every `operator new`/`operator delete` overload — plain, `nothrow`,
+  `align_val_t`), `init_array.cpp` (the six linker-synthesized array bounds, behind three
+  accessors), `heap.cpp` (the `heap` type only). The last two are separate translation
+  units so `tests/crt` can compile the rest: linking a replacement `operator new` into a
+  hosted binary routes the standard library's own pre-main initializers through the arena,
+  and the array bounds cannot be reproduced on a host at all
 - `-D_LIBCPP_VERBOSE_ABORT(...)=__builtin_trap()` for `<expected>` support
 - `std::expected<T, zpp::error>` (replaced custom `zpp::maybe<T>`)
 - `zpp::scope_exit` (matches P0052 `std::scope_exit` API — not in libc++ until C++29)

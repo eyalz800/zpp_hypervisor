@@ -31,16 +31,28 @@
  * Hosted, native, no emulator and no target - the whole point is that
  * none of this needs one.
  *
- * How crt.cpp is compiled here, and why it is not simply linked: see the
- * long comment in build.sh. The short version is that crt.cpp is a
+ * How crt.cpp is compiled here, and why it is not simply linked. It is a
  * *replacement* C runtime, so linking it into a hosted binary preempts
- * the host's memcpy (destroying the oracle this harness compares
- * against), the host's __cxa_atexit and __dso_handle, and every operator
- * new - and that last one routes the standard library's own pre-main
- * initializers through a heap that zpp::crt::init::main() has not
- * brought up yet, which traps. So the C-linkage names are renamed with
- * macros below, after every header crt.cpp includes has already been
- * included, and build.sh drops the two things a macro cannot rename.
+ * the host's memcpy - destroying the oracle this harness compares
+ * against - the host's __cxa_atexit and __dso_handle, and every operator
+ * new. That last one routes the standard library's own pre-main
+ * initializers through a heap that zpp::crt::init::main() has not brought
+ * up yet, which traps: the harness would die at start-up for a reason
+ * that says nothing about the hypervisor.
+ *
+ * So the C-linkage names are renamed with macros below, after every
+ * header crt.cpp includes has already been included, and the file is
+ * *included* rather than linked. The two things a macro cannot rename
+ * are not in it: `operator` is a keyword, so the twenty allocation
+ * operators live in crt/operators.cpp, and the six linker-synthesized
+ * array bounds cannot be reproduced on a host at all, so they live in
+ * crt/init_array.cpp behind three accessors this file supplies instead.
+ * Both of those are translation units this harness does not compile.
+ *
+ * That arrangement replaces one where build.sh generated a real.cpp by
+ * deleting those two things out of crt.cpp with awk at build time. The
+ * cuts are in the source layout now, so they cannot silently stop
+ * matching.
  */
 #include "zpp/containers.h"
 #include "zpp/crt.h"
@@ -104,34 +116,48 @@ void check_equal(std::uint64_t expected,
                 static_cast<unsigned long long>(actual));
 }
 
-using init_function = void (*)();
+using init_function = zpp::crt::init::array_entry;
 
 /*
- * Stand-ins for the six symbols the linker synthesizes around
- * .preinit_array, .init_array and .fini_array. build.sh drops crt.cpp's
- * own declarations of them, so these are what the loops in
- * zpp::crt::init see.
+ * Stand-ins for the three linker-synthesized arrays.
  *
- * They are pointers rather than arrays on purpose, and this is the one
- * place the hosted stand-in differs from the target. crt.cpp declares
- * them as arrays of unknown bound and walks from start to end by
- * increment, which only terminates when the two symbols sit in one
- * contiguous object - something the linker arranges and no portable C++
- * can. `auto * entry = __init_array_start` deduces the identical type
- * either way, so every line of the code under test is the real one.
+ * The real ones are declared in hypervisor/src/crt/init_array.cpp, which
+ * this harness does not compile, and the reason is the whole difficulty:
+ * the bounds are arrays of unknown bound whose addresses the linker fills
+ * in, and only a linked image places two separately declared arrays
+ * contiguously. So crt.cpp asks for them through the three accessors
+ * below, and the three below are this harness's.
  *
- * Being pointers is also what lets a test aim them at whatever it likes,
- * which is how the CLAUDE.md claim about the preinit bounds gets stated
- * below: the loop is bounded by the two symbols and by nothing else.
+ * Everything the code under test does with them is unchanged - it walks
+ * a range forward for the init arrays and backward for the fini array -
+ * and a test can aim a range at whatever it likes, which is how the
+ * CLAUDE.md claim about the preinit bounds gets stated further down: the
+ * walk is bounded by the range and by nothing else.
  */
-init_function * zpp_test_preinit_array_start{};
-init_function * zpp_test_preinit_array_end{};
-init_function * zpp_test_init_array_start{};
-init_function * zpp_test_init_array_end{};
-init_function * zpp_test_fini_array_start{};
-init_function * zpp_test_fini_array_end{};
+std::span<const init_function> g_preinit_array{};
+std::span<const init_function> g_init_array{};
+std::span<const init_function> g_fini_array{};
 
 } // namespace
+
+namespace zpp::crt::init
+{
+std::span<const array_entry> preinit_array()
+{
+    return g_preinit_array;
+}
+
+std::span<const array_entry> init_array()
+{
+    return g_init_array;
+}
+
+std::span<const array_entry> fini_array()
+{
+    return g_fini_array;
+}
+
+} // namespace zpp::crt::init
 
 // Every header crt.cpp includes is already included above, so no macro
 // below is ever live while a system or project header is being parsed.
@@ -149,14 +175,8 @@ init_function * zpp_test_fini_array_end{};
 #define __cxa_guard_release zpp_test_cxa_guard_release
 #define __cxa_guard_abort zpp_test_cxa_guard_abort
 #define __dso_handle zpp_test_dso_handle
-#define __preinit_array_start zpp_test_preinit_array_start
-#define __preinit_array_end zpp_test_preinit_array_end
-#define __init_array_start zpp_test_init_array_start
-#define __init_array_end zpp_test_init_array_end
-#define __fini_array_start zpp_test_fini_array_start
-#define __fini_array_end zpp_test_fini_array_end
 
-#include "real.cpp"
+#include "crt.cpp"
 
 #undef memcpy
 #undef memmove
@@ -170,21 +190,16 @@ init_function * zpp_test_fini_array_end{};
 #undef __cxa_guard_release
 #undef __cxa_guard_abort
 #undef __dso_handle
-#undef __preinit_array_start
-#undef __preinit_array_end
-#undef __init_array_start
-#undef __init_array_end
-#undef __fini_array_start
-#undef __fini_array_end
 
 /*
- * real.cpp is included into this translation unit, so everything in its
+ * crt.cpp is included into this translation unit, so everything in its
  * unnamed namespace is visible from here: g_heap_storage,
- * global_heap_size, max_registered_destructors,
- * g_registered_destructor_count, and the three allocation helpers the
- * dropped operator new overloads used to call. That is deliberate. It is
- * what lets the tests below assert against the real storage rather than
- * against a copy of its constants.
+ * global_heap_size, max_registered_destructors and
+ * g_registered_destructor_count. That is deliberate. It is what lets the
+ * tests below assert against the real storage rather than against a copy
+ * of its constants. The three allocation helpers are not in it - they
+ * are zpp::crt names now, because crt/operators.cpp calls them from
+ * another translation unit.
  */
 
 namespace
@@ -536,11 +551,11 @@ void heap_soak()
 
 void aligned_allocation()
 {
-    // These are the three static helpers in crt.cpp's unnamed namespace.
-    // build.sh drops the operator new / operator delete overloads that
-    // call them - a hosted binary cannot have those without routing the
-    // standard library's own allocations through the arena - but keeps
-    // the helpers, because the over-allocate-and-stash arithmetic is
+    // The three helpers in crt.cpp that the allocation operators call.
+    // The operators themselves are in crt/operators.cpp and are not
+    // compiled here - a hosted binary cannot have them without routing
+    // the standard library's own allocations through the arena - but the
+    // helpers are, because the over-allocate-and-stash arithmetic is
     // where anything interesting could go wrong.
     static constexpr std::size_t alignments[] = {
         1, 2, 4, 8, 16, 32, 64, 128, 256, 512, 1024, 2048, 4096};
@@ -555,7 +570,7 @@ void aligned_allocation()
     for (auto alignment : alignments) {
         for (auto size : sizes) {
             auto * pointer = static_cast<unsigned char *>(
-                allocate_aligned_or_trap(size, alignment));
+                zpp::crt::allocate_aligned_or_trap(size, alignment));
             if (!is_aligned(pointer, alignment)) {
                 ++misaligned;
             }
@@ -567,7 +582,7 @@ void aligned_allocation()
             // allocation must not disturb it, which the deallocate
             // below is what checks.
             std::memset(pointer, 0xa5, size);
-            deallocate_aligned(pointer, alignment);
+            zpp::crt::deallocate_aligned(pointer, alignment);
         }
     }
 
@@ -586,21 +601,22 @@ void aligned_allocation()
     std::size_t second_pass_failures{};
     for (auto alignment : alignments) {
         auto * pointer = static_cast<unsigned char *>(
-            allocate_aligned_or_trap(4096, alignment));
+            zpp::crt::allocate_aligned_or_trap(4096, alignment));
         if (!pointer || !is_aligned(pointer, alignment)) {
             ++second_pass_failures;
         }
-        deallocate_aligned(pointer, alignment);
+        zpp::crt::deallocate_aligned(pointer, alignment);
     }
     check_equal(0,
                 second_pass_failures,
                 "the arena survives a second over-aligned sweep, so "
                 "deallocate_aligned recovered the right base each time");
 
-    deallocate_aligned(nullptr, 4096); // Must be a no-op, not a fault.
+    zpp::crt::deallocate_aligned(nullptr,
+                                 4096); // Must be a no-op, not a fault.
     check(true, "deallocate_aligned(nullptr) is a no-op");
 
-    auto * plain = allocate_or_trap(0);
+    auto * plain = zpp::crt::allocate_or_trap(0);
     check(plain,
           "a zero sized allocation still yields a unique pointer, since "
           "two objects may not share an address");
@@ -1328,15 +1344,13 @@ void the_init_arrays_run_forward()
     // The array they both point at holds a function that must therefore
     // never run - if the loop ever walked from the module base instead,
     // this is what would catch it.
-    zpp_test_preinit_array_start = g_preinit_storage;
-    zpp_test_preinit_array_end = g_preinit_storage;
+    g_preinit_array = std::span(g_preinit_storage).first(0);
 
     // The init bounds cover the first three of five entries. The last
     // two exist so that "runs the array" and "runs from start to end"
     // are different claims: a loop bounded by anything other than the
     // two symbols would reach them.
-    zpp_test_init_array_start = g_init_storage;
-    zpp_test_init_array_end = g_init_storage + 3;
+    g_init_array = std::span(g_init_storage).first(3);
 
     zpp::crt::init::main();
 
@@ -1535,8 +1549,7 @@ void cleanup_runs_destructors_then_the_fini_array_in_reverse()
                 g_registered_destructor_count,
                 "the registry fills to exactly its capacity");
 
-    zpp_test_fini_array_start = g_fini_storage;
-    zpp_test_fini_array_end = g_fini_storage + 3;
+    g_fini_array = std::span(g_fini_storage).first(3);
 
     zpp::crt::init::cleanup();
 

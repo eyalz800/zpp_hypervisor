@@ -5,18 +5,6 @@
 #include <cstdint>
 #include <new>
 
-// Bounds of the initializer and finalizer arrays, synthesized by the
-// linker. When a section is absent lld gives the two symbols the same
-// value, so the corresponding loop simply does nothing.
-extern "C" {
-extern void (*__preinit_array_start[])();
-extern void (*__preinit_array_end[])();
-extern void (*__init_array_start[])();
-extern void (*__init_array_end[])();
-extern void (*__fini_array_start[])();
-extern void (*__fini_array_end[])();
-}
-
 // The compiler passes the address of this symbol to __cxa_atexit. It is
 // normally supplied by crtbegin, which a -nostdlib link never pulls in.
 extern "C" constinit void * __dso_handle = &__dso_handle;
@@ -210,12 +198,16 @@ void __cxa_guard_abort(std::int64_t * guard_object)
 }
 }
 
-namespace
+namespace zpp::crt
 {
 /**
  * Allocates from the global heap, trapping on failure. Exceptions are
  * unavailable, so returning null here would surface as a null dereference
  * far away from the exhausted allocation.
+ *
+ * These three are declared in zpp/crt.h rather than being file-local,
+ * because the allocation operators that call them are a translation unit
+ * of their own. See crt/operators.cpp for why.
  */
 void * allocate_or_trap(std::size_t size)
 {
@@ -266,126 +258,7 @@ void deallocate_aligned(void * pointer, std::size_t alignment) noexcept
 
     zpp::crt::heap().deallocate(static_cast<void **>(pointer)[-1]);
 }
-} // namespace
 
-void * operator new(std::size_t size)
-{
-    return allocate_or_trap(size);
-}
-
-void * operator new[](std::size_t size)
-{
-    return allocate_or_trap(size);
-}
-
-void * operator new(std::size_t size, const std::nothrow_t &) noexcept
-{
-    return zpp::crt::heap().allocate(size ? size : 1);
-}
-
-void * operator new[](std::size_t size, const std::nothrow_t &) noexcept
-{
-    return zpp::crt::heap().allocate(size ? size : 1);
-}
-
-void * operator new(std::size_t size, std::align_val_t alignment)
-{
-    return allocate_aligned_or_trap(size,
-                                    static_cast<std::size_t>(alignment));
-}
-
-void * operator new[](std::size_t size, std::align_val_t alignment)
-{
-    return allocate_aligned_or_trap(size,
-                                    static_cast<std::size_t>(alignment));
-}
-
-void * operator new(std::size_t size,
-                    std::align_val_t alignment,
-                    const std::nothrow_t &) noexcept
-{
-    return allocate_aligned_or_trap(size,
-                                    static_cast<std::size_t>(alignment));
-}
-
-void * operator new[](std::size_t size,
-                      std::align_val_t alignment,
-                      const std::nothrow_t &) noexcept
-{
-    return allocate_aligned_or_trap(size,
-                                    static_cast<std::size_t>(alignment));
-}
-
-void operator delete(void * ptr) noexcept
-{
-    zpp::crt::heap().deallocate(ptr);
-}
-
-void operator delete[](void * ptr) noexcept
-{
-    zpp::crt::heap().deallocate(ptr);
-}
-
-void operator delete(void * ptr, std::size_t) noexcept
-{
-    zpp::crt::heap().deallocate(ptr);
-}
-
-void operator delete[](void * ptr, std::size_t) noexcept
-{
-    zpp::crt::heap().deallocate(ptr);
-}
-
-void operator delete(void * ptr, const std::nothrow_t &) noexcept
-{
-    zpp::crt::heap().deallocate(ptr);
-}
-
-void operator delete[](void * ptr, const std::nothrow_t &) noexcept
-{
-    zpp::crt::heap().deallocate(ptr);
-}
-
-void operator delete(void * ptr, std::align_val_t alignment) noexcept
-{
-    deallocate_aligned(ptr, static_cast<std::size_t>(alignment));
-}
-
-void operator delete[](void * ptr, std::align_val_t alignment) noexcept
-{
-    deallocate_aligned(ptr, static_cast<std::size_t>(alignment));
-}
-
-void operator delete(void * ptr,
-                     std::size_t,
-                     std::align_val_t alignment) noexcept
-{
-    deallocate_aligned(ptr, static_cast<std::size_t>(alignment));
-}
-
-void operator delete[](void * ptr,
-                       std::size_t,
-                       std::align_val_t alignment) noexcept
-{
-    deallocate_aligned(ptr, static_cast<std::size_t>(alignment));
-}
-
-void operator delete(void * ptr,
-                     std::align_val_t alignment,
-                     const std::nothrow_t &) noexcept
-{
-    deallocate_aligned(ptr, static_cast<std::size_t>(alignment));
-}
-
-void operator delete[](void * ptr,
-                       std::align_val_t alignment,
-                       const std::nothrow_t &) noexcept
-{
-    deallocate_aligned(ptr, static_cast<std::size_t>(alignment));
-}
-
-namespace zpp::crt
-{
 zpp::heap & heap()
 {
     // Deliberately just an accessor - no initialization check on the
@@ -408,15 +281,12 @@ void main()
     // allowed to allocate.
     g_heap.init(g_heap_storage);
 
-    for (auto * entry = __preinit_array_start;
-         entry != __preinit_array_end;
-         ++entry) {
-        (*entry)();
+    for (auto entry : preinit_array()) {
+        entry();
     }
 
-    for (auto * entry = __init_array_start; entry != __init_array_end;
-         ++entry) {
-        (*entry)();
+    for (auto entry : init_array()) {
+        entry();
     }
 }
 
@@ -435,8 +305,10 @@ void cleanup()
         entry.function(entry.argument);
     }
 
-    for (auto * entry = __fini_array_end; entry != __fini_array_start;) {
-        (*--entry)();
+    auto finalizers = fini_array();
+    for (auto entry = finalizers.rbegin(); entry != finalizers.rend();
+         ++entry) {
+        (*entry)();
     }
 }
 

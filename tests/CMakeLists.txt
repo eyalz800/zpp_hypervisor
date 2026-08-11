@@ -252,21 +252,20 @@ else()
         "them on PATH and fail if they are not there")
 endif()
 
-# === Harnesses that still generate a real.cpp with awk ====================
+# The freestanding C runtime: the heap, the string and memory primitives,
+# scope_exit, the allocator and the container aliases, zpp::error, and the
+# init and fini array machinery.
 #
-# Transitional, and the direction is one way: each of these is a shell
-# script that cuts named function bodies out of hypervisor.cpp or crt.cpp
-# and compiles the result. They are registered here so ctest runs the whole
-# suite from the first commit rather than from the last, and each leaves as
-# the functions it wants become a translation unit a harness can compile.
-#
-# Nothing else should be added to this list.
-foreach(_generated crt)
-    add_test(NAME "tests/${_generated}"
-        COMMAND "${CMAKE_CURRENT_SOURCE_DIR}/${_generated}/build.sh")
-    set_tests_properties("tests/${_generated}" PROPERTIES
-        TIMEOUT ${ZPP_HOST_TEST_TIMEOUT_SECONDS})
-endforeach()
+# The only harness that *includes* a hypervisor source rather than linking
+# it, and the reason is in harness.cpp: crt.cpp is a replacement C runtime
+# whose memcpy, __cxa_* and __dso_handle would preempt the host's if they
+# were linked in, so the harness renames them with #define and includes the
+# file. hypervisor/src/crt is on the include path for that one line.
+zpp_add_host_test(crt
+    SOURCES
+        crt/harness.cpp
+        "${ZPP_HYPERVISOR_SRC}/crt/heap.cpp"
+    INCLUDES "${ZPP_HYPERVISOR_SRC}/crt")
 
 # === Checks that are not a compile =======================================
 
