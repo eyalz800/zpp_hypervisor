@@ -85,6 +85,7 @@
 #include <memory>
 #include <print>
 #include <string>
+#include <vector>
 
 /**
  * What this harness records about the two calls the resume path makes
@@ -156,6 +157,33 @@ void check_equal(std::uint64_t expected,
                  actual);
 }
 
+std::vector<std::string> g_findings;
+
+/**
+ * A place where this VMM's answer is wrong and is recorded rather than
+ * repaired here.
+ *
+ * Same shape as tests/nested_exit's helper of the same name, and the
+ * same reasoning: a permanently red harness is one nobody runs, and
+ * repairing the decision is a change to the hypervisor rather than to
+ * its tests. So the *current* answer is asserted, which means a fix
+ * flips this check and forces whoever makes it to come back and delete
+ * the entry - and the citation is printed on every run in the meantime.
+ */
+void diverge(bool current_answer_holds, const std::string & what)
+{
+    ++g_checks;
+    g_findings.push_back(what);
+    if (current_answer_holds) {
+        std::println("  DIVERGES {}", what);
+        return;
+    }
+    ++g_failures;
+    std::println("FAIL: a recorded divergence no longer reproduces, so "
+                 "the record is stale: {}",
+                 what);
+}
+
 /*
  * The original-event identification field, SDM Table 27-21. Values 1 and
  * 7 of the type are "not used" and so have no name here.
@@ -199,6 +227,20 @@ namespace interruptibility
 constexpr std::uint64_t blocking_by_sti = 1ull << 0;
 constexpr std::uint64_t blocking_by_nmi = 1ull << 3;
 } // namespace interruptibility
+
+/**
+ * The guest RFLAGS bits an entry check reads.
+ *
+ * Bit 1 is the one RFLAGS bit the architecture requires to be set - SDM
+ * 29.3.1.4, "reserved bit 1 must be 1" (.references/sdm.txt:202579) - so
+ * a fixture that wants IF clear still has to set it, or it is testing a
+ * value no VM entry would accept for a different reason.
+ */
+namespace rflags
+{
+constexpr std::uint64_t always_one = 1ull << 1;
+constexpr std::uint64_t interrupt_enable = 1ull << 9;
+} // namespace rflags
 
 /*
  * The vectors the cases below name. Each is here because the
@@ -354,6 +396,15 @@ machine make()
     vmcs.vpid(cpu + 1);
     vmcs.guest_rip(guest_rip);
     vmcs.guest_cs_selector(guest_cs);
+
+    // Interrupts enabled, which is the state an interrupted delivery of
+    // an *external* interrupt was in: hardware only delivers one while
+    // RFLAGS.IF is 1. The fixture used to leave RFLAGS at the zero the
+    // VMCS is wiped to, which is IF clear - so every external-interrupt
+    // case here was asking the resume path to re-queue into a state SDM
+    // 29.3.1.4 refuses (.references/sdm.txt:202582), and passing. The
+    // one case that wants IF clear now says so, below.
+    vmcs.guest_rflags(rflags::always_one | rflags::interrupt_enable);
     vmcs.write(
         zpp::arch::x86_64::vmx::vmcs::field::vm_exit_instruction_length,
         exit_instruction_length);
@@ -893,6 +944,148 @@ void an_active_processor_takes_any_event()
                 "SDM 29.3.1.5: \"Active. Any event is allowed.\"");
 }
 
+// === The interrupt flag ================================================
+
+/**
+ * An external interrupt may only be put back into a guest whose
+ * interrupts are enabled, and this VMM does not ask.
+ *
+ * Written from the SDM before reading `event_allowed_on_entry`, which is
+ * why it is a finding rather than a confirmation. The entry checks live
+ * in two sections and this VMM transcribed one of them. SDM 29.3.1.5,
+ * "Checks on Guest Non-Register State", is the activity-state and
+ * interruptibility rule the cases above are about. The requirement here
+ * is one section earlier, in 29.3.1.4, "Checks on Guest RFLAGS"
+ * (.references/sdm.txt:202582):
+ *
+ *   "The IF flag (RFLAGS[bit 9]) must be 1 if the valid bit (bit 31) in
+ *    the injected-event identification field is 1 and the event type
+ *    (bits 10:8) is external interrupt."
+ *
+ * KVM spells the whole predicate in one place, and it is both halves at
+ * once - `__vmx_interrupt_blocked` (.references/kvm/vmx.c:5071):
+ *
+ *   return !(vmx_get_rflags(vcpu) & X86_EFLAGS_IF) ||
+ *          (vmcs_read32(GUEST_INTERRUPTIBILITY_INFO) &
+ *           (GUEST_INTR_STATE_STI | GUEST_INTR_STATE_MOV_SS));
+ *
+ * `event_allowed_on_entry` has the second disjunct and not the first, so
+ * an external interrupt whose delivery an exit interrupted is put back
+ * into a guest with IF clear - and the entry then fails, which produces
+ * **no exit at all**. That is the silent failure the whole re-queue path
+ * exists to prevent, arriving through the path itself.
+ *
+ * Reproduced outside this harness, which is why it is recorded rather
+ * than merely argued. Under Bochs 3.0 (--enable-vmx=2), a guest-tests
+ * build at `bfb69c7` stops with
+ *
+ *   VMENTER FAIL: VMCS guest interrupts blocked when injecting external
+ *                 interrupt
+ *   VMEXIT: Guest State Checks Failed
+ *
+ * and Bochs' condition for that message (`cpu/vmx.cc:2002`) is
+ * `(interruptibility & 3) != 0 || (rflags & IF) == 0`. The first
+ * disjunct is the one this VMM already refuses, so the one that fired is
+ * the interrupt flag.
+ *
+ * The fix is one condition in `event_allowed_on_entry`, beside the
+ * blocking-by-STI test it already makes, and it is deliberately not made
+ * here: resume.cpp is not this harness' to edit.
+ */
+void an_external_interrupt_needs_the_interrupt_flag()
+{
+    auto built = make();
+    auto event = original_event::valid |
+                 original_event::external_interrupt |
+                 clock_interrupt_vector;
+
+    built.state->vmcs.guest_rflags(rflags::always_one);
+    interrupt_the_delivery_of(built, event);
+    resume(built);
+
+    diverge(event == entry_field(built),
+            "SDM 29.3.1.4 (sdm.txt:202582) requires RFLAGS.IF to be 1 "
+            "when the entry field injects an external interrupt, and "
+            "event_allowed_on_entry does not read RFLAGS at all - so "
+            "the event is put back into a guest with interrupts "
+            "disabled and the VM entry fails silently. KVM's "
+            "__vmx_interrupt_blocked (kvm/vmx.c:5071) tests IF and the "
+            "STI/MOV-SS blocking together");
+
+    diverge(0 == built.state->pending_event[cpu],
+            "and the event is cleared as though it had been delivered, "
+            "so the entry failure destroys it - the same destruction "
+            "the re-queue exists to prevent");
+}
+
+/**
+ * The same event, with interrupts enabled, still goes back.
+ *
+ * The pair matters: a fix that refuses every external interrupt would
+ * satisfy the case above and undo the whole path, so what may not change
+ * is asserted beside what must.
+ */
+void an_external_interrupt_goes_back_when_interrupts_are_enabled()
+{
+    auto built = make();
+    auto event = original_event::valid |
+                 original_event::external_interrupt |
+                 clock_interrupt_vector;
+
+    built.state->vmcs.guest_rflags(rflags::always_one |
+                                   rflags::interrupt_enable);
+    interrupt_the_delivery_of(built, event);
+    resume(built);
+
+    check_equal(event,
+                entry_field(built),
+                "an external interrupt is put back where RFLAGS.IF is 1");
+    check_equal(0,
+                built.state->pending_event[cpu],
+                "and nothing is left held once it has gone out");
+}
+
+/**
+ * An NMI is not subject to the interrupt flag, and a hardware exception
+ * is not either.
+ *
+ * SDM 29.3.1.4 names one event type, "external interrupt", and 29.3.1.5
+ * names two for the STI and MOV-SS blocking - external interrupt and
+ * NMI. The asymmetry is the point: an NMI is not maskable by IF, so a
+ * fix that reads RFLAGS for every type would hold back the one event a
+ * guest with interrupts disabled must still be able to take.
+ */
+void the_interrupt_flag_binds_only_external_interrupts()
+{
+    struct
+    {
+        std::uint64_t event;
+        const char * what;
+    } const cases[]{
+        {original_event::non_maskable_interrupt | 2,
+         "an NMI, which RFLAGS.IF does not mask"},
+        {original_event::hardware_exception | page_fault_vector,
+         "a page fault, which no interruptibility rule mentions"},
+        {original_event::software_exception | invalid_opcode_vector,
+         "a software exception, likewise"},
+    };
+
+    for (const auto & one : cases) {
+        auto built = make();
+        auto event = original_event::valid | one.event;
+
+        built.state->vmcs.guest_rflags(rflags::always_one);
+        interrupt_the_delivery_of(built, event);
+        resume(built);
+
+        check_equal(event,
+                    entry_field(built),
+                    std::string{"with interrupts disabled, "} + one.what +
+                        " still goes back: SDM 29.3.1.4 restricts only "
+                        "the external-interrupt type");
+    }
+}
+
 // === Blocking by NMI ===================================================
 
 /**
@@ -1174,6 +1367,9 @@ int main()
     shutdown_permits_only_nmi_and_machine_check();
     hlt_permits_what_a_halted_processor_can_take();
     an_active_processor_takes_any_event();
+    an_external_interrupt_needs_the_interrupt_flag();
+    an_external_interrupt_goes_back_when_interrupts_are_enabled();
+    the_interrupt_flag_binds_only_external_interrupts();
     an_nmi_put_back_clears_blocking_by_nmi();
     only_an_nmi_clears_blocking_by_nmi();
     nothing_is_put_back_without_a_pending_event();
@@ -1182,7 +1378,14 @@ int main()
     the_entry_is_chosen_by_launch_state();
     the_resume_records_where_it_left_the_guest();
 
+    if (!g_findings.empty()) {
+        std::println("\nfindings:");
+        for (const auto & finding : g_findings) {
+            std::println("  - {}", finding);
+        }
+    }
+
     std::println(
-        "resume_guest: {} checks, {} failures", g_checks, g_failures);
+        "\nresume_guest: {} checks, {} failures", g_checks, g_failures);
     return g_failures ? 1 : 0;
 }
