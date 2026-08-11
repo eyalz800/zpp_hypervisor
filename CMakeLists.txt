@@ -109,6 +109,24 @@ option(ZPP_TRACE
     "Compile the serial trace output in the loaders"
     ${ZPP_VERIFY_HYPERVISOR})
 
+# The guest-side coverage suite: uefi_loader/include/zpp/guest_tests.h, run
+# from inside the guest once the hypervisor is live, reporting one line per
+# case on serial. scripts/ci/bochs-exit-coverage.sh grades the result.
+#
+# Off, and off is the decision rather than a convenience. It is a test
+# facility and has no place in a loader that boots anything: it installs an
+# interrupt descriptor table of its own, deliberately faults thirteen
+# instructions, writes the local APIC's task priority register and then
+# stops instead of chainloading. None of that destroys state the way
+# ZPP_VERIFY_HYPERVISOR does - every register it writes is put back and no
+# other processor is touched - but a build carrying it never reaches an
+# operating system, which is the failure mode CLAUDE.md records as costing
+# a full day when it was a stale cache entry rather than a deliberate
+# choice. scripts/check-bootable.sh refuses one.
+option(ZPP_GUEST_TESTS
+    "Compile the guest-side VM-exit, EPT and emulation coverage suite"
+    OFF)
+
 ExternalProject_Add(uefi_loader
     SOURCE_DIR "${CMAKE_CURRENT_SOURCE_DIR}/cmake/uefi-loader"
     BINARY_DIR "${CMAKE_BINARY_DIR}/uefi-loader"
@@ -120,6 +138,7 @@ ExternalProject_Add(uefi_loader
         -DZPP_OUTPUT_DIR=${ZPP_OUTPUT_DIR}
         -DFETCHCONTENT_BASE_DIR=${CMAKE_BINARY_DIR}/_deps
         -DZPP_VERIFY_HYPERVISOR=${ZPP_VERIFY_HYPERVISOR}
+        -DZPP_GUEST_TESTS=${ZPP_GUEST_TESTS}
         -DZPP_TRACE=${ZPP_TRACE}
         -DZPP_CHAINLOAD_ONLY=${ZPP_CHAINLOAD_ONLY}
         -DZPP_SEARCH_ALL_DEVICES=${ZPP_SEARCH_ALL_DEVICES}

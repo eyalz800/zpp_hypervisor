@@ -13,6 +13,7 @@ extern "C" {
 #include <Protocol/SimpleFileSystem.h>
 }
 #include "zpp/esp_reservation.h"
+#include "zpp/guest_tests.h"
 #include "zpp/loader.h"
 #include "zpp/nvme_selftest.h"
 #include "zpp/reserved_region.h"
@@ -105,6 +106,7 @@ static EFI_GUID g_efi_device_path_to_text_protocol_guid = {
 static bool g_timed_waits_usable = true;
 
 // Unqualified, so the many call sites below stay readable.
+using zpp::guest_tests;
 using zpp::nvme_selftest;
 using zpp::reserved_region;
 using zpp::sleep_control_finder;
@@ -737,24 +739,23 @@ static void write_trace_variable()
     if constexpr (!trace::enabled || !to_firmware_variable) {
         return;
     } else {
+        if (!g_runtime_services) {
+            return;
+        }
 
-    if (!g_runtime_services) {
-        return;
-    }
+        auto log = trace::log();
+        if (log.empty()) {
+            return;
+        }
 
-    auto log = trace::log();
-    if (log.empty()) {
-        return;
-    }
-
-    auto name = u"ZppTrace";
-    g_runtime_services->SetVariable(
-        reinterpret_cast<CHAR16 *>(const_cast<char16_t *>(name)),
-        &g_zpp_variable_guid,
-        EFI_VARIABLE_NON_VOLATILE | EFI_VARIABLE_BOOTSERVICE_ACCESS |
-            EFI_VARIABLE_RUNTIME_ACCESS,
-        log.size(),
-        const_cast<char *>(log.data()));
+        auto name = u"ZppTrace";
+        g_runtime_services->SetVariable(
+            reinterpret_cast<CHAR16 *>(const_cast<char16_t *>(name)),
+            &g_zpp_variable_guid,
+            EFI_VARIABLE_NON_VOLATILE | EFI_VARIABLE_BOOTSERVICE_ACCESS |
+                EFI_VARIABLE_RUNTIME_ACCESS,
+            log.size(),
+            const_cast<char *>(log.data()));
     }
 }
 
@@ -1782,6 +1783,30 @@ extern "C" EFI_STATUS EFIAPI uefi_main(EFI_HANDLE image_handle,
         write_trace_variable();
         hold_screen();
         return EFI_LOAD_ERROR;
+    }
+
+    // The guest-side coverage suite: what this VMM answers a guest with,
+    // asked from inside that guest, one line of verdict per case on
+    // serial. See zpp/guest_tests.h.
+    //
+    // Ahead of the self check below because the two are mutually
+    // exclusive by construction - the build system forces this one off
+    // whenever that one is on - and because this is the one that leaves
+    // the machine as it found it. Non-destructive, so the boot could
+    // continue afterwards; it does not, because a test build should end
+    // in a verdict rather than in an operating system, and because a
+    // harness that has to tell a test failure from a later boot failure
+    // is a harness with two ways to be wrong.
+    if constexpr (guest_tests::enabled) {
+        auto ok = guest_tests::run(system_table);
+
+        trace::line(ok ? "ZPP_TRACE GUEST TESTS PASSED, not chainloading"
+                       : "ZPP_TRACE GUEST TESTS FAILED, not chainloading");
+        trace::line("ZPP_TRACE this build runs the guest coverage suite "
+                    "and stops - rebuild with ZPP_GUEST_TESTS=OFF to "
+                    "boot a guest");
+        write_trace_variable();
+        return ok ? EFI_SUCCESS : EFI_LOAD_ERROR;
     }
 
     // Ask the hypervisor to identify itself now that it should be live.

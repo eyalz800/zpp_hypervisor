@@ -26,6 +26,10 @@ option(ZPP_TRACE
     "Compile the serial trace output in the loaders"
     ${ZPP_VERIFY_HYPERVISOR})
 
+option(ZPP_GUEST_TESTS
+    "Compile the guest-side VM-exit, EPT and emulation coverage suite"
+    OFF)
+
 option(ZPP_DIAG
     "Compile the diagnostic log, its ring and its sinks (debug builds only)"
     ON)
@@ -175,6 +179,16 @@ target_compile_definitions(zpp_loader_efi PRIVATE
     # exactly once, through a stale ON in a cache - the same way
     # BACKLOG.md records this option costing time before.
     "ZPP_VERIFY_HYPERVISOR=$<AND:$<BOOL:${ZPP_VERIFY_HYPERVISOR}>,$<NOT:$<BOOL:${ZPP_CHAINLOAD_ONLY}>>>"
+    # The guest-side coverage suite. Forced off in the two configurations
+    # where it could not mean anything, rather than documented as
+    # incompatible - which is the lesson the line above already carries.
+    #
+    # With ZPP_CHAINLOAD_ONLY there is no hypervisor to ask, so every case
+    # would fail correctly and uselessly. With ZPP_VERIFY_HYPERVISOR the
+    # destructive check runs first and ends the boot, and worse, anything
+    # this suite then reported would be attributed to it rather than to
+    # the state verify::present had already left behind.
+    "ZPP_GUEST_TESTS=$<AND:$<BOOL:${ZPP_GUEST_TESTS}>,$<NOT:$<BOOL:${ZPP_CHAINLOAD_ONLY}>>,$<NOT:$<BOOL:${ZPP_VERIFY_HYPERVISOR}>>>"
     # Serial tracing, controlled on its own so it can be enabled or disabled
     # independently of the check above. Defaults to the same value.
     "ZPP_TRACE=$<BOOL:${ZPP_TRACE}>"

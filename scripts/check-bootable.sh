@@ -45,6 +45,33 @@ for marker in 'hypervisor_bit=' 'leaf 0x40000000 ebx=' 'vmm exits '; do
     fi
 done
 
+# The guest-side coverage suite. Not destructive the way verify::present
+# is - it restores the interrupt descriptor table, the control registers
+# and the local APIC register it wrote, and it touches no other processor
+# - but a build carrying it deliberately faults thirteen instructions and
+# then stops instead of chainloading, so it never reaches an operating
+# system. That is the same failure shape as above, and it is refused for
+# the same reason: the switch persists in a CMake cache, and a boot that
+# ends in a verdict looks from outside like a boot that hung.
+#
+# The marker is a string only the suite emits. It is checked before the
+# chainload-only test below because it is unconditional - there is no
+# reason to deploy one deliberately.
+if LC_ALL=C grep -qa 'ZPPTEST BEGIN' "$loader"; then
+    echo "REFUSING: $loader carries the guest coverage suite." >&2
+    echo "" >&2
+    echo "It runs the VM-exit, EPT and emulation cases and then stops," >&2
+    echo "without chainloading, so this machine will not boot." >&2
+    echo "" >&2
+    echo "Rebuild with the switch off before deploying:" >&2
+    echo "  cmake --preset debug -DZPP_GUEST_TESTS=OFF" >&2
+    echo "  cmake --build --preset debug" >&2
+    echo "" >&2
+    echo "The switch persists in the CMake cache, so passing it once" >&2
+    echo "is not enough - check it, do not assume it." >&2
+    exit 1
+fi
+
 # The other switch that persists in the cache, and the one that is worse
 # to be wrong about, because nothing about the boot looks wrong.
 #
