@@ -204,8 +204,8 @@ zpp_add_host_test(nested_exit
     DEFINES ZPP_NESTED_VMX=1 ZPP_HOSTED_TESTS=1)
 
 # The nested VMX state machine: the real nested_vmx.cpp and the real
-# vmcs12.h against stand-ins for hypervisor.h, the log and the two asm.h
-# headers.
+# vmcs12.h against the real hypervisor class, with only the two asm.h
+# stand-ins on the path.
 #
 # nested_vmx/fields.inc is every encoding in vmcs_fields.h, and this is
 # the only record of how it was made. Regenerate it after editing that
@@ -222,12 +222,14 @@ zpp_add_host_test(nested_exit
 zpp_add_host_test(nested_vmx
     SOURCES
         nested_vmx/harness.cpp
+        support/host_heap.cpp
         "${ZPP_HYPERVISOR_SRC}/hypervisor/nested_vmx.cpp"
+        "${ZPP_HYPERVISOR_SRC}/hypervisor/nested_shadow_vmcs.cpp"
+        "${ZPP_HYPERVISOR_SRC}/crt/heap.cpp"
     INCLUDES
-        "${CMAKE_CURRENT_SOURCE_DIR}/nested_vmx/shim"
         "${CMAKE_CURRENT_SOURCE_DIR}/shim"
         "${CMAKE_CURRENT_SOURCE_DIR}/nested_vmx"
-    DEFINES ZPP_NESTED_VMX=1)
+    DEFINES ZPP_NESTED_VMX=1 ZPP_HOSTED_TESTS=1)
 
 # Application-processor start-up and adoption, with host threads standing
 # in for logical processors: the real slot allocator, the real interrupt
@@ -241,7 +243,6 @@ zpp_add_host_test(ap_start_up
         "${ZPP_HYPERVISOR_SRC}/hypervisor/local_apic.cpp"
     INCLUDES
         "${CMAKE_CURRENT_SOURCE_DIR}/ap_start_up/shim"
-        "${CMAKE_CURRENT_SOURCE_DIR}/nested_vmx/shim"
         "${CMAKE_CURRENT_SOURCE_DIR}/shim"
         "${CMAKE_CURRENT_SOURCE_DIR}/ap_start_up")
 
@@ -256,7 +257,6 @@ zpp_add_host_test(local_apic
         "${ZPP_HYPERVISOR_SRC}/hypervisor/local_apic.cpp"
     INCLUDES
         "${CMAKE_CURRENT_SOURCE_DIR}/local_apic/shim"
-        "${CMAKE_CURRENT_SOURCE_DIR}/nested_vmx/shim"
         "${CMAKE_CURRENT_SOURCE_DIR}/shim"
         "${CMAKE_CURRENT_SOURCE_DIR}/local_apic")
 
@@ -271,7 +271,6 @@ zpp_add_host_test(watched_page
         "${ZPP_HYPERVISOR_SRC}/hypervisor/local_apic_write.cpp"
     INCLUDES
         "${CMAKE_CURRENT_SOURCE_DIR}/watched_page/shim"
-        "${CMAKE_CURRENT_SOURCE_DIR}/nested_vmx/shim"
         "${CMAKE_CURRENT_SOURCE_DIR}/shim"
         "${CMAKE_CURRENT_SOURCE_DIR}/watched_page")
 
@@ -286,7 +285,6 @@ zpp_add_host_test(resume_guest
         "${ZPP_HYPERVISOR_SRC}/hypervisor/resume.cpp"
     INCLUDES
         "${CMAKE_CURRENT_SOURCE_DIR}/resume_guest/shim"
-        "${CMAKE_CURRENT_SOURCE_DIR}/nested_vmx/shim"
         "${CMAKE_CURRENT_SOURCE_DIR}/shim"
         "${CMAKE_CURRENT_SOURCE_DIR}/resume_guest"
     DEFINES ZPP_NESTED_VMX=1)

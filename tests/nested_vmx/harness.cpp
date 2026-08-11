@@ -1,9 +1,13 @@
 // Differential test harness for the nested VMX state machine.
 //
 // Compiles the real vmcs12 shadow and the real VMX-instruction emulation
-// (hypervisor/src/hypervisor/nested_vmx.cpp) natively against a shim
-// hypervisor, a shim VMCS and a fake guest physical memory, and drives
-// them the way a guest hypervisor would.
+// (hypervisor/src/hypervisor/nested_vmx.cpp) natively against the real
+// hypervisor class, a shim VMCS and a fake guest physical memory, and
+// drives them the way a guest hypervisor would.
+//
+// The only stand-in headers on this harness's include path are
+// tests/shim/zpp/arch/x86_64/asm.h and .../vmx/asm.h, which exist
+// because a Mac cannot execute `vmread`.
 #include "zpp/hypervisor/hypervisor.h"
 #include <cstdio>
 #include <cstring>
@@ -34,6 +38,40 @@ static std::vector<std::byte> & page_of(std::uint64_t physical)
 
 static bool g_page_present_only = false;
 
+// --------------------------------------------------------- observations
+/**
+ * What this harness records about the calls the code under test makes
+ * into the rest of the VMM, and the two answers it makes those calls
+ * give back.
+ *
+ * Namespace scope, because these are the harness's counters and not the
+ * hypervisor's. They used to be members of a stand-in
+ * `zpp::hypervisor::hypervisor`; that class copy is gone and the real
+ * one has no place for them, which is the right answer - a counter only
+ * a test reads does not belong in a class the hypervisor ships.
+ */
+struct observations
+{
+    std::uint64_t gp_faults{};
+    std::uint64_t ept_discards{};
+    std::uint64_t ept_discards_for{};
+    std::uint64_t last_discard_root{};
+    std::uint64_t ept_refreshes_for{};
+    std::uint64_t last_refresh_root{};
+    std::uint64_t flushes{};
+    std::uint64_t enter_or_park_l2_calls{};
+
+    /**
+     * What `build_vmcs02` and `enter_or_park_l2` answer, which the
+     * suite drives rather than observes.
+     */
+    bool build_vmcs02_fails{};
+    zpp::hypervisor::hypervisor::l2_entry_outcome
+        enter_or_park_l2_outcome{};
+};
+
+static observations g_observed;
+
 namespace zpp::hypervisor
 {
 hypervisor & hypervisor::instance()
@@ -42,7 +80,14 @@ hypervisor & hypervisor::instance()
     return the;
 }
 
-std::uint64_t hypervisor::cached_vmx_msr(std::size_t msr)
+/**
+ * The fixture processor's VMX capability MSRs.
+ *
+ * Split from `cached_vmx_msr`, which returns a reference: the real one
+ * hands back a slot of the array `initialize_vmx_msrs` fills, and this
+ * harness compiles that declaration rather than a copy of it.
+ */
+static std::uint64_t vmx_msr_fixture(std::size_t msr)
 {
     // A generous but realistic host: every control allowed-1, allowed-0
     // minimal, so narrowing is the only thing that can remove a bit.
@@ -72,9 +117,18 @@ std::uint64_t hypervisor::cached_vmx_msr(std::size_t msr)
     }
 }
 
-void hypervisor::inject_general_protection_fault()
+std::uint64_t & hypervisor::cached_vmx_msr(std::size_t msr)
 {
-    this->gp_faults = this->gp_faults + 1;
+    static std::map<std::size_t, std::uint64_t> answers;
+
+    auto & slot = answers[msr];
+    slot = vmx_msr_fixture(msr);
+    return slot;
+}
+
+void hypervisor::inject_general_protection_fault(std::uint64_t)
+{
+    g_observed.gp_faults = g_observed.gp_faults + 1;
 }
 
 std::expected<std::uint64_t, zpp::error>
@@ -136,13 +190,13 @@ std::expected<void, zpp::error> hypervisor::write_guest_physical(
 
 void hypervisor::discard_shadow_ept(std::size_t)
 {
-    this->ept_discards = this->ept_discards + 1;
+    g_observed.ept_discards = g_observed.ept_discards + 1;
 }
 
 void hypervisor::discard_shadow_ept_for(std::size_t, std::uint64_t root)
 {
-    this->ept_discards_for = this->ept_discards_for + 1;
-    this->last_discard_root = root;
+    g_observed.ept_discards_for = g_observed.ept_discards_for + 1;
+    g_observed.last_discard_root = root;
 }
 
 // The refresh replaced the discard on the single-context path. Modelled
@@ -152,28 +206,29 @@ void hypervisor::discard_shadow_ept_for(std::size_t, std::uint64_t root)
 // would pass either way.
 void hypervisor::refresh_shadow_ept_for(std::size_t, std::uint64_t root)
 {
-    this->ept_refreshes_for = this->ept_refreshes_for + 1;
-    this->last_refresh_root = root;
+    g_observed.ept_refreshes_for = g_observed.ept_refreshes_for + 1;
+    g_observed.last_refresh_root = root;
 }
 
 void hypervisor::nested_transition_flush()
 {
-    this->flushes = this->flushes + 1;
+    g_observed.flushes = g_observed.flushes + 1;
 }
 
 std::expected<void, zpp::error> hypervisor::build_vmcs02(std::size_t)
 {
-    if (this->build_vmcs02_fails) {
+    if (g_observed.build_vmcs02_fails) {
         return std::unexpected(
-            zpp::error{error::nested_control_unsupported});
+            zpp::error{error::nested_controls_unsupported});
     }
     return {};
 }
 
 hypervisor::l2_entry_outcome hypervisor::enter_or_park_l2(std::size_t)
 {
-    this->enter_or_park_l2_calls = this->enter_or_park_l2_calls + 1;
-    return this->enter_or_park_l2_outcome;
+    g_observed.enter_or_park_l2_calls =
+        g_observed.enter_or_park_l2_calls + 1;
+    return g_observed.enter_or_park_l2_outcome;
 }
 
 void hypervisor::reflect_l2_exit(std::size_t,
@@ -294,13 +349,13 @@ static result run(basic_reason reason,
             qualification;
     v.guest_rflags((v.guest_rflags() & ~0x8d5ull) | 0x2);
 
-    auto faults = hv().gp_faults;
+    auto faults = g_observed.gp_faults;
     auto handled =
         hv().on_vmx_instruction(zpp::arch::x86_64::vmx::exit_reason(
                                     static_cast<std::uint64_t>(reason)),
                                 regs);
 
-    if (hv().gp_faults != faults) {
+    if (g_observed.gp_faults != faults) {
         return {outcome::gp, 0};
     }
     if (!handled) {
@@ -381,10 +436,10 @@ static void reset_cpu(std::size_t cpu)
     hv().guest_feature_control[cpu] = 0x5;
     hv().running_l2[cpu] = false;
     hv().l2_entries[cpu] = 0;
-    hv().build_vmcs02_fails = false;
-    hv().enter_or_park_l2_outcome =
+    g_observed.build_vmcs02_fails = false;
+    g_observed.enter_or_park_l2_outcome =
         hypervisor_t::l2_entry_outcome::entered;
-    hv().enter_or_park_l2_calls = 0;
+    g_observed.enter_or_park_l2_calls = 0;
     arm_guest(cpu);
 }
 
@@ -872,7 +927,7 @@ static void test_launch_state_machine()
                     ? "launched"
                     : "clear");
 
-    check(1 == hv().enter_or_park_l2_calls,
+    check(1 == g_observed.enter_or_park_l2_calls,
           "VMLAUNCH did not ask whether the guest may be entered");
 
     // The guest-state decision is asked after the controls and the host
@@ -886,7 +941,7 @@ static void test_launch_state_machine()
         hv().running_l2[cpu] = false;
         hv().nested_rip_settled[cpu] = false;
         hv().guest_vmcs12[cpu].state(vmcs12::launch_state::clear);
-        hv().enter_or_park_l2_outcome = outcome_case;
+        g_observed.enter_or_park_l2_outcome = outcome_case;
 
         expect("VMLAUNCH the guest-state decision declined",
                run(basic_reason::vmlaunch, regs, 0),
@@ -897,20 +952,20 @@ static void test_launch_state_machine()
               "a declined VM entry let the caller advance RIP");
     }
 
-    hv().enter_or_park_l2_outcome =
+    g_observed.enter_or_park_l2_outcome =
         hypervisor_t::l2_entry_outcome::entered;
 
     // A refused build_vmcs02 must leave the launch state alone and tell
     // the guest hypervisor its entry did not happen.
     hv().running_l2[cpu] = false;
-    hv().build_vmcs02_fails = true;
+    g_observed.build_vmcs02_fails = true;
     expect("VMLAUNCH refused by build_vmcs02",
            run(basic_reason::vmlaunch, regs, 0),
            outcome::fail_valid,
            7);
     check(!hv().running_l2[cpu],
           "a refused VMLAUNCH left the processor marked as running L2");
-    hv().build_vmcs02_fails = false;
+    g_observed.build_vmcs02_fails = false;
 }
 
 // ------------------------------------------ 4. VMCLEAR / migration cycle
@@ -1118,13 +1173,13 @@ static void test_invalidation()
     // - this harness compiles that file, so it follows the switch rather
     // than describing an intention. Flip both together, and the refresh
     // counters below are here so that flip is one line.
-    auto before = hv().ept_discards_for;
+    auto before = g_observed.ept_discards_for;
     expect("INVEPT single-context",
            invalidate(basic_reason::invept, 1),
            outcome::succeed);
-    check(hv().ept_discards_for == before + 1,
+    check(g_observed.ept_discards_for == before + 1,
           "INVEPT single-context did not invalidate the named shadow");
-    check(hv().last_discard_root == 0x1000,
+    check(g_observed.last_discard_root == 0x1000,
           "INVEPT single-context named the wrong root");
     expect("INVEPT all-context",
            invalidate(basic_reason::invept, 2),
@@ -1230,9 +1285,9 @@ static void test_capability_msrs()
     // A write to any of them is a fault.
     {
         context regs{};
-        auto before = hv().gp_faults;
+        auto before = g_observed.gp_faults;
         hv().on_nested_vmx_msr_write(vmxmsr::basic, regs);
-        check(hv().gp_faults == before + 1,
+        check(g_observed.gp_faults == before + 1,
               "a WRMSR to IA32_VMX_BASIC was not a fault");
     }
 
@@ -1245,10 +1300,10 @@ static void test_capability_msrs()
         hv().on_nested_vmx_msr_write(0x3a, regs);
         check(hv().guest_feature_control[cpu] == 0x5,
               "the first write to IA32_FEATURE_CONTROL was dropped");
-        auto before = hv().gp_faults;
+        auto before = g_observed.gp_faults;
         regs.rax = 0x1;
         hv().on_nested_vmx_msr_write(0x3a, regs);
-        check(hv().gp_faults == before + 1,
+        check(g_observed.gp_faults == before + 1,
               "a second write to a locked IA32_FEATURE_CONTROL was not a "
               "fault");
         check(
