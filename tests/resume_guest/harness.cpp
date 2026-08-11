@@ -975,18 +975,30 @@ void an_active_processor_takes_any_event()
  * **no exit at all**. That is the silent failure the whole re-queue path
  * exists to prevent, arriving through the path itself.
  *
- * Reproduced outside this harness, which is why it is recorded rather
- * than merely argued. Under Bochs 3.0 (--enable-vmx=2), a guest-tests
- * build at `bfb69c7` stops with
+ * What is established here and what is not, kept separate on purpose.
+ *
+ * Established: the two `diverge` calls below. `resume_guest` writes the
+ * event into the entry-interruption field with RFLAGS.IF clear, and
+ * clears `pending_event`, so the event is gone either way. That is this
+ * harness' own measurement and it needs no emulator.
+ *
+ * *Not* established here: that this is what a real boot hits. An earlier
+ * revision of this comment claimed a Bochs run reproduced it, on the
+ * strength of
  *
  *   VMENTER FAIL: VMCS guest interrupts blocked when injecting external
  *                 interrupt
- *   VMEXIT: Guest State Checks Failed
  *
- * and Bochs' condition for that message (`cpu/vmx.cc:2002`) is
- * `(interruptibility & 3) != 0 || (rflags & IF) == 0`. The first
- * disjunct is the one this VMM already refuses, so the one that fired is
- * the interrupt flag.
+ * appearing in a guest-tests run at `bfb69c7`. Bochs' condition for that
+ * message (`cpu/vmx.cc:2002`) is `(interruptibility & 3) != 0 ||
+ * (rflags & IF) == 0`, and the first disjunct is one this VMM refuses -
+ * but there is a second injection site in that run and it is the more
+ * likely one: `uefi_loader/include/zpp/verify_nested.h:953` builds its
+ * vmcs12 with `guest_rflags = 0x2` and then asks for an external
+ * interrupt to be injected, which SDM 29.3.1.4 refuses on its own. The
+ * two cannot be told apart from the emulator's log, so the claim is
+ * withdrawn rather than kept. The defect above stands on the source and
+ * on the checks below.
  *
  * The fix is one condition in `event_allowed_on_entry`, beside the
  * blocking-by-STI test it already makes, and it is deliberately not made

@@ -950,6 +950,34 @@ struct verify_nested
         // Bit 1 is reserved and must be 1; everything else stays clear,
         // and interrupts stay off because there is nothing here to take
         // one.
+        //
+        // **This is why the injecting launch fails, and the failure is
+        // this probe's, not the VMM's.** SDM 29.3.1.4, "Checks on Guest
+        // RFLAGS" (.references/sdm.txt:202582): "The IF flag
+        // (RFLAGS[bit 9]) must be 1 if the valid bit (bit 31) in the
+        // injected-event identification field is 1 and the event type
+        // (bits 10:8) is external interrupt." The third launch passes
+        // `interruption_valid | interruption_external | injected_vector`
+        // and this RFLAGS has IF clear, so no processor may enter that
+        // vmcs02 - and the one under this one is right to refuse it.
+        //
+        // That closes a question `guest_tests.cpp` records as open. Its
+        // `nested.injection_refused_by_hardware` case measured
+        // `0x80000021` in the VMM's own exit ring and concluded "what is
+        // wrong is the guest state built into vmcs02, which the
+        // injection exposes rather than causes" without naming which
+        // field. It is this one. Bochs says so in as many words -
+        // "VMENTER FAIL: VMCS guest interrupts blocked when injecting
+        // external interrupt", whose condition at `cpu/vmx.cc:2002` is
+        // `(interruptibility & 3) != 0 || (rflags & IF) == 0`, and the
+        // interruptibility field written above is 0.
+        //
+        // NOT FIXED HERE, deliberately. Setting IF for the injecting
+        // launch is one word, but it flips three cases in
+        // guest_tests.cpp that currently assert the refusal - including
+        // the only thing that reaches exit reason 33 - and flipping an
+        // expectation without an end-to-end run is what got `50dc614`
+        // reverted. It needs a coverage run to land behind.
         write(field_guest_rflags, 0x2);
         write(field_guest_rsp, host_stack + 0x800);
         write(field_guest_rip,
