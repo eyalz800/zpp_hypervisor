@@ -69,11 +69,23 @@ OUT=${ZPP_TRACE_OUT:-/tmp/kvm.log}
 # of MB/s - the reference boot alone was 3.5 GB in 90 s - so an
 # unattended 900 s stream would be tens of GB.
 #
-# 8 GB rather than something larger because these captures are written to
+# 2 GB by default and 10 GB as an absolute ceiling, because these are
+# written to
 # **flash**, and a habit of leaving a verbose stream running costs write
 # endurance for data nobody reads. Stop the stream as soon as the
 # question is answered; do not leave one running "in case".
-MAX_BYTES=${ZPP_TRACE_MAX_BYTES:-8000000000}
+# Two ceilings, not one. The default is what a capture should cost; the
+# hard limit is what it may never exceed however it is invoked, because
+# ZPP_TRACE_MAX_BYTES is an override and an override with no bound is a
+# footgun with a longer fuse.
+MAX_BYTES=${ZPP_TRACE_MAX_BYTES:-2000000000}
+HARD_MAX_BYTES=10000000000
+
+if [ "$MAX_BYTES" -gt "$HARD_MAX_BYTES" ] 2>/dev/null; then
+    echo "capping at the hard limit ${HARD_MAX_BYTES} bytes" \
+         "(asked for ${MAX_BYTES})" >&2
+    MAX_BYTES=$HARD_MAX_BYTES
+fi
 SSH="ssh -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o ConnectTimeout=15 $RIG"
 T=/sys/kernel/tracing
 
@@ -211,13 +223,31 @@ status)
           [ "$n" = 0 ] && echo "dmesg: clean" ||
           echo "dmesg: $n fault lines - THE KERNEL IS DAMAGED, reboot before trusting anything"'
     ;;
+clean)
+    # Captures are large and nobody reads an old one. Deleting is the
+    # default state of this directory, not a chore - a stale multi
+    # gigabyte /tmp/kvm.log on a laptop is the same waste as leaving the
+    # stream running, one just costs disk instead of flash endurance.
+    for f in "$OUT" "$OUT".*; do
+        [ -f "$f" ] || continue
+        echo "removing $f ($(du -h "$f" 2>/dev/null | cut -f1))"
+        rm -f "$f"
+    done
+    ;;
+
 stop)
+    # Disarm as well as pause. tracing_on=0 stops the recording, and
+    # leaving every event enabled behind it is how the next `status`
+    # reads "armed" for a session nobody armed - which is exactly the
+    # confusion the arm path checks against. Costs nothing to be
+    # unambiguous.
     stop_listener
     $SSH "sudo sh -c 'echo 0 > $T/tracing_on'"
-    echo "stopped"
+    $SSH "sudo sh -c 'echo > $T/set_event'"
+    echo "stopped and disarmed"
     ;;
 *)
-    echo "usage: $0 {verify|arm [events...]|stream [seconds]|status|stop}" >&2
+    echo "usage: $0 {verify|arm [events...]|stream [seconds]|status|stop|clean}" >&2
     exit 1
     ;;
 esac
