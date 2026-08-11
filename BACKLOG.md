@@ -8124,9 +8124,40 @@ tables this VMM builds cover the whole guest-physical space, and an MMIO
 page that QEMU needs to *see* written is exactly the kind of page a
 faithful identity map gets wrong.
 
+### Retaken, because the first pair of runs was not what it claimed
+
+**The original comparison was invalid and so was its retraction.** Both
+were taken from boots that did not carry the hypervisor: Windows
+reasserts `Boot0004` at the front of `BootOrder` on every boot it
+completes, the firmware stopped reaching our loader, and serial showed
+`starting Boot0004 "Windows Boot Manager"` with **zero** ZPP_TRACE
+lines. A control run wearing the label of a test run.
+
+`scripts/rig-trace.sh stream` now refuses unless serial carries
+ZPP_TRACE, and prints which option the firmware actually started. The
+numbers below are from runs where that check passed.
+
+| | with us (verified) | without us |
+|---|---|---|
+| total `kvm_msi_set_irq` | 1,523 | 29,266 |
+| **vector 0, unrouted** | **1,152 - 76%** | 278 - **0.9%** |
+| vector 80 | 211 | 21,615 |
+| vector 81 | 156 | 6,079 |
+
+The shape survives retaking, and it is sharper than the first reading
+suggested: real vectors **do** appear under us, so the MSI-X table is
+partly programmed and the routing partly works. What differs is the
+proportion - three quarters of every interrupt the device raises under us
+goes to an entry that was never programmed, against one in a hundred
+without us.
+
+Vector 0 is therefore not by itself a defect - the control produces 278
+of them - and any explanation has to account for the *ratio* rather than
+the presence.
+
 ### On method
 
-Four hypotheses died before this one, each of which fitted the symptom:
+Five hypotheses died before this one, each of which fitted the symptom:
 the cost of nested exits, a stuck task-priority register, the guest's
 clock running slow, and an RFLAGS.IF defect that was real, was fixed, and
 turned out never to fire on this machine. Every one was argued from the
