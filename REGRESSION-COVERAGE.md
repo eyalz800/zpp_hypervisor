@@ -37,8 +37,28 @@ The audit's finding is at the top of the next section and it reframes every
 - `uefi_loader/include/zpp/guest_tests.h` and
   `scripts/ci/bochs-exit-coverage.sh` cover the exit handler, EPT and the
   store emulation end to end, from inside the guest, graded against the SDM.
-  87 cases, 18 of 60 exit reasons reached, and the 42 not reached are printed
-  in full every run.
+  106 cases, 21 of 60 exit reasons reached, and the 39 not reached are
+  printed in full every run. Eleven more cases assert the *negative* - that
+  an instruction whose exiting control this VMM does not set really does not
+  exit - which a reached-reason count cannot show and which is what turns a
+  control enabled by accident into a clean failure rather than a wedged
+  processor.
+- `tests/local_apic/` covers the interrupt command register's decode: the
+  three defects fixed inside `on_interrupt_command`, every delivery mode,
+  every shorthand, and the slot allocator.
+- `tests/nested_vmx` section 13 and five source-level invariants in
+  `check-exit-handler.sh` cover **what the capability MSRs advertise against
+  what is implemented** - the largest instance in this tree of the
+  "answering part of an interface" failure mode, since a guest hypervisor
+  reads those MSRs once and builds a VMCS and its own page tables on them.
+- `tests/mtrr/` covers the memory-type derivation the EPT builder depends
+  on. Under EPT the guest's own MTRRs are not consulted by hardware, so
+  what this derives is the only memory type the guest's address space has,
+  and a wrong answer is cached MMIO rather than a slow one.
+- `tests/ap_start_up` covers `apply_start_up`: SDM Table 12-1's INIT state
+  including the CR0 footnote that CLAUDE.md records three positions being
+  held on in one afternoon, and the duplicate-SIPI guard with the launch
+  exemption that cost one processor of eight per boot.
 
 Everything else below is still open. The ranked list at the end is the order
 to take it in.
