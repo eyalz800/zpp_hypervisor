@@ -46,6 +46,26 @@ has_case() {
 # introduced with VMX": INVEPT, INVVPID, SEAMCALL, TDCALL, VMCALL,
 # VMCLEAR, VMLAUNCH, VMPTRLD, VMPTRST, VMRESUME, VMXOFF and VMXON.
 #
+# **Instructions are not the whole of it**, and stopping at them is how
+# two more reasons sat uncased for as long as they did. SDM 28.2, "Other
+# Causes of VM Exits" (.references/sdm.txt:200927 onwards), lists events
+# that exit with no VM-execution control gating them at all, and four of
+# them are reachable here:
+#
+#   task switch   (:200956) "Task switches are not allowed in VMX
+#                 non-root operation. Any attempt to effect a task switch
+#                 in VMX non-root operation causes a VM exit." A far JMP
+#                 through a TSS descriptor is enough.
+#   triple fault  (:200927) the guest faulted calling its own
+#                 double-fault handler.
+#   INIT signal   (:200945) and
+#   start-up IPI  (:200950), which this VMM already answers because it
+#                 emulates processor start-up.
+#
+# The rest of 28.2 is gated on something this VMM does not turn on: SMIs
+# need the dual-monitor treatment, external interrupts need pin bit 0,
+# and the preemption timer is armed only where a case exists for it.
+#
 # SEAMCALL and TDCALL are left out: they exist only on a processor with
 # TDX, they have no basic exit reason in the enumeration this tree
 # carries, and nothing here can reach them.
@@ -56,7 +76,8 @@ has_case() {
 # instructions are answered rather than faulted, so a case is needed
 # either way.
 required="cpuid getsec invd xsetbv invept invvpid vmcall vmclear
-vmlaunch vmptrld vmptrst vmresume vmxoff vmxon vmread vmwrite"
+vmlaunch vmptrld vmptrst vmresume vmxoff vmxon vmread vmwrite
+task_switch triple_fault init_signal start_up_ipi"
 
 # Reasons that are known to have no case, with why.
 #

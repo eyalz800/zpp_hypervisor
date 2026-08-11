@@ -1966,7 +1966,7 @@ private:
      * real hardware" - the alternative, resuming as though it had
      * succeeded, hands the guest a result it never computed.
      */
-    void inject_general_protection_fault();
+    void inject_general_protection_fault(std::uint64_t error_code = 0);
 
     /**
      * Handles the exit a VMX instruction the guest executed produced.

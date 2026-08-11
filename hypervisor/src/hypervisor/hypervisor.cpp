@@ -7477,7 +7477,7 @@ void hypervisor::record_exit(arch::x86_64::vmx::exit_reason reason,
     this->exit_trace[cpu][(count - 1) % exit_trace_capacity] = recorded;
 }
 
-void hypervisor::inject_general_protection_fault()
+void hypervisor::inject_general_protection_fault(std::uint64_t error_code)
 {
     constexpr std::uint64_t general_protection_vector = 13;
 
@@ -7490,9 +7490,11 @@ void hypervisor::inject_general_protection_fault()
         arch::x86_64::vmx::vm_entry_interruption::deliver_error_code |
         arch::x86_64::vmx::vm_entry_interruption::valid);
 
-    // Zero, which is what a general protection fault that is not a
-    // segment violation pushes.
-    this->vmcs.vm_entry_exception_error_code(0);
+    // Zero by default, which is what a general protection fault that is
+    // not a segment violation pushes. The refused task switch is the one
+    // caller that passes something: a #GP raised by a task switch carries
+    // the selector it could not switch to.
+    this->vmcs.vm_entry_exception_error_code(error_code);
 }
 
 void hypervisor::inject_invalid_opcode_exception()
@@ -10225,6 +10227,96 @@ hypervisor::main(arch::x86_64::context & caller_context)
             // The fault is reported at the faulting instruction, so RIP
             // stays where it is.
             advance_rip = false;
+            break;
+        }
+        case basic_reason::task_switch: {
+            // A task switch, which SDM 28.2 (.references/sdm.txt:200956)
+            // makes unconditional: "Task switches are not allowed in VMX
+            // non-root operation. Any attempt to effect a task switch in
+            // VMX non-root operation causes a VM exit." No VM-execution
+            // control turns it off, so any guest reaches it with a far
+            // JMP or CALL through a TSS descriptor, an INT through a task
+            // gate, or an IRET with RFLAGS.NT set.
+            //
+            // It had no case, so it reached `default:` and stopped the
+            // processor - found by the same sweep as GETSEC and with a
+            // lower bar to reach, since it needs no control register
+            // write first. Not reachable from a long-mode guest, which is
+            // why a Windows boot never found it: "hardware task switches
+            // are not supported in IA-32e mode". But `unrestricted_guest`
+            // is on and this VMM adopts application processors that start
+            // in real mode, so "the guest is always in long mode" is not
+            // a property this VMM has.
+            //
+            // #GP with the selector from the exit qualification, which is
+            // the closest honest answer available. Emulating the switch
+            // is what KVM does - `kvm_task_switch` reads and writes both
+            // task-state segments - and is a large amount of code for a
+            // mechanism no 64-bit operating system uses. Refusing it
+            // instead reports a task switch that could not be performed,
+            // which is what a guest gets from a malformed TSS descriptor
+            // anyway, and it kills at most the guest rather than the
+            // machine.
+            //
+            // SDM Table 28-5 puts the selector in bits 15:0 of the exit
+            // qualification, and a #GP raised by a task switch carries
+            // that selector as its error code.
+            inject_general_protection_fault(vmcs.exit_qualification() &
+                                            0xffff);
+            advance_rip = false;
+
+            log("cpu {} refused a task switch, selector {} rip {}",
+                vmcs.vpid(),
+                vmcs.exit_qualification() & 0xffff,
+                vmcs.guest_rip());
+            break;
+        }
+        case basic_reason::triple_fault: {
+            // The guest has destroyed itself. SDM 28.2
+            // (.references/sdm.txt:200927): a VM exit occurs "if the
+            // logical processor encounters an exception while attempting
+            // to call the double-fault handler". Unconditional, like the
+            // task switch above.
+            //
+            // There is nothing to resume and nothing to inject: a guest
+            // that faulted on its way into its own double-fault handler
+            // has an interrupt descriptor table that cannot deliver, so
+            // any exception put in would take the same path again. On
+            // bare metal the processor resets the machine, which is not
+            // something to do to somebody else's hardware because one
+            // guest lost its IDT.
+            //
+            // So the processor stops - the same outcome `default:` gave.
+            // What changes is *what it says*, and that is the whole point
+            // of the case. `unhandled_exit` means "this VMM was asked
+            // something it does not implement", and it is one of the two
+            // records read out of a wedged machine. Reporting a guest's
+            // own triple fault through it sends the next investigation
+            // into this VMM's exit handler, looking for a missing case
+            // that was never the problem.
+            //
+            // A second-level guest's triple fault does not reach here:
+            // `l1_wants_l2_exit` reflects reason 2 unconditionally, as
+            // KVM does in `nested_vmx_l1_wants_exit`
+            // (.references/kvm/nested.c:6427), so a guest hypervisor is
+            // told its own guest died and decides what to do about it.
+            log("cpu {} guest triple faulted, rip {} cs {} - the guest "
+                "took an exception calling its own double-fault "
+                "handler, which is a guest failure and not an "
+                "unimplemented exit",
+                vmcs.vpid(),
+                vmcs.guest_rip(),
+                vmcs.guest_cs_selector());
+
+            // Stopped through the same path, and the log line above is
+            // what tells the two apart. A record of its own was
+            // considered and not added: `unhandled_exit` is read by a
+            // debugger attached to a processor that is already stopped,
+            // and the log is what survives a restart and what CLAUDE.md
+            // says to read first - so a second member would duplicate
+            // the weaker half of the evidence.
+            record_exit(full_reason, context);
+            on_unhandled_exit(full_reason);
             break;
         }
         case basic_reason::getsec: {
