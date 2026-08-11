@@ -48,6 +48,43 @@ jobs:
           name: binaries-${{ matrix.config }}
           path: out/${{ matrix.config }}/x86_64/
 
+  # Every hosted harness and every source-level check, in one job.
+  #
+  # This job exists because an audit of the whole history found that they
+  # were not run at all. Six harnesses under tests/ and several
+  # compile-only checks under scripts/ci/ - together about eleven thousand
+  # lines of assertions - and this workflow invoked two of them. Nothing
+  # else did either: no ctest, no Makefile, no runner.
+  #
+  # It was not a theoretical gap. When the runner was first written, four
+  # of the eleven did not even compile: three harness shims had drifted
+  # from hypervisor.cpp as members were added, and one decoder assertion
+  # was still asserting behaviour the decoder had deliberately stopped
+  # having. All four were caught by the first run.
+  #
+  # No emulator, no target and no cross toolchain: everything here is
+  # compiled natively for the host, so this is the cheapest job in the
+  # workflow and the one most likely to catch a mistake.
+  host-tests:
+    name: host tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install LLVM ${{ env.LLVM_VERSION }}
+        run: |
+          wget -qO- https://apt.llvm.org/llvm.sh | sudo bash -s -- "$LLVM_VERSION"
+          sudo apt-get install -y --no-install-recommends \
+            "libc++-$LLVM_VERSION-dev" "libc++abi-$LLVM_VERSION-dev"
+          echo "/usr/lib/llvm-$LLVM_VERSION/bin" >> "$GITHUB_PATH"
+      # The decoder harness is a differential against LLVM's own
+      # assembler and disassembler, so it needs those two by name.
+      - name: Run every hosted test
+        env:
+          CXX: clang++
+          LLVM_MC: llvm-mc
+          LLVM_OBJDUMP: llvm-objdump
+        run: ./scripts/ci/run-host-tests.sh
+
   # The 75 column limit in .clang-format is not enforced by the build.
   format:
     name: format
@@ -187,6 +224,115 @@ jobs:
           CPUS: 4
           TIMEOUT: 280
         run: BOCHS="$HOME/.local/bochs-smp/bin/bochs" ./scripts/ci/bochs-smoke.sh
+
+  # Runs the guest-side coverage suite: the VM exit handler's cases, the
+  # extended page tables and the store emulation, asked from inside the
+  # guest and graded against the SDM. See uefi_loader/include/zpp/
+  # guest_tests.h for why the questions can only be asked from there.
+  #
+  # Separate from bochs-vmx rather than folded into it. That job runs
+  # verify::present, which is destructive by design - it takes every
+  # application processor away from the firmware - so anything this suite
+  # reported after it would be describing a machine that check had already
+  # taken apart. The two switches are mutually exclusive in the build
+  # system for the same reason.
+  bochs-exit-coverage:
+    name: bochs exit coverage (${{ matrix.config }})
+    runs-on: ubuntu-latest
+    needs: build
+    strategy:
+      fail-fast: false
+      matrix:
+        config: [debug, release]
+    steps:
+      - uses: actions/checkout@v4
+
+      # Same key as bochs-vmx, deliberately: one Bochs serves both, and
+      # whichever job reaches a cold cache first pays for it once.
+      - name: Cache Bochs
+        id: bochs-cache
+        uses: actions/cache@v4
+        with:
+          path: ~/.local/bochs-smp
+          key: bochs-3.0-smp-vmx2-${{ runner.os }}
+
+      - name: Build Bochs with VMX emulation
+        if: steps.bochs-cache.outputs.cache-hit != 'true'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends build-essential
+          curl -sLO https://downloads.sourceforge.net/project/bochs/bochs/3.0/bochs-3.0.tar.gz
+          tar xzf bochs-3.0.tar.gz && cd bochs-3.0
+          sed -i 's|#include "param_names.h"|#include <libgen.h>\n#include "param_names.h"|' \
+              gui/keymap.cc
+          ./configure --prefix="$HOME/.local/bochs-smp" \
+            --enable-smp --enable-vmx=2 --enable-x86-64 \
+            --enable-cpu-level=6 --enable-avx --enable-evex --enable-pci \
+            --enable-a20-pin --enable-fpu --enable-long-phy-address \
+            --enable-large-ramfile --enable-logging --enable-show-ips \
+            --with-nogui
+          make -j"$(nproc)" && make install
+
+      - name: Install boot medium tooling
+        run: sudo apt-get install -y --no-install-recommends mtools ovmf
+
+      - name: Install LLVM ${{ env.LLVM_VERSION }}
+        run: |
+          wget -qO- https://apt.llvm.org/llvm.sh | sudo bash -s -- "$LLVM_VERSION"
+          sudo apt-get install -y --no-install-recommends \
+            "libc++-$LLVM_VERSION-dev" "libc++abi-$LLVM_VERSION-dev" \
+            "lld-$LLVM_VERSION" ninja-build
+          echo "/usr/lib/llvm-$LLVM_VERSION/bin" >> "$GITHUB_PATH"
+
+      # ZPP_DIAG=OFF, and it is about the clock rather than about scope.
+      #
+      # With the diagnostic facility on, the loader establishes the ESP
+      # reservation and then restarts the machine so the channel is live
+      # on the next boot - which is right on a real machine and costs a
+      # second whole OVMF boot here, about three minutes of the budget for
+      # a facility none of these cases touch. Measured: 68 seconds with it
+      # off against a run that had not reached the suite at all after 600
+      # with it on.
+      - name: Build with the guest coverage suite enabled
+        run: |
+          cmake --preset ${{ matrix.config }} \
+            -DZPP_GUEST_TESTS=ON -DZPP_DIAG=OFF
+          cmake --build --preset ${{ matrix.config }}
+
+      # The switch persists in a CMake cache, and a loader without the
+      # suite produces no result lines at all - which reads exactly like a
+      # boot that never got that far. Asserted rather than assumed, in
+      # both directions: check-bootable.sh must refuse this loader, and a
+      # run of it that it did not refuse would mean the marker had drifted.
+      - name: Assert the loader carries the suite and is refused for boot
+        run: |
+          if ./scripts/check-bootable.sh \
+              out/${{ matrix.config }}/x86_64/zpp_loader.efi; then
+            echo "check-bootable.sh accepted a guest-test loader" >&2
+            exit 1
+          fi
+
+      - name: Build boot medium
+        run: ./scripts/bochs/setup.sh ${{ matrix.config }}
+
+      - name: Run the coverage suite
+        env:
+          CONFIG: ${{ matrix.config }}
+          TIMEOUT: 420
+        run: |
+          BOCHS="$HOME/.local/bochs-smp/bin/bochs" \
+            ./scripts/ci/bochs-exit-coverage.sh
+
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: exit-coverage-${{ matrix.config }}
+          path: |
+            build/bochs/results.xml
+            build/bochs/results.json
+            build/bochs/coverage.txt
+            build/bochs/serial.out
+            build/bochs/bochs.log
 
   probe-virtualization:
     name: probe virtualization (${{ matrix.os }})

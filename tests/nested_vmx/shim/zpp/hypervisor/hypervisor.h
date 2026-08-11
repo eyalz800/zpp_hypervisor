@@ -94,9 +94,8 @@ public:
                             std::uint64_t value);
     std::expected<void, zpp::error>
     read_guest_linear(std::uint64_t linear, std::span<std::byte> into);
-    std::expected<void, zpp::error>
-    write_guest_linear(std::uint64_t linear,
-                       std::span<const std::byte> from);
+    std::expected<void, zpp::error> write_guest_linear(
+        std::uint64_t linear, std::span<const std::byte> from);
     std::expected<std::uint64_t, zpp::error>
     read_guest_vmcs_pointer(const arch::x86_64::context & context);
     bool vmcs_pointer_valid(std::uint64_t pointer);
@@ -115,9 +114,10 @@ public:
     bool on_guest_invept(std::size_t cpu, arch::x86_64::context & context);
     bool on_guest_invvpid(std::size_t cpu,
                           arch::x86_64::context & context);
-    bool on_guest_vmlaunch(
-        std::size_t cpu,
-        arch::x86_64::vmx::exit_reason::basic_reason reason);
+    bool
+    on_guest_vmlaunch(std::size_t cpu,
+                      arch::x86_64::vmx::exit_reason::basic_reason reason,
+                      arch::x86_64::context & context);
     void on_nested_entry_failure(arch::x86_64::context * recovery);
 
     // Defined by the harness.
@@ -127,9 +127,8 @@ public:
     guest_linear_to_physical(std::uint64_t linear);
     std::expected<void, zpp::error>
     read_guest_physical(std::uint64_t physical, std::span<std::byte> into);
-    std::expected<void, zpp::error>
-    write_guest_physical(std::uint64_t physical,
-                         std::span<const std::byte> from);
+    std::expected<void, zpp::error> write_guest_physical(
+        std::uint64_t physical, std::span<const std::byte> from);
     void discard_shadow_ept(std::size_t cpu);
     void discard_shadow_ept_for(std::size_t cpu, std::uint64_t root);
     void refresh_shadow_ept_for(std::size_t cpu, std::uint64_t root);
@@ -163,10 +162,18 @@ public:
     // shadow region current on, so the copies are no-ops and the control
     // is never enabled - which is also the behaviour on a processor that
     // does not offer it, so the paths under test are the same ones.
-    void set_vmcs_shadowing(std::size_t, bool) {}
-    void copy_vmcs12_to_shadow(std::size_t) {}
-    void copy_shadow_to_vmcs12(std::size_t) {}
-    void initialize_vmcs_shadowing() {}
+    void set_vmcs_shadowing(std::size_t, bool)
+    {
+    }
+    void copy_vmcs12_to_shadow(std::size_t)
+    {
+    }
+    void copy_shadow_to_vmcs12(std::size_t)
+    {
+    }
+    void initialize_vmcs_shadowing()
+    {
+    }
 
     // The field-use table, which the harness does not read but the
     // handlers under test write on every VMREAD and VMWRITE.
@@ -188,6 +195,22 @@ public:
     bool nested_msr_load_failed[max_cpus]{};
     std::uint64_t nested_msr_failure_entry[max_cpus]{};
     std::uint64_t guest_feature_control[max_cpus]{};
+
+    // The reference-counter sampling nested_vmx.cpp writes into. Nothing
+    // here reads it; it exists so the emulation compiles against the same
+    // source the hypervisor does.
+    //
+    // Added after run-host-tests.sh was written and this harness turned
+    // out not to build any more - the members and the extra
+    // on_guest_vmlaunch argument arrived with later commits and nothing
+    // was running the harness to notice. That is what the runner is for.
+    static constexpr std::size_t reference_sample_capacity = 32;
+    std::uint64_t reference_read_value[max_cpus]
+                                      [reference_sample_capacity]{};
+    std::uint64_t reference_read_tsc[max_cpus]
+                                    [reference_sample_capacity]{};
+    std::uint64_t reference_read_count[max_cpus]{};
+    bool reference_read_pending[max_cpus]{};
 
     // Harness-only observation.
     std::uint64_t gp_faults{};

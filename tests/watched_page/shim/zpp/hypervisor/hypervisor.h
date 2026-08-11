@@ -220,6 +220,22 @@ public:
     volatile std::uint64_t apic_writes_undecoded{};
     std::uint64_t module_access_count{};
 
+    // The local APIC timer sampling on_local_apic_write records. Nothing
+    // here reads it; it exists so the real function compiles against the
+    // same source the hypervisor does.
+    //
+    // Added after run-host-tests.sh was written and this harness turned
+    // out not to build any more - the members arrived with the
+    // diagnostic commits and nothing was running the harness to notice.
+    // That is what the runner is for.
+    std::uint64_t timer_arm_recent_value[max_cpus][timer_arm_capacity]{};
+    std::uint64_t timer_arm_recent_tsc[max_cpus][timer_arm_capacity]{};
+    std::uint64_t timer_arm_recent_lvt[max_cpus][timer_arm_capacity]{};
+    std::uint64_t timer_arm_recent_divide[max_cpus][timer_arm_capacity]{};
+    std::uint64_t timer_arm_recent_count[max_cpus]{};
+    std::uint64_t timer_lvt[max_cpus]{};
+    std::uint64_t timer_divide[max_cpus]{};
+
     std::map<std::uint64_t, std::uint64_t> module_physical_to_virtual{};
 
     struct

@@ -598,6 +598,18 @@ bool guest_tests::run(EFI_SYSTEM_TABLE * system_table)
         // Sampled rather than exhaustive - the range is 268 million leaves
         // - across the boundaries, the block this VMM defines, the leaf
         // Windows actually reads, and a spread of the rest.
+        //
+        // **This case can only bite where something underneath answers.**
+        // Measured: with the range check deliberately narrowed to six
+        // leaves, every sample still came back zero, because Bochs'
+        // CPUID returns zero for an unimplemented leaf and there is no
+        // second hypervisor beneath it. The same narrowing on the rig,
+        // where KVM answers its own block, would be caught here. What
+        // caught it under Bochs was diag.exit_ring_live above - the
+        // diagnostic leaf sits at 0x40000100, so a range that stops short
+        // of it stops answering the instrument itself. Both are kept: one
+        // is the direct statement of the rule, the other is what actually
+        // fails on an emulator with nothing behind it.
         constexpr std::uint32_t sampled[]{
             0x40000001,
             0x40000002,

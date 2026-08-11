@@ -199,11 +199,36 @@ public:
     std::uint64_t l2_exit_detail[max_cpus]{};
     std::uint64_t pending_event[max_cpus]{};
 
+    // The reference-counter and synthetic-timer sampling the diagnostic
+    // side of nested_entry.cpp writes into. Nothing here reads them; they
+    // exist so the reflection path compiles against the same source the
+    // hypervisor does.
+    //
+    // Added after run-host-tests.sh was written and this harness turned
+    // out not to build any more: the members arrived with the diagnostic
+    // commits and nothing was running the harness to notice. That is the
+    // whole reason the runner exists, and this is its first catch.
+    static constexpr std::size_t reference_sample_capacity = 32;
+    std::uint64_t reference_read_value[max_cpus]
+                                      [reference_sample_capacity]{};
+    std::uint64_t reference_read_tsc[max_cpus]
+                                    [reference_sample_capacity]{};
+    std::uint64_t reference_read_count[max_cpus]{};
+    std::uint64_t stimer_arm_value[max_cpus][reference_sample_capacity]{};
+    std::uint64_t stimer_arm_tsc[max_cpus][reference_sample_capacity]{};
+    std::uint64_t stimer_arm_kind[max_cpus][reference_sample_capacity]{};
+    std::uint64_t stimer_arm_count[max_cpus]{};
+    bool reference_read_pending[max_cpus]{};
+
     // VMCS shadowing does nothing here: this harness has no processor and
     // no shadow region, so publishing to one is a no-op that keeps the
     // reflection path compiling unchanged.
-    void copy_vmcs12_to_shadow(std::size_t) {}
-    void copy_shadow_to_vmcs12(std::size_t) {}
+    void copy_vmcs12_to_shadow(std::size_t)
+    {
+    }
+    void copy_shadow_to_vmcs12(std::size_t)
+    {
+    }
     bool vmcs02_launched[max_cpus]{};
     std::uint64_t vmcs02_physical[max_cpus]{};
     std::uint64_t l2_entries[max_cpus]{};

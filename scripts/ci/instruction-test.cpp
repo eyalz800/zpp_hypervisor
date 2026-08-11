@@ -205,9 +205,31 @@ static_assert(apply(*run(bit_flip), 1) == 0);
 constexpr std::uint8_t bit_test[] = {0x0f, 0xba, 0x21, 0x03};
 static_assert(run(bit_test)->what == memory_operation::examine);
 
-// The immediate bit number is taken modulo the operand width.
+// A bit number outside the operand is refused, not reduced.
+//
+// This case asserted the opposite - `->operand == 1`, the modulo the
+// decoder used to take - and went on asserting it after the decoder
+// stopped, because nothing ran this file. The modulo applies only where
+// the bit base is a *register*: `.references/sdm.txt:38974`, "if the bit
+// base operand specifies a register, the instruction takes the modulo
+// 16, 32, or 64 of the bit offset operand". With a memory bit base the
+// processor moves the access instead, to `Effective Address + (4 *
+// (BitOffset DIV 32))` for a 32-bit operand (`:38988`).
+//
+// So `btsl $33, (%rcx)` sets bit 1 of the dword at `[rcx+4]`, and
+// reducing 33 to 1 set the right bit of the *wrong* dword - on a watched
+// page, a write to a device register four bytes from the one the guest
+// named, with the named one left alone. Refused rather than followed,
+// because on_ept_violation pastes the low twelve bits of the effective
+// address onto the page the violation reported and an adjusted address
+// would land back inside it.
 constexpr std::uint8_t bit_set_wrapping[] = {0x0f, 0xba, 0x29, 0x21};
-static_assert(run(bit_set_wrapping)->operand == 1);
+static_assert(!run(bit_set_wrapping).has_value());
+
+// And the last offset that is still inside a dword operand is accepted,
+// so the refusal above is a boundary rather than a blanket.
+constexpr std::uint8_t bit_set_last[] = {0x0f, 0xba, 0x29, 0x1f};
+static_assert(run(bit_set_last)->operand == 31);
 
 // --- exchange ----------------------------------------------------------
 
