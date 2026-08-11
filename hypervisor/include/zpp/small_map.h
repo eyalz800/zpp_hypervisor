@@ -114,8 +114,16 @@ public:
     small_map(const small_map & other)
     {
         // The guard destroys exactly what was built if a copy fails
-        // part way - inert under -fno-exceptions. Note the loop tests
-        // this->m_size, which is zero, so it copies nothing.
+        // part way - inert under -fno-exceptions.
+        //
+        // The loop tests `other.m_size`. It used to test `m_size`, which
+        // is this object's own and is zero in a constructor - so the
+        // copy constructor copied nothing and produced an empty map. The
+        // comment here described that as though it were the design
+        // ("Note the loop tests this->m_size, which is zero, so it
+        // copies nothing"), which is how it survived: the member was
+        // never instantiated, so nothing disagreed with the comment.
+        // tests/small_map's `a_copy_is_independent` is what disagreed.
         struct guard
         {
             ~guard()
@@ -127,7 +135,7 @@ public:
             small_map * me;
         } clear_guard{this};
 
-        for (size_type i{}; i < m_size; ++i) {
+        for (size_type i{}; i < other.m_size; ++i) {
             auto & other_value = other.value(i);
 
             ::new (std::addressof(m_storage[i])) value_type(other_value);
@@ -158,9 +166,14 @@ public:
             ::new (std::addressof(m_storage[i]))
                 value_type(std::move(other_value));
 
-            // `other_value` is a reference, so this does not compile.
-            // Never instantiated, which is why the build passes.
-            other_value->~value_type();
+            // `.` rather than `->`: `other_value` is a reference, and
+            // this said `other_value->~value_type()` until something
+            // instantiated the member. Nothing did - the class comment
+            // above says the copy, move and assignment members "have
+            // never been compiled by anything here" - so a member that
+            // could not compile at all sat here behind a comment saying
+            // so. tests/small_map instantiates it now.
+            other_value.~value_type();
         }
 
         other.m_size = {};
@@ -249,10 +262,29 @@ public:
 
     /**
      * Returns an iterator to the end of the map.
+     *
+     * `begin() + m_size`, spelled out. It used to be
+     * `std::addressof(value(m_size - 1)) + 1`, which is the same pointer
+     * for every non-empty map and undefined behaviour for an empty one:
+     * `m_size - 1` is unsigned, so it wraps to SIZE_MAX and
+     * `value(SIZE_MAX)` forms a reference sixteen bytes *before* the
+     * storage array before the `+ 1` walks back to the start.
+     *
+     * Caught by UndefinedBehaviorSanitizer over tests/watched_page:
+     * "index 18446744073709551615 out of bounds for type
+     * std::byte[25600][16]", then "addition of unsigned offset to
+     * 0x...098 overflowed to 0x...088". An empty map is not exotic here -
+     * `module_physical_to_virtual` is empty until the first module page
+     * is recorded, and anything that iterates or compares against `end()`
+     * before then went through this.
+     *
+     * `find_index` below guards the identical hazard and says so - "the
+     * empty case is separate because `m_size - 1` below would wrap on an
+     * unsigned zero". The same wrap, twenty lines apart, noticed once.
      */
     iterator end()
     {
-        return std::addressof(value(m_size - 1)) + 1;
+        return std::addressof(value(0)) + m_size;
     }
 
     /**
@@ -260,7 +292,7 @@ public:
      */
     const_iterator end() const
     {
-        return std::addressof(value(m_size - 1)) + 1;
+        return std::addressof(value(0)) + m_size;
     }
 
     /**
@@ -268,7 +300,7 @@ public:
      */
     const_iterator cend() const
     {
-        return std::addressof(value(m_size - 1)) + 1;
+        return std::addressof(value(0)) + m_size;
     }
 
     /**
@@ -358,7 +390,7 @@ public:
     void insert(InputIterator first, InputIterator last)
     {
         std::for_each(first, last, [this](auto && value) {
-            insert(std::forward<decltype(value)>(value));
+            this->insert(std::forward<decltype(value)>(value));
         });
     }
 

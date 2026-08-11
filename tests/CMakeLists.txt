@@ -237,6 +237,22 @@ endfunction()
 zpp_add_host_test(elf_relocate
     SOURCES elf_relocate/harness.cpp)
 
+# zpp::small_map, the fixed-capacity sorted map the hypervisor keeps
+# `module_physical_to_virtual` in. A header depending on nothing but the
+# standard library, so it compiles here exactly as the hypervisor
+# compiles it.
+#
+# What it pins: `end()` on an *empty* map computed
+# `std::addressof(value(m_size - 1)) + 1`, and `m_size - 1` wraps on an
+# unsigned zero - so it formed a pointer one element before the storage
+# array and walked back. Same pointer, undefined behaviour, and it
+# survived every run of this suite on three platforms. Found by
+# UndefinedBehaviorSanitizer over tests/watched_page rather than by a
+# failure, which is the argument for this file existing at all: the
+# container had no test of any kind.
+zpp_add_host_test(small_map
+    SOURCES small_map/harness.cpp)
+
 # The MTRR memory-type derivation. zpp/arch/x86_64/mtrr.h depends on
 # memory_type.h, msr.h and the standard library and on nothing else, so
 # the header under test compiles here exactly as the hypervisor compiles
