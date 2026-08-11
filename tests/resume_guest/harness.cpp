@@ -159,30 +159,6 @@ void check_equal(std::uint64_t expected,
 
 std::vector<std::string> g_findings;
 
-/**
- * A place where this VMM's answer is wrong and is recorded rather than
- * repaired here.
- *
- * Same shape as tests/nested_exit's helper of the same name, and the
- * same reasoning: a permanently red harness is one nobody runs, and
- * repairing the decision is a change to the hypervisor rather than to
- * its tests. So the *current* answer is asserted, which means a fix
- * flips this check and forces whoever makes it to come back and delete
- * the entry - and the citation is printed on every run in the meantime.
- */
-void diverge(bool current_answer_holds, const std::string & what)
-{
-    ++g_checks;
-    g_findings.push_back(what);
-    if (current_answer_holds) {
-        std::println("  DIVERGES {}", what);
-        return;
-    }
-    ++g_failures;
-    std::println("FAIL: a recorded divergence no longer reproduces, so "
-                 "the record is stale: {}",
-                 what);
-}
 
 /*
  * The original-event identification field, SDM Table 27-21. Values 1 and
@@ -1015,19 +991,20 @@ void an_external_interrupt_needs_the_interrupt_flag()
     interrupt_the_delivery_of(built, event);
     resume(built);
 
-    diverge(event == entry_field(built),
-            "SDM 29.3.1.4 (sdm.txt:202582) requires RFLAGS.IF to be 1 "
-            "when the entry field injects an external interrupt, and "
-            "event_allowed_on_entry does not read RFLAGS at all - so "
-            "the event is put back into a guest with interrupts "
-            "disabled and the VM entry fails silently. KVM's "
-            "__vmx_interrupt_blocked (kvm/vmx.c:5071) tests IF and the "
-            "STI/MOV-SS blocking together");
+    check_equal(0,
+                entry_field(built),
+                "an external interrupt is not put back into a guest "
+                "with interrupts disabled: SDM 29.3.1.4 "
+                "(sdm.txt:202582) requires RFLAGS.IF to be 1 when the "
+                "entry field injects one, and an entry that fails its "
+                "guest-state checks produces no exit at all");
 
-    diverge(0 == built.state->pending_event[cpu],
-            "and the event is cleared as though it had been delivered, "
-            "so the entry failure destroys it - the same destruction "
-            "the re-queue exists to prevent");
+    check_equal(event,
+                built.state->pending_event[cpu],
+                "and it is held rather than cleared, so the interrupt "
+                "goes back on an entry the guest can take - clearing it "
+                "here is what destroyed the I/O completion Windows was "
+                "blocked on");
 }
 
 /**

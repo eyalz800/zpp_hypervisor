@@ -120,6 +120,42 @@ bool hypervisor::event_allowed_on_entry(std::uint64_t event) const
         }
     }
 
+    // And the check from the *other* section, which this predicate was
+    // written without and which is the one that mattered.
+    //
+    // SDM 29.3.1.4 (`sdm.txt:202582`): "The IF flag (RFLAGS[bit 9]) must
+    // be 1 if the valid bit (bit 31) in the injected-event
+    // identification field is 1 and the event type (bits 10:8) is
+    // external interrupt."
+    //
+    // Only external interrupts, and that is the difference from the pair
+    // above: an NMI is delivered to a guest with interrupts disabled,
+    // because that is what makes it non-maskable. Transcribing 29.3.1.5
+    // and stopping there produced a predicate that looked complete and
+    // let exactly one case through - the common one.
+    //
+    // What it cost is worth recording, because the failure is silent by
+    // construction. A device interrupt whose delivery an exit
+    // interrupted is re-queued into a guest that has since disabled
+    // interrupts; the entry fails its guest-state checks; a failed entry
+    // produces **no exit at all**; and `pending_event` has already been
+    // cleared, so nothing retries it. The event is destroyed - which is
+    // precisely what this whole path exists to prevent, arriving through
+    // the path itself. On the rig it presents as Windows blocked for
+    // ever on an I/O completion that never arrives, with the timer still
+    // ticking at 97 Hz so the machine looks alive.
+    //
+    // KVM keeps both halves in one predicate, `__vmx_interrupt_blocked`
+    // (.references/kvm/vmx.c:5071), which is the shape this should have
+    // had.
+    if (type_external_interrupt == type) {
+        constexpr std::uint64_t rflags_interrupt_enable = 1ull << 9;
+
+        if (0 == (this->vmcs.guest_rflags() & rflags_interrupt_enable)) {
+            return false;
+        }
+    }
+
     return true;
 }
 
