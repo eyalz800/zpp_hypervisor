@@ -3647,6 +3647,28 @@ private:
      * duplicate start-up IPIs are worth ignoring for the rest of the
      * boot, which is precisely what the guard wants and what the firmware
      * flag cannot say.
+     *
+     * **Nothing reads it. It is a record, not a guard, and the paragraph
+     * above describes a guard that no longer exists.** Kept because the
+     * fact is real and is recorded nowhere else - a debugger can still
+     * ask which processors the guest itself started - but read on the
+     * assumption that it decides something and the conclusion will be
+     * wrong.
+     *
+     * What replaced it is the activity-state test in
+     * `start_up_processor`, and the comment there is the one to read:
+     * it records the measurement that retired both flags, which
+     * is that they are a *proxy* for a fact the processor already keeps.
+     * On the rig with Hyper-V running, slots 2-7 had both flags set while
+     * their activity state was wait-for-SIPI, so every start-up IPI
+     * Hyper-V sent them was swallowed as a duplicate. Two flags, one of
+     * them cleared by INIT, could not describe that state; the activity
+     * state describes it exactly, and KVM makes the same single test in
+     * `kvm_apic_accept_events`.
+     *
+     * So restoring a guard here would be re-proposing what that
+     * measurement already rejected. Anything wanting this fact should
+     * take it as evidence about the past, never as permission.
      */
     bool started_by_guest_start_up_ipi[max_cpus]{};
 
