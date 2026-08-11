@@ -206,6 +206,98 @@ else
     status=1
 fi
 
+# === Every VM-execution control written goes through adjust_msr ========
+#
+# Stated as a rule rather than as a list, because the list is how it got
+# missed twice. `5531fdc` fixed it for the pin-based preemption timer and
+# recorded the symptom: "Setting a control that is not permitted does not
+# fail where it is written; it fails the next VM entry, and under a nested
+# hypervisor it can simply never come back" - one exit recorded, and no
+# second exit ever. There is no fault, no exit and no record, because the
+# failure happens on the way in.
+#
+# `monitor_trap_flag` then did the same thing for the primary controls and
+# survived for months: `setup_vmcs` composes those through `adjust_msr`,
+# which correctly drops the monitor trap flag on a processor that does not
+# permit it, and that function OR'd it straight back in - bypassing the
+# only thing checking. An audit found it, which is exactly the kind of
+# work this check exists to replace.
+#
+# The rule: every write to a VM-execution control field passes the value
+# through `adjust_msr` first. A read-modify-write is not exempt - it can
+# only be legal if what it started from was.
+echo "== every VM-execution control written goes through adjust_msr"
+
+control_writers=$(grep -rn \
+    -e 'vmcs\.pin_based_vm_execution_controls(' \
+    -e 'vmcs\.primary_processor_based_vm_execution_controls(' \
+    -e 'vmcs\.secondary_processor_based_vm_execution_controls(' \
+    "$root/hypervisor/src/hypervisor/" \
+    | grep -v 'auto ' | grep -v '= vmcs\.' | grep -v '^\s*//')
+
+# The one place a control is written without adjust_msr and is correct.
+#
+# `set_vmcs_shadowing` writes the secondary controls under a guard that is
+# itself the capability test: `vmcs_shadowing_enabled` is assigned from the
+# allowed-1 half of IA32_VMX_PROCBASED_CTLS2 at nested_shadow_vmcs.cpp:153
+# and the function returns early when it is false. That is the same check
+# adjust_msr would make, spelled once at the top instead of at each write.
+# Its clearing branch is safe on its own terms too: SDM A.3.3 reserves the
+# allowed-0 half of the secondary controls to zero, so no bit in that field
+# is ever required to be 1.
+#
+# Named rather than pattern matched, so adding a second exception is a
+# deliberate act with a reason beside it.
+# Some writes are guarded by a capability test spelled once at the top of
+# the function rather than at the write - `set_vmcs_shadowing` returns
+# early when the control is not offered, and `arm_controller_poll` falls
+# back to the guest's own timer. Those are the same check adjust_msr would
+# make, so they are accepted, but only where the code *says so*: the
+# marker below has to appear within the window. A line number would drift;
+# a marker moves with the code it explains.
+allowed_marker="capability checked above"
+
+unadjusted=""
+while IFS= read -r line; do
+    [ -z "$line" ] && continue
+    # The value written is either an adjust_msr call on the same line, or
+    # a local the two lines above it computed one into. Both spellings are
+    # in the tree, so the window is small rather than exact.
+    where=$(echo "$line" | cut -d: -f1,2)
+    file=$(echo "$line" | cut -d: -f1)
+    number=$(echo "$line" | cut -d: -f2)
+    window=$(sed -n "$((number > 6 ? number - 6 : 1)),$((number + 3))p" "$file")
+
+    # A read wrapped onto two lines puts `auto x =` on the line above the
+    # call, which the grep above cannot see. Reads are not writes.
+    previous=$(sed -n "$((number > 1 ? number - 1 : 1))p" "$file")
+    case "$previous" in
+        *"auto "*"="*) continue ;;
+    esac
+    exempt=0
+    if echo "$window" | grep -q "$allowed_marker"; then
+        exempt=1
+    fi
+
+    if [ "$exempt" = "0" ] && ! echo "$window" | grep -q 'adjust_msr'; then
+        unadjusted="$unadjusted
+    $where"
+    fi
+done <<EOF
+$control_writers
+EOF
+
+if [ -z "$unadjusted" ]; then
+    echo "  ok    no control field is written without adjust_msr"
+else
+    echo "  FAIL  a VM-execution control is written without passing" >&2
+    echo "        through adjust_msr. Setting a control the processor" >&2
+    echo "        does not permit fails the NEXT VM entry, with no" >&2
+    echo "        fault, no exit and nothing recorded - see 5531fdc." >&2
+    echo "$unadjusted" >&2
+    status=1
+fi
+
 # === The watched local APIC page must be one the host can address =====
 #
 # `filter_local_apic_write` and `on_local_apic_write` reach the watched

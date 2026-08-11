@@ -1370,10 +1370,16 @@ void hypervisor::arm_controller_poll(bool armed)
         auto ticks = (controller_poll_microseconds * 1800) >> divisor;
 
         this->vmcs.vmx_preemption_timer_value(ticks ? ticks : 1);
+
+        // No adjust_msr here because the capability checked above already
+        // made it: a processor that does not offer the timer took the
+        // guest-timer fallback and returned before reaching this.
         this->vmcs.pin_based_vm_execution_controls(
             controls | arch::x86_64::vmx::vm_execution_controls::pin::
                            activate_preemption_timer);
     } else {
+        // Same capability checked above, and clearing could not violate
+        // it either way: SDM A.3.1 does not reserve pin bit 6 to 1.
         this->vmcs.pin_based_vm_execution_controls(
             controls & ~arch::x86_64::vmx::vm_execution_controls::pin::
                            activate_preemption_timer);

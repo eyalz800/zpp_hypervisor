@@ -131,7 +131,8 @@ constexpr field shadow_read_write_fields[] = {
  */
 void hypervisor::initialize_vmcs_shadowing()
 {
-    if constexpr (!nested_vmx::enabled || !nested_vmx::shadow_vmcs_enabled) {
+    if constexpr (!nested_vmx::enabled ||
+                  !nested_vmx::shadow_vmcs_enabled) {
         // Left false, so set_vmcs_shadowing and both copies are no-ops
         // and the guest hypervisor exits for every field as it always
         // did. Said out loud, because a run that was meant to have this
@@ -151,10 +152,11 @@ void hypervisor::initialize_vmcs_shadowing()
         constexpr auto shadowing = arch::x86_64::vmx::
             vm_execution_controls::secondary::vmcs_shadowing;
         this->vmcs_shadowing_enabled =
-            0 != ((this->cached_vmx_msr(arch::x86_64::vmx::msr::
-                                            processor_based_contorls_2) >>
-                   32) &
-                  shadowing);
+            0 !=
+            ((this->cached_vmx_msr(
+                  arch::x86_64::vmx::msr::processor_based_contorls_2) >>
+              32) &
+             shadowing);
 
         // All ones is "exit for everything", which is what this VMM did
         // before there were bitmaps at all - so a field left out of the
@@ -215,12 +217,19 @@ void hypervisor::set_vmcs_shadowing(std::size_t cpu, bool enabled)
         auto controls =
             this->vmcs.secondary_processor_based_vm_execution_controls();
 
+        // No adjust_msr on either write below: the capability checked
+        // above is the same test, made once. `vmcs_shadowing_enabled` is
+        // assigned from the allowed-1 half of IA32_VMX_PROCBASED_CTLS2
+        // and this function returns early when it is false.
         if (enabled) {
             this->vmcs.vmcs_link_pointer(this->shadow_vmcs_physical[cpu]);
             this->vmcs.secondary_processor_based_vm_execution_controls(
                 controls | shadowing);
             copy_vmcs12_to_shadow(cpu);
         } else {
+            // Same capability checked above, and SDM A.3.3 reserves the
+            // allowed-0 half of the secondary controls to zero, so
+            // clearing a bit there can violate neither half.
             this->vmcs.secondary_processor_based_vm_execution_controls(
                 controls & ~static_cast<std::uint64_t>(shadowing));
             this->vmcs.vmcs_link_pointer(~std::uint64_t{});
@@ -262,14 +271,14 @@ void hypervisor::copy_vmcs12_to_shadow(std::size_t cpu)
 
         auto & cached = this->guest_vmcs12[cpu];
         for (auto entry : shadow_read_only_fields) {
-            this->vmcs.write(
-                entry, cached.read(vmcs_field_encoding(
-                           static_cast<std::uint64_t>(entry))));
+            this->vmcs.write(entry,
+                             cached.read(vmcs_field_encoding(
+                                 static_cast<std::uint64_t>(entry))));
         }
         for (auto entry : shadow_read_write_fields) {
-            this->vmcs.write(
-                entry, cached.read(vmcs_field_encoding(
-                           static_cast<std::uint64_t>(entry))));
+            this->vmcs.write(entry,
+                             cached.read(vmcs_field_encoding(
+                                 static_cast<std::uint64_t>(entry))));
         }
 
         arch::x86_64::vmx::vmclear(&this->shadow_vmcs_physical[cpu]);

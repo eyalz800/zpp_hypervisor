@@ -1,6 +1,7 @@
 #include "zpp/arch/x86_64/asm.h"
 #include "zpp/arch/x86_64/mmio.h"
 #include "zpp/arch/x86_64/vmx/asm.h"
+#include "zpp/arch/x86_64/vmx/msr.h"
 #include "zpp/arch/x86_64/vmx/vmcs.h"
 #include "zpp/diag/log.h"
 #include "zpp/hypervisor/hypervisor.h"
@@ -17,9 +18,52 @@ void hypervisor::monitor_trap_flag(bool value)
 
     auto controls =
         this->vmcs.primary_processor_based_vm_execution_controls();
-    this->vmcs.primary_processor_based_vm_execution_controls(
-        value ? (controls | monitor_trap_flag_bit)
-              : (controls & ~monitor_trap_flag_bit));
+
+    // Through `adjust_msr`, like every other control this VMM writes, and
+    // that is a correctness requirement rather than tidiness.
+    //
+    // `5531fdc` fixed exactly this defect one control field over, for the
+    // pin-based preemption timer, and recorded what it costs: "Setting a
+    // control that is not permitted does not fail where it is written; it
+    // fails the next VM entry, and under a nested hypervisor it can simply
+    // never come back" - one exit recorded, and no second exit ever. There
+    // is no fault, no exit and no record, because the failure happens on
+    // the way *in*.
+    //
+    // The bit was reachable in that state: `setup_vmcs` composes the
+    // primary controls through `adjust_msr`, which correctly drops the
+    // monitor trap flag on a processor that does not permit it, and this
+    // function then OR'd it straight back in - bypassing the only thing
+    // that was checking. It fires on the stepping path, so every
+    // straddling or non-plain-store write to a watched page took it,
+    // the local APIC page included.
+    //
+    // Re-adjusting the whole field rather than testing the one bit,
+    // because the read-modify-write can only be legal if what it starts
+    // from is: `adjust_msr` forces the allowed-0 bits back on and masks
+    // to allowed-1, so the result is a fixed point of the capability MSR
+    // whatever it was given.
+    auto requested = value ? (controls | monitor_trap_flag_bit)
+                           : (controls & ~monitor_trap_flag_bit);
+
+    auto permitted = arch::x86_64::vmx::adjust_msr(
+        this->cached_vmx_msr(
+            arch::x86_64::vmx::msr::true_processor_based_controls),
+        requested);
+
+    this->vmcs.primary_processor_based_vm_execution_controls(permitted);
+
+    // Asked for and not granted, which is a degradation rather than a
+    // fault and so has to be said out loud. The stepping path arms this
+    // to be told when one instruction has retired; without it the trap
+    // exit never arrives, `on_monitor_trap_flag` never runs, and the
+    // watched page is left open for every processor - which is the
+    // failure `build_vmcs02` describes at length for the same bit going
+    // missing from vmcs02.
+    if (value && (0 == (permitted & monitor_trap_flag_bit))) {
+        log("the monitor trap flag is not permitted by this processor, "
+            "so a stepped write cannot be closed");
+    }
 }
 
 bool hypervisor::x2apic_enabled()
