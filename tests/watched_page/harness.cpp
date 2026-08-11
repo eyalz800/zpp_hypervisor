@@ -339,6 +339,23 @@ static void reset()
     self.module_access_count = 0;
     self.module_physical_to_virtual.clear();
 
+    // The timer records, which persist across cases otherwise and would
+    // make every arming count cumulative.
+    for (std::size_t cpu{}; cpu < hypervisor_t::max_cpus; ++cpu) {
+        self.timer_arm_count[cpu] = 0;
+        self.timer_arm_recent_count[cpu] = 0;
+        self.timer_lvt[cpu] = 0;
+        self.timer_divide[cpu] = 0;
+        for (std::size_t i{}; i < hypervisor_t::timer_arm_capacity; ++i) {
+            self.timer_arm_value[cpu][i] = 0;
+            self.timer_arm_tsc[cpu][i] = 0;
+            self.timer_arm_recent_value[cpu][i] = 0;
+            self.timer_arm_recent_tsc[cpu][i] = 0;
+            self.timer_arm_recent_lvt[cpu][i] = 0;
+            self.timer_arm_recent_divide[cpu][i] = 0;
+        }
+    }
+
     std::memset(self.last_fetched_code, 0, sizeof(self.last_fetched_code));
 
     g_notified.clear();
@@ -2387,6 +2404,200 @@ static void test_straddle_and_width()
 }
 
 // ---------------------------------------------------------------- main
+/**
+ * The local APIC timer, as `on_local_apic_write` records it.
+ *
+ * This is the register a guest hypervisor's own clock is built on, and
+ * the records taken here are what a stopped machine is read through - so
+ * the questions are not "did it store the value" but "did it store the
+ * value *with the things that make it mean something*, and did it keep
+ * the right ones".
+ *
+ * Three registers, and none of them says anything alone. SDM 13.5.4,
+ * "APIC Timer": 0x320 is the LVT timer entry, carrying the mode - one
+ * shot, periodic or TSC deadline - and the vector; 0x3e0 is the divide
+ * configuration, the divisor the count is scaled by; 0x380 is the
+ * initial count. A ring of bare counts recorded across a mode change is
+ * two different quantities in one column, which is the mistake this
+ * recording is shaped to avoid.
+ */
+static void test_apic_timer()
+{
+    std::printf("\n-- the local apic timer, and what a count means\n");
+
+    constexpr std::uint64_t lvt_timer = 0x320;
+    constexpr std::uint64_t divide_configuration = 0x3e0;
+    constexpr std::uint64_t timer_initial_count = 0x380;
+
+    auto write_register = [&](std::uint64_t offset, std::uint64_t value) {
+        guest_write write{
+            .address = base() + offset,
+            .value = value,
+            .size = 4,
+        };
+        // `filter_local_apic_write`, not `on_local_apic_write`. The
+        // timer records are taken on the *filter* path, which sees every
+        // register on the page - the notify path returns early for any
+        // offset that is not the interrupt command register's low half,
+        // so it never sees a timer write at all. Getting that wrong is
+        // how this section was first written, and every case failed with
+        // nothing recorded.
+        static_cast<void>(hypervisor_t::filter_local_apic_write(
+            &hv(), watched_page(), &write));
+    };
+
+    // The mode and the divisor are latched as they are written, so that
+    // an arming can be recorded with the pair that was in force for it.
+    {
+        reset();
+        hv().vmcs.vpid(1);
+        write_register(lvt_timer, 0x20005);
+        write_register(divide_configuration, 0xb);
+
+        check(0x20005 == hv().timer_lvt[0],
+              "the LVT timer entry is latched - it carries the mode and "
+              "the vector, without which a count is a bare number");
+        check(0xb == hv().timer_divide[0],
+              "and the divide configuration, which is what the count is "
+              "scaled by");
+    }
+
+    // An arming records the count, a time stamp, and **the mode and
+    // divisor as they stood at that moment**. Recording the current ones
+    // instead would be correct until the guest changed mode, which the
+    // rig measured it doing: periodic at vector 5 while bringing
+    // processors up, then one-shot at vector 0xef.
+    {
+        reset();
+        hv().vmcs.vpid(1);
+        write_register(lvt_timer, 0x20005);
+        write_register(divide_configuration, 0xb);
+        write_register(timer_initial_count, 0x1000);
+
+        // Now change the mode, the way the guest does after start-up,
+        // and arm again.
+        write_register(lvt_timer, 0x000ef);
+        write_register(divide_configuration, 0);
+        write_register(timer_initial_count, 0x2000);
+
+        check(2 == hv().timer_arm_recent_count[0],
+              "two armings were recorded");
+        check(0x1000 == hv().timer_arm_recent_value[0][0] &&
+                  0x2000 == hv().timer_arm_recent_value[0][1],
+              "with their own counts");
+        check(0x20005 == hv().timer_arm_recent_lvt[0][0],
+              "the first arming kept the periodic mode it was made in, "
+              "not the one-shot mode set afterwards - a ring that "
+              "recorded the current LVT would relabel every earlier "
+              "arming the moment the guest switched");
+        check(0x000ef == hv().timer_arm_recent_lvt[0][1],
+              "and the second kept its own");
+        check(0xb == hv().timer_arm_recent_divide[0][0] &&
+                  0 == hv().timer_arm_recent_divide[0][1],
+              "the divisors likewise travel with their arming");
+    }
+
+    // The two records answer different questions and must not be one
+    // record. `timer_arm_*` keeps the **earliest** armings, because the
+    // calibration is the first thing a guest does with this register and
+    // a ring would throw it away. `timer_arm_recent_*` keeps the newest,
+    // because a machine that stopped stopped at the end.
+    {
+        reset();
+        hv().vmcs.vpid(1);
+        constexpr std::size_t capacity = hypervisor_t::timer_arm_capacity;
+
+        for (std::size_t i{}; i < (capacity * 2); ++i) {
+            write_register(timer_initial_count, 0x100 + i);
+        }
+
+        check(capacity == hv().timer_arm_count[0],
+              "the first-armings array stops at capacity rather than "
+              "wrapping");
+        check(0x100 == hv().timer_arm_value[0][0],
+              "and its first slot still holds the *first* arming of the "
+              "boot - the one that decided the calibration, which a ring "
+              "would have evicted long before anything went wrong");
+        check((0x100 + capacity - 1) ==
+                  hv().timer_arm_value[0][capacity - 1],
+              "and its last slot holds the last arming it had room for");
+
+        check((capacity * 2) == hv().timer_arm_recent_count[0],
+              "the recent ring counts every arming, not only the ones it "
+              "kept - the count is how a reader knows how far behind the "
+              "ring is");
+        check((0x100 + capacity) == hv().timer_arm_recent_value[0][0],
+              "and it wrapped, so slot 0 now holds an arming from the "
+              "second lap");
+        check((0x100 + (capacity * 2) - 1) ==
+                  hv().timer_arm_recent_value[0][(capacity * 2 - 1) %
+                                                 capacity],
+              "with the newest arming at (count - 1) mod capacity, which "
+              "is where a reader has to look");
+    }
+
+    // A time stamp per arming, because the interval between two of them
+    // is the whole measurement: it separates a guest that measured a
+    // true interval and scaled it wrongly from one that measured an
+    // interval this VMM had already stretched.
+    {
+        reset();
+        hv().vmcs.vpid(1);
+        write_register(timer_initial_count, 0x1000);
+        write_register(timer_initial_count, 0x2000);
+
+        check(hv().timer_arm_tsc[0][0] != 0,
+              "an arming carries a time stamp");
+        check(hv().timer_arm_tsc[0][1] >= hv().timer_arm_tsc[0][0],
+              "and the stamps do not go backwards, so an interval "
+              "between two armings can be taken");
+    }
+
+    // The width and alignment gate applies to the timer registers too.
+    //
+    // SDM 13.4.1 makes a local APIC register a 4-byte access on a
+    // 16-byte boundary, and `filter_local_apic_write` refuses to read
+    // anything else as a register access. A narrow store composed into
+    // an arming would put a fragment of a count into the record and the
+    // reader would take it for a deadline.
+    {
+        reset();
+        hv().vmcs.vpid(1);
+        for (std::uint8_t size : {1, 2, 8}) {
+            guest_write write{
+                .address = base() + timer_initial_count,
+                .value = 0xdead,
+                .size = size,
+            };
+            static_cast<void>(hypervisor_t::filter_local_apic_write(
+                &hv(), watched_page(), &write));
+        }
+
+        check(0 == hv().timer_arm_count[0],
+              "a store that is not four bytes wide is not recorded as an "
+              "arming - SDM 13.4.1 makes it not a register access at all");
+    }
+
+    // And the records are per processor. A guest hypervisor arms one
+    // timer per virtual processor it brings up, so a shared record would
+    // interleave several clocks into one column and read as a single
+    // clock behaving impossibly.
+    {
+        reset();
+        hv().vmcs.vpid(1);
+        write_register(timer_initial_count, 0x1111);
+        hv().vmcs.vpid(2);
+        write_register(timer_initial_count, 0x2222);
+        hv().vmcs.vpid(1);
+
+        check(1 == hv().timer_arm_count[0] && 1 == hv().timer_arm_count[1],
+              "each processor recorded its own arming");
+        check(0x1111 == hv().timer_arm_value[0][0] &&
+                  0x2222 == hv().timer_arm_value[1][0],
+              "and kept its own count");
+    }
+}
+
 int main()
 {
     test_offset_resolution();
@@ -2394,6 +2605,7 @@ int main()
     test_filter_notify();
     test_local_apic();
     test_straddle_and_width();
+    test_apic_timer();
 
     std::printf("\n%d checks, %d failures\n", g_checks, g_failures);
 
