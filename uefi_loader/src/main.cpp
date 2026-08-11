@@ -1632,6 +1632,27 @@ extern "C" EFI_STATUS EFIAPI uefi_main(EFI_HANDLE image_handle,
         if (zpp::esp_reservation::shrank_this_boot) {
             trace::line("ZPP_TRACE reservation established, restarting so "
                         "the channel is live on the next boot");
+
+            // Through `raw`, so it survives ZPP_TRACE being off, and for
+            // the reason the self check's verdict does: this is not a
+            // diagnostic about what the loader is thinking, it is an
+            // announcement that the machine is about to reboot. A
+            // restart nothing announced is indistinguishable from a hang
+            // from outside, and the line above is compiled away in every
+            // build that does not ask for tracing - which is every build
+            // anybody runs unattended.
+            //
+            // That cost four Bochs runs and most of a session. The
+            // symptom is exactly a hang: serial stops after the
+            // firmware's own "starting Boot0001", no verdict is ever
+            // produced, and the emulator sits there until the harness
+            // times it out. `scripts/ci/bochs-exit-coverage.sh` greps for
+            // this string and fails immediately with the reason.
+            trace::raw("ZPP_RESTART esp reservation established, warm "
+                       "resetting so the channel is live next boot - "
+                       "this build cannot reach anything after this "
+                       "point, rebuild with -DZPP_DIAG=OFF if that is "
+                       "not what you wanted\r\n");
             write_trace_variable();
             g_runtime_services->ResetSystem(
                 EfiResetWarm, EFI_SUCCESS, 0, nullptr);

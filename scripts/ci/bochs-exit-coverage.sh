@@ -93,8 +93,27 @@ bochs_pid=$!
 # firmware drops into its shell once the loader returns and sits there -
 # so a successful run would otherwise cost the whole timeout.
 waited=0
+# ZPP_RESTART is the other way this loop can end, and recognising it is
+# worth more than the three lines it costs.
+#
+# With the diagnostic facility compiled in, the loader establishes the
+# ESP reservation and then warm-resets the machine so the channel is
+# live on the next boot. That is right on a real machine and fatal here:
+# nothing after that point runs, so the suite never starts, and the only
+# symptom is serial going quiet after the firmware's own "starting
+# Boot0001". Waiting the full timeout out and reporting "the guest never
+# reached the suite" is true and useless - it reads as a hypervisor hang
+# and sends the reader to the VMM.
+#
+# Cost four runs and most of a session to identify from the outside.
+# The loader announces it with `raw` now, which survives ZPP_TRACE being
+# off, so this can stop at once and name the flag.
 while kill -0 "$bochs_pid" 2>/dev/null; do
     if grep -q 'ZPPTEST DONE' serial.out 2>/dev/null; then
+        break
+    fi
+    if grep -q 'ZPP_RESTART' serial.out 2>/dev/null; then
+        echo "restarted after establishing the ESP reservation" >&2
         break
     fi
     if [ "$waited" -ge "$timeout_seconds" ]; then
@@ -119,6 +138,22 @@ tr -d '\r' < serial.out > serial.txt
 grep -E '^ZPPTEST [^ ]+ (PASS|FAIL|SKIP|XFAIL|XPASS) ' serial.txt \
     > cases.txt 2>/dev/null || : > cases.txt
 grep '^ZPPCOVER ' serial.txt > cover.txt 2>/dev/null || : > cover.txt
+
+if grep -q 'ZPP_RESTART' serial.txt 2>/dev/null; then
+    echo >&2
+    echo "FAIL: the loader established the ESP reservation and restarted" >&2
+    echo "the machine, so it never reached the coverage suite. That" >&2
+    echo "happens whenever the diagnostic facility is compiled in:" >&2
+    echo "zpp::diag::restart_after_reservation follows ZPP_DIAG, which" >&2
+    echo "defaults ON for a debug build." >&2
+    echo >&2
+    echo "Rebuild the medium without it, which is what ci.yml does:" >&2
+    echo "  cmake --preset ${CONFIG:-debug} -DZPP_GUEST_TESTS=ON -DZPP_DIAG=OFF" >&2
+    echo "  cmake --build --preset ${CONFIG:-debug}" >&2
+    echo "  ./scripts/bochs/setup.sh ${CONFIG:-debug}" >&2
+    grep 'ZPP_RESTART' serial.txt | sed 's/^/  /' >&2
+    exit 1
+fi
 
 if [ ! -s cases.txt ]; then
     echo "=== serial output ($(wc -c < serial.out) bytes) ===" >&2
