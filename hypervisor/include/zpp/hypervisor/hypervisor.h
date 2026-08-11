@@ -4159,6 +4159,42 @@ private:
      */
     bool pending_event_l2[max_cpus]{};
     std::uint64_t events_deferred[max_cpus]{};
+
+    /**
+     * The two other things that can happen to a held event, counted
+     * beside the two that already were.
+     *
+     * `events_yielded` is an event kept back because the exit's own
+     * handler had already staged one - the interrupted event is not
+     * lost, it goes in on a later entry. `events_discarded` is one
+     * dropped because the second-level guest it was being delivered to
+     * is gone, which the guest hypervisor's current VMCS identifies.
+     *
+     * Counted rather than silent because both are the shapes a leak
+     * would take. A `yielded` that climbs without `requeued` following
+     * it means events are being held and never delivered; a `discarded`
+     * that climbs at all means a guest is being torn down with an event
+     * owed to it, which is worth knowing even though dropping it is
+     * correct.
+     * @{
+     */
+    std::uint64_t events_yielded[max_cpus]{};
+    std::uint64_t events_discarded[max_cpus]{};
+    /**
+     * @}
+     */
+
+    /**
+     * Which second-level guest a held event was being delivered to,
+     * named by the guest hypervisor's current VMCS.
+     *
+     * A held event is not always re-injected on the next entry - one
+     * for a second-level guest waits while its hypervisor runs - so
+     * "the same guest" has to mean something across that gap. A VMPTRLD
+     * of another region is a different guest, and an event held across
+     * that switch is owed to a guest that no longer exists.
+     */
+    std::uint64_t pending_event_vmcs[max_cpus]{};
     /**
      * @}
      */

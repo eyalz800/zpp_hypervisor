@@ -8815,6 +8815,19 @@ hypervisor::main(arch::x86_64::context & caller_context)
 
                 this->pending_event[cpu] = vectoring;
                 this->pending_event_l2[cpu] = this->running_l2[cpu];
+
+                // Which second-level guest it was being delivered to.
+                //
+                // Held events are not always re-injected on the very
+                // next entry - one for a second-level guest is deferred
+                // while its hypervisor runs - and "the same guest" has
+                // to mean something over that gap. The guest
+                // hypervisor's current VMCS is what names it: a
+                // VMPTRLD of another region is a different guest, and
+                // an event held across that switch belongs to a guest
+                // that is no longer running.
+                this->pending_event_vmcs[cpu] =
+                    this->guest_current_vmcs[cpu];
                 this->pending_event_error[cpu] =
                     (0 != (vectoring & vectoring_error_valid))
                         ? vmcs.read(arch::x86_64::vmx::vmcs::field::
@@ -10455,28 +10468,87 @@ void hypervisor::resume_guest(arch::x86_64::context & context,
     //   an event deferred because it belonged to the other level is held
     //   indefinitely and then delivered into some later unrelated entry.
     //
-    // To switch it back on, fix both and re-run the same test. The
-    // problem it was written for is real and still open - `1975400`
-    // measured nine events destroyed in one boot - so this is a
-    // withdrawal of a fix that cost more than it bought, not a decision
-    // that the events do not matter.
-    constexpr bool requeue_interrupted_events = false;
+    // BOTH DEFECTS ARE FIXED AND IT IS BACK ON. See the two branches
+    // below marked "defect 1" and "defect 2".
+    //
+    // What settled it was not inspection. The monitor trap flag armed on
+    // every entry that injects `0xd1` - the vector the root partition's
+    // `SINT3` carries - exits after one retired instruction, and on all
+    // eight processors the first landing was an EPT violation with the
+    // instruction pointer **unmoved**. Delivery reads the interrupt
+    // descriptor table and pushes five words on the guest's stack before
+    // reaching the handler, and both go through the extended page
+    // tables, so it faults there against the lazily built shadow. With
+    // this off the event was then destroyed, the handler never ran, the
+    // end-of-message register was never written, and Hyper-V dropped the
+    // timer and halted every processor behind it. BACKLOG.md carries the
+    // whole chain.
+    //
+    // That is the same failure the paragraph above measured from the
+    // other end - "five clock interrupts at 0xd1" - found again months
+    // later by a different measurement.
+    constexpr bool requeue_interrupted_events = true;
 
     if constexpr (!requeue_interrupted_events) {
         (void)0;
     } else if (auto slot = vmcs.vpid();
                (0 != slot) && (slot <= max_cpus)) {
         auto cpu = slot - 1;
+        constexpr std::uint64_t injection_valid = 1ull << 31;
 
-        // Only into the guest it was being delivered to. A guest
-        // hypervisor's VMLAUNCH is an exit like any other, so an exit
-        // that interrupted a delivery to it can be followed straight
-        // away by an entry into *its* guest - and putting the event back
-        // there would hand one level's interrupt to the other. Held
-        // instead until that guest runs again.
+        auto staged =
+            vmcs.read(arch::x86_64::vmx::vmcs::field::
+                          vm_entry_interruption_information_field);
+
+        // Defect 1: yield to an event this exit's own handler staged.
+        //
+        // The write below used to be unconditional, so a re-queue
+        // silently replaced a fault the handler had just decided to
+        // inject - the general protection fault for a locked MSR, say.
+        // The exit's own event wins: it is the processor's account of
+        // what the guest just did, and delivering it is the whole reason
+        // the exit was handled that way. The interrupted one stays held
+        // and goes in on a later entry, which is what being held is for.
+        //
+        // The same test is already spelled twice in this file, at the
+        // invalid-opcode injection and the MSR fault, both reading the
+        // field's valid bit for exactly this reason.
         if (this->pending_event[cpu] &&
-            (this->pending_event_l2[cpu] != this->running_l2[cpu])) {
+            (0 != (staged & injection_valid))) {
+            this->events_yielded[cpu] = this->events_yielded[cpu] + 1;
+
+            // Only into the guest it was being delivered to. A guest
+            // hypervisor's VMLAUNCH is an exit like any other, so an exit
+            // that interrupted a delivery to it can be followed straight
+            // away by an entry into *its* guest - and putting the event
+            // back there would hand one level's interrupt to the other.
+            // Held instead until that guest runs again.
+        } else if (this->pending_event[cpu] &&
+                   (this->pending_event_l2[cpu] !=
+                    this->running_l2[cpu])) {
             this->events_deferred[cpu] = this->events_deferred[cpu] + 1;
+
+            // Defect 2: the guest it belonged to is gone.
+            //
+            // Being held across an entry into the other level is normal
+            // and the branch above is what does it. Being held across a
+            // VMPTRLD of a different region is not: that is a different
+            // second-level guest, and the event is one its predecessor
+            // was owed. Delivering it there is delivering a vector into
+            // a guest that never had it pending - the worst shape of
+            // this bug, because it arrives long after the exit that
+            // produced it and nothing connects the two.
+            //
+            // Discarded rather than held for ever, and counted, because
+            // an event whose guest is gone has no later entry to wait
+            // for and a silent leak here would look exactly like the
+            // destruction this whole path exists to prevent.
+        } else if (this->pending_event[cpu] &&
+                   this->pending_event_l2[cpu] &&
+                   (this->pending_event_vmcs[cpu] !=
+                    this->guest_current_vmcs[cpu])) {
+            this->pending_event[cpu] = 0;
+            this->events_discarded[cpu] = this->events_discarded[cpu] + 1;
         } else if (auto event = this->pending_event[cpu]; 0 != event) {
             constexpr std::uint64_t error_valid = 1ull << 11;
             constexpr std::uint64_t type_mask = 7ull << 8;
