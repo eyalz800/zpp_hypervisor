@@ -7097,3 +7097,60 @@ transcription would go on passing while testing itself.
   root survives the release, which pins the arrangement the callers depend
   on - a future caller that releases and then fills without zeroing would
   build a shadow out of tables another slot has since been handed.
+
+### Nothing is silently dropped, and the control boots
+
+Measured 2026-08-11 on `15aad54`. Two results, both negative, both closing
+a line of enquiry that looked strong.
+
+**The control run boots.** `-DZPP_CHAINLOAD_ONLY=ON` - the same disk, the
+same launcher, the same NVRAM, the hypervisor simply not launched - and
+Windows with Hyper-V runs normally: user-mode code at CPL 3 on several
+processors, eight distinct instruction pointers, every one of them moved
+thirty seconds later. **So the failure is ours and not the rig's**, which
+had not been established this session and is worth the boot it cost.
+
+It also corrects an inference this file was carrying. The reference's own
+boot processor arms **1,751,716,440** counts, one-shot - 1.75 seconds -
+so a long idle deadline there is *normal*, and "2.38 seconds is
+suspiciously long" was wrong. The discriminating difference is one level
+down: on the reference an application processor holds a **1,920,139**
+count, about 1.92 ms, and is actively counting down, where under this VMM
+every application processor writes a zero initial count and never arms
+again. That 1.92e6 is also the 1,961,755 the `timer_arm_value` comment
+records, now confirmed as the reference's ordinary tick rather than a
+number from a different machine.
+
+**No capability is silently withheld.** `vmcs12_secondary_asked` against
+`vmcs02_secondary_written` - both OR-accumulated across every entry
+rather than sampled at the first, which is what made the older
+`vmcs12_secondary_controls` read a meaningless zero:
+
+```
+vmcs12 secondary ASKED   = 0x1010ae
+vmcs02 secondary WRITTEN = 0x1010ae
+```
+
+Identical. Enable EPT, descriptor-table exiting, RDTSCP, VPID,
+unrestricted guest, INVPCID and XSAVES - asked for and granted, every
+one. Pin controls asked `0x3f`, primary `0xb6a06dfe`.
+
+That kills the strongest remaining structural hypothesis. **Hyper-V never
+asks for virtual-interrupt delivery, APIC-register virtualization or
+virtualize-APIC-accesses**, so it is not delivering interrupts through a
+virtual APIC page this VMM fails to maintain - it uses plain
+entry-interruption injection, which `build_vmcs02` copies correctly and
+the test suite has since verified independently. It does not ask for VMCS
+shadowing either, so that remains a performance item and not a
+correctness one.
+
+What survives, and it is now a short list. Hyper-V holds a timer message
+it wrote itself, with message-pending set; no interrupt is pending on any
+local APIC; nothing is masked by priority; every capability it asked for
+it received; every entry it attempted succeeded; and it never enters the
+virtual processor that would consume the message. The next thing to
+measure is the one the test suite says it cannot reach: whether an
+injection written into vmcs02 actually *retires* into the second-level
+guest. A count of entries carrying a valid entry-interruption field
+against interrupts the second-level guest is observed to take would close
+it, and nothing records either today.

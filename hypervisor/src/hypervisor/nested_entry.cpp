@@ -1303,10 +1303,41 @@ std::expected<void, zpp::error> hypervisor::build_vmcs02(std::size_t cpu)
     secondary |= secondary12 & secondary_unrestricted_guest;
     secondary |= secondary_enable_ept | secondary_enable_vpid;
 
-    vmcs.secondary_processor_based_vm_execution_controls(
-        arch::x86_64::vmx::adjust_msr(
-            this->cached_vmx_msr(vmx_msr::processor_based_contorls_2),
-            secondary));
+    auto secondary02 = arch::x86_64::vmx::adjust_msr(
+        this->cached_vmx_msr(vmx_msr::processor_based_contorls_2),
+        secondary);
+
+    vmcs.secondary_processor_based_vm_execution_controls(secondary02);
+
+    // Every control either side has *ever* asked for, and every one this
+    // VMM ever actually wrote, accumulated rather than sampled.
+    //
+    // `vmcs12_secondary_controls` beside them records the first entry
+    // only, and the first entry is too early to mean anything: it comes
+    // back zero while the primary controls have bit 31 set to activate
+    // the secondary ones and the shadow extended page tables are
+    // demonstrably in use, so the guest hypervisor had not written the
+    // field yet at the moment it was read. A record that is empty for a
+    // reason unrelated to the question invites exactly one wrong
+    // conclusion, which is that nothing was asked for.
+    //
+    // The difference between the two words below is the whole point. A
+    // control set in `asked` and clear in `written` is one this VMM took
+    // away - `adjust_msr` clears anything the hardware does not offer,
+    // and the composition above removes two deliberately - and a guest
+    // hypervisor that asked for a capability, was not told it was
+    // refused, and then relied on it is this project's recurring failure
+    // stated exactly. The ones being looked for are virtual-interrupt
+    // delivery, APIC-register virtualization and virtualize-APIC-
+    // accesses, because a guest hypervisor delivering interrupts to its
+    // guest through a virtual APIC this VMM does not maintain would stop
+    // exactly the way the rig stops.
+    this->vmcs12_secondary_asked =
+        this->vmcs12_secondary_asked | secondary12;
+    this->vmcs02_secondary_written =
+        this->vmcs02_secondary_written | secondary02;
+    this->vmcs12_primary_asked = this->vmcs12_primary_asked | primary12;
+    this->vmcs12_pin_asked = this->vmcs12_pin_asked | pin12;
 
     // Exit controls are this VMM's, unchanged. The exit comes here.
     vmcs.vm_exit_controls(exit01);

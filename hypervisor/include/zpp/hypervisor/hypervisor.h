@@ -3090,6 +3090,34 @@ private:
     volatile std::uint64_t vmcs12_pin_controls{};
     volatile std::uint64_t vmcs12_primary_controls{};
     volatile std::uint64_t vmcs12_secondary_controls{};
+
+    /**
+     * Every control either level ever asked for, and every secondary
+     * control this VMM ever wrote, OR-accumulated across every entry.
+     *
+     * The sampled records above take the *first* entry, which is too
+     * early: `vmcs12_secondary_controls` reads zero while the primary
+     * controls activate the secondary ones and the shadow extended page
+     * tables are in use, so the guest hypervisor had simply not written
+     * the field yet. An empty record whose emptiness has nothing to do
+     * with the question is worse than none.
+     *
+     * `asked` against `written` is the comparison worth having: a bit set
+     * in the first and clear in the second is a capability the guest
+     * hypervisor requested and did not get, silently. Virtual-interrupt
+     * delivery, APIC-register virtualization and virtualize-APIC-accesses
+     * are the three being looked for, since a guest hypervisor delivering
+     * interrupts through a virtual APIC page this VMM does not maintain
+     * would stall precisely the way the rig stalls.
+     * @{
+     */
+    volatile std::uint64_t vmcs12_secondary_asked{};
+    volatile std::uint64_t vmcs02_secondary_written{};
+    volatile std::uint64_t vmcs12_primary_asked{};
+    volatile std::uint64_t vmcs12_pin_asked{};
+    /**
+     * @}
+     */
     volatile std::uint64_t vmcs12_exit_controls{};
     volatile std::uint64_t vmcs12_entry_controls{};
     volatile std::uint64_t vmcs12_controls_captured{};

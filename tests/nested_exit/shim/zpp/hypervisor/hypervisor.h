@@ -274,6 +274,10 @@ public:
     volatile std::uint64_t vmcs12_pin_controls{};
     volatile std::uint64_t vmcs12_primary_controls{};
     volatile std::uint64_t vmcs12_secondary_controls{};
+    volatile std::uint64_t vmcs12_secondary_asked{};
+    volatile std::uint64_t vmcs02_secondary_written{};
+    volatile std::uint64_t vmcs12_primary_asked{};
+    volatile std::uint64_t vmcs12_pin_asked{};
     volatile std::uint64_t vmcs12_exit_controls{};
     volatile std::uint64_t vmcs12_entry_controls{};
 
