@@ -335,7 +335,38 @@ public:
     [[noreturn]] void
     on_nested_entry_failure(arch::x86_64::context * recovery);
 
+    // Everything below is private, except to the hosted test suite.
+    //
+    // `ZPP_HOSTED_TESTS` is defined by tests/CMakeLists.txt and by
+    // nothing else - no target this tree ships defines it, and the four
+    // cross builds do not pass it. What it buys is that a harness under
+    // tests/ compiles *this* class rather than a hand-written copy of
+    // it. There were six such copies, 1463 lines of them, and they
+    // drifted: a member added here had to be added to up to six other
+    // files or the suite went red.
+    //
+    // Two alternatives, both rejected with a reason:
+    //
+    //   - `friend`. Friendship does not reach the free functions a
+    //     harness is written out of, so granting it would mean
+    //     restructuring five thousand lines of test into members of one
+    //     struct - a much larger change than this, for the same access.
+    //   - making the members public outright. The shipped class keeps
+    //     its encapsulation this way, and a reader sees one line saying
+    //     who else may look and under what switch.
+    //
+    // Layout is unaffected, and that is checked rather than asserted:
+    // [class.mem] fixes the order of members within one access class and
+    // leaves it unspecified only *between* access classes, so removing
+    // an access specifier can only make the order more determined, never
+    // less. Measured both ways with clang - sizeof and every member
+    // offset are identical, 0x2c3c000 either way, which is also what
+    // llvm-dwarfdump reports for the built x86_64 hypervisor.
+#ifdef ZPP_HOSTED_TESTS
+public:
+#else
 private:
+#endif
     /**
      * Capture important registers for later use of the hypervisor.
      */

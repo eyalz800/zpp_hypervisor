@@ -38,6 +38,17 @@ set(ZPP_TEST_COMPILE_OPTIONS
     -fno-rtti)
 
 set(ZPP_HYPERVISOR_INCLUDE "${ZPP_SOURCE_DIR}/hypervisor/include")
+set(ZPP_DIAG_INCLUDE "${ZPP_SOURCE_DIR}/diag/include")
+
+# zpp/diag/config.h reads ZPP_DIAG directly rather than defaulting it, so
+# every harness that includes a hypervisor source has to answer. Off,
+# which is what a release build answers: the diagnostic channel's sinks
+# write to an NVMe controller this suite does not have, so on would need
+# them stood in for - and standing our own headers in for our own headers
+# is what this suite is getting rid of. The calls under test compile away
+# to nothing either way, which is exactly what the shim
+# `zpp::diag::log` these harnesses used to carry did.
+set(ZPP_TEST_DIAG 0)
 set(ZPP_HYPERVISOR_SRC "${ZPP_SOURCE_DIR}/hypervisor/src")
 set(ZPP_CI_DIR "${ZPP_SOURCE_DIR}/scripts/ci")
 
@@ -81,12 +92,17 @@ function(zpp_add_host_test name)
     # compile_commands.json either way, which is what clangd needs.
     add_executable(${name} EXCLUDE_FROM_ALL ${HARNESS_SOURCES})
     target_compile_options(${name} PRIVATE ${ZPP_TEST_COMPILE_OPTIONS})
+    # diag/include last, and unconditionally: the hypervisor sources
+    # include zpp/diag/log.h, whose real header is header-only and
+    # compiles natively, so there is nothing here for a harness to
+    # choose between.
     target_include_directories(${name} PRIVATE
         ${HARNESS_INCLUDES}
-        "${ZPP_HYPERVISOR_INCLUDE}")
-    if(HARNESS_DEFINES)
-        target_compile_definitions(${name} PRIVATE ${HARNESS_DEFINES})
-    endif()
+        "${ZPP_HYPERVISOR_INCLUDE}"
+        "${ZPP_DIAG_INCLUDE}")
+    target_compile_definitions(${name} PRIVATE
+        ${HARNESS_DEFINES}
+        ZPP_DIAG=${ZPP_TEST_DIAG})
 
     add_dependencies(zpp_tests ${name})
 
@@ -158,16 +174,34 @@ zpp_add_host_test(decoder
     SOURCES decoder/harness.cpp)
 
 # The nested VM-exit reflection decision: the real l0_wants_l2_exit and
-# l1_wants_l2_exit, compiled against a stand-in hypervisor.h.
+# l1_wants_l2_exit, compiled against the real hypervisor class.
+#
+# The first harness to drop its copy of that class, and the shape the
+# rest follow. Three things replaced 338 lines of stand-in:
+#
+#   - ZPP_HOSTED_TESTS, which widens the class's one `private:` to
+#     `public:` and is defined here and nowhere else. The comment on it
+#     in hypervisor.h carries the reasoning and the layout measurement.
+#   - the real sources for what the stand-in used to fake. Its
+#     `copy_vmcs12_to_shadow` was an empty body; nested_shadow_vmcs.cpp
+#     is the real one, and returns early here because shadowing is off.
+#     Its `page_table_stub::virtual_to_physical` returned its argument;
+#     page_table.cpp is the real walker.
+#   - support/host_heap.cpp plus crt/heap.cpp, so the real
+#     `zpp::hypervisor::log` allocates its lines from a real arena
+#     instead of the stand-in's `log` that discarded them.
 zpp_add_host_test(nested_exit
     SOURCES
         nested_exit/harness.cpp
+        support/host_heap.cpp
         "${ZPP_HYPERVISOR_SRC}/hypervisor/nested_entry.cpp"
+        "${ZPP_HYPERVISOR_SRC}/hypervisor/nested_shadow_vmcs.cpp"
+        "${ZPP_HYPERVISOR_SRC}/arch/x86_64/page_table.cpp"
+        "${ZPP_HYPERVISOR_SRC}/crt/heap.cpp"
     INCLUDES
-        "${CMAKE_CURRENT_SOURCE_DIR}/nested_exit/shim"
-        "${CMAKE_CURRENT_SOURCE_DIR}/nested_vmx/shim"
+        "${CMAKE_CURRENT_SOURCE_DIR}/shim"
         "${CMAKE_CURRENT_SOURCE_DIR}/nested_exit"
-    DEFINES ZPP_NESTED_VMX=1)
+    DEFINES ZPP_NESTED_VMX=1 ZPP_HOSTED_TESTS=1)
 
 # The nested VMX state machine: the real nested_vmx.cpp and the real
 # vmcs12.h against stand-ins for hypervisor.h, the log and the two asm.h
@@ -191,6 +225,7 @@ zpp_add_host_test(nested_vmx
         "${ZPP_HYPERVISOR_SRC}/hypervisor/nested_vmx.cpp"
     INCLUDES
         "${CMAKE_CURRENT_SOURCE_DIR}/nested_vmx/shim"
+        "${CMAKE_CURRENT_SOURCE_DIR}/shim"
         "${CMAKE_CURRENT_SOURCE_DIR}/nested_vmx"
     DEFINES ZPP_NESTED_VMX=1)
 
@@ -207,6 +242,7 @@ zpp_add_host_test(ap_start_up
     INCLUDES
         "${CMAKE_CURRENT_SOURCE_DIR}/ap_start_up/shim"
         "${CMAKE_CURRENT_SOURCE_DIR}/nested_vmx/shim"
+        "${CMAKE_CURRENT_SOURCE_DIR}/shim"
         "${CMAKE_CURRENT_SOURCE_DIR}/ap_start_up")
 
 # The interrupt command register's decode path: the real processor_slot,
@@ -221,6 +257,7 @@ zpp_add_host_test(local_apic
     INCLUDES
         "${CMAKE_CURRENT_SOURCE_DIR}/local_apic/shim"
         "${CMAKE_CURRENT_SOURCE_DIR}/nested_vmx/shim"
+        "${CMAKE_CURRENT_SOURCE_DIR}/shim"
         "${CMAKE_CURRENT_SOURCE_DIR}/local_apic")
 
 # The watched-page write path: the real watch_guest_page_writes,
@@ -235,6 +272,7 @@ zpp_add_host_test(watched_page
     INCLUDES
         "${CMAKE_CURRENT_SOURCE_DIR}/watched_page/shim"
         "${CMAKE_CURRENT_SOURCE_DIR}/nested_vmx/shim"
+        "${CMAKE_CURRENT_SOURCE_DIR}/shim"
         "${CMAKE_CURRENT_SOURCE_DIR}/watched_page")
 
 # The interrupted-event re-queue on the way back to a guest: the real
@@ -249,6 +287,7 @@ zpp_add_host_test(resume_guest
     INCLUDES
         "${CMAKE_CURRENT_SOURCE_DIR}/resume_guest/shim"
         "${CMAKE_CURRENT_SOURCE_DIR}/nested_vmx/shim"
+        "${CMAKE_CURRENT_SOURCE_DIR}/shim"
         "${CMAKE_CURRENT_SOURCE_DIR}/resume_guest"
     DEFINES ZPP_NESTED_VMX=1)
 

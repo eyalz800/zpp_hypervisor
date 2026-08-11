@@ -1,9 +1,16 @@
 // Differential test harness for the nested VM-exit reflection decision.
 //
 // Compiles the real hypervisor/src/hypervisor/nested_entry.cpp natively
-// against a shim hypervisor, a shim VMCS and a fake guest physical memory,
-// and drives `l0_wants_l2_exit` and `l1_wants_l2_exit` the way a VM exit
-// taken by a second-level guest would.
+// against the real hypervisor class, a shim VMCS and a fake guest
+// physical memory, and drives `l0_wants_l2_exit` and `l1_wants_l2_exit`
+// the way a VM exit taken by a second-level guest would.
+//
+// "The real class" is the whole of what is shimmed and what is not: the
+// only stand-in headers on this harness's include path are
+// tests/shim/zpp/arch/x86_64/asm.h and .../vmx/asm.h, which exist
+// because a Mac cannot execute `vmread`. Everything else - the class,
+// the VMCS type, vmcs12, the log, the page table walker - is the header
+// the hypervisor is built from.
 //
 // The expected column is not this harness's opinion. Every entry in the
 // table below was read out of KVM's `nested_vmx_l1_wants_exit` and
@@ -92,13 +99,16 @@ hypervisor & hypervisor::instance()
     return the;
 }
 
-std::uint64_t hypervisor::cached_vmx_msr(std::size_t msr)
+/**
+ * The fixture processor's VMX capability MSRs.
+ *
+ * Split out of `cached_vmx_msr` below, which has to hand back a
+ * reference: the real one returns a reference into the array
+ * `initialize_vmx_msrs` fills, and this harness now compiles the real
+ * declaration rather than a copy of it that returned by value.
+ */
+static std::uint64_t vmx_msr_fixture(std::size_t msr)
 {
-    if (auto it = g_vmx_msr_override.find(msr);
-        it != g_vmx_msr_override.end()) {
-        return it->second;
-    }
-
     switch (msr) {
     case 0x480:
         return 0x00da040000000000ull;
@@ -170,6 +180,29 @@ std::uint64_t hypervisor::cached_vmx_msr(std::size_t msr)
     default:
         return 0;
     }
+}
+
+/**
+ * The real declaration, defined here because initialize_vmx_msrs is not
+ * compiled into this harness.
+ *
+ * Recomputed on every call rather than cached, because
+ * `g_vmx_msr_override` is written between cases and a slot filled once
+ * would answer the control-composition suite with the previous case's
+ * processor.
+ */
+std::uint64_t & hypervisor::cached_vmx_msr(std::size_t msr)
+{
+    static std::map<std::size_t, std::uint64_t> answers;
+
+    auto & slot = answers[msr];
+    if (auto it = g_vmx_msr_override.find(msr);
+        it != g_vmx_msr_override.end()) {
+        slot = it->second;
+    } else {
+        slot = vmx_msr_fixture(msr);
+    }
+    return slot;
 }
 
 /**
