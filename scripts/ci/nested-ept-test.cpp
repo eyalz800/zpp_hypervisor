@@ -31,6 +31,7 @@
 // this revision calls the EPT-violation exit qualification **Table 30-7**
 // (sdm.txt:203865). Older revisions number it 28-7; if a citation here
 // does not land, the revision moved, not the rule.
+#include "zpp/arch/x86_64/vmx/ept_pointer.h"
 #include "zpp/arch/x86_64/vmx/nested_ept.h"
 #include <array>
 #include <cstdio>
@@ -2033,6 +2034,115 @@ void releasing_a_slot_returns_its_tables()
     check(free_tables(of, 0) == empty,
           "releasing returns a wholly consumed pool");
 }
+
+// -------------------------------------------------------------------------
+// `ept_pointer`'s own accessors.
+//
+// The class nothing calls, which is why it was wrong in three ways at
+// once - and why it is worth fixing rather than deleting: `build_vmcs02`
+// tests bit 6 with a literal `0x40` because reaching for the accessor
+// would have given the wrong answer, so the class being wrong is the
+// reason the code beside it does not use it.
+//
+// SDM 29.2.1.1 (sdm.txt:202160): "Bit 6 (enable bit for accessed and
+// dirty flags for EPT) must be 0 if bit 21 of the IA32_VMX_EPT_VPID_CAP
+// MSR ... is read as 0". Bit 8 is a different thing entirely - it is the
+// accessed flag of a leaf *entry*, and SDM Table 31-7 (sdm.txt:205542)
+// makes it meaningful only "If bit 6 of EPTP is 1". Reading the enable
+// out of bit 8 confuses the pointer with the entry it points at.
+//
+// Static, because every one of these is `constexpr` and the compile is
+// then the test. A runtime tier would add nothing: there is no state and
+// no ordering, only arithmetic that is either right or wrong.
+//
+// **Not reachable under Bochs**, and worth saying why rather than
+// leaving it as an omission: nothing in the tree calls these accessors,
+// so no instruction a guest can execute reaches them. A Bochs case would
+// have to call them from the guest test suite, which would be testing a
+// copy of the arithmetic compiled into the loader rather than the
+// hypervisor's use of it - and the hypervisor has no use of it yet. When
+// `build_vmcs02` stops testing bit 6 with a literal and reaches for the
+// accessor instead, the Bochs suite's existing EPT cases cover it for
+// free.
+// -------------------------------------------------------------------------
+static_assert(
+    [] {
+        ept_pointer pointer{};
+        pointer.access_and_dirty(true);
+        return pointer.value();
+    }() == (1ull << 6),
+    "setting accessed-and-dirty must set bit 6 of the EPT pointer and "
+    "nothing else - SDM 29.2.1.1, sdm.txt:202160");
+
+static_assert(
+    [] {
+        ept_pointer pointer{1ull << 6};
+        return pointer.access_and_dirty();
+    }(),
+    "and reading it back must read bit 6, not bit 8 - bit 8 is a leaf "
+    "entry's accessed flag, which Table 31-7 makes meaningful only when "
+    "this bit is set (sdm.txt:205542)");
+
+static_assert(
+    [] {
+        ept_pointer pointer{1ull << 8};
+        return pointer.access_and_dirty();
+    }() == false,
+    "a pointer with bit 8 set and bit 6 clear does not have accessed and "
+    "dirty flags enabled");
+
+static_assert(
+    [] {
+        ept_pointer pointer{~std::uint64_t{}};
+        pointer.access_and_dirty(false);
+        return pointer.value() & (1ull << 6);
+    }() == 0,
+    "clearing it clears bit 6");
+
+// And the bits it must not disturb on the way. The setter was copied
+// from `page_walk_length`, which legitimately stores its value minus
+// one - so `access_and_dirty(false)` evaluated `((0 - 1) & 0x7) << 8`
+// and **set** bits 10:8, which are reserved and which `build_vmcs02`
+// refuses in a guest hypervisor's own pointer. A setter that makes a
+// pointer invalid by clearing a flag is worse than one that does
+// nothing.
+static_assert(
+    [] {
+        ept_pointer pointer{};
+        pointer.access_and_dirty(false);
+        return pointer.value();
+    }() == 0,
+    "clearing accessed-and-dirty on an empty pointer leaves it empty - "
+    "it must not set bits 10:8, which SDM 29.2.1.1 reserves and which "
+    "build_vmcs02 refuses");
+
+static_assert(
+    [] {
+        ept_pointer pointer{};
+        pointer.memory_type(memory_type::write_back);
+        pointer.page_walk_length(4);
+        pointer.page_number(0x100);
+        auto before = pointer.value();
+        pointer.access_and_dirty(true);
+        pointer.access_and_dirty(false);
+        return pointer.value() == before;
+    }(),
+    "and setting it then clearing it leaves every other field as it was, "
+    "so the accessor composes with the ones beside it");
+
+static_assert(
+    [] {
+        ept_pointer pointer{};
+        pointer.memory_type(memory_type::write_back);
+        pointer.page_walk_length(4);
+        pointer.page_number(0x100);
+        pointer.access_and_dirty(true);
+        return (pointer.page_walk_length() == 4) &&
+               (pointer.page_number() == 0x100) &&
+               (pointer.memory_type() == memory_type::write_back);
+    }(),
+    "setting accessed-and-dirty does not disturb the walk length, the "
+    "root or the memory type");
 
 // -------------------------------------------------------------------------
 // `e4e7e96`: the guest hypervisor's own EPT pointer.

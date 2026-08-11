@@ -63,19 +63,45 @@ public:
     }
 
     /**
-     * Returns the access and dirty bit.
+     * Returns whether accessed and dirty flags are enabled for the
+     * extended page tables this pointer names.
+     *
+     * Bit 6. SDM 29.2.1.1: "Bit 6 (enable bit for accessed and dirty
+     * flags for EPT) must be 0 if bit 21 of the IA32_VMX_EPT_VPID_CAP
+     * MSR ... is read as 0" (.references/sdm.txt:202160).
+     *
+     * It used to read bit 8, which is a different thing one level down:
+     * bit 8 of a leaf *entry* is that page's accessed flag, and SDM
+     * Table 31-7 (.references/sdm.txt:205542) makes it meaningful only
+     * "If bit 6 of EPTP is 1". Reading the enable out of the flag it
+     * enables confuses the pointer with what it points at.
      */
     constexpr bool access_and_dirty() const
     {
-        return m_value & (1 << 8);
+        return 0 != (m_value & (1ull << 6));
     }
 
     /**
-     * Sets the access and dirty bit to the specified value.
+     * Enables or disables accessed and dirty flags.
+     *
+     * One bit, written as one bit. The previous version was copied from
+     * `page_walk_length` above, which legitimately stores its value
+     * minus one - so `access_and_dirty(true)` evaluated
+     * `((1 - 1) & 0x7) << 8` and cleared three bits, and
+     * `access_and_dirty(false)` evaluated `((0 - 1) & 0x7) << 8` and set
+     * bits 10:8. Those are reserved, and `build_vmcs02` refuses a guest
+     * hypervisor's pointer that has them - so *clearing* this flag
+     * produced a pointer this VMM would reject.
+     *
+     * Nothing called either, and that is not a coincidence:
+     * `build_vmcs02` tests bit 6 with a literal `0x40` rather than
+     * through this class. A class that answers wrongly is a class its
+     * neighbours route around.
      */
     constexpr void access_and_dirty(bool value)
     {
-        m_value = ((m_value & ~(0x7 << 8)) | (((value - 1) & 0x7) << 8));
+        m_value = (m_value & ~(1ull << 6)) |
+                  (value ? (1ull << 6) : std::uint64_t{});
     }
 
     /**

@@ -7047,8 +7047,12 @@ transcription would go on passing while testing itself.
 
 ### Found while doing this, not fixed
 
-- **`ept_pointer::access_and_dirty` reads the wrong bit and its setter
-  writes garbage.** The getter is `m_value & (1 << 8)`; the accessed and
+- ~~**`ept_pointer::access_and_dirty` reads the wrong bit and its setter
+  writes garbage.**~~ **Fixed.** Seven `static_assert`s in
+  `scripts/ci/nested-ept-test.cpp` went in first and six of them failed;
+  the accessor now reads and writes bit 6 and disturbs nothing else. The
+  original account follows because the *reason* it survived is the part
+  worth keeping. The getter is `m_value & (1 << 8)`; the accessed and
   dirty enable is **bit 6** of the EPT pointer - SDM 29.2.1.1's "Bit 6
   (enable bit for accessed and dirty flags for EPT)"
   (`.references/sdm.txt:202160`), and Table 31-7 says the per-entry flags
