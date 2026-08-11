@@ -62,12 +62,13 @@ WANTED='watch_guest_page_writes unwatch_guest_page read_guest_word
         END {
             for (n in want) {
                 if (!(n in seen)) {
-                    printf("#error \"not found in hypervisor.cpp: %s\"\n", n);
+                    printf("#error \"not found in the hypervisor sources: %s\"\n", n);
                 }
             }
             printf("// extracted %d definitions\n", found);
         }
-    ' "$SRC/src/hypervisor/hypervisor.cpp"
+    ' "$SRC/src/hypervisor/hypervisor.cpp" \
+      "$SRC/src/hypervisor/local_apic.cpp"
     echo '}'
 } > real.cpp
 

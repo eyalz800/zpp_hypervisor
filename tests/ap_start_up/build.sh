@@ -72,12 +72,13 @@ WANTED='processor_slot start_up_processor start_application_processor
         END {
             for (n in want) {
                 if (!(n in seen)) {
-                    printf("#error \"not found in hypervisor.cpp: %s\"\n", n);
+                    printf("#error \"not found in the hypervisor sources: %s\"\n", n);
                 }
             }
             printf("// extracted %d definitions\n", found);
         }
-    ' "$SRC/src/hypervisor/hypervisor.cpp"
+    ' "$SRC/src/hypervisor/hypervisor.cpp" \
+      "$SRC/src/hypervisor/local_apic.cpp"
     echo '}'
 } > real.cpp
 
