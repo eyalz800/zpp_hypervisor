@@ -146,6 +146,21 @@ zpp_add_host_test(nested_vmx
         "${CMAKE_CURRENT_SOURCE_DIR}/nested_vmx"
     DEFINES ZPP_NESTED_VMX=1)
 
+# The interrupted-event re-queue on the way back to a guest: the real
+# resume_guest and event_allowed_on_entry out of resume.cpp, against a
+# stand-in carrying the per-processor event state and the VMCS. The shim's
+# restore_context comes back instead of trapping, because resume_guest is
+# [[noreturn]] and everything worth reading is written just before it.
+zpp_add_host_test(resume_guest
+    SOURCES
+        resume_guest/harness.cpp
+        "${ZPP_HYPERVISOR_SRC}/hypervisor/resume.cpp"
+    INCLUDES
+        "${CMAKE_CURRENT_SOURCE_DIR}/resume_guest/shim"
+        "${CMAKE_CURRENT_SOURCE_DIR}/nested_vmx/shim"
+        "${CMAKE_CURRENT_SOURCE_DIR}/resume_guest"
+    DEFINES ZPP_NESTED_VMX=1)
+
 # === Compile-only checks ==================================================
 #
 # Their assertions are static_asserts, so the compile *is* the run and the
@@ -203,7 +218,7 @@ endif()
 # the functions it wants become a translation unit a harness can compile.
 #
 # Nothing else should be added to this list.
-foreach(_generated local_apic watched_page ap_start_up crt resume_guest)
+foreach(_generated local_apic watched_page ap_start_up crt)
     add_test(NAME "tests/${_generated}"
         COMMAND "${CMAKE_CURRENT_SOURCE_DIR}/${_generated}/build.sh")
     set_tests_properties("tests/${_generated}" PROPERTIES

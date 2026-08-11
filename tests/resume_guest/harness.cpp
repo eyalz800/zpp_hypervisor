@@ -77,6 +77,8 @@
  *    entry wherever the guest hypervisor asked for virtual NMIs -
  *    `an_nmi_put_back_clears_blocking_by_nmi`.
  */
+#include "zpp/diag/pump.h"
+#include "zpp/diag/sinks/esp_blocks.h"
 #include "zpp/hypervisor/hypervisor.h"
 
 #include <cstdio>
