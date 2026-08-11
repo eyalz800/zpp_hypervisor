@@ -460,6 +460,30 @@ void hypervisor::on_vm_exit(std::uint64_t cpuid,
         // a miss proves nothing.
         constexpr std::uint32_t presence_leaf = 0x40000101;
 
+        // The same question asked from *two* levels up, which the leaf
+        // above cannot answer.
+        //
+        // Measured on the rig: a guest running under Hyper-V sees
+        // "Microsoft Hv" at 0x40000000 **and at 0x40000101**, because
+        // Hyper-V claims the whole 0x40000000-0x4fffffff range and
+        // answers every leaf in it - exactly as this VMM does, and for
+        // the same reason. So no leaf inside that range can ever reach
+        // a guest with another hypervisor above it.
+        //
+        // Outside the range is different: a hypervisor has no reason to
+        // synthesise a leaf that is not its own, so it executes CPUID
+        // and passes the processor's answer up - and the processor's
+        // answer, under this VMM, is this one.
+        //
+        // 0x8fffffff is chosen because it is architecturally undefined.
+        // It is above the maximum extended leaf on every processor this
+        // runs on, so nothing reads it expecting a defined value, and
+        // answering it takes nothing away from a guest. That is the
+        // whole test for whether a leaf may be claimed: not "is it
+        // free" but "does claiming it deprive a guest of an answer it
+        // would otherwise have got".
+        constexpr std::uint32_t deep_presence_leaf = 0x8fffffff;
+
         // Leaf 1, the feature bits, where two of them are cleared
         // and a third is deliberately left alone.
         if (1 == leaf) {
@@ -580,6 +604,13 @@ void hypervisor::on_vm_exit(std::uint64_t cpuid,
             // declared. Leaf 5, which the same bit governs, is
             // likewise passed through untouched, so the guest sees
             // one consistent answer across both leaves.
+        } else if (deep_presence_leaf == leaf) {
+            // Answered outside the hypervisor range on purpose, so a
+            // guest two levels up can see it. See the declaration.
+            cpuid_result[0] = 1;
+            cpuid_result[1] = 0x5a70705a;
+            cpuid_result[2] = 0x705a7070;
+            cpuid_result[3] = 0x70705a70;
         } else if ((leaf >= hypervisor_leaf_first) &&
                    (leaf <= hypervisor_leaf_last) &&
                    !nested_vmx::pass_through_hypervisor_interface) {
