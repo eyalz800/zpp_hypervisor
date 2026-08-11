@@ -66,6 +66,9 @@ static std::vector<std::pair<std::uint32_t, std::uint64_t>> g_msr_writes;
  */
 static std::map<std::size_t, std::uint64_t> g_vmx_msr_override;
 
+// Host-physical pages this VMM's own extended page tables refuse.
+static std::map<std::uint64_t, bool> g_host_denied;
+
 namespace zpp::arch::x86_64
 {
 std::uint64_t rdmsr(std::uint32_t index)
@@ -286,8 +289,20 @@ arch::x86_64::vmx::ept_walk_result
 hypervisor::host_ept_lookup(std::uint64_t physical_address)
 {
     arch::x86_64::vmx::ept_walk_result result;
-    result.status = arch::x86_64::vmx::ept_walk_status::mapped;
     result.physical_address = physical_address;
+
+    // A page this VMM will not let the guest touch: the module's own, the
+    // log storage, a watched page. `build_vmcs02` asks exactly this
+    // question of a virtual-APIC address a guest hypervisor names, and
+    // with every address mapped and writable the refusal branches could
+    // not be reached at all.
+    if (g_host_denied.count(physical_address & ~std::uint64_t(0xfff))) {
+        result.status = arch::x86_64::vmx::ept_walk_status::not_present;
+        result.permissions = arch::x86_64::vmx::ept_permissions();
+        return result;
+    }
+
+    result.status = arch::x86_64::vmx::ept_walk_status::mapped;
     result.permissions = arch::x86_64::vmx::ept_permissions::all();
     return result;
 }
@@ -466,6 +481,7 @@ static void reset(context & registers)
     g_msr.clear();
     g_msr_writes.clear();
     g_vmx_msr_override.clear();
+    g_host_denied.clear();
 
     registers = context{};
     registers.rcx = 0x1234; // An MSR neither side's bitmap names.
@@ -4124,6 +4140,7 @@ static void test_exit_and_entry_control_composition()
               "capability MSR and then accepted here would rely on a "
               "control nothing set");
         g_vmx_msr_override.clear();
+        g_host_denied.clear();
     }
 
     {
@@ -4189,6 +4206,445 @@ static void test_exit_and_entry_control_composition()
     }
 }
 
+// ------------- 12. the rest of what build_vmcs02 composes into vmcs02
+/**
+ * The composition rules that are not the exit and entry controls, and
+ * that nothing tested.
+ *
+ * These were chosen by auditing every `fix:` commit in the history that
+ * touched `nested_entry.cpp` for whether a test would fail without it.
+ * Five would not have:
+ *
+ * - `c7cc4e5`/`a7634af` and the re-offer that followed, which are the
+ *   whole TPR-shadow path - three branches, one of which withholds a
+ *   control a real guest hypervisor sets and replaces it with two exits.
+ *   BACKLOG.md records that getting this wrong cost seventeen
+ *   second-level entries and a boot loop.
+ * - `d192a34`, "re-merge the nested bitmaps every entry". The bug it
+ *   fixed was a cache on the bitmap *addresses*, which is invisible to
+ *   any test that builds vmcs02 once.
+ * - `68ebe80`, "obey the I/O rules", which is the precedence between
+ *   "unconditional I/O exiting" and "use I/O bitmaps".
+ * - `39ec0bf`, the CR0 and CR4 read shadows, whose composition is what
+ *   makes a second-level guest read back the values its own hypervisor
+ *   intended rather than this VMM's.
+ *
+ * The MSR-area case is here for a different reason: it is the one
+ * composition rule whose failure is a privilege escalation rather than a
+ * wrong answer, and it was asserted nowhere.
+ */
+static void test_the_rest_of_vmcs02()
+{
+    std::printf("the rest of what build_vmcs02 composes into vmcs02\n");
+
+    context registers{};
+
+    constexpr std::uint64_t l1_virtual_apic = 0x70000;
+
+    // ------------------------------------------------------- TPR shadow
+    {
+        // Honoured. The control stays, and the two fields behind it come
+        // from vmcs12 - the page the processor virtualizes VTPR in and
+        // the threshold below which it exits.
+        asked_controls asked;
+        asked.primary = primary_default1 | primary_tpr_shadow;
+
+        auto & shadow = hv().guest_vmcs12[cpu];
+
+        // Written before `compose`, which resets - so set them after and
+        // build again rather than fighting the fixture.
+        auto built = compose(asked, registers);
+        static_cast<void>(built);
+        shadow.write(field::virtual_apic_address, l1_virtual_apic);
+        shadow.write(field::tpr_threshold, 4);
+        hv().vmcs12_controls_captured = 0;
+
+        auto honoured = hv().build_vmcs02(cpu);
+        check(honoured.has_value(),
+              "a usable virtual-APIC page and a legal threshold are "
+              "accepted");
+        check(0 !=
+                  (hv().vmcs.read(
+                       field::
+                           primary_processor_based_vm_execution_controls) &
+                   primary_tpr_shadow),
+              "'use TPR shadow' stays set in vmcs02 when it is honoured");
+        check(l1_virtual_apic ==
+                  hv().vmcs.read(field::virtual_apic_address),
+              "vmcs12's virtual-APIC address is written into vmcs02 - the "
+              "extended page tables are an identity map, so the "
+              "L1-physical address is the host-physical one");
+        check(4 == hv().vmcs.read(field::tpr_threshold),
+              "and the threshold beside it");
+    }
+
+    {
+        // Refused: a page this VMM will not let the processor touch, and
+        // a guest hypervisor that does not intercept CR8. The processor
+        // reads and writes the virtual-APIC page in root operation, where
+        // extended page tables do not apply, so accepting one of this
+        // VMM's own pages here would have the processor write into it on
+        // the guest hypervisor's behalf. Nothing else in this VMM's
+        // protection would apply.
+        asked_controls asked;
+        asked.primary = primary_default1 | primary_tpr_shadow;
+
+        auto built = compose(asked, registers);
+        static_cast<void>(built);
+        hv().guest_vmcs12[cpu].write(field::virtual_apic_address,
+                                     l1_virtual_apic);
+        g_host_denied[l1_virtual_apic] = true;
+        hv().vmcs12_controls_captured = 0;
+
+        check(!hv().build_vmcs02(cpu).has_value(),
+              "a virtual-APIC page this VMM's own tables refuse is not "
+              "handed to the processor - it would be written in root "
+              "operation, where no extended page-table permission "
+              "applies");
+    }
+
+    {
+        // Replaced. Same page, and a guest hypervisor that intercepts
+        // both CR8 accesses - so the processor never consults the page
+        // (SDM 27.6.8 makes MOV CR8 the only operation that reads it
+        // here) and the control can go with nothing lost. KVM's
+        // `nested_get_vmcs12_pages` takes the same fallback, under "The
+        // processor will never use the TPR shadow, simply clear the bit
+        // from the execution control" (.references/kvm/nested.c:3339).
+        asked_controls asked;
+        asked.primary = primary_default1 | primary_tpr_shadow |
+                        primary_cr8_load_exiting |
+                        primary_cr8_store_exiting;
+
+        auto built = compose(asked, registers);
+        static_cast<void>(built);
+        hv().guest_vmcs12[cpu].write(field::virtual_apic_address,
+                                     l1_virtual_apic);
+        g_host_denied[l1_virtual_apic] = true;
+        hv().vmcs12_controls_captured = 0;
+
+        check(hv().build_vmcs02(cpu).has_value(),
+              "with both CR8 accesses intercepted the entry is allowed");
+
+        auto primary02 = hv().vmcs.read(
+            field::primary_processor_based_vm_execution_controls);
+
+        check(0 == (primary02 & primary_tpr_shadow),
+              "'use TPR shadow' is removed from vmcs02");
+        check((primary_cr8_load_exiting | primary_cr8_store_exiting) ==
+                  (primary02 &
+                   (primary_cr8_load_exiting | primary_cr8_store_exiting)),
+              "and both CR8 intercepts are forced, so no `mov cr8` "
+              "reaches the physical control register - removing the "
+              "control alone is the bug the whole TPR-shadow path exists "
+              "to avoid");
+    }
+
+    {
+        // Never asked for. The control is dropped and *nothing* is forced
+        // in its place, which is the opposite of the branch above and is
+        // deliberate: a guest hypervisor that did not ask does not
+        // believe its guest's CR8 is virtualized, so the second-level
+        // guest owns the physical register exactly as on bare hardware.
+        // Forcing CR8 exiting would manufacture exits neither side asked
+        // for, which `l1_wants_l2_exit` declines and the ordinary
+        // handler stops the processor on.
+        asked_controls asked;
+
+        auto built = compose(asked, registers);
+        check(built.has_value(), "no TPR shadow asked for");
+
+        auto primary02 = hv().vmcs.read(
+            field::primary_processor_based_vm_execution_controls);
+
+        check(0 == (primary02 & primary_tpr_shadow),
+              "'use TPR shadow' is clear in vmcs02 when nobody asked");
+        check(0 == (primary02 & (primary_cr8_load_exiting |
+                                 primary_cr8_store_exiting)),
+              "and no CR8 intercept is manufactured");
+    }
+
+    // -------------------------------------------------- the I/O bitmaps
+    {
+        // SDM 27.6.2 (.references/sdm.txt:200719-200726): "If the
+        // 'unconditional I/O exiting' VM-execution control is 1 and the
+        // 'use I/O bitmaps' VM-execution control is 0, the instruction
+        // causes a VM exit", and "the 'unconditional I/O exiting'
+        // VM-execution control is ignored if the 'use I/O bitmaps'
+        // VM-execution control is 1".
+        //
+        // The two are therefore not a union: leaving both set would let
+        // the bitmap decide, and a guest hypervisor that asked for
+        // unconditional exiting would stop getting the exits it asked
+        // for. So the pair is taken from vmcs12 and the other one
+        // cleared.
+        asked_controls asked;
+        asked.primary = primary_default1 | primary_unconditional_io;
+
+        auto built = compose(asked, registers);
+        check(built.has_value(), "unconditional I/O exiting is accepted");
+
+        auto primary02 = hv().vmcs.read(
+            field::primary_processor_based_vm_execution_controls);
+
+        check(0 != (primary02 & primary_unconditional_io),
+              "vmcs12's 'unconditional I/O exiting' reaches vmcs02");
+        check(0 == (primary02 & primary_io_bitmaps),
+              "and 'use I/O bitmaps' is cleared beside it, or the bitmap "
+              "would decide and the control be ignored - SDM 27.6.2");
+    }
+
+    {
+        // The other way round, and the asymmetry that matters: this VMM
+        // always uses bitmaps and has ports of its own in them, so a
+        // guest hypervisor that uses neither still gets bitmap-driven
+        // exits for the ports this VMM watches - which is exactly right,
+        // since it asked for none of its own.
+        asked_controls asked;
+
+        auto built = compose(asked, registers);
+        check(built.has_value(), "no I/O control asked for");
+
+        auto primary02 = hv().vmcs.read(
+            field::primary_processor_based_vm_execution_controls);
+
+        check(0 == (primary02 & primary_unconditional_io),
+              "vmcs02 does not exit unconditionally on I/O");
+        check(0 != (primary02 & primary_io_bitmaps),
+              "and uses bitmaps, which carry this VMM's own ports");
+        check(hv().nested_io_bitmap_physical[cpu] ==
+                  hv().vmcs.read(field::io_bitmap_a),
+              "vmcs02's I/O bitmap A is the merged one, never the guest "
+              "hypervisor's own page");
+        check((hv().nested_io_bitmap_physical[cpu] + 0x1000) ==
+                  hv().vmcs.read(field::io_bitmap_b),
+              "and bitmap B is the page after it");
+    }
+
+    // --------------------------------------- the MSR bitmap, re-merged
+    {
+        // The control follows the guest hypervisor rather than the merge:
+        // "use MSR bitmaps" clear means *every* MSR access exits, which
+        // is what a guest hypervisor that set no bitmap asked for.
+        asked_controls asked;
+        asked.primary = primary_default1 | primary_msr_bitmaps;
+
+        auto built = compose(asked, registers);
+        check(built.has_value(), "MSR bitmaps are accepted");
+        check(0 !=
+                  (hv().vmcs.read(
+                       field::
+                           primary_processor_based_vm_execution_controls) &
+                   primary_msr_bitmaps),
+              "vmcs12's 'use MSR bitmaps' reaches vmcs02");
+        check(hv().nested_msr_bitmap_physical[cpu] ==
+                  hv().vmcs.read(field::msr_bitmap),
+              "and the bitmap behind it is the merged one, never the "
+              "guest hypervisor's own page - the processor would then be "
+              "consulting a page the guest writes with no exit");
+
+        // The regression case for `d192a34`. The bitmap *contents* live
+        // in guest memory the guest hypervisor writes directly, with no
+        // VMWRITE and no exit - so a cache keyed on the address would go
+        // on trapping what it stopped asking for and, worse, go on *not*
+        // trapping what it started asking for. Two entries with the same
+        // address and different contents is the only shape that catches
+        // it, and nothing in the tree had one.
+        constexpr std::size_t msr_read_bit = 0x10;
+
+        check(0 == (hv().nested_msr_bitmap[cpu][msr_read_bit / 8] &
+                    (1u << (msr_read_bit % 8))),
+              "the merged bitmap starts without the bit");
+
+        set_bit(l1_msr_bitmap, msr_read_bit);
+        hv().vmcs12_controls_captured = 0;
+
+        check(hv().build_vmcs02(cpu).has_value(),
+              "the second entry builds");
+        check(0 != (hv().nested_msr_bitmap[cpu][msr_read_bit / 8] &
+                    (1u << (msr_read_bit % 8))),
+              "a bit the guest hypervisor set in its own bitmap between "
+              "two entries is in the merged bitmap by the second - the "
+              "merge is re-run every entry, and a cache on the address "
+              "would miss it. KVM re-merges every entry too, in "
+              "`nested_vmx_prepare_msr_bitmap`");
+    }
+
+    // ------------------------------------------------- the MSR areas
+    {
+        // The one composition rule whose failure is a privilege
+        // escalation rather than a wrong answer.
+        //
+        // The processor reads *and writes* the VM-exit MSR-store area in
+        // root operation, where extended page tables do not apply. Every
+        // other protection this VMM has is an extended page-table
+        // permission, so a guest hypervisor that named this module's own
+        // pages as its store area would have the processor write MSR
+        // values into them with nothing in the way. The areas are
+        // therefore processed in software and the processor is given
+        // counts of zero.
+        asked_controls asked;
+
+        auto built = compose(asked, registers);
+        check(built.has_value(), "the default configuration builds");
+
+        check(0 == hv().vmcs.read(field::vm_entry_msr_load_count),
+              "vmcs02's VM-entry MSR-load count is zero");
+        check(0 == hv().vmcs.read(field::vm_exit_msr_load_count),
+              "vmcs02's VM-exit MSR-load count is zero");
+        check(0 == hv().vmcs.read(field::vm_exit_msr_store_count),
+              "vmcs02's VM-exit MSR-store count is zero - the processor "
+              "writes that area in root operation, so a guest "
+              "hypervisor naming one of this module's pages would have "
+              "it written on its behalf");
+    }
+
+    // -------------------------- the exception bitmap and the CR masks
+    {
+        constexpr std::uint64_t vector_page_fault = 1ull << 14;
+        constexpr std::uint64_t vector_debug = 1ull << 1;
+
+        asked_controls asked;
+
+        auto built = compose(asked, registers);
+        static_cast<void>(built);
+
+        hv().vmcs.write(field::exception_bitmap, vector_debug);
+        hv().guest_vmcs12[cpu].write(field::exception_bitmap,
+                                     vector_page_fault);
+        hv().guest_vmcs12[cpu].write(field::page_fault_error_code_mask,
+                                     0xf);
+        hv().guest_vmcs12[cpu].write(field::page_fault_error_code_match,
+                                     0x5);
+        hv().vmcs12_controls_captured = 0;
+
+        check(hv().build_vmcs02(cpu).has_value(),
+              "the bitmap case builds");
+        check((vector_debug | vector_page_fault) ==
+                  hv().vmcs.read(field::exception_bitmap),
+              "the exception bitmap is the union - an exception either "
+              "side wants must exit, and `l1_wants_l2_exit` then decides "
+              "whose it was");
+        check(0xf == hv().vmcs.read(field::page_fault_error_code_mask),
+              "the page-fault error-code mask is the guest "
+              "hypervisor's unchanged, because this VMM traps no page "
+              "faults of its own");
+        check(0x5 == hv().vmcs.read(field::page_fault_error_code_match),
+              "and the match beside it");
+    }
+
+    {
+        // The regression case for `39ec0bf`. A guest reads
+        // `(shadow & mask) | (register & ~mask)`. Under the guest
+        // hypervisor alone that is vmcs12's own three fields; under this
+        // VMM the mask is wider, so the shadow has to carry the whole
+        // answer rather than half of it - or the second-level guest reads
+        // back a bit its own hypervisor never wrote.
+        constexpr std::uint64_t cr0_write_protect = 1ull << 16;
+        constexpr std::uint64_t cr0_cache_disable = 1ull << 30;
+        constexpr std::uint64_t cr4_smep = 1ull << 20;
+
+        asked_controls asked;
+
+        auto built = compose(asked, registers);
+        static_cast<void>(built);
+
+        auto & shadow = hv().guest_vmcs12[cpu];
+
+        // This VMM owns cache-disable; the guest hypervisor owns
+        // write-protect and says its guest sees it set.
+        hv().vmcs.write(field::cr0_guest_host_mask, cr0_cache_disable);
+        hv().vmcs.write(field::cr4_guest_host_mask, 0);
+        shadow.write(field::cr0_guest_host_mask, cr0_write_protect);
+        shadow.write(field::guest_cr0, 0x80000031);
+        shadow.write(field::cr0_read_shadow, cr0_write_protect);
+        shadow.write(field::cr4_guest_host_mask, cr4_smep);
+        shadow.write(field::guest_cr4, 0x20);
+        shadow.write(field::cr4_read_shadow, cr4_smep);
+        hv().vmcs12_controls_captured = 0;
+
+        check(hv().build_vmcs02(cpu).has_value(),
+              "the CR mask case builds");
+
+        check((cr0_cache_disable | cr0_write_protect) ==
+                  hv().vmcs.read(field::cr0_guest_host_mask),
+              "the CR0 guest/host mask is the union of both levels'");
+        check(cr4_smep == hv().vmcs.read(field::cr4_guest_host_mask),
+              "and the CR4 mask likewise");
+
+        // effective = (value & ~mask12) | (shadow12 & mask12).
+        check(((0x80000031ull & ~cr0_write_protect) | cr0_write_protect) ==
+                  hv().vmcs.read(field::cr0_read_shadow),
+              "vmcs02's CR0 read shadow carries the whole value the "
+              "second-level guest must read, not only the half vmcs12's "
+              "own mask covers - this VMM's mask is wider, and the bits "
+              "it adds have to be answered too");
+        check(((0x20ull & ~cr4_smep) | cr4_smep) ==
+                  hv().vmcs.read(field::cr4_read_shadow),
+              "and CR4's the same way");
+
+        constexpr std::uint64_t cr4_vmxe = 1ull << 13;
+        check(0 != (hv().vmcs.read(field::guest_cr4) & cr4_vmxe),
+              "VMXE is forced into the real CR4, because "
+              "IA32_VMX_CR4_FIXED0 requires it in VMX operation and an "
+              "entry without it fails - the read shadow above is what "
+              "keeps the second-level guest from seeing it");
+    }
+
+    // ----------------------------------------- pointers and identifiers
+    {
+        asked_controls asked;
+
+        auto built = compose(asked, registers);
+        check(built.has_value(), "the pointer case builds");
+
+        check(~std::uint64_t{} == hv().vmcs.read(field::vmcs_link_pointer),
+              "vmcs02's link pointer is all ones - VMCS shadowing is not "
+              "offered, so the guest hypervisor's own link pointer is "
+              "never consulted");
+        check((cpu + 1) == hv().vmcs.read(field::vpid),
+              "vmcs02 keeps this VMM's VPID, so `nested_transition_flush` "
+              "invalidates both levels with one INVVPID");
+        check(0 == hv().vmcs.read(field::cr3_target_count),
+              "and no CR3 targets, which IA32_VMX_MISC reports as zero");
+    }
+
+    {
+        // The preemption timer and posted interrupts are stripped from
+        // the pin union whatever vmcs12 holds. Neither is offered, so a
+        // guest hypervisor cannot have set them deliberately - but the
+        // union runs before the capability check has any say over
+        // vmcs01's half, and this VMM arms the timer for its own log.
+        constexpr std::uint64_t pin_preemption_timer = 1ull << 6;
+        constexpr std::uint64_t pin_posted_interrupts = 1ull << 7;
+
+        asked_controls asked;
+
+        auto built = compose(asked, registers);
+        static_cast<void>(built);
+
+        hv().vmcs.write(field::pin_based_vm_execution_controls,
+                        own_pin | pin_preemption_timer |
+                            pin_posted_interrupts);
+        hv().vmcs12_controls_captured = 0;
+
+        check(hv().build_vmcs02(cpu).has_value(), "the pin case builds");
+
+        auto pin02 =
+            hv().vmcs.read(field::pin_based_vm_execution_controls);
+
+        check(0 == (pin02 & pin_preemption_timer),
+              "the preemption timer is stripped from vmcs02 - it is this "
+              "VMM's clock, and its exits are not reflected");
+        check(0 == (pin02 & pin_posted_interrupts),
+              "and posted interrupts with it, which nothing here "
+              "maintains a descriptor for");
+        check(0 != (pin02 & (1ull << 3)),
+              "NMI exiting survives the union, because this VMM needs it "
+              "whoever is running");
+    }
+}
+
 int main()
 {
     test_reason_table();
@@ -4202,6 +4658,7 @@ int main()
     test_injection_into_a_parked_guest();
     test_halt_then_wake();
     test_exit_and_entry_control_composition();
+    test_the_rest_of_vmcs02();
 
     std::printf("\n%d checks, %d failures\n", g_checks, g_failures);
 
