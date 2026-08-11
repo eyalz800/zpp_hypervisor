@@ -15,6 +15,7 @@
 #include "zpp/arch/x86_64/ap_start_up.h"
 #include "zpp/arch/x86_64/asm.h"
 #include "zpp/arch/x86_64/context.h"
+#include "zpp/arch/x86_64/segment_descriptor.h"
 #include "zpp/arch/x86_64/vmx/asm.h"
 #include "zpp/arch/x86_64/vmx/vmcs.h"
 #include "zpp/arch/x86_64/vmx/vmx.h"
@@ -122,6 +123,17 @@ public:
 
     std::expected<void, zpp::error> enter_root_mode(std::size_t cpu);
 
+    /**
+     * The state an INIT leaves behind, plus the entry point a start-up
+     * IPI names. Same default arguments as the real declaration - the
+     * `first_launch` one is load bearing, so a call site that omits it
+     * has to mean the same thing here as there.
+     */
+    void apply_start_up(arch::x86_64::context & context,
+                        std::uint64_t vector,
+                        const char * from = "?",
+                        bool first_launch = false);
+
     // ------------------------------------------ defined by the harness
     void send_start_up_ipi(std::uint64_t apic, std::uint64_t vector);
 
@@ -143,6 +155,12 @@ public:
     volatile std::uint64_t l2_activity_state[max_cpus]{};
 
     std::atomic<std::uint64_t> start_up_handoff[max_cpus]{};
+
+    // Whether a start-up has already been applied to this processor.
+    // `apply_start_up` reads it to ignore the *second* start-up IPI of an
+    // INIT-SIPI-SIPI sequence, which would otherwise send a running
+    // processor back to its entry point.
+    bool started_by_start_up_ipi[max_cpus]{};
     std::atomic<bool> start_up_launched[max_cpus]{};
 
     std::uint64_t guest_start_up_vector[max_cpus]{};
