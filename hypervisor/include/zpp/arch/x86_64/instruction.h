@@ -1765,11 +1765,9 @@ flags_after(const decoded_instruction & instruction,
             std::uint64_t old_memory,
             std::uint64_t new_memory)
 {
-    using namespace instruction_detail;
-
     auto size = instruction.size;
-    auto old = truncate(old_memory, size);
-    auto operand = truncate(instruction.operand, size);
+    auto old = instruction_detail::truncate(old_memory, size);
+    auto operand = instruction_detail::truncate(instruction.operand, size);
 
     switch (instruction.what) {
     case memory_operation::store:
@@ -1835,8 +1833,8 @@ flags_after(const decoded_instruction & instruction,
     // set separately: the operands are equal exactly when it is zero,
     // which is the branch `apply` takes.
     if (memory_operation::compare_exchange == instruction.what) {
-        return cleared |
-               subtract_flags(instruction.compare_value, old, size);
+        return cleared | instruction_detail::subtract_flags(
+                             instruction.compare_value, old, size);
     }
 
     // A compare and a subtract set the same flags; a test and an AND
@@ -1848,19 +1846,23 @@ flags_after(const decoded_instruction & instruction,
          (combine_with::none == instruction.how) && instruction.compares);
 
     if (subtracting) {
-        return keep_carry(cleared | subtract_flags(old, operand, size));
+        return keep_carry(cleared | instruction_detail::subtract_flags(
+                                        old, operand, size));
     }
 
     if (combine_with::add == instruction.how) {
-        auto result = truncate(old + operand, size);
-        auto flags = cleared | common_flags(result, size);
+        auto result = instruction_detail::truncate(old + operand, size);
+        auto flags =
+            cleared | instruction_detail::common_flags(result, size);
 
         if (result < old) {
             flags |= status_flag::carry;
         }
 
-        if (sign_of(old, size) == sign_of(operand, size)) {
-            if (sign_of(result, size) != sign_of(old, size)) {
+        if (instruction_detail::sign_of(old, size) ==
+            instruction_detail::sign_of(operand, size)) {
+            if (instruction_detail::sign_of(result, size) !=
+                instruction_detail::sign_of(old, size)) {
                 flags |= status_flag::overflow;
             }
         }
@@ -1876,10 +1878,10 @@ flags_after(const decoded_instruction & instruction,
     // the result. A test computes the AND it does not store, which is why
     // the result comes from the operands here rather than from memory.
     auto result = (memory_operation::examine == instruction.what)
-                      ? truncate(old & operand, size)
-                      : truncate(new_memory, size);
+                      ? instruction_detail::truncate(old & operand, size)
+                      : instruction_detail::truncate(new_memory, size);
 
-    return cleared | common_flags(result, size);
+    return cleared | instruction_detail::common_flags(result, size);
 }
 
 /**

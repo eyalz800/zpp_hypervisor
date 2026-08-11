@@ -16,8 +16,6 @@
 #include <string>
 #include <vector>
 
-using namespace zpp;
-using namespace zpp::arch::x86_64;
 using zpp::arch::x86_64::vmx::vmcs12;
 using zpp::arch::x86_64::vmx::vmcs_field_encoding;
 using basic_reason = zpp::arch::x86_64::vmx::exit_reason::basic_reason;
@@ -339,7 +337,7 @@ static std::uint64_t register_operand_information(std::uint64_t reg1,
 }
 
 static result run(basic_reason reason,
-                  context & regs,
+                  zpp::arch::x86_64::context & regs,
                   std::uint64_t information,
                   std::uint64_t qualification = 0)
 {
@@ -414,7 +412,7 @@ static result do_pointer_instruction(basic_reason reason,
                 &pointer,
                 sizeof(pointer));
 
-    context regs{};
+    zpp::arch::x86_64::context regs{};
     return run(
         reason, regs, memory_operand_information(), operand_address);
 }
@@ -467,7 +465,7 @@ static const named_field g_fields[] = {
 
 static result vmwrite_field(std::uint64_t encoding, std::uint64_t value)
 {
-    context regs{};
+    zpp::arch::x86_64::context regs{};
     regs.rcx = encoding;
     regs.rax = value;
     return run(basic_reason::vmwrite,
@@ -477,7 +475,7 @@ static result vmwrite_field(std::uint64_t encoding, std::uint64_t value)
 
 static result vmread_result(std::uint64_t encoding, std::uint64_t & out)
 {
-    context regs{};
+    zpp::arch::x86_64::context regs{};
     regs.rcx = encoding;
     auto r = run(
         basic_reason::vmread, regs, register_operand_information(0, 1));
@@ -695,7 +693,7 @@ static void test_launch_state_machine()
     reset_cpu(cpu);
 
     // Not in VMX operation: every instruction but VMXON is #UD.
-    context regs{};
+    zpp::arch::x86_64::context regs{};
     expect("VMREAD outside VMX operation",
            run(basic_reason::vmread,
                regs,
@@ -761,7 +759,7 @@ static void test_launch_state_machine()
                basic_reason::vmxon, operand_slot, vmxon_region + 8),
            outcome::fail_invalid);
     {
-        context r2{};
+        zpp::arch::x86_64::context r2{};
         expect("VMXON with a register operand",
                run(basic_reason::vmxon,
                    r2,
@@ -818,7 +816,7 @@ static void test_launch_state_machine()
 
     // VMPTRST with no current VMCS writes the all-ones sentinel.
     {
-        context r2{};
+        zpp::arch::x86_64::context r2{};
         run(basic_reason::vmptrst,
             r2,
             memory_operand_information(),
@@ -1016,7 +1014,7 @@ static void test_vmclear_and_migration()
 
     // The launch state must survive the round trip through memory too.
     do_pointer_instruction(basic_reason::vmptrld, operand_slot, vmcs_a);
-    context regs{};
+    zpp::arch::x86_64::context regs{};
     run(basic_reason::vmlaunch, regs, 0);
     hv().running_l2[cpu] = false;
     auto state_before = hv().guest_vmcs12[cpu].state();
@@ -1052,7 +1050,7 @@ static void test_memory_operands()
     {
         auto & page = page_of(operand_slot);
         std::memset(page.data() + (operand_slot & 0xfff), 0xcc, 16);
-        context regs{};
+        zpp::arch::x86_64::context regs{};
         regs.rcx = fields::guest_rip;
         auto r = run(basic_reason::vmread,
                      regs,
@@ -1072,7 +1070,7 @@ static void test_memory_operands()
         auto & page = page_of(operand_slot);
         std::memcpy(
             page.data() + (operand_slot & 0xfff), &source, sizeof(source));
-        context regs{};
+        zpp::arch::x86_64::context regs{};
         regs.rcx = fields::guest_rsp;
         auto r = run(basic_reason::vmwrite,
                      regs,
@@ -1089,7 +1087,7 @@ static void test_memory_operands()
     // the architecture only defines the low bits as the encoding - must
     // still reach the field.
     {
-        context regs{};
+        zpp::arch::x86_64::context regs{};
         regs.rcx = fields::guest_rip;
         regs.rax = 0x5555;
         auto r = run(basic_reason::vmwrite,
@@ -1101,7 +1099,7 @@ static void test_memory_operands()
 
     // RSP as the operand register: it is not in the captured context.
     {
-        context regs{};
+        zpp::arch::x86_64::context regs{};
         regs.rcx = fields::guest_rip;
         hv().vmcs.guest_rsp(0x7777000);
         auto r = run(basic_reason::vmwrite,
@@ -1114,7 +1112,7 @@ static void test_memory_operands()
               "VMWRITE naming RSP as the source did not read the VMCS");
     }
     {
-        context regs{};
+        zpp::arch::x86_64::context regs{};
         regs.rcx = fields::guest_cr3;
         vmwrite_field(fields::guest_cr3, 0x123000);
         auto r = run(basic_reason::vmread,
@@ -1146,7 +1144,7 @@ static void test_invalidation()
     };
 
     auto invalidate = [&](basic_reason reason, std::uint64_t type) {
-        context regs{};
+        zpp::arch::x86_64::context regs{};
         regs.rcx = type;
         return run(
             reason, regs, memory_operand_information(1), operand_slot);
@@ -1209,7 +1207,7 @@ static void test_capability_msrs()
     reset_cpu(cpu);
 
     auto read = [&](std::uint32_t index) {
-        context regs{};
+        zpp::arch::x86_64::context regs{};
         hv().on_nested_vmx_msr_read(index, regs);
         return (regs.rax & 0xffffffff) | (regs.rdx << 32);
     };
@@ -1276,7 +1274,7 @@ static void test_capability_msrs()
 
     // A write to any of them is a fault.
     {
-        context regs{};
+        zpp::arch::x86_64::context regs{};
         auto before = g_observed.gp_faults;
         hv().on_nested_vmx_msr_write(vmxmsr::basic, regs);
         check(g_observed.gp_faults == before + 1,
@@ -1287,7 +1285,7 @@ static void test_capability_msrs()
     reset_cpu(cpu);
     hv().guest_feature_control[cpu] = 0;
     {
-        context regs{};
+        zpp::arch::x86_64::context regs{};
         regs.rax = 0x5;
         hv().on_nested_vmx_msr_write(0x3a, regs);
         check(hv().guest_feature_control[cpu] == 0x5,
@@ -1311,7 +1309,7 @@ static void test_cpu_indexing()
     // Slot 0 is unreachable: cpu = vpid - 1 and vpid 0 wraps.
     reset_cpu(0);
     hv().vmcs.vpid(0);
-    context regs{};
+    zpp::arch::x86_64::context regs{};
     auto r = run(basic_reason::vmxon, regs, memory_operand_information());
     check(r.what == outcome::ud,
           "a processor whose VPID is 0 was not refused outright");
@@ -1516,7 +1514,7 @@ static void test_operand_size()
 
     auto & page = page_of(operand_slot);
     std::memset(page.data() + (operand_slot & 0xfff), 0xcc, 16);
-    context regs{};
+    zpp::arch::x86_64::context regs{};
     regs.rcx = fields::guest_rip;
     auto r = run(basic_reason::vmread,
                  regs,
@@ -1546,7 +1544,7 @@ static void test_effective_address()
     do_pointer_instruction(basic_reason::vmptrld, operand_slot, vmcs_a);
 
     // base + index * scale + displacement, 64-bit addressing.
-    context regs{};
+    zpp::arch::x86_64::context regs{};
     regs.rbx = 0x40000;                // base, encoding 3
     regs.rsi = 0x10;                   // index, encoding 6
     auto information = (2ull << 7)     // address size 64
@@ -1567,7 +1565,7 @@ static void test_effective_address()
     // FS-relative, which is the one segment base that participates in
     // 64-bit mode.
     hv().vmcs.guest_fs_base(0x40000);
-    regs = context{};
+    regs = zpp::arch::x86_64::context{};
     regs.rcx = fields::guest_rip;
     auto fs_information = (2ull << 7) | (1ull << 22) | (1ull << 27) |
                           (4ull << 15) | (1ull << 28);
@@ -1581,7 +1579,7 @@ static void test_effective_address()
 
     // A negative displacement, sign extended from the exit qualification.
     // In 64-bit mode the qualification carries the whole 64-bit value.
-    regs = context{};
+    regs = zpp::arch::x86_64::context{};
     regs.rcx = fields::guest_rip;
     regs.rbx = 0x41000;
     auto negative =
@@ -1616,7 +1614,7 @@ static void test_advertised_versus_implemented()
     reset_cpu(cpu);
 
     auto read = [&](std::uint32_t index) {
-        context regs{};
+        zpp::arch::x86_64::context regs{};
         hv().on_nested_vmx_msr_read(index, regs);
         return (regs.rax & 0xffffffff) | (regs.rdx << 32);
     };
@@ -1850,7 +1848,7 @@ static void test_advertised_versus_implemented()
             // answered, so the operand is deliberately the easy one.
             descriptor(is_invept ? 0x1000 : 1, 0);
 
-            context regs{};
+            zpp::arch::x86_64::context regs{};
             regs.rcx = entry.type;
             auto result = run(is_invept ? basic_reason::invept
                                         : basic_reason::invvpid,

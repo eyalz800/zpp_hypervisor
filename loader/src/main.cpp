@@ -16,8 +16,6 @@ extern const std::size_t elf_binary_size;
 extern "C" int
 zpp_load_elf(const struct zpp_loader_parameters * parameters)
 {
-    using namespace zpp;
-
     // A caller that supplies neither a way to allocate nor a CPU count
     // cannot be served.
     if (!parameters || !parameters->allocate_rwx ||
@@ -28,10 +26,11 @@ zpp_load_elf(const struct zpp_loader_parameters * parameters)
     // The protect callback does nothing on purpose: every loader here
     // allocates one readable, writable and executable region, so there
     // are no per-segment permissions to apply afterwards.
-    elf_file elf(elf_binary, elf_file::state::unloaded);
-    auto base = elf.load(
-        parameters->allocate_rwx,
-        [](const void *, std::size_t, elf_file::memory_protection) {});
+    zpp::elf_file elf(zpp::elf_binary, zpp::elf_file::state::unloaded);
+    auto base = elf.load(parameters->allocate_rwx,
+                         [](const void *,
+                            std::size_t,
+                            zpp::elf_file::memory_protection) {});
     if (!base) {
         return -1;
     }

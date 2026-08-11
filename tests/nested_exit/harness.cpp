@@ -29,8 +29,6 @@
 #include <utility>
 #include <vector>
 
-using namespace zpp;
-using namespace zpp::arch::x86_64;
 using zpp::arch::x86_64::vmx::vmcs12;
 using basic_reason = zpp::arch::x86_64::vmx::exit_reason::basic_reason;
 namespace fields = zpp::arch::x86_64::vmx::vmcs_fields;
@@ -516,7 +514,7 @@ static constexpr std::size_t cpu = 0;
  * name, and both bitmaps are cleared, so the two reasons whose L0 answer
  * is bitmap driven answer no.
  */
-static void reset(context & registers)
+static void reset(zpp::arch::x86_64::context & registers)
 {
     std::memset(zpp::arch::x86_64::vmx::g_vmcs,
                 0,
@@ -533,7 +531,7 @@ static void reset(context & registers)
     g_vmx_msr_override.clear();
     g_host_denied.clear();
 
-    registers = context{};
+    registers = zpp::arch::x86_64::context{};
     registers.rcx = 0x1234; // An MSR neither side's bitmap names.
 
     auto & shadow = hv().guest_vmcs12[cpu];
@@ -562,13 +560,15 @@ static void controls(std::uint64_t pin,
                  secondary);
 }
 
-static bool l1_wants(unsigned reason, const context & registers)
+static bool l1_wants(unsigned reason,
+                     const zpp::arch::x86_64::context & registers)
 {
     return hv().l1_wants_l2_exit(
         cpu, zpp::arch::x86_64::vmx::exit_reason(reason), registers);
 }
 
-static bool l0_wants(unsigned reason, const context & registers)
+static bool l0_wants(unsigned reason,
+                     const zpp::arch::x86_64::context & registers)
 {
     return hv().l0_wants_l2_exit(
         cpu, zpp::arch::x86_64::vmx::exit_reason(reason), registers);
@@ -585,7 +585,8 @@ enum class decision
     reflected, // handed to the guest hypervisor
 };
 
-static decision decide(unsigned reason, const context & registers)
+static decision decide(unsigned reason,
+                       const zpp::arch::x86_64::context & registers)
 {
     if (l0_wants(reason, registers)) {
         return decision::kept;
@@ -1499,7 +1500,9 @@ static const reason_case g_reasons[] = {
      nullptr},
 };
 
-static void arm(const reason_case & entry, bool on, context & registers)
+static void arm(const reason_case & entry,
+                bool on,
+                zpp::arch::x86_64::context & registers)
 {
     auto & shadow = hv().guest_vmcs12[cpu];
 
@@ -1553,7 +1556,7 @@ static void test_reason_table()
 
     for (auto & entry : g_reasons) {
         for (auto on : {false, true}) {
-            context registers{};
+            zpp::arch::x86_64::context registers{};
             reset(registers);
             arm(entry, on, registers);
 
@@ -1644,7 +1647,7 @@ static void test_reason_table()
             continue;
         }
 
-        context registers{};
+        zpp::arch::x86_64::context registers{};
         reset(registers);
         controls(pin, primary, secondary);
         check(!l1_wants(entry.reason, registers),
@@ -1657,7 +1660,7 @@ static void test_reason_table()
     // The either/both knobs deserve their own combinations rather than the
     // one the table drives.
     {
-        context registers{};
+        zpp::arch::x86_64::context registers{};
         reset(registers);
         controls(0, 0, secondary_pause_loop_exiting);
         check(l1_wants(40, registers),
@@ -1675,7 +1678,7 @@ static void test_reason_table()
     }
 
     {
-        context registers{};
+        zpp::arch::x86_64::context registers{};
         reset(registers);
         controls(0, primary_invlpg_exiting, 0);
         check(!l1_wants(58, registers),
@@ -1697,7 +1700,7 @@ static void test_reason_table()
     // were zero when primary bit 31 is clear, and l1_wants_l2_exit only
     // reads them under that bit.
     {
-        context registers{};
+        zpp::arch::x86_64::context registers{};
         reset(registers);
         auto & shadow = hv().guest_vmcs12[cpu];
         shadow.write(fields::primary_processor_based_vm_execution_controls,
@@ -1741,7 +1744,7 @@ static void test_msr_bitmap()
     };
 
     for (auto & entry : quadrants) {
-        context registers{};
+        zpp::arch::x86_64::context registers{};
         reset(registers);
         controls(0, primary_msr_bitmaps, 0);
         registers.rcx = entry.index;
@@ -1786,7 +1789,7 @@ static void test_msr_bitmap()
     };
 
     for (auto & entry : boundaries) {
-        context registers{};
+        zpp::arch::x86_64::context registers{};
         reset(registers);
         controls(0, primary_msr_bitmaps, 0);
         registers.rcx = entry.index;
@@ -1801,7 +1804,7 @@ static void test_msr_bitmap()
     // No bitmap at all means every access exits, which is what the guest
     // hypervisor asked for. SDM 28.1.3, RDMSR, first condition.
     {
-        context registers{};
+        zpp::arch::x86_64::context registers{};
         reset(registers);
         controls(0, 0, 0);
         registers.rcx = 0x10;
@@ -1814,7 +1817,7 @@ static void test_msr_bitmap()
     // A bitmap this VMM cannot read is treated as intercepting, which is
     // KVM's answer too - `kvm_vcpu_read_guest` failing returns true.
     {
-        context registers{};
+        zpp::arch::x86_64::context registers{};
         reset(registers);
         controls(0, primary_msr_bitmaps, 0);
         registers.rcx = 0x10;
@@ -1906,7 +1909,7 @@ static void test_cr_access()
     };
 
     for (auto & entry : writes) {
-        context registers{};
+        zpp::arch::x86_64::context registers{};
         reset(registers);
         controls(0, 0, 0);
         shadow.write((0 == entry.number) ? fields::cr0_guest_host_mask
@@ -1931,7 +1934,7 @@ static void test_cr_access()
     // are meant to differ - that is what owning a bit is for - and this is
     // the case the fix in this session was about.
     {
-        context registers{};
+        zpp::arch::x86_64::context registers{};
         reset(registers);
         controls(0, 0, 0);
         shadow.write(fields::cr0_guest_host_mask, 1ull << 5);
@@ -1948,7 +1951,7 @@ static void test_cr_access()
     // The general purpose register really is read out of bits 11:8, and
     // RSP is the one that is not in the captured context.
     {
-        context registers{};
+        zpp::arch::x86_64::context registers{};
         reset(registers);
         controls(0, 0, 0);
         shadow.write(fields::cr0_guest_host_mask, 1ull << 5);
@@ -1963,7 +1966,7 @@ static void test_cr_access()
     // Every general purpose register encoding, so that bits 11:8 really
     // are what names the source operand.
     for (std::uint64_t gpr = 0; gpr < 16; ++gpr) {
-        context registers{};
+        zpp::arch::x86_64::context registers{};
         reset(registers);
         registers.rcx = 0; // The fixture's MSR index is not wanted here.
         controls(0, 0, 0);
@@ -1974,8 +1977,8 @@ static void test_cr_access()
         if (4 == gpr) {
             hv().vmcs.guest_rsp(1ull << 5);
         } else {
-            registers.*arch::x86_64::detail::encoded_registers[gpr] = 1ull
-                                                                      << 5;
+            registers.*zpp::arch::x86_64::detail::encoded_registers[gpr] =
+                1ull << 5;
         }
 
         hv().vmcs.write(field::exit_qualification,
@@ -1985,7 +1988,7 @@ static void test_cr_access()
                    (unsigned long long)gpr));
 
         // And a neighbour holding the same value must not answer for it.
-        context others{};
+        zpp::arch::x86_64::context others{};
         reset(others);
         others.rcx = 0;
         controls(0, 0, 0);
@@ -1995,8 +1998,8 @@ static void test_cr_access()
             if ((other == gpr) || (4 == other)) {
                 continue;
             }
-            others.*arch::x86_64::detail::encoded_registers[other] = 1ull
-                                                                     << 5;
+            others.*zpp::arch::x86_64::detail::encoded_registers[other] =
+                1ull << 5;
         }
         if (4 != gpr) {
             hv().vmcs.guest_rsp(1ull << 5);
@@ -2016,7 +2019,7 @@ static void test_cr_access()
     // CR8. zpp's `default: return true` and KVM's fall-through `return
     // false` therefore differ on inputs a processor never delivers.
     {
-        context registers{};
+        zpp::arch::x86_64::context registers{};
         reset(registers);
         controls(0, 0, 0);
         hv().vmcs.write(field::exit_qualification,
@@ -2060,7 +2063,7 @@ static void test_cr_access()
 
     for (auto & entry : gated) {
         for (auto on : {false, true}) {
-            context registers{};
+            zpp::arch::x86_64::context registers{};
             reset(registers);
             controls(0, on ? entry.control : 0, 0);
             hv().vmcs.write(
@@ -2100,7 +2103,7 @@ static void test_cr_access()
     };
 
     for (auto & entry : clts) {
-        context registers{};
+        zpp::arch::x86_64::context registers{};
         reset(registers);
         controls(0, 0, 0);
         shadow.write(fields::cr0_guest_host_mask, entry.mask);
@@ -2157,7 +2160,7 @@ static void test_cr_access()
     };
 
     for (auto & entry : lmsws) {
-        context registers{};
+        zpp::arch::x86_64::context registers{};
         reset(registers);
         controls(0, 0, 0);
         shadow.write(fields::cr0_guest_host_mask, entry.mask);
@@ -2171,7 +2174,7 @@ static void test_cr_access()
     // The source data lives in bits 31:16, and the bits above the low four
     // must not reach the comparison. KVM masks the source with 0x0f.
     {
-        context registers{};
+        zpp::arch::x86_64::context registers{};
         reset(registers);
         controls(0, 0, 0);
         shadow.write(fields::cr0_guest_host_mask, 0xe);
@@ -2199,7 +2202,7 @@ static void test_exceptions()
         }
 
         for (auto on : {false, true}) {
-            context registers{};
+            zpp::arch::x86_64::context registers{};
             reset(registers);
             controls(0, 0, 0);
             shadow.write(fields::exception_bitmap,
@@ -2215,7 +2218,7 @@ static void test_exceptions()
 
     // A vector whose bit is set must not answer for a different vector.
     {
-        context registers{};
+        zpp::arch::x86_64::context registers{};
         reset(registers);
         controls(0, 0, 0);
         shadow.write(fields::exception_bitmap, 1ull << 13);
@@ -2270,7 +2273,7 @@ static void test_exceptions()
     };
 
     for (auto & entry : faults) {
-        context registers{};
+        zpp::arch::x86_64::context registers{};
         reset(registers);
         controls(0, 0, 0);
         shadow.write(fields::exception_bitmap,
@@ -2290,7 +2293,7 @@ static void test_exceptions()
     // nested_vmx_l0_wants_exit answers the same. Interruption type 2 is
     // NMI, SDM Table 25-19.
     {
-        context registers{};
+        zpp::arch::x86_64::context registers{};
         reset(registers);
         controls(0, 0, 0);
         hv().vmcs.write(field::vm_exit_interruption_information,
@@ -2320,7 +2323,7 @@ static void test_exceptions()
     // so the divergence is structural rather than a defect. Recorded so
     // that adding any of those features comes back through here.
     for (auto vector : {1u, 3u, 14u, 17u, 20u}) {
-        context registers{};
+        zpp::arch::x86_64::context registers{};
         reset(registers);
         controls(0, 0, 0);
         hv().vmcs.write(field::vm_exit_interruption_information,
@@ -2345,7 +2348,7 @@ static void test_io()
 
     // Neither control: the guest hypervisor asked for nothing.
     {
-        context registers{};
+        zpp::arch::x86_64::context registers{};
         reset(registers);
         controls(0, 0, 0);
         hv().vmcs.write(field::exit_qualification,
@@ -2356,7 +2359,7 @@ static void test_io()
 
     // Unconditional I/O exiting alone.
     {
-        context registers{};
+        zpp::arch::x86_64::context registers{};
         reset(registers);
         controls(0, primary_unconditional_io, 0);
         hv().vmcs.write(field::exit_qualification,
@@ -2383,7 +2386,7 @@ static void test_io()
     };
 
     for (auto & entry : bitmaps) {
-        context registers{};
+        zpp::arch::x86_64::context registers{};
         reset(registers);
         controls(0, primary_io_bitmaps, 0);
         hv().vmcs.write(field::exit_qualification,
@@ -2400,7 +2403,7 @@ static void test_io()
     // not. KVM's nested_vmx_check_io_bitmaps walks the same range.
     {
         for (unsigned offset = 0; offset < 4; ++offset) {
-            context registers{};
+            zpp::arch::x86_64::context registers{};
             reset(registers);
             controls(0, primary_io_bitmaps, 0);
             hv().vmcs.write(field::exit_qualification,
@@ -2412,7 +2415,7 @@ static void test_io()
                        0x60 + offset));
         }
 
-        context registers{};
+        zpp::arch::x86_64::context registers{};
         reset(registers);
         controls(0, primary_io_bitmaps, 0);
         hv().vmcs.write(field::exit_qualification,
@@ -2429,7 +2432,7 @@ static void test_io()
     // 0x7f.
     {
         for (unsigned offset = 0; offset < 4; ++offset) {
-            context registers{};
+            zpp::arch::x86_64::context registers{};
             reset(registers);
             controls(0, primary_io_bitmaps, 0);
             hv().vmcs.write(field::exit_qualification,
@@ -2445,7 +2448,7 @@ static void test_io()
     // A range straddling the A/B bitmap boundary at 0x8000.
     {
         for (unsigned offset = 0; offset < 4; ++offset) {
-            context registers{};
+            zpp::arch::x86_64::context registers{};
             reset(registers);
             controls(0, primary_io_bitmaps, 0);
             hv().vmcs.write(field::exit_qualification,
@@ -2462,7 +2465,7 @@ static void test_io()
 
     // A bitmap this VMM cannot read is treated as intercepting.
     {
-        context registers{};
+        zpp::arch::x86_64::context registers{};
         reset(registers);
         controls(0, primary_io_bitmaps, 0);
         hv().vmcs.write(field::exit_qualification,
@@ -2492,7 +2495,7 @@ static void test_io()
     // Both controls are offered to a guest hypervisor - nested_vmx.h lines
     // for bits 24 and 25 - so this is reachable.
     {
-        context registers{};
+        zpp::arch::x86_64::context registers{};
         reset(registers);
         controls(0, primary_unconditional_io | primary_io_bitmaps, 0);
         hv().vmcs.write(field::exit_qualification,
@@ -2513,7 +2516,7 @@ static void test_io()
     // VMM breaks out of the loop and answers with whatever the ports below
     // said.
     {
-        context registers{};
+        zpp::arch::x86_64::context registers{};
         reset(registers);
         controls(0, primary_io_bitmaps, 0);
         hv().vmcs.write(field::exit_qualification,
@@ -2545,7 +2548,7 @@ static void test_l0_precedence()
 
     // The three cases an MSR access can be in.
     {
-        context registers{};
+        zpp::arch::x86_64::context registers{};
         reset(registers);
         controls(0, primary_msr_bitmaps, 0);
         registers.rcx = 0x1b; // IA32_APIC_BASE.
@@ -2559,7 +2562,7 @@ static void test_l0_precedence()
     }
 
     {
-        context registers{};
+        zpp::arch::x86_64::context registers{};
         reset(registers);
         controls(0, primary_msr_bitmaps, 0);
         registers.rcx = 0x1b;
@@ -2587,7 +2590,7 @@ static void test_l0_precedence()
     // capability range when nested VMX is on - which is the exact set a
     // guest hypervisor presenting VMX to its own guest also intercepts.
     {
-        context registers{};
+        zpp::arch::x86_64::context registers{};
         reset(registers);
         controls(0, primary_msr_bitmaps, 0);
         registers.rcx = 0x1b;
@@ -2605,7 +2608,7 @@ static void test_l0_precedence()
 
     // The same shape for I/O ports.
     {
-        context registers{};
+        zpp::arch::x86_64::context registers{};
         reset(registers);
         controls(0, primary_io_bitmaps, 0);
         hv().vmcs.write(field::exit_qualification, (0x604ull << 16) | 1);
@@ -2620,7 +2623,7 @@ static void test_l0_precedence()
 
     // The monitor trap flag: this VMM's only while it is stepping.
     {
-        context registers{};
+        zpp::arch::x86_64::context registers{};
         reset(registers);
         controls(0, primary_monitor_trap_flag, 0);
         check(!l0_wants(37, registers),
@@ -2639,7 +2642,7 @@ static void test_l0_precedence()
 
     // The two exits that are always this VMM's whatever vmcs12 says.
     for (auto reason : {48u, 49u, 52u}) {
-        context registers{};
+        zpp::arch::x86_64::context registers{};
         reset(registers);
         controls(~0ull, ~0ull, ~0ull);
         check(l0_wants(reason, registers),
@@ -2654,7 +2657,7 @@ static void test_l0_precedence()
             continue;
         }
 
-        context registers{};
+        zpp::arch::x86_64::context registers{};
         reset(registers);
         controls(~0ull, ~0ull, ~0ull);
         check(!l0_wants(reason, registers),
@@ -2693,7 +2696,7 @@ static void test_activity_state()
     auto & shadow = hv().guest_vmcs12[cpu];
 
     auto arm = [&](std::uint64_t state) {
-        context registers{};
+        zpp::arch::x86_64::context registers{};
         reset(registers);
         controls(0, 0, 0);
         hv().running_l2[cpu] = false;
@@ -2934,7 +2937,7 @@ static void test_reflected_activity_and_interruptibility()
     // ran, exited on HLT with the STI shadow still in effect, and is
     // being reflected.
     {
-        context registers{};
+        zpp::arch::x86_64::context registers{};
         reset(registers);
         hv().running_l2[cpu] = true;
         hv().l2_activity_state[cpu] = activity::active;
@@ -2963,7 +2966,7 @@ static void test_reflected_activity_and_interruptibility()
     // the honest answer, and it comes out of hardware rather than out of
     // a flag - which is the whole reason this VMM can report it at all.
     {
-        context registers{};
+        zpp::arch::x86_64::context registers{};
         reset(registers);
         hv().running_l2[cpu] = true;
         hv().l2_activity_state[cpu] = activity::active;
@@ -2983,7 +2986,7 @@ static void test_reflected_activity_and_interruptibility()
     // `l2_activity_state` instead, because the field in the real VMCS
     // describes whatever ran last - which is the guest hypervisor.
     {
-        context registers{};
+        zpp::arch::x86_64::context registers{};
         reset(registers);
         hv().running_l2[cpu] = false;
         hv().l2_activity_state[cpu] = activity::wait_for_start_up_ipi;
@@ -3035,7 +3038,7 @@ static void test_reflected_activity_and_interruptibility()
         for (auto & state : activities) {
             for (auto & blocking : blockings) {
                 for (auto ran : {false, true}) {
-                    context registers{};
+                    zpp::arch::x86_64::context registers{};
                     reset(registers);
                     hv().running_l2[cpu] = ran;
                     hv().l2_activity_state[cpu] = state.value;
@@ -3118,7 +3121,7 @@ static void test_reflected_activity_and_interruptibility()
             zpp::hypervisor::hypervisor::l2_entry_outcome;
 
         for (auto blocking : {blocking_by_sti, blocking_by_mov_ss}) {
-            context registers{};
+            zpp::arch::x86_64::context registers{};
             reset(registers);
             controls(0, 0, 0);
             hv().running_l2[cpu] = false;
@@ -3148,7 +3151,7 @@ static void test_reflected_activity_and_interruptibility()
     // second-level guest is inside an NMI handler, and losing it would
     // let a second NMI be delivered where the architecture blocks one.
     {
-        context registers{};
+        zpp::arch::x86_64::context registers{};
         reset(registers);
         hv().running_l2[cpu] = true;
         hv().l2_activity_state[cpu] = activity::active;
@@ -3239,7 +3242,7 @@ static void test_injection_into_a_parked_guest()
     auto & shadow = hv().guest_vmcs12[cpu];
 
     auto arm = [&](std::uint64_t state, std::uint64_t event) {
-        context registers{};
+        zpp::arch::x86_64::context registers{};
         reset(registers);
         controls(0, 0, 0);
         hv().running_l2[cpu] = false;
@@ -3478,7 +3481,7 @@ static void test_halt_then_wake()
 
     auto & shadow = hv().guest_vmcs12[cpu];
 
-    context registers{};
+    zpp::arch::x86_64::context registers{};
     reset(registers);
 
     // --- Step 1: the guest hypervisor asked for HLT exits -------------
@@ -3735,8 +3738,8 @@ struct asked_controls
  * it needs out of vmcs01 before its `vmptrld`, so after the call every
  * field in the array is vmcs02's.
  */
-static std::expected<void, zpp::error>
-compose(const asked_controls & asked, context & registers)
+static std::expected<void, zpp::error> compose(
+    const asked_controls & asked, zpp::arch::x86_64::context & registers)
 {
     reset(registers);
 
@@ -3799,7 +3802,7 @@ static void test_exit_and_entry_control_composition()
 {
     std::println("what vmcs02 carries in its exit and entry controls");
 
-    context registers{};
+    zpp::arch::x86_64::context registers{};
 
     // The fixture agrees with the processor it claims to be. Everything
     // below is a refusal or an acceptance decided by these halves, so a
@@ -4343,7 +4346,7 @@ static void test_the_rest_of_vmcs02()
 {
     std::println("the rest of what build_vmcs02 composes into vmcs02");
 
-    context registers{};
+    zpp::arch::x86_64::context registers{};
 
     constexpr std::uint64_t l1_virtual_apic = 0x70000;
 
@@ -4813,7 +4816,7 @@ static void test_the_measured_control_words()
 {
     std::println("the control words a real guest hypervisor asked for");
 
-    context registers{};
+    zpp::arch::x86_64::context registers{};
 
     asked_controls asked;
     asked.pin = 0x0000001e;
@@ -5018,7 +5021,7 @@ static void test_injection_against_activity_state()
     auto arm = [&](std::uint64_t state,
                    std::uint64_t injection,
                    std::uint64_t interruptibility) {
-        context registers{};
+        zpp::arch::x86_64::context registers{};
         reset(registers);
         controls(0, 0, 0);
         hv().running_l2[cpu] = false;

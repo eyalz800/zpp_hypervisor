@@ -21,7 +21,6 @@ namespace zpp
 {
 namespace
 {
-using namespace zpp::nvme;
 using arch::x86_64::pci_config;
 using arch::x86_64::vmd;
 
@@ -55,15 +54,19 @@ constexpr std::uint16_t test_queue_id = 4;
  * The resolve-once paths in this loader are all written this way.
  * @{
  */
-submission_entry g_before_submission[admin_borrow::max_depth]{};
-completion_entry g_before_completion[admin_borrow::max_depth]{};
-submission_entry g_scratch_submission[admin_borrow::max_depth]{};
-completion_entry g_scratch_completion[admin_borrow::max_depth]{};
+zpp::nvme::submission_entry
+    g_before_submission[zpp::nvme::admin_borrow::max_depth]{};
+zpp::nvme::completion_entry
+    g_before_completion[zpp::nvme::admin_borrow::max_depth]{};
+zpp::nvme::submission_entry
+    g_scratch_submission[zpp::nvme::admin_borrow::max_depth]{};
+zpp::nvme::completion_entry
+    g_scratch_completion[zpp::nvme::admin_borrow::max_depth]{};
 /**
  * @}
  */
 
-using test_queues = queue_pair<64>;
+using test_queues = zpp::nvme::queue_pair<64>;
 
 static_assert(nvme_selftest::queue_storage_bytes ==
                   test_queues::storage_bytes,
@@ -316,7 +319,7 @@ bool validate_capabilities(volatile void * bar)
         return false;
     }
 
-    controller_capabilities capabilities{raw};
+    zpp::nvme::controller_capabilities capabilities{raw};
     if (0 == capabilities.maximum_queue_entries_field()) {
         trace::line("selftest: CAP.MQES is zero, refused");
         return false;
@@ -337,7 +340,9 @@ void compare_and_report(std::uint32_t submission_depth,
             &g_before_submission[i]);
         const auto * b = reinterpret_cast<const std::uint8_t *>(
             &g_scratch_submission[i]);
-        for (std::size_t byte{}; byte < sizeof(submission_entry); ++byte) {
+        for (std::size_t byte{};
+             byte < sizeof(zpp::nvme::submission_entry);
+             ++byte) {
             if (a[byte] != b[byte]) {
                 ++submission_differences;
                 break;
@@ -351,7 +356,9 @@ void compare_and_report(std::uint32_t submission_depth,
             &g_before_completion[i]);
         const auto * b = reinterpret_cast<const std::uint8_t *>(
             &g_scratch_completion[i]);
-        for (std::size_t byte{}; byte < sizeof(completion_entry); ++byte) {
+        for (std::size_t byte{};
+             byte < sizeof(zpp::nvme::completion_entry);
+             ++byte) {
             if (a[byte] != b[byte]) {
                 ++completion_differences;
                 break;
@@ -437,19 +444,29 @@ void nvme_selftest::execute(const nvme::log_target & destination,
     }
 
     auto * bytes = static_cast<volatile std::uint8_t *>(bar);
-    controller_capabilities capabilities{arch::x86_64::read64(bar)};
+    zpp::nvme::controller_capabilities capabilities{
+        arch::x86_64::read64(bar)};
     auto stride = capabilities.doorbell_stride();
 
-    auto configuration = controller_configuration{arch::x86_64::read32(
-        bytes + offset_of(register_offset::configuration))};
-    auto status = controller_status{
-        arch::x86_64::read32(bytes + offset_of(register_offset::status))};
-    auto attributes = admin_queue_attributes{arch::x86_64::read32(
-        bytes + offset_of(register_offset::admin_queue_attributes))};
+    auto configuration =
+        zpp::nvme::controller_configuration{arch::x86_64::read32(
+            bytes + zpp::nvme::offset_of(
+                        zpp::nvme::register_offset::configuration))};
+    auto status = zpp::nvme::controller_status{arch::x86_64::read32(
+        bytes + zpp::nvme::offset_of(zpp::nvme::register_offset::status))};
+    auto attributes =
+        zpp::nvme::admin_queue_attributes{arch::x86_64::read32(
+            bytes +
+            zpp::nvme::offset_of(
+                zpp::nvme::register_offset::admin_queue_attributes))};
     auto submission_base = arch::x86_64::read64(
-        bytes + offset_of(register_offset::admin_submission_queue_base));
+        bytes +
+        zpp::nvme::offset_of(
+            zpp::nvme::register_offset::admin_submission_queue_base));
     auto completion_base = arch::x86_64::read64(
-        bytes + offset_of(register_offset::admin_completion_queue_base));
+        bytes +
+        zpp::nvme::offset_of(
+            zpp::nvme::register_offset::admin_completion_queue_base));
 
     trace::hex_line("selftest: CAP.MQES ",
                     capabilities.maximum_queue_entries());
@@ -484,27 +501,27 @@ void nvme_selftest::execute(const nvme::log_target & destination,
     // transaction actually carries. It changes nothing today, since the
     // register block is null and the gate reports that, but the wrong
     // value here would be a wrong lookup the moment one is parsed.
-    auto verdict = iommu_gate::verdict_for(
+    auto verdict = zpp::nvme::iommu_gate::verdict_for(
         nullptr,
         static_cast<std::uint8_t>(controller.requester.bus),
         static_cast<std::uint8_t>(controller.requester.device),
         static_cast<std::uint8_t>(controller.requester.function),
         nullptr);
     trace::line("selftest: iommu gate (no DMAR parsed yet)");
-    trace::line(iommu_gate::describe(verdict));
+    trace::line(zpp::nvme::iommu_gate::describe(verdict));
 
-    admin_borrow::queues where{};
+    zpp::nvme::admin_borrow::queues where{};
     where.submission =
-        reinterpret_cast<submission_entry *>(submission_base);
+        reinterpret_cast<zpp::nvme::submission_entry *>(submission_base);
     where.completion =
-        reinterpret_cast<completion_entry *>(completion_base);
+        reinterpret_cast<zpp::nvme::completion_entry *>(completion_base);
     where.submission_depth = attributes.submission_queue_size();
     where.completion_depth = attributes.completion_queue_size();
 
     if ((0 == where.submission_depth) ||
-        (where.submission_depth > admin_borrow::max_depth) ||
+        (where.submission_depth > zpp::nvme::admin_borrow::max_depth) ||
         (0 == where.completion_depth) ||
-        (where.completion_depth > admin_borrow::max_depth)) {
+        (where.completion_depth > zpp::nvme::admin_borrow::max_depth)) {
         trace::line("selftest: admin queue depth outside the bound");
         return;
     }
@@ -517,14 +534,14 @@ void nvme_selftest::execute(const nvme::log_target & destination,
         g_before_completion[i] = where.completion[i];
     }
 
-    admin_borrow::locate(where);
+    zpp::nvme::admin_borrow::locate(where);
     trace::hex_line("selftest: derived cq tail ", where.completion_tail);
     trace::hex_line("selftest: derived cq phase ",
                     where.completion_phase ? 1 : 0);
     trace::hex_line("selftest: derived sq tail ", where.submission_tail);
 
-    auto lap = admin_borrow::length(where.submission_depth,
-                                    where.completion_depth);
+    auto lap = zpp::nvme::admin_borrow::length(where.submission_depth,
+                                               where.completion_depth);
     trace::hex_line("selftest: lap length ", lap);
 
     // The storage the queues live in, before anything touches them.
@@ -547,28 +564,28 @@ void nvme_selftest::execute(const nvme::log_target & destination,
     // Queue: the host owns the initial phase bits, and a stale entry
     // from anything else would read as a completion that never happened.
     for (std::uint32_t i{}; i < 64; ++i) {
-        test_queues::completions[i] = completion_entry{};
-        test_queues::submissions[i] = submission_entry{};
+        test_queues::completions[i] = zpp::nvme::completion_entry{};
+        test_queues::submissions[i] = zpp::nvme::submission_entry{};
     }
 
-    submission_entry payload[2]{};
-    payload[0] =
-        create_io_completion_queue(test_queue_id,
-                                   64,
-                                   identity_of(test_queues::completions),
-                                   false,
-                                   0);
-    payload[1] =
-        create_io_submission_queue(test_queue_id,
-                                   64,
-                                   identity_of(test_queues::submissions),
-                                   test_queue_id,
-                                   queue_priority::medium);
+    zpp::nvme::submission_entry payload[2]{};
+    payload[0] = zpp::nvme::create_io_completion_queue(
+        test_queue_id,
+        64,
+        identity_of(test_queues::completions),
+        false,
+        0);
+    payload[1] = zpp::nvme::create_io_submission_queue(
+        test_queue_id,
+        64,
+        identity_of(test_queues::submissions),
+        test_queue_id,
+        zpp::nvme::queue_priority::medium);
 
     std::uint16_t payload_status[2]{0xffff, 0xffff};
 
-    admin_borrow::snapshot saved{g_scratch_submission,
-                                 g_scratch_completion};
+    zpp::nvme::admin_borrow::snapshot saved{g_scratch_submission,
+                                            g_scratch_completion};
 
     trace::line("selftest: borrowing the firmware's admin queue");
 
@@ -586,15 +603,15 @@ void nvme_selftest::execute(const nvme::log_target & destination,
     // against the same controller, and here it costs nothing and risks
     // nothing.
     auto borrow_started = arch::x86_64::rdtsc();
-    auto result = admin_borrow::run(bar,
-                                    stride,
-                                    where,
-                                    saved,
-                                    payload,
-                                    2,
-                                    payload_status,
-                                    nullptr,
-                                    1u << 24);
+    auto result = zpp::nvme::admin_borrow::run(bar,
+                                               stride,
+                                               where,
+                                               saved,
+                                               payload,
+                                               2,
+                                               payload_status,
+                                               nullptr,
+                                               1u << 24);
     auto borrow_ticks = arch::x86_64::rdtsc() - borrow_started;
 
     trace::hex_line("selftest: borrow took tsc ticks ", borrow_ticks);
@@ -634,21 +651,21 @@ void nvme_selftest::execute(const nvme::log_target & destination,
          measure_borrow_cost
              ? std::initializer_list<std::uint32_t>{8u, 64u}
              : std::initializer_list<std::uint32_t>{}) {
-        admin_borrow::snapshot again{g_scratch_submission,
-                                     g_scratch_completion};
+        zpp::nvme::admin_borrow::snapshot again{g_scratch_submission,
+                                                g_scratch_completion};
         auto started = arch::x86_64::rdtsc();
-        auto measured = admin_borrow::run(bar,
-                                          stride,
-                                          where,
-                                          again,
-                                          nullptr,
-                                          0,
-                                          nullptr,
-                                          nullptr,
-                                          1u << 24,
-                                          laps);
+        auto measured = zpp::nvme::admin_borrow::run(bar,
+                                                     stride,
+                                                     where,
+                                                     again,
+                                                     nullptr,
+                                                     0,
+                                                     nullptr,
+                                                     nullptr,
+                                                     1u << 24,
+                                                     laps);
         auto ticks = arch::x86_64::rdtsc() - started;
-        if (borrow_result::ok != measured) {
+        if (zpp::nvme::borrow_result::ok != measured) {
             trace::hex_line("selftest: timing borrow refused at laps ",
                             laps);
             break;
@@ -659,19 +676,19 @@ void nvme_selftest::execute(const nvme::log_target & destination,
     }
 
     switch (result) {
-    case borrow_result::ok:
+    case zpp::nvme::borrow_result::ok:
         trace::line("selftest: borrow returned ok");
         break;
-    case borrow_result::controller_not_ready:
+    case zpp::nvme::borrow_result::controller_not_ready:
         trace::line("selftest: borrow refused - controller not ready");
         return;
-    case borrow_result::queue_too_deep:
+    case zpp::nvme::borrow_result::queue_too_deep:
         trace::line("selftest: borrow refused - queue too deep");
         return;
-    case borrow_result::too_many_foreign_completions:
+    case zpp::nvme::borrow_result::too_many_foreign_completions:
         trace::line("selftest: borrow refused - too many foreign");
         return;
-    case borrow_result::timed_out:
+    case zpp::nvme::borrow_result::timed_out:
         trace::line("selftest: borrow TIMED OUT - the admin queue is "
                     "left desynchronised and the controller needs a "
                     "reset");
@@ -701,13 +718,17 @@ void nvme_selftest::execute(const nvme::log_target & destination,
     // Bind the private pair and prove a command of ours completes on our
     // own completion queue, with the guest's never involved.
     test_queues::bound = test_queues::binding{
-        .submission_doorbell = bytes + submission_queue_doorbell_offset(
-                                           test_queue_id, stride),
-        .completion_doorbell = bytes + completion_queue_doorbell_offset(
-                                           test_queue_id, stride),
-        .status_register = bytes + offset_of(register_offset::status),
+        .submission_doorbell =
+            bytes + zpp::nvme::submission_queue_doorbell_offset(
+                        test_queue_id, stride),
+        .completion_doorbell =
+            bytes + zpp::nvme::completion_queue_doorbell_offset(
+                        test_queue_id, stride),
+        .status_register = bytes + zpp::nvme::offset_of(
+                                       zpp::nvme::register_offset::status),
         .configuration_register =
-            bytes + offset_of(register_offset::configuration),
+            bytes + zpp::nvme::offset_of(
+                        zpp::nvme::register_offset::configuration),
         .submission_id = test_queue_id,
         .completion_id = test_queue_id,
         .namespace_id = 1,
@@ -808,9 +829,9 @@ void nvme_selftest::execute(const nvme::log_target & destination,
     //
     // So the rule is: a block this code writes must come out of it
     // carrying everything it carried going in.
-    auto header =
-        reinterpret_cast<block_signature *>(test_queues::staging);
-    header->signature_magic = block_signature::magic;
+    auto header = reinterpret_cast<zpp::nvme::block_signature *>(
+        test_queues::staging);
+    header->signature_magic = zpp::nvme::block_signature::magic;
     header->file_id = target.file_id;
     header->block_index = 0;
     std::memcpy(
@@ -821,12 +842,12 @@ void nvme_selftest::execute(const nvme::log_target & destination,
 
     static constexpr char marker[] = "ZPP_DISK_CHANNEL_PROOF_V1";
     for (std::size_t i{}; i < (sizeof(marker) - 1); ++i) {
-        test_queues::staging[sizeof(block_signature) + i] =
+        test_queues::staging[sizeof(zpp::nvme::block_signature) + i] =
             static_cast<std::uint8_t>(marker[i]);
     }
 
     auto written = test_queues::submit(target, 0, 1, identity_of, 1000000);
-    if (write_result::ok != written) {
+    if (zpp::nvme::write_result::ok != written) {
         trace::hex_line("selftest: proof write did not land, result ",
                         static_cast<std::uint64_t>(written));
         trace::hex_line("selftest: submitted ", test_queues::submitted);

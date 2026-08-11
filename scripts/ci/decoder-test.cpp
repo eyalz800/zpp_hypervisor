@@ -2,11 +2,9 @@
 #include <array>
 #include <print>
 
-using namespace zpp::arch::x86_64;
-
-constexpr context make_registers()
+constexpr zpp::arch::x86_64::context make_registers()
 {
-    context r{};
+    zpp::arch::x86_64::context r{};
     r.rax = 0x1111111122222222ull;
     r.rcx = 0x3333333344444444ull;
     r.rdx = 0xaaaaaaaabbbbbbbbull;
@@ -16,13 +14,14 @@ constexpr context make_registers()
 }
 
 template <std::size_t N>
-constexpr std::optional<memory_store> run(const std::uint8_t (&bytes)[N])
+constexpr std::optional<zpp::arch::x86_64::memory_store>
+run(const std::uint8_t (&bytes)[N])
 {
     std::array<std::byte, N> code{};
     for (std::size_t i{}; i < N; ++i) {
         code[i] = static_cast<std::byte>(bytes[i]);
     }
-    return decode_memory_store(code, make_registers());
+    return zpp::arch::x86_64::decode_memory_store(code, make_registers());
 }
 
 // mov [rcx], edx

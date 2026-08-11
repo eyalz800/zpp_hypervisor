@@ -33,8 +33,6 @@
 #include <string>
 #include <vector>
 
-using namespace zpp;
-using namespace zpp::arch::x86_64;
 using zpp::arch::x86_64::code_size;
 using zpp::arch::x86_64::combine_with;
 using zpp::arch::x86_64::memory_operation;
@@ -73,7 +71,7 @@ static void set_code(std::initializer_list<std::uint8_t> bytes)
 }
 
 // ------------------------------------------------- other shim behaviour
-static arch::x86_64::vmx::epte g_epte{};
+static zpp::arch::x86_64::vmx::epte g_epte{};
 static bool g_epte_fails = false;
 static std::uint64_t g_invalidations = 0;
 static std::uint64_t g_monitor_trap_calls = 0;
@@ -274,7 +272,8 @@ static void write_field(field which, std::uint64_t value)
     // an exit reports - the qualification, the guest-linear address -
     // have getters and no setters on the real class, which is correct
     // of the real class and unhelpful here.
-    arch::x86_64::vmx::g_vmcs[static_cast<std::uint64_t>(which)] = value;
+    zpp::arch::x86_64::vmx::g_vmcs[static_cast<std::uint64_t>(which)] =
+        value;
 }
 
 /**
@@ -293,8 +292,9 @@ static void reset()
     auto & self = hv();
 
     std::memset(g_memory, 0, sizeof(g_memory));
-    std::memset(
-        arch::x86_64::vmx::g_vmcs, 0, sizeof(arch::x86_64::vmx::g_vmcs));
+    std::memset(zpp::arch::x86_64::vmx::g_vmcs,
+                0,
+                sizeof(zpp::arch::x86_64::vmx::g_vmcs));
 
     for (auto & watch : self.watches) {
         watch.page = 0;
@@ -367,7 +367,7 @@ static void reset()
     g_invalidations = 0;
     g_monitor_trap_calls = 0;
     g_monitor_trap_armed = false;
-    g_epte = arch::x86_64::vmx::epte{};
+    g_epte = zpp::arch::x86_64::vmx::epte{};
 
     std::memset(g_code, 0, sizeof(g_code));
 }
@@ -410,7 +410,8 @@ static constexpr std::uint64_t linear_valid = 1ull << 7;
 static constexpr std::uint64_t operand_access = 1ull << 8;
 static constexpr std::uint64_t data_write = 1ull << 1;
 
-static bool fault(const violation & what, context & registers)
+static bool fault(const violation & what,
+                  zpp::arch::x86_64::context & registers)
 {
     write_field(field::exit_qualification, what.qualification);
     write_field(field::guest_linear_address, what.linear);
@@ -533,9 +534,10 @@ static void movsx_reg_mem8()
     set_code({0x0f, 0xbe, 0x03}); // movsx eax, byte [rbx]
 }
 
-static decoded_instruction decoded(const context & registers)
+static zpp::arch::x86_64::decoded_instruction
+decoded(const zpp::arch::x86_64::context & registers)
 {
-    auto answer = arch::x86_64::decode(
+    auto answer = zpp::arch::x86_64::decode(
         std::as_bytes(std::span{g_code}), registers, g_code_size);
     if (!answer) {
         std::println("  FAIL the harness wrote bytes the decoder refuses");
@@ -567,7 +569,7 @@ static void test_offset_resolution()
         arm(notify_handler, nullptr);
         put32(0x300, 0x11111111);
 
-        context registers{};
+        zpp::arch::x86_64::context registers{};
         registers.rbx = base() + 0x300;
         registers.rax = 0xdeadbeef;
         mov_mem_reg32();
@@ -596,7 +598,7 @@ static void test_offset_resolution()
         reset();
         arm(notify_handler, nullptr);
 
-        context registers{};
+        zpp::arch::x86_64::context registers{};
         registers.rbx = base() + 0x300;
         registers.rax = 0xdeadbeef;
         mov_mem_reg32();
@@ -623,7 +625,7 @@ static void test_offset_resolution()
         arm(notify_handler, nullptr);
         g_decode_refuses = true;
 
-        context registers{};
+        zpp::arch::x86_64::context registers{};
         fault({.qualification = data_write, .physical = base()},
               registers);
 
@@ -644,7 +646,7 @@ static void test_offset_resolution()
         reset();
         arm(notify_handler, nullptr);
 
-        context registers{};
+        zpp::arch::x86_64::context registers{};
         registers.rbx = base() + 0x300;
         mov_mem_reg32();
 
@@ -664,7 +666,7 @@ static void test_offset_resolution()
         reset();
         arm(notify_handler, nullptr);
 
-        context registers{};
+        zpp::arch::x86_64::context registers{};
         registers.rbx = base() + 0x300;
         mov_mem_reg32();
 
@@ -685,7 +687,7 @@ static void test_offset_resolution()
         reset();
         arm(notify_handler, nullptr);
 
-        context registers{};
+        zpp::arch::x86_64::context registers{};
         registers.rbx = base() + 0x310;
         registers.rax = 0x5a5a5a5a;
         mov_mem_reg32();
@@ -710,7 +712,7 @@ static void test_offset_resolution()
         reset();
         arm(notify_handler, nullptr);
 
-        context registers{};
+        zpp::arch::x86_64::context registers{};
         registers.rbx = base() + 0x300;
         mov_mem_reg32();
 
@@ -734,7 +736,7 @@ static void test_offset_resolution()
         reset();
         arm(notify_handler, nullptr);
 
-        context registers{};
+        zpp::arch::x86_64::context registers{};
         registers.rbx = base() + 0x300;
         registers.rax = 0xa5a5a5a5;
         mov_mem_reg32();
@@ -758,7 +760,7 @@ static void test_offset_resolution()
         arm(notify_handler, nullptr);
         g_decode_refuses = true;
 
-        context registers{};
+        zpp::arch::x86_64::context registers{};
         fault({.qualification = data_write, .physical = base() + 0x300},
               registers);
 
@@ -775,7 +777,7 @@ static void test_offset_resolution()
         reset();
         arm(notify_handler, nullptr);
 
-        context registers{};
+        zpp::arch::x86_64::context registers{};
         registers.rbx = base() + 0x300;
         registers.rax = 0xcafe;
         mov_mem_reg32();
@@ -800,7 +802,7 @@ static void test_offset_resolution()
         reset();
         arm(notify_handler, nullptr);
 
-        context registers{};
+        zpp::arch::x86_64::context registers{};
         registers.rbx = base() + 0x300;
         registers.rax = 0xfeed;
         mov_mem_reg32();
@@ -818,7 +820,7 @@ static void test_offset_resolution()
         reset();
         arm(notify_handler, nullptr);
 
-        context registers{};
+        zpp::arch::x86_64::context registers{};
         check(!fault({.physical = base() + 0x1000}, registers),
               "a violation on an unwatched page is refused");
 
@@ -834,7 +836,7 @@ static void test_carry_out()
 {
     std::println("\ncarry_out_guest_instruction");
 
-    auto run = [](context & registers,
+    auto run = [](zpp::arch::x86_64::context & registers,
                   std::uint64_t address,
                   guest_write & performed,
                   bool & changed,
@@ -862,7 +864,7 @@ static void test_carry_out()
         reset();
         one.encode();
 
-        context registers{};
+        zpp::arch::x86_64::context registers{};
         registers.rbx = base() + 0x40;
         registers.rax = one.value;
 
@@ -896,7 +898,7 @@ static void test_carry_out()
         reset();
         mov_mem_imm32(0x89abcdef);
 
-        context registers{};
+        zpp::arch::x86_64::context registers{};
         registers.rbx = base() + 0x40;
 
         guest_write performed{};
@@ -917,7 +919,7 @@ static void test_carry_out()
         reset();
         mov_mem_reg32();
 
-        context registers{};
+        zpp::arch::x86_64::context registers{};
         registers.rbx = base() + 0x40;
         registers.rax = 0x12345678;
         put32(0x40, 0xffffffff);
@@ -941,7 +943,7 @@ static void test_carry_out()
         reset();
         mov_reg_mem32();
 
-        context registers{};
+        zpp::arch::x86_64::context registers{};
         registers.rbx = base() + 0x40;
         registers.rax = 0xffffffffffffffffull;
         put32(0x40, 0x0badf00d);
@@ -966,7 +968,7 @@ static void test_carry_out()
         reset();
         movzx_reg_mem8();
 
-        context registers{};
+        zpp::arch::x86_64::context registers{};
         registers.rbx = base() + 0x40;
         registers.rax = 0xffffffffffffffffull;
         g_memory[0x40] = 0x81;
@@ -986,7 +988,7 @@ static void test_carry_out()
         reset();
         movsx_reg_mem8();
 
-        context registers{};
+        zpp::arch::x86_64::context registers{};
         registers.rbx = base() + 0x40;
         registers.rax = 0;
         g_memory[0x40] = 0x81;
@@ -1005,7 +1007,7 @@ static void test_carry_out()
         reset();
         cmp_mem_imm();
 
-        context registers{};
+        zpp::arch::x86_64::context registers{};
         registers.rbx = base() + 0x40;
         put32(0x40, 0x12);
         write_field(field::guest_rflags, 0x2);
@@ -1018,7 +1020,8 @@ static void test_carry_out()
         check(!changed, "cmp changes no memory");
         check(0x12 == at32(0x40), "so memory is untouched");
         check(0x12 == performed.value, "and it reports what was there");
-        check(0 != (hv().vmcs.guest_rflags() & status_flag::zero),
+        check(0 != (hv().vmcs.guest_rflags() &
+                    zpp::arch::x86_64::status_flag::zero),
               "cmp of equal operands sets the zero flag");
     }
 
@@ -1033,11 +1036,12 @@ static void test_carry_out()
         reset();
         cmp_mem_reg32();
 
-        context registers{};
+        zpp::arch::x86_64::context registers{};
         registers.rbx = base() + 0x40;
         registers.rax = 0x12;
         put32(0x40, 0x12);
-        write_field(field::guest_rflags, 0x2 | status_flag::carry);
+        write_field(field::guest_rflags,
+                    0x2 | zpp::arch::x86_64::status_flag::carry);
 
         guest_write performed{};
         auto changed = false;
@@ -1046,9 +1050,11 @@ static void test_carry_out()
               "cmp against a register is carried out");
         check(!changed, "cmp changes no memory");
         check(0x12 == at32(0x40), "so memory is untouched");
-        check(0 != (hv().vmcs.guest_rflags() & status_flag::zero),
+        check(0 != (hv().vmcs.guest_rflags() &
+                    zpp::arch::x86_64::status_flag::zero),
               "cmp of equal operands sets the zero flag");
-        check(0 == (hv().vmcs.guest_rflags() & status_flag::carry),
+        check(0 == (hv().vmcs.guest_rflags() &
+                    zpp::arch::x86_64::status_flag::carry),
               "and clears the carry flag it was given");
     }
 
@@ -1060,7 +1066,7 @@ static void test_carry_out()
         reset();
         cmp_mem_reg32();
 
-        context registers{};
+        zpp::arch::x86_64::context registers{};
         registers.rbx = base() + 0x40;
         registers.rax = 0x20;
         put32(0x40, 0x10);
@@ -1071,11 +1077,14 @@ static void test_carry_out()
 
         check(run(registers, base() + 0x40, performed, changed),
               "cmp against a larger register is carried out");
-        check(0 != (hv().vmcs.guest_rflags() & status_flag::carry),
+        check(0 != (hv().vmcs.guest_rflags() &
+                    zpp::arch::x86_64::status_flag::carry),
               "memory below the register borrows");
-        check(0 != (hv().vmcs.guest_rflags() & status_flag::sign),
+        check(0 != (hv().vmcs.guest_rflags() &
+                    zpp::arch::x86_64::status_flag::sign),
               "and leaves a negative result");
-        check(0 == (hv().vmcs.guest_rflags() & status_flag::zero),
+        check(0 == (hv().vmcs.guest_rflags() &
+                    zpp::arch::x86_64::status_flag::zero),
               "and no zero flag");
     }
 
@@ -1083,20 +1092,23 @@ static void test_carry_out()
         reset();
         test_mem_reg32();
 
-        context registers{};
+        zpp::arch::x86_64::context registers{};
         registers.rbx = base() + 0x40;
         registers.rax = 0x1;
         put32(0x40, 0x2);
-        write_field(field::guest_rflags, 0x2 | status_flag::carry);
+        write_field(field::guest_rflags,
+                    0x2 | zpp::arch::x86_64::status_flag::carry);
 
         guest_write performed{};
         auto changed = false;
 
         run(registers, base() + 0x40, performed, changed);
 
-        check(0 != (hv().vmcs.guest_rflags() & status_flag::zero),
+        check(0 != (hv().vmcs.guest_rflags() &
+                    zpp::arch::x86_64::status_flag::zero),
               "test of disjoint bits sets the zero flag");
-        check(0 == (hv().vmcs.guest_rflags() & status_flag::carry),
+        check(0 == (hv().vmcs.guest_rflags() &
+                    zpp::arch::x86_64::status_flag::carry),
               "and clears a stale carry, because RFLAGS is assigned "
               "rather than merged");
     }
@@ -1106,7 +1118,7 @@ static void test_carry_out()
         reset();
         or_mem_reg32();
 
-        context registers{};
+        zpp::arch::x86_64::context registers{};
         registers.rbx = base() + 0x40;
         registers.rax = 0x0000ff00;
         put32(0x40, 0x000000ff);
@@ -1126,7 +1138,7 @@ static void test_carry_out()
         reset();
         and_mem_reg32();
 
-        context registers{};
+        zpp::arch::x86_64::context registers{};
         registers.rbx = base() + 0x40;
         registers.rax = 0x0f0f0f0f;
         put32(0x40, 0xf0f0f0f0);
@@ -1138,7 +1150,8 @@ static void test_carry_out()
         run(registers, base() + 0x40, performed, changed);
 
         check(0 == at32(0x40), "and of disjoint operands leaves zero");
-        check(0 != (hv().vmcs.guest_rflags() & status_flag::zero),
+        check(0 != (hv().vmcs.guest_rflags() &
+                    zpp::arch::x86_64::status_flag::zero),
               "and sets the zero flag the guest branches on");
     }
 
@@ -1146,7 +1159,7 @@ static void test_carry_out()
         reset();
         add_mem_reg32();
 
-        context registers{};
+        zpp::arch::x86_64::context registers{};
         registers.rbx = base() + 0x40;
         registers.rax = 1;
         put32(0x40, 0xffffffff);
@@ -1157,7 +1170,8 @@ static void test_carry_out()
         run(registers, base() + 0x40, performed, changed);
 
         check(0 == at32(0x40), "add wraps at the access width");
-        check(0 != (hv().vmcs.guest_rflags() & status_flag::carry),
+        check(0 != (hv().vmcs.guest_rflags() &
+                    zpp::arch::x86_64::status_flag::carry),
               "and sets the carry flag");
     }
 
@@ -1166,10 +1180,11 @@ static void test_carry_out()
         reset();
         bts_mem_imm(5);
 
-        context registers{};
+        zpp::arch::x86_64::context registers{};
         registers.rbx = base() + 0x40;
         put32(0x40, 0);
-        write_field(field::guest_rflags, 0x2 | status_flag::carry);
+        write_field(field::guest_rflags,
+                    0x2 | zpp::arch::x86_64::status_flag::carry);
 
         guest_write performed{};
         auto changed = false;
@@ -1178,7 +1193,8 @@ static void test_carry_out()
               "bts is carried out");
         check(changed, "bts changes memory");
         check((1u << 5) == at32(0x40), "and sets the bit named");
-        check(0 == (hv().vmcs.guest_rflags() & status_flag::carry),
+        check(0 == (hv().vmcs.guest_rflags() &
+                    zpp::arch::x86_64::status_flag::carry),
               "carry takes the bit as it was");
     }
 
@@ -1186,7 +1202,7 @@ static void test_carry_out()
         reset();
         bt_mem_imm(5);
 
-        context registers{};
+        zpp::arch::x86_64::context registers{};
         registers.rbx = base() + 0x40;
         put32(0x40, 1u << 5);
         write_field(field::guest_rflags, 0x2);
@@ -1198,7 +1214,8 @@ static void test_carry_out()
               "bt is carried out");
         check(!changed, "bt changes no memory");
         check((1u << 5) == at32(0x40), "so memory is untouched");
-        check(0 != (hv().vmcs.guest_rflags() & status_flag::carry),
+        check(0 != (hv().vmcs.guest_rflags() &
+                    zpp::arch::x86_64::status_flag::carry),
               "and carry takes the bit");
     }
 
@@ -1208,11 +1225,12 @@ static void test_carry_out()
         reset();
         xchg_mem_reg32();
 
-        context registers{};
+        zpp::arch::x86_64::context registers{};
         registers.rbx = base() + 0x40;
         registers.rax = 0xaaaaaaaa;
         put32(0x40, 0xbbbbbbbb);
-        write_field(field::guest_rflags, 0x2 | status_flag::carry);
+        write_field(field::guest_rflags,
+                    0x2 | zpp::arch::x86_64::status_flag::carry);
 
         guest_write performed{};
         auto changed = false;
@@ -1225,7 +1243,8 @@ static void test_carry_out()
               "the register takes what memory held");
         check(0xaaaaaaaa == performed.value,
               "and the report is what memory now holds");
-        check(0 != (hv().vmcs.guest_rflags() & status_flag::carry),
+        check(0 != (hv().vmcs.guest_rflags() &
+                    zpp::arch::x86_64::status_flag::carry),
               "xchg leaves the flags alone");
     }
 
@@ -1237,7 +1256,7 @@ static void test_carry_out()
         reset();
         or_mem_reg32();
 
-        context registers{};
+        zpp::arch::x86_64::context registers{};
         registers.rbx = base() + 0x40;
         registers.rax = 0x00ff0000;
         put32(0x40, 0x0000ffff);
@@ -1263,7 +1282,7 @@ static void test_carry_out()
         reset();
         cmp_mem_imm();
 
-        context registers{};
+        zpp::arch::x86_64::context registers{};
         registers.rbx = 0x1000;
 
         guest_write performed{};
@@ -1283,18 +1302,20 @@ static void test_carry_out()
         reset();
         mov_mem_reg32();
 
-        context registers{};
+        zpp::arch::x86_64::context registers{};
         registers.rbx = base() + 0x40;
         registers.rax = 0;
         write_field(field::guest_rflags,
-                    0x2 | status_flag::carry | status_flag::zero);
+                    0x2 | zpp::arch::x86_64::status_flag::carry |
+                        zpp::arch::x86_64::status_flag::zero);
 
         guest_write performed{};
         auto changed = false;
 
         run(registers, base() + 0x40, performed, changed);
 
-        check((0x2 | status_flag::carry | status_flag::zero) ==
+        check((0x2 | zpp::arch::x86_64::status_flag::carry |
+               zpp::arch::x86_64::status_flag::zero) ==
                   hv().vmcs.guest_rflags(),
               "a store touches no flags");
     }
@@ -1305,7 +1326,7 @@ static void test_carry_out()
         reset();
         mov_mem_reg32();
 
-        context registers{};
+        zpp::arch::x86_64::context registers{};
         registers.rbx = base() + 0x40;
         guest_write performed{};
         auto changed = false;
@@ -1335,7 +1356,7 @@ static void test_carry_out()
         reset();
         mov_mem_reg32();
 
-        context registers{};
+        zpp::arch::x86_64::context registers{};
         registers.rbx = 0x1000;
         guest_write performed{};
         auto changed = false;
@@ -1386,7 +1407,7 @@ static void test_carry_out()
         bts_mem_imm(9);
         put32(0x300, 0);
 
-        context registers{};
+        zpp::arch::x86_64::context registers{};
         registers.rbx = base() + 0x300;
 
         fault({.qualification = linear_valid | operand_access | data_write,
@@ -1396,7 +1417,7 @@ static void test_carry_out()
 
         check((1u << 9) == at32(0x300),
               "the exit path emulates BTS, so it is on the full decoder");
-        check(!arch::x86_64::decode_memory_store(
+        check(!zpp::arch::x86_64::decode_memory_store(
                    std::as_bytes(std::span{g_code}), registers)
                    .has_value(),
               "which the narrow decode_memory_store refuses");
@@ -1467,7 +1488,7 @@ static void test_filter_notify()
         put32(0x300, one.before);
         one.encode();
 
-        context registers{};
+        zpp::arch::x86_64::context registers{};
         registers.rbx = base() + 0x300;
         registers.rax = one.operand;
 
@@ -1503,7 +1524,7 @@ static void test_filter_notify()
         put32(0x300, one.before);
         one.encode();
 
-        context registers{};
+        zpp::arch::x86_64::context registers{};
         registers.rbx = base() + 0x300;
         registers.rax = one.operand;
 
@@ -1534,7 +1555,7 @@ static void test_filter_notify()
         put32(0x300, one.before);
         one.encode();
 
-        context registers{};
+        zpp::arch::x86_64::context registers{};
         registers.rbx = base() + 0x300;
         registers.rax = one.operand;
 
@@ -1572,7 +1593,7 @@ static void test_filter_notify()
         put32(0x300, 0);
         mov_mem_reg32();
 
-        context registers{};
+        zpp::arch::x86_64::context registers{};
         registers.rbx = base() + 0x300;
         registers.rax = 0x12345678;
 
@@ -1611,7 +1632,7 @@ static void test_filter_notify()
             put32(0x300, one.before);
             one.encode();
 
-            context registers{};
+            zpp::arch::x86_64::context registers{};
             registers.rbx = base() + 0x300;
             registers.rax = one.operand;
 
@@ -1654,7 +1675,7 @@ static void test_filter_notify()
         put32(0x300, 0x1111);
         xchg_mem_reg32();
 
-        context registers{};
+        zpp::arch::x86_64::context registers{};
         registers.rbx = base() + 0x300;
         registers.rax = 0x2222;
 
@@ -1678,7 +1699,7 @@ static void test_filter_notify()
         g_filter_refuses = true;
         mov_mem_reg32();
 
-        context registers{};
+        zpp::arch::x86_64::context registers{};
         registers.rbx = base() + 0x300;
 
         fault({.qualification = linear_valid | operand_access | data_write,
@@ -1697,7 +1718,7 @@ static void test_filter_notify()
         arm(notify_handler, nullptr, before_handler);
         g_decode_refuses = true;
 
-        context registers{};
+        zpp::arch::x86_64::context registers{};
         fault({.qualification = data_write, .physical = base()},
               registers);
 
@@ -1712,7 +1733,7 @@ static void test_filter_notify()
         arm(notify_handler, filter_handler);
         g_decode_refuses = true;
 
-        context registers{};
+        zpp::arch::x86_64::context registers{};
         fault({.qualification = data_write, .physical = base() + 0x300},
               registers);
 
@@ -1748,7 +1769,7 @@ static void test_filter_notify()
         put32(0x300, 0x0000ff00);
         lock_or_mem_reg32();
 
-        context registers{};
+        zpp::arch::x86_64::context registers{};
         registers.rbx = base() + 0x300;
         registers.rax = 0x000000ff;
 
@@ -1780,7 +1801,7 @@ static void test_filter_notify()
         arm(notify_handler, nullptr);
         mov_mem_reg32();
 
-        context registers{};
+        zpp::arch::x86_64::context registers{};
         registers.rbx = base() + 0x300;
 
         auto ours = fault(
@@ -1805,7 +1826,7 @@ static void test_filter_notify()
         arm(notify_handler, nullptr);
         mov_mem_reg32();
 
-        context registers{};
+        zpp::arch::x86_64::context registers{};
         registers.rbx = base() + 0x300;
 
         check(fault({.qualification =
@@ -2213,7 +2234,7 @@ static void test_straddle_and_width()
         arm(notify_handler, filter_handler);
         one.encode();
 
-        context registers{};
+        zpp::arch::x86_64::context registers{};
         registers.rbx = base() + one.offset;
         registers.rax = 0xffffffffffffffffull;
 
@@ -2255,7 +2276,7 @@ static void test_straddle_and_width()
         arm(notify_handler, nullptr);
         mov_mem_reg32();
 
-        context registers{};
+        zpp::arch::x86_64::context registers{};
         registers.rbx = base() + 0xffe;
 
         fault({.qualification = linear_valid | operand_access | data_write,
@@ -2304,7 +2325,7 @@ static void test_straddle_and_width()
             put32(interrupt_command_high, 0x03000000);
             one.encode();
 
-            context registers{};
+            zpp::arch::x86_64::context registers{};
             registers.rbx = base() + one.offset;
             registers.rax = 0x000c4600000c4600ull;
 
@@ -2352,7 +2373,7 @@ static void test_straddle_and_width()
         put32(0x300, 0);
         mov_mem_reg32();
 
-        context registers{};
+        zpp::arch::x86_64::context registers{};
         registers.rbx = base() + 0x2fe;
         registers.rax = 0x4600ffff;
 
@@ -2378,7 +2399,7 @@ static void test_straddle_and_width()
         put32(interrupt_command_low, 0x000c4600);
         mov_mem_reg8();
 
-        context registers{};
+        zpp::arch::x86_64::context registers{};
         registers.rbx = base() + 0x300;
         registers.rax = 0x11;
 

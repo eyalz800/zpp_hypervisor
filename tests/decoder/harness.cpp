@@ -44,8 +44,6 @@
 #include <string>
 #include <vector>
 
-using namespace zpp::arch::x86_64;
-
 // ------------------------------------------------------------ reporting
 static int g_checks{};
 static int g_failures{};
@@ -91,9 +89,9 @@ static constexpr std::uint64_t host_stack_pointer = 0xdead'beef'0bad'0000;
  */
 static constexpr std::uint64_t guest_rip = 0xffff'8000'1234'5000;
 
-static context guest_registers()
+static zpp::arch::x86_64::context guest_registers()
 {
-    context registers{};
+    zpp::arch::x86_64::context registers{};
     registers.rax = 0x1111'1111'2222'2222;
     registers.rcx = 0x0000'0000'0001'0000;
     registers.rdx = 0xaaaa'aaaa'bbbb'bbbb;
@@ -113,7 +111,7 @@ static context guest_registers()
     return registers;
 }
 
-static const context g_registers = guest_registers();
+static const zpp::arch::x86_64::context g_registers = guest_registers();
 
 // ---------------------------------------------------------- the corpus
 enum class expectation : std::uint8_t
@@ -144,7 +142,8 @@ struct semantic_case;
 struct entry
 {
     std::string text;
-    code_size mode{code_size::bits_64};
+    zpp::arch::x86_64::code_size mode{
+        zpp::arch::x86_64::code_size::bits_64};
     expectation expect{expectation::accepted};
     const semantic_case * model{nullptr};
 
@@ -157,7 +156,8 @@ struct entry
 static std::vector<entry> g_corpus;
 
 static void emit(std::string text,
-                 code_size mode = code_size::bits_64,
+                 zpp::arch::x86_64::code_size mode =
+                     zpp::arch::x86_64::code_size::bits_64,
                  expectation expect = expectation::accepted,
                  const semantic_case * model = nullptr)
 {
@@ -212,10 +212,11 @@ static std::string read_file(const std::string & path)
     return contents;
 }
 
-static std::string triple_of(code_size mode)
+static std::string triple_of(zpp::arch::x86_64::code_size mode)
 {
-    return (code_size::bits_64 == mode) ? "x86_64-unknown-none"
-                                        : "i386-unknown-none";
+    return (zpp::arch::x86_64::code_size::bits_64 == mode)
+               ? "x86_64-unknown-none"
+               : "i386-unknown-none";
 }
 
 /**
@@ -228,7 +229,7 @@ static std::string triple_of(code_size mode)
  * against, and a prefix that llvm-objdump lists on a line of its own -
  * `lock` does - is still inside it.
  */
-static void assemble(code_size mode, const char * name)
+static void assemble(zpp::arch::x86_64::code_size mode, const char * name)
 {
     std::string source;
     for (std::size_t index{}; index < g_corpus.size(); ++index) {
@@ -576,7 +577,7 @@ static printed_memory find_memory(const std::string & operands)
  */
 static std::uint64_t address_of(const printed_memory & memory,
                                 std::size_t length,
-                                code_size mode)
+                                zpp::arch::x86_64::code_size mode)
 {
     auto address = static_cast<std::uint64_t>(memory.displacement);
 
@@ -584,16 +585,18 @@ static std::uint64_t address_of(const printed_memory & memory,
         address += guest_rip + length;
     } else {
         if (memory.has_base) {
-            address += g_registers.*register_of(memory.base);
+            address +=
+                g_registers.*zpp::arch::x86_64::register_of(memory.base);
         }
 
         if (memory.has_index) {
             address +=
-                g_registers.*register_of(memory.index) * memory.scale;
+                g_registers.*zpp::arch::x86_64::register_of(memory.index) *
+                memory.scale;
         }
     }
 
-    if (code_size::bits_64 != mode) {
+    if (zpp::arch::x86_64::code_size::bits_64 != mode) {
         address &= 0xffff'ffff;
     }
 
@@ -658,23 +661,23 @@ static std::uint64_t model_add_flags(std::uint64_t left,
     std::uint64_t flags{};
 
     if (wide > mask) {
-        flags |= status_flag::carry;
+        flags |= zpp::arch::x86_64::status_flag::carry;
     }
     if (0 == result) {
-        flags |= status_flag::zero;
+        flags |= zpp::arch::x86_64::status_flag::zero;
     }
     if (model_sign(result, size)) {
-        flags |= status_flag::sign;
+        flags |= zpp::arch::x86_64::status_flag::sign;
     }
     if (model_parity(result)) {
-        flags |= status_flag::parity;
+        flags |= zpp::arch::x86_64::status_flag::parity;
     }
     if (((left & 0xf) + (right & 0xf)) > 0xf) {
-        flags |= status_flag::adjust;
+        flags |= zpp::arch::x86_64::status_flag::adjust;
     }
     if ((model_signed(left, size) + model_signed(right, size)) !=
         model_signed(result, size)) {
-        flags |= status_flag::overflow;
+        flags |= zpp::arch::x86_64::status_flag::overflow;
     }
 
     return flags;
@@ -698,23 +701,23 @@ static std::uint64_t model_sub_flags(std::uint64_t left,
     std::uint64_t flags{};
 
     if (left < right) {
-        flags |= status_flag::carry;
+        flags |= zpp::arch::x86_64::status_flag::carry;
     }
     if (0 == result) {
-        flags |= status_flag::zero;
+        flags |= zpp::arch::x86_64::status_flag::zero;
     }
     if (model_sign(result, size)) {
-        flags |= status_flag::sign;
+        flags |= zpp::arch::x86_64::status_flag::sign;
     }
     if (model_parity(result)) {
-        flags |= status_flag::parity;
+        flags |= zpp::arch::x86_64::status_flag::parity;
     }
     if ((left & 0xf) < (right & 0xf)) {
-        flags |= status_flag::adjust;
+        flags |= zpp::arch::x86_64::status_flag::adjust;
     }
     if ((model_signed(left, size) - model_signed(right, size)) !=
         model_signed(result, size)) {
-        flags |= status_flag::overflow;
+        flags |= zpp::arch::x86_64::status_flag::overflow;
     }
 
     return flags;
@@ -732,13 +735,13 @@ static std::uint64_t model_logic_flags(std::uint64_t result,
     std::uint64_t flags{};
 
     if (0 == (result & mask_of(size))) {
-        flags |= status_flag::zero;
+        flags |= zpp::arch::x86_64::status_flag::zero;
     }
     if (model_sign(result & mask_of(size), size)) {
-        flags |= status_flag::sign;
+        flags |= zpp::arch::x86_64::status_flag::sign;
     }
     if (model_parity(result)) {
-        flags |= status_flag::parity;
+        flags |= zpp::arch::x86_64::status_flag::parity;
     }
 
     return flags;
@@ -789,7 +792,8 @@ enum class model_kind : std::uint8_t
 struct semantic_case
 {
     const char * text{};
-    code_size mode{code_size::bits_64};
+    zpp::arch::x86_64::code_size mode{
+        zpp::arch::x86_64::code_size::bits_64};
     model_kind kind{};
 
     /** Width of the memory access, in bytes. */
@@ -805,52 +809,54 @@ struct semantic_case
     std::uint8_t destination{};
 };
 
-static memory_operation expected_operation(model_kind kind)
+static zpp::arch::x86_64::memory_operation
+expected_operation(model_kind kind)
 {
     switch (kind) {
     case model_kind::store:
-        return memory_operation::store;
+        return zpp::arch::x86_64::memory_operation::store;
     case model_kind::load:
     case model_kind::widen_zero:
     case model_kind::widen_sign:
-        return memory_operation::load;
+        return zpp::arch::x86_64::memory_operation::load;
     case model_kind::exchange:
-        return memory_operation::exchange;
+        return zpp::arch::x86_64::memory_operation::exchange;
     case model_kind::compare:
     case model_kind::test:
     case model_kind::bit_test:
-        return memory_operation::examine;
+        return zpp::arch::x86_64::memory_operation::examine;
     case model_kind::compare_exchange:
-        return memory_operation::compare_exchange;
+        return zpp::arch::x86_64::memory_operation::compare_exchange;
     default:
-        return memory_operation::combine;
+        return zpp::arch::x86_64::memory_operation::combine;
     }
 }
 
-static combine_with expected_combination(model_kind kind)
+static zpp::arch::x86_64::combine_with
+expected_combination(model_kind kind)
 {
     switch (kind) {
     case model_kind::logic_and:
-        return combine_with::bitwise_and;
+        return zpp::arch::x86_64::combine_with::bitwise_and;
     case model_kind::logic_or:
-        return combine_with::bitwise_or;
+        return zpp::arch::x86_64::combine_with::bitwise_or;
     case model_kind::logic_xor:
-        return combine_with::bitwise_xor;
+        return zpp::arch::x86_64::combine_with::bitwise_xor;
     case model_kind::add:
     case model_kind::increment:
     case model_kind::exchange_add:
-        return combine_with::add;
+        return zpp::arch::x86_64::combine_with::add;
     case model_kind::subtract:
     case model_kind::decrement:
-        return combine_with::subtract;
+        return zpp::arch::x86_64::combine_with::subtract;
     case model_kind::bit_set:
-        return combine_with::set_bit;
+        return zpp::arch::x86_64::combine_with::set_bit;
     case model_kind::bit_clear:
-        return combine_with::clear_bit;
+        return zpp::arch::x86_64::combine_with::clear_bit;
     case model_kind::bit_flip:
-        return combine_with::flip_bit;
+        return zpp::arch::x86_64::combine_with::flip_bit;
     default:
-        return combine_with::none;
+        return zpp::arch::x86_64::combine_with::none;
     }
 }
 
@@ -888,7 +894,7 @@ static outcome model_of(const semantic_case & instruction,
         .flags = flags_before,
     };
 
-    auto keep = flags_before & ~status_flag::arithmetic;
+    auto keep = flags_before & ~zpp::arch::x86_64::status_flag::arithmetic;
 
     switch (instruction.kind) {
     case model_kind::store:
@@ -962,8 +968,9 @@ static outcome model_of(const semantic_case & instruction,
         // flag is undefined; leaving them alone is this decoder's
         // choice.
         auto bit = (memory >> operand) & 1u;
-        result.flags = (flags_before & ~status_flag::carry) |
-                       (bit ? status_flag::carry : 0);
+        result.flags =
+            (flags_before & ~zpp::arch::x86_64::status_flag::carry) |
+            (bit ? zpp::arch::x86_64::status_flag::carry : 0);
 
         if (model_kind::bit_set == instruction.kind) {
             result.memory = memory | (std::uint64_t{1} << operand);
@@ -987,8 +994,9 @@ static outcome model_of(const semantic_case & instruction,
         auto flags = incrementing ? model_add_flags(memory, 1, size)
                                   : model_sub_flags(memory, 1, size);
 
-        result.flags = keep | (flags & ~status_flag::carry) |
-                       (flags_before & status_flag::carry);
+        result.flags =
+            keep | (flags & ~zpp::arch::x86_64::status_flag::carry) |
+            (flags_before & zpp::arch::x86_64::status_flag::carry);
         break;
     }
 
@@ -1341,9 +1349,9 @@ static const char * const g_regs8_32[] = {"%dl", "%bl"};
 static const char * const g_regs16_32[] = {"%dx", "%bx"};
 static const char * const g_regs32_32[] = {"%edx", "%ebx"};
 
-static void generate(code_size mode)
+static void generate(zpp::arch::x86_64::code_size mode)
 {
-    auto sixty_four = (code_size::bits_64 == mode);
+    auto sixty_four = (zpp::arch::x86_64::code_size::bits_64 == mode);
 
     const char * const * forms =
         sixty_four ? g_memory_forms_64 : g_memory_forms_32;
@@ -1508,25 +1516,51 @@ static void generate(code_size mode)
 static void generate_refusals()
 {
     // A register destination has no memory operand at all.
-    emit("movl %edx, %ecx", code_size::bits_64, expectation::refused);
-    emit("addl %edx, %ecx", code_size::bits_64, expectation::refused);
-    emit("btsl $3, %ecx", code_size::bits_64, expectation::refused);
+    emit("movl %edx, %ecx",
+         zpp::arch::x86_64::code_size::bits_64,
+         expectation::refused);
+    emit("addl %edx, %ecx",
+         zpp::arch::x86_64::code_size::bits_64,
+         expectation::refused);
+    emit("btsl $3, %ecx",
+         zpp::arch::x86_64::code_size::bits_64,
+         expectation::refused);
 
     // The high-byte registers alias differently without REX, so the
     // encoding would index the table and read RSP, RBP, RSI or RDI.
-    emit("movb %ah, (%rcx)", code_size::bits_64, expectation::refused);
-    emit("addb %ch, (%rcx)", code_size::bits_64, expectation::refused);
-    emit("testb %dh, (%rcx)", code_size::bits_64, expectation::refused);
-    emit("xchgb %bh, (%rcx)", code_size::bits_64, expectation::refused);
+    emit("movb %ah, (%rcx)",
+         zpp::arch::x86_64::code_size::bits_64,
+         expectation::refused);
+    emit("addb %ch, (%rcx)",
+         zpp::arch::x86_64::code_size::bits_64,
+         expectation::refused);
+    emit("testb %dh, (%rcx)",
+         zpp::arch::x86_64::code_size::bits_64,
+         expectation::refused);
+    emit("xchgb %bh, (%rcx)",
+         zpp::arch::x86_64::code_size::bits_64,
+         expectation::refused);
 
     // Encoding four without REX.B is the *host* stack pointer in the
     // context this decoder is handed.
-    emit("movq %rsp, (%rcx)", code_size::bits_64, expectation::refused);
-    emit("addq %rsp, (%rcx)", code_size::bits_64, expectation::refused);
-    emit("testq %rsp, (%rcx)", code_size::bits_64, expectation::refused);
-    emit("xchgq %rsp, (%rcx)", code_size::bits_64, expectation::refused);
-    emit("movq (%rcx), %rsp", code_size::bits_64, expectation::refused);
-    emit("movzbq (%rcx), %rsp", code_size::bits_64, expectation::refused);
+    emit("movq %rsp, (%rcx)",
+         zpp::arch::x86_64::code_size::bits_64,
+         expectation::refused);
+    emit("addq %rsp, (%rcx)",
+         zpp::arch::x86_64::code_size::bits_64,
+         expectation::refused);
+    emit("testq %rsp, (%rcx)",
+         zpp::arch::x86_64::code_size::bits_64,
+         expectation::refused);
+    emit("xchgq %rsp, (%rcx)",
+         zpp::arch::x86_64::code_size::bits_64,
+         expectation::refused);
+    emit("movq (%rcx), %rsp",
+         zpp::arch::x86_64::code_size::bits_64,
+         expectation::refused);
+    emit("movzbq (%rcx), %rsp",
+         zpp::arch::x86_64::code_size::bits_64,
+         expectation::refused);
 
     // Group 11 defines only /0; every other value of the ModRM register
     // field with a memory operand is an invalid opcode on hardware.
@@ -1536,72 +1570,137 @@ static void generate_refusals()
     // Group 5's other members are control transfers and a push. They
     // touch memory, so they reach this decoder, and emulating one as a
     // read-modify-write would be a write the guest never asked for.
-    emit("callq *(%rax)", code_size::bits_64, expectation::refused);
-    emit("jmpq *(%rax)", code_size::bits_64, expectation::refused);
-    emit("pushq (%rax)", code_size::bits_64, expectation::refused);
+    emit("callq *(%rax)",
+         zpp::arch::x86_64::code_size::bits_64,
+         expectation::refused);
+    emit("jmpq *(%rax)",
+         zpp::arch::x86_64::code_size::bits_64,
+         expectation::refused);
+    emit("pushq (%rax)",
+         zpp::arch::x86_64::code_size::bits_64,
+         expectation::refused);
 
     // Group 3's other members - not, neg, mul, imul, div, idiv.
-    emit("notl (%rcx)", code_size::bits_64, expectation::refused);
-    emit("negl (%rcx)", code_size::bits_64, expectation::refused);
-    emit("mull (%rcx)", code_size::bits_64, expectation::refused);
-    emit("divl (%rcx)", code_size::bits_64, expectation::refused);
+    emit("notl (%rcx)",
+         zpp::arch::x86_64::code_size::bits_64,
+         expectation::refused);
+    emit("negl (%rcx)",
+         zpp::arch::x86_64::code_size::bits_64,
+         expectation::refused);
+    emit("mull (%rcx)",
+         zpp::arch::x86_64::code_size::bits_64,
+         expectation::refused);
+    emit("divl (%rcx)",
+         zpp::arch::x86_64::code_size::bits_64,
+         expectation::refused);
 
     // Add-with-carry and subtract-with-borrow need a flag this decoder
     // does not carry into `apply`.
-    emit("adcl %edx, (%rcx)", code_size::bits_64, expectation::refused);
-    emit("sbbl %edx, (%rcx)", code_size::bits_64, expectation::refused);
-    emit("adcl $0x7, (%rcx)", code_size::bits_64, expectation::refused);
+    emit("adcl %edx, (%rcx)",
+         zpp::arch::x86_64::code_size::bits_64,
+         expectation::refused);
+    emit("sbbl %edx, (%rcx)",
+         zpp::arch::x86_64::code_size::bits_64,
+         expectation::refused);
+    emit("adcl $0x7, (%rcx)",
+         zpp::arch::x86_64::code_size::bits_64,
+         expectation::refused);
 
     // The reversed direction, where memory is the source of a
     // read-modify-write whose destination is the register.
-    emit("addl (%rcx), %edx", code_size::bits_64, expectation::refused);
-    emit("andl (%rcx), %edx", code_size::bits_64, expectation::refused);
-    emit("cmpl (%rcx), %edx", code_size::bits_64, expectation::refused);
+    emit("addl (%rcx), %edx",
+         zpp::arch::x86_64::code_size::bits_64,
+         expectation::refused);
+    emit("andl (%rcx), %edx",
+         zpp::arch::x86_64::code_size::bits_64,
+         expectation::refused);
+    emit("cmpl (%rcx), %edx",
+         zpp::arch::x86_64::code_size::bits_64,
+         expectation::refused);
 
     // A bit offset outside the operand names a different word of
     // memory, not a different bit of this one - the modulo the SDM
     // describes applies only to a register bit base
     // (`.references/sdm.txt:38974`). `btsl $40, (%rcx)` sets bit 8 of
     // the dword at `[rcx+4]`.
-    emit("btsl $40, (%rcx)", code_size::bits_64, expectation::refused);
-    emit("btl $32, (%rcx)", code_size::bits_64, expectation::refused);
-    emit("btrw $20, (%rcx)", code_size::bits_64, expectation::refused);
-    emit("btcq $64, (%rcx)", code_size::bits_64, expectation::refused);
-    emit("btsl $200, (%rcx)", code_size::bits_64, expectation::refused);
-    emit("btsl $40, (%ecx)", code_size::bits_32, expectation::refused);
+    emit("btsl $40, (%rcx)",
+         zpp::arch::x86_64::code_size::bits_64,
+         expectation::refused);
+    emit("btl $32, (%rcx)",
+         zpp::arch::x86_64::code_size::bits_64,
+         expectation::refused);
+    emit("btrw $20, (%rcx)",
+         zpp::arch::x86_64::code_size::bits_64,
+         expectation::refused);
+    emit("btcq $64, (%rcx)",
+         zpp::arch::x86_64::code_size::bits_64,
+         expectation::refused);
+    emit("btsl $200, (%rcx)",
+         zpp::arch::x86_64::code_size::bits_64,
+         expectation::refused);
+    emit("btsl $40, (%ecx)",
+         zpp::arch::x86_64::code_size::bits_32,
+         expectation::refused);
 
     // The same, with the offset in a register - where the value rather
     // than the encoding decides. RDI holds -1, R11 holds 0x40 and R13
     // holds 0x1f, so each of these is outside the operand it is applied
     // to and each names a word this decoder cannot address.
-    emit("btl %edi, (%rcx)", code_size::bits_64, expectation::refused);
-    emit("btsq %rdi, (%rcx)", code_size::bits_64, expectation::refused);
-    emit("btrl %r11d, (%rcx)", code_size::bits_64, expectation::refused);
-    emit("btcw %r13w, (%rcx)", code_size::bits_64, expectation::refused);
-    emit("btsq %r11, (%rcx)", code_size::bits_64, expectation::refused);
+    emit("btl %edi, (%rcx)",
+         zpp::arch::x86_64::code_size::bits_64,
+         expectation::refused);
+    emit("btsq %rdi, (%rcx)",
+         zpp::arch::x86_64::code_size::bits_64,
+         expectation::refused);
+    emit("btrl %r11d, (%rcx)",
+         zpp::arch::x86_64::code_size::bits_64,
+         expectation::refused);
+    emit("btcw %r13w, (%rcx)",
+         zpp::arch::x86_64::code_size::bits_64,
+         expectation::refused);
+    emit("btsq %r11, (%rcx)",
+         zpp::arch::x86_64::code_size::bits_64,
+         expectation::refused);
 
     // Group 5's members that are not INC or DEC. Each reads its memory
     // operand rather than modifying it, so emulating one as an increment
     // would write memory the guest never asked to write and then run on
     // from a control transfer that never happened.
-    emit("lcallq *(%rax)", code_size::bits_64, expectation::refused);
-    emit("ljmpq *(%rax)", code_size::bits_64, expectation::refused);
+    emit("lcallq *(%rax)",
+         zpp::arch::x86_64::code_size::bits_64,
+         expectation::refused);
+    emit("ljmpq *(%rax)",
+         zpp::arch::x86_64::code_size::bits_64,
+         expectation::refused);
 
     // XADD and CMPXCHG read their register operand and XADD writes it,
     // so both guards apply to both.
-    emit("xaddq %rsp, (%rcx)", code_size::bits_64, expectation::refused);
-    emit("xaddb %ah, (%rcx)", code_size::bits_64, expectation::refused);
-    emit(
-        "cmpxchgq %rsp, (%rcx)", code_size::bits_64, expectation::refused);
-    emit("cmpxchgb %ah, (%rcx)", code_size::bits_64, expectation::refused);
+    emit("xaddq %rsp, (%rcx)",
+         zpp::arch::x86_64::code_size::bits_64,
+         expectation::refused);
+    emit("xaddb %ah, (%rcx)",
+         zpp::arch::x86_64::code_size::bits_64,
+         expectation::refused);
+    emit("cmpxchgq %rsp, (%rcx)",
+         zpp::arch::x86_64::code_size::bits_64,
+         expectation::refused);
+    emit("cmpxchgb %ah, (%rcx)",
+         zpp::arch::x86_64::code_size::bits_64,
+         expectation::refused);
 
     // And with the offset taken out of the host stack pointer's slot.
-    emit("btsl %esp, (%rcx)", code_size::bits_64, expectation::refused);
-    emit("btq %rsp, (%rcx)", code_size::bits_64, expectation::refused);
+    emit("btsl %esp, (%rcx)",
+         zpp::arch::x86_64::code_size::bits_64,
+         expectation::refused);
+    emit("btq %rsp, (%rcx)",
+         zpp::arch::x86_64::code_size::bits_64,
+         expectation::refused);
 
     // An address-size prefix in 32-bit code selects 16-bit addressing,
     // which moves where the instruction ends.
-    emit("movl %edx, (%bx,%si)", code_size::bits_32, expectation::refused);
+    emit("movl %edx, (%bx,%si)",
+         zpp::arch::x86_64::code_size::bits_32,
+         expectation::refused);
 }
 
 // ------------------------------------------------------------ the runs
@@ -1623,7 +1722,8 @@ static void check_lengths_and_addresses()
             code.push_back(static_cast<std::byte>(byte));
         }
 
-        auto decoded = decode(code, g_registers, item.mode);
+        auto decoded =
+            zpp::arch::x86_64::decode(code, g_registers, item.mode);
 
         if (expectation::refused == item.expect) {
             ++refused;
@@ -1652,8 +1752,10 @@ static void check_lengths_and_addresses()
         if (code.size() > 1) {
             auto shorter =
                 std::span<const std::byte>(code).first(code.size() - 1);
-            check(!decode(shorter, g_registers, item.mode).has_value(),
-                  "truncation must be refused: " + item.text);
+            check(
+                !zpp::arch::x86_64::decode(shorter, g_registers, item.mode)
+                     .has_value(),
+                "truncation must be refused: " + item.text);
         }
 
         auto printed = find_memory(item.operands);
@@ -1669,7 +1771,8 @@ static void check_lengths_and_addresses()
         check(decoded->where.known,
               "memory operand printed, none decoded: " + item.text);
 
-        auto address = effective_address(*decoded, g_registers, guest_rip);
+        auto address = zpp::arch::x86_64::effective_address(
+            *decoded, g_registers, guest_rip);
 
         auto names_stack = printed.has_base && (4 == printed.base);
 
@@ -1716,7 +1819,8 @@ static void check_sixteen_bit_refusal()
     auto tried = 0;
 
     for (auto & item : g_corpus) {
-        if ((code_size::bits_32 != item.mode) || item.bytes.empty()) {
+        if ((zpp::arch::x86_64::code_size::bits_32 != item.mode) ||
+            item.bytes.empty()) {
             continue;
         }
 
@@ -1726,8 +1830,11 @@ static void check_sixteen_bit_refusal()
         }
 
         ++tried;
-        check(!decode(code, g_registers, code_size::bits_16).has_value(),
-              "16-bit code must be refused: " + item.text);
+        check(
+            !zpp::arch::x86_64::decode(
+                 code, g_registers, zpp::arch::x86_64::code_size::bits_16)
+                 .has_value(),
+            "16-bit code must be refused: " + item.text);
     }
 
     std::println("  {} instructions refused in 16-bit code", tried);
@@ -1755,9 +1862,10 @@ static const std::uint64_t g_memory_samples[] = {
 
 static const std::uint64_t g_flag_samples[] = {
     0x2,
-    0x2 | status_flag::carry,
-    0x2 | status_flag::arithmetic,
-    0x2 | status_flag::zero | status_flag::sign,
+    0x2 | zpp::arch::x86_64::status_flag::carry,
+    0x2 | zpp::arch::x86_64::status_flag::arithmetic,
+    0x2 | zpp::arch::x86_64::status_flag::zero |
+        zpp::arch::x86_64::status_flag::sign,
     0x246,
 };
 
@@ -1777,7 +1885,8 @@ static void check_semantics()
             code.push_back(static_cast<std::byte>(byte));
         }
 
-        auto decoded = decode(code, g_registers, item.mode);
+        auto decoded =
+            zpp::arch::x86_64::decode(code, g_registers, item.mode);
         if (!decoded) {
             check(false,
                   std::string("must be decoded: ") + instruction.text);
@@ -1808,30 +1917,32 @@ static void check_semantics()
                   "destination" + named);
         }
 
-        auto previous = g_registers.*register_of(instruction.destination);
+        auto previous = g_registers.*zpp::arch::x86_64::register_of(
+                                         instruction.destination);
 
         for (auto memory : g_memory_samples) {
             for (auto flags : g_flag_samples) {
                 auto expected =
                     model_of(instruction, memory, previous, flags);
 
-                auto replacement = apply(*decoded, memory);
+                auto replacement =
+                    zpp::arch::x86_64::apply(*decoded, memory);
                 check(replacement ==
                           (expected.memory & mask_of(instruction.size)),
                       "memory " + hex(replacement) +
                           " != " + hex(expected.memory) + " from " +
                           hex(memory) + named);
 
-                auto after =
-                    flags_after(*decoded, flags, memory, replacement);
+                auto after = zpp::arch::x86_64::flags_after(
+                    *decoded, flags, memory, replacement);
                 check(after == expected.flags,
                       "flags " + hex(after) +
                           " != " + hex(expected.flags) + " from " +
                           hex(memory) + " and " + hex(flags) + named);
 
                 if (instruction.writes_register) {
-                    auto value =
-                        result_for_register(*decoded, memory, previous);
+                    auto value = zpp::arch::x86_64::result_for_register(
+                        *decoded, memory, previous);
                     check(value == expected.reg,
                           "register " + hex(value) +
                               " != " + hex(expected.reg) + " from " +
@@ -1847,8 +1958,8 @@ static void check_semantics()
 // -------------------------------------------------------------- main
 int main()
 {
-    generate(code_size::bits_64);
-    generate(code_size::bits_32);
+    generate(zpp::arch::x86_64::code_size::bits_64);
+    generate(zpp::arch::x86_64::code_size::bits_32);
     generate_refusals();
 
     for (auto & instruction : g_semantics) {
@@ -1858,8 +1969,8 @@ int main()
              &instruction);
     }
 
-    assemble(code_size::bits_64, "64");
-    assemble(code_size::bits_32, "32");
+    assemble(zpp::arch::x86_64::code_size::bits_64, "64");
+    assemble(zpp::arch::x86_64::code_size::bits_32, "32");
 
     std::println("{} instructions in the corpus", g_corpus.size());
 

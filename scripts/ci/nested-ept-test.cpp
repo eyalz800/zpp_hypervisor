@@ -37,14 +37,11 @@
 #include <cstdio>
 #include <optional>
 
-using namespace zpp::arch::x86_64;
-using namespace zpp::arch::x86_64::vmx;
-
 // The sixteen permission sets, indexed by the four bits in the order
 // `ept_permissions` takes them: read, write, execute, execute_user.
-constexpr ept_permissions permissions_number(int i)
+constexpr zpp::arch::x86_64::vmx::ept_permissions permissions_number(int i)
 {
-    return ept_permissions(
+    return zpp::arch::x86_64::vmx::ept_permissions(
         0 != (i & 1), 0 != (i & 2), 0 != (i & 4), 0 != (i & 8));
 }
 
@@ -52,9 +49,11 @@ constexpr ept_permissions permissions_number(int i)
 // ept_permissions: intersection and normalisation.
 // ---------------------------------------------------------------------------
 
-constexpr auto rwx = ept_permissions(true, true, true, true);
-constexpr auto read_only = ept_permissions(true, false, false, false);
-constexpr auto nothing = ept_permissions();
+constexpr auto rwx =
+    zpp::arch::x86_64::vmx::ept_permissions(true, true, true, true);
+constexpr auto read_only =
+    zpp::arch::x86_64::vmx::ept_permissions(true, false, false, false);
+constexpr auto nothing = zpp::arch::x86_64::vmx::ept_permissions();
 
 static_assert(rwx.present());
 static_assert(!nothing.present());
@@ -70,19 +69,20 @@ static_assert(!rwx.intersected_with(nothing).present());
 
 // Normalisation: write without read is what an intersection can produce
 // and what SDM 31.3.3.1 makes a misconfiguration.
-constexpr auto write_no_read = ept_permissions(false, true, false, false);
+constexpr auto write_no_read =
+    zpp::arch::x86_64::vmx::ept_permissions(false, true, false, false);
 static_assert(write_no_read.normalised(false) == nothing);
 static_assert(write_no_read.normalised(true) == nothing);
 
 // Execute without read is legal only where execute-only translations are
 // reported, and then only for execute - never for write.
 constexpr auto execute_no_read =
-    ept_permissions(false, false, true, false);
+    zpp::arch::x86_64::vmx::ept_permissions(false, false, true, false);
 static_assert(execute_no_read.normalised(false) == nothing);
 static_assert(execute_no_read.normalised(true) == execute_no_read);
 
 constexpr auto user_execute_no_read =
-    ept_permissions(false, false, false, true);
+    zpp::arch::x86_64::vmx::ept_permissions(false, false, false, true);
 static_assert(user_execute_no_read.normalised(false) == nothing);
 static_assert(user_execute_no_read.normalised(true) ==
               user_execute_no_read);
@@ -90,7 +90,7 @@ static_assert(user_execute_no_read.normalised(true) ==
 // Write and execute without read: the write must go even where
 // execute-only is available.
 constexpr auto write_execute_no_read =
-    ept_permissions(false, true, true, false);
+    zpp::arch::x86_64::vmx::ept_permissions(false, true, true, false);
 static_assert(write_execute_no_read.normalised(true) == execute_no_read);
 
 // Anything with read is already legal and must be left exactly alone.
@@ -99,7 +99,8 @@ static_assert(read_only.normalised(false) == read_only);
 
 // Normalisation only ever removes. Checked as a property rather than by
 // example, because "it never adds read" is the safety argument.
-constexpr bool never_adds(ept_permissions before, bool execute_only)
+constexpr bool never_adds(zpp::arch::x86_64::vmx::ept_permissions before,
+                          bool execute_only)
 {
     auto after = before.normalised(execute_only);
     return (!after.read() || before.read()) &&
@@ -111,7 +112,7 @@ constexpr bool never_adds(ept_permissions before, bool execute_only)
 constexpr bool never_adds_anywhere()
 {
     for (int i = 0; i < 16; ++i) {
-        auto before = ept_permissions(
+        auto before = zpp::arch::x86_64::vmx::ept_permissions(
             0 != (i & 1), 0 != (i & 2), 0 != (i & 4), 0 != (i & 8));
         if (!never_adds(before, false) || !never_adds(before, true)) {
             return false;
@@ -128,7 +129,7 @@ static_assert(never_adds_anywhere());
 constexpr bool always_legal()
 {
     for (int i = 0; i < 16; ++i) {
-        auto before = ept_permissions(
+        auto before = zpp::arch::x86_64::vmx::ept_permissions(
             0 != (i & 1), 0 != (i & 2), 0 != (i & 4), 0 != (i & 8));
 
         for (auto execute_only : {false, true}) {
@@ -261,14 +262,15 @@ static_assert(normalisation_is_idempotent());
 // mapping.
 // ---------------------------------------------------------------------------
 
-constexpr ept_walk_result mapped_with(ept_permissions permissions,
-                                      std::uint64_t shift = 12)
+constexpr zpp::arch::x86_64::vmx::ept_walk_result
+mapped_with(zpp::arch::x86_64::vmx::ept_permissions permissions,
+            std::uint64_t shift = 12)
 {
-    ept_walk_result result;
-    result.status = ept_walk_status::mapped;
+    zpp::arch::x86_64::vmx::ept_walk_result result;
+    result.status = zpp::arch::x86_64::vmx::ept_walk_status::mapped;
     result.page_shift = shift;
     result.permissions = permissions;
-    result.type = memory_type::write_back;
+    result.type = zpp::arch::x86_64::memory_type::write_back;
     return result;
 }
 
@@ -291,9 +293,10 @@ constexpr bool composition_is_the_normalised_intersection()
             auto host = permissions_number(j);
 
             for (auto execute_only : {false, true}) {
-                auto composed = compose_ept(mapped_with(guest),
-                                            mapped_with(host, 21),
-                                            execute_only);
+                auto composed = zpp::arch::x86_64::vmx::compose_ept(
+                    mapped_with(guest),
+                    mapped_with(host, 21),
+                    execute_only);
 
                 auto wanted =
                     permissions_number(i & j).normalised(execute_only);
@@ -302,14 +305,15 @@ constexpr bool composition_is_the_normalised_intersection()
                     // Nothing left to install. Never `composed`, and
                     // never reflected either - see the outcome rule
                     // below.
-                    if (ept_compose_outcome::composed ==
-                        composed.outcome) {
+                    if (zpp::arch::x86_64::vmx::ept_compose_outcome::
+                            composed == composed.outcome) {
                         return false;
                     }
                     continue;
                 }
 
-                if (ept_compose_outcome::composed != composed.outcome) {
+                if (zpp::arch::x86_64::vmx::ept_compose_outcome::
+                        composed != composed.outcome) {
                     return false;
                 }
 
@@ -334,14 +338,14 @@ constexpr bool composition_is_symmetric_in_permissions()
     for (int i = 0; i < 16; ++i) {
         for (int j = 0; j < 16; ++j) {
             for (auto execute_only : {false, true}) {
-                auto forward =
-                    compose_ept(mapped_with(permissions_number(i)),
-                                mapped_with(permissions_number(j), 21),
-                                execute_only);
-                auto backward =
-                    compose_ept(mapped_with(permissions_number(j)),
-                                mapped_with(permissions_number(i), 21),
-                                execute_only);
+                auto forward = zpp::arch::x86_64::vmx::compose_ept(
+                    mapped_with(permissions_number(i)),
+                    mapped_with(permissions_number(j), 21),
+                    execute_only);
+                auto backward = zpp::arch::x86_64::vmx::compose_ept(
+                    mapped_with(permissions_number(j)),
+                    mapped_with(permissions_number(i), 21),
+                    execute_only);
 
                 if (forward.outcome != backward.outcome) {
                     return false;
@@ -370,9 +374,10 @@ constexpr bool composition_grants_nothing_new()
             auto host = permissions_number(j);
 
             for (auto execute_only : {false, true}) {
-                auto got = compose_ept(mapped_with(guest),
-                                       mapped_with(host, 21),
-                                       execute_only)
+                auto got = zpp::arch::x86_64::vmx::compose_ept(
+                               mapped_with(guest),
+                               mapped_with(host, 21),
+                               execute_only)
                                .permissions;
 
                 if (got.read() && !(guest.read() && host.read())) {
@@ -406,16 +411,18 @@ constexpr bool an_empty_side_is_never_reflected()
     for (int i = 0; i < 16; ++i) {
         for (int j = 0; j < 16; ++j) {
             for (auto execute_only : {false, true}) {
-                auto composed =
-                    compose_ept(mapped_with(permissions_number(i)),
-                                mapped_with(permissions_number(j), 21),
-                                execute_only);
+                auto composed = zpp::arch::x86_64::vmx::compose_ept(
+                    mapped_with(permissions_number(i)),
+                    mapped_with(permissions_number(j), 21),
+                    execute_only);
 
-                if (ept_compose_outcome::composed == composed.outcome) {
+                if (zpp::arch::x86_64::vmx::ept_compose_outcome::
+                        composed == composed.outcome) {
                     continue;
                 }
 
-                if (ept_compose_outcome::host_denied != composed.outcome) {
+                if (zpp::arch::x86_64::vmx::ept_compose_outcome::
+                        host_denied != composed.outcome) {
                     return false;
                 }
             }
@@ -447,9 +454,10 @@ constexpr std::uint64_t physical_address_bits = 46;
 constexpr std::uint64_t translated =
     (1ull << 39) | (2ull << 30) | (3ull << 21) | (4ull << 12) | 0x678;
 
-constexpr epte table_entry(std::uint64_t page_number)
+constexpr zpp::arch::x86_64::vmx::epte
+table_entry(std::uint64_t page_number)
 {
-    epte entry;
+    zpp::arch::x86_64::vmx::epte entry;
     entry.read(true);
     entry.write(true);
     entry.execute(true);
@@ -458,11 +466,13 @@ constexpr epte table_entry(std::uint64_t page_number)
     return entry;
 }
 
-constexpr epte leaf_entry(std::uint64_t page_number,
-                          bool large,
-                          memory_type type = memory_type::write_back)
+constexpr zpp::arch::x86_64::vmx::epte
+leaf_entry(std::uint64_t page_number,
+           bool large,
+           zpp::arch::x86_64::memory_type type =
+               zpp::arch::x86_64::memory_type::write_back)
 {
-    epte entry;
+    zpp::arch::x86_64::vmx::epte entry;
     entry.read(true);
     entry.write(true);
     entry.execute(true);
@@ -477,15 +487,16 @@ constexpr epte leaf_entry(std::uint64_t page_number,
 // shape rather than a fresh table.
 struct tree
 {
-    epte pml4{table_entry(pdpt_at >> 12)};
-    epte pdpte{table_entry(pd_at >> 12)};
-    epte pde{table_entry(pt_at >> 12)};
-    epte pte{leaf_entry(0x9abcd, false)};
+    zpp::arch::x86_64::vmx::epte pml4{table_entry(pdpt_at >> 12)};
+    zpp::arch::x86_64::vmx::epte pdpte{table_entry(pd_at >> 12)};
+    zpp::arch::x86_64::vmx::epte pde{table_entry(pt_at >> 12)};
+    zpp::arch::x86_64::vmx::epte pte{leaf_entry(0x9abcd, false)};
 };
 
 constexpr auto reader_for(const tree & of)
 {
-    return [&of](std::uint64_t at) -> std::optional<epte> {
+    return [&of](std::uint64_t at)
+               -> std::optional<zpp::arch::x86_64::vmx::epte> {
         switch (at) {
         case pml4_at + (1 * 8):
             return of.pml4;
@@ -503,24 +514,27 @@ constexpr auto reader_for(const tree & of)
     };
 }
 
-constexpr ept_walk_result walk(const tree & of,
-                               std::uint64_t guest_physical = translated,
-                               bool execute_only = false)
+constexpr zpp::arch::x86_64::vmx::ept_walk_result
+walk(const tree & of,
+     std::uint64_t guest_physical = translated,
+     bool execute_only = false)
 {
-    return walk_ept(pml4_at,
-                    guest_physical,
-                    physical_address_bits,
-                    execute_only,
-                    reader_for(of));
+    return zpp::arch::x86_64::vmx::walk_ept(pml4_at,
+                                            guest_physical,
+                                            physical_address_bits,
+                                            execute_only,
+                                            reader_for(of));
 }
 
 // The plain case: four levels, a 4 KB leaf.
-static_assert(walk(tree{}).status == ept_walk_status::mapped);
+static_assert(walk(tree{}).status ==
+              zpp::arch::x86_64::vmx::ept_walk_status::mapped);
 static_assert(walk(tree{}).page_shift == 12);
 static_assert(walk(tree{}).physical_address ==
               ((0x9abcdull << 12) | 0x678));
 static_assert(walk(tree{}).permissions == rwx);
-static_assert(walk(tree{}).type == memory_type::write_back);
+static_assert(walk(tree{}).type ==
+              zpp::arch::x86_64::memory_type::write_back);
 
 // A 2 MB leaf at the page-directory level. The offset kept is bits 20:0 of
 // the address, per SDM 31.3.2's "Bits 20:0 are from the original
@@ -532,7 +546,8 @@ constexpr tree two_megabyte = [] {
     return of;
 }();
 
-static_assert(walk(two_megabyte).status == ept_walk_status::mapped);
+static_assert(walk(two_megabyte).status ==
+              zpp::arch::x86_64::vmx::ept_walk_status::mapped);
 static_assert(walk(two_megabyte).page_shift == 21);
 static_assert(walk(two_megabyte).physical_address ==
               ((0x123ull << 21) | (translated & 0x1fffff)));
@@ -541,11 +556,13 @@ static_assert(walk(two_megabyte).physical_address ==
 constexpr tree one_gigabyte = [] {
     tree of;
     of.pdpte = leaf_entry(0, true);
-    of.pdpte = epte(of.pdpte.value() | (0x5ull << 30));
+    of.pdpte =
+        zpp::arch::x86_64::vmx::epte(of.pdpte.value() | (0x5ull << 30));
     return of;
 }();
 
-static_assert(walk(one_gigabyte).status == ept_walk_status::mapped);
+static_assert(walk(one_gigabyte).status ==
+              zpp::arch::x86_64::vmx::ept_walk_status::mapped);
 static_assert(walk(one_gigabyte).page_shift == 30);
 static_assert(walk(one_gigabyte).physical_address ==
               ((0x5ull << 30) | (translated & 0x3fffffff)));
@@ -561,7 +578,8 @@ constexpr tree read_only_pdpte = [] {
     return of;
 }();
 
-static_assert(walk(read_only_pdpte).status == ept_walk_status::mapped);
+static_assert(walk(read_only_pdpte).status ==
+              zpp::arch::x86_64::vmx::ept_walk_status::mapped);
 static_assert(!walk(read_only_pdpte).permissions.write());
 static_assert(walk(read_only_pdpte).permissions.read());
 
@@ -577,7 +595,8 @@ constexpr tree absent_pde = [] {
     return of;
 }();
 
-static_assert(walk(absent_pde).status == ept_walk_status::not_present);
+static_assert(walk(absent_pde).status ==
+              zpp::arch::x86_64::vmx::ept_walk_status::not_present);
 static_assert(walk(absent_pde).permissions == nothing);
 
 // Write without read is a misconfiguration, at any level.
@@ -588,7 +607,7 @@ constexpr tree write_only_pde = [] {
 }();
 
 static_assert(walk(write_only_pde).status ==
-              ept_walk_status::misconfigured);
+              zpp::arch::x86_64::vmx::ept_walk_status::misconfigured);
 
 // Execute without read is a misconfiguration only where execute-only
 // translations are not supported. The same table gives both answers, which
@@ -602,20 +621,20 @@ constexpr tree execute_only_pde = [] {
 }();
 
 static_assert(walk(execute_only_pde, translated, false).status ==
-              ept_walk_status::misconfigured);
+              zpp::arch::x86_64::vmx::ept_walk_status::misconfigured);
 static_assert(walk(execute_only_pde, translated, true).status ==
-              ept_walk_status::mapped);
+              zpp::arch::x86_64::vmx::ept_walk_status::mapped);
 
 // A reserved memory type in a leaf is a misconfiguration. 2, 3 and 7 are
 // the reserved values per SDM 31.3.7.2.
 constexpr tree reserved_type = [] {
     tree of;
-    of.pte = leaf_entry(0x9abcd, false, memory_type(3));
+    of.pte = leaf_entry(0x9abcd, false, zpp::arch::x86_64::memory_type(3));
     return of;
 }();
 
 static_assert(walk(reserved_type).status ==
-              ept_walk_status::misconfigured);
+              zpp::arch::x86_64::vmx::ept_walk_status::misconfigured);
 
 // A memory type in a *non-leaf* entry is a reserved bit rather than a
 // type: SDM Table 31-6 reserves bits 6:3 of a page-directory entry that
@@ -623,39 +642,41 @@ static_assert(walk(reserved_type).status ==
 // splits; here the walker has to notice when a guest does not.
 constexpr tree type_in_table_entry = [] {
     tree of;
-    of.pde.type(memory_type::write_back);
+    of.pde.type(zpp::arch::x86_64::memory_type::write_back);
     return of;
 }();
 
 static_assert(walk(type_in_table_entry).status ==
-              ept_walk_status::misconfigured);
+              zpp::arch::x86_64::vmx::ept_walk_status::misconfigured);
 
 // An address bit at or above the processor's physical-address width is a
 // reserved bit, so also a misconfiguration.
 constexpr tree address_too_wide = [] {
     tree of;
-    of.pde = epte(of.pde.value() | (1ull << physical_address_bits));
+    of.pde = zpp::arch::x86_64::vmx::epte(of.pde.value() |
+                                          (1ull << physical_address_bits));
     return of;
 }();
 
 static_assert(walk(address_too_wide).status ==
-              ept_walk_status::misconfigured);
+              zpp::arch::x86_64::vmx::ept_walk_status::misconfigured);
 
 // A 2 MB leaf must have bits 20:12 of its address clear - SDM Table 31-5.
 constexpr tree misaligned_large_leaf = [] {
     tree of;
     of.pde = leaf_entry(0, true);
     of.pde.large_page_number(0x123);
-    of.pde = epte(of.pde.value() | (1ull << 13));
+    of.pde = zpp::arch::x86_64::vmx::epte(of.pde.value() | (1ull << 13));
     return of;
 }();
 
 static_assert(walk(misaligned_large_leaf).status ==
-              ept_walk_status::misconfigured);
+              zpp::arch::x86_64::vmx::ept_walk_status::misconfigured);
 
 // Bits 51:48 of a guest-physical address must be zero with 4-level EPT.
-static_assert(walk(tree{}, translated | (1ull << 48)).status ==
-              ept_walk_status::address_out_of_range);
+static_assert(
+    walk(tree{}, translated | (1ull << 48)).status ==
+    zpp::arch::x86_64::vmx::ept_walk_status::address_out_of_range);
 static_assert(walk(tree{}, translated | (1ull << 48)).permissions ==
               nothing);
 
@@ -667,7 +688,8 @@ constexpr tree large_pml4e = [] {
     return of;
 }();
 
-static_assert(walk(large_pml4e).status == ept_walk_status::misconfigured);
+static_assert(walk(large_pml4e).status ==
+              zpp::arch::x86_64::vmx::ept_walk_status::misconfigured);
 
 // An entry that cannot be read at all is reported as absent rather than
 // mapped, which is what a table outside guest memory has to come out as.
@@ -678,7 +700,7 @@ constexpr tree unreachable_table = [] {
 }();
 
 static_assert(walk(unreachable_table).status ==
-              ept_walk_status::not_present);
+              zpp::arch::x86_64::vmx::ept_walk_status::not_present);
 
 // A reserved bit in an entry that is *not present* is not a
 // misconfiguration: SDM 31.3.3.1 guards that whole group with "The entry
@@ -690,12 +712,12 @@ constexpr tree absent_with_reserved_bit = [] {
     of.pde.write(false);
     of.pde.execute(false);
     of.pde.execute_user(false);
-    of.pde.type(memory_type::write_back);
+    of.pde.type(zpp::arch::x86_64::memory_type::write_back);
     return of;
 }();
 
 static_assert(walk(absent_with_reserved_bit).status ==
-              ept_walk_status::not_present);
+              zpp::arch::x86_64::vmx::ept_walk_status::not_present);
 
 // A permission set the walker rejects is exactly one normalisation would
 // have changed, over all sixteen and both capability settings. The two are
@@ -708,13 +730,14 @@ constexpr bool normalised_agrees_with_misconfigured()
         for (auto execute_only : {false, true}) {
             auto before = permissions_number(i);
 
-            epte entry;
+            zpp::arch::x86_64::vmx::epte entry;
             before.apply_to(entry);
             entry.page_number(1);
-            entry.type(memory_type::write_back);
+            entry.type(zpp::arch::x86_64::memory_type::write_back);
 
-            auto rejected = ept_walk::misconfigured(
-                entry, 0, true, physical_address_bits, execute_only);
+            auto rejected =
+                zpp::arch::x86_64::vmx::ept_walk::misconfigured(
+                    entry, 0, true, physical_address_bits, execute_only);
 
             if (rejected != (before != before.normalised(execute_only))) {
                 return false;
@@ -744,20 +767,23 @@ constexpr bool the_walk_agrees_with_the_rules()
             auto result = walk(of, translated, execute_only);
 
             if (!wanted.present()) {
-                if (ept_walk_status::not_present != result.status) {
+                if (zpp::arch::x86_64::vmx::ept_walk_status::not_present !=
+                    result.status) {
                     return false;
                 }
                 continue;
             }
 
             if (wanted != wanted.normalised(execute_only)) {
-                if (ept_walk_status::misconfigured != result.status) {
+                if (zpp::arch::x86_64::vmx::ept_walk_status::
+                        misconfigured != result.status) {
                     return false;
                 }
                 continue;
             }
 
-            if (ept_walk_status::mapped != result.status) {
+            if (zpp::arch::x86_64::vmx::ept_walk_status::mapped !=
+                result.status) {
                 return false;
             }
 
@@ -775,14 +801,15 @@ static_assert(the_walk_agrees_with_the_rules());
 // compose_ept: who owns the fault, and what gets installed.
 // ---------------------------------------------------------------------------
 
-constexpr ept_walk_result
+constexpr zpp::arch::x86_64::vmx::ept_walk_result
 mapped_at(std::uint64_t physical,
           std::uint64_t shift,
-          ept_permissions permissions,
-          memory_type type = memory_type::write_back)
+          zpp::arch::x86_64::vmx::ept_permissions permissions,
+          zpp::arch::x86_64::memory_type type =
+              zpp::arch::x86_64::memory_type::write_back)
 {
-    ept_walk_result result;
-    result.status = ept_walk_status::mapped;
+    zpp::arch::x86_64::vmx::ept_walk_result result;
+    result.status = zpp::arch::x86_64::vmx::ept_walk_status::mapped;
     result.physical_address = physical;
     result.page_shift = shift;
     result.permissions = permissions;
@@ -790,21 +817,23 @@ mapped_at(std::uint64_t physical,
     return result;
 }
 
-constexpr ept_walk_result failed_with(ept_walk_status status)
+constexpr zpp::arch::x86_64::vmx::ept_walk_result
+failed_with(zpp::arch::x86_64::vmx::ept_walk_status status)
 {
-    ept_walk_result result;
+    zpp::arch::x86_64::vmx::ept_walk_result result;
     result.status = status;
-    result.permissions = ept_permissions();
+    result.permissions = zpp::arch::x86_64::vmx::ept_permissions();
     return result;
 }
 
-constexpr auto host_rwx_2mb =
-    mapped_at(0x40000000, 21, rwx, memory_type::write_back);
+constexpr auto host_rwx_2mb = mapped_at(
+    0x40000000, 21, rwx, zpp::arch::x86_64::memory_type::write_back);
 
 // The ordinary case: both sides map it, both grant everything.
-constexpr auto plain =
-    compose_ept(mapped_at(0x8000, 12, rwx), host_rwx_2mb, false);
-static_assert(plain.outcome == ept_compose_outcome::composed);
+constexpr auto plain = zpp::arch::x86_64::vmx::compose_ept(
+    mapped_at(0x8000, 12, rwx), host_rwx_2mb, false);
+static_assert(plain.outcome ==
+              zpp::arch::x86_64::vmx::ept_compose_outcome::composed);
 static_assert(plain.permissions == rwx);
 static_assert(plain.physical_address == 0x40000000);
 
@@ -812,80 +841,111 @@ static_assert(plain.physical_address == 0x40000000);
 // under a 4 KB one of L1's must not become a 2 MB shadow leaf, or the
 // shadow grants a whole 2 MB the permissions of one page.
 static_assert(plain.page_shift == 12);
-static_assert(compose_ept(mapped_at(0, 21, rwx), host_rwx_2mb, false)
+static_assert(zpp::arch::x86_64::vmx::compose_ept(mapped_at(0, 21, rwx),
+                                                  host_rwx_2mb,
+                                                  false)
                   .page_shift == 21);
-static_assert(compose_ept(mapped_at(0, 30, rwx), host_rwx_2mb, false)
+static_assert(zpp::arch::x86_64::vmx::compose_ept(mapped_at(0, 30, rwx),
+                                                  host_rwx_2mb,
+                                                  false)
                   .page_shift == 21);
 
 // The memory type is ours, never L1's - the recorded divergence.
-static_assert(compose_ept(mapped_at(0, 12, rwx, memory_type::uncachable),
-                          mapped_at(0, 21, rwx, memory_type::write_back),
-                          false)
-                  .type == memory_type::write_back);
+static_assert(
+    zpp::arch::x86_64::vmx::compose_ept(
+        mapped_at(0, 12, rwx, zpp::arch::x86_64::memory_type::uncachable),
+        mapped_at(0, 21, rwx, zpp::arch::x86_64::memory_type::write_back),
+        false)
+        .type == zpp::arch::x86_64::memory_type::write_back);
 
 // Permissions intersect. A page we watch - write removed on our side -
 // stays installable as read-only rather than becoming L1's business.
-constexpr auto watched =
-    compose_ept(mapped_at(0, 12, rwx),
-                mapped_at(0, 21, ept_permissions(true, false, true, true)),
-                false);
-static_assert(watched.outcome == ept_compose_outcome::composed);
+constexpr auto watched = zpp::arch::x86_64::vmx::compose_ept(
+    mapped_at(0, 12, rwx),
+    mapped_at(
+        0,
+        21,
+        zpp::arch::x86_64::vmx::ept_permissions(true, false, true, true)),
+    false);
+static_assert(watched.outcome ==
+              zpp::arch::x86_64::vmx::ept_compose_outcome::composed);
 static_assert(!watched.permissions.write());
 static_assert(watched.permissions.read());
 
 // A gap in L1's tables is L1's to hear about, and the two ways of having
 // one produce the same answer.
-static_assert(compose_ept(failed_with(ept_walk_status::not_present),
-                          host_rwx_2mb,
-                          false)
-                  .outcome == ept_compose_outcome::reflect_violation);
 static_assert(
-    compose_ept(failed_with(ept_walk_status::address_out_of_range),
-                host_rwx_2mb,
-                false)
-        .outcome == ept_compose_outcome::reflect_violation);
+    zpp::arch::x86_64::vmx::compose_ept(
+        failed_with(zpp::arch::x86_64::vmx::ept_walk_status::not_present),
+        host_rwx_2mb,
+        false)
+        .outcome ==
+    zpp::arch::x86_64::vmx::ept_compose_outcome::reflect_violation);
+static_assert(
+    zpp::arch::x86_64::vmx::compose_ept(
+        failed_with(
+            zpp::arch::x86_64::vmx::ept_walk_status::address_out_of_range),
+        host_rwx_2mb,
+        false)
+        .outcome ==
+    zpp::arch::x86_64::vmx::ept_compose_outcome::reflect_violation);
 
 // A misconfiguration in L1's tables is reflected as one, not as a
 // violation.
-static_assert(compose_ept(failed_with(ept_walk_status::misconfigured),
-                          host_rwx_2mb,
-                          false)
-                  .outcome ==
-              ept_compose_outcome::reflect_misconfiguration);
+static_assert(
+    zpp::arch::x86_64::vmx::compose_ept(
+        failed_with(
+            zpp::arch::x86_64::vmx::ept_walk_status::misconfigured),
+        host_rwx_2mb,
+        false)
+        .outcome ==
+    zpp::arch::x86_64::vmx::ept_compose_outcome::reflect_misconfiguration);
 
 // L1's tables are consulted first, so a fault they explain is theirs even
 // where ours would also have refused. Getting this order wrong absorbs a
 // fault L1 is waiting for.
-static_assert(compose_ept(failed_with(ept_walk_status::not_present),
-                          failed_with(ept_walk_status::not_present),
-                          false)
-                  .outcome == ept_compose_outcome::reflect_violation);
+static_assert(
+    zpp::arch::x86_64::vmx::compose_ept(
+        failed_with(zpp::arch::x86_64::vmx::ept_walk_status::not_present),
+        failed_with(zpp::arch::x86_64::vmx::ept_walk_status::not_present),
+        false)
+        .outcome ==
+    zpp::arch::x86_64::vmx::ept_compose_outcome::reflect_violation);
 
 // Our own gap, with L1's tables fine, is ours.
-static_assert(compose_ept(mapped_at(0, 12, rwx),
-                          failed_with(ept_walk_status::not_present),
-                          false)
-                  .outcome == ept_compose_outcome::host_denied);
-static_assert(compose_ept(mapped_at(0, 12, rwx),
-                          failed_with(ept_walk_status::misconfigured),
-                          false)
-                  .outcome == ept_compose_outcome::host_denied);
+static_assert(
+    zpp::arch::x86_64::vmx::compose_ept(
+        mapped_at(0, 12, rwx),
+        failed_with(zpp::arch::x86_64::vmx::ept_walk_status::not_present),
+        false)
+        .outcome ==
+    zpp::arch::x86_64::vmx::ept_compose_outcome::host_denied);
+static_assert(
+    zpp::arch::x86_64::vmx::compose_ept(
+        mapped_at(0, 12, rwx),
+        failed_with(
+            zpp::arch::x86_64::vmx::ept_walk_status::misconfigured),
+        false)
+        .outcome ==
+    zpp::arch::x86_64::vmx::ept_compose_outcome::host_denied);
 
 // A module page - everything cleared on our side - is ours, and is never
 // reflected. L1's tables map it perfectly well and it must not be told
 // otherwise.
-static_assert(compose_ept(mapped_at(0, 12, rwx),
-                          mapped_at(0, 21, nothing),
-                          false)
-                  .outcome == ept_compose_outcome::host_denied);
+static_assert(zpp::arch::x86_64::vmx::compose_ept(
+                  mapped_at(0, 12, rwx), mapped_at(0, 21, nothing), false)
+                  .outcome ==
+              zpp::arch::x86_64::vmx::ept_compose_outcome::host_denied);
 
 // Two permission sets overlapping in nothing is also ours, for the same
 // reason: L1's walk succeeded, so saying its tables refused would be
 // false.
-static_assert(compose_ept(mapped_at(0, 12, read_only),
-                          mapped_at(0, 21, execute_no_read),
-                          true)
-                  .outcome == ept_compose_outcome::host_denied);
+static_assert(
+    zpp::arch::x86_64::vmx::compose_ept(mapped_at(0, 12, read_only),
+                                        mapped_at(0, 21, execute_no_read),
+                                        true)
+        .outcome ==
+    zpp::arch::x86_64::vmx::ept_compose_outcome::host_denied);
 
 // And whatever is composed is always something the processor accepts,
 // which is normalisation applied after the intersection rather than
@@ -894,17 +954,19 @@ constexpr bool composition_always_legal()
 {
     for (int i = 1; i < 16; ++i) {
         for (int j = 1; j < 16; ++j) {
-            auto left = ept_permissions(
+            auto left = zpp::arch::x86_64::vmx::ept_permissions(
                 0 != (i & 1), 0 != (i & 2), 0 != (i & 4), 0 != (i & 8));
-            auto right = ept_permissions(
+            auto right = zpp::arch::x86_64::vmx::ept_permissions(
                 0 != (j & 1), 0 != (j & 2), 0 != (j & 4), 0 != (j & 8));
 
             for (auto execute_only : {false, true}) {
-                auto composed = compose_ept(mapped_at(0, 12, left),
-                                            mapped_at(0, 21, right),
-                                            execute_only);
+                auto composed = zpp::arch::x86_64::vmx::compose_ept(
+                    mapped_at(0, 12, left),
+                    mapped_at(0, 21, right),
+                    execute_only);
 
-                if (ept_compose_outcome::composed != composed.outcome) {
+                if (zpp::arch::x86_64::vmx::ept_compose_outcome::
+                        composed != composed.outcome) {
                     continue;
                 }
 
@@ -936,17 +998,19 @@ constexpr bool composition_never_widens()
 {
     for (int i = 1; i < 16; ++i) {
         for (int j = 1; j < 16; ++j) {
-            auto left = ept_permissions(
+            auto left = zpp::arch::x86_64::vmx::ept_permissions(
                 0 != (i & 1), 0 != (i & 2), 0 != (i & 4), 0 != (i & 8));
-            auto right = ept_permissions(
+            auto right = zpp::arch::x86_64::vmx::ept_permissions(
                 0 != (j & 1), 0 != (j & 2), 0 != (j & 4), 0 != (j & 8));
 
             for (auto execute_only : {false, true}) {
-                auto composed = compose_ept(mapped_at(0, 12, left),
-                                            mapped_at(0, 21, right),
-                                            execute_only);
+                auto composed = zpp::arch::x86_64::vmx::compose_ept(
+                    mapped_at(0, 12, left),
+                    mapped_at(0, 21, right),
+                    execute_only);
 
-                if (ept_compose_outcome::composed != composed.outcome) {
+                if (zpp::arch::x86_64::vmx::ept_compose_outcome::
+                        composed != composed.outcome) {
                     continue;
                 }
 
@@ -985,7 +1049,7 @@ static_assert(composition_never_widens());
 constexpr std::uint64_t every_bit = ~std::uint64_t{};
 
 constexpr auto reflected_all_granted =
-    reflected_ept_violation_qualification(
+    zpp::arch::x86_64::vmx::reflected_ept_violation_qualification(
         every_bit, mapped_at(0, 12, rwx), true);
 
 // The access bits survive: 2:0 access type, 7 linear address valid, 8
@@ -1016,15 +1080,17 @@ static_assert(0 == (reflected_all_granted >> 17));
 
 // Bit 6 is left clear without mode-based execute control, whatever L1's
 // tables say, because Table 30-7 leaves its value undefined there.
-static_assert(0 == (reflected_ept_violation_qualification(
-                        every_bit, mapped_at(0, 12, rwx), false) &
-                    (1ull << 6)));
+static_assert(
+    0 == (zpp::arch::x86_64::vmx::reflected_ept_violation_qualification(
+              every_bit, mapped_at(0, 12, rwx), false) &
+          (1ull << 6)));
 
 // The permission bits reflect L1's tables and not hardware's. A read-only
 // mapping in L1 reports readable and not writable, even though the
 // qualification handed in claims writable.
-constexpr auto reflected_read_only = reflected_ept_violation_qualification(
-    every_bit, mapped_at(0, 12, read_only), true);
+constexpr auto reflected_read_only =
+    zpp::arch::x86_64::vmx::reflected_ept_violation_qualification(
+        every_bit, mapped_at(0, 12, read_only), true);
 static_assert(0 != (reflected_read_only & (1ull << 3)));
 static_assert(0 == (reflected_read_only & (1ull << 4)));
 static_assert(0 == (reflected_read_only & (1ull << 5)));
@@ -1033,21 +1099,28 @@ static_assert(0 == (reflected_read_only & (1ull << 6)));
 // A walk that found nothing present reports no permissions at all - Note 2
 // and Note 3 to Table 30-7 - and the walker having cleared them is what
 // makes that fall out rather than needing a case here.
-constexpr auto reflected_absent = reflected_ept_violation_qualification(
-    every_bit, failed_with(ept_walk_status::not_present), true);
+constexpr auto reflected_absent =
+    zpp::arch::x86_64::vmx::reflected_ept_violation_qualification(
+        every_bit,
+        failed_with(zpp::arch::x86_64::vmx::ept_walk_status::not_present),
+        true);
 static_assert(0 == (reflected_absent & (0xfull << 3)));
 
 constexpr auto reflected_out_of_range =
-    reflected_ept_violation_qualification(
+    zpp::arch::x86_64::vmx::reflected_ept_violation_qualification(
         every_bit,
-        failed_with(ept_walk_status::address_out_of_range),
+        failed_with(
+            zpp::arch::x86_64::vmx::ept_walk_status::address_out_of_range),
         true);
 static_assert(0 == (reflected_out_of_range & (0xfull << 3)));
 
 // And with nothing set in the incoming qualification, nothing is invented.
-static_assert(0 ==
-              reflected_ept_violation_qualification(
-                  0, failed_with(ept_walk_status::not_present), true));
+static_assert(
+    0 ==
+    zpp::arch::x86_64::vmx::reflected_ept_violation_qualification(
+        0,
+        failed_with(zpp::arch::x86_64::vmx::ept_walk_status::not_present),
+        true));
 
 // ---------------------------------------------------------------------------
 // The same qualification, exhaustively: every access type against every
@@ -1076,10 +1149,11 @@ constexpr bool the_access_bits_are_hardware_s()
     for (int access = 0; access < 8; ++access) {
         for (int i = 0; i < 16; ++i) {
             for (auto mode_based : {false, true}) {
-                auto got = reflected_ept_violation_qualification(
-                    std::uint64_t(access),
-                    mapped_at(0, 12, permissions_number(i)),
-                    mode_based);
+                auto got = zpp::arch::x86_64::vmx::
+                    reflected_ept_violation_qualification(
+                        std::uint64_t(access),
+                        mapped_at(0, 12, permissions_number(i)),
+                        mode_based);
 
                 if (std::uint64_t(access) != (got & 0x7)) {
                     return false;
@@ -1103,8 +1177,9 @@ constexpr bool the_permission_bits_are_the_guest_s()
         auto permissions = permissions_number(i);
 
         for (auto mode_based : {false, true}) {
-            auto got = reflected_ept_violation_qualification(
-                every_bit, mapped_at(0, 12, permissions), mode_based);
+            auto got = zpp::arch::x86_64::vmx::
+                reflected_ept_violation_qualification(
+                    every_bit, mapped_at(0, 12, permissions), mode_based);
 
             if (permissions.read() != (0 != (got & (1ull << 3)))) {
                 return false;
@@ -1140,10 +1215,11 @@ constexpr bool nothing_outside_the_carried_bits()
 {
     for (int i = 0; i < 16; ++i) {
         for (auto mode_based : {false, true}) {
-            auto got = reflected_ept_violation_qualification(
-                every_bit,
-                mapped_at(0, 12, permissions_number(i)),
-                mode_based);
+            auto got = zpp::arch::x86_64::vmx::
+                reflected_ept_violation_qualification(
+                    every_bit,
+                    mapped_at(0, 12, permissions_number(i)),
+                    mode_based);
 
             if (0 != (got & ~carried_bits)) {
                 return false;
@@ -1198,12 +1274,14 @@ static_assert(0 == (reflected_all_granted >> 17));
 // execute control on and off.
 constexpr bool a_failed_walk_reports_no_permissions()
 {
-    for (auto status : {ept_walk_status::not_present,
-                        ept_walk_status::address_out_of_range,
-                        ept_walk_status::misconfigured}) {
+    for (auto status :
+         {zpp::arch::x86_64::vmx::ept_walk_status::not_present,
+          zpp::arch::x86_64::vmx::ept_walk_status::address_out_of_range,
+          zpp::arch::x86_64::vmx::ept_walk_status::misconfigured}) {
         for (auto mode_based : {false, true}) {
-            auto got = reflected_ept_violation_qualification(
-                every_bit, failed_with(status), mode_based);
+            auto got = zpp::arch::x86_64::vmx::
+                reflected_ept_violation_qualification(
+                    every_bit, failed_with(status), mode_based);
 
             if (0 != (got & (0xfull << 3))) {
                 return false;
@@ -1246,8 +1324,9 @@ constexpr std::uint64_t access_bit_read = 1ull << 0;
 constexpr std::uint64_t access_bit_write = 1ull << 1;
 constexpr std::uint64_t access_bit_fetch = 1ull << 2;
 
-constexpr bool permits(const ept_permissions & permissions,
-                       std::uint64_t access)
+constexpr bool
+permits(const zpp::arch::x86_64::vmx::ept_permissions & permissions,
+        std::uint64_t access)
 {
     return ((0 == (access & access_bit_read)) || permissions.read()) &&
            ((0 == (access & access_bit_write)) || permissions.write()) &&
@@ -1258,14 +1337,15 @@ constexpr bool permits(const ept_permissions & permissions,
 // guest hypervisor watches composes to a *valid* mapping, so its own fault
 // is invisible in the outcome and visible only in its permissions.
 constexpr auto watched_by_the_guest_hypervisor =
-    ept_permissions(true, false, true, true);
+    zpp::arch::x86_64::vmx::ept_permissions(true, false, true, true);
 
-constexpr auto guest_watched_page =
-    compose_ept(mapped_with(watched_by_the_guest_hypervisor),
-                mapped_with(rwx, 21),
-                false);
+constexpr auto guest_watched_page = zpp::arch::x86_64::vmx::compose_ept(
+    mapped_with(watched_by_the_guest_hypervisor),
+    mapped_with(rwx, 21),
+    false);
 
-static_assert(guest_watched_page.outcome == ept_compose_outcome::composed);
+static_assert(guest_watched_page.outcome ==
+              zpp::arch::x86_64::vmx::ept_compose_outcome::composed);
 static_assert(guest_watched_page.permissions.read());
 static_assert(guest_watched_page.permissions.execute());
 static_assert(!guest_watched_page.permissions.write());
@@ -1279,12 +1359,14 @@ static_assert(!permits(watched_by_the_guest_hypervisor, access_bit_write));
 
 // The mirror image, which must go the other way: a page *this VMM* watches
 // over tables that grant everything. Same composition, opposite owner.
-constexpr auto watched_here = ept_permissions(true, false, true, true);
+constexpr auto watched_here =
+    zpp::arch::x86_64::vmx::ept_permissions(true, false, true, true);
 
-constexpr auto host_watched_page =
-    compose_ept(mapped_with(rwx), mapped_with(watched_here, 21), false);
+constexpr auto host_watched_page = zpp::arch::x86_64::vmx::compose_ept(
+    mapped_with(rwx), mapped_with(watched_here, 21), false);
 
-static_assert(host_watched_page.outcome == ept_compose_outcome::composed);
+static_assert(host_watched_page.outcome ==
+              zpp::arch::x86_64::vmx::ept_compose_outcome::composed);
 static_assert(!permits(host_watched_page.permissions, access_bit_write));
 static_assert(permits(rwx, access_bit_write));
 
@@ -1293,7 +1375,7 @@ static_assert(permits(rwx, access_bit_write));
 // to a page it watches reports readable and executable and *not* writable,
 // even though hardware reported every bit set.
 constexpr auto reflected_for_the_watched_page =
-    reflected_ept_violation_qualification(
+    zpp::arch::x86_64::vmx::reflected_ept_violation_qualification(
         every_bit | access_bit_write,
         mapped_at(0, 12, watched_by_the_guest_hypervisor),
         false);
@@ -1318,19 +1400,21 @@ enum class fault_owner
     install,
 };
 
-constexpr fault_owner owner_of(ept_permissions guest,
-                               ept_permissions host,
-                               std::uint64_t access,
-                               bool execute_only)
+constexpr fault_owner
+owner_of(zpp::arch::x86_64::vmx::ept_permissions guest,
+         zpp::arch::x86_64::vmx::ept_permissions host,
+         std::uint64_t access,
+         bool execute_only)
 {
     if (!permits(guest, access)) {
         return fault_owner::reflect_to_the_guest_hypervisor;
     }
 
-    auto composed = compose_ept(
+    auto composed = zpp::arch::x86_64::vmx::compose_ept(
         mapped_with(guest), mapped_with(host, 21), execute_only);
 
-    if (ept_compose_outcome::composed != composed.outcome) {
+    if (zpp::arch::x86_64::vmx::ept_compose_outcome::composed !=
+        composed.outcome) {
         return fault_owner::ours;
     }
 
@@ -1770,11 +1854,12 @@ std::size_t free_tables(const hypervisor & of, std::size_t cpu)
  * hypervisor follows it - through the reverse map, because the module is
  * not identity mapped.
  */
-epte * shadow_entry_at(hypervisor & of,
-                       std::size_t cpu,
-                       std::size_t slot,
-                       std::uint64_t guest_physical,
-                       std::uint64_t level)
+zpp::arch::x86_64::vmx::epte *
+shadow_entry_at(hypervisor & of,
+                std::size_t cpu,
+                std::size_t slot,
+                std::uint64_t guest_physical,
+                std::uint64_t level)
 {
     auto * table = &of.shadow_epml4[cpu][slot][0];
 
@@ -1786,7 +1871,9 @@ epte * shadow_entry_at(hypervisor & of,
             return &entry;
         }
 
-        if (!ept_permissions::of(entry).present() || entry.large()) {
+        if (!zpp::arch::x86_64::vmx::ept_permissions::of(entry)
+                 .present() ||
+            entry.large()) {
             return nullptr;
         }
 
@@ -1796,7 +1883,8 @@ epte * shadow_entry_at(hypervisor & of,
             return nullptr;
         }
 
-        table = reinterpret_cast<epte *>(found->second);
+        table = reinterpret_cast<zpp::arch::x86_64::vmx::epte *>(
+            found->second);
     }
 }
 
@@ -1842,10 +1930,10 @@ void a_large_leaf_is_dropped_for_a_smaller_one()
               (hypervisor::shadow_ept_tables_per_cpu - 2),
           "reaching a 2 MB entry takes two tables from the pool");
 
-    epte leaf;
+    zpp::arch::x86_64::vmx::epte leaf;
     rwx.apply_to(leaf);
     leaf.large(true);
-    leaf.type(memory_type::write_back);
+    leaf.type(zpp::arch::x86_64::memory_type::write_back);
     leaf.large_page_number(0x8000);
     **large = leaf;
 
@@ -1880,8 +1968,10 @@ void a_large_leaf_is_dropped_for_a_smaller_one()
 
     check(!page_directory_entry->large(),
           "the large entry was dropped rather than descended into");
-    check(ept_permissions::of(*page_directory_entry).present(),
-          "a table entry replaced it");
+    check(
+        zpp::arch::x86_64::vmx::ept_permissions::of(*page_directory_entry)
+            .present(),
+        "a table entry replaced it");
     check(of.module_physical_to_virtual.end() !=
               of.module_physical_to_virtual.find(
                   page_directory_entry->page_number() << 12),
@@ -1895,18 +1985,20 @@ void a_large_leaf_is_dropped_for_a_smaller_one()
     // zeroes is not present per SDM 31.3.2 (sdm.txt:205446).
     auto found = of.module_physical_to_virtual.find(
         page_directory_entry->page_number() << 12);
-    auto * created = reinterpret_cast<epte *>(found->second);
+    auto * created =
+        reinterpret_cast<zpp::arch::x86_64::vmx::epte *>(found->second);
 
     check(*small == (created + 3),
           "the 4 KB entry is the right slot of the new table");
-    check(!ept_permissions::of(**small).present(),
+    check(!zpp::arch::x86_64::vmx::ept_permissions::of(**small).present(),
           "the new table is handed out empty");
 
     // And the mappings the large entry covered are gone rather than
     // silently retained, which is what makes them fault back in one at a
     // time.
     for (std::size_t i{}; i < 512; ++i) {
-        if (ept_permissions::of(created[i]).present()) {
+        if (zpp::arch::x86_64::vmx::ept_permissions::of(created[i])
+                .present()) {
             check(false, "the dropped 2 MB region left a mapping behind");
             return;
         }
@@ -2009,7 +2101,9 @@ void releasing_a_slot_returns_its_tables()
         // slot before a rebuild. Three callers, two conventions and one
         // exception, with nothing saying so - which is a contract waiting
         // for a fourth caller.
-        check(!ept_permissions::of(of.shadow_epml4[0][0][1]).present(),
+        check(!zpp::arch::x86_64::vmx::ept_permissions::of(
+                   of.shadow_epml4[0][0][1])
+                   .present(),
               "releasing a slot empties its root, so no caller has to "
               "remember to");
 
@@ -2091,7 +2185,7 @@ void releasing_a_slot_returns_its_tables()
 // -------------------------------------------------------------------------
 static_assert(
     [] {
-        ept_pointer pointer{};
+        zpp::arch::x86_64::vmx::ept_pointer pointer{};
         pointer.access_and_dirty(true);
         return pointer.value();
     }() == (1ull << 6),
@@ -2100,7 +2194,7 @@ static_assert(
 
 static_assert(
     [] {
-        ept_pointer pointer{1ull << 6};
+        zpp::arch::x86_64::vmx::ept_pointer pointer{1ull << 6};
         return pointer.access_and_dirty();
     }(),
     "and reading it back must read bit 6, not bit 8 - bit 8 is a leaf "
@@ -2109,7 +2203,7 @@ static_assert(
 
 static_assert(
     [] {
-        ept_pointer pointer{1ull << 8};
+        zpp::arch::x86_64::vmx::ept_pointer pointer{1ull << 8};
         return pointer.access_and_dirty();
     }() == false,
     "a pointer with bit 8 set and bit 6 clear does not have accessed and "
@@ -2117,7 +2211,7 @@ static_assert(
 
 static_assert(
     [] {
-        ept_pointer pointer{~std::uint64_t{}};
+        zpp::arch::x86_64::vmx::ept_pointer pointer{~std::uint64_t{}};
         pointer.access_and_dirty(false);
         return pointer.value() & (1ull << 6);
     }() == 0,
@@ -2132,7 +2226,7 @@ static_assert(
 // nothing.
 static_assert(
     [] {
-        ept_pointer pointer{};
+        zpp::arch::x86_64::vmx::ept_pointer pointer{};
         pointer.access_and_dirty(false);
         return pointer.value();
     }() == 0,
@@ -2142,8 +2236,8 @@ static_assert(
 
 static_assert(
     [] {
-        ept_pointer pointer{};
-        pointer.memory_type(memory_type::write_back);
+        zpp::arch::x86_64::vmx::ept_pointer pointer{};
+        pointer.memory_type(zpp::arch::x86_64::memory_type::write_back);
         pointer.page_walk_length(4);
         pointer.page_number(0x100);
         auto before = pointer.value();
@@ -2156,14 +2250,15 @@ static_assert(
 
 static_assert(
     [] {
-        ept_pointer pointer{};
-        pointer.memory_type(memory_type::write_back);
+        zpp::arch::x86_64::vmx::ept_pointer pointer{};
+        pointer.memory_type(zpp::arch::x86_64::memory_type::write_back);
         pointer.page_walk_length(4);
         pointer.page_number(0x100);
         pointer.access_and_dirty(true);
         return (pointer.page_walk_length() == 4) &&
                (pointer.page_number() == 0x100) &&
-               (pointer.memory_type() == memory_type::write_back);
+               (pointer.memory_type() ==
+                zpp::arch::x86_64::memory_type::write_back);
     }(),
     "setting accessed-and-dirty does not disturb the walk length, the "
     "root or the memory type");
@@ -2219,8 +2314,10 @@ void the_eptp_checks_hold()
                                  capability_uncacheable |
                                  capability_write_back;
 
-    auto write_back = static_cast<std::uint64_t>(memory_type::write_back);
-    auto uncachable = static_cast<std::uint64_t>(memory_type::uncachable);
+    auto write_back = static_cast<std::uint64_t>(
+        zpp::arch::x86_64::memory_type::write_back);
+    auto uncachable = static_cast<std::uint64_t>(
+        zpp::arch::x86_64::memory_type::uncachable);
 
     auto plain = eptp_with(write_back, eptp_walk_length_4, 0);
 
@@ -2419,13 +2516,14 @@ void the_owner_of_every_fault()
                 auto guest_walk = mapped_with(guest);
                 guest_walk.physical_address = first_level_address;
 
-                auto composition =
-                    compose_ept(guest_walk, mapped_with(host, 21), false);
+                auto composition = zpp::arch::x86_64::vmx::compose_ept(
+                    guest_walk, mapped_with(host, 21), false);
 
                 // Only the composed branch is under test here. The other
                 // outcomes are decided before it and are covered by the
                 // static assertions above.
-                if (ept_compose_outcome::composed != composition.outcome) {
+                if (zpp::arch::x86_64::vmx::ept_compose_outcome::
+                        composed != composition.outcome) {
                     continue;
                 }
 
@@ -2519,10 +2617,11 @@ void a_page_the_guest_hypervisor_watches()
     auto guest_walk = mapped_with(watched_by_the_guest_hypervisor);
     guest_walk.physical_address = 0x40000;
 
-    auto composition =
-        compose_ept(guest_walk, mapped_with(rwx, 21), false);
+    auto composition = zpp::arch::x86_64::vmx::compose_ept(
+        guest_walk, mapped_with(rwx, 21), false);
 
-    check(ept_compose_outcome::composed == composition.outcome,
+    check(zpp::arch::x86_64::vmx::ept_compose_outcome::composed ==
+              composition.outcome,
           "a page L1 watches composes to a valid mapping");
 
     of.reflections = 0;
@@ -2554,10 +2653,11 @@ void a_page_this_vmm_watches()
     auto guest_walk = mapped_with(rwx);
     guest_walk.physical_address = 0x40000;
 
-    auto composition =
-        compose_ept(guest_walk, mapped_with(watched_here, 21), false);
+    auto composition = zpp::arch::x86_64::vmx::compose_ept(
+        guest_walk, mapped_with(watched_here, 21), false);
 
-    check(ept_compose_outcome::composed == composition.outcome,
+    check(zpp::arch::x86_64::vmx::ept_compose_outcome::composed ==
+              composition.outcome,
           "a page we watch composes to a valid mapping too");
 
     of.reflections = 0;
