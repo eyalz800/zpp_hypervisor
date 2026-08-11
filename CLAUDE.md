@@ -564,6 +564,32 @@ Notes that cost time when forgotten:
 - Serial output lands in `build/bochs/serial.out`.
 - On failure the UEFI loader prints the hypervisor's own error code, which `zpp_load_elf`
   passes through unflattened. That is usually enough to skip gdb entirely.
+- **The guest coverage suite needs `-DZPP_DIAG=OFF`.** `ZPP_DIAG` defaults ON for a debug
+  build, and with it on the loader establishes the ESP reservation and then warm-resets the
+  machine so the channel is live on the next boot. Nothing after that point runs, so the
+  suite never starts. Build it the way `ci.yml` does:
+
+  ```sh
+  cmake --preset debug -DZPP_GUEST_TESTS=ON -DZPP_DIAG=OFF
+  ```
+
+  This cost four runs and most of a session, and the wrong conclusions it produced are worth
+  more than the fact: the emulator was suspected, then the medium, then the boot option,
+  then a change to the coverage table, then the event re-queue — each eliminated by another
+  seven-minute run, because the symptom is *exactly* a hang. Serial stops after the
+  firmware's own `starting Boot0001` and nothing else is ever written. The loader now
+  announces it with `trace::raw` (`ZPP_RESTART …`), which survives `ZPP_TRACE` being off,
+  and `scripts/ci/bochs-exit-coverage.sh` fails on that line in about 28 seconds naming the
+  flag. The general lesson is the one `ZPP_VERIFY_HYPERVISOR` already taught in the section
+  above: **when a hang survives every code change you can think of, suspect the build.**
+
+### Never edit a shell script while `sh` is interpreting it
+
+`sh` reads a script incrementally and remembers a byte offset, so rewriting the file under a
+running interpreter makes it resume in the middle of whatever now occupies that offset. Seen
+here as `bochs-exit-coverage.sh: line 107: chine: command not found` — the tail of `machine`
+— which killed a coverage run that had already produced 142 result lines. Edit a copy, or
+wait.
 
 Never pass `CLAUDE.md` (or any other Markdown) to `clang-format` — it will happily reflow it
 as C++ and destroy the file.
