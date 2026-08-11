@@ -1,0 +1,345 @@
+#!/usr/bin/env python3
+"""The diagnostic scripts' hardcoded layout constants, against the C++.
+
+There were no Python tests of any kind in this tree, and the readers under
+scripts/ are the one place a wrong number produces *plausible* output
+rather than an error. That is the worst failure mode there is: a reader
+that crashes sends you to the reader, and a reader that prints confident
+nonsense sends you to the hypervisor.
+
+The commit this file exists for is ecc4b70. `rig-dump-state.py` walked the
+per-processor exit-reason histogram with a row stride of 64 words where
+the array is 96 wide, so cpu 1 onwards read into the middle of its own
+neighbour's row. It cancels exactly at cpu 0, which was the only processor
+anyone had dumped, so it reported plausible numbers for as long as nobody
+looked at a second processor.
+
+The lesson recorded there - "a constant copied here is a constant that
+does not move when the header does" - was only half applied. Several
+capacities, one entry size, one member count and one member *order* are
+still transcribed by hand, and each of them fails the same silent way.
+
+The check is deliberately source-level rather than DWARF-level. Reading
+the built ELF would be stronger and is the right end state, but it needs a
+cross build to have happened, and this has to be runnable on a machine
+that has only cloned the repository - which is exactly when a stale
+constant is cheapest to notice.
+
+Run with:  python3 -m unittest discover tests/python_layout
+"""
+import os
+import re
+import unittest
+
+ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))
+HEADER = os.path.join(ROOT, "hypervisor", "include", "zpp", "hypervisor",
+                      "hypervisor.h")
+EXIT_REASON_HEADER = os.path.join(
+    ROOT, "hypervisor", "include", "zpp", "arch", "x86_64", "vmx",
+    "vmx_exit_reason.h")
+DUMP_STATE = os.path.join(ROOT, "scripts", "rig-dump-state.py")
+ZPP_GDB = os.path.join(ROOT, "scripts", "zpp.gdb")
+
+
+def read(path):
+    with open(path, encoding="utf-8") as handle:
+        return handle.read()
+
+
+def cxx_constant(source, name):
+    """The value of a `static constexpr std::size_t <name> = <n>;`.
+
+    Raises rather than returning None when the name is absent. That is the
+    negative control this whole family of bugs needs: every one of them is
+    "the lookup silently returned nothing and the caller carried on", so a
+    lookup that cannot fail loudly is not a check.
+    """
+    match = re.search(
+        r"static\s+constexpr\s+std::size_t\s+" + re.escape(name)
+        + r"\s*=\s*(0x[0-9a-fA-F]+|\d+)\s*;",
+        source)
+    if not match:
+        raise AssertionError(
+            "no `static constexpr std::size_t {}` in the header - it was "
+            "renamed or removed, and every script that hardcodes its "
+            "value is now silently wrong".format(name))
+    return int(match.group(1), 0)
+
+
+def cxx_member_words(source, struct_name):
+    """The names of a diagnostic record's members, in declaration order.
+
+    Handles the two shapes this header uses: a named `struct <name> {`,
+    and an anonymous `struct { ... } <name>{};` - the records read by the
+    scripts are written both ways, and a checker that only knew one of
+    them would silently skip the other, which is the failure mode being
+    guarded against.
+
+    Only members declared `std::uint64_t` or `bool` are counted, which is
+    all these records contain. Anything else raises rather than returning
+    a short list.
+    """
+    match = re.search(
+        r"struct\s+" + re.escape(struct_name) + r"\s*\{(.*?)\n(\s*)\};",
+        source, re.S)
+    if not match:
+        # The anonymous form, anchored to the *nearest* preceding
+        # `struct {`. Without the lookahead the non-greedy body starts at
+        # the first anonymous struct in the whole header and swallows
+        # every one between - which reported sixteen members for a record
+        # that has six, and would have been a checker inventing its own
+        # version of the bug it exists to catch.
+        match = re.search(
+            r"struct\s*\{((?:(?!struct\s*\{).)*?)\n\s*\}\s*"
+            + re.escape(struct_name) + r"\s*\{\}\s*;",
+            source, re.S)
+    if not match:
+        raise AssertionError(
+            "no `struct {}` in the header, named or anonymous - it was "
+            "renamed or removed, and every script that reads it by a "
+            "fixed word count is now silently wrong".format(struct_name))
+
+    body = match.group(1)
+    # Strip comments before counting, so a member named in prose does not
+    # count as a member.
+    body = re.sub(r"/\*.*?\*/", "", body, flags=re.S)
+    body = re.sub(r"//[^\n]*", "", body)
+
+    members = re.findall(
+        r"\b(?:std::uint64_t|bool)\s+([a-z_0-9]+)\s*(?:\{[^}]*\}|=[^;]*)?\s*;",
+        body)
+    if not members:
+        raise AssertionError(
+            "struct {} parsed to no members - the parser is wrong, which "
+            "is worse than the constant being wrong".format(struct_name))
+    return members
+
+
+class ExitTraceEntry(unittest.TestCase):
+    """The record rig-dump-state.py unpacks as a positional 8-tuple."""
+
+    def setUp(self):
+        self.header = read(HEADER)
+        self.script = read(DUMP_STATE)
+
+    def test_entry_size_matches_the_struct(self):
+        """`entry_size = 0x40` against the real member count.
+
+        This one is correct today and multiplies into every ring address
+        in the file, so it is the constant with the widest blast radius.
+        """
+        members = cxx_member_words(self.header, "exit_trace_entry")
+        match = re.search(r"entry_size\s*=\s*(0x[0-9a-fA-F]+|\d+)",
+                          self.script)
+        self.assertIsNotNone(
+            match, "rig-dump-state.py no longer sets entry_size")
+        self.assertEqual(
+            int(match.group(1), 0), 8 * len(members),
+            "rig-dump-state.py's entry_size disagrees with "
+            "exit_trace_entry's {} members. Every ring address in that "
+            "file is derived from it.".format(len(members)))
+
+    def test_unpacked_names_match_declaration_order(self):
+        """The 8-tuple encodes member *order*, which no size check sees.
+
+        Swapping two uint64_t members changes nothing about the struct's
+        size, so a `sizeof` check passes while every printed column is
+        relabelled. 7a85e7a was the insertion case of this.
+        """
+        members = cxx_member_words(self.header, "exit_trace_entry")
+
+        # The names the script unpacks into, in the order it unpacks them.
+        match = re.search(
+            r"reason, qual, activity, cs, rip, phys, repeat, detail = ",
+            self.script)
+        self.assertIsNotNone(
+            match,
+            "rig-dump-state.py no longer unpacks the exit trace as the "
+            "8-tuple this test knows about - re-read it and update this")
+
+        expected = ["reason", "qualification", "activity_state",
+                    "cs_selector", "rip", "guest_physical", "repeated",
+                    "detail"]
+        self.assertEqual(
+            members, expected,
+            "exit_trace_entry's members changed order or name. "
+            "rig-dump-state.py unpacks them positionally as "
+            "(reason, qual, activity, cs, rip, phys, repeat, detail), so "
+            "every column it prints is now attributed to the wrong field "
+            "- confidently, and with no error.")
+
+
+class Capacities(unittest.TestCase):
+    """The array capacities the scripts carry copies of."""
+
+    def setUp(self):
+        self.header = read(HEADER)
+
+    def test_vmcs_field_use_capacity(self):
+        """`dump_field_use(capacity=128)`.
+
+        The same shape, the same file and the same kind of default
+        argument as the bug ecc4b70 fixed: too small misses the tail of
+        four contiguous arrays, too large reads into the next one and
+        prints counts where encodings should be.
+        """
+        declared = cxx_constant(self.header, "vmcs_field_use_capacity")
+        script = read(DUMP_STATE)
+        match = re.search(r"def dump_field_use\([^)]*capacity=(\d+)",
+                          script)
+        self.assertIsNotNone(
+            match, "dump_field_use no longer takes a capacity default")
+        self.assertEqual(
+            int(match.group(1)), declared,
+            "dump_field_use's capacity default disagrees with "
+            "vmcs_field_use_capacity in the header")
+
+    def test_exit_trace_capacity_in_gdb(self):
+        """`set $cap = 32` in scripts/zpp.gdb.
+
+        Literally the same constant class as the fixed bug, in a language
+        that could read it for free -
+        `sizeof($h->exit_trace[0]) / sizeof($h->exit_trace[0][0])`.
+        Wrong, and `$slot = ($n - $count + $i) % $cap` prints the wrong
+        slots in the wrong order, plausibly.
+        """
+        declared = cxx_constant(self.header, "exit_trace_capacity")
+        script = read(ZPP_GDB)
+        match = re.search(r"set \$cap = (\d+)", script)
+        self.assertIsNotNone(
+            match, "scripts/zpp.gdb no longer sets $cap")
+        self.assertEqual(
+            int(match.group(1)), declared,
+            "zpp.gdb's $cap disagrees with exit_trace_capacity")
+
+
+class QueuedRecordLengths(unittest.TestCase):
+    """Records read as a fixed number of words."""
+
+    def setUp(self):
+        self.header = read(HEADER)
+        self.script = read(DUMP_STATE)
+
+    def _queued_words(self, member):
+        match = re.search(
+            r'monitor\.queue\(instance \+ off\["' + re.escape(member)
+            + r'"\], (\d+)\)', self.script)
+        self.assertIsNotNone(
+            match,
+            "rig-dump-state.py no longer queues {} with a literal word "
+            "count".format(member))
+        return int(match.group(1))
+
+    def test_unhandled_exit_word_count(self):
+        members = cxx_member_words(self.header, "unhandled_exit")
+        self.assertEqual(
+            self._queued_words("unhandled_exit"), len(members),
+            "rig-dump-state.py reads a different number of words than "
+            "the unhandled_exit record has members, so the tail of the "
+            "record is missing or the read runs into what follows it")
+
+    @unittest.expectedFailure
+    def test_vm_entry_failure_word_count(self):
+        """Known wrong, and recorded rather than fixed here.
+
+        The record is queued as 6 words and has considerably more. It is
+        harmless today only because nothing reads past the sixth, which is
+        precisely the state the exit-reason stride was in before somebody
+        looked at a second processor.
+
+        Marked expected-failure rather than deleted: a test that asserts
+        the wrong number would be a second copy of the bug, and a test
+        that skips says nothing. This one turns red when the script is
+        fixed, which is the moment to delete the decorator.
+        """
+        members = cxx_member_words(self.header, "vm_entry_failure")
+        self.assertEqual(self._queued_words("vm_entry_failure"),
+                         len(members))
+
+
+class NegativeControl(unittest.TestCase):
+    """The lookups have to fail loudly when the name moves.
+
+    Every bug in this family is "the lookup silently returned nothing and
+    the caller carried on". A checker with the same property checks
+    nothing, so the checker's own failure mode is asserted here.
+    """
+
+    def test_missing_constant_raises(self):
+        with self.assertRaises(AssertionError):
+            cxx_constant("struct x {};", "no_such_capacity")
+
+    def test_missing_struct_raises(self):
+        with self.assertRaises(AssertionError):
+            cxx_member_words("struct x {};", "no_such_record")
+
+    def test_renamed_member_is_visible(self):
+        """A rename must change the member list, not silently pass.
+
+        Stated on a synthetic struct rather than the real one, so it
+        checks the parser rather than the header.
+        """
+        source = (
+            "    struct probe_record\n"
+            "    {\n"
+            "        std::uint64_t first{};\n"
+            "        // std::uint64_t commented_out{};\n"
+            "        std::uint64_t second{};\n"
+            "    };\n")
+        self.assertEqual(cxx_member_words(source, "probe_record"),
+                         ["first", "second"])
+
+
+class ExitReasonNames(unittest.TestCase):
+    """The duplicated exit-reason name table.
+
+    rig-dump-state.py's own docstring calls a duplicated name table worse
+    than no names, because "it labels the wrong field confidently" - and
+    then carries one. A *renamed* enumerator is the drift that matters; a
+    new one degrades acceptably to a bare number, so only names that exist
+    in both are compared.
+    """
+
+    def test_names_agree_where_both_have_them(self):
+        enum_source = read(EXIT_REASON_HEADER)
+        script = read(DUMP_STATE)
+
+        declared = {}
+        for name, value in re.findall(
+                r"^\s*([a-z_0-9]+)\s*=\s*(\d+),\s*$", enum_source,
+                re.M):
+            declared.setdefault(int(value), name)
+
+        scripted = {
+            int(value): name
+            for value, name in re.findall(
+                r"^\s*(\d+):\s*\"([a-z_0-9 /]+)\"", script, re.M)}
+
+        self.assertTrue(
+            scripted,
+            "rig-dump-state.py's EXIT_REASON table did not parse - the "
+            "shape this test knows about has changed")
+
+        disagreements = []
+        for value, name in sorted(scripted.items()):
+            if value not in declared:
+                continue
+            # The script uses readable names, the enum uses identifiers.
+            # Compare loosely: what matters is that they describe the same
+            # thing, and a rename shows up as a word that is simply gone.
+            expected = declared[value].replace("_", " ")
+            actual = name.replace("_", " ")
+            if expected.split()[0] not in actual and \
+                    actual.split()[0] not in expected:
+                disagreements.append(
+                    "  {}: header says {!r}, script says {!r}".format(
+                        value, declared[value], name))
+
+        self.assertEqual(
+            [], disagreements,
+            "the exit reason names in rig-dump-state.py have drifted "
+            "from vmx_exit_reason.h:\n" + "\n".join(disagreements))
+
+
+if __name__ == "__main__":
+    unittest.main()

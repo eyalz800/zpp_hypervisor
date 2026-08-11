@@ -97,6 +97,14 @@ run "check-nested-ept" "$root/scripts/ci/check-nested-ept.sh"
 # The source-level invariants, which need no build at all.
 run "check-exit-handler" "$root/scripts/ci/check-exit-handler.sh"
 
+# The Python readers under scripts/, against the C++ they transcribe.
+# There were no Python tests of any kind in this tree, and those scripts
+# are the one place a wrong constant produces *plausible* output rather
+# than an error - which is the failure mode that sends an investigation
+# to the hypervisor instead of to the reader.
+run "tests/python_layout" python3 -m unittest discover \
+    -s "$root/tests/python_layout" -t "$root/tests/python_layout"
+
 # The checks that grade a built binary. Skipped rather than failed when
 # the binary is not there, because this script is also the one a
 # developer runs before touching CMake.
