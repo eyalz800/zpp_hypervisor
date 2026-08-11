@@ -178,6 +178,135 @@ else
     status=1
 fi
 
+# === What is advertised versus what is implemented ====================
+#
+# A capability MSR bit is a promise, and this project's recurring failure
+# mode is "answering part of an interface". Most of that surface is
+# checked by tests/nested_vmx section 13, which reads the MSRs the
+# emulation actually answers - but two of the pairings span headers the
+# harness replaces with a shim, so they can only be checked here, against
+# the real sources.
+echo "== a capability offered is a capability implemented"
+
+nested="$root/hypervisor/include/zpp/hypervisor/nested_vmx.h"
+header="$root/hypervisor/include/zpp/hypervisor/hypervisor.h"
+
+# Execute-only translations: IA32_VMX_EPT_VPID_CAP bit 0, paired with
+# `execute_only_translations_offered`. That constant decides what
+# `ept_permissions::normalised` may leave in a shadow entry, so reporting
+# the bit without honouring it - or honouring it without reporting it -
+# puts the capability MSR and the permission composition at odds, and the
+# guest hypervisor is the one that finds out.
+#
+# The mask is written one bit per line with the bit number in the
+# expression, so "is bit 0 in it" is a grep for the line rather than an
+# arithmetic evaluation.
+if grep -A20 'supported_ept_vpid_capabilities' "$nested" \
+    | grep -qE '^\s*\(1ull << 0\)'; then
+    offers_execute_only=1
+else
+    offers_execute_only=0
+fi
+
+if grep -q 'execute_only_translations_offered = true' "$header"; then
+    honours_execute_only=1
+else
+    honours_execute_only=0
+fi
+
+if [ "$offers_execute_only" = "$honours_execute_only" ]; then
+    echo "  ok    execute-only translations: offered=$offers_execute_only"\
+         "honoured=$honours_execute_only"
+else
+    echo "  FAIL  IA32_VMX_EPT_VPID_CAP bit 0 says execute-only" >&2
+    echo "        translations are offered=$offers_execute_only while" >&2
+    echo "        execute_only_translations_offered says" >&2
+    echo "        honoured=$honours_execute_only. The capability MSR and" >&2
+    echo "        ept_permissions::normalised have to move together: a" >&2
+    echo "        guest hypervisor builds its own tables on the strength" >&2
+    echo "        of that bit." >&2
+    status=1
+fi
+
+# Accessed and dirty flags: bit 21 withheld, and build_vmcs02 must refuse
+# an EPT pointer that asks for them. Withholding the bit while accepting
+# the pointer leaves a guest hypervisor's page tracking silently never
+# marking anything - the failure that looks like a guest bug for as long
+# as it takes to find.
+if grep -A20 'supported_ept_vpid_capabilities' "$nested" \
+    | grep -qE '^\s*\(1ull << 21\)'; then
+    echo "  FAIL  IA32_VMX_EPT_VPID_CAP bit 21 offers accessed and" >&2
+    echo "        dirty flags, and nothing in the shadow sets either." >&2
+    status=1
+elif grep -q 'ept_cap_access_and_dirty' \
+    "$root/hypervisor/src/hypervisor/nested_entry.cpp"; then
+    echo "  ok    accessed and dirty flags withheld, and build_vmcs02"\
+         "refuses an EPT pointer asking for them"
+else
+    echo "  FAIL  accessed and dirty flags are withheld in the" >&2
+    echo "        capability MSR, but build_vmcs02 no longer refuses an" >&2
+    echo "        EPT pointer that asks for them." >&2
+    status=1
+fi
+
+# The VMX-preemption timer, which this VMM arms for its own use. It must
+# be absent from what a guest hypervisor is offered *and* stripped from
+# the pin union in build_vmcs02 - either alone is not enough, and the two
+# live in different files.
+if grep -A6 'supported_pin_based_controls' "$nested" \
+    | grep -qE '^\s*\(1ull << 6\)'; then
+    echo "  FAIL  pin control bit 6 offers the VMX-preemption timer to" >&2
+    echo "        a guest hypervisor, and this VMM arms it for itself." >&2
+    status=1
+elif grep -q 'pin_preemption_timer' \
+    "$root/hypervisor/src/hypervisor/nested_entry.cpp"; then
+    echo "  ok    the VMX-preemption timer is withheld and stripped"\
+         "from vmcs02"
+else
+    echo "  FAIL  the preemption timer is withheld from the capability" >&2
+    echo "        MSR but build_vmcs02 no longer strips it from the pin" >&2
+    echo "        union." >&2
+    status=1
+fi
+
+# Posted interrupts, same shape: pin bit 7 withheld and stripped.
+if grep -A6 'supported_pin_based_controls' "$nested" \
+    | grep -qE '^\s*\(1ull << 7\)'; then
+    echo "  FAIL  pin control bit 7 offers posted interrupts, and there" >&2
+    echo "        is no posted-interrupt descriptor behind it." >&2
+    status=1
+elif grep -q 'pin_posted_interrupts' \
+    "$root/hypervisor/src/hypervisor/nested_entry.cpp"; then
+    echo "  ok    posted interrupts are withheld and stripped from vmcs02"
+else
+    echo "  FAIL  posted interrupts are withheld from the capability MSR" >&2
+    echo "        but build_vmcs02 no longer strips the bit." >&2
+    status=1
+fi
+
+# The MSR load and store areas. Their addresses must never reach the
+# processor: it reads and *writes* those lists in root operation, where
+# extended page tables do not apply, so a guest hypervisor could name this
+# module's own pages as its VM-exit MSR-store area and have the processor
+# write MSR values into them. Every other protection here is an EPT
+# permission and none of them would apply.
+if grep -q 'vm_entry_msr_load_count, 0' \
+    "$root/hypervisor/src/hypervisor/nested_entry.cpp" &&
+   grep -q 'vm_exit_msr_load_count, 0' \
+    "$root/hypervisor/src/hypervisor/nested_entry.cpp" &&
+   grep -q 'vm_exit_msr_store_count, 0' \
+    "$root/hypervisor/src/hypervisor/nested_entry.cpp"; then
+    echo "  ok    all three MSR area counts in vmcs02 are zero, so the"\
+         "processor is given no list of its own"
+else
+    echo "  FAIL  build_vmcs02 no longer zeroes all three MSR area" >&2
+    echo "        counts. The processor reads and writes those lists in" >&2
+    echo "        root operation, where extended page tables do not" >&2
+    echo "        apply - a guest hypervisor naming this module's own" >&2
+    echo "        pages would have MSR values written into them." >&2
+    status=1
+fi
+
 echo
 if [ "$status" = "0" ]; then
     echo "exit handler invariants hold"

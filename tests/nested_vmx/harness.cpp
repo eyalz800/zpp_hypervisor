@@ -88,9 +88,8 @@ hypervisor::guest_linear_to_physical(std::uint64_t linear)
     return linear;
 }
 
-std::expected<void, zpp::error>
-hypervisor::read_guest_physical(std::uint64_t physical,
-                                std::span<std::byte> into)
+std::expected<void, zpp::error> hypervisor::read_guest_physical(
+    std::uint64_t physical, std::span<std::byte> into)
 {
     if (g_page_present_only &&
         !g_pages.count(physical & ~std::uint64_t(0xfff))) {
@@ -105,15 +104,15 @@ hypervisor::read_guest_physical(std::uint64_t physical,
         if (count > (into.size() - done)) {
             count = into.size() - done;
         }
-        std::memcpy(into.data() + done, page_of(at).data() + offset, count);
+        std::memcpy(
+            into.data() + done, page_of(at).data() + offset, count);
         done += count;
     }
     return {};
 }
 
-std::expected<void, zpp::error>
-hypervisor::write_guest_physical(std::uint64_t physical,
-                                 std::span<const std::byte> from)
+std::expected<void, zpp::error> hypervisor::write_guest_physical(
+    std::uint64_t physical, std::span<const std::byte> from)
 {
     if (g_page_present_only &&
         !g_pages.count(physical & ~std::uint64_t(0xfff))) {
@@ -128,7 +127,8 @@ hypervisor::write_guest_physical(std::uint64_t physical,
         if (count > (from.size() - done)) {
             count = from.size() - done;
         }
-        std::memcpy(page_of(at).data() + offset, from.data() + done, count);
+        std::memcpy(
+            page_of(at).data() + offset, from.data() + done, count);
         done += count;
     }
     return {};
@@ -218,9 +218,9 @@ static hypervisor_t & hv()
 // Result of executing one emulated instruction.
 enum class outcome
 {
-    ud,          // handler returned false: caller injects #UD
-    gp,          // a general protection fault was injected
-    succeed,     // VMsucceed
+    ud,           // handler returned false: caller injects #UD
+    gp,           // a general protection fault was injected
+    succeed,      // VMsucceed
     fail_invalid, // VMfailInvalid
     fail_valid,   // VMfailValid, error in `error`
 };
@@ -253,12 +253,12 @@ static void arm_guest(std::size_t cpu)
 {
     auto & v = hv().vmcs;
     v.vpid(cpu + 1);
-    v.guest_cr0(1);                                    // PE
-    v.guest_rflags(0x2);                               // no VM, no arith
-    v.cr4_read_shadow(1ull << 13);                     // VMXE
-    v.guest_cs_access_rights(0xa09b | (1ull << 13));   // L = 1
-    v.guest_ss_access_rights(0xc093);                  // DPL 0
-    v.vm_entry_controls(1ull << 9);                    // IA-32e mode guest
+    v.guest_cr0(1);                                  // PE
+    v.guest_rflags(0x2);                             // no VM, no arith
+    v.cr4_read_shadow(1ull << 13);                   // VMXE
+    v.guest_cs_access_rights(0xa09b | (1ull << 13)); // L = 1
+    v.guest_ss_access_rights(0xc093);                // DPL 0
+    v.vm_entry_controls(1ull << 9);                  // IA-32e mode guest
     v.guest_fs_base(0);
     v.guest_gs_base(0);
 }
@@ -268,10 +268,10 @@ static void arm_guest(std::size_t cpu)
 static std::uint64_t memory_operand_information(std::uint64_t reg2 = 0,
                                                 std::uint64_t reg1 = 0)
 {
-    return (2ull << 7)          // address size 64-bit
-           | (1ull << 22)       // index invalid
-           | (1ull << 27)       // base invalid
-           | (0ull << 15)       // segment ES (ignored in 64-bit)
+    return (2ull << 7)    // address size 64-bit
+           | (1ull << 22) // index invalid
+           | (1ull << 27) // base invalid
+           | (0ull << 15) // segment ES (ignored in 64-bit)
            | ((reg1 & 0xf) << 3) | ((reg2 & 0xf) << 28);
 }
 
@@ -289,15 +289,16 @@ static result run(basic_reason reason,
 {
     auto & v = hv().vmcs;
     v.vm_exit_instruction_information(information);
-    zpp::arch::x86_64::vmx::g_vmcs[zpp::arch::x86_64::vmx::
-        vmcs_fields::exit_qualification] = qualification;
+    zpp::arch::x86_64::vmx::g_vmcs
+        [zpp::arch::x86_64::vmx::vmcs_fields::exit_qualification] =
+            qualification;
     v.guest_rflags((v.guest_rflags() & ~0x8d5ull) | 0x2);
 
     auto faults = hv().gp_faults;
-    auto handled = hv().on_vmx_instruction(
-        zpp::arch::x86_64::vmx::exit_reason(
-            static_cast<std::uint64_t>(reason)),
-        regs);
+    auto handled =
+        hv().on_vmx_instruction(zpp::arch::x86_64::vmx::exit_reason(
+                                    static_cast<std::uint64_t>(reason)),
+                                regs);
 
     if (hv().gp_faults != faults) {
         return {outcome::gp, 0};
@@ -313,8 +314,7 @@ static result run(basic_reason reason,
     }
     if (0 != (flags & rflags_zf)) {
         return {outcome::fail_valid,
-                hv().guest_vmcs12[cpu].read(
-                    fields::vm_instruction_error)};
+                hv().guest_vmcs12[cpu].read(fields::vm_instruction_error)};
     }
     return {outcome::succeed, 0};
 }
@@ -362,7 +362,8 @@ static result do_pointer_instruction(basic_reason reason,
                 sizeof(pointer));
 
     context regs{};
-    return run(reason, regs, memory_operand_information(), operand_address);
+    return run(
+        reason, regs, memory_operand_information(), operand_address);
 }
 
 static constexpr std::uint64_t operand_slot = 0x40000;
@@ -390,9 +391,8 @@ static void reset_cpu(std::size_t cpu)
 static void enter_vmx(std::size_t cpu)
 {
     make_region(vmxon_region, vmcs12::revision);
-    auto r = do_pointer_instruction(basic_reason::vmxon,
-                                    operand_slot,
-                                    vmxon_region);
+    auto r = do_pointer_instruction(
+        basic_reason::vmxon, operand_slot, vmxon_region);
     if (r.what != outcome::succeed) {
         std::printf("  setup: vmxon failed (%s)\n", name(r.what));
     }
@@ -412,7 +412,7 @@ static const named_field g_fields[] = {
 static std::uint64_t vmread_field(std::size_t cpu, std::uint64_t encoding)
 {
     context regs{};
-    regs.rcx = encoding;              // reg2 = rcx (1)
+    regs.rcx = encoding; // reg2 = rcx (1)
     auto r = run(basic_reason::vmread,
                  regs,
                  register_operand_information(0 /*rax*/, 1 /*rcx*/));
@@ -437,9 +437,8 @@ static result vmread_result(std::uint64_t encoding, std::uint64_t & out)
 {
     context regs{};
     regs.rcx = encoding;
-    auto r = run(basic_reason::vmread,
-                 regs,
-                 register_operand_information(0, 1));
+    auto r = run(
+        basic_reason::vmread, regs, register_operand_information(0, 1));
     out = regs.rax;
     return r;
 }
@@ -474,15 +473,16 @@ static void test_field_round_trip()
 
         if (w.what != outcome::succeed) {
             char buffer[256];
-            std::snprintf(buffer,
-                          sizeof(buffer),
-                          "VMWRITE %s (encoding %#llx, index %llu) refused: "
-                          "%s(%llu)",
-                          f.text,
-                          (unsigned long long)f.encoding,
-                          (unsigned long long)e.index(),
-                          name(w.what),
-                          (unsigned long long)w.error);
+            std::snprintf(
+                buffer,
+                sizeof(buffer),
+                "VMWRITE %s (encoding %#llx, index %llu) refused: "
+                "%s(%llu)",
+                f.text,
+                (unsigned long long)f.encoding,
+                (unsigned long long)e.index(),
+                name(w.what),
+                (unsigned long long)w.error);
             ++g_checks;
             ++g_failures;
             std::printf("  FAIL %s\n", buffer);
@@ -494,8 +494,9 @@ static void test_field_round_trip()
         auto r = vmread_result(f.encoding, got);
         if (r.what != outcome::succeed) {
             check(false,
-                  std::string("VMREAD ") + f.text + " refused after a "
-                  "successful VMWRITE");
+                  std::string("VMREAD ") + f.text +
+                      " refused after a "
+                      "successful VMWRITE");
             continue;
         }
 
@@ -513,15 +514,16 @@ static void test_field_round_trip()
 
         if (got != want) {
             char buffer[256];
-            std::snprintf(buffer,
-                          sizeof(buffer),
-                          "%s (%#llx): wrote %#llx read back %#llx, wanted "
-                          "%#llx",
-                          f.text,
-                          (unsigned long long)f.encoding,
-                          (unsigned long long)pattern,
-                          (unsigned long long)got,
-                          (unsigned long long)want);
+            std::snprintf(
+                buffer,
+                sizeof(buffer),
+                "%s (%#llx): wrote %#llx read back %#llx, wanted "
+                "%#llx",
+                f.text,
+                (unsigned long long)f.encoding,
+                (unsigned long long)pattern,
+                (unsigned long long)got,
+                (unsigned long long)want);
             ++g_checks;
             ++g_failures;
             std::printf("  FAIL %s\n", buffer);
@@ -659,7 +661,9 @@ static void test_launch_state_machine()
     // Not in VMX operation: every instruction but VMXON is #UD.
     context regs{};
     expect("VMREAD outside VMX operation",
-           run(basic_reason::vmread, regs, register_operand_information(0, 1)),
+           run(basic_reason::vmread,
+               regs,
+               register_operand_information(0, 1)),
            outcome::ud);
     expect("VMLAUNCH outside VMX operation",
            run(basic_reason::vmlaunch, regs, 0),
@@ -671,34 +675,30 @@ static void test_launch_state_machine()
     // VMXON with no CR4.VMXE in the read shadow.
     hv().vmcs.cr4_read_shadow(0);
     expect("VMXON with CR4.VMXE clear in the read shadow",
-           do_pointer_instruction(basic_reason::vmxon,
-                                  operand_slot,
-                                  vmxon_region),
+           do_pointer_instruction(
+               basic_reason::vmxon, operand_slot, vmxon_region),
            outcome::ud);
     hv().vmcs.cr4_read_shadow(1ull << 13);
 
     // CPL above zero.
     hv().vmcs.guest_ss_access_rights(0xc0f3);
     expect("VMXON at CPL 3",
-           do_pointer_instruction(basic_reason::vmxon,
-                                  operand_slot,
-                                  vmxon_region),
+           do_pointer_instruction(
+               basic_reason::vmxon, operand_slot, vmxon_region),
            outcome::gp);
     hv().vmcs.guest_ss_access_rights(0xc093);
 
     // Virtual-8086 mode and real mode.
     hv().vmcs.guest_rflags(0x2 | (1ull << 17));
     expect("VMXON in virtual-8086 mode",
-           do_pointer_instruction(basic_reason::vmxon,
-                                  operand_slot,
-                                  vmxon_region),
+           do_pointer_instruction(
+               basic_reason::vmxon, operand_slot, vmxon_region),
            outcome::ud);
     hv().vmcs.guest_rflags(0x2);
     hv().vmcs.guest_cr0(0);
     expect("VMXON with CR0.PE clear",
-           do_pointer_instruction(basic_reason::vmxon,
-                                  operand_slot,
-                                  vmxon_region),
+           do_pointer_instruction(
+               basic_reason::vmxon, operand_slot, vmxon_region),
            outcome::ud);
     hv().vmcs.guest_cr0(1);
 
@@ -706,31 +706,29 @@ static void test_launch_state_machine()
     // rights). 0xa09b already carries L, so the D/B form is used.
     hv().vmcs.guest_cs_access_rights(0xc09b);
     expect("VMXON in compatibility mode",
-           do_pointer_instruction(basic_reason::vmxon,
-                                  operand_slot,
-                                  vmxon_region),
+           do_pointer_instruction(
+               basic_reason::vmxon, operand_slot, vmxon_region),
            outcome::ud);
     hv().vmcs.guest_cs_access_rights(0xa09b | (1ull << 13));
 
     // VMXON with the feature control MSR unlocked.
     hv().guest_feature_control[cpu] = 0;
     expect("VMXON with IA32_FEATURE_CONTROL unlocked",
-           do_pointer_instruction(basic_reason::vmxon,
-                                  operand_slot,
-                                  vmxon_region),
+           do_pointer_instruction(
+               basic_reason::vmxon, operand_slot, vmxon_region),
            outcome::gp);
     hv().guest_feature_control[cpu] = 0x5;
 
     // Misaligned region, and a register operand.
     expect("VMXON with a misaligned region",
-           do_pointer_instruction(basic_reason::vmxon,
-                                  operand_slot,
-                                  vmxon_region + 8),
+           do_pointer_instruction(
+               basic_reason::vmxon, operand_slot, vmxon_region + 8),
            outcome::fail_invalid);
     {
         context r2{};
         expect("VMXON with a register operand",
-               run(basic_reason::vmxon, r2,
+               run(basic_reason::vmxon,
+                   r2,
                    register_operand_information(0, 1)),
                outcome::ud);
     }
@@ -745,25 +743,22 @@ static void test_launch_state_machine()
     // Wrong revision.
     make_region(vmxon_region, vmcs12::revision ^ 1);
     expect("VMXON with the wrong revision identifier",
-           do_pointer_instruction(basic_reason::vmxon,
-                                  operand_slot,
-                                  vmxon_region),
+           do_pointer_instruction(
+               basic_reason::vmxon, operand_slot, vmxon_region),
            outcome::fail_invalid);
 
     // Good.
     make_region(vmxon_region, vmcs12::revision);
     expect("VMXON",
-           do_pointer_instruction(basic_reason::vmxon,
-                                  operand_slot,
-                                  vmxon_region),
+           do_pointer_instruction(
+               basic_reason::vmxon, operand_slot, vmxon_region),
            outcome::succeed);
 
     // Again. SDM 33.2 VMfail: with no current VMCS this is VMfailInvalid,
     // not VMfailValid(15) - the error number has nowhere to go.
     expect("VMXON in VMX root operation, no current VMCS",
-           do_pointer_instruction(basic_reason::vmxon,
-                                  operand_slot,
-                                  vmxon_region),
+           do_pointer_instruction(
+               basic_reason::vmxon, operand_slot, vmxon_region),
            outcome::fail_invalid);
 
     // No current VMCS yet.
@@ -774,7 +769,9 @@ static void test_launch_state_machine()
            run(basic_reason::vmresume, regs, 0),
            outcome::fail_invalid);
     expect("VMREAD with no current VMCS",
-           run(basic_reason::vmread, regs, register_operand_information(0, 1)),
+           run(basic_reason::vmread,
+               regs,
+               register_operand_information(0, 1)),
            outcome::fail_invalid);
     expect("VMWRITE with no current VMCS",
            vmwrite_field(fields::guest_rip, 1),
@@ -786,63 +783,66 @@ static void test_launch_state_machine()
     // VMPTRST with no current VMCS writes the all-ones sentinel.
     {
         context r2{};
-        run(basic_reason::vmptrst, r2, memory_operand_information(),
+        run(basic_reason::vmptrst,
+            r2,
+            memory_operand_information(),
             operand_slot);
         std::uint64_t stored{};
         std::memcpy(&stored,
                     page_of(operand_slot).data() + (operand_slot & 0xfff),
                     sizeof(stored));
         check(stored == ~std::uint64_t(0),
-              "VMPTRST with no current VMCS did not store FFFFFFFFFFFFFFFFH");
+              "VMPTRST with no current VMCS did not store "
+              "FFFFFFFFFFFFFFFFH");
     }
 
     // A good VMPTRLD, so that from here every VMfail carries an error.
     make_region(vmcs_a, vmcs12::revision);
     expect("VMPTRLD",
-           do_pointer_instruction(basic_reason::vmptrld,
-                                  operand_slot,
-                                  vmcs_a),
+           do_pointer_instruction(
+               basic_reason::vmptrld, operand_slot, vmcs_a),
            outcome::succeed);
     check(hv().guest_current_vmcs[cpu] == vmcs_a,
           "VMPTRLD did not make the region current");
 
     // Now the error numbers, SDM Table 33-1.
     expect("VMXON in VMX root operation",
-           do_pointer_instruction(basic_reason::vmxon,
-                                  operand_slot,
-                                  vmxon_region),
-           outcome::fail_valid, 15);
+           do_pointer_instruction(
+               basic_reason::vmxon, operand_slot, vmxon_region),
+           outcome::fail_valid,
+           15);
     expect("VMCALL in VMX root operation",
            run(basic_reason::vmcall, regs, 0),
-           outcome::fail_valid, 1);
+           outcome::fail_valid,
+           1);
     expect("VMPTRLD with the VMXON pointer",
-           do_pointer_instruction(basic_reason::vmptrld,
-                                  operand_slot,
-                                  vmxon_region),
-           outcome::fail_valid, 10);
+           do_pointer_instruction(
+               basic_reason::vmptrld, operand_slot, vmxon_region),
+           outcome::fail_valid,
+           10);
     expect("VMCLEAR with the VMXON pointer",
-           do_pointer_instruction(basic_reason::vmclear,
-                                  operand_slot,
-                                  vmxon_region),
-           outcome::fail_valid, 3);
+           do_pointer_instruction(
+               basic_reason::vmclear, operand_slot, vmxon_region),
+           outcome::fail_valid,
+           3);
     expect("VMPTRLD with a misaligned address",
-           do_pointer_instruction(basic_reason::vmptrld,
-                                  operand_slot,
-                                  vmcs_b + 8),
-           outcome::fail_valid, 9);
+           do_pointer_instruction(
+               basic_reason::vmptrld, operand_slot, vmcs_b + 8),
+           outcome::fail_valid,
+           9);
     expect("VMCLEAR with a misaligned address",
-           do_pointer_instruction(basic_reason::vmclear,
-                                  operand_slot,
-                                  vmcs_b + 8),
-           outcome::fail_valid, 2);
+           do_pointer_instruction(
+               basic_reason::vmclear, operand_slot, vmcs_b + 8),
+           outcome::fail_valid,
+           2);
 
     // A region with the wrong revision.
     make_region(vmcs_b, 0xdeadbeef);
     expect("VMPTRLD with the wrong revision identifier",
-           do_pointer_instruction(basic_reason::vmptrld,
-                                  operand_slot,
-                                  vmcs_b),
-           outcome::fail_valid, 11);
+           do_pointer_instruction(
+               basic_reason::vmptrld, operand_slot, vmcs_b),
+           outcome::fail_valid,
+           11);
     check(hv().guest_current_vmcs[cpu] == vmcs_a,
           "a refused VMPTRLD changed the current VMCS anyway");
 
@@ -850,9 +850,8 @@ static void test_launch_state_machine()
     // the regression the cache-over-region bug left behind.
     vmwrite_field(fields::guest_rip, 0x1234);
     expect("VMPTRLD of the already-current VMCS",
-           do_pointer_instruction(basic_reason::vmptrld,
-                                  operand_slot,
-                                  vmcs_a),
+           do_pointer_instruction(
+               basic_reason::vmptrld, operand_slot, vmcs_a),
            outcome::succeed);
     std::uint64_t rip{};
     vmread_result(fields::guest_rip, rip);
@@ -862,7 +861,8 @@ static void test_launch_state_machine()
     // VMRESUME before any VMLAUNCH.
     expect("VMRESUME on a clear VMCS",
            run(basic_reason::vmresume, regs, 0),
-           outcome::fail_valid, 5);
+           outcome::fail_valid,
+           5);
 
     vmwrite_field(fields::pin_based_vm_execution_controls, 0x1e);
 
@@ -917,7 +917,8 @@ static void test_launch_state_machine()
     hv().build_vmcs02_fails = true;
     expect("VMLAUNCH refused by build_vmcs02",
            run(basic_reason::vmlaunch, regs, 0),
-           outcome::fail_valid, 7);
+           outcome::fail_valid,
+           7);
     check(!hv().running_l2[cpu],
           "a refused VMLAUNCH left the processor marked as running L2");
     hv().build_vmcs02_fails = false;
@@ -938,9 +939,8 @@ static void test_vmclear_and_migration()
 
     // VMCLEAR of the current VMCS: the fields must survive.
     expect("VMCLEAR of the current VMCS",
-           do_pointer_instruction(basic_reason::vmclear,
-                                  operand_slot,
-                                  vmcs_a),
+           do_pointer_instruction(
+               basic_reason::vmclear, operand_slot, vmcs_a),
            outcome::succeed);
     check(hv().guest_current_vmcs[cpu] ==
               zpp::hypervisor::nested_vmx::no_current_vmcs,
@@ -948,9 +948,8 @@ static void test_vmclear_and_migration()
 
     // Reload and confirm the data came back.
     expect("VMPTRLD after VMCLEAR",
-           do_pointer_instruction(basic_reason::vmptrld,
-                                  operand_slot,
-                                  vmcs_a),
+           do_pointer_instruction(
+               basic_reason::vmptrld, operand_slot, vmcs_a),
            outcome::succeed);
     std::uint64_t rip{};
     vmread_result(fields::guest_rip, rip);
@@ -962,24 +961,22 @@ static void test_vmclear_and_migration()
     vmwrite_field(fields::guest_rip, 0xbeef0000);
     make_region(vmcs_b, vmcs12::revision);
     expect("VMCLEAR of a VMCS that is not current",
-           do_pointer_instruction(basic_reason::vmclear,
-                                  operand_slot,
-                                  vmcs_b),
+           do_pointer_instruction(
+               basic_reason::vmclear, operand_slot, vmcs_b),
            outcome::succeed);
     expect("VMPTRLD of the other VMCS",
-           do_pointer_instruction(basic_reason::vmptrld,
-                                  operand_slot,
-                                  vmcs_b),
+           do_pointer_instruction(
+               basic_reason::vmptrld, operand_slot, vmcs_b),
            outcome::succeed);
     expect("VMPTRLD back to the first",
-           do_pointer_instruction(basic_reason::vmptrld,
-                                  operand_slot,
-                                  vmcs_a),
+           do_pointer_instruction(
+               basic_reason::vmptrld, operand_slot, vmcs_a),
            outcome::succeed);
     vmread_result(fields::guest_rip, rip);
-    check(rip == 0xbeef0000,
-          "a VMWRITE made after the last VMCLEAR did not reach the region, "
-          "so switching VMCS pointers loses it");
+    check(
+        rip == 0xbeef0000,
+        "a VMWRITE made after the last VMCLEAR did not reach the region, "
+        "so switching VMCS pointers loses it");
 
     // The launch state must survive the round trip through memory too.
     do_pointer_instruction(basic_reason::vmptrld, operand_slot, vmcs_a);
@@ -997,7 +994,9 @@ static void test_vmclear_and_migration()
     check(!hv().guest_in_vmx_operation[cpu],
           "VMXOFF left the processor in VMX operation");
     expect("VMREAD after VMXOFF",
-           run(basic_reason::vmread, regs, register_operand_information(0, 1)),
+           run(basic_reason::vmread,
+               regs,
+               register_operand_information(0, 1)),
            outcome::ud);
 }
 
@@ -1025,9 +1024,8 @@ static void test_memory_operands()
                      operand_slot);
         expect("VMREAD to memory", r, outcome::succeed);
         std::uint64_t stored{};
-        std::memcpy(&stored,
-                    page.data() + (operand_slot & 0xfff),
-                    sizeof(stored));
+        std::memcpy(
+            &stored, page.data() + (operand_slot & 0xfff), sizeof(stored));
         check(stored == 0x1122334455667788ull,
               "VMREAD to memory stored the wrong value");
     }
@@ -1036,9 +1034,8 @@ static void test_memory_operands()
     {
         std::uint64_t source = 0x99aabbccddeeff00ull;
         auto & page = page_of(operand_slot);
-        std::memcpy(page.data() + (operand_slot & 0xfff),
-                    &source,
-                    sizeof(source));
+        std::memcpy(
+            page.data() + (operand_slot & 0xfff), &source, sizeof(source));
         context regs{};
         regs.rcx = fields::guest_rsp;
         auto r = run(basic_reason::vmwrite,
@@ -1062,8 +1059,8 @@ static void test_memory_operands()
         auto r = run(basic_reason::vmwrite,
                      regs,
                      register_operand_information(0, 1));
-        expect("VMWRITE with a clean encoding register", r,
-               outcome::succeed);
+        expect(
+            "VMWRITE with a clean encoding register", r, outcome::succeed);
     }
 
     // RSP as the operand register: it is not in the captured context.
@@ -1088,8 +1085,9 @@ static void test_memory_operands()
                      regs,
                      register_operand_information(4 /*rsp*/, 1 /*rcx*/));
         expect("VMREAD into RSP", r, outcome::succeed);
-        check(hv().vmcs.guest_rsp() == 0x123000,
-              "VMREAD naming RSP as the destination did not write the VMCS");
+        check(
+            hv().vmcs.guest_rsp() == 0x123000,
+            "VMREAD naming RSP as the destination did not write the VMCS");
     }
 }
 
@@ -1105,51 +1103,62 @@ static void test_invalidation()
 
     auto descriptor = [](std::uint64_t low, std::uint64_t high) {
         auto & page = page_of(operand_slot);
-        std::memcpy(page.data() + (operand_slot & 0xfff), &low,
-                    sizeof(low));
-        std::memcpy(page.data() + (operand_slot & 0xfff) + 8, &high,
-                    sizeof(high));
+        std::memcpy(
+            page.data() + (operand_slot & 0xfff), &low, sizeof(low));
+        std::memcpy(
+            page.data() + (operand_slot & 0xfff) + 8, &high, sizeof(high));
     };
 
     auto invalidate = [&](basic_reason reason, std::uint64_t type) {
         context regs{};
         regs.rcx = type;
-        return run(reason, regs, memory_operand_information(1), operand_slot);
+        return run(
+            reason, regs, memory_operand_information(1), operand_slot);
     };
 
     descriptor(0x1000, 0);
-    expect("INVEPT type 0", invalidate(basic_reason::invept, 0),
-           outcome::fail_valid, 28);
-    expect("INVEPT type 3", invalidate(basic_reason::invept, 3),
-           outcome::fail_valid, 28);
+    expect("INVEPT type 0",
+           invalidate(basic_reason::invept, 0),
+           outcome::fail_valid,
+           28);
+    expect("INVEPT type 3",
+           invalidate(basic_reason::invept, 3),
+           outcome::fail_valid,
+           28);
     // Discard, because refresh_shadow_on_invept is off in nested_vmx.cpp
     // - this harness compiles that file, so it follows the switch rather
     // than describing an intention. Flip both together, and the refresh
     // counters below are here so that flip is one line.
     auto before = hv().ept_discards_for;
-    expect("INVEPT single-context", invalidate(basic_reason::invept, 1),
+    expect("INVEPT single-context",
+           invalidate(basic_reason::invept, 1),
            outcome::succeed);
     check(hv().ept_discards_for == before + 1,
           "INVEPT single-context did not invalidate the named shadow");
     check(hv().last_discard_root == 0x1000,
           "INVEPT single-context named the wrong root");
-    expect("INVEPT all-context", invalidate(basic_reason::invept, 2),
+    expect("INVEPT all-context",
+           invalidate(basic_reason::invept, 2),
            outcome::succeed);
 
     descriptor(0, 0);
     expect("INVVPID single-context with VPID 0",
            invalidate(basic_reason::invvpid, 1),
-           outcome::fail_valid, 28);
+           outcome::fail_valid,
+           28);
     expect("INVVPID all-context with VPID 0",
            invalidate(basic_reason::invvpid, 2),
            outcome::succeed);
-    expect("INVVPID type 4", invalidate(basic_reason::invvpid, 4),
-           outcome::fail_valid, 28);
+    expect("INVVPID type 4",
+           invalidate(basic_reason::invvpid, 4),
+           outcome::fail_valid,
+           28);
 
     descriptor(1, 0x0000800000000000ull);
     expect("INVVPID individual-address, non-canonical",
            invalidate(basic_reason::invvpid, 0),
-           outcome::fail_valid, 28);
+           outcome::fail_valid,
+           28);
     descriptor(1, 0x00007fffffffffffull);
     expect("INVVPID individual-address, canonical",
            invalidate(basic_reason::invvpid, 0),
@@ -1181,8 +1190,9 @@ static void test_capability_msrs()
           "IA32_VMX_VMCS_ENUM disagrees with the shadow's index capacity");
 
     auto misc = read(vmxmsr::misc);
-    check(0 == (misc & (1ull << 29)),
-          "IA32_VMX_MISC reports that VMWRITE may modify read-only fields");
+    check(
+        0 == (misc & (1ull << 29)),
+        "IA32_VMX_MISC reports that VMWRITE may modify read-only fields");
     check(0 == ((misc >> 16) & 0x1ff),
           "IA32_VMX_MISC reports a non-zero CR3-target count");
 
@@ -1252,8 +1262,9 @@ static void test_capability_msrs()
         check(hv().gp_faults == before + 1,
               "a second write to a locked IA32_FEATURE_CONTROL was not a "
               "fault");
-        check(hv().guest_feature_control[cpu] == 0x5,
-              "a second write to a locked IA32_FEATURE_CONTROL changed it");
+        check(
+            hv().guest_feature_control[cpu] == 0x5,
+            "a second write to a locked IA32_FEATURE_CONTROL changed it");
     }
 }
 
@@ -1271,7 +1282,8 @@ static void test_cpu_indexing()
     hv().vmcs.vpid(1);
 }
 
-// ------------------------------- 9. exhaustive sweep of the encoding space
+// ------------------------------- 9. exhaustive sweep of the encoding
+// space
 static void test_encoding_sweep()
 {
     std::printf("[9] exhaustive sweep of the 15-bit encoding space\n");
@@ -1397,15 +1409,17 @@ static void test_encoding_sweep()
         }
     }
 
-    std::printf("      %zu accepted, %zu refused only by index_capacity, "
-                "%zu wrongly accepted, %zu wrongly refused, %zu aliasing\n",
-                accepted,
-                refused_by_capacity,
-                wrongly_accepted,
-                wrongly_refused,
-                aliases);
-    check(wrongly_accepted == 0, "encodings accepted that Table 27-22 "
-                                 "reserves");
+    std::printf(
+        "      %zu accepted, %zu refused only by index_capacity, "
+        "%zu wrongly accepted, %zu wrongly refused, %zu aliasing\n",
+        accepted,
+        refused_by_capacity,
+        wrongly_accepted,
+        wrongly_refused,
+        aliases);
+    check(wrongly_accepted == 0,
+          "encodings accepted that Table 27-22 "
+          "reserves");
     check(wrongly_refused == 0, "structurally valid encodings refused");
     check(aliases == 0, "two encodings share one shadow slot");
 }
@@ -1474,8 +1488,8 @@ static void test_operand_size()
                  operand_slot);
     expect("VMREAD to memory outside IA-32e mode", r, outcome::succeed);
     std::uint64_t stored{};
-    std::memcpy(&stored, page.data() + (operand_slot & 0xfff),
-                sizeof(stored));
+    std::memcpy(
+        &stored, page.data() + (operand_slot & 0xfff), sizeof(stored));
     check((stored & 0xffffffff) == 0x55667788ull,
           "VMREAD to memory outside IA-32e mode stored the wrong 32 bits");
     check((stored >> 32) == 0xccccccccull,
@@ -1497,13 +1511,13 @@ static void test_effective_address()
 
     // base + index * scale + displacement, 64-bit addressing.
     context regs{};
-    regs.rbx = 0x40000;    // base, encoding 3
-    regs.rsi = 0x10;       // index, encoding 6
-    auto information = (2ull << 7)          // address size 64
-                       | (3ull << 23)       // base rbx
-                       | (6ull << 18)       // index rsi
-                       | (2ull << 0)        // scale 4
-                       | (1ull << 28);      // reg2 = rcx
+    regs.rbx = 0x40000;                // base, encoding 3
+    regs.rsi = 0x10;                   // index, encoding 6
+    auto information = (2ull << 7)     // address size 64
+                       | (3ull << 23)  // base rbx
+                       | (6ull << 18)  // index rsi
+                       | (2ull << 0)   // scale 4
+                       | (1ull << 28); // reg2 = rcx
     regs.rcx = fields::guest_rip;
     vmwrite_field(fields::guest_rip, 0xfeedfeed);
     std::memset(page_of(0x40040).data(), 0, 4096);
@@ -1534,16 +1548,342 @@ static void test_effective_address()
     regs = context{};
     regs.rcx = fields::guest_rip;
     regs.rbx = 0x41000;
-    auto negative = (2ull << 7) | (3ull << 23) | (1ull << 22) |
-                    (1ull << 28);
+    auto negative =
+        (2ull << 7) | (3ull << 23) | (1ull << 22) | (1ull << 28);
     std::memset(page_of(0x40000).data(), 0, 4096);
-    expect("VMREAD at base - 0x1000",
-           run(basic_reason::vmread, regs, negative,
-               ~std::uint64_t(0xfff)),
-           outcome::succeed);
+    expect(
+        "VMREAD at base - 0x1000",
+        run(basic_reason::vmread, regs, negative, ~std::uint64_t(0xfff)),
+        outcome::succeed);
     std::memcpy(&stored, page_of(0x40000).data(), sizeof(stored));
-    check(stored == 0xfeedfeed,
-          "a negative displacement was not applied");
+    check(stored == 0xfeedfeed, "a negative displacement was not applied");
+}
+
+// ------- 13. what is advertised versus what is implemented
+//
+// Every bit set in a capability MSR is a promise. This project's recurring
+// failure mode is stated in CLAUDE.md as "answering *part* of an
+// interface", and a capability MSR is the largest interface here: a guest
+// hypervisor reads it once, believes it for the life of the machine, and
+// builds a VMCS and its own page tables on the strength of it.
+//
+// So this section pairs each promise with the thing that has to be true
+// for it to be kept, in both directions. A bit offered whose behaviour is
+// missing is the defect. A bit withheld is not a defect, but it is a gap
+// in what a guest hypervisor may use, and pinning it here is what stops
+// the mask and the implementation drifting apart silently - which is the
+// only way this class of defect ever arrives.
+static void test_advertised_versus_implemented()
+{
+    std::printf("[13] what is advertised versus what is implemented\n");
+    std::size_t cpu = 0;
+    reset_cpu(cpu);
+
+    auto read = [&](std::uint32_t index) {
+        context regs{};
+        hv().on_nested_vmx_msr_read(index, regs);
+        return (regs.rax & 0xffffffff) | (regs.rdx << 32);
+    };
+
+    // The allowed-1 half is what a guest hypervisor may set.
+    auto offered = [&](std::uint32_t index) { return read(index) >> 32; };
+
+    // --- The local APIC, offered in none of its forms -----------------
+    //
+    // Three secondary controls turn parts of the local APIC into
+    // something the processor maintains: bit 0 virtualize APIC accesses,
+    // bit 8 APIC-register virtualization, bit 9 virtual-interrupt
+    // delivery. Each needs pages and state of its own that nothing here
+    // maintains, so none is offered - and `within_capability` in
+    // build_vmcs02 is what makes "not offered" mean "cannot be set"
+    // rather than "we hope nobody tries".
+    //
+    // Worth stating because it answers a question that would otherwise
+    // need an experiment: a guest hypervisor cannot produce the
+    // inconsistent vmcs02 of virtual-interrupt delivery with the TPR
+    // shadow dropped, because it cannot set virtual-interrupt delivery
+    // at all. That pair is a VM-entry consistency check on hardware;
+    // here it is refused a step earlier, at the control itself, which is
+    // the stronger place to refuse it.
+    struct
+    {
+        std::uint64_t bit;
+        const char * name;
+    } apic_controls[]{
+        {0, "virtualize APIC accesses"},
+        {8, "APIC-register virtualization"},
+        {9, "virtual-interrupt delivery"},
+    };
+
+    auto secondary_offered = offered(0x48b);
+    for (auto & entry : apic_controls) {
+        check(0 == (secondary_offered & (1ull << entry.bit)),
+              std::string("secondary control bit ") +
+                  std::to_string(entry.bit) + " (" + entry.name +
+                  ") is offered, and nothing here maintains the state it "
+                  "needs");
+    }
+
+    // --- Posted interrupts and the preemption timer -------------------
+    //
+    // Pin bit 7 processes posted interrupts, which needs a descriptor and
+    // a notification vector this VMM has neither of. Pin bit 6 activates
+    // the VMX-preemption timer, which this VMM arms for its own use - so
+    // a guest hypervisor's copy of the bit would mean nothing, and the
+    // exits it produced would belong to the wrong layer.
+    //
+    // Both are withheld here, and build_vmcs02 strips both from the pin
+    // union regardless. The strip is the belt; this is the braces.
+    auto pin_offered = offered(0x481);
+    check(0 == (pin_offered & (1ull << 6)),
+          "pin control bit 6 (activate VMX-preemption timer) is offered, "
+          "but this VMM arms the timer for its own use - a guest "
+          "hypervisor's exits would be taken by the wrong layer");
+    check(0 == (pin_offered & (1ull << 7)),
+          "pin control bit 7 (process posted interrupts) is offered, and "
+          "there is no posted-interrupt descriptor behind it");
+
+    // The TRUE variants have to agree with the originals. This VMM sets
+    // IA32_VMX_BASIC bit 55, which tells a guest hypervisor the TRUE MSRs
+    // exist - and a guest hypervisor then reads whichever of the pair it
+    // prefers. A disagreement between them is a guest reading a different
+    // machine depending on which MSR it asked, which is the worst kind of
+    // inconsistency because it depends on the guest's own code path.
+    check(offered(0x48d) == pin_offered,
+          "IA32_VMX_TRUE_PINBASED_CTLS offers a different set from "
+          "IA32_VMX_PINBASED_CTLS");
+    check(offered(0x48e) == offered(0x482),
+          "IA32_VMX_TRUE_PROCBASED_CTLS offers a different set from "
+          "IA32_VMX_PROCBASED_CTLS");
+    check(offered(0x48f) == offered(0x483),
+          "IA32_VMX_TRUE_EXIT_CTLS offers a different set from "
+          "IA32_VMX_EXIT_CTLS");
+    check(offered(0x490) == offered(0x484),
+          "IA32_VMX_TRUE_ENTRY_CTLS offers a different set from "
+          "IA32_VMX_ENTRY_CTLS");
+
+    // --- VMCS shadowing -----------------------------------------------
+    //
+    // Secondary bit 14, not offered, and that is the honest answer: this
+    // VMM builds no second shadow region for a guest hypervisor's own
+    // guest to have its VMCS accesses caught in.
+    //
+    // The measurement that argues for implementing it is recorded in
+    // nested_vmx.h - VMREAD and VMWRITE were 65.7% of every exit taken
+    // while Hyper-V booted Windows - and the switch that turns on this
+    // VMM's *own* use of shadowing is `shadow_vmcs_enabled`, deliberately
+    // not a CMake option. Neither changes what a guest hypervisor may
+    // set, which is what this asserts and all it asserts.
+    check(0 == (secondary_offered & (1ull << 14)),
+          "secondary control bit 14 (VMCS shadowing) is offered to a "
+          "guest hypervisor, and there is no second shadow region for "
+          "its own guest's accesses");
+
+    // --- Mode-based execute control, the asymmetry in the other
+    //     direction ---------------------------------------------------
+    //
+    // Secondary bit 22 is set by this VMM in its own VMCS and is *not*
+    // offered to a guest hypervisor, and build_vmcs02 strips it from
+    // vmcs02. That is a capability implemented and withheld, which is the
+    // safe direction - but it is asserted so that offering it later is a
+    // deliberate act rather than a side effect.
+    check(0 == (secondary_offered & (1ull << 22)),
+          "secondary control bit 22 (mode-based execute control) is "
+          "offered, and build_vmcs02 strips it from vmcs02 - a guest "
+          "hypervisor would set it and get nothing");
+
+    // --- The EPT and VPID capabilities --------------------------------
+    //
+    // IA32_VMX_EPT_VPID_CAP is where a promise is cheapest to make and
+    // most expensive to break, because a guest hypervisor acts on it when
+    // it *builds its own page tables* - long before anything here could
+    // refuse the result.
+    auto ept_vpid = read(0x48c);
+
+    // Bit 0, execute-only translations. Withheld, and paired with
+    // `execute_only_translations_offered` in the real hypervisor.h: the
+    // composition in nested_ept.h consults that constant when deciding
+    // what `normalised` may leave in an entry, so reporting the bit
+    // without honouring it - or honouring it without reporting it - puts
+    // the capability MSR and the permission composition at odds.
+    //
+    // Only one half is checkable here, because this harness compiles
+    // against a shim hypervisor.h and comparing the mask against the
+    // *shim's* copy of the constant would test the shim. The pairing
+    // itself is a source-level invariant and is asserted in
+    // scripts/ci/check-exit-handler.sh, which reads both real headers.
+    check(0 == (ept_vpid & (1ull << 0)),
+          "IA32_VMX_EPT_VPID_CAP bit 0 (execute-only translations) is "
+          "offered, and normalised may not leave an execute-only entry "
+          "unless execute_only_translations_offered says so");
+
+    // Bit 21, accessed and dirty flags. Withheld, and build_vmcs02
+    // refuses an EPT pointer that asks for them. Both halves matter:
+    // withholding the bit while accepting the pointer leaves a guest
+    // hypervisor's page tracking silently never marking anything, which
+    // is the failure that looks like a guest bug for as long as it takes
+    // to find.
+    check(0 == (ept_vpid & (1ull << 21)),
+          "IA32_VMX_EPT_VPID_CAP bit 21 (accessed and dirty flags) is "
+          "offered, and nothing in the shadow ever sets either flag");
+
+    // Bit 22, advanced VM-exit information for EPT violations. Withheld
+    // because the reflected exit qualification does not carry bits 11:9.
+    check(0 == (ept_vpid & (1ull << 22)),
+          "IA32_VMX_EPT_VPID_CAP bit 22 (advanced VM-exit information) "
+          "is offered, and the reflected qualification does not carry "
+          "bits 11:9");
+
+    // Bit 6, four-level walks: offered, and the only walk length the
+    // shadow builds. A promise that is kept, asserted so that a shadow
+    // gaining five-level support without the bit is caught too.
+    check(0 != (ept_vpid & (1ull << 6)),
+          "IA32_VMX_EPT_VPID_CAP bit 6 (four-level page walks) is "
+          "withheld, and it is the only walk length the shadow builds");
+
+    // Bits 16 and 17, 2 MB and 1 GB leaves. Both offered, and this is the
+    // one place where "advertised" and "implemented" deliberately mean
+    // different things: the bits report what a *guest hypervisor* may
+    // write in its own tables, not what the shadow holds. A 1 GB guest
+    // mapping is fanned out to 2 MB shadow entries, which implements it
+    // rather than breaking the promise.
+    check(0 != (ept_vpid & (1ull << 16)),
+          "IA32_VMX_EPT_VPID_CAP bit 16 (2 MB EPT leaves) is withheld");
+    check(0 != (ept_vpid & (1ull << 17)),
+          "IA32_VMX_EPT_VPID_CAP bit 17 (1 GB EPT leaves) is withheld");
+
+    // --- Every advertised invalidation type must be answered ----------
+    //
+    // The capability MSR names which INVEPT and INVVPID types exist. A
+    // type reported but refused is the exact shape of the recurring
+    // defect: the guest hypervisor believes an invalidation happened, and
+    // a stale translation is silent until it is wrong.
+    //
+    // Section 6 above drives each type; this asserts the *set* it drives
+    // is the set the MSR advertises, so adding a capability bit without
+    // adding its answer fails here.
+    {
+        struct
+        {
+            std::uint64_t cap_bit;
+            std::uint64_t type;
+            const char * name;
+        } types[]{
+            {25, 1, "INVEPT single-context"},
+            {26, 2, "INVEPT all-context"},
+            {40, 0, "INVVPID individual-address"},
+            {41, 1, "INVVPID single-context"},
+            {42, 2, "INVVPID all-context"},
+            {43, 3, "INVVPID single-context retaining globals"},
+        };
+
+        auto invept_supported = 0 != (ept_vpid & (1ull << 20));
+        auto invvpid_supported = 0 != (ept_vpid & (1ull << 32));
+
+        check(invept_supported,
+              "IA32_VMX_EPT_VPID_CAP bit 20 (INVEPT) is withheld while "
+              "its type bits are offered");
+        check(invvpid_supported,
+              "IA32_VMX_EPT_VPID_CAP bit 32 (INVVPID) is withheld while "
+              "its type bits are offered");
+
+        reset_cpu(cpu);
+        enter_vmx(cpu);
+        make_region(vmcs_a, vmcs12::revision);
+        do_pointer_instruction(
+            basic_reason::vmptrld, operand_slot, vmcs_a);
+
+        auto descriptor = [](std::uint64_t low, std::uint64_t high) {
+            auto & page = page_of(operand_slot);
+            std::memcpy(
+                page.data() + (operand_slot & 0xfff), &low, sizeof(low));
+            std::memcpy(page.data() + (operand_slot & 0xfff) + 8,
+                        &high,
+                        sizeof(high));
+        };
+
+        for (auto & entry : types) {
+            if (0 == (ept_vpid & (1ull << entry.cap_bit))) {
+                continue;
+            }
+
+            auto is_invept = entry.cap_bit < 32;
+            // A descriptor each type will accept: a non-zero EPT root for
+            // INVEPT, a non-zero VPID with a canonical address for
+            // INVVPID. The point of the case is the *type* being
+            // answered, so the operand is deliberately the easy one.
+            descriptor(is_invept ? 0x1000 : 1, 0);
+
+            context regs{};
+            regs.rcx = entry.type;
+            auto result = run(is_invept ? basic_reason::invept
+                                        : basic_reason::invvpid,
+                              regs,
+                              memory_operand_information(1),
+                              operand_slot);
+
+            check(outcome::succeed == result.what,
+                  std::string(entry.name) +
+                      " is advertised in IA32_VMX_EPT_VPID_CAP and is "
+                      "not answered - a guest hypervisor believes the "
+                      "invalidation happened");
+        }
+    }
+
+    // --- The narrowing is a subset, never a superset ------------------
+    //
+    // Nothing this VMM answers may offer a control the hardware
+    // underneath does not, whatever the supported mask says. `narrow`
+    // ANDs the allowed-1 half with the supported set and ORs the
+    // hardware's allowed-0 half back in, so the result is bounded above
+    // by hardware - and this checks that against the same
+    // `cached_vmx_msr` the code reads, so the two cannot be satisfied by
+    // the same mistake.
+    struct
+    {
+        std::uint32_t msr;
+        const char * name;
+    } narrowed[]{
+        {0x481, "pin based"},
+        {0x482, "primary"},
+        {0x48b, "secondary"},
+        {0x483, "exit"},
+        {0x484, "entry"},
+    };
+
+    for (auto & entry : narrowed) {
+        auto hardware = hv().cached_vmx_msr(entry.msr) >> 32;
+        auto reported = offered(entry.msr);
+        check(0 == (reported & ~hardware),
+              std::string(entry.name) +
+                  " controls offer a bit the hardware underneath does "
+                  "not allow - the narrowing has become a widening");
+    }
+
+    // The EPT and VPID capabilities are masked rather than narrowed - a
+    // plain AND, so the subset property is the whole of it.
+    check(0 == (ept_vpid & ~hv().cached_vmx_msr(0x48c)),
+          "IA32_VMX_EPT_VPID_CAP reports a capability the hardware "
+          "underneath does not have");
+
+    // --- IA32_VMX_MISC: the MSR-list capacity is a promise too --------
+    //
+    // Bits 27:25 give (N+1)*512 as the number of entries a VM-entry or
+    // VM-exit MSR area may hold. This VMM clears them, promising 512 -
+    // and it processes those areas in software rather than handing their
+    // addresses to the processor, so the number it promises is the number
+    // its own loop has to be willing to walk.
+    auto misc = read(0x485);
+    check(0 == ((misc >> 25) & 0x7),
+          "IA32_VMX_MISC offers an MSR-list capacity above 512 entries, "
+          "and the areas are walked in software");
+
+    // And the CR3-target count, which is zero for the same kind of
+    // reason: there is no CR3-target list here, so promising one would
+    // invite a guest hypervisor to write values nothing consults.
+    check(0 == ((misc >> 16) & 0x1ff),
+          "IA32_VMX_MISC offers a CR3-target list, and nothing here "
+          "consults one");
 }
 
 int main()
@@ -1561,6 +1901,7 @@ int main()
     test_read_only_fields();
     test_operand_size();
     test_effective_address();
+    test_advertised_versus_implemented();
 
     std::printf("\n%d checks, %d failures\n", g_checks, g_failures);
     if (!g_findings.empty()) {
