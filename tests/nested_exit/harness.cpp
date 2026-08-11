@@ -3830,18 +3830,64 @@ static void test_exit_and_entry_control_composition()
         // then `kvm_cpu_get_extint` and `kvm_apic_ack_interrupt`). This
         // VMM has no emulated APIC: the guest owns the real one. So the
         // processor has to do it, and that means the bit.
-        diverge(0 == (vmcs02_exit_controls() & exit_acknowledge_interrupt),
-                "DEFECT: vmcs12 sets 'acknowledge interrupt on exit' and "
-                "vmcs02 does not - `build_vmcs02` writes `exit01` "
-                "verbatim, and this VMM's own exit controls are only "
-                "host_address_space_size | save_debug_controls. Every "
-                "external-interrupt exit reflected to the guest "
-                "hypervisor therefore carries an invalid "
-                "interruption-information field (SDM 30.2.2) and leaves "
-                "the interrupt pending at the controller (SDM 30.2). "
-                "Measured on the rig: 324 external-interrupt exits in "
-                "one boot and 323 VMREADs of the field. Fix: set the bit "
-                "in vmcs02 when vmcs12 asks");
+        check(0 != (vmcs02_exit_controls() & exit_acknowledge_interrupt),
+              "vmcs12's 'acknowledge interrupt on exit' reaches vmcs02, "
+              "so the processor takes the vector from the interrupt "
+              "controller and the field the guest hypervisor reads is "
+              "valid. Only the processor can do this: nothing after the "
+              "exit can acknowledge an interrupt or recover a vector it "
+              "never latched, which is what separates this control from "
+              "the save group beside it");
+    }
+
+    {
+        // The condition the fix added beside the bit, and the one nothing
+        // else in the tree tests.
+        //
+        // Acknowledging *consumes* the interrupt - SDM 30.2
+        // (.references/sdm.txt:203416): "the interrupt controller is
+        // acknowledged and the interrupt is no longer pending". So it may
+        // only be done on an exit that will be reflected, or this VMM
+        // would swallow an interrupt on behalf of a guest hypervisor that
+        // is never told it happened. `l1_wants_l2_exit` decides that for
+        // an external interrupt on pin12's external-interrupt exiting
+        // alone, since this VMM never sets the control itself.
+        //
+        // This is the half a union would have got wrong, and it is why
+        // the exit controls could not simply be unioned the way the
+        // execution controls are.
+        asked_controls asked;
+        asked.exit_controls = exit_default1 |
+                              exit_host_address_space_size |
+                              exit_acknowledge_interrupt;
+
+        auto built = compose(asked, registers);
+        check(built.has_value(),
+              "the control may be set without external-interrupt exiting");
+        check(0 == (vmcs02_exit_controls() & exit_acknowledge_interrupt),
+              "with vmcs12 asking to acknowledge but *not* asking for "
+              "external-interrupt exiting, vmcs02 does not acknowledge - "
+              "the exit would not be reflected, and acknowledging it "
+              "would consume an interrupt nobody is told about");
+    }
+
+    {
+        // And the mirror: external-interrupt exiting without the
+        // acknowledgement control. The exit is reflected and the field
+        // stays invalid, which is what the architecture says a guest
+        // hypervisor that did not ask should see.
+        asked_controls asked;
+        asked.pin = pin_default1 | pin_external_interrupt;
+        asked.exit_controls = exit_default1 | exit_host_address_space_size;
+
+        auto built = compose(asked, registers);
+        check(built.has_value(),
+              "external-interrupt exiting without the acknowledgement");
+        check(0 == (vmcs02_exit_controls() & exit_acknowledge_interrupt),
+              "vmcs02 does not acknowledge when vmcs12 did not ask - SDM "
+              "30.2.2 makes the interruption-information field invalid in "
+              "exactly that case, and manufacturing one would be a "
+              "different lie from the one this fixed");
     }
 
     {
@@ -4163,12 +4209,17 @@ static void test_exit_and_entry_control_composition()
     {
         // The end of the chain the first case starts, asserted on the
         // field the guest hypervisor actually reads rather than on the
-        // control. This is what 323 VMREADs a boot were looking at.
+        // control. This is what 323 VMREADs a boot were looking at, and
+        // what a real one now reads: 324 external interrupts in a boot,
+        // 35 of vector 0xef and 289 of 0xff, recorded in BACKLOG.md.
         //
-        // The harness cannot acknowledge an interrupt, so it models the
-        // processor: with the control clear in vmcs02 the hardware leaves
-        // the interruption-information field invalid, which is a zero
-        // here, and `reflect_l2_exit` copies it into vmcs12.
+        // The harness has no interrupt controller, so it models the
+        // processor: with the control set in vmcs02 the hardware latches
+        // the vector and marks the field valid, and `reflect_l2_exit`
+        // carries it into vmcs12 unchanged. The property under test is
+        // that carrying - a reflection that dropped or rewrote the field
+        // would leave the guest hypervisor exactly where the missing
+        // control left it.
         asked_controls asked;
         asked.pin = pin_default1 | pin_external_interrupt;
         asked.exit_controls = exit_default1 |
@@ -4180,13 +4231,18 @@ static void test_exit_and_entry_control_composition()
 
         constexpr unsigned external_interrupt = 1;
         constexpr std::uint64_t interruption_valid = 1ull << 31;
+        constexpr std::uint64_t interruption_type_external = 0;
+        constexpr std::uint64_t vector = 0xef;
 
         check(l1_wants(external_interrupt, registers),
               "an external interrupt is the guest hypervisor's when it "
               "set external-interrupt exiting");
 
+        auto latched = interruption_valid |
+                       (interruption_type_external << 8) | vector;
+
         hv().running_l2[cpu] = true;
-        hv().vmcs.write(field::vm_exit_interruption_information, 0);
+        hv().vmcs.write(field::vm_exit_interruption_information, latched);
         hv().reflect_l2_exit(
             cpu,
             zpp::arch::x86_64::vmx::exit_reason(external_interrupt),
@@ -4195,14 +4251,14 @@ static void test_exit_and_entry_control_composition()
         auto reported = hv().guest_vmcs12[cpu].read(
             fields::vm_exit_interruption_information);
 
-        diverge(0 == (reported & interruption_valid),
-                "DEFECT: an external-interrupt exit reflected to a guest "
-                "hypervisor that asked to acknowledge interrupts on exit "
-                "carries an invalid interruption-information field, so "
-                "it cannot learn which interrupt fired. SDM 30.2.2 makes "
-                "the field valid exactly when the control is 1, and this "
-                "is the field a real guest hypervisor was measured "
-                "reading 323 times in one boot");
+        check(latched == reported,
+              "the acknowledged vector reaches vmcs12's "
+              "interruption-information field unchanged - the guest "
+              "hypervisor learns which interrupt fired, which is the "
+              "whole of dispatching a device interrupt");
+        check(0 != (reported & interruption_valid),
+              "and the valid bit with it, which SDM 30.2.2 sets exactly "
+              "when the acknowledgement control is 1");
     }
 }
 
