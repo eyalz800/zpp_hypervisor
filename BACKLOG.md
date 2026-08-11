@@ -7827,3 +7827,67 @@ regression, stated in one row, and it is where the next work goes.
 processor must ignore the second IPI of a pair, so drops are expected
 and were present in the working boot too. The number that changed is the
 hand-offs.
+
+## The re-queue costs the application processors. Measured, not argued
+
+2026-08-11. `-DZPP_REQUEUE_INTERRUPTED_EVENTS` was added so this would be
+one boot rather than an argument, and it was:
+
+| build | `guest vmxon` | boot processor |
+|---|---|---|
+| re-queue **ON** | **1 of 8** | runs continuously, timer protocol completes |
+| re-queue **OFF** | **8 of 8**, 8 distinct regions | freezes at 82,4xx |
+
+Same tree, same launcher, same installation, one option apart. Nothing
+else that landed that day is responsible - and two candidates were
+eliminated first, by measurement rather than by reasoning:
+
+- **The monitor-trap-flag instrumentation was not it.** Removed and
+  re-run: still 1 of 8. Removing it was still right, for a reason worth
+  keeping on its own - see below.
+- **The APIC interception was not it.** `observed_apic_mode` reads
+  **xapic** on all eight processors, not x2APIC, and the watch is armed
+  (`watching the local apic page at 0xfee00000`). The x2APIC MSRs are
+  correctly not intercepted because nothing is in x2APIC. That hypothesis
+  was formed from the MSR bitmap alone and died on one read of the mode.
+
+So the two measurements this VMM has to reconcile are both real and both
+caused by the same switch. **Neither is a bug to be traded against the
+other; the re-queue is necessary and its interaction with processor
+start-up is a third defect not yet found.** The four already fixed - the
+unconditional write, the unbounded hold, the entry-state check, and the
+FRED/NMI/wait-for-SIPI trio - are not the whole of it.
+
+Where to look next, in order:
+
+1. The APs reach 107 exits each and stop, in **firmware** (`cs=0x0038`,
+   `0x7ed5xxxx`). Every one of the five event-outcome counters reads zero
+   on all seven, so the re-queue never ran on them. It is affecting them
+   through the boot processor, not directly.
+2. The log stops at 115 lines with the re-queue on, against 713 with it
+   off, and contains no Windows-era APIC traffic at all. Windows never
+   sends the INIT-SIPI-SIPI that would start its own processors.
+3. So the question is not "what does the re-queue do to an application
+   processor" but **"what does the re-queue change about the boot
+   processor such that Windows never starts the others"** - and that is
+   answerable with the module list from `ntoskrnl`, which says how far
+   the kernel actually got.
+
+### A diagnostic that perturbed what it measured
+
+`injection_step_count` read **30,968** on the boot processor against the
+sixteen injections it was written to observe. The arm is per *injection*,
+and Hyper-V re-injects a vector it never sees acknowledged - so sixteen
+was the number measured on the **broken** machine, where the events were
+being destroyed. With the re-queue on the guest takes them, the timer
+runs, and the injection rate rises by three orders of magnitude. **The
+instrumentation was sized against the broken machine and shipped into the
+fixed one.**
+
+It answered its question and then became a behaviour change: an MTF exit
+and a read-modify-write of the primary controls on every one of thirty
+thousand entries. Removed rather than switched.
+
+CLAUDE.md carries this lesson pointing outward - "when a hang survives
+every code change you can think of, suspect the build". This is the same
+trap pointing inward: **suspect the instrument.**
