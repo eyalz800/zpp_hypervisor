@@ -74,6 +74,42 @@ void hypervisor::watch_local_apic(bool watch)
         unwatch_guest_page(this->watched_apic_page);
     }
 
+    // A page this VMM's own table does not map is one the watch must not
+    // be armed on, and refusing is the whole of the answer.
+    //
+    // `filter_local_apic_write` and `on_local_apic_write` both reach the
+    // page by dereferencing `page << 12` as a **host virtual address**,
+    // and the host page table maps exactly one local APIC page - read
+    // from IA32_APIC_BASE once, before any guest ran. Relocating the
+    // local APIC is a guest's to do: IA32_APIC_BASE[35:12] is writable
+    // and `note_apic_mode` follows the move, so before this the watch
+    // was armed on the new page and the guest's next interrupt-command
+    // store took an EPT violation into a filter that read an unmapped
+    // address. That is a #PF in the exit handler, where there is no
+    // recovery point left to unwind to, so the processor simply stops -
+    // the failure the comment at that dereference already describes, and
+    // one that leaves nothing behind to say what happened.
+    //
+    // Mapping the new page instead was the obvious repair and does not
+    // work: `map_from` walks the loader's OS page table through a
+    // callback that stops resolving once a processor has switched to this
+    // table, which is why the controller register pages beside it are
+    // mapped before the switch rather than when they are first used.
+    //
+    // So the choice is between losing sight of the interrupt command
+    // register and stopping the processor. Losing sight of it costs the
+    // start-up IPI interception, which is real - but it is a degradation
+    // the log names, where the alternative is a processor that vanishes
+    // with nothing recorded anywhere.
+    if (base != this->mapped_apic_page) {
+        this->watched_apic_page = 0;
+        log("refusing to watch a relocated local apic page at {}, this "
+            "vmm maps {}",
+            base,
+            this->mapped_apic_page);
+        return;
+    }
+
     if (auto armed = watch_guest_page_writes(
             base,
             &hypervisor::on_local_apic_write,

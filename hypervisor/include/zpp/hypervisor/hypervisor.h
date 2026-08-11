@@ -1773,6 +1773,27 @@ private:
     std::uint64_t watched_apic_page{};
 
     /**
+     * The local APIC page this VMM's own page table maps, read from
+     * IA32_APIC_BASE once before any guest ran.
+     *
+     * `filter_local_apic_write` and `on_local_apic_write` dereference the
+     * watched page as a **host virtual address**, so the only page they
+     * may be pointed at is one the host page table maps - and it maps
+     * exactly one, established at initialization. A guest may relocate
+     * its local APIC by writing IA32_APIC_BASE, and this VMM follows the
+     * move; without this record it would follow it into a page it cannot
+     * address, and the first intercepted write would take a #PF in the
+     * exit handler, where there is no recovery point.
+     *
+     * Recorded rather than re-derived, because the mapping cannot be
+     * repeated later: `map_from` walks the loader's OS page table through
+     * a callback that stops resolving once a processor switches to this
+     * table, which is why every other runtime mapping is established
+     * before the switch as well.
+     */
+    std::uint64_t mapped_apic_page{};
+
+    /**
      * What mode each processor's local APIC was in the last time this VMM
      * looked, which is at its launch and on every write it makes to
      * IA32_APIC_BASE.

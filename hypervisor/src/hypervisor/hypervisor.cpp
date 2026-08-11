@@ -231,6 +231,11 @@ void hypervisor::initialize_host_page_table()
             arch::x86_64::page_table::protection::write,
         this->os_page_table);
 
+    // Which page that was, so `watch_local_apic` can refuse to arm on any
+    // other. It is the only local APIC page this table maps, and the
+    // watch's filter reaches it by dereferencing a host virtual address.
+    this->mapped_apic_page = apic_base;
+
     // Compose the value that will be loaded into CR3.
     //
     // The top of it is the physical address of this table's top level,

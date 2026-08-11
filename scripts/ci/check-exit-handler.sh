@@ -206,6 +206,50 @@ else
     status=1
 fi
 
+# === The watched local APIC page must be one the host can address =====
+#
+# `filter_local_apic_write` and `on_local_apic_write` reach the watched
+# page by dereferencing `page << 12` as a **host virtual address**, and
+# the host page table maps exactly one local APIC page - read from
+# IA32_APIC_BASE once, before any guest ran.
+#
+# A guest may relocate its local APIC; IA32_APIC_BASE[35:12] is writable
+# and `note_apic_mode` follows the move. Before the guard below, the watch
+# was then armed on a page the host does not map, and the guest's next
+# interrupt-command store took an EPT violation into a filter that read an
+# unmapped address - a #PF in the exit handler, where there is no recovery
+# point, so the processor stops with nothing recorded anywhere.
+#
+# Checked at the source because no harness compiles `watch_local_apic`,
+# and because the two halves live in different translation units: the
+# record is written where the mapping is made in hypervisor.cpp, and read
+# where the watch is armed in local_apic.cpp. A grep is what spans them.
+echo "== the watched local APIC page is one the host page table maps"
+
+apic="$root/hypervisor/src/hypervisor/local_apic.cpp"
+setup="$root/hypervisor/src/hypervisor/hypervisor.cpp"
+
+if grep -q 'this->mapped_apic_page = apic_base;' "$setup"; then
+    echo "  ok    the mapped page is recorded where it is mapped"
+else
+    echo "  FAIL  nothing records which local APIC page the host page" >&2
+    echo "        table maps, so the watch cannot tell whether the page" >&2
+    echo "        it is about to arm on is addressable." >&2
+    status=1
+fi
+
+if grep -q 'base != this->mapped_apic_page' "$apic"; then
+    echo "  ok    and watch_local_apic refuses any other page"
+else
+    echo "  FAIL  watch_local_apic no longer refuses a local APIC page" >&2
+    echo "        other than the one the host page table maps. A guest" >&2
+    echo "        that relocates its APIC now arms the watch on an" >&2
+    echo "        address the filter cannot dereference, and the next" >&2
+    echo "        interrupt-command write stops the processor with" >&2
+    echo "        nothing recorded." >&2
+    status=1
+fi
+
 # The MSR ranges the bitmap can govern. Everything outside them exits
 # unconditionally (SDM 28.1.3, .references/sdm.txt:200814), which is why
 # an all-zeroes bitmap does not stop the accesses that cost an afternoon.
