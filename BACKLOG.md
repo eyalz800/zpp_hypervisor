@@ -10570,3 +10570,60 @@ deferred procedure call it queues is correctly refused.
 **Next**: sample the task priority and the stack *together*, and look
 only at the stacks taken while the priority is `0xf0`. What raises IRQL
 to HIGH_LEVEL and does not lower it is now the whole question.
+
+
+## Root cause, measured: a second-level exit costs milliseconds
+
+The guest is not stuck, not deadlocked and not waiting on a lost event.
+**It cannot finish a clock tick before the next one arrives.**
+
+**The measurement.** `reference_read_tsc` records the time stamp counter
+at each read of the reference counter. Consecutive reads *within one
+tick* are:
+
+    2,166,982 ticks   1.11 ms
+    4,986,488         2.56 ms
+    7,611,962         3.90 ms
+    4,503,867         2.31 ms
+
+A single `rdmsr 0x40000020` costs **one to four milliseconds**. Windows
+does about ten of them per clock tick - measured at 966 reads a second
+against 96 ticks a second - so the clock handler alone needs 10 to 40 ms
+against a tick period of 10.4 ms. It can never catch up.
+
+Everything else follows and nothing else needs explaining: the stacks
+are in the clock path at every task priority because that is where all
+the time goes; deferred calls never run because the processor never
+leaves the handler long enough; the animation never advances past its
+first frame; and on eight processors the application processors are
+never started because the boot never gets that far.
+
+**Why an exit costs that much.** `build_vmcs02` writes on the order of a
+hundred VMCS fields on **every** nested entry, and `save_l2_state` reads
+more on every exit. This VMM is itself KVM's guest, so *every one of
+those VMX instructions traps to KVM*. One `rdmsr` by the second-level
+guest costs two full transitions - exit, reflect to the guest
+hypervisor, its resume, rebuild - each carrying a hundred trapped
+instructions. Under KVM alone there is one less level and the same read
+costs tens of microseconds.
+
+**This is a known problem with a known fix, and KVM implements it.**
+`prepare_vmcs02` writes only the hot fields per entry and calls
+`prepare_vmcs02_rare` - the bulk of the VMCS - **only when
+`dirty_vmcs12` is set**, clearing the flag afterwards
+(.references/kvm/nested.c:2645-2647). The flag is set on `vmptrld`, on
+the vmwrite path and on state restore (5720, 5735, 6892). So the bulk is
+written once per change of vmcs12 rather than once per entry.
+
+**The design point that makes it work**, and the thing to get right
+here: the fields the processor shadows are exactly the ones the guest
+hypervisor touches often, so a write to any *rare* field still exits and
+can set the flag. Shadowing everything would make the change
+undetectable.
+
+**Two earlier claims are corrected by this.** "Not a performance
+problem" was computed from 70 reference reads a second, a stale counter
+reading; the real rate is 966. And the empty reference TSC page is back
+in the chain after all - it is why Windows reads the counter through an
+MSR at all, and with the page populated those reads would be `rdtsc`
+and cost nothing.
