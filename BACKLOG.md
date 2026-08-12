@@ -9458,3 +9458,46 @@ underneath, which is one boot and would say whether this is ours at all -
 or the guest's own view of what it is waiting for, which needs the wait
 object rather than the thread, and that is a walk this VMM cannot do
 without more of the guest kernel's layout than it has.
+
+
+## What the deep stack scan found, and the wall it hit
+
+2026-08-12, scanning sixteen kilobytes - a whole kernel stack - rather
+than one or four.
+
+**During the hypercall storm it produces a complete chain**, which the
+shorter scans never did:
+
+```
+MiInitializeLoadedModuleList
+ MiReloadBootLoadedDrivers
+  MiHandleBootImage
+   MiAllocateDriverPage
+    MiGetSlabPage, MiGetPageFromSlabAllocator, MiGetPageFromSlabEntry
+     MiUpdateSlabPagePlaceholderState
+      VslSetPlaceholderPages
+       VslpEnterIumSecureMode
+        HvlSwitchToVsmVtl1
+```
+
+So the storm is the memory manager **reloading boot-loaded drivers into
+virtual-trust-level protected pages**, one secure-mode call per page.
+That refines the earlier attribution to
+`ExpRevokeBootLoaderPagePrivileges`, which is a sibling path in the same
+phase rather than the whole of it.
+
+**At the stall it returns the clock interrupt's frames and nothing
+above them**, over sixteen kilobytes. That is not a scan that was too
+short - it is the answer: the clock interrupt runs on its own stack.
+Windows uses interrupt stack tables for some vectors, and on that stack
+the interrupted thread's frames are not present at any depth.
+
+So the thread's own stack is reachable only through the trap frame, which
+holds the interrupted stack pointer that hardware pushed - `ss`, `rsp`,
+`rflags`, `cs`, `rip`, per SDM 7.14.2. Finding it means locating that
+frame on the handler's stack and scanning from the pointer inside it,
+rather than scanning further from where the handler happens to be.
+
+That is the next step and it is mechanical. What it would buy is the one
+thing still missing: the caller that owns the condition
+`Phase1Initialization` is busy-waiting on.
