@@ -331,6 +331,30 @@ zpp_add_host_test(nested_exit
         "${CMAKE_CURRENT_SOURCE_DIR}/nested_exit"
     DEFINES ZPP_NESTED_VMX=1 ZPP_HOSTED_TESTS=1)
 
+# The nested extended page table rules, exhaustively.
+#
+# zpp/arch/x86_64/vmx/nested_ept.h depends on ept.h and memory_type.h and
+# on nothing else, so the header under test compiles here exactly as the
+# hypervisor compiles it - no shim, no stand-in, and no hypervisor object,
+# because every function in it is pure and reaches memory only through a
+# callback.
+#
+# Why it earns a harness of its own, beside check-nested-ept.sh rather
+# than inside it: that script asserts a handful of static_asserts over the
+# same header and cannot call anything, because the interesting functions
+# are templates taking a reader. Everything nested rests on these five
+# functions and until now the only thing that ever called them was a
+# second-level guest fault on real hardware - where a wrong answer is not
+# a crash but a shadow entry granting slightly the wrong thing, and the
+# symptom is a guest livelocked on one address a million exits later.
+#
+# The permission algebra is swept exhaustively rather than sampled: there
+# are sixteen permission sets and two settings of execute-only support, so
+# the whole input space is 512 pairs and sampling it would be a choice
+# with no argument behind it.
+zpp_add_host_test(nested_ept
+    SOURCES nested_ept/harness.cpp)
+
 # The nested VMX state machine: the real nested_vmx.cpp and the real
 # vmcs12.h against the real hypervisor class, with only the two asm.h
 # stand-ins on the path.
