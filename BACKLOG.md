@@ -10369,3 +10369,58 @@ could be anywhere - but that is a thing to find, not to assert.
 `KiSetClockTickRate` do that does not terminate, given a correct clock
 and a correct deadline. That is answerable by disassembling it from the
 PDB and the image rather than by another boot.
+
+
+## Correction: "stuck inside the clock handler" was one sample, and the routine has no loop
+
+`KiSetClockTickRate` was disassembled from the image rather than guessed
+at, and it settles the question against the claim.
+
+    30dde2: call  KeQueryPerformanceCounter
+    30dde7: mov   %rax, 0x328(%rbx)      store the result
+    30ddfe: xor   %rsp, %rcx             stack cookie
+    30de01: call  __security_check_cookie
+    30de06: lea   0x70(%rsp), %r11       <- the address read off the stack
+    30de0b: pop   rbx rbp rsi r15 r14 r13 r12 rdi
+    30de23: ret
+
+`0x30de06` is the **epilogue**. The routine calls
+`KeQueryPerformanceCounter` once, stores the answer and returns. There is
+no loop in it, so the recorded frame was an ordinary return address in an
+ordinary call, and a clock interrupt handler running periodically is what
+a *healthy* machine looks like.
+
+**The error is one already recorded twice here**: a single sample does
+not describe where a program spends its time. The guest stack was read
+once, it landed in the clock handler, and that was written up as the
+guest being stuck in it. The right instrument is many samples, and
+`sample_guest_stack` exists to take them.
+
+So the causal chain built on top of it - handler never returns, task
+priority pinned at CLOCK_LEVEL, dispatch interrupt correctly refused -
+is **withdrawn**. The refusal of vector `0x2f` is still real and still
+unexplained; what is gone is the explanation for it.
+
+**What survives, all of it independently measured:**
+
+- Injection is not lost. The guest hypervisor wrote the entry
+  interruption field 278,223 times and 277,442 injections were
+  delivered.
+- Of those, 271,674 were the clock and 12 the dispatch vector. The guest
+  hypervisor asks for one and not the other.
+- The reference counter is monotonic and advances at 10 MHz against the
+  time stamp counter; synthetic timer deadlines advance at about 17.7 ms
+  and lie in the future when written.
+- The reference TSC page Windows enabled at `0x117a02000` is all zeros,
+  read with the hypercall page as a control for the address arithmetic.
+- The guest does no work: `l2_working_trace_count` frozen while
+  `l2_entries` climbs by 120,000 in ninety seconds.
+- The TPR shadow is not involved: withdrawing it changes nothing.
+- The capability set is not involved: KVM degraded to our exact menu
+  boots the same guest to user mode.
+
+**Next, and it is cheap**: take the guest stack repeatedly rather than
+once. A histogram of where the second-level guest actually is answers
+"what is it doing" in a way no single frame can, and every wrong turn in
+this investigation for two days has come from reading one sample as a
+distribution.
