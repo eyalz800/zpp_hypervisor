@@ -8502,3 +8502,71 @@ which is 2 MB aligned: the final `wrmsr` is at `base + 0x1a57e7` in all
 three runs. Naming that function is the next step and it needs the guest
 down - mount the volume read only, take `ntoskrnl.exe`, and find which
 relative address ending `0x1a57e7` disassembles to a `wrmsr`.
+
+
+## The stall, symbolized
+
+2026-08-12. `scripts/symbolize-guest.py` and `ntoskrnl.exe` taken off the
+volume with `ntfscat`. Third one-processor boot, kernel base
+`0xfffff8047bc00000`, deduced from the WRMSR trick the script encodes.
+
+**The last two hundred working exits before the guest stops:**
+
+| count | reason |
+|---|---|
+| 128 | EPT violation |
+| 28 | VMCALL |
+| 16 | TPR below threshold |
+| 16 | CPUID |
+| 7 | WRMSR |
+| 3 | RDMSR |
+| 1 each | XSETBV, CR access |
+
+The EPT violations are one instruction, `rva 0x6a72f3`, reading
+`0xee400000` through `0xefe00000` in **2 MB steps** - one fault per shadow
+leaf across a 28 MB window of PCI configuration space. A linear scan being
+faulted in, not a page that will not map.
+
+The VMCALLs are three stubs of Hyper-V's hypercall page with call codes
+`0x000c`, `0x0011` and `0x0012` in a repeating group. Reading them as the
+TLFS's `HvCallModifyVtlProtectionMask` bracketed by `HvCallVtlCall` and
+`HvCallVtlReturn` fits what they do: the secure kernel applying
+virtual-trust-level protections a page at a time, which is the workload
+the INVEPT note in `nested_ept.cpp` was written about. Sustained at about
+a hundred a second for twelve minutes, 14,348 to 55,054 working exits,
+before the guest stops.
+
+**Where it stops.** The instruction pointers resolve into `ntoskrnl.exe`:
+
+```
+rva 0x0c627ec  [INIT]   fn 0x0c62470+0x37c
+rva 0x03a57e7  [.text]  fn 0x03a5780+0x67    the final loop
+rva 0x06a72f3  [.text]  fn 0x06a72f0+0x3     the scan
+```
+
+The first is the one that matters: **it is in the INIT section**, which is
+discardable initialisation code. Phase 1 has not finished. The exit mix
+had been read as a booted system idling; it is not.
+
+Disassembled, `0x0c62470` is clock initialisation - it loads
+`HalPrivateDispatchTable+0x300`, calls it, writes the result into four
+adjacent globals, and lowers the task priority register, which is the
+`tpr-below` exit recorded at `+0x37c`. And `0x03a5780`, the function the
+guest never leaves, is the synthetic timer arming routine: it writes
+`0x400000b0` and then `0x400000b1` and returns.
+
+So the shape is: **the guest initialises its clock during Phase 1, and
+from then on only ever re-arms a timer.**
+
+That puts the older unexplained measurement back in the frame - the note
+that this guest arms its local APIC timer to about 2.38e9 where the same
+guest with nothing underneath arms it to 1,961,755, a ratio near 1213,
+stable across builds. A boot whose every timeout is off by three orders of
+magnitude is alive, ticking, and never finishes, which is exactly what is
+observed. It was recorded as an oddity and never chased.
+
+Next: read `timer_arm_value` and `timer_arm_tsc` from the **first**
+armings rather than the settled ones - the ring keeps the earliest
+thirty-two deliberately, for this - and compare against what
+`HalPrivateDispatchTable+0x300` is being told. If the calibration is
+wrong, the ratio is the bug.
