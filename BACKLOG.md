@@ -9180,3 +9180,61 @@ exactly "reads that do not answer the way the enumerator expects".
 The memory-type range registers do describe the region correctly - the
 log shows `mtrr 0 base 0x80000000 size 0x80000000 type 0x0`, uncacheable,
 covering it - so the question is whether that reaches the leaf.
+
+
+## The stall, named: Windows polls a PCI vendor ID that reads 0xFFFF
+
+2026-08-12. The profiler, sampling on the VMX-preemption timer at the
+stall - working ring frozen at 89,122.
+
+```
+486 of 1,376 samples, 35.3%, at one instruction:
+  rva 0x06a72f8   HalpPciReadMmConfigUshort
+
+and the registers at every one of them, identical:
+  rax 0xfffff802978affff      low sixteen bits 0xffff
+  rcx 0xfffff7ea80017000      the mapped configuration address
+  rdx 0xfffff48688c07820
+  rbx 0xfffff80297202040
+  rsi 0  rdi 2  r8 0
+```
+
+**Identical registers across every sample is a poll, not a scan.** A bus
+walk moves; this does not. `rcx`'s low twelve bits are zero, so the
+register being read is offset 0 - the vendor identifier - and the value
+coming back, in the low half of `rax`, is `0xffff`, which is PCI's "no
+device here".
+
+So Windows reads one function's vendor identifier, is told nothing is
+there, and reads it again. Thirty-five per cent of the guest's entire
+execution is that one instruction.
+
+That is the stall, stated as a fact about the guest rather than an
+inference about this VMM. It also retires, finally, the reading that
+started this whole line of enquiry: the extended-page-table violations
+stepping `0xee400000` to `0xefe00000` at one instruction pointer were
+this function faulting its configuration window in - ordinary, and the
+thing they preceded is not.
+
+**What has been ruled out already, so it is not re-proposed:**
+
+- The extended page tables covering the configuration window are
+  uncacheable, present and fully permitted - `epd[3][0x172] =
+  0xee400487` read from the running guest - so the reads reach hardware
+  and `0xffff` is what hardware answered, not something this VMM
+  invented.
+- Nothing in this VMM intercepts configuration space. The watched pages
+  are the local APIC and the disk controller's registers.
+
+**What to establish next, in order:**
+
+1. **Which function.** `rcx` is a virtual address in a window
+   `HalpPciMapMmConfigPhysicalAddress` created; the physical address
+   behind it names the bus, device and function directly. One
+   translation, and this VMM can already do it.
+2. **Whether it reads `0xffff` without this VMM present.** If it does,
+   the device is genuinely absent from the virtual machine and the fault
+   is in the rig's configuration rather than here - which would be the
+   most valuable possible outcome and is one boot to check.
+3. **Why a caller retries forever on an absent device**, which is a
+   question about Windows and answerable from the symbols.
