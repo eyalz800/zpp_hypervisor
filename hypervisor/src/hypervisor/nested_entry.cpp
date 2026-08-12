@@ -1219,6 +1219,10 @@ std::expected<void, zpp::error> hypervisor::build_vmcs02(std::size_t cpu)
         // validation above is what stands in for KVM's kvm_vcpu_map.
         vmcs.virtual_apic_address(virtual_apic12);
         vmcs.tpr_threshold(tpr_threshold12);
+
+        // Kept so the task priority behind it can be read back. See
+        // `interrupt_request_vtpr`.
+        this->nested_virtual_apic_address[cpu] = virtual_apic12;
     } else if (tpr_shadow12) {
         // Asked for and not honoured, which the branch above only reaches
         // for a virtual-APIC page this VMM refuses to let the processor
@@ -2874,6 +2878,55 @@ void hypervisor::reflect_l2_exit(std::size_t cpu,
     copy_vmcs12_to_shadow(cpu);
 }
 
+void hypervisor::record_interrupt_request(std::size_t cpu,
+                                          std::uint64_t command)
+{
+    if (cpu >= max_cpus) {
+        return;
+    }
+
+    // SDM 30.1.1: "VTPR: the value of bits 7:0 of the byte at offset 080H
+    // on the virtual-APIC page". The processor keeps it there for the
+    // guest hypervisor, and it is the value the guest hypervisor's own
+    // decision to deliver or hold an interrupt is made against - so it is
+    // the only reading that separates "the guest really is at
+    // DISPATCH_LEVEL" from "the guest hypervisor is looking at a page
+    // this VMM pointed somewhere else".
+    constexpr std::uint64_t virtual_task_priority_offset = 0x80;
+
+    auto page = this->nested_virtual_apic_address[cpu];
+    std::uint8_t vtpr{};
+
+    if (0 != page) {
+        // Read rather than trusted: the address came out of vmcs12 and is
+        // used as a host-physical one, which is only sound because the
+        // extended page tables are an identity map. A failed read leaves
+        // the sample zero and is not otherwise reported - this is a
+        // diagnostic, and one that stops a processor to complain would be
+        // worse than the question it answers.
+        static_cast<void>(read_guest_physical(
+            page + virtual_task_priority_offset,
+            std::span(reinterpret_cast<std::byte *>(&vtpr),
+                      sizeof(vtpr))));
+    }
+
+    auto slot =
+        this->interrupt_request_count[cpu] % interrupt_request_capacity;
+    this->interrupt_request_vtpr[cpu][slot] = vtpr;
+    this->interrupt_request_command[cpu][slot] = command;
+    this->interrupt_request_count[cpu] =
+        this->interrupt_request_count[cpu] + 1;
+
+    // SDM Figure 12-12 puts the vector in bits 7:0 of the interrupt
+    // command register, and the Hyper-V interface keeps that layout for
+    // its synthetic one.
+    constexpr std::uint64_t interrupt_command_vector_mask = 0xff;
+
+    auto vector = command & interrupt_command_vector_mask;
+    this->interrupt_request_vector[cpu][vector] =
+        this->interrupt_request_vector[cpu][vector] + 1;
+}
+
 hypervisor::l2_exit_outcome
 hypervisor::on_l2_ept_fault(std::size_t cpu,
                             arch::x86_64::vmx::exit_reason reason,
@@ -3454,6 +3507,20 @@ hypervisor::on_l2_exit(std::size_t cpu,
             this->hlt_reflect_tsc[cpu] = arch::x86_64::rdtsc();
             this->hlt_reflect_count[cpu] =
                 this->hlt_reflect_count[cpu] + 1;
+        }
+
+        // The interrupt the guest is asking for, and the task priority in
+        // force as it asks. See `interrupt_request_vtpr` for why this is
+        // the one moment worth a guest memory read: the guest asks for
+        // vector 0x2f a quarter of a million times and receives it seven,
+        // and whether that is the guest hypervisor's fault or its guest's
+        // is decided by one byte on the virtual-APIC page.
+        constexpr std::uint32_t synthetic_interrupt_command = 0x40000071;
+
+        if ((basic_reason::wrmsr == reason.basic()) &&
+            (synthetic_interrupt_command == index)) {
+            record_interrupt_request(
+                cpu, (context.rax & 0xffffffff) | (context.rdx << 32));
         }
 
         if ((basic_reason::rdmsr == reason.basic()) &&

@@ -3917,6 +3917,74 @@ private:
      */
 
     /**
+     * What the second-level guest's task priority actually is when it
+     * asks for an interrupt it never receives.
+     *
+     * Measured on the rig, and this is the whole reason these exist: the
+     * guest writes the synthetic interrupt command register 230,933 times
+     * with `0x4002f` - a fixed self-directed inter-processor interrupt at
+     * vector `0x2f`, which is the vector Windows drains its deferred
+     * procedure calls through - and the guest hypervisor injects vector
+     * `0x2f` into it **seven** times. Meanwhile it injects `0xd1` 238,237
+     * times and `0x40` 3,661 times.
+     *
+     * Those three numbers are not arbitrary. An interrupt is blocked when
+     * its priority class, `vector >> 4`, does not exceed the task priority
+     * register: 0xd1 is class 13, 0x40 is class 4, and 0x2f is class
+     * **2**. Everything above class 2 is delivered and the one at class 2
+     * is not, which is precisely what a task priority stuck at 2 -
+     * Windows' DISPATCH_LEVEL - produces. A guest that cannot run its
+     * deferred procedure calls does no work, which is what the boot does.
+     *
+     * What is *not* known is whose fault it is, and one byte settles it.
+     * The processor virtualizes the register into the guest hypervisor's
+     * own virtual-APIC page, at offset 0x80 - SDM 30.1.1, "VTPR: the
+     * value of bits 7:0 of the byte at offset 080H on the virtual-APIC
+     * page". If that byte reads 2 while the guest asks for `0x2f`, the
+     * guest is genuinely at DISPATCH_LEVEL and the guest hypervisor is
+     * right to hold the interrupt; if it reads 0, the guest hypervisor is
+     * looking at something else and this VMM has mislaid the page.
+     *
+     * Sampled only where it is decisive - at a write to the synthetic
+     * interrupt command register - rather than on every exit, which would
+     * put a guest memory read on the hottest path there is.
+     * @{
+     */
+    static constexpr std::size_t interrupt_request_capacity = 64;
+
+    /**
+     * The virtual-APIC page this processor's last entry honoured, so the
+     * samples below can be checked against the page they came from.
+     */
+    std::uint64_t nested_virtual_apic_address[max_cpus]{};
+
+    /**
+     * VTPR, and the command that was being written, for the newest
+     * `interrupt_request_capacity` requests.
+     */
+    std::uint8_t interrupt_request_vtpr[max_cpus]
+                                       [interrupt_request_capacity]{};
+    std::uint64_t interrupt_request_command[max_cpus]
+                                           [interrupt_request_capacity]{};
+    std::uint64_t interrupt_request_count[max_cpus]{};
+
+    /**
+     * Every vector the second-level guest asked for, counted, so the
+     * request side can be compared with `l2_injected_vector` on the
+     * delivery side without reading a ring.
+     */
+    std::uint64_t interrupt_request_vector[max_cpus][256]{};
+
+    /**
+     * Records one synthetic interrupt command the second-level guest
+     * issued, with the task priority in force as it did.
+     */
+    void record_interrupt_request(std::size_t cpu, std::uint64_t command);
+    /**
+     * @}
+     */
+
+    /**
      * Exits taken per CPU, counting repeats. Together with the ring's
      * `repeated` counts this says how much of the history the window
      * covers.
