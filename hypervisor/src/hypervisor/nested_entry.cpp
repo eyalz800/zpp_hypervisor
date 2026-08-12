@@ -3312,6 +3312,18 @@ void hypervisor::record_profile_context(
         .r8 = context.r8,
     };
 
+    // And what the polled pointer maps to, occasionally. See
+    // `profile_pointer_physical` for why not every time.
+    if (0 == slot) {
+        if (auto physical = translate_guest_linear(context.rcx)) {
+            if (auto reachable =
+                    l2_physical_to_l1(this->vmcs.vpid() - 1, *physical)) {
+                this->profile_pointer_virtual = context.rcx;
+                this->profile_pointer_physical = *reachable;
+            }
+        }
+    }
+
     this->profile_context_count = this->profile_context_count + 1;
 }
 

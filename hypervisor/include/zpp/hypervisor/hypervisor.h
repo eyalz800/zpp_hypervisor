@@ -4269,6 +4269,24 @@ private:
     };
 
     profile_context profile_contexts[profile_context_capacity]{};
+
+    /**
+     * The physical address behind the polled configuration pointer.
+     *
+     * `rcx` at the stalled instruction is a virtual address in a window
+     * `HalpPciMapMmConfigPhysicalAddress` made, and it is the same value
+     * at every sample. What is wanted is what it *maps to*: subtract the
+     * memory-mapped configuration base and the result names the bus,
+     * device and function whose vendor identifier reads `0xffff` for
+     * ever.
+     *
+     * Translated once every `profile_context_capacity` samples rather
+     * than on each. A four-level walk through two levels of translation
+     * is not something to do six thousand times a second, and the answer
+     * does not change - that is the whole finding.
+     */
+    std::uint64_t profile_pointer_physical{};
+    std::uint64_t profile_pointer_virtual{};
     std::uint64_t profile_context_count{};
     /** @} */
 
