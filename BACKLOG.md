@@ -10627,3 +10627,41 @@ reading; the real rate is 966. And the empty reference TSC page is back
 in the chain after all - it is why Windows reads the counter through an
 MSR at all, and with the page populated those reads would be `rdtsc`
 and cost nothing.
+
+
+## A reboot loop that was the guest's boot state, not the code
+
+Worth recording because it cost a build and nearly an hour, and because
+the first two explanations were both wrong.
+
+**Symptom.** With the hypervisor resident the machine stopped stalling
+and started resetting about once every six seconds - `l2_entries` back
+to zero each time, so it never reached the guest hypervisor at all. The
+loader trace is complete and identical every cycle: controllers
+connected, boot manager found, chainloaded. So the reset is after the
+hand-over, in Windows' own boot manager.
+
+**First wrong explanation: the instrument.** A timing instrument had
+just been added, so it was reverted - and the loop continued unchanged.
+The revert was still right to do, but it was not the cause. *One
+variable per boot is only useful if the variable is actually the one
+that changed.*
+
+**Second wrong explanation: a damaged guest.** The obvious reading was
+that repeatedly killing QEMU mid-boot had corrupted the installation.
+It had not: booting the same disk with `ZPP_CHAINLOAD_ONLY`, nothing of
+ours resident, reached **user mode in about ninety seconds**.
+
+**What it actually is.** Windows counts failed boot attempts and after
+enough of them takes a recovery path that restarts quickly. Under this
+VMM the boot is far too slow to ever complete, so every attempt was
+counted as another failure, and the count eventually tipped the guest
+into that path. The control boots fast enough to complete, which clears
+the count.
+
+**The operational rule that follows**, and it applies to every future
+session on this rig: **after a run of killed boots, boot the control
+once and let it reach user mode before drawing conclusions from another
+resident run.** A guest that has been failed enough times stops
+behaving like the guest under test, and its symptom - an early reset -
+looks exactly like a hypervisor bug.
