@@ -9016,3 +9016,39 @@ So it is a wait whose *condition* never becomes true, rather than a wait
 that is never woken. Naming the condition is the next step, and the
 instruction pointers in the loop are already symbolized - what is missing
 is the caller, which needs a stack walk rather than a program counter.
+
+
+## What the hypercall storm is: revoking the boot loader's page privileges
+
+2026-08-12, from the stack scan, sampled while the storm was running.
+Read bottom-up, the candidates name a chain:
+
+```
+InitBootProcessor
+  ExpRevokeBootLoaderPagePrivileges
+    KeSetPagePrivilege
+      VslRemoveProtectedPage
+        VslpEnterIumSecureMode
+          HvlSwitchToVsmVtl1
+```
+
+So the eighty-eight thousand hypercalls are Windows revoking the page
+privileges the boot loader was given, one page at a time, each revocation
+entering virtual trust level 1 to do it. That is what
+`HvCallModifyVtlProtectionMask` bracketed by a VTL call and return has
+been all along, and it is ordinary boot work rather than a symptom.
+
+The scan also returned `KiIdleLoop`, `KiInitialThread` and
+`KiInitialProcess`. The last two are data addresses inside the image -
+exactly the false positives the method is documented to produce - and
+they identify themselves as such the moment they are named, which is the
+argument for symbolizing candidates rather than trusting them.
+
+This also settles what the earlier trust-level alternation was: not a
+scheduler handing a processor between two operating systems, but one
+loop in the root partition calling into the secure kernel per page.
+
+What it does not yet explain is the stall, which happens *after* this
+loop finishes - the hypercall count stops climbing and stays put. The
+same scan taken then is the reading that matters, and it is one boot
+away.
