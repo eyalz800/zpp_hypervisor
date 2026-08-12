@@ -1496,6 +1496,50 @@ also carries an ordering constraint, since the stacks must exist before
 any processor launches. Recorded so the trade is visible, not because it
 is queued.
 
+### 20. The guest owns IA32_EFER, and the host page table depends on it
+
+Read, not measured, and it predates the per-segment module protection
+that made it worth writing down.
+
+The host page table sets the execute disable bit - on its own pages,
+on the local APIC page, and now on everything in this module that is not
+text. SDM 5.5.4 (`.references/sdm.txt:157079`): "If IA32_EFER.NXE = 0,
+the XD flag (bit 63) is reserved in every paging-structure entry", and an
+entry with a reserved bit set faults on *every* access through it, not
+only on an instruction fetch. So NXE is not a hardening option here, it
+is a precondition for the host being able to fetch its next instruction.
+
+Nothing separates the guest's EFER from the host's. The VMCS sets neither
+`load IA32_EFER` (VM-exit control bit 21) nor `save`/`load IA32_EFER` on
+entry, so `wrmsr` to EFER is not intercepted, the physical register
+carries straight across both directions, and a guest that clears NXE
+takes the host's paging with it at its next VM exit. The symptom would be
+a page fault with no recovery point, on every processor, at once.
+
+Not observed: every guest this has run under sets NXE and leaves it set,
+and the AP trampoline sets it explicitly for the processors this VMM
+starts (`ap_start_up.S`, measured there as EFER `0x500` against the boot
+processor's `0xd00`).
+
+What is in the tree now is a refusal, not a fix: `hypervisor::main` reads
+EFER before switching to the host page table and returns
+`execute_disable_not_enabled` if NXE is clear, which turns a dead machine
+into an error code the loader prints. It does not cover the guest
+clearing the bit later.
+
+The fix is the full separation KVM makes: `save IA32_EFER` and `load
+IA32_EFER` in the VM-exit controls with `host_ia32_efer` written, and
+`load IA32_EFER` in the entry controls with `guest_ia32_efer` written.
+Rejected for now as a change to VM entry consistency checking that has
+nothing to do with page protection and cannot be tested apart from it -
+`apply_start_up` deliberately leaves `guest_ia32_efer` unwritten today
+and says why, and adding the entry control makes that field live on the
+INIT path. Two cheaper alternatives were considered and are worse:
+setting NXE from the host, which leaves it set in the guest as well and
+silently makes a bit the guest treats as reserved meaningful; and
+intercepting `wrmsr` to EFER to refuse the clear, which lies to the guest
+about a register it owns.
+
 ## Dead and misleading
 
 These cost nothing at runtime and cost time during every future

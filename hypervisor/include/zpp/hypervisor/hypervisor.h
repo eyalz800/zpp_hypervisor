@@ -186,6 +186,22 @@ public:
         /**
          * @}
          */
+
+        /**
+         * IA32_EFER.NXE is clear on a processor that is about to run on
+         * the host page table, which sets the execute disable bit.
+         *
+         * Refused rather than risked. SDM 5.5.4
+         * (.references/sdm.txt:157079): "If IA32_EFER.NXE = 0, the XD
+         * flag (bit 63) is reserved in every paging-structure entry", and
+         * an entry with a reserved bit set faults on every access through
+         * it rather than only on an instruction fetch. So the failure is
+         * not "no-execute stops working", it is every mapping that
+         * carries the bit becoming a page fault at once, in a place with
+         * no recovery point - which is a dead machine with nothing
+         * written down. One error code from the loader is worth more.
+         */
+        execute_disable_not_enabled = 24,
     };
 
     /**
@@ -2793,8 +2809,40 @@ private:
 
     /**
      * The host CR0 register.
+     *
+     * What this processor was found running with, adjusted to satisfy the
+     * VMX fixed bits. It is also what the guest's own CR0 field is loaded
+     * from, which is why write protection is not in here - see
+     * host_control_register_0.
      */
     std::uint64_t host_cr0{};
+
+    /**
+     * The CR0 this VMM's own code runs with: host_cr0 and write
+     * protection.
+     *
+     * Separate from host_cr0, and the separation is the point. The host
+     * page table maps this module's text and read-only data without the
+     * write flag, and SDM 5.6.1 (.references/sdm.txt:157661) only
+     * consults that flag for a supervisor write when CR0.WP is set -
+     * everything here runs at privilege zero, so with WP clear the
+     * read-only mappings would deny nothing at all.
+     *
+     * It is not simply added to host_cr0 because host_cr0 is what the
+     * *guest* CR0 field is loaded from, and forcing write protection on a
+     * guest whose operating system had it clear changes what that guest's
+     * own supervisor writes may do. This VMM owns its own paging and has
+     * no business owning the guest's.
+     *
+     * Loaded in three places, which are the three ways this VMM's code
+     * comes to be running: entering root mode before the first launch,
+     * the host CR0 field a VM exit loads, and the trampoline a processor
+     * this VMM started climbs through.
+     */
+    constexpr std::uint64_t host_control_register_0() const
+    {
+        return this->host_cr0 | arch::x86_64::cr0_bits::write_protect;
+    }
 
     /**
      * The host CR3 register.
@@ -6476,6 +6524,9 @@ inline const zpp::error_category & category(hypervisor::error)
                 return "Nested host state out of range";
             case hypervisor::error::nested_msr_area_unsupported:
                 return "Nested MSR-area names an MSR we will not touch";
+            case hypervisor::error::execute_disable_not_enabled:
+                return "IA32_EFER.NXE is clear, so the host page table's "
+                       "execute disable bit is a reserved bit";
             }
         });
     return error_category;

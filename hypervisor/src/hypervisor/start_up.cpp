@@ -88,7 +88,12 @@ hypervisor::enter_root_mode(std::size_t cpu)
     auto cr0 = arch::x86_64::cr0();
     auto cr4 = arch::x86_64::cr4();
 
-    arch::x86_64::cr0(this->host_cr0);
+    // Write protected, because from here until the guest is entered this
+    // processor is running this VMM's own code on this VMM's own page
+    // table, and that table denies writes to the module's text and
+    // read-only data. Without CR0.WP those denials mean nothing at
+    // privilege zero - see host_control_register_0.
+    arch::x86_64::cr0(this->host_control_register_0());
     scope_exit restore_cr0{[&] { arch::x86_64::cr0(cr0); }};
 
     arch::x86_64::cr4(this->host_cr4);

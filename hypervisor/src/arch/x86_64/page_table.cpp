@@ -14,6 +14,49 @@ void page_table::map_page(std::uint64_t address,
     return map_page_from(address, physical_address, protection, *this);
 }
 
+void page_table::add_protection(std::uint64_t base_address,
+                                std::size_t size,
+                                protection protection)
+{
+    auto first = base_address & ~std::uint64_t{page_size - 1};
+    auto last = (base_address + size + (page_size - 1)) &
+                ~std::uint64_t{page_size - 1};
+
+    for (auto address = first; address < last; address += page_size) {
+        // Whichever entry terminates the walk, which is the one the
+        // permission has to go in - the levels above are shared with
+        // every other mapping under them and stay permissive, as
+        // map_page_from's own comment explains.
+        auto & entry = page_table_entry(address);
+
+        // Set, never cleared. This is the union: a page two segments
+        // share is visited once per segment and keeps what either asked
+        // for. It also means the caller has to have established the
+        // floor first, because nothing here can lower one.
+        if (protection & page_table::protection::write) {
+            entry.write(true);
+        }
+
+        if (protection & page_table::protection::execute) {
+            entry.execute_disable(false);
+        }
+    }
+
+    // No TLB invalidation, and that is a precondition rather than an
+    // omission: this rewrites entries in a table the calling processor is
+    // not yet running on, so there is nothing cached to be stale. Loading
+    // CR3 with it is what makes these visible, and that flushes
+    // everything non-global - nothing here sets the global bit.
+}
+
+void page_table::add_protection(const void * base_address,
+                                std::size_t size,
+                                protection protection)
+{
+    return add_protection(
+        reinterpret_cast<std::uint64_t>(base_address), size, protection);
+}
+
 std::uint64_t page_table::virtual_to_physical(std::uint64_t value) const
 {
     // Starts at the pdpt, not the pml4, because every pml4 entry

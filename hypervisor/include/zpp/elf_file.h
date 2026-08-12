@@ -249,6 +249,32 @@ public:
     }
 
     /**
+     * Applies the loadable segments' own permissions to an image that is
+     * already in memory, through the same protection strategy `load`
+     * takes. The behavior is undefined if the ELF file is not loaded.
+     *
+     * This exists because the two halves of `load` have different owners
+     * here. The loaders place the image and relocate it, into one
+     * readable, writable and executable region, because that is all a
+     * platform allocator gives them and because relocating writes into
+     * pages protection would close. The hypervisor builds a page table of
+     * its own afterwards and is the only thing that can express per
+     * segment permissions in it - by which time the load is long over, so
+     * it needs the protection pass without the rest.
+     */
+    template <typename Protect>
+    void protect(Protect && protect_callback)
+    {
+        // The load bias of an image already in memory: where it is, less
+        // where it was linked. The same subtraction the constructor makes
+        // to find the dynamic segment in a loaded image.
+        protect_segments(
+            std::forward<Protect>(protect_callback),
+            reinterpret_cast<std::ptrdiff_t>(m_file_data) -
+                static_cast<std::ptrdiff_t>(m_preferred_base));
+    }
+
+    /**
      * Returns the entry relative to file to be mapped in memory.
      */
     constexpr std::uintptr_t entry() const
@@ -507,7 +533,10 @@ private:
     {
         // p_memsz rather than p_filesz, so a segment's .bss tail gets
         // the same protection as the rest of it. Every loader here
-        // passes a callback that does nothing, so this is untested.
+        // passes a callback that does nothing - they own one RWX region
+        // and have nothing to say per segment - so the only caller that
+        // acts on this is the hypervisor, through `protect` above, once
+        // it is building its own page table.
         for (std::size_t i{}; i < m_header->e_phnum; ++i) {
             auto & program_header = m_program_headers[i];
 

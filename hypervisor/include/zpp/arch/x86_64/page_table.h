@@ -51,6 +51,31 @@ public:
                   protection protection);
 
     /**
+     * Adds protection to a range that is already mapped, leaving the
+     * translation alone. Permissions are added and never taken away, and
+     * the range is rounded outward to whole pages at both ends.
+     *
+     * Both of those are what makes this usable for ELF segment
+     * permissions. A page is the finest granularity a page table has and
+     * a segment boundary need not be page aligned, so two segments can
+     * share a page and the page has to satisfy both - the union of what
+     * they ask for. Rounding outward can only grant a neighbour a
+     * permission it did not ask for; rounding inward takes one away from
+     * a segment that did, and what it takes is the last page of one
+     * segment or the first page of the next.
+     */
+    void add_protection(std::uint64_t base_address,
+                        std::size_t size,
+                        protection protection);
+
+    /**
+     * Adds protection to a range that is already mapped.
+     */
+    void add_protection(const void * base_address,
+                        std::size_t size,
+                        protection protection);
+
+    /**
      * Maps the page table itself using another page table.
      */
     template <typename PageTable>

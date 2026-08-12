@@ -1369,6 +1369,125 @@ void boundaries_between_levels()
     }
 }
 
+/*
+ * add_protection, in exactly the shape initialize_host_page_table uses
+ * it: a read-only floor over the whole module, then each loadable
+ * segment's own permissions added on top.
+ *
+ * Three properties, and each of them is a way the module protection
+ * fails silently rather than loudly.
+ *
+ * - Added, never assigned. A page two segments share has to satisfy
+ *   both, so the second call must not take away what the first granted.
+ * - Rounded outward at both ends. Rounding inward would drop the last
+ *   page of one segment and the first page of the next, which for this
+ *   module is the tail of .text and the head of .data.
+ * - The floor holds where nothing asked for anything. The padding
+ *   between segments stays read-only and not executable, which is the
+ *   whole reason the floor is read-only rather than the read, write and
+ *   execute the module used to be mapped with.
+ */
+void segment_permissions_are_added_over_a_floor()
+{
+    auto table = fresh_table();
+    identity_source source;
+
+    using protection = zpp::arch::x86_64::page_table::protection;
+
+    // Eight pages standing in for a loaded module, mapped as the floor
+    // is: readable, not writable, not executable.
+    constexpr std::uint64_t base = 0x60000000;
+    constexpr std::size_t pages = 8;
+    table->map_from(base, pages * page_size, protection::read, source);
+
+    for (std::size_t page{}; page < pages; ++page) {
+        auto & entry = table->page_table_entry(base + (page * page_size));
+        check(!entry.write() && entry.execute_disable(),
+              "the floor grants neither write nor execute at page " +
+                  std::to_string(page));
+    }
+
+    // A text segment that begins part way into page 1 and ends part way
+    // into page 3, the way a real one does - p_vaddr is aligned to the
+    // segment's own alignment, not to a page, and p_memsz ends wherever
+    // the section did.
+    table->add_protection(base + page_size + 0x100,
+                          (2 * page_size) + 0x40,
+                          protection::read | protection::execute);
+
+    for (auto page : {1u, 2u, 3u}) {
+        auto & entry = table->page_table_entry(base + (page * page_size));
+        check(!entry.execute_disable(),
+              "the outward rounding reaches every page a segment "
+              "touches, including page " +
+                  std::to_string(page));
+        check(!entry.write(),
+              "and grants nothing the segment did not ask for, at page " +
+                  std::to_string(page));
+    }
+
+    check(table->page_table_entry(base).execute_disable(),
+          "the page before the segment is untouched");
+    check(
+        table->page_table_entry(base + (4 * page_size)).execute_disable(),
+        "and so is the page after it");
+
+    // A data segment sharing page 3 with the text segment above. Nothing
+    // in ELF forbids that - the linker only keeps them apart because it
+    // aligns each segment to a page - and the shared page has to satisfy
+    // both.
+    table->add_protection(base + (3 * page_size) + 0x80,
+                          page_size,
+                          protection::read | protection::write);
+
+    auto & shared = table->page_table_entry(base + (3 * page_size));
+    check(shared.write() && !shared.execute_disable(),
+          "a page two segments share keeps the union of what they "
+          "asked for, not whichever was applied last");
+
+    auto & data = table->page_table_entry(base + (4 * page_size));
+    check(data.write() && data.execute_disable(),
+          "and the page only the data segment reaches is writable and "
+          "not executable");
+
+    // The floor still holds where no segment reached, which is what the
+    // padding between segments gets.
+    for (auto page : {5u, 6u, 7u}) {
+        auto & entry = table->page_table_entry(base + (page * page_size));
+        check(!entry.write() && entry.execute_disable(),
+              "padding no segment covers keeps the floor at page " +
+                  std::to_string(page));
+    }
+
+    // Neither the translation nor the present bit is disturbed by any of
+    // this: add_protection edits access rights and nothing else.
+    for (std::size_t page{}; page < pages; ++page) {
+        auto address = base + (page * page_size);
+        check(table->page_table_entry(address).present(),
+              "the entry stays present at page " + std::to_string(page));
+        check_equal(address,
+                    table->virtual_to_physical(address),
+                    "and still translates to where it did at " +
+                        hex(address));
+    }
+
+    // A zero-sized range touches nothing. A segment with p_memsz zero is
+    // legal, and rounding a zero length outward must not grant a page.
+    table->add_protection(
+        base + (6 * page_size), 0, protection::read | protection::write);
+    check(!table->page_table_entry(base + (6 * page_size)).write(),
+          "a zero length range grants nothing");
+
+    // And the pointer overload forwards to the integer one, the same way
+    // map_from's does.
+    table->add_protection(
+        reinterpret_cast<const void *>(base + (7 * page_size)),
+        page_size,
+        protection::read | protection::write);
+    check(table->page_table_entry(base + (7 * page_size)).write(),
+          "the pointer overload of add_protection forwards");
+}
+
 void repeated_and_overlapping_mappings()
 {
     auto table = fresh_table();
@@ -2214,6 +2333,7 @@ int main()
     entry_accessors();
 
     mapping_round_trips();
+    segment_permissions_are_added_over_a_floor();
     scattered_sources_are_translated_per_page();
     unmapped_addresses_are_not_refused();
     boundaries_between_levels();

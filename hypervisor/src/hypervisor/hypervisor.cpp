@@ -110,6 +110,35 @@ namespace
 volatile std::uint64_t g_module_base_seen{};
 volatile std::uint64_t g_module_size_seen{};
 volatile std::uint64_t g_module_base_handed_over{};
+
+/**
+ * A loadable segment's permissions in the page table's spelling.
+ *
+ * A translation and deliberately not a cast: both are three flags in one
+ * integer and the two orders disagree - the ELF form is execute 1, write
+ * 2, read 4 (elf_file::memory_protection, from p_flags), the page table's
+ * is read 1, write 2, execute 4. Only write happens to line up, so a cast
+ * would silently swap read for execute and produce a writable, executable
+ * .text with a read-only page table beside it.
+ */
+constexpr arch::x86_64::page_table::protection
+host_protection(elf_file::memory_protection protection)
+{
+    // Read is unconditional. A page that is mapped at all is readable on
+    // this architecture - there is no bit for it - and every loadable
+    // segment carries PF_R in practice.
+    auto result = arch::x86_64::page_table::protection::read;
+
+    if (protection & elf_file::memory_protection::write) {
+        result = result | arch::x86_64::page_table::protection::write;
+    }
+
+    if (protection & elf_file::memory_protection::execute) {
+        result = result | arch::x86_64::page_table::protection::execute;
+    }
+
+    return result;
+}
 } // namespace
 
 void hypervisor::initialize_module_region()
@@ -185,19 +214,52 @@ void hypervisor::initialize_host_page_table()
     // the physical address to install.
     this->host_page_table.map_self(this->os_page_table);
 
-    // Map the module.
+    // Map the module, readable and nothing else.
     //
-    // Writable and executable as well as readable, because this is the
-    // VMM's own image: it executes from here, and it writes to its own
-    // data - which lives in the same mapped region, the module being
-    // mapped as one range rather than per section.
+    // This is the floor, not the answer. What each part of the image may
+    // do is decided immediately below from its own program headers; what
+    // is left at this level is the padding between segments, which holds
+    // no code and no data and therefore needs neither writing nor
+    // executing.
+    //
+    // It used to be read, write and execute over the whole range, on the
+    // grounds that this VMM executes from its image and writes to its own
+    // data and both live in it. Both halves are true and neither needs
+    // the whole range: text is executed and never written, data is
+    // written and never executed. A range that is both is a single stray
+    // store away from being the thing that rewrites this VMM's own code,
+    // and the image already says which is which.
     this->host_page_table.map_from(
         this->module_base,
         this->module_size,
-        arch::x86_64::page_table::protection::read |
-            arch::x86_64::page_table::protection::write |
-            arch::x86_64::page_table::protection::execute,
+        arch::x86_64::page_table::protection::read,
         this->os_page_table);
+
+    // What each loadable segment asks for, on top of that floor.
+    //
+    // The ELF the loader placed here is the only authority on its own
+    // layout, and it is still readable: this is the same image
+    // initialize_module_region measured, addressed through the OS page
+    // table this processor is still running on.
+    //
+    // Permissions are added rather than assigned, and each segment is
+    // rounded outward to whole pages - see page_table::add_protection for
+    // why that direction and not the other. The consequence to know is
+    // that a page two segments share ends up with the union of what they
+    // asked for; today nothing here shares one, which the program headers
+    // show and which the log line below records per boot.
+    elf_file(this->module_base, elf_file::state::loaded)
+        .protect([this](const void * address,
+                        std::size_t size,
+                        elf_file::memory_protection protection) {
+            log("module segment {} size {} protection {}",
+                reinterpret_cast<std::uint64_t>(address),
+                size,
+                static_cast<std::uint64_t>(protection));
+
+            this->host_page_table.add_protection(
+                address, size, host_protection(protection));
+        });
 
     // Map the local APIC page.
     //
@@ -4734,12 +4796,28 @@ void hypervisor::initialize_start_up_memory(std::uint64_t memory)
     // Mapped into the host page table, because the trampoline is still
     // executing out of it at the moment it loads the host page table root
     // - the instruction after that load is fetched through this mapping.
+    //
+    // The blob's own page is the one place in this VMM's address space
+    // that is writable and executable at the same time, and it has to be:
+    // the code fetched from it writes its own progress marker and its own
+    // data area, both of which live in that same page because a start-up
+    // vector names a page and the blob may not span two. What can be
+    // taken away is the executable half of the three pages behind it,
+    // which are the temporary page table - walked by the processor
+    // through physical addresses and never fetched from.
     this->host_page_table.map_from(
         memory,
-        arch::x86_64::ap_start_up_pages * page_size,
+        page_size,
         arch::x86_64::page_table::protection::read |
             arch::x86_64::page_table::protection::write |
             arch::x86_64::page_table::protection::execute,
+        this->os_page_table);
+
+    this->host_page_table.map_from(
+        memory + page_size,
+        (arch::x86_64::ap_start_up_pages - 1) * page_size,
+        arch::x86_64::page_table::protection::read |
+            arch::x86_64::page_table::protection::write,
         this->os_page_table);
 
     std::memcpy(reinterpret_cast<void *>(memory),
@@ -4778,7 +4856,13 @@ void hypervisor::initialize_start_up_memory(std::uint64_t memory)
     auto & area = *reinterpret_cast<arch::x86_64::ap_start_up_area *>(
         memory + arch::x86_64::ap_start_up_area_offset);
     area.host_cr3 = this->host_cr3;
-    area.host_cr0 = this->host_cr0;
+
+    // With write protection, unlike the value the guest's CR0 field gets:
+    // a processor climbing this trampoline lands directly in this VMM's
+    // C++, on the host page table, and never passes through a VM exit
+    // that would have loaded it - so this is the only place it can be
+    // given.
+    area.host_cr0 = this->host_control_register_0();
     area.host_cr4 = this->host_cr4;
     area.temporary_cr3 = level4;
     area.entry = reinterpret_cast<std::uint64_t>(zpp_ap_start_up_main);
@@ -5579,7 +5663,13 @@ void hypervisor::setup_vmcs(std::size_t cpu,
     vmcs.cr0_guest_host_mask(arch::x86_64::cr0_bits::numeric_error);
     vmcs.cr0_read_shadow(this->guest_cr0);
     vmcs.guest_cr0(this->host_cr0);
-    vmcs.host_cr0(this->host_cr0);
+
+    // The host half takes write protection with it and the guest half
+    // above deliberately does not. Every VM exit lands on the host page
+    // table, where this module's text and read-only data are mapped
+    // without the write flag, and that flag is only consulted for a
+    // supervisor write while CR0.WP is set.
+    vmcs.host_cr0(this->host_control_register_0());
 
     // The guest keeps the OS page table and the host runs on its own.
     // CR3-load exiting is not set, so guest writes to CR3 are never seen
@@ -6109,6 +6199,35 @@ hypervisor::main(arch::x86_64::context & caller_context)
         }
     }};
 
+    // The host page table sets the execute disable bit - on its own
+    // pages, on the local APIC page, and since this module is protected
+    // per segment on everything that is not text. That bit is *reserved*
+    // while IA32_EFER.NXE is clear (SDM 5.5.4,
+    // .references/sdm.txt:157079), and a reserved bit set makes the entry
+    // fault on any access through it, not merely on an instruction fetch.
+    //
+    // So this is not a check that a hardening feature is available, it is
+    // a check that the next instruction has somewhere to be fetched from.
+    // Checked rather than assumed, and checked here rather than at the
+    // one place that could have set it: the boot processor inherits EFER
+    // from whatever launched it, and a processor this VMM started set the
+    // bit itself in ap_start_up.S - so there is no single owner to ask,
+    // only the register.
+    //
+    // Not set here either. Writing EFER on this path would leave the bit
+    // set in the guest as well, since no VM-entry control loads EFER and
+    // the register simply carries over - which silently turns the guest's
+    // own reserved bit into a meaningful one. Refusing to launch is the
+    // honest answer; BACKLOG.md records what separating the two would
+    // take.
+    constexpr std::uint64_t execute_disable_enable = 1ull << 11;
+    if (!(arch::x86_64::rdmsr(
+              arch::x86_64::msr::ia32_extended_feature_enable) &
+          execute_disable_enable)) {
+        return std::unexpected(
+            zpp::error{error::execute_disable_not_enabled});
+    }
+
     // Switch page tables. Already the case on a processor this VMM
     // started - its trampoline loaded the host page table to get here -
     // and writing the same value again is harmless.
@@ -6120,6 +6239,32 @@ hypervisor::main(arch::x86_64::context & caller_context)
     scope_exit restore_cr3{[&] {
         if (!from_trampoline) {
             arch::x86_64::cr3(this->guest_cr3);
+        }
+    }};
+
+    // And write protection, in the same breath as the table it makes mean
+    // something. The host page table denies writes to this module's text
+    // and read-only data, and SDM 5.6.1 only consults those denials for a
+    // supervisor write while CR0.WP is set.
+    //
+    // Here as well as in host_control_register_0, because that value does
+    // not exist yet: host_cr0 is derived in initialize_vmx, which runs
+    // several hundred lines below this. Between the two the processor is
+    // already on the host page table, running this VMM's own code, with
+    // whatever CR0 the platform left behind - and what it leaves is not
+    // ours to assume. OVMF sets the bit; the probe build's page fault
+    // (0x60e03) was taken under it, so on that firmware this line changes
+    // nothing and on one without it this line is the whole protection.
+    //
+    // The bit is set rather than the register written, since everything
+    // else in CR0 belongs to whatever launched this and is restored
+    // below on the same terms CR3 is.
+    auto entry_cr0 = arch::x86_64::cr0();
+    arch::x86_64::cr0(entry_cr0 | arch::x86_64::cr0_bits::write_protect);
+
+    scope_exit restore_cr0{[&] {
+        if (!from_trampoline) {
+            arch::x86_64::cr0(entry_cr0);
         }
     }};
 
