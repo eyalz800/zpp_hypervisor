@@ -3424,6 +3424,36 @@ private:
      * are being misread.
      * @{
      */
+    /**
+     * What the second-level guest is handed back as it resumes, and
+     * where it resumes to.
+     *
+     * The guest is stuck inside its clock interrupt handler, in
+     * `KeQueryPerformanceCounter` reaching `HvlpGetRegister64` - the
+     * MSR form of the reference counter, so every query is an exit
+     * reflected to the guest hypervisor and answered by it. What has
+     * never been observed is the **value** that comes back.
+     *
+     * Recorded here because here is where it becomes visible: the
+     * guest hypervisor has already answered, the instruction pointer
+     * has been advanced past the RDMSR, and the pair the guest will
+     * read is sitting in RAX and RDX waiting to be restored.
+     *
+     * `reference_count_backwards` is the reason for all of it. A
+     * routine that waits for a counter to reach a deadline never
+     * finishes if the counter steps backwards, and a counter composed
+     * across a reflect-and-resume path is exactly where that can
+     * happen. One step back is a bug; none says look elsewhere.
+     * @{
+     */
+    static constexpr std::size_t l2_resume_sample_capacity = 64;
+    std::uint64_t l2_resume_rip[max_cpus][l2_resume_sample_capacity]{};
+    std::uint64_t l2_resume_value[max_cpus][l2_resume_sample_capacity]{};
+    volatile std::uint64_t l2_resume_count[max_cpus]{};
+    volatile std::uint64_t reference_count_backwards[max_cpus]{};
+    std::uint64_t reference_count_previous[max_cpus]{};
+    /** @} */
+
     volatile std::uint32_t l2_entry_vector[max_cpus][256]{};
     volatile std::uint64_t l2_entries_carrying_nothing[max_cpus]{};
     /** @} */

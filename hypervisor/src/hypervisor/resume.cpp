@@ -606,6 +606,40 @@ void hypervisor::resume_guest(arch::x86_64::context & context,
                               vm_entry_interruption_information_field);
 
             auto cpu = slot - 1;
+
+            // What the guest resumes with. See `l2_resume_rip`: the
+            // guest hypervisor has answered by now, the instruction
+            // pointer is past the RDMSR, and the value it produced is
+            // in RAX and RDX.
+            //
+            // Monotonicity is checked against the previous sample from
+            // the *same* instruction pointer, because that is what
+            // makes two samples comparable - a different caller is
+            // reading a different thing and proves nothing about this
+            // one.
+            auto guest_rip =
+                vmcs.read(arch::x86_64::vmx::vmcs::field::guest_rip);
+            auto value = ((context.rdx & 0xffffffff) << 32) |
+                         (context.rax & 0xffffffff);
+
+            auto slot_index =
+                this->l2_resume_count[cpu] % l2_resume_sample_capacity;
+            this->l2_resume_rip[cpu][slot_index] = guest_rip;
+            this->l2_resume_value[cpu][slot_index] = value;
+            this->l2_resume_count[cpu] = this->l2_resume_count[cpu] + 1;
+
+            auto previous_index = (this->l2_resume_count[cpu] +
+                                   l2_resume_sample_capacity - 2) %
+                                  l2_resume_sample_capacity;
+
+            if ((this->l2_resume_count[cpu] > 1) &&
+                (this->l2_resume_rip[cpu][previous_index] == guest_rip) &&
+                (value < this->reference_count_previous[cpu])) {
+                this->reference_count_backwards[cpu] =
+                    this->reference_count_backwards[cpu] + 1;
+            }
+            this->reference_count_previous[cpu] = value;
+
             if (0 != (carried & injection_valid)) {
                 auto vector = carried & vector_mask;
                 this->l2_entry_vector[cpu][vector] =
