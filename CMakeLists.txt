@@ -86,6 +86,10 @@ option(ZPP_NESTED_TPR_SHADOW
     "Hand a guest hypervisor's TPR shadow to the processor. Off forces CR8 exiting and emulates it against the same page, which is slower and exists to be the one variable between two boots."
     ON)
 
+option(ZPP_PROFILE_L2
+    "Sample a second-level guest's instruction pointer on the VMX-preemption timer. A profiler: it costs an exit per interval and is the only instrument that can see a guest spinning on memory."
+    OFF)
+
 # The loader's edit of the guest's DMAR table to declare a reserved
 # window for the storage controller, plus the EFI system partition
 # reservation and the restart that picks it up.
@@ -162,6 +166,7 @@ ExternalProject_Add(hypervisor
         -DZPP_NESTED_VMX=${ZPP_NESTED_VMX}
         -DZPP_REQUEUE_INTERRUPTED_EVENTS=${ZPP_REQUEUE_INTERRUPTED_EVENTS}
         -DZPP_NESTED_TPR_SHADOW=${ZPP_NESTED_TPR_SHADOW}
+        -DZPP_PROFILE_L2=${ZPP_PROFILE_L2}
         -DZPP_GUEST_TESTS=${ZPP_GUEST_TESTS}
         -DZPP_TEST_MODULE_PROTECTION=${ZPP_TEST_MODULE_PROTECTION}
     INSTALL_COMMAND ""
@@ -240,6 +245,7 @@ ExternalProject_Add(uefi_loader
         -DZPP_NESTED_VMX=${ZPP_NESTED_VMX}
         -DZPP_REQUEUE_INTERRUPTED_EVENTS=${ZPP_REQUEUE_INTERRUPTED_EVENTS}
         -DZPP_NESTED_TPR_SHADOW=${ZPP_NESTED_TPR_SHADOW}
+        -DZPP_PROFILE_L2=${ZPP_PROFILE_L2}
         -DZPP_TRACE=${ZPP_TRACE}
         -DZPP_CHAINLOAD_ONLY=${ZPP_CHAINLOAD_ONLY}
         -DZPP_SEARCH_ALL_DEVICES=${ZPP_SEARCH_ALL_DEVICES}

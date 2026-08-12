@@ -1146,10 +1146,27 @@ std::expected<void, zpp::error> hypervisor::build_vmcs02(std::size_t cpu)
     // hypervisor, and this VMM arms it to drive its own log - so a guest
     // hypervisor's copy of the bit means nothing and its exits are not
     // reflected.
+    auto pin02 =
+        (pin01 | pin12) & ~(pin_preemption_timer | pin_posted_interrupts);
+
+    // The profiler's clock, which is the timer put back. See
+    // `nested_vmx::profile_l2` for why this is the only instrument that
+    // can see a guest spinning on memory.
+    if constexpr (nested_vmx::profile_l2) {
+        pin02 |= pin_preemption_timer;
+    }
+
     vmcs.pin_based_vm_execution_controls(arch::x86_64::vmx::adjust_msr(
-        this->cached_vmx_msr(vmx_msr::true_pin_based_controls),
-        (pin01 | pin12) &
-            ~(pin_preemption_timer | pin_posted_interrupts)));
+        this->cached_vmx_msr(vmx_msr::true_pin_based_controls), pin02));
+
+    if constexpr (nested_vmx::profile_l2) {
+        // Reloaded from this field on every entry, because "save
+        // VMX-preemption timer value" stays clear in the exit controls -
+        // SDM 26.6.4 - so one write here keeps producing exits at the
+        // same interval.
+        vmcs.write(field::vmx_preemption_timer_value,
+                   nested_vmx::profile_timer_value);
+    }
 
     // Primary controls: the union, with the two window controls taken from
     // the guest hypervisor alone. A window exit says "the guest can take
@@ -3277,6 +3294,28 @@ std::uint64_t hypervisor::find_guest_kernel_base(std::size_t cpu)
     }
 
     return 0;
+}
+
+void hypervisor::record_profile_sample(std::uint64_t rip)
+{
+    this->profile_samples = this->profile_samples + 1;
+
+    for (std::size_t i{}; i < profile_capacity; ++i) {
+        if (this->profile_rip[i] == rip) {
+            this->profile_hits[i] = this->profile_hits[i] + 1;
+            return;
+        }
+
+        if (0 == this->profile_rip[i]) {
+            this->profile_rip[i] = rip;
+            this->profile_hits[i] = 1;
+            return;
+        }
+    }
+
+    // A full table reads as a full table rather than as a complete
+    // answer, which is the same reason `vmcs_field_use_overflow` exists.
+    this->profile_overflow = this->profile_overflow + 1;
 }
 
 void hypervisor::sample_guest_stack(std::size_t cpu)

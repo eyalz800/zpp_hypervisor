@@ -1697,6 +1697,18 @@ void hypervisor::on_vm_exit(std::uint64_t cpuid,
         // instruction once per tick, which is the recurring mistake
         // this file warns about.
         advance_rip = false;
+
+        // And the profile, when the timer was armed for a second-level
+        // guest. This is the only sample in the tree taken on a clock the
+        // guest does not control - see `nested_vmx::profile_l2`.
+        if constexpr (nested_vmx::profile_l2) {
+            if (auto slot = vmcs.vpid(); (0 != slot) &&
+                                         (slot <= max_cpus) &&
+                                         this->running_l2[slot - 1]) {
+                record_profile_sample(vmcs.guest_rip());
+            }
+        }
+
         break;
     }
     case basic_reason::vmxon:

@@ -4216,6 +4216,35 @@ private:
      */
     std::uint64_t guest_stack_rip{};
 
+    /**
+     * Where the second-level guest spends its time, sampled on a clock
+     * this VMM owns rather than on the guest's own exits.
+     *
+     * **Every other instrument here is driven by exits, and the guest
+     * being chased takes none.** Between clock ticks it spins on memory:
+     * 1,449 second-level entries a second against a hundred ticks is
+     * fourteen exits per tick and nothing in between, so every sample
+     * from every ring lands in the clock interrupt handler - which is not
+     * where the problem is.
+     *
+     * The VMX-preemption timer fixes that by exiting on a schedule the
+     * guest cannot influence. A table rather than a ring, because a spin
+     * is a small set of addresses hit enormously often and what is wanted
+     * is which they are, not the order.
+     * @{
+     */
+    static constexpr std::size_t profile_capacity = 64;
+
+    std::uint64_t profile_rip[profile_capacity]{};
+    std::uint64_t profile_hits[profile_capacity]{};
+    std::uint64_t profile_samples{};
+    std::uint64_t profile_overflow{};
+
+    void record_profile_sample(std::uint64_t rip);
+    /**
+     * @}
+     */
+
     void sample_guest_stack(std::size_t cpu);
     /**
      * @}

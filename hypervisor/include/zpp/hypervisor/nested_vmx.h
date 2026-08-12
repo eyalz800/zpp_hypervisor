@@ -233,6 +233,43 @@ inline constexpr bool shadow_vmcs_enabled = true;
 inline constexpr bool tpr_shadow_offered = (0 != ZPP_NESTED_TPR_SHADOW);
 
 /**
+ * Whether to sample the second-level guest's instruction pointer on a
+ * clock this VMM owns.
+ *
+ * Off by default: it is a profiler, it costs an exit every interval, and
+ * it perturbs what it measures.
+ *
+ * On, it answers the one question the exit rings structurally cannot.
+ * Every instrument here is driven by exits, and the guest this VMM is
+ * chasing **spins on memory** - it takes no exit at all between clock
+ * ticks, so every sample lands in the clock interrupt handler and the
+ * handler is not the problem. An exit source the guest does not control
+ * is the only way to see the rest, and the VMX-preemption timer is
+ * exactly that: it is already this VMM's alone, already stripped from
+ * the controls a guest hypervisor is given, and already claimed by
+ * `l0_wants_l2_exit`, so arming it for a second-level guest adds a clock
+ * and nothing else.
+ */
+#ifndef ZPP_PROFILE_L2
+#define ZPP_PROFILE_L2 0
+#endif
+
+inline constexpr bool profile_l2 = (0 != ZPP_PROFILE_L2);
+
+/**
+ * How long the timer runs before it forces an exit.
+ *
+ * The counter decrements once per time-stamp counter tick shifted right
+ * by IA32_VMX_MISC bits 4:0, which is five on every processor this has
+ * run on - so a unit is 32 ticks, and ten thousand units is about 160
+ * microseconds at 2 GHz. That is roughly six thousand samples a second
+ * against the fourteen hundred entries a second the guest already makes,
+ * which is enough to see a spin and cheap enough that the guest still
+ * runs.
+ */
+constexpr std::uint64_t profile_timer_value = 10000;
+
+/**
  * The value the guest's current-VMCS pointer takes when there is none.
  *
  * All ones rather than zero, because zero names physical page zero. SDM
