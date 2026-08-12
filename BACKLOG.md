@@ -10199,3 +10199,65 @@ investigation twice. Off, every access exits and is recorded, and the
 record will show directly whether the guest hypervisor writes an
 entry-interruption field after the window exit. It will be slow. It only
 has to boot once.
+
+
+## Found: Windows is stuck inside its clock interrupt handler
+
+With `ZPP_NESTED_SHADOW_VMCS=OFF` the guest hypervisor's side of the
+conversation is visible for the first time, and the guest's own call
+stack names the failure.
+
+**Delivery is correct and is not the bug.** At the stall the guest
+hypervisor wrote `vm_entry_interruption_information_field` 278,223 times
+and this VMM delivered 277,442 injections - a 0.3% difference, which is
+agreement. Of those, 271,674 were vector `0xd1` and **12** were `0x2f`.
+So the guest hypervisor asks for the clock and declines to ask for the
+dispatch interrupt. It is not being lost here.
+
+**Why it declines.** The recorded guest stack, with the kernel base for
+that boot at `0xfffff805b0600000`:
+
+    HvlpGetRegister64+0x3e            read the reference counter
+    KeQueryPerformanceCounter+0x411
+    KiSetClockTickRate+0x176
+    KiUpdateTime+0xa8
+    KiSetNextClockTickDueTime+0x220
+    KeClockInterruptNotify+0x28a
+    KiEndThreadCycleAccumulation+0x927
+    KiCallInterruptServiceRoutine+0x32c
+    KiInterruptSubDispatchNoLockNoEtw+0x4e
+    KiInterruptDispatchNoLockNoEtw+0x3c
+
+Windows took the clock interrupt - vector `0xd1`, CLOCK_LEVEL, task
+priority class 13 - and never returned from it. The task priority
+therefore never falls below 13, a dispatch interrupt is priority class 2,
+and the guest hypervisor is **right** to refuse it. Its 917,843 writes to
+`tpr_threshold` are it waiting for a priority drop that cannot happen
+while its guest is inside the handler.
+
+**This inverts the causality of everything above.** The starved dispatch
+interrupt is a symptom. So is the animation frozen after one dot, so is
+the timer being re-armed for ever, and so are seven application
+processors left in firmware - Windows never reaches the code that starts
+them. There is one fault, and it is inside the clock tick.
+
+The clock keeps arriving, 271,674 times, because the timer keeps expiring
+while the previous tick's handler is still running.
+
+**What is left to find**, and it is now one routine rather than a system:
+why `KiSetClockTickRate` does not complete. It reaches
+`KeQueryPerformanceCounter`, which reaches `HvlpGetRegister64` - the MSR
+path, meaning the reference TSC page is not in use and every query costs
+a reflected MSR exit. Two candidates, both ours to get wrong and both
+measurable: a reference count that does not advance the way the routine
+requires, or one that is not monotonic. `build_vmcs02` composes
+`tsc_offset01 + tsc_offset12` the way KVM's
+`kvm_calc_nested_tsc_offset` does, so the composition is right; what has
+never been checked is whether the *value the guest reads* is monotonic
+across the reflect-and-resume path.
+
+**Recorded as method, because it worked where a month of counters did
+not:** the guest's own call stack, symbolised against the public PDB,
+answered in one read what every hypervisor-side counter had only
+circled. When the question is "what is the guest waiting for", ask the
+guest.
