@@ -3297,6 +3297,7 @@ void hypervisor::sample_guest_stack(std::size_t cpu)
     }
 
     this->guest_stack_pointer = stack;
+    this->guest_stack_rip = this->vmcs.guest_rip();
     this->guest_stack_count = 0;
 
     for (std::size_t word{};

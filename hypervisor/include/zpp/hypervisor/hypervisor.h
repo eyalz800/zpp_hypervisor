@@ -4190,13 +4190,31 @@ private:
      * one reading.
      * @{
      */
-    static constexpr std::size_t guest_stack_words = 128;
-    static constexpr std::size_t guest_stack_capacity = 16;
+    /**
+     * How far up the stack to look, and how many candidates to keep.
+     *
+     * A kilobyte was the first attempt and it reached only the interrupt
+     * frame: every exit this loop takes is a model-specific register
+     * access made *inside* the clock interrupt handler, so the newest
+     * frames are always `KiInterruptDispatchNoLockNoEtw` and its
+     * callees, and the thread's own frames are below them. Four kilobytes
+     * covers a good part of a kernel stack without the scan becoming the
+     * expensive thing in the sample.
+     */
+    static constexpr std::size_t guest_stack_words = 512;
+    static constexpr std::size_t guest_stack_capacity = 24;
 
     std::uint64_t guest_kernel_size{};
     std::uint64_t guest_stack_trace[guest_stack_capacity]{};
     std::uint64_t guest_stack_count{};
     std::uint64_t guest_stack_pointer{};
+
+    /**
+     * The instruction pointer the stack was sampled at, so a trace can be
+     * read against where the guest actually was rather than against an
+     * assumption about it.
+     */
+    std::uint64_t guest_stack_rip{};
 
     void sample_guest_stack(std::size_t cpu);
     /**
