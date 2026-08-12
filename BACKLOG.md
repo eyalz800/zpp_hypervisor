@@ -10261,3 +10261,54 @@ not:** the guest's own call stack, symbolised against the public PDB,
 answered in one read what every hypervisor-side counter had only
 circled. When the question is "what is the guest waiting for", ask the
 guest.
+
+
+## Root cause: the reference TSC page is never populated
+
+Windows livelocks inside its clock interrupt handler because every time
+query costs a reflected VM exit, and it costs that because the Hyper-V
+reference TSC page is empty.
+
+**The chain, every link measured.**
+
+1. Windows enables the page. `HV_X64_MSR_REFERENCE_TSC` (`0x40000021`)
+   was written with `0x117a02001` - enable bit set, page at guest
+   physical `0x117a02000`.
+2. **The page is all zeros.** Read through the monitor: sequence, scale
+   and offset are `0`. The Hyper-V TLFS makes `TscSequence == 0` mean
+   "this page is not usable, use the reference counter MSR instead".
+3. So Windows does. `0x40000020` has been read **85,233** times against
+   two reads of the page - and each of those is an exit, reflected to
+   the guest hypervisor, answered, and resumed. Microseconds where a
+   `rdtsc` would be nanoseconds.
+4. `KeQueryPerformanceCounter` sits under `KiSetClockTickRate`, under
+   `KiUpdateTime`, under `KeClockInterruptNotify` - a **catch-up loop
+   that has to finish inside one tick**. At that price it cannot, so it
+   falls further behind every tick and never leaves.
+5. Which pins the task priority at CLOCK_LEVEL for ever. A dispatch
+   interrupt is priority class 2, so the guest hypervisor refuses it -
+   correctly - 917,843 `tpr_threshold` writes' worth of waiting for a
+   drop that cannot come. No deferred work runs, so the boot graphics
+   never advance past their first dot and the application processors are
+   never started.
+
+**The reading was controlled.** An all-zero page is also exactly what a
+wrong address looks like, and the translation assumed the second-level
+guest's physical addresses are the machine's. So the hypercall page was
+read the same way as a check: `0x117a00000` holds `0f 01 c1` - `VMCALL` -
+followed by `ret`. Real code at the computed address, so the zeros are
+real too. **After five instrument defects in this investigation, no
+reading of a new kind goes in without one of these.**
+
+**What is not yet known** is why the guest hypervisor declines to
+populate the page. Two candidates are already eliminated: TSC scaling is
+absent from KVM's menu too (bit 25 is clear in its `0x1378ff`) and
+Windows boots there, and CPUID `0x80000007` is not touched here so
+invariant TSC passes through.
+
+**The next run answers it and is one boot.** `ZPP_CHAINLOAD_ONLY` with
+the same guest, reading the same two pages by the same method: if the
+reference TSC page is populated with nothing underneath and empty with
+us underneath, the cause is ours and this is where it is. That is a
+direct differential on the one page that decides the whole boot, and
+nothing about it needs another instrument.
