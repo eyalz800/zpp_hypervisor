@@ -8927,3 +8927,36 @@ The next step is mechanical rather than speculative.
 fetched `ntkrnlmp.pdb`, and the probe needs a second set of offsets and a
 way to choose between them - the GS base itself distinguishes the two,
 since they differ per trust level and the samples already record it.
+
+
+## The sequence, settled across four boots
+
+2026-08-12. Every run does the same three things in the same order, and
+the counters now name each one.
+
+1. **The secure kernel applies virtual-trust-level protections.** About
+   88,000 hypercalls - `HvCallModifyVtlProtectionMask` bracketed by
+   `HvCallVtlCall` and `HvCallVtlReturn` - over roughly twelve minutes.
+   88,217 in the newest run against 88,863 in the one before it, so the
+   pass is doing the same work each time.
+2. **A short pure alternation of call and return** with no protection
+   call between them, which reads like a livelock and is not: `vmcall`
+   goes to zero a moment later and stays there. It is the tail of the
+   pass, not a loop.
+3. **Idle, for ever.** Second-level entries continue at 1,449 a second,
+   extended-page-table violations at 290 - which are the guest
+   hypervisor's own local APIC accesses - and *nothing else moves*.
+   Hypercalls, INVEPTs and shadow leaves are all frozen: 88,217, 16,005
+   and 450,041, unchanged over a minute.
+
+While that is happening the root partition runs its idle thread on every
+sample that reads cleanly. The machine is not stuck in a loop and it is
+not slow. It has finished what it was doing and stopped asking for
+anything.
+
+The candidate that survives all of this is the one the trust-level split
+suggests: the root partition is waiting for something the secure kernel
+was meant to do and did not, or did and did not signal. Nothing measured
+so far can see inside the secure kernel - its public symbols carry
+function names but no structure layouts, so the thread probe cannot
+follow it the way it follows the root partition.
