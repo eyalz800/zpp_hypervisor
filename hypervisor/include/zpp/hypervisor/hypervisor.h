@@ -4240,7 +4240,41 @@ private:
     std::uint64_t profile_samples{};
     std::uint64_t profile_overflow{};
 
+    /**
+     * The registers at a profile sample, for the newest few.
+     *
+     * The instruction pointer says *which* read repeats and the registers
+     * say *what it is reading*. For `HalpPciReadMmConfigUshort` - which
+     * is 27.8% of samples at the stall - that is the difference between
+     * "enumerating the bus", which is bounded and ordinary, and "polling
+     * one device register", which is not.
+     *
+     * A ring rather than a table, because unlike the addresses these are
+     * expected to vary and their *spread* is the answer: registers that
+     * never change are a poll, and registers that walk are a scan.
+     * @{
+     */
+    static constexpr std::size_t profile_context_capacity = 32;
+
+    struct profile_context
+    {
+        std::uint64_t rip{};
+        std::uint64_t rax{};
+        std::uint64_t rcx{};
+        std::uint64_t rdx{};
+        std::uint64_t rbx{};
+        std::uint64_t rsi{};
+        std::uint64_t rdi{};
+        std::uint64_t r8{};
+    };
+
+    profile_context profile_contexts[profile_context_capacity]{};
+    std::uint64_t profile_context_count{};
+    /** @} */
+
     void record_profile_sample(std::uint64_t rip);
+    void record_profile_context(std::uint64_t rip,
+                                const arch::x86_64::context & context);
     /**
      * @}
      */

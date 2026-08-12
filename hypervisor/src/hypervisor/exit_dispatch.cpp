@@ -1705,7 +1705,9 @@ void hypervisor::on_vm_exit(std::uint64_t cpuid,
             if (auto slot = vmcs.vpid(); (0 != slot) &&
                                          (slot <= max_cpus) &&
                                          this->running_l2[slot - 1]) {
-                record_profile_sample(vmcs.guest_rip());
+                auto where = vmcs.guest_rip();
+                record_profile_sample(where);
+                record_profile_context(where, context);
             }
         }
 

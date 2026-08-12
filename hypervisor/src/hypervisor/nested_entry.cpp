@@ -3296,6 +3296,25 @@ std::uint64_t hypervisor::find_guest_kernel_base(std::size_t cpu)
     return 0;
 }
 
+void hypervisor::record_profile_context(
+    std::uint64_t rip, const arch::x86_64::context & context)
+{
+    auto slot = this->profile_context_count % profile_context_capacity;
+
+    this->profile_contexts[slot] = profile_context{
+        .rip = rip,
+        .rax = context.rax,
+        .rcx = context.rcx,
+        .rdx = context.rdx,
+        .rbx = context.rbx,
+        .rsi = context.rsi,
+        .rdi = context.rdi,
+        .r8 = context.r8,
+    };
+
+    this->profile_context_count = this->profile_context_count + 1;
+}
+
 void hypervisor::record_profile_sample(std::uint64_t rip)
 {
     this->profile_samples = this->profile_samples + 1;
