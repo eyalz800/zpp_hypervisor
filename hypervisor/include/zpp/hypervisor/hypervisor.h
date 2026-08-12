@@ -4001,6 +4001,36 @@ private:
      * of.
      * @{
      */
+    /**
+     * What the guest hypervisor asked for in its own VMCS, and what its
+     * guest was actually run with.
+     *
+     * **The one comparison this investigation never made.** Every
+     * mechanism here has been measured against what it is supposed to do,
+     * and all of them pass - but the machine boots under KVM and not
+     * under this VMM, so the difference is something this VMM presents or
+     * withholds rather than something it does incorrectly.
+     *
+     * `build_vmcs02` composes these three fields from vmcs12 and vmcs01
+     * and then strips: the preemption timer and posted interrupts always,
+     * the TPR shadow conditionally, and whatever `adjust_msr` refuses on
+     * top. A control the guest hypervisor set and did not get back is a
+     * promise broken silently - it configured itself expecting a
+     * behaviour, and its guest runs without it.
+     *
+     * Recorded as the raw values rather than decoded, because which bit
+     * matters is exactly what is not yet known and a decoder here would
+     * be a guess about that.
+     * @{
+     */
+    std::uint64_t control_pin_requested[max_cpus]{};
+    std::uint64_t control_pin_granted[max_cpus]{};
+    std::uint64_t control_primary_requested[max_cpus]{};
+    std::uint64_t control_primary_granted[max_cpus]{};
+    std::uint64_t control_secondary_requested[max_cpus]{};
+    std::uint64_t control_secondary_granted[max_cpus]{};
+    /** @} */
+
     std::uint64_t tpr_shadow_honoured[max_cpus]{};
     std::uint64_t tpr_shadow_refused[max_cpus]{};
     std::uint64_t tpr_shadow_absent[max_cpus]{};

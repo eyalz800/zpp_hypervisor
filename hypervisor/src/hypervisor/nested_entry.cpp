@@ -1364,6 +1364,21 @@ std::expected<void, zpp::error> hypervisor::build_vmcs02(std::size_t cpu)
 
     vmcs.secondary_processor_based_vm_execution_controls(secondary02);
 
+    // What the guest hypervisor asked for against what it got. See
+    // `control_pin_requested` - the machine boots under KVM and not here,
+    // so a control it set and did not get back is exactly the shape of
+    // difference worth looking for.
+    if (cpu < max_cpus) {
+        this->control_pin_requested[cpu] = pin12;
+        this->control_pin_granted[cpu] =
+            vmcs.pin_based_vm_execution_controls();
+        this->control_primary_requested[cpu] = primary12;
+        this->control_primary_granted[cpu] =
+            vmcs.primary_processor_based_vm_execution_controls();
+        this->control_secondary_requested[cpu] = secondary12;
+        this->control_secondary_granted[cpu] = secondary02;
+    }
+
     // Every control either side has *ever* asked for, and every one this
     // VMM ever actually wrote, accumulated rather than sampled.
     //

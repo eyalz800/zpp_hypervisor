@@ -277,11 +277,18 @@ while IFS= read -r line; do
     number=$(echo "$line" | cut -d: -f2)
     window=$(sed -n "$((number > 6 ? number - 6 : 1)),$((number + 3))p" "$file")
 
-    # A read wrapped onto two lines puts `auto x =` on the line above the
-    # call, which the grep above cannot see. Reads are not writes.
+    # A read wrapped onto two lines leaves the assignment on the line
+    # above the call, which the grep above cannot see. Reads are not
+    # writes.
+    #
+    # The test is that the line above *ends* in an assignment, not that
+    # it says `auto`. `auto` is one spelling of a read's destination and
+    # a member or an array element is another - this used to match only
+    # the first, so assigning a control field to a member read as a write
+    # of it and failed the check.
     previous=$(sed -n "$((number > 1 ? number - 1 : 1))p" "$file")
     case "$previous" in
-        *"auto "*"="*) continue ;;
+        *=) continue ;;
     esac
     exempt=0
     if echo "$window" | grep -q "$allowed_marker"; then

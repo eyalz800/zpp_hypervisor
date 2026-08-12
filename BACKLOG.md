@@ -9737,3 +9737,75 @@ produced confident wrong conclusions before being caught.
   which is one boot and would say whether this is ours at all;
 - what the `Phase1Initialization` thread is actually waiting for, which
   needs the guest's own wait state rather than its stack.
+
+
+## What KVM offers Hyper-V that this VMM does not
+
+The rig boots this Windows installation under KVM and does not boot it
+under this VMM. That was settled by the machine's owner, not by an
+argument here, and it moves the question: every mechanism this VMM owns
+has been measured and passes, so the difference is something **presented
+or withheld** rather than something done incorrectly.
+
+So ask the other side. `scripts/kvm-nested-msrs.sh` reads the VMX
+capability MSRs out of the rig's own KVM through `KVM_GET_MSRS` on
+`/dev/kvm` - the feature-MSR ioctl, so no VM and no processor is needed -
+and that is the exact menu Hyper-V configures itself from. Run
+2026-08-12, against the same hardware values this VMM sees, and reduced
+through `narrow`'s own rule, `allowed_1 = (hardware_high & supported) |
+hardware_low`:
+
+| | KVM | here |
+|---|---|---|
+| pin 6, activate VMX-preemption timer | offered | withheld |
+| primary controls | | **identical, all of them** |
+| secondary 0, virtualize APIC accesses | offered | withheld |
+| secondary 4, virtualize x2APIC mode | offered | withheld |
+| secondary 13, enable VMFUNC | offered | withheld |
+| secondary 14, VMCS shadowing | offered | withheld |
+| secondary 17, enable page-modification logging | offered | withheld |
+| exit 12 and entry 13, load IA32_PERF_GLOBAL_CTRL | offered | withheld |
+| exit 22, save VMX-preemption timer value | offered | withheld |
+| EPT capability 0, execute-only translations | offered | withheld |
+| EPT capability 21, accessed and dirty flags | offered | withheld |
+| IA32_VMX_VMFUNC, EPTP switching | offered | withheld |
+
+Two bits go the other way and neither survives: PAUSE-loop exiting and
+uncacheable EPT paging structures are advertised here and absent from the
+hardware underneath, so the AND against hardware removes them.
+
+**Two corrections to how this was arrived at, both worth more than the
+table.** The first pass parsed the constants out of the header with a
+regular expression and reported a diff twice as large, because the
+non-greedy match ended at a semicolon *inside a comment* - so
+`supported_primary_controls` came back missing its top ten bits,
+including "activate secondary controls", which if true would have meant
+no secondary control could be used at all. The second pass compared raw
+`supported_*` masks against KVM's MSRs and counted the
+reserved-must-be-1 bits as differences; they are not, because `narrow`
+ORs the allowed-0 half back in. Primary controls are *identical* once
+both mistakes are undone, and the first pass had them as the largest
+difference of all.
+
+The generalisation, which this investigation has now paid for five
+times: **a measurement of your own source is still a measurement, and it
+has instrument error.** Parsing beats guessing and executing beats
+parsing.
+
+**Why this list is worth acting on rather than reading.** The guest's
+twelve-minute phase is `VslSetPlaceholderPages` applying virtual trust
+level protections through about 88,000 hypercalls, and virtual secure
+mode is the consumer of exactly two entries above - execute-only
+translations, which is how a page is made executable but not readable,
+and VMFUNC EPTP switching, which is how a VTL transition swaps memory
+views without an exit. Neither is proof, and neither should be
+implemented on the strength of that paragraph.
+
+**It is testable without touching this VMM at all.** Every entry is a
+QEMU `-cpu` flag, and `ZPP_CHAINLOAD_ONLY` boots the same guest with our
+boot option still the only one installed and no hypervisor resident. So
+KVM can be degraded to precisely the menu above and Windows booted
+underneath it, with this tree out of the picture: if it stalls in the
+boot graphics rasterizer, the cause is in the table and bisects in
+eleven more boots; if it boots, the capability set is exonerated and the
+difference is elsewhere.
