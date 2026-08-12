@@ -9094,3 +9094,49 @@ both force one, and sampling the instruction pointer at a rate the guest
 does not control turns this into an ordinary profile. That is the
 remaining measurement, and it is a different mechanism rather than
 another reading of the same one.
+
+
+## What it is spinning on: building the page frame number database
+
+2026-08-12, from the profiler - samples taken on the VMX-preemption
+timer, which is the first instrument here whose clock the guest does not
+control.
+
+At the stall, the hot addresses are all one subsystem:
+
+```
+MiInitializePfnEntriesRaw    the largest share
+MiCreateInitialPfns
+MiFindDescriptorByPfn
+MiCreateDescriptorPfns
+RtlCompareMemoryUlong
+```
+
+That is the memory manager building the page frame number database, and
+it is not a spin on a lock or a wait for a device - it is *work*, running
+continuously and never finishing.
+
+Everything that was confusing now fits. The work touches memory that is
+already mapped, so it takes no extended-page-table violation; it makes no
+hypercall; it accesses no model-specific register. It is invisible to
+every instrument in this tree except a clock, which is why four separate
+readings today all returned `KeClockInterruptNotify` - the interrupt was
+the only thing exiting.
+
+**And this is the first candidate that points at something this VMM
+does.** The loader takes memory from the firmware with `allocate_rwx` and
+the hypervisor then hides its own pages from the guest by clearing their
+extended-page-table permissions. The memory manager builds its database
+from the firmware's memory descriptors. If those two disagree - a
+descriptor covering pages the guest may not touch, or a page frame with
+no descriptor - a search like `MiFindDescriptorByPfn` has nothing to
+find.
+
+Next, in order:
+
+1. **Does it terminate?** The profile is a window; two readings minutes
+   apart show whether the addresses move at all.
+2. **What does the guest's memory map say about this VMM's own pages?**
+   That is a static question about the loader, answerable without a boot.
+3. **Whether the descriptor list the guest walks is the firmware's or one
+   this VMM altered.**
