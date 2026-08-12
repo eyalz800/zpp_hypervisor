@@ -8960,3 +8960,59 @@ was meant to do and did not, or did and did not signal. Nothing measured
 so far can see inside the secure kernel - its public symbols carry
 function names but no structure layouts, so the thread probe cannot
 follow it the way it follows the root partition.
+
+
+## Corrected: the guest is not idle at the stall, it is spinning in Phase 1
+
+2026-08-12, from the guest-thread probe once it refreshed its readings
+instead of taking one snapshot.
+
+At the stall, every sample says the same thing:
+
+```
+thread 0xffffdf83024a2040   (not the idle thread)
+start  0xfffff807f06fb520 = base + 0x6fb520 = Phase1Initialization
+state  Running             wait irql 1
+idle   0xfffff807f0fd25c0  - a different pointer entirely
+```
+
+**The processor is running `Phase1Initialization`, continuously.** It is
+not idle, it is not blocked, and there is no thread waiting on anything.
+It is executing.
+
+The earlier reading - "the root partition is idle whenever it runs" - was
+taken from samples earlier in the boot, while the secure kernel was still
+applying its protections, and was then carried forward as though it
+described the stall. It does not. The processor idles *during* the
+protection pass and runs Phase 1 afterwards.
+
+That changes the question completely. The loop it is spinning in is
+visible in the working ring and has been all along, mistaken for an idle
+loop because it is made of the same instructions:
+
+```
+HvlpGetRegister64          rdmsr 0x40000020, the reference counter
+HalpHvTimerArm             wrmsr 0x400000b0 / 0x400000b1
+                           wrmsr 0x40000070, synthetic end of interrupt
+                           wrmsr 0x40000071, synthetic interrupt command
+                           wrmsr 0x40000084, end of message
+```
+
+So `Phase1Initialization` polls the Hyper-V reference counter, re-arms a
+timer and completes a message round, over and over, and never leaves.
+Two and three quarter million reads of the counter in one run.
+
+What is already known about that loop, and rules out the obvious causes:
+
+- **The counter advances correctly.** The synthetic timer's own arming
+  values move 101,470 units per 10.1 ms of time-stamp counter, which is
+  the 100 ns unit the interface specifies, measured both ways.
+- **The interrupts arrive.** 238,237 injections of the clock vector in
+  the same window, and the message protocol completes 230,928 rounds.
+- **Nothing underneath fails.** No stalled fault, no bad shadow leaf, no
+  refused entry, an empty log.
+
+So it is a wait whose *condition* never becomes true, rather than a wait
+that is never woken. Naming the condition is the next step, and the
+instruction pointers in the loop are already symbolized - what is missing
+is the caller, which needs a stack walk rather than a program counter.
