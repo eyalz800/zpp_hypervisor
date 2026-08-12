@@ -9597,3 +9597,52 @@ That is the fourth time in this investigation an instrument has been
 found to answer a different question from the one being asked of it. The
 pattern is stable enough to state as a rule: **an instrument driven by
 the guest's own behaviour cannot measure that behaviour's distribution.**
+
+
+## The deferred-call path is healthy too
+
+2026-08-12. `KPRCB.InterruptRequest` sampled from inside the hypervisor:
+
+| | during the storm | at the stall |
+|---|---|---|
+| outstanding | 0 | 15 |
+| clear | 9 | 28 |
+
+**The flag clears.** Sixty-five per cent of samples at the stall find no
+software interrupt outstanding, which cannot happen if the guest is
+asking for a deferred call and never getting it - that state is exactly
+"the flag stays set".
+
+So the 230,933 requests against 6 deliveries of vector `0x2f` is
+explained, and explained the way the counter-argument said it would be:
+Windows drains its deferred calls inline when it lowers priority, without
+the interrupt being delivered at all, and it does that on real hardware
+too. The delivery count was never the anomaly it looked like.
+
+That is the eleventh mechanism eliminated by measurement in this
+investigation, and it closes the last one reachable from either side of
+the boundary. What remains unexplained is not a mechanism but a loop:
+
+```
+Phase1Initialization, PASSIVE_LEVEL, Running
+  BgpFwFreeMemory
+  MiAllocatePagesForMdl
+  ExpAllocatePoolWithTagFromNode / ExFreePoolWithTag
+  RtlpHpVsChunkSplit / ContextAllocate / SlotAllocate / ContextFree
+  HalRequestSoftwareInterrupt -> HalpInterruptSendIpi
+```
+
+Allocate, free, request a deferred call, repeat. `BgpFwFreeMemory` is the
+boot graphics provider handing firmware memory back, which is what
+Windows does when it takes the display over from the firmware
+framebuffer. A loop that allocates, frees and retries is a loop whose
+allocation is failing - and the next question is which one, which is a
+question about the guest's memory state rather than about this VMM's
+mechanisms.
+
+Worth noting where that points, without claiming it: the display is a
+passed-through GPU, the firmware framebuffer is a physical range this
+machine's loader also has opinions about, and `allocate_rwx` takes its
+memory as `EfiReservedMemoryType` from wherever the firmware chooses.
+Whether those overlap is checkable from the loader's own trace and does
+not need a boot.
