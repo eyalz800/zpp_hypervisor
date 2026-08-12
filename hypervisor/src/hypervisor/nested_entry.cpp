@@ -1579,8 +1579,27 @@ std::expected<void, zpp::error> hypervisor::build_vmcs02(std::size_t cpu)
     // level below this one.
     vmcs.guest_cr4((cr4_12 | cr4_vmxe) & ~cr4_smxe);
 
-    for (auto guest_field : guest_state_fields) {
-        vmcs.write(guest_field, shadow.read(guest_field));
+    {
+        auto fresh = this->guest_state_fresh[cpu];
+        std::size_t index{};
+
+        for (auto guest_field : guest_state_fields) {
+            auto value = shadow.read(guest_field);
+
+            if (fresh && (this->guest_state_cache[cpu][index] == value)) {
+                this->guest_state_writes_skipped[cpu] += 1;
+                ++index;
+                continue;
+            }
+
+            vmcs.write(guest_field, value);
+            this->guest_state_cache[cpu][index] = value;
+            this->guest_state_writes_done[cpu] += 1;
+            ++index;
+        }
+
+        // Consumed: the next elision needs its own save to justify it.
+        this->guest_state_fresh[cpu] = false;
     }
 
     // The activity state is decided, never copied.
@@ -2210,8 +2229,26 @@ void hypervisor::save_l2_state(std::size_t cpu)
 
     // Everything unconditional first, in the same order it was loaded, so
     // that the two lists cannot drift apart.
-    for (auto guest_field : guest_state_fields) {
-        shadow.write(guest_field, vmcs.read(guest_field));
+    static_assert(std::size(guest_state_fields) <= 48,
+                  "guest_state_cache is too small for the field list");
+
+    {
+        std::size_t index{};
+        for (auto guest_field : guest_state_fields) {
+            auto value = vmcs.read(guest_field);
+            shadow.write(guest_field, value);
+
+            // What vmcs02 actually holds, which is the only thing the
+            // elision in build_vmcs02 may compare against. See
+            // `guest_state_cache`.
+            if (cpu < max_cpus) {
+                this->guest_state_cache[cpu][index] = value;
+            }
+            ++index;
+        }
+        if (cpu < max_cpus) {
+            this->guest_state_fresh[cpu] = true;
+        }
     }
 
     shadow.write(field::guest_rip, vmcs.guest_rip());

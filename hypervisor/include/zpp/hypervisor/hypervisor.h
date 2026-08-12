@@ -6739,6 +6739,40 @@ private:
      * Twenty more VMCS accesses a call at 1.76 microseconds each.
      */
     bool vmcs02_host_written[max_cpus]{};
+
+    /**
+     * What vmcs02's guest-state fields actually hold, so `build_vmcs02`
+     * can skip writing back what is already there.
+     *
+     * Forty VMWRITEs on every nested entry, about 120,000 cycles at the
+     * 1.4 to 1.8 microseconds a VMCS access costs here, and almost all
+     * of them redundant: the processor saves the guest's state into
+     * vmcs02 on every exit (SDM 28.3), `save_l2_state` copies that into
+     * vmcs12, and the loop then writes vmcs02 the values the processor
+     * just put there.
+     *
+     * **The obvious version of this is wrong.** A cache of what this VMM
+     * last *wrote* would skip a field the processor had since changed,
+     * and the guest would resume with stale state - a fault that would
+     * surface much later as an impossible guest bug. So the cache is
+     * filled from `save_l2_state`'s read on the way out, which is what
+     * vmcs02 genuinely contains, exactly as `shadow_cache` is filled
+     * from what `copy_shadow_to_vmcs12` finds.
+     *
+     * `guest_state_fresh` is what makes it safe rather than merely
+     * likely. It is set by `save_l2_state` and cleared by
+     * `build_vmcs02`, so a write can only be elided when a save has run
+     * since the last build - which is the one ordering under which the
+     * cache is known to describe vmcs02. Between that save and that
+     * build the second-level guest does not execute, so nothing else can
+     * change those fields.
+     * @{
+     */
+    std::uint64_t guest_state_cache[max_cpus][48]{};
+    bool guest_state_fresh[max_cpus]{};
+    std::uint64_t guest_state_writes_skipped[max_cpus]{};
+    std::uint64_t guest_state_writes_done[max_cpus]{};
+    /** @} */
     /** @} */
 
     std::uint64_t vmread_benchmark_cycles{};
