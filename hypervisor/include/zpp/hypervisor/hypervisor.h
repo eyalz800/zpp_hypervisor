@@ -2185,20 +2185,34 @@ private:
     host_ept_lookup(std::uint64_t physical_address);
 
     /**
-     * What a processor's current shadow says about a second-level
-     * guest-physical address, without changing it.
+     * What a processor walking this processor's *shadow* would find for a
+     * second-level guest-physical address.
      *
-     * `shadow_ept_entry` is not this: it descends *making* tables, drops a
-     * large entry that is in the way, and hands back a pointer to write
-     * through. Asking it what is mapped would alter what is mapped.
+     * Read-only, and it changes nothing: no table is created, no slot is
+     * taken, and a walk that ends nowhere is reported rather than filled
+     * in. That is what separates it from `shadow_ept_entry`, which is the
+     * write path and makes tables as it descends.
      *
-     * Exists so the fault path can check its own work. An EPT violation
-     * retires no instruction, so a handler that installs a mapping and
-     * resumes has made progress only if the mapping it installed permits
-     * the access that faulted - and when it does not, the same access
-     * faults again, for ever, with nothing in any counter to say so. Three
-     * separate defects in this tree have had exactly that shape. Reading
-     * the entry back turns the whole class into one log line.
+     * **It exists because "the fault was handled" and "the access will now
+     * succeed" are different claims, and only the second one matters.**
+     * Every path in `on_l2_ept_fault` that installs a leaf returns
+     * `handled` and resumes the guest; if the leaf it installed does not
+     * permit the access that faulted, the guest faults again at the same
+     * RIP on the same address, for ever. That is not a hypothetical - it
+     * is the livelock this VMM has been chased by twice, once as
+     * qualification 0x1aa on a watched page and once as 0x184 on an
+     * instruction fetch - and in both cases the handler believed it had
+     * succeeded.
+     *
+     * So this is the oracle for that claim, and it is deliberately the
+     * *generic* walker rather than a second implementation: what it
+     * reports is what hardware would report, by construction, because
+     * `walk_ept` is what composes the entries in the first place.
+     *
+     * Also the answer to "what does this processor's shadow actually hold"
+     * from a debugger, which nothing else gives - the tables are reached
+     * by physical address through `module_physical_to_virtual` and cannot
+     * be followed by hand.
      */
     arch::x86_64::vmx::ept_walk_result
     shadow_ept_lookup(std::size_t cpu, std::uint64_t guest_physical);

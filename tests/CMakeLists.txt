@@ -355,6 +355,41 @@ zpp_add_host_test(nested_exit
 zpp_add_host_test(nested_ept
     SOURCES nested_ept/harness.cpp)
 
+# The shadow extended page table fault path: the real nested_ept.cpp
+# against the real hypervisor class.
+#
+# The other half of nested EPT, and the half that has state - the pool,
+# the slots, the tables made and freed, the split, the collect and the
+# refresh. tests/nested_ept covers the rules, which are pure and need no
+# object at all; nothing above could be reached without one.
+#
+# **What it exists to assert**: a leaf installed for a faulting access
+# permits that access. Every path in on_l2_ept_fault that installs a leaf
+# then resumes the guest, and a leaf that does not permit what faulted is
+# a guest that faults again at the same RIP for ever while `handled`
+# climbs. That livelock has been reached twice on real hardware -
+# qualification 0x1aa on a watched page, 0x184 on an instruction fetch -
+# and in both cases the handler believed it had succeeded. Nothing in the
+# tree could express the difference until `shadow_ept_lookup`, which is
+# the read-only walk this uses as its oracle and which the same commit
+# adds.
+#
+# ZPP_NESTED_VMX=1, and it is load-bearing rather than tidy:
+# shadow_ept_tables_per_cpu is 96 with it on and *1* with it off, so an
+# off build refuses on its first table and every case here would measure
+# the refusal instead of the path.
+zpp_add_host_test(shadow_ept
+    SOURCES
+        shadow_ept/harness.cpp
+        support/host_heap.cpp
+        "${ZPP_HYPERVISOR_SRC}/hypervisor/nested_ept.cpp"
+        "${ZPP_HYPERVISOR_SRC}/arch/x86_64/page_table.cpp"
+        "${ZPP_HYPERVISOR_SRC}/crt/heap.cpp"
+    INCLUDES
+        "${CMAKE_CURRENT_SOURCE_DIR}/shim"
+        "${CMAKE_CURRENT_SOURCE_DIR}/shadow_ept"
+    DEFINES ZPP_NESTED_VMX=1 ZPP_HOSTED_TESTS=1)
+
 # The nested VMX state machine: the real nested_vmx.cpp and the real
 # vmcs12.h against the real hypervisor class, with only the two asm.h
 # stand-ins on the path.

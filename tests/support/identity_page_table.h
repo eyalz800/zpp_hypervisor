@@ -23,6 +23,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <initializer_list>
+#include <span>
 
 namespace zpp::tests
 {
@@ -87,7 +88,7 @@ struct identity_range
  * object itself, but it is free to avoid.
  */
 inline void map_identity(zpp::arch::x86_64::page_table & table,
-                         std::initializer_list<identity_range> ranges)
+                         std::span<const identity_range> ranges)
 {
     identity_page_table identity;
 
@@ -101,6 +102,21 @@ inline void map_identity(zpp::arch::x86_64::page_table & table,
                 zpp::arch::x86_64::page_table::protection::write,
             identity);
     }
+}
+
+/**
+ * The same, written as a list at the call site.
+ *
+ * Both spellings exist because a harness needs the list twice: once to
+ * map it, and once to walk it filling the reverse map that
+ * `module_physical_to_virtual` is. A `std::initializer_list` cannot be
+ * built from an array, so a caller that has to iterate its own ranges
+ * takes the span; one that only maps them takes the list.
+ */
+inline void map_identity(zpp::arch::x86_64::page_table & table,
+                         std::initializer_list<identity_range> ranges)
+{
+    map_identity(table, std::span(ranges.begin(), ranges.size()));
 }
 
 } // namespace zpp::tests
