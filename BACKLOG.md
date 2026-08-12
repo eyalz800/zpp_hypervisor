@@ -10424,3 +10424,53 @@ once. A histogram of where the second-level guest actually is answers
 "what is it doing" in a way no single frame can, and every wrong turn in
 this investigation for two days has come from reading one sample as a
 distribution.
+
+
+## Why the dispatch interrupt is refused: the guest sits at DISPATCH_LEVEL
+
+Read out of the virtual-APIC page the guest hypervisor gave its guest -
+`nested_virtual_apic_address` is `0x117a19000` for that boot, and the
+task priority register is the byte at offset `0x80`:
+
+    VTPR = 0x20
+
+That is priority class 2, `DISPATCH_LEVEL`. An interrupt is deliverable
+only when its priority class is **strictly greater** than the task
+priority's, so vector `0x2f` - also class 2 - is masked, while the clock
+at `0xd1` is class 13 and is not. That is the injection split exactly:
+271,674 of one and 12 of the other, with no fault anywhere in between.
+
+**The guest hypervisor is right, this VMM is delivering correctly, and
+Windows is simply at raised priority.** Three explanations that each held
+for a while are gone with it: that we were losing the interrupt, that the
+TPR shadow was misreporting, and that a clock handler was failing to
+return.
+
+**It is Windows' own value, not an artefact.** `MOV CR8` exits eight
+times in a whole boot, so the processor is maintaining that byte through
+the TPR shadow out of the guest's own writes rather than anything here
+emulating it. Turning the TPR shadow off changes nothing because the
+value was never wrong.
+
+So the question is now the right one and a much smaller one: **what is
+Windows doing at DISPATCH_LEVEL that never finishes.**
+
+**Method fixed first, since it caused every previous wrong turn.** The
+guest stack is now sampled repeatedly rather than once - the profiler
+refreshes `sample_guest_stack` every 256 samples, so polling it from
+outside accumulates a distribution without touching the hypervisor. The
+first twenty samples, symbolised against the public PDB, are dominated
+by:
+
+    HvlSwitchToVsmVtl1 / VslpEnterIumSecureMode
+    VslSetPlaceholderPages / VslCopyProtectedPage / MiCopyPage
+    MiUpdateSlabPagePlaceholderState / MiGetPageFromSlabEntry
+    KiFlushRangeTb / KeCopyPrivilegedPage
+
+which is the virtual secure mode page-protection path, with the clock
+handler interleaved.
+
+**Those samples describe the working phase, not the stall** - the working
+counter was climbing through all of them - and they are recorded here
+only so the next set can be compared against them. Reading them as the
+failure would be the same mistake this file already records five times.
