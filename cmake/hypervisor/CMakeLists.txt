@@ -9,6 +9,10 @@ option(ZPP_NESTED_TPR_SHADOW
     "Hand a guest hypervisor's TPR shadow to the processor. Off forces CR8 exiting and emulates it against the same page, which is slower and exists to be the one variable between two boots."
     ON)
 
+option(ZPP_NESTED_SHADOW_VMCS
+    "Let the processor shadow a guest hypervisor's VMCS, so its vmreads and vmwrites do not exit. Off makes every one of them exit and be recorded, which is the only way to see what it actually asks for."
+    ON)
+
 option(ZPP_PROFILE_L2
     "Sample a second-level guest's instruction pointer on the VMX-preemption timer. A profiler: it costs an exit per interval and is the only instrument that can see a guest spinning on memory."
     OFF)
@@ -134,6 +138,7 @@ target_compile_options(zpp_hypervisor PRIVATE
     -DZPP_NESTED_VMX=$<BOOL:${ZPP_NESTED_VMX}>
     -DZPP_REQUEUE_INTERRUPTED_EVENTS=$<BOOL:${ZPP_REQUEUE_INTERRUPTED_EVENTS}>
     -DZPP_NESTED_TPR_SHADOW=$<BOOL:${ZPP_NESTED_TPR_SHADOW}>
+    -DZPP_NESTED_SHADOW_VMCS=$<BOOL:${ZPP_NESTED_SHADOW_VMCS}>
     -DZPP_PROFILE_L2=$<BOOL:${ZPP_PROFILE_L2}>
     # The guest coverage suite, which lives in the loader but turns on two
     # VM-execution controls here. Same always-defined 0/1 shape as the two
