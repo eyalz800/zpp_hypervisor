@@ -10699,3 +10699,57 @@ rewrites its own boot state when it does. The nested failure may
 therefore have two distinct shapes depending on what the guest last
 recorded about itself, which is worth knowing before reading any future
 nested run as a regression.
+
+
+## Measured: 85% of the machine is this VMM's own exit handler
+
+`handler_cycles` accumulates the time stamp counter from the first
+instruction of `on_vm_exit` to the last instant of `resume_guest`.
+Against wall clock from the same counter, on the nested single-processor
+boot:
+
+    in-vmm        85-87%
+    cycles/exit   ~310,000, about 160 us at 1.95 GHz
+    exits         ~3,300/s, second-level entries ~1,260/s
+
+**The cost is ours, and that is the answer the measurement was for.**
+Had it come back at ten percent the fix would have been fewer exits;
+at eighty-five it is fewer instructions per exit, and the same work
+that makes the guest slow is what makes its clock handler miss its
+deadline.
+
+**Where the 160 microseconds goes.** Every VMX instruction this VMM
+executes traps to KVM, because this VMM is KVM's guest. One
+second-level exit reflected to the guest hypervisor and resumed costs
+roughly:
+
+    save_l2_state          ~15 vmreads
+    copy_vmcs12_to_shadow  36 fields + vmptrst/vmptrld/vmclear/vmptrld
+    copy_shadow_to_vmcs12  26 fields + the same four
+    build_vmcs02           ~50 vmwrites
+
+about **150 trapped instructions**, at the ~1.07 microseconds each that
+160/150 implies. The shadow VMCS field list is 26 read-write and 10
+read-only.
+
+**What this does not say.** It does not say this VMM is slow on real
+hardware - on bare metal those instructions do not trap at all and cost
+tens of cycles each. It says the *nested-under-KVM* configuration, which
+is the only one being tested, is where the clock handler cannot keep up.
+Whether the same guest boots on the machine directly is a question this
+rig cannot answer, since everything here runs inside QEMU.
+
+**The fix, in order of measured value.** Getting a factor of five needs
+all three:
+
+1. `build_vmcs02` should write only the fields whose composed value
+   changed. The values are already in `guest_vmcs12`, an ordinary
+   in-memory structure, so the comparison is free against a VMWRITE that
+   is not. KVM does this through `prepare_vmcs02_rare` and
+   `dirty_vmcs12`.
+2. `copy_vmcs12_to_shadow` should copy only what changed, by the same
+   comparison.
+3. The shadow field list should be the *hot* fields only. Every field
+   shadowed is a field that must be copied both ways on every round
+   trip; a field left unshadowed costs an exit only when the guest
+   hypervisor actually touches it.
