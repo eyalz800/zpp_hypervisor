@@ -3287,10 +3287,18 @@ void hypervisor::sample_guest_thread(std::size_t cpu)
         sample.wait_irql = word & byte_mask;
     }
 
-    // And, once, everything else that process is running - which is
-    // where the blocked thread is, since the current one is the idle
-    // thread.
-    walk_guest_threads(cpu, sample.thread);
+    // And, once, everything else that thread's process is running.
+    //
+    // **Not from the idle thread**, which was the first attempt and
+    // answered with a list of one: the idle thread belongs to the *idle*
+    // process, which has exactly one thread per processor and never any
+    // others. What is wanted is a thread of the system process, and any
+    // sample taken while the guest is doing work is one - so the walk
+    // waits for a sample whose thread is not the idle thread rather than
+    // taking the first that reads cleanly.
+    if (sample.thread != sample.idle_thread) {
+        walk_guest_threads(cpu, sample.thread);
+    }
 
     auto slot = this->guest_thread_sample_count[cpu] %
                 guest_thread_sample_capacity;
