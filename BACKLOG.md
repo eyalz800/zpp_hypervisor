@@ -10839,3 +10839,52 @@ should settle them before optimising anything:
 spread evenly across a hundred small operations there is no fix worth
 making and the nested-under-KVM configuration is simply too slow to
 carry Windows. If it is one operation, there is.
+
+
+## A VMREAD costs 1.76 microseconds here, and that is the whole story
+
+Benchmarked directly rather than inferred: a thousand VMREADs of
+`exit_reason`, once, on the first exit, take **3,433,259 cycles** - 3,433
+cycles, about **1.76 microseconds**, each.
+
+**That is seventeen times the figure previously inferred**, and it
+inverts the conclusion drawn from it. The inference came from comparing
+two runs at different phases of a boot, which is not a controlled
+comparison; the benchmark is one, and the shadow-copy optimisation
+reverted on the strength of the inference has been restored.
+
+**It also closes the arithmetic.** The handler costs about 312,000
+cycles an exit. Divided by 3,433, that is **ninety VMCS accesses per
+exit** - which is to say the exit handler is *nothing but* VMCS traffic,
+and every phase measurement above is really a count of accesses in
+disguise: `build_vmcs02` at 270 microseconds is about 150 of them,
+`save_l2_state` at 102 is about 58, the exit trace ring is six on every
+exit.
+
+**Why it costs that, and the part that matters most.** A VMREAD is a few
+tens of cycles on real hardware. It costs 3,433 here because this VMM is
+KVM's guest, so each one traps and is emulated. **The measurement is of
+the test rig, not of the hypervisor.**
+
+That reframes the entire failure. Windows' clock handler needs about ten
+reflected reference-counter reads per tick and cannot finish inside 10.4
+milliseconds - but only because each one carries a hundred-odd emulated
+VMCS accesses. On the metal the same work is roughly seventy times
+cheaper and would fit in the tick with room to spare.
+
+**So the open question is no longer "what is wrong with the nested
+path".** It is whether this failure exists at all outside QEMU. Two ways
+to find out, and neither is free:
+
+- Boot `\zpp + windows` from the rig's Limine menu, which runs this VMM
+  on the machine directly. That needs a power cycle and someone at the
+  keyboard.
+- Or cut the ninety accesses to nine, which makes the nested-under-KVM
+  configuration viable and is worth doing anyway. The levers, in order:
+  cache the vmcs01 control words that `build_vmcs02` re-reads every call
+  and never change; elide vmcs02 writes whose value is unchanged; and
+  make the exit trace ring cost nothing when it is not being read.
+
+**Do not optimise anything else before re-running the benchmark.** Every
+wrong turn in this part of the investigation came from a cost model that
+had never been measured.
