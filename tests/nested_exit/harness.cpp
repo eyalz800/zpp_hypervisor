@@ -333,6 +333,32 @@ hypervisor::fill_shadow_leaf(std::size_t,
     return {};
 }
 
+/**
+ * What the shadow holds for an address, which this harness answers from
+ * the same table `fill_shadow_leaf` above pretends to fill.
+ *
+ * Standing in rather than linking the real one, because this harness
+ * tests the *decision* `on_l2_ept_fault` makes and stands in for the
+ * whole shadow layer beneath it - `host_ept_lookup`,
+ * `shadow_ept_pointer_for` and `fill_shadow_leaf` are all here for the
+ * same reason. tests/shadow_ept links the real nested_ept.cpp and is
+ * where the walk itself is tested.
+ *
+ * Answers "mapped, everything permitted", which is what a fault path
+ * that has just installed a leaf should see - so a defect that installs
+ * a leaf permitting nothing would be caught there rather than hidden
+ * here.
+ */
+arch::x86_64::vmx::ept_walk_result
+hypervisor::shadow_ept_lookup(std::size_t, std::uint64_t guest_physical)
+{
+    arch::x86_64::vmx::ept_walk_result result;
+    result.status = arch::x86_64::vmx::ept_walk_status::mapped;
+    result.physical_address = guest_physical;
+    result.permissions = arch::x86_64::vmx::ept_permissions::all();
+    return result;
+}
+
 arch::x86_64::vmx::ept_walk_result
 hypervisor::host_ept_lookup(std::uint64_t physical_address)
 {
