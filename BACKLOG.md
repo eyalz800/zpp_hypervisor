@@ -9052,3 +9052,45 @@ What it does not yet explain is the stall, which happens *after* this
 loop finishes - the hypercall count stops climbing and stays put. The
 same scan taken then is the reading that matters, and it is one boot
 away.
+
+
+## The stall is a spin on memory, and that is why nothing showed it
+
+2026-08-12, the stack scan taken at the stall - working ring frozen at
+90,062, sampled instruction pointer `HvlpGetRegister64`.
+
+```
+KiInterruptDispatchNoLockNoEtw
+ KiInterruptSubDispatchNoLockNoEtw
+  KiCallInterruptServiceRoutine
+   KeClockInterruptNotify
+    KiUpdateTime, KiSetNextClockTickDueTime, KiSetClockTickRate,
+    KeQueryPerformanceCounter, KiEndThreadCycleAccumulation
+```
+
+Every sample lands inside the clock interrupt handler, and that is the
+result rather than a disappointment. **The exits this VMM takes *are* the
+model-specific register accesses that handler makes** - the
+reference-counter read, the timer arming, the end-of-interrupt, the
+end-of-message. Between ticks there are no exits at all: measured, 1,449
+second-level entries a second against a hundred clock ticks, which is
+about fourteen exits per tick and nothing in between.
+
+So `Phase1Initialization` - which the thread probe shows Running, at IRQL
+1, continuously - is executing code that causes **no exit of any kind**.
+That is computation or a spin on memory, and it is not a wait: a waiting
+thread would be Waiting and the processor would run the idle thread, and
+neither is true.
+
+This also explains why nothing found it for so long. Every instrument
+here is driven by exits. A guest that spins on a memory location is
+invisible to all of them, and the only reason it can be seen at all is
+that the clock keeps interrupting it - so every sample shows the
+interrupt, and the interrupt is not the problem.
+
+What would settle what it is spinning *on*: an exit source independent of
+what the guest does. The VMX preemption timer or the monitor trap flag
+both force one, and sampling the instruction pointer at a rate the guest
+does not control turns this into an ordinary profile. That is the
+remaining measurement, and it is a different mechanism rather than
+another reading of the same one.
