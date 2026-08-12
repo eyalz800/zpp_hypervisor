@@ -3836,6 +3836,24 @@ void hypervisor::sample_guest_thread(std::size_t cpu)
     // taking the first that reads cleanly.
     walk_guest_threads(cpu, sample.thread);
 
+    // And where the task priority sits, which is what decides whether
+    // the deferred-call vector can be delivered at all. See
+    // `guest_priority_class`.
+    if (auto page = this->nested_virtual_apic_address[cpu]; 0 != page) {
+        constexpr std::uint64_t virtual_task_priority_offset = 0x80;
+        constexpr std::uint64_t priority_class_shift = 4;
+
+        std::uint8_t vtpr{};
+        if (read_guest_physical(
+                page + virtual_task_priority_offset,
+                std::span(reinterpret_cast<std::byte *>(&vtpr),
+                          sizeof(vtpr)))) {
+            auto klass = vtpr >> priority_class_shift;
+            this->guest_priority_class[cpu][klass] =
+                this->guest_priority_class[cpu][klass] + 1;
+        }
+    }
+
     auto slot = this->guest_thread_sample_count[cpu] %
                 guest_thread_sample_capacity;
     this->guest_thread_samples[cpu][slot] = sample;

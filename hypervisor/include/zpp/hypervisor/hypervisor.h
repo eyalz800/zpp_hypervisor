@@ -4101,6 +4101,27 @@ private:
     std::uint64_t guest_thread_sample_count[max_cpus]{};
 
     /**
+     * How often the second-level guest's task priority sits at each
+     * priority class.
+     *
+     * The question is narrow and it decides whether the deferred-call
+     * interrupt can ever be delivered: vector `0x2f` is priority class 2,
+     * so it is blocked unless this register falls **below** `0x20`, and a
+     * thread at PASSIVE_LEVEL should put it at `0x00`.
+     *
+     * Two hundred pokes from outside never saw `0x00` - but two hundred
+     * arbitrary moments is not a distribution, and reading it from the
+     * monitor samples whenever the reader happened to ask rather than
+     * whenever the guest is running. This counts every sample the
+     * hypervisor itself takes, which is one per four thousand
+     * second-level entries and is at least regular.
+     *
+     * Sixteen buckets because the class is the high nibble, which is what
+     * the delivery rule compares.
+     */
+    std::uint64_t guest_priority_class[max_cpus][16]{};
+
+    /**
      * Reads one, if this entry is a sampling one. Failures are silent and
      * leave the slot zero: every offset it follows is a guess about
      * another operating system's build, and a diagnostic that stopped a
