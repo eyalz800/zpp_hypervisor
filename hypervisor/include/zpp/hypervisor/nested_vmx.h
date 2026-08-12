@@ -203,6 +203,36 @@ inline constexpr bool enabled =
 inline constexpr bool shadow_vmcs_enabled = true;
 
 /**
+ * Whether a guest hypervisor's TPR shadow is handed to the processor, or
+ * emulated here instead.
+ *
+ * On, which is what a processor does and what costs nothing: the guest's
+ * `mov cr8` writes the task priority straight into the guest hypervisor's
+ * virtual-APIC page with no exit at all, and the processor raises a
+ * TPR-below-threshold exit when it crosses the threshold that hypervisor
+ * set.
+ *
+ * Off exists to be the one variable between two boots. It forces CR8
+ * load and store exiting instead, and answers both here against the same
+ * page - reading and writing byte 0x80, and synthesising the
+ * below-threshold exit the processor would have raised. That is strictly
+ * slower, one exit per interrupt-priority change where there were none,
+ * and it is not a fallback: the point is that a boot which behaves
+ * identically either way has ruled the whole mechanism out, and one that
+ * does not has localised the fault to it.
+ *
+ * This is worth having because three separate explanations of the stall
+ * have been built out of the task priority register and all three were
+ * wrong. `BACKLOG.md` records them. What none of them did was change the
+ * mechanism and re-run.
+ */
+#ifndef ZPP_NESTED_TPR_SHADOW
+#define ZPP_NESTED_TPR_SHADOW 1
+#endif
+
+inline constexpr bool tpr_shadow_offered = (0 != ZPP_NESTED_TPR_SHADOW);
+
+/**
  * The value the guest's current-VMCS pointer takes when there is none.
  *
  * All ones rather than zero, because zero names physical page zero. SDM

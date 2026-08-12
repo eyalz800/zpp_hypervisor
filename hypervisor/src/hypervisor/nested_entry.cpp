@@ -1093,7 +1093,14 @@ std::expected<void, zpp::error> hypervisor::build_vmcs02(std::size_t cpu)
         constexpr std::uint64_t cr8_exiting =
             primary_cr8_load_exiting | primary_cr8_store_exiting;
 
-        if (usable) {
+        // Switched off deliberately, which is not the same as refusing a
+        // page. `nested_vmx::tpr_shadow_offered` is the one variable
+        // between two boots, and the branch below forces CR8 exiting and
+        // answers those exits here - so the entry must not be failed for
+        // want of a control the guest hypervisor was never going to set.
+        if (!nested_vmx::tpr_shadow_offered) {
+            honour_tpr_shadow = false;
+        } else if (usable) {
             honour_tpr_shadow = true;
         } else if (cr8_exiting != (primary12 & cr8_exiting)) {
             return std::unexpected(
@@ -1241,6 +1248,14 @@ std::expected<void, zpp::error> hypervisor::build_vmcs02(std::size_t cpu)
         this->tpr_shadow_refused[cpu] = this->tpr_shadow_refused[cpu] + 1;
         primary &= ~primary_tpr_shadow;
         primary |= primary_cr8_load_exiting | primary_cr8_store_exiting;
+
+        // Kept so `on_nested_cr8_access` can answer against the same page
+        // and the same threshold the processor would have used. Without
+        // the threshold the emulation would be silently one-way: the
+        // guest's priority would fall and the guest hypervisor would
+        // never be told it may deliver.
+        this->nested_virtual_apic_address[cpu] = virtual_apic12;
+        this->nested_tpr_threshold[cpu] = tpr_threshold12;
     } else {
         // Never asked for, so the bit can only be here from this VMM's
         // own controls - which do not set it today, making this a guard
@@ -2876,6 +2891,173 @@ void hypervisor::reflect_l2_exit(std::size_t cpu,
     // hypervisor has not run since on_guest_vmlaunch collected its silent
     // writes, so the shadow's writable fields and the cache agree.
     copy_vmcs12_to_shadow(cpu);
+}
+
+namespace
+{
+/**
+ * The general-purpose register an exit qualification names.
+ *
+ * Spelled out rather than indexed, for the reason the control-register
+ * handler in `exit_dispatch.cpp` gives for doing the same: the encoding
+ * is the architecture's register numbering and the context stores them in
+ * whatever order its assembly pushed them, so an index into the structure
+ * would be right only by coincidence.
+ */
+std::uint64_t * general_purpose_register(arch::x86_64::context & context,
+                                         std::uint64_t number)
+{
+    switch (number) {
+    case 0:
+        return &context.rax;
+    case 1:
+        return &context.rcx;
+    case 2:
+        return &context.rdx;
+    case 3:
+        return &context.rbx;
+    case 4:
+        return &context.rsp;
+    case 5:
+        return &context.rbp;
+    case 6:
+        return &context.rsi;
+    case 7:
+        return &context.rdi;
+    case 8:
+        return &context.r8;
+    case 9:
+        return &context.r9;
+    case 10:
+        return &context.r10;
+    case 11:
+        return &context.r11;
+    case 12:
+        return &context.r12;
+    case 13:
+        return &context.r13;
+    case 14:
+        return &context.r14;
+    case 15:
+        return &context.r15;
+    default:
+        return nullptr;
+    }
+}
+
+} // namespace
+
+bool hypervisor::on_nested_cr8_access(std::size_t cpu,
+                                      std::uint64_t qualification,
+                                      arch::x86_64::context & context)
+{
+    // SDM Table 28-3: bits 3:0 the register, bits 5:4 the access type -
+    // 0 is MOV to, 1 is MOV from - and bits 11:8 the general-purpose
+    // register.
+    constexpr std::uint64_t register_mask = 0xf;
+    constexpr std::uint64_t access_shift = 4;
+    constexpr std::uint64_t access_mask = 0x3;
+    constexpr std::uint64_t gpr_shift = 8;
+    constexpr std::uint64_t gpr_mask = 0xf;
+    constexpr std::uint64_t control_register_8 = 8;
+    constexpr std::uint64_t access_move_to = 0;
+    constexpr std::uint64_t access_move_from = 1;
+
+    // SDM 30.1.1 again: VTPR is the byte at offset 0x80 on the page.
+    constexpr std::uint64_t virtual_task_priority_offset = 0x80;
+
+    // SDM 27.6.8: the threshold is compared against bits 7:4 of VTPR -
+    // the priority *class* - not against the whole byte.
+    constexpr std::uint64_t priority_class_shift = 4;
+
+    if ((cpu >= max_cpus) || !this->running_l2[cpu]) {
+        return false;
+    }
+
+    auto page = this->nested_virtual_apic_address[cpu];
+    if ((control_register_8 != (qualification & register_mask)) ||
+        (0 == page)) {
+        return false;
+    }
+
+    auto access = (qualification >> access_shift) & access_mask;
+    auto gpr = (qualification >> gpr_shift) & gpr_mask;
+
+    auto slot = general_purpose_register(context, gpr);
+    if (nullptr == slot) {
+        return false;
+    }
+
+    std::uint8_t vtpr{};
+    auto at = page + virtual_task_priority_offset;
+
+    if (access_move_from == access) {
+        if (auto read = read_guest_physical(
+                at,
+                std::span(reinterpret_cast<std::byte *>(&vtpr),
+                          sizeof(vtpr)));
+            !read) {
+            return false;
+        }
+
+        // CR8 is the priority *class*, which is VTPR's high nibble. A
+        // guest reading back what it wrote depends on this being the
+        // inverse of the write below, and a guest whose CR8 reads four
+        // bits too large raises its own interrupt priority every time it
+        // saves and restores one.
+        *slot = vtpr >> priority_class_shift;
+        this->nested_cr8_reads[cpu] = this->nested_cr8_reads[cpu] + 1;
+        return true;
+    }
+
+    if (access_move_to != access) {
+        return false;
+    }
+
+    constexpr std::uint64_t priority_class_mask = 0xf;
+
+    vtpr = static_cast<std::uint8_t>((*slot & priority_class_mask)
+                                     << priority_class_shift);
+
+    if (auto written = write_guest_physical(
+            at,
+            std::span(reinterpret_cast<const std::byte *>(&vtpr),
+                      sizeof(vtpr)));
+        !written) {
+        return false;
+    }
+
+    this->nested_cr8_writes[cpu] = this->nested_cr8_writes[cpu] + 1;
+
+    // And the exit the processor would have raised. SDM 27.6.8: the
+    // TPR-below-threshold exit occurs "if the value of bits 3:0 of the
+    // TPR threshold VM-execution control field is greater than the value
+    // of bits 7:4 of VTPR".
+    //
+    // Emulating the write and not this would be the worst of both: the
+    // guest's priority would fall, the guest hypervisor would never be
+    // told, and every interrupt it was holding would stay held. That is
+    // the failure this switch exists to test for, so producing it here by
+    // omission would make the experiment answer itself.
+    constexpr std::uint64_t threshold_mask = 0xf;
+
+    auto threshold = this->nested_tpr_threshold[cpu] & threshold_mask;
+
+    if (threshold > (vtpr >> priority_class_shift)) {
+        this->nested_cr8_below_threshold[cpu] =
+            this->nested_cr8_below_threshold[cpu] + 1;
+
+        // The instruction has retired as far as the guest is concerned -
+        // the priority is written - so the reflected exit must resume
+        // after it, which `reflect_l2_exit` does by saving the state the
+        // caller has already advanced.
+        reflect_l2_exit(
+            cpu,
+            static_cast<std::uint64_t>(basic_reason::tpr_below_threshold),
+            0);
+    }
+
+    return true;
 }
 
 void hypervisor::record_interrupt_request(std::size_t cpu,

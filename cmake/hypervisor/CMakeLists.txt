@@ -4,6 +4,10 @@ option(ZPP_DIAG_RESERVE_WINDOW
 option(ZPP_REQUEUE_INTERRUPTED_EVENTS
     "Put back an event whose delivery a VM exit interrupted"
     ON)
+
+option(ZPP_NESTED_TPR_SHADOW
+    "Hand a guest hypervisor's TPR shadow to the processor. Off forces CR8 exiting and emulates it against the same page, which is slower and exists to be the one variable between two boots."
+    ON)
 cmake_minimum_required(VERSION 3.28)
 project(zpp_hypervisor LANGUAGES CXX ASM)
 
@@ -125,6 +129,7 @@ target_compile_options(zpp_hypervisor PRIVATE
     # what is still missing.
     -DZPP_NESTED_VMX=$<BOOL:${ZPP_NESTED_VMX}>
     -DZPP_REQUEUE_INTERRUPTED_EVENTS=$<BOOL:${ZPP_REQUEUE_INTERRUPTED_EVENTS}>
+    -DZPP_NESTED_TPR_SHADOW=$<BOOL:${ZPP_NESTED_TPR_SHADOW}>
     # The guest coverage suite, which lives in the loader but turns on two
     # VM-execution controls here. Same always-defined 0/1 shape as the two
     # above. Off by default and off in every build that is not a test one;

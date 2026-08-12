@@ -3959,6 +3959,39 @@ private:
     std::uint64_t nested_virtual_apic_address[max_cpus]{};
 
     /**
+     * The threshold that went with it, so an emulated CR8 write can raise
+     * the exit the processor would have raised.
+     */
+    std::uint64_t nested_tpr_threshold[max_cpus]{};
+
+    /**
+     * Answers a second-level guest's CR8 access against the guest
+     * hypervisor's virtual-APIC page.
+     *
+     * Reached only where the TPR shadow was not handed to the processor -
+     * see `nested_vmx::tpr_shadow_offered` - in which case CR8 load and
+     * store exiting were forced in its place and these exits are this
+     * VMM's to answer.
+     *
+     * Returns false where the access is not one it can answer, so the
+     * caller can fall through to the ordinary refusal rather than resume
+     * a guest as though a write had landed.
+     */
+    bool on_nested_cr8_access(std::size_t cpu,
+                              std::uint64_t qualification,
+                              arch::x86_64::context & context);
+
+    /**
+     * How many CR8 accesses were emulated, and how many of them dropped
+     * the priority far enough to owe the guest hypervisor an exit.
+     * @{
+     */
+    std::uint64_t nested_cr8_reads[max_cpus]{};
+    std::uint64_t nested_cr8_writes[max_cpus]{};
+    std::uint64_t nested_cr8_below_threshold[max_cpus]{};
+    /** @} */
+
+    /**
      * VTPR, and the command that was being written, for the newest
      * `interrupt_request_capacity` requests.
      */

@@ -1491,6 +1491,20 @@ void hypervisor::on_vm_exit(std::uint64_t cpuid,
         auto access = (qualification >> 4) & 0x3;
         auto gpr = (qualification >> 8) & 0xf;
 
+        // CR8, which reaches here only where the TPR shadow was not
+        // handed to the processor and CR8 exiting was forced in its
+        // place - `nested_vmx::tpr_shadow_offered`. Answered against the
+        // guest hypervisor's own virtual-APIC page, which is where the
+        // processor would have put it.
+        //
+        // Before the register test below rather than inside it, because
+        // that test refuses everything but CR0 and CR4 and refusing means
+        // stopping the processor.
+        if (on_nested_cr8_access(
+                vmcs.vpid() - 1, qualification, context)) {
+            break;
+        }
+
         // A MOV to CR0 or to CR4 can arrive here. Anything else
         // means a mask grew without this growing with it, and
         // guessing would resume the guest as though something had
