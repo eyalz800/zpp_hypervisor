@@ -83,6 +83,19 @@ alignas(64) std::uint8_t g_xrstors_area[1024]{};
  */
 std::uint32_t g_probe_msr{};
 std::uint64_t g_probe_value{};
+
+/**
+ * A flag an instruction reported, where the value alone does not say
+ * whether it is usable.
+ *
+ * RDRAND and RDSEED are the two: both report through the carry flag, and
+ * an emulation that produced a value and dropped the flag would hand a
+ * guest something it has no way to reject. Kept separate from
+ * `g_probe_value` rather than folded into it, because "the value is zero"
+ * and "the instruction failed" are different claims and a random number
+ * really can be zero.
+ */
+std::uint64_t g_probe_flags{};
 volatile std::uint32_t * g_probe_dword{};
 /**
  * @}
@@ -349,6 +362,26 @@ void probe_pause()
     asm volatile("pause");
 }
 
+/**
+ * HLT, which is safe to execute here for exactly one reason: the test
+ * build sets "HLT exiting", so the instruction takes a VM exit and the
+ * handler emulates it as a no-op instead of the processor halting.
+ *
+ * With the control off - every deployed build - this would halt a
+ * processor that runs with interrupts disabled, and nothing in this suite
+ * could end it. That is why the negative table above never carried an
+ * entry for HLT and says so.
+ */
+void probe_hlt()
+{
+    asm volatile("hlt");
+}
+
+void probe_mov_to_dr()
+{
+    asm volatile("mov %0, %%dr0" : : "r"(g_probe_value));
+}
+
 void probe_mov_from_dr()
 {
     std::uint64_t value{};
@@ -386,8 +419,14 @@ void probe_invpcid()
 void probe_rdrand()
 {
     std::uint64_t value{};
-    asm volatile("rdrand %0" : "=r"(value) : : "cc");
+    std::uint8_t carry{};
+    asm volatile("rdrand %0\n\t"
+                 "setc %1"
+                 : "=r"(value), "=qm"(carry)
+                 :
+                 : "cc");
     g_probe_value = value;
+    g_probe_flags = carry;
 }
 
 void probe_rdseed()
@@ -1774,19 +1813,26 @@ bool guest_tests::run(EFI_SYSTEM_TABLE * system_table)
         // -O0 every local table here is copied there on entry, and
         // the total went past 4 KB, which makes the Microsoft ABI
         // ask for `__chkstk` - see the note on `names` below.
+        // Nine instructions left this table when their controls were
+        // turned on under ZPP_GUEST_TESTS - RDTSC, RDTSCP, INVLPG, PAUSE,
+        // MOV-DR, RDPMC, WBINVD, RDRAND and RDSEED. They are asserted
+        // positively below instead, and HLT joins them.
+        //
+        // Their entries here were not wrong; they were as strong a claim
+        // as could be made while the reasons were unreachable, which is
+        // the state the coverage table called "unreachable-here: the
+        // control is off". That was true and was not a closed question -
+        // the control being off is a decision setup_vmcs makes, not a
+        // property of the environment - and a negative that only holds
+        // because nothing implements the positive is the weaker half of
+        // the pair.
+        //
+        // What stays here is what stays genuinely unreachable: the four
+        // descriptor-table instructions need the *memory* operand
+        // computed from the VM-exit instruction information before they
+        // can be emulated, XSAVES and XRSTORS the same, and XGETBV exits
+        // under no control at all.
         static const negative_case cases[]{
-            {"rdtsc", probe_rdtsc, "primary_bit_12_rdtsc_exiting"},
-            {"rdtscp", probe_rdtscp, "primary_bit_12_rdtsc_exiting"},
-            {"invlpg", probe_invlpg, "primary_bit_9_invlpg_exiting"},
-            {"pause", probe_pause, "primary_bit_30_pause_exiting"},
-            {"mov_from_dr",
-             probe_mov_from_dr,
-             "primary_bit_23_mov_dr_exiting"},
-            {"rdpmc", probe_rdpmc, "primary_bit_11_rdpmc_exiting"},
-            {"wbinvd", probe_wbinvd, "secondary_bit_6_wbinvd_exiting"},
-            {"invpcid", probe_invpcid, "secondary_bit_12_enable_invpcid"},
-            {"rdrand", probe_rdrand, "secondary_bit_11_rdrand_exiting"},
-            {"rdseed", probe_rdseed, "secondary_bit_16_rdseed_exiting"},
             {"xgetbv", probe_xgetbv, "no_control_xgetbv_never_exits"},
 
             // The four descriptor-table instructions, which are reasons
@@ -1833,6 +1879,152 @@ bool guest_tests::run(EFI_SYSTEM_TABLE * system_table)
                  no_exit_reason,
                  measured.reason);
         }
+    }
+
+    // === Instructions the test build intercepts =========================
+    //
+    // Ten exit reasons that a deployed build never produces and this one
+    // does, because `trap_the_quiet_instructions` in setup_vmcs requests
+    // the controls. Each was recorded in the coverage table below as
+    // "unreachable-here: the control is off", which was true and was not
+    // a closed question - and each had a handler case that could not run,
+    // because an exit reason with no case reaches `default:` and stops
+    // the processor.
+    //
+    // So the reason is asserted *and*, wherever the instruction leaves
+    // something behind, so is its effect. The reason alone would pass for
+    // a handler that took the exit and dropped the instruction on the
+    // floor, which is the failure mode CLAUDE.md's header calls out: the
+    // resume path advances RIP, so a guest continues as though the
+    // instruction had worked.
+    {
+        struct intercepted_case
+        {
+            const char * name;
+            void (*body)();
+            std::uint32_t reason;
+        };
+
+        static const intercepted_case cases[]{
+            {"exit.hlt", probe_hlt, exit_hlt},
+            {"exit.invlpg", probe_invlpg, exit_invlpg},
+            {"exit.rdpmc", probe_rdpmc, exit_rdpmc},
+            {"exit.rdtsc", probe_rdtsc, exit_rdtsc},
+            {"exit.mov_debug_register",
+             probe_mov_from_dr,
+             exit_mov_debug_register},
+            {"exit.pause", probe_pause, exit_pause},
+            {"exit.rdtscp", probe_rdtscp, exit_rdtscp},
+            {"exit.wbinvd", probe_wbinvd, exit_wbinvd},
+            {"exit.rdrand", probe_rdrand, exit_rdrand},
+            {"exit.rdseed", probe_rdseed, exit_rdseed},
+
+            // Reachable only because INVLPG exiting is on: SDM Table
+            // 25-6 makes INVPCID exit when "enable INVPCID" and "INVLPG
+            // exiting" are both 1, and the first is on in every build.
+            // So this reason arrived as a side effect of another control
+            // rather than by being asked for, which is exactly how a
+            // guest instruction reaches `default:` and stops a
+            // processor.
+            {"exit.invpcid", probe_invpcid, exit_invpcid},
+        };
+
+        for (const auto & entry : cases) {
+            auto measured = probe(entry.body);
+            check_equal(state,
+                        entry.name,
+                        "reason",
+                        entry.reason,
+                        measured.reason);
+        }
+
+        // === and what each one actually did ============================
+
+        // The timestamp counter advances. A handler that took the exit
+        // and left RAX and RDX alone would pass the reason check above
+        // and hand the guest whatever those registers happened to hold -
+        // and a guest computing a rate from a clock that does not move
+        // divides by zero.
+        //
+        // Two reads with a probe between them, so the second is strictly
+        // later. Only the low half is compared: the high half moves once
+        // every few seconds at any plausible frequency, and a case that
+        // needed it to move would be a case that usually failed.
+        static_cast<void>(probe(probe_rdtsc));
+        auto first_counter = g_probe_value;
+        static_cast<void>(probe(probe_pause));
+        static_cast<void>(probe(probe_rdtsc));
+        auto second_counter = g_probe_value;
+
+        emit(state,
+             "rdtsc.counter_advances",
+             (second_counter > first_counter) ? outcome::pass
+                                              : outcome::fail,
+             "second_read_is_later_than_the_first",
+             first_counter,
+             second_counter);
+
+        // RDPMC is answered with a general-protection fault, which is
+        // what a processor gives for a counter that does not exist - SDM
+        // Vol. 2B, RDPMC, and KVM's `kvm_pmu_rdpmc` sending an invalid
+        // index to `kvm_inject_gp`. Nothing here virtualizes the
+        // performance counters, so every index is invalid.
+        //
+        // The pairing is the point: the instruction exited *and* faulted.
+        // A handler that took the exit and resumed would leave the guest
+        // with a fabricated counter it would then compute rates from.
+        auto counter_read = probe(probe_rdpmc);
+        check_equal(state,
+                    "rdpmc.faults_with_general_protection",
+                    "vector",
+                    vector_general_protection,
+                    static_cast<std::uint64_t>(counter_read.vector));
+
+        // A debug register reads back what was written to it, through
+        // two exits: the write is a MOV to DR and the read a MOV from DR,
+        // and both are intercepted. DR0 is an address register with no
+        // architectural side effect of its own while DR7 leaves it
+        // disabled, so writing one is observable and harmless.
+        //
+        // This is the case that would catch the emulation using the
+        // wrong general-purpose register: the exit qualification names it
+        // in encoding order, which is not the order the context stores
+        // them in, and `register_of` is the only thing that knows the
+        // difference.
+        constexpr std::uint64_t debug_pattern = 0x00000000deadb000ull;
+
+        g_probe_value = debug_pattern;
+        static_cast<void>(probe(probe_mov_to_dr));
+
+        g_probe_value = 0;
+        static_cast<void>(probe(probe_mov_from_dr));
+
+        check_equal(state,
+                    "mov_debug_register.reads_back_what_was_written",
+                    "dr0",
+                    debug_pattern,
+                    g_probe_value);
+
+        // Put it back, so nothing after this runs with a debug address
+        // register armed by this suite.
+        g_probe_value = 0;
+        static_cast<void>(probe(probe_mov_to_dr));
+
+        // RDRAND reports through the carry flag whether what it produced
+        // is usable, and an emulation that forgot the flag would hand a
+        // guest a value it had no way to reject. SDM Vol. 2B, RDRAND:
+        // "If a random number was available ... the CF flag is set to 1".
+        //
+        // Asserted as "the flag agrees with the value": Bochs' RDRAND
+        // always succeeds, so a cleared flag here means the emulation
+        // dropped it rather than that entropy ran out.
+        static_cast<void>(probe(probe_rdrand));
+        emit(state,
+             "rdrand.reports_success_in_carry",
+             g_probe_flags ? outcome::pass : outcome::fail,
+             "carry_set_and_a_value_produced",
+             1,
+             g_probe_flags);
     }
 
     // === MONITOR and MWAIT =============================================
@@ -2607,23 +2799,11 @@ bool guest_tests::run(EFI_SYSTEM_TABLE * system_table)
             // executing it, and the only things that end a halt are an
             // interrupt - which this suite disables - or an NMI from
             // another processor, of which there is one.
-            {12,
-             "hlt",
-             "out-of-scope:asserting_it_requires_halting_the_processor_"
-             "the_assertion_runs_on"},
+            {12, "hlt", "covered:exit.hlt"},
             {13, "invd", "covered:exit.invd"},
-            {14,
-             "invlpg",
-             "unreachable-here:quiet.invlpg.does_not_exit_measures_"
-             "invlpg_exiting_off"},
-            {15,
-             "rdpmc",
-             "unreachable-here:quiet.rdpmc.does_not_exit_measures_rdpmc_"
-             "exiting_off"},
-            {16,
-             "rdtsc",
-             "unreachable-here:quiet.rdtsc.does_not_exit_measures_rdtsc_"
-             "exiting_off"},
+            {14, "invlpg", "covered:exit.invlpg"},
+            {15, "rdpmc", "covered:exit.rdpmc"},
+            {16, "rdtsc", "covered:exit.rdtsc"},
             {17,
              "rsm",
              "unreachable-here:quiet.rsm.invalid_opcode_measures_the_ud_"
@@ -2641,10 +2821,7 @@ bool guest_tests::run(EFI_SYSTEM_TABLE * system_table)
             {28,
              "control_register_access",
              "covered:exit.control_register_access"},
-            {29,
-             "mov_debug_register",
-             "unreachable-here:quiet.mov_from_dr.does_not_exit_measures_"
-             "mov_dr_exiting_off"},
+            {29, "mov_debug_register", "covered:exit.mov_debug_register"},
             {30, "io_instruction", "covered:exit.io_instruction"},
             {31, "rdmsr", "covered:msr.rdmsr.hyperv_frequency"},
             {32, "wrmsr", "covered:msr.wrmsr.hyperv_frequency"},
@@ -2664,10 +2841,7 @@ bool guest_tests::run(EFI_SYSTEM_TABLE * system_table)
             {36, "mwait", "covered:exit.mwait"},
             {37, "monitor_trap_flag", "covered:exit.monitor_trap_flag"},
             {39, "monitor", "covered:exit.monitor"},
-            {40,
-             "pause",
-             "unreachable-here:quiet.pause.does_not_exit_measures_pause_"
-             "exiting_off"},
+            {40, "pause", "covered:exit.pause"},
             // "A machine-check event occurred during VM entry"
             // (.references/sdm.txt:224340). The same shape as 33 and 34
             // above: the guest did not run, so there is nothing inside
@@ -2719,10 +2893,7 @@ bool guest_tests::run(EFI_SYSTEM_TABLE * system_table)
              "out-of-scope:only_this_vmm_writes_ept_entries_so_a_guest_"
              "cannot_construct_one"},
             {50, "invept", "covered:vmx.invept.exit_reason"},
-            {51,
-             "rdtscp",
-             "unreachable-here:quiet.rdtscp.does_not_exit_measures_rdtsc_"
-             "exiting_off"},
+            {51, "rdtscp", "covered:exit.rdtscp"},
             // Armed by this VMM alone, for its own log polling, and never
             // by anything a guest executes. diag.exit_count_step measures
             // that none arrives: two consecutive readings differ by
@@ -2732,10 +2903,7 @@ bool guest_tests::run(EFI_SYSTEM_TABLE * system_table)
              "unreachable-here:armed_by_this_vmm_only_and_diag.exit_"
              "count_step_measures_none_arriving"},
             {53, "invvpid", "covered:vmx.invvpid.exit_reason"},
-            {54,
-             "wbinvd",
-             "unreachable-here:quiet.wbinvd.does_not_exit_measures_"
-             "wbinvd_exiting_off"},
+            {54, "wbinvd", "covered:exit.wbinvd"},
             {55, "xsetbv", "covered:exit.xsetbv"},
             // APIC-register virtualization and virtualize-x2APIC mode are
             // the two controls that produce reason 56, and SDM 29.2.1.1
@@ -2745,14 +2913,8 @@ bool guest_tests::run(EFI_SYSTEM_TABLE * system_table)
              "apic_write",
              "unreachable-here:apic_register_virtualization_requires_use_"
              "tpr_shadow_which_is_off"},
-            {57,
-             "rdrand",
-             "unreachable-here:quiet.rdrand.does_not_exit_measures_"
-             "rdrand_exiting_off"},
-            {58,
-             "invpcid",
-             "unreachable-here:quiet.invpcid.does_not_exit_measures_"
-             "invlpg_exiting_off"},
+            {57, "rdrand", "covered:exit.rdrand"},
+            {58, "invpcid", "covered:exit.invpcid"},
             {59,
              "vmfunc",
              "unreachable-here:vmx.vmfunc.does_not_exit_measures_enable_"
@@ -2761,10 +2923,7 @@ bool guest_tests::run(EFI_SYSTEM_TABLE * system_table)
              "encls",
              "unreachable-here:quiet.encls.invalid_opcode_measures_that_"
              "the_instruction_cannot_execute_here"},
-            {61,
-             "rdseed",
-             "unreachable-here:quiet.rdseed.does_not_exit_measures_"
-             "rdseed_exiting_off"},
+            {61, "rdseed", "covered:exit.rdseed"},
             // No instruction produces these two, so the only guest-side
             // statement available is whether the processor offers the
             // control at all - which the run reads out of

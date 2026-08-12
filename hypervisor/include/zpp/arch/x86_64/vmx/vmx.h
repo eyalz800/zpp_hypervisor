@@ -60,6 +60,33 @@ enum type : std::uint64_t
     // SDM Table 25-6, "Definitions of Primary Processor-Based
     // VM-Execution Controls", bits 10 and 29.
     mwait_exiting = (1ull << 10),
+
+    /**
+     * The controls that intercept an instruction which would otherwise
+     * simply execute in the guest. SDM Table 25-6, "Definitions of
+     * Primary Processor-Based VM-Execution Controls", by bit.
+     *
+     * **None of these is requested by a deployed build, and each is
+     * requested by a ZPP_GUEST_TESTS one.** Their exit reasons are
+     * otherwise unreachable from inside a guest, which left the handler
+     * cases for them either absent or unexecutable - and an exit reason
+     * with no case reaches `default:` and stops the processor, so
+     * "unreachable" and "would stop the machine if it ever happened" were
+     * the same sentence. Turning each on in the test build makes the
+     * reason reachable and its case live; see `setup_vmcs`, where the
+     * same argument is made at length for MONITOR and MWAIT above.
+     * @{
+     */
+    hlt_exiting = (1ull << 7),
+    invlpg_exiting = (1ull << 9),
+    rdpmc_exiting = (1ull << 11),
+    rdtsc_exiting = (1ull << 12),
+    mov_dr_exiting = (1ull << 23),
+    pause_exiting = (1ull << 30),
+    /**
+     * @}
+     */
+
     // SDM Table 25-6 bit 25. With it set, an I/O instruction exits only
     // when its port's bit is set in one of the two bitmaps below - so
     // this is how a single port is watched without paying for every
@@ -133,6 +160,21 @@ enum type : std::uint64_t
     vmcs_shadowing = (1ull << 14),
     enable_xsaves_xrstors = (1ull << 20),
     mode_based_execute_control = (1ull << 22),
+
+    /**
+     * The secondary half of the same family as the primary controls
+     * above: instructions a deployed build lets run and a
+     * ZPP_GUEST_TESTS build intercepts so their exit reasons are
+     * reachable. SDM Table 25-7, "Definitions of Secondary Processor-
+     * Based VM-Execution Controls", by bit.
+     * @{
+     */
+    wbinvd_exiting = (1ull << 6),
+    rdrand_exiting = (1ull << 11),
+    rdseed_exiting = (1ull << 16),
+    /**
+     * @}
+     */
 };
 } // namespace vm_execution_controls::secondary
 

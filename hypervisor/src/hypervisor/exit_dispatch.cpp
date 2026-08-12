@@ -1808,6 +1808,315 @@ void hypervisor::on_vm_exit(std::uint64_t cpuid,
         }
         break;
     }
+    // === Instructions a deployed build lets run ========================
+    //
+    // Ten exit reasons that arrive only in a ZPP_GUEST_TESTS build, where
+    // `trap_the_quiet_instructions` in setup_vmcs requests the controls
+    // that produce them. Their reason for existing is in that comment;
+    // what matters here is that each of these **emulates the
+    // instruction** rather than skipping it.
+    //
+    // That is not a nicety. Every case below breaks out to the resume
+    // path, which advances RIP by the instruction's length - so a case
+    // that did nothing would have the guest continue as though the
+    // instruction had worked, which is the recurring failure this file
+    // warns about everywhere else. A guest reading a timestamp that never
+    // changes, or a random number that is always whatever was in the
+    // register, is a guest that has been lied to.
+    case basic_reason::hlt: {
+        // Emulated as a no-op, so the guest polls instead of idling.
+        //
+        // This is what a VMM that intercepts HLT and wants the processor
+        // to keep running does, and it is safe here for a reason that
+        // would not hold generally: with the control off - every deployed
+        // build - HLT is not intercepted at all and does what the guest
+        // asked. A guest that genuinely needs to wait for an interrupt
+        // therefore still waits; only the test build spins, and only
+        // around the one HLT the coverage suite executes deliberately.
+        break;
+    }
+    case basic_reason::pause: {
+        // A hint with no architectural effect, so a no-op is the whole
+        // of the emulation. SDM Vol. 2B, PAUSE: "improves the performance
+        // of spin-wait loops ... the processor uses this hint" - nothing
+        // observable follows from executing it.
+        break;
+    }
+    case basic_reason::rdtsc: {
+        // The host's timestamp counter, which is also the guest's: the
+        // TSC offset field is zero and nothing here scales it, so there
+        // is one clock and this hands it over unchanged.
+        //
+        // Both halves masked to thirty-two bits, because RDTSC writes
+        // EAX and EDX - the upper halves of RAX and RDX are cleared, and
+        // a guest reading a value with our high bits still in it would
+        // see a clock that jumps.
+        constexpr std::uint64_t low = 0xffffffffull;
+
+        auto counter = arch::x86_64::rdtsc();
+        context.rax = counter & low;
+        context.rdx = (counter >> 32) & low;
+        break;
+    }
+    case basic_reason::rdtscp: {
+        // The same, plus IA32_TSC_AUX into ECX. SDM Vol. 2B, RDTSCP:
+        // "reads the current value of the processor's time-stamp counter
+        // into the EDX:EAX registers and also reads the value of the
+        // IA32_TSC_AUX MSR into the ECX register".
+        //
+        // Reaching this needs two controls, which is why it is separate
+        // from the case above rather than folded into it: "RDTSC exiting"
+        // *and* the secondary "enable RDTSCP". The second is already on
+        // in every build - without it the instruction raises #UD rather
+        // than exiting - so the test build only adds the first.
+        constexpr std::uint64_t low = 0xffffffffull;
+        constexpr std::uint32_t ia32_tsc_aux = 0xc0000103;
+
+        auto counter = arch::x86_64::rdtsc();
+        context.rax = counter & low;
+        context.rdx = (counter >> 32) & low;
+        context.rcx = arch::x86_64::rdmsr(ia32_tsc_aux) & low;
+        break;
+    }
+    case basic_reason::wbinvd: {
+        // Executed, and that is the whole difference from INVD above.
+        //
+        // WBINVD writes modified cache lines back before invalidating
+        // them, so carrying it out on a guest's behalf loses nothing -
+        // where INVD discards them, which is why that case is a no-op and
+        // says so at length. SDM Vol. 2B, WBINVD: "Writes back all
+        // modified cache lines in the processor's internal cache to main
+        // memory and invalidates the internal caches."
+        arch::x86_64::wbinvd();
+        break;
+    }
+    case basic_reason::rdpmc: {
+        // Answered with a general-protection fault, which is what a
+        // processor gives for a counter that does not exist.
+        //
+        // Nothing here virtualizes the performance counters, so no index
+        // is valid, and #GP(0) is the architectural answer to an invalid
+        // one - SDM Vol. 2B, RDPMC: "#GP(0) If the value in ECX specifies
+        // a non-existent performance counter". KVM answers the same way:
+        // `kvm_pmu_rdpmc` returning non-zero sends x86.c's emulator to
+        // `kvm_inject_gp(vcpu, 0)`.
+        //
+        // A fault rather than a zero, deliberately. Handing back a
+        // fabricated counter value is the "answer part of an interface"
+        // mistake this file's header warns about: a guest would then
+        // compute rates from a counter that never moves.
+        inject_general_protection_fault();
+        advance_rip = false;
+        break;
+    }
+    case basic_reason::invlpg: {
+        // Invalidated for the guest, on the guest's own tag.
+        //
+        // Executing `invlpg` here would invalidate a *host* linear
+        // address, which is not what the guest asked and would leave its
+        // stale translation in place. The guest's linear mappings are
+        // tagged with its VPID - `enable_vpid` is on and setup_vmcs
+        // writes one per processor - so the precise answer is INVVPID
+        // type 0, individual-address, which SDM 31.4.3.1 defines as
+        // invalidating "mappings for the linear address ... tagged with
+        // the specified VPID".
+        //
+        // The linear address is the exit qualification, which SDM Table
+        // 28-6 gives for this reason as the operand of the instruction.
+        struct invvpid_descriptor
+        {
+            std::uint64_t vpid{};
+            std::uint64_t linear_address{};
+        };
+
+        constexpr std::uint64_t invvpid_individual_address = 0;
+
+        invvpid_descriptor descriptor{vmcs.vpid(),
+                                      vmcs.exit_qualification()};
+
+        if (arch::x86_64::vmx::invvpid(invvpid_individual_address,
+                                       &descriptor)) {
+            log("cpu {} invlpg: invvpid refused address {}",
+                vmcs.vpid() - 1,
+                vmcs.exit_qualification());
+        }
+        break;
+    }
+    case basic_reason::invpcid: {
+        // **Reachable only as a side effect of INVLPG exiting, which is
+        // the trap worth naming.** SDM Table 25-6 makes INVPCID exit when
+        // "enable INVPCID" is 1 *and* "INVLPG exiting" is 1. The first is
+        // requested by every build; the second is requested by the test
+        // build alone - so turning INVLPG exiting on made a second exit
+        // reason reachable, and without this case it would have reached
+        // `default:` and stopped the processor.
+        //
+        // Emulated as a single-context invalidation of the guest's whole
+        // VPID rather than by decoding the operand.
+        //
+        // That invalidates more than the guest asked for, and more is
+        // always allowed: SDM 31.4.3.2 says an execution of INVVPID "may
+        // invalidate mappings ... beyond those it is required to
+        // invalidate", and the guidelines in 31.4.3.3 are about doing too
+        // little rather than too much. What it buys is not needing the
+        // memory operand at all - INVPCID's descriptor lives in guest
+        // memory whose linear address only the VM-exit instruction
+        // information field describes, and computing it is the piece the
+        // descriptor-table instructions also want and none of them has
+        // yet.
+        //
+        // The cost is a guest losing translations it had not asked to
+        // lose, which costs it page walks and nothing else.
+        struct invvpid_descriptor
+        {
+            std::uint64_t vpid{};
+            std::uint64_t linear_address{};
+        };
+
+        constexpr std::uint64_t invvpid_single_context = 1;
+
+        invvpid_descriptor descriptor{vmcs.vpid(), 0};
+
+        if (arch::x86_64::vmx::invvpid(invvpid_single_context,
+                                       &descriptor)) {
+            log("cpu {} invpcid: invvpid refused vpid {}",
+                vmcs.vpid() - 1,
+                vmcs.vpid());
+        }
+        break;
+    }
+    case basic_reason::mov_debug_register: {
+        // SDM Table 28-6, "Exit Qualification for MOV DR": bits 2:0 are
+        // the debug register, bit 4 is the direction - 0 is MOV to DR, 1
+        // is MOV from DR - and bits 11:8 are the general-purpose register.
+        constexpr std::uint64_t debug_register_mask = 0x7;
+        constexpr std::uint64_t direction_bit = 1ull << 4;
+        constexpr std::uint64_t general_register_shift = 8;
+        constexpr std::uint64_t general_register_mask = 0xf;
+
+        auto qualification = vmcs.exit_qualification();
+        auto number = qualification & debug_register_mask;
+        auto reading = 0 != (qualification & direction_bit);
+        auto general = static_cast<std::uint8_t>(
+            (qualification >> general_register_shift) &
+            general_register_mask);
+
+        // The encoding order is not the context's layout, and
+        // `register_of` is the only thing that knows the difference -
+        // the same mapping the instruction decoder uses for a decoded
+        // destination.
+        auto & value = context.*arch::x86_64::register_of(general);
+
+        // DR0 through DR3 and DR6 are *live in hardware* across a VM
+        // exit: SDM 28.5.1 lists only DR7 among the registers a VM exit
+        // changes, and the exit controls here save DR7 into the VMCS. So
+        // the real registers still hold the guest's values and reading
+        // them is reading the guest's, while DR7 has to come from the
+        // field.
+        //
+        // DR4 and DR5 alias DR6 and DR7 when CR4.DE is clear and raise
+        // #UD when it is set; the aliasing is what the masks below leave
+        // in place, since the qualification only carries three bits.
+        constexpr std::uint64_t debug_register_6 = 6;
+        constexpr std::uint64_t debug_register_7 = 7;
+
+        if (reading) {
+            switch (number) {
+            case debug_register_7:
+                value =
+                    vmcs.read(arch::x86_64::vmx::vmcs::field::guest_dr7);
+                break;
+            case debug_register_6:
+                value = arch::x86_64::dr6();
+                break;
+            default:
+                value = arch::x86_64::debug_register(
+                    static_cast<std::uint8_t>(number));
+                break;
+            }
+            break;
+        }
+
+        switch (number) {
+        case debug_register_7:
+            vmcs.write(arch::x86_64::vmx::vmcs::field::guest_dr7, value);
+            break;
+        case debug_register_6:
+            arch::x86_64::dr6(value);
+            break;
+        default:
+            arch::x86_64::debug_register(static_cast<std::uint8_t>(number),
+                                         value);
+            break;
+        }
+        break;
+    }
+    case basic_reason::rdrand:
+    case basic_reason::rdseed: {
+        // SDM Table 28-12, "Format of the VM-Exit Instruction-Information
+        // Field (for RDRAND and RDSEED)": bits 6:3 are the destination
+        // register and bits 12:11 the operand size - 0 is 16 bits, 1 is
+        // 32 and 2 is 64.
+        constexpr std::uint64_t destination_shift = 3;
+        constexpr std::uint64_t destination_mask = 0xf;
+        constexpr std::uint64_t operand_size_shift = 11;
+        constexpr std::uint64_t operand_size_mask = 0x3;
+        constexpr std::uint64_t operand_size_16 = 0;
+        constexpr std::uint64_t operand_size_32 = 1;
+
+        auto information = vmcs.read(arch::x86_64::vmx::vmcs::field::
+                                         vm_exit_instruction_information);
+
+        auto destination = static_cast<std::uint8_t>(
+            (information >> destination_shift) & destination_mask);
+        auto size =
+            (information >> operand_size_shift) & operand_size_mask;
+
+        // The host's own instruction, which is the only honest source: a
+        // fabricated value handed to a guest asking for entropy is worse
+        // than a refusal, and refusing is expressible - both instructions
+        // report failure by clearing CF, which SDM Vol. 2B documents as
+        // the "if the returned value is valid" flag.
+        std::uint64_t random{};
+        auto succeeded = (basic_reason::rdrand == reason)
+                             ? arch::x86_64::rdrand(random)
+                             : arch::x86_64::rdseed(random);
+
+        auto & value = context.*arch::x86_64::register_of(destination);
+
+        if (succeeded) {
+            if (operand_size_16 == size) {
+                // A 16-bit destination leaves the upper bits of the
+                // register alone, unlike every wider form.
+                constexpr std::uint64_t low_16 = 0xffffull;
+                value = (value & ~low_16) | (random & low_16);
+            } else if (operand_size_32 == size) {
+                constexpr std::uint64_t low_32 = 0xffffffffull;
+                value = random & low_32;
+            } else {
+                value = random;
+            }
+        } else {
+            // SDM Vol. 2B, RDRAND: on failure "the returned value is 0"
+            // and CF is cleared, so a guest that ignores the flag reads a
+            // zero rather than a stale register.
+            value = 0;
+        }
+
+        // The flags the instruction sets, written into the guest's saved
+        // RFLAGS: CF says whether the value is valid, and SDM Vol. 2B
+        // says OF, SF, ZF, AF and PF are cleared.
+        constexpr std::uint64_t rflags_carry = 1ull << 0;
+        constexpr std::uint64_t rflags_cleared_by_rdrand =
+            (1ull << 2) | (1ull << 4) | (1ull << 6) | (1ull << 7) |
+            (1ull << 11);
+
+        auto flags = vmcs.guest_rflags() & ~rflags_cleared_by_rdrand;
+        flags =
+            succeeded ? (flags | rflags_carry) : (flags & ~rflags_carry);
+        vmcs.guest_rflags(flags);
+        break;
+    }
     default: {
         // Everything reaching here exits unconditionally - there is
         // no VM execution control that turns it off - so arriving

@@ -5422,7 +5422,22 @@ void hypervisor::setup_vmcs(std::size_t cpu,
                 arch::x86_64::vmx::vm_execution_controls::secondary::
                     enable_xsaves_xrstors |
                 arch::x86_64::vmx::vm_execution_controls::secondary::
-                    mode_based_execute_control));
+                    mode_based_execute_control |
+                // The secondary half of the guest-test intercepts. See
+                // `trap_the_quiet_instructions` below, which is declared
+                // after this field is written and is therefore spelled
+                // out again rather than shared - the alternative was to
+                // move the whole argument above the secondary controls,
+                // which would put it a hundred lines from the primary
+                // controls it is mostly about.
+                (ZPP_GUEST_TESTS
+                     ? (arch::x86_64::vmx::vm_execution_controls::
+                            secondary::wbinvd_exiting |
+                        arch::x86_64::vmx::vm_execution_controls::
+                            secondary::rdrand_exiting |
+                        arch::x86_64::vmx::vm_execution_controls::
+                            secondary::rdseed_exiting)
+                     : std::uint64_t{})));
 
     // Nothing requested: external interrupts and NMIs stay the guest's,
     // which owns the interrupt controller.
@@ -5484,6 +5499,48 @@ void hypervisor::setup_vmcs(std::size_t cpu,
                    monitor_exiting)
             : std::uint64_t{};
 
+    // The rest of the family, on the same switch and for the same reason
+    // spelled out above MONITOR and MWAIT.
+    //
+    // Six primary controls and three secondary ones, each intercepting an
+    // instruction a deployed build lets run. Every one of their exit
+    // reasons was recorded in the coverage suite's table as
+    // "unreachable-here: the control is off", which is true and is not a
+    // closed question - the control being off is a decision this file
+    // makes, not a property of the environment. And each was worse than
+    // untested: an exit reason with no case reaches `default:`, which
+    // stops the processor, so the handler cases for these were code that
+    // could not run and could not be removed.
+    //
+    // Turning them on here makes ten exit reasons reachable - 12, 14, 15,
+    // 16, 29, 40, 51, 54, 57 and 61 - and makes their handler cases live.
+    // Each of those cases emulates the instruction rather than skipping
+    // it; see exit_dispatch.cpp, where the cost of resuming as though an
+    // unhandled instruction had succeeded is the recurring lesson.
+    //
+    // Costs a deployed build nothing: a hypervisor compiled with this
+    // switch is only ever embedded in a loader check-bootable.sh refuses.
+    // The cost to the *test* build is real and bounded - PAUSE exiting in
+    // particular turns every spin loop into a stream of exits - which is
+    // why this is one switch with the suite rather than a default.
+    constexpr bool trap_the_quiet_instructions = ZPP_GUEST_TESTS;
+
+    auto quiet_primary_controls =
+        trap_the_quiet_instructions
+            ? (arch::x86_64::vmx::vm_execution_controls::primary::
+                   hlt_exiting |
+               arch::x86_64::vmx::vm_execution_controls::primary::
+                   invlpg_exiting |
+               arch::x86_64::vmx::vm_execution_controls::primary::
+                   rdpmc_exiting |
+               arch::x86_64::vmx::vm_execution_controls::primary::
+                   rdtsc_exiting |
+               arch::x86_64::vmx::vm_execution_controls::primary::
+                   mov_dr_exiting |
+               arch::x86_64::vmx::vm_execution_controls::primary::
+                   pause_exiting)
+            : std::uint64_t{};
+
     vmcs.primary_processor_based_vm_execution_controls(
         arch::x86_64::vmx::adjust_msr(
             this->cached_vmx_msr(vmx_msr::true_processor_based_controls),
@@ -5493,7 +5550,7 @@ void hypervisor::setup_vmcs(std::size_t cpu,
                     enable_msr_bitmaps |
                 arch::x86_64::vmx::vm_execution_controls::primary::
                     enable_io_bitmaps |
-                monitor_controls));
+                monitor_controls | quiet_primary_controls));
 
     // The host runs in 64-bit mode after an exit, and DR7 and
     // IA32_DEBUGCTL are saved on the way out so the guest gets back what

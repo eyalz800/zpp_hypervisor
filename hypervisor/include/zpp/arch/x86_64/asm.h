@@ -167,6 +167,186 @@ inline std::uint64_t __attribute__((naked)) dr7()
     )!!");
 }
 
+/**
+ * DR0 through DR3, the four address registers.
+ *
+ * Spelled out one at a time because the register number is part of the
+ * opcode - there is no `mov rax, dr[rcx]` - so an indexed accessor has to
+ * be a switch over these, which `debug_register` below is.
+ *
+ * Like DR6 and unlike DR7, these are not VMCS guest fields: SDM 28.5.1
+ * lists only DR7 among the registers a VM exit changes, so the values in
+ * them after an exit are still the guest's own. That is what makes
+ * reading them on a guest's behalf correct rather than a guess.
+ * @{
+ */
+inline std::uint64_t __attribute__((naked)) dr0()
+{
+    asm(R"!!(
+        .intel_syntax noprefix
+        mov rax, dr0
+        ret
+    )!!");
+}
+
+inline void __attribute__((naked)) dr0(std::uint64_t)
+{
+    asm(R"!!(
+        .intel_syntax noprefix
+        mov dr0, rdi
+        ret
+    )!!");
+}
+
+inline std::uint64_t __attribute__((naked)) dr1()
+{
+    asm(R"!!(
+        .intel_syntax noprefix
+        mov rax, dr1
+        ret
+    )!!");
+}
+
+inline void __attribute__((naked)) dr1(std::uint64_t)
+{
+    asm(R"!!(
+        .intel_syntax noprefix
+        mov dr1, rdi
+        ret
+    )!!");
+}
+
+inline std::uint64_t __attribute__((naked)) dr2()
+{
+    asm(R"!!(
+        .intel_syntax noprefix
+        mov rax, dr2
+        ret
+    )!!");
+}
+
+inline void __attribute__((naked)) dr2(std::uint64_t)
+{
+    asm(R"!!(
+        .intel_syntax noprefix
+        mov dr2, rdi
+        ret
+    )!!");
+}
+
+inline std::uint64_t __attribute__((naked)) dr3()
+{
+    asm(R"!!(
+        .intel_syntax noprefix
+        mov rax, dr3
+        ret
+    )!!");
+}
+
+inline void __attribute__((naked)) dr3(std::uint64_t)
+{
+    asm(R"!!(
+        .intel_syntax noprefix
+        mov dr3, rdi
+        ret
+    )!!");
+}
+/**
+ * @}
+ */
+
+/**
+ * DR0 through DR3 by number, which is the shape a MOV-DR exit hands over:
+ * SDM Table 28-6 puts the register in bits 2:0 of the exit qualification.
+ *
+ * Only the four address registers. DR6 and DR7 have accessors of their
+ * own above because they are different in kind - DR7 is a VMCS field and
+ * DR6 is shared - and folding them in here would hide that.
+ * @{
+ */
+inline std::uint64_t debug_register(std::uint8_t index)
+{
+    switch (index) {
+    case 0:
+        return dr0();
+    case 1:
+        return dr1();
+    case 2:
+        return dr2();
+    default:
+        return dr3();
+    }
+}
+
+inline void debug_register(std::uint8_t index, std::uint64_t value)
+{
+    switch (index) {
+    case 0:
+        dr0(value);
+        break;
+    case 1:
+        dr1(value);
+        break;
+    case 2:
+        dr2(value);
+        break;
+    default:
+        dr3(value);
+        break;
+    }
+}
+/**
+ * @}
+ */
+
+/**
+ * The two entropy instructions, each reporting through the carry flag
+ * whether what it produced is usable.
+ *
+ * Extended assembly rather than the naked style around them, because the
+ * answer is two things - a value and a flag - and a naked function can
+ * only carry one back without inventing a calling convention for it.
+ *
+ * The flag is the whole interface. SDM Vol. 2B, RDRAND: "If a
+ * random number was available at the time the instruction was executed,
+ * the CF flag is set to 1 ... otherwise ... CF is cleared to 0" and the
+ * destination is zeroed. RDSEED is the same shape and fails more often by
+ * design, since it draws on the conditioner's raw output.
+ * @{
+ */
+inline bool rdrand(std::uint64_t & into)
+{
+    std::uint64_t value{};
+    std::uint8_t succeeded{};
+
+    asm volatile("rdrand %0\n\t"
+                 "setc %1"
+                 : "=r"(value), "=qm"(succeeded)
+                 :
+                 : "cc");
+
+    into = value;
+    return 0 != succeeded;
+}
+
+inline bool rdseed(std::uint64_t & into)
+{
+    std::uint64_t value{};
+    std::uint8_t succeeded{};
+
+    asm volatile("rdseed %0\n\t"
+                 "setc %1"
+                 : "=r"(value), "=qm"(succeeded)
+                 :
+                 : "cc");
+
+    into = value;
+    return 0 != succeeded;
+}
+/**
+ * @}
+ */
+
 inline std::uint16_t __attribute__((naked)) cs()
 {
     asm(R"!!(

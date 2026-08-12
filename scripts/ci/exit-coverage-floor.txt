@@ -47,7 +47,35 @@
 # reached against a floor of 22" on run 31542068588, and a local run
 # agreed at 23 of 79.
 
-floor=23
+# 23 -> 34. Eleven reasons, one mechanism: `trap_the_quiet_instructions`
+# in setup_vmcs now requests, under ZPP_GUEST_TESTS alone, the six primary
+# and three secondary controls that intercept instructions a deployed
+# build lets run - HLT, INVLPG, RDPMC, RDTSC, MOV-DR, PAUSE, WBINVD,
+# RDRAND and RDSEED - which brings reasons 12, 14, 15, 16, 29, 40, 51, 54,
+# 57 and 61 within reach, plus 58 for free.
+#
+# 58 is the one worth remembering. INVPCID exits when "enable INVPCID"
+# and "INVLPG exiting" are both 1, and the first is on in every build - so
+# turning INVLPG exiting on made a second reason reachable that nothing
+# had asked for. Without a case it would have reached `default:` and
+# stopped the processor, which is precisely the hazard the old
+# "unreachable-here: the control is off" dispositions were describing
+# from the other side.
+#
+# Every one of those dispositions was true and none was a closed
+# question: the control being off is a decision setup_vmcs makes, not a
+# property of the environment. What made them worth reopening is that the
+# handler cases behind them were code that could not run and could not be
+# removed.
+#
+# Measured under Bochs 3.0 --enable-vmx=2, one processor, debug, on
+# 2026-08-12: 143 pass, 0 fail, 34 of 79 reasons, against 138 and 23
+# before. The eleven new reasons each carry an effect assertion beside
+# the reason check - the counter advances, RDPMC faults with #GP, DR0
+# reads back what was written, RDRAND's carry is set - because a reason
+# check alone passes for a handler that takes the exit and drops the
+# instruction, and the resume path then advances RIP past it.
+floor=34
 
 # The number of rows the coverage table must have, and it is exact rather
 # than a floor.
