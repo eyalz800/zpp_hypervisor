@@ -250,7 +250,8 @@ def main():
     base = int(base, 16)
 
     members = ["exit_trace", "exit_trace_count", "l2_exit_trace",
-               "l2_exit_trace_count", "l2_entries", "l2_activity_state",
+               "l2_exit_trace_count", "l2_working_trace",
+               "l2_working_trace_count", "l2_entries", "l2_activity_state",
                "running_l2", "events_requeued", "events_deferred",
                "pending_event", "unhandled_exit", "vm_entry_failure",
                "exit_reason_counts",
@@ -266,9 +267,11 @@ def main():
         args.elf, "zpp::hypervisor::hypervisor::instance()::instance")
     entry_size = 0x40
     lengths = gdb_lengths(args.elf, ["exit_trace", "l2_exit_trace",
+                                     "l2_working_trace",
                                      "exit_reason_counts"])
     ring = lengths["exit_trace"]
     l2ring = lengths["l2_exit_trace"]
+    working_ring = lengths["l2_working_trace"]
     reason_capacity = lengths["exit_reason_counts"]
 
     # A processor named by --l2 must have its scalars read even when it is
@@ -280,7 +283,8 @@ def main():
 
     monitor = Monitor(args.rig, args.port)
     # The scalar per-processor arrays, one read each - they are contiguous.
-    scalars = ["exit_trace_count", "l2_exit_trace_count", "l2_entries",
+    scalars = ["exit_trace_count", "l2_exit_trace_count",
+               "l2_working_trace_count", "l2_entries",
                "l2_activity_state", "events_requeued", "events_deferred",
                "pending_event", "shadow_ept_builds", "shadow_ept_cache_hits",
                "shadow_ept_evictions", "shadow_ept_resets",
@@ -358,31 +362,60 @@ def main():
                   f"qual=0x{qual:<12x} {ACTIVITY.get(activity, activity)} "
                   f"cs=0x{cs:04x} rip=0x{rip:x}{extra}{times}")
 
-    if args.l2 is not None:
-        cpu = args.l2
-        count = read("l2_exit_trace_count", cpu)
-        show = min(args.l2_entries, count, l2ring)
-        print(f"\n--- cpu {cpu}: last {show} second-level exits "
-              f"(count {count}) ---")
-        monitor2 = Monitor(args.rig, args.port)
+    def dump_ring(cpu, member, capacity, counter, title):
+        """One second-level ring, newest `--l2-entries` records last.
+
+        Both rings hold the same record type and differ only in what
+        reaches them, so they print through the same code - which also
+        means the working ring cannot drift into a second, subtly
+        different reader.
+        """
+        count = read(counter, cpu)
+        show = min(args.l2_entries, count, capacity)
+        print(f"\n--- cpu {cpu}: last {show} {title} (count {count}) ---")
+
+        reader = Monitor(args.rig, args.port)
         for i in range(count - show, count):
-            slot = i % l2ring
-            monitor2.queue(
-                instance + off["l2_exit_trace"]
-                + (cpu * l2ring + slot) * entry_size, entry_size // 8)
-        w2 = monitor2.run()
+            slot = i % capacity
+            reader.queue(
+                instance + off[member]
+                + (cpu * capacity + slot) * entry_size, entry_size // 8)
+        got = reader.run()
+
         for i in range(count - show, count):
-            slot = i % l2ring
-            a = (instance + off["l2_exit_trace"]
-                 + (cpu * l2ring + slot) * entry_size)
+            slot = i % capacity
+            a = (instance + off[member]
+                 + (cpu * capacity + slot) * entry_size)
             reason, qual, activity, cs, rip, phys, repeat, detail = (
-                w2.get(a + 8 * k, 0) for k in range(8))
+                got.get(a + 8 * k, 0) for k in range(8))
             times = f" x{repeat}" if repeat > 1 else ""
             extra = f" phys=0x{phys:x}" if phys else ""
             extra += f" detail=0x{detail:x}" if detail else ""
             print(f"  [{i:6d}] {name_reason(reason):<16} "
                   f"qual=0x{qual:<12x} {ACTIVITY.get(activity, activity)} "
                   f"cs=0x{cs:04x} rip=0x{rip:x}{extra}{times}")
+
+    if args.l2 is not None:
+        dump_ring(args.l2, "l2_exit_trace", l2ring, "l2_exit_trace_count",
+                  "second-level exits")
+
+        # The same ring with the idle loop removed, and the one worth
+        # reading first.
+        #
+        # A blocked guest spins its reference-counter poll, its
+        # end-of-interrupt and its timer re-arm at about a hundred exits a
+        # second, so the ring above holds two or three seconds of that and
+        # nothing else - whatever the guest last *did* was evicted long
+        # before anybody attached. This one drops exactly those and keeps
+        # 4096 of the rest, which is minutes of work rather than seconds
+        # of waiting.
+        #
+        # Its count against the other's is also the measurement that says
+        # which failure this is: both climbing is a guest making progress,
+        # the working count frozen while the other climbs is a guest that
+        # has stopped working and is only waiting.
+        dump_ring(args.l2, "l2_working_trace", working_ring,
+                  "l2_working_trace_count", "working second-level exits")
 
 
 if __name__ == "__main__":
