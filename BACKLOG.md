@@ -8615,3 +8615,68 @@ them is not evidence until both have units.
 What remains unexplained is unchanged and now unencumbered: during Phase 1
 initialisation, with a correct clock, correct interrupts and a healthy
 shadow, the guest stops doing anything except re-arming a timer.
+
+
+## Where the guest is: Phase 1 initialisation, the clock subtree
+
+2026-08-12. The call chain above the stalled instruction, found by
+scanning `ntoskrnl.exe` for direct calls to each function in turn - a
+technique worth keeping, since it needs no symbols at all:
+
+```
+rva 0x06fb520  [PAGE]  no direct callers - started as a thread
+   +0x0f  call KeQueryPerformanceCounter
+   +0x17  store the result to a global
+   +0x1e  call 0x0c0e048  [INIT]
+   +0x55  call KeBugCheckEx
+   +0x61  call 0x0c61c98  [INIT]
+              +0x194 call 0x0c62470  [INIT]
+                        +0x37c   <-- the recorded exit
+```
+
+A function in `PAGE` with **no direct callers**, calling
+`KeQueryPerformanceCounter`, three initialisation-section routines and
+`KeBugCheckEx`, is a thread start routine - it is reached through a
+pointer, which is why nothing calls it. That shape, in that order, is
+`Phase1Initialization`.
+
+So the guest is in early Phase 1, in a subtree that reads the performance
+counter, calls through `HalPrivateDispatchTable+0x300`, writes the result
+into four adjacent globals and into three fields near offset 0x9580 of
+what is almost certainly the processor control block, and lowers the task
+priority register - which is the `tpr-below` exit recorded there.
+
+**And it is not slow, it is finished and stopped.** Sampled over sixty
+seconds on a settled guest:
+
+| counter | rate |
+|---|---|
+| `l2_entries` | 1,459/s |
+| VMCALL | **0/s**, frozen at 88,863 |
+| INVEPT | **0/s**, frozen at 16,240 |
+| shadow leaves filled | **0/s**, frozen at 448,649 |
+| EPT violations | 292/s |
+
+The virtual-trust-level protection pass completed - eighty-eight thousand
+hypercalls, then nothing. The extended page tables have stopped changing
+entirely. The 292 violations a second are the guest hypervisor's own
+accesses to the local APIC page this VMM watches, which is its ordinary
+housekeeping and installs no leaf. The second-level guest enters fourteen
+hundred times a second and does nothing but re-arm a timer.
+
+So: everything the machine is asked to do, it does, quickly and
+correctly, and the guest has simply stopped asking.
+
+What would settle it next, in increasing cost:
+
+1. **Which HAL private dispatch entry is at offset 0x300.** It names the
+   operation the stalled subtree is performing, and it is a static
+   question about one image.
+2. **The interrupt mix by vector, against a boot with nothing
+   underneath.** Vector 0x2f - the dispatch interrupt - has been injected
+   **six** times against the clock's 327,677. If that is wrong it is very
+   wrong, and one bare boot with KVM's `kvm_inj_virq` tracepoint gives the
+   comparison directly.
+3. **The guest's own kernel state.** Reachable only by walking the guest
+   hypervisor's extended page tables from outside, which nothing here does
+   yet.
