@@ -10474,3 +10474,51 @@ handler interleaved.
 counter was climbing through all of them - and they are recorded here
 only so the next set can be compared against them. Reading them as the
 failure would be the same mistake this file already records five times.
+
+
+## What the guest does before and after it stops, sampled properly
+
+The guest stack is now sampled repeatedly and split by whether the
+working counter was still moving, so the boot and the stall are described
+separately. Forty-two samples of one and four of the other so far.
+
+**The kernel base is chosen by evidence rather than assumed.** Taking the
+lowest frame gave `0xfffff80522200000` and nonsense, because one stale
+value in the buffer dragged it down. Scoring every 2 MB-aligned candidate
+by how many frames land just after a known symbol picks
+`0xfffff80592c00000`, where 307 of 506 frames resolve; the wrong bases
+resolve almost none. **A base that explains the data is a measurement; a
+base taken from one address is a guess.**
+
+**While working**, the guest is in the virtual secure mode page
+protection path, with the clock handler interleaved:
+
+    VslpEnterIumSecureMode / HvlSwitchToVsmVtl1
+    VslSetPlaceholderPages / VslCopyProtectedPage / MiCopyPage
+    MiUpdateSlabPagePlaceholderState / MiGetPageFromSlabEntry
+    KiFlushRangeTb / KeCopyPrivilegedPage
+
+**After it stops**, every one of those frames is gone. What is left is
+only the clock path - `KeClockInterruptNotify`, `KiUpdateTime`,
+`KiSetNextClockTickDueTime`, `KiSetClockTickRate`,
+`RtlGetInterruptTimePrecise`, `HvlpGetRegister64`,
+`KiDpcInterruptBypass`, `HalpTimerClockInterruptStub`. The guest has
+stopped doing secure-mode work and now services clock ticks and nothing
+else, at `DISPATCH_LEVEL`.
+
+**A false lead, killed by its own control.** Sixteen of sixty-six samples
+carry an instruction pointer at `0xfffff805222a001c`, far below
+ntoskrnl, and against `securekernel.pdb` one candidate base resolves it
+to a plausible name. That is **not** evidence: with 3,868 symbols in a
+1.3 MB image there is a symbol every 350 bytes, so scanning bases finds a
+match almost always. The control is whether the frames captured beside it
+are in the same image - and all 160 of them are in ntoskrnl, where a
+secure kernel stack would carry secure kernel return addresses. So the
+field is not reliably the current instruction pointer and nothing is
+built on it.
+
+**Still open**: what holds the guest at `DISPATCH_LEVEL`. It queues a
+dispatch interrupt every tick through `HvlWriteApicCommandRegister`,
+which is what `HalRequestSoftwareInterrupt` does, and never lowers the
+priority that would let it run. More stall-phase samples are the next
+thing, not another hypothesis.
