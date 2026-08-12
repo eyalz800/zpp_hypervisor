@@ -58,8 +58,16 @@ fi
 # Nothing is booted over a guest that is already running. The devices are
 # passed through, so a second QEMU cannot claim them and the failure it
 # produces names the devices rather than the cause.
+#
+# Matched as `qemu*` and **not** as the full name. `/proc/<pid>/comm` is
+# truncated to fifteen characters, so `qemu-system-x86_64` reads back as
+# `qemu-system-x86` and an exact match never fires - which is worse than
+# no check at all, since it reports the machine idle while a guest holds
+# every passed-through device. `pkill -x` compares against the same
+# truncated name and misses for the same reason. rig-kill-qemu.sh has
+# always matched by prefix; this is why.
 if rig 25 'ls /proc/*/comm 2>/dev/null | while read -r c; do
-        grep -q "^qemu-system-x86_64$" "$c" 2>/dev/null && echo running
+        grep -q "^qemu" "$c" 2>/dev/null && echo running
     done' 2>/dev/null | grep -q running; then
     say "FAIL: a guest is already running. Kill it with rig-kill-qemu.sh"
     say "      first - by PID and by process name, never by command line."
@@ -91,7 +99,7 @@ rig 120 "
 ok=1
 
 if ! rig 30 'ls /proc/*/comm 2>/dev/null | while read -r c; do
-        grep -q "^qemu-system-x86_64$" "$c" 2>/dev/null && echo running
+        grep -q "^qemu" "$c" 2>/dev/null && echo running
     done' 2>/dev/null | grep -q running; then
     say "FAIL: no qemu-system-x86_64 process. Read /home/tc/zpp/boot.log -"
     say "      a missing sudo prints permission denials and exits quietly."

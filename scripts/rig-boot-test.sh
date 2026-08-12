@@ -64,8 +64,19 @@ if ! timeout 240 bash -c "cat out/debug/x86_64/zpp_loader.efi \
     exit 125
 fi
 
+# The guest holds the NVMe through VFIO, so it has to be gone before the
+# partition can be mounted at all.
+#
+# Through rig-kill-qemu.sh rather than the `sudo pkill -9 -x
+# qemu-system-x86_64` that used to be on the next line, which was two
+# defects in one: `-x` compares against /proc/<pid>/comm, which is
+# truncated to fifteen characters, so it matched nothing and every run
+# deployed over whatever was still running; and `-9` is precisely how a
+# QEMU killed mid-VFIO-teardown becomes a zombie holding twelve gigabytes
+# of pinned guest pages that nothing reaps.
+"$(dirname "$0")/rig-kill-qemu.sh" > /dev/null 2>&1 || true
+
 REMOTE=$(rig 180 '
-    sudo pkill -9 -x qemu-system-x86_64 2>/dev/null; sleep 4
     sudo umount /tmp/resp 2>/dev/null || true
     sudo mkdir -p /tmp/resp
     sudo mount /dev/nvme0n1p2 /tmp/resp || exit 1
@@ -112,8 +123,7 @@ if ! MONITOR_PORT="$MONITOR_PORT" "$(dirname "$0")/rig-boot.sh"; then
     say "      this run says nothing about the commit. The reason is"
     say "      above; a missing 'zpp:' line means the firmware booted"
     say "      something other than the loader."
-    rig 60 'sudo pkill -x qemu-system-x86_64 2>/dev/null; true' \
-        > /dev/null 2>&1 || true
+    "$(dirname "$0")/rig-kill-qemu.sh" > /dev/null 2>&1 || true
     exit 125
 fi
 
@@ -137,9 +147,10 @@ while [ "$SECONDS" -lt "$deadline" ]; do
     esac
 done
 
-# Leave nothing running, and do not let the teardown hang either.
-rig 60 'sudo pkill -9 -x qemu-system-x86_64 2>/dev/null; true' \
-    > /dev/null 2>&1 || true
+# Leave nothing running, and do not let the teardown hang either. TERM
+# before KILL, and the launcher left alone so it rebinds the NVMe and the
+# GPU back from vfio-pci - which rig-kill-qemu.sh is the encoding of.
+"$(dirname "$0")/rig-kill-qemu.sh" > /dev/null 2>&1 || true
 
 if ! rig 25 'echo up' 2>/dev/null | grep -q up; then
     say "LOST: the rig stopped answering during this run ($LOCAL)."
