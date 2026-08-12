@@ -3527,6 +3527,18 @@ void hypervisor::sample_guest_thread(std::size_t cpu)
         return true;
     };
 
+    // The kernel image first, and unconditionally.
+    //
+    // It used to be found inside the thread walk, which runs only for a
+    // sample this VMM can make sense of - and those are the samples from
+    // one of the two virtual trust levels, which are a minority. So the
+    // image was not located until twenty minutes into a boot, and
+    // everything that depends on it - the stack scan above all - sat idle
+    // until then. The identification refuses the wrong image by name, so
+    // trying on every sample costs a few reads and cannot record a wrong
+    // answer.
+    static_cast<void>(find_guest_kernel_base(cpu));
+
     guest_thread_sample sample;
 
     // SDM 27.4.1 keeps the guest's GS base in the VMCS, which in kernel
