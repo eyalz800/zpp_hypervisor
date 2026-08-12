@@ -8570,3 +8570,48 @@ armings rather than the settled ones - the ring keeps the earliest
 thirty-two deliberately, for this - and compare against what
 `HalPrivateDispatchTable+0x300` is being told. If the calibration is
 wrong, the ratio is the bug.
+
+
+## Retired: the "ratio near 1213" was two different quantities
+
+2026-08-12, from the earliest thirty-two local APIC timer armings of the
+one-processor boot - which is what that ring is for, and which nothing had
+read until now.
+
+```
+ [3] initial-count 2341886532   tsc gap        101,415,591
+ [5] initial-count 2382592343   tsc gap      4,665,131,777
+ [6] initial-count 2382598036   tsc gap      4,746,539,379
+ ..  five more of the same
+[11] initial-count   15875857   tsc gap      2,625,098,420
+[12] initial-count   15232575   tsc gap         32,380,395
+[13] initial-count   15157846   tsc gap         31,272,064
+```
+
+**The timer is self consistent.** 2,382,592,343 counts against a
+4.747e9-tick gap is 2.37 seconds at a 2 GHz time-stamp counter, so this
+processor's APIC timer runs at about 1.0 GHz; 15,232,575 counts against a
+32.4e6 gap is 15.5 ms at the same 1.0 GHz. The guest asks for an interval
+and gets that interval, twice over, at two different scales.
+
+The synthetic timer agrees independently: 101,300 reference units between
+armings, 20.18e6 ticks apart, which is 10.1 ms both ways.
+
+So the note that this guest arms its timer to 2.38e9 where the same guest
+with nothing underneath arms it to 1,961,755, "a ratio near 1213", was
+comparing **an interval against an interval measured in different units**:
+2.38e9 counts at 1.0 GHz is 2.37 seconds, and 1,961,755 counts at the
+~125 MHz an APIC timer more usually runs at is 15.6 ms. Those are two
+different requests, not the same request answered wrongly, and the ratio
+between the raw counts means nothing. What early boot actually does here
+is six one-shot waits of about 2.37 seconds and then a 15.5 ms periodic
+tick.
+
+**So the clock is not the bug**, and this line of enquiry is closed rather
+than left open. The lesson is the one this file keeps re-learning: two
+numbers with the same name are not the same quantity, and a ratio between
+them is not evidence until both have units.
+
+What remains unexplained is unchanged and now unencumbered: during Phase 1
+initialisation, with a correct clock, correct interrupts and a healthy
+shadow, the guest stops doing anything except re-arming a timer.
