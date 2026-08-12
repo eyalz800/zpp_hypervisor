@@ -131,6 +131,12 @@ target_compile_options(zpp_hypervisor PRIVATE
     # scripts/check-bootable.sh refuses a loader carrying the suite, and a
     # hypervisor built with this is only ever embedded in such a loader.
     -DZPP_GUEST_TESTS=$<BOOL:${ZPP_GUEST_TESTS}>
+    # The module protection probe. Debug only and hardcoded off in release,
+    # for the same reason the diagnostic switch is: it ends the launch in a
+    # verdict instead of a guest, and no cache entry or command line should
+    # be able to put that in a release binary.
+    $<$<CONFIG:Debug>:-DZPP_TEST_MODULE_PROTECTION=$<BOOL:${ZPP_TEST_MODULE_PROTECTION}>>
+    $<$<CONFIG:Release>:-DZPP_TEST_MODULE_PROTECTION=0>
     $<$<CONFIG:Release>:-O2>
     $<$<CONFIG:Release>:-ffunction-sections>
     $<$<CONFIG:Release>:-fdata-sections>

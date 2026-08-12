@@ -119,6 +119,29 @@ option(ZPP_GUEST_TESTS
     "Compile the guest-side VM-exit, EPT and emulation coverage suite"
     OFF)
 
+# The module protection probe: one store into this module's own text, made
+# from inside the hypervisor once it is running on its own page table.
+#
+# It exists because every step of the per-segment protection fails silently
+# and in the safe-looking direction. The ELF permissions could be read
+# wrong, the union could round the wrong way, CR0.WP could be clear, and in
+# each case the page table reads correctly in a debugger and denies
+# nothing. The only evidence that separates "protected" from "looks
+# protected" is a fault, so this build makes one happen.
+#
+# Off, and off is the decision. The probe is not destructive - it reads the
+# byte and writes the same byte back - but the launch ends in a verdict
+# either way and the machine never reaches an operating system. That is the
+# ZPP_GUEST_TESTS failure shape, and scripts/check-bootable.sh refuses it
+# for the same reason.
+#
+# The passing result is error 0x60e03 printed by the loader: a page fault,
+# error code 3, a present page written by a supervisor. Error 25 -
+# module_protection_missing - is the failing one.
+option(ZPP_TEST_MODULE_PROTECTION
+    "Probe the module's own text with a store, to prove it is read-only"
+    OFF)
+
 # === Hypervisor (freestanding x86_64 PIE ELF) ===
 ExternalProject_Add(hypervisor
     SOURCE_DIR "${CMAKE_CURRENT_SOURCE_DIR}/cmake/hypervisor"
@@ -135,6 +158,7 @@ ExternalProject_Add(hypervisor
         -DZPP_NESTED_VMX=${ZPP_NESTED_VMX}
         -DZPP_REQUEUE_INTERRUPTED_EVENTS=${ZPP_REQUEUE_INTERRUPTED_EVENTS}
         -DZPP_GUEST_TESTS=${ZPP_GUEST_TESTS}
+        -DZPP_TEST_MODULE_PROTECTION=${ZPP_TEST_MODULE_PROTECTION}
     INSTALL_COMMAND ""
     BUILD_ALWAYS ON
 )

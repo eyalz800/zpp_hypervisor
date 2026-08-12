@@ -202,6 +202,20 @@ public:
          * written down. One error code from the loader is worth more.
          */
         execute_disable_not_enabled = 24,
+
+        /**
+         * The module protection probe stored a byte into this module's
+         * own text and the store was allowed. Compiled only under
+         * -DZPP_TEST_MODULE_PROTECTION, which exists to ask exactly this.
+         *
+         * The passing result is not this code, it is a page fault: 0x60e03
+         * from the host exception path - vector 14, error code 3, a
+         * present page written by a supervisor. This code is what a
+         * *failed* probe returns, and it refuses the launch rather than
+         * continuing, because a build that boots is how a protection that
+         * was never applied gets mistaken for one that was.
+         */
+        module_protection_missing = 25,
     };
 
     /**
@@ -6527,6 +6541,8 @@ inline const zpp::error_category & category(hypervisor::error)
             case hypervisor::error::execute_disable_not_enabled:
                 return "IA32_EFER.NXE is clear, so the host page table's "
                        "execute disable bit is a reserved bit";
+            case hypervisor::error::module_protection_missing:
+                return "A store into this module's own text was allowed";
             }
         });
     return error_category;

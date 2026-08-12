@@ -6293,6 +6293,50 @@ hypervisor::main(arch::x86_64::context & caller_context)
     this->host_exception_recovery_flag = &host_exception_occurred;
     arch::x86_64::capture_context(&this->host_exception_recovery);
 
+#if ZPP_TEST_MODULE_PROTECTION
+    // Prove the module protection rather than believe it.
+    //
+    // A tightening nobody has watched fault is a tightening that may not
+    // have been applied: every step of it - the ELF permissions, the
+    // union, CR0.WP, EFER.NXE - fails silently and in the safe-looking
+    // direction, leaving a page table that reads correctly in a debugger
+    // and denies nothing.
+    //
+    // So this stores a byte of .text back over itself. The byte is read
+    // first and written back unchanged, so the probe destroys nothing
+    // whichever way it goes - it is the *store* that is being tested, not
+    // what it would have written.
+    //
+    // Only the fall-through needs code. If the store faults, the host IDT
+    // unwinds to the recovery point armed just above, `host_exception`
+    // holds the frame, and the block immediately below already turns that
+    // into the error code the loader prints: 0x60e03 - vector 14, error
+    // code 3, which is a present page written by a supervisor. That is
+    // the expected result of this build and the whole verdict.
+    //
+    // Reaching the line after the store is the failure. It means a write
+    // to this module's own code was allowed, and the launch is refused
+    // with its own code rather than continuing, because a machine that
+    // boots is exactly how this would be missed.
+    //
+    // Boot processor only: the answer is a property of one page table
+    // that every processor shares, and a second opinion costs a boot.
+    if (first_launch && !host_exception_occurred) {
+        log("module protection probe: storing to text");
+
+        auto probe = reinterpret_cast<volatile unsigned char *>(
+            const_cast<unsigned char *>(
+                arch::x86_64::zpp_ap_start_up_begin));
+
+        auto value = *probe;
+        *probe = value;
+
+        log("module protection probe: the store to text was allowed");
+        return std::unexpected(
+            zpp::error{error::module_protection_missing});
+    }
+#endif
+
     // Arriving from an exception rather than from the capture. The details
     // are in host_exception and host_exception_cr2 for a debugger to read;
     // the caller only learns that a host exception happened.

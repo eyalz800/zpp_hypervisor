@@ -72,6 +72,29 @@ if LC_ALL=C grep -qa 'ZPPTEST BEGIN' "$loader"; then
     exit 1
 fi
 
+# The module protection probe, which is the same shape again: not
+# destructive - it reads a byte of this module's text and writes the same
+# byte back - but the launch ends in a verdict rather than a guest, so the
+# machine never reaches an operating system. The marker is a log line only
+# the probe emits, and the hypervisor ELF carrying it is embedded in the
+# loader.
+if LC_ALL=C grep -qa 'module protection probe: storing to text' \
+    "$loader"; then
+    echo "REFUSING: $loader carries the module protection probe." >&2
+    echo "" >&2
+    echo "It stores into the hypervisor's own text to prove the store" >&2
+    echo "faults, and reports the verdict as an error code instead of" >&2
+    echo "launching a guest, so this machine will not boot." >&2
+    echo "" >&2
+    echo "Rebuild with the switch off before deploying:" >&2
+    echo "  cmake --preset debug -DZPP_TEST_MODULE_PROTECTION=OFF" >&2
+    echo "  cmake --build --preset debug" >&2
+    echo "" >&2
+    echo "The switch persists in the CMake cache, so passing it once" >&2
+    echo "is not enough - check it, do not assume it." >&2
+    exit 1
+fi
+
 # The other switch that persists in the cache, and the one that is worse
 # to be wrong about, because nothing about the boot looks wrong.
 #
