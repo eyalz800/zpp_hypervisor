@@ -68,18 +68,6 @@ void hypervisor::on_vm_exit(std::uint64_t cpuid,
     using basic_reason = arch::x86_64::vmx::exit_reason::basic_reason;
     auto & vmcs = this->vmcs;
 
-    // The clock for `handler_cycles`. See its declaration: this is the
-    // measurement that decides whether the fix is fewer instructions per
-    // exit or fewer exits, and it is taken here because here is the
-    // first instruction of this VMM's own code after the exit.
-    if (cpuid < max_cpus) {
-        auto now = arch::x86_64::rdtsc();
-        this->handler_entry_tsc[cpuid] = now;
-        if (0 == this->handler_first_tsc[cpuid]) {
-            this->handler_first_tsc[cpuid] = now;
-        }
-    }
-
     // Notice a controller that has come back, if the write that
     // brought it back was not caught.
     //

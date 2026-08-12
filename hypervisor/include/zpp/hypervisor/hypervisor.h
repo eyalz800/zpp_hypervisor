@@ -3450,32 +3450,6 @@ private:
     std::uint64_t l2_resume_rip[max_cpus][l2_resume_sample_capacity]{};
     std::uint64_t l2_resume_value[max_cpus][l2_resume_sample_capacity]{};
     volatile std::uint64_t l2_resume_count[max_cpus]{};
-    /**
-     * How much of the machine's time is spent inside this VMM.
-     *
-     * The measurement that decides what to fix. A second-level guest's
-     * `rdmsr` of the reference counter was measured at one to four
-     * milliseconds end to end, which is what makes the guest unable to
-     * finish a clock tick before the next arrives. That cost is either
-     * ours - a hundred VMCS accesses per entry, every one of them a VMX
-     * instruction trapping to the layer below - or it is the layer
-     * below's, and the two need opposite fixes: fewer instructions per
-     * exit, or fewer exits.
-     *
-     * `handler_cycles` accumulates the time stamp counter delta from
-     * the top of `on_vm_exit` to the last instant of `resume_guest`.
-     * Against wall clock taken from the same counter, it says what
-     * fraction of the machine is this VMM's own code. Nothing here has
-     * ever measured that.
-     * @{
-     */
-    volatile std::uint64_t handler_cycles[max_cpus]{};
-    volatile std::uint64_t handler_exits[max_cpus]{};
-    volatile std::uint64_t handler_entry_tsc[max_cpus]{};
-    volatile std::uint64_t handler_first_tsc[max_cpus]{};
-    volatile std::uint64_t handler_last_tsc[max_cpus]{};
-    /** @} */
-
     volatile std::uint64_t reference_count_backwards[max_cpus]{};
     std::uint64_t reference_count_previous[max_cpus]{};
     /** @} */
