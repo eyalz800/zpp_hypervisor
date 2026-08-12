@@ -10925,3 +10925,47 @@ fast that nothing ships on. Doing the boot first risks one trip to the
 machine. The boot is the cheaper experiment and it is also the one that
 answers the original question, which was never "is this fast" but "does
 Windows boot".
+
+
+## The next optimisation, and the trap in it
+
+`build_vmcs02` still costs 390,277 cycles, about 130 VMCS accesses. The
+largest identified block is this:
+
+    for (auto guest_field : guest_state_fields) {
+        vmcs.write(guest_field, shadow.read(guest_field));
+    }
+
+**Forty VMWRITEs on every nested entry**, roughly 120,000 cycles, about
+thirty per cent of the function. The read beside each is from memory and
+free; the write is not.
+
+**Why they are almost all redundant.** On every VM exit the processor
+saves the guest's state back into vmcs02 (SDM 28.3) - segments, control
+registers, RIP, RSP, RFLAGS, the descriptor tables, the SYSENTER
+registers. `save_l2_state` then copies that into vmcs12. So when the
+guest hypervisor resumes its guest unchanged, this loop writes vmcs02
+exactly the values the processor just put there.
+
+**The trap, and it is why this was not done tonight.** A cache of "what
+we last wrote" is *wrong* here, because the hardware writes these fields
+too. Comparing against our own last write would skip a field the
+processor had since changed, and the guest would resume with stale state
+- the kind of fault that appears as an impossible guest bug days later.
+
+**What would make it correct.** The value in vmcs02 after an exit is
+known without reading it back, because `save_l2_state` has just read it
+on the way out. So the cache must be updated from *that* read, exactly
+as `shadow_cache` is updated from `copy_shadow_to_vmcs12` rather than
+from intent. Then a field need only be rewritten when the guest
+hypervisor changed it in vmcs12 in between - which is visible either as
+a vmwrite exit or as a difference found by `copy_shadow_to_vmcs12`.
+
+That is the same structure KVM uses, and the same one this file already
+records for `prepare_vmcs02_rare` and `dirty_vmcs12`. It is a design, not
+an edit, and it should be built with the guest-state save path in front
+of whoever writes it.
+
+**Do it after the bare-metal boot, not before.** If the failure is an
+artefact of running under KVM, none of this is on the path to booting
+Windows; it only makes the test rig faster.
