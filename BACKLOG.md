@@ -10312,3 +10312,60 @@ reference TSC page is populated with nothing underneath and empty with
 us underneath, the cause is ours and this is where it is. That is a
 direct differential on the one page that decides the whole boot, and
 nothing about it needs another instrument.
+
+
+## Correction: the empty reference TSC page is not yet a root cause
+
+The entry above called it one. That was premature on two counts, and
+both are worth writing down because the same mistake has now been made
+six times in this investigation.
+
+**The performance argument does not survive arithmetic.** It claimed the
+MSR fallback was so expensive that a catch-up loop could not finish
+inside a tick. But `0x40000020` was read 85,233 times across the run -
+on the order of seventy a second. Even at ten microseconds an exit that
+is under a millisecond a second. **It is not a performance problem, and
+the inference that it was never had a number under it.**
+
+**The differential did not confirm it either.** Under
+`ZPP_CHAINLOAD_ONLY`, with the same guest and nothing of ours resident,
+the hypercall pages were located by their own contents - `0f 01 c1 c3`,
+VMCALL then RET, at `0x117a4a000` and `0x117a4b000`, two of them, which
+is VTL0 and VTL1 - so the addresses are found rather than assumed. No
+populated reference TSC page was found anywhere in 80 MB around them,
+scanning for the shape the TLFS gives it: a small non-zero sequence
+beside a scale of `2**64 * 10MHz / tsc_frequency`, which for this part
+is about `0x0147AE14...`. Two earlier scans "found" candidates that were
+page-table entries and kernel pointers; tightening the filter to a
+physically possible scale left nothing.
+
+So it is **not established** that the control populates the page, and
+therefore not established that the empty page is the difference. It may
+still be - 80 MB is a small part of the guest's memory and the page
+could be anywhere - but that is a thing to find, not to assert.
+
+**What is solid, and none of it depends on the above:**
+
+- Windows is stuck inside its clock interrupt handler, from the guest's
+  own call stack symbolised against the public PDB:
+  `HvlpGetRegister64` under `KeQueryPerformanceCounter` under
+  `KiSetClockTickRate` under `KiUpdateTime` under
+  `KeClockInterruptNotify` under the interrupt dispatcher.
+- The task priority therefore never leaves CLOCK_LEVEL, so the guest
+  hypervisor is **right** to refuse a dispatch interrupt at priority
+  class 2. The starved deferred calls, the animation stopped after one
+  dot and the application processors left in firmware are all downstream
+  of that one fact.
+- Injection is not being lost: 278,223 asked for against 277,442
+  delivered.
+- The reference counter is monotonic and advances at 10 MHz against the
+  time stamp counter, and the synthetic timer deadlines advance sensibly
+  at about 17.7 ms.
+- Windows enabled a reference TSC page at guest physical `0x117a02000`
+  and that page is all zeros - read with the hypercall page as a control
+  for the address arithmetic, which held real `VMCALL` code.
+
+**The next question is the narrow one**: what does
+`KiSetClockTickRate` do that does not terminate, given a correct clock
+and a correct deadline. That is answerable by disassembling it from the
+PDB and the image rather than by another boot.
