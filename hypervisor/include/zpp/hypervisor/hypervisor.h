@@ -17,6 +17,7 @@
 #include "zpp/arch/x86_64/vmx/vmx.h"
 #include "zpp/arch/x86_64/vmx/vmx_exit_reason.h"
 #include "zpp/error.h"
+#include "zpp/hypervisor/guest_windows.h"
 #include "zpp/hypervisor/log.h"
 #include "zpp/hypervisor/nested_vmx.h"
 #include "zpp/hypervisor/start_up_handoff.h"
@@ -4106,6 +4107,44 @@ private:
      * processor over one would be worse than the question it answers.
      */
     void sample_guest_thread(std::size_t cpu);
+
+    /**
+     * Every thread of the running thread's process, with what each is
+     * doing.
+     *
+     * The processor is idle, so its *current* thread is the idle thread
+     * and says nothing at all - which is what the samples above showed.
+     * The thread worth finding is the blocked one, and during Phase 1 it
+     * is in the system process's list along with a handful of others.
+     *
+     * Walked once, on the first sample that finds a plausible thread, and
+     * never again: a list of sixteen entries costs four dependent guest
+     * reads each through two levels of translation, and what it records
+     * does not change while the machine makes no progress. Bounded by
+     * `thread_walk_limit` and by the head reappearing, because a list
+     * read out of another operating system's memory is not something to
+     * trust to terminate.
+     * @{
+     */
+    struct guest_thread_entry
+    {
+        std::uint64_t thread{};
+        std::uint64_t start_address{};
+        std::uint64_t state{};
+        std::uint64_t wait_reason{};
+        std::uint64_t wait_irql{};
+    };
+
+    guest_thread_entry
+        guest_thread_list[guest_windows::thread_walk_limit]{};
+    std::uint64_t guest_thread_list_count{};
+    std::uint64_t guest_thread_list_process{};
+    std::uint64_t guest_thread_list_walked{};
+
+    void walk_guest_threads(std::size_t cpu, std::uint64_t thread);
+    /**
+     * @}
+     */
     /**
      * @}
      */

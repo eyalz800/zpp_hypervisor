@@ -65,6 +65,18 @@ namespace zpp::hypervisor::guest_windows
 #define ZPP_WINDOWS_ETHREAD_START_ADDRESS 1248
 #endif
 
+#ifndef ZPP_WINDOWS_KTHREAD_PROCESS
+#define ZPP_WINDOWS_KTHREAD_PROCESS 544
+#endif
+
+#ifndef ZPP_WINDOWS_ETHREAD_THREAD_LIST_ENTRY
+#define ZPP_WINDOWS_ETHREAD_THREAD_LIST_ENTRY 1400
+#endif
+
+#ifndef ZPP_WINDOWS_EPROCESS_THREAD_LIST_HEAD
+#define ZPP_WINDOWS_EPROCESS_THREAD_LIST_HEAD 880
+#endif
+
 constexpr std::uint64_t kpcr_current_prcb = ZPP_WINDOWS_KPCR_CURRENT_PRCB;
 constexpr std::uint64_t kprcb_current_thread =
     ZPP_WINDOWS_KPRCB_CURRENT_THREAD;
@@ -75,6 +87,22 @@ constexpr std::uint64_t kthread_wait_reason =
     ZPP_WINDOWS_KTHREAD_WAIT_REASON;
 constexpr std::uint64_t ethread_start_address =
     ZPP_WINDOWS_ETHREAD_START_ADDRESS;
+constexpr std::uint64_t kthread_process = ZPP_WINDOWS_KTHREAD_PROCESS;
+constexpr std::uint64_t ethread_thread_list_entry =
+    ZPP_WINDOWS_ETHREAD_THREAD_LIST_ENTRY;
+constexpr std::uint64_t eprocess_thread_list_head =
+    ZPP_WINDOWS_EPROCESS_THREAD_LIST_HEAD;
+
+/**
+ * How many threads of the running one's process to record.
+ *
+ * The point is not a census. The processor is idle, so its *current*
+ * thread is the idle thread and says nothing; what is wanted is the
+ * thread that is blocked, and it is one of the system process's. Sixteen
+ * is enough to reach it during Phase 1, when there are few, and bounds a
+ * walk of a list this VMM cannot trust to be well formed.
+ */
+constexpr std::size_t thread_walk_limit = 16;
 /**
  * @}
  */

@@ -3096,6 +3096,92 @@ bool hypervisor::on_nested_cr8_access(std::size_t cpu,
     return true;
 }
 
+void hypervisor::walk_guest_threads(std::size_t cpu, std::uint64_t thread)
+{
+    // Once. What it records does not change while the machine makes no
+    // progress, and the walk is expensive enough that repeating it would
+    // be the diagnostic costing more than the thing it diagnoses.
+    if (0 != this->guest_thread_list_walked) {
+        return;
+    }
+
+    auto read = [&](std::uint64_t linear, std::uint64_t & into) -> bool {
+        auto physical = translate_guest_linear(linear);
+        if (!physical) {
+            return false;
+        }
+
+        std::uint64_t value{};
+        auto got = read_guest_memory(
+            cpu,
+            *physical,
+            std::span(reinterpret_cast<std::byte *>(&value),
+                      sizeof(value)));
+        if (!got) {
+            return false;
+        }
+
+        into = value;
+        return true;
+    };
+
+    constexpr std::uint64_t kernel_address_floor = 0xffff800000000000;
+    constexpr std::uint64_t byte_mask = 0xff;
+
+    std::uint64_t process{};
+    if (!read(thread + guest_windows::kthread_process, process) ||
+        (process < kernel_address_floor)) {
+        return;
+    }
+
+    // The list head is inside the process object, and its first entry
+    // points at a *field* of the first thread rather than at the thread -
+    // which is what a doubly linked list of embedded links means, and
+    // what the subtraction below undoes.
+    auto head = process + guest_windows::eprocess_thread_list_head;
+
+    std::uint64_t link{};
+    if (!read(head, link)) {
+        return;
+    }
+
+    this->guest_thread_list_process = process;
+    this->guest_thread_list_walked = 1;
+
+    std::size_t found{};
+    while ((found < guest_windows::thread_walk_limit) &&
+           (link >= kernel_address_floor) && (link != head)) {
+        auto entry = link - guest_windows::ethread_thread_list_entry;
+
+        guest_thread_entry recorded;
+        recorded.thread = entry;
+
+        static_cast<void>(
+            read(entry + guest_windows::ethread_start_address,
+                 recorded.start_address));
+
+        std::uint64_t word{};
+        if (read(entry + guest_windows::kthread_state, word)) {
+            recorded.state = word & byte_mask;
+        }
+        if (read(entry + guest_windows::kthread_wait_reason, word)) {
+            recorded.wait_reason = word & byte_mask;
+        }
+        if (read(entry + guest_windows::kthread_wait_irql, word)) {
+            recorded.wait_irql = word & byte_mask;
+        }
+
+        this->guest_thread_list[found] = recorded;
+        ++found;
+
+        if (!read(link, link)) {
+            break;
+        }
+    }
+
+    this->guest_thread_list_count = found;
+}
+
 void hypervisor::sample_guest_thread(std::size_t cpu)
 {
     if (cpu >= max_cpus) {
@@ -3200,6 +3286,11 @@ void hypervisor::sample_guest_thread(std::size_t cpu)
     if (read(sample.thread + guest_windows::kthread_wait_irql, word)) {
         sample.wait_irql = word & byte_mask;
     }
+
+    // And, once, everything else that process is running - which is
+    // where the blocked thread is, since the current one is the idle
+    // thread.
+    walk_guest_threads(cpu, sample.thread);
 
     auto slot = this->guest_thread_sample_count[cpu] %
                 guest_thread_sample_capacity;
