@@ -10665,3 +10665,37 @@ once and let it reach user mode before drawing conclusions from another
 resident run.** A guest that has been failed enough times stops
 behaving like the guest under test, and its symptom - an early reset -
 looks exactly like a hypervisor bug.
+
+
+## Baseline, measured rather than assumed: Windows boots under this VMM
+
+With `ZPP_NESTED_VMX=OFF`, so VMX is hidden and the guest hypervisor
+stands down, the resident hypervisor booted Windows to **user mode in a
+single boot**, about four minutes, eight processors, no reset. The
+serial log shows one chainload and stays at one.
+
+That was believed rather than measured until now - `check-bootable.sh`
+says it in a comment and this file did not record it - and it is worth
+having as a number because it settles three things at once:
+
+- the guest installation is **healthy**, so the reboot loop above was
+  not a damaged disk;
+- this VMM's **base virtualization is sound** end to end, including the
+  page protections, the module hiding and the local APIC watch;
+- the whole failure is **nested-specific**, which halves what is left to
+  look at.
+
+**The reboot loop is nested-specific too.** The same tree with nesting
+on resets every six seconds from inside Windows' boot manager; with
+nesting off it boots. So whatever the loop is, it is in what the guest
+hypervisor is told or given, not in anything underneath it.
+
+**A change of behaviour worth flagging.** Earlier nested runs today
+*stalled* for tens of minutes rather than resetting. The tree is the
+same - the timing instrument was reverted and the loop continued, then
+reapplied and it continued - so the code is not what changed. What did
+change is that the guest completed a full boot in between, and Windows
+rewrites its own boot state when it does. The nested failure may
+therefore have two distinct shapes depending on what the guest last
+recorded about itself, which is worth knowing before reading any future
+nested run as a regression.
