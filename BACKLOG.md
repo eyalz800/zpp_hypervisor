@@ -9501,3 +9501,54 @@ rather than scanning further from where the handler happens to be.
 That is the next step and it is mechanical. What it would buy is the one
 thing still missing: the caller that owns the condition
 `Phase1Initialization` is busy-waiting on.
+
+
+## The busy wait, named: requesting a software interrupt that is never delivered
+
+2026-08-12, from the thread's own stack at the stall - reached once the
+trap-frame search stopped asking for more than the architecture
+guarantees.
+
+```
+HvlWriteApicCommandRegister          the sampled instruction
+ HalpApicRequestInterrupt
+  HalpInterruptSendIpi
+   HalRequestSoftwareInterrupt
+KiEndInterruptCycleAccumulation
+RtlpHpVsChunkSplit, RtlpHpVsContextAllocate, RtlpHpVsSlotAllocate,
+RtlpHpVsContextFree, ExpAllocatePoolWithTagFromNode, ExFreePoolWithTag
+MiAllocatePagesForMdl
+BgpFwFreeMemory
+```
+
+`HalRequestSoftwareInterrupt` is the deferred-procedure-call request
+path, and it is what writes the synthetic interrupt command register with
+vector `0x2f`. Which closes on a measurement taken hours earlier and
+dismissed: **230,933 requests against 6 deliveries.**
+
+That dismissal was reasoned, and wrong. The argument was that an idle
+processor drains its deferred calls inline and does not need the
+interrupt, so the ratio meant nothing. But the processor is not idle -
+the thread probe shows `Phase1Initialization` Running at PASSIVE_LEVEL -
+and a thread at PASSIVE_LEVEL requesting a software interrupt is asking
+for something that must be delivered immediately.
+
+And the priority measurement fits it exactly. Two hundred samples of the
+virtual task priority register: `0xd0` ninety-seven times, `0xf0`
+eighty-eight, `0x20` fifteen, **and `0x00` never**. Vector `0x2f` has
+priority class 2, so it is blocked unless the register falls *below*
+`0x20`. A thread at PASSIVE_LEVEL has IRQL 0 and should show `0x00`.
+
+So the shape of it is: the guest asks for a deferred call, the register
+never reads low enough for that vector to be delivered, the call never
+runs, and the thread asks again - while the work it is doing is
+`BgpFwFreeMemory` and pool allocation, which is the boot graphics
+provider handing back firmware memory.
+
+**What this does not yet settle.** The TPR shadow was tested directly by
+turning it off and emulating every CR8 access here instead, and the boot
+behaved identically - so if the register is wrong, both paths are wrong
+in the same way, and the mechanism is not the shadow itself. The next
+measurement is narrow: sample the register *while the thread probe says
+IRQL 0*, and see whether the two disagree. They are read from different
+places and have never been compared at the same instant.
