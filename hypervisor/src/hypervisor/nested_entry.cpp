@@ -3268,6 +3268,53 @@ std::uint64_t hypervisor::find_guest_kernel_base(std::size_t cpu)
     return 0;
 }
 
+void hypervisor::refresh_guest_threads(std::size_t cpu)
+{
+    if (0 == this->guest_thread_list_count) {
+        return;
+    }
+
+    auto read = [&](std::uint64_t linear, std::uint64_t & into) -> bool {
+        auto physical = translate_guest_linear(linear);
+        if (!physical) {
+            return false;
+        }
+
+        std::uint64_t value{};
+        auto got = read_guest_memory(
+            cpu,
+            *physical,
+            std::span(reinterpret_cast<std::byte *>(&value),
+                      sizeof(value)));
+        if (!got) {
+            return false;
+        }
+
+        into = value;
+        return true;
+    };
+
+    constexpr std::uint64_t byte_mask = 0xff;
+
+    for (std::size_t i{}; i < this->guest_thread_list_count; ++i) {
+        auto & entry = this->guest_thread_list[i];
+
+        std::uint64_t word{};
+        if (read(entry.thread + guest_windows::kthread_state, word)) {
+            entry.state = word & byte_mask;
+        }
+        if (read(entry.thread + guest_windows::kthread_wait_reason,
+                 word)) {
+            entry.wait_reason = word & byte_mask;
+        }
+        if (read(entry.thread + guest_windows::kthread_wait_irql, word)) {
+            entry.wait_irql = word & byte_mask;
+        }
+    }
+
+    this->guest_thread_refreshes = this->guest_thread_refreshes + 1;
+}
+
 void hypervisor::walk_guest_threads(std::size_t cpu, std::uint64_t thread)
 {
     // Until it finds a process with more than one thread, and then never
@@ -3482,6 +3529,15 @@ void hypervisor::sample_guest_thread(std::size_t cpu)
     if (read(sample.thread + guest_windows::kthread_wait_irql, word)) {
         sample.wait_irql = word & byte_mask;
     }
+
+    // Refreshed every sample, once the list exists.
+    //
+    // The walk itself runs once - it is expensive and the membership does
+    // not change while nothing happens - but *what those threads are
+    // doing* is the whole question, and the one snapshot taken when the
+    // list was built is from whatever moment happened to work. Here it
+    // caught `Phase1Initialization` still running.
+    refresh_guest_threads(cpu);
 
     // And, once, everything else that thread's process is running.
     //

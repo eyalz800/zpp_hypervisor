@@ -4151,6 +4151,20 @@ private:
     void walk_guest_threads(std::size_t cpu, std::uint64_t thread);
 
     /**
+     * Re-reads what the recorded threads are doing.
+     *
+     * The walk runs once - it is expensive and the membership does not
+     * change while nothing happens - but *what those threads are doing*
+     * is the whole question, and the snapshot taken when the list was
+     * built is from whatever moment happened to succeed. Here that caught
+     * `Phase1Initialization` still running, which says nothing about the
+     * stall that follows.
+     */
+    void refresh_guest_threads(std::size_t cpu);
+
+    std::uint64_t guest_thread_refreshes{};
+
+    /**
      * Where the second-level guest's kernel image is loaded, found by
      * stepping down from an address inside it until its header appears.
      *
