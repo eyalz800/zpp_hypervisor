@@ -8680,3 +8680,65 @@ What would settle it next, in increasing cost:
 3. **The guest's own kernel state.** Reachable only by walking the guest
    hypervisor's extended page tables from outside, which nothing here does
    yet.
+
+
+## The task priority register is stuck at CLOCK_LEVEL
+
+2026-08-12, and this is the most specific thing known about the stall.
+
+The second-level guest writes the synthetic interrupt command register
+with `0x4002f` - a fixed, self-directed inter-processor interrupt at
+vector `0x2f`, the vector Windows drains its deferred procedure calls
+through. Measured on a settled boot: **3,395 requests, 6 delivered.** Over
+the same window the guest hypervisor injected `0xd1` 10,728 times and
+`0x40` 3,197 times.
+
+Those numbers only fit one explanation. An interrupt is blocked unless its
+priority class - `vector >> 4` - exceeds the task priority register:
+`0xd1` is class 13, `0x40` is class 4, `0x2f` is class 2. And read live
+off the guest hypervisor's own virtual-APIC page, at offset 0x80 where
+SDM 30.1.1 puts it:
+
+```
+xp/1xb 0x117a1c080   ->   0xd0      the second-level guest's page
+xp/1xb 0x117a1f080   ->   0x40      the other one
+```
+
+**`0xd0` is priority class 13, which is Windows' CLOCK_LEVEL, and it does
+not change.** Every one of the 3,395 requests was recorded with the same
+value. A guest permanently at CLOCK_LEVEL can never run a deferred
+procedure call, and a Windows kernel that cannot run deferred procedure
+calls does no work at all - which is exactly what this boot does, while
+its clock keeps ticking and its extended page tables sit idle.
+
+So the question is now narrow and answerable: **why does the task
+priority never come down?**
+
+What is already ruled out:
+
+- The shadow is honoured, not refused - `tpr_shadow_honoured` is 3,664,868
+  against `tpr_shadow_refused` of zero, so every entry hands the processor
+  the guest hypervisor's own page and its threshold.
+- The page is the right one, and readable: the byte holds `0xd0` and
+  `0x40`, which are meaningful task priorities, not zero and not rubbish.
+- The interrupts that *are* delivered arrive by VM-entry injection, which
+  is not subject to the task priority check - which is why the clock keeps
+  running while everything at or below class 13 does not.
+
+What to look at next, in order:
+
+1. **How the guest lowers it.** `mov cr8` is virtualized by the shadow and
+   writes that byte without exiting. The x2APIC task priority register at
+   MSR `0x808` is **not** - the shadow virtualizes the control register
+   only. This guest is in x2APIC mode; it writes `0x834` and `0x836`. If
+   it lowers its priority through the MSR and that write is not
+   intercepted, it reaches the physical register and the guest
+   hypervisor's page is never updated, which would produce exactly this.
+   No `0x808` access appears anywhere in the recorded rings, which is
+   itself the thing to explain.
+2. **Two pages, one per virtual trust level.**
+   `nested_virtual_apic_address` alternates between `0x117a1c000` and
+   `0x117a1f000` across entries. If a priority written while one is
+   current is read back against the other, it is lost the same way.
+3. `tpr_below_threshold` fired **40** times against 3,395 pending
+   requests, which is the same fact from the other side.
