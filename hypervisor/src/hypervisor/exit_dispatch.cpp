@@ -1501,7 +1501,7 @@ void hypervisor::on_vm_exit(std::uint64_t cpuid,
         // that test refuses everything but CR0 and CR4 and refusing means
         // stopping the processor.
         if (on_nested_cr8_access(
-                vmcs.vpid() - 1, qualification, context)) {
+                vmcs.vpid() - 1, qualification, context, advance_rip)) {
             break;
         }
 

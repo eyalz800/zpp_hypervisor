@@ -76,6 +76,11 @@ static std::map<std::size_t, std::uint64_t> g_vmx_msr_override;
 // Host-physical pages this VMM's own extended page tables refuse.
 static std::map<std::uint64_t, bool> g_host_denied;
 
+// How many general-protection faults the emulation chose to
+// raise. See the definition of inject_general_protection_fault
+// below for why it is counted rather than performed.
+static std::size_t g_general_protection_faults;
+
 namespace zpp::arch::x86_64
 {
 std::uint64_t rdmsr(std::uint32_t index)
@@ -349,6 +354,18 @@ hypervisor::fill_shadow_leaf(std::size_t,
  * a leaf permitting nothing would be caught there rather than hidden
  * here.
  */
+/**
+ * The fault a CR8 write with a reserved bit set earns, per SDM 2.5.
+ *
+ * Counted rather than performed: this harness has no interruption
+ * information field to write, and what its cases assert is that the
+ * emulation *chooses* to fault rather than truncate the value silently.
+ */
+void hypervisor::inject_general_protection_fault(std::uint64_t)
+{
+    ++g_general_protection_faults;
+}
+
 arch::x86_64::vmx::ept_walk_result
 hypervisor::shadow_ept_lookup(std::size_t, std::uint64_t guest_physical)
 {

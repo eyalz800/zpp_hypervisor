@@ -3979,7 +3979,8 @@ private:
      */
     bool on_nested_cr8_access(std::size_t cpu,
                               std::uint64_t qualification,
-                              arch::x86_64::context & context);
+                              arch::x86_64::context & context,
+                              bool & advance_rip);
 
     /**
      * How many CR8 accesses were emulated, and how many of them dropped

@@ -2949,7 +2949,8 @@ std::uint64_t * general_purpose_register(arch::x86_64::context & context,
 
 bool hypervisor::on_nested_cr8_access(std::size_t cpu,
                                       std::uint64_t qualification,
-                                      arch::x86_64::context & context)
+                                      arch::x86_64::context & context,
+                                      bool & advance_rip)
 {
     // SDM Table 28-3: bits 3:0 the register, bits 5:4 the access type -
     // 0 is MOV to, 1 is MOV from - and bits 11:8 the general-purpose
@@ -3016,6 +3017,18 @@ bool hypervisor::on_nested_cr8_access(std::size_t cpu,
 
     constexpr std::uint64_t priority_class_mask = 0xf;
 
+    // SDM 2.5, CR8: "Reserved bits ... must be written with zeros.
+    // Writing a nonzero value to these bits will cause a
+    // general-protection exception." The guest is given the fault
+    // hardware would have given it rather than having the value
+    // silently truncated, which is the rule this project applies to
+    // everything else it emulates.
+    if (0 != (*slot & ~priority_class_mask)) {
+        inject_general_protection_fault();
+        advance_rip = false;
+        return true;
+    }
+
     vtpr = static_cast<std::uint8_t>((*slot & priority_class_mask)
                                      << priority_class_shift);
 
@@ -3047,14 +3060,30 @@ bool hypervisor::on_nested_cr8_access(std::size_t cpu,
         this->nested_cr8_below_threshold[cpu] =
             this->nested_cr8_below_threshold[cpu] + 1;
 
-        // The instruction has retired as far as the guest is concerned -
-        // the priority is written - so the reflected exit must resume
-        // after it, which `reflect_l2_exit` does by saving the state the
-        // caller has already advanced.
+        // **The instruction pointer is advanced here, before reflecting,
+        // and the caller is told not to advance it again.**
+        //
+        // This was the other way round and it corrupted the guest
+        // hypervisor. `reflect_l2_exit` switches the current VMCS back to
+        // vmcs01 and loads that hypervisor's host state, so an advance
+        // performed afterwards lands on *its* instruction pointer rather
+        // than its guest's - it resumes a few bytes into whatever it was
+        // executing, which is a reset a moment later. Measured: four
+        // loader boots in one run, and the counter below at one.
+        //
+        // The advance itself is what the architecture requires anyway.
+        // The write has taken effect, so the exit is a trap rather than a
+        // fault and the guest hypervisor must see its guest positioned
+        // after the instruction.
+        this->vmcs.guest_rip(this->vmcs.guest_rip() +
+                             this->vmcs.vm_exit_instruction_length());
+
         reflect_l2_exit(
             cpu,
             static_cast<std::uint64_t>(basic_reason::tpr_below_threshold),
             0);
+
+        advance_rip = false;
     }
 
     return true;
