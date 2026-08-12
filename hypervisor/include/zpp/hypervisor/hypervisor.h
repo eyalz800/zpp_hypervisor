@@ -4292,6 +4292,17 @@ private:
      */
     std::uint64_t profile_pointer_physical{};
     std::uint64_t profile_pointer_virtual{};
+
+    /**
+     * Which instruction the pointer above was taken at.
+     *
+     * Without it the translation is uninterpretable: it is `rcx` at
+     * whatever the profiler happened to catch, and `rcx` means a
+     * configuration pointer only inside `HalpPciReadMmConfigUshort`.
+     * A reading taken during the page-frame work translated to ordinary
+     * memory and said nothing, which is the failure this prevents.
+     */
+    std::uint64_t profile_pointer_rip{};
     std::uint64_t profile_context_count{};
     /** @} */
 

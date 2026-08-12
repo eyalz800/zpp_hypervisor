@@ -3333,6 +3333,7 @@ void hypervisor::record_profile_context(
                     l2_physical_to_l1(this->vmcs.vpid() - 1, *physical)) {
                 this->profile_pointer_virtual = context.rcx;
                 this->profile_pointer_physical = *reachable;
+                this->profile_pointer_rip = rip;
             }
         }
     }
