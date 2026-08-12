@@ -97,24 +97,22 @@ fi
 # hypervisor was never on. The tell is in the serial log, which ends at
 # `BdsDxe: starting Boot0003 "Windows Boot Manager"` and holds no `zpp:`
 # line anywhere. The check below is that tell, made fatal.
-rig 120 '
-    cd /home/tc/vm
-    export ZPP_QEMU_EXTRA="-monitor telnet:0.0.0.0:'"$MONITOR_PORT"',server,nowait"
-    setsid nohup sudo -E ./boot-zpp.sh > /home/tc/zpp/boot.log 2>&1 < /dev/null &
-    sleep 2' > /dev/null 2>&1 || true
-
-# Did this hypervisor run at all? Asked before anything is measured,
-# because "Windows reached its kernel" is true of a guest with nothing
-# underneath it, and that is the one failure a boot test must never
-# report as a pass. The loader says `zpp:` on serial long before the
-# firmware hands over, so an empty match is conclusive.
-if ! rig 30 'grep -ac "zpp:" /home/tc/zpp/serial.out' 2>/dev/null \
-     | grep -qE '^[1-9]'; then
-    say "SKIP: no 'zpp:' line on serial - the firmware booted something"
-    say "      other than the loader, so this run had no hypervisor in"
-    say "      it. Check the guest NVRAM's boot option before debugging"
-    say "      anything else."
-    rig 60 'sudo pkill -9 -x qemu-system-x86_64 2>/dev/null; true' \
+#
+# Launched through rig-boot.sh rather than by hand, so this run gets the
+# same three channels every other run gets - monitor, gdb stub and serial
+# - and so there is one place where that set is decided. It used to open
+# only the monitor here, which is how a boot would reach the interesting
+# moment with no way to load symbols against it.
+#
+# It also makes the "did the hypervisor run at all" check unnecessary
+# here: rig-boot.sh does not report success until `zpp:` is on serial,
+# which is the same tell, made fatal in the one place that can act on it.
+if ! MONITOR_PORT="$MONITOR_PORT" "$(dirname "$0")/rig-boot.sh"; then
+    say "SKIP: the guest did not boot with all three channels open, so"
+    say "      this run says nothing about the commit. The reason is"
+    say "      above; a missing 'zpp:' line means the firmware booted"
+    say "      something other than the loader."
+    rig 60 'sudo pkill -x qemu-system-x86_64 2>/dev/null; true' \
         > /dev/null 2>&1 || true
     exit 125
 fi

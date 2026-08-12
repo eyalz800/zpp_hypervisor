@@ -94,9 +94,32 @@ touching the disk channel has to boot the real ESP.
    the shell runs it automatically - but remove it once an NVRAM entry
    exists, or `bcfg boot add` will pile up duplicates on every boot.
 
-4. **Run** `cd ~/vm && sudo ./boot-zpp.sh`. **The `sudo` is not optional
-   and leaving it off does not fail loudly.** Without it the script keeps
-   going past every device step, printing
+4. **Run `./scripts/rig-boot.sh`, never the launcher directly.**
+
+   ```sh
+   ./scripts/rig-boot.sh                    # monitor 4446, gdb 1234, serial
+   ZPP_QEMU_EXTRA='-S' ./scripts/rig-boot.sh   # composed *with* the channels
+   ```
+
+   It opens all three diagnostic channels and then **proves each one
+   answers** before reporting success - a QEMU process by
+   `/proc/<pid>/comm`, `info status` from the monitor, a listening gdb
+   port, and a `zpp:` line on serial. Any of those missing is a run that
+   cannot be inspected, and finding that out later costs the whole boot:
+   the failure being chased is over by then, and the only way to add a
+   channel is to kill the guest and start again.
+
+   None of the three costs anything unused. A listening socket is a
+   listening socket, and `-gdb` without `-S` does not pause the machine -
+   so there is no configuration where leaving one out is the better
+   trade, and the script does not offer the choice.
+
+   The rest of this section is what the script encodes, kept because
+   every line of it was paid for.
+
+   **The `sudo` is not optional and leaving it off does not fail
+   loudly.** Without it the script keeps going past every device step,
+   printing
 
    ```
    can't create /sys/bus/pci/devices/0000:02:00.0/driver/unbind: Permission denied
