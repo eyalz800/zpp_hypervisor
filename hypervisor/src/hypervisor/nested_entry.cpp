@@ -3147,6 +3147,17 @@ bool hypervisor::is_guest_kernel_image(std::size_t cpu,
         return false;
     }
 
+    // The image's own size, which the stack scan needs to decide whether
+    // an address on the stack points into it. Offset 56 of the optional
+    // header, per the PE specification.
+    constexpr std::uint64_t size_of_image_field = 56;
+
+    std::uint32_t size{};
+    if (read(base + headers + optional_header + size_of_image_field,
+             size)) {
+        this->guest_kernel_size = size;
+    }
+
     // "ntoskrnl", read as two words so it needs no string comparison and
     // no assumption about what follows.
     constexpr std::uint32_t first_half = 0x736f746e;  // "ntos"
@@ -3266,6 +3277,59 @@ std::uint64_t hypervisor::find_guest_kernel_base(std::size_t cpu)
     }
 
     return 0;
+}
+
+void hypervisor::sample_guest_stack(std::size_t cpu)
+{
+    auto base = this->guest_kernel_base;
+    auto size = this->guest_kernel_size;
+
+    if ((0 == base) || (0 == size)) {
+        return;
+    }
+
+    auto stack = this->vmcs.guest_rsp();
+
+    constexpr std::uint64_t kernel_address_floor = 0xffff800000000000;
+
+    if (stack < kernel_address_floor) {
+        return;
+    }
+
+    this->guest_stack_pointer = stack;
+    this->guest_stack_count = 0;
+
+    for (std::size_t word{};
+         (word < guest_stack_words) &&
+         (this->guest_stack_count < guest_stack_capacity);
+         ++word) {
+        auto at = stack + (word * sizeof(std::uint64_t));
+
+        auto physical = translate_guest_linear(at);
+        if (!physical) {
+            // A gap in the stack's mapping ends the scan rather than
+            // being stepped over: past an unmapped page the addresses
+            // read belong to something else entirely.
+            break;
+        }
+
+        std::uint64_t value{};
+        if (!read_guest_memory(
+                cpu,
+                *physical,
+                std::span(reinterpret_cast<std::byte *>(&value),
+                          sizeof(value)))) {
+            break;
+        }
+
+        // Inside the kernel image, which is what a return address into it
+        // looks like. Nothing else about it is checked - see the
+        // declaration for why this is a candidate list and not a stack.
+        if ((value >= base) && (value < (base + size))) {
+            this->guest_stack_trace[this->guest_stack_count] = value;
+            this->guest_stack_count = this->guest_stack_count + 1;
+        }
+    }
 }
 
 void hypervisor::refresh_guest_threads(std::size_t cpu)
@@ -3538,6 +3602,7 @@ void hypervisor::sample_guest_thread(std::size_t cpu)
     // list was built is from whatever moment happened to work. Here it
     // caught `Phase1Initialization` still running.
     refresh_guest_threads(cpu);
+    sample_guest_stack(cpu);
 
     // And, once, everything else that thread's process is running.
     //

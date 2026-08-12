@@ -4165,6 +4165,45 @@ private:
     std::uint64_t guest_thread_refreshes{};
 
     /**
+     * Return addresses found on the second-level guest's stack, newest
+     * first.
+     *
+     * The instruction pointer says which function is spinning and that
+     * has been known for hours - `HvlpGetRegister64`, reading the
+     * reference counter. What it cannot say is *why*, because the
+     * condition being waited on belongs to whoever called it, and a
+     * program counter has no caller in it.
+     *
+     * Found by scanning rather than unwinding. Unwinding needs the
+     * exception directory of an image this VMM does not have and could
+     * not trust, whereas a return address is recognisable by where it
+     * points: inside the kernel image, which is now known at runtime
+     * along with its size. That admits false positives - a stale word
+     * from a deeper frame reads exactly like a live one - so what this
+     * produces is a set of candidates to symbolize, not a call stack,
+     * and it is described that way wherever it is read.
+     *
+     * It is still decisive here. The functions in this loop are a handful
+     * and the callers above them are a handful more; a list of sixteen
+     * plausible addresses with names on them separates "waiting for a
+     * device" from "waiting for a message" from "waiting for a lock" in
+     * one reading.
+     * @{
+     */
+    static constexpr std::size_t guest_stack_words = 128;
+    static constexpr std::size_t guest_stack_capacity = 16;
+
+    std::uint64_t guest_kernel_size{};
+    std::uint64_t guest_stack_trace[guest_stack_capacity]{};
+    std::uint64_t guest_stack_count{};
+    std::uint64_t guest_stack_pointer{};
+
+    void sample_guest_stack(std::size_t cpu);
+    /**
+     * @}
+     */
+
+    /**
      * Where the second-level guest's kernel image is loaded, found by
      * stepping down from an address inside it until its header appears.
      *
