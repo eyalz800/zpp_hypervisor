@@ -262,7 +262,42 @@ hypervisor::install_shadow_leaf(std::size_t cpu,
     // which is the silent privilege escalation nested EPT exists to
     // prevent.
     if (composition.page_shift < shift) {
-        return install_shadow_split(cpu, guest_physical, guest);
+        // Down to the size both walks agreed on, and no further.
+        //
+        // `install_shadow_split` is written for one case - a 2 MB region
+        // this VMM's own tables describe at 4 KB - and it says so: it
+        // masks the address to a 2 MB region and fills it a page at a
+        // time. Sending every under-composed mapping there was wrong for
+        // any composition that landed between the two.
+        //
+        // **Measured, by tests/shadow_ept, which asserted it as it
+        // behaved rather than as it should:** a 1 GB mapping in a guest
+        // hypervisor's tables composes at 2 MB against our own 2 MB
+        // leaves, and went to the splitter anyway. The result was 512
+        // entries of 4 KB covering 2 MB of the gigabyte, the other
+        // 1022 MB still absent, and a page table out of a 96-table pool
+        // for each 2 MB region touched - about 188 MB of address space
+        // before `fill_shadow_leaf` starts reclaiming and resetting.
+        // `verify_nested` builds its own EPT12 as four 1 GB leaves, so
+        // the tree's own probe took that path, and a guest hypervisor
+        // mapping its guest with large pages is the normal case.
+        //
+        // So the splitter keeps the case it was written for, where the
+        // eager fill of all 512 pages is worth its one table - the
+        // guest hypervisor's side is uniform across the region and only
+        // ours varies, which is what a watched page inside it looks like
+        // - and everything else installs one leaf at the composed size.
+        //
+        // The recursion is one level deep by construction: the call
+        // below passes `composition.page_shift` as the shift, and
+        // composing the same two walks again cannot produce anything
+        // smaller.
+        if (page_shift_4kb == composition.page_shift) {
+            return install_shadow_split(cpu, guest_physical, guest);
+        }
+
+        return install_shadow_leaf(
+            cpu, guest_physical, guest, composition.page_shift);
     }
 
     auto entry = shadow_ept_entry(cpu, guest_physical, shift);

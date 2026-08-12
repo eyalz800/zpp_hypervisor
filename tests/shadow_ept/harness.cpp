@@ -927,42 +927,24 @@ void test_install_sizes_and_splitting()
 
     build_host_ept();
 
-    // === A guest hypervisor mapping at 1 GB, which is a defect ==========
-    //
-    // **Found by writing this case, and asserted as it behaves today so a
-    // fix turns a named check red.**
+    // === A guest hypervisor mapping at 1 GB ============================
     //
     // A 1 GB mapping in the guest hypervisor's tables over this VMM's own
     // 2 MB leaves composes at 2 MB - `compose_ept` takes the smaller of
-    // the two, which tests/nested_ept asserts directly. So the leaf that
-    // *should* go in is one 2 MB entry.
+    // the two, which tests/nested_ept asserts directly - so one 2 MB
+    // entry is the leaf that belongs there.
     //
-    // What goes in instead is 512 entries of 4 KB covering one 2 MB
-    // region of the gigabyte. `install_shadow_leaf` tests
-    // `composition.page_shift < shift` and, when it holds, calls
-    // `install_shadow_split` - which is written for the 2 MB-to-4 KB case
-    // alone: it masks the address to a 2 MB region and fills it a 4 KB
-    // page at a time, whatever size the composition actually allowed.
-    //
-    // Two costs, and the second is the one that bites:
-    //
-    //  - 511 entries of the 512 describe pages the fault never asked
-    //    about, and the other 1022 MB of the gigabyte are still absent.
-    //  - each 2 MB region of that gigabyte needs a page table of its own
-    //    out of a 96-table pool, so a guest hypervisor using 1 GB
-    //    mappings exhausts the pool after about 188 MB of touched
-    //    address space and then thrashes through `fill_shadow_leaf`'s
-    //    reclaim and reset stages.
-    //
-    // This is not hypothetical: `verify_nested::launch` builds its own
-    // EPT12 as four 1 GB leaves, so the tree's own nested probe takes
-    // this path, and a guest hypervisor mapping its guest's memory with
-    // large pages is the normal case rather than an exotic one.
-    //
-    // The fix is one line in `install_shadow_leaf` - install at
-    // `composition.page_shift` rather than delegating to a splitter fixed
-    // at 4 KB - but it changes what the shadow builder produces for every
-    // large mapping, so it is reported rather than made here.
+    // **These are the four checks that recorded the defect, flipped.**
+    // What used to happen: `install_shadow_leaf` tested
+    // `composition.page_shift < shift` and sent everything matching to
+    // `install_shadow_split`, which is written for the 2 MB-to-4 KB case
+    // alone and masks the address to a 2 MB region. A gigabyte therefore
+    // became 512 entries of 4 KB covering 2 MB of it, the other 1022 MB
+    // still absent, and a page table out of a 96-table pool for every
+    // 2 MB region touched - about 188 MB of address space before
+    // `fill_shadow_leaf` starts reclaiming and resetting.
+    // `verify_nested` builds its own EPT12 as four 1 GB leaves, so the
+    // tree's own probe took that path.
     reset_shadows();
     static_cast<void>(take_slot(root_1));
 
@@ -975,33 +957,55 @@ void test_install_sizes_and_splitting()
                                         shift_1gb)
                    .has_value());
 
-    check("install.1gb_over_2mb_installs_4kb_today_not_2mb",
-          shift_4kb,
+    check("install.1gb_over_2mb_installs_at_2mb",
+          shift_2mb,
           hv().shadow_ept_lookup(cpu, gigabyte).page_shift);
 
-    check("install.1gb_over_2mb_costs_a_split",
-          1,
+    // No split, which is the whole of the change: the splitter keeps the
+    // one case it was written for and nothing else reaches it.
+    check("install.1gb_over_2mb_costs_no_split",
+          0,
           hv().shadow_ept_splits[cpu]);
 
-    // Only the first 2 MB of the gigabyte was mapped. An address one
-    // region further in is still absent, so the guest faults on it again -
-    // which is the forward progress that keeps this a cost rather than a
-    // livelock, and is also why it went unnoticed.
-    check("install.1gb_over_2mb_maps_only_the_first_region",
+    // Still only 2 MB of the gigabyte, and that is correct rather than a
+    // leftover. A leaf goes in for the address that faulted, at the
+    // largest size both walks agreed on; the rest faults in the same way
+    // when it is touched. Filling all 512 regions eagerly would be
+    // guessing at what the second-level guest will reach, which is the
+    // guess the lazy fill exists to stop making.
+    check("install.1gb_over_2mb_maps_one_region",
           static_cast<std::uint64_t>(
               zpp::arch::x86_64::vmx::ept_walk_status::not_present),
           static_cast<std::uint64_t>(
               hv().shadow_ept_lookup(cpu, gigabyte + bytes_2mb).status));
 
-    // And what it costs the pool: a page-directory-pointer table, a page
-    // directory and one page table, for 2 MB of a gigabyte. Written as a
-    // number so a fix that installs a 2 MB leaf instead shows up here as
-    // two tables rather than three.
-    constexpr std::size_t tables_for_one_split_region = 3;
+    // Two tables now, not three: a page-directory-pointer table and a
+    // page directory, with the leaf in the directory. The page table the
+    // split used to need is what a 2 MB leaf saves, and it is the number
+    // that decides how much of a guest's address space fits in the pool.
+    constexpr std::size_t tables_for_a_2mb_leaf = 2;
 
     check("install.1gb_over_2mb_pool_cost",
-          tables_for_one_split_region,
+          tables_for_a_2mb_leaf,
           tables_owned_by(hv().shadow_ept_current_slot[cpu]));
+
+    // And the neighbouring region shares that page directory rather than
+    // needing another, which is the pool saving stated as the thing that
+    // actually matters: the 512 regions of a gigabyte cost 512 page
+    // tables under the old behaviour and one directory under this.
+    static_cast<void>(
+        hv().install_shadow_leaf(cpu,
+                                 gigabyte + bytes_2mb,
+                                 guest_mapping(gigabyte, shift_1gb),
+                                 shift_1gb));
+
+    check("install.1gb_over_2mb_second_region_shares_the_directory",
+          tables_for_a_2mb_leaf,
+          tables_owned_by(hv().shadow_ept_current_slot[cpu]));
+
+    check("install.1gb_over_2mb_second_region_is_mapped",
+          shift_2mb,
+          hv().shadow_ept_lookup(cpu, gigabyte + bytes_2mb).page_shift);
 }
 
 void test_large_entry_in_the_way()
@@ -1271,7 +1275,7 @@ void test_collect_and_refresh()
     // shadow leaf today, because a guest hypervisor's gigabyte composes
     // against this VMM's own 2 MB tables and then goes down the 4 KB
     // splitter - which is the defect
-    // `install.1gb_over_2mb_installs_4kb_today_not_2mb` above records. A
+    // `install.1gb_over_2mb_installs_at_2mb` above covers. A
     // case here that asked for one would be measuring that instead of the
     // collector.
     auto region = address_b & ~(bytes_2mb - 1);
