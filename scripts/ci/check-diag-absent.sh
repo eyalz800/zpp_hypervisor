@@ -37,7 +37,19 @@ nm="${NM:-llvm-nm}"
 readelf="${READELF:-llvm-readelf}"
 strings="${STRINGS:-llvm-strings}"
 
-[ -f "$elf" ] || { echo "missing $elf - build the release preset" >&2; exit 1; }
+# Skipped rather than failed when there is no release build, which is the
+# same contract check-invariants.sh has and for the same reason: this is
+# registered with ctest, and a developer running the suite after building
+# only the debug preset has not regressed anything. 77 is ctest's
+# SKIP_RETURN_CODE, set on the test in tests/CMakeLists.txt.
+#
+# It used to exit 1 here, which is what kept it out of ctest: a check that
+# fails when its input is absent cannot be registered, so it was left
+# unregistered and then nothing ran it at all.
+[ -f "$elf" ] || {
+    echo "no $elf - build the release preset to run this" >&2
+    exit 77
+}
 
 status=0
 

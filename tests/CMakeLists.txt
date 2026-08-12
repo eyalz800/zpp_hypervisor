@@ -646,7 +646,26 @@ add_test(NAME check-invariants
     COMMAND "${ZPP_CI_DIR}/check-invariants.sh" "${ZPP_CONFIG_LOWER}")
 set_tests_properties(check-invariants PROPERTIES SKIP_RETURN_CODE 77)
 
-foreach(_test IN ITEMS check-nested-ept check-exit-handler check-invariants)
+# The diagnostic facility's absence from a release build, which is a claim
+# about a binary rather than about the source: the sub-builds hardcode
+# ZPP_DIAG=0 for release rather than passing the option through
+# (cmake/hypervisor/CMakeLists.txt and cmake/uefi-loader/CMakeLists.txt),
+# so this also catches a -DZPP_DIAG=ON left in a cache and inherited by a
+# later plain build - the trap BACKLOG.md records.
+#
+# Registered here rather than left beside the other scripts, because that
+# is where it was and nothing ran it: not in ci.yml, not in ctest, not
+# called by anything. A check that exists and is never run reads as
+# coverage and is not.
+#
+# Skipped rather than failed when there is no release build, the same
+# contract as check-invariants above.
+add_test(NAME check-diag-absent
+    COMMAND "${ZPP_CI_DIR}/check-diag-absent.sh")
+set_tests_properties(check-diag-absent PROPERTIES SKIP_RETURN_CODE 77)
+
+foreach(_test IN ITEMS check-nested-ept check-exit-handler check-invariants
+                       check-diag-absent)
     set_tests_properties(${_test} PROPERTIES
         TIMEOUT ${ZPP_HOST_TEST_TIMEOUT_SECONDS})
 endforeach()
