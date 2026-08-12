@@ -165,6 +165,53 @@ class Image:
         }
 
 
+# The instructions a base can be deduced from, as the bytes that begin
+# them and a test on the ModRM byte where the opcode alone is ambiguous.
+#
+# VMPTRLD, VMCLEAR and VMXON share `0f c7 /6` and differ only by prefix,
+# so the reg field is checked; INVEPT is unambiguous.
+ANCHORS = {
+    "wrmsr": (lambda b: b[:2] == b"\x0f\x30"),
+    "vmptrld": (lambda b: b[0] == 0x0F and b[1] == 0xC7 and
+                ((b[2] >> 3) & 7) == 6),
+    "invept": (lambda b: b[:4] == b"\x66\x0f\x38\x80"),
+}
+
+
+def base_from_anchor(image, rip, mnemonic, after):
+    """The load address, deduced from one instruction pointer.
+
+    Two conventions have to be handled and mixing them up wastes a boot.
+    The second-level ring records the address *of* the instruction, since
+    a reflected exit advances nothing. The first-level ring records the
+    address *after* it, because `record_exit` runs at the end of
+    `resume_guest`, which has already advanced. So `after` searches back
+    over every plausible instruction length rather than assuming one.
+
+    Alignment is not assumed either. A 2 MB aligned image lets the low
+    twenty-one bits pin the relative address; a 4 KB aligned one leaves
+    only twelve, which is a thousand candidates in a 4 MB image and still
+    a short list. This walks the 4 KB stride, so it covers both - and the
+    coarser assumption failing while the finer one succeeds is exactly
+    what happened with hvix64.
+    """
+    matcher = ANCHORS[mnemonic]
+    lengths = range(2, 9) if after else range(0, 1)
+    found = set()
+
+    for length in lengths:
+        at = rip - length
+        rva = at & 0xFFF
+        while rva < image.size_of_image:
+            offset = image.offset_of(rva)
+            if offset is not None and offset + 4 <= len(image.data):
+                if matcher(image.data[offset:offset + 4]):
+                    found.add(at - rva)
+            rva += 0x1000
+
+    return found
+
+
 def base_from_wrmsr(image, rip):
     """The load address, deduced from one instruction pointer.
 
@@ -201,6 +248,17 @@ def main():
     parser.add_argument("--wrmsr-rip",
                         help="an instruction pointer whose exit was a "
                              "WRMSR, from which the base is deduced")
+    parser.add_argument("--anchor",
+                        help="RIP:MNEMONIC[:after] - deduce the base from "
+                             "an instruction pointer recorded against a "
+                             "known instruction. MNEMONIC is one of "
+                             + ", ".join(sorted(ANCHORS)) + ". Add :after "
+                             "for a pointer taken from the first-level "
+                             "ring, which records the address past the "
+                             "instruction rather than its own. Repeatable: "
+                             "one anchor rarely pins a 4 KB aligned image "
+                             "and the intersection of two does.",
+                        action="append")
     arguments = parser.parse_args()
 
     image = Image(arguments.image)
@@ -209,8 +267,25 @@ def main():
         base = int(arguments.base, 0)
     elif arguments.wrmsr_rip:
         base = base_from_wrmsr(image, int(arguments.wrmsr_rip, 0))
+    elif arguments.anchor:
+        candidates = None
+        for anchor in arguments.anchor:
+            parts = anchor.split(":")
+            if len(parts) not in (2, 3) or parts[1] not in ANCHORS:
+                sys.exit("--anchor takes RIP:MNEMONIC[:after], MNEMONIC "
+                         "one of " + ", ".join(sorted(ANCHORS)))
+            found = base_from_anchor(
+                image, int(parts[0], 0), parts[1],
+                3 == len(parts) and "after" == parts[2])
+            candidates = found if candidates is None else candidates & found
+
+        if 1 != len(candidates):
+            sys.exit(f"{len(candidates)} bases fit every anchor: "
+                     f"{[hex(b) for b in sorted(candidates)]}; add another "
+                     f"--anchor or pass --base")
+        base = candidates.pop()
     else:
-        sys.exit("need --base or --wrmsr-rip")
+        sys.exit("need --base, --wrmsr-rip or --anchor")
 
     print(f"kernel base 0x{base:x}, image size 0x{image.size_of_image:x}, "
           f"{len(image.functions)} functions, {len(image.exports)} exports")

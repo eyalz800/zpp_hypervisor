@@ -366,6 +366,10 @@ def main():
                 reflected = (words.get(a + 8 * k, 0) for k in range(9))
             extra = f" phys=0x{phys:x}" if phys else ""
             extra += f" detail=0x{detail:x}" if detail else ""
+            # Whose rip this is - see exit_trace_entry::reflected. An
+            # address attributed to the wrong guest reads as a perfectly
+            # ordinary address, so it is marked rather than left implicit.
+            extra += " [l1-rip]" if reflected else ""
             times = f" x{repeat}" if repeat > 1 else ""
             print(f"  [{i:6d}] {name_reason(reason):<16} "
                   f"qual=0x{qual:<12x} {ACTIVITY.get(activity, activity)} "
