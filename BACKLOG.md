@@ -9288,3 +9288,43 @@ answered, and it divides cleanly:
    is the rig's configuration and not this hypervisor's.
 2. **What calls it**, which the stack scan can answer now that it knows
    where to look.
+
+
+## Qualifying the 35%: it was a phase, not the present state
+
+2026-08-12, and this is a correction to the entry above before anyone
+builds on it.
+
+The profiler samples on the VMX-preemption timer, which is reloaded on
+every entry - so it fires only when the guest runs longer than its
+interval without exiting. Measured on the settled machine:
+
+```
+profile_samples   1370 -> 1371    in sixty seconds
+l2_entries      270,336 -> 357,727  in the same sixty seconds
+```
+
+One sample a minute against 1,456 entries a second. The guest is *not*
+running uninterrupted; it exits about fourteen hundred times a second and
+each residency is far shorter than the 160 microsecond interval. The
+timer almost never expires.
+
+So the table's contents - 500 of 1,371 samples, 36.5%, at
+`HalpPciReadMmConfigUshort` - describe **a window that has passed**, not
+what the guest is doing now. During that window the guest really did run
+long stretches without exiting and really was polling that one
+configuration address; the physical address was constant across three
+readings and decoded to bus 252, device 31, function 0, register 0. That
+part stands.
+
+What does not stand is "35% of the guest's execution *is* this poll",
+stated in the present tense. The honest statement is: **the last
+substantial stretch of uninterrupted work the guest did was polling the
+vendor identifier of a function that does not exist, and afterwards it
+returned to the timer loop with the working ring frozen at 89,091.**
+
+The instrument was right and the tense was wrong. A profiler whose clock
+is reloaded per entry measures *long residencies*, not time - which is
+exactly the right tool for finding a spin and the wrong one for
+attributing shares of total execution. That distinction should have been
+in the first entry.
