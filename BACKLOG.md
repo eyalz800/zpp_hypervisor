@@ -8457,3 +8457,48 @@ message protocol completed for the first time with it, end-of-message
 writes going from 1 to 13,159 - so if it is confirmed as the cause the
 answer is to understand *why* it suppresses the kernel's own start-up
 sequence, not simply to turn it off.
+
+
+## Refuted the same day: it is not the application processors
+
+2026-08-12, one boot after the entry above, same binary, one variable
+changed - `ZPP_CPUS=1`. The monitor confirms one processor, and `cpu 1`
+has zero exits, so there is genuinely nothing to wait for.
+
+The guest stops in the same place anyway:
+
+```
+[91119..91120] wrmsr  0x836, 0x834      x2APIC LVT LINT1, LVT PMC
+[91121..91123] cpuid  x3
+[91124]        wrmsr  0x400000b0        STIMER0_CONFIG
+[91125..91126] rdmsr  0x40000083 SIMP;  wrmsr 0x40000093 SINT3
+[91127..91128] wrmsr  0x400000b0        STIMER0_CONFIG
+[91130..]      wrmsr  0x400000b0        and nothing else, ever
+```
+
+That is instruction for instruction what the eight-processor run did, and
+what the run before it did. So **the stall is independent of the
+processor count**, which also explains the older note that the freeze
+lands at about 82,100 second-level entries "in every configuration from
+two processors to eight".
+
+The seven processors stranded in the firmware are real, and worth fixing,
+and are **not** the cause. The claim that they were was made one boot too
+early: the evidence was an absence - no second start-up sequence in the
+log - and an absence is consistent with "never sent because the guest is
+blocked" just as well as with "never sent because we swallowed it". The
+single-processor run distinguishes them, and it should have been run
+before the claim rather than after.
+
+What survives, and is now the whole question: **on one processor, with a
+correct clock, interrupts arriving, and the nested extended page tables
+demonstrably healthy, the root partition finishes bringing its own
+processor online - LVT LINT1 and the performance counter, the synthetic
+interrupt controller's message page and one synthetic interrupt source,
+one timer - and then never does anything again.**
+
+The instruction pointers are stable across boots modulo the kernel base,
+which is 2 MB aligned: the final `wrmsr` is at `base + 0x1a57e7` in all
+three runs. Naming that function is the next step and it needs the guest
+down - mount the volume read only, take `ntoskrnl.exe`, and find which
+relative address ending `0x1a57e7` disassembles to a `wrmsr`.
