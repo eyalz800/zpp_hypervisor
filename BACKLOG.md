@@ -9646,3 +9646,41 @@ machine's loader also has opinions about, and `allocate_rwx` takes its
 memory as `EfiReservedMemoryType` from wherever the firmware chooses.
 Whether those overlap is checkable from the loader's own trace and does
 not need a boot.
+
+
+## The loop is the boot graphics rasterizer, which is probably a symptom
+
+2026-08-12, from the call graph around the frames the stall's stack
+carries, all read out of the image with no boot needed.
+
+`Bgp` is the boot graphics provider and `Rasp` is its **rasterizer**:
+
+```
+RaspLoadGlyphData, RaspLoadCompositeGlyphData, RaspGetCompositeGlyphList,
+RaspGetUnscaledGlyphData, RaspScanConvert, RaspInitializeGlyphData,
+RaspAllocateMemory, RaspDestroySegmentList, BgpFwFreeMemory
+```
+
+So the loop the stalled thread runs - allocate pool, allocate pages for a
+descriptor list, scan-convert, free, request a deferred call, repeat - is
+**Windows drawing text on the boot screen**. The first three of those
+functions are mutually recursive, which is what a composite glyph is:
+one built out of component glyphs.
+
+**And that is very likely a symptom rather than the fault.** Windows
+animates its boot screen; a machine that is still booting keeps
+rasterizing. The user's own observation is that the display is stopped
+before the spinner, which is consistent with an animation running on a
+boot that is not progressing, and equally consistent with the rasterizer
+being the thing stuck. The measurements here cannot separate those two.
+
+What weighs against the rasterizer being the fault: the stall's stack
+holds *one* rasterizer frame, not a deep chain of them, so it is not
+runaway recursion on a malformed glyph. What weighs for it: the thread
+running this is `Phase1Initialization`, and Phase 1 has no business
+spending its life drawing.
+
+The honest reading is that this narrows *where* to look without saying
+which side of it the fault is on, and that separating them needs the
+thing this investigation has needed for a while - the control boot, or
+the guest's own view of what it is waiting for.
