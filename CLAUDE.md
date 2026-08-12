@@ -228,6 +228,40 @@ reverse registration order, `.fini_array` ran after them, and the log list's own
 freed its nodes. Note `.fini_array` slots are `R_X86_64_RELATIVE` too, so the relocation bug
 above broke that path identically; it was just even further from ever being reached.
 
+### The hypervisor's own pages are not writable and executable
+
+The host page table maps this module read-only as a floor and then adds what each
+PT_LOAD segment's program header asks for, through `elf_file::protect` and
+`page_table::add_protection`. Text is read-execute, read-only data is read, `.data` and
+`.bss` are read-write-no-execute, and the padding between segments is read-only. The
+loaders are unchanged: they allocate one RWX region because that is what a platform
+allocator gives them, and relocation writes into pages protection would close.
+
+What that means for anything added here:
+
+- **Nothing writes to `.text` or `.rodata` any more.** A store into either takes `#PF`
+  with error code 3, and on the launch path that comes out as loader error `0x60e03`.
+  Recognise it: it is *not* the relocation bug's signature, which is a fault at a tiny
+  offset from the module base with vector 6 or 14 on a *fetch*.
+- **Nothing executes from `.bss`.** The 512 KB per-processor stacks, the 20 MB heap
+  arena, the EPT tables and the VMCS regions all lose execute with it. There is no code
+  generation in this tree, so nothing needed it.
+- **Two preconditions, both checked rather than assumed.** CR0.WP is set beside the CR3
+  load and carried in `host_control_register_0` for root mode, the VMCS host field and the
+  application-processor trampoline - without it a read-only mapping denies nothing at ring
+  0 (SDM 5.6.1). IA32_EFER.NXE must be set or bit 63 is a *reserved* bit and every mapping
+  carrying it faults on any access, not only a fetch (SDM 5.5.4); `main` refuses to launch
+  with `execute_disable_not_enabled` rather than take that fault. `BACKLOG.md` 20 records
+  that the guest can still clear NXE, and what separating the two EFERs would cost.
+- **One page is still writable and executable**: the start-up trampoline below one
+  megabyte, which writes its own progress marker and per-processor data area while
+  executing from that same page. It cannot be split - a start-up IPI names a page.
+- **Build with `-DZPP_TEST_MODULE_PROTECTION=ON` to check it is real.** It stores a byte
+  of `.text` back over itself and the launch ends in the fault code above. A protection
+  nobody has watched fault is one that may not have been applied - every step of it fails
+  silently and in the safe-looking direction. `scripts/check-bootable.sh` refuses such a
+  loader, since it ends in a verdict rather than a guest.
+
 ### Include order (critical for freestanding)
 
 1. `cmake/freestanding-config/` — `__config_site` overrides
