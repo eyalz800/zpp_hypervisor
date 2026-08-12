@@ -9684,3 +9684,56 @@ The honest reading is that this narrows *where* to look without saying
 which side of it the fault is on, and that separating them needs the
 thing this investigation has needed for a while - the control boot, or
 the guest's own view of what it is waiting for.
+
+
+## Where the nested boot investigation stands, 2026-08-12
+
+The guest's behaviour is fully characterised and every mechanism this VMM
+owns has been measured. Written compactly because the entries above are
+long and the shape is easy to lose.
+
+**What the guest does, in order, all of it bounded and completing:**
+
+1. Revokes the boot loader's page privileges - `InitBootProcessor` ->
+   `ExpRevokeBootLoaderPagePrivileges`.
+2. Reloads boot drivers into virtual-trust-level protected pages -
+   `MiReloadBootLoadedDrivers` -> `VslSetPlaceholderPages` ->
+   `HvlSwitchToVsmVtl1`. About 88,000 hypercalls, twelve minutes.
+3. Builds the page frame database - `MiCreateInitialPfns`,
+   `MiInitializePfnEntriesRaw`.
+4. Enumerates 256 PCI buses - `HalpPciReadMmConfigUshort`.
+5. Then loops in the boot graphics rasterizer at PASSIVE_LEVEL, on the
+   `Phase1Initialization` thread, allocating and freeing pool, allocating
+   descriptor-list pages, scan-converting glyphs and requesting deferred
+   calls - for ever.
+
+**Eleven explanations eliminated by measurement, each retracted where it
+was claimed:**
+
+extended-page-table livelock; stranded application processors;
+miscalibrated clock; task priority blocking the deferred-call vector;
+a stuck virtual trust level; the trust-level ping-pong; "the guest is
+idle"; the TPR shadow itself; an unbounded bus enumeration; a spin on
+memory; and the deferred-call path.
+
+**Everything this VMM owns, measured healthy:** 454,650 shadow leaves
+installed with zero repeats and zero that failed to permit their own
+fault; the reference counter at 10.04 MHz where 10 is required; timer
+deadlines correct against that counter; interrupts delivered; both trust
+levels scheduled; the synthetic message protocol completing rounds; an
+empty log across every run.
+
+**Four instrument defects found, which is the reusable part:** the exit
+ring's instruction pointer belongs to one of three different guests
+depending on what the handler did; a thread sample taken in one phase
+does not describe another; a profiler whose timer reloads per entry
+measures long residencies and not time; and a field refreshed under a
+condition hands back agreement that reads as corroboration. All four
+produced confident wrong conclusions before being caught.
+
+**What is left**, and neither half is reachable from this side:
+
+- whether the same guest does the same thing with nothing underneath,
+  which is one boot and would say whether this is ours at all;
+- what the `Phase1Initialization` thread is actually waiting for, which
+  needs the guest's own wait state rather than its stack.
