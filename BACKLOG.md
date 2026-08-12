@@ -10142,3 +10142,60 @@ priority change is seen. If the dispatch vector starts arriving and the
 working count starts climbing, that is the mechanism. If it does not,
 the TPR shadow is exonerated and the question becomes why the guest
 hypervisor declines to inject an interrupt it has been asked for.
+
+
+## Named at last: what the guest is doing every clock tick
+
+The TPR shadow is **exonerated**. `-DZPP_NESTED_TPR_SHADOW=OFF`, which
+gives the guest hypervisor CR8-load and CR8-store exiting instead of a
+real shadow, stalls identically: the working count froze at 85,756 and
+stayed there for twenty-two minutes while entries climbed to 1,837,749
+and the dispatch vector was injected nine times. How the guest hypervisor
+learns the task priority is not the problem.
+
+With the kernel base pinned at `0xfffff801c9000000` - derivable because
+the image-relative addresses repeat across runs under different KASLR
+bases - the public symbols name every address in the loop:
+
+| image-relative | function |
+|---|---|
+| `0x3a57f8` | `HalpHvTimerArm+0x78` - re-arm STIMER0 |
+| `0x3a597c` | `HvlpGetRegister64+0x3c` - read the reference counter |
+| `0x42890b` | `HvlWriteApicCommandRegister+0x1b` - synthetic ICR |
+| `0x6a768c` | `HvlEndSystemInterrupt+0x1c` - synthetic end of interrupt |
+| `0x6b3692` | **`KiDpcInterruptBypass+0x12`** - the interrupt-window exit |
+
+So every tick Windows acknowledges the clock, writes the synthetic
+interrupt command register to request its **dispatch** interrupt, enters
+`KiDpcInterruptBypass` to run deferred procedure calls, re-arms the
+timer, and spins reading the reference counter. It is trying to dispatch
+deferred work on every single tick and never once succeeds.
+
+Note what this retires: `HvlpGetRegister64` is a *helper that reads a
+register*. The address this investigation kept sampling and kept calling
+"the stall" is a two-instruction accessor called from everywhere, which
+is exactly why a healthy booted Windows sits there too.
+
+**Every link in the chain is now verified except the last.** The
+synthetic interrupt command register is MSR `0x40000071`, outside both
+ranges the MSR bitmap covers, so it exits unconditionally and
+`l1_wants_l2_exit` reflects it - SDM 28.1.3, and the code says so. The
+guest hypervisor therefore receives the request. It then sets
+interrupt-window exiting, which is why the window exit lands in
+`KiDpcInterruptBypass`, and that exit is reflected too
+(`primary_set(primary_interrupt_window)`). It takes that window
+thousands of times and injects vector `0x2f` nine.
+
+So the guest hypervisor is asked for the interrupt, is told when its
+guest can take one, and declines. Everything on our side of that
+conversation has now been checked; what has never been observed is the
+conversation itself.
+
+**Next: turn `shadow_vmcs_enabled` off for one run.** It is the reason
+none of this is visible - with hardware VMCS shadowing every vmread and
+vmwrite the guest hypervisor makes goes to memory without exiting, which
+is what made `vmcs_field_use` read 411 writes and mislead this
+investigation twice. Off, every access exits and is recorded, and the
+record will show directly whether the guest hypervisor writes an
+entry-interruption field after the window exit. It will be slow. It only
+has to boot once.
