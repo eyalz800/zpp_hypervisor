@@ -8742,3 +8742,52 @@ What to look at next, in order:
    current is read back against the other, it is lost the same way.
 3. `tpr_below_threshold` fired **40** times against 3,395 pending
    requests, which is the same fact from the other side.
+
+
+## Corrected, same day: the task priority is an idle processor, not a stuck one
+
+The entry above read a single live sample of `0xd0` as "stuck at
+CLOCK_LEVEL". Sampling two hundred times says otherwise:
+
+| VTPR | Windows level | samples |
+|---|---|---|
+| `0xd0` | CLOCK_LEVEL, 13 | 97 |
+| `0xf0` | HIGH_LEVEL, 15 | 88 |
+| `0x20` | DISPATCH_LEVEL, 2 | 15 |
+
+It moves. And that distribution - clock interrupts at 13, the idle loop
+alternating 15 and 2 - is what an ordinary **idle** Windows processor
+looks like. It never goes below DISPATCH_LEVEL, which is true of an idle
+processor and is not a fault: the idle loop drains its deferred procedure
+call queue inline rather than by taking vector `0x2f`, so the interrupt
+staying pending costs nothing.
+
+So the 3,395-requests-to-6-deliveries ratio is a consequence of the guest
+being idle, not a cause of it. The priority classes still explain which
+vectors get through, and that part stands; what does not stand is the
+inference that withholding `0x2f` is what stops the boot.
+
+**Three hypotheses have now died the same way in one session** - the EPT
+livelock, the stranded application processors, and this - and the shape is
+identical each time: a number was read, a mechanism was constructed that
+would explain it, and the mechanism was announced before the *cheap*
+measurement that discriminates it from the ordinary explanation. In all
+three cases that measurement took one command. The rule this earns:
+**before proposing a mechanism, ask what the same number would look like
+if nothing were wrong, and go and measure that first.**
+
+What is left, and it is solid:
+
+- The guest reaches Phase 1 initialisation and executes INIT-section code.
+- It completes the virtual-trust-level protection pass, 88,000 hypercalls.
+- It then idles - correctly, at the correct priorities, with a correct
+  clock and interrupts arriving - because the Phase 1 thread is blocked
+  and there is nothing else to run.
+- Nothing in this VMM is failing: no stalls, no bad installs, no refused
+  shadows, no dropped events, and an empty log.
+
+So the question is what the blocked thread is waiting for, and every
+remaining answer needs to see inside the guest rather than around it. The
+honest options are a bare-boot differential with KVM's tracepoints, or
+walking the guest hypervisor's extended page tables from outside to read
+the root partition's own kernel state.
