@@ -3,6 +3,7 @@
 #include "zpp/arch/x86_64/msr.h"
 #include "zpp/arch/x86_64/vmx/ept_pointer.h"
 #include "zpp/arch/x86_64/vmx/nested_ept.h"
+#include "zpp/hypervisor/guest_windows.h"
 #include "zpp/hypervisor/hypervisor.h"
 #include "zpp/hypervisor/nested_vmx.h"
 #include <cstddef>
@@ -3093,6 +3094,98 @@ bool hypervisor::on_nested_cr8_access(std::size_t cpu,
     }
 
     return true;
+}
+
+void hypervisor::sample_guest_thread(std::size_t cpu)
+{
+    if (cpu >= max_cpus) {
+        return;
+    }
+
+    // Only one entry in every period, for the reason the declaration
+    // gives: four dependent reads through two levels of translation, on
+    // the hottest path here.
+    if (0 != (this->l2_entries[cpu] % guest_thread_sample_period)) {
+        return;
+    }
+
+    // A 64-bit read of a guest linear address, through the guest's own
+    // page tables and then the guest hypervisor's extended ones. Both
+    // steps are `translate_guest_linear`'s now - see `l2_physical_to_l1`
+    // for why the second exists.
+    auto read = [&](std::uint64_t linear, std::uint64_t & into) -> bool {
+        auto physical = translate_guest_linear(linear);
+        if (!physical) {
+            return false;
+        }
+
+        std::uint64_t value{};
+        auto got = read_guest_memory(
+            cpu,
+            *physical,
+            std::span(reinterpret_cast<std::byte *>(&value),
+                      sizeof(value)));
+        if (!got) {
+            return false;
+        }
+
+        into = value;
+        return true;
+    };
+
+    guest_thread_sample sample;
+
+    // SDM 27.4.1 keeps the guest's GS base in the VMCS, which in kernel
+    // mode is the processor control region. Nothing else here is
+    // architectural - every offset below belongs to another operating
+    // system's build and is documented as such.
+    sample.gs_base =
+        this->vmcs.read(arch::x86_64::vmx::vmcs::field::guest_gs_base);
+
+    if (0 == sample.gs_base) {
+        return;
+    }
+
+    if (!read(sample.gs_base + guest_windows::kpcr_current_prcb,
+              sample.prcb) ||
+        (0 == sample.prcb)) {
+        return;
+    }
+
+    if (!read(sample.prcb + guest_windows::kprcb_current_thread,
+              sample.thread) ||
+        (0 == sample.thread)) {
+        return;
+    }
+
+    static_cast<void>(read(sample.prcb + guest_windows::kprcb_idle_thread,
+                           sample.idle_thread));
+    static_cast<void>(
+        read(sample.thread + guest_windows::ethread_start_address,
+             sample.start_address));
+
+    // The three single-byte fields, read as words and masked. One read
+    // each rather than one read of the enclosing quadword, because they
+    // are not adjacent and a shared read would tie this to their spacing
+    // as well as their offsets.
+    constexpr std::uint64_t byte_mask = 0xff;
+
+    std::uint64_t word{};
+    if (read(sample.thread + guest_windows::kthread_state, word)) {
+        sample.state = word & byte_mask;
+    }
+    if (read(sample.thread + guest_windows::kthread_wait_reason, word)) {
+        sample.wait_reason = word & byte_mask;
+    }
+    if (read(sample.thread + guest_windows::kthread_wait_irql, word)) {
+        sample.wait_irql = word & byte_mask;
+    }
+
+    auto slot = this->guest_thread_sample_count[cpu] %
+                guest_thread_sample_capacity;
+    this->guest_thread_samples[cpu][slot] = sample;
+    this->guest_thread_sample_count[cpu] =
+        this->guest_thread_sample_count[cpu] + 1;
 }
 
 void hypervisor::record_interrupt_request(std::size_t cpu,

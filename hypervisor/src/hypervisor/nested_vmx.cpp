@@ -1746,6 +1746,11 @@ bool hypervisor::on_guest_vmlaunch(std::size_t cpu,
     this->nested_rip_settled[cpu] = true;
     this->l2_entries[cpu] = this->l2_entries[cpu] + 1;
 
+    // Which thread this guest is running, once every few thousand
+    // entries. Here rather than on the exit path because the guest state
+    // is loaded and vmcs02 is current, which is what the walk needs.
+    sample_guest_thread(cpu);
+
     // The answer to a reference-counter read this VMM reflected, which is
     // readable here and nowhere else. Hyper-V has just loaded its guest's
     // general purpose registers into the physical ones - that is what a

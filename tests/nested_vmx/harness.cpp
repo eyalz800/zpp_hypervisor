@@ -141,6 +141,19 @@ hypervisor::guest_linear_to_physical(std::uint64_t linear)
     return linear;
 }
 
+/**
+ * The guest-thread probe, which `on_guest_vmlaunch` calls on every entry.
+ *
+ * Stood in rather than linked, because it lives in nested_entry.cpp and
+ * this harness deliberately compiles nested_vmx.cpp alone. What it does
+ * is read another operating system's structures through two levels of
+ * translation, which this harness has neither of - and it is a
+ * diagnostic, so doing nothing is a faithful stand-in.
+ */
+void hypervisor::sample_guest_thread(std::size_t)
+{
+}
+
 std::expected<void, zpp::error> hypervisor::read_guest_physical(
     std::uint64_t physical, std::span<std::byte> into)
 {

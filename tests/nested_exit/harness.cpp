@@ -366,6 +366,28 @@ void hypervisor::inject_general_protection_fault(std::uint64_t)
     ++g_general_protection_faults;
 }
 
+/**
+ * The two the guest-thread probe reaches through, refused rather than
+ * answered.
+ *
+ * This harness has no guest memory and no page tables, and the probe is a
+ * diagnostic whose whole contract is that failure is silent - so refusing
+ * exercises the path these cases care about, which is that a failed read
+ * leaves the sample empty and stops the walk rather than recording a
+ * plausible number.
+ */
+std::optional<std::uint64_t>
+hypervisor::translate_guest_linear(std::uint64_t)
+{
+    return {};
+}
+
+std::expected<void, zpp::error> hypervisor::read_guest_memory(
+    std::size_t, std::uint64_t, std::span<std::byte>)
+{
+    return std::unexpected(zpp::error{error::guest_address_not_mapped});
+}
+
 arch::x86_64::vmx::ept_walk_result
 hypervisor::shadow_ept_lookup(std::size_t, std::uint64_t guest_physical)
 {

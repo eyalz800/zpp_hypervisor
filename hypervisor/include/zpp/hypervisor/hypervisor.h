@@ -4056,6 +4056,61 @@ private:
     std::uint64_t nested_tpr_threshold[max_cpus]{};
 
     /**
+     * What thread the second-level guest was running, sampled while it
+     * makes no progress.
+     *
+     * The exit rings say what *traps*, and a blocked thread traps
+     * nothing - which is the wall this investigation reached. Everything
+     * measurable about the machine is healthy while a Windows kernel sits
+     * in Phase 1 initialisation doing nothing, and the only thing left
+     * that could say why is the guest's own idea of what it is waiting
+     * for.
+     *
+     * So the chain in `guest_windows.h` is followed: the GS base out of
+     * the VMCS names the processor control region, that names the control
+     * block, and that names the running thread. Its start address
+     * symbolizes into a function - which is how a thread is identified
+     * without a debugger - and its state and wait reason say what it is
+     * doing.
+     *
+     * Sampled, not traced. One sample every `guest_thread_sample_period`
+     * second-level entries, because this is four dependent guest memory
+     * reads through two levels of translation and the entry path is the
+     * hottest one here. A blocked thread stays blocked; it does not need
+     * to be watched at a microsecond.
+     * @{
+     */
+    static constexpr std::uint64_t guest_thread_sample_period = 4096;
+    static constexpr std::size_t guest_thread_sample_capacity = 32;
+
+    struct guest_thread_sample
+    {
+        std::uint64_t gs_base{};
+        std::uint64_t prcb{};
+        std::uint64_t thread{};
+        std::uint64_t idle_thread{};
+        std::uint64_t start_address{};
+        std::uint64_t state{};
+        std::uint64_t wait_reason{};
+        std::uint64_t wait_irql{};
+    };
+
+    guest_thread_sample
+        guest_thread_samples[max_cpus][guest_thread_sample_capacity]{};
+    std::uint64_t guest_thread_sample_count[max_cpus]{};
+
+    /**
+     * Reads one, if this entry is a sampling one. Failures are silent and
+     * leave the slot zero: every offset it follows is a guess about
+     * another operating system's build, and a diagnostic that stopped a
+     * processor over one would be worse than the question it answers.
+     */
+    void sample_guest_thread(std::size_t cpu);
+    /**
+     * @}
+     */
+
+    /**
      * Answers a second-level guest's CR8 access against the guest
      * hypervisor's virtual-APIC page.
      *
