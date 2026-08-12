@@ -9140,3 +9140,43 @@ Next, in order:
    That is a static question about the loader, answerable without a boot.
 3. **Whether the descriptor list the guest walks is the firmware's or one
    this VMM altered.**
+
+
+## The stall is PCI configuration space, read through MMCONFIG
+
+2026-08-12. Two profiles ninety seconds apart, and the second is the
+answer.
+
+| | |
+|---|---|
+| first, at 86,527 second-level entries | `MiInitializePfnEntriesRaw` and friends, spread thin - the memory manager building its page frame database |
+| second, at 195,009 | **`HalpPciReadMmConfigUshort`, 404 hits of 1,454 - 27.8% at a single address**, with `HalpPciMapMmConfigPhysicalAddress` behind it |
+
+So the page frame work was not the stall - it finished, and the profile
+moved. What the guest does afterwards is read PCI configuration space
+through the memory-mapped configuration window, at one instruction,
+indefinitely.
+
+Which closes a circle. The very first thing this investigation looked at
+was a run of extended-page-table violations stepping `0xee400000` to
+`0xefe00000` in 2 MB strides at one instruction pointer - and that
+instruction pointer is this one. It was read then as a scan of a device
+aperture and dismissed as ordinary enumeration. It is the stall.
+
+A bus walk is bounded, so an unbounded one means the reads are not
+answering the way the enumerator expects. Absent hardware answers all
+ones; a bridge that answers plausibly gets its subordinate bus walked. So
+what the guest *reads* through that window decides whether the walk
+terminates, and every one of those reads is served by this VMM's extended
+page tables.
+
+The specific thing to check, and it is checkable without a boot: the
+memory type composed into the shadow leaf for those pages.
+`install_shadow_leaf` writes `composition.type`, and a configuration
+window mapped write-back rather than uncacheable would return whatever a
+cache line happened to hold instead of what the device answers - which is
+exactly "reads that do not answer the way the enumerator expects".
+
+The memory-type range registers do describe the region correctly - the
+log shows `mtrr 0 base 0x80000000 size 0x80000000 type 0x0`, uncacheable,
+covering it - so the question is whether that reaches the leaf.
