@@ -3577,6 +3577,17 @@ private:
      * fields show the state the guest is about to be resumed with rather
      * than the state it exited in.
      */
+    /**
+     * Whose instruction pointer an `exit_trace_entry` holds. See the
+     * `rip_owner` member for why three answers are needed.
+     */
+    enum class rip_owner : std::uint64_t
+    {
+        guest,
+        second_level,
+        first_level,
+    };
+
     struct exit_trace_entry
     {
         std::uint64_t reason{};
@@ -3662,31 +3673,37 @@ private:
         /**
          * Whose instruction pointer `rip` is.
          *
-         * Zero for an exit this VMM answered, where it is the guest's
-         * own. **One for an exit reflected to a guest hypervisor, where
-         * it is not.**
-         *
          * `record_exit` runs from `resume_guest`, after the handlers have
-         * had their say - which is deliberate, so the record shows what
-         * the guest was about to be resumed with. Under nesting that has
-         * a consequence nothing said out loud: `reflect_l2_exit` has by
-         * then made vmcs01 current and loaded the guest hypervisor's host
-         * state, so the instruction pointer read there belongs to *that
-         * hypervisor*, at its resume site, and not to the guest whose
-         * instruction caused the exit.
+         * had their say - deliberately, so the record shows what the
+         * processor was about to be resumed with. Under nesting that
+         * makes the address belong to one of *three* different guests
+         * depending on what the handler did, and nothing said so.
          *
-         * It cost an afternoon. One address appeared in the ring against
-         * `rdmsr`, `vmcall` and `ext-int` alike - which no single
-         * instruction can be - and was read as the guest hypervisor
-         * itself reading synthetic model-specific registers two and a
-         * half million times, which became a hypothesis before the
-         * arithmetic was checked. `cs_selector` cannot tell the two
-         * apart; both run at `0x10`.
+         * - `rip_owner::guest` - the guest that faulted, which for a
+         *   second-level exit this VMM answered itself is that
+         *   second-level guest. Advanced past the instruction already.
+         * - `rip_owner::second_level` - a VMLAUNCH or VMRESUME the guest
+         *   hypervisor executed, which the handler answered by *entering*
+         *   its guest. vmcs02 is current by then, so the address is that
+         *   guest's entry point and not the instruction that caused the
+         *   exit.
+         * - `rip_owner::first_level` - an exit reflected to the guest
+         *   hypervisor. `reflect_l2_exit` has made vmcs01 current and
+         *   loaded its host state, so the address is its resume site.
          *
-         * The second-level ring has the right address for these, since
+         * Each of the last two cost real time. One address stood against
+         * `rdmsr`, `vmcall` and `ext-int` alike - which no instruction can
+         * be - and was read as the guest hypervisor executing synthetic
+         * model-specific register reads two and a half million times.
+         * Another made a first-level VMRESUME look as though the guest
+         * hypervisor lived at an address in its guest's kernel, which
+         * sent a symbolization at the wrong image. `cs_selector` cannot
+         * separate any of them; all three run at `0x10`.
+         *
+         * The second-level ring is unambiguous by construction:
          * `reflect_l2_exit` writes it while vmcs02 is still current.
          */
-        std::uint64_t reflected{};
+        std::uint64_t rip_owner{};
     };
 
     /**

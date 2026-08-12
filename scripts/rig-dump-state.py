@@ -45,6 +45,12 @@ EXIT_REASON = {
 
 ACTIVITY = {0: "active", 1: "hlt", 2: "shutdown", 3: "wait-sipi"}
 
+# Whose instruction pointer a record holds - see exit_trace_entry's
+# rip_owner. An address attributed to the wrong guest reads as a
+# perfectly ordinary address, so it is marked rather than left implicit,
+# and the unmarked case is the ordinary one.
+RIP_OWNER = {0: "", 1: " [l2-rip]", 2: " [l1-rip]"}
+
 
 def gdb_offsets(elf, members):
     """Ask the ELF where each member lives inside the singleton."""
@@ -363,13 +369,10 @@ def main():
             slot = i % ring
             a = instance + off["exit_trace"] + (cpu * ring + slot) * entry_size
             reason, qual, activity, cs, rip, phys, repeat, detail, \
-                reflected = (words.get(a + 8 * k, 0) for k in range(9))
+                rip_owner = (words.get(a + 8 * k, 0) for k in range(9))
             extra = f" phys=0x{phys:x}" if phys else ""
             extra += f" detail=0x{detail:x}" if detail else ""
-            # Whose rip this is - see exit_trace_entry::reflected. An
-            # address attributed to the wrong guest reads as a perfectly
-            # ordinary address, so it is marked rather than left implicit.
-            extra += " [l1-rip]" if reflected else ""
+            extra += RIP_OWNER.get(rip_owner, "")
             times = f" x{repeat}" if repeat > 1 else ""
             print(f"  [{i:6d}] {name_reason(reason):<16} "
                   f"qual=0x{qual:<12x} {ACTIVITY.get(activity, activity)} "
@@ -400,14 +403,11 @@ def main():
             a = (instance + off[member]
                  + (cpu * capacity + slot) * entry_size)
             reason, qual, activity, cs, rip, phys, repeat, detail, \
-                reflected = (got.get(a + 8 * k, 0) for k in range(9))
+                rip_owner = (got.get(a + 8 * k, 0) for k in range(9))
             times = f" x{repeat}" if repeat > 1 else ""
             extra = f" phys=0x{phys:x}" if phys else ""
             extra += f" detail=0x{detail:x}" if detail else ""
-            # Whose rip this is. Printed rather than left implicit,
-            # because an address attributed to the wrong guest reads as a
-            # perfectly ordinary address.
-            extra += " [l1-rip]" if reflected else ""
+            extra += RIP_OWNER.get(rip_owner, "")
             print(f"  [{i:6d}] {name_reason(reason):<16} "
                   f"qual=0x{qual:<12x} {ACTIVITY.get(activity, activity)} "
                   f"cs=0x{cs:04x} rip=0x{rip:x}{extra}{times}")

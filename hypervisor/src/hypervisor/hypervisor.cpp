@@ -4994,7 +4994,21 @@ void hypervisor::record_exit(arch::x86_64::vmx::exit_reason reason,
     // and the address just read is the guest hypervisor's resume site
     // rather than its guest's. See the field for what reading it the
     // other way cost.
-    recorded.reflected = this->exit_reflected[cpu];
+    // Whose instruction pointer that is, which the three cases in
+    // `rip_owner` spell out. `running_l2` being set here means vmcs02 is
+    // current and the address is the second-level guest's; the reflection
+    // flag, set on the way out of `reflect_l2_exit`, means vmcs01 is
+    // current again and it is the guest hypervisor's resume site.
+    if (this->running_l2[cpu]) {
+        recorded.rip_owner =
+            static_cast<std::uint64_t>(rip_owner::second_level);
+    } else if (0 != this->exit_reflected[cpu]) {
+        recorded.rip_owner =
+            static_cast<std::uint64_t>(rip_owner::first_level);
+    } else {
+        recorded.rip_owner = static_cast<std::uint64_t>(rip_owner::guest);
+    }
+
     this->exit_reflected[cpu] = 0;
 
     // Only the two reasons that report one, so nothing else pays a VMREAD

@@ -166,13 +166,13 @@ class ExitTraceEntry(unittest.TestCase):
 
         expected = ["reason", "qualification", "activity_state",
                     "cs_selector", "rip", "guest_physical", "repeated",
-                    "detail", "reflected"]
+                    "detail", "rip_owner"]
         self.assertEqual(
             members, expected,
             "exit_trace_entry's members changed order or name. "
             "rig-dump-state.py unpacks them positionally as "
             "(reason, qual, activity, cs, rip, phys, repeat, detail, "
-            "reflected), so "
+            "rip_owner), so "
             "every column it prints is now attributed to the wrong field "
             "- confidently, and with no error.")
 
