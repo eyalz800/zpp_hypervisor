@@ -1708,6 +1708,26 @@ void hypervisor::on_vm_exit(std::uint64_t cpuid,
                 auto where = vmcs.guest_rip();
                 record_profile_sample(where);
                 record_profile_context(where, context);
+
+                // And the stack, occasionally, from *here* rather than
+                // from the thread sampler.
+                //
+                // The thread sampler runs on the second-level entry path,
+                // which the guest reaches only by exiting - so its stack
+                // is always the clock interrupt's, which is the one place
+                // the guest is not stuck. This exit is on a clock the
+                // guest does not control, so it lands wherever the guest
+                // actually is, which at the stall is the configuration
+                // read 35% of the time.
+                //
+                // Rate-limited hard: a scan is hundreds of guest reads
+                // through two levels of translation and this fires six
+                // thousand times a second.
+                constexpr std::uint64_t stack_sample_period = 256;
+
+                if (0 == (this->profile_samples % stack_sample_period)) {
+                    sample_guest_stack(slot - 1);
+                }
             }
         }
 
