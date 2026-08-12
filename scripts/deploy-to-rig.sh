@@ -25,6 +25,20 @@ LOADER=${1:-out/debug/x86_64/zpp_loader.efi}
 # destructive self check persists in the CMake cache, its hang looks
 # exactly like a hypervisor bug, and a day was lost to it once.
 "$(dirname "$0")/check-bootable.sh" "$LOADER" || exit 1
+
+# And make sure the firmware will actually reach what we just deployed.
+#
+# Windows writes its own boot option and puts it at the front of
+# BootOrder every time it completes a boot, so a deploy can land
+# perfectly and the next run still be Windows on the metal - which reads
+# as a working boot and is a control run. Two measurements and the
+# retraction of one were taken that way before this was automatic.
+#
+# Skippable for a deliberate control run, in the shape the other escape
+# hatches here use.
+if [ "${ZPP_KEEP_BOOT_ORDER:-0}" != "1" ]; then
+    "$(dirname "$0")/rig-one-boot-option.sh" || exit 1
+fi
 DEST=${ZPP_DEST:-/EFI/zpp/zpp_loader.efi}
 PART=${ZPP_PART:-/dev/nvme0n1p2}
 MOUNT=/mnt/zppdeploy
