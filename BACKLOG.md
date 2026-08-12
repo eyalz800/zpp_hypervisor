@@ -10522,3 +10522,51 @@ dispatch interrupt every tick through `HvlWriteApicCommandRegister`,
 which is what `HalRequestSoftwareInterrupt` does, and never lowers the
 priority that would let it run. More stall-phase samples are the next
 thing, not another hypothesis.
+
+
+## The guest sits at HIGH_LEVEL, and the earlier DISPATCH_LEVEL reading was one sample
+
+`VTPR` was read once, came back `0x20`, and was written up as the guest
+sitting at `DISPATCH_LEVEL`. Read ten times instead:
+
+    0xf0  HIGH_LEVEL, IRQL 15   x7
+    0xd0  CLOCK_LEVEL           x2
+    0x20  DISPATCH_LEVEL        x1
+
+The guest spends most of its time at **IRQL 15**, where every interrupt
+is masked rather than just the dispatch one. That is a far stranger place
+to be, and it is the real reason vector `0x2f` is never injected: the
+guest hypervisor honours the task priority and there is nothing above 15
+to deliver.
+
+**Seventh instrument defect of this shape, and the second in an hour.**
+A single read of a varying quantity is not a measurement of it. The rule
+that keeps being relearned: before any conclusion, sample the thing more
+than once and show the distribution.
+
+**What else is true at the stall**, each measured over 45 to 60 seconds:
+
+- Hypercalls have **stopped completely** - `vmcall` frozen at 87,024.
+  The virtual secure mode work is over, one way or another.
+- The clock is healthy: 95.7 timer arms and 95.6 synthetic interrupts
+  per second, one arm per interrupt, with about ten reference-counter
+  reads per tick.
+- Extended-page-table violations continue at 284 a second while
+  `invept`, `shadow_ept_builds` and `shadow_ept_leaves_filled` are all
+  frozen - so they are not being satisfied by filling shadow leaves.
+  They are also absent from the newest thirty-two ring entries, so they
+  arrive in bursts rather than steadily. Not yet explained.
+- The guest is **not idle**: its stack at the stall shows
+  `BgpRasPrintGlyph`, `MmAllocateNodePagesForMdlEx` and
+  `RtlpHpVsContextFree` beside the clock path. It is drawing boot
+  graphics and churning memory. `l2_working_trace_count` looking frozen
+  means that work causes few exits, **not** that there is none - another
+  counter read as saying more than it can.
+
+So the shape is: virtual secure mode work finishes, the guest goes to
+IRQL 15, and from there it draws and allocates for ever while every
+deferred procedure call it queues is correctly refused.
+
+**Next**: sample the task priority and the stack *together*, and look
+only at the stacks taken while the priority is `0xf0`. What raises IRQL
+to HIGH_LEVEL and does not lower it is now the whole question.
