@@ -10753,3 +10753,51 @@ all three:
    shadowed is a field that must be copied both ways on every round
    trip; a field left unshadowed costs an exit only when the guest
    hypervisor actually touches it.
+
+
+## The shadow VMCS copy is not the bottleneck - measured, and reverted
+
+Two optimizations were built, measured and taken back out. The knowledge
+is worth more than the code was.
+
+**What was tried.** `copy_vmcs12_to_shadow` writes 36 fields on every
+reflected exit. First it was changed to write only the fields the region
+did not already hold, tracked in a cache updated from both directions.
+Then, since the pointer operations cost more than the writes, the whole
+sequence - `vmptrst`, `vmptrld`, the writes, `vmclear`, `vmptrld` - was
+skipped when nothing at all had changed.
+
+**What it bought.** Nothing worth keeping:
+
+    writes skipped            84.6%   (5,276,547 of 6,233,728)
+    whole copies elided       16      of about 700,000
+    cost per exit             160 us -> 156 us
+    fraction inside this VMM  85% -> 85%
+
+**Why, and this is the part to keep.** Skipping 84% of the VMWRITEs
+moved the cost by 2%, which says **a VMWRITE here is cheap** - the layer
+below shadows this VMM's own VMCS accesses, so most do not trap at all.
+And the whole-copy elision never fires because the read-only half of the
+shadow set is exit reason, exit qualification and the interruption
+fields, which change on *every* exit by construction. A cache over
+values that always change is dead weight.
+
+**Where the 160 microseconds is not.** Not in the shadow copy. That
+leaves, in the span this VMM actually measures - `on_vm_exit` through
+the end of `resume_guest`, which excludes the VM entry itself:
+`save_l2_state`, `build_vmcs02`, the VMCS pointer switches between
+vmcs01 and vmcs02, the shadow extended page tables, and the trace rings.
+
+**What to try next, and what not to.** `build_vmcs02`'s writes are the
+remaining candidate and are a *better* one than the shadow copy was,
+because the fields it writes - segment bases, control registers, the
+control words - genuinely do not change between entries, unlike exit
+reason. Do not re-try the shadow copy: it is measured, and the numbers
+are above.
+
+**A contamination worth recording.** The first cost measurements were
+taken with `ZPP_PROFILE_L2=ON`, left over from stack sampling, whose
+`sample_guest_stack` does hundreds of guest reads through two levels of
+translation. Re-measured with it off the answer barely moved - 85% both
+ways - so it was not the cause, but the measurement had no right to be
+trusted until that was checked.
