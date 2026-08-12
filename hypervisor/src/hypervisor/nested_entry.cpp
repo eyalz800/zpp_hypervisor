@@ -3098,10 +3098,24 @@ bool hypervisor::on_nested_cr8_access(std::size_t cpu,
 
 void hypervisor::walk_guest_threads(std::size_t cpu, std::uint64_t thread)
 {
-    // Once. What it records does not change while the machine makes no
-    // progress, and the walk is expensive enough that repeating it would
-    // be the diagnostic costing more than the thing it diagnoses.
-    if (0 != this->guest_thread_list_walked) {
+    // Until it finds a process with more than one thread, and then never
+    // again.
+    //
+    // "Once, on the first plausible thread" was the first rule and it
+    // caught the idle process, whose list is one thread long by
+    // construction. "Only from a thread that is not the idle thread" was
+    // the second and it never fired at all: this processor alternates
+    // between two virtual trust levels, and every sample that read
+    // cleanly - that is, every sample from the level whose offsets these
+    // are - found it idle.
+    //
+    // So the condition is on the answer rather than on the question. A
+    // list of one is the idle process and worth replacing; a longer one
+    // is the system process and worth keeping. The walk stays bounded
+    // because it stops for good as soon as it succeeds.
+    constexpr std::uint64_t threads_worth_keeping = 2;
+
+    if (this->guest_thread_list_count >= threads_worth_keeping) {
         return;
     }
 
@@ -3146,7 +3160,7 @@ void hypervisor::walk_guest_threads(std::size_t cpu, std::uint64_t thread)
     }
 
     this->guest_thread_list_process = process;
-    this->guest_thread_list_walked = 1;
+    this->guest_thread_list_walked = this->guest_thread_list_walked + 1;
 
     std::size_t found{};
     while ((found < guest_windows::thread_walk_limit) &&
@@ -3296,9 +3310,7 @@ void hypervisor::sample_guest_thread(std::size_t cpu)
     // sample taken while the guest is doing work is one - so the walk
     // waits for a sample whose thread is not the idle thread rather than
     // taking the first that reads cleanly.
-    if (sample.thread != sample.idle_thread) {
-        walk_guest_threads(cpu, sample.thread);
-    }
+    walk_guest_threads(cpu, sample.thread);
 
     auto slot = this->guest_thread_sample_count[cpu] %
                 guest_thread_sample_capacity;

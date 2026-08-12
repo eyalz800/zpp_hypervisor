@@ -4117,13 +4117,20 @@ private:
      * The thread worth finding is the blocked one, and during Phase 1 it
      * is in the system process's list along with a handful of others.
      *
-     * Walked once, on the first sample that finds a plausible thread, and
-     * never again: a list of sixteen entries costs four dependent guest
-     * reads each through two levels of translation, and what it records
-     * does not change while the machine makes no progress. Bounded by
-     * `thread_walk_limit` and by the head reappearing, because a list
-     * read out of another operating system's memory is not something to
-     * trust to terminate.
+     * Walked until it finds a process with more than one thread, and
+     * then never again. Two narrower rules were tried first and both
+     * failed for reasons worth keeping: walking once on the first
+     * plausible thread caught the *idle* process, whose list is one
+     * thread long by construction, and walking only from a thread that
+     * was not the idle thread never fired at all, because this processor
+     * alternates between two virtual trust levels and every sample from
+     * the one these offsets describe found it idle. Conditioning on the
+     * answer rather than the question is what works.
+     *
+     * Bounded by `thread_walk_limit` and by the head reappearing, because
+     * a list read out of another operating system's memory is not
+     * something to trust to terminate - and bounded in time because it
+     * stops for good as soon as it succeeds.
      * @{
      */
     struct guest_thread_entry
