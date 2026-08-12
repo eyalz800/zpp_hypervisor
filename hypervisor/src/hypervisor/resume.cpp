@@ -651,6 +651,21 @@ void hypervisor::resume_guest(arch::x86_64::context & context,
         }
     }
 
+    // Close the span opened at the top of `on_vm_exit`. Here rather
+    // than anywhere earlier because everything this VMM does for an exit
+    // has now been done, and the next instruction is the entry itself.
+    if (auto slot = vmcs.vpid(); (0 != slot) && (slot <= max_cpus)) {
+        auto cpu = slot - 1;
+        auto now = arch::x86_64::rdtsc();
+        if (0 != this->handler_entry_tsc[cpu]) {
+            this->handler_cycles[cpu] =
+                this->handler_cycles[cpu] +
+                (now - this->handler_entry_tsc[cpu]);
+            this->handler_exits[cpu] = this->handler_exits[cpu] + 1;
+        }
+        this->handler_last_tsc[cpu] = now;
+    }
+
     // The mirror of the launch: the guest's registers are put back
     // and the last thing executed in host mode is the resume itself.
     context.rip = reinterpret_cast<std::uint64_t>(entry);
