@@ -2669,7 +2669,16 @@ void hypervisor::reflect_l2_exit(std::size_t cpu,
                             (end_of_message_msr == index) ||
                             (synthetic_timer_count_msr == index));
 
+        // External interrupts go too, and they are most of what the
+        // first version of this ring caught: the timer arrives *during*
+        // the reference-clock poll, so an idle guest produces one of
+        // these per tick and they filled 4096 slots with the same
+        // instruction pointer. Nothing is lost by dropping them here -
+        // `l2_external_vector` already counts every one by vector, which
+        // is the question they answer. This ring answers a different
+        // one: what the guest was *doing*.
         if (!is_idle_msr &&
+            (basic_reason::external_interrupt != reason.basic()) &&
             (basic_reason::interrupt_window != reason.basic())) {
             auto & working = this->l2_working_trace_count[cpu];
 
