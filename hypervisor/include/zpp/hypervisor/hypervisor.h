@@ -3658,6 +3658,35 @@ private:
          * status in RAX would make the high half its own.
          */
         std::uint64_t detail{};
+
+        /**
+         * Whose instruction pointer `rip` is.
+         *
+         * Zero for an exit this VMM answered, where it is the guest's
+         * own. **One for an exit reflected to a guest hypervisor, where
+         * it is not.**
+         *
+         * `record_exit` runs from `resume_guest`, after the handlers have
+         * had their say - which is deliberate, so the record shows what
+         * the guest was about to be resumed with. Under nesting that has
+         * a consequence nothing said out loud: `reflect_l2_exit` has by
+         * then made vmcs01 current and loaded the guest hypervisor's host
+         * state, so the instruction pointer read there belongs to *that
+         * hypervisor*, at its resume site, and not to the guest whose
+         * instruction caused the exit.
+         *
+         * It cost an afternoon. One address appeared in the ring against
+         * `rdmsr`, `vmcall` and `ext-int` alike - which no single
+         * instruction can be - and was read as the guest hypervisor
+         * itself reading synthetic model-specific registers two and a
+         * half million times, which became a hypothesis before the
+         * arithmetic was checked. `cs_selector` cannot tell the two
+         * apart; both run at `0x10`.
+         *
+         * The second-level ring has the right address for these, since
+         * `reflect_l2_exit` writes it while vmcs02 is still current.
+         */
+        std::uint64_t reflected{};
     };
 
     /**
@@ -4637,6 +4666,13 @@ private:
     /**
      * @}
      */
+    /**
+     * Set by `reflect_l2_exit` and consumed by `record_exit`, which is
+     * the only pair that needs it: it is how the ring knows whose
+     * instruction pointer it just read. See `exit_trace_entry::reflected`.
+     */
+    std::uint64_t exit_reflected[max_cpus]{};
+
     std::uint64_t l2_exits_reflected[max_cpus]{};
     std::uint64_t l2_exits_handled[max_cpus]{};
     /**

@@ -2865,6 +2865,12 @@ void hypervisor::reflect_l2_exit(std::size_t cpu,
 
     this->l2_exits_reflected[cpu] = this->l2_exits_reflected[cpu] + 1;
 
+    // So the ring written at the end of this exit says whose instruction
+    // pointer it holds. From here the current VMCS is vmcs01 and the
+    // guest hypervisor's host state is loaded, so `guest_rip` no longer
+    // answers about the guest that faulted.
+    this->exit_reflected[cpu] = 1;
+
     // A failure in either exit area is a VMX abort, SDM 30.4 and SDM 30.6.
     // A real abort is a shutdown, which is not something to do to a whole
     // machine because one guest's hypervisor named a page that stopped

@@ -122,22 +122,29 @@ class ExitTraceEntry(unittest.TestCase):
         self.header = read(HEADER)
         self.script = read(DUMP_STATE)
 
-    def test_entry_size_matches_the_struct(self):
-        """`entry_size = 0x40` against the real member count.
+    def test_entry_size_is_derived_and_not_copied(self):
+        """The stride must come from the type, not from a literal.
 
-        This one is correct today and multiplies into every ring address
-        in the file, so it is the constant with the widest blast radius.
+        It used to be `entry_size = 0x40` here and this test compared it
+        against the member count - which worked, and only because someone
+        remembered to run it. A record gained a ninth field the day this
+        was rewritten, and a stale stride does not fail: it reads the ring
+        at the wrong pitch and prints plausible nonsense, which is the
+        same failure mode `gdb_lengths` documents for the capacities.
+
+        So the check is now the stronger one - that no literal is carried
+        at all.
         """
-        members = cxx_member_words(self.header, "exit_trace_entry")
-        match = re.search(r"entry_size\s*=\s*(0x[0-9a-fA-F]+|\d+)",
-                          self.script)
-        self.assertIsNotNone(
-            match, "rig-dump-state.py no longer sets entry_size")
-        self.assertEqual(
-            int(match.group(1), 0), 8 * len(members),
-            "rig-dump-state.py's entry_size disagrees with "
-            "exit_trace_entry's {} members. Every ring address in that "
-            "file is derived from it.".format(len(members)))
+        self.assertNotRegex(
+            self.script, r"entry_size\s*=\s*(0x[0-9a-fA-F]+|\d+)\s*$",
+            "rig-dump-state.py carries a literal entry_size again. Derive "
+            "it from sizeof(exit_trace[0][0]) instead - a copy of a "
+            "struct's size does not fail when the struct changes, it "
+            "reads every ring at the wrong stride.")
+        self.assertIn(
+            "sizeof(('zpp::hypervisor::hypervisor' *)0)", self.script,
+            "rig-dump-state.py no longer asks the ELF for the record "
+            "size")
 
     def test_unpacked_names_match_declaration_order(self):
         """The 8-tuple encodes member *order*, which no size check sees.
@@ -150,21 +157,22 @@ class ExitTraceEntry(unittest.TestCase):
 
         # The names the script unpacks into, in the order it unpacks them.
         match = re.search(
-            r"reason, qual, activity, cs, rip, phys, repeat, detail = ",
+            r"reason, qual, activity, cs, rip, phys, repeat, detail, ",
             self.script)
         self.assertIsNotNone(
             match,
             "rig-dump-state.py no longer unpacks the exit trace as the "
-            "8-tuple this test knows about - re-read it and update this")
+            "tuple this test knows about - re-read it and update this")
 
         expected = ["reason", "qualification", "activity_state",
                     "cs_selector", "rip", "guest_physical", "repeated",
-                    "detail"]
+                    "detail", "reflected"]
         self.assertEqual(
             members, expected,
             "exit_trace_entry's members changed order or name. "
             "rig-dump-state.py unpacks them positionally as "
-            "(reason, qual, activity, cs, rip, phys, repeat, detail), so "
+            "(reason, qual, activity, cs, rip, phys, repeat, detail, "
+            "reflected), so "
             "every column it prints is now attributed to the wrong field "
             "- confidently, and with no error.")
 

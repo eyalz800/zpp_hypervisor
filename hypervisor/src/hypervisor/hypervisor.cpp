@@ -4988,6 +4988,15 @@ void hypervisor::record_exit(arch::x86_64::vmx::exit_reason reason,
     recorded.rip = vmcs.guest_rip();
     recorded.repeated = 1;
 
+    // Whose instruction pointer that is. `running_l2` is cleared by
+    // `reflect_l2_exit` on its way out, so a processor that was running a
+    // second-level guest and is not now is one whose exit was reflected -
+    // and the address just read is the guest hypervisor's resume site
+    // rather than its guest's. See the field for what reading it the
+    // other way cost.
+    recorded.reflected = this->exit_reflected[cpu];
+    this->exit_reflected[cpu] = 0;
+
     // Only the two reasons that report one, so nothing else pays a VMREAD
     // on a path taken by every exit.
     constexpr std::uint64_t ept_violation = 48;

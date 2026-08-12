@@ -265,7 +265,16 @@ def main():
     off = gdb_offsets(args.elf, members)
     instance = base + gdb_symbol(
         args.elf, "zpp::hypervisor::hypervisor::instance()::instance")
-    entry_size = 0x40
+    # Derived from the type rather than carried here, for the reason
+    # gdb_lengths gives at length: a constant copied out of the header
+    # does not fail when the header changes, it reads the ring at the
+    # wrong stride and reports plausible nonsense. The record gained a
+    # field the day this comment was written.
+    entry_size = int(subprocess.run(
+        ["x86_64-elf-gdb", "-q", "-batch", args.elf, "-ex",
+         "print (int)sizeof(('zpp::hypervisor::hypervisor' *)0)"
+         "->exit_trace[0][0]"],
+        capture_output=True, text=True).stdout.split("=")[-1].strip())
     lengths = gdb_lengths(args.elf, ["exit_trace", "l2_exit_trace",
                                      "l2_working_trace",
                                      "exit_reason_counts"])
@@ -353,8 +362,8 @@ def main():
         for i in range(start, count):
             slot = i % ring
             a = instance + off["exit_trace"] + (cpu * ring + slot) * entry_size
-            reason, qual, activity, cs, rip, phys, repeat, detail = (
-                words.get(a + 8 * k, 0) for k in range(8))
+            reason, qual, activity, cs, rip, phys, repeat, detail, \
+                reflected = (words.get(a + 8 * k, 0) for k in range(9))
             extra = f" phys=0x{phys:x}" if phys else ""
             extra += f" detail=0x{detail:x}" if detail else ""
             times = f" x{repeat}" if repeat > 1 else ""
@@ -386,11 +395,15 @@ def main():
             slot = i % capacity
             a = (instance + off[member]
                  + (cpu * capacity + slot) * entry_size)
-            reason, qual, activity, cs, rip, phys, repeat, detail = (
-                got.get(a + 8 * k, 0) for k in range(8))
+            reason, qual, activity, cs, rip, phys, repeat, detail, \
+                reflected = (got.get(a + 8 * k, 0) for k in range(9))
             times = f" x{repeat}" if repeat > 1 else ""
             extra = f" phys=0x{phys:x}" if phys else ""
             extra += f" detail=0x{detail:x}" if detail else ""
+            # Whose rip this is. Printed rather than left implicit,
+            # because an address attributed to the wrong guest reads as a
+            # perfectly ordinary address.
+            extra += " [l1-rip]" if reflected else ""
             print(f"  [{i:6d}] {name_reason(reason):<16} "
                   f"qual=0x{qual:<12x} {ACTIVITY.get(activity, activity)} "
                   f"cs=0x{cs:04x} rip=0x{rip:x}{extra}{times}")
