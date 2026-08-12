@@ -9869,3 +9869,81 @@ delivery and the virtual trust level transitions. The control is
 reproducible now and takes one boot, which makes the next comparison a
 differential one rather than another instrument added to the failing
 side.
+
+
+## The application processors never start, and no start-up IPI is ever seen
+
+The failure has a shape at last, and it is not what any of the twelve
+eliminated explanations described. Measured 2026-08-12 on the rig,
+module base `0x673e3000`, singleton `0x68847000`, eight processors.
+
+**What the machine is doing.** Through the QEMU monitor, which perturbs
+nothing:
+
+- Processor 0: 1,639,424 exits, 454,045 second-level entries. Windows
+  and Hyper-V are running, on the boot processor alone.
+- Processors 1 through 7: **198 exits each, zero second-level entries**,
+  and all seven sit at the *same* instruction pointer `0x7f96b030` with
+  identical flags. That is firmware. Their last recorded exits are at
+  `cs=0x0038` doing CPUID and `rdmsr 0x1b` - EDK2's own MP startup - and
+  then nothing at all.
+- Not one of them has ever taken an `init` or a `sipi` exit.
+
+So seven processors were virtualized at launch, went back to the
+firmware's wait loop, and were never woken. Windows is on one processor.
+
+**What the guest is waiting for.** Processor 0's exit ring, read with
+the instruction pointer attributed to its owner, is Windows executing
+`rdmsr 0x40000020` - the Hyper-V reference time counter - over and over,
+returning each time to the same address. That is a timed spin. The
+guest is waiting with a timeout, and what it is waiting for is seven
+processors that are never going to answer.
+
+This also retires an address that misled this investigation for a long
+time. The instruction pointer sampled endlessly in the failing runs is a
+*stall routine*, which is why it appears in a healthy booted Windows
+too. It was never where the guest was stuck; it is where the guest waits.
+
+**Why no IPI is seen, and this is the part to act on.** The counters,
+read out of the resident module:
+
+    observed_apic_mode[0..7]   02 02 02 02 02 02 02 02   all xAPIC
+    ipi_init_seen              1
+    ipi_start_up_seen          2
+    ipi_refused_shorthand      0
+    ipi_refused_logical        0
+    ipi_last_command           0xc4687
+
+One INIT and two start-up IPIs for the whole boot, and
+`ipi_last_command` decodes as vector `0x87`, delivery mode 6, shorthand
+3 - a *broadcast* start-up IPI. One INIT plus two broadcast SIPIs is
+EDK2's own MP initialisation, exactly. **Every IPI we have ever seen is
+the firmware's.** Nothing from Windows, nothing from Hyper-V.
+
+And they were not refused: both refusal counters are zero. We did not
+turn a start-up IPI down, we never got one.
+
+`on_interrupt_command` in `interrupt_command.cpp` says what to check
+first when a processor never starts, and it is right: only the x2APIC
+interrupt command register is an MSR, so a guest in xAPIC mode writes
+its command to the APIC page instead and reaches none of that code.
+Every processor here is in xAPIC mode. `local_apic_write.cpp` *does*
+decode the page write at offset 0x300 and does call
+`on_interrupt_command` - the path exists and demonstrably worked for the
+firmware's own broadcast. What is not established is whether it is still
+armed, and still reached, once Hyper-V is resident and the shadow EPT is
+in use for its guest.
+
+**The next measurement, and it is one boot.** Either the guest sent a
+start-up IPI we did not observe - in which case the watch on the APIC
+page is not doing its job in that phase - or the guest never sent one,
+in which case Hyper-V is stuck earlier and the parked processors are a
+symptom. The two are distinguishable from underneath and only from
+underneath: KVM's `kvm_apic_ipi` and `kvm_apic_accept_irq` tracepoints
+say what the layer below was asked for and what it did. That is the same
+instrument that once proved a broadcast INIT-SIPI-SIPI delivered to all
+seven while this VMM was refusing it.
+
+**Do not use a FIFO for that capture.** It corrupted kernel memory here
+and cost the machine. Stream it off-box over netcat with the reader
+`setsid`-detached, per the trace-kvm notes.
