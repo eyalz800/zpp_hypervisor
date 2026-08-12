@@ -9238,3 +9238,53 @@ thing they preceded is not.
    most valuable possible outcome and is one boot to check.
 3. **Why a caller retries forever on an absent device**, which is a
    question about Windows and answerable from the symbols.
+
+
+## The stall, exactly: a vendor-ID poll of bus 252, device 31, function 0
+
+2026-08-12. The polled pointer, translated by this VMM through both
+levels and decoded against a window read out of the machine rather than
+guessed:
+
+```
+guest virtual   0xfffff7ea80017000
+host physical   0xefcf8000
+ECAM window     0xe0000000-0xefffffff   (QEMU `info mtree`, -machine q35)
+
+  bus 0xfc (252), device 0x1f (31), function 0, register 0x000
+```
+
+Register zero is the vendor identifier, and the value coming back is
+`0xffff` - PCI for "nothing here". The guest has one bus with ten
+functions on it; bus 252 does not exist and never will.
+
+**It is a poll and not a scan, and proving that took correcting an
+earlier claim.** The registers being identical at every sample looked
+like proof, and it is not: `HalpPciMapMmConfigPhysicalAddress` reuses one
+virtual window and remaps it, so a scan would show a constant `rcx` too.
+What settles it is the *physical* address, sampled three times seconds
+apart from the live guest and identical each time. The target does not
+move.
+
+So: **Windows reads the vendor identifier of a function that is not
+there, is told it is not there, and reads it again - for 35% of its
+entire execution.**
+
+What is now known with certainty:
+
+- The mapping is this VMM's and it is correct: the extended-page-table
+  entry covering that address is uncacheable, present and fully
+  permitted, read from the running guest.
+- The `0xffff` is hardware's answer, not this VMM's invention. Nothing
+  here intercepts configuration space.
+- Bus 252 is near the end of a 256-bus space, so the enumerator reached
+  it and stopped advancing rather than never starting.
+
+The remaining question is why a caller retries a probe that has already
+answered, and it divides cleanly:
+
+1. **Does the same poll happen without this VMM?** One boot answers it,
+   and it is the most valuable outcome available - if it does, the fault
+   is the rig's configuration and not this hypervisor's.
+2. **What calls it**, which the stack scan can answer now that it knows
+   where to look.
