@@ -10085,3 +10085,60 @@ This also finally explains the address that has haunted the whole
 investigation. `...5a597e` is not where anything is stuck and not a stall
 routine in general - it is the *jump* of a two-instruction timeout spin,
 which is why a healthy Windows sits there too.
+
+
+## The deferred-procedure interrupt is never delivered
+
+The interrupt census, taken at the stall on the single-processor run,
+with the guest's working count frozen and its entries climbing at eight
+hundred thousand in ten minutes:
+
+    l2_injected_vector[0x2f]        13
+    l2_injected_vector[0xd1]    68,301 and climbing at ~96/s
+
+`0xd1` is the synthetic interrupt the timer messages arrive on. `0x2f` is
+Windows' **dispatch vector** - the one that runs deferred procedure
+calls. Thirteen in twenty minutes.
+
+The loop in the second-level ring says what is being asked for, and it
+repeats without variation:
+
+    rdmsr 0x40000020   read the reference counter, several times
+    ext-int            an interrupt arrives
+    wrmsr 0x40000070   synthetic end of interrupt
+    wrmsr 0x40000071   **synthetic interrupt command - request a DPC**
+    int-window         waiting for a window to take one
+    rdmsr 0x40000020   spin on the clock, six more times
+    wrmsr 0x400000b1   STIMER0_COUNT, re-arm the timer
+
+Windows takes each clock tick, acknowledges it, asks for its dispatch
+interrupt, waits, gets nothing, and re-arms. Everything in the rest of
+phase one runs at dispatch level - the boot graphics among it - so
+nothing after this point can happen. A boot that draws one dot of the
+circle and stops is exactly what this produces, which is the observation
+that turned the investigation around: **slowness of any degree still
+animates.**
+
+**Corrected on the way here, and both corrections were the machine's
+owner's.** The guest hypervisor *is* injecting - `vmcs_field_write`
+counting 411 proves nothing, because `shadow_vmcs_enabled` is true and a
+shadowed vmwrite never exits. And the timer is *not* dead: a new census
+taken at the last instant before `restore_context` shows every staged
+injection still present in the field at the entry that runs, one for
+one, their difference being exactly the frozen requeue total. Delivery
+works. What does not arrive is the *dispatch* interrupt.
+
+**The suspect, and it is one build switch away from an answer.** For
+Hyper-V to know when Windows has dropped its task priority far enough to
+accept vector `0x2f`, it needs the TPR-below-threshold exit. There have
+been **42** of them. This VMM hands the guest hypervisor a real TPR
+shadow, and `nested_vmx.h` marks that "OFFERED, experiment in progress" -
+withdrawn twice before, both times on evidence later found to be
+confounded by the interrupt-remapping setting.
+
+So the next run is `-DZPP_NESTED_TPR_SHADOW=OFF`, which gives the guest
+hypervisor CR8-load and CR8-store exiting instead, so every task
+priority change is seen. If the dispatch vector starts arriving and the
+working count starts climbing, that is the mechanism. If it does not,
+the TPR shadow is exonerated and the question becomes why the guest
+hypervisor declines to inject an interrupt it has been asked for.
