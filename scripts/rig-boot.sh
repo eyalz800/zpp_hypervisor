@@ -43,6 +43,16 @@ GDB_PORT=${GDB_PORT:-1234}
 # it.
 EXTRA=${ZPP_QEMU_EXTRA:-}
 
+# How many processors the guest gets, passed through to the launcher.
+#
+# **Empty means eight, not one.** The launcher's own default is the host's
+# count, and nothing here used to forward this at all - so a run started
+# to investigate a single-processor boot got eight, and every per-processor
+# counter read afterwards was processor zero of eight. That cost an entire
+# investigation: seven processors sat in the firmware's wait loop and the
+# state that said so was never read, because nobody knew there were seven.
+CPUS=${ZPP_CPUS:-}
+
 SSH_OPTS="-o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o ConnectTimeout=10 -o ServerAliveInterval=5 -o ServerAliveCountMax=3 -o BatchMode=yes"
 
 # shellcheck disable=SC2086
@@ -78,7 +88,7 @@ CHANNELS="-monitor telnet:0.0.0.0:$MONITOR_PORT,server,nowait"
 CHANNELS="$CHANNELS -gdb tcp:0.0.0.0:$GDB_PORT"
 
 say "booting with monitor :$MONITOR_PORT, gdb :$GDB_PORT, serial to"
-say "/home/tc/zpp/serial.out"
+say "/home/tc/zpp/serial.out, cpus ${CPUS:-<launcher default>}"
 
 # `setsid nohup` because QEMU must outlive the ssh session, and `sudo -E`
 # because the launcher reads ZPP_QEMU_EXTRA from the environment. Without
@@ -88,6 +98,7 @@ say "/home/tc/zpp/serial.out"
 rig 120 "
     cd /home/tc/vm
     export ZPP_QEMU_EXTRA='$CHANNELS $EXTRA'
+    ${CPUS:+export ZPP_CPUS=$CPUS}
     setsid nohup sudo -E ./boot-zpp.sh > /home/tc/zpp/boot.log 2>&1 < /dev/null &
     sleep 3" > /dev/null 2>&1 || true
 
@@ -147,7 +158,7 @@ while [ "$SECONDS" -lt "$deadline" ]; do
 done
 
 if [ "$serial" -eq 0 ]; then
-    say "FAIL: no 'zpp:' line on serial within 90s. The firmware booted"
+    say "FAIL: no 'zpp:' line on serial within 240s. The firmware booted"
     say "      something other than the loader, so this run has no"
     say "      hypervisor in it. Check the guest's boot option with"
     say "      rig-one-boot-option.sh before debugging anything else."
@@ -158,4 +169,10 @@ if [ "$ok" -eq 0 ]; then
     exit 1
 fi
 
-say "ok: monitor, gdb stub and serial all answering."
+# Reported rather than assumed, and always, because assuming it is what
+# cost the investigation described above `CPUS`. Every per-processor
+# reading afterwards has to be taken over this many processors.
+seen=$(rig 30 "printf 'info cpus\n' | nc -w 5 127.0.0.1 $MONITOR_PORT" \
+    2>/dev/null | LC_ALL=C tr -d '\r' | grep -ac 'CPU #')
+
+say "ok: monitor, gdb stub and serial all answering. guest has $seen cpus."
