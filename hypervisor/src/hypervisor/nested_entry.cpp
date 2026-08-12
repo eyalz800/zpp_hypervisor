@@ -3312,9 +3312,22 @@ void hypervisor::record_profile_context(
         .r8 = context.r8,
     };
 
-    // And what the polled pointer maps to, occasionally. See
-    // `profile_pointer_physical` for why not every time.
-    if (0 == slot) {
+    // And what the polled pointer maps to.
+    //
+    // **Every sample, not every thirty-second.** Rate-limiting this was
+    // an error that produced a false conclusion: the profiler fires only
+    // when the guest runs a long time without exiting, which on a settled
+    // machine is about once a minute, so a value refreshed every
+    // thirty-two samples is refreshed every half hour. Three readings
+    // taken seconds apart thenreturned the same number and were read as
+    // three independent observations agreeing - which is what "it is a
+    // poll, not a scan" rested on. They were one observation read three
+    // times.
+    //
+    // The walk is expensive and the sample rate is what bounds it, not
+    // this counter. When the profiler is quiet this costs almost nothing;
+    // when it is loud the guest is spinning and the cost is worth paying.
+    if (true) {
         if (auto physical = translate_guest_linear(context.rcx)) {
             if (auto reachable =
                     l2_physical_to_l1(this->vmcs.vpid() - 1, *physical)) {

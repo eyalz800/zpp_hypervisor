@@ -4280,10 +4280,15 @@ private:
      * device and function whose vendor identifier reads `0xffff` for
      * ever.
      *
-     * Translated once every `profile_context_capacity` samples rather
-     * than on each. A four-level walk through two levels of translation
-     * is not something to do six thousand times a second, and the answer
-     * does not change - that is the whole finding.
+     * Translated on every sample. Rate-limiting it produced a false
+     * conclusion: the profiler fires only when the guest runs a long time
+     * without exiting, which on a settled machine is about once a minute,
+     * so a value refreshed every thirty-two samples is refreshed every
+     * half hour - and three readings taken seconds apart returned the
+     * same number and were read as three independent observations
+     * agreeing. They were one observation read three times.
+     *
+     * The sample rate bounds the cost, not a counter on top of it.
      */
     std::uint64_t profile_pointer_physical{};
     std::uint64_t profile_pointer_virtual{};

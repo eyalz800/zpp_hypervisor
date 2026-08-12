@@ -9328,3 +9328,42 @@ is reloaded per entry measures *long residencies*, not time - which is
 exactly the right tool for finding a spin and the wrong one for
 attributing shares of total execution. That distinction should have been
 in the first entry.
+
+
+## Retracted: "it is a poll, not a scan" rested on one reading, not three
+
+2026-08-12, immediately after the entry above and before anything is
+built on it.
+
+The claim was that the polled configuration address is fixed, and the
+evidence was three readings taken seconds apart returning the same
+physical address. **Those readings were not independent.**
+`profile_pointer_physical` was refreshed once every thirty-two profile
+samples, and the profiler on a settled machine fires about once a minute
+- so the stored value is refreshed roughly every half hour. Three reads
+seconds apart were guaranteed to agree, whatever the guest was doing.
+
+So the distinction the whole conclusion turned on - a poll of one
+function versus a scan across many - is **unmeasured**, not settled.
+`HalpPciMapMmConfigPhysicalAddress` reuses one virtual window and remaps
+it, so the constant `rcx` proves nothing either, which was already noted;
+removing the physical evidence leaves nothing at all.
+
+What survives:
+
+- The guest spends long uninterrupted stretches inside
+  `HalpPciReadMmConfigUshort` - that comes from the sample *addresses*,
+  which are aggregated over thousands of samples and are not affected.
+- The value it reads back is `0xffff` in the low half of `rax`.
+- One address it read was bus 252, device 31, function 0, register 0,
+  decoded against an ECAM window verified from the machine.
+
+The translation now runs on every sample rather than every thirty-second,
+so the next reading measures what it claims to. The sample rate already
+bounds the cost; a counter on top of it bought nothing and cost a wrong
+conclusion.
+
+**The general lesson, which is the third time today:** an instrument that
+caches its answer will hand back agreement that looks like corroboration.
+Two readings of a stale field are not two observations. Before treating
+repeated values as evidence, check what refreshes them and how often.
