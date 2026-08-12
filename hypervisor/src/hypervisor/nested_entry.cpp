@@ -3158,6 +3158,26 @@ void hypervisor::sample_guest_thread(std::size_t cpu)
         return;
     }
 
+    // **Two operating systems share this processor and only one of them
+    // has these offsets.** Measured: the samples alternate between a GS
+    // base of 0xfffff80683294000, where every field reads coherently, and
+    // one of 0xfffff8068ac2ff80, where the thread pointer comes back as
+    // 0xfffff806 and the idle thread as zero. The second is the secure
+    // kernel's own processor region - its structures are
+    // securekernel.exe's, not ntoskrnl.exe's, and following one image's
+    // offsets through the other's memory is exactly the fabricated answer
+    // this project refuses everywhere else.
+    //
+    // Nothing here can tell them apart by identity, so it is told apart
+    // by plausibility: a thread pointer is a canonical kernel address.
+    // That rejects the truncated reads without pretending to know which
+    // trust level is running.
+    constexpr std::uint64_t kernel_address_floor = 0xffff800000000000;
+
+    if (sample.thread < kernel_address_floor) {
+        return;
+    }
+
     static_cast<void>(read(sample.prcb + guest_windows::kprcb_idle_thread,
                            sample.idle_thread));
     static_cast<void>(
