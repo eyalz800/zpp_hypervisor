@@ -587,6 +587,33 @@ void hypervisor::resume_guest(arch::x86_64::context & context,
             entry = this->vmcs02_launched[slot - 1]
                         ? arch::x86_64::vmx::nested_vmresume
                         : arch::x86_64::vmx::nested_vmlaunch;
+
+            // What the entry actually carries, read here because here
+            // is the last instant it can still change. See
+            // `l2_entry_vector`: the guest hypervisor is injecting and
+            // the second-level guest is not vectoring, and a successful
+            // entry holding a valid injection has no third option.
+            //
+            // A vmread on the entry path is not free, and it is worth
+            // it: every other counter in this investigation observes
+            // where an event was *put*, and none of them observes
+            // whether it was still there.
+            constexpr std::uint64_t injection_valid = 1ull << 31;
+            constexpr std::uint64_t vector_mask = 0xff;
+
+            auto carried =
+                vmcs.read(arch::x86_64::vmx::vmcs::field::
+                              vm_entry_interruption_information_field);
+
+            auto cpu = slot - 1;
+            if (0 != (carried & injection_valid)) {
+                auto vector = carried & vector_mask;
+                this->l2_entry_vector[cpu][vector] =
+                    this->l2_entry_vector[cpu][vector] + 1;
+            } else {
+                this->l2_entries_carrying_nothing[cpu] =
+                    this->l2_entries_carrying_nothing[cpu] + 1;
+            }
         }
     }
 

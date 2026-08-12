@@ -3399,6 +3399,36 @@ private:
     volatile std::uint32_t l2_injected_vector[max_cpus][256]{};
 
     /**
+     * The same census, taken at the **actual VM entry** rather than
+     * where the event was copied out of vmcs12.
+     *
+     * `l2_injected_vector` counts what `build_vmcs02` wrote into
+     * vmcs02 when the guest hypervisor asked. This counts what the
+     * field still held at the instant the processor was entered - the
+     * last point before `restore_context`, with vmcs02 current.
+     *
+     * The two exist because they disagree in exactly one way and it is
+     * the way that matters. Injection through the VM-entry
+     * interruption-information field is unconditional: SDM 27.6
+     * delivers the event regardless of RFLAGS.IF, the task priority
+     * register or interrupt shadowing. So a successful entry carrying a
+     * valid injection *must* vector. The rig shows vector `0xd1`
+     * injected 52,799 times, no entry failure, and a second-level guest
+     * that never vectored once - which leaves only one possibility
+     * worth measuring: the field does not still hold it when the entry
+     * happens.
+     *
+     * If this trails `l2_injected_vector`, the event is being lost
+     * between the copy and the entry and the difference says how often.
+     * If the two agree, the loss is not here and the landing records
+     * are being misread.
+     * @{
+     */
+    volatile std::uint32_t l2_entry_vector[max_cpus][256]{};
+    volatile std::uint64_t l2_entries_carrying_nothing[max_cpus]{};
+    /** @} */
+
+    /**
      * How many landings the ring below holds.
      */
     static constexpr std::size_t injection_landing_capacity = 16;
