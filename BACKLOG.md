@@ -9367,3 +9367,51 @@ conclusion.
 caches its answer will hand back agreement that looks like corroboration.
 Two readings of a stale field are not two observations. Before treating
 repeated values as evidence, check what refreshes them and how often.
+
+
+## Settled: the configuration reads are a scan, and they finish
+
+2026-08-12, with the instrument fixed so the reading means what it says.
+
+Two boots, each sampled at the configuration-read instruction itself:
+
+```
+boot A, last sample:  physical 0xefcf8000  -> bus 252, device 31, function 0
+boot B, last sample:  physical 0xefff8000  -> bus 255, device 31, function 0
+```
+
+Different addresses, both device 31, both near the top of a 256-bus
+space. That is **a scan running to the end of the bus space** - 256 buses
+by 32 devices - and the last sample landing near the end is exactly what
+a completed scan looks like. It is not a poll of one function, which is
+what two earlier entries claimed on evidence that turned out to be a
+cached field read twice.
+
+And it finishes. `profile_samples` is frozen at 1364 across readings a
+hundred seconds apart while `l2_entries` climbs by 144,000 - so after the
+scan the guest has no long uninterrupted stretches at all. It is not
+spinning; it exits about fourteen hundred times a second and each
+residency is short.
+
+So the whole sequence, and every stage of it is bounded and completes:
+
+1. `ExpRevokeBootLoaderPagePrivileges` - about 88,000 hypercalls into the
+   secure kernel, one per page.
+2. The memory manager building its page frame database.
+3. `HalpPciReadMmConfigUshort` enumerating 256 buses.
+4. **Then nothing.** The working ring freezes at about 89,000, the
+   profiler goes quiet, and the guest runs the Hyper-V timer loop
+   indefinitely.
+
+Which returns the question to where it was before the profiler existed,
+but with three candidate answers eliminated by measurement rather than by
+argument: it is not a livelock in the shadow tables, not a spin on
+memory, and not an unbounded enumeration. The guest finishes its work and
+then waits.
+
+**The instrument's own lesson, stated once for all three times it bit:**
+a field that is written only under a condition and read whenever asked
+will hand back agreement that reads as corroboration. `profile_samples`
+is the guard - if it has not moved, nothing else in the profile has
+either, and two readings are one reading. Check the counter before
+believing the value.
