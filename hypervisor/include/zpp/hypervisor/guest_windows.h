@@ -103,6 +103,44 @@ constexpr std::uint64_t eprocess_thread_list_head =
  * walk of a list this VMM cannot trust to be well formed.
  */
 constexpr std::size_t thread_walk_limit = 16;
+
+/**
+ * Where `PsInitialSystemProcess` sits in the image.
+ *
+ * The system process is what the interesting threads belong to, and
+ * reaching it from a running thread does not work: the processor is idle
+ * whenever these offsets apply to it, so the thread found is the idle
+ * thread and its process is the idle process, which has one thread per
+ * processor and never any others. Both narrower rules were tried and
+ * both failed that way.
+ *
+ * This is the global that names it directly. Segment 27 - `ALMOSTRO`, at
+ * relative address 0xfc5000 - plus 0x1af0, read from the public symbols
+ * with `llvm-pdbutil dump --publics`.
+ */
+#ifndef ZPP_WINDOWS_PS_INITIAL_SYSTEM_PROCESS
+#define ZPP_WINDOWS_PS_INITIAL_SYSTEM_PROCESS 0xfc6af0
+#endif
+
+constexpr std::uint64_t ps_initial_system_process =
+    ZPP_WINDOWS_PS_INITIAL_SYSTEM_PROCESS;
+
+/**
+ * How far to look for the kernel's image header, in 2 MB steps.
+ *
+ * The relative address above is useless without the address the image was
+ * loaded at, which moves every boot and which nothing tells this VMM. It
+ * is findable, though: any instruction pointer the second-level guest
+ * exits with is inside the image, the image is 2 MB aligned - checked
+ * against three boots, which put it at 0xfffff8047bc00000,
+ * 0xfffff806a1000000 and 0xfffff802c7200000 - and its first two bytes are
+ * `MZ`. So step down from the faulting address until the header appears.
+ *
+ * Sixty-four steps is 128 MB, comfortably more than the 21 MB image and
+ * far short of wandering into unmapped memory for long: every read that
+ * misses simply fails and costs a translation.
+ */
+constexpr std::size_t kernel_base_scan_limit = 64;
 /**
  * @}
  */

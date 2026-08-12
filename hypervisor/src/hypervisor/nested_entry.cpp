@@ -3096,6 +3096,70 @@ bool hypervisor::on_nested_cr8_access(std::size_t cpu,
     return true;
 }
 
+std::uint64_t hypervisor::find_guest_kernel_base(std::size_t cpu)
+{
+    if (0 != this->guest_kernel_base) {
+        return this->guest_kernel_base;
+    }
+
+    constexpr std::uint64_t kernel_address_floor = 0xffff800000000000;
+    constexpr std::uint64_t two_megabytes = 0x200000;
+
+    // The signatures a PE image starts with: `MZ` at the top, and `PE\0\0`
+    // at the offset the field at 0x3c names. Both are checked, because a
+    // single two-byte match over a hundred megabytes of kernel memory is
+    // not evidence of anything.
+    constexpr std::uint16_t dos_signature = 0x5a4d;
+    constexpr std::uint32_t pe_signature = 0x00004550;
+    constexpr std::uint64_t pe_offset_field = 0x3c;
+
+    auto rip = this->vmcs.guest_rip();
+    if (rip < kernel_address_floor) {
+        return 0;
+    }
+
+    auto read = [&](std::uint64_t linear, auto & into) -> bool {
+        auto physical = translate_guest_linear(linear);
+        if (!physical) {
+            return false;
+        }
+
+        return read_guest_memory(
+                   cpu,
+                   *physical,
+                   std::span(reinterpret_cast<std::byte *>(&into),
+                             sizeof(into)))
+            .has_value();
+    };
+
+    auto candidate = rip & ~(two_megabytes - 1);
+
+    for (std::size_t step{}; step < guest_windows::kernel_base_scan_limit;
+         ++step) {
+        std::uint16_t magic{};
+        if (read(candidate, magic) && (dos_signature == magic)) {
+            std::uint32_t at{};
+            std::uint32_t signature{};
+
+            if (read(candidate + pe_offset_field, at) &&
+                read(candidate + at, signature) &&
+                (pe_signature == signature)) {
+                this->guest_kernel_base = candidate;
+                log("second-level guest kernel image at {}", candidate);
+                return candidate;
+            }
+        }
+
+        if (candidate < two_megabytes) {
+            break;
+        }
+
+        candidate -= two_megabytes;
+    }
+
+    return 0;
+}
+
 void hypervisor::walk_guest_threads(std::size_t cpu, std::uint64_t thread)
 {
     // Until it finds a process with more than one thread, and then never
@@ -3142,11 +3206,21 @@ void hypervisor::walk_guest_threads(std::size_t cpu, std::uint64_t thread)
     constexpr std::uint64_t kernel_address_floor = 0xffff800000000000;
     constexpr std::uint64_t byte_mask = 0xff;
 
+    // The system process, named by a global in the image rather than
+    // reached from whatever thread happens to be running - see
+    // `ps_initial_system_process` for why the latter cannot work here.
+    auto base = find_guest_kernel_base(cpu);
+    if (0 == base) {
+        return;
+    }
+
     std::uint64_t process{};
-    if (!read(thread + guest_windows::kthread_process, process) ||
+    if (!read(base + guest_windows::ps_initial_system_process, process) ||
         (process < kernel_address_floor)) {
         return;
     }
+
+    static_cast<void>(thread);
 
     // The list head is inside the process object, and its first entry
     // points at a *field* of the first thread rather than at the thread -

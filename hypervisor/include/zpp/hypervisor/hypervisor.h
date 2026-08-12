@@ -4149,6 +4149,19 @@ private:
     std::uint64_t guest_thread_list_walked{};
 
     void walk_guest_threads(std::size_t cpu, std::uint64_t thread);
+
+    /**
+     * Where the second-level guest's kernel image is loaded, found by
+     * stepping down from an address inside it until its header appears.
+     *
+     * Recorded as well as returned, because it is what makes every
+     * instruction pointer in the rings symbolizable offline without
+     * deducing the base from an instruction's own bytes - which works,
+     * and needs a second anchor whenever the image is not 2 MB aligned.
+     */
+    std::uint64_t find_guest_kernel_base(std::size_t cpu);
+
+    std::uint64_t guest_kernel_base{};
     /**
      * @}
      */
