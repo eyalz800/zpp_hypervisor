@@ -6652,17 +6652,44 @@ private:
      * @{
      */
     /**
+     * What the shadow VMCS region currently holds, so a copy into it can
+     * skip the fields that already match.
+     *
+     * Measured on the rig: this VMM's own exit handler is 85% of wall
+     * clock, at about 160 microseconds and roughly 150 trapped VMX
+     * instructions per reflected second-level exit. Thirty-six of those
+     * are this copy, and most of the fields it writes are unchanged from
+     * the last time it ran. **A comparison against memory is free; a
+     * VMWRITE traps to the layer below and is not.**
+     *
+     * Correct despite the guest hypervisor writing the read-write fields
+     * itself without exiting, because the cache records what is *in the
+     * region* rather than what was intended: `copy_shadow_to_vmcs12`
+     * reads those fields back and updates the cache with what it found,
+     * so the next copy out compares against the truth.
+     *
+     * `shadow_cache_valid` starts false so the first copy writes
+     * everything.
+     * @{
+     */
+    static constexpr std::size_t shadow_cache_capacity = 64;
+    std::uint64_t shadow_cache[max_cpus][shadow_cache_capacity]{};
+    bool shadow_cache_valid[max_cpus]{};
+    std::uint64_t shadow_writes_skipped[max_cpus]{};
+    std::uint64_t shadow_writes_done[max_cpus]{};
+    /** @} */
+
+    /**
      * Where the exit handler's time actually goes, per phase.
      *
      * Measured: this VMM is 85% of wall clock at about 156 microseconds
-     * an exit, and two attempts to explain that by counting VMCS writes
-     * were both wrong - skipping 84% of the shadow copy's writes moved
-     * the total by 2%, which puts a VMWRITE at roughly a tenth of a
-     * microsecond and rules out the whole class. Guessing at the
-     * breakdown has now failed twice, so it is measured instead.
+     * an exit. Guessing at the breakdown failed twice, so it is
+     * instrumented - `save_l2_state` is 9%, `build_vmcs02` 24% at 270
+     * microseconds a call, and the shadow extended-page-table lookup
+     * 0.2%, which retires the page tables as a suspect.
      *
-     * Indices: 0 save_l2_state, 1 reflect_l2_exit, 2 build_vmcs02.
-     * Anything left over is the rest of the handler.
+     * Indices: 0 save_l2_state, 1 reflect_l2_exit, 2 build_vmcs02,
+     * 3 shadow_ept_pointer_for. Anything left over is the rest.
      * @{
      */
     /**

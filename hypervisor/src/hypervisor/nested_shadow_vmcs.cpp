@@ -270,16 +270,40 @@ void hypervisor::copy_vmcs12_to_shadow(std::size_t cpu)
         }
 
         auto & cached = this->guest_vmcs12[cpu];
+
+        // Only what the region does not already hold. See
+        // `shadow_cache`: each of these writes traps to the layer below,
+        // and most of them write a value that is already there.
+        std::size_t index{};
+        auto put = [&](auto entry) {
+            auto value = cached.read(
+                vmcs_field_encoding(static_cast<std::uint64_t>(entry)));
+
+            if (this->shadow_cache_valid[cpu] &&
+                (index < shadow_cache_capacity) &&
+                (this->shadow_cache[cpu][index] == value)) {
+                this->shadow_writes_skipped[cpu] =
+                    this->shadow_writes_skipped[cpu] + 1;
+                ++index;
+                return;
+            }
+
+            this->vmcs.write(entry, value);
+            this->shadow_writes_done[cpu] =
+                this->shadow_writes_done[cpu] + 1;
+            if (index < shadow_cache_capacity) {
+                this->shadow_cache[cpu][index] = value;
+            }
+            ++index;
+        };
+
         for (auto entry : shadow_read_only_fields) {
-            this->vmcs.write(entry,
-                             cached.read(vmcs_field_encoding(
-                                 static_cast<std::uint64_t>(entry))));
+            put(entry);
         }
         for (auto entry : shadow_read_write_fields) {
-            this->vmcs.write(entry,
-                             cached.read(vmcs_field_encoding(
-                                 static_cast<std::uint64_t>(entry))));
+            put(entry);
         }
+        this->shadow_cache_valid[cpu] = true;
 
         arch::x86_64::vmx::vmclear(&this->shadow_vmcs_physical[cpu]);
         arch::x86_64::vmx::vmptrld(&previous);
@@ -316,10 +340,24 @@ void hypervisor::copy_shadow_to_vmcs12(std::size_t cpu)
         }
 
         auto & cached = this->guest_vmcs12[cpu];
+
+        // The read-write fields sit after the read-only ones in the
+        // cache, because that is the order the copy out writes them.
+        // Updated with what was *found*, not what was last intended -
+        // the guest hypervisor writes these without exiting, so what it
+        // left behind is the region's truth.
+        auto index = sizeof(shadow_read_only_fields) /
+                     sizeof(shadow_read_only_fields[0]);
+
         for (auto entry : shadow_read_write_fields) {
+            auto value = this->vmcs.read(entry);
             cached.write(
                 vmcs_field_encoding(static_cast<std::uint64_t>(entry)),
-                this->vmcs.read(entry));
+                value);
+            if (index < shadow_cache_capacity) {
+                this->shadow_cache[cpu][index] = value;
+            }
+            ++index;
         }
 
         arch::x86_64::vmx::vmclear(&this->shadow_vmcs_physical[cpu]);
