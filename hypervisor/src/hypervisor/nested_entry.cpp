@@ -3177,11 +3177,6 @@ std::uint64_t hypervisor::find_guest_kernel_base(std::size_t cpu)
     constexpr std::uint32_t pe_signature = 0x00004550;
     constexpr std::uint64_t pe_offset_field = 0x3c;
 
-    auto rip = this->vmcs.guest_rip();
-    if (rip < kernel_address_floor) {
-        return 0;
-    }
-
     auto read = [&](std::uint64_t linear, auto & into) -> bool {
         auto physical = translate_guest_linear(linear);
         if (!physical) {
@@ -3195,6 +3190,54 @@ std::uint64_t hypervisor::find_guest_kernel_base(std::size_t cpu)
                              sizeof(into)))
             .has_value();
     };
+
+    // Started from an interrupt handler, not from the instruction
+    // pointer.
+    //
+    // The instruction pointer was the first attempt and it does not work
+    // while the guest is doing the thing worth watching: through the
+    // whole virtual-trust-level protection pass - twelve minutes, and
+    // every sample taken in it - the guest is executing its hypercall
+    // page, which is its own allocation and not part of any image. The
+    // scan then walks down from an address that has no kernel below it.
+    //
+    // The interrupt descriptor table has no such problem. Its base is in
+    // the VMCS, free to read, and every gate in it points at a handler
+    // inside the kernel image whatever the guest is doing. Entry zero is
+    // the divide-error fault, which exists on every processor and is
+    // never a driver's.
+    //
+    // SDM 7.14.1 gives the 64-bit gate: the offset is split across bits
+    // 15:0 at byte 0, 31:16 at byte 6, and 63:32 at byte 8.
+    struct interrupt_gate
+    {
+        std::uint16_t offset_low{};
+        std::uint16_t selector{};
+        std::uint16_t attributes{};
+        std::uint16_t offset_middle{};
+        std::uint32_t offset_high{};
+        std::uint32_t reserved{};
+    };
+
+    auto idt =
+        this->vmcs.read(arch::x86_64::vmx::vmcs::field::guest_idtr_base);
+
+    if (idt < kernel_address_floor) {
+        return 0;
+    }
+
+    interrupt_gate gate{};
+    if (!read(idt, gate)) {
+        return 0;
+    }
+
+    auto rip = static_cast<std::uint64_t>(gate.offset_low) |
+               (static_cast<std::uint64_t>(gate.offset_middle) << 16) |
+               (static_cast<std::uint64_t>(gate.offset_high) << 32);
+
+    if (rip < kernel_address_floor) {
+        return 0;
+    }
 
     auto candidate = rip & ~(two_megabytes - 1);
 
