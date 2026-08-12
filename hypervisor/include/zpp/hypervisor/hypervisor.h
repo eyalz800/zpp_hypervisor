@@ -4161,6 +4161,15 @@ private:
      */
     std::uint64_t find_guest_kernel_base(std::size_t cpu);
 
+    /**
+     * Whether an image at this address is the guest's kernel, asked by
+     * making the image name itself rather than by trusting a header
+     * match - every image in the address space has the same header.
+     */
+    bool is_guest_kernel_image(std::size_t cpu,
+                               std::uint64_t base,
+                               std::uint64_t headers);
+
     std::uint64_t guest_kernel_base{};
     /**
      * @}

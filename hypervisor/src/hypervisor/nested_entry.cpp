@@ -3096,6 +3096,70 @@ bool hypervisor::on_nested_cr8_access(std::size_t cpu,
     return true;
 }
 
+bool hypervisor::is_guest_kernel_image(std::size_t cpu,
+                                       std::uint64_t base,
+                                       std::uint64_t headers)
+{
+    // **A header match is not an identification.** Every image in the
+    // address space begins with the same two signatures - the secure
+    // kernel's does, and every driver's does - and the relative address
+    // this VMM then reads a pointer from belongs to exactly one of them.
+    // Reading it from the wrong image gives a number rather than a
+    // failure, which is the shape of answer this project refuses.
+    //
+    // So the image names itself. The export directory carries the name it
+    // was linked as, which for the kernel is `ntoskrnl.exe` whichever
+    // file it was loaded from.
+    //
+    // PE32+ layout, from the specification: the optional header follows
+    // the four-byte signature and the twenty-byte file header, its data
+    // directories begin 112 bytes into it, the first is the export
+    // directory, and that directory's name is a relative address twelve
+    // bytes in.
+    constexpr std::uint64_t optional_header = 4 + 20;
+    constexpr std::uint64_t data_directories = 112;
+    constexpr std::uint64_t export_directory_name = 12;
+
+    auto read = [&](std::uint64_t linear, auto & into) -> bool {
+        auto physical = translate_guest_linear(linear);
+        if (!physical) {
+            return false;
+        }
+
+        return read_guest_memory(
+                   cpu,
+                   *physical,
+                   std::span(reinterpret_cast<std::byte *>(&into),
+                             sizeof(into)))
+            .has_value();
+    };
+
+    std::uint32_t directory{};
+    if (!read(base + headers + optional_header + data_directories,
+              directory) ||
+        (0 == directory)) {
+        return false;
+    }
+
+    std::uint32_t name{};
+    if (!read(base + directory + export_directory_name, name) ||
+        (0 == name)) {
+        return false;
+    }
+
+    // "ntoskrnl", read as two words so it needs no string comparison and
+    // no assumption about what follows.
+    constexpr std::uint32_t first_half = 0x736f746e;  // "ntos"
+    constexpr std::uint32_t second_half = 0x6c6e726b; // "krnl"
+
+    std::uint32_t front{};
+    std::uint32_t back{};
+
+    return read(base + name, front) && (first_half == front) &&
+           read(base + name + sizeof(front), back) &&
+           (second_half == back);
+}
+
 std::uint64_t hypervisor::find_guest_kernel_base(std::size_t cpu)
 {
     if (0 != this->guest_kernel_base) {
@@ -3143,7 +3207,8 @@ std::uint64_t hypervisor::find_guest_kernel_base(std::size_t cpu)
 
             if (read(candidate + pe_offset_field, at) &&
                 read(candidate + at, signature) &&
-                (pe_signature == signature)) {
+                (pe_signature == signature) &&
+                is_guest_kernel_image(cpu, candidate, at)) {
                 this->guest_kernel_base = candidate;
                 log("second-level guest kernel image at {}", candidate);
                 return candidate;
