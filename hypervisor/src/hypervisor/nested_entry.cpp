@@ -1125,21 +1125,45 @@ std::expected<void, zpp::error> hypervisor::build_vmcs02(std::size_t cpu)
     }
 
     // Everything that is this VMM's, read out of the VMCS that runs the
-    // guest hypervisor before that one stops being current.
-    std::uint64_t host_values[std::size(host_state_fields)]{};
-    for (std::size_t i{}; i < std::size(host_state_fields); ++i) {
-        host_values[i] = vmcs.read(host_state_fields[i]);
+    // guest hypervisor before that one stops being current - and read
+    // **once**, not on every entry. See `host_state_cache`: this is
+    // twenty-eight VMCS reads of state that is fixed for the life of the
+    // processor, and a VMREAD costs 1.76 microseconds here.
+    static_assert(std::size(host_state_fields) <= 24,
+                  "host_state_cache is too small for the field list");
+
+    if (!this->host_state_cached[cpu]) {
+        for (std::size_t i{}; i < std::size(host_state_fields); ++i) {
+            this->host_state_cache[cpu][i] =
+                vmcs.read(host_state_fields[i]);
+        }
+
+        this->host_controls_cache[cpu][0] =
+            vmcs.pin_based_vm_execution_controls();
+        this->host_controls_cache[cpu][1] =
+            vmcs.primary_processor_based_vm_execution_controls();
+        this->host_controls_cache[cpu][2] =
+            vmcs.secondary_processor_based_vm_execution_controls();
+        this->host_controls_cache[cpu][3] = vmcs.vm_exit_controls();
+        this->host_controls_cache[cpu][4] =
+            vmcs.read(field::exception_bitmap);
+        this->host_controls_cache[cpu][5] =
+            vmcs.read(field::cr0_guest_host_mask);
+        this->host_controls_cache[cpu][6] =
+            vmcs.read(field::cr4_guest_host_mask);
+        this->host_controls_cache[cpu][7] = vmcs.vpid();
+        this->host_state_cached[cpu] = true;
     }
 
-    auto pin01 = vmcs.pin_based_vm_execution_controls();
-    auto primary01 = vmcs.primary_processor_based_vm_execution_controls();
-    auto secondary01 =
-        vmcs.secondary_processor_based_vm_execution_controls();
-    auto exit01 = vmcs.vm_exit_controls();
-    auto exception_bitmap01 = vmcs.read(field::exception_bitmap);
-    auto cr0_mask01 = vmcs.read(field::cr0_guest_host_mask);
-    auto cr4_mask01 = vmcs.read(field::cr4_guest_host_mask);
-    auto vpid01 = vmcs.vpid();
+    auto * host_values = this->host_state_cache[cpu];
+    auto pin01 = this->host_controls_cache[cpu][0];
+    auto primary01 = this->host_controls_cache[cpu][1];
+    auto secondary01 = this->host_controls_cache[cpu][2];
+    auto exit01 = this->host_controls_cache[cpu][3];
+    auto exception_bitmap01 = this->host_controls_cache[cpu][4];
+    auto cr0_mask01 = this->host_controls_cache[cpu][5];
+    auto cr4_mask01 = this->host_controls_cache[cpu][6];
+    auto vpid01 = this->host_controls_cache[cpu][7];
 
     // From here nothing may fail: vmcs02 is about to become current, and a
     // caller that answered VMfail with it current would resume the guest
@@ -1148,8 +1172,14 @@ std::expected<void, zpp::error> hypervisor::build_vmcs02(std::size_t cpu)
         return std::unexpected(zpp::error{error::vmptrld_failed});
     }
 
-    for (std::size_t i{}; i < std::size(host_state_fields); ++i) {
-        vmcs.write(host_state_fields[i], host_values[i]);
+    // Once per vmcs02, not once per entry. See `vmcs02_host_written`:
+    // the region is cleared where it is created and never again, so what
+    // was written the first time is still there.
+    if (!this->vmcs02_host_written[cpu]) {
+        for (std::size_t i{}; i < std::size(host_state_fields); ++i) {
+            vmcs.write(host_state_fields[i], host_values[i]);
+        }
+        this->vmcs02_host_written[cpu] = true;
     }
 
     // Pin-based controls: the union, less the preemption timer, which is

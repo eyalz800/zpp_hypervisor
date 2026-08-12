@@ -6705,6 +6705,42 @@ private:
      * that is read-only and already being read anyway, so the
      * measurement disturbs nothing.
      */
+    /**
+     * This VMM's own host state and control words, read out of vmcs01
+     * once instead of on every nested entry.
+     *
+     * `build_vmcs02` copied twenty host-state fields out of vmcs01 and
+     * into vmcs02 on **every** call - forty VMCS accesses, about seventy
+     * microseconds of its two hundred and seventy at the 1.76
+     * microseconds a VMREAD costs here - for state that is written once
+     * at launch and never changes afterwards. The host is this VMM; its
+     * stack, its page tables, its segment selectors and its entry point
+     * are fixed for the life of the processor.
+     *
+     * The control words beside them are the same story: they describe
+     * what this VMM asks for when *it* runs a guest, and nothing rewrites
+     * them.
+     *
+     * Filled on the first nested entry per processor, when vmcs01 is
+     * still current, and used from then on.
+     * @{
+     */
+    std::uint64_t host_state_cache[max_cpus][24]{};
+    std::uint64_t host_controls_cache[max_cpus][8]{};
+    bool host_state_cached[max_cpus]{};
+
+    /**
+     * Whether vmcs02 already carries this VMM's host state.
+     *
+     * The other half of the same saving. The host fields were not only
+     * re-read from vmcs01 every entry, they were re-*written* into vmcs02
+     * every entry - and vmcs02 is cleared once, where it is created, and
+     * never again, so the values written the first time are still there.
+     * Twenty more VMCS accesses a call at 1.76 microseconds each.
+     */
+    bool vmcs02_host_written[max_cpus]{};
+    /** @} */
+
     std::uint64_t vmread_benchmark_cycles{};
     bool vmread_benchmark_done{};
 
