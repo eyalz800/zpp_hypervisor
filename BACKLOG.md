@@ -9809,3 +9809,63 @@ underneath it, with this tree out of the picture: if it stalls in the
 boot graphics rasterizer, the cause is in the table and bisects in
 eleven more boots; if it boots, the capability set is exonerated and the
 difference is elsewhere.
+
+
+## The capability set is exonerated, in one boot
+
+Twelve capabilities KVM offers a nested guest and this VMM withholds
+were measured in the entry above. They are not the difference.
+
+The test, 2026-08-12: `ZPP_CHAINLOAD_ONLY` deploys a loader that starts
+the boot manager and never launches the hypervisor, so our boot option
+stays the only one installed and our code is entirely out of the
+picture. `ZPP_CPU_EXTRA` degrades QEMU's advertised VMX features to
+exactly our menu - all twelve at once:
+
+    vmx-preemption-timer=off  vmx-exit-save-preemption-timer=off
+    vmx-apicv-xapic=off       vmx-apicv-x2apic=off
+    vmx-vmfunc=off            vmx-eptp-switching=off
+    vmx-shadow-vmcs=off       vmx-pml=off
+    vmx-exit-load-perf-global-ctrl=off
+    vmx-entry-load-perf-global-ctrl=off
+    vmx-ept-execonly=off      vmx-eptad=off
+
+Verified present on QEMU's command line before reading anything, and the
+loader's own `ZPP_LOADER chainload only` marker verified on serial.
+
+**Windows booted.** Sampled through the monitor with `info registers -a`,
+which perturbs nothing: two processors at **CPL=3** in user mode at
+`0x7ff7...` and `0x7ffb...`, one in ntoskrnl, and five clustered inside a
+*second* kernel image at `0xfffff86c27d31...` - Hyper-V, running on its
+own processors. Sampled again ten seconds later, every one had moved.
+
+So Hyper-V launches and Windows reaches user space with the exact
+capability menu this VMM presents. Twelve candidate causes eliminated by
+one boot, and none of them needs implementing.
+
+**A caution that falls out of it, and it is not small.** The instruction
+pointer `0xfffff800b95a597e` was sampled repeatedly in the failing runs
+and treated as where the guest was stuck. The same offset appears here -
+`0xfffff805e71a597e`, the same image-relative address under a different
+KASLR base - twice in sixteen samples of a **healthy, fully booted**
+Windows. Whatever lives there is somewhere Windows sits often when it is
+working, so its appearance was never evidence of a stall. Any reasoning
+above that rests on that address needs re-reading.
+
+**Two measurement notes, both of which produced a wrong reading first.**
+`screendump` cannot work here at all - the GPU is passed through, so QEMU
+has no console and answers "There is no console to take a screendump
+from". And processor time is meaningless as an idle signal under
+`-overcommit cpu-pm=on`: MWAIT is passed through, so an idle processor
+waits *inside guest mode* and the host counts the thread as running. It
+read as eight cores pinned at 100% on a machine that was largely idle.
+Sampling instruction pointers through the monitor is the instrument that
+works.
+
+**Where this leaves the search.** Not what we tell Hyper-V it may use -
+that is now measured and identical in effect. What is left is what we
+*do* when it uses it: the shadow EPT, the exit reflection, interrupt
+delivery and the virtual trust level transitions. The control is
+reproducible now and takes one boot, which makes the next comparison a
+differential one rather than another instrument added to the failing
+side.
