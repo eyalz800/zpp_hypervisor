@@ -10017,3 +10017,71 @@ at first.
 `scripts/rig-dump-state.py --log` now reads the hypervisor's log ring
 over the monitor rather than gdb, since gdb resolves through the current
 processor's page tables and our module is not mapped in the guest's.
+
+
+## Retraction: "the clock never fires" was wrong, and so was the reasoning under it
+
+The entry above concluded that the guest hypervisor was injecting
+nothing, from `vmcs_field_write` totalling 411 writes against 183,458
+second-level entries. **That inference is void.** `shadow_vmcs_enabled`
+is `true`, so the guest hypervisor's vmreads and vmwrites go to a shadow
+VMCS in memory and never exit - the counter only ever recorded the ones
+that *did* exit, and it says nothing whatever about injection. The same
+dump shows `vmcs_shadow_loads` and `vmcs_shadow_stores` at 238,580 each,
+which is the mechanism saying so plainly on the line above the one that
+was misread.
+
+That is the sixth instrument defect in this investigation and the second
+of exactly this shape: a counter read as measuring a thing it structurally
+cannot see. **Before drawing a conclusion from a counter, establish what
+it is blind to.**
+
+## The synthetic timer interrupt is injected and never taken
+
+Measured instead of inferred. `l2_injected_vector`, which counts what the
+guest hypervisor asked to inject into its guest, on the single-processor
+run:
+
+    vector 0x2f  (47)         7
+    vector 0x40  (64)     3,248
+    vector 0xd1 (209)    52,799
+
+`0xd1` is the synthetic interrupt the root partition's timer messages are
+delivered on. It has been injected **52,799 times**. The timer fires, and
+the guest hypervisor delivers it. Both halves of the previous conclusion
+were wrong.
+
+What happens to it is the failure. `injection_from_rip`,
+`injection_to_rip` and `injection_to_reason` record where the second-level
+guest was when `0xd1` was injected and where it was at the very next
+exit. All sixteen slots, identical:
+
+    from   0xfffff807a37a597e
+    to     0xfffff807a37a597c
+    reason 0x1f, rdmsr
+
+Windows is in a two-instruction spin - `rdmsr 0x40000020` at `...597c`,
+test and jump back at `...597e`. The interrupt is injected while it sits
+at `...597e`, and at the very next exit it is back at `...597c` executing
+the *same* `rdmsr`. It never vectored anywhere.
+
+**That should not be possible.** Injection through the VM-entry
+interruption-information field is unconditional: SDM 27.6 delivers the
+event on entry irrespective of RFLAGS.IF, the task priority register or
+interrupt shadowing. A guest handed a valid injection must vector to its
+handler. So either the injection does not survive to the VM entry that
+actually runs, or it is not in the VMCS that entry uses.
+
+**What this does not yet exclude**, and it should be checked before
+acting: that the handler ran, completed without causing an exit, and
+returned into the loop, so the next recorded exit is the loop's own
+`rdmsr`. Against it - a Hyper-V-enlightened handler ends with a write to
+the synthetic end-of-message register, which exits, and sixteen records
+that are byte-identical are not what a handler that ran would produce.
+Distinguishing them takes one more field: whether the guest's interrupt
+in-service state ever shows `0xd1`.
+
+This also finally explains the address that has haunted the whole
+investigation. `...5a597e` is not where anything is stuck and not a stall
+routine in general - it is the *jump* of a two-instruction timeout spin,
+which is why a healthy Windows sits there too.
