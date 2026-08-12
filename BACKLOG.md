@@ -9947,3 +9947,73 @@ seven while this VMM was refusing it.
 **Do not use a FIFO for that capture.** It corrupted kernel memory here
 and cost the machine. Stream it off-box over netcat with the reader
 `setsid`-detached, per the trace-kvm notes.
+
+
+## The guest stops working the moment it arms its synthetic timer
+
+The single-processor boot is the clean case - no application processors,
+so nothing about start-up IPIs can be involved - and it fails the same
+way. Measured 2026-08-12, module base `0x674e3000`, one processor.
+
+**It is stalled, and our own instrument says so rather than a person.**
+`l2_working_trace` exists to separate a guest doing work from a guest
+only waiting, by dropping the reference-counter poll, the
+end-of-interrupt and the timer re-arm. Sampled ninety seconds apart:
+
+    l2_entries              314,124 -> 434,300    +120,176
+    l2_exit_trace_count     314,123 -> 434,300    +120,177
+    l2_working_trace_count   89,451 ->  89,451    **zero**
+
+About 1,335 second-level exits a second, and not one of them is work.
+That retires "stalled or merely slow" as a question. It is stalled.
+
+**What it did last, in order**, from the tail of the working ring - and
+this is the whole finding:
+
+    ept-violation ... 0xefe00000     the last page of the ECAM scan
+    rdmsr 0x277                      IA32_PAT
+    rdmsr 0xc0000080                 IA32_EFER
+    wrmsr 0x836, wrmsr 0x834         two local APIC LVT entries
+    cpuid x3
+    wrmsr 0x400000b0                 HV_X64_MSR_STIMER0_CONFIG
+    rdmsr 0x40000083                 HV_X64_MSR_SIMP
+    wrmsr 0x40000093                 HV_X64_MSR_SINT3
+    wrmsr 0x400000b0                 STIMER0_CONFIG again
+    wrmsr 0x400000b0                 ... and then only this, for ever
+
+Windows sets up synthetic timer 0 with its message page and synthetic
+interrupt source, and from that instant the only work it ever does again
+is **re-arm that same timer**, from one address. It arms the clock, the
+clock does not fire, it times out, it arms it again.
+
+One cause accounts for every symptom collected over this whole
+investigation: a boot animation frozen after a single dot, because the
+thread drawing it is blocked; the endless `rdmsr 0x40000020` reading the
+reference counter, which is the timeout being measured; and on eight
+processors the application processors never starting, because Windows
+never reaches the point of starting them. The parked processors are a
+consequence, not the disease.
+
+**What is not yet established.** Two counters bear on where the timer
+dies and neither is conclusive on its own:
+
+- `apic_writes_undecoded` and `watched_access_count` are both **zero**,
+  so this VMM is not failing to decode APIC page writes - nothing is
+  touching that page here. Windows is on x2APIC MSRs and the synthetic
+  timer, not the APIC page.
+- The guest hypervisor has written its own VMCS **411 times in total**
+  against 183,458 second-level entries. Injecting an interrupt means
+  writing the entry-interruption field, and VMCS shadowing is not
+  offered, so every such write would exit to us. Hyper-V is resuming
+  Windows over and over and injecting nothing.
+
+So the question has narrowed to one thing: **does the guest hypervisor
+ever try to deliver the synthetic timer interrupt, and if it does, where
+does it go?** If it never tries, it is itself missing whatever it uses to
+know the deadline passed. If it tries, the injection is being lost here.
+Those are distinguishable, and the counters above say which half to look
+at first.
+
+`scripts/rig-dump-state.py --log` now reads the hypervisor's log ring
+over the monitor rather than gdb, since gdb resolves through the current
+processor's page tables and our module is not mapped in the guest's.

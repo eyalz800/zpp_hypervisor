@@ -137,6 +137,85 @@ class Monitor:
         return words
 
 
+def dump_log(monitor, elf, base, limit):
+    """The hypervisor's own log, oldest line first.
+
+    The counters say what the state *is*; this says what happened, in
+    order, which is usually the question. Walked by hand for the same
+    reason `scripts/zpp.gdb` walks it by hand - the hypervisor is built
+    against libc++ headers only, so there are no pretty printers and a
+    list of strings is raw nodes and unions.
+
+    Read over the monitor rather than gdb deliberately. gdb resolves
+    through the *current* processor's page tables, and once the guest is
+    running our module is not mapped in its CR3 - so every read answers
+    "Cannot access memory" unless a processor happens to be inside our
+    code. `xp` reads physical memory and ignores paging, and since the
+    module is identity mapped the pointers stored in it are already
+    physical addresses.
+
+    Layout, matching zpp.gdb: a node is {__prev_, __next_, value} so the
+    string starts sixteen bytes in, and libc++'s string keeps its
+    long/short flag in the low bit of the first byte - long keeps a
+    pointer sixteen bytes in, short keeps the characters one byte in.
+    """
+    head = gdb_symbol(elf, "zpp::hypervisor::log_storage::m_lines") + base
+
+    # Walk the node chain first, one round trip per batch rather than
+    # per node: the list is singly followed here, so each step needs the
+    # previous answer, but the string bodies can all be fetched together.
+    nodes, seen, node = [], set(), None
+    monitor.queue(head + 8, 1)
+    node = monitor.run().get(head + 8, 0)
+    while node and node != head and len(nodes) < limit and node not in seen:
+        seen.add(node)
+        nodes.append(node)
+        monitor.queue(node + 8, 1)
+        node = monitor.run().get(node + 8, 0)
+
+    if not nodes:
+        print("\nlog ring: empty")
+        return
+
+    # The string headers, all at once.
+    for n in nodes:
+        monitor.queue(n + 16, 3)
+    words = monitor.run()
+
+    long_ones = []
+    lines = []
+    for i, n in enumerate(nodes):
+        first = words.get(n + 16, 0)
+        if first & 1:
+            long_ones.append((i, words.get(n + 32, 0), first))
+            lines.append(None)
+        else:
+            # Short: length in the top bits of the first byte's slot,
+            # characters immediately after it.
+            length = (first >> 1) & 0x7f
+            raw = b""
+            for w in (words.get(n + 16, 0), words.get(n + 24, 0),
+                      words.get(n + 32, 0)):
+                raw += w.to_bytes(8, "little")
+            lines.append(raw[1:1 + length].decode("ascii", "replace"))
+
+    # And the bodies of the long ones, also all at once.
+    if long_ones:
+        for _, pointer, _ in long_ones:
+            if pointer:
+                monitor.queue(pointer, 24)
+        body = monitor.run()
+        for index, pointer, _ in long_ones:
+            raw = b""
+            for k in range(24):
+                raw += body.get(pointer + 8 * k, 0).to_bytes(8, "little")
+            lines[index] = raw.split(b"\0")[0].decode("ascii", "replace")
+
+    print(f"\nlog ring ({len(lines)} lines, oldest first)")
+    for i, text in enumerate(lines):
+        print(f"  [{i:4}] {text}")
+
+
 def name_reason(value):
     reason = value & 0xffff
     tag = EXIT_REASON.get(reason, str(reason))
@@ -238,6 +317,10 @@ def main():
                     help="module base; read from serial when omitted")
     ap.add_argument("--l2", type=int, default=None,
                     help="also dump this processor's second-level ring")
+    ap.add_argument("--log", type=int, nargs="?", const=4096, default=None,
+                    metavar="N",
+                    help="also dump the hypervisor's log ring, oldest "
+                         "first (default all 4096 lines)")
     ap.add_argument("--l2-entries", type=int, default=24,
                     help="how many second-level entries to show")
     args = ap.parse_args()
@@ -433,6 +516,9 @@ def main():
         # has stopped working and is only waiting.
         dump_ring(args.l2, "l2_working_trace", working_ring,
                   "l2_working_trace_count", "working second-level exits")
+
+    if args.log is not None:
+        dump_log(monitor, args.elf, base, args.log)
 
 
 if __name__ == "__main__":
