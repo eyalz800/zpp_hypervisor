@@ -1503,6 +1503,31 @@ extern "C" EFI_STATUS EFIAPI uefi_main(EFI_HANDLE image_handle,
     // system partition by construction - this image is at
     // \EFI\zpp\zpp_loader.efi on it - so no search is needed and none
     // is done. Nothing is traced but the outcome.
+    // Which loader this is, said unconditionally on both paths, and said
+    // **here** - above the chainload branch, because that branch returns.
+    //
+    // Three things had to be true at once and none of them were:
+    //
+    // - `trace::raw`, not `trace::line`. Every other string identifying
+    //   a chainload-only build carries the `ZPP_TRACE` prefix and
+    //   disappears with the trace compiled out. `raw` survives it, which
+    //   is why `ZPP_RESTART` uses it.
+    // - Before the return, not after. The marker was first written below
+    //   this block, where `prepare_for_hypervisor` is decided - which in
+    //   a chainload build is unreachable code, so the compiler dropped
+    //   the literal and the binary carried no marker at all. This is
+    //   almost certainly why the string `check-bootable.sh` was written
+    //   to grep for had never existed: the guard meant to keep a control
+    //   loader off the disk had never once fired.
+    // - Both branches, so the check can test for *presence*. An absence
+    //   test fails open - a renamed or eliminated marker reads exactly
+    //   like a loader that is fine.
+    if constexpr (ZPP_CHAINLOAD_ONLY) {
+        trace::raw("ZPP_LOADER chainload only, hypervisor not launched");
+    } else {
+        trace::raw("ZPP_LOADER resident, hypervisor launch compiled in");
+    }
+
     if constexpr (ZPP_CHAINLOAD_ONLY) {
         EFI_LOADED_IMAGE_PROTOCOL * our_image{};
         if (EFI_ERROR(g_boot_services->HandleProtocol(
@@ -1550,9 +1575,6 @@ extern "C" EFI_STATUS EFIAPI uefi_main(EFI_HANDLE image_handle,
     // which is the only preparation it actually needs.
     constexpr bool prepare_for_hypervisor = !ZPP_CHAINLOAD_ONLY;
 
-    if constexpr (!prepare_for_hypervisor) {
-        trace::line("ZPP_TRACE chainload only, nothing prepared");
-    }
 
     // Establish whether timed waits work before touching MP services,
     // since a dead timer makes them hang rather than return an error.

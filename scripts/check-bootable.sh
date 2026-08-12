@@ -112,8 +112,7 @@ fi
 # this script guards wants the hypervisor. Set ZPP_ALLOW_CHAINLOAD_ONLY=1
 # to deploy one deliberately.
 if [ "${ZPP_ALLOW_CHAINLOAD_ONLY:-0}" != "1" ]; then
-    if LC_ALL=C grep -qa 'chainload only, hypervisor not launched' \
-        "$loader"; then
+    if LC_ALL=C grep -qa 'ZPP_LOADER chainload only' "$loader"; then
         echo "REFUSING: $loader is a chainload-only build." >&2
         echo "" >&2
         echo "It boots the guest without launching the hypervisor, so it" >&2
@@ -196,11 +195,49 @@ if [ "${ZPP_ALLOW_NO_TRACE:-0}" != "1" ]; then
     fi
 fi
 
+# The same question asked the other way round, because the check above
+# fails open and this one fails closed.
+#
+# It grepped for a string nothing emitted - every marker identifying a
+# chainload-only build carried the `ZPP_TRACE` prefix and disappeared
+# with the trace compiled out - so the guard had never fired once. An
+# absence test cannot notice that: no match reads as "not a control
+# build" whether the marker is absent or merely misspelled.
+#
+# So require the resident marker to be *present*. Both are emitted with
+# trace::raw and survive ZPP_TRACE being off. A loader that is neither
+# is a loader nobody has classified, and that is the state this whole
+# section exists to refuse.
+if [ "${ZPP_ALLOW_CHAINLOAD_ONLY:-0}" != "1" ]; then
+    if ! LC_ALL=C grep -qa 'ZPP_LOADER resident' "$loader"; then
+        echo "REFUSING: $loader carries no resident-loader marker." >&2
+        echo "" >&2
+        echo "A loader that launches the hypervisor says so in its own" >&2
+        echo "bytes, unconditionally. This one says neither that nor" >&2
+        echo "that it is chainload-only, so what it does is unknown -" >&2
+        echo "and the failure this guards against is a control build" >&2
+        echo "reaching the disk and every later run silently becoming" >&2
+        echo "a control run." >&2
+        echo "" >&2
+        echo "If the marker was renamed, update this check with it." >&2
+        exit 1
+    fi
+fi
+
 # Says what was actually established rather than what the checks are
 # named after: an escape hatch that was used must not be reported as a
 # property that holds.
-summary="ok: $loader launches the hypervisor and carries no destructive"
-summary="$summary self check"
+# Read from the loader's own marker rather than from which escape
+# hatch was set, so a deliberate control build cannot be summarised as
+# one that launches the hypervisor - which is the exact sentence that
+# would let it be deployed and believed.
+if LC_ALL=C grep -qa 'ZPP_LOADER chainload only' "$loader"; then
+    summary="ok: $loader is a CONTROL loader - it chainloads the boot"
+    summary="$summary manager and does NOT launch the hypervisor"
+else
+    summary="ok: $loader launches the hypervisor and carries no"
+    summary="$summary destructive self check"
+fi
 [ "${ZPP_ALLOW_NO_NESTED:-0}" = "1" ] &&
     summary="$summary; nested VMX NOT checked"
 [ "${ZPP_ALLOW_NO_TRACE:-0}" = "1" ] &&
