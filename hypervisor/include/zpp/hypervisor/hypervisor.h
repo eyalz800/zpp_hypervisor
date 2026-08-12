@@ -4197,12 +4197,17 @@ private:
      * frame: every exit this loop takes is a model-specific register
      * access made *inside* the clock interrupt handler, so the newest
      * frames are always `KiInterruptDispatchNoLockNoEtw` and its
-     * callees, and the thread's own frames are below them. Four kilobytes
-     * covers a good part of a kernel stack without the scan becoming the
-     * expensive thing in the sample.
+     * callees. Four kilobytes was the second and still returned six
+     * candidates, all of them that handler's.
+     *
+     * Sixteen is the whole of a kernel stack, which is what it takes: the
+     * interrupted thread's frames are at *higher* addresses than the
+     * handler's stack pointer - the stack grows down - and how much
+     * higher depends on how deep it was when the tick arrived. Guessing
+     * that distance is what the two shorter scans were doing.
      */
-    static constexpr std::size_t guest_stack_words = 512;
-    static constexpr std::size_t guest_stack_capacity = 24;
+    static constexpr std::size_t guest_stack_words = 2048;
+    static constexpr std::size_t guest_stack_capacity = 48;
 
     std::uint64_t guest_kernel_size{};
     std::uint64_t guest_stack_trace[guest_stack_capacity]{};
