@@ -8791,3 +8791,48 @@ remaining answer needs to see inside the guest rather than around it. The
 honest options are a bare-boot differential with KVM's tracepoints, or
 walking the guest hypervisor's extended page tables from outside to read
 the root partition's own kernel state.
+
+
+## With and without the TPR shadow are completely different boots
+
+2026-08-12, one variable, `ZPP_NESTED_TPR_SHADOW`, on a one-processor
+boot of the same tree.
+
+**On** - the shadow handed to the processor, which is the default and what
+a processor does: the guest reaches Phase 1 initialisation, completes the
+virtual-trust-level protection pass and idles, which is the long-standing
+stall.
+
+**Off** - CR8 load and store exiting forced, both answered here against
+the same virtual-APIC page: **the guest reboot-loops.** Four loader boots
+in one run, the counters resetting each time - `l2_entries` seen climbing
+to 27,261 and then found at 12,673.
+
+Two things worth keeping from it.
+
+**The guest leans on CR8 hard.** 62,566 reads and 96,635 writes across
+27,261 second-level entries - about six accesses per entry. Handing that
+to the processor costs nothing and emulating it costs an exit each, which
+is most of why the off build is several times slower before it even
+fails.
+
+**The guest hypervisor's TPR threshold is zero.** So it never asked the
+processor to tell it when the priority falls; it reads VTPR when it wants
+it. That retires the "40 TPR-below-threshold exits against 3,395 pending
+requests" line as evidence of anything - with a threshold of zero the
+processor raises that exit for nobody, and the forty came from the other
+virtual trust level's own VMCS.
+
+**What this does *not* show.** The reboot loop is most likely a defect in
+the emulation written for the experiment rather than a discovery about
+the honoured path - the emulation is new, unreviewed against a second
+implementation, and has at least one known rough edge: the synthesised
+below-threshold reflection happens inside the exit handler, which then
+resumes as though it had not, and only a threshold of zero has kept that
+from firing. It says the guest is *sensitive* to how the task priority is
+handled, which is worth knowing after three failed explanations built on
+it, and it does not say the honoured path is wrong.
+
+The known-good build was rebuilt and redeployed immediately afterwards,
+since the rule here is that the disk never keeps a loader that has not
+completed a boot.
