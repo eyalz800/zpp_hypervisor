@@ -2248,6 +2248,51 @@ private:
     shadow_ept_lookup(std::size_t cpu, std::uint64_t guest_physical);
 
     /**
+     * A second-level guest's physical address, translated through the
+     * guest hypervisor's extended page tables into one this VMM can
+     * reach.
+     *
+     * **Everything that reads guest memory is wrong without this while a
+     * second-level guest runs, and wrong silently.** The addresses in
+     * that guest's page tables, and the addresses its instructions name,
+     * are physical *in its own guest hypervisor's address space* - one
+     * translation short of anything this VMM can map. Reading them
+     * directly lands on whatever host memory happens to share the number:
+     * either a page above the physical address width, which faults in
+     * root operation where there is no recovery point, or unrelated bytes
+     * that decode into a plausible instruction and produce a fabricated
+     * answer. The second is the dangerous one and it was reachable.
+     *
+     * KVM cannot make the mistake because the two are separate objects:
+     * `nested_ept_init_mmu_context` splits `arch.mmu` from
+     * `arch.walk_mmu`, and every table read on the nested path goes
+     * through `kvm_translate_gpa`. This is the same split, expressed as a
+     * function rather than a type, because there is one caller shape here
+     * and not a class of them.
+     *
+     * Answers the address unchanged when the processor is not running a
+     * second-level guest, or when that guest's hypervisor gave it no
+     * extended page tables of its own - in both cases the guest-physical
+     * address already is one of this VMM's.
+     */
+    std::expected<std::uint64_t, zpp::error>
+    l2_physical_to_l1(std::size_t cpu, std::uint64_t guest_physical);
+
+    /**
+     * Reads guest memory named by a guest-physical address, at whichever
+     * level is running.
+     *
+     * The counterpart of `read_guest_physical` for anything reachable
+     * from a second-level exit, and the one every such path should use:
+     * it is `read_guest_physical` exactly when that is the right answer,
+     * and a translation followed by it otherwise.
+     */
+    std::expected<void, zpp::error>
+    read_guest_memory(std::size_t cpu,
+                      std::uint64_t guest_physical,
+                      std::span<std::byte> into);
+
+    /**
      * The processor's physical-address width, cached.
      *
      * SDM 31.3.3.1 makes it the boundary for an entry's reserved address

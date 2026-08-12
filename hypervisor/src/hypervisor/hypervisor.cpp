@@ -2915,9 +2915,22 @@ hypervisor::translate_guest_linear(std::uint64_t linear)
         {12, 0}, // the last level always terminates
     };
 
+    // Which processor's second-level guest this is, if any. Every table
+    // read below goes through the guest hypervisor's extended page tables
+    // when one is running, because the addresses in that guest's page
+    // tables are physical in *its* hypervisor's address space and not in
+    // this VMM's - see `l2_physical_to_l1`, which is where the whole of
+    // that reasoning lives.
+    auto cpu = this->vmcs.vpid() - 1;
+
     for (std::size_t level{}; level < 4; ++level) {
+        auto reachable = l2_physical_to_l1(cpu, table);
+        if (!reachable) {
+            return {};
+        }
+
         auto * entries = static_cast<const std::uint64_t *>(
-            map_window_at(transfer_window_first_page, table, 1));
+            map_window_at(transfer_window_first_page, *reachable, 1));
         if (!entries) {
             return {};
         }
@@ -2996,6 +3009,26 @@ hypervisor::decode_guest_instruction(std::size_t cpu,
     auto tail_linear = (rip & page_mask) + page_size;
     auto tail_physical = this->translate_guest_linear(tail_linear);
 
+    // Both translations end in the address space of whichever guest is
+    // running, so both need the same last step before anything maps them.
+    // `translate_guest_linear` walks *through* the guest hypervisor's
+    // extended page tables and hands back an address still inside its
+    // guest - see `l2_physical_to_l1` - and mapping that directly is how
+    // the decoder came to read unrelated memory and answer with a
+    // plausible instruction.
+    auto reachable = this->l2_physical_to_l1(cpu, *physical);
+    if (!reachable) {
+        return {};
+    }
+
+    std::optional<std::uint64_t> tail_reachable;
+    if (tail_physical) {
+        if (auto translated =
+                this->l2_physical_to_l1(cpu, *tail_physical)) {
+            tail_reachable = *translated;
+        }
+    }
+
     // Fifteen bytes is the architectural maximum length of an
     // instruction, and it may straddle a page boundary, which is why the
     // window is two pages. They need not be contiguous in guest physical
@@ -3005,14 +3038,14 @@ hypervisor::decode_guest_instruction(std::size_t cpu,
 
     auto first_page = instruction_window_first_page(cpu);
     auto * bytes = static_cast<const std::uint8_t *>(
-        map_window_at(first_page, *physical, 1));
+        map_window_at(first_page, *reachable, 1));
     if (!bytes) {
         return {};
     }
 
     std::uint8_t code[longest_instruction]{};
 
-    auto offset = *physical & (page_size - 1);
+    auto offset = *reachable & (page_size - 1);
     auto in_first = page_size - offset;
     if (in_first > longest_instruction) {
         in_first = longest_instruction;
@@ -3026,9 +3059,9 @@ hypervisor::decode_guest_instruction(std::size_t cpu,
         // anywhere, or not at all, and a decoder that read past the end
         // of the first page would be reading whatever physically follows
         // it.
-        if (tail_physical) {
+        if (tail_reachable) {
             if (auto * tail = static_cast<const std::uint8_t *>(
-                    map_window_at(first_page + 1, *tail_physical, 1))) {
+                    map_window_at(first_page + 1, *tail_reachable, 1))) {
                 __builtin_memcpy(
                     code + in_first, tail, longest_instruction - in_first);
             }

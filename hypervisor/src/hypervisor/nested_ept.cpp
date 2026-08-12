@@ -162,6 +162,79 @@ ept_walk_result hypervisor::host_ept_lookup(std::uint64_t physical_address)
     return leaf_result(leaf, physical_address, page_shift_4kb, above);
 }
 
+std::expected<std::uint64_t, zpp::error> hypervisor::l2_physical_to_l1(
+    std::size_t cpu, std::uint64_t guest_physical)
+{
+    constexpr std::uint64_t primary_secondary_controls = 1ull << 31;
+    constexpr std::uint64_t secondary_enable_ept = 1ull << 1;
+
+    if ((cpu >= max_cpus) || !this->running_l2[cpu]) {
+        return guest_physical;
+    }
+
+    auto & shadow = this->guest_vmcs12[cpu];
+
+    auto primary12 =
+        shadow.read(arch::x86_64::vmx::vmcs::field::
+                        primary_processor_based_vm_execution_controls);
+    auto secondary12 =
+        (0 != (primary12 & primary_secondary_controls))
+            ? shadow.read(
+                  arch::x86_64::vmx::vmcs::field::
+                      secondary_processor_based_vm_execution_controls)
+            : std::uint64_t{};
+
+    // Without tables of its own the guest hypervisor's guest runs on this
+    // VMM's, so the address is already one of this VMM's - the same
+    // reasoning `on_l2_ept_fault` gives for deferring that case whole.
+    if (0 == (secondary12 & secondary_enable_ept)) {
+        return guest_physical;
+    }
+
+    auto eptp12 = shadow.read(arch::x86_64::vmx::vmcs::field::ept_pointer);
+
+    auto walk = arch::x86_64::vmx::walk_ept(
+        eptp12 & (((1ull << 52) - 1) & ~0xfffull),
+        guest_physical,
+        physical_address_bits(),
+        execute_only_translations_offered,
+        [&](std::uint64_t at) -> std::optional<epte> {
+            std::uint64_t value{};
+            auto read = read_guest_physical(
+                at,
+                std::span(reinterpret_cast<std::byte *>(&value),
+                          sizeof(value)));
+            if (!read) {
+                return std::nullopt;
+            }
+            return epte(value);
+        });
+
+    // Refused rather than approximated. A caller that gets an address
+    // back will read through it, and an address invented for a mapping
+    // the guest hypervisor does not have is the silent-wrong-answer case
+    // this function exists to remove.
+    if (ept_walk_status::mapped != walk.status) {
+        return std::unexpected(
+            zpp::error{error::guest_address_not_mapped});
+    }
+
+    return walk.physical_address;
+}
+
+std::expected<void, zpp::error>
+hypervisor::read_guest_memory(std::size_t cpu,
+                              std::uint64_t guest_physical,
+                              std::span<std::byte> into)
+{
+    auto translated = l2_physical_to_l1(cpu, guest_physical);
+    if (!translated) {
+        return std::unexpected(translated.error());
+    }
+
+    return read_guest_physical(*translated, into);
+}
+
 ept_walk_result hypervisor::shadow_ept_lookup(std::size_t cpu,
                                               std::uint64_t guest_physical)
 {
