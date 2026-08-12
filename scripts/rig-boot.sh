@@ -112,16 +112,30 @@ if ! rig 30 "printf 'info status\n' | nc -w 5 127.0.0.1 $MONITOR_PORT" \
     ok=0
 fi
 
-if ! rig 30 "nc -z -w 5 127.0.0.1 $GDB_PORT && echo open" 2>/dev/null \
-        | grep -q open; then
+# Checked by looking at the listening socket, **never by connecting to
+# it**. A TCP connection to the gdb stub *is* a debugger attaching, and
+# QEMU stops the virtual machine the moment one arrives - so `nc -z`,
+# which exists precisely to open and immediately close a connection,
+# silently paused the guest mid-firmware and left it there. The symptom
+# was a boot whose serial stopped growing at the graphics option ROM,
+# which reads exactly like a hang in that option ROM; `info status`
+# answering `paused` rather than `running` is what distinguishes them,
+# and it is worth asking before believing any hang on this machine.
+if ! rig 30 "netstat -ln 2>/dev/null | grep -c ':$GDB_PORT '" 2>/dev/null \
+        | grep -qE '^[1-9]'; then
     say "FAIL: the gdb stub on :$GDB_PORT is not listening."
     ok=0
 fi
 
 # Serial last, since it is the one that takes time to say anything: the
 # firmware runs before the loader does.
+#
+# Four minutes, not ninety seconds. The firmware runs the graphics option
+# ROM before it reaches any boot option, and on this machine that alone
+# takes over two minutes - a shorter deadline reports a perfectly healthy
+# boot as a failure, which then invites killing it and starting again.
 serial=0
-deadline=$((SECONDS + 90))
+deadline=$((SECONDS + 240))
 
 while [ "$SECONDS" -lt "$deadline" ]; do
     sleep 5
