@@ -10801,3 +10801,41 @@ taken with `ZPP_PROFILE_L2=ON`, left over from stack sampling, whose
 translation. Re-measured with it off the answer barely moved - 85% both
 ways - so it was not the cause, but the measurement had no right to be
 trusted until that was checked.
+
+
+## Where the exit handler's time goes, measured per phase
+
+Guessing at this failed twice, so it is instrumented. `phase_cycles`
+against `handler_cycles`, nested single-processor boot, 780,641 exits:
+
+    save_l2_state            9.2%   113,435 calls   102 us each
+    build_vmcs02            24.5%   113,435 calls   270 us each
+    shadow_ept_pointer_for   0.2%   576,262 calls   830 cycles each
+    everything else         ~66%
+
+**Two candidates eliminated.** The shadow extended-page-table lookup is
+0.2% - it is called five times as often as `build_vmcs02` and costs 830
+cycles a call, so the shadow page tables are not the problem. And
+`cached_vmx_msr`, which `build_vmcs02` calls five times through
+`adjust_msr`, is a plain array index and reads no MSR.
+
+**`build_vmcs02` at 270 microseconds a call is the largest single item
+identified**, and its own VMCS writes cannot account for it: the shadow
+copy experiment put a VMWRITE at roughly a tenth of a microsecond, so
+fifty of them is five microseconds of two hundred and seventy.
+
+**Two things that measurement does not settle**, and the next person
+should settle them before optimising anything:
+
+- Whether a VMWRITE really is that cheap. The tenth of a microsecond
+  came from comparing two runs at *different phases of the boot*, which
+  is not a controlled comparison. A micro-benchmark at initialisation -
+  read the counter, execute a hundred writes of one harmless field, read
+  it again - settles it in one boot and costs nothing afterwards.
+- What the remaining 66% is. `reflect_l2_exit` is the obvious next phase
+  to time; the timer index is already reserved for it.
+
+**The shape of the answer matters more than the number.** If the cost is
+spread evenly across a hundred small operations there is no fix worth
+making and the nested-under-KVM configuration is simply too slow to
+carry Windows. If it is one operation, there is.

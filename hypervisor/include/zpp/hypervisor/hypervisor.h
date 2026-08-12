@@ -6651,6 +6651,25 @@ private:
      * visible beside the exits it removed.
      * @{
      */
+    /**
+     * Where the exit handler's time actually goes, per phase.
+     *
+     * Measured: this VMM is 85% of wall clock at about 156 microseconds
+     * an exit, and two attempts to explain that by counting VMCS writes
+     * were both wrong - skipping 84% of the shadow copy's writes moved
+     * the total by 2%, which puts a VMWRITE at roughly a tenth of a
+     * microsecond and rules out the whole class. Guessing at the
+     * breakdown has now failed twice, so it is measured instead.
+     *
+     * Indices: 0 save_l2_state, 1 reflect_l2_exit, 2 build_vmcs02.
+     * Anything left over is the rest of the handler.
+     * @{
+     */
+    static constexpr std::size_t phase_count = 4;
+    std::uint64_t phase_cycles[max_cpus][phase_count]{};
+    std::uint64_t phase_calls[max_cpus][phase_count]{};
+    /** @} */
+
     std::uint64_t vmcs_shadow_loads[max_cpus]{};
     std::uint64_t vmcs_shadow_stores[max_cpus]{};
     /** @} */

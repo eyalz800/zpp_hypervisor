@@ -6,6 +6,7 @@
 #include "zpp/hypervisor/guest_windows.h"
 #include "zpp/hypervisor/hypervisor.h"
 #include "zpp/hypervisor/nested_vmx.h"
+#include "zpp/scope_exit.h"
 #include <cstddef>
 #include <cstdint>
 #include <cstring>
@@ -761,6 +762,16 @@ hypervisor::merge_nested_bitmaps(std::size_t cpu)
 
 std::expected<void, zpp::error> hypervisor::build_vmcs02(std::size_t cpu)
 {
+    // Phase timing; see `phase_cycles`.
+    auto phase_start = arch::x86_64::rdtsc();
+    auto phase_stop = zpp::scope_exit([&] {
+        if (cpu < max_cpus) {
+            this->phase_cycles[cpu][2] +=
+                arch::x86_64::rdtsc() - phase_start;
+            this->phase_calls[cpu][2] += 1;
+        }
+    });
+
     namespace vmx_msr = arch::x86_64::vmx::msr;
 
     if constexpr (!nested_vmx::enabled) {
@@ -2154,6 +2165,16 @@ bool hypervisor::l1_wants_l2_exit(std::size_t cpu,
 
 void hypervisor::save_l2_state(std::size_t cpu)
 {
+    // Phase timing; see `phase_cycles`.
+    auto phase_start = arch::x86_64::rdtsc();
+    auto phase_stop = zpp::scope_exit([&] {
+        if (cpu < max_cpus) {
+            this->phase_cycles[cpu][0] +=
+                arch::x86_64::rdtsc() - phase_start;
+            this->phase_calls[cpu][0] += 1;
+        }
+    });
+
     auto & vmcs = this->vmcs;
     auto & shadow = this->guest_vmcs12[cpu];
 

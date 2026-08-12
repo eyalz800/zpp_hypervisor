@@ -4,6 +4,7 @@
 #include "zpp/arch/x86_64/vmx/ept_pointer.h"
 #include "zpp/hypervisor/hypervisor.h"
 #include "zpp/hypervisor/nested_vmx.h"
+#include "zpp/scope_exit.h"
 #include <cstring>
 #include <optional>
 
@@ -512,6 +513,18 @@ hypervisor::shadow_ept_entry(std::size_t cpu,
 std::expected<std::uint64_t, zpp::error>
 hypervisor::shadow_ept_pointer_for(std::size_t cpu, std::uint64_t eptp12)
 {
+    // Phase timing; see `phase_cycles`. build_vmcs02 costs 262
+    // microseconds a call and its VMCS writes account for about
+    // five of those, so the rest is here or nowhere.
+    auto phase_start = arch::x86_64::rdtsc();
+    auto phase_stop = zpp::scope_exit([&] {
+        if (cpu < max_cpus) {
+            this->phase_cycles[cpu][3] +=
+                arch::x86_64::rdtsc() - phase_start;
+            this->phase_calls[cpu][3] += 1;
+        }
+    });
+
     auto root = eptp12 & (((1ull << 52) - 1) & ~0xfffull);
 
     // Rebuilt when no shadow this processor holds was built from this
