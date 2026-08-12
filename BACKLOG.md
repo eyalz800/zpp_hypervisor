@@ -8338,3 +8338,68 @@ controller setup and before the storage stack - which is consistent with
 the earlier observation that the MSI-X vectors are never programmed, and
 that observation, previously written off as downstream, is now the most
 specific thing known about the stall.
+
+
+## What the root partition is waiting for: its other seven processors
+
+2026-08-12, the boot after the livelock entry above was withdrawn. Same
+build, same medium, module base `0x67522000`.
+
+**Every measurement before this one was of processor 0, of eight.** The
+run was believed to be a single-processor boot; `info cpus` says
+otherwise, and `boot-zpp.sh` defaults to eight unless `ZPP_CPUS` is set,
+which `rig-boot.sh` does not set. Reading all eight:
+
+| cpu | exits | l2 entries |
+|---|---|---|
+| 0 | 3,533,126 | 1,378,668 |
+| 1-7 | **107 each** | **0** |
+
+Seven processors took a hundred and seven exits each and then stopped
+taking any. Their last recorded exits are `cs=0x0038`,
+`rip=0x7ed5xxxx` - **UEFI firmware** - alternating `cpuid` and
+`rdmsr 0x1b` (IA32_APIC_BASE), which is EDK2's `MpInitLib` application
+processor loop. They are parked on its `WAKEUP_AP_SIGNAL` semaphore,
+which is a spin on memory and produces no exits at all, which is why the
+count stops rather than climbs.
+
+So they never became Windows processors, and the root partition is
+waiting for processors that are still in the firmware. Everything
+previously chased is downstream of that:
+
+- the idle cycle - poll the reference counter, re-arm, end-of-interrupt,
+  end-of-message - is a kernel waiting, and it is the only thing left
+  after the wait begins,
+- no device interrupt ever arrives because the storage stack is never
+  reached,
+- the NVMe reports `MSI: Enable-` and `MSI-X: Enable- Masked-` at the
+  device, because nothing ever enabled them,
+- the second-level guest's last real work is synthetic interrupt
+  controller setup and arming synthetic timer 0, which is exactly where a
+  kernel is when it starts its application processors.
+
+**Exactly one INIT and two start-up IPIs have ever been seen**
+(`ipi_init_seen` = 1, `ipi_start_up_seen` = 2), with nothing refused -
+`ipi_refused_shorthand` and `ipi_refused_logical` are both zero. One
+INIT-SIPI-SIPI is one processor being started once. Seven were needed.
+
+Next, in order:
+
+1. **Whether the guest ever sent the other six sequences.** The guest is
+   in x2APIC mode by then - it writes `0x836` and `0x834` - so an
+   interrupt command is `wrmsr 0x830` and not a write to the APIC page.
+   `intercept_interrupt_command` sets the bitmap bit for that MSR and
+   `note_apic_mode` decides machine-wide when to arm it; the boot begins
+   in xAPIC mode, so the arming depends on the switch being noticed.
+   A counter on the arming, and one on every `wrmsr 0x830` seen, settles
+   whether the writes are arriving and being mishandled or never arriving.
+2. **What happened to the one processor that was started.** One
+   INIT-SIPI-SIPI was seen and its target is still in the firmware, so
+   the sequence was seen and did not take effect. That is a smaller and
+   sharper question than the first, and answering it probably answers
+   both.
+
+The two are related to the open note that with the interrupted-event
+re-queue on, one processor of eight reached `vmxon` where eight did with
+it off. That note is now the same investigation rather than a separate
+one.
