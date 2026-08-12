@@ -8168,3 +8168,51 @@ second-level guest is running.
 **The control run settled it in one comparison.** A measurement of the
 machine with the variable removed was worth more than four measurements
 of the machine with it in.
+
+## The guest is livelocked on one EPT violation
+
+2026-08-12, verified boot (`Boot0000 "zpp hypervisor"`, 60 trace lines),
+one processor, after the working-exit ring learned to drop external
+interrupts as well as the idle loop's MSR traffic.
+
+The tail of what the second-level guest actually *did*:
+
+```
+[89070..89079]  ept-violation  rip=0xfffff802c78a72f3  qual=0x181
+[89080]         rdmsr  0x277           IA32_PAT
+[89081]         rdmsr  0xc0000080      IA32_EFER
+[89082..89083]  wrmsr  0x836, 0x834    x2APIC LVT registers
+[89087..89093]  wrmsr  0x400000b0      STIMER0_CONFIG, repeatedly
+                rdmsr  0x40000083      SIMP
+                wrmsr  0x40000093      SINT3
+```
+
+**The same instruction pointer takes an extended-page-table violation
+over and over.** Qualification `0x181` is a data read of a guest page
+with the guest-linear address valid (SDM Table 30-7, bits 0, 7 and 8), so
+it is an ordinary read that never resolves - the guest retries the same
+instruction for ever.
+
+That is a livelock in this VMM's shadow tables, not a guest waiting on a
+device. It is the first explanation of the stall that is *ours* and that
+survived being retaken on a confirmed boot.
+
+Two things to establish next, in order:
+
+1. **Which guest-physical address.** The ring's `detail` field carries
+   `l2_exit_detail`, which is RCX, and is 0 here - the faulting address
+   is in the guest-physical-address VMCS field and is not being recorded
+   for this path. One field.
+2. **Why the shadow never installs a leaf for it.** `install_shadow_leaf`
+   deliberately leaves conditional entries *absent* so the decision is
+   taken per access, and a page whose right answer is never "present"
+   would produce exactly this. The watched local APIC page is the obvious
+   candidate class, and `0x181` says the access is a read of a guest
+   page rather than a paging-structure walk.
+
+Note what it is not. It is not the interrupted-event re-queue, which
+reports 4,458 requeued and nothing lost; not the synthetic timer, which
+ticks at 97 Hz throughout; and not the device, which the guest never gets
+far enough to configure - the surrounding records show it still
+programming x2APIC LVTs and the synthetic interrupt controller when it
+stops.
