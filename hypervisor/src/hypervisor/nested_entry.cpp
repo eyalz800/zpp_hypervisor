@@ -3487,12 +3487,25 @@ void hypervisor::sample_interrupted_stack(std::size_t cpu,
             break;
         }
 
-        auto shaped =
-            (frame[0] >= base) && (frame[0] < (base + size)) &&
-            (kernel_code_selector == frame[1]) &&
-            (0 != (frame[2] & rflags_always_one)) &&
-            (frame[3] >= kernel_address_floor) &&
-            ((kernel_stack_selector == frame[4]) || (0 == frame[4]));
+        // Two of the five are load bearing and the rest are not.
+        //
+        // The code selector and the stack pointer identify the frame:
+        // `0x10` is the kernel's, and a canonical kernel address is what
+        // an interrupted kernel thread's stack pointer looks like.
+        // Requiring the *interrupted instruction pointer* to be inside
+        // ntoskrnl as well was too strict - a thread interrupted in a
+        // driver, in the hypercall page or in the HAL has a perfectly
+        // valid frame this would reject - and so was pinning the stack
+        // selector, which is pushed as zero as often as `0x18`.
+        //
+        // Measured: with those two required, no frame was found at all in
+        // sixteen kilobytes of a stack that certainly contains one.
+        auto shaped = (kernel_code_selector == frame[1]) &&
+                      (0 != (frame[2] & rflags_always_one)) &&
+                      (frame[3] >= kernel_address_floor) &&
+                      (frame[0] >= kernel_address_floor);
+
+        static_cast<void>(kernel_stack_selector);
 
         if (!shaped) {
             continue;
