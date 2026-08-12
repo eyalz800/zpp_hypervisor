@@ -86,6 +86,10 @@ option(ZPP_NESTED_TPR_SHADOW
     "Hand a guest hypervisor's TPR shadow to the processor. Off forces CR8 exiting and emulates it against the same page, which is slower and exists to be the one variable between two boots."
     ON)
 
+option(ZPP_NESTED_SHADOW_VMCS
+    "Let the processor shadow a guest hypervisor's VMCS, so its vmreads and vmwrites do not exit. Off makes every one of them exit and be recorded, which is slow and is the only way to see what it actually asks for - with it on, vmcs_field_use reads 411 writes for a whole boot and says nothing."
+    ON)
+
 option(ZPP_PROFILE_L2
     "Sample a second-level guest's instruction pointer on the VMX-preemption timer. A profiler: it costs an exit per interval and is the only instrument that can see a guest spinning on memory."
     OFF)
@@ -166,6 +170,7 @@ ExternalProject_Add(hypervisor
         -DZPP_NESTED_VMX=${ZPP_NESTED_VMX}
         -DZPP_REQUEUE_INTERRUPTED_EVENTS=${ZPP_REQUEUE_INTERRUPTED_EVENTS}
         -DZPP_NESTED_TPR_SHADOW=${ZPP_NESTED_TPR_SHADOW}
+        -DZPP_NESTED_SHADOW_VMCS=${ZPP_NESTED_SHADOW_VMCS}
         -DZPP_PROFILE_L2=${ZPP_PROFILE_L2}
         -DZPP_GUEST_TESTS=${ZPP_GUEST_TESTS}
         -DZPP_TEST_MODULE_PROTECTION=${ZPP_TEST_MODULE_PROTECTION}
@@ -245,6 +250,7 @@ ExternalProject_Add(uefi_loader
         -DZPP_NESTED_VMX=${ZPP_NESTED_VMX}
         -DZPP_REQUEUE_INTERRUPTED_EVENTS=${ZPP_REQUEUE_INTERRUPTED_EVENTS}
         -DZPP_NESTED_TPR_SHADOW=${ZPP_NESTED_TPR_SHADOW}
+        -DZPP_NESTED_SHADOW_VMCS=${ZPP_NESTED_SHADOW_VMCS}
         -DZPP_PROFILE_L2=${ZPP_PROFILE_L2}
         -DZPP_TRACE=${ZPP_TRACE}
         -DZPP_CHAINLOAD_ONLY=${ZPP_CHAINLOAD_ONLY}

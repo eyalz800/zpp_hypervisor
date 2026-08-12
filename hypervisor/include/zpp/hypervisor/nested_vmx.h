@@ -200,7 +200,12 @@ inline constexpr bool enabled =
  * adjust_msr, and `hypervisor::vmcs_shadowing_enabled` records whether it
  * was granted. On is a request, not an assertion.
  */
-inline constexpr bool shadow_vmcs_enabled = true;
+#ifndef ZPP_NESTED_SHADOW_VMCS
+#define ZPP_NESTED_SHADOW_VMCS 1
+#endif
+
+inline constexpr bool shadow_vmcs_enabled =
+    (0 != ZPP_NESTED_SHADOW_VMCS);
 
 /**
  * Whether a guest hypervisor's TPR shadow is handed to the processor, or
