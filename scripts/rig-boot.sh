@@ -53,6 +53,21 @@ EXTRA=${ZPP_QEMU_EXTRA:-}
 # state that said so was never read, because nobody knew there were seven.
 CPUS=${ZPP_CPUS:-}
 
+# ZPP_CPU_EXTRA is appended to the launcher's `-cpu host,kvm=on,topoext`,
+# so a boot can change what VMX capabilities the guest hypervisor is
+# offered without touching this tree at all.
+#
+# That is the point of it. The rig boots this Windows installation under
+# KVM and not under this VMM, and scripts/kvm-nested-msrs.sh measured
+# twelve capabilities KVM offers a nested guest that we withhold. Every
+# one is a `-cpu` flag, so KVM can be degraded to exactly our menu and
+# the guest booted underneath it with `ZPP_CHAINLOAD_ONLY` - which
+# settles whether the capability set is the difference, with our code
+# out of the picture and no rebuild of it between runs.
+#
+# Leading comma included by the caller, since it joins an existing list.
+CPU_EXTRA=${ZPP_CPU_EXTRA:-}
+
 SSH_OPTS="-o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o ConnectTimeout=10 -o ServerAliveInterval=5 -o ServerAliveCountMax=3 -o BatchMode=yes"
 
 # shellcheck disable=SC2086
@@ -99,6 +114,7 @@ rig 120 "
     cd /home/tc/vm
     export ZPP_QEMU_EXTRA='$CHANNELS $EXTRA'
     ${CPUS:+export ZPP_CPUS=$CPUS}
+    ${CPU_EXTRA:+export ZPP_CPU_EXTRA='$CPU_EXTRA'}
     setsid nohup sudo -E ./boot-zpp.sh > /home/tc/zpp/boot.log 2>&1 < /dev/null &
     sleep 3" > /dev/null 2>&1 || true
 

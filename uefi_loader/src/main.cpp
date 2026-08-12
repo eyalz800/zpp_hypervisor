@@ -1523,9 +1523,9 @@ extern "C" EFI_STATUS EFIAPI uefi_main(EFI_HANDLE image_handle,
     //   test fails open - a renamed or eliminated marker reads exactly
     //   like a loader that is fine.
     if constexpr (ZPP_CHAINLOAD_ONLY) {
-        trace::raw("ZPP_LOADER chainload only, hypervisor not launched");
+        trace::raw("ZPP_LOADER chainload only, hypervisor not launched\n");
     } else {
-        trace::raw("ZPP_LOADER resident, hypervisor launch compiled in");
+        trace::raw("ZPP_LOADER resident, hypervisor launch compiled in\n");
     }
 
     if constexpr (ZPP_CHAINLOAD_ONLY) {
@@ -1574,7 +1574,6 @@ extern "C" EFI_STATUS EFIAPI uefi_main(EFI_HANDLE image_handle,
     // start it. The chainload below connects controllers for itself,
     // which is the only preparation it actually needs.
     constexpr bool prepare_for_hypervisor = !ZPP_CHAINLOAD_ONLY;
-
 
     // Establish whether timed waits work before touching MP services,
     // since a dead timer makes them hang rather than return an error.
