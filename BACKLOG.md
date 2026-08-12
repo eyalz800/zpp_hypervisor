@@ -9552,3 +9552,48 @@ in the same way, and the mechanism is not the shadow itself. The next
 measurement is narrow: sample the register *while the thread probe says
 IRQL 0*, and see whether the two disagree. They are read from different
 places and have never been compared at the same instant.
+
+
+## The priority histogram, and why it cannot settle the question
+
+2026-08-12. Counted inside the hypervisor rather than poked from the
+monitor, at the stall:
+
+| class | Windows level | samples | share |
+|---|---|---|---|
+| 15 | HIGH | 24 | 52% |
+| 13 | CLOCK | 11 | 24% |
+| 2 | DISPATCH | 10 | 22% |
+| 1 | APC | 1 | 2% |
+| **0** | **PASSIVE** | **0** | — |
+
+Never PASSIVE, which is what the deferred-call vector needs. But **this
+histogram is biased and cannot be used as evidence**, and the bias is
+structural rather than a sampling accident.
+
+The samples are taken on the second-level entry path, which the guest
+reaches only by *exiting* - and at the stall it exits because it writes a
+synthetic register, which it does from inside a raised-priority region.
+`HalRequestSoftwareInterrupt` raises, writes the interrupt command
+register, and lowers. So the instrument looks exactly where the priority
+is high and never where it is low. Fifty-two per cent at HIGH is the
+instrument describing itself.
+
+An unbiased distribution needs a clock the guest does not control, and
+the preemption-timer profiler is that clock - but at the stall it is
+nearly silent, because the guest exits about fourteen hundred times a
+second and never runs a full interval uninterrupted. The one instrument
+that could answer this is the one the stall switches off.
+
+So the honest position on the deferred-call ratio - 230,933 requests
+against 6 deliveries - is that **it remains unexplained rather than
+established as the fault**. Windows drains deferred calls inline when it
+lowers priority, without the interrupt being delivered at all, so a low
+delivery count is not by itself wrong. What would settle it is knowing
+whether the calls *run*, which is a question about the guest's own
+deferred-call queue and not about interrupt delivery.
+
+That is the fourth time in this investigation an instrument has been
+found to answer a different question from the one being asked of it. The
+pattern is stable enough to state as a rule: **an instrument driven by
+the guest's own behaviour cannot measure that behaviour's distribution.**
