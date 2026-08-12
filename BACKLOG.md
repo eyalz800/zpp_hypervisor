@@ -8169,50 +8169,78 @@ second-level guest is running.
 machine with the variable removed was worth more than four measurements
 of the machine with it in.
 
-## The guest is livelocked on one EPT violation
+## Withdrawn: the guest is not livelocked on an EPT violation
 
-2026-08-12, verified boot (`Boot0000 "zpp hypervisor"`, 60 trace lines),
-one processor, after the working-exit ring learned to drop external
-interrupts as well as the idle loop's MSR traffic.
+2026-08-12. The entry that stood here read the tail of the working-exit
+ring as a livelock - the same instruction pointer taking the same
+extended-page-table violation for ever - and it was wrong. Kept rather
+than deleted, because the way it was wrong is the reusable part.
 
-The tail of what the second-level guest actually *did*:
+**What the ring actually said, read forwards:**
 
 ```
 [89070..89079]  ept-violation  rip=0xfffff802c78a72f3  qual=0x181
-[89080]         rdmsr  0x277           IA32_PAT
-[89081]         rdmsr  0xc0000080      IA32_EFER
-[89082..89083]  wrmsr  0x836, 0x834    x2APIC LVT registers
-[89087..89093]  wrmsr  0x400000b0      STIMER0_CONFIG, repeatedly
-                rdmsr  0x40000083      SIMP
-                wrmsr  0x40000093      SINT3
+                               l2 entry 0x1b4ef .. 0x1b4fb
+[89080..89081]  rdmsr  0x277, 0xc0000080     IA32_PAT, IA32_EFER
+[89082..89083]  wrmsr  0x836, 0x834          x2APIC LVT registers
+[89084..89086]  cpuid
+[89087..89091]  rdmsr  0x40000083            SIMP
+                wrmsr  0x40000093            SINT3
+                wrmsr  0x400000b0            STIMER0_CONFIG
+[89093]         wrmsr  0x400000b0            and then nothing, ever
 ```
 
-**The same instruction pointer takes an extended-page-table violation
-over and over.** Qualification `0x181` is a data read of a guest page
-with the guest-linear address valid (SDM Table 30-7, bits 0, 7 and 8), so
-it is an ordinary read that never resolves - the guest retries the same
-instruction for ever.
+Those violations are **nine of them, consecutive** - the record's
+`detail` field carries the second-level entry number, and it runs 0x1b4ef
+to 0x1b4fb without a gap - and the guest carried straight on afterwards.
+Nine faults for one instruction is a page being faulted in, not a loop.
+The mistake was reading the newest end of a ring as "where it stopped"
+when the records after it were plainly ordinary work.
 
-That is a livelock in this VMM's shadow tables, not a guest waiting on a
-device. It is the first explanation of the stall that is *ours* and that
-survived being retaken on a confirmed boot.
+**What is actually happening**, from the same run hours later:
 
-Two things to establish next, in order:
+| counter | value |
+|---|---|
+| `l2_working_trace_count` | 89,094 - **unchanged** |
+| `l2_exit_trace_count` | 4,006,429 |
+| `l2_entries` | 3,959,196 |
+| reference count reads (`0x40000020`) | 2,750,639 |
+| EOI / ICR / EOM / STIMER0 count writes | 273,570 / 273,574 / 273,571 / 273,572 |
+| `STIMER0_CONFIG` writes | 9 |
+| `events_discarded`, `events_refused_by_state` | 0, 0 |
+| `injection_landing_count` | 280,974 |
 
-1. **Which guest-physical address.** The ring's `detail` field carries
-   `l2_exit_detail`, which is RCX, and is 0 here - the faulting address
-   is in the guest-physical-address VMCS field and is not being recorded
-   for this path. One field.
-2. **Why the shadow never installs a leaf for it.** `install_shadow_leaf`
-   deliberately leaves conditional entries *absent* so the decision is
-   taken per access, and a page whose right answer is never "present"
-   would produce exactly this. The watched local APIC page is the obvious
-   candidate class, and `0x181` says the access is a read of a guest
-   page rather than a paging-structure walk.
+The working count frozen while the exit count climbs by millions is the
+whole finding: **the second-level guest has done no work at all for
+hours.** It set up the synthetic interrupt controller, armed synthetic
+timer 0, and went to sleep. Every wake since has been the same cycle -
+poll the reference counter, re-arm the timer, end-of-interrupt, send an
+inter-processor interrupt, end-of-message - 273,000 times. Interrupts are
+delivered and the message protocol completes rounds, so it is not starved
+of the timer. It is waiting for something else.
 
-Note what it is not. It is not the interrupted-event re-queue, which
-reports 4,458 requeued and nothing lost; not the synthetic timer, which
-ticks at 97 Hz throughout; and not the device, which the guest never gets
-far enough to configure - the surrounding records show it still
-programming x2APIC LVTs and the synthetic interrupt controller when it
-stops.
+The hypervisor's own log for that run is 42 lines and carries no error at
+all: no shadow reset, no unwatched page, no entry failure.
+
+**Lessons, which are why this entry is kept:**
+
+- A ring is written oldest to newest. Reading its tail as a conclusion
+  requires checking what came *after* the suspicious records, and here
+  what came after was three MSR reads, two LVT writes and a timer being
+  armed.
+- The record carries a sequence number for exactly this. Nine consecutive
+  entry numbers and a million look identical in a screenful and are not
+  the same finding.
+- **Two counters answer "stuck or waiting" and neither answers it
+  alone.** The exit count climbing says the machine is alive; the working
+  count frozen says the guest is not using it. `rig-dump-state.py` prints
+  both rings now for that reason.
+
+Next, and it is a different question from the one this entry used to ask:
+**what is the root partition waiting for?** Not the synthetic timer,
+which fires; not an interrupt, which lands; not memory, which faults in.
+The phase it stopped in is immediately after synthetic interrupt
+controller setup and before the storage stack - which is consistent with
+the earlier observation that the MSI-X vectors are never programmed, and
+that observation, previously written off as downstream, is now the most
+specific thing known about the stall.
