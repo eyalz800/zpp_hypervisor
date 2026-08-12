@@ -6665,6 +6665,22 @@ private:
      * Anything left over is the rest of the handler.
      * @{
      */
+    /**
+     * The cost of one VMREAD, measured rather than inferred.
+     *
+     * Everything about what to optimise turns on this. The figure in use
+     * - about a tenth of a microsecond - came from comparing two runs at
+     * different phases of a boot, which is not a controlled comparison,
+     * and if it is wrong by an order of magnitude the conclusion drawn
+     * from it inverts.
+     *
+     * Timed once, on the first exit, over a thousand reads of a field
+     * that is read-only and already being read anyway, so the
+     * measurement disturbs nothing.
+     */
+    std::uint64_t vmread_benchmark_cycles{};
+    bool vmread_benchmark_done{};
+
     static constexpr std::size_t phase_count = 4;
     std::uint64_t phase_cycles[max_cpus][phase_count]{};
     std::uint64_t phase_calls[max_cpus][phase_count]{};

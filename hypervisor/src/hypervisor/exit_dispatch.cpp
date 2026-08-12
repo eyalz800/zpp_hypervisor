@@ -68,6 +68,19 @@ void hypervisor::on_vm_exit(std::uint64_t cpuid,
     using basic_reason = arch::x86_64::vmx::exit_reason::basic_reason;
     auto & vmcs = this->vmcs;
 
+    // One thousand VMREADs, once, to price the instruction the whole
+    // optimisation question turns on. See `vmread_benchmark_cycles`.
+    if (!this->vmread_benchmark_done) {
+        this->vmread_benchmark_done = true;
+        auto before = arch::x86_64::rdtsc();
+        std::uint64_t sink{};
+        for (int i = 0; i < 1000; ++i) {
+            sink += vmcs.read(arch::x86_64::vmx::vmcs::field::exit_reason);
+        }
+        this->vmread_benchmark_cycles =
+            (arch::x86_64::rdtsc() - before) | (sink & 0);
+    }
+
     // The clock for `handler_cycles`. See its declaration: this is the
     // measurement that decides whether the fix is fewer instructions per
     // exit or fewer exits, and it is taken here because here is the

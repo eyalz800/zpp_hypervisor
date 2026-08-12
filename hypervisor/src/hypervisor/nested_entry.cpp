@@ -2681,6 +2681,16 @@ void hypervisor::reflect_l2_exit(std::size_t cpu,
                                  arch::x86_64::vmx::exit_reason reason,
                                  std::uint64_t qualification)
 {
+    // Phase timing; see `phase_cycles`.
+    auto reflect_start = arch::x86_64::rdtsc();
+    auto reflect_stop = zpp::scope_exit([&] {
+        if (cpu < max_cpus) {
+            this->phase_cycles[cpu][1] +=
+                arch::x86_64::rdtsc() - reflect_start;
+            this->phase_calls[cpu][1] += 1;
+        }
+    });
+
     auto & vmcs = this->vmcs;
     auto & shadow = this->guest_vmcs12[cpu];
 
