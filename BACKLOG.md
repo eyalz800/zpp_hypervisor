@@ -10888,3 +10888,40 @@ to find out, and neither is free:
 **Do not optimise anything else before re-running the benchmark.** Every
 wrong turn in this part of the investigation came from a cost model that
 had never been measured.
+
+
+## First real speedup, and how far it is from enough
+
+Two eliminations, both justified by the VMREAD benchmark rather than by
+argument, both measured after the fact:
+
+    build_vmcs02   525,000 -> 390,277 cycles a call   26% faster
+    whole handler  312,000 -> 285,390 cycles an exit   8.5% faster
+
+What was removed: twenty host-state fields read out of vmcs01 and twenty
+written into vmcs02 on **every** nested entry, plus eight control words -
+for state fixed for the life of the processor. vmcs02 is cleared once,
+where it is created, so the first write survives.
+
+**The gap is the point.** 8.5% against the five to ten times needed to
+fit Windows' clock handler inside its tick. `build_vmcs02` still costs
+390,277 cycles, about 130 VMCS accesses, and the handler as a whole is
+still 285,390. Closing that by optimisation means removing essentially
+all VMCS traffic from the hot path - caching the composed vmcs02 and
+writing only differences, making the trace ring free, and shrinking the
+shadow field set - which is a deep change to the nested path and would
+want its own design.
+
+**The alternative is one boot.** Every microsecond of this is the price
+of a trapped VMX instruction, and that price exists only because this VMM
+is KVM's guest. On the machine directly a VMREAD is tens of cycles, not
+three thousand, and the same handler costs about two microseconds instead
+of 146. **Before optimising further, find out whether the failure exists
+at all outside QEMU** - the rig's Limine menu has an entry that boots
+this VMM on the metal, and it needs a power cycle and someone present.
+
+Doing the optimisation first risks spending days making a configuration
+fast that nothing ships on. Doing the boot first risks one trip to the
+machine. The boot is the cheaper experiment and it is also the one that
+answers the original question, which was never "is this fast" but "does
+Windows boot".
