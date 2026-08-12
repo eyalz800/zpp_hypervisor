@@ -2251,9 +2251,15 @@ bool guest_tests::run(EFI_SYSTEM_TABLE * system_table)
                  1,
                  0);
         } else {
-            auto before = ::zpp_probe_l2_injections;
             auto ok = zpp::verify_nested::present(system_table);
-            auto delivered = ::zpp_probe_l2_injections - before;
+
+            // Taken from the probe rather than measured around the whole
+            // of `present`, and that is a correction: `present` now makes
+            // *two* injecting launches - one the architecture forbids and
+            // one it allows - so a count taken around both attributes the
+            // refused launch's arrivals to the delivering one. Measured:
+            // it reported two deliveries for one delivered event.
+            auto delivered = ::zpp_probe_delivered_injections;
 
             // **The measurement.** Everything else about injection is
             // checkable from outside the guest and is checked, hosted, in
@@ -2286,13 +2292,28 @@ bool guest_tests::run(EFI_SYSTEM_TABLE * system_table)
             auto retired = (1 == delivered) &&
                            (::zpp_probe_l2_interrupted_rip == entry_point);
 
+            // No longer an expected failure. The probe used to make one
+            // injecting launch, with guest RFLAGS.IF clear, which SDM
+            // 29.3.1.4 forbids for an external interrupt - so the entry
+            // could never succeed and this case could only ever record
+            // that it had not. It now makes two, and this one grades the
+            // launch that is allowed to work.
             emit(state,
                  "nested.injection_retires",
-                 retired ? outcome::unexpected_pass
-                         : outcome::expected_failure,
+                 retired ? outcome::pass : outcome::fail,
                  "injected_interrupt_reaches_the_second_level_guest",
                  entry_point,
                  ::zpp_probe_l2_interrupted_rip);
+
+            // Exactly one, not "at least one". More would mean the event
+            // was re-delivered on a re-entry nobody asked for, which is
+            // its own defect and would show in a guest as an interrupt
+            // storm.
+            check_equal(state,
+                        "nested.injection_delivered_once",
+                        "deliveries",
+                        1,
+                        delivered);
 
             // **Which layer refused it.**
             //
@@ -2317,10 +2338,28 @@ bool guest_tests::run(EFI_SYSTEM_TABLE * system_table)
             constexpr std::uint32_t entry_failure_bit = 1u << 31;
             constexpr std::uint32_t vmlaunch_reason = 20;
 
+            // Read from the *refused* launch's own reading rather than
+            // the shared one, which the delivering launch above has since
+            // overwritten. Two injecting launches happen now: one with
+            // guest RFLAGS.IF clear, which no processor may enter, and
+            // one with it set, which must deliver.
             auto refused_by_hardware =
-                0 != (::zpp_probe_ring_reason & entry_failure_bit);
+                0 != (::zpp_probe_refused_ring_reason & entry_failure_bit);
             auto refused_by_us =
-                vmlaunch_reason == (::zpp_probe_ring_reason & 0xffff);
+                vmlaunch_reason ==
+                (::zpp_probe_refused_ring_reason & 0xffff);
+
+            // Nothing may have reached the handler during the refused
+            // launch. An entry the processor refused ran no guest, so an
+            // arrival there came from the first-level world through the
+            // borrowed gate - which is the exact false positive that gave
+            // this probe a wrong pass on its first run, and it would make
+            // the delivery count above meaningless.
+            check_equal(state,
+                        "nested.refused_entry_delivers_nothing",
+                        "deliveries_during_the_refused_launch",
+                        0,
+                        ::zpp_probe_refused_injections);
 
             // The one place in this suite where an entry-failure reason
             // is *observed* rather than reasoned about. The exit ring
@@ -2343,7 +2382,7 @@ bool guest_tests::run(EFI_SYSTEM_TABLE * system_table)
                  refused_by_hardware ? outcome::pass : outcome::fail,
                  "the_vmms_own_entry_of_vmcs02_failed",
                  entry_failure_bit,
-                 ::zpp_probe_ring_reason);
+                 ::zpp_probe_refused_ring_reason);
 
             emit(state,
                  "nested.injection_not_refused_in_software",
@@ -2352,12 +2391,19 @@ bool guest_tests::run(EFI_SYSTEM_TABLE * system_table)
                  0,
                  refused_by_us ? vmlaunch_reason : 0);
 
-            // The probe as a whole, which fails today for the same
-            // reason: its third launch is the injecting one.
+            // The probe as a whole: every VMX instruction against the flag
+            // conventions SDM 33.2 specifies, both launches, and the
+            // injection.
+            //
+            // No longer an expected failure either. It failed for one
+            // reason - the injecting launch was built with guest
+            // RFLAGS.IF clear and could not be entered - and that launch
+            // now sets IF, with the refusal kept as a case of its own
+            // rather than as the only behaviour available.
             emit(state,
                  "nested.probe_passed",
-                 ok ? outcome::unexpected_pass : outcome::expected_failure,
-                 "verify_nested_present_fails_on_the_injecting_launch",
+                 ok ? outcome::pass : outcome::fail,
+                 "every_step_answered_as_the_sdm_says",
                  1,
                  ok ? 1 : 0);
         }

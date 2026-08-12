@@ -840,6 +840,56 @@ Read in the code. Each is a real divergence from what the architecture
 requires, but none has been provoked yet — so the first job on each is to
 establish the trigger, and only then to fix it.
 
+### 2b. A guest hypervisor can stop a physical processor with one VMWRITE
+
+Found by reading KVM's entry-check family against ours, and not yet
+provoked — so establishing the trigger is the first job, as this section
+says.
+
+**The gap.** KVM validates the whole of vmcs12's host-state area before it
+will enter: `nested_vmx_check_host_state`
+(`.references/kvm/nested.c:3013`) checks host CR0 and CR4 against the
+fixed-bit MSRs, refuses a host CR3 or a SYSENTER address that is not
+canonical, refuses a host RIP that is not canonical, and refuses a
+selector with RPL or TI set. A vmcs12 failing any of them is answered with
+`VMfailValid(VM entry with invalid host-state field(s))` — error 8, RIP on
+the instruction after the VMLAUNCH, and the processor untouched.
+
+We check exactly one of them. `build_vmcs02`
+(`hypervisor/src/hypervisor/nested_entry.cpp:879`) refuses when
+`exit_host_address_space_size` is clear, with the right error number and
+through the right path — `vmx_fail(..., entry_invalid_host_state_field)`
+in `nested_vmx.cpp:1713`, so the machinery is all there. Nothing else in
+the host-state area is looked at.
+
+**Why the processor does not catch it for us, which is the part that
+matters.** vmcs02's *host* state is ours, not the guest hypervisor's, so
+the hardware entry checks never see vmcs12's host fields at all. They are
+read much later, by `load_l1_host_state` (`nested_entry.cpp:2239`), which
+writes them into vmcs02's **guest** fields to resume the guest hypervisor
+after a reflected exit. A non-canonical `host_rip`, or a `host_cr0` with
+PG clear, therefore becomes an invalid *guest* state on the VM entry back
+into the guest hypervisor — and that entry failure is ours, not one that
+can be reflected to anybody. `on_vm_entry_failure`
+(`hypervisor.cpp:5074`) records it and stops the processor.
+
+So a guest hypervisor writes one bad value into its own VMCS, launches,
+takes any exit, and the physical processor halts. It needs no privilege it
+does not already have and no race.
+
+**What would close it**: the missing checks in `build_vmcs02`, beside the
+address-space-size one, all returning `nested_host_state_unsupported` so
+they arrive at the same `vmx_fail` that is already wired. The canonical
+tests need the processor's linear-address width rather than its
+physical-address width, which `physical_address_bits` does not answer.
+
+**The trigger to establish first**: `verify_nested::launch` writes a
+complete host-state area, so the probe cannot reach this by accident. A
+case that deliberately writes a non-canonical `host_rip` and launches
+would settle it — and it belongs in the Bochs suite rather than a hosted
+one, because what is being asserted is that VMLAUNCH comes back with error
+8 instead of the machine stopping.
+
 ### 3. `guest_fs_base` is taken from the GDT — FIXED
 
 `hypervisor/src/hypervisor/hypervisor.cpp:1768` writes

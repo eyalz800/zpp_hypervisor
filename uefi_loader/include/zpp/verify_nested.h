@@ -129,6 +129,40 @@ extern "C" inline std::uint32_t zpp_probe_ring_count{};
 extern "C" inline std::uint32_t zpp_probe_ring_reason{};
 extern "C" inline std::uint32_t zpp_probe_ring_qualification{};
 extern "C" inline std::uint32_t zpp_probe_ring_flags{};
+
+/**
+ * The same reading, kept from the launch that was *meant* to be refused.
+ *
+ * Two injecting launches happen - one whose guest RFLAGS.IF is clear,
+ * which SDM 29.3.1.4 forbids and the processor must refuse, and one with
+ * it set, which must deliver - and the second overwrites the shared
+ * reading above. Both are graded, so the first needs somewhere of its
+ * own.
+ *
+ * `zpp_probe_refused_injections` is how many events reached the handler
+ * during the refused launch, and the only correct value is zero: an
+ * entry the processor refused ran no guest, so anything that reached the
+ * handler came from the first-level world through the borrowed gate and
+ * would make the delivery measurement below meaningless.
+ * @{
+ */
+extern "C" inline std::uint32_t zpp_probe_refused_ring_reason{};
+extern "C" inline std::uint64_t zpp_probe_refused_injections{};
+
+/**
+ * How many events the *delivering* launch put into the second-level
+ * guest.
+ *
+ * Exported rather than recomputed by the caller, and that is a
+ * correction: `guest_tests.cpp` used to take `zpp_probe_l2_injections`
+ * around the whole of `present`, which was right while there was one
+ * injecting launch and counts both once there are two. Measured - it
+ * reported two deliveries for one delivered event.
+ */
+extern "C" inline std::uint64_t zpp_probe_delivered_injections{};
+/**
+ * @}
+ */
 /**
  * @}
  */
@@ -679,6 +713,30 @@ struct verify_nested
      * shadow page-table builder, and a failure has one place to be rather
      * than two. Turning them on is the next experiment.
      */
+    /**
+     * The guest RFLAGS a launch gives its second-level guest.
+     *
+     * Bit 1 is reserved and must be 1, which is what makes `0x2` the
+     * smallest legal value. The second spelling adds IF, and it is not a
+     * preference: SDM 29.3.1.4, "Checks on Guest RFLAGS"
+     * (.references/sdm.txt:202582), requires "The IF flag (RFLAGS[bit 9])
+     * must be 1 if the valid bit (bit 31) in the injected-event
+     * identification field is 1 and the event type (bits 10:8) is
+     * external interrupt."
+     *
+     * So an injecting launch needs the second and a plain one does not,
+     * and a launch given the first while injecting is one no processor
+     * may enter - which is a case worth keeping rather than only a bug
+     * worth fixing. `present` below does both.
+     * @{
+     */
+    static constexpr std::uint64_t guest_rflags_reserved = 0x2;
+    static constexpr std::uint64_t guest_rflags_interrupts_enabled =
+        guest_rflags_reserved | (1ull << 9);
+    /**
+     * @}
+     */
+
     template <typename Line, typename Say, typename Step>
     static bool launch(EFI_SYSTEM_TABLE * system_table,
                        std::uint64_t vmcs_region,
@@ -686,7 +744,10 @@ struct verify_nested
                        Line && line,
                        Say && say,
                        Step && step,
-                       std::uint64_t injection = 0)
+                       std::uint64_t injection = 0,
+                       std::uint64_t guest_rflags = guest_rflags_reserved,
+                       bool entry_expected_to_fail = false,
+                       std::uint64_t host_stack_provided = 0)
     {
         // A clear launch state each time, so both runs can use VMLAUNCH.
         // SDM 29.1: VMLAUNCH requires clear and VMRESUME requires
@@ -702,13 +763,38 @@ struct verify_nested
         // Never actually used for anything - `zpp_probe_l1_host` moves off
         // it immediately - but VM exit loads RSP from the field whatever
         // the landing code does with it, so it has to name real memory.
-        EFI_PHYSICAL_ADDRESS host_stack = 0xffffffff;
-        auto status = system_table->BootServices->AllocatePages(
-            AllocateMaxAddress, EfiBootServicesData, 1, &host_stack);
+        // A caller may hand one in, and the injecting launch does.
+        //
+        // **Not an optimisation - it is what makes the injection
+        // measurable.** The delivering launch runs with an interrupt gate
+        // borrowed from the firmware's own table, and the counter behind
+        // that gate has to mean "the second-level guest took the injected
+        // event" and nothing else. A boot-services call inside that
+        // window is a call into firmware that may enable interrupts, so a
+        // timer tick on the same vector arrives at the borrowed handler
+        // and is counted.
+        //
+        // Measured twice, in two different places, which is why this is a
+        // parameter rather than a comment: with the gate borrowed across
+        // both injecting launches the *refused* one counted a delivery -
+        // impossible, since a refused entry runs no guest - and with the
+        // borrow narrowed to the delivering launch alone the count moved
+        // there instead, reporting two deliveries with the interrupted
+        // RIP of a first-level address. Allocating before the gate is
+        // borrowed removes the window rather than tolerating it.
+        auto provided = 0 != host_stack_provided;
+        EFI_PHYSICAL_ADDRESS host_stack = host_stack_provided;
 
-        if (EFI_ERROR(status)) {
-            line("zpp: nested FAIL could not allocate a host stack\r\n");
-            return false;
+        if (!provided) {
+            host_stack = 0xffffffff;
+            auto status = system_table->BootServices->AllocatePages(
+                AllocateMaxAddress, EfiBootServicesData, 1, &host_stack);
+
+            if (EFI_ERROR(status)) {
+                line("zpp: nested FAIL could not allocate a host stack"
+                     "\r\n");
+                return false;
+            }
         }
 
         EFI_PHYSICAL_ADDRESS ept_pages = 0xffffffff;
@@ -717,7 +803,12 @@ struct verify_nested
         // four, and the second run of this needs the pages the first
         // returned.
         auto release = [&] {
-            system_table->BootServices->FreePages(host_stack, 1);
+            // A stack the caller provided is the caller's to give back,
+            // and giving it back here would free it inside the window
+            // this parameter exists to keep clear of firmware.
+            if (!provided) {
+                system_table->BootServices->FreePages(host_stack, 1);
+            }
             if (0xffffffff != ept_pages) {
                 system_table->BootServices->FreePages(ept_pages, 2);
             }
@@ -947,38 +1038,28 @@ struct verify_nested
         write(field_guest_sysenter_esp, 0);
         write(field_guest_sysenter_eip, 0);
 
-        // Bit 1 is reserved and must be 1; everything else stays clear,
-        // and interrupts stay off because there is nothing here to take
-        // one.
+        // The caller's choice, because it is the one field that decides
+        // whether an injecting entry is legal at all.
         //
-        // **This is why the injecting launch fails, and the failure is
-        // this probe's, not the VMM's.** SDM 29.3.1.4, "Checks on Guest
-        // RFLAGS" (.references/sdm.txt:202582): "The IF flag
-        // (RFLAGS[bit 9]) must be 1 if the valid bit (bit 31) in the
-        // injected-event identification field is 1 and the event type
-        // (bits 10:8) is external interrupt." The third launch passes
-        // `interruption_valid | interruption_external | injected_vector`
-        // and this RFLAGS has IF clear, so no processor may enter that
-        // vmcs02 - and the one under this one is right to refuse it.
-        //
-        // That closes a question `guest_tests.cpp` records as open. Its
-        // `nested.injection_refused_by_hardware` case measured
-        // `0x80000021` in the VMM's own exit ring and concluded "what is
-        // wrong is the guest state built into vmcs02, which the
-        // injection exposes rather than causes" without naming which
-        // field. It is this one. Bochs says so in as many words -
+        // SDM 29.3.1.4, "Checks on Guest RFLAGS"
+        // (.references/sdm.txt:202582): "The IF flag (RFLAGS[bit 9]) must
+        // be 1 if the valid bit (bit 31) in the injected-event
+        // identification field is 1 and the event type (bits 10:8) is
+        // external interrupt." Bochs says the same in as many words -
         // "VMENTER FAIL: VMCS guest interrupts blocked when injecting
         // external interrupt", whose condition at `cpu/vmx.cc:2002` is
         // `(interruptibility & 3) != 0 || (rflags & IF) == 0`, and the
         // interruptibility field written above is 0.
         //
-        // NOT FIXED HERE, deliberately. Setting IF for the injecting
-        // launch is one word, but it flips three cases in
-        // guest_tests.cpp that currently assert the refusal - including
-        // the only thing that reaches exit reason 33 - and flipping an
-        // expectation without an end-to-end run is what got `50dc614`
-        // reverted. It needs a coverage run to land behind.
-        write(field_guest_rflags, 0x2);
+        // This used to be `0x2` unconditionally, which made the one
+        // injecting launch an entry no processor may accept - so the
+        // probe measured a refusal and `guest_tests.cpp` carried three
+        // cases asserting it, one of them the only thing in the suite
+        // reaching exit reason 33. Both launches exist now rather than
+        // one being replaced by the other: the refusal is a real
+        // architectural check worth exercising, and the delivery is the
+        // thing the probe was written for.
+        write(field_guest_rflags, guest_rflags);
         write(field_guest_rsp, host_stack + 0x800);
         write(field_guest_rip,
               reinterpret_cast<std::uint64_t>(&zpp_probe_l2_entry));
@@ -1089,12 +1170,22 @@ struct verify_nested
                      : "a"(0x40000100u), "c"(0u));
 
         if (0 == zpp_probe_exit_taken) {
-            step("vmlaunch", outcome_of(flags), outcome::succeeded);
-
             std::uint64_t error{};
             vmread(field_vm_instruction_error, error);
             say("vm-instruction error", error);
 
+            if (entry_expected_to_fail) {
+                // The case that is *about* the refusal. Reported as the
+                // pass it is rather than as a failure, so a run reads
+                // correctly - and returning false anyway, because the
+                // second level did not run and the caller grades that.
+                line("zpp: nested the entry was refused, as this case "
+                     "requires\r\n");
+                release();
+                return false;
+            }
+
+            step("vmlaunch", outcome_of(flags), outcome::succeeded);
             line("zpp: nested FAIL the second level never ran\r\n");
             release();
             return false;
@@ -1551,7 +1642,25 @@ struct verify_nested
             return passed;
         }
 
-        // Interrupts off from here until the gate is put back.
+        // The delivering launch's host stack, allocated *before*
+        // interrupts go off and before the gate is borrowed, so that the
+        // launch itself makes no firmware call at all. See
+        // `host_stack_provided` on `launch` for the two measurements that
+        // made this necessary.
+        EFI_PHYSICAL_ADDRESS injecting_host_stack = 0xffffffff;
+
+        if (EFI_ERROR(system_table->BootServices->AllocatePages(
+                AllocateMaxAddress,
+                EfiBootServicesData,
+                1,
+                &injecting_host_stack))) {
+            line("zpp: nested FAIL could not allocate the injecting host "
+                 "stack\r\n");
+            return false;
+        }
+
+        // Interrupts off from here until the gate is put back, and the
+        // gate borrowed only around the launch that is meant to deliver.
         //
         // Not a precaution - a correction. The first run of this measured
         // one delivery and the entry had *failed*, which cannot both be
@@ -1563,6 +1672,65 @@ struct verify_nested
         // nothing else, so nothing else may reach the handler.
         asm volatile("cli" : : : "memory");
 
+        auto injection =
+            interruption_valid | interruption_external | injected_vector;
+
+        // **First, the entry the architecture forbids.**
+        //
+        // An external interrupt injected into a guest whose RFLAGS.IF is
+        // clear is refused by SDM 29.3.1.4, and the refusal is worth
+        // exercising rather than only avoiding: it is the one thing in
+        // this suite that reaches exit reason 33, VM-entry failure due to
+        // invalid guest state, and it is the only place the VMM's
+        // reflection of a hardware entry failure is observed rather than
+        // reasoned about.
+        //
+        // What separates a refusal made by the processor from one this
+        // VMM synthesised is the VMM's own exit ring, sampled the instant
+        // the launch comes back: a software refusal leaves the VMLAUNCH
+        // itself as the last exit, reason 20, because the VMM never
+        // entered; a hardware refusal means the VMM's own entry failed
+        // and the last exit carries bit 31. Kept in its own variable
+        // because the second launch below overwrites the shared one.
+        auto refused_injections = zpp_probe_l2_injections;
+
+        static_cast<void>(launch(system_table,
+                                 vmcs_region,
+                                 false,
+                                 line,
+                                 say,
+                                 step,
+                                 injection,
+                                 guest_rflags_reserved,
+                                 true));
+
+        zpp_probe_refused_ring_reason = zpp_probe_ring_reason;
+        zpp_probe_refused_injections =
+            zpp_probe_l2_injections - refused_injections;
+
+        say("the vmm's newest exit at the refused launch",
+            zpp_probe_refused_ring_reason);
+
+        // **Then the one that must work.**
+        //
+        // The same injection with IF set, which is the entry a guest
+        // hypervisor delivering an interrupt to its guest actually makes.
+        // Everything else about injection is checkable from outside and
+        // is checked, hosted, in tests/nested_exit; that the event
+        // *retires into the second-level guest* is not, because SDM 30.2
+        // clears the valid bit on every exit and a delivery and a silent
+        // drop leave the same vmcs12 behind.
+        //
+        // **The gate is borrowed here rather than above, and that is a
+        // measurement fix rather than tidying.** With it installed across
+        // the refused launch too, that launch counted one delivery - an
+        // entry the processor refused runs no guest, so the arrival came
+        // from the first-level world through the borrowed gate while
+        // `launch`'s own boot-services allocations ran. Measured:
+        // `nested.refused_entry_delivers_nothing` reported 1 where the
+        // only correct answer is 0. Borrowing it only around the launch
+        // that is meant to deliver removes the window entirely, which is
+        // better than tolerating a count that is sometimes one too high.
         auto saved = gates[injected_vector];
 
         auto handler =
@@ -1586,8 +1754,10 @@ struct verify_nested
                          line,
                          say,
                          step,
-                         interruption_valid | interruption_external |
-                             injected_vector);
+                         injection,
+                         guest_rflags_interrupts_enabled,
+                         false,
+                         injecting_host_stack);
 
         // Sampled inside `launch`, the instant it came back.
         say("the vmm's newest exit at the injecting launch",
@@ -1595,6 +1765,7 @@ struct verify_nested
         say("its qualification", zpp_probe_ring_qualification);
 
         auto delivered = zpp_probe_l2_injections - before;
+        zpp_probe_delivered_injections = delivered;
         say("injections delivered to the second-level guest", delivered);
 
         // Where it fired, which is what tells a delivery into the
@@ -1610,6 +1781,11 @@ struct verify_nested
         // defect and would show as a guest taking an interrupt storm.
         gates[injected_vector] = saved;
         asm volatile("sti" : : : "memory");
+
+        // Given back only now, with the gate restored and interrupts on
+        // again - the whole point of allocating it early was to keep
+        // every firmware call outside the window above.
+        system_table->BootServices->FreePages(injecting_host_stack, 1);
 
         passed &= step("second-level guest took the injected interrupt",
                        (1 == delivered) ? outcome::succeeded
