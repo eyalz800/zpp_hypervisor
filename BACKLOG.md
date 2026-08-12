@@ -9415,3 +9415,46 @@ will hand back agreement that reads as corroboration. `profile_samples`
 is the guard - if it has not moved, nothing else in the profile has
 either, and two readings are one reading. Check the counter before
 believing the value.
+
+
+## The clock, the deadlines and the messages are all correct
+
+2026-08-12, using the two rings whose declaration says they exist to
+"separate the deadline is enormous because the reference clock is wrong
+from the deadline is right and its expiry is never noticed".
+
+**The reference counter the guest reads is exact.** Over 508,263 reads,
+successive values against the time-stamp counter give 10.04 MHz - which
+is the 10 MHz a 100 ns counter must be - monotonic throughout.
+
+**The deadlines it arms are correct against that same counter.** The
+newest of 53,100 synthetic timer arms is `now + 25,000` units, which is
+2.5 ms ahead; the ones before it are behind because they have already
+fired. This retires the older note that the guest arms "a time nine hours
+in the past", which was read from a different boot and is not what this
+one does.
+
+**And the timers fire.** 238,237 clock injections and 230,928 completed
+message rounds in one window.
+
+So the whole of timekeeping is correct: the clock, the deadlines computed
+against it, the interrupts that result, and the message protocol that
+acknowledges them. That eliminates the last mechanism this VMM plausibly
+had a hand in.
+
+What is left, stated as narrowly as the evidence allows:
+
+`Phase1Initialization` runs at PASSIVE_LEVEL, state Running, exiting
+about fourteen hundred times a second, and every one of those exits is a
+Hyper-V synthetic register: the reference counter, the end-of-interrupt,
+the interrupt command, the end-of-message, the timer re-arm. It is a
+**busy wait** - a blocked thread would be `Waiting` and the idle thread
+would run, and neither is true - whose condition never becomes true,
+while everything it is waiting *on* demonstrably works.
+
+The remaining question cannot be answered from this side. It needs either
+the control - the same guest on the same machine with no hypervisor
+underneath, which is one boot and would say whether this is ours at all -
+or the guest's own view of what it is waiting for, which needs the wait
+object rather than the thread, and that is a walk this VMM cannot do
+without more of the guest kernel's layout than it has.
