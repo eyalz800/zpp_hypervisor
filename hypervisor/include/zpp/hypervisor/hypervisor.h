@@ -4319,6 +4319,39 @@ private:
      */
 
     void sample_guest_stack(std::size_t cpu);
+
+    /**
+     * The stack pointer of whatever the interrupt interrupted.
+     *
+     * The clock interrupt runs on its own stack - Windows gives some
+     * vectors an interrupt stack table entry - so scanning the handler's
+     * stack finds the handler's frames at any depth and never the
+     * thread's. Sixteen kilobytes of it returned nothing but
+     * `KiInterruptDispatchNoLockNoEtw` and its callees, which is not a
+     * scan that was too short but the wrong stack entirely.
+     *
+     * The interrupted stack pointer is on the handler's stack, though,
+     * because hardware put it there. SDM 7.14.2: a 64-bit interrupt
+     * pushes SS, RSP, RFLAGS, CS and RIP unconditionally, so the frame is
+     * five consecutive quadwords with a recognisable shape - a canonical
+     * kernel instruction pointer, then a code selector, then flags with
+     * bit 1 set, then a canonical kernel stack pointer, then a stack
+     * selector.
+     *
+     * Found by that shape rather than by an offset, because where the
+     * frame sits depends on how much the handler has pushed since.
+     * @{
+     */
+    std::uint64_t guest_interrupted_rsp{};
+    std::uint64_t guest_interrupted_rip{};
+    std::uint64_t guest_interrupted_trace[guest_stack_capacity]{};
+    std::uint64_t guest_interrupted_count{};
+
+    void sample_interrupted_stack(std::size_t cpu,
+                                  std::uint64_t stack,
+                                  std::uint64_t base,
+                                  std::uint64_t size);
+    /** @} */
     /**
      * @}
      */

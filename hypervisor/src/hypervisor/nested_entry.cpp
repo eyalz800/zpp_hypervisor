@@ -3433,6 +3433,99 @@ void hypervisor::sample_guest_stack(std::size_t cpu)
             this->guest_stack_count = this->guest_stack_count + 1;
         }
     }
+
+    sample_interrupted_stack(cpu, stack, base, size);
+}
+
+void hypervisor::sample_interrupted_stack(std::size_t cpu,
+                                          std::uint64_t stack,
+                                          std::uint64_t base,
+                                          std::uint64_t size)
+{
+    // The five quadwords hardware pushes, by their shape. SDM 7.14.2
+    // gives the order - RIP, CS, RFLAGS, RSP, SS at increasing addresses
+    // - and Windows runs its kernel at code selector 0x10 with a stack
+    // selector of 0x18 or zero.
+    constexpr std::uint64_t kernel_code_selector = 0x10;
+    constexpr std::uint64_t kernel_stack_selector = 0x18;
+    constexpr std::uint64_t rflags_always_one = 1ull << 1;
+    constexpr std::uint64_t kernel_address_floor = 0xffff800000000000;
+    constexpr std::size_t frame_words = 5;
+
+    auto read = [&](std::uint64_t at, std::uint64_t & into) -> bool {
+        auto physical = translate_guest_linear(at);
+        if (!physical) {
+            return false;
+        }
+
+        return read_guest_memory(
+                   cpu,
+                   *physical,
+                   std::span(reinterpret_cast<std::byte *>(&into),
+                             sizeof(into)))
+            .has_value();
+    };
+
+    this->guest_interrupted_count = 0;
+    this->guest_interrupted_rsp = 0;
+    this->guest_interrupted_rip = 0;
+
+    for (std::size_t word{}; (word + frame_words) < guest_stack_words;
+         ++word) {
+        std::uint64_t frame[frame_words]{};
+        auto readable = true;
+
+        for (std::size_t i{}; i < frame_words; ++i) {
+            if (!read(stack + ((word + i) * sizeof(std::uint64_t)),
+                      frame[i])) {
+                readable = false;
+                break;
+            }
+        }
+
+        if (!readable) {
+            break;
+        }
+
+        auto shaped =
+            (frame[0] >= base) && (frame[0] < (base + size)) &&
+            (kernel_code_selector == frame[1]) &&
+            (0 != (frame[2] & rflags_always_one)) &&
+            (frame[3] >= kernel_address_floor) &&
+            ((kernel_stack_selector == frame[4]) || (0 == frame[4]));
+
+        if (!shaped) {
+            continue;
+        }
+
+        this->guest_interrupted_rip = frame[0];
+        this->guest_interrupted_rsp = frame[3];
+        break;
+    }
+
+    if (0 == this->guest_interrupted_rsp) {
+        return;
+    }
+
+    // And the thread's own stack, from the pointer the frame carried.
+    for (std::size_t word{};
+         (word < guest_stack_words) &&
+         (this->guest_interrupted_count < guest_stack_capacity);
+         ++word) {
+        std::uint64_t value{};
+        if (!read(this->guest_interrupted_rsp +
+                      (word * sizeof(std::uint64_t)),
+                  value)) {
+            break;
+        }
+
+        if ((value >= base) && (value < (base + size))) {
+            this->guest_interrupted_trace[this->guest_interrupted_count] =
+                value;
+            this->guest_interrupted_count =
+                this->guest_interrupted_count + 1;
+        }
+    }
 }
 
 void hypervisor::refresh_guest_threads(std::size_t cpu)
