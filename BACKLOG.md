@@ -8403,3 +8403,57 @@ The two are related to the open note that with the interrupted-event
 re-queue on, one processor of eight reached `vmxon` where eight did with
 it off. That note is now the same investigation rather than a separate
 one.
+
+
+## The seven processors are adopted, and Windows never starts them
+
+2026-08-12, continuing the entry above, from the log ring of the same
+boot. 109 lines, of a ring that holds 4096, so nothing was evicted and
+the absence of a line is evidence.
+
+```
+20  guest ipi command 0xc4500, delivery mode 0x5   broadcast INIT
+23  guest ipi command 0xc4687, delivery mode 0x6   start-up, vector 0x87
+25  cpu 0x1 came up on the trampoline ... guest vector 0x87
+..  cpu 0x2 .. 0x7, all seven
+45  guest ipi command 0xc4687, delivery mode 0x6   the second start-up
+46  guest start-up ipi for cpu 0x1, activity 0x0 is not wait-for-sipi,
+    dropped                                        .. and 0x2 through 0x7
+100 cpu 0x0 guest vmxon at 0x101aed000
+101 cpu 0x0 entering the second level
+```
+
+**Every part of that is correct.** The broadcast is resolved against the
+roster, all seven processors are adopted at the vector the guest asked
+for, and the second start-up IPI is dropped because the targets are
+active - SDM 29.7.2, "the active state blocks start-up IPIs (SIPIs)". The
+adoption path this tree spent so long on works.
+
+That sequence is the **firmware's** MP-services wakeup, which winload
+uses. What never happens is the next one: the kernel's own
+INIT-SIPI-SIPI, which is how Windows takes its processors from the
+firmware. There is no `guest ipi command` line after line 45 anywhere in
+the ring, and the guest is in xAPIC mode throughout - lines 86 to 99 are
+ordinary APIC *page* writes - so a command would have been logged.
+
+So seven processors sit in the firmware's wait loop, one processor
+executes `vmxon`, and Hyper-V runs a machine it believes has eight.
+
+**This is the regression already recorded as "one processor of eight
+reached vmxon with the interrupted-event re-queue on, eight with it
+off".** It was filed as a side issue. It is not a side issue - it is the
+boot, and everything else measured for weeks is downstream of it:
+
+- the root partition idles because it is waiting for processors,
+- no device interrupt arrives because the storage stack is never reached,
+- MSI-X is never enabled because nothing enumerates,
+- the nested EPT path is healthy because it is never asked to do
+  anything interesting.
+
+Next: one variable, `-DZPP_REQUEUE_INTERRUPTED_EVENTS=OFF`, and read
+`ipi_init_seen`, `ipi_start_up_seen` and the per-processor `l2_entries`.
+The re-queue was added for a measured reason - Hyper-V's synthetic timer
+message protocol completed for the first time with it, end-of-message
+writes going from 1 to 13,159 - so if it is confirmed as the cause the
+answer is to understand *why* it suppresses the kernel's own start-up
+sequence, not simply to turn it off.
