@@ -4122,6 +4122,17 @@ private:
     std::uint64_t guest_priority_class[max_cpus][16]{};
 
     /**
+     * How often a software interrupt was outstanding when sampled, and
+     * how often it was not.
+     *
+     * Unlike the priority histogram beside it this is not biased by where
+     * the samples land: the question is not "what fraction of time" but
+     * "is this ever clear", and one clear reading answers it.
+     */
+    std::uint64_t guest_interrupt_requested[max_cpus]{};
+    std::uint64_t guest_interrupt_idle[max_cpus]{};
+
+    /**
      * Reads one, if this entry is a sampling one. Failures are silent and
      * leave the slot zero: every offset it follows is a guess about
      * another operating system's build, and a diagnostic that stopped a

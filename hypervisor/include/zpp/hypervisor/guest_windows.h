@@ -45,6 +45,22 @@ namespace zpp::hypervisor::guest_windows
 #define ZPP_WINDOWS_KPRCB_CURRENT_THREAD 8
 #endif
 
+/**
+ * `KPRCB.InterruptRequest`, the byte that says a software interrupt is
+ * outstanding on this processor.
+ *
+ * It is what `HalRequestSoftwareInterrupt` is asking for, and it is the
+ * one reading that separates the two remaining stories. If it is set
+ * whenever this is sampled, the guest has asked for a deferred call and
+ * has not had it - which is the fault. If it is clear, the requests are
+ * being serviced and the low delivery count of vector `0x2f` means only
+ * that Windows drains the queue inline when it lowers priority, which it
+ * does on real hardware too.
+ */
+#ifndef ZPP_WINDOWS_KPRCB_INTERRUPT_REQUEST
+#define ZPP_WINDOWS_KPRCB_INTERRUPT_REQUEST 6
+#endif
+
 #ifndef ZPP_WINDOWS_KPRCB_IDLE_THREAD
 #define ZPP_WINDOWS_KPRCB_IDLE_THREAD 24
 #endif
@@ -81,6 +97,8 @@ constexpr std::uint64_t kpcr_current_prcb = ZPP_WINDOWS_KPCR_CURRENT_PRCB;
 constexpr std::uint64_t kprcb_current_thread =
     ZPP_WINDOWS_KPRCB_CURRENT_THREAD;
 constexpr std::uint64_t kprcb_idle_thread = ZPP_WINDOWS_KPRCB_IDLE_THREAD;
+constexpr std::uint64_t kprcb_interrupt_request =
+    ZPP_WINDOWS_KPRCB_INTERRUPT_REQUEST;
 constexpr std::uint64_t kthread_state = ZPP_WINDOWS_KTHREAD_STATE;
 constexpr std::uint64_t kthread_wait_irql = ZPP_WINDOWS_KTHREAD_WAIT_IRQL;
 constexpr std::uint64_t kthread_wait_reason =

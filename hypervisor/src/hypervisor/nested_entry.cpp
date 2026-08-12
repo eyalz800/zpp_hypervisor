@@ -3854,6 +3854,25 @@ void hypervisor::sample_guest_thread(std::size_t cpu)
         }
     }
 
+    // Whether a software interrupt is outstanding. See
+    // `kprcb_interrupt_request` - one clear reading settles what the
+    // deferred-call ratio cannot.
+    {
+        std::uint64_t requested{};
+        if (read(sample.prcb + guest_windows::kprcb_interrupt_request,
+                 requested)) {
+            constexpr std::uint64_t byte_mask = 0xff;
+
+            if (0 != (requested & byte_mask)) {
+                this->guest_interrupt_requested[cpu] =
+                    this->guest_interrupt_requested[cpu] + 1;
+            } else {
+                this->guest_interrupt_idle[cpu] =
+                    this->guest_interrupt_idle[cpu] + 1;
+            }
+        }
+    }
+
     auto slot = this->guest_thread_sample_count[cpu] %
                 guest_thread_sample_capacity;
     this->guest_thread_samples[cpu][slot] = sample;
