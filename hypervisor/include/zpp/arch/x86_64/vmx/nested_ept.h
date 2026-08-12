@@ -150,6 +150,23 @@ public:
     }
 
     /**
+     * These permissions in the layout an entry carries them in, so a
+     * diagnostic can record all four in one word.
+     *
+     * The positions are the entry's own - SDM Tables 31-1 through 31-7
+     * give bit 0 read, bit 1 write, bit 2 execute for supervisor-mode
+     * linear addresses and bit 10 execute for user-mode ones - so a
+     * recorded value reads the same way as the entry it came from and
+     * needs no separate key.
+     */
+    constexpr std::uint64_t bits() const
+    {
+        return (m_read ? (1ull << 0) : 0) | (m_write ? (1ull << 1) : 0) |
+               (m_execute ? (1ull << 2) : 0) |
+               (m_execute_user ? (1ull << 10) : 0);
+    }
+
+    /**
      * Writes these permissions into an entry, leaving everything else in
      * it alone.
      */

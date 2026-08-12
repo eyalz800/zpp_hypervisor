@@ -1591,6 +1591,49 @@ public:
         deferred,
     };
 
+    /**
+     * What the real fault path did about a fault, mirrored here because
+     * the extracted fragment names these.
+     *
+     * The order has to match the real enumeration, since the tests below
+     * assert on the value rather than on the name and a reordering there
+     * would silently change what they assert.
+     */
+    enum class l2_ept_disposition : std::uint64_t
+    {
+        none,
+        without_ept,
+        reflected_walk,
+        reflected_misconfiguration,
+        reflected_permission,
+        watched,
+        unwatched,
+        installed,
+        install_failed,
+        pointer_failed,
+    };
+
+    /**
+     * The real function's stall detector, reduced to what the extracted
+     * fragment needs from it: a record of the branch taken, and the
+     * outcome passed straight back.
+     *
+     * Kept rather than stubbed away, because *which* branch answered a
+     * fault is exactly what the tests below are about. Every one of the
+     * dispositions is a correct answer to some fault and a livelock in
+     * answer to the wrong one, and asserting the outcome alone cannot
+     * tell a reflection to the guest hypervisor from a reflection this
+     * VMM decided on its own behalf.
+     */
+    l2_exit_outcome finish(l2_ept_disposition disposition,
+                           l2_exit_outcome outcome)
+    {
+        this->last_disposition = disposition;
+        return outcome;
+    }
+
+    l2_ept_disposition last_disposition{};
+
     static constexpr std::size_t max_cpus = 2;
     static constexpr std::size_t page_size = 0x1000;
 

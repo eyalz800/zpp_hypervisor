@@ -2185,6 +2185,25 @@ private:
     host_ept_lookup(std::uint64_t physical_address);
 
     /**
+     * What a processor's current shadow says about a second-level
+     * guest-physical address, without changing it.
+     *
+     * `shadow_ept_entry` is not this: it descends *making* tables, drops a
+     * large entry that is in the way, and hands back a pointer to write
+     * through. Asking it what is mapped would alter what is mapped.
+     *
+     * Exists so the fault path can check its own work. An EPT violation
+     * retires no instruction, so a handler that installs a mapping and
+     * resumes has made progress only if the mapping it installed permits
+     * the access that faulted - and when it does not, the same access
+     * faults again, for ever, with nothing in any counter to say so. Three
+     * separate defects in this tree have had exactly that shape. Reading
+     * the entry back turns the whole class into one log line.
+     */
+    arch::x86_64::vmx::ept_walk_result
+    shadow_ept_lookup(std::size_t cpu, std::uint64_t guest_physical);
+
+    /**
      * The processor's physical-address width, cached.
      *
      * SDM 31.3.3.1 makes it the boundary for an entry's reserved address
@@ -6131,6 +6150,153 @@ private:
     void refresh_shadow_ept_for(std::size_t cpu, std::uint64_t root);
     std::size_t collect_shadow_leaves(std::size_t cpu, std::size_t slot);
     /** @} */
+
+    /**
+     * What was done about a second-level extended-page-table fault.
+     *
+     * Every one of these is a correct answer to *some* fault and a
+     * livelock in answer to the wrong one, which is why the fault path
+     * records which it chose rather than only that it chose. An exit that
+     * repeats is not evidence about the branch taken - all of them repeat
+     * when they are wrong, and they repeat identically.
+     */
+    enum class l2_ept_disposition : std::uint64_t
+    {
+        none,
+
+        /** The guest hypervisor runs its guest on this VMM's own tables.
+         */
+        without_ept,
+
+        /** Its tables do not map the address. */
+        reflected_walk,
+
+        /** Its tables hold a value the processor rejects. */
+        reflected_misconfiguration,
+
+        /** Its tables map the address and refuse the access. */
+        reflected_permission,
+
+        /** This VMM's tables refuse it, and something here watches it. */
+        watched,
+
+        /** This VMM's tables refuse it, and nothing here watches it. */
+        unwatched,
+
+        /** Both levels permit it, and a mapping was installed. */
+        installed,
+
+        /** Both permit it, and the mapping could not be installed. */
+        install_failed,
+
+        /** Both permit it, and no shadow could be obtained at all. */
+        pointer_failed,
+    };
+
+    /**
+     * How many identical second-level faults in a row are a livelock
+     * rather than a busy page.
+     *
+     * An EPT violation retires no instruction - SDM 30.2 has the saved
+     * instruction pointer address the faulting instruction - so the *same*
+     * fault, at the same instruction pointer, for the same guest-physical
+     * address, is by definition the same access being re-attempted and not
+     * satisfied. There is no legitimate reason for five hundred of them:
+     * one fault installs the mapping, and the next access to that page
+     * does not fault at all.
+     *
+     * Five hundred and twelve rather than a handful, because a page whose
+     * mapping is genuinely re-taken - a watched one stepped over, a shadow
+     * slot evicted under pressure - can repeat a few times honestly, and a
+     * detector that cries at three would be turned off.
+     */
+    static constexpr std::uint64_t l2_ept_stall_threshold = 512;
+
+    /**
+     * The fault each processor last took, so a repeat can be recognised.
+     *
+     * Compared among faults only, ignoring whatever exits happen in
+     * between: an external interrupt arriving mid-livelock does not make
+     * the livelock stop, and a detector reset by one would never fire.
+     * @{
+     */
+    std::uint64_t l2_ept_fault_rip[max_cpus]{};
+    std::uint64_t l2_ept_fault_address[max_cpus]{};
+    std::uint64_t l2_ept_fault_qualification[max_cpus]{};
+    std::uint64_t l2_ept_fault_repeats[max_cpus]{};
+    /** @} */
+
+    /**
+     * A second-level guest making no forward progress, and everything
+     * needed to say why without another boot.
+     *
+     * This exists because of what finding the last one cost. The symptom
+     * is one line - the same instruction pointer, the same qualification,
+     * for ever - and it is the same line whichever of nine branches
+     * produced it. Every one of those branches is reached from state that
+     * is gone by the time anything reads a counter: the guest
+     * hypervisor's own walk, this VMM's, and what the two composed to.
+     * So they are captured at the moment the repeat count crosses the
+     * threshold, which is the last moment they are all in hand.
+     *
+     * Written once per processor and then left alone, on purpose. The
+     * first stall is the one that explains the boot; the millionth repeat
+     * of it explains nothing further, and overwriting would lose the
+     * transition that led in.
+     */
+    struct l2_ept_stall_record
+    {
+        std::uint64_t occurred{};
+        std::uint64_t repeats{};
+
+        std::uint64_t rip{};
+        std::uint64_t guest_physical{};
+        std::uint64_t qualification{};
+        std::uint64_t ept_pointer{};
+
+        /** The walk of the guest hypervisor's own tables. */
+        std::uint64_t guest_walk_status{};
+        std::uint64_t guest_walk_physical{};
+        std::uint64_t guest_walk_shift{};
+        std::uint64_t guest_walk_permissions{};
+
+        /** This VMM's own translation of what that walk produced. */
+        std::uint64_t host_walk_status{};
+        std::uint64_t host_walk_permissions{};
+
+        /** What the two composed to. */
+        std::uint64_t composition_outcome{};
+        std::uint64_t composition_shift{};
+        std::uint64_t composition_permissions{};
+
+        /** What the shadow held for the address at that moment. */
+        std::uint64_t shadow_status{};
+        std::uint64_t shadow_permissions{};
+
+        l2_ept_disposition disposition{};
+    };
+
+    l2_ept_stall_record l2_ept_stall[max_cpus]{};
+
+    /**
+     * Mappings installed by a fault that did not permit the access which
+     * caused it, counted.
+     *
+     * A guaranteed livelock, and the only counter here that should be
+     * zero on every run: the handler resumed a guest whose next act is to
+     * take the identical fault. Non-zero means the composition and the
+     * installation disagree about what was granted.
+     */
+    std::uint64_t shadow_ept_leaves_that_did_not_help[max_cpus]{};
+
+    /**
+     * How each fault was answered, so the branch is a number rather than a
+     * re-derivation.
+     */
+    std::uint64_t
+        l2_ept_dispositions[max_cpus]
+                           [1 + static_cast<std::size_t>(
+                                    l2_ept_disposition::pointer_failed)]{};
     /**
      * @}
      */

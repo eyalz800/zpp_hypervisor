@@ -2628,13 +2628,29 @@ void hypervisor::reflect_l2_exit(std::size_t cpu,
         auto & slot =
             this->l2_exit_trace[cpu][count % l2_exit_trace_capacity];
 
+        // The field means what its name says for the two reasons that
+        // report an address, and the register number for everything else.
+        //
+        // It used to mean the register number for all of them, which made
+        // the ring's account of a reflected extended-page-table fault
+        // read `0x0` - the second-level guest's RCX, which is not
+        // interesting and is not what the field is documented to hold.
+        // A whole boot's worth of faults at one instruction pointer was
+        // read that way before it was noticed that the one datum needed to
+        // identify the page was being overwritten with a register.
+        auto reports_an_address =
+            (basic_reason::ept_violation == reason.basic()) ||
+            (basic_reason::ept_misconfiguration == reason.basic());
+
         slot = exit_trace_entry{
             .reason = reason.value(),
             .qualification = qualification,
             .activity_state = vmcs.guest_activity_state(),
             .cs_selector = vmcs.guest_cs_selector(),
             .rip = vmcs.guest_rip(),
-            .guest_physical = this->l2_exit_detail[cpu],
+            .guest_physical = reports_an_address
+                                  ? vmcs.guest_physical_address()
+                                  : this->l2_exit_detail[cpu],
             .repeated = 1,
             .detail = this->l2_entries[cpu],
         };
@@ -2874,6 +2890,73 @@ hypervisor::on_l2_ept_fault(std::size_t cpu,
 
     auto guest_physical = vmcs.guest_physical_address();
     auto qualification = vmcs.exit_qualification();
+    auto rip = vmcs.guest_rip();
+
+    // How many times this exact fault has repeated, and everything the
+    // branches below learn about it on the way past.
+    //
+    // Compared among faults only, ignoring whatever exits happen in
+    // between. A livelocked second-level guest still takes its timer
+    // interrupts, and a counter reset by one of those would never reach
+    // any threshold - which is how the last of these went unnoticed for
+    // as long as it did.
+    if ((guest_physical == this->l2_ept_fault_address[cpu]) &&
+        (qualification == this->l2_ept_fault_qualification[cpu]) &&
+        (rip == this->l2_ept_fault_rip[cpu])) {
+        this->l2_ept_fault_repeats[cpu] =
+            this->l2_ept_fault_repeats[cpu] + 1;
+    } else {
+        this->l2_ept_fault_address[cpu] = guest_physical;
+        this->l2_ept_fault_qualification[cpu] = qualification;
+        this->l2_ept_fault_rip[cpu] = rip;
+        this->l2_ept_fault_repeats[cpu] = 1;
+    }
+
+    auto repeats = this->l2_ept_fault_repeats[cpu];
+
+    l2_ept_stall_record probe{};
+    probe.repeats = repeats;
+    probe.rip = rip;
+    probe.guest_physical = guest_physical;
+    probe.qualification = qualification;
+
+    // Every return below goes through this, so a branch cannot be added
+    // without saying which it is.
+    auto finish = [&](l2_ept_disposition disposition,
+                      l2_exit_outcome outcome) {
+        probe.disposition = disposition;
+
+        this->l2_ept_dispositions[cpu]
+                                 [static_cast<std::size_t>(disposition)] +=
+            1;
+
+        // Exactly at the threshold rather than past it. The first stall is
+        // the one that explains the boot, and a line per repeat afterwards
+        // would evict the sequence that led into it.
+        if (l2_ept_stall_threshold == repeats) {
+            probe.occurred = 1;
+            this->l2_ept_stall[cpu] = probe;
+
+            log("cpu {} second level made no progress: {} faults at rip "
+                "{} for {}, qualification {}, disposition {}, guest walk "
+                "{} permissions {}, composition {} permissions {}, "
+                "shadow {} permissions {}",
+                cpu,
+                repeats,
+                rip,
+                guest_physical,
+                qualification,
+                disposition,
+                probe.guest_walk_status,
+                probe.guest_walk_permissions,
+                probe.composition_outcome,
+                probe.composition_permissions,
+                probe.shadow_status,
+                probe.shadow_permissions);
+        }
+
+        return outcome;
+    };
 
     auto primary12 =
         shadow.read(field::primary_processor_based_vm_execution_controls);
@@ -2889,10 +2972,12 @@ hypervisor::on_l2_ept_fault(std::size_t cpu,
     // one. That is the same code path the guest hypervisor's own faults
     // take, which is what makes it correct rather than convenient.
     if (0 == (secondary12 & secondary_enable_ept)) {
-        return l2_exit_outcome::deferred;
+        return finish(l2_ept_disposition::without_ept,
+                      l2_exit_outcome::deferred);
     }
 
     auto eptp12 = shadow.read(field::ept_pointer);
+    probe.ept_pointer = eptp12;
 
     // Walk the guest hypervisor's tables for the address the processor
     // reported, which is a second-level guest-physical one. The processor
@@ -2915,10 +3000,43 @@ hypervisor::on_l2_ept_fault(std::size_t cpu,
             return arch::x86_64::vmx::epte(value);
         });
 
+    auto host_walk = host_ept_lookup(guest_walk.physical_address);
+
     auto composition = arch::x86_64::vmx::compose_ept(
-        guest_walk,
-        host_ept_lookup(guest_walk.physical_address),
-        execute_only_translations_offered);
+        guest_walk, host_walk, execute_only_translations_offered);
+
+    // Everything the branches below decide from, captured while it is in
+    // hand. A stall is recognised by a count, and a count says nothing
+    // about which of two tables refused what.
+    probe.guest_walk_status =
+        static_cast<std::uint64_t>(guest_walk.status);
+    probe.guest_walk_physical = guest_walk.physical_address;
+    probe.guest_walk_shift = guest_walk.page_shift;
+    probe.guest_walk_permissions = guest_walk.permissions.bits();
+    probe.host_walk_status = static_cast<std::uint64_t>(host_walk.status);
+    probe.host_walk_permissions = host_walk.permissions.bits();
+    probe.composition_outcome =
+        static_cast<std::uint64_t>(composition.outcome);
+    probe.composition_shift = composition.page_shift;
+    probe.composition_permissions = composition.permissions.bits();
+
+    // What the shadow itself holds, which is the one account nothing else
+    // here carries: the processor walked it, and the qualification it
+    // produced is that walk's, but the entry it stopped on is not saved
+    // anywhere. A stall whose shadow says "present, readable" while the
+    // qualification says a read was refused is a stale cached translation
+    // rather than a missing mapping, and the two need opposite fixes.
+    //
+    // Only once the fault has already repeated, because this is a walk of
+    // four tables through a reverse map and the fault path is the hottest
+    // one this VMM has - four hundred thousand of them in a bad minute. A
+    // first fault is ordinary and needs no account of itself; a second one
+    // for the same address is already the thing being watched for.
+    if (repeats > 1) {
+        auto in_shadow = shadow_ept_lookup(cpu, guest_physical);
+        probe.shadow_status = static_cast<std::uint64_t>(in_shadow.status);
+        probe.shadow_permissions = in_shadow.permissions.bits();
+    }
 
     switch (composition.outcome) {
     case arch::x86_64::vmx::ept_compose_outcome::reflect_violation:
@@ -2932,7 +3050,8 @@ hypervisor::on_l2_ept_fault(std::size_t cpu,
             static_cast<std::uint64_t>(basic_reason::ept_violation),
             arch::x86_64::vmx::reflected_ept_violation_qualification(
                 qualification, guest_walk, false));
-        return l2_exit_outcome::reflected;
+        return finish(l2_ept_disposition::reflected_walk,
+                      l2_exit_outcome::reflected);
 
     case arch::x86_64::vmx::ept_compose_outcome::reflect_misconfiguration:
         // Its tables hold a value the processor rejects. Reflected for the
@@ -2942,7 +3061,8 @@ hypervisor::on_l2_ept_fault(std::size_t cpu,
             cpu,
             static_cast<std::uint64_t>(basic_reason::ept_misconfiguration),
             0);
-        return l2_exit_outcome::reflected;
+        return finish(l2_ept_disposition::reflected_misconfiguration,
+                      l2_exit_outcome::reflected);
 
     case arch::x86_64::vmx::ept_compose_outcome::composed: {
         // "Composed" means the intersection is non-empty, NOT that it
@@ -3005,7 +3125,8 @@ hypervisor::on_l2_ept_fault(std::size_t cpu,
                 static_cast<std::uint64_t>(basic_reason::ept_violation),
                 arch::x86_64::vmx::reflected_ept_violation_qualification(
                     qualification, guest_walk, false));
-            return l2_exit_outcome::reflected;
+            return finish(l2_ept_disposition::reflected_permission,
+                          l2_exit_outcome::reflected);
         }
 
         // Left over: the guest hypervisor permits it and the composition
@@ -3021,9 +3142,13 @@ hypervisor::on_l2_ept_fault(std::size_t cpu,
                     guest_walk.physical_address);
                 record_exit(reason, context);
                 on_unhandled_exit(reason);
+
+                return finish(l2_ept_disposition::unwatched,
+                              l2_exit_outcome::handled);
             }
 
-            return l2_exit_outcome::handled;
+            return finish(l2_ept_disposition::watched,
+                          l2_exit_outcome::handled);
         }
 
         // Both levels permit it, so the shadow is behind and this is not
@@ -3063,7 +3188,8 @@ hypervisor::on_l2_ept_fault(std::size_t cpu,
                 pointer.error().code());
             record_exit(reason, context);
             on_unhandled_exit(reason);
-            return l2_exit_outcome::handled;
+            return finish(l2_ept_disposition::pointer_failed,
+                          l2_exit_outcome::handled);
         }
 
         vmcs.ept_pointer(*pointer);
@@ -3080,7 +3206,8 @@ hypervisor::on_l2_ept_fault(std::size_t cpu,
                 installed.error().code());
             record_exit(reason, context);
             on_unhandled_exit(reason);
-            return l2_exit_outcome::handled;
+            return finish(l2_ept_disposition::install_failed,
+                          l2_exit_outcome::handled);
         }
 
         // The shadow's entry for this address has just changed from
@@ -3092,7 +3219,47 @@ hypervisor::on_l2_ept_fault(std::size_t cpu,
         this->shadow_ept_leaves_filled[cpu] =
             this->shadow_ept_leaves_filled[cpu] + 1;
 
-        return l2_exit_outcome::handled;
+        // The handler's own work, read back.
+        //
+        // Installing a mapping is the one disposition here that claims to
+        // have *fixed* something, and the claim is checkable: the access
+        // that faulted must now be permitted by what is in the table. When
+        // it is not, the guest is about to be resumed onto the identical
+        // fault and will be for ever, and every counter in this class will
+        // go on looking healthy while it happens - `leaves_filled` in
+        // particular climbs beautifully.
+        //
+        // That is not hypothetical. It has happened twice: a watched page
+        // composing to a valid read-and-execute leaf that a *write* then
+        // faulted on again, 411,333 leaves for 88,281 entries; and a 2 MB
+        // leaf where the composition was only valid for 4 KB. Both were
+        // found by hand, days later, from a ring full of one address.
+        //
+        // Only past the first repeat, since the walk is not free and a
+        // single fault cannot be a loop yet.
+        if (repeats > 1) {
+            auto after = shadow_ept_lookup(cpu, guest_physical);
+
+            probe.shadow_status = static_cast<std::uint64_t>(after.status);
+            probe.shadow_permissions = after.permissions.bits();
+
+            if (!permits(after.permissions)) {
+                this->shadow_ept_leaves_that_did_not_help[cpu] =
+                    this->shadow_ept_leaves_that_did_not_help[cpu] + 1;
+
+                log("cpu {} installed a shadow leaf for {} that still "
+                    "refuses the access: qualification {}, composed {}, "
+                    "installed {}",
+                    cpu,
+                    page,
+                    qualification,
+                    composition.permissions.bits(),
+                    after.permissions.bits());
+            }
+        }
+
+        return finish(l2_ept_disposition::installed,
+                      l2_exit_outcome::handled);
     }
 
     case arch::x86_64::vmx::ept_compose_outcome::host_denied:
@@ -3127,9 +3294,13 @@ hypervisor::on_l2_ept_fault(std::size_t cpu,
                 guest_walk.physical_address);
             record_exit(reason, context);
             on_unhandled_exit(reason);
+
+            return finish(l2_ept_disposition::unwatched,
+                          l2_exit_outcome::handled);
         }
 
-        return l2_exit_outcome::handled;
+        return finish(l2_ept_disposition::watched,
+                      l2_exit_outcome::handled);
     }
 }
 

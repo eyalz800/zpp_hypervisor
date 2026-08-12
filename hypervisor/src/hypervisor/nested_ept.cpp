@@ -162,6 +162,54 @@ ept_walk_result hypervisor::host_ept_lookup(std::uint64_t physical_address)
     return leaf_result(leaf, physical_address, page_shift_4kb, above);
 }
 
+ept_walk_result hypervisor::shadow_ept_lookup(std::size_t cpu,
+                                              std::uint64_t guest_physical)
+{
+    ept_walk_result result;
+    result.permissions = ept_permissions::all();
+
+    auto * table =
+        this->shadow_epml4[cpu][this->shadow_ept_current_slot[cpu]];
+
+    for (auto level = std::uint64_t{3};; --level) {
+        auto & entry =
+            table[(guest_physical >> (12 + (9 * level))) & 0x1ff];
+        auto shift = 12 + (9 * level);
+
+        // SDM Table 30-7 accumulates each permission across every entry
+        // the walk used, which is what the caller compares the faulting
+        // access against - so the accumulation is the answer, not the
+        // leaf.
+        if (!ept_permissions::of(entry).present()) {
+            result.status = ept_walk_status::not_present;
+            result.permissions = ept_permissions();
+            return result;
+        }
+
+        if (entry.large() || (0 == level)) {
+            return leaf_result(
+                entry, guest_physical, shift, result.permissions);
+        }
+
+        result.permissions = result.permissions.intersected_with(
+            ept_permissions::of(entry));
+
+        auto found = this->module_physical_to_virtual.find(
+            entry.page_number() << 12);
+        if (this->module_physical_to_virtual.end() == found) {
+            // A table this VMM did not allocate, so the tree is not what
+            // it is assumed to be. Reported as not present rather than
+            // guessed at: this is a diagnostic, and a diagnostic that
+            // invents an answer is worse than one that declines.
+            result.status = ept_walk_status::not_present;
+            result.permissions = ept_permissions();
+            return result;
+        }
+
+        table = reinterpret_cast<epte *>(found->second);
+    }
+}
+
 std::expected<arch::x86_64::vmx::epte *, zpp::error>
 hypervisor::shadow_ept_table(std::size_t cpu)
 {
