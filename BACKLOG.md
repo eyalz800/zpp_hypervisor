@@ -8879,3 +8879,51 @@ What the experiment did produce, which is worth more than its own result:
   second-level entry. Handing that to the processor is free; emulating it
   is an exit each, and that ratio is the argument for keeping the default
   where it is.
+
+
+## The root partition is idle throughout; the work is the secure kernel's
+
+2026-08-12, from the guest-thread probe, which follows the GS base to the
+processor control region, that to the control block, and that to the
+running thread.
+
+Every sample that reads cleanly finds the **idle** thread. Not some of
+them - all of them, across three boots and at every point in the run,
+including the twelve minutes of virtual-trust-level protection hypercalls
+when the machine is plainly busy. The walk of the running thread's
+process therefore keeps finding a list one thread long, which is the idle
+process by construction.
+
+Two narrower trigger rules were tried and both failed informatively:
+
+- walking once on the first plausible thread caught the idle process and
+  succeeded while telling us nothing;
+- walking only from a thread that is *not* the processor's idle thread
+  never fired at all.
+
+The second is the finding. **The samples that read cleanly are the ones
+from virtual trust level 0**, because these offsets are `ntoskrnl.exe`'s;
+the ones from level 1 are rejected by the canonical-address check,
+because the secure kernel's structures are `securekernel.exe`'s and
+following one image's offsets through the other's memory is the
+fabricated answer this project refuses. So "every clean sample is idle"
+means precisely: **the root partition is idle whenever it is running, and
+the work is being done in the secure kernel.**
+
+Which fits everything else. The hypercall storm is
+`HvCallModifyVtlProtectionMask` bracketed by VTL calls and returns, and
+applying virtual-trust-level protections is the secure kernel's job, not
+the root partition's. The two virtual-APIC pages alternate 60/40. The
+processor is handed back and forth at thread granularity.
+
+So the question changes shape, and for the first time in this
+investigation it is about a component nothing here has ever looked at:
+**the root partition has been idle since early Phase 1 and the secure
+kernel has been doing all the work - so what is the root partition
+waiting for the secure kernel to do, and did the secure kernel finish?**
+
+The next step is mechanical rather than speculative.
+`scripts/guest-symbols.sh` fetches `securekernel.pdb` the same way it
+fetched `ntkrnlmp.pdb`, and the probe needs a second set of offsets and a
+way to choose between them - the GS base itself distinguishes the two,
+since they differ per trust level and the samples already record it.
