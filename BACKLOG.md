@@ -8836,3 +8836,46 @@ it, and it does not say the honoured path is wrong.
 The known-good build was rebuilt and redeployed immediately afterwards,
 since the rule here is that the disk never keeps a loader that has not
 completed a boot.
+
+
+## Ruled out properly: the task priority mechanism is not the cause
+
+2026-08-12, after the reboot loop in the first attempt was traced to the
+emulation advancing the *guest hypervisor's* instruction pointer rather
+than its guest's. With that fixed, the experiment is valid and it answers.
+
+|  | shadow on, in hardware | shadow off, emulated |
+|---|---|---|
+| reaches | Phase 1, then idles | Phase 1, then idles |
+| working ring | frozen at ~89,000 | frozen at ~85,000 |
+| second-level entries | climbing | climbing, 108,204 to 124,565 |
+| vector `0x2f` | 3,395 asked, 6 given | 918 asked, 7 given |
+| below-threshold reflections | n/a | 94, none of them fatal |
+
+The two paths share no code. One is the processor virtualizing CR8 into
+the guest hypervisor's page with no exit at all; the other intercepts
+every CR8 access - 225,455 reads and 334,519 writes across 124,565
+entries - and writes the byte by hand. **They behave identically**, down
+to the same phase, the same frozen working ring and the same ratio of
+requested to delivered dispatch interrupts.
+
+So the task priority register is not where the boot is lost, and the
+three explanations built on it are closed for good rather than merely
+unproven. That is worth the two boots it cost: an interrupt-priority
+fault would have been very hard to find later, and it can now be
+eliminated by citation instead of re-derived.
+
+What the experiment did produce, which is worth more than its own result:
+
+- **A real defect, found because it was exercised.** A handler that
+  reflects and then returns to a caller which advances the instruction
+  pointer writes into the wrong VMCS - `reflect_l2_exit` has already made
+  vmcs01 current. It killed the guest with a single occurrence. The shape
+  is checkable by grep and no other handler currently has it.
+- **A CR8 emulation that is exercised and correct**, which is the only
+  path available if a guest hypervisor ever names a virtual-APIC page
+  this VMM refuses. Before this the entry was simply failed.
+- **The guest's own use of CR8, measured**: about four accesses per
+  second-level entry. Handing that to the processor is free; emulating it
+  is an exit each, and that ratio is the argument for keeping the default
+  where it is.
