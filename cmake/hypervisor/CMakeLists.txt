@@ -13,6 +13,9 @@ option(ZPP_NESTED_SHADOW_VMCS
     "Let the processor shadow a guest hypervisor's VMCS, so its vmreads and vmwrites do not exit. Off makes every one of them exit and be recorded, which is the only way to see what it actually asks for."
     ON)
 
+set(ZPP_SLOW_EXITS "0" CACHE STRING
+    "Extra cycles burned in every VM exit, to test whether the stall moves with throughput")
+
 option(ZPP_PROFILE_L2
     "Sample a second-level guest's instruction pointer on the VMX-preemption timer. A profiler: it costs an exit per interval and is the only instrument that can see a guest spinning on memory."
     OFF)
@@ -140,6 +143,7 @@ target_compile_options(zpp_hypervisor PRIVATE
     -DZPP_NESTED_TPR_SHADOW=$<BOOL:${ZPP_NESTED_TPR_SHADOW}>
     -DZPP_NESTED_SHADOW_VMCS=$<BOOL:${ZPP_NESTED_SHADOW_VMCS}>
     -DZPP_PROFILE_L2=$<BOOL:${ZPP_PROFILE_L2}>
+    -DZPP_SLOW_EXITS=${ZPP_SLOW_EXITS}
     # The guest coverage suite, which lives in the loader but turns on two
     # VM-execution controls here. Same always-defined 0/1 shape as the two
     # above. Off by default and off in every build that is not a test one;

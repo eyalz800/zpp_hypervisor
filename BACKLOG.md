@@ -11094,3 +11094,50 @@ nobody asked.
 
 That is worth knowing before spending another night on the remaining
 blocks.
+
+
+## The stall is a wall, not a throughput limit - and that inverts the plan
+
+Optimising could not answer this, because making a machine somewhat
+faster cannot tell a throughput limit from a wall. Making it **slower**
+can, and `ZPP_SLOW_EXITS` does exactly that - it burns a fixed number of
+cycles in every VM exit and nothing else.
+
+The point the guest stops at, across a **two-and-a-half-fold** range of
+hypervisor speed:
+
+    unoptimised            1.00x    stalls at 85,756 and 88,370
+    optimised              1.15x    stalls at 94,572
+    slowed 300,000 cycles  0.48x    stalls at 88,106
+
+**No correlation.** The build running at less than half the speed stops
+in the same place as the one running fastest; the spread is five per cent
+across a factor of two and a half, which is noise. The guest performs
+about the same amount of work and then stops, however long that work
+takes.
+
+**So throughput was never the cause**, and three conclusions follow that
+matter more than anything else recorded tonight:
+
+- **The bare-metal boot would not have fixed it.** The recommendation
+  that closed the last four entries was wrong. A seventy-fold speed-up
+  is still a speed-up, and this stall does not care about speed.
+- **The optimisation work was not on the path.** It is honest hygiene -
+  fifteen per cent, measured, three real redundancies removed - but it
+  was an answer to a question the machine was not asking.
+- **The question is the one from before the optimising began**: what is
+  the guest waiting for. Everything measured about *that* still stands:
+  it sits at raised task priority and never lowers it, the clock arrives
+  and is injected 96 times a second, it asks for a dispatch interrupt
+  every tick and the guest hypervisor correctly refuses because the
+  priority forbids it, hypercalls have stopped entirely, and its stack
+  is the clock handler and the boot rasteriser.
+
+**The lesson, and it is the one this file keeps writing down.** A
+measurement that only moves the quantity you already suspect cannot
+falsify your suspicion. Fifteen per cent faster produced no change and
+was read as "consistent with throughput" - it was equally consistent
+with the opposite, and the experiment that separated them took one boot
+and a switch that makes things *worse*. **When an intervention does not
+move the outcome, try the intervention that should move it the other
+way, before believing either.**

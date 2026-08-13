@@ -52,6 +52,7 @@
 #include "zpp/loader.h"
 #include "zpp/nvme/command.h"
 #include "zpp/scope_exit.h"
+#include "zpp/spin_lock.h"
 #include <algorithm>
 #include <atomic>
 #include <cstdint>
@@ -79,6 +80,25 @@ void hypervisor::on_vm_exit(std::uint64_t cpuid,
         }
         this->vmread_benchmark_cycles =
             (arch::x86_64::rdtsc() - before) | (sink & 0);
+    }
+
+    // A deliberate slowdown, off unless asked for. See ZPP_SLOW_EXITS.
+    //
+    // Fifteen per cent faster did not move the stall at all, and that is
+    // consistent with two opposite things: a throughput limit that
+    // fifteen per cent does not cross, and a wall that no speed crosses.
+    // Making the machine faster cannot separate them - making it
+    // *slower* can. If the point the guest stops at moves down with this
+    // turned up, the limit is throughput; if it sits where it is, speed
+    // was never the question.
+#ifndef ZPP_SLOW_EXITS
+#define ZPP_SLOW_EXITS 0
+#endif
+    if constexpr (0 != ZPP_SLOW_EXITS) {
+        auto until = arch::x86_64::rdtsc() + ZPP_SLOW_EXITS;
+        while (arch::x86_64::rdtsc() < until) {
+            zpp::spin_hint();
+        }
     }
 
     // The clock for `handler_cycles`. See its declaration: this is the

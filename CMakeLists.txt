@@ -90,6 +90,9 @@ option(ZPP_NESTED_SHADOW_VMCS
     "Let the processor shadow a guest hypervisor's VMCS, so its vmreads and vmwrites do not exit. Off makes every one of them exit and be recorded, which is slow and is the only way to see what it actually asks for - with it on, vmcs_field_use reads 411 writes for a whole boot and says nothing."
     ON)
 
+set(ZPP_SLOW_EXITS "0" CACHE STRING
+    "Burn this many extra cycles in every VM exit. A deliberate slowdown, to find out whether the nested stall moves with throughput or sits at a fixed point - making a machine faster cannot distinguish a throughput limit from a wall, making it slower can.")
+
 option(ZPP_PROFILE_L2
     "Sample a second-level guest's instruction pointer on the VMX-preemption timer. A profiler: it costs an exit per interval and is the only instrument that can see a guest spinning on memory."
     OFF)
@@ -170,6 +173,7 @@ ExternalProject_Add(hypervisor
         -DZPP_NESTED_VMX=${ZPP_NESTED_VMX}
         -DZPP_REQUEUE_INTERRUPTED_EVENTS=${ZPP_REQUEUE_INTERRUPTED_EVENTS}
         -DZPP_NESTED_TPR_SHADOW=${ZPP_NESTED_TPR_SHADOW}
+        -DZPP_SLOW_EXITS=${ZPP_SLOW_EXITS}
         -DZPP_NESTED_SHADOW_VMCS=${ZPP_NESTED_SHADOW_VMCS}
         -DZPP_PROFILE_L2=${ZPP_PROFILE_L2}
         -DZPP_GUEST_TESTS=${ZPP_GUEST_TESTS}
@@ -250,6 +254,7 @@ ExternalProject_Add(uefi_loader
         -DZPP_NESTED_VMX=${ZPP_NESTED_VMX}
         -DZPP_REQUEUE_INTERRUPTED_EVENTS=${ZPP_REQUEUE_INTERRUPTED_EVENTS}
         -DZPP_NESTED_TPR_SHADOW=${ZPP_NESTED_TPR_SHADOW}
+        -DZPP_SLOW_EXITS=${ZPP_SLOW_EXITS}
         -DZPP_NESTED_SHADOW_VMCS=${ZPP_NESTED_SHADOW_VMCS}
         -DZPP_PROFILE_L2=${ZPP_PROFILE_L2}
         -DZPP_TRACE=${ZPP_TRACE}
