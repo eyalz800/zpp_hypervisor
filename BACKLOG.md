@@ -11141,3 +11141,55 @@ with the opposite, and the experiment that separated them took one boot
 and a switch that makes things *worse*. **When an intervention does not
 move the outcome, try the intervention that should move it the other
 way, before believing either.**
+
+
+## What the wall actually is: trust-level switching stops
+
+With throughput eliminated as the cause, the question is what the guest
+waits for, and the counters answer it sharply. At the stall, over fifty
+seconds:
+
+    vmptrld    65,056   frozen     no VMCS switching at all
+    vmcall     93,114   frozen     no hypercalls at all
+    rdmsr     262,872 -> 322,639   +1,195/s, the reference counter poll
+
+and `guest_current_vmcs` reads `0x117a19000` unchanged across eight
+samples over ninety seconds.
+
+**Virtual secure mode moves between trust levels by changing which
+vmcs12 is current.** During the working phase there were 55,120 of those
+switches; at the stall there are none, and the pointer never moves. The
+hypercalls that carry `HvCallVtlCall` and `HvCallVtlReturn` have stopped
+with them.
+
+So the shape is not "the guest is slow" and not "an interrupt was lost".
+It is: **the guest hypervisor stops switching trust levels, its guest
+stops making hypercalls, the task priority stays raised, and the only
+thing still happening is time being read.** Everything else measured
+tonight fits inside that - the dispatch interrupt correctly refused
+because the priority forbids it, the clock arriving and being injected 96
+times a second, the boot rasteriser drawing one frame for ever.
+
+**Where to look next**, in order, and none of it needs the machine
+rebooted:
+
+- The last few hypercalls before `vmcall` froze. The second-level
+  working ring holds them with their call codes, and the last
+  `HvCallVtlCall` or `HvCallVtlReturn` before the freeze says which
+  side the guest stopped on.
+- Whether the vmcs12 that is stuck current is VTL0's or VTL1's. The two
+  can be told apart by their guest RIP: ntoskrnl's image against the
+  secure kernel's. Sixteen of sixty-six earlier instruction-pointer
+  samples sat on a *single* address outside ntoskrnl, which is what a
+  spin in the secure kernel would look like, and that lead was dropped
+  too early on a control that could not have worked - the stack walker
+  reads the stack pointer of whichever level it last saved.
+- What the guest hypervisor was asked for immediately before it stopped
+  switching. `vmcs_field_use` with shadowing off records every field it
+  reads and writes, and the last writes before the freeze are visible
+  there.
+
+**And the correction that makes all of this worth reading**: the four
+entries above recommending a bare-metal boot were wrong, and wrong for a
+reason worth remembering. A speed-up is not a diagnostic. The experiment
+that settled it made the machine *slower* and took one boot.
