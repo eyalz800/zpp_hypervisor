@@ -11193,3 +11193,31 @@ rebooted:
 entries above recommending a bare-metal boot were wrong, and wrong for a
 reason worth remembering. A speed-up is not a diagnostic. The experiment
 that settled it made the machine *slower* and took one boot.
+
+
+## Telling the three images apart at the stall
+
+216 instruction-pointer samples through the monitor, of which most catch
+this VMM itself - `vmread`, `vmwrite` and `vmptrld` account for 63% of
+them, which is the 85%-of-wall-clock figure showing up a second way.
+
+The twelve guest-mode samples fall into exactly two images:
+
+    0xfffff804bc...   5   ntoskrnl - `...bc1a597e` is
+                          HvlpGetRegister64+0x3e against base
+                          0xfffff804bbe00000
+    0xfffff865 97...  7   the guest hypervisor's own image - the
+                          offset `...7a843d` appeared as its instruction
+                          pointer in two earlier runs under different
+                          bases
+
+**No secure kernel.** The earlier cluster of sixteen samples on a single
+address outside ntoskrnl does not reproduce, so that lead stays dead
+rather than merely unproven - and the way to check it is now written
+down: the images are distinguishable by base, and the offsets repeat
+across runs even though the bases do not.
+
+So at the stall both the guest hypervisor and its guest are executing,
+which rules out "one of them is parked" and leaves the shape recorded
+above: neither is switching trust levels or making hypercalls, and the
+only work left is reading the clock.
