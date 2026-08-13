@@ -95,7 +95,7 @@ option(ZPP_INTERCEPT_APIC
     ON)
 
 option(ZPP_NESTED_SHADOW_VMCS
-    "Let the processor shadow a guest hypervisor's VMCS, so its vmreads and vmwrites do not exit. ON, and worth 88.0% -> 83.2% of the wall clock in this VMM's handler only since the field list was cut to the measured hot set - with the old 36 field list it was a LOSS against off. Do NOT compare settings by cost per exit; the flag changes the exit count several fold and only handler share of wall clock survives that. Turn it OFF to read vmcs_field_use, which is blind to every field it shadows and is the only way to re-measure the hot set."
+    "Let the processor shadow a guest hypervisor's VMCS, so its vmreads and vmwrites do not exit. ON, with the field list cut to the measured hot set - measured at the wall, the handler holds 90.1% of the wall clock with the old 36 field list and 89.2% with the short one, so the guest gets a tenth more of the machine. Do NOT compare settings by cost per exit; the flag changes the exit count several fold and only handler share of wall clock survives that. Turn it OFF to read vmcs_field_use, which is blind to every field it shadows and is the only way to re-measure the hot set."
     ON)
 
 set(ZPP_SLOW_EXITS "0" CACHE STRING

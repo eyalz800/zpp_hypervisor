@@ -11632,16 +11632,30 @@ Counting with shadowing off - the only way to see fields it would
 otherwise hide - Hyper-V's 5,095,645 reads are 99.6% in nine fields and
 its 2,176,011 writes 99.98% in five. Their union is eleven.
 
-| | handler share of wall clock |
-|---|---|
-| shadowing off | 85.0% |
-| shadowing on, 36 fields | 88.0% |
-| shadowing on, 11 fields | **83.2%, 83.8%** |
+62 VMCS accesses per second-level exit became 20, and the exits given up
+are the 0.4% tail: `vmcs_field_use` reports 3,849 accesses for a run where
+it reported 7.27 million. The default is on again, with the short list.
 
-So 62 VMCS accesses per second-level exit became 20, the exits given up
-are the 0.4% tail - `vmcs_field_use` now reports 3,849 accesses for a run
-where it reported 7.27 million - and the guest's share of the machine
-went from 12% to 17%. The default is on again, with the short list.
+**What it is worth is small, and the first two attempts to say so were
+both wrong in the same way.** Cumulative handler share - everything since
+the module loaded - is not comparable between runs, because it averages
+over however much of the boot each run happened to cover, and a run that
+got further has a different mix. Both "88.0% against 85.0%" and "83.2%
+against 88.0%" are that mistake.
+
+The comparable measurement is the **steady state at the wall**, where the
+guest is in a fixed loop and every run is doing the identical thing:
+sample `handler_cycles` and `handler_last_tsc` twice and take the ratio of
+the deltas.
+
+| config, measured at the wall | handler share | guest gets |
+|---|---|---|
+| shadowing on, 36 fields | 90.1% | 9.9% |
+| shadowing on, 11 fields | 89.2% | 10.8% |
+| shadowing on, 11 fields, APIC watch off | 90.0% | 10.0% |
+
+So the trim buys the guest about a tenth more of the machine and the APIC
+page watch is free. Keep both; expect neither to matter on its own.
 
 `vm_exit_interruption_information` is the one dropped field with real
 traffic, 3,272 exits, and it was left off deliberately: against one more
