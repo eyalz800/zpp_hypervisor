@@ -1,6 +1,6 @@
 // The way back into a guest.
 //
-// Two functions, and they are here rather than in hypervisor.cpp for the
+// Four functions, and they are here rather than in hypervisor.cpp for the
 // reason b6f0bee moved the local APIC path out: hypervisor.cpp reaches
 // the whole VMM and nothing can compile it, so the only way to test
 // anything in it was to cut the bodies out with awk at build time. A
@@ -8,12 +8,14 @@
 // is what makes that extraction unnecessary - see tests/resume_guest,
 // which compiles this file.
 //
-// Why these two and no others. `resume_guest` is the last thing every
+// Why these four and no others. `resume_guest` is the last thing every
 // exit path calls, and `event_allowed_on_entry` is the predicate it asks
-// before re-queueing an interrupted event; the second has exactly one
-// caller and it is the first. Checked by grep across every other
-// translation unit, which finds no caller of either outside the file they
-// left.
+// before re-queueing an interrupted event. The other two are the whole of
+// the external-interrupt queue behind `ZPP_VIRTUALIZE_APIC`:
+// `queue_external_interrupt` is called from the exit handler and
+// `deliver_pending_external_interrupt` from `resume_guest`, and they are
+// here so a harness can drive the decision with the switch off - what the
+// switch removes is the two call sites, not these bodies.
 #include "zpp/arch/x86_64/asm.h"
 #include "zpp/arch/x86_64/vmx/asm.h"
 #include "zpp/arch/x86_64/vmx/vmcs.h"
@@ -23,6 +25,7 @@
 #include "zpp/diag/sinks.h"
 #include "zpp/diag/sinks/esp_blocks.h"
 #include "zpp/hypervisor/hypervisor.h"
+#include <bit>
 #include <cstdint>
 #include <utility>
 
@@ -155,6 +158,198 @@ bool hypervisor::event_allowed_on_entry(std::uint64_t event) const
             return false;
         }
     }
+
+    return true;
+}
+
+void hypervisor::queue_external_interrupt(std::size_t cpu,
+                                          std::uint64_t vector)
+{
+    if (cpu >= max_cpus) {
+        return;
+    }
+
+    // Masked here rather than trusted from the caller, because the one
+    // thing this function must not do is write outside the bitmap. The
+    // exit-interruption field's vector is bits 7:0 (SDM 27.9.2), so the
+    // mask is a no-op on the real path and a guard on any other.
+    vector = vector & 0xff;
+
+    auto & word = this->pending_external_vectors[cpu][vector / 64];
+    auto bit = std::uint64_t{1} << (vector % 64);
+
+    this->external_interrupts_taken[cpu] =
+        this->external_interrupts_taken[cpu] + 1;
+
+    if (0 != (word & bit)) {
+        // The same vector acknowledged twice with nothing delivered in
+        // between. A bitmap cannot represent two, so this is a real
+        // loss - and it should be unreachable: the first acknowledge set
+        // the in-service bit for that vector in the physical local APIC,
+        // and SDM 12.8.4 has the APIC deliver only an interrupt of
+        // *higher* priority while an in-service bit is set, which the
+        // same vector is not. Counted rather than hidden because if it
+        // ever fires, the model this whole path rests on is wrong.
+        this->external_interrupts_dropped[cpu] =
+            this->external_interrupts_dropped[cpu] + 1;
+        return;
+    }
+
+    word = word | bit;
+
+    auto pending = this->external_interrupts_pending[cpu] + 1;
+    this->external_interrupts_pending[cpu] = pending;
+
+    if (pending > this->external_interrupts_pending_high_water[cpu]) {
+        this->external_interrupts_pending_high_water[cpu] = pending;
+    }
+}
+
+bool hypervisor::deliver_pending_external_interrupt(std::size_t cpu)
+{
+    if (cpu >= max_cpus) {
+        return false;
+    }
+
+    auto & vmcs = this->vmcs;
+
+    constexpr std::uint64_t primary_interrupt_window = 1ull << 2;
+    constexpr std::uint64_t valid = 1ull << 31;
+    constexpr std::uint64_t type_external_interrupt = 0ull << 8;
+
+    // Highest vector first. The local APIC's own delivery order is by
+    // interrupt priority, which SDM 12.8.4 defines as the vector divided
+    // by sixteen, with the higher vector winning inside a class - so
+    // scanning down from the top word reproduces the order the hardware
+    // would have used had these never been taken away from it.
+    auto found = false;
+    std::uint64_t vector = 0;
+
+    for (auto index = external_vector_words; index-- > 0;) {
+        if (auto word = this->pending_external_vectors[cpu][index];
+            0 != word) {
+            vector = (index * 64) + (std::bit_width(word) - 1);
+            found = true;
+            break;
+        }
+    }
+
+    // Nothing queued: make sure the window this may have armed on an
+    // earlier entry is closed again, or the processor exits on every
+    // instruction boundary the guest can take an interrupt at, for ever.
+    if (!found) {
+        auto primary =
+            vmcs.primary_processor_based_vm_execution_controls();
+
+        if (0 != (primary & primary_interrupt_window)) {
+            vmcs.primary_processor_based_vm_execution_controls(
+                arch::x86_64::vmx::adjust_msr(
+                    this->cached_vmx_msr(
+                        arch::x86_64::vmx::msr::
+                            true_processor_based_controls),
+                    primary & ~primary_interrupt_window));
+        }
+        return false;
+    }
+
+    // Never into a second-level guest. The interrupt was signalled to
+    // the *physical* processor, so in the two-level world it belongs to
+    // the first-level guest - the guest hypervisor - and putting it
+    // through vmcs02's entry-interruption field would deliver it to the
+    // second-level guest's interrupt descriptor table instead. A guest
+    // hypervisor that wanted it asked for external-interrupt exiting in
+    // vmcs12, and that exit is reflected long before this runs; see
+    // `l1_wants_l2_exit`.
+    //
+    // Held rather than dropped, and nothing here shortens the wait -
+    // which is the known weakness of this path and why the counter
+    // exists. KVM does force the exit, through `vmx_check_nested_events`
+    // and `nested_vmx_vmexit`; that is not implemented here. Also note
+    // the controls must not be touched with vmcs02 current: a write here
+    // would land in the second-level guest's VMCS.
+    //
+    // The window this VMM arms in vmcs01 does not leak downward, which
+    // is what makes holding safe rather than merely tolerable:
+    // `build_vmcs02` composes the primary controls as `(primary01 &
+    // ~(interrupt_window | nmi_window)) | primary12`, so a second-level
+    // guest sees only the windows its own hypervisor asked for. The bit
+    // stays set in vmcs01 and is there again when the first level runs.
+    if constexpr (nested_vmx::enabled) {
+        if (this->running_l2[cpu]) {
+            this->external_interrupts_deferred_in_l2[cpu] =
+                this->external_interrupts_deferred_in_l2[cpu] + 1;
+            return false;
+        }
+    }
+
+    auto event = valid | type_external_interrupt | vector;
+
+    // Not on top of something else. The re-queue above may already have
+    // staged the event whose delivery this exit interrupted, and that
+    // one is owed to the guest from before this interrupt existed.
+    auto staged = vmcs.read(arch::x86_64::vmx::vmcs::field::
+                                vm_entry_interruption_information_field);
+
+    auto deliverable =
+        (0 == (staged & valid)) && event_allowed_on_entry(event);
+
+    auto primary = vmcs.primary_processor_based_vm_execution_controls();
+    auto wanted = deliverable ? (primary & ~primary_interrupt_window)
+                              : (primary | primary_interrupt_window);
+
+    if (wanted != primary) {
+        vmcs.primary_processor_based_vm_execution_controls(
+            arch::x86_64::vmx::adjust_msr(
+                this->cached_vmx_msr(
+                    arch::x86_64::vmx::msr::true_processor_based_controls),
+                wanted));
+    }
+
+    if (!deliverable) {
+        this->external_interrupts_deferred[cpu] =
+            this->external_interrupts_deferred[cpu] + 1;
+        return false;
+    }
+
+    vmcs.write(arch::x86_64::vmx::vmcs::field::
+                   vm_entry_interruption_information_field,
+               event);
+
+    // A halted processor is put back into the active state, because the
+    // interrupt is what ends the halt. SDM 29.3.1.5 permits injecting an
+    // external interrupt while the activity state is HLT - that is what
+    // `event_allowed_on_entry` just agreed to - and SDM 29.7.2
+    // (`sdm.txt:203155`) says the entry is active afterwards regardless:
+    // "If the VM entry is injecting, the logical processor is in the
+    // active state after VM entry ... the contents of the activity-state
+    // field do not determine the activity state after VM entry."
+    //
+    // So this write changes nothing about *this* entry. It is here so
+    // that the field agrees with what the processor is about to do, for
+    // the next exit and for anything reading the VMCS in between -
+    // `resume_activity_state` is one such reader. KVM writes it for the
+    // same reason in `vmx_clear_hlt` (`vmx.c:1817`). The HLT instruction
+    // is not re-executed: RIP is already past it, which is how the
+    // activity state came to be HLT at all.
+    if (arch::x86_64::vmx::activity_state::hlt ==
+        vmcs.guest_activity_state()) {
+        vmcs.guest_activity_state(
+            arch::x86_64::vmx::activity_state::active);
+        this->external_interrupts_hlt_cleared[cpu] =
+            this->external_interrupts_hlt_cleared[cpu] + 1;
+    }
+
+    this->pending_external_vectors[cpu][vector / 64] =
+        this->pending_external_vectors[cpu][vector / 64] &
+        ~(std::uint64_t{1} << (vector % 64));
+
+    if (0 != this->external_interrupts_pending[cpu]) {
+        this->external_interrupts_pending[cpu] =
+            this->external_interrupts_pending[cpu] - 1;
+    }
+
+    this->external_interrupts_injected[cpu] =
+        this->external_interrupts_injected[cpu] + 1;
 
     return true;
 }
@@ -667,74 +862,18 @@ void hypervisor::resume_guest(arch::x86_64::context & context,
     }
 
     // Put back an external interrupt this VMM took on the guest's
-    // behalf. Only with ZPP_VIRTUALIZE_APIC; otherwise nothing ever sets
-    // `pending_external_vector` and this is dead.
+    // behalf. Only with ZPP_VIRTUALIZE_APIC; otherwise nothing ever
+    // queues one and this is a call that is not compiled at all.
     //
-    // Delivered only when the guest could have taken it itself - the
-    // interrupt flag set and no blocking by STI or MOV-SS - because
-    // injection ignores all of that and would otherwise deliver into a
-    // critical section the guest had closed. When it cannot be
-    // delivered, interrupt-window exiting is armed and the processor
-    // comes back the moment it can.
+    // The decision is `deliver_pending_external_interrupt`'s and not
+    // spelled out here, so that `tests/resume_guest` can drive it
+    // without the switch: what the switch removes is this call.
 #ifndef ZPP_VIRTUALIZE_APIC
 #define ZPP_VIRTUALIZE_APIC 0
 #endif
     if constexpr (0 != ZPP_VIRTUALIZE_APIC) {
         if (auto slot = vmcs.vpid(); (0 != slot) && (slot <= max_cpus)) {
-            auto cpu = slot - 1;
-            constexpr std::uint64_t valid = 1ull << 31;
-            constexpr std::uint64_t type_external = 0ull << 8;
-            constexpr std::uint64_t interrupt_flag = 1ull << 9;
-            constexpr std::uint64_t blocking_sti_or_mov_ss = 0x3;
-            constexpr std::uint64_t primary_interrupt_window = 1ull << 2;
-
-            auto vector = this->pending_external_vector[cpu];
-            auto primary =
-                vmcs.primary_processor_based_vm_execution_controls();
-
-            if (0 != vector) {
-                auto staged =
-                    vmcs.read(arch::x86_64::vmx::vmcs::field::
-                                  vm_entry_interruption_information_field);
-                auto interruptibility =
-                    vmcs.read(arch::x86_64::vmx::vmcs::field::
-                                  guest_interruptibility_state);
-
-                auto deliverable =
-                    (0 == (staged & valid)) &&
-                    (0 != (vmcs.guest_rflags() & interrupt_flag)) &&
-                    (0 == (interruptibility & blocking_sti_or_mov_ss));
-
-                if (deliverable) {
-                    vmcs.write(arch::x86_64::vmx::vmcs::field::
-                                   vm_entry_interruption_information_field,
-                               valid | type_external | vector);
-                    this->pending_external_vector[cpu] = 0;
-                    this->external_interrupts_injected[cpu] =
-                        this->external_interrupts_injected[cpu] + 1;
-
-                    vmcs.primary_processor_based_vm_execution_controls(
-                        arch::x86_64::vmx::adjust_msr(
-                            this->cached_vmx_msr(
-                                arch::x86_64::vmx::msr::
-                                    true_processor_based_controls),
-                            primary & ~primary_interrupt_window));
-                } else {
-                    vmcs.primary_processor_based_vm_execution_controls(
-                        arch::x86_64::vmx::adjust_msr(
-                            this->cached_vmx_msr(
-                                arch::x86_64::vmx::msr::
-                                    true_processor_based_controls),
-                            primary | primary_interrupt_window));
-                }
-            } else if (0 != (primary & primary_interrupt_window)) {
-                vmcs.primary_processor_based_vm_execution_controls(
-                    arch::x86_64::vmx::adjust_msr(
-                        this->cached_vmx_msr(
-                            arch::x86_64::vmx::msr::
-                                true_processor_based_controls),
-                        primary & ~primary_interrupt_window));
-            }
+            deliver_pending_external_interrupt(slot - 1);
         }
     }
 

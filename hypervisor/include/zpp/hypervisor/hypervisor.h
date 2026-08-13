@@ -2743,6 +2743,42 @@ private:
      */
     bool event_allowed_on_entry(std::uint64_t event) const;
 
+    /**
+     * Record an external interrupt this VMM has taken out of the
+     * interrupt controller, so that a later entry can put it into the
+     * guest.
+     *
+     * Only ever called with `ZPP_VIRTUALIZE_APIC` on. Compiled
+     * unconditionally so that `tests/resume_guest` can drive it - the
+     * call site is what the switch removes, and with the switch off the
+     * linker drops the body with `--gc-sections`.
+     *
+     * A vector reaching here has already been consumed at the
+     * controller: "acknowledge interrupt on exit" is what put it in the
+     * exit-interruption field, and SDM 30.2 says the interrupt is no
+     * longer pending once that happens. So there is nowhere to give it
+     * back to and losing it here loses it for ever - which is why the
+     * queue is a whole 256-bit bitmap rather than the single slot this
+     * used to be.
+     */
+    void queue_external_interrupt(std::size_t cpu, std::uint64_t vector);
+
+    /**
+     * Put the highest-priority queued external interrupt into the guest
+     * through the entry-interruption field, or arm interrupt-window
+     * exiting if the guest cannot take one yet. Returns whether one was
+     * injected.
+     *
+     * Highest vector first, because that is the order the local APIC
+     * itself would have delivered them in: the interrupt priority of a
+     * vector is `vector / 16` and, within a class, the higher vector
+     * wins (SDM 12.8.4).
+     *
+     * Same caveat as `queue_external_interrupt` about being compiled
+     * with the switch off.
+     */
+    bool deliver_pending_external_interrupt(std::size_t cpu);
+
     [[noreturn]] void resume_guest(arch::x86_64::context & context,
                                    arch::x86_64::vmx::exit_reason reason,
                                    bool advance_rip);
@@ -6799,18 +6835,79 @@ private:
      * nested guest stalls here while booting under KVM. Whether the
      * difference matters is worth one boot.
      *
-     * `pending_external_vector` holds a vector taken but not yet
-     * delivered, and `external_interrupts_taken` and
-     * `external_interrupts_injected` should track each other - a gap
-     * means interrupts are being dropped here, which is exactly the
-     * failure this mechanism can introduce and the guest's own
-     * controller cannot.
+     * **This is not what KVM's `acknowledge_interrupt_on_exit` is for**,
+     * and the difference is the whole design. KVM takes the interrupt
+     * for its *host*: `handle_external_interrupt_irqoff` calls
+     * `vmx_do_interrupt_irqoff(gate_offset(host_idt_base + vector))`,
+     * which runs the Linux handler, and the Linux handler writes the
+     * end-of-interrupt. What KVM's guests receive is a different
+     * interrupt entirely, synthesized by the virtual local APIC in
+     * `lapic.c` - `kvm_apic_ack_interrupt` sets vISR, `apic_set_eoi`
+     * clears it when the guest writes EOI, and `apic_update_ppr` keeps
+     * the priority. None of that machinery exists here.
+     *
+     * What makes taking-and-injecting nevertheless sound *here* is the
+     * design KVM does not have: the guest owns the physical local APIC.
+     * The hardware acknowledge sets the real ISR bit and the guest's own
+     * handler writes the real EOI that clears it, so in-service state
+     * and priority are maintained by the hardware, for free - provided
+     * every acknowledged vector reaches the guest. That proviso is why
+     * the queue below is a 256-bit bitmap and not the single slot it
+     * used to be.
+     *
+     * Reading it from outside, which is the only way this is observable
+     * on a running machine:
+     *
+     * - `taken` counts vectors the hardware acknowledged into this VMM.
+     * - `injected` counts vectors handed to the guest. It should chase
+     *   `taken` and settle at most `pending` behind it.
+     * - `dropped` is the alarm: a vector acknowledged twice with no
+     *   intervening delivery, which the bitmap cannot represent and
+     *   which the local APIC should make impossible while the first
+     *   occurrence's in-service bit is still set. Non-zero means the
+     *   model here is wrong.
+     * - `pending` is what is queued now, `pending_high_water` the most
+     *   ever queued at once. A high-water mark above 1 means delivery is
+     *   not keeping up with arrival.
+     * - `deferred` counts entries at which a queued vector could not be
+     *   delivered - the guest had interrupts masked, was in an STI
+     *   shadow, or already had an event staged - and interrupt-window
+     *   exiting was armed instead.
+     * - `deferred_in_l2` counts entries at which a queued vector was
+     *   held because a *second-level* guest was about to run. The
+     *   interrupt was signalled to the physical processor, so it belongs
+     *   to the first-level guest's world and must not go into L2's IDT.
+     *   This one has no bound: nothing here forces an L2 exit to shorten
+     *   the wait, and while it waits the physical APIC's in-service bit
+     *   blocks everything at or below that priority. If this climbs, that
+     *   is the next thing to fix.
+     * - `hlt_cleared` counts injections into a halted processor, where
+     *   the activity state had to be put back to active. KVM does the
+     *   same in `vmx_clear_hlt`.
+     *
+     * Interrupt-window exits are not counted separately: they are exit
+     * reason 7 in `exit_reason_counts`.
      * @{
      */
     volatile std::uint64_t external_interrupts_taken[max_cpus]{};
     volatile std::uint64_t external_interrupts_injected[max_cpus]{};
     volatile std::uint64_t external_interrupts_dropped[max_cpus]{};
-    std::uint64_t pending_external_vector[max_cpus]{};
+    volatile std::uint64_t external_interrupts_deferred[max_cpus]{};
+    volatile std::uint64_t external_interrupts_deferred_in_l2[max_cpus]{};
+    volatile std::uint64_t external_interrupts_pending[max_cpus]{};
+    volatile std::uint64_t
+        external_interrupts_pending_high_water[max_cpus]{};
+    volatile std::uint64_t external_interrupts_hlt_cleared[max_cpus]{};
+
+    /**
+     * The queue itself: one bit per vector, four words of sixty-four.
+     * Not a count and not a single slot, because a vector that reaches
+     * it has already been taken out of the interrupt controller and
+     * cannot be recovered from anywhere.
+     */
+    static constexpr std::size_t external_vector_words = 4;
+    std::uint64_t pending_external_vectors[max_cpus]
+                                          [external_vector_words]{};
     /** @} */
 
     std::uint64_t vmread_benchmark_cycles{};

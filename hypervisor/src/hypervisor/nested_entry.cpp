@@ -1488,9 +1488,20 @@ std::expected<void, zpp::error> hypervisor::build_vmcs02(std::size_t cpu)
     // acknowledging *consumes* the interrupt and an acknowledgement on
     // an exit this VMM keeps would drop it. `l1_wants_l2_exit` decides
     // that for an external interrupt on pin12's external-interrupt
-    // exiting alone, and this VMM never sets that control itself - see
-    // the case there - so the two conditions below are the whole of it.
-    // If pin01 ever sets it, this needs a third: and not pin01's.
+    // exiting alone, so the two conditions below are the whole of what
+    // this composition adds.
+    //
+    // With `ZPP_VIRTUALIZE_APIC` on, pin01 sets external-interrupt
+    // exiting too and exit01 already carries the acknowledge - so vmcs02
+    // inherits it here whatever vmcs12 says, and an exit this VMM keeps
+    // *is* acknowledged. That used to be the reason for the warning this
+    // paragraph replaces. It is answered rather than avoided now:
+    // `queue_external_interrupt` records the vector in a per-processor
+    // bitmap and `deliver_pending_external_interrupt` refuses to put it
+    // into a second-level guest, holding it until vmcs01 is current
+    // again. Withholding the acknowledge instead would be worse - the
+    // exit would report an external interrupt with no vector, and this
+    // VMM could neither dispatch it nor give it back.
     auto exit02 = exit01;
 
     if ((0 != (exit12 & exit_acknowledge_interrupt)) &&
@@ -1900,11 +1911,17 @@ bool hypervisor::l1_wants_l2_exit(std::size_t cpu,
 
     case basic_reason::external_interrupt:
         // Unlike KVM, which always takes this for itself because its host
-        // has interrupt handlers to run, this VMM never sets
-        // external-interrupt exiting - interrupts are the guest's, which
-        // owns the interrupt controller. So the control can only be set
-        // because the guest hypervisor asked, and the exit can only be
-        // its own.
+        // has interrupt handlers to run, this VMM does not set
+        // external-interrupt exiting by default - interrupts are the
+        // guest's, which owns the interrupt controller. So ordinarily the
+        // control can only be set because the guest hypervisor asked, and
+        // the exit can only be its own.
+        //
+        // With `ZPP_VIRTUALIZE_APIC` on, pin01 sets it as well, and this
+        // answer stays right: an interrupt the guest hypervisor asked to
+        // see is still its own, and one it did not ask to see is kept
+        // here and queued for the *first-level* guest rather than put
+        // into the second-level one.
         return 0 != (pin12 & pin_external_interrupt);
 
     case basic_reason::interrupt_window:

@@ -11450,3 +11450,158 @@ to that sequence has now been measured and is correct**, which makes the
 next question a narrow one about the guest rather than a broad one about
 us: what does `HalpTimerInitializeHypervisorTimer` wait for after arming,
 and what tells it the switch succeeded.
+## Found: take-and-inject corrupted the guest's RIP on every interrupt
+
+**The defect is certain and it is four lines from where everyone looked.**
+`resume_guest` takes `advance_rip` and defaults it to `true`; the handler
+clears it in the cases where nothing retired. Neither the
+`external_interrupt` case nor the `interrupt_window` case cleared it. So
+with `ZPP_VIRTUALIZE_APIC` on, every external-interrupt exit did
+
+    context.rip += vmcs.vm_exit_instruction_length();
+
+and SDM 30.2.5 (`sdm.txt:204101` for the list, `:204135` for the
+sentence) says that field is *undefined* here: it lists fault-like exits
+due to named instructions, software exceptions and interrupts, task
+switches, VMFUNC failures and a handful of others, and ends "All VM exits
+other than those listed in the above items leave this field undefined."
+An external-interrupt exit is not on the list. The field therefore held
+whatever the last instruction-caused exit had left in it - one to fifteen
+- and the guest resumed that many bytes into the middle of an instruction
+it had never executed.
+
+The same exit *also* injected the interrupt, so the guest's handler was
+entered with the corrupt address as its return address. That is why the
+firmware died in `LocalApicTimerDxe`: the fault is reported at the
+instruction pointer, and the interrupted code was the firmware's own
+timer path.
+
+**This was hiding in plain sight, and the tree already knew it.** The
+`exception_or_nmi` case sets `advance_rip = false` with a comment citing
+the same section for the same reason, added when this VMM's own wake NMIs
+walked the guest's RIP forward. The two cases added for the APIC switch
+did not copy it.
+
+**KVM cannot make this mistake**, which is the shape difference worth
+recording: advancing is opt-in there. `handle_external_interrupt`
+(`vmx.c:5383`) is `++vcpu->stat.irq_exits; return 1;` and
+`handle_interrupt_window` (`vmx.c:5653`) clears the control and returns -
+neither calls `kvm_skip_emulated_instruction`. Here it is opt-out, and
+one case forgetting to opt out is silent.
+
+### The in-service hypothesis was wrong, and the reason matters
+
+The previous entry left "the acknowledge sets an in-service bit nothing
+ever clears" as the leading candidate and noted an argument against it.
+The argument against it is right, and reading KVM says why the hypothesis
+was reaching for the wrong model in the first place.
+
+**KVM's `acknowledge_interrupt_on_exit` is not how KVM gives its guest an
+interrupt.** It is how KVM gives the interrupt to its *host*:
+`handle_external_interrupt_irqoff` (`vmx.c:7007`) takes the vector out of
+the exit-interruption field and calls
+`vmx_do_interrupt_irqoff(gate_offset((gate_desc *)host_idt_base +
+vector))` - it jumps into the Linux IDT entry for that vector, and the
+Linux handler writes the end-of-interrupt to the physical APIC. What a
+KVM guest receives is a different interrupt entirely, one the virtual
+local APIC in `lapic.c` synthesizes: `kvm_apic_ack_interrupt`
+(`lapic.c:2969`) clears the virtual IRR bit and sets the virtual ISR bit,
+`apic_set_eoi` (`lapic.c:1476`) clears it again when the guest writes
+EOI, and `apic_update_ppr` keeps the priority. Two APICs, and the guest
+never touches the real one.
+
+So the naive version was a chimera: KVM's host-side mechanism used for
+guest-side delivery, with none of `lapic.c` behind it.
+
+**But here that chimera is sound, and that is the interesting finding.**
+The guest owns the physical local APIC in this design. The hardware
+acknowledge sets the *real* ISR bit, and the guest's own handler writes
+the *real* EOI that clears it - so in-service state, PPR and the delivery
+order are all maintained by the hardware for free. This VMM does not have
+to own an APIC to inject; it has to not lose a vector and not corrupt
+RIP.
+
+The one thing that follows: a vector this VMM fails to deliver is not
+merely late. `acknowledge_interrupt_on_exit` has already taken it out of
+the controller - SDM 30.2, quoted in `build_vmcs02` - so there is nowhere
+it is still pending, and the in-service bit nobody will EOI blocks every
+interrupt at or below that priority for the life of the machine. The old
+code held exactly one vector and counted the rest as dropped. That is why
+the queue is now a bitmap.
+
+### What was implemented
+
+Option (a) from the two on the table: a *correct* take-and-inject, not a
+virtual APIC. Chosen because the analysis names a specific fixable defect
+and because the second option would build state the hardware is already
+maintaining. What (b) would buy that (a) does not: interrupt remapping,
+posted interrupts, and delivering to a guest whose APIC this VMM does not
+hand over - none of which is wanted here.
+
+- `advance_rip = false` in both cases. This is the fix; everything else
+  below is about not losing interrupts.
+- `queue_external_interrupt` / `deliver_pending_external_interrupt`, in
+  `resume.cpp` so `tests/resume_guest` can drive them with the switch
+  off - what the switch removes is the two call sites.
+- A 256-bit pending bitmap per processor, delivered highest vector first.
+  SDM 12.8.4 makes a vector's interrupt priority its value divided by
+  sixteen with the higher vector winning inside a class, so descending
+  order is the order the APIC would have used.
+- The deliverability test is `event_allowed_on_entry`, which already
+  transcribes SDM 29.3.1.5 and 29.3.1.4 and is what the interrupted-event
+  re-queue uses. The old code open-coded a weaker version of the same
+  three checks and did not ask the activity state at all.
+- A halted processor is put back to active on injection, as KVM's
+  `vmx_clear_hlt` (`vmx.c:1817`) does. HLT exiting is off in a deployed
+  build, so the guest reaches that state.
+- Nothing is injected into a second-level guest, and no control is
+  written with vmcs02 current. An interrupt a guest hypervisor asked to
+  see is reflected by `l1_wants_l2_exit` long before this runs; one it
+  did not ask to see is the first-level guest's and is held.
+
+### What is not fixed, and is the thing to watch
+
+**A queued interrupt held across a second-level guest has no bound.**
+Nothing here forces an L2 exit to shorten the wait - KVM does, through
+`vmx_check_nested_events` - and while it waits the physical APIC is
+blocked at that priority. Under a guest hypervisor that runs L2 for long
+stretches this could starve the first-level guest. It is counted rather
+than fixed: `external_interrupts_deferred_in_l2` climbing is the symptom.
+
+### Reading it from a running machine
+
+Plain members of the singleton, per processor, all `volatile`:
+
+    external_interrupts_taken               acknowledged into this VMM
+    external_interrupts_injected            handed to the guest
+    external_interrupts_dropped             ALARM - see below
+    external_interrupts_deferred            guest could not take one
+    external_interrupts_deferred_in_l2      held for the first level
+    external_interrupts_pending             queued now
+    external_interrupts_pending_high_water  most ever queued at once
+    external_interrupts_hlt_cleared         injections that woke a halt
+
+`injected` should chase `taken` and settle at most `pending` behind it.
+`dropped` counts the same vector acknowledged twice with nothing
+delivered between, which the bitmap cannot represent - and which SDM
+12.8.4 should make impossible while the first occurrence's in-service bit
+is set. **Non-zero `dropped` means the model above is wrong**, and is
+worth more than the boot it appears in. `pending_high_water` above 1 says
+delivery is not keeping up with arrival. Interrupt-window exits are exit
+reason 7 in `exit_reason_counts`.
+
+### Unverified
+
+Nothing here has been on hardware. What has run is `tests/resume_guest`,
+which drives the queue directly - order, no loss, the window armed and
+disarmed, the HLT wake, the L2 refusal - and a build with the switch on
+and nested VMX on. The RIP defect is a source-level certainty against
+SDM 30.2.5; that fixing it makes the firmware survive is a prediction.
+
+The first thing to look at on a boot is whether the firmware reaches the
+boot manager at all. If it does not and the fault is again inside
+`LocalApicTimerDxe`, the RIP explanation was incomplete and the
+in-service story is back on the table - in which case the next
+measurement is `external_interrupts_taken` against `injected` over the
+first hundred milliseconds, because the in-service story predicts
+delivery stopping after the first vector and the RIP story does not.

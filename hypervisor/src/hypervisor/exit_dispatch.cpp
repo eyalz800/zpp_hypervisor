@@ -328,6 +328,26 @@ void hypervisor::on_vm_exit(std::uint64_t cpuid,
         // exit` is set with the control (SDM 30.2); without it the field
         // is not valid and the interrupt would still be pending at the
         // controller, so dropping it here would lose it for ever.
+        //
+        // **Nothing retired to produce this exit**, and getting that
+        // wrong is what broke the firmware the first time this switch
+        // was turned on. SDM 30.2.5 lists the VM exits for which the
+        // VM-exit instruction length is defined - fault-like exits due
+        // to named instructions, software exceptions, task switches, a
+        // few others - and ends "All VM exits other than those listed in
+        // the above items leave this field undefined"
+        // (`sdm.txt:204135`). An external-interrupt exit is not on that
+        // list, so the field holds whatever the last instruction-caused
+        // exit left in it, and the default `advance_rip` added it to the
+        // guest's RIP. The guest resumed a few bytes into the middle of
+        // an instruction it had not executed, *and* was handed the
+        // interrupt, so its handler's return address was the corrupt
+        // one. KVM's `handle_external_interrupt` (`vmx.c:5383`) does
+        // nothing but count and return 1 - it never calls
+        // `kvm_skip_emulated_instruction` - which is the same statement
+        // in a codebase where advancing is opt-in rather than default.
+        advance_rip = false;
+
         constexpr std::uint64_t interruption_valid = 1ull << 31;
         constexpr std::uint64_t interruption_vector = 0xff;
 
@@ -337,22 +357,15 @@ void hypervisor::on_vm_exit(std::uint64_t cpuid,
         if (auto slot = vmcs.vpid();
             (0 != slot) && (slot <= max_cpus) &&
             (0 != (information & interruption_valid))) {
-            auto cpu = slot - 1;
-
-            // One at a time. A second interrupt arriving before the
-            // first is delivered would overwrite it, and that is a lost
-            // interrupt rather than a late one - counted rather than
-            // hidden, because it is the failure this mechanism can
-            // introduce and the guest's own controller cannot.
-            if (0 != this->pending_external_vector[cpu]) {
-                this->external_interrupts_dropped[cpu] =
-                    this->external_interrupts_dropped[cpu] + 1;
-            }
-
-            this->pending_external_vector[cpu] =
-                information & interruption_vector;
-            this->external_interrupts_taken[cpu] =
-                this->external_interrupts_taken[cpu] + 1;
+            // Queued, not held in a single slot. The acknowledge has
+            // already taken this vector out of the interrupt controller
+            // and set its in-service bit there, so a vector this VMM
+            // fails to deliver is not merely late: it is gone, and the
+            // in-service bit nothing will now EOI blocks every interrupt
+            // at or below its priority for the rest of the machine's
+            // life. See `queue_external_interrupt`.
+            queue_external_interrupt(slot - 1,
+                                     information & interruption_vector);
         }
         break;
     }
@@ -367,6 +380,17 @@ void hypervisor::on_vm_exit(std::uint64_t cpuid,
         // `default:` stops the processor - see the note at the top of
         // this handler. An exit this VMM asked for and then did not
         // handle would be a halt of its own making.
+        //
+        // Nothing retired here either, and for the same reason as the
+        // case above: SDM 30.2.5 does not list this exit, so the
+        // instruction-length field is undefined. KVM's
+        // `handle_interrupt_window` (`vmx.c:5653`) likewise clears the
+        // control and returns without skipping anything. Unreachable
+        // with ZPP_VIRTUALIZE_APIC off - nothing else here ever sets
+        // interrupt-window exiting, and a guest hypervisor that sets it
+        // in vmcs12 has the exit reflected before this switch is
+        // reached - so this is not a change to that build's behaviour.
+        advance_rip = false;
         break;
     }
 

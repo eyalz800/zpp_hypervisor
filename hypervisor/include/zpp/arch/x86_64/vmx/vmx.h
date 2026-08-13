@@ -143,9 +143,18 @@ enum type : std::uint64_t
      * Off by default and deliberately: the interrupts are the guest's
      * and the guest owns the interrupt controller, so letting them
      * arrive natively costs no exit at all. `ZPP_VIRTUALIZE_APIC` turns
-     * it on to do what KVM does instead - take every interrupt in the
-     * host and inject it - which is the one architectural difference
-     * between the two that a measurement has ever pointed at.
+     * it on, which is the one architectural difference between this VMM
+     * and KVM that a measurement has ever pointed at.
+     *
+     * It is *not* the same thing KVM uses the control for, and the
+     * comment here used to say it was. KVM sets it because the
+     * interrupts belong to its host: it runs the host's own IDT handler
+     * for the vector in `handle_external_interrupt_irqoff`, and its
+     * guests are given a different interrupt entirely, synthesized by
+     * the virtual local APIC in `lapic.c`. Here the guest owns the
+     * physical APIC, so the same acknowledged vector is what goes back
+     * in - see `deliver_pending_external_interrupt`, and the BACKLOG
+     * entry on why that is sound and where it is not.
      */
     external_interrupt_exiting = (1ull << 0),
     nmi_exiting = (1ull << 3),

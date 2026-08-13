@@ -125,6 +125,24 @@ void hypervisor::arm_controller_poll(bool)
     g_observed.controller_polls += 1;
 }
 
+/**
+ * A processor that permits every VM-execution control and requires none.
+ *
+ * `adjust_msr` computes `(value & allowed_1) | allowed_0` from the two
+ * halves of a capability MSR, so allowed-1 all ones and allowed-0 zero
+ * makes it the identity - and the cases that arm and disarm
+ * interrupt-window exiting then read back exactly what the code under
+ * test asked for. A real processor requires several primary controls to
+ * be 1 even in the TRUE MSR, but none of those are the bit under test,
+ * and a fixture that set them would only make the expected values here
+ * harder to read for no question answered.
+ */
+std::uint64_t & hypervisor::cached_vmx_msr(std::size_t)
+{
+    static std::uint64_t permissive = 0xffffffff00000000ull;
+    return permissive;
+}
+
 } // namespace zpp::hypervisor
 
 namespace
@@ -1256,6 +1274,270 @@ void rip_advances_only_when_asked()
                 "left the guest");
 }
 
+// === The external-interrupt queue behind ZPP_VIRTUALIZE_APIC ===========
+//
+// `resume_guest` only calls into this with the switch on, and the switch
+// is off here - so these drive `queue_external_interrupt` and
+// `deliver_pending_external_interrupt` directly. That is deliberate and
+// is why the two are separate functions: the alternative was a second
+// build of this harness with `-DZPP_VIRTUALIZE_APIC=1`, which would
+// double the test count for one code path.
+//
+// What is under test is the part that has no hardware in it: which vector
+// is chosen, that none is lost, and when interrupt-window exiting is
+// armed. What is *not* under test is the part that only a machine can
+// answer - that the physical local APIC's in-service bit is cleared by
+// the guest's own end-of-interrupt write. Nothing here models an APIC.
+
+constexpr std::uint64_t primary_interrupt_window = 1ull << 2;
+
+std::uint64_t interrupt_window(const machine & built)
+{
+    return built.state->vmcs
+               .primary_processor_based_vm_execution_controls() &
+           primary_interrupt_window;
+}
+
+/**
+ * Highest vector first, and every queued vector eventually delivered.
+ *
+ * The order is the local APIC's own: SDM 12.8.4 makes a vector's
+ * interrupt priority its value divided by sixteen, with the higher vector
+ * winning inside a class, so descending vector order is what the hardware
+ * would have produced had the interrupts never been taken from it.
+ */
+void queued_interrupts_go_out_highest_first()
+{
+    auto built = make();
+
+    for (auto vector : {0x30ull, 0xf0ull, 0x51ull, 0x50ull}) {
+        built.state->queue_external_interrupt(cpu, vector);
+    }
+
+    check_equal(4,
+                built.state->external_interrupts_pending[cpu],
+                "four vectors acknowledged, four queued");
+    check_equal(4,
+                built.state->external_interrupts_pending_high_water[cpu],
+                "and the high-water mark records the depth reached");
+
+    for (auto expected : {0xf0ull, 0x51ull, 0x50ull, 0x30ull}) {
+        built.state->vmcs.write(
+            zpp::arch::x86_64::vmx::vmcs::field::
+                vm_entry_interruption_information_field,
+            0);
+
+        check(built.state->deliver_pending_external_interrupt(cpu),
+              std::format("vector 0x{:x} is next", expected));
+        check_equal(original_event::valid |
+                        original_event::external_interrupt | expected,
+                    entry_field(built),
+                    "and it goes out as a valid external interrupt");
+    }
+
+    check_equal(0,
+                built.state->external_interrupts_pending[cpu],
+                "the queue empties");
+    check_equal(4,
+                built.state->external_interrupts_injected[cpu],
+                "and every acknowledged vector reached the guest");
+    check_equal(0,
+                built.state->external_interrupts_dropped[cpu],
+                "none of them dropped");
+}
+
+/**
+ * A second vector arriving before the first is delivered is kept.
+ *
+ * This is the defect the single slot had, and it is not a lost interrupt
+ * in the ordinary sense: "acknowledge interrupt on exit" has already
+ * taken the vector out of the interrupt controller (SDM 30.2), so there
+ * is nowhere for it to still be pending. Its in-service bit is set in the
+ * physical local APIC and only the guest's handler would ever clear it.
+ */
+void a_second_vector_does_not_displace_the_first()
+{
+    auto built = make();
+    built.state->queue_external_interrupt(cpu, 0x40);
+    built.state->queue_external_interrupt(cpu, 0x41);
+
+    check_equal(0,
+                built.state->external_interrupts_dropped[cpu],
+                "two different vectors are both representable");
+
+    built.state->deliver_pending_external_interrupt(cpu);
+    check_equal(original_event::valid |
+                    original_event::external_interrupt | 0x41,
+                entry_field(built),
+                "the higher goes first");
+    check_equal(1,
+                built.state->external_interrupts_pending[cpu],
+                "and the other is still owed");
+}
+
+/**
+ * The same vector twice with nothing delivered between is the alarm.
+ *
+ * It should be unreachable on hardware, for the reason the counter's
+ * comment gives, so what is pinned here is that it is *counted* rather
+ * than silently coalesced.
+ */
+void the_same_vector_twice_is_counted_as_a_drop()
+{
+    auto built = make();
+    built.state->queue_external_interrupt(cpu, 0x60);
+    built.state->queue_external_interrupt(cpu, 0x60);
+
+    check_equal(2,
+                built.state->external_interrupts_taken[cpu],
+                "both acknowledgements are counted as taken");
+    check_equal(1,
+                built.state->external_interrupts_dropped[cpu],
+                "and the one a bitmap cannot represent is counted lost");
+    check_equal(1,
+                built.state->external_interrupts_pending[cpu],
+                "one is queued, not two");
+}
+
+/**
+ * A guest that cannot take an interrupt gets a window instead, and the
+ * window is closed again the moment the queue empties.
+ */
+void a_masked_guest_gets_an_interrupt_window()
+{
+    auto built = make();
+    built.state->vmcs.guest_rflags(rflags::always_one);
+    built.state->queue_external_interrupt(cpu, 0x50);
+
+    check(!built.state->deliver_pending_external_interrupt(cpu),
+          "an interrupt is not injected into a guest with RFLAGS.IF "
+          "clear - injection ignores the flag, so honouring it is this "
+          "code's job (SDM 29.3.1.4)");
+    check_equal(0, entry_field(built), "nothing is staged");
+    check(0 != interrupt_window(built),
+          "interrupt-window exiting is armed instead");
+    check_equal(1,
+                built.state->external_interrupts_deferred[cpu],
+                "and the deferral is counted");
+
+    built.state->vmcs.guest_rflags(rflags::always_one |
+                                   rflags::interrupt_enable);
+    check(built.state->deliver_pending_external_interrupt(cpu),
+          "and it goes out once the guest enables interrupts");
+    check_equal(0,
+                interrupt_window(built),
+                "with the window closed again on the way");
+
+    check(!built.state->deliver_pending_external_interrupt(cpu),
+          "an empty queue injects nothing");
+    check_equal(0,
+                interrupt_window(built),
+                "and leaves the window closed, or the processor would "
+                "exit at every instruction boundary for ever");
+}
+
+/**
+ * An STI shadow defers too, and so does an event already staged.
+ */
+void a_shadow_or_a_staged_event_defers_the_interrupt()
+{
+    auto shadowed = make();
+    shadowed.state->vmcs.guest_interruptibility_state(
+        interruptibility::blocking_by_sti);
+    shadowed.state->queue_external_interrupt(cpu, 0x50);
+
+    check(!shadowed.state->deliver_pending_external_interrupt(cpu),
+          "not into an STI shadow (SDM 29.3.1.5)");
+    check(0 != interrupt_window(shadowed), "window armed");
+
+    auto occupied = make();
+    occupied.state->vmcs.write(
+        zpp::arch::x86_64::vmx::vmcs::field::
+            vm_entry_interruption_information_field,
+        original_event::valid | original_event::hardware_exception | 14);
+    occupied.state->queue_external_interrupt(cpu, 0x50);
+
+    check(!occupied.state->deliver_pending_external_interrupt(cpu),
+          "and not on top of an event the exit interrupted, which the "
+          "guest was owed first");
+    check_equal(original_event::valid |
+                    original_event::hardware_exception | 14,
+                entry_field(occupied),
+                "the staged event is untouched");
+}
+
+/**
+ * A halted processor takes the interrupt and is made active.
+ *
+ * KVM writes the activity state back for the same reason in
+ * `vmx_clear_hlt` (.references/kvm/vmx.c:1817).
+ */
+void a_halted_processor_is_woken_by_the_interrupt()
+{
+    auto built = make();
+    built.state->vmcs.guest_activity_state(activity::hlt);
+    built.state->queue_external_interrupt(cpu, 0x50);
+
+    check(built.state->deliver_pending_external_interrupt(cpu),
+          "an external interrupt may be injected into a halted "
+          "processor (SDM 29.3.1.5)");
+    check_equal(activity::active,
+                built.state->vmcs.guest_activity_state(),
+                "and the activity state says the processor is running "
+                "again");
+    check_equal(1,
+                built.state->external_interrupts_hlt_cleared[cpu],
+                "counted, so a guest that halts a lot is visible");
+}
+
+/**
+ * Nothing goes into a second-level guest.
+ *
+ * The interrupt was signalled to the physical processor, so it is the
+ * first-level guest's - the guest hypervisor's - and vmcs02's
+ * entry-interruption field would deliver it to the second-level guest's
+ * interrupt descriptor table instead. One a guest hypervisor asked to see
+ * never reaches here: `l1_wants_l2_exit` reflects that exit first.
+ */
+void a_second_level_guest_is_never_given_a_host_interrupt()
+{
+    if constexpr (!zpp::hypervisor::nested_vmx::enabled) {
+        return;
+    } else {
+        auto built = make();
+        built.state->running_l2[cpu] = true;
+        built.state->queue_external_interrupt(cpu, 0x50);
+
+        check(!built.state->deliver_pending_external_interrupt(cpu),
+              "held while a second-level guest is about to run");
+        check_equal(0, entry_field(built), "nothing staged into vmcs02");
+        check_equal(0,
+                    interrupt_window(built),
+                    "and no control written, because the VMCS in hand is "
+                    "the second-level guest's");
+        check_equal(1,
+                    built.state->external_interrupts_deferred_in_l2[cpu],
+                    "counted, because nothing here bounds the wait");
+
+        built.state->running_l2[cpu] = false;
+        check(built.state->deliver_pending_external_interrupt(cpu),
+              "and delivered once the first-level guest runs again");
+    }
+}
+
+/**
+ * A slot outside the table is refused rather than written past.
+ */
+void the_queue_ignores_a_slot_it_does_not_have()
+{
+    auto built = make();
+    built.state->queue_external_interrupt(
+        zpp::hypervisor::hypervisor::max_cpus, 0x50);
+    check(!built.state->deliver_pending_external_interrupt(
+              zpp::hypervisor::hypervisor::max_cpus),
+          "a processor slot the table does not have is left alone");
+}
+
 /**
  * Which entry the processor leaves through, which is three questions
  * rather than one.
@@ -1363,6 +1645,14 @@ int main()
     nothing_is_put_back_without_a_pending_event();
     a_slot_outside_the_table_is_left_alone();
     rip_advances_only_when_asked();
+    queued_interrupts_go_out_highest_first();
+    a_second_vector_does_not_displace_the_first();
+    the_same_vector_twice_is_counted_as_a_drop();
+    a_masked_guest_gets_an_interrupt_window();
+    a_shadow_or_a_staged_event_defers_the_interrupt();
+    a_halted_processor_is_woken_by_the_interrupt();
+    a_second_level_guest_is_never_given_a_host_interrupt();
+    the_queue_ignores_a_slot_it_does_not_have();
     the_entry_is_chosen_by_launch_state();
     the_resume_records_where_it_left_the_guest();
 
