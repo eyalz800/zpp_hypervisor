@@ -164,14 +164,33 @@ void hypervisor::note_apic_mode(std::size_t cpu)
     // one that should take #GP, and an armed bit would instead exit and
     // have this VMM perform the write in the host, where the #GP has no
     // recovery point and stops the processor.
-    intercept_interrupt_command(any_x2apic);
+    // Both interceptions are expressible off, as one variable.
+    //
+    // They are the only thing this VMM does to the guest's own interrupt
+    // controller, and the nested stall is a guest that stops switching
+    // trust levels and then waits for ever - so "is the watch itself the
+    // deadlock" is a question worth one boot rather than an argument.
+    //
+    // **Safe only with one processor**, which is how it is meant to be
+    // tested. The interception exists to catch a start-up IPI and
+    // replace it with one naming this VMM's own trampoline; with no
+    // application processors there is no start-up IPI to catch and
+    // nothing to hand over unvirtualized. With more than one processor
+    // this hands them to the guest and they are lost - see
+    // `on_interrupt_command`.
+#ifndef ZPP_INTERCEPT_APIC
+#define ZPP_INTERCEPT_APIC 1
+#endif
+    constexpr bool intercept_apic = (0 != ZPP_INTERCEPT_APIC);
+
+    intercept_interrupt_command(intercept_apic && any_x2apic);
 
     // And the page, only while some processor still uses it. Reads the
     // base from the calling processor's own MSR, which is right because
     // the page is a single physical address that every processor's local
     // APIC answers at; a machine that gave each processor a different one
     // would need a watch per processor and gets none.
-    watch_local_apic(any_xapic);
+    watch_local_apic(intercept_apic && any_xapic);
 
     // The shape is KVM's. kvm_lapic_set_base in arch/x86/kvm/lapic.c
     // notices any change in either of those two bits and calls

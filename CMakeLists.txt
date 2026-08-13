@@ -86,6 +86,10 @@ option(ZPP_NESTED_TPR_SHADOW
     "Hand a guest hypervisor's TPR shadow to the processor. Off forces CR8 exiting and emulates it against the same page, which is slower and exists to be the one variable between two boots."
     ON)
 
+option(ZPP_INTERCEPT_APIC
+    "Watch the guest's local APIC - the page in xAPIC mode, the interrupt command MSR in x2APIC mode. Off only makes sense with one processor, since the watch is what stops a start-up IPI handing a processor over unvirtualized."
+    ON)
+
 option(ZPP_NESTED_SHADOW_VMCS
     "Let the processor shadow a guest hypervisor's VMCS, so its vmreads and vmwrites do not exit. Off makes every one of them exit and be recorded, which is slow and is the only way to see what it actually asks for - with it on, vmcs_field_use reads 411 writes for a whole boot and says nothing."
     ON)
@@ -175,6 +179,7 @@ ExternalProject_Add(hypervisor
         -DZPP_NESTED_TPR_SHADOW=${ZPP_NESTED_TPR_SHADOW}
         -DZPP_SLOW_EXITS=${ZPP_SLOW_EXITS}
         -DZPP_NESTED_SHADOW_VMCS=${ZPP_NESTED_SHADOW_VMCS}
+        -DZPP_INTERCEPT_APIC=${ZPP_INTERCEPT_APIC}
         -DZPP_PROFILE_L2=${ZPP_PROFILE_L2}
         -DZPP_GUEST_TESTS=${ZPP_GUEST_TESTS}
         -DZPP_TEST_MODULE_PROTECTION=${ZPP_TEST_MODULE_PROTECTION}
@@ -256,6 +261,7 @@ ExternalProject_Add(uefi_loader
         -DZPP_NESTED_TPR_SHADOW=${ZPP_NESTED_TPR_SHADOW}
         -DZPP_SLOW_EXITS=${ZPP_SLOW_EXITS}
         -DZPP_NESTED_SHADOW_VMCS=${ZPP_NESTED_SHADOW_VMCS}
+        -DZPP_INTERCEPT_APIC=${ZPP_INTERCEPT_APIC}
         -DZPP_PROFILE_L2=${ZPP_PROFILE_L2}
         -DZPP_TRACE=${ZPP_TRACE}
         -DZPP_CHAINLOAD_ONLY=${ZPP_CHAINLOAD_ONLY}
