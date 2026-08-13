@@ -11836,3 +11836,44 @@ exactly why there is no "same point" to compare against - the failure
 here is that our guest *stays* somewhere the control only passes through.
 
 Tracing was disarmed afterwards and no reader was left in D state.
+
+
+## What the guest hypervisor does inside the livelock, and two more eliminations
+
+With `ZPP_NESTED_SHADOW_VMCS=OFF` every vmcs12 write exits and is
+recorded, which is the only view of the guest hypervisor's intent
+available from here. Inside the livelock, 507,122 writes:
+
+    primary_processor_based_vm_execution_controls  188,741  37.2%
+    guest_rip                                      177,441  35.0%
+    tpr_threshold                                   95,195  18.8%
+    guest_interruptibility_state                    44,556   8.8%
+    vm_entry_interruption_information_field            665   0.1%
+
+About **one primary-controls write per iteration** - arming and
+disarming interrupt-window exiting - with 95,195 task-priority threshold
+writes and **almost no injections**. That is a hypervisor holding an
+interrupt it cannot deliver and waiting for a priority drop.
+
+**The TPR shadow is not why.** `ZPP_NESTED_TPR_SHADOW=OFF` gives the
+guest hypervisor CR8-load and CR8-store exiting instead, so every
+priority change is visible to it. Measured: the same cycle, `vmresume`,
+`vmcall 0x12`, two `vmptrld`s - and `cr-access` now 75.6% of 3,116,856
+exits, which is the cost of the alternative and no benefit. Tested
+against the *old* failure earlier and again here against the new one;
+neither moves.
+
+**Running total of what the livelock is not.** The VMCS switch works and
+alternates between two vmcs12s. Nested entries do not fail. Injected
+interrupts do not drive it - half a second against 940. This VMM does not
+take exits the guest hypervisor asked for. vmcs02 no longer inherits our
+external-interrupt exiting. The task-priority shadow is not involved.
+
+**What is left is the one thing not yet inspectable**: what the guest
+hypervisor consults *between* writing the interrupt window and deciding
+to resume the level that just left. Every input to that decision which
+this VMM supplies has now been measured and is correct, so either it is
+reading something we present wrongly that is not on this list, or it is
+in a state its own logic cannot leave. The next instrument that would
+say which is the guest hypervisor's own code path, and that is not
+readable from this side.
