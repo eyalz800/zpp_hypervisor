@@ -375,7 +375,8 @@ def main():
                "vmcs_shadow_loads", "vmcs_shadow_stores",
                "vmcs_field_read_encoding", "vmcs_field_read_count",
                "vmcs_field_write_encoding", "vmcs_field_write_count",
-               "vmcs_field_use_overflow"]
+               "vmcs_field_use_overflow",
+               "external_interrupt_vector_counts"]
     off = gdb_offsets(args.elf, members)
     instance = base + gdb_symbol(
         args.elf, "zpp::hypervisor::hypervisor::instance()::instance")
