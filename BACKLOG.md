@@ -11681,6 +11681,57 @@ period. **It did not move the wall.** The guest stops at the same place
 either way, which is what rules the cost out as the cause rather than
 merely making it cheaper.
 
+### Where the exits actually go at the wall
+
+Cumulative `exit_reason_counts` describe the boot, not the wall, and the
+boot is over in a minute while the wall lasts for ever. Sampled as a delta
+over sixty seconds with the guest in its steady loop - 273,330 exits,
+4,556/s, 64 clock ticks/s, so **71 exits per tick**:
+
+| | rate | share |
+|---|---|---|
+| vmresume | 1,640/s | 36.0% |
+| ept-violation | 981/s | 21.5% |
+| rdmsr | 957/s | 21.0% |
+| wrmsr | 339/s | 7.4% |
+| vmcall | 158/s | 3.5% |
+| vmptrld | 130/s | 2.9% |
+| int-window | 113/s | 2.5% |
+| ext-int | 106/s | 2.3% |
+| vmread | 95/s | 2.1% |
+| **invept** | **23/s** | **0.5%** |
+
+Three things fall out, and the first two cancel work that looked obvious.
+
+**The shadow EPT is not the target.** INVEPT is 23/s. Even making the
+discard free - the `watch_guest_page_writes` project the entry below ends
+with - cannot reach the exits it was supposed to. The 38 to 53 per cent
+figure quoted for EPT violations everywhere above is *cumulative*, and it
+is the boot's memory-map scan, not the wall.
+
+**The structure is two exits per second-level event.** vmresume at 1,640/s
+is almost exactly the sum of the reflected exits below it: the guest exits,
+this VMM reflects, the guest hypervisor handles it and resumes, and that
+resume exits here too. Nothing shaves that pair without answering the exit
+instead of reflecting it, and the reflected ones belong to the guest
+hypervisor by definition.
+
+**The clock is the workload.** 957 rdmsr/s is the second-level guest
+reading `0x40000020`, the reference counter, about fifteen times per tick,
+each costing its reflection and its resume - roughly 42% of every exit on
+the machine, spent reading the clock. It does that because it is using the
+**MSR form** of the reference counter (`HvlpGetRegister64`) rather than the
+reference TSC *page*, which needs no exit at all. Why the guest hypervisor
+does not give its guest that page is the open question, and it is worth
+more than any exit-count tuning: it is the only known change that could
+halve the machine's exit rate.
+
+One candidate, unverified and cheap to test: this VMM answers the
+Hyper-V features leaf `0x40000003` as **zero** while announcing the `Hv#1`
+signature, so the level above is told its own parent offers no partition
+reference counter and no reference TSC. Whether a nested Hyper-V mirrors
+that downward is not known and nothing here has measured it.
+
 ### Rejected: prefetching a faulting page's neighbours into the shadow
 
 Tried on 2026-08-13, measured, reverted. The idea was sound and is the
