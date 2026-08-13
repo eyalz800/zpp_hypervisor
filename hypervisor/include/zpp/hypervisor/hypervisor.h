@@ -5216,6 +5216,51 @@ private:
      */
     std::uint64_t l2_exit_detail[max_cpus]{};
     std::uint64_t l2_exit_detail_value[max_cpus]{};
+
+    /**
+     * Every synthetic MSR the second-level guest touches, counted for
+     * the whole run, reads and writes apart.
+     *
+     * The rings cannot answer this and the difference matters. Both are
+     * windows - 256 exits and 4,096 filtered ones - and what is being
+     * asked is whether something happened *at all*, once, early, before
+     * anything worth keeping had been recorded. Specifically whether the
+     * guest ever writes `0x40000021`, the reference TSC page: it reads
+     * the reference counter through `0x40000020` about fifteen times per
+     * clock tick, and each of those costs a reflection to the guest
+     * hypervisor and the resume that follows - about 42% of every exit
+     * on this machine, spent reading the clock. A guest with the
+     * reference TSC page computes the same value from RDTSC and memory
+     * and exits for none of it. Absence from a window proves nothing;
+     * absence from a counter that has been up since the module loaded
+     * proves it was never offered.
+     *
+     * Indexed by the low byte, so it covers `0x40000000`-`0x400000ff`,
+     * which is every synthetic MSR this guest hypervisor uses.
+     */
+    /**
+     * The last value the second-level guest wrote to `0x40000021`, the
+     * reference TSC page, per processor.
+     *
+     * The census below says the guest writes it - so the page *is*
+     * enabled - and then reads the reference counter through
+     * `0x40000020` twelve thousand times anyway, which is about 42% of
+     * every exit on this machine. The Hyper-V reference TSC page carries
+     * a sequence number in its first four bytes, and the protocol is
+     * that a sequence of zero means the page is invalid and the guest
+     * must fall back to the counter MSR. So the address is kept here to
+     * be read from outside: `xp` the low word of this page and a zero
+     * says the guest hypervisor withdrew the fast path, which moves the
+     * question from "why does the guest not use it" to "why does the
+     * level above refuse to offer it".
+     *
+     * The value is as written, enable bit and all - bit 0 enables and
+     * bits 12 and up are the guest-physical page number.
+     */
+    std::uint64_t l2_reference_tsc_written[max_cpus]{};
+
+    std::uint32_t l2_synthetic_msr_reads[max_cpus][256]{};
+    std::uint32_t l2_synthetic_msr_writes[max_cpus][256]{};
     /**
      * @}
      */

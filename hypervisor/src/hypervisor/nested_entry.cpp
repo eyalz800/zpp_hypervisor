@@ -4592,6 +4592,30 @@ hypervisor::on_l2_exit(std::size_t cpu,
             ((context.rdx & low_half_mask) << high_half_shift) |
             (context.rax & low_half_mask);
 
+        // And a census of the synthetic range that outlives both rings.
+        // See `l2_synthetic_msr_reads`.
+        constexpr std::uint64_t synthetic_msr_block = 0xffffff00;
+        constexpr std::uint64_t synthetic_msr_base = 0x40000000;
+
+        if (synthetic_msr_base == (context.rcx & synthetic_msr_block)) {
+            auto slot = context.rcx & 0xff;
+
+            if (basic_reason::rdmsr == reason.basic()) {
+                this->l2_synthetic_msr_reads[cpu][slot] += 1;
+            } else if (basic_reason::wrmsr == reason.basic()) {
+                this->l2_synthetic_msr_writes[cpu][slot] += 1;
+
+                // Kept so the page can be read from outside. See
+                // `l2_reference_tsc_written`.
+                constexpr std::uint64_t reference_tsc_slot = 0x21;
+
+                if (reference_tsc_slot == slot) {
+                    this->l2_reference_tsc_written[cpu] =
+                        this->l2_exit_detail_value[cpu];
+                }
+            }
+        }
+
         // The vector of an external interrupt on its way to the guest
         // hypervisor. Available only because "acknowledge interrupt on
         // exit" now reaches vmcs02 - see build_vmcs02 - and read here

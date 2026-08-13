@@ -11681,6 +11681,52 @@ period. **It did not move the wall.** The guest stops at the same place
 either way, which is what rules the cost out as the cause rather than
 merely making it cheaper.
 
+### The reference TSC page is enabled, empty, and costs 42% of every exit
+
+Found 2026-08-13, and it is a chain that runs from this VMM's own CPUID
+answer to the wall. Every step below is measured except the last, which is
+a prediction and is labelled as one.
+
+**1. This VMM answers the Hyper-V features leaf `0x40000003` as zero**
+while announcing the `Hv#1` interface signature. So the guest hypervisor
+is told its parent offers no partition reference counter and no partition
+reference TSC. That was a deliberate choice - see the comment on the leaf
+in `exit_dispatch.cpp`, whose reasoning is that a guest which finds
+nothing offered carries on as it would with no hypervisor at all.
+
+**2. The guest hypervisor then polls us for time.** The first-level exit
+ring shows `rdmsr 0x40000020` from Hyper-V's own instruction pointer, ten
+of the sampled first-level exits. It has no faster way to ask.
+
+**3. It cannot then give *its* guest a working one.** Windows enables the
+reference TSC page - the whole-run census reads `0x40000021` twice and
+writes it twice, and the captured value is `0x117dff001`, enable bit set,
+page at `0x117dff000`. Reading that page: **all zeroes.** `TscSequence`
+is 0, and the Hyper-V interface defines a zero sequence as "this page is
+invalid, fall back to the reference counter MSR".
+
+**4. So Windows polls, and that is the workload.** 12,809 reads of
+`0x40000020`, about fifteen per clock tick, each costing its reflection to
+the guest hypervisor *and* the resume that follows - roughly 42% of every
+exit on the machine, spent reading the clock. At 71 exits per tick and
+188 us each that is the whole 15.625 ms tick period, which is why the
+guest never finishes a tick, never lowers its task priority below `0xd0`,
+and never runs the deferred procedure call it asks for.
+
+**5. Predicted, not measured:** implementing the partition reference TSC
+for the first level - a real page with a sequence, scale and offset, and
+the feature bits to match - would let the guest hypervisor build one for
+its own guest and take that 42% away. Nothing here has tested it, and
+there is a specific way it could fail: the guest hypervisor may leave the
+page invalid for its own reasons, not for want of one from us.
+
+Whatever is done here must answer the whole interface or none of it. The
+features leaf is zero today precisely so that nothing is claimed and
+unimplemented, and CLAUDE.md's rule about answering the whole of an
+interface or faulting was written after a skipped `rdmsr 0x40000022` cost
+an afternoon. Claiming reference TSC support without publishing a valid
+page would be that mistake exactly.
+
 ### Where the exits actually go at the wall
 
 Cumulative `exit_reason_counts` describe the boot, not the wall, and the
