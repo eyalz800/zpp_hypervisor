@@ -11269,3 +11269,64 @@ page address is in `synthetic_msr_last_value` for `0x40000083`, and its
 contents can be read the same way the reference TSC page was - with the
 hypercall page beside it as the control for the address arithmetic,
 which is the check that made that earlier reading trustworthy.
+
+
+## Not the local APIC watch, and what KVM does with the same guest
+
+**The watch is eliminated.** `ZPP_INTERCEPT_APIC=OFF` disarms both
+interceptions - the page watch used in xAPIC mode and the interrupt
+command MSR bit used in x2APIC mode - and with one processor that is safe,
+because the watch exists to catch a start-up IPI and there are no
+application processors to lose. Measured: the guest stalls at **93,584**
+working exits against 94,246, 94,315 and 94,572 with the watch on. Same
+wall. **This VMM touching the guest's interrupt controller is not the
+deadlock.**
+
+**Our exits at the stall**, one processor, 1,412,225 of them:
+
+    ept-violation   34.5%   486,856
+    vmresume        29.6%   417,788
+    rdmsr           15.4%   217,522
+    vmcall           6.6%    92,774
+    wrmsr            5.7%    81,176
+    vmptrld          4.6%    64,412
+    int-window       1.6%    22,748
+    invept           1.3%    18,690
+    ext-int          0.3%     3,657
+
+**What KVM sees with the same guest and nothing of ours underneath**,
+sampled over a 0.9 second window through `kvm_apic_accept_irq` and
+`kvm_mmio`:
+
+    vector 0x50   542 accepts   Fixed, edge
+    vector 0x60    50 accepts   Fixed, edge
+                  -> about 660 interrupts a second into the guest
+    mmio writes to 0xfee00380   the APIC timer initial count
+    mmio writes to 0xfee000b0   the end-of-interrupt register
+
+**The two cannot be compared directly, and the reason is the interesting
+part.** KVM virtualises the local APIC and *injects* every interrupt,
+which is why it can count them. This VMM does not: it never sets
+external-interrupt exiting, on the principle that the interrupts are the
+guest's and the guest owns the controller - so under us those interrupts
+arrive natively and take no exit at all. `ext-int` at 3,657 is only the
+ones a guest hypervisor asked to see.
+
+So "KVM delivers 660 a second and we deliver 4" is **not** a finding, and
+would have been a wrong one. What the trace does establish is that the
+guest hypervisor drives its APIC timer through the page at `0xfee00380`
+in xAPIC mode - which is exactly the traffic our watch was intercepting,
+and which the experiment above has now shown is not the deadlock either
+way.
+
+**Three notes on getting the trace at all**, since two of them are
+already written down and were walked into anyway:
+
+- tracefs answers an unprivileged read with an **empty string**. Three
+  captures came back empty before `sudo` was added, exactly as the
+  trace-kvm notes warn.
+- `head -c` buffers and loses everything when `timeout` kills it. `dd`
+  writes each block as it reads.
+- The leaked readers from the failed attempts were cleaned up and
+  checked - no D-state processes - and tracing was disarmed afterwards
+  rather than left on.
