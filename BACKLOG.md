@@ -11221,3 +11221,51 @@ So at the stall both the guest hypervisor and its guest are executing,
 which rules out "one of them is parked" and leaves the shape recorded
 above: neither is switching trust levels or making hypercalls, and the
 only work left is reading the clock.
+
+
+## The last hypercall is a VTL return, and nothing follows it
+
+The working ring keeps the newest 4096 exits that are not the poll, the
+end-of-interrupt or the timer re-arm, so the hypercalls that ran just
+before everything froze are still in it. Stall reproduced at working
+94,315 - the same point as 94,572 and 88,106 before it - and the tail
+reads:
+
+    94153  0x11          VtlCall                    rip ...de0019
+    94154  0x10001000c   ModifyVtlProtectionMask
+    94155  0x12          VtlReturn                  rip ...de0032
+    94156  0x11          VtlCall
+    94157  0x12          VtlReturn
+    94158  0x11          VtlCall
+    94159  0x10001000c   ModifyVtlProtectionMask
+    94160  0x10001000c   ModifyVtlProtectionMask
+    94161  0x12          VtlReturn              <- the last one, ever
+
+All three instruction pointers are inside the hypercall page -
+`...de0000` for the fast calls, `...de0019` and `...de0032` for the two
+trust-level stubs - which is what the page is for and confirms the
+decode.
+
+**The machine's last act is a VTL *return*.** The secure kernel hands
+control back to the normal world, and from that instant the guest makes
+no further hypercall, never switches trust level again, holds its task
+priority raised and does nothing but read the clock.
+
+So the deadlock is **on the VTL0 side, after a return**, not inside the
+secure kernel and not in the transition itself. Windows gets control
+back and then waits for something that never comes.
+
+**What that narrows it to.** After a return, the normal world resumes
+whatever it was doing when it called in. It is at raised priority, it
+queues a dispatch interrupt on every clock tick which is correctly
+refused because its own priority forbids it, and the deferred work that
+would lower that priority therefore never runs. The question is what it
+believes it is still waiting for: a synthetic message from the secure
+kernel that was never posted, or a completion flag in shared memory that
+was never written.
+
+**Both are checkable without rebooting anything.** The synthetic message
+page address is in `synthetic_msr_last_value` for `0x40000083`, and its
+contents can be read the same way the reference TSC page was - with the
+hypercall page beside it as the control for the address arithmetic,
+which is the check that made that earlier reading trustworthy.
