@@ -11687,18 +11687,27 @@ Found 2026-08-13, and it is a chain that runs from this VMM's own CPUID
 answer to the wall. Every step below is measured except the last, which is
 a prediction and is labelled as one.
 
-**1. This VMM answers the Hyper-V features leaf `0x40000003` as zero**
-while announcing the `Hv#1` interface signature. So the guest hypervisor
-is told its parent offers no partition reference counter and no partition
-reference TSC. That was a deliberate choice - see the comment on the leaf
-in `exit_dispatch.cpp`, whose reasoning is that a guest which finds
-nothing offered carries on as it would with no hypervisor at all.
+**1. Not this VMM's interface at all.** `nested_vmx::announce_hypervisor`
+is `false`, so no `Hv#1` signature is published, no feature bit is
+claimed, and every synthetic MSR faults. From the guest hypervisor's side
+this machine looks like bare hardware, which is the intended answer.
 
-**2. The guest hypervisor then polls us for time.** The first-level exit
-ring shows `rdmsr 0x40000020` from Hyper-V's own instruction pointer, ten
-of the sampled first-level exits. It has no faster way to ask.
+**2. Two claims that were published here and are wrong, retracted.** This
+entry first said the features leaf was answered as zero *while announcing
+the signature*, and that the guest hypervisor polls us for time - "the
+first-level ring shows `rdmsr 0x40000020` from Hyper-V's own instruction
+pointer". Neither holds. Nothing is announced, so the leaf never arises;
+and those ring entries are the *second-level* guest's reads.
 
-**3. It cannot then give *its* guest a working one.** Windows enables the
+**They read as the first level's because the ring samples after the exit
+is handled.** `exit_trace_entry` records the guest that is about to be
+*resumed*, so an exit reflected to the guest hypervisor is filed under
+that hypervisor's instruction pointer and tagged `[l1-rip]`, however it
+arose. To tell where an exit came from, use `l2_exit_trace`, which holds
+second-level exits only - and there the same reads appear, 12,809 of them
+in the census.
+
+**3. The guest hypervisor does not give its guest a working page.** Windows enables the
 reference TSC page - the whole-run census reads `0x40000021` twice and
 writes it twice, and the captured value is `0x117dff001`, enable bit set,
 page at `0x117dff000`. Reading that page: **all zeroes.** `TscSequence`
@@ -11713,19 +11722,22 @@ exit on the machine, spent reading the clock. At 71 exits per tick and
 guest never finishes a tick, never lowers its task priority below `0xd0`,
 and never runs the deferred procedure call it asks for.
 
-**5. Predicted, not measured:** implementing the partition reference TSC
-for the first level - a real page with a sequence, scale and offset, and
-the feature bits to match - would let the guest hypervisor build one for
-its own guest and take that 42% away. Nothing here has tested it, and
-there is a specific way it could fail: the guest hypervisor may leave the
-page invalid for its own reasons, not for want of one from us.
+**5. Why it leaves the page empty is open.** With the retraction above,
+the tempting answer - "because we told it we had no reference TSC" - is
+gone: we tell it nothing, which is what bare hardware tells it. So the
+reason lies in what the guest hypervisor needs before it will vouch for a
+TSC to its own guest, and the candidate worth measuring first is **TSC
+scaling**: `supported_secondary_controls` does not offer bit 25, so a
+guest hypervisor cannot scale its guest's time-stamp counter at all, and a
+hypervisor that cannot scale may decline to publish a scale.
 
-Whatever is done here must answer the whole interface or none of it. The
-features leaf is zero today precisely so that nothing is claimed and
-unimplemented, and CLAUDE.md's rule about answering the whole of an
-interface or faulting was written after a skipped `rdmsr 0x40000022` cost
-an afternoon. Claiming reference TSC support without publishing a valid
-page would be that mistake exactly.
+That is a hypothesis with a cheap test and a real hazard. Offering the
+control means composing `tsc_multiplier` into vmcs02 the way KVM's
+`kvm_calc_nested_tsc_multiplier` does, and composing the *offset* through
+the multiplier too - `kvm_calc_nested_tsc_offset` - which the plain sum in
+`build_vmcs02` today does not do and does not need to while no multiplier
+exists. Offering the bit without both is the "answer part of an interface"
+mistake this tree keeps paying for.
 
 ### Where the exits actually go at the wall
 
