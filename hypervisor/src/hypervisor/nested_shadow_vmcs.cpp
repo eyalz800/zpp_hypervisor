@@ -26,6 +26,48 @@ namespace
 using field = arch::x86_64::vmx::vmcs::field;
 
 /**
+ * **Both lists are the measured hot set and deliberately nothing more.**
+ *
+ * A field left off is not a bug: the guest hypervisor's access to it
+ * exits and this VMM emulates it, which is exactly what happens with the
+ * whole feature switched off. So the lists trade a copy on every
+ * second-level exit against an exit whenever that field is touched, and
+ * the only way to place that trade is to count what the guest hypervisor
+ * in front of you actually touches.
+ *
+ * Counted on the rig with the feature off, so `vmcs_field_use` could see
+ * everything rather than only what it does not shadow - Hyper-V, one
+ * processor, one run: 5,095,645 reads over 25 distinct fields and
+ * 2,176,011 writes over 106. The distribution is not close:
+ *
+ *   read   interruptibility 18.4%, instruction length 17.8%,
+ *          exit reason 17.8%, CS access rights 16.6%, RIP 16.6%,
+ *          RFLAGS 8.1%, SS access rights 2.0%, DR7 1.6%,
+ *          entry interruption 1.3%           -> 99.6% in nine fields
+ *   write  RIP 38.8%, interruptibility 36.0%, TPR threshold 11.3%,
+ *          primary controls 10.4%,
+ *          entry interruption 3.5%           -> 99.98% in five fields
+ *
+ * Their union is the eleven fields below. Everything dropped was
+ * measured in the tens: `guest_cr4` twenty reads and twelve writes,
+ * `guest_cr0` seven and seven, `guest_cr3` four and seven,
+ * `exit_qualification` 146 reads, `guest_physical_address` and
+ * `guest_linear_address` and `idt_vectoring_information` 129 each - and
+ * the whole of the segment-base and access-right block seven writes
+ * apiece, which is a guest hypervisor building a VMCS once and never
+ * touching it again.
+ *
+ * What the trim is worth: the lists were 10 read-only and 26
+ * read-write, so 62 VMCS accesses per second-level exit, against 20 now.
+ * Every one of those is a VMX instruction trapping to the layer below at
+ * a measured 1.76 us. The exits it gives up are the 0.4% tail.
+ *
+ * **Re-measure before editing this.** The previous list was assembled
+ * from KVM's `vmcs_shadow_fields.h` plus one measurement, and carried
+ * fifteen fields this guest hypervisor touches single-digit times.
+ */
+
+/**
  * The fields the guest hypervisor may read without an exit.
  *
  * The exit-information fields are here and not in the writable list
@@ -37,15 +79,7 @@ using field = arch::x86_64::vmx::vmcs::field;
  */
 constexpr field shadow_read_only_fields[] = {
     field::exit_reason,
-    field::exit_qualification,
-    field::vm_exit_interruption_information,
-    field::vm_exit_interruption_error_code,
     field::vm_exit_instruction_length,
-    field::vm_exit_instruction_information,
-    field::idt_vectoring_information_field,
-    field::idt_vectoring_error_code,
-    field::guest_physical_address,
-    field::guest_linear_address,
 };
 
 /**
@@ -73,30 +107,13 @@ constexpr field shadow_read_write_fields[] = {
     // in front of you rather than copying another VMM's list.
     field::guest_dr7,
     field::guest_rip,
-    field::guest_rsp,
     field::guest_rflags,
-    field::guest_cr0,
-    field::guest_cr3,
-    field::guest_cr4,
-    field::cr0_read_shadow,
-    field::cr4_read_shadow,
-    field::cr0_guest_host_mask,
-    field::cr4_guest_host_mask,
     field::guest_interruptibility_state,
-    field::guest_activity_state,
     field::vm_entry_interruption_information_field,
-    field::vm_entry_exception_error_code,
-    field::vm_entry_instruction_length,
-    field::exception_bitmap,
-    field::pin_based_vm_execution_controls,
     field::primary_processor_based_vm_execution_controls,
     field::tpr_threshold,
-    field::guest_cs_selector,
     field::guest_cs_access_rights,
     field::guest_ss_access_rights,
-    field::guest_interrupt_status,
-    field::host_fs_base,
-    field::host_gs_base,
 };
 
 /**

@@ -11622,10 +11622,31 @@ fields shadowing does not cover. It is not the total and must never be
 quoted as one.
 
 **Handler share of wall clock is the only metric that survives the
-trade**, and by it the two are nearly equal: 88.0% on, 85.0% off. The
-guest gets 12% of the machine one way and 15% the other. Off is kept as
-the default for that margin and because it makes `vmcs_field_use` honest,
-not because it is a large win.
+trade**, and by it the two were nearly equal: 88.0% on, 85.0% off.
+
+**Then the field list was cut to the measured hot set and on won.** The
+lists had been 10 read-only and 26 read-write, assembled from KVM's
+`vmcs_shadow_fields.h` plus one measurement, and fifteen of those fields
+turned out to be touched single-digit times by this guest hypervisor.
+Counting with shadowing off - the only way to see fields it would
+otherwise hide - Hyper-V's 5,095,645 reads are 99.6% in nine fields and
+its 2,176,011 writes 99.98% in five. Their union is eleven.
+
+| | handler share of wall clock |
+|---|---|
+| shadowing off | 85.0% |
+| shadowing on, 36 fields | 88.0% |
+| shadowing on, 11 fields | **83.2%, 83.8%** |
+
+So 62 VMCS accesses per second-level exit became 20, the exits given up
+are the 0.4% tail - `vmcs_field_use` now reports 3,849 accesses for a run
+where it reported 7.27 million - and the guest's share of the machine
+went from 12% to 17%. The default is on again, with the short list.
+
+`vm_exit_interruption_information` is the one dropped field with real
+traffic, 3,272 exits, and it was left off deliberately: against one more
+copy on each of 212,560 second-level exits it is within noise either way.
+Re-measure before adding it back rather than assuming.
 
 The effect on the guest is visible and was the point of measuring:
 Windows' clock went from firing back to back every 8.26 ms - the tick
