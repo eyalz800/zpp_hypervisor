@@ -11681,6 +11681,46 @@ period. **It did not move the wall.** The guest stops at the same place
 either way, which is what rules the cost out as the cause rather than
 merely making it cheaper.
 
+### What the guest is actually doing: a kernel thread in a timed retry loop
+
+Read on 2026-08-14 from `guest_thread_samples` and `l2_resume_value`, and
+it is not what every earlier reading in this file assumed.
+
+**It is not idle and it is not stuck in an interrupt handler.** The thread
+samples show one non-idle kernel thread, `0xffffd106d14dd080`, start
+address `0xfffff804a0cfb520`, `state=Running`, `wait_irql=1`, in nearly
+every sample, with the idle thread appearing only occasionally. And
+`l2_entry_vtpr` has the guest at passive level 7.9% of entries and
+dispatch level 37.7%.
+
+What that thread does, from the values handed back at resume:
+
+| site | what |
+|---|---|
+| `0xfffff804a09a597e` | reads the reference counter, advancing **monotonically ~4,900 units, about 490 us, per read** |
+| `0xfffff804a09a57fa` | writes a synthetic timer deadline of now **+25,000 or +10,000** - 2.5 ms or 1 ms |
+| `0xfffff804a0a2890d` | writes the synthetic interrupt command, value `0x4002f` |
+
+So: **arm a short timer, poll the clock until it expires, ask for a
+deferred procedure call, repeat.** Indefinitely. That is a timed retry
+loop waiting on a condition that never becomes true - not a starved
+machine and not a hung one.
+
+**The clock is sane.** Within the reads at the poll site the counter is
+monotonic and advances at the right rate. `reference_count_backwards`
+reads 114 of 793,332 samples and should not be trusted as a clock
+regression: `l2_resume_value` records RAX:RDX for every sampled exit, so
+one series carries reference-counter reads, timer deadlines and the
+`0x4002f` command together, and differencing across them manufactures
+exactly those steps. `0x4002f` is 262,191, which is where the largest
+"backwards" jumps in the ring come from.
+
+This is the first reading that says what the guest is *waiting for*
+rather than what it is spending time on, and it moves the question again:
+not "why is it slow" and not "why does it never lower its priority", but
+**what condition does that thread retry on, and who was supposed to
+signal it.**
+
 ### The reference TSC page is enabled, empty, and costs 42% of every exit
 
 Found 2026-08-13, and it is a chain that runs from this VMM's own CPUID
