@@ -11590,6 +11590,46 @@ worth more than the boot it appears in. `pending_high_water` above 1 says
 delivery is not keeping up with arrival. Interrupt-window exits are exit
 reason 7 in `exit_reason_counts`.
 
+### Rejected: gating injection on the processor priority register
+
+Tried on 2026-08-13 and reverted the same hour. KVM gates delivery on the
+processor priority register - `apic_has_interrupt_for_ppr` in
+`.references/kvm/lapic.c` - and this VMM appeared to have no equivalent, so
+`deliver_pending_external_interrupt` was made to read PPR (x2APIC MSR
+`0x80a`, or the APIC page at `+0xa0`) and deliver only when
+`(vector >> 4) > (ppr >> 4)`.
+
+**It deadlocks on the first interrupt, unconditionally.** Measured: one
+boot, `external_interrupts_taken = 1`, `external_interrupts_injected = 0`,
+`l2_working_trace_count = 0`, held flat for four minutes - strictly worse
+than the livelock it was meant to explain.
+
+The reason is `acknowledge_interrupt_on_exit`. The exit *acknowledges* the
+interrupt at the local APIC, which sets that vector's in-service bit, and
+PPR is the maximum of the task priority register and the in-service
+vector's priority class. So by the time the handler runs, PPR already
+reflects the very vector being tested, `(vector >> 4) > (ppr >> 4)` is
+false by construction for every interrupt ever, and nothing is delivered
+again.
+
+**The generalisation is why this is worth the space: with
+acknowledge-interrupt-on-exit there is nothing to add.** The physical local
+APIC performs the priority arbitration *before* it hands the vector over -
+it would not have delivered a vector that did not already outrank PPR. KVM
+needs `apic_has_interrupt_for_ppr` because KVM's virtual APIC has no
+hardware doing this for it; here the guest owns the real controller and the
+hardware has already answered. A comparison against PPR is not merely
+redundant, it inverts.
+
+What would still be a real gap, and is *not* what was tried: the guest's
+**virtual** task priority. With the TPR shadow honoured, the guest's TPR
+writes land in the virtual-APIC page and never reach the physical register,
+so the hardware arbitrated against a priority the guest did not set. VTPR
+was measured at `0x40` while tpr-below-threshold exits numbered 10. Any
+future attempt belongs there, against VTPR at offset `0x80` of
+`nested_virtual_apic_address` - and has to answer first what happens to an
+interrupt already acknowledged at the controller and then held.
+
 ### Unverified
 
 Nothing here has been on hardware. What has run is `tests/resume_guest`,
