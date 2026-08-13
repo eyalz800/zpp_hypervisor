@@ -200,6 +200,17 @@ std::expected<void, zpp::error> hypervisor::write_guest_physical(
     return {};
 }
 
+/**
+ * The on-demand fetch of the guest-state fields `save_l2_state` skips.
+ * Standing in because it switches VMCS to do its work and this harness
+ * models neither - and because with `nested_vmx::lazy_guest_state` off,
+ * which is the default this suite builds, the real one returns
+ * immediately anyway.
+ */
+void hypervisor::refresh_cold_guest_state(std::size_t)
+{
+}
+
 void hypervisor::discard_shadow_ept(std::size_t)
 {
     g_observed.ept_discards = g_observed.ept_discards + 1;

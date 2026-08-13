@@ -11815,6 +11815,29 @@ Worth, if it works: `save_l2_state` from 46 reads to about ten takes the
 handler from 89% of the machine toward 82%, which is the guest's share
 going from 11% to 18% - the largest single change identified.
 
+**Attempted on 2026-08-13 behind `ZPP_LAZY_GUEST_STATE`, and it does not
+work.** Two boots, both reset loops - 62 module loads then 22 - against
+two loads with the switch off, so the bisect is clean. One genuine defect
+was found between the attempts and fixed: `guest_state_cache` holds what
+was last *written*, and a cold field is never read back, so the
+processor's write-back moves vmcs02 out from under the cache and the
+elision in `build_vmcs02` then skips writes that are owed on a comparison
+that has been meaningless since the first exit. Cold fields now bypass the
+elision. **The reset loop survived that fix**, so a second flaw remains.
+
+What was skipped and must come first next time: **SDM 28.3's list of what
+a VM exit actually saves, field by field.** The whole design rests on
+"vmcs02 already holds the guest's own value", and that is only true of
+fields the processor writes back - `IA32_DEBUGCTL` and the PDPTEs are
+conditional, and nothing here checked the rest. After that, two more
+candidates: whether `guest_current_vmcs` is updated before or after the
+guard that compares it, and the single vmcs02 shared between the two
+virtual trust levels the guest hypervisor switches between, where "the
+same second-level guest" is a subtler question than one pointer.
+
+The switch is kept, off, with the failure written on it, because the
+measurement that motivated it is unchanged and large.
+
 ### Where the exits actually go at the wall
 
 Cumulative `exit_reason_counts` describe the boot, not the wall, and the

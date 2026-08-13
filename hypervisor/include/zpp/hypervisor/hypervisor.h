@@ -2658,6 +2658,35 @@ private:
      * into its VMCS, the exit-information fields written, its own host
      * state loaded, and its VMCS made current again.
      */
+    /**
+     * Fetches the guest-state fields `save_l2_state` skipped, switching
+     * to vmcs02 to do it and back again. See
+     * `nested_vmx::lazy_guest_state`.
+     */
+    void refresh_cold_guest_state(std::size_t cpu);
+
+    /**
+     * Whether an encoding names one of the guest-state fields that
+     * `nested_vmx::lazy_guest_state` stops copying, so that a write to it
+     * has to be remembered. Out here rather than beside the field list
+     * because the VMWRITE path is in another translation unit.
+     */
+    static bool guest_state_left_cold(std::uint64_t encoding);
+
+    /** Whether those fields are stale in vmcs12, and whether the guest
+     * hypervisor has written one since they were last loaded. */
+    bool guest_state_cold_stale[max_cpus]{};
+    bool guest_state_cold_dirty[max_cpus]{};
+
+    /** Which vmcs12 the cold fields were last written into vmcs02 for.
+     * A different one means vmcs02 holds another guest's and all of them
+     * are owed, whatever the dirty flag says. */
+    std::uint64_t guest_state_cold_written_for[max_cpus]{};
+
+    /** How often the on-demand fetch ran, which is what says whether the
+     * trade is the one the measurement predicted. */
+    std::uint64_t guest_state_cold_refreshes[max_cpus]{};
+
     void reflect_l2_exit(std::size_t cpu,
                          arch::x86_64::vmx::exit_reason reason,
                          std::uint64_t qualification);

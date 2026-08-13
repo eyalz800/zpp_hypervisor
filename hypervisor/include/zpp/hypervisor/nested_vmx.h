@@ -157,6 +157,70 @@ inline constexpr bool enabled =
 #endif
 
 /**
+ * Whether the second-level guest's state is copied out of vmcs02 lazily
+ * rather than in full on every exit.
+ *
+ * `save_l2_state` reads all 46 of `guest_state_fields` out of vmcs02 on
+ * every second-level exit, and that is measured at 198,018 cycles - a
+ * third of the whole round trip - because each read is a VMX instruction
+ * trapping to the layer below at about 4,300 cycles. Measured against
+ * what the guest hypervisor actually reads, 44 of those 46 are waste:
+ * Hyper-V reads `guest_cs_access_rights` 843,627 times and
+ * `guest_ss_access_rights` 100,337 times in a run, and every other field
+ * in the list between one and four times.
+ *
+ * With this on, the other 44 are neither read back nor written forward.
+ * Not writing them is what makes not reading them safe: the processor
+ * writes guest state into the current VMCS on every VM exit (SDM 28.3),
+ * so vmcs02 already holds the guest's own values, and the only reason to
+ * write is that the guest hypervisor changed one - which it does by
+ * VMWRITE, which exits and is seen.
+ *
+ * The hazard is the guest hypervisor *reading* one of the 44. Its copy is
+ * then stale, and a stale answer about its own guest's state is silent
+ * corruption rather than a fault. `refresh_cold_guest_state` closes it by
+ * fetching them on demand, which costs a VMPTRLD either side of the
+ * reads - expensive, and measured to happen a handful of times per run
+ * against 46 x 800,000 eager reads.
+ *
+ * **It does not work. Do not turn it on.** Measured on the rig on
+ * 2026-08-13, twice, and both times the machine reset in a loop - 62
+ * module loads in the first attempt and 22 in the second - with the
+ * second-level guest never surviving long enough to record an entry.
+ * With the switch off the same tree boots normally, two loads, so the
+ * bisect is clean and the fault is here.
+ *
+ * One real defect was found and fixed between the two attempts and was
+ * not enough. `guest_state_cache` records what was last *written*, and
+ * for a field left cold nothing reads vmcs02 back afterwards, so the
+ * processor's write-back moves vmcs02 out from under the cache; letting
+ * such a field reach the elision in `build_vmcs02` skips a write that
+ * was owed, on a comparison that has been meaningless since the first
+ * exit. That is fixed - a cold field now bypasses the elision entirely -
+ * and the reset loop survived it.
+ *
+ * So a second flaw remains and is not identified. Candidates not yet
+ * eliminated: fields SDM 28.3 does *not* save on every VM exit, where
+ * the assumption "vmcs02 already holds the guest's own value" simply
+ * does not hold; the ordering of `guest_current_vmcs` against the guard
+ * that compares it; and the single vmcs02 being shared between the two
+ * virtual trust levels the guest hypervisor switches between, where
+ * "the same second-level guest" is a subtler question than one pointer.
+ *
+ * The measurement that motivated it stands and is large - 44 of 46
+ * VMREADs per second-level exit, a third of the round trip - so this is
+ * kept rather than deleted. What it needs is the SDM 28.3 list checked
+ * field by field before anything else, which is the step that was
+ * skipped.
+ */
+inline constexpr bool lazy_guest_state =
+#if defined(ZPP_LAZY_GUEST_STATE) && ZPP_LAZY_GUEST_STATE
+    true;
+#else
+    false;
+#endif
+
+/**
  * Whether the guest hypervisor's own VMREADs and VMWRITEs are served from
  * a shadow VMCS region instead of exiting.
  *

@@ -1274,6 +1274,11 @@ bool hypervisor::on_guest_vmread(std::size_t cpu,
 
     record_vmcs_field_use(false, encoding.value());
 
+    // A field `save_l2_state` skipped is stale here, and answering stale
+    // is silent corruption rather than a fault. See
+    // `nested_vmx::lazy_guest_state`; with it off this is a no-op.
+    refresh_cold_guest_state(cpu);
+
     auto value = this->guest_vmcs12[cpu].read(encoding);
 
     if (operand.is_register) {
@@ -1361,6 +1366,15 @@ bool hypervisor::on_guest_vmwrite(std::size_t cpu,
     }
 
     record_vmcs_field_use(true, encoding.value());
+
+    // The guest hypervisor changing one of the fields `build_vmcs02`
+    // stopped writing forward is the one thing that makes it owed again.
+    // See `nested_vmx::lazy_guest_state`.
+    if constexpr (nested_vmx::lazy_guest_state) {
+        if ((cpu < max_cpus) && guest_state_left_cold(encoding.value())) {
+            this->guest_state_cold_dirty[cpu] = true;
+        }
+    }
 
     this->guest_vmcs12[cpu].write(encoding, value);
 
