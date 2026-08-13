@@ -11669,6 +11669,43 @@ period. **It did not move the wall.** The guest stops at the same place
 either way, which is what rules the cost out as the cause rather than
 merely making it cheaper.
 
+### Rejected: prefetching a faulting page's neighbours into the shadow
+
+Tried on 2026-08-13, measured, reverted. The idea was sound and is the
+safe cousin of the eager INVEPT refresh below: install the neighbours of
+each faulting page at **fault** time, from tables that are current, while
+still discarding the whole shadow on every INVEPT - so a VTL protection
+change is still picked up by the fault after it, which is precisely what
+the eager refresh got wrong. Sixteen neighbours, eight each side, every
+one through `install_shadow_leaf` so a conditional composition is refused
+exactly as it is for a real fault.
+
+It works, and it does not help. Measured on the rig, one processor:
+
+| | fault-filled leaves per build | exits/s | handler share |
+|---|---|---|---|
+| without | 27 | 5,321 | 89.2% |
+| with | 17 | 5,105 | 89.8% |
+
+3,750,584 leaves were prefetched and 881,332 skipped. EPT violations fell
+from 38-53% of exits to 26%, and **the total exit rate moved 4%, inside
+run to run variation, with the handler's share of the machine unchanged.**
+
+The reason is the trade it actually makes rather than the one intended. A
+prefetch does not remove work, it moves it: each speculative neighbour is
+a full walk of the guest hypervisor's tables through `read_guest_physical`
+plus a composition, and doing that 3.75 million times costs about what the
+avoided exits saved. Faults are expensive here because the layer *below*
+this VMM emulates them, and that cost is not paid in guest page reads.
+
+**So do not re-propose prefetching, widening it, or tuning the count.**
+What remains true is the target: the shadow is discarded about once per
+tick of the second-level guest and refills from nothing. Removing that
+means not discarding - which means knowing when the guest hypervisor
+writes its own tables, which means `watch_guest_page_writes` on them, and
+`watch_capacity` is 8 where an EPT tree is dozens of pages. That is the
+work, and it is not a shortcut away.
+
 ### Settled: why the shadow EPT cannot be refreshed eagerly on INVEPT
 
 `refresh_shadow_on_invept` in `on_guest_invept` has been off since it was
