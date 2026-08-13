@@ -11608,13 +11608,24 @@ the measured 1.76 us per VMCS access that is about 88 accesses per exit
 with shadowing on, every one a VMX instruction trapping to the layer
 below.
 
-**Hardware VMCS shadowing is a 2x loss here, not a win.** It exists to
-stop a guest hypervisor's VMREAD and VMWRITE from exiting, and Hyper-V
-issues 411 writes and 13 reads across an entire boot. It charges 36
-fields copied in each direction on every second-level exit, of which
-there are hundreds of thousands. The default is now off; turn it on to
-read `vmcs_field_use`, which is blind to any field it shadows and is the
-only reason to pay for it.
+**Cost per exit is the wrong way to compare the two columns, and reading
+it that way produced a wrong conclusion once already.** It shows a 2x win
+for off, which is an artefact: the flag changes the exit *count* by 3.6x.
+With shadowing off, VMREAD and VMWRITE are 50.6% and 21.5% of all exits -
+the guest hypervisor makes 6.6 million VMCS accesses across one run, and
+each one is an exit. Shadowing removes them and charges 36 fields copied
+in each direction per second-level exit instead.
+
+The claim that Hyper-V issues "411 writes and 13 reads across a boot" is
+what `vmcs_field_use` says *with shadowing on*, and it is exactly the
+fields shadowing does not cover. It is not the total and must never be
+quoted as one.
+
+**Handler share of wall clock is the only metric that survives the
+trade**, and by it the two are nearly equal: 88.0% on, 85.0% off. The
+guest gets 12% of the machine one way and 15% the other. Off is kept as
+the default for that margin and because it makes `vmcs_field_use` honest,
+not because it is a large win.
 
 The effect on the guest is visible and was the point of measuring:
 Windows' clock went from firing back to back every 8.26 ms - the tick

@@ -95,7 +95,7 @@ option(ZPP_INTERCEPT_APIC
     ON)
 
 option(ZPP_NESTED_SHADOW_VMCS
-    "Let the processor shadow a guest hypervisor's VMCS, so its vmreads and vmwrites do not exit. OFF by default because it is a measured 2x loss here, not a win: it saves a guest hypervisor's traps - 411 writes and 13 reads across a whole boot - and charges 36 fields copied in each direction on every single second-level exit. Measured on the rig, one processor, Hyper-V as the guest hypervisor: 441,380 wall cycles per exit with it on against 214,431 with it off, and the guest's clock went from firing back to back at 8.26 ms to its correct 15.625 ms period. Turn it on to read vmcs_field_use, which is blind to any field it shadows."
+    "Let the processor shadow a guest hypervisor's VMCS, so its vmreads and vmwrites do not exit. OFF by default, but only just: measured on the rig with Hyper-V as the guest hypervisor, the handler holds 88.0% of the wall clock with it on and 85.0% with it off, so the guest gets 12% of the machine either way and 15% off. Do NOT compare the two by cost per exit - it reads as a 2x win for off and is an artefact, because the flag changes the exit COUNT by 3.6x: with it off, vmread and vmwrite are 50.6% and 21.5% of all exits, 6.6 million VMCS accesses by the guest hypervisor across one run. Shadowing removes those and charges 36 fields copied in each direction per second-level exit instead. Handler share of wall clock is the only metric that survives the trade. Turn it on to read vmcs_field_use, which is blind to any field it shadows."
     OFF)
 
 set(ZPP_SLOW_EXITS "0" CACHE STRING
