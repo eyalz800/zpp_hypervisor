@@ -11358,13 +11358,28 @@ and the firmware's own serial says what happened:
 The firmware's local APIC timer driver faulted. Nothing reached the boot
 manager at all.
 
-**Why, and it is structural rather than a slip.**
-`acknowledge_interrupt_on_exit` does what its name says: the processor
-takes the vector *from the controller*, which sets the in-service bit in
-the **physical** local APIC. Only an end-of-interrupt clears it. This
-VMM takes the vector and nothing ever writes an EOI, so the in-service
-bit stays set and blocks every interrupt at or below its priority - the
-timer driver waits for a tick that can no longer arrive, and faults.
+**Why - and the first answer written here was a hypothesis dressed as a
+finding, so it is corrected.**
+
+What was *measured* is the order: one interrupt injected, then the
+firmware faulted, then a second interrupt arrived and was never
+delivered, and no interrupt-window exit ever fired. A firmware already
+faulted and spinning with interrupts masked explains the last two
+without any further mechanism. **So the failure is "the first injection
+broke the firmware", and what about it broke the firmware is not
+established.**
+
+The in-service explanation - that
+`acknowledge_interrupt_on_exit` takes the vector from the controller,
+sets the in-service bit in the *physical* local APIC, and that nothing
+here ever writes the end-of-interrupt that clears it - is plausible and
+would produce exactly this, but it was not shown. Against it: the guest
+owns the physical controller here, so the guest's own handler writing
+EOI would clear that bit, which is the one case where taking the vector
+and injecting it could have worked without emulating anything. That is
+worth knowing before anyone repeats this.
+
+What *is* certain is the cost of doing it properly.
 
 **So virtualizing the APIC is not a control bit, it is a device.** Doing
 it properly means owning the in-service and request registers, answering
