@@ -224,6 +224,31 @@ def name_reason(value):
     return tag
 
 
+def monitor_vector_counts(monitor, instance, off, cpu):
+    """Which interrupt vectors were acknowledged, per processor.
+
+    The totals beside this cannot answer the question it exists for: a
+    guest parked with its clock ticking is either not being handed a
+    device's interrupt or never asked the device for anything, and
+    `external_interrupts_taken` counts a timer tick and a completion the
+    same.  One or two vectors here means only the clock is arriving.
+
+    Read as one block of 1024 bytes rather than 256 words, because the
+    counters are 32 bit - two per quadword, low half first.
+    """
+    base = instance + off["external_interrupt_vector_counts"] + cpu * 1024
+    monitor.queue(base, 128)
+    words = monitor.run()
+    counts = {}
+    for i in range(128):
+        word = words.get(base + 8 * i, 0)
+        for half in range(2):
+            value = (word >> (32 * half)) & 0xffffffff
+            if value:
+                counts[2 * i + half] = value
+    return counts
+
+
 def monitor_reasons(monitor, instance, off, args, cpu, capacity):
     """The whole-run histogram, which the 32-entry ring cannot give.
 
@@ -440,6 +465,17 @@ def main():
         print(f"\ncpu {cpu} exit reasons (total {total:,})")
         for reason, value in sorted(counts.items(), key=lambda kv: -kv[1]):
             print(f"  {EXIT_REASON.get(reason, reason):<18} {value:>10}  "
+                  f"{100.0 * value / total:5.1f}%")
+
+    for cpu in range(args.cpus):
+        vectors = monitor_vector_counts(monitor, instance, off, cpu)
+        if not vectors:
+            continue
+        total = sum(vectors.values())
+        print(f"\ncpu {cpu} interrupt vectors acknowledged "
+              f"({total:,} over {len(vectors)} distinct)")
+        for vector, value in sorted(vectors.items(), key=lambda kv: -kv[1]):
+            print(f"  0x{vector:02x}  {value:>10}  "
                   f"{100.0 * value / total:5.1f}%")
 
     for cpu in range(args.cpus):

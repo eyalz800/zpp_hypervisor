@@ -364,8 +364,11 @@ void hypervisor::on_vm_exit(std::uint64_t cpuid,
             // in-service bit nothing will now EOI blocks every interrupt
             // at or below its priority for the rest of the machine's
             // life. See `queue_external_interrupt`.
-            queue_external_interrupt(slot - 1,
-                                     information & interruption_vector);
+            auto vector = information & interruption_vector;
+
+            this->external_interrupt_vector_counts[slot - 1][vector] += 1;
+
+            queue_external_interrupt(slot - 1, vector);
         }
         break;
     }

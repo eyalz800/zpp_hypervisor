@@ -6910,6 +6910,26 @@ private:
                                           [external_vector_words]{};
     /** @} */
 
+    /**
+     * How many times each interrupt vector has been acknowledged into
+     * this VMM, per processor.
+     *
+     * One question, and it forks the diagnosis rather than narrowing it:
+     * a guest parked with its clock ticking is either not being given a
+     * device's interrupt, or never asked the device for anything. The
+     * totals cannot tell those apart - `external_interrupts_taken`
+     * counts a timer tick and a completion the same. A histogram can:
+     * one or two vectors means only the clock is arriving, and whatever
+     * the guest is waiting for was never issued.
+     *
+     * 32 bits and not `volatile`, unlike the totals beside it. These are
+     * read from outside through the monitor as a block of physical
+     * memory, so a torn count costs a wrong bar on a histogram and
+     * nothing else; the totals are read one at a time and are load
+     * bearing for whether an interrupt was lost.
+     */
+    std::uint32_t external_interrupt_vector_counts[max_cpus][256]{};
+
     std::uint64_t vmread_benchmark_cycles{};
     bool vmread_benchmark_done{};
 
