@@ -1492,9 +1492,35 @@ bool hypervisor::on_guest_invept(std::size_t cpu,
     // is the note install_shadow_leaf already carries: "the table holds
     // only what is unconditionally true".
     //
-    // What would settle it: a ring that freezes on the guest's VMXOFF, so
-    // the exits leading to it survive. Everything read here was after the
-    // fact and after a reset. BACKLOG.md carries this.
+    // **Settled on 2026-08-13, and the answer is a hypercall.** Run again
+    // with the newer rings, the machine reset in a loop - six module
+    // loads in eighty seconds - and the second-level ring caught what
+    // preceded every one of them, which nothing had before:
+    //
+    //   vmcall rcx=0x1000c from the second-level guest, reflected, and
+    //   then vmcall rcx=0x1000c from the guest hypervisor, alternating
+    //   until the reset. Every entry identical.
+    //
+    // `0x000c` with a repeat count of one is
+    // `HvCallModifyVtlProtectionMask`
+    // - the second virtual trust level changing what the first may do to
+    // a page. So the state "the composition does not capture" has a name:
+    // it is a protection change in flight.
+    //
+    // Which gives the ordering that makes eager refresh unsound. It is
+    // only safe if a guest hypervisor always modifies its tables and
+    // *then* invalidates. Hyper-V does not: it invalidates around a VTL
+    // protection change, so a refresh driven by the INVEPT reinstalls
+    // from tables that are about to change, the entry is present, no
+    // fault ever occurs to pick the change up, and the level asking for
+    // the protection asks again for ever.
+    //
+    // The lazy path is not merely the conservative choice here, it is the
+    // correct one, and the cost it pays - about twenty-seven refaults per
+    // INVEPT, 38 to 53 per cent of all exits - is the price of not
+    // needing to know when the guest hypervisor writes its own tables.
+    // Making that cheap means watching those pages, which
+    // `watch_guest_page_writes` could do; it does not mean this switch.
     constexpr bool refresh_shadow_on_invept = false;
 
     if (single_context == type) {

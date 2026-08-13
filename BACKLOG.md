@@ -11669,6 +11669,39 @@ period. **It did not move the wall.** The guest stops at the same place
 either way, which is what rules the cost out as the cause rather than
 merely making it cheaper.
 
+### Settled: why the shadow EPT cannot be refreshed eagerly on INVEPT
+
+`refresh_shadow_on_invept` in `on_guest_invept` has been off since it was
+written, with a note saying the guest hypervisor stood down and that
+nothing read after the fact could say why. Run again on 2026-08-13 with
+the second-level ring, and it says why.
+
+The machine resets in a loop - six module loads in eighty seconds - and
+every reset is preceded by the same two entries alternating until it dies:
+
+    l2  vmcall rcx=0x1000c   reflected to the guest hypervisor
+    l1  vmcall rcx=0x1000c   the guest hypervisor asking in turn
+
+`0x000c` with a repeat count of one is **`HvCallModifyVtlProtectionMask`**:
+the second virtual trust level changing what the first may do to a page.
+So the "state the composition does not capture" was never mysterious - it
+is a protection change in flight.
+
+**The ordering is what makes eager refresh unsound.** Refreshing from the
+guest hypervisor's tables at INVEPT is only safe if it always modifies
+*then* invalidates. Hyper-V does not: it invalidates around a VTL
+protection change. The refresh reinstalls from tables that are about to
+change, the entry is then present, no fault ever occurs to pick the change
+up, and the level that asked for the protection asks again for ever.
+
+So the lazy path is the correct one and not merely the careful one. Its
+cost - about twenty-seven refaults per INVEPT, and EPT violations are 38
+to 53 per cent of all exits - is the price of not needing to know when the
+guest hypervisor writes its own tables. **Do not re-propose this switch.**
+Making the cost go away means watching those pages for writes, which
+`watch_guest_page_writes` already exists to do, and invalidating on the
+write rather than on the INVEPT.
+
 ### Where the nested boot actually stops
 
 Windows parks immediately after `HalpTimerInitializeHypervisorTimer`,
