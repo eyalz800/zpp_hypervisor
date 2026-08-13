@@ -11744,3 +11744,59 @@ it:**
 - the livelock is **not explained**. It is the first failure here that
   is visibly about the trust-level mechanism rather than near it, and it
   wants design attention rather than another flag.
+
+
+## The VTL return livelock, characterised
+
+The full exit ring inside it, which the working ring could not show
+because it filters:
+
+    vmresume  [l2-rip] rip=0xfffff8077ce90035
+    vmcall    [l1-rip] detail=0x12            HvCallVtlReturn
+    vmptrld   qual=0x188  x2
+    ... repeating, about 940 a second
+
+`0xfffff8077ce90035` is the hypercall page three bytes past the
+trust-level return stub at `+0x32` - the instruction after the `vmcall`.
+So the guest hypervisor resumes its guest immediately after that guest's
+return hypercall, and that guest issues the same hypercall again.
+
+**What is eliminated, each by its own reading:**
+
+- **the VMCS switch works.** `guest_current_vmcs` alternates between
+  `0x117a19000` and `0x117a1c000` across samples, so the guest hypervisor
+  is genuinely moving between two vmcs12s and this VMM's tracking follows.
+- **nested entries are not failing.** `nested_entry_error` and
+  `nested_entry_failed` are both zero, so the pair of `vmptrld`s is not a
+  retry after a refused entry.
+- **the loop is not driven by injected interrupts.** They arrive at
+  about 0.5 a second against a loop running at 940, with `pending` zero
+  and `taken` equal to `injected`.
+- **this VMM is not stealing exits the guest hypervisor asked for.**
+  `l0_wants_l2_exit` has no external-interrupt case, so those reflect
+  whenever pin12 asks.
+- **vmcs02 no longer inherits our external-interrupt exiting**, which was
+  a real defect and is fixed, and did not change this.
+
+**What that leaves.** The guest hypervisor loads one trust level's VMCS,
+loads the other's, and resumes the one that just asked to leave -
+endlessly, and by its own decision, since every mechanism it depends on
+from this VMM has now been measured working. Something it consults says
+"go back to VTL1", and what that is cannot be read from this side.
+
+**A misreading to avoid repeating.** One cycle in the ring appears
+without its `vmcall`, and that was briefly taken as evidence of an entry
+that did not happen. The ring collapses identical consecutive entries
+into a repeat marker, so an absent line is a display artefact and not a
+missing exit. **Do not infer from what the ring does not show.**
+
+**Where to go next**, in preference order:
+
+- Compare against the control at the same point. With nothing of ours
+  underneath, the same guest completes these transitions in well under a
+  second, and KVM's `kvm_nested_vmexit` tracepoint can show what its
+  cycle looks like - the difference in shape is the lead.
+- Read what the guest hypervisor writes into vmcs12 immediately before
+  each return, with `ZPP_NESTED_SHADOW_VMCS=OFF` so every write exits and
+  is recorded. That is the only view of its intent available here, and it
+  is the same instrument that made its earlier traffic visible.
