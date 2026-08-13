@@ -94,10 +94,6 @@ option(ZPP_INTERCEPT_APIC
     "Watch the guest's local APIC - the page in xAPIC mode, the interrupt command MSR in x2APIC mode. Off only makes sense with one processor, since the watch is what stops a start-up IPI handing a processor over unvirtualized."
     ON)
 
-option(ZPP_LAZY_GUEST_STATE
-    "Copy a second-level guest's state out of vmcs02 lazily instead of all 46 fields on every exit. Measured: save_l2_state is 198,018 cycles a call, a third of a second-level round trip, and it is exactly 46 VMREADs at ~4,300 cycles each - while the guest hypervisor reads only two of those fields more than a handful of times in a whole run. DOES NOT WORK - do not turn it on. Measured twice on the rig and the machine reset in a loop both times, 62 module loads then 22, against two with it off. One real defect was found and fixed between the attempts and was not enough; a second is unidentified. See the long comment on nested_vmx::lazy_guest_state for what has been eliminated and what to check first."
-    OFF)
-
 option(ZPP_NESTED_SHADOW_VMCS
     "Let the processor shadow a guest hypervisor's VMCS, so its vmreads and vmwrites do not exit. ON, with the field list cut to the measured hot set - measured at the wall, the handler holds 90.1% of the wall clock with the old 36 field list and 89.2% with the short one, so the guest gets a tenth more of the machine. Do NOT compare settings by cost per exit; the flag changes the exit count several fold and only handler share of wall clock survives that. Turn it OFF to read vmcs_field_use, which is blind to every field it shadows and is the only way to re-measure the hot set."
     ON)
@@ -187,7 +183,6 @@ ExternalProject_Add(hypervisor
         -DZPP_NESTED_TPR_SHADOW=${ZPP_NESTED_TPR_SHADOW}
         -DZPP_SLOW_EXITS=${ZPP_SLOW_EXITS}
         -DZPP_NESTED_SHADOW_VMCS=${ZPP_NESTED_SHADOW_VMCS}
-        -DZPP_LAZY_GUEST_STATE=${ZPP_LAZY_GUEST_STATE}
         -DZPP_INTERCEPT_APIC=${ZPP_INTERCEPT_APIC}
         -DZPP_VIRTUALIZE_APIC=${ZPP_VIRTUALIZE_APIC}
         -DZPP_PROFILE_L2=${ZPP_PROFILE_L2}
@@ -271,7 +266,6 @@ ExternalProject_Add(uefi_loader
         -DZPP_NESTED_TPR_SHADOW=${ZPP_NESTED_TPR_SHADOW}
         -DZPP_SLOW_EXITS=${ZPP_SLOW_EXITS}
         -DZPP_NESTED_SHADOW_VMCS=${ZPP_NESTED_SHADOW_VMCS}
-        -DZPP_LAZY_GUEST_STATE=${ZPP_LAZY_GUEST_STATE}
         -DZPP_INTERCEPT_APIC=${ZPP_INTERCEPT_APIC}
         -DZPP_VIRTUALIZE_APIC=${ZPP_VIRTUALIZE_APIC}
         -DZPP_PROFILE_L2=${ZPP_PROFILE_L2}

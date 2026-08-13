@@ -429,23 +429,6 @@ constexpr field host_state_fields[] = {
  * activity state, which is not a copy in either direction because vmcs02
  * is not entered in every state vmcs12 may name - see `enter_or_park_l2`.
  */
-/**
- * Whether a guest-state field is one the guest hypervisor reads often
- * enough to be worth copying out of vmcs02 on every exit.
- *
- * Measured on the rig, one run: these two are read 843,627 and 100,337
- * times, and every other field in the list below between one and four.
- * See `nested_vmx::lazy_guest_state` for what is done with that.
- */
-[[maybe_unused]] constexpr bool
-guest_state_read_often(arch::x86_64::vmx::vmcs::field at)
-{
-    using field = arch::x86_64::vmx::vmcs::field;
-
-    return (field::guest_cs_access_rights == at) ||
-           (field::guest_ss_access_rights == at);
-}
-
 constexpr field guest_state_fields[] = {
     field::guest_es_selector,
     field::guest_cs_selector,
@@ -1677,42 +1660,6 @@ std::expected<void, zpp::error> hypervisor::build_vmcs02(std::size_t cpu)
         for (auto guest_field : guest_state_fields) {
             auto value = shadow.read(guest_field);
 
-            // A field left cold takes neither branch below.
-            //
-            // It is owed only on the first entry for this second-level
-            // guest, or after the guest hypervisor wrote one. Otherwise
-            // vmcs02 still holds what the processor saved into it on the
-            // way out (SDM 28.3), which is the guest's own value and
-            // needs no help from here.
-            //
-            // **And when it is owed it must be written without consulting
-            // the cache**, which is the bug the first version of this
-            // had. `guest_state_cache` records what was last *written*,
-            // and for a cold field nothing reads vmcs02 back afterwards -
-            // so the processor's write-back moves vmcs02 out from under
-            // the cache and the two say different things. Letting a cold
-            // field reach the elision below then skips a write that was
-            // genuinely owed, on the strength of a comparison that has
-            // been meaningless since the first exit. Measured: the
-            // machine reset in a loop, 62 module loads, and the second
-            // level never got far enough to record one.
-            if constexpr (nested_vmx::lazy_guest_state) {
-                if (!guest_state_read_often(guest_field)) {
-                    auto owed = !fresh ||
-                                this->guest_state_cold_dirty[cpu] ||
-                                (this->guest_state_cold_written_for[cpu] !=
-                                 this->guest_current_vmcs[cpu]);
-
-                    if (owed) {
-                        vmcs.write(guest_field, value);
-                        this->guest_state_cache[cpu][index] = value;
-                    }
-
-                    ++index;
-                    continue;
-                }
-            }
-
             if (fresh && (this->guest_state_cache[cpu][index] == value)) {
                 this->guest_state_writes_skipped[cpu] += 1;
                 ++index;
@@ -1727,12 +1674,6 @@ std::expected<void, zpp::error> hypervisor::build_vmcs02(std::size_t cpu)
 
         // Consumed: the next elision needs its own save to justify it.
         this->guest_state_fresh[cpu] = false;
-
-        if constexpr (nested_vmx::lazy_guest_state) {
-            this->guest_state_cold_dirty[cpu] = false;
-            this->guest_state_cold_written_for[cpu] =
-                this->guest_current_vmcs[cpu];
-        }
     }
 
     // The activity state is decided, never copied.
@@ -2419,16 +2360,6 @@ void hypervisor::save_l2_state(std::size_t cpu)
     {
         std::size_t index{};
         for (auto guest_field : guest_state_fields) {
-            // Left behind on purpose, and safe only because
-            // `build_vmcs02` will not write it back either. See
-            // `nested_vmx::lazy_guest_state`.
-            if constexpr (nested_vmx::lazy_guest_state) {
-                if (!guest_state_read_often(guest_field)) {
-                    ++index;
-                    continue;
-                }
-            }
-
             auto value = vmcs.read(guest_field);
             shadow.write(guest_field, value);
 
@@ -2442,10 +2373,6 @@ void hypervisor::save_l2_state(std::size_t cpu)
         }
         if (cpu < max_cpus) {
             this->guest_state_fresh[cpu] = true;
-
-            if constexpr (nested_vmx::lazy_guest_state) {
-                this->guest_state_cold_stale[cpu] = true;
-            }
         }
     }
 
@@ -2940,66 +2867,6 @@ hypervisor::l2_entry_outcome hypervisor::enter_or_park_l2(std::size_t cpu)
     this->l2_start_up_waits[cpu] = this->l2_start_up_waits[cpu] + 1;
 
     return l2_entry_outcome::retry;
-}
-
-bool hypervisor::guest_state_left_cold(std::uint64_t encoding)
-{
-    // A linear scan of 46 entries, on a path that costs about 188 us
-    // anyway. See `nested_vmx::lazy_guest_state`.
-    for (auto at : guest_state_fields) {
-        if (static_cast<std::uint64_t>(at) == encoding) {
-            return !guest_state_read_often(at);
-        }
-    }
-
-    return false;
-}
-
-void hypervisor::refresh_cold_guest_state(std::size_t cpu)
-{
-    if constexpr (!nested_vmx::lazy_guest_state) {
-        return;
-    } else {
-        if ((cpu >= max_cpus) || !this->guest_state_cold_stale[cpu]) {
-            return;
-        }
-
-        // The value wanted is in vmcs02 and vmcs01 is what is current, so
-        // there is no reading it without switching and switching back.
-        // Both halves are checked: failing to *reach* vmcs02 leaves
-        // vmcs01 current and the stale copy in place, which is a wrong
-        // answer and is why the flag's comment calls this the hazard -
-        // but failing to get *back* leaves no guest hypervisor to return
-        // to at all, which is the same trap `reflect_l2_exit` takes.
-        auto own = own_vmcs_region_physical();
-        if (0 == own) {
-            return;
-        }
-
-        if (arch::x86_64::vmx::vmptrld(&this->vmcs02_physical[cpu])) {
-            return;
-        }
-
-        auto & shadow = this->guest_vmcs12[cpu];
-        std::size_t index{};
-
-        for (auto guest_field : guest_state_fields) {
-            if (!guest_state_read_often(guest_field)) {
-                auto value = this->vmcs.read(guest_field);
-                shadow.write(guest_field, value);
-                this->guest_state_cache[cpu][index] = value;
-            }
-            ++index;
-        }
-
-        if (arch::x86_64::vmx::vmptrld(&own)) {
-            __builtin_trap();
-        }
-
-        this->guest_state_cold_stale[cpu] = false;
-        this->guest_state_cold_refreshes[cpu] =
-            this->guest_state_cold_refreshes[cpu] + 1;
-    }
 }
 
 void hypervisor::reflect_l2_exit(std::size_t cpu,

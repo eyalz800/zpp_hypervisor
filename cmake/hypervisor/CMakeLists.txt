@@ -17,10 +17,6 @@ option(ZPP_INTERCEPT_APIC
     "Watch the guest's local APIC. Off only makes sense with one processor."
     ON)
 
-option(ZPP_LAZY_GUEST_STATE
-    "Copy a second-level guest's state out of vmcs02 lazily. See the root CMakeLists."
-    OFF)
-
 option(ZPP_NESTED_SHADOW_VMCS
     "Let the processor shadow a guest hypervisor's VMCS, so its vmreads and vmwrites do not exit. ON: 88.0% -> 83.2% of wall clock in the handler, but only with the trimmed field list. See the root CMakeLists."
     ON)
@@ -154,7 +150,6 @@ target_compile_options(zpp_hypervisor PRIVATE
     -DZPP_REQUEUE_INTERRUPTED_EVENTS=$<BOOL:${ZPP_REQUEUE_INTERRUPTED_EVENTS}>
     -DZPP_NESTED_TPR_SHADOW=$<BOOL:${ZPP_NESTED_TPR_SHADOW}>
     -DZPP_NESTED_SHADOW_VMCS=$<BOOL:${ZPP_NESTED_SHADOW_VMCS}>
-    -DZPP_LAZY_GUEST_STATE=$<BOOL:${ZPP_LAZY_GUEST_STATE}>
     -DZPP_INTERCEPT_APIC=$<BOOL:${ZPP_INTERCEPT_APIC}>
     -DZPP_VIRTUALIZE_APIC=$<BOOL:${ZPP_VIRTUALIZE_APIC}>
     -DZPP_PROFILE_L2=$<BOOL:${ZPP_PROFILE_L2}>

@@ -11844,12 +11844,33 @@ That covers up to 24 of the 46 fields: base, limit and access rights for
 each of the eight segment registers. Leaving those unwritten hands the
 next VM entry whatever the processor happened to leave behind.
 
-So a working version of this cannot leave a segment's base, limit or
-access rights cold - it can only leave cold the fields SDM 30.3.1 says are
-saved unconditionally, which are CR0, CR3, CR4 and the three
-IA32_SYSENTER MSRs, plus the selectors and the descriptor-table registers.
-That is about twenty fields rather than forty-four, so roughly half the
-win, which is still worth having.
+So a working version cannot leave a segment's base, limit or access
+rights cold. Counting what is left:
+
+| | fields |
+|---|---|
+| segment base, limit, access rights - undefined when unusable | 24 |
+| conditional on a VM-exit control - IA32_DEBUGCTL, four PDPTEs, pending debug exceptions | 6 |
+| **safe to leave cold** - CR3, three IA32_SYSENTER MSRs, eight selectors, GDTR and IDTR base and limit | **16** |
+
+GDTR and IDTR are explicitly unconditional - SDM 30.3.2, "the contents of
+the GDTR and IDTR registers are saved into the corresponding base-address
+and limit fields" - and CR3 and the SYSENTER MSRs are in 30.3.1's
+unconditional list. The selectors are counted safe because 30.3.2
+enumerates what becomes undefined and does not name them; that is an
+argument from silence and should be checked before being relied on.
+
+Sixteen of forty-six is 68,876 cycles of `save_l2_state`'s 198,018, which
+is 3.3% of the handler: **89% of the machine to 85.7%, and the guest's
+share from 11% to 14.3%.** Real, and about a third of what the naive count
+promised.
+
+**The implementation has been removed.** Eighty lines behind a switch that
+resets the machine, for a third of the projected win, is worse than a note
+- and the note now contains everything the code did not: the safe field
+list, the two SDM citations that bound it, and the two flaws that killed
+the first attempt. Anyone taking it up again starts from the answer rather
+than from the measurement that misled.
 
 Two further candidates remain unexamined and should be checked before
 coding: whether `guest_current_vmcs` is updated before or after the guard
