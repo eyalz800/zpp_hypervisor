@@ -11053,3 +11053,44 @@ only progress toward a faster test rig, and it carries the risk of a
 field turning out to be hot in a phase the measurement did not cover.
 The trim is written up here so it can be done deliberately when the
 bare-metal question has been answered, and not before.
+
+
+## The 15% does not move the boot
+
+Tested rather than assumed, and it is the test that should have come
+before any of the optimisation was reported as progress.
+
+With all three eliminations in - handler at 265,355 cycles an exit
+against 312,000 - the single-processor nested boot was run again and
+watched for the only thing that counts:
+
+    working counter   94,572, frozen across three samples
+    l2_entries        177,690 -> 253,952 -> 330,233, climbing
+    user mode         never
+
+**Same wall, same place.** The guest stops doing work at the same point
+it did before, and fifteen per cent of the handler bought none of it.
+
+**Two readings, and the second is the uncomfortable one.**
+
+If the failure is throughput, this is exactly what fifteen per cent
+should look like: the clock handler needs somewhere between ten and
+forty milliseconds against a tick of 10.4, and shaving a seventh off
+does not cross that. Consistent, and it argues for the bare-metal test
+where the same work is seventy times cheaper.
+
+But it is *also* what a hard functional block looks like - something the
+guest waits for that never arrives, at which point speed is irrelevant
+and every microsecond spent here was spent on the wrong question. The
+two cannot be told apart by making the machine somewhat faster, which is
+the whole problem with optimisation as a diagnostic.
+
+**What would tell them apart**: the bare-metal boot, where the cost
+falls by a factor of seventy rather than a seventh. If the guest still
+stops at the same working count with a handler costing two microseconds
+instead of 136, throughput was never the cause and this entire line of
+work - measured, documented and committed - was an answer to a question
+nobody asked.
+
+That is worth knowing before spending another night on the remaining
+blocks.
