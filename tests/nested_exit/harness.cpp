@@ -388,6 +388,21 @@ std::expected<void, zpp::error> hypervisor::read_guest_memory(
     return std::unexpected(zpp::error{error::guest_address_not_mapped});
 }
 
+/**
+ * Refuses, for the same reason `translate_guest_linear` above does.
+ *
+ * Lives in nested_ept.cpp, which this test does not compile.
+ * `record_profile_context` is its only caller inside nested_entry.cpp and
+ * it reaches that call only after `translate_guest_linear` has answered -
+ * which here it does not - so the body is unreachable in this harness and
+ * exists to satisfy the link.
+ */
+std::expected<std::uint64_t, zpp::error>
+hypervisor::l2_physical_to_l1(std::size_t, std::uint64_t)
+{
+    return std::unexpected(zpp::error{error::guest_address_not_mapped});
+}
+
 arch::x86_64::vmx::ept_walk_result
 hypervisor::shadow_ept_lookup(std::size_t, std::uint64_t guest_physical)
 {
@@ -4692,6 +4707,18 @@ static void test_the_rest_of_vmcs02()
                                      0x5);
         hv().vmcs12_controls_captured = 0;
 
+        // And the *other* cache, which the two cases writing vmcs01
+        // fields after a build are the only ones here that need. Since
+        // the VMREAD reduction, `build_vmcs02` reads this VMM's own
+        // controls and the two guest/host masks once per processor and
+        // then answers from `host_controls_cache`. That is sound in
+        // production - `setup_vmcs` writes them before any guest runs
+        // and nothing writes them again, checked by grep for
+        // `exception_bitmap` and `cr0_guest_host_mask` across the
+        // hypervisor sources - but it means a test that writes one after
+        // a build has to say so.
+        hv().host_state_cached[cpu] = false;
+
         check(hv().build_vmcs02(cpu).has_value(),
               "the bitmap case builds");
         check((vector_debug | vector_page_fault) ==
@@ -4736,6 +4763,7 @@ static void test_the_rest_of_vmcs02()
         shadow.write(field::guest_cr4, 0x20);
         shadow.write(field::cr4_read_shadow, cr4_smep);
         hv().vmcs12_controls_captured = 0;
+        hv().host_state_cached[cpu] = false;
 
         check(hv().build_vmcs02(cpu).has_value(),
               "the CR mask case builds");
