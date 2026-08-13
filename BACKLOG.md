@@ -11715,6 +11715,32 @@ one series carries reference-counter reads, timer deadlines and the
 exactly those steps. `0x4002f` is 262,191, which is where the largest
 "backwards" jumps in the ring come from.
 
+**The sites, as RVAs into ntoskrnl, so they can be named.** Derived from
+the run whose logged image base and instruction pointers share a prefix,
+then cross-checked against a second run with a different ASLR base: the
+derived base there is 2 MB aligned and the synthetic-ICR RVA comes out
+identical, `0x042890b`, from both.
+
+| RVA | site |
+|---|---|
+| `0x06fb520` | **the thread's start address** - the one worth naming first |
+| `0x03a597c` | polls the reference counter |
+| `0x03a57f8` | arms the synthetic timer, now + 2.5 ms or + 1 ms |
+| `0x042890b` | writes the synthetic interrupt command, `0x4002f` |
+| `0x06a768c` | writes the synthetic end of interrupt |
+| `0x03100e4` | writes the synthetic end of message |
+
+The poll and the arm are `0x184` bytes apart, so they are the same
+routine - a stall-and-poll helper. Resolving `0x06fb520` against this
+Windows build's symbols names the thread, and that is the cheapest route
+to the condition it retries on.
+
+Note the log line "second-level guest kernel image at ..." is **not** the
+image these belong to in every run: it records the first second level
+entered, which is the guest hypervisor's own trust level, and in one run
+read `0xfffff805ed200000` while every address above was `0xfffff804a0...`.
+Do not derive a base from it without checking the prefixes agree.
+
 This is the first reading that says what the guest is *waiting for*
 rather than what it is spending time on, and it moves the question again:
 not "why is it slow" and not "why does it never lower its priority", but
