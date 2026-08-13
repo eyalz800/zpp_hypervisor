@@ -5037,6 +5037,12 @@ void hypervisor::record_exit(arch::x86_64::vmx::exit_reason reason,
 
     if ((rdmsr == basic) || (wrmsr == basic)) {
         recorded.detail = context.rcx & low_half_mask;
+
+        // EDX:EAX either way - the answer on a read, the value supplied
+        // on a write. See `exit_trace_entry::detail_value`.
+        recorded.detail_value =
+            ((context.rdx & low_half_mask) << high_half_shift) |
+            (context.rax & low_half_mask);
     } else if (vmcall == basic) {
         recorded.detail =
             ((context.rax & low_half_mask) << high_half_shift) |
@@ -5083,7 +5089,8 @@ void hypervisor::record_exit(arch::x86_64::vmx::exit_reason reason,
             (previous.cs_selector == recorded.cs_selector) &&
             (previous.rip == recorded.rip) &&
             (previous.guest_physical == recorded.guest_physical) &&
-            (previous.detail == recorded.detail)) {
+            (previous.detail == recorded.detail) &&
+            (previous.detail_value == recorded.detail_value)) {
             ++previous.repeated;
             --count;
             return;
@@ -5510,10 +5517,9 @@ void hypervisor::setup_vmcs(std::size_t cpu,
     vmcs.pin_based_vm_execution_controls(arch::x86_64::vmx::adjust_msr(
         this->cached_vmx_msr(vmx_msr::true_pin_based_controls),
         arch::x86_64::vmx::vm_execution_controls::pin::nmi_exiting |
-            (virtualize_apic
-                 ? arch::x86_64::vmx::vm_execution_controls::pin::
-                       external_interrupt_exiting
-                 : 0)));
+            (virtualize_apic ? arch::x86_64::vmx::vm_execution_controls::
+                                   pin::external_interrupt_exiting
+                             : 0)));
 
     // Trapping MONITOR and MWAIT, which is **off**, and the reason is a
     // measurement rather than a preference.
@@ -5627,10 +5633,9 @@ void hypervisor::setup_vmcs(std::size_t cpu,
             // Without this the exit reports no vector and leaves the
             // interrupt pending at the controller, so there is nothing
             // to inject. SDM 30.2.
-            (virtualize_apic
-                 ? arch::x86_64::vmx::vm_exit_controls::
-                       acknowledge_interrupt_on_exit
-                 : 0)));
+            (virtualize_apic ? arch::x86_64::vmx::vm_exit_controls::
+                                   acknowledge_interrupt_on_exit
+                             : 0)));
 
     // The mirror on entry. apply_start_up clears ia_32e_mode_guest
     // again, since it has to agree with CR0.PG or entry fails.

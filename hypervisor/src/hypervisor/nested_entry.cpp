@@ -2842,6 +2842,7 @@ void hypervisor::reflect_l2_exit(std::size_t cpu,
                                   ? vmcs.guest_physical_address()
                                   : this->l2_exit_detail[cpu],
             .repeated = 1,
+            .detail_value = this->l2_exit_detail_value[cpu],
             .detail = this->l2_entries[cpu],
         };
 
@@ -2896,6 +2897,7 @@ void hypervisor::reflect_l2_exit(std::size_t cpu,
         // Cleared, so an exit that carries no register number shows zero
         // rather than the last one that did.
         this->l2_exit_detail[cpu] = 0;
+        this->l2_exit_detail_value[cpu] = 0;
     }
 
     // The interrupted event becomes the guest hypervisor's, not ours.
@@ -4578,6 +4580,17 @@ hypervisor::on_l2_exit(std::size_t cpu,
     // guest's registers are still the ones in hand.
     if (cpu < max_cpus) {
         this->l2_exit_detail[cpu] = context.rcx;
+
+        // And what went through that register, for the MSR reasons. See
+        // `exit_trace_entry::detail_value`: the reason and the register
+        // together cannot tell a clock being waited on from a clock that
+        // stopped, and the value can.
+        constexpr std::uint64_t low_half_mask = 0xffffffff;
+        constexpr std::uint64_t high_half_shift = 32;
+
+        this->l2_exit_detail_value[cpu] =
+            ((context.rdx & low_half_mask) << high_half_shift) |
+            (context.rax & low_half_mask);
 
         // The vector of an external interrupt on its way to the guest
         // hypervisor. Available only because "acknowledge interrupt on

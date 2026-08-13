@@ -3749,6 +3749,28 @@ private:
         std::uint64_t repeated{};
 
         /**
+         * The *value* behind `detail`, for the two MSR reasons - what was
+         * written, or what was answered. Zero for every other reason.
+         *
+         * `detail` names the register and this says what went through it,
+         * and the difference is the difference between "the guest is
+         * asking about the clock" and "the clock is wrong". A guest
+         * parked in a loop that reads the reference count and re-arms a
+         * one-shot timer looks identical either way from the reason
+         * alone: a deadline that advances is a clock being waited on, and
+         * a deadline that does not is a clock that stopped. Four hundred
+         * thousand exits were read as the first when only this can tell
+         * them apart.
+         *
+         * Sampled from the context after handling, like `detail`, so on
+         * RDMSR it is the answer the guest is about to be resumed with -
+         * EDX:EAX recombined, since the halves are separate registers -
+         * and on WRMSR the value the guest supplied, which nothing on
+         * that path rewrites.
+         */
+        std::uint64_t detail_value{};
+
+        /**
          * What the guest asked for, where the exit reason alone does not
          * say and the guest's own registers do. Zero for every other
          * reason.
@@ -5193,6 +5215,7 @@ private:
      * deadline it is never given.
      */
     std::uint64_t l2_exit_detail[max_cpus]{};
+    std::uint64_t l2_exit_detail_value[max_cpus]{};
     /**
      * @}
      */

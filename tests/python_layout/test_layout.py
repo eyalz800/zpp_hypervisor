@@ -147,7 +147,7 @@ class ExitTraceEntry(unittest.TestCase):
             "size")
 
     def test_unpacked_names_match_declaration_order(self):
-        """The 8-tuple encodes member *order*, which no size check sees.
+        """The tuple encodes member *order*, which no size check sees.
 
         Swapping two uint64_t members changes nothing about the struct's
         size, so a `sizeof` check passes while every printed column is
@@ -157,7 +157,8 @@ class ExitTraceEntry(unittest.TestCase):
 
         # The names the script unpacks into, in the order it unpacks them.
         match = re.search(
-            r"reason, qual, activity, cs, rip, phys, repeat, detail, ",
+            r"reason, qual, activity, cs, rip, phys, repeat, value, "
+            r"\\\n\s*detail, rip_owner",
             self.script)
         self.assertIsNotNone(
             match,
@@ -166,13 +167,13 @@ class ExitTraceEntry(unittest.TestCase):
 
         expected = ["reason", "qualification", "activity_state",
                     "cs_selector", "rip", "guest_physical", "repeated",
-                    "detail", "rip_owner"]
+                    "detail_value", "detail", "rip_owner"]
         self.assertEqual(
             members, expected,
             "exit_trace_entry's members changed order or name. "
             "rig-dump-state.py unpacks them positionally as "
-            "(reason, qual, activity, cs, rip, phys, repeat, detail, "
-            "rip_owner), so "
+            "(reason, qual, activity, cs, rip, phys, repeat, value, "
+            "detail, rip_owner), so "
             "every column it prints is now attributed to the wrong field "
             "- confidently, and with no error.")
 

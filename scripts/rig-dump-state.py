@@ -488,10 +488,12 @@ def main():
         for i in range(start, count):
             slot = i % ring
             a = instance + off["exit_trace"] + (cpu * ring + slot) * entry_size
-            reason, qual, activity, cs, rip, phys, repeat, detail, \
-                rip_owner = (words.get(a + 8 * k, 0) for k in range(9))
+            reason, qual, activity, cs, rip, phys, repeat, value, \
+                detail, rip_owner = (words.get(a + 8 * k, 0)
+                                     for k in range(10))
             extra = f" phys=0x{phys:x}" if phys else ""
             extra += f" detail=0x{detail:x}" if detail else ""
+            extra += f" value=0x{value:x}" if value else ""
             extra += RIP_OWNER.get(rip_owner, "")
             times = f" x{repeat}" if repeat > 1 else ""
             print(f"  [{i:6d}] {name_reason(reason):<16} "
@@ -522,11 +524,13 @@ def main():
             slot = i % capacity
             a = (instance + off[member]
                  + (cpu * capacity + slot) * entry_size)
-            reason, qual, activity, cs, rip, phys, repeat, detail, \
-                rip_owner = (got.get(a + 8 * k, 0) for k in range(9))
+            reason, qual, activity, cs, rip, phys, repeat, value, \
+                detail, rip_owner = (got.get(a + 8 * k, 0)
+                                     for k in range(10))
             times = f" x{repeat}" if repeat > 1 else ""
             extra = f" phys=0x{phys:x}" if phys else ""
             extra += f" detail=0x{detail:x}" if detail else ""
+            extra += f" value=0x{value:x}" if value else ""
             extra += RIP_OWNER.get(rip_owner, "")
             print(f"  [{i:6d}] {name_reason(reason):<16} "
                   f"qual=0x{qual:<12x} {ACTIVITY.get(activity, activity)} "
