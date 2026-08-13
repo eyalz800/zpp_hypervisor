@@ -11760,6 +11760,61 @@ the TSC frequency by a route this VMM does not answer; or that a nested
 Hyper-V simply never publishes one, in which case the 42% is structural
 and the only way past it is fewer exits per read rather than fewer reads.
 
+### What a second-level round trip costs, and the trade that blocks it
+
+Per-phase, from `phase_cycles` / `phase_calls` on the rig. **The table
+double counts and it is easy to misread**: `reflect_l2_exit` calls
+`save_l2_state`, and their call counts are identical at 801,691, so the
+first figure contains the second.
+
+| phase | cycles/call | of handler |
+|---|---|---|
+| `reflect_l2_exit` (includes the save) | 386,544 | 18.5% |
+| ...of which `save_l2_state` | 198,018 | 9.5% |
+| `build_vmcs02` | 231,378 | 11.1% |
+
+So a second-level round trip is about 618,000 cycles, near 247 us, of
+which `save_l2_state` is a third. That third is exactly 46 VMREADs -
+`guest_state_fields` has 46 entries and 46 x ~4,300 cycles is 198,000,
+which is the measured number to three figures.
+
+**The obvious cut does not work, and why is the interesting part.**
+Reading 46 fields out of vmcs02 on every exit looks like pure waste when
+the guest hypervisor demonstrably reads six of them. But the read-back is
+what feeds `guest_state_cache`, and that cache is what lets
+`build_vmcs02` *elide* writes: the processor writes guest state back into
+the current VMCS on every VM exit (SDM 28.3), so without reading it there
+is no way to know a field already holds the right value. Stop reading and
+every entry must write all 46 instead. The cost moves, it does not go.
+
+**The design that breaks the trade is a dirty set, and the measurement
+says it would be tiny.** Drive vmcs02's guest-state writes from what the
+guest hypervisor actually *changed* rather than from a full copy:
+
+- Its VMWRITEs are 99.98% in five fields - guest RIP, interruptibility,
+  TPR threshold, primary controls, entry interruption. Anything not
+  shadowed exits when written, so those are visible for free.
+- The eleven shadowed fields are copied both ways already, so a diff
+  there costs nothing extra.
+- Everything else it never writes, and the processor's own write-back
+  already left vmcs02 correct, so neither a read nor a write is owed.
+
+KVM works this way - `prepare_vmcs02_rare` runs only on
+`nested.dirty_vmcs12` rather than on every entry.
+
+The one hard part is the guest hypervisor reading a *cold* field. Those
+exit, so they can be answered on demand, but vmcs01 is current when they
+do and the value lives in vmcs02 - so it costs a VMPTRLD either side of
+the VMREAD. Rare by measurement (the whole cold tail is a few hundred
+reads per run against 46 x 800,000 eager ones) and it must be *correct*
+rather than rare: a stale answer to a guest hypervisor reading its own
+guest's state is silent corruption, which is why this is written down
+rather than attempted at the end of a long session.
+
+Worth, if it works: `save_l2_state` from 46 reads to about ten takes the
+handler from 89% of the machine toward 82%, which is the guest's share
+going from 11% to 18% - the largest single change identified.
+
 ### Where the exits actually go at the wall
 
 Cumulative `exit_reason_counts` describe the boot, not the wall, and the
