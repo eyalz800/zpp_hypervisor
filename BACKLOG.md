@@ -11603,6 +11603,18 @@ declaration said "nothing here has ever measured that".
 | handler cycles per exit | 388,263 | 177,005 |
 | handler share of wall clock | 88.0% | 82.5% |
 
+**Read all of these knowing what the rig is.** `~/vm/boot-zpp.sh` runs
+`qemu-system-x86_64-new -cpu host,kvm=on`, so this VMM is not on hardware:
+it is KVM's guest. The stack is KVM -> zpp -> Hyper-V -> Windows, and
+every VMX instruction this VMM executes and every exit it takes is
+emulated by KVM underneath it. That is what 470,000 cycles - 188 us - per
+exit means, and it is why no configuration tried moves the handler's share
+by more than a percentage point: the cost is almost all in the layer
+below.
+
+It also means "KVM boots this without us" is not the comparison it looks
+like. That is two levels of nesting against three.
+
 **Between 82 and 88 per cent of the machine is this VMM's own code.** At
 the measured 1.76 us per VMCS access that is about 88 accesses per exit
 with shadowing on, every one a VMX instruction trapping to the layer
