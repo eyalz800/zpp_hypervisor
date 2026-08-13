@@ -10969,3 +10969,53 @@ of whoever writes it.
 **Do it after the bare-metal boot, not before.** If the failure is an
 artefact of running under KVM, none of this is on the path to booting
 Windows; it only makes the test rig faster.
+
+
+## Where the nested transition's time goes, complete
+
+Six phases instrumented, single-processor nested boot, 654,815 exits at
+265,355 cycles each. **The phases overlap** - `reflect_l2_exit` calls
+`save_l2_state`, and both copies sit inside their callers - so these are
+nested shares, not a partition:
+
+    reflect_l2_exit    22%   417,883 cyc/call
+      save_l2_state    10%   200,509      (inside it)
+      copy_to_shadow    2%    32,475      (inside it)
+      load_l1_host_state       - 36 VMCS accesses, 4 MSR, one loop
+    build_vmcs02       15%   294,641 cyc/call
+    copy_from_shadow    8%   108,163 cyc/call
+    shadow_ept_ptr      0%       878 cyc/call
+
+An earlier reading called 41% "unaccounted"; that was double counting,
+because `reflect_l2_exit` already contained `save_l2_state`.
+
+**Three eliminations landed tonight, each measured before and after:**
+
+    host state read and written once, not per entry   build 525k -> 390k
+    guest-state writes elided, 92% skipped            build 390k -> 277k
+    shadow copy writes elided, 85% skipped            (small, kept)
+
+    whole handler                                     312k -> 265k, 15%
+
+**What is left and why it is harder.** `load_l1_host_state` is the
+largest remaining block and it does not yield to the same trick. It
+writes vmcs12's host-state area into vmcs01's guest fields, and the
+processor overwrites those fields every time the guest hypervisor exits -
+so a cache of what this VMM last wrote is wrong for exactly the reason it
+was wrong for the guest state, and the fix that worked there does not
+apply, because nothing reads vmcs01's guest fields back on the way in.
+Knowing what is already there costs a VMREAD, which is the price of the
+write it would save.
+
+`copy_shadow_to_vmcs12` at 108,163 cycles is the other block, and it
+cannot be elided at all: the guest hypervisor may have written any of the
+twenty-six fields without exiting, so they must be read to be known. The
+only lever there is **shadowing fewer fields**, which trades these reads
+for exits on whatever is unshadowed - worth doing only with a measurement
+of which fields the guest hypervisor actually touches, which
+`vmcs_field_use` can provide.
+
+**Fifteen per cent is not five hundred.** The conclusion from the
+measurements above stands: this is the cost of being KVM's guest, every
+instruction of it, and the question worth answering first is whether the
+failure exists on the metal at all.
