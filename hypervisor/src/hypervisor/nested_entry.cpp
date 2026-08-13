@@ -1187,8 +1187,31 @@ std::expected<void, zpp::error> hypervisor::build_vmcs02(std::size_t cpu)
     // hypervisor, and this VMM arms it to drive its own log - so a guest
     // hypervisor's copy of the bit means nothing and its exits are not
     // reflected.
+    // External-interrupt exiting is masked out for the same reason the
+    // preemption timer is: with `ZPP_VIRTUALIZE_APIC` on it is **this
+    // VMM's**, set in vmcs01 so that interrupts can be taken and injected
+    // into the guest hypervisor. A guest hypervisor's guest must not
+    // inherit it.
+    //
+    // Inheriting it livelocks, and did: with the bit in vmcs02 every
+    // external interrupt arriving while a second-level guest runs exits
+    // here, `l1_wants_l2_exit` declines it because pin12 never asked, and
+    // the interrupt is deferred rather than delivered - so it is still
+    // pending, and the entry that follows exits again immediately.
+    // Measured on the rig as a solid run of one hypercall from one
+    // address, two hundred of two hundred working exits.
+    //
+    // The tree predicted this. The comment on the acknowledge-interrupt
+    // composition below says "this VMM never sets that control itself...
+    // If pin01 ever sets it, this needs a third: and not pin01's." This
+    // is that third condition.
     auto pin02 =
-        (pin01 | pin12) & ~(pin_preemption_timer | pin_posted_interrupts);
+        (pin01 | pin12) & ~(pin_preemption_timer | pin_posted_interrupts |
+                            pin_external_interrupt);
+
+    // Put back only where the guest hypervisor asked for it, which is
+    // what makes the exit its own to handle.
+    pin02 |= pin12 & pin_external_interrupt;
 
     // The profiler's clock, which is the timer put back. See
     // `nested_vmx::profile_l2` for why this is the only instrument that

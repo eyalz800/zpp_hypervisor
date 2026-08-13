@@ -11701,3 +11701,46 @@ straight back into VTL1, or the return does not take effect. That is a
 new and much narrower question than the one before it, and it is the
 first failure in this investigation that is visibly *about* the trust
 level mechanism rather than merely near it.
+
+
+## vmcs02 must not inherit this VMM's external-interrupt exiting
+
+With `ZPP_VIRTUALIZE_APIC` on, `external_interrupt_exiting` is set in
+vmcs01 so interrupts can be taken and injected. `build_vmcs02` composed
+`pin02 = (pin01 | pin12)` less the preemption timer and posted
+interrupts, so **a second-level guest inherited it** - every interrupt
+arriving while one ran exited here, `l1_wants_l2_exit` declined it
+because pin12 had not asked, and it was deferred rather than delivered,
+leaving it pending for the next entry to exit on again.
+
+Masked out and put back only from pin12, exactly as the preemption timer
+is, since with the flag on the control is this VMM's own.
+
+**The tree predicted the need.** The comment on the acknowledge-interrupt
+composition already said: "this VMM never sets that control itself... If
+pin01 ever sets it, this needs a third: and not pin01's." Setting it
+without adding that condition is what happened.
+
+**It is the right change and it did not fix the livelock.** Measured
+after it: the guest still ends in a solid run of one hypercall from one
+address - 150 of 150 working exits, `HvCallVtlReturn` from the hypercall
+page stub - and `external_interrupts_deferred_in_l2` is still non-zero at
+179, so second-level external-interrupt exits still occur through the
+path pin12 legitimately asks for.
+
+**State of the APIC work, so the next person does not have to re-derive
+it:**
+
+- the RIP-advance defect was real and is fixed; the firmware survives
+  and `taken` equals `injected` with nothing dropped and nothing left
+  pending;
+- the clock-polling wall at 93,584-94,572, which stood across five runs
+  and four builds, is **gone**;
+- what replaces it is a **VTL return livelock**: VTL1 issues
+  `HvCallVtlReturn`, two VMCS switches follow, and it issues it again,
+  about 940 a second, with the guest no longer reading the clock at all;
+- `l0_wants_l2_exit` has no external-interrupt case, so this VMM is not
+  taking exits the guest hypervisor asked for;
+- the livelock is **not explained**. It is the first failure here that
+  is visibly about the trust-level mechanism rather than near it, and it
+  wants design attention rather than another flag.
