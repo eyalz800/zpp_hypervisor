@@ -1,7 +1,9 @@
+#include "zpp/arch/x86_64/asm.h"
 #include "zpp/arch/x86_64/vmx/asm.h"
 #include "zpp/diag/log.h"
 #include "zpp/hypervisor/hypervisor.h"
 #include "zpp/hypervisor/nested_vmx.h"
+#include "zpp/scope_exit.h"
 #include <cstdint>
 
 /**
@@ -253,6 +255,16 @@ void hypervisor::set_vmcs_shadowing(std::size_t cpu, bool enabled)
  */
 void hypervisor::copy_vmcs12_to_shadow(std::size_t cpu)
 {
+    // Phase timing; see `phase_cycles`.
+    auto copy_start = arch::x86_64::rdtsc();
+    auto copy_stop = zpp::scope_exit([&] {
+        if (cpu < max_cpus) {
+            this->phase_cycles[cpu][4] +=
+                arch::x86_64::rdtsc() - copy_start;
+            this->phase_calls[cpu][4] += 1;
+        }
+    });
+
     if constexpr (!nested_vmx::enabled) {
         return;
     } else {
@@ -323,6 +335,16 @@ void hypervisor::copy_vmcs12_to_shadow(std::size_t cpu)
  */
 void hypervisor::copy_shadow_to_vmcs12(std::size_t cpu)
 {
+    // Phase timing; see `phase_cycles`.
+    auto copy_start = arch::x86_64::rdtsc();
+    auto copy_stop = zpp::scope_exit([&] {
+        if (cpu < max_cpus) {
+            this->phase_cycles[cpu][5] +=
+                arch::x86_64::rdtsc() - copy_start;
+            this->phase_calls[cpu][5] += 1;
+        }
+    });
+
     if constexpr (!nested_vmx::enabled) {
         return;
     } else {

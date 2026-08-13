@@ -6689,7 +6689,14 @@ private:
      * 0.2%, which retires the page tables as a suspect.
      *
      * Indices: 0 save_l2_state, 1 reflect_l2_exit, 2 build_vmcs02,
-     * 3 shadow_ept_pointer_for. Anything left over is the rest.
+     * 3 shadow_ept_pointer_for, 4 copy_vmcs12_to_shadow,
+     * 5 copy_shadow_to_vmcs12. Anything left over is the rest.
+     *
+     * The last two are inside the first two and are broken out because
+     * reflect_l2_exit is the largest phase at 409,739 cycles a call, and
+     * the copies are the only thing in it that executes instructions
+     * which can never be shadowed - vmptrst, vmptrld and vmclear always
+     * trap to the layer below.
      * @{
      */
     /**
@@ -6778,7 +6785,7 @@ private:
     std::uint64_t vmread_benchmark_cycles{};
     bool vmread_benchmark_done{};
 
-    static constexpr std::size_t phase_count = 4;
+    static constexpr std::size_t phase_count = 6;
     std::uint64_t phase_cycles[max_cpus][phase_count]{};
     std::uint64_t phase_calls[max_cpus][phase_count]{};
     /** @} */
