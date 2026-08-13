@@ -11722,7 +11722,38 @@ exit on the machine, spent reading the clock. At 71 exits per tick and
 guest never finishes a tick, never lowers its task priority below `0xd0`,
 and never runs the deferred procedure call it asks for.
 
-**5. Why it leaves the page empty is open.** With the retraction above,
+**5a. Two more candidates eliminated, and what is left is uncomfortable.**
+
+- **The time-stamp counter is invariant and the guest can see it.**
+  CPUID `0x80000007` passes through this VMM untouched, and the rig's host
+  reports `constant_tsc` and `nonstop_tsc` on an i7-8565U. So "it does not
+  believe the counter is invariant" is not the reason.
+- **The guest hypervisor believes it is on bare metal.** The
+  hypervisor-present bit, CPUID leaf 1 ECX bit 31, is *cleared* here -
+  `exit_dispatch.cpp` sets it only under `announce_hypervisor` or
+  `pass_through_hypervisor_interface`, and both are false. So "it declines
+  because it knows it is nested" is not the reason either.
+
+What that leaves is the least convenient explanation and the one that
+fits everything else measured: **a hypervisor that believes it is on bare
+metal calibrates the counter as if it were, and every access it makes to
+calibrate costs 188 us because it is not.** A calibration whose samples
+are three orders of magnitude out is a calibration that fails its own
+sanity check, and a hypervisor that cannot calibrate does not publish a
+scale - it writes a sequence of zero and tells its guest to ask the
+counter MSR instead, which is exactly what is observed.
+
+It also fits the shape of the whole investigation: Windows boots normally
+with nested VMX off, KVM boots Hyper-V at two levels of nesting, and only
+this VMM's three levels are slow enough for the guest hypervisor's own
+assumptions about the machine to stop holding.
+
+Nothing here proves it. What would: reading the frequency the guest
+hypervisor computes and answers `0x40000022` with, which needs capturing a
+*reflected* answer rather than the stale registers `l2_exit_detail_value`
+holds - see the retraction above for why those are not it.
+
+**5b. Why it leaves the page empty is open.** With the retraction above,
 the tempting answer - "because we told it we had no reference TSC" - is
 gone: we tell it nothing, which is what bare hardware tells it. So the
 reason lies in what the guest hypervisor needs before it will vouch for a
