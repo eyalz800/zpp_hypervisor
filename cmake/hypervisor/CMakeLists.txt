@@ -18,8 +18,8 @@ option(ZPP_INTERCEPT_APIC
     ON)
 
 option(ZPP_NESTED_SHADOW_VMCS
-    "Let the processor shadow a guest hypervisor's VMCS, so its vmreads and vmwrites do not exit. Off makes every one of them exit and be recorded, which is the only way to see what it actually asks for."
-    ON)
+    "Let the processor shadow a guest hypervisor's VMCS, so its vmreads and vmwrites do not exit. OFF by default: measured a 2x loss, 441,380 wall cycles per exit against 214,431. See the root CMakeLists for the numbers."
+    OFF)
 
 set(ZPP_SLOW_EXITS "0" CACHE STRING
     "Extra cycles burned in every VM exit, to test whether the stall moves with throughput")

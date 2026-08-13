@@ -11590,6 +11590,64 @@ worth more than the boot it appears in. `pending_high_water` above 1 says
 delivery is not keeping up with arrival. Interrupt-window exits are exit
 reason 7 in `exit_reason_counts`.
 
+### Measured: what a second-level exit costs, and what it buys
+
+Taken on the rig on 2026-08-13, one processor, Hyper-V as the guest
+hypervisor, from `handler_cycles` / `handler_exits` against the wall clock
+span in `handler_first_tsc` / `handler_last_tsc` - the counters whose
+declaration said "nothing here has ever measured that".
+
+| | shadow VMCS on | off |
+|---|---|---|
+| wall cycles per exit | 441,380 | 214,431 |
+| handler cycles per exit | 388,263 | 177,005 |
+| handler share of wall clock | 88.0% | 82.5% |
+
+**Between 82 and 88 per cent of the machine is this VMM's own code.** At
+the measured 1.76 us per VMCS access that is about 88 accesses per exit
+with shadowing on, every one a VMX instruction trapping to the layer
+below.
+
+**Hardware VMCS shadowing is a 2x loss here, not a win.** It exists to
+stop a guest hypervisor's VMREAD and VMWRITE from exiting, and Hyper-V
+issues 411 writes and 13 reads across an entire boot. It charges 36
+fields copied in each direction on every second-level exit, of which
+there are hundreds of thousands. The default is now off; turn it on to
+read `vmcs_field_use`, which is blind to any field it shadows and is the
+only reason to pay for it.
+
+The effect on the guest is visible and was the point of measuring:
+Windows' clock went from firing back to back every 8.26 ms - the tick
+never finishing before the next was due - to its correct 15.625 ms
+period. **It did not move the wall.** The guest stops at the same place
+either way, which is what rules the cost out as the cause rather than
+merely making it cheaper.
+
+### Where the nested boot actually stops
+
+Windows parks immediately after `HalpTimerInitializeHypervisorTimer`,
+with the synthetic timer up and working, and never does anything new
+again. The evidence, all from one run:
+
+- Its task priority never falls below `0xd0`. Sixty-four recorded
+  requests all at `0xd0`, and asynchronous samples of VTPR read `0xf0`
+  and `0xd0` and nothing else - IRQL 13 and 15, clock level and high
+  level. A booting kernel does not live there.
+- It asks for vector `0x2f`, the deferred-procedure-call interrupt, by
+  writing the synthetic interrupt command register, tens of thousands of
+  times. `l2_injected_vector` says it was delivered **12** times.
+- The only vectors ever injected into it are the guest hypervisor's own:
+  `0xd1`, which `wrmsr 0x40000093` shows is SINT3, and `0x40`.
+- **No device raises an interrupt on the machine at all.** Two vectors
+  are acknowledged in forty minutes, `0xef` and `0x20`, both the guest
+  hypervisor's local APIC timer. The same loader with nested VMX off
+  sees seven distinct vectors and devices interrupting within ninety
+  seconds.
+
+So the guest never reaches the point of driving a device, and the thing
+standing between it and that point is a deferred-procedure-call
+interrupt it asks for and does not get.
+
 ### Rejected: gating injection on the processor priority register
 
 Tried on 2026-08-13 and reverted the same hour. KVM gates delivery on the

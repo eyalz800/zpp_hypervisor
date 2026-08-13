@@ -224,7 +224,7 @@ def name_reason(value):
     return tag
 
 
-def monitor_vector_counts(monitor, instance, off, cpu):
+def monitor_vector_counts(monitor, instance, off, cpu, member):
     """Which interrupt vectors were acknowledged, per processor.
 
     The totals beside this cannot answer the question it exists for: a
@@ -236,7 +236,7 @@ def monitor_vector_counts(monitor, instance, off, cpu):
     Read as one block of 1024 bytes rather than 256 words, because the
     counters are 32 bit - two per quadword, low half first.
     """
-    base = instance + off["external_interrupt_vector_counts"] + cpu * 1024
+    base = instance + off[member] + cpu * 1024
     monitor.queue(base, 128)
     words = monitor.run()
     counts = {}
@@ -376,7 +376,8 @@ def main():
                "vmcs_field_read_encoding", "vmcs_field_read_count",
                "vmcs_field_write_encoding", "vmcs_field_write_count",
                "vmcs_field_use_overflow",
-               "external_interrupt_vector_counts"]
+               "external_interrupt_vector_counts",
+               "l2_injected_vector"]
     off = gdb_offsets(args.elf, members)
     instance = base + gdb_symbol(
         args.elf, "zpp::hypervisor::hypervisor::instance()::instance")
@@ -469,15 +470,22 @@ def main():
                   f"{100.0 * value / total:5.1f}%")
 
     for cpu in range(args.cpus):
-        vectors = monitor_vector_counts(monitor, instance, off, cpu)
-        if not vectors:
-            continue
-        total = sum(vectors.values())
-        print(f"\ncpu {cpu} interrupt vectors acknowledged "
-              f"({total:,} over {len(vectors)} distinct)")
-        for vector, value in sorted(vectors.items(), key=lambda kv: -kv[1]):
-            print(f"  0x{vector:02x}  {value:>10}  "
-                  f"{100.0 * value / total:5.1f}%")
+        for member, what in (
+                ("external_interrupt_vector_counts",
+                 "interrupt vectors acknowledged"),
+                ("l2_injected_vector",
+                 "vectors injected into the second level")):
+            vectors = monitor_vector_counts(monitor, instance, off, cpu,
+                                            member)
+            if not vectors:
+                continue
+            total = sum(vectors.values())
+            print(f"\ncpu {cpu} {what} "
+                  f"({total:,} over {len(vectors)} distinct)")
+            for vector, value in sorted(vectors.items(),
+                                        key=lambda kv: -kv[1]):
+                print(f"  0x{vector:02x}  {value:>10}  "
+                      f"{100.0 * value / total:5.1f}%")
 
     for cpu in range(args.cpus):
         count = read("exit_trace_count", cpu)
