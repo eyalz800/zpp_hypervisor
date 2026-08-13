@@ -11019,3 +11019,37 @@ of which fields the guest hypervisor actually touches, which
 measurements above stands: this is the cost of being KVM's guest, every
 instruction of it, and the question worth answering first is whether the
 failure exists on the metal at all.
+
+
+## Eliminated without a boot: we already hide ourselves from the guest hypervisor
+
+A promising-looking idea, killed by reading the tree instead of testing
+it. The reasoning was: Windows reads the reference counter through an
+MSR 966 times a second only because the reference TSC page is empty;
+Hyper-V will not publish a TSC page it cannot trust; and Hyper-V can see
+from CPUID leaf `0x40000000` that it is running under something. Hide
+that, and it would publish, and the traffic would vanish.
+
+**It is already hidden.** `announce_hypervisor` and
+`pass_through_hypervisor_interface` are both `false`, so leaf 1's
+hypervisor-present bit is *cleared* and the hypervisor leaf block reports
+itself empty. Hyper-V already believes it is on bare metal, and the page
+is empty anyway. So whatever makes it decline, it is not that.
+
+Worth recording for the same reason the twelve capabilities were: it is
+the kind of idea that reads well, costs a boot to test, and can be
+settled in two minutes with grep.
+
+**Why the shadow field list was not trimmed either.** The measurement
+exists - with shadowing off, the guest hypervisor's traffic concentrates
+in about a dozen fields, and roughly fourteen of the twenty-six
+read-write fields shadowed here see single-digit accesses in a whole
+boot. Trimming them would cut `copy_shadow_to_vmcs12`, which is 108,163
+cycles a call and cannot be elided any other way, by about half.
+
+That is worth **four per cent** of the handler. Against a gap of five
+hundred, four per cent is not progress toward booting Windows; it is
+only progress toward a faster test rig, and it carries the risk of a
+field turning out to be hot in a phase the measurement did not cover.
+The trim is written up here so it can be done deliberately when the
+bare-metal question has been answered, and not before.
