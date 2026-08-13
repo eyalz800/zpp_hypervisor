@@ -11397,3 +11397,56 @@ Note also what this rules in: the *guest owning the physical controller*
 is not obviously the wrong design here. It costs no exits, it needs no
 emulation, and the one attempt to replace it failed on the first
 interrupt.
+
+
+## Named at last: the guest dies initialising the hypervisor timer
+
+The working ring keeps the newest exits that are not the poll, the
+end-of-interrupt or the timer re-arm, so the guest's last actions survive
+in it. Stall reproduced at 93,700 - the fifth time at that number - with
+the kernel base at `0xfffff801b2000000`, and every address symbolised
+against the public PDB:
+
+    HalpPciReadMmConfigUshort+0x3        the ECAM scan, one fault per 2 MB page
+    HalpApicX2WriteRegister+0x11         wrmsr 0x836, 0x834 - APIC LVT setup
+    KiReleaseSecondaryInterruptConnectLock+0x26
+    HalpIsMicrosoftCompatibleHvLoaded+0x27      cpuid
+    HalpIsPartitionCpuManager+0x2f              cpuid
+    HalpTimerInitializeHypervisorTimer+0x68     cpuid
+    HalpHvTimerStop+0x21                 wrmsr 0x400000b0
+    HalpHvTimerSetInterruptVector+0x14   rdmsr 0x40000083, the message page
+    HalpHvTimerSetInterruptVector+0x56   wrmsr 0x40000093, SINT3
+    HalpHvTimerSetInterruptVector+0x6c   wrmsr 0x400000b0
+    HalpHvTimerArm+0x67                  wrmsr 0x400000b0, for ever
+
+**Windows' hardware abstraction layer is switching its clock source to
+the hypervisor's synthetic timer, and the switch is the last thing it
+ever does.** It finishes enumerating PCI configuration space, sets up its
+local APIC, asks three questions by CPUID - is a Microsoft compatible
+hypervisor loaded, am I the partition's processor manager, and the one
+inside `HalpTimerInitializeHypervisorTimer` itself - then stops the
+timer, points it at synthetic interrupt source 3, and arms it.
+
+This is the same tail recorded when the stall was first characterised
+hours earlier, symbol for symbol. It is not drift and it is not a phase
+of the boot that happens to be slow.
+
+**What is now excluded around it, each by its own measurement:**
+
+- the timer *fires*: vector `0xd1` is injected about 96 times a second
+  and the count keeps climbing at the stall;
+- the messages *flow*: the SINT3 slot in the message page alternates
+  between `HvMessageTimerExpired` and consumed, with its payload
+  advancing at 10 MHz;
+- the three CPUIDs *reach the guest hypervisor* rather than being
+  answered here - `l1_wants_l2_exit` reflects CPUID by its default,
+  which is KVM's default too;
+- the APIC watch is not involved, since removing it does not move the
+  wall.
+
+So the guest arms a timer that works, receives its interrupts, consumes
+its messages, and still does not proceed. **Everything this VMM supplies
+to that sequence has now been measured and is correct**, which makes the
+next question a narrow one about the guest rather than a broad one about
+us: what does `HalpTimerInitializeHypervisorTimer` wait for after arming,
+and what tells it the switch succeeded.
