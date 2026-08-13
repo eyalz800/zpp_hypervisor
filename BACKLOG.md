@@ -11653,3 +11653,51 @@ mechanism it varied, not the subsystem that mechanism lives in.**
 Not yet established: whether the guest reaches user mode. It is past the
 wall and doing sustained work; that is not the same as booting, and the
 next entry should say which.
+
+
+## Correction: the wall was replaced, not broken, and the counter lied again
+
+The entry above reports the guest going "past the wall" and doing
+"sustained work" at 57,000 working exits a minute. **It was not doing
+work.** Measured over forty-five seconds once it had settled:
+
+    vmcall      780,280 -> 822,569   +42,289   940/s
+    vmptrld   1,452,255 -> 1,537,346 +85,091 1,891/s  (exactly 2 per vmcall)
+    rdmsr         7,561 -> 7,561     frozen
+    ept-violation 417,648 -> 417,724 +76       1.7/s
+
+and the working ring is a solid run of one hypercall, `0x12`, from one
+address - the hypercall page's VTL-return stub. The guest is in a **VTL
+return livelock**, two VMCS switches per return, and has stopped reading
+the clock entirely.
+
+**What is true and what is not.**
+
+True: the old wall is gone. Five runs stopped at 93,584-94,572 and this
+one does not; the clock-polling stall that stood for two days is not
+where it stops any more. Virtualizing the APIC changed the machine's
+behaviour in a large and reproducible way, and the RIP-advance defect was
+real.
+
+Not true: that it is booting. It reaches a different failure, sooner in
+wall-clock terms, and sits there.
+
+**The instrument error, for the fourth time and the most embarrassing
+one.** `l2_working_trace_count` exists to separate work from waiting by
+dropping the reference-counter poll, the end-of-interrupt and the timer
+re-arm. A VTL-return livelock is none of those, so it counts as work -
+and the counter climbed at 57,000 a minute while the guest did nothing
+but switch trust levels. **A filter that removes the known idle patterns
+does not detect an unknown one**, and reading it as a progress meter is
+only safe for the failures it was built against.
+
+The check that would have caught it in one step is the one that was
+skipped in the excitement: look at *what* the working exits are, not how
+many. Sixteen lines of the ring answered it.
+
+**Where this leaves the search.** The guest hypervisor now returns from
+VTL1 to VTL0 endlessly. Whatever VTL0 does on being resumed puts it
+straight back into VTL1, or the return does not take effect. That is a
+new and much narrower question than the one before it, and it is the
+first failure in this investigation that is visibly *about* the trust
+level mechanism rather than merely near it.
