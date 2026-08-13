@@ -11605,3 +11605,51 @@ in-service story is back on the table - in which case the next
 measurement is `external_interrupts_taken` against `injected` over the
 first hundred milliseconds, because the in-service story predicts
 delivery stopping after the first vector and the RIP story does not.
+
+
+## The wall is broken: virtualizing the APIC gets the guest past it
+
+Measured on the rig, one processor, `ZPP_VIRTUALIZE_APIC=ON` with the
+RIP-advance fix in place:
+
+    time      taken  injected  dropped  deferred   working
+    11:49:21    336       336        0       104    19,901
+    11:50:41    971       971        0       497    79,472
+    11:51:21  1,100     1,100        0       570   114,947   <- past the wall
+    11:52:42  1,149     1,149        0       588   191,444
+    11:54:42  1,222     1,222        0       619   306,013
+
+**Every previous run stopped dead at 93,584-94,572 working exits** - five
+reproductions across four different builds, including one deliberately
+slowed to half speed. This one went through it without pausing and is
+still climbing at about 38,000 every forty seconds.
+
+`taken` and `injected` track exactly, `dropped` is zero, and the firmware
+survives - which is the agent's prediction confirmed on all three counts.
+
+**What this says about the last two days of work.** The deadlock *was*
+about interrupt delivery, and three separate measurements pointed away
+from it:
+
+- turning off this VMM's APIC **interception** did not move the wall,
+  and that was read as "the APIC is not involved". It only showed that
+  *watching* the controller was not the problem. Virtualizing it is a
+  different thing entirely, and it is what the guest needed.
+- the timer *fired*, the messages *flowed*, the injection counters
+  *agreed*. All true, and all about the synthetic timer path, which was
+  working. The interrupts that were not arriving were the ones the guest
+  hypervisor takes from the **physical** controller it owns.
+- the stall reproduced at the same point under a 2.5x range of
+  hypervisor speed, which correctly ruled out throughput and was then
+  over-read as ruling out anything that could be fixed by changing what
+  this VMM does.
+
+**The lesson is about the shape of the eliminations, not their
+correctness.** Each was a sound measurement of the thing it measured.
+"Not the APIC watch" was reported as "not the APIC", and that
+generalisation is what cost the time. **An experiment eliminates the
+mechanism it varied, not the subsystem that mechanism lives in.**
+
+Not yet established: whether the guest reaches user mode. It is past the
+wall and doing sustained work; that is not the same as booting, and the
+next entry should say which.
