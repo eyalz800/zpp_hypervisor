@@ -4636,6 +4636,27 @@ private:
     std::uint64_t interrupt_request_vector[max_cpus][256]{};
 
     /**
+     * The second-level guest's virtual task priority, sampled on every
+     * entry rather than only when it asks for an interrupt.
+     *
+     * `interrupt_request_vtpr` samples at the synthetic interrupt command
+     * write, which happens *inside* the guest's clock handler - so it
+     * reads a high priority by construction and cannot answer the
+     * question. The question is whether the guest ever comes *down*: it
+     * asks for vector `0x2f`, the deferred-procedure-call interrupt,
+     * 34,288 times and is given it 12, and a task priority that never
+     * falls below `0x20` is the guest masking it itself rather than the
+     * level above withholding it.
+     *
+     * Sampled from the page of the VMCS actually being entered, which
+     * the earlier reading did not do: the guest hypervisor keeps a
+     * separate VMCS per virtual trust level, and
+     * `nested_virtual_apic_address` holds whichever was built last. A
+     * histogram of VTPR-over-entries cannot be read off the wrong page.
+     */
+    std::uint32_t l2_entry_vtpr[max_cpus][256]{};
+
+    /**
      * Records one synthetic interrupt command the second-level guest
      * issued, with the task priority in force as it did.
      */

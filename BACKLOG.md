@@ -12039,10 +12039,30 @@ Windows parks immediately after `HalpTimerInitializeHypervisorTimer`,
 with the synthetic timer up and working, and never does anything new
 again. The evidence, all from one run:
 
-- Its task priority never falls below `0xd0`. Sixty-four recorded
-  requests all at `0xd0`, and asynchronous samples of VTPR read `0xf0`
-  and `0xd0` and nothing else - IRQL 13 and 15, clock level and high
-  level. A booting kernel does not live there.
+- ~~Its task priority never falls below `0xd0`.~~ **Wrong, and the
+  correction matters more than the claim.** That came from
+  `interrupt_request_vtpr`, which samples at the synthetic interrupt
+  command write - *inside* the guest's clock handler - so it reads a high
+  priority by construction; and from asynchronous reads of
+  `nested_virtual_apic_address`, which holds whichever virtual-APIC page
+  was built last and the guest hypervisor keeps one per virtual trust
+  level. Both answer a question that was not asked.
+
+  Sampled properly - `l2_entry_vtpr`, on every entry, from the page of
+  the VMCS actually being entered - over 154,131 entries:
+
+  | VTPR | IRQL | share |
+  |---|---|---|
+  | `0x00` | 0, passive | 7.9% |
+  | `0x10` | 1, APC | 1.8% |
+  | `0x20` | 2, dispatch | 37.7% |
+  | `0x40` | 4 | 17.6% |
+  | `0xd0` | 13, clock | 24.2% |
+  | `0xf0` | 15, high | 10.8% |
+
+  **The guest comes all the way down to passive level routinely.** It is
+  not parked in its clock handler, and the "it never finishes a tick"
+  reading built on top of that is unsupported.
 - It asks for vector `0x2f`, the deferred-procedure-call interrupt, by
   writing the synthetic interrupt command register, tens of thousands of
   times. `l2_injected_vector` says it was delivered **12** times.
@@ -12057,6 +12077,23 @@ again. The evidence, all from one run:
 So the guest never reaches the point of driving a device, and the thing
 standing between it and that point is a deferred-procedure-call
 interrupt it asks for and does not get.
+
+**And with the task priority corrected, that is a functional failure
+rather than a starved one.** At ~10% of entries the guest sits at IRQL 0
+or 1, where vector `0x2f` - priority class 2 - is deliverable by its own
+rules. The guest hypervisor is asked 34,288 times and injects 12. So it
+is not the guest masking it, and it is not the level above running out of
+time; something between the request and the injection is being lost.
+
+Where to look next, in order: whether the guest hypervisor is *told* -
+the write to `0x40000071` is outside both MSR bitmap ranges and so
+reflects unconditionally, which is believed but not measured on the
+reflection side; whether it answers by some route this VMM does not
+count, though `external_interrupt_vector_counts` sees only `0xef` and
+`0x20` so it is not going out through the physical controller; and
+whether `l2_injected_vector` is counting both virtual trust levels into
+one bucket, which the VTPR mistake above shows is exactly the kind of
+error this instrumentation invites.
 
 ### Rejected: gating injection on the processor priority register
 

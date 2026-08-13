@@ -1352,6 +1352,20 @@ std::expected<void, zpp::error> hypervisor::build_vmcs02(std::size_t cpu)
         // Kept so the task priority behind it can be read back. See
         // `interrupt_request_vtpr`.
         this->nested_virtual_apic_address[cpu] = virtual_apic12;
+
+        // And sampled here, on the page about to be entered, which is
+        // the only place that is the right page. See `l2_entry_vtpr`.
+        if ((cpu < max_cpus) && (0 != virtual_apic12)) {
+            constexpr std::uint64_t virtual_task_priority = 0x80;
+            std::uint8_t vtpr{};
+
+            if (read_guest_physical(
+                    virtual_apic12 + virtual_task_priority,
+                    std::span(reinterpret_cast<std::byte *>(&vtpr),
+                              sizeof(vtpr)))) {
+                this->l2_entry_vtpr[cpu][vtpr] += 1;
+            }
+        }
     } else if (tpr_shadow12) {
         // Asked for and not honoured, which the branch above only reaches
         // for a virtual-APIC page this VMM refuses to let the processor
