@@ -10,9 +10,20 @@ cmake --preset debug && cmake --build --preset debug      # debug
 cmake --preset release && cmake --build --preset release  # release
 cmake --build --preset debug --target clean               # clean (preserves deps)
 cmake --build --preset debug --target linux_loader_ko     # linux .ko (needs Podman)
+./scripts/ci/run-host-tests.sh                            # host test suite
 ```
 
 Output goes to `out/{debug,release}/x86_64/`.
+
+**Run the suite through that script, never `ctest` on its own.** Every harness
+is `EXCLUDE_FROM_ALL` on purpose - the suite is native and the rest of the tree
+is cross-compiled, so a harness that fails to compile must not be able to stop
+a deploy - which means `cmake --build --preset debug` does not build them. Bare
+`ctest` then runs whatever binaries happen to be there and reports them
+passing. Measured: a stale `resume_guest` reported "70 checks, 0 failures"
+against a source that had 115 checks and a failing one, so a new regression
+test appeared to pass before its fix existed. The script builds `zpp_tests`
+first, and that is the whole difference.
 
 ## Architecture
 

@@ -1526,6 +1526,61 @@ void a_second_level_guest_is_never_given_a_host_interrupt()
 }
 
 /**
+ * The window a *guest hypervisor* armed survives an exit with nothing
+ * queued.
+ *
+ * This is the other half of the case above, and it was the defect. The
+ * not-found branch closes the interrupt window this VMM may have armed on
+ * an earlier entry, and it used to sit *above* the second-level guard - so
+ * an exit taken with vmcs02 current and an empty queue cleared the bit out
+ * of vmcs02. That bit is never this VMM's: `build_vmcs02` composes the
+ * primary controls as `(primary01 & ~(interrupt_window | nmi_window)) |
+ * primary12`, so its only source is vmcs12.
+ *
+ * A guest hypervisor arms that window when it has an interrupt it cannot
+ * yet deliver, and the exit is how it is told it may. Removing it under
+ * the guest hypervisor is therefore not a lost optimisation, it is a
+ * livelock: the measured shape was a guest hypervisor rewriting its
+ * primary controls on 37% of its VMWRITEs and injecting on 0.1%, around
+ * 940 exits a second, indefinitely.
+ */
+void a_second_level_guests_own_interrupt_window_is_left_alone()
+{
+    if constexpr (!zpp::hypervisor::nested_vmx::enabled) {
+        return;
+    } else {
+        auto built = make();
+
+        // What `build_vmcs02` leaves behind for a guest hypervisor that
+        // asked for the window, and an empty queue.
+        auto primary =
+            built.state->vmcs
+                .primary_processor_based_vm_execution_controls();
+        built.state->vmcs.primary_processor_based_vm_execution_controls(
+            primary | primary_interrupt_window);
+        built.state->running_l2[cpu] = true;
+
+        check(!built.state->deliver_pending_external_interrupt(cpu),
+              "nothing to deliver, so nothing is delivered");
+        check(0 != interrupt_window(built),
+              "and the window the guest hypervisor armed is still there, "
+              "because the VMCS in hand is the second-level guest's");
+        check_equal(0,
+                    built.state->external_interrupts_deferred_in_l2[cpu],
+                    "with nothing deferred, since nothing was queued");
+
+        // And the close still happens for the level it belongs to.
+        built.state->running_l2[cpu] = false;
+        check(!built.state->deliver_pending_external_interrupt(cpu),
+              "still nothing to deliver at the first level");
+        check_equal(0,
+                    interrupt_window(built),
+                    "and there the window is closed, because that one is "
+                    "this VMM's own");
+    }
+}
+
+/**
  * A slot outside the table is refused rather than written past.
  */
 void the_queue_ignores_a_slot_it_does_not_have()
@@ -1652,6 +1707,7 @@ int main()
     a_shadow_or_a_staged_event_defers_the_interrupt();
     a_halted_processor_is_woken_by_the_interrupt();
     a_second_level_guest_is_never_given_a_host_interrupt();
+    a_second_level_guests_own_interrupt_window_is_left_alone();
     the_queue_ignores_a_slot_it_does_not_have();
     the_entry_is_chosen_by_launch_state();
     the_resume_records_where_it_left_the_guest();

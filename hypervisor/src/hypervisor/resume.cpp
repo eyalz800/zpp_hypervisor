@@ -234,9 +234,50 @@ bool hypervisor::deliver_pending_external_interrupt(std::size_t cpu)
         }
     }
 
+    // Never into a second-level guest. The interrupt was signalled to
+    // the *physical* processor, so in the two-level world it belongs to
+    // the first-level guest - the guest hypervisor - and putting it
+    // through vmcs02's entry-interruption field would deliver it to the
+    // second-level guest's interrupt descriptor table instead. A guest
+    // hypervisor that wanted it asked for external-interrupt exiting in
+    // vmcs12, and that exit is reflected long before this runs; see
+    // `l1_wants_l2_exit`.
+    //
+    // Held rather than dropped, and nothing here shortens the wait -
+    // which is the known weakness of this path and why the counter
+    // exists. KVM does force the exit, through `vmx_check_nested_events`
+    // and `nested_vmx_vmexit`; that is not implemented here.
+    //
+    // And - this is the half that was missing - never *touching a
+    // second-level guest's controls* either. This guard used to sit
+    // below the not-found branch, so an exit taken
+    // with vmcs02 current and nothing queued fell into that branch and
+    // cleared the interrupt-window bit out of vmcs02. That bit is not
+    // this VMM's: `build_vmcs02` composes the primary controls as
+    // `(primary01 & ~(interrupt_window | nmi_window)) | primary12`, so an
+    // interrupt-window bit in vmcs02 is one the *guest hypervisor* asked
+    // for, and clearing it means its interrupt-window exit never arrives.
+    //
+    // Measured as a livelock: a guest hypervisor rewriting its primary
+    // controls on 37% of its VMWRITEs and injecting on 0.1% of them, at
+    // around 940 exits a second, indefinitely - arming a window over and
+    // over that was removed under it every time. The rule was already
+    // written down here, in the paragraph above, and obeyed by the
+    // delivery path and by nothing else.
+    if constexpr (nested_vmx::enabled) {
+        if (this->running_l2[cpu]) {
+            if (found) {
+                this->external_interrupts_deferred_in_l2[cpu] =
+                    this->external_interrupts_deferred_in_l2[cpu] + 1;
+            }
+            return false;
+        }
+    }
+
     // Nothing queued: make sure the window this may have armed on an
     // earlier entry is closed again, or the processor exits on every
     // instruction boundary the guest can take an interrupt at, for ever.
+    // Only ever reached with vmcs01 current, by the guard above.
     if (!found) {
         auto primary =
             vmcs.primary_processor_based_vm_execution_controls();
@@ -250,36 +291,6 @@ bool hypervisor::deliver_pending_external_interrupt(std::size_t cpu)
                     primary & ~primary_interrupt_window));
         }
         return false;
-    }
-
-    // Never into a second-level guest. The interrupt was signalled to
-    // the *physical* processor, so in the two-level world it belongs to
-    // the first-level guest - the guest hypervisor - and putting it
-    // through vmcs02's entry-interruption field would deliver it to the
-    // second-level guest's interrupt descriptor table instead. A guest
-    // hypervisor that wanted it asked for external-interrupt exiting in
-    // vmcs12, and that exit is reflected long before this runs; see
-    // `l1_wants_l2_exit`.
-    //
-    // Held rather than dropped, and nothing here shortens the wait -
-    // which is the known weakness of this path and why the counter
-    // exists. KVM does force the exit, through `vmx_check_nested_events`
-    // and `nested_vmx_vmexit`; that is not implemented here. Also note
-    // the controls must not be touched with vmcs02 current: a write here
-    // would land in the second-level guest's VMCS.
-    //
-    // The window this VMM arms in vmcs01 does not leak downward, which
-    // is what makes holding safe rather than merely tolerable:
-    // `build_vmcs02` composes the primary controls as `(primary01 &
-    // ~(interrupt_window | nmi_window)) | primary12`, so a second-level
-    // guest sees only the windows its own hypervisor asked for. The bit
-    // stays set in vmcs01 and is there again when the first level runs.
-    if constexpr (nested_vmx::enabled) {
-        if (this->running_l2[cpu]) {
-            this->external_interrupts_deferred_in_l2[cpu] =
-                this->external_interrupts_deferred_in_l2[cpu] + 1;
-            return false;
-        }
     }
 
     auto event = valid | type_external_interrupt | vector;
