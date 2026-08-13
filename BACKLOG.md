@@ -11825,15 +11825,37 @@ elision in `build_vmcs02` then skips writes that are owed on a comparison
 that has been meaningless since the first exit. Cold fields now bypass the
 elision. **The reset loop survived that fix**, so a second flaw remains.
 
-What was skipped and must come first next time: **SDM 28.3's list of what
-a VM exit actually saves, field by field.** The whole design rests on
-"vmcs02 already holds the guest's own value", and that is only true of
-fields the processor writes back - `IA32_DEBUGCTL` and the PDPTEs are
-conditional, and nothing here checked the rest. After that, two more
-candidates: whether `guest_current_vmcs` is updated before or after the
-guard that compares it, and the single vmcs02 shared between the two
-virtual trust levels the guest hypervisor switches between, where "the
-same second-level guest" is a subtler question than one pointer.
+**The second flaw, found afterwards by doing the check that was skipped.**
+It is SDM 30.3.2 - and note the section, since this was first cited as
+28.3, which is a different chapter in this edition:
+
+> "If the register was unusable, the values saved into the following
+> fields are **undefined**: (1) base address; (2) segment limit; and
+> (3) bits 7:0 and bits 15:12 in the access-rights field."
+
+The whole design rests on "vmcs02 already holds the guest's own value
+after an exit". For an unusable segment register that is explicitly false:
+the processor saves **undefined** values, not the guest's. And unusable is
+the ordinary case here - the guest-state read taken off the rig shows
+`guest_ss_access_rights` and `guest_ldtr_access_rights` both `0x1c000`,
+bit 16 set, unusable.
+
+That covers up to 24 of the 46 fields: base, limit and access rights for
+each of the eight segment registers. Leaving those unwritten hands the
+next VM entry whatever the processor happened to leave behind.
+
+So a working version of this cannot leave a segment's base, limit or
+access rights cold - it can only leave cold the fields SDM 30.3.1 says are
+saved unconditionally, which are CR0, CR3, CR4 and the three
+IA32_SYSENTER MSRs, plus the selectors and the descriptor-table registers.
+That is about twenty fields rather than forty-four, so roughly half the
+win, which is still worth having.
+
+Two further candidates remain unexamined and should be checked before
+coding: whether `guest_current_vmcs` is updated before or after the guard
+that compares it, and the single vmcs02 shared between the two virtual
+trust levels the guest hypervisor switches between, where "the same
+second-level guest" is a subtler question than one pointer.
 
 The switch is kept, off, with the failure written on it, because the
 measurement that motivated it is unchanged and large.

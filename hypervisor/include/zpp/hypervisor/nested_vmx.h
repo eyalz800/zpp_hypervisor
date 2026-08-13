@@ -199,19 +199,24 @@ inline constexpr bool enabled =
  * exit. That is fixed - a cold field now bypasses the elision entirely -
  * and the reset loop survived it.
  *
- * So a second flaw remains and is not identified. Candidates not yet
- * eliminated: fields SDM 28.3 does *not* save on every VM exit, where
- * the assumption "vmcs02 already holds the guest's own value" simply
- * does not hold; the ordering of `guest_current_vmcs` against the guard
- * that compares it; and the single vmcs02 being shared between the two
- * virtual trust levels the guest hypervisor switches between, where
- * "the same second-level guest" is a subtler question than one pointer.
+ * **The second flaw is SDM 30.3.2**, found by doing the check that should
+ * have come first: "If the register was unusable, the values saved into
+ * the following fields are undefined: (1) base address; (2) segment
+ * limit; and (3) bits 7:0 and bits 15:12 in the access-rights field."
  *
- * The measurement that motivated it stands and is large - 44 of 46
- * VMREADs per second-level exit, a third of the round trip - so this is
- * kept rather than deleted. What it needs is the SDM 28.3 list checked
- * field by field before anything else, which is the step that was
- * skipped.
+ * So "vmcs02 already holds the guest's own value" is false for every
+ * unusable segment register - the processor saves *undefined* there -
+ * and unusable is ordinary: the guest read off the rig has SS and LDTR
+ * access rights both `0x1c000`, bit 16 set. That is up to 24 of the 46
+ * fields, and leaving them unwritten hands the next entry whatever
+ * happened to be left behind.
+ *
+ * A working version therefore cannot leave a segment's base, limit or
+ * access rights cold. What it may leave cold is what SDM 30.3.1 saves
+ * unconditionally - CR0, CR3, CR4, the three IA32_SYSENTER MSRs - plus
+ * the selectors and descriptor-table registers: about twenty fields
+ * rather than forty-four, so roughly half the win, which is still worth
+ * having. Two candidates remain unexamined; BACKLOG.md names them.
  */
 inline constexpr bool lazy_guest_state =
 #if defined(ZPP_LAZY_GUEST_STATE) && ZPP_LAZY_GUEST_STATE
