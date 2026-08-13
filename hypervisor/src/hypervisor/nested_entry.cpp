@@ -115,6 +115,46 @@ constexpr std::uint64_t secondary_rdrand_exiting = 1ull << 11;
 constexpr std::uint64_t secondary_enable_invpcid = 1ull << 12;
 constexpr std::uint64_t secondary_rdseed_exiting = 1ull << 16;
 constexpr std::uint64_t secondary_enable_xsaves = 1ull << 20;
+constexpr std::uint64_t secondary_tsc_scaling = 1ull << 25;
+
+/**
+ * The product of two values shifted right by the time-stamp counter's
+ * scaling fraction, which SDM 27.6.5 fixes at 48 bits: "It then shifts
+ * the value of the product right 48 bits and returns the sum of that
+ * shifted value and the value of the TSC offset."
+ *
+ * A 64 by 64 product needs 128 bits before the shift or it is simply
+ * wrong, and there is no standard 128-bit integer to say that in. The
+ * builtin is the only spelling available and it generates no call - a
+ * `mul` and a `shrd` - which matters on a path taken by every entry.
+ *
+ * Signed for the offset and unsigned for the multiplier, which is KVM's
+ * split too: `mul_s64_u64_shr` in `kvm_calc_nested_tsc_offset` against
+ * `mul_u64_u64_shr` in `kvm_calc_nested_tsc_multiplier`. The offset is a
+ * two's complement quantity and shifting it as unsigned turns a guest
+ * hypervisor's negative offset into an enormous positive one.
+ * @{
+ */
+constexpr std::uint64_t tsc_scaling_fraction = 48;
+constexpr std::uint64_t tsc_scaling_default = 1ull << tsc_scaling_fraction;
+
+constexpr std::uint64_t scaled_product(std::uint64_t left,
+                                       std::uint64_t right)
+{
+    return static_cast<std::uint64_t>(
+        (static_cast<unsigned __int128>(left) * right) >>
+        tsc_scaling_fraction);
+}
+
+constexpr std::uint64_t signed_scaled_product(std::uint64_t left,
+                                              std::uint64_t right)
+{
+    return static_cast<std::uint64_t>(
+        (static_cast<__int128>(static_cast<std::int64_t>(left)) *
+         static_cast<__int128>(right)) >>
+        tsc_scaling_fraction);
+}
+/** @} */
 constexpr std::uint64_t secondary_mode_based_execute = 1ull << 22;
 /**
  * @}
@@ -1685,7 +1725,52 @@ std::expected<void, zpp::error> hypervisor::build_vmcs02(std::size_t cpu)
     auto tsc_offset12 = (0 != (primary12 & primary_tsc_offsetting))
                             ? shadow.read(field::tsc_offset)
                             : std::uint64_t{};
-    vmcs.write(field::tsc_offset, tsc_offset01 + tsc_offset12);
+
+    // The multiplier, which has to be composed before the offset because
+    // the offset is scaled by it. SDM 27.6.5 orders the two: "the
+    // contents of the time-stamp counter is first multiplied by the TSC
+    // multiplier before adding the TSC offset", so what the second-level
+    // guest must see is
+    //
+    //     ((tsc * m01 >> 48) + o01) * m12 >> 48 + o12
+    //
+    // and multiplying that out gives the pair below - the multipliers
+    // composed, and *this VMM's* offset scaled by the guest
+    // hypervisor's before its own is added. KVM reaches the same two in
+    // `kvm_calc_nested_tsc_multiplier` and `kvm_calc_nested_tsc_offset`,
+    // and gates the guest hypervisor's multiplier on both controls
+    // exactly as `vmx_get_l2_tsc_multiplier` does - scaling means
+    // nothing without offsetting, which SDM 27.6.5 also says: the field
+    // applies "if this control is 1 (and the 'RDTSC exiting' control is
+    // 0 and the 'use TSC offsetting' control is 1)".
+    //
+    // Both levels default to 1.0 in 48-bit fixed point when they are not
+    // scaling, so a machine where neither does composes to exactly the
+    // sum this used to be.
+    auto scaling12 = (0 != (secondary12 & secondary_tsc_scaling)) &&
+                     (0 != (primary12 & primary_tsc_offsetting));
+
+    auto multiplier01 = (0 != (secondary01 & secondary_tsc_scaling))
+                            ? vmcs.read(field::tsc_multiplier)
+                            : tsc_scaling_default;
+    auto multiplier12 = scaling12 ? shadow.read(field::tsc_multiplier)
+                                  : tsc_scaling_default;
+
+    auto scaled = tsc_scaling_default != multiplier12;
+
+    vmcs.write(field::tsc_offset,
+               (scaled ? signed_scaled_product(tsc_offset01, multiplier12)
+                       : tsc_offset01) +
+                   tsc_offset12);
+
+    // Written only when the control that reads it is set, since the
+    // field does not exist on a processor that does not offer the
+    // control and a VMWRITE to it would fail there.
+    if (0 != (secondary02 & secondary_tsc_scaling)) {
+        vmcs.write(field::tsc_multiplier,
+                   scaled ? scaled_product(multiplier01, multiplier12)
+                          : multiplier01);
+    }
 
     // The event the guest hypervisor asked to inject, taken from its VMCS
     // on the entry that starts its guest running. SDM 27.8.3 makes the

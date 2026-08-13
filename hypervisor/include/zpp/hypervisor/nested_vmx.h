@@ -530,6 +530,28 @@ constexpr std::uint64_t supported_secondary_controls =
     (1ull << 16) | // RDSEED exiting.
     (1ull << 20);  // Enable XSAVES/XRSTORS.
 
+// Deliberately absent: **use TSC scaling**, SDM Table 25-7 bit 25.
+//
+// It was offered, run on the rig and withdrawn on 2026-08-13. The
+// hypothesis it tested was that a guest hypervisor which cannot scale its
+// guest's time-stamp counter will not vouch for one either - which would
+// explain the reference TSC page Windows enables and Hyper-V leaves with
+// a sequence of zero, and the 42% of all exits the resulting fallback to
+// the reference counter MSR costs. See BACKLOG.md.
+//
+// Hyper-V did not take it. `control_secondary_requested` reads 0x1010ae
+// with bit 25 clear, so the control was advertised and never asked for,
+// the guest stalled at the same instruction as before, and the steady
+// state was unchanged at 89.9% of the wall clock against 89.2%.
+//
+// So it is withdrawn rather than left standing, because a capability
+// nothing has ever exercised is a claim this VMM cannot back with a
+// measurement. `build_vmcs02` keeps the composition it grew for this -
+// the multiplier composed and the offset scaled through it, rather than
+// the two offsets added - since that is what the architecture requires
+// the day anything does use it, and with the bit absent it reduces
+// exactly to the sum it replaced.
+
 /**
  * The extended-page-table and VPID capabilities reported to a first-level
  * hypervisor through IA32_VMX_EPT_VPID_CAP, from SDM A.10.

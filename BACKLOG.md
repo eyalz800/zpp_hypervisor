@@ -11731,13 +11731,34 @@ scaling**: `supported_secondary_controls` does not offer bit 25, so a
 guest hypervisor cannot scale its guest's time-stamp counter at all, and a
 hypervisor that cannot scale may decline to publish a scale.
 
-That is a hypothesis with a cheap test and a real hazard. Offering the
-control means composing `tsc_multiplier` into vmcs02 the way KVM's
-`kvm_calc_nested_tsc_multiplier` does, and composing the *offset* through
-the multiplier too - `kvm_calc_nested_tsc_offset` - which the plain sum in
-`build_vmcs02` today does not do and does not need to while no multiplier
-exists. Offering the bit without both is the "answer part of an interface"
-mistake this tree keeps paying for.
+**Tested on 2026-08-13, and it is false.** The control was implemented
+properly - `build_vmcs02` composes the multiplier and scales this VMM's
+offset through it, per SDM 27.6.5's ordering and KVM's
+`kvm_calc_nested_tsc_multiplier` / `kvm_calc_nested_tsc_offset` - and
+added to `supported_secondary_controls`. On the rig:
+
+- **Hyper-V never asked for it.** `control_secondary_requested` reads
+  `0x1010ae`, bit 25 clear. Advertised, declined.
+- The guest stalled at the same instruction, working exit ~94,267 against
+  ~94,357 before.
+- `0x40000020` was read 236,073 times, so the fallback is unchanged.
+- Steady state 89.9% of the wall clock against 89.2%: no difference.
+
+So a guest hypervisor's inability to scale is **not** why it withholds the
+reference TSC page, and one candidate is off the list. The bit is
+withdrawn - a capability nothing has exercised is a claim that cannot be
+backed by a measurement - and the composition is kept, because it is what
+the architecture requires the day anything does use it and reduces exactly
+to the old sum while nothing does.
+
+What is still unexplained is the thing itself: **the guest hypervisor
+enables a reference TSC page for its guest and never fills it in.** The
+next candidates, none tested: that it wants an invariant TSC it does not
+believe it has (CPUID `0x80000007` EDX bit 8 passes through untouched
+here, so what it sees is whatever the layer below reports); that it wants
+the TSC frequency by a route this VMM does not answer; or that a nested
+Hyper-V simply never publishes one, in which case the 42% is structural
+and the only way past it is fewer exits per read rather than fewer reads.
 
 ### Where the exits actually go at the wall
 
