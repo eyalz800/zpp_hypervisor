@@ -666,6 +666,78 @@ void hypervisor::resume_guest(arch::x86_64::context & context,
         this->handler_last_tsc[cpu] = now;
     }
 
+    // Put back an external interrupt this VMM took on the guest's
+    // behalf. Only with ZPP_VIRTUALIZE_APIC; otherwise nothing ever sets
+    // `pending_external_vector` and this is dead.
+    //
+    // Delivered only when the guest could have taken it itself - the
+    // interrupt flag set and no blocking by STI or MOV-SS - because
+    // injection ignores all of that and would otherwise deliver into a
+    // critical section the guest had closed. When it cannot be
+    // delivered, interrupt-window exiting is armed and the processor
+    // comes back the moment it can.
+#ifndef ZPP_VIRTUALIZE_APIC
+#define ZPP_VIRTUALIZE_APIC 0
+#endif
+    if constexpr (0 != ZPP_VIRTUALIZE_APIC) {
+        if (auto slot = vmcs.vpid(); (0 != slot) && (slot <= max_cpus)) {
+            auto cpu = slot - 1;
+            constexpr std::uint64_t valid = 1ull << 31;
+            constexpr std::uint64_t type_external = 0ull << 8;
+            constexpr std::uint64_t interrupt_flag = 1ull << 9;
+            constexpr std::uint64_t blocking_sti_or_mov_ss = 0x3;
+            constexpr std::uint64_t primary_interrupt_window = 1ull << 2;
+
+            auto vector = this->pending_external_vector[cpu];
+            auto primary =
+                vmcs.primary_processor_based_vm_execution_controls();
+
+            if (0 != vector) {
+                auto staged =
+                    vmcs.read(arch::x86_64::vmx::vmcs::field::
+                                  vm_entry_interruption_information_field);
+                auto interruptibility =
+                    vmcs.read(arch::x86_64::vmx::vmcs::field::
+                                  guest_interruptibility_state);
+
+                auto deliverable =
+                    (0 == (staged & valid)) &&
+                    (0 != (vmcs.guest_rflags() & interrupt_flag)) &&
+                    (0 == (interruptibility & blocking_sti_or_mov_ss));
+
+                if (deliverable) {
+                    vmcs.write(arch::x86_64::vmx::vmcs::field::
+                                   vm_entry_interruption_information_field,
+                               valid | type_external | vector);
+                    this->pending_external_vector[cpu] = 0;
+                    this->external_interrupts_injected[cpu] =
+                        this->external_interrupts_injected[cpu] + 1;
+
+                    vmcs.primary_processor_based_vm_execution_controls(
+                        arch::x86_64::vmx::adjust_msr(
+                            this->cached_vmx_msr(
+                                arch::x86_64::vmx::msr::
+                                    true_processor_based_controls),
+                            primary & ~primary_interrupt_window));
+                } else {
+                    vmcs.primary_processor_based_vm_execution_controls(
+                        arch::x86_64::vmx::adjust_msr(
+                            this->cached_vmx_msr(
+                                arch::x86_64::vmx::msr::
+                                    true_processor_based_controls),
+                            primary | primary_interrupt_window));
+                }
+            } else if (0 != (primary & primary_interrupt_window)) {
+                vmcs.primary_processor_based_vm_execution_controls(
+                    arch::x86_64::vmx::adjust_msr(
+                        this->cached_vmx_msr(
+                            arch::x86_64::vmx::msr::
+                                true_processor_based_controls),
+                        primary & ~primary_interrupt_window));
+            }
+        }
+    }
+
     // The mirror of the launch: the guest's registers are put back
     // and the last thing executed in host mode is the resume itself.
     context.rip = reinterpret_cast<std::uint64_t>(entry);

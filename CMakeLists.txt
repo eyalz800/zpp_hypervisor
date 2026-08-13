@@ -86,6 +86,10 @@ option(ZPP_NESTED_TPR_SHADOW
     "Hand a guest hypervisor's TPR shadow to the processor. Off forces CR8 exiting and emulates it against the same page, which is slower and exists to be the one variable between two boots."
     ON)
 
+option(ZPP_VIRTUALIZE_APIC
+    "Take every external interrupt in the host and inject it into the guest, the way KVM does, instead of letting the guest's own interrupt controller deliver them natively. Off is this VMM's design; on exists to test whether that difference is what stalls the nested guest."
+    OFF)
+
 option(ZPP_INTERCEPT_APIC
     "Watch the guest's local APIC - the page in xAPIC mode, the interrupt command MSR in x2APIC mode. Off only makes sense with one processor, since the watch is what stops a start-up IPI handing a processor over unvirtualized."
     ON)
@@ -180,6 +184,7 @@ ExternalProject_Add(hypervisor
         -DZPP_SLOW_EXITS=${ZPP_SLOW_EXITS}
         -DZPP_NESTED_SHADOW_VMCS=${ZPP_NESTED_SHADOW_VMCS}
         -DZPP_INTERCEPT_APIC=${ZPP_INTERCEPT_APIC}
+        -DZPP_VIRTUALIZE_APIC=${ZPP_VIRTUALIZE_APIC}
         -DZPP_PROFILE_L2=${ZPP_PROFILE_L2}
         -DZPP_GUEST_TESTS=${ZPP_GUEST_TESTS}
         -DZPP_TEST_MODULE_PROTECTION=${ZPP_TEST_MODULE_PROTECTION}
@@ -262,6 +267,7 @@ ExternalProject_Add(uefi_loader
         -DZPP_SLOW_EXITS=${ZPP_SLOW_EXITS}
         -DZPP_NESTED_SHADOW_VMCS=${ZPP_NESTED_SHADOW_VMCS}
         -DZPP_INTERCEPT_APIC=${ZPP_INTERCEPT_APIC}
+        -DZPP_VIRTUALIZE_APIC=${ZPP_VIRTUALIZE_APIC}
         -DZPP_PROFILE_L2=${ZPP_PROFILE_L2}
         -DZPP_TRACE=${ZPP_TRACE}
         -DZPP_CHAINLOAD_ONLY=${ZPP_CHAINLOAD_ONLY}

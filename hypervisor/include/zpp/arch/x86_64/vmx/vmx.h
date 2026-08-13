@@ -135,6 +135,19 @@ enum type : std::uint64_t
      * arrives here instead, and has to be handed back rather than
      * swallowed. See on_nmi.
      */
+    /**
+     * SDM Table 27-5, bit 0: an external interrupt causes a VM exit
+     * instead of being delivered through the guest's own interrupt
+     * descriptor table.
+     *
+     * Off by default and deliberately: the interrupts are the guest's
+     * and the guest owns the interrupt controller, so letting them
+     * arrive natively costs no exit at all. `ZPP_VIRTUALIZE_APIC` turns
+     * it on to do what KVM does instead - take every interrupt in the
+     * host and inject it - which is the one architectural difference
+     * between the two that a measurement has ever pointed at.
+     */
+    external_interrupt_exiting = (1ull << 0),
     nmi_exiting = (1ull << 3),
 
     activate_preemption_timer = (1ull << 6),
@@ -191,6 +204,14 @@ enum type : std::uint64_t
     // guest had in it is simply gone.
     save_debug_controls = (1ull << 2),
     host_address_space_size = (1ull << 9),
+    /**
+     * SDM 30.2: without this an external-interrupt VM exit leaves the
+     * interrupt pending at the controller and reports no vector; with it
+     * the controller is acknowledged and the vector lands in the
+     * exit-interruption-information field. Only the processor can take a
+     * vector from the controller, so injecting one requires this.
+     */
+    acknowledge_interrupt_on_exit = (1ull << 15),
 };
 } // namespace vm_exit_controls
 

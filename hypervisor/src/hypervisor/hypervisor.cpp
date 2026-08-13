@@ -5502,9 +5502,18 @@ void hypervisor::setup_vmcs(std::size_t cpu,
     // which nothing else available here can do. The cost is that a genuine
     // NMI from the guest's world arrives here too and has to be handed
     // back; see the exception_or_nmi case in the exit handler.
+#ifndef ZPP_VIRTUALIZE_APIC
+#define ZPP_VIRTUALIZE_APIC 0
+#endif
+    constexpr bool virtualize_apic = (0 != ZPP_VIRTUALIZE_APIC);
+
     vmcs.pin_based_vm_execution_controls(arch::x86_64::vmx::adjust_msr(
         this->cached_vmx_msr(vmx_msr::true_pin_based_controls),
-        arch::x86_64::vmx::vm_execution_controls::pin::nmi_exiting));
+        arch::x86_64::vmx::vm_execution_controls::pin::nmi_exiting |
+            (virtualize_apic
+                 ? arch::x86_64::vmx::vm_execution_controls::pin::
+                       external_interrupt_exiting
+                 : 0)));
 
     // Trapping MONITOR and MWAIT, which is **off**, and the reason is a
     // measurement rather than a preference.
@@ -5614,7 +5623,14 @@ void hypervisor::setup_vmcs(std::size_t cpu,
     vmcs.vm_exit_controls(arch::x86_64::vmx::adjust_msr(
         this->cached_vmx_msr(vmx_msr::true_exit_controls),
         arch::x86_64::vmx::vm_exit_controls::host_address_space_size |
-            arch::x86_64::vmx::vm_exit_controls::save_debug_controls));
+            arch::x86_64::vmx::vm_exit_controls::save_debug_controls |
+            // Without this the exit reports no vector and leaves the
+            // interrupt pending at the controller, so there is nothing
+            // to inject. SDM 30.2.
+            (virtualize_apic
+                 ? arch::x86_64::vmx::vm_exit_controls::
+                       acknowledge_interrupt_on_exit
+                 : 0)));
 
     // The mirror on entry. apply_start_up clears ia_32e_mode_guest
     // again, since it has to agree with CR0.PG or entry fails.

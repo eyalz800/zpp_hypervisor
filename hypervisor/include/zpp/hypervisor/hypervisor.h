@@ -6782,6 +6782,37 @@ private:
     /** @} */
     /** @} */
 
+    /**
+     * Whether this VMM takes every external interrupt and injects it,
+     * the way KVM does, instead of letting the guest's own interrupt
+     * controller deliver them natively.
+     *
+     * Off by default, which is this VMM's design: the interrupts are the
+     * guest's, it owns the controller, and letting them arrive without
+     * an exit costs nothing. On, `external_interrupt_exiting` and
+     * `acknowledge_interrupt_on_exit` are set in vmcs01, every interrupt
+     * exits here with its vector in hand, and it is put back into the
+     * guest through the entry-interruption field.
+     *
+     * It exists because that is the one architectural difference between
+     * this VMM and KVM that any measurement has pointed at, and the
+     * nested guest stalls here while booting under KVM. Whether the
+     * difference matters is worth one boot.
+     *
+     * `pending_external_vector` holds a vector taken but not yet
+     * delivered, and `external_interrupts_taken` and
+     * `external_interrupts_injected` should track each other - a gap
+     * means interrupts are being dropped here, which is exactly the
+     * failure this mechanism can introduce and the guest's own
+     * controller cannot.
+     * @{
+     */
+    volatile std::uint64_t external_interrupts_taken[max_cpus]{};
+    volatile std::uint64_t external_interrupts_injected[max_cpus]{};
+    volatile std::uint64_t external_interrupts_dropped[max_cpus]{};
+    std::uint64_t pending_external_vector[max_cpus]{};
+    /** @} */
+
     std::uint64_t vmread_benchmark_cycles{};
     bool vmread_benchmark_done{};
 

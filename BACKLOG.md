@@ -11330,3 +11330,55 @@ already written down and were walked into anyway:
 - The leaked readers from the failed attempts were cleaned up and
   checked - no D-state processes - and tracing was disarmed afterwards
   rather than left on.
+
+
+## Virtualizing the APIC the way KVM does: tried, and it is not a flag
+
+`ZPP_VIRTUALIZE_APIC`, default **off**, sets
+`external_interrupt_exiting` in vmcs01 with
+`acknowledge_interrupt_on_exit` beside it, takes every external
+interrupt in the exit handler, and puts it back into the guest through
+the entry-interruption field - arming interrupt-window exiting when the
+guest cannot take one. That is the shape KVM uses, and it is the one
+architectural difference between the two that any measurement has
+pointed at.
+
+**It breaks the machine before Windows loads.** Measured, one processor:
+
+    external interrupts taken       2
+    external interrupts injected    1
+    interrupt-window exits          0
+    working exits                   0
+
+and the firmware's own serial says what happened:
+
+    FXSAVE_STATE - 000000007FE64BE0
+    !!!! Find image based on IP(0x7EE3E66F) ... LocalApicTimerDxe.dll
+
+The firmware's local APIC timer driver faulted. Nothing reached the boot
+manager at all.
+
+**Why, and it is structural rather than a slip.**
+`acknowledge_interrupt_on_exit` does what its name says: the processor
+takes the vector *from the controller*, which sets the in-service bit in
+the **physical** local APIC. Only an end-of-interrupt clears it. This
+VMM takes the vector and nothing ever writes an EOI, so the in-service
+bit stays set and blocks every interrupt at or below its priority - the
+timer driver waits for a tick that can no longer arrive, and faults.
+
+**So virtualizing the APIC is not a control bit, it is a device.** Doing
+it properly means owning the in-service and request registers, answering
+the guest's end-of-interrupt writes against them, tracking priority, and
+re-evaluating what to deliver on every entry - which is what KVM's
+`lapic.c` is, and it is thousands of lines. The half of it that fits in
+a flag is the half that loses interrupts.
+
+**Kept, off, with this written next to it**, because the question "would
+virtualizing the APIC fix the nested stall" is a reasonable one to ask
+again, and the answer should be "here is what it costs" rather than
+another afternoon.
+
+Note also what this rules in: the *guest owning the physical controller*
+is not obviously the wrong design here. It costs no exits, it needs no
+emulation, and the one attempt to replace it failed on the first
+interrupt.

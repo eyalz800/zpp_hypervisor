@@ -317,6 +317,59 @@ void hypervisor::on_vm_exit(std::uint64_t cpuid,
     // configuration problem that did not exist. When adding a case,
     // answer the whole of whatever it is, or fault.
     switch (reason) {
+    case basic_reason::external_interrupt: {
+        // Only reachable with ZPP_VIRTUALIZE_APIC on, because nothing
+        // else in this VMM sets external-interrupt exiting. See the
+        // flag: this is the KVM shape - take every interrupt here and
+        // put it back into the guest - against this VMM's own, where the
+        // guest owns the controller and the interrupt never exits.
+        //
+        // The vector is in hand only because `acknowledge_interrupt_on_
+        // exit` is set with the control (SDM 30.2); without it the field
+        // is not valid and the interrupt would still be pending at the
+        // controller, so dropping it here would lose it for ever.
+        constexpr std::uint64_t interruption_valid = 1ull << 31;
+        constexpr std::uint64_t interruption_vector = 0xff;
+
+        auto information = vmcs.read(arch::x86_64::vmx::vmcs::field::
+                                         vm_exit_interruption_information);
+
+        if (auto slot = vmcs.vpid();
+            (0 != slot) && (slot <= max_cpus) &&
+            (0 != (information & interruption_valid))) {
+            auto cpu = slot - 1;
+
+            // One at a time. A second interrupt arriving before the
+            // first is delivered would overwrite it, and that is a lost
+            // interrupt rather than a late one - counted rather than
+            // hidden, because it is the failure this mechanism can
+            // introduce and the guest's own controller cannot.
+            if (0 != this->pending_external_vector[cpu]) {
+                this->external_interrupts_dropped[cpu] =
+                    this->external_interrupts_dropped[cpu] + 1;
+            }
+
+            this->pending_external_vector[cpu] =
+                information & interruption_vector;
+            this->external_interrupts_taken[cpu] =
+                this->external_interrupts_taken[cpu] + 1;
+        }
+        break;
+    }
+
+    case basic_reason::interrupt_window: {
+        // Armed by the resume path when it had a vector to deliver and
+        // the guest could not take one. Nothing to do here: the window
+        // is open by definition now, so the resume below will inject it
+        // and disarm the control.
+        //
+        // A case is *required* even though it does nothing, because
+        // `default:` stops the processor - see the note at the top of
+        // this handler. An exit this VMM asked for and then did not
+        // handle would be a halt of its own making.
+        break;
+    }
+
     case basic_reason::exception_or_nmi: {
         // Either a wake this VMM sent, or the guest's own.
         //
