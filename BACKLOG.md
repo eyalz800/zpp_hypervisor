@@ -11800,3 +11800,39 @@ missing exit. **Do not infer from what the ring does not show.**
   each return, with `ZPP_NESTED_SHADOW_VMCS=OFF` so every write exits and
   is recorded. That is the only view of its intent available here, and it
   is the same instrument that made its earlier traffic visible.
+
+
+## What the control's nested exits look like, for comparison
+
+`kvm_nested_vmexit` and `kvm_nested_vmenter` armed on a control boot -
+same guest, nothing of ours resident - and read with `sudo dd`, 306 exits
+in the window:
+
+    MSR_READ             247   81%
+    MSR_WRITE             20
+    INTERRUPT_WINDOW      12
+    TPR_BELOW_THRESHOLD    8
+    EPT_VIOLATION          7
+    EXTERNAL_INTERRUPT     6
+    EPT_MISCONFIG          6
+    VMCALL                 0
+
+Against ours inside the livelock, which is **100% `vmcall`**, all of it
+`HvCallVtlReturn` from one address.
+
+**Two things this establishes and one it does not.**
+
+Establishes: the guest hypervisor really does set external-interrupt
+exiting in pin12 - `EXTERNAL_INTERRUPT` appears as a reflected L2 exit
+here - which is what the pin fix above depends on being true, and it is
+now measured rather than assumed. And the control's steady state is
+reference-counter polling, the same traffic ours shows before it stops,
+so that part is not pathological.
+
+Does not establish: a phase-matched comparison. This window is early
+boot. The control passes through the trust-level work fast enough that
+hypercalls do not dominate any twenty-five second sample, which is
+exactly why there is no "same point" to compare against - the failure
+here is that our guest *stays* somewhere the control only passes through.
+
+Tracing was disarmed afterwards and no reader was left in D state.
