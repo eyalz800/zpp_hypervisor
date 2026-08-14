@@ -3321,6 +3321,14 @@ void hypervisor::reflect_l2_exit(std::size_t cpu,
     shadow.write(field::exit_reason, reason.value());
     shadow.write(field::exit_qualification, qualification);
 
+    // Phase timing for the exit-information block below; see
+    // `phase_cycles`. Split out from `reflect_l2_exit` as a whole because
+    // what is left of that function after `save_l2_state` and
+    // `load_l1_host_state` is 26% of the wall clock and was attributed to
+    // nothing - and eight of the VMREADs in it are unconditional where
+    // the architecture defines only three of them for most exits.
+    auto info_start = arch::x86_64::rdtsc();
+
     if (!reason.entry_failure()) {
         // SDM 33.3, VMLAUNCH: the launch state becomes launched once an
         // entry has completed, and an entry that failed after loading
@@ -3367,6 +3375,11 @@ void hypervisor::reflect_l2_exit(std::size_t cpu,
             field::vm_entry_interruption_information_field,
             shadow.read(field::vm_entry_interruption_information_field) &
                 ~interruption_valid);
+    }
+
+    if (cpu < max_cpus) {
+        this->phase_cycles[cpu][13] += arch::x86_64::rdtsc() - info_start;
+        this->phase_calls[cpu][13] += 1;
     }
 
     // SDM 30.4: the VM-exit MSR-store area is processed after the guest
@@ -3419,7 +3432,19 @@ void hypervisor::reflect_l2_exit(std::size_t cpu,
     // Anything queued for the second-level guest is dropped here, which
     // vmcs02's own field holding it makes automatic: the next entry
     // rewrites it from vmcs12, and vmcs12's valid bit was just cleared.
-    load_l1_host_state(cpu);
+    {
+        // Phase timing; see `phase_cycles`.
+        auto host_start = arch::x86_64::rdtsc();
+        zpp::scope_exit host_stop{[&] {
+            if (cpu < max_cpus) {
+                this->phase_cycles[cpu][12] +=
+                    arch::x86_64::rdtsc() - host_start;
+                this->phase_calls[cpu][12] += 1;
+            }
+        }};
+
+        load_l1_host_state(cpu);
+    }
 
     // SDM 30.6: and the VM-exit MSR-load area after host state, which is
     // why this is here rather than beside the store above.
