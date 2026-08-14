@@ -11999,6 +11999,32 @@ stopped polling the clock and started drawing the boot animation**, which
 is the first time anything in this investigation has moved the boot rather
 than explained it.
 
+**Then it halts, and that is the next failure.** Left running, the guest
+goes further than it ever had - the second-level ring's last entries are
+`vmcall 0x11` and `0x12`, a virtual-trust-level call and return, then
+`HvCallModifyVtlProtectionMask` with a repeat count of **510**, and then
+`hlt`. Exits fall from about 5,000 a second to **4**, the monitor still
+reports the machine running, and no interrupt arrives to wake it.
+
+That is progress and a regression at once. **The guest never halted
+before this change** - it spun - and a kernel only halts when it believes
+it has a timer that will wake it. So the reference TSC page got it past
+the poll and through secure-kernel work it had never reached, and then it
+slept on a timer that did not fire.
+
+The obvious suspect is the page this VMM now publishes. Windows arms the
+synthetic timer with a deadline computed *from* it, so a scale or offset
+even slightly wrong puts that deadline somewhere the counter will not
+reach soon. The fit was checked against one sample inside a 32-entry ring
+- a window of milliseconds - and nothing has checked it over minutes.
+
+**The next step, and it is small:** keep verifying. Re-read the guest
+hypervisor's counter periodically after publishing and compare it against
+what the published scale and offset predict, recording the worst
+divergence. If it grows, the fit is the fault and needs a longer baseline;
+if it does not, the halt has another cause and the timer path is where to
+look.
+
 Still to settle, and read the counters carefully here:
 
 - The thread is **still `Phase1Initialization`**, 32 samples out of 32.
