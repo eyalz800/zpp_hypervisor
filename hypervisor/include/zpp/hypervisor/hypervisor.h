@@ -4314,6 +4314,9 @@ private:
      */
     void sample_guest_thread(std::size_t cpu);
 
+    /** Fills `l2_poll_code` and `l2_poll_stack`, once. */
+    void capture_poll_site(std::size_t cpu);
+
     /**
      * Every thread of the running thread's process, with what each is
      * doing.
@@ -4655,6 +4658,34 @@ private:
      * histogram of VTPR-over-entries cannot be read off the wrong page.
      */
     std::uint32_t l2_entry_vtpr[max_cpus][256]{};
+
+    /**
+     * One capture of the code and stack at the reference-counter poll,
+     * taken once per boot.
+     *
+     * The guest is in a timed retry loop - arm a 2.5 ms timer, poll the
+     * counter until it expires, ask for a deferred procedure call,
+     * repeat - and what it retries *on* is not in any counter. It is in
+     * the instructions around the poll and in the return addresses above
+     * it. Both move with address-space layout randomisation every boot,
+     * so they have to be fetched from inside rather than computed
+     * outside.
+     *
+     * Read through `translate_guest_linear`, which walks the guest's own
+     * page tables and then the guest hypervisor's extended ones - the
+     * same two steps `sample_guest_thread` needs, and the reason reading
+     * this from a debugger has failed every time: a CR3 sampled from
+     * outside is whichever trust level exited last.
+     */
+    static constexpr std::size_t l2_poll_code_size = 128;
+    static constexpr std::size_t l2_poll_stack_words = 16;
+
+    std::uint8_t l2_poll_code[l2_poll_code_size]{};
+    std::uint64_t l2_poll_stack[l2_poll_stack_words]{};
+    std::uint64_t l2_poll_code_base{};
+    std::uint64_t l2_poll_rip{};
+    std::uint64_t l2_poll_rsp{};
+    volatile std::uint64_t l2_poll_captured{};
 
     /**
      * Records one synthetic interrupt command the second-level guest

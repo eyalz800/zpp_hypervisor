@@ -3952,6 +3952,54 @@ void hypervisor::walk_guest_threads(std::size_t cpu, std::uint64_t thread)
     this->guest_thread_list_count = found;
 }
 
+void hypervisor::capture_poll_site(std::size_t cpu)
+{
+    auto rip = this->vmcs.guest_rip();
+    auto rsp = this->vmcs.guest_rsp();
+
+    // Backwards far enough to take in the head of the loop, since the
+    // poll itself is the bottom of it.
+    constexpr std::uint64_t behind = 0x60;
+    auto from = rip - behind;
+
+    auto fetch = [&](std::uint64_t linear, std::span<std::byte> into) {
+        auto physical = translate_guest_linear(linear);
+        if (!physical) {
+            return false;
+        }
+
+        return read_guest_memory(cpu, *physical, into).has_value();
+    };
+
+    // Byte at a time, because the range crosses a page boundary whenever
+    // the loop does and a single translation would then read the wrong
+    // second page. Slow, and it happens once.
+    for (std::size_t i{}; i < l2_poll_code_size; ++i) {
+        if (!fetch(from + i,
+                   std::span(reinterpret_cast<std::byte *>(
+                                 &this->l2_poll_code[i]),
+                             1))) {
+            return;
+        }
+    }
+
+    for (std::size_t i{}; i < l2_poll_stack_words; ++i) {
+        if (!fetch(rsp + (i * sizeof(std::uint64_t)),
+                   std::span(reinterpret_cast<std::byte *>(
+                                 &this->l2_poll_stack[i]),
+                             sizeof(std::uint64_t)))) {
+            break;
+        }
+    }
+
+    this->l2_poll_code_base = from;
+    this->l2_poll_rip = rip;
+    this->l2_poll_rsp = rsp;
+
+    // Last, so a reader that sees this set sees everything above it.
+    this->l2_poll_captured = 1;
+}
+
 void hypervisor::sample_guest_thread(std::size_t cpu)
 {
     if (cpu >= max_cpus) {
@@ -4701,6 +4749,19 @@ hypervisor::on_l2_exit(std::size_t cpu,
 
             if (basic_reason::rdmsr == reason.basic()) {
                 this->l2_synthetic_msr_reads[cpu][slot] += 1;
+
+                // Once, at the poll, and only after the loop has clearly
+                // settled - an early capture would catch the boot path
+                // reading the counter rather than the loop that never
+                // leaves. See `l2_poll_code`.
+                constexpr std::uint64_t reference_count_slot = 0x20;
+                constexpr std::uint64_t settled = 200000;
+
+                if ((reference_count_slot == slot) &&
+                    (0 == this->l2_poll_captured) &&
+                    (this->l2_synthetic_msr_reads[cpu][slot] > settled)) {
+                    capture_poll_site(cpu);
+                }
             } else if (basic_reason::wrmsr == reason.basic()) {
                 this->l2_synthetic_msr_writes[cpu][slot] += 1;
 

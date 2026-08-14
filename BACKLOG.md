@@ -11741,6 +11741,53 @@ entered, which is the guest hypervisor's own trust level, and in one run
 read `0xfffff805ed200000` while every address above was `0xfffff804a0...`.
 Do not derive a base from it without checking the prefixes agree.
 
+### The loop, disassembled: a driver polling the clock
+
+Captured from inside the guest on 2026-08-14 - `capture_poll_site` reads
+the instructions at the poll and the stack above it through
+`translate_guest_linear`, because both move with address-space layout
+randomisation and a CR3 sampled from outside is whichever trust level
+exited last.
+
+**The poll site is not the loop.** Disassembled it is a switch on a
+Hyper-V synthetic register name:
+
+    movl  $0xA0002, %eax     cmpl %eax, %ecx    jg / je ...
+    movl  $0x90002, %eax     cmpl %eax, %ecx    jle ...
+    subl  $0x90003, %ecx     je ...
+    movl  $0x40000020, %ecx  rdmsr
+    shlq  $32, %rdx ; orq %rdx, %rax ; movq %rax, (%r9)
+
+That is `HvlpGetRegister64` - given a register name, read it, and for the
+time reference count read MSR `0x40000020`. So it is the clock-read
+helper, and the retry loop is its caller.
+
+**And the caller is not in the kernel.** With the base derived from the
+poll's own RVA, `0xfffff8039fe00000`, two-megabyte aligned:
+
+| return address | resolves to |
+|---|---|
+| `0xfffff803a0163e91` | ntoskrnl + `0x363e91` |
+| `0xfffff803a010dde7` | ntoskrnl + `0x30dde7` |
+| `0xfffff8032eb3c801` | **not ntoskrnl - a separate driver image** |
+| `0xfffff8032eb3c7e0` | **not ntoskrnl - a separate driver image** |
+
+So the chain is **driver -> a kernel timing routine -> `HvlpGetRegister64`
+-> `rdmsr 0x40000020`**, on a thread that arms a 2.5 ms timer and retries
+for ever.
+
+**That is the shape of the hang: a boot-start driver is waiting on its
+device, and timing out and retrying.** It fits the one fact nothing else
+explained - that in forty minutes exactly two interrupt vectors are ever
+acknowledged, `0xef` and `0x20`, both the guest hypervisor's own timer,
+and no device raises one at all. The driver polls because nothing is
+answering it.
+
+Which driver is the remaining question, and it is answerable: walk
+`PsLoadedModuleList` and find the image containing `0xfffff8032eb3c7e0`.
+The candidates are what this rig passes through - the NVMe the guest boots
+from, and the GPU.
+
 This is the first reading that says what the guest is *waiting for*
 rather than what it is spending time on, and it moves the question again:
 not "why is it slow" and not "why does it never lower its priority", but
