@@ -13064,3 +13064,78 @@ That retires "renders into a RAM back buffer and never presents" for
 good - the framebuffer path through to the passed-through GPU works -
 and it is weak evidence for the first reading, since partial progress is
 what being just short of a finite threshold looks like.
+
+### Settled: the guest asks for 575 Hz, we can afford 507, and that is the whole gap
+
+Both readings in the entry above are wrong, and two reads of live state
+settle it without a boot.
+
+**The reference clock we publish is correct.** `reference_scale` reads
+`0x0148f472366408c2`, which is 0.005019 of 2^64 per TSC tick. Reference
+time is in 100 ns units, so the implied TSC frequency is
+`1e7 / 0.005019` = **1.992 GHz** - an ordinary value for this machine,
+not eight times anything. The fitted page is not the source of a fast
+clock and can stop being suspect.
+
+**And the guest was never asking for 64 Hz.** `stimer_arm_count` reads
+8, so the arm ring holds every arm this boot with no wrap, in order:
+
+    config 0x10008, 0x30008, 0x3000a
+    count  0x2625a = 156,250  -> 15.625 ms,  64 Hz
+    config 0x3000a, 0x30008, 0x3000a
+    count  0x43f8  =  17,400  ->  1.74 ms,  575 Hz
+
+The **last** arm is what is running. The guest arms its ordinary 15.625
+ms clock early and then re-arms at 1.74 ms, and it is that second rate
+the delivered 507 a second should be compared against - 88% of it, not
+792% of the first one. The earlier claim came from quoting this file's
+own note of `STIMER0_COUNT = 156,250`, which was taken from a boot that
+never reached the second arm. **A recorded measurement is only evidence
+for the run it was taken in**; that is the lesson, and it cost two
+wrong conclusions in one session.
+
+**So the diagnosis is the unglamorous one after all: this VMM is too
+slow, by a factor of about two.** Not forty, which was the figure while
+the tick rate was being compared against the wrong denominator, and not
+a clock defect. The arithmetic:
+
+- the guest wants 575 ticks a second, so a tick may cost 1.74 ms
+- a tick costs about 1.97 ms today, so it saturates and the guest is
+  left with the remainder, which is nearly nothing
+- to leave the guest half the machine a tick must cost about 0.87 ms,
+  which is **2.3x**
+
+That is consistent with what the display shows: the boot circle begins
+to draw and does not get far. We are just past the edge of breaking
+even, which is exactly what a guest with a few percent of a processor
+looks like.
+
+**Where the 2.3x has to come from, and what is already spent.** Per L2
+round trip, essentially the whole cost is VMCS accesses at about 1.4 to
+1.8 us each, because this VMM is KVM's guest and every VMREAD and
+VMWRITE traps:
+
+| | accesses | cycles/call |
+|---|---|---|
+| `save_l2_state` | 48 reads | 201,338 |
+| `load_l1_host_state`, inside `reflect_l2_exit` | ~52 writes | ~211,000 |
+| `build_vmcs02` | ~10 writes after both elisions | 181,338 |
+| shadow copies both ways | 22 | 70,709 |
+
+Three elisions are already in and near-perfect - guest state 99.4%,
+controls 99.36%, shadow fields via `shadow_cache` - so the remaining
+cost is not redundant writes. It is the two eager copies, and both have
+a note against them: `save_l2_state`'s lazy version was tried and reset
+the machine (SDM 30.3.2, unusable segments), and `load_l1_host_state`
+cannot use a last-written cache because the processor saves L1's own
+state over those fields whenever L1 exits.
+
+**The one idea not yet tried** is that `load_l1_host_state` is writing
+vmcs01 guest-state fields whose values, on a reflection, are the same
+ones the processor just saved there - L1 exits to us from its own
+VMRESUME, in its own kernel context, which *is* its host context for
+everything except RIP, RSP and RFLAGS. A cache validated by reading one
+canary field would be 1 read against 52 writes. It is a heuristic and
+the hazard is a field that moves while the canary does not, so it needs
+the same treatment as the last attempt: a switch, a boot, and a
+willingness to find it does not work.
