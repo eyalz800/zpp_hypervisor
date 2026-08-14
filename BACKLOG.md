@@ -13971,3 +13971,56 @@ Two directions are left, and they are the only two:
   be VMPTRLDed as an ordinary one, and KVM checked on what its emulated
   shadowing does with such a region. Do not build it before reading
   both.
+
+### vmcs02 cannot be the shadow VMCS — checked, not built
+
+The idea in the section above was to point vmcs01's VMCS-link pointer at
+vmcs02 with the shadow-VMCS indicator set, so the guest hypervisor's own
+VMREADs and VMWRITEs would land on the VMCS that actually runs its
+guest, and `save_l2_state`, `load_l1_host_state` and both shadow copies
+- 49% of the wall clock - would have nothing left to do.
+
+**The SDM refuses it twice**, and the second refusal is the fatal one.
+
+> "An ordinary VMCS can be used for VM entry but a shadow VMCS cannot.
+> Attempts to perform VM entry when the current VMCS is a shadow VMCS
+> fail (see Section 29.1)." — SDM 27.10, `.references/sdm.txt:200442`
+
+So the same region cannot both be read by the guest hypervisor from
+non-root operation and be entered from. Flipping the indicator between
+the two roles is what would be needed, and:
+
+> "Software should not modify the shadow-VMCS indicator in the VMCS
+> region of a VMCS that is active. Doing so may cause the VMCS to become
+> corrupted. Before modifying the shadow-VMCS indicator, software should
+> execute VMCLEAR for the VMCS to ensure that it is not active."
+> — SDM 27.11.1, `.references/sdm.txt:200468`
+
+Two VMCLEARs per round trip, each forcing the next entry to be a
+VMLAUNCH against a cold VMCS, to save a hundred VMCS accesses that cost
+2,700 cycles each. That is not obviously a loss, but it is not the free
+win the idea promised, and VMCLEAR's cost here is unmeasured. Left
+unbuilt.
+
+### And eliding load_l1_host_state's writes is unsound for the same
+### reason the guest-state elision was
+
+`load_l1_host_state` is 52 VMWRITEs and 14.1% of the wall clock, almost
+all of them constants or vmcs12 host fields that never change. A cache
+of what was last written would skip nearly all of them - and cannot,
+because the processor overwrites vmcs01's whole guest-state area with
+the guest hypervisor's own state at every exit:
+
+> "If the register was not unusable, the values saved into the following
+> fields are those which were in the register before the VM exit: (1)
+> base address; (2) segment limit; and (3) bits 7:0 and bits 15:12 in
+> access rights." — SDM 30.3.2, `.references/sdm.txt:204558`
+
+So what is in vmcs01 after an exit is the guest hypervisor's state and
+not what this VMM last wrote, and a last-written cache would elide a
+write that is owed. That is precisely what killed `ZPP_LAZY_GUEST_STATE`
+one VMCS over. Eliding here needs the same read-back that makes it
+pointless, or a set of assumptions about what the guest hypervisor's
+exit path does to its own segments - which is an assumption about
+Hyper-V rather than about the architecture, and this tree has now been
+wrong three times in a row about what may be assumed of it.
