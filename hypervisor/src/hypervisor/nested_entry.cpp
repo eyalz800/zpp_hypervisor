@@ -1385,7 +1385,8 @@ std::expected<void, zpp::error> hypervisor::build_vmcs02(std::size_t cpu)
     // Phase timing; see `phase_cycles`. Timed on its own because the
     // rest of this function is now nearly free and the phase is not.
     auto switch_start = arch::x86_64::rdtsc();
-    auto switch_failed = arch::x86_64::vmx::vmptrld(&this->vmcs02_physical[cpu]);
+    auto switch_failed =
+        arch::x86_64::vmx::vmptrld(&this->vmcs02_physical[cpu]);
 
     if (cpu < max_cpus) {
         this->phase_cycles[cpu][6] += arch::x86_64::rdtsc() - switch_start;
@@ -3398,7 +3399,8 @@ void hypervisor::reflect_l2_exit(std::size_t cpu,
     // makes, so phases 6 and 7 price the whole of it.
     auto region = own_vmcs_region_physical();
     auto switch_start = arch::x86_64::rdtsc();
-    auto switch_failed = (0 == region) || arch::x86_64::vmx::vmptrld(&region);
+    auto switch_failed =
+        (0 == region) || arch::x86_64::vmx::vmptrld(&region);
 
     if (cpu < max_cpus) {
         this->phase_cycles[cpu][7] += arch::x86_64::rdtsc() - switch_start;
@@ -4965,6 +4967,142 @@ void hypervisor::capture_poll_site(std::size_t cpu)
     this->l2_poll_captured = 1;
 }
 
+void hypervisor::capture_vtl_switch(std::size_t cpu,
+                                    std::size_t kind,
+                                    arch::x86_64::context & context)
+{
+    if ((cpu >= max_cpus) || (kind >= vtl_kinds)) {
+        return;
+    }
+
+    auto & vmcs = this->vmcs;
+    auto & shadow = this->guest_vmcs12[cpu];
+
+    // Slot 4 is the VMCS's guest RSP and not the context's, and slots 16
+    // to 19 are not registers the exit handler holds at all. See
+    // `vtl_differed` for the layout.
+    std::uint64_t now[vtl_slot_count] = {
+        context.rax,         context.rbx,
+        context.rcx,         context.rdx,
+        vmcs.guest_rsp(),    context.rbp,
+        context.rsi,         context.rdi,
+        context.r8,          context.r9,
+        context.r10,         context.r11,
+        context.r12,         context.r13,
+        context.r14,         context.r15,
+        vmcs.guest_rip(),    vmcs.guest_cr3(),
+        vmcs.guest_rflags(), shadow.read(field::ept_pointer),
+    };
+
+    auto count = this->vtl_switches[cpu][kind];
+
+    // Against the previous switch of this kind, so the answer is about
+    // the loop rather than about how the boot reached it.
+    if (0 != count) {
+        for (std::size_t i{}; i < vtl_slot_count; ++i) {
+            if (now[i] != this->vtl_previous[cpu][kind][i]) {
+                this->vtl_differed[cpu][kind][i] += 1;
+            }
+        }
+    }
+
+    for (std::size_t i{}; i < vtl_slot_count; ++i) {
+        this->vtl_previous[cpu][kind][i] = now[i];
+        this->vtl_latest[cpu][kind][i] = now[i];
+    }
+
+    this->vtl_switches[cpu][kind] = count + 1;
+
+    if (vtl_capture_at != count) {
+        return;
+    }
+
+    for (std::size_t i{}; i < vtl_slot_count; ++i) {
+        this->vtl_first[cpu][kind][i] = now[i];
+    }
+
+    // The stack, in this side's own address space, which is why it is
+    // taken here rather than from a reader outside: a CR3 sampled from
+    // out there is whichever trust level exited last, and half the time
+    // that is the other one.
+    auto rip = now[16];
+    auto rsp = now[4];
+
+    for (std::size_t i{}; i < vtl_stack_words; ++i) {
+        auto physical =
+            translate_guest_linear(rsp + (i * sizeof(std::uint64_t)));
+        if (!physical) {
+            break;
+        }
+
+        std::uint64_t word{};
+        if (!read_guest_memory(
+                cpu,
+                *physical,
+                std::span(reinterpret_cast<std::byte *>(&word),
+                          sizeof(word)))) {
+            break;
+        }
+
+        this->vtl_stack[kind][i] = word;
+    }
+
+    this->vtl_rip[kind] = rip;
+    this->vtl_rsp[kind] = rsp;
+    this->vtl_cr3[kind] = now[17];
+
+    // The hypercall page is its own page and belongs to no image, so
+    // this is expected to come back empty - it is recorded so that an
+    // empty answer is distinguishable from a capture that never ran.
+    this->vtl_image_base[kind] = image_base_of(cpu, rip);
+    image_name_of(
+        cpu, this->vtl_image_base[kind], this->vtl_image_name[kind]);
+
+    // The first return address above it that resolves to an image, which
+    // is the caller. Same trick as `capture_poll_site`, and the same
+    // three ways of naming what it finds.
+    constexpr std::uint64_t kernel_space = 0xffff800000000000;
+
+    for (auto entry : this->vtl_stack[kind]) {
+        if (entry < kernel_space) {
+            continue;
+        }
+
+        auto base = image_base_of(cpu, entry);
+        if (0 == base) {
+            continue;
+        }
+
+        this->vtl_caller_base[kind] = base;
+        this->vtl_caller_address[kind] = entry;
+
+        image_name_of(cpu, base, this->vtl_caller_name[kind]);
+
+        if ('\0' == this->vtl_caller_name[kind][0]) {
+            image_debug_name_of(cpu, base, this->vtl_caller_name[kind]);
+        }
+
+        // And the kernel's own list last, which needs a kernel base and
+        // so only answers for the side that has one. `l2_kernel_base` is
+        // whichever image `capture_poll_site` found, and that runs in
+        // the ordinary trust level - so this is the right list for kind
+        // 0 and the wrong one for kind 1, where it finds nothing rather
+        // than the wrong thing.
+        if (('\0' == this->vtl_caller_name[kind][0]) &&
+            (0 != this->l2_kernel_base)) {
+            module_name_of(cpu,
+                           this->l2_kernel_base,
+                           base,
+                           this->vtl_caller_name[kind]);
+        }
+
+        break;
+    }
+
+    // Last, so a reader that sees this set sees everything above it.
+    this->vtl_captured[kind] = 1;
+}
+
 void hypervisor::sample_guest_thread(std::size_t cpu)
 {
     if (cpu >= max_cpus) {
@@ -5768,6 +5906,28 @@ hypervisor::on_l2_exit(std::size_t cpu,
                     this->l2_reference_tsc_written[cpu] =
                         this->l2_exit_detail_value[cpu];
                 }
+            }
+        }
+
+        // And the two hypercalls that switch virtual trust level, which
+        // are the only work this guest does that is not the idle loop.
+        //
+        // The call code is the low sixteen bits of the hypercall input
+        // value in RCX, which is the interface this VMM announces
+        // through the hypercall page MSR - not KVM's, which takes it in
+        // RAX. Both have been seen on this path, so the reason is
+        // checked as well as the register.
+        constexpr std::uint64_t hypercall_code_mask = 0xffff;
+        constexpr std::uint64_t vtl_call_code = 0x11;
+        constexpr std::uint64_t vtl_return_code = 0x12;
+
+        if (basic_reason::vmcall == reason.basic()) {
+            auto code = context.rcx & hypercall_code_mask;
+
+            if (vtl_call_code == code) {
+                capture_vtl_switch(cpu, 0, context);
+            } else if (vtl_return_code == code) {
+                capture_vtl_switch(cpu, 1, context);
             }
         }
 

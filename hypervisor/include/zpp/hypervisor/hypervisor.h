@@ -4318,6 +4318,14 @@ private:
     void capture_poll_site(std::size_t cpu);
 
     /**
+     * Records one side of a trust-level switch. `kind` is 0 for
+     * `HvCallVtlCall` and 1 for `HvCallVtlReturn`. See `vtl_differed`.
+     */
+    void capture_vtl_switch(std::size_t cpu,
+                            std::size_t kind,
+                            arch::x86_64::context & context);
+
+    /**
      * The base of the page-aligned PE image containing an address, found
      * by scanning back for `MZ`, and the name from its export directory.
      * Zero when neither is found within the bound.
@@ -4764,6 +4772,70 @@ private:
     std::uint64_t l2_driver_address{};
     char l2_kernel_name[l2_image_name_size]{};
     char l2_driver_name[l2_image_name_size]{};
+
+    /**
+     * Whether the trust-level switch loop advances, and what it is made
+     * of.
+     *
+     * The second-level guest alternates `HvCallVtlCall` and
+     * `HvCallVtlReturn` - hypercall codes 0x11 and 0x12 - at two
+     * instruction pointers twenty-five bytes apart in the hypercall
+     * page, tens of thousands of times, with nothing else between them.
+     * From outside that is indistinguishable from two things that want
+     * opposite work: a secure call being *made* repeatedly because it is
+     * making progress, and a secure call being *retried* because it is
+     * not. Every counter this VMM had said only how many.
+     *
+     * So the registers are compared against **the previous switch of the
+     * same kind** rather than against a fixed first capture. A running
+     * count of how often each one changed answers it directly: all zero
+     * is a livelock, and whichever entries are non-zero name what the
+     * loop carries. Comparing against a fixed first snapshot would not
+     * do, because the boot legitimately switches trust levels before the
+     * loop starts and there is no way to know from in here which capture
+     * is the first one inside it.
+     *
+     * Slots 0-15 are the general-purpose registers in `context` order,
+     * except that slot 4 is the VMCS's guest RSP rather than the
+     * context's - the context's is not the second-level guest's. Slot 16
+     * is RIP, 17 CR3, 18 RFLAGS, and 19 the extended-page-table pointer
+     * out of vmcs12, which is what distinguishes the two trust levels'
+     * address spaces from each other.
+     */
+    static constexpr std::size_t vtl_slot_count = 20;
+    static constexpr std::size_t vtl_kinds = 2;
+
+    std::uint64_t vtl_switches[max_cpus][vtl_kinds]{};
+    std::uint64_t vtl_previous[max_cpus][vtl_kinds][vtl_slot_count]{};
+    std::uint64_t vtl_differed[max_cpus][vtl_kinds][vtl_slot_count]{};
+    std::uint64_t vtl_first[max_cpus][vtl_kinds][vtl_slot_count]{};
+    std::uint64_t vtl_latest[max_cpus][vtl_kinds][vtl_slot_count]{};
+
+    /**
+     * One capture of the stack on each side of the switch, taken well
+     * inside the loop rather than at its first turn.
+     *
+     * The instruction pointer says nothing here on purpose: both sides
+     * are in the hypercall page, which is a stub the guest hypervisor
+     * published and is the same address for every caller. What names the
+     * caller is the return addresses above it, exactly as
+     * `capture_poll_site` uses them - and unlike that one, the two
+     * captures are in *different address spaces*, so each has to be
+     * taken while its own side is the one that exited.
+     */
+    static constexpr std::size_t vtl_stack_words = 32;
+    static constexpr std::uint64_t vtl_capture_at = 4096;
+
+    std::uint64_t vtl_stack[vtl_kinds][vtl_stack_words]{};
+    std::uint64_t vtl_rip[vtl_kinds]{};
+    std::uint64_t vtl_rsp[vtl_kinds]{};
+    std::uint64_t vtl_cr3[vtl_kinds]{};
+    std::uint64_t vtl_image_base[vtl_kinds]{};
+    std::uint64_t vtl_caller_base[vtl_kinds]{};
+    std::uint64_t vtl_caller_address[vtl_kinds]{};
+    char vtl_image_name[vtl_kinds][l2_image_name_size]{};
+    char vtl_caller_name[vtl_kinds][l2_image_name_size]{};
+    volatile std::uint64_t vtl_captured[vtl_kinds]{};
 
     /**
      * What the loaded-module walk got as far as, so a run that produces

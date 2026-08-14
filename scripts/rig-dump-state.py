@@ -61,6 +61,13 @@ PHASE_NAMES = ["save_l2_state", "reflect_l2_exit", "build_vmcs02",
 # and the unmarked case is the ordinary one.
 RIP_OWNER = {0: "", 1: " [l2-rip]", 2: " [l1-rip]"}
 
+# The slot order `capture_vtl_switch` writes, and the two hypercalls it
+# is armed for.  Slot 4 is the VMCS's guest RSP, not the exit context's.
+VTL_SLOTS = ["rax", "rbx", "rcx", "rdx", "rsp", "rbp", "rsi", "rdi",
+             "r8", "r9", "r10", "r11", "r12", "r13", "r14", "r15",
+             "rip", "cr3", "rflags", "eptp"]
+VTL_KINDS = ["HvCallVtlCall 0x11", "HvCallVtlReturn 0x12"]
+
 
 def gdb_offsets(elf, members):
     """Ask the ELF where each member lives inside the singleton."""
@@ -103,6 +110,26 @@ def gdb_lengths(elf, members):
     if len(values) != len(members):
         sys.exit(f"could not read all lengths from {elf}: got {values}")
     return dict(zip(members, (int(v) for v in values)))
+
+
+def gdb_values(elf, expressions):
+    """Evaluate integer expressions against the ELF's own types.
+
+    Same argument as `gdb_lengths`, one step more general: the trust-level
+    capture is a three-dimensional array and its inner two bounds are not
+    `sizeof(row)/sizeof(row[0])`.  Deriving them here rather than copying
+    the constants keeps the failure mode at "gdb could not answer" instead
+    of "the reader walked the array at the wrong stride".
+    """
+    args = []
+    for expression in expressions:
+        args += ["-ex", f"print (int)({expression})"]
+    out = subprocess.run(["x86_64-elf-gdb", "-q", "-batch", elf] + args,
+                         capture_output=True, text=True).stdout
+    values = re.findall(r"^\$\d+ = (\d+)$", out, re.M)
+    if len(values) != len(expressions):
+        sys.exit(f"could not evaluate against {elf}: got {values}")
+    return [int(v) for v in values]
 
 
 def gdb_symbol(elf, symbol):
@@ -336,6 +363,88 @@ def load_field_names():
 VMCS_FIELD = load_field_names()
 
 
+def dump_vtl(args, elf, instance):
+    """The trust-level switch loop: whether it advances, and who calls it.
+
+    `changed` is against the previous switch of the same kind rather than
+    against the first, so it reads as "how often this register moved
+    while the loop ran".  All zero is a livelock; whichever rows are not
+    zero say what the loop carries.
+    """
+    members = ["vtl_switches", "vtl_differed", "vtl_first", "vtl_latest",
+               "vtl_stack", "vtl_rip", "vtl_rsp", "vtl_cr3",
+               "vtl_image_base", "vtl_caller_base", "vtl_caller_address",
+               "vtl_image_name", "vtl_caller_name", "vtl_captured"]
+    off = gdb_offsets(elf, members)
+
+    kind = "sizeof(('zpp::hypervisor::hypervisor' *)0)->vtl_differed[0][0]"
+    slots, kinds, stack_words, name_size = gdb_values(elf, [
+        f"{kind} / 8",
+        f"sizeof(('zpp::hypervisor::hypervisor' *)0)->vtl_differed[0] "
+        f"/ {kind}",
+        "sizeof(('zpp::hypervisor::hypervisor' *)0)->vtl_stack[0] / 8",
+        "sizeof(('zpp::hypervisor::hypervisor' *)0)->vtl_image_name[0]"])
+
+    reader = Monitor(args.rig, args.port)
+    reader.queue(instance + off["vtl_switches"], args.cpus * kinds)
+    for cpu in range(args.cpus):
+        for k in range(kinds):
+            for member in ("vtl_differed", "vtl_first", "vtl_latest"):
+                reader.queue(instance + off[member]
+                             + ((cpu * kinds + k) * slots) * 8, slots)
+    for member in ("vtl_rip", "vtl_rsp", "vtl_cr3", "vtl_image_base",
+                   "vtl_caller_base", "vtl_caller_address",
+                   "vtl_captured"):
+        reader.queue(instance + off[member], kinds)
+    reader.queue(instance + off["vtl_stack"], kinds * stack_words)
+    for member in ("vtl_image_name", "vtl_caller_name"):
+        reader.queue(instance + off[member], kinds * name_size // 8)
+    got = reader.run()
+
+    def word(member, index):
+        return got.get(instance + off[member] + 8 * index, 0)
+
+    def text(member, k):
+        raw = b"".join(word(member, k * name_size // 8 + i)
+                       .to_bytes(8, "little")
+                       for i in range(name_size // 8))
+        return raw.split(b"\0")[0].decode("ascii", "replace")
+
+    if not any(word("vtl_switches", i) for i in range(args.cpus * kinds)):
+        return
+
+    for cpu in range(args.cpus):
+        for k in range(kinds):
+            count = word("vtl_switches", cpu * kinds + k)
+            if not count:
+                continue
+            print(f"\n--- cpu {cpu}: {VTL_KINDS[k]}, {count:,} switches ---")
+            print("     register       changed  first                "
+                  "latest")
+            for s, name in enumerate(VTL_SLOTS[:slots]):
+                index = (cpu * kinds + k) * slots + s
+                print(f"     {name:<8} {word('vtl_differed', index):>12}  "
+                      f"0x{word('vtl_first', index):<16x}   "
+                      f"0x{word('vtl_latest', index):x}")
+
+    for k in range(kinds):
+        if not word("vtl_captured", k):
+            continue
+        print(f"\n--- {VTL_KINDS[k]} call site ---")
+        print(f"  rip 0x{word('vtl_rip', k):x} "
+              f"rsp 0x{word('vtl_rsp', k):x} "
+              f"cr3 0x{word('vtl_cr3', k):x}")
+        print(f"  image  0x{word('vtl_image_base', k):x} "
+              f"{text('vtl_image_name', k)!r}")
+        print(f"  caller 0x{word('vtl_caller_base', k):x} "
+              f"{text('vtl_caller_name', k)!r} "
+              f"at 0x{word('vtl_caller_address', k):x}")
+        for i in range(stack_words):
+            value = word("vtl_stack", k * stack_words + i)
+            if value:
+                print(f"    +0x{i * 8:03x}  0x{value:x}")
+
+
 def main():
     ap = argparse.ArgumentParser()
     # The archived copy first, because it is the binary the guest is
@@ -491,6 +600,8 @@ def main():
                 continue
             print(f"{cpu:3d}  {name:<20} {calls:10d}  {cycles:12d}  "
                   f"{cycles // calls:11d}")
+
+    dump_vtl(args, args.elf, instance)
 
     print("\ncpu  guest-state skipped/done   control skipped/done")
     for cpu in range(args.cpus):
