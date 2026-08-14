@@ -13649,3 +13649,23 @@ Check, in order:
    the *access* the qualification describes is still not permitted -
    that case must reflect, not fill.
 3. Only then measure anything.
+
+Step 1 answered without a boot: `l0_wants_l2_exit` claims every
+`ept_violation` and `ept_misconfiguration` unconditionally, and that is
+**correct** - the processor walked the shadow, which is neither side's
+table, so the exit as delivered says nothing about whose fault it was,
+and KVM's `nested_vmx_l0_wants_exit` agrees. Not the bug.
+
+So it is entirely step 2: in `on_l2_ept_fault`, when the composition
+finds the guest hypervisor's own tables deny the access the
+qualification describes, does it **reflect** the violation or install
+and retry? The counters say it never reflects. That is where to read
+next, and the fix - if it is missing - is to reflect with vmcs12's
+`guest_physical_address`, `guest_linear_address` and exit qualification
+filled from the *guest hypervisor's* walk, not from the shadow's.
+
+For the run that tests it, ask the launcher for
+`ZPP_QEMU_EXTRA='-no-reboot -no-shutdown'`. A guest that bugchecks then
+stops and stays paused instead of resetting, so `info status` reads
+`paused` and every counter and the memory behind them survive for the
+monitor - which is what the sixteen-load stretched run destroyed.
