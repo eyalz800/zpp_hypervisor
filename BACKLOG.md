@@ -13028,3 +13028,39 @@ Where the eight could come from, in the order worth testing:
 The instrument that settles it in one boot is a count of SynIC message
 deliveries against wall time, taken beside the existing
 `l2_injected_vector` - the ratio to 64 is the whole answer.
+
+### Correction: the eight-times claim is one of two readings, not a finding
+
+The entry above states the guest is given about 507 clock interrupts a
+second against the 64 it programmed, and calls the livelock "a clock
+running fast". That is over-stated, and the evidence against it is in
+its own table: the delivered rate went 426, 454, 507 across three builds
+whose only difference was cost per exit.
+
+A periodic 15.625 ms timer delivers 64 a second, and an eight-times-fast
+one delivers 512 a second, whatever this VMM's throughput happens to be.
+A rate that *rises whenever we get cheaper* is capacity limited, so the
+measurement says only that we could not previously deliver as many as
+were owed. Two readings survive it:
+
+- **A real 512 Hz source.** 426 and 454 were capacity limited and 507 is
+  nearly caught up to it. The remaining gap is then small, and the
+  factor of eight is still a genuine defect worth finding.
+- **A re-delivery spin** - the message is posted, acknowledged and
+  immediately re-posted, so the rate is bounded by nothing but our speed
+  and no amount of optimisation reaches a threshold, because there is
+  none.
+
+**The discriminator is cheap and is the next thing to do: cut exits
+again and see whether the rate plateaus near 512 or keeps climbing.**
+Either way the action is the same, which is why this was not worth
+stopping for - but the conclusion drawn from it is completely different,
+and the first version of this entry would have sent the next reader
+hunting a TSC calibration bug that may not exist.
+
+Observed on the rig's own display while this was being written: the
+Windows boot circle now begins to draw, where before there was nothing.
+That retires "renders into a RAM back buffer and never presents" for
+good - the framebuffer path through to the passed-through GPU works -
+and it is weak evidence for the first reading, since partial progress is
+what being just short of a finite threshold looks like.
