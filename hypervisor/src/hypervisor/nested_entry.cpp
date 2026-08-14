@@ -479,6 +479,64 @@ constexpr field guest_state_fields[] = {
 };
 
 /**
+ * vmcs02's control fields, which `write_vmcs02_control` may elide.
+ *
+ * Two properties are required of every field here, and the second is
+ * the one that is easy to lose.
+ *
+ * The processor never saves over a VM-execution, VM-exit or VM-entry
+ * control, so what was last written is still there - unlike the guest
+ * state fields next door, which it overwrites on every exit.
+ *
+ * And nothing writes them but `build_vmcs02`, which runs with vmcs02
+ * current by construction. That is why the pin-based and primary
+ * controls are **not** here even though they are controls: `resume.cpp`
+ * and `local_apic.cpp` write them too, and the CR-access handler in
+ * `exit_dispatch.cpp` writes the CR0 and CR4 read shadows, so for those
+ * four the cache would describe a field somebody else had moved. The
+ * primary controls are also the one entry in the list that genuinely
+ * changes almost every entry - the interrupt window is armed and
+ * disarmed constantly - so caching them was worth very little anyway.
+ * Everything remaining is written on vmcs01 only during one-time
+ * initialisation, or in `set_vmcs_shadowing`, which runs while the
+ * guest hypervisor's own instruction is being handled and vmcs01 is
+ * current.
+ *
+ * See `control_cache` for the three fields that look like controls and
+ * are not - the entry interruption-information field, the preemption
+ * timer value, and the two that accompany an injection.
+ *
+ * `tests/nested_exit` is what enforces the second property: it pokes a
+ * field directly and rebuilds, which is exactly the shape of a caller
+ * that has moved vmcs02 out from under the cache.
+ */
+constexpr field control_fields[] = {
+    field::secondary_processor_based_vm_execution_controls,
+    field::vm_exit_controls,
+    field::vm_entry_controls,
+    field::exception_bitmap,
+    field::page_fault_error_code_mask,
+    field::page_fault_error_code_match,
+    field::cr0_guest_host_mask,
+    field::cr4_guest_host_mask,
+    field::ept_pointer,
+    field::vpid,
+    field::vmcs_link_pointer,
+    field::msr_bitmap,
+    field::io_bitmap_a,
+    field::io_bitmap_b,
+    field::virtual_apic_address,
+    field::tpr_threshold,
+    field::cr3_target_value_0,
+    field::cr3_target_count,
+    field::tsc_offset,
+    field::tsc_multiplier,
+    field::vm_entry_msr_load_count,
+    field::vm_exit_msr_load_count,
+    field::vm_exit_msr_store_count,
+};
+
+/**
  * The effective CR0 and CR4 a second-level guest reads, which is what its
  * read shadow under this VMM has to answer with.
  *
@@ -798,6 +856,59 @@ hypervisor::merge_nested_bitmaps(std::size_t cpu)
             this->nested_io_bitmap[cpu]);
 
     return {};
+}
+
+void hypervisor::forget_vmcs02_contents(std::size_t cpu)
+{
+    if (cpu >= max_cpus) {
+        return;
+    }
+
+    this->vmcs02_host_written[cpu] = false;
+
+    for (auto & valid : this->control_cache_valid[cpu]) {
+        valid = false;
+    }
+}
+
+void hypervisor::write_vmcs02_control(std::size_t cpu,
+                                      field control,
+                                      std::uint64_t value)
+{
+    static_assert(std::size(control_fields) <= control_cache_capacity,
+                  "control_cache is too small for the field list");
+
+    if (cpu >= max_cpus) {
+        this->vmcs.write(control, value);
+        return;
+    }
+
+    // A linear scan over twenty-seven constants, against a VMWRITE that
+    // costs about 4,500 cycles here because this VMM is itself KVM's
+    // guest and the instruction traps. The comparison is free by
+    // comparison, so there is nothing to gain from a smarter index and a
+    // table to keep in step with the list.
+    for (std::size_t i{}; i < std::size(control_fields); ++i) {
+        if (control_fields[i] != control) {
+            continue;
+        }
+
+        if (this->control_cache_valid[cpu][i] &&
+            (this->control_cache[cpu][i] == value)) {
+            this->control_writes_skipped[cpu] += 1;
+            return;
+        }
+
+        this->vmcs.write(control, value);
+        this->control_cache[cpu][i] = value;
+        this->control_cache_valid[cpu][i] = true;
+        this->control_writes_done[cpu] += 1;
+        return;
+    }
+
+    // Not on the list, so not argued for. Written straight through
+    // rather than added to the cache by accident.
+    this->vmcs.write(control, value);
 }
 
 std::expected<void, zpp::error> hypervisor::build_vmcs02(std::size_t cpu)
@@ -1260,8 +1371,12 @@ std::expected<void, zpp::error> hypervisor::build_vmcs02(std::size_t cpu)
         pin02 |= pin_preemption_timer;
     }
 
-    vmcs.pin_based_vm_execution_controls(arch::x86_64::vmx::adjust_msr(
-        this->cached_vmx_msr(vmx_msr::true_pin_based_controls), pin02));
+    write_vmcs02_control(
+        cpu,
+        field::pin_based_vm_execution_controls,
+        arch::x86_64::vmx::adjust_msr(
+            this->cached_vmx_msr(vmx_msr::true_pin_based_controls),
+            pin02));
 
     if constexpr (nested_vmx::profile_l2) {
         // Reloaded from this field on every entry, because "save
@@ -1346,8 +1461,9 @@ std::expected<void, zpp::error> hypervisor::build_vmcs02(std::size_t cpu)
         // the host-physical one this field takes. Nothing pins the page:
         // there is no paging here and no memory hot-unplug, and the
         // validation above is what stands in for KVM's kvm_vcpu_map.
-        vmcs.virtual_apic_address(virtual_apic12);
-        vmcs.tpr_threshold(tpr_threshold12);
+        write_vmcs02_control(
+            cpu, field::virtual_apic_address, virtual_apic12);
+        write_vmcs02_control(cpu, field::tpr_threshold, tpr_threshold12);
 
         // Kept so the task priority behind it can be read back. See
         // `interrupt_request_vtpr`.
@@ -1416,7 +1532,8 @@ std::expected<void, zpp::error> hypervisor::build_vmcs02(std::size_t cpu)
     // union.
     if (0 != (primary12 & primary_msr_bitmaps)) {
         primary |= primary_msr_bitmaps;
-        vmcs.msr_bitmap(this->nested_msr_bitmap_physical[cpu]);
+        write_vmcs02_control(
+            cpu, field::msr_bitmap, this->nested_msr_bitmap_physical[cpu]);
     } else {
         primary &= ~primary_msr_bitmaps;
     }
@@ -1432,10 +1549,12 @@ std::expected<void, zpp::error> hypervisor::build_vmcs02(std::size_t cpu)
     } else {
         primary &= ~primary_unconditional_io;
         primary |= primary_io_bitmaps;
-        vmcs.write(field::io_bitmap_a,
-                   this->nested_io_bitmap_physical[cpu]);
-        vmcs.write(field::io_bitmap_b,
-                   this->nested_io_bitmap_physical[cpu] + page_size);
+        write_vmcs02_control(
+            cpu, field::io_bitmap_a, this->nested_io_bitmap_physical[cpu]);
+        write_vmcs02_control(cpu,
+                             field::io_bitmap_b,
+                             this->nested_io_bitmap_physical[cpu] +
+                                 page_size);
     }
 
     // Extended page tables are always in use for a second-level guest, so
@@ -1443,7 +1562,9 @@ std::expected<void, zpp::error> hypervisor::build_vmcs02(std::size_t cpu)
     // hypervisor asked.
     primary |= primary_secondary_controls;
 
-    vmcs.primary_processor_based_vm_execution_controls(
+    write_vmcs02_control(
+        cpu,
+        field::primary_processor_based_vm_execution_controls,
         arch::x86_64::vmx::adjust_msr(
             this->cached_vmx_msr(vmx_msr::true_processor_based_controls),
             primary));
@@ -1480,7 +1601,10 @@ std::expected<void, zpp::error> hypervisor::build_vmcs02(std::size_t cpu)
         this->cached_vmx_msr(vmx_msr::processor_based_contorls_2),
         secondary);
 
-    vmcs.secondary_processor_based_vm_execution_controls(secondary02);
+    write_vmcs02_control(
+        cpu,
+        field::secondary_processor_based_vm_execution_controls,
+        secondary02);
 
     // What the guest hypervisor asked for against what it got. See
     // `control_pin_requested` - the machine boots under KVM and not here,
@@ -1589,7 +1713,7 @@ std::expected<void, zpp::error> hypervisor::build_vmcs02(std::size_t cpu)
     exit02 = arch::x86_64::vmx::adjust_msr(
         this->cached_vmx_msr(vmx_msr::true_exit_controls), exit02);
 
-    vmcs.vm_exit_controls(exit02);
+    write_vmcs02_control(cpu, field::vm_exit_controls, exit02);
 
     // Same comparison as the execution controls above, for the group
     // that has never had one. A bit set in `asked` and clear in
@@ -1603,23 +1727,27 @@ std::expected<void, zpp::error> hypervisor::build_vmcs02(std::size_t cpu)
     // completely - including "IA-32e mode guest", which has to agree with
     // the CR0 and CR4 it wrote beside them or the entry fails its own
     // consistency check and is reflected as such.
-    vmcs.vm_entry_controls(arch::x86_64::vmx::adjust_msr(
-        this->cached_vmx_msr(vmx_msr::true_entry_controls), entry12));
+    write_vmcs02_control(
+        cpu,
+        field::vm_entry_controls,
+        arch::x86_64::vmx::adjust_msr(
+            this->cached_vmx_msr(vmx_msr::true_entry_controls), entry12));
 
-    vmcs.ept_pointer(eptp02);
-    vmcs.vpid(vpid01);
+    write_vmcs02_control(cpu, field::ept_pointer, eptp02);
+    write_vmcs02_control(cpu, field::vpid, vpid01);
 
     // All ones is "no linked VMCS". VMCS shadowing is not offered, so the
     // guest hypervisor's own link pointer is not consulted.
-    vmcs.vmcs_link_pointer(~std::uint64_t{});
+    write_vmcs02_control(cpu, field::vmcs_link_pointer, ~std::uint64_t{});
 
     // Where a refused entry unwinds to. See asm.h: the stubs read this
     // field because on a refusal nothing has been reloaded and there is no
     // other per-processor thing left addressable.
-    vmcs.write(field::cr3_target_value_0,
-               reinterpret_cast<std::uint64_t>(
-                   &this->nested_entry_recovery[cpu]));
-    vmcs.write(field::cr3_target_count, 0);
+    write_vmcs02_control(cpu,
+                         field::cr3_target_value_0,
+                         reinterpret_cast<std::uint64_t>(
+                             &this->nested_entry_recovery[cpu]));
+    write_vmcs02_control(cpu, field::cr3_target_count, 0);
 
     // The exception bitmap is the bitwise or of what the guest hypervisor
     // wants to trap and what this VMM does, which is the merge KVM
@@ -1628,12 +1756,16 @@ std::expected<void, zpp::error> hypervisor::build_vmcs02(std::size_t cpu)
     // because this VMM traps no page faults of its own - if it ever does,
     // both must go to zero so that every page fault exits and the
     // filtering moves into the reflect decision.
-    vmcs.write(field::exception_bitmap,
-               exception_bitmap01 | shadow.read(field::exception_bitmap));
-    vmcs.write(field::page_fault_error_code_mask,
-               shadow.read(field::page_fault_error_code_mask));
-    vmcs.write(field::page_fault_error_code_match,
-               shadow.read(field::page_fault_error_code_match));
+    write_vmcs02_control(cpu,
+                         field::exception_bitmap,
+                         exception_bitmap01 |
+                             shadow.read(field::exception_bitmap));
+    write_vmcs02_control(cpu,
+                         field::page_fault_error_code_mask,
+                         shadow.read(field::page_fault_error_code_mask));
+    write_vmcs02_control(cpu,
+                         field::page_fault_error_code_match,
+                         shadow.read(field::page_fault_error_code_match));
 
     // The control-register masks are the union too, and the read shadows
     // then have to carry the whole answer rather than half of it - see
@@ -1643,13 +1775,21 @@ std::expected<void, zpp::error> hypervisor::build_vmcs02(std::size_t cpu)
     auto cr0_12 = shadow.read(field::guest_cr0);
     auto cr4_12 = shadow.read(field::guest_cr4);
 
-    vmcs.write(field::cr0_guest_host_mask, cr0_mask01 | cr0_mask12);
-    vmcs.write(field::cr4_guest_host_mask, cr4_mask01 | cr4_mask12);
+    write_vmcs02_control(
+        cpu, field::cr0_guest_host_mask, cr0_mask01 | cr0_mask12);
+    write_vmcs02_control(
+        cpu, field::cr4_guest_host_mask, cr4_mask01 | cr4_mask12);
 
-    vmcs.cr0_read_shadow(effective_control_register(
-        cr0_12, shadow.read(field::cr0_read_shadow), cr0_mask12));
-    vmcs.cr4_read_shadow(effective_control_register(
-        cr4_12, shadow.read(field::cr4_read_shadow), cr4_mask12));
+    write_vmcs02_control(
+        cpu,
+        field::cr0_read_shadow,
+        effective_control_register(
+            cr0_12, shadow.read(field::cr0_read_shadow), cr0_mask12));
+    write_vmcs02_control(
+        cpu,
+        field::cr4_read_shadow,
+        effective_control_register(
+            cr4_12, shadow.read(field::cr4_read_shadow), cr4_mask12));
 
     // VMXE is forced into the real register for the same reason it is for
     // the guest hypervisor: IA32_VMX_CR4_FIXED0 requires it in VMX
@@ -1772,18 +1912,22 @@ std::expected<void, zpp::error> hypervisor::build_vmcs02(std::size_t cpu)
 
     auto scaled = tsc_scaling_default != multiplier12;
 
-    vmcs.write(field::tsc_offset,
-               (scaled ? signed_scaled_product(tsc_offset01, multiplier12)
-                       : tsc_offset01) +
-                   tsc_offset12);
+    write_vmcs02_control(
+        cpu,
+        field::tsc_offset,
+        (scaled ? signed_scaled_product(tsc_offset01, multiplier12)
+                : tsc_offset01) +
+            tsc_offset12);
 
     // Written only when the control that reads it is set, since the
     // field does not exist on a processor that does not offer the
     // control and a VMWRITE to it would fail there.
     if (0 != (secondary02 & secondary_tsc_scaling)) {
-        vmcs.write(field::tsc_multiplier,
-                   scaled ? scaled_product(multiplier01, multiplier12)
-                          : multiplier01);
+        write_vmcs02_control(
+            cpu,
+            field::tsc_multiplier,
+            scaled ? scaled_product(multiplier01, multiplier12)
+                   : multiplier01);
     }
 
     // The event the guest hypervisor asked to inject, taken from its VMCS
@@ -1874,9 +2018,9 @@ std::expected<void, zpp::error> hypervisor::build_vmcs02(std::size_t cpu)
     // have the processor write MSR values into them. Every other
     // protection this VMM has is an extended page-table permission, and
     // none of them would apply.
-    vmcs.write(field::vm_entry_msr_load_count, 0);
-    vmcs.write(field::vm_exit_msr_load_count, 0);
-    vmcs.write(field::vm_exit_msr_store_count, 0);
+    write_vmcs02_control(cpu, field::vm_entry_msr_load_count, 0);
+    write_vmcs02_control(cpu, field::vm_exit_msr_load_count, 0);
+    write_vmcs02_control(cpu, field::vm_exit_msr_store_count, 0);
 
     // SDM 29, step 4: the MSR loads are the last thing a VM entry does
     // before the launch state changes. Done here, at the end, for the same

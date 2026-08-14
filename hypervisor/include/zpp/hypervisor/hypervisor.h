@@ -7056,6 +7056,76 @@ private:
     std::uint64_t guest_state_writes_skipped[max_cpus]{};
     std::uint64_t guest_state_writes_done[max_cpus]{};
     /** @} */
+
+    /**
+     * The same elision for vmcs02's *control* fields, which is sound for
+     * a reason the guest-state one had to work for.
+     *
+     * `guest_state_cache` cannot hold what this VMM last wrote - the
+     * processor saves the guest's own state over those fields on every
+     * exit (SDM 30.3), so a last-written cache would skip a write that
+     * is owed. That is what killed `ZPP_LAZY_GUEST_STATE`; BACKLOG.md
+     * records it, with SDM 30.3.2 on unusable segments.
+     *
+     * None of that applies here. The processor never writes a
+     * VM-execution, VM-exit or VM-entry *control* field, so what was
+     * last written is still what vmcs02 holds, and the cache needs no
+     * read-back and no freshness flag. It is the same argument
+     * `vmcs02_host_written` already makes for the host-state fields, and
+     * it rests on the same fact: vmcs02 is VMCLEARed where it is created
+     * and never again.
+     *
+     * **Deliberately excludes three fields that look like controls and
+     * are not.** The VM-entry interruption-information field has its
+     * valid bit cleared by the processor on entry (SDM 27.6.1); the
+     * VMX-preemption timer value is decremented and saved back when the
+     * matching exit control is set; and the entry exception error code
+     * and instruction length are only written when injecting, so caching
+     * them would trade a rare write for a permanent hazard.
+     *
+     * Twenty-three fields, worth that many VMWRITEs an entry at the 1.4
+     * to 1.8 microseconds a VMCS access costs here - `build_vmcs02`
+     * measured at 225,952 cycles a call before it, with its guest-state
+     * writes already 99.4% elided, so nearly all of that was this.
+     *
+     * `control_fields` says which four controls are deliberately left
+     * out and why; the short version is that they have writers outside
+     * `build_vmcs02`.
+     * @{
+     */
+    static constexpr std::size_t control_cache_capacity = 32;
+
+    std::uint64_t control_cache[max_cpus][control_cache_capacity]{};
+    bool control_cache_valid[max_cpus][control_cache_capacity]{};
+    std::uint64_t control_writes_skipped[max_cpus]{};
+    std::uint64_t control_writes_done[max_cpus]{};
+
+    /**
+     * Write one of vmcs02's control fields, skipping the VMWRITE when
+     * the field already holds that value. Any field not on
+     * `control_fields` is written straight through, so a caller cannot
+     * silently gain an elision it has not argued for.
+     */
+    void write_vmcs02_control(std::size_t cpu,
+                              arch::x86_64::vmx::vmcs::field control,
+                              std::uint64_t value);
+
+    /**
+     * Forget what vmcs02 is believed to hold, for both elisions that
+     * believe anything about it.
+     *
+     * Called where vmcs02's region is created and cleared, which in this
+     * VMM happens exactly once per processor. It exists as a named
+     * function rather than two assignments because the coupling is
+     * otherwise invisible: anything that resets vmcs02's contents owes
+     * both caches an invalidation, and `tests/nested_exit` is the thing
+     * that found this - its `reset` zeroes the fake VMCS between cases,
+     * which is a legitimate model of a fresh region, and the control
+     * elision then skipped writes that were owed. `vmcs02_host_written`
+     * had the same dependency all along and no check that noticed.
+     */
+    void forget_vmcs02_contents(std::size_t cpu);
+    /** @} */
     /** @} */
 
     /**

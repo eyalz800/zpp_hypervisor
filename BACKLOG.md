@@ -12957,3 +12957,74 @@ TPR threshold emulation (the guest hypervisor sets it to 0 and does not
 use it), virtual-interrupt delivery (it does not ask for it - secondary
 controls 0x1010ae, bit 9 clear), and blaming the reference TSC page (the
 clock rate is what Windows programmed; the cost per tick is ours).
+
+## vmcs02's control fields, and the number that matters more
+
+**The elision works and is not the answer.** `write_vmcs02_control`
+skips a VMWRITE when vmcs02 already holds the value, on the same
+argument `vmcs02_host_written` makes: the processor never saves over a
+VM-execution, VM-exit or VM-entry control, so what was last written is
+still there. Measured 21,199,382 skipped against 136,145 done - 99.36% -
+and `build_vmcs02` fell from 225,952 cycles a call to 181,338, a fifth
+of the phase. `save_l2_state` and `reflect_l2_exit` are unchanged, as
+expected: neither writes a control.
+
+Four controls are deliberately not cached. The pin-based and primary
+controls are written by `resume.cpp` and `local_apic.cpp`, and the CR0
+and CR4 read shadows by the CR-access handler in `exit_dispatch.cpp`, so
+for those the cache would describe a field somebody else had moved. The
+primary controls also change almost every entry as the interrupt window
+is armed and disarmed, so caching them was worth little.
+
+`tests/nested_exit` found the one real defect in the first version, and
+is worth keeping pointed at this: its `reset` zeroes the fake VMCS
+between cases, which is a fair model of a fresh region, and the elision
+then skipped writes that were owed. Hence `forget_vmcs02_contents`,
+called where vmcs02 is created and from the harness.
+`vmcs02_host_written` had carried the same dependency all along with no
+check that noticed.
+
+**What the three measurements together actually say.**
+
+| build | exits/s | ticks/s | exits/tick |
+|---|---|---|---|
+| baseline | 4,733 | 426 | 11.1 |
+| `ZPP_INTERCEPT_APIC=OFF` | 4,198 | 454 | 9.2 |
+| plus this | 4,331 | 507 | 8.5 |
+
+Per-tick cost falls and the tick *rate* rises to meet it. That is the
+signature of a guest that spends everything it has on its clock - and it
+is the clue that was missed, because the interesting number is not on
+this table.
+
+**The guest asked for 64 Hz and is being given about 507.** Recorded
+earlier in this file and not connected to the livelock until now: every
+`STIMER0_CONFIG` write is `enable=0 periodic=1 lazy=0 auto_enable=1
+sintx=0x3` followed by `STIMER0_COUNT = 156,250`, which in the
+interface's 100 ns units is a periodic **15.625 ms** timer - Windows'
+ordinary clock - posting to synthetic interrupt 3, vector 0xd1. Nothing
+re-arms it; periodic timers are armed once. So the delivered rate should
+be 64 a second and it is measured at 507, near enough eight times.
+
+That reframes the whole thing. At 64 Hz the present 8.5 exits a tick
+would cost about 10% of the machine and the guest would boot; the
+optimisation work above is chasing a factor of forty that only exists
+because of a factor of eight nobody had checked. **The livelock is a
+clock running fast, not a hypervisor running slow.**
+
+Where the eight could come from, in the order worth testing:
+
+- the reference clock the deadline is computed against - this VMM now
+  publishes a fitted reference TSC page, and a scale eight times too
+  large would do exactly this. It is the newest thing in the path and
+  the first suspect. `-DZPP_PUBLISH_REFERENCE_TSC=OFF` is one boot.
+- the TSC frequency the level above derives, whether from CPUID leaf
+  0x15/0x16 or from `HV_X64_MSR_TSC_FREQUENCY` (0x40000022), which this
+  VMM answers.
+- the composed nested TSC offset and multiplier on vmcs02.
+- and the possibility that not every 0xd1 is a timer expiry, which the
+  per-cycle EOM argues against but which has not been measured directly.
+
+The instrument that settles it in one boot is a count of SynIC message
+deliveries against wall time, taken beside the existing
+`l2_injected_vector` - the ratio to 64 is the whole answer.

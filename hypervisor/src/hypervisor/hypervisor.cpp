@@ -5403,6 +5403,10 @@ void hypervisor::setup_vmcs(std::size_t cpu,
                 log("cpu {} could not clear its second level vmcs", cpu);
             }
 
+            // The region's contents are now nothing, so neither elision
+            // that believes something about them may keep believing it.
+            forget_vmcs02_contents(cpu);
+
             // The shadow region, which the guest hypervisor's own VMREADs
             // and VMWRITEs are served from once a VMCS of its own is
             // current. Bit 31 of the revision identifier is what makes it

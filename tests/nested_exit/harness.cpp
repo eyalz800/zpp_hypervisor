@@ -599,6 +599,12 @@ static void reset(zpp::arch::x86_64::context & registers)
     std::memset(zpp::arch::x86_64::vmx::g_vmcs,
                 0,
                 sizeof(zpp::arch::x86_64::vmx::g_vmcs));
+    // The memset above is a fresh vmcs02, so anything that remembers
+    // what the old one held has to forget it - exactly as the real
+    // creation path does after its VMCLEAR. Without this the control
+    // elision skips writes that are owed and the checks below read
+    // zeroes out of a field that was never written this time round.
+    hv().forget_vmcs02_contents(cpu);
     hv().guest_vmcs12[cpu].clear();
     std::memset(hv().msr_bitmap, 0, sizeof(hv().msr_bitmap));
     std::memset(hv().io_bitmap_a, 0, sizeof(hv().io_bitmap_a));
