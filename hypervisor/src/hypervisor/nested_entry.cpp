@@ -2033,8 +2033,37 @@ std::expected<void, zpp::error> hypervisor::build_vmcs02(std::size_t cpu)
 
             auto vector = this->l2_self_ipi_pending[cpu];
 
-            if (read && ((vector >> priority_class) >
-                         (std::uint64_t{vtpr} >> priority_class))) {
+            // The task priority is not the whole of "may this be
+            // delivered". An external interrupt injected while the guest
+            // has RFLAGS.IF clear, or while it is inside the
+            // one-instruction shadow after STI or a MOV to SS, arrives
+            // in a critical section that had disabled interrupts to keep
+            // one - and the VM entry does **not** refuse it, so nothing
+            // catches the mistake. SDM 27.2.1.3 lists the checks on an
+            // injected event and RFLAGS.IF is not among them for an
+            // external interrupt; KVM's own equivalent is the
+            // `vmx_interrupt_allowed` test it makes before injecting,
+            // rather than anything the processor does.
+            //
+            // Read out of vmcs12 rather than the VMCS, which is free:
+            // `build_vmcs02` has these two values in hand from the guest
+            // hypervisor's own guest-state area, and they are what the
+            // entry below is about to load.
+            constexpr std::uint64_t rflags_interrupt_enable = 1ull << 9;
+            constexpr std::uint64_t blocking_by_sti = 1ull << 0;
+            constexpr std::uint64_t blocking_by_mov_ss = 1ull << 1;
+
+            auto blocking =
+                shadow.read(field::guest_interruptibility_state);
+
+            auto interruptible =
+                (0 != (shadow.read(field::guest_rflags) &
+                       rflags_interrupt_enable)) &&
+                (0 == (blocking & (blocking_by_sti | blocking_by_mov_ss)));
+
+            if (read && interruptible &&
+                ((vector >> priority_class) >
+                 (std::uint64_t{vtpr} >> priority_class))) {
                 injection = valid | external | vector;
                 this->l2_self_ipi_pending[cpu] = 0;
                 this->l2_self_ipi_delivered[cpu] =
@@ -6119,13 +6148,47 @@ hypervisor::on_l2_exit(std::size_t cpu,
             // `nested_vmx::deliver_self_ipi`; SDM Figure 12-12 puts the
             // vector in bits 7:0 and the destination shorthand in 19:18,
             // and 01 there is "self".
+            //
+            // **The shorthand is not how this guest says "me".** Measured
+            // on the rig: every one of 297,465 writes of this register
+            // carries `0x4002f` in the low half and zero in the high one
+            // - vector 0x2f, fixed delivery, level asserted, destination
+            // shorthand **00**, and a physical destination of APIC id 0.
+            // Testing the shorthand alone therefore matched nothing at
+            // all, and the three `l2_self_ipi_*` counters would have read
+            // zero on a run with the switch on and been read as "the
+            // guest never asks", which is the opposite of the truth.
+            //
+            // A physical destination naming this processor is the same
+            // request by the other spelling, and it is the spelling the
+            // Hyper-V synthetic register uses: its high half is the
+            // x2APIC destination field rather than a second shorthand.
+            //
+            // `0` is taken as "this processor" because the second-level
+            // guest here has one virtual processor and its APIC id is
+            // zero. That is an assumption about the guest rather than
+            // about the architecture, so it is counted rather than
+            // trusted: `l2_ipi_not_self` rises for any command that is
+            // neither spelling, and a run where it is non-zero has found
+            // a destination this rule would deliver to the wrong
+            // processor.
             if constexpr (nested_vmx::deliver_self_ipi) {
                 constexpr std::uint64_t shorthand_mask = 3ull << 18;
                 constexpr std::uint64_t shorthand_self = 1ull << 18;
+                constexpr std::uint64_t destination_shift = 32;
 
-                if ((cpu < max_cpus) &&
-                    (shorthand_self == (command & shorthand_mask))) {
-                    this->l2_self_ipi_pending[cpu] = command & 0xff;
+                auto shorthand = command & shorthand_mask;
+                auto destination = command >> destination_shift;
+
+                auto to_self = (shorthand_self == shorthand) ||
+                               ((0 == shorthand) && (0 == destination));
+
+                if (cpu < max_cpus) {
+                    if (to_self) {
+                        this->l2_self_ipi_pending[cpu] = command & 0xff;
+                    } else {
+                        this->l2_ipi_not_self[cpu] += 1;
+                    }
                 }
             }
         }

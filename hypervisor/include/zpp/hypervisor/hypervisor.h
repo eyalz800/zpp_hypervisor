@@ -4717,6 +4717,15 @@ private:
     volatile std::uint64_t l2_self_ipi_held[max_cpus]{};
 
     /**
+     * Synthetic interrupt commands that named somewhere other than this
+     * processor, so the assumption behind treating a physical
+     * destination of zero as "me" is falsifiable rather than implicit.
+     * Non-zero means the second-level guest has more than the one
+     * virtual processor this rule was written for.
+     */
+    volatile std::uint64_t l2_ipi_not_self[max_cpus]{};
+
+    /**
      * One capture of the code and stack at the reference-counter poll,
      * taken once per boot.
      *
