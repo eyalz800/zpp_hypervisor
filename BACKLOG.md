@@ -13713,3 +13713,32 @@ a row** - lost permission in the composition, l0 claiming the exit, a
 missing reflect path, and the reflect path never firing. Each took
 minutes because the counters already existed. Keep reading counters
 before changing code.
+
+## Confirmed: two guest EPT roots, one per trust level
+
+Read live, no boot:
+
+    slot 0: source 0x101b1b000  generation 0
+    slot 1: source 0x101b1e000  generation 0
+    2 of 4 shadow slots in use
+
+Two roots three pages apart, both resident. So each virtual trust level
+has its own extended page tables and Hyper-V switches the EPT pointer
+across `HvCallVtlCall` and `HvCallVtlReturn` - the alternating hypercall
+pair is two address spaces being entered in turn, exactly as the
+previous entry guessed. Both shadows exist and neither is being evicted,
+so the switch itself is not thrashing: `shadow_ept_builds` of 16,129
+tracks INVEPT, not the 92,856 switches.
+
+**The new oddity, and the next thing to read:
+`shadow_ept_generation_seen` is 0 on both slots** after 16,129 INVEPTs
+and 448,311 leaf installs. If that field is meant to notice the guest
+hypervisor's tables changing under a shadow, then either it is never
+advanced or nothing has ever been noticed - and a shadow that never
+learns its source changed is a stale one. That would show up as exactly
+what is measured: no permission ever denied, because the shadow is
+composed from a version of the tables in which nothing was denied.
+
+Read `shadow_ept_generation_seen`'s writers before anything else. It is
+one grep, and it is the first thing in this investigation that is
+anomalous on its face rather than by inference.
