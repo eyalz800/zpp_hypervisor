@@ -52,7 +52,8 @@ PHASE_NAMES = ["save_l2_state", "reflect_l2_exit", "build_vmcs02",
                "shadow_ept_pointer_for", "copy_vmcs12_to_shadow",
                "copy_shadow_to_vmcs12", "vmptrld->vmcs02",
                "vmptrld->vmcs01", "merge_nested_bitmaps",
-               "on_l2_ept_fault", "  of which guest read"]
+               "on_l2_ept_fault", "  of which guest read",
+               "    of which map_window"]
 
 # Whose instruction pointer a record holds - see exit_trace_entry's
 # rip_owner. An address attributed to the wrong guest reads as a

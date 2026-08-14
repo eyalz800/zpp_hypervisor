@@ -1,3 +1,4 @@
+#include "zpp/arch/x86_64/asm.h"
 #include "zpp/arch/x86_64/pte.h"
 #include "zpp/arch/x86_64/virtual_address.h"
 #include "zpp/hypervisor/hypervisor.h"
@@ -67,7 +68,15 @@ std::expected<void, zpp::error> hypervisor::read_guest_physical(
         this->mapping_window_lock.lock();
         scope_exit release{[&] { this->mapping_window_lock.unlock(); }};
 
+        // Phase 11 is the mapping alone. The copy through it is cold
+        // cache traffic and would survive a kept mapping; only this
+        // would go away, so the two are timed apart before anything is
+        // built on either.
+        auto map_start = arch::x86_64::rdtsc();
         auto window = map_window_at(transfer_window_first_page, at, 1);
+        this->phase_cycles[0][11] += arch::x86_64::rdtsc() - map_start;
+        this->phase_calls[0][11] += 1;
+
         if (nullptr == window) {
             return std::unexpected(
                 zpp::error{error::guest_memory_unreachable});

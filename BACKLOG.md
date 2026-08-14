@@ -13503,3 +13503,38 @@ hypervisor's own I/O bitmap pages directly and skip two of the three
 copies entirely. That trades this VMM's interception of that port while
 a second-level guest runs, which is a decision rather than an
 optimisation, and it wants the port list checked before it is taken.
+
+## The mapping window is not the cost; the copy is. Do not keep the mapping
+
+    of which guest read     752,505 calls   20,697 cycles each
+      of which map_window 4,769,975 calls      960 cycles each
+
+**960 of 20,697 - 4.6%.** Keeping the guest bitmap pages mapped across
+VM entries, which the entry above was heading towards proposing, would
+save about half a per cent of everything. It is not worth building, and
+this is the fourth idea in this file to die on the difference between
+where the calls are and where the cycles are.
+
+What remains is the copy itself: 4 KB in about 19,700 cycles, 4.8 cycles
+a byte, which is what a `memcpy` costs when every line misses and the
+window it reads through was re-pointed a moment ago, so each line pays a
+page walk and an extended page walk under it.
+
+**So the only useful move on the merge is not to copy at all.**
+
+- The two I/O bitmaps are two of the three copies, 8 KB an entry. This
+  VMM's own I/O interception is one port, so vmcs02 could name the guest
+  hypervisor's own I/O bitmap pages directly and copy nothing. The cost
+  is losing that port's interception while a second-level guest runs -
+  a decision, not an optimisation, and one that wants the port list read
+  first.
+- The MSR bitmap genuinely needs the union, so it needs either the copy
+  or a write watch on the guest's page. `watch_guest_page_writes` exists
+  and is unused. That is the same mechanism the shadow-EPT entry wants,
+  and it would now serve two callers - which is a better argument for
+  building it than either had alone.
+
+Between them those are about 11% of everything. Nothing else in the
+round trip is reducible without the unsound elisions already rejected:
+`reflect_l2_exit` is a hundred VMCS accesses at four thousand cycles
+each, and on this machine there is no cheap subset of them.
