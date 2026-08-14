@@ -13266,3 +13266,45 @@ exit - so KVM is emulating VMCS shadowing for our second level, exactly
 as `nested.c` says it does. Those reads still cost a VM exit into KVM;
 they are cheaper than a reflection, not free. The shadow field list is
 still worth having, for a smaller reason than assumed.
+
+## "The guest never leaves its clock handler" is not what the numbers say
+
+The central symptom of the last several sessions has been read wrongly,
+and the arithmetic that shows it is one line.
+
+Delivery of a vector requires its priority class to be **strictly
+greater** than the task priority class - SDM 12.8.4, and the class is
+the high nibble. Vector 0xd1 is class 13. A virtual task priority of
+0xd0 is class 13. So at VTPR 0xd0 the clock interrupt is refused too.
+
+**And the clock is delivered 506 times a second.** Therefore the task
+priority drops below 0xd0 at least 506 times a second, and the guest is
+leaving its clock handler at exactly the rate the clock arrives. It is
+not stuck in it.
+
+What `interrupt_request_vtpr` actually shows is a guest alternating
+between 0xd0 and 0x20 - class 13 and class 2 - which is CLOCK_LEVEL and
+DISPATCH_LEVEL. That is a kernel running its deferred-procedure queue,
+not one starved of it.
+
+**Which makes vector 0x2f's non-delivery a red herring.** 0x2f is class
+2 and DISPATCH_LEVEL is class 2, so 2 > 2 is false and the refusal is
+correct at every one of the 92,116 requests recorded. Windows does not
+need that interrupt delivered to run deferred procedures - the queue is
+drained by the dispatcher already running at that level, and the
+self-IPI is how a *lower* level asks to be raised to it. A guest at
+DISPATCH asking for DISPATCH and being refused is the architecture
+working.
+
+So the two things that have been treated as the failure - "stuck at
+0xd0" and "0x2f never delivered" - are both consistent with a healthy
+kernel that never returns to PASSIVE_LEVEL. **The open question is why
+it never goes below IRQL 2**, which is a different question from either,
+and none of the instrumentation added so far addresses it.
+
+Worth having before the next attempt: a histogram of VTPR sampled on
+every second-level entry rather than only on the 0x40000071 write, so
+the *distribution* of task priority is visible instead of the value at
+one particular instruction. If it is 0xd0 and 0x20 and nothing else,
+the guest has a permanently non-empty deferred-procedure queue, and the
+question becomes what keeps refilling it.
