@@ -4219,15 +4219,46 @@ std::uint64_t hypervisor::image_export(std::size_t cpu,
                                        std::uint64_t base,
                                        const char * name)
 {
+    // One translation per *page*, not per access.
+    //
+    // The first version of this translated every byte, and every
+    // translation is a walk of the guest's page tables followed by the
+    // guest hypervisor's extended ones. A kernel exports thousands of
+    // names, so comparing them a byte at a time is millions of walks
+    // inside a single VM exit - it never finished, returned zero, and the
+    // caller read that as "not exported". A scan is sequential by nature
+    // and stays on a page for 4096 of those bytes.
+    constexpr std::uint64_t page_mask = 0xfff;
+
+    std::uint64_t cached_page = ~std::uint64_t{};
+    std::uint64_t cached_physical{};
+
     auto word = [&](std::uint64_t at, auto & value) {
-        auto physical = translate_guest_linear(at);
-        return physical &&
-               read_guest_memory(
-                   cpu,
-                   *physical,
-                   std::span(reinterpret_cast<std::byte *>(&value),
-                             sizeof(value)))
-                   .has_value();
+        auto into = std::span(reinterpret_cast<std::byte *>(&value),
+                              sizeof(value));
+
+        // A read straddling two pages cannot use one translation, and
+        // the aligned fields here never do - so it is answered the slow
+        // way rather than made a special case of.
+        if (((at & page_mask) + sizeof(value)) > (page_mask + 1)) {
+            auto physical = translate_guest_linear(at);
+            return physical &&
+                   read_guest_memory(cpu, *physical, into).has_value();
+        }
+
+        if (auto page = at & ~page_mask; page != cached_page) {
+            auto physical = translate_guest_linear(page);
+            if (!physical) {
+                return false;
+            }
+
+            cached_page = page;
+            cached_physical = *physical;
+        }
+
+        return read_guest_memory(
+                   cpu, cached_physical + (at & page_mask), into)
+            .has_value();
     };
 
     std::uint32_t lfanew{};

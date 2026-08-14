@@ -11828,9 +11828,30 @@ that is millions of walks inside a single VM exit. It either does not
 finish or gives up partway, and either way it returns zero and the caller
 falls through silently.
 
-The fix is to translate once per page and read a span, the way
-`capture_poll_site` reads the code bytes, rather than once per character.
-That is the next step and it is small.
+That was fixed - `image_export` now translates once per *page* and reuses
+it, falling back to a per-access translation only for a read that
+straddles two pages. It is the right change and it did **not** produce a
+name, so the byte-at-a-time translation was a real defect and not the
+reason.
+
+**What is still unknown is which step fails**, and that is the next thing
+to fix about the instrument rather than about Windows. Three candidates,
+none distinguishable from outside today because every failure path
+returns quietly:
+
+- `image_export` does not find `PsLoadedModuleList` at all;
+- it finds it, but the `LDR_DATA_TABLE_ENTRY` offsets used - `DllBase` at
+  `0x30`, `BaseDllName` at `0x58` - are wrong for this build;
+- the walk runs and no entry's `DllBase` matches, which would mean the
+  base found by scanning for `MZ` is not the base Windows recorded.
+
+The cheap way to tell them apart is to keep the intermediate results:
+store the resolved `PsLoadedModuleList` address and the number of entries
+walked, so one boot says which of the three it is instead of none of them.
+
+A fourth run also widened what is known about the caller: its return
+address was RVA `0xa5f68` rather than `0xa5cd0`, so there are at least two
+call sites in that image reaching this loop.
 
 Also worth keeping: the capture had to become a *retry* rather than a
 one-shot. The loop reaches the poll by more than one call path, and a
