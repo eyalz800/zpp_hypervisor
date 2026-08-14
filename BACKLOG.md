@@ -12895,3 +12895,65 @@ reading something we present wrongly that is not on this list, or it is
 in a state its own logic cannot leave. The next instrument that would
 say which is the guest hypervisor's own code path, and that is not
 readable from this side.
+
+## The livelock is the clock costing more than its own period
+
+Read live off a wedged guest, with symbols, which is what the earlier
+eliminations could not do. Kernel base from `symbolize-guest.py
+--wrmsr-rip`; the four addresses the second level cycles through are:
+
+    HvlWriteApicCommandRegister   writes the synthetic ICR, 0x4002f
+    HalpHvTimerAcknowledgeInterrupt  writes the synthetic EOM
+    HvlEndSystemInterrupt         writes the synthetic EOI
+    BgpFmSqrt / KiDpcInterruptBypass  the code being interrupted
+
+120 consecutive second-level exits are a perfect four-cycle, and the
+interrupted instruction pointer **never moves**. `BgpFmSqrt` is an
+integer square root by successive subtraction, four instructions long;
+being caught at the same one every time over 1.5 million exits is not a
+hot loop, it is zero instructions retired per tick.
+
+**It is not a delivery bug, and the guest is not masking itself.**
+`interrupt_request_vector` says the second level asked for vector 0x2f
+441,851 times and `l2_injected_vector` says it was given it 5. But the
+task priority histogram says why, and it is not the level above
+withholding: over 1,887,281 entries the guest is at VTPR 0xd0 68.2% of
+the time and 0x20 29.7%, so a priority-2 vector is correctly refused on
+98% of them. The live vmcs12 agrees the mechanism is ordinary:
+`tpr_threshold` 0, virtual-interrupt delivery clear in the secondary
+controls, interrupt-window exiting set - the guest hypervisor delivers
+by window and injection and checks the priority itself.
+
+So the guest never comes down to DISPATCH_LEVEL, because it never gets
+enough processor to finish what it is doing there. Measured: 454 clock
+interrupts a second, 9.2 exits each, and the exits cost about 188 us -
+which is 100% of the wall clock spent servicing a clock whose period is
+2.2 ms. `KiDpcInterruptBypass` as the interrupted function is the same
+statement in Windows' own vocabulary: it is trying to drain the deferred
+procedure call queue and is preempted before one instruction retires.
+
+**Removing the local APIC page watch was worth doing and is not
+enough.** `-DZPP_INTERCEPT_APIC=OFF`, one variable, everything else as
+deployed. EPT violations stop climbing entirely - frozen at 441,304
+where they had been 37% of a growing total, all of them at 0xfee00000 -
+and vector 0x2f goes from 5 deliveries in 25 minutes to 365 and rising.
+The guest gets measurably further, through the virtual trust level
+setup and into `KiDpcInterruptBypass`. It then livelocks in the same
+shape: 4,198 exits a second against 4,733 before, an 11% saving where
+about 40x is needed.
+
+**Where the 188 us goes is the thing worth attacking next, and it is
+not our exit handler.** This VMM is itself KVM's guest, so every VMX
+instruction it executes is another exit to KVM. `vmcs_shadow_loads` and
+`vmcs_shadow_stores` are both 588,144 against 538,724 VMRESUMEs - one
+shadow copy each way per entry, eleven fields apiece, so roughly 22
+VMREAD/VMWRITE per nested entry *plus* the vmcs02 build, each one a
+trap to the layer underneath. The per-exit cost is dominated by how many
+privileged instructions we issue, not by what we decide. That is the
+measurement any further work here should be aimed at.
+
+Do not re-propose: the task-priority shadow (tested off, no movement),
+TPR threshold emulation (the guest hypervisor sets it to 0 and does not
+use it), virtual-interrupt delivery (it does not ask for it - secondary
+controls 0x1010ae, bit 9 clear), and blaming the reference TSC page (the
+clock rate is what Windows programmed; the cost per tick is ours).
