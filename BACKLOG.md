@@ -12043,6 +12043,14 @@ one solved so far: not the clock, not scheduling, not priority, not cost.
 It is that the passed-through devices' interrupts do not reach the guest
 once the guest hypervisor is between them.
 
+**And it is not this VMM's interrupt virtualization.** `ZPP_VIRTUALIZE_APIC`
+had been on all session - it is default *off* - so that every interrupt
+would exit here and could be counted, which is take-and-inject and could
+plausibly lose one. Turned back off, so the guest's own controller
+delivers natively with no exit at all, and keeping the clock fix: the
+guest reaches the same place and halts the same way, 223,685 exits then
+50 a minute. So the losing is not in the taking.
+
 Still to settle, and read the counters carefully here:
 
 - The thread is **still `Phase1Initialization`**, 32 samples out of 32.
