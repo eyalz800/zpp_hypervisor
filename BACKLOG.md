@@ -13614,3 +13614,38 @@ bug and none of the performance work touches it.
 **Everything in the four entries above this one is worth about 15% put
 together and none of it matters if this is right.** Recorded so the next
 session starts here and not there.
+
+## Sharper: is any second-level EPT violation ever reflected to Hyper-V?
+
+`install_shadow_leaf` composes against the guest hypervisor's own walk -
+`compose_ept(guest, host_ept_lookup(...))` - so a page VTL1 restricted
+does come out restricted in the shadow. The permission is not being
+lost there, which rules out the loose form of the previous entry's
+hypothesis and leaves a tighter one.
+
+`shadow_ept_leaves_filled` is 451,002 against 451,132 EPT violations.
+**Essentially every violation was filled here and none reflected.** The
+second-level exit ring agrees: it holds wrmsr, interrupt window and
+external interrupt, and no EPT violation ever appears in it.
+
+That is the thing to check first, and it is a grep rather than a boot.
+A violation caused by a *missing* mapping is ours to fill. A violation
+caused by a permission VTL1 asked for is **Hyper-V's**, and must be
+reflected, or the trust level that imposed the protection never learns
+its guest touched the page - so it re-applies the mask, returns, the
+guest touches it again, and the pair of hypercalls repeats for ever with
+identical arguments. That is precisely the observed loop.
+
+If `l0_wants_l2_exit` claims every `ept_violation` unconditionally, that
+is the bug, and it would also explain why filling a correctly restricted
+leaf does not end the loop: the retry faults again, gets filled again,
+and the count of fills tracks the count of violations exactly as
+measured.
+
+Check, in order:
+1. `l0_wants_l2_exit` for `basic_reason::ept_violation` - is there any
+   path that returns false?
+2. If not, what the fault path does when the composition succeeds but
+   the *access* the qualification describes is still not permitted -
+   that case must reflect, not fill.
+3. Only then measure anything.
