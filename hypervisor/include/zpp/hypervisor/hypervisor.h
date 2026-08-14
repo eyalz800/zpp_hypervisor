@@ -4759,6 +4759,23 @@ private:
     char l2_driver_name[l2_image_name_size]{};
 
     /**
+     * What the loaded-module walk got as far as, so a run that produces
+     * no name says *which* step failed rather than only that one did.
+     *
+     * Three ways it can fail and nothing distinguished them: the export
+     * lookup not finding `PsLoadedModuleList` leaves `l2_module_list`
+     * zero; wrong `LDR_DATA_TABLE_ENTRY` offsets or a broken link show up
+     * as a tiny `l2_modules_walked` and a nonsense
+     * `l2_first_module_base`; and a complete walk that matched nothing
+     * shows a plausible first base and a walk length in the hundreds,
+     * which would mean the base found by scanning for `MZ` is not the one
+     * Windows recorded.
+     */
+    std::uint64_t l2_module_list{};
+    std::uint64_t l2_modules_walked{};
+    std::uint64_t l2_first_module_base{};
+
+    /**
      * Records one synthetic interrupt command the second-level guest
      * issued, with the task priority in force as it did.
      */

@@ -11834,24 +11834,40 @@ straddles two pages. It is the right change and it did **not** produce a
 name, so the byte-at-a-time translation was a real defect and not the
 reason.
 
-**What is still unknown is which step fails**, and that is the next thing
-to fix about the instrument rather than about Windows. Three candidates,
-none distinguishable from outside today because every failure path
-returns quietly:
+**Which step fails is now measured, and the answer retires the claim
+above.** Keeping the intermediates - the resolved list address, the number
+of entries walked, the first entry's base - one boot said:
 
-- `image_export` does not find `PsLoadedModuleList` at all;
-- it finds it, but the `LDR_DATA_TABLE_ENTRY` offsets used - `DllBase` at
-  `0x30`, `BaseDllName` at `0x58` - are wrong for this build;
-- the walk runs and no entry's `DllBase` matches, which would mean the
-  base found by scanning for `MZ` is not the base Windows recorded.
+    module list    0xfffff800ed4f53d0     found
+    walked         78                     completed, limit is 512
+    first DllBase  0xfffff800ec600000     exactly the kernel base
 
-The cheap way to tell them apart is to keep the intermediate results:
-store the resolved `PsLoadedModuleList` address and the number of entries
-walked, so one boot says which of the three it is instead of none of them.
+So `image_export` works, the `LDR_DATA_TABLE_ENTRY` offsets are right, the
+list walk reaches its end - and **no loaded module has the base the `MZ`
+scan found**.
 
-A fourth run also widened what is known about the caller: its return
-address was RVA `0xa5f68` rather than `0xa5cd0`, so there are at least two
-call sites in that image reaching this loop.
+### Retracted: "the retry loop's caller is a driver"
+
+That claim came from scanning 64 stack words for the first value
+resolving to an image other than the kernel. **Dead stack satisfies that
+test exactly as well as a live return address**, and the module walk now
+says the image those values point at is not loaded at all. The stable
+`0xa5cd0` across three runs made it look real; a stale value written by a
+deterministic earlier call is equally stable, and a fourth run gave
+`0xa5f68` instead, which should have been the warning.
+
+What survives is what was read rather than inferred: the loop itself, the
+thread that runs it, the priorities it runs at, and its immediate caller -
+`ntoskrnl + 0x363e91`, the return address at `rsp+0x28`, present in every
+capture.
+
+Going further up the stack needs real unwinding. Windows x64 has no frame
+pointers, so the caller chain lives in the `.pdata` unwind tables, and
+guessing at frame sizes is what produced the retraction above. The
+alternative that needs no unwinding: `l2_entry_vtpr` and the thread
+samples already identify the thread, so **walking `PsLoadedModuleList` for
+the image containing the *thread's start address* names the owner
+directly** - and that walk is now known to work.
 
 Also worth keeping: the capture had to become a *retry* rather than a
 one-shot. The loop reaches the poll by more than one call path, and a

@@ -4358,6 +4358,11 @@ void hypervisor::module_name_of(std::size_t cpu,
     };
 
     auto head = image_export(cpu, kernel, "PsLoadedModuleList");
+
+    this->l2_module_list = head;
+    this->l2_modules_walked = 0;
+    this->l2_first_module_base = 0;
+
     if (0 == head) {
         return;
     }
@@ -4373,6 +4378,12 @@ void hypervisor::module_name_of(std::size_t cpu,
         std::uint64_t dll_base{};
         if (!word(entry + ldr_dll_base, dll_base)) {
             return;
+        }
+
+        this->l2_modules_walked = i + 1;
+
+        if (0 == i) {
+            this->l2_first_module_base = dll_base;
         }
 
         if (dll_base == image) {
