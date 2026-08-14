@@ -13765,3 +13765,11 @@ failure every time, the loop is a hypercall this VMM breaks somewhere
 else entirely - the synthetic MSR path, the reference page, the
 interrupt state at the moment of the switch - and none of the extended
 page table work above touches it.
+
+Re-sampled hours later, on a fresh boot: the same two instructions, the
+same alternation, and the argument now reads `0x8540783000000000` where
+the earlier boot read `0x7280783000000000` - identical low 48 bits,
+different top 16. So it varies with the boot and not within it, which is
+what a per-boot address or handle looks like and confirms the loop is
+wedged rather than progressing slowly. The next question stands: capture
+what the two hypercalls *return*, which nothing records today.
