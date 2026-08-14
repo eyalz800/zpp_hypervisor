@@ -11999,10 +11999,24 @@ stopped polling the clock and started drawing the boot animation**, which
 is the first time anything in this investigation has moved the boot rather
 than explained it.
 
-Still to settle: the guest has not reached user mode, and the remaining
-loop is the clock tick plus a repeated request for vector `0x2f`. Whether
-that is now ordinary boot progress being watched too closely, or a second
-wall behind the first, needs the screen and a longer run.
+Still to settle, and read the counters carefully here:
+
+- The thread is **still `Phase1Initialization`**, 32 samples out of 32.
+  So the boot has not left phase one - but it is now *drawing* inside it
+  rather than polling, which is what phase one does while it works.
+- **`l2_working_trace_count` is now useless as a progress signal.** Its
+  filter excludes exactly the loop the guest is running - the synthetic
+  end-of-message, end-of-interrupt, interrupt command and the interrupt
+  window - so it cannot move while the guest draws, and a frozen count is
+  no longer evidence of a stall. Anything read off it after this change is
+  meaningless; use the thread samples or the screen.
+- Vector `0x2f` is still injected 6 times against a request on every
+  cycle. That may not matter: `0xd1` is injected 165,687 times and is
+  SINT3, so the deferred procedure call may be arriving as a synthetic
+  message rather than as that vector. Not established either way.
+
+The screen is the ground truth for whether the animation turns, and
+nothing in here can substitute for it.
 
 ### Where the nested boot stands, in one chain
 
