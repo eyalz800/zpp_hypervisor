@@ -11906,16 +11906,31 @@ capture, base derivation from ASLR, and the shipped binary all agree.
 | `0x3121cf` | `RtlGetInterruptTimePrecise` |
 
 **The thread is `Phase1Initialization`.** Windows' boot never leaves phase
-one, and the loop it is stuck in is the clock: `KiSetClockTickRate` and
-`KiSetNextClockTickDueTime` arming the hypervisor timer through
-`HalpHvTimerArm`, `KeQueryPerformanceCounter` reading the reference
-counter back through `HvlpGetRegister64`, and
-`HalpHvTimerAcknowledgeInterrupt` consuming the expiry - round and round.
+one. That much is solid: it comes from `guest_thread_samples`, which reads
+the thread's start address out of its `ETHREAD` rather than off a stack.
 
-So it is not a driver waiting on a device after all, and not the
-scheduler. **Phase one is trying to establish the system clock and cannot
-finish doing it.** That is where to look next, and every symbol above is
-a name to search for rather than an address to derive.
+**How much of the rest is a live call chain is not established, and the
+distinction matters here because getting it wrong is what produced the
+retraction above.** Two tiers:
+
+- *Every* capture has `HvlpGetRegister64` at the instruction pointer and
+  `KeQueryPerformanceCounter` at `rsp+0x28`. Those are the poll and its
+  immediate caller and they are reliable.
+- `KiSetClockTickRate`, `KiSetNextClockTickDueTime`, `KiUpdateTime` and
+  `RtlGetInterruptTimePrecise` were found by scanning stack words. They
+  are all clock routines, which is strong circumstantial support, but the
+  same scan is what invented a driver an hour earlier. **Treat them as
+  consistent with the clock path, not as a proven chain.**
+
+So the defensible statement is: **`Phase1Initialization` is spinning on
+`KeQueryPerformanceCounter`, and every symbol found near it belongs to the
+clock.** Phase one appears to be trying to establish the system clock and
+not finishing - which also explains why no device ever interrupts, since
+device and PnP initialisation happen later in phase one than this.
+
+Proving the chain needs real unwinding against the `.pdata` tables, which
+are in the copy of `ntoskrnl.exe` now known to be reachable: with the
+guest down, `ntfs-3g -o ro /dev/nvme0n1p4`.
 
 ### The addresses, as ntoskrnl RVAs
 
