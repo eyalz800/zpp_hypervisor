@@ -11863,11 +11863,35 @@ capture.
 
 Going further up the stack needs real unwinding. Windows x64 has no frame
 pointers, so the caller chain lives in the `.pdata` unwind tables, and
-guessing at frame sizes is what produced the retraction above. The
-alternative that needs no unwinding: `l2_entry_vtpr` and the thread
-samples already identify the thread, so **walking `PsLoadedModuleList` for
-the image containing the *thread's start address* names the owner
-directly** - and that walk is now known to work.
+guessing at frame sizes is what produced the retraction above.
+
+**And the module walk will not name a driver either, because there is no
+driver to name.** The thread's own start address is `ntoskrnl + 0x6fb520`
+and every resolvable frame in every capture is in ntoskrnl. The chain is
+kernel code throughout: a kernel thread, running - not blocked on a
+dispatcher object, `state=Running`, `wait_reason=0` - at APC level, doing
+timed retries.
+
+So the question is not "which driver" but "what is the kernel waiting
+for", and answering it needs symbols rather than more instrumentation.
+
+### Everything the investigation pinned, as ntoskrnl RVAs
+
+Stable across boots, derived from the poll's own RVA and cross-checked
+between runs at different address-space layouts. Resolving these against
+this Windows build's `ntoskrnl.exe` names the whole loop at once:
+
+| RVA | what it is |
+|---|---|
+| `0x6fb520` | **the looping thread's start address** |
+| `0x3a597c` | the poll - `HvlpGetRegister64`, confirmed by disassembly |
+| `0x3a57f8` | arms the synthetic timer, now + 2.5 ms or + 1 ms |
+| `0x363e91` | **the poll's immediate caller**, present in every capture |
+| `0x42890b` | writes the synthetic interrupt command, `0x4002f` |
+| `0x6a768c` | writes the synthetic end of interrupt |
+| `0x3100e4` | writes the synthetic end of message |
+| `0x30dde7`, `0x30de06`, `0x30d8f0`, `0x29ff3a`, `0x3121cf` | further frames seen on the stack, unordered |
+| `0xfd25c0` | the idle thread's object, for orientation |
 
 Also worth keeping: the capture had to become a *retry* rather than a
 one-shot. The loop reaches the poll by more than one call path, and a
