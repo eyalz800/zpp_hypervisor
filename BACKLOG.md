@@ -13742,3 +13742,26 @@ composed from a version of the tables in which nothing was denied.
 Read `shadow_ept_generation_seen`'s writers before anything else. It is
 one grep, and it is the first thing in this investigation that is
 anomalous on its face rather than by inference.
+
+Correction, immediately: `shadow_ept_generation_seen` of 0 is **not**
+anomalous. `ept_generation` is *this VMM's own* extended-page-table
+generation - bumped when a page watch is armed or a region protected,
+per the comment on the member - and this build has armed none, which the
+dump confirms with "watched writes: emulated 0, stepped 0, filtered 0".
+Zero is the correct value and the shadows are not stale. Sixth
+hypothesis, killed in one grep.
+
+Which leaves the finding standing on its own and harder: **both trust
+levels' extended page tables permit every access their guest makes**,
+across 448,311 installs, so `HvCallModifyVtlProtectionMask` is enforcing
+nothing through the tables this VMM shadows - and yet the two levels
+call and return 92,856 times with identical arguments.
+
+The next question is therefore not about our shadow at all. It is what
+`HvCallVtlCall` and `HvCallVtlReturn` are *for* here, and the cheapest
+way to ask it is the second-level ring's register capture: what the
+guest passes and what comes back. If the return value is the same
+failure every time, the loop is a hypercall this VMM breaks somewhere
+else entirely - the synthetic MSR path, the reference page, the
+interrupt state at the moment of the switch - and none of the extended
+page table work above touches it.
