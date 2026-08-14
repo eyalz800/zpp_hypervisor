@@ -5416,6 +5416,13 @@ private:
     volatile std::uint64_t reference_published[max_cpus]{};
     volatile std::uint64_t reference_fit_error[max_cpus]{};
 
+    /** The first answer seen, kept as a long baseline for the fit. A
+     * scale fitted across a 32-entry ring spans milliseconds, and a rate
+     * error small enough to pass that check still puts a timer deadline
+     * seconds away. See `publish_reference_tsc_page`. */
+    std::uint64_t reference_first_tsc[max_cpus]{};
+    std::uint64_t reference_first_value[max_cpus]{};
+
     /**
      * Fits that pair from the answers already recorded in
      * `reference_read_value` and `reference_read_tsc`, checks the fit

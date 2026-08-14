@@ -12018,12 +12018,30 @@ even slightly wrong puts that deadline somewhere the counter will not
 reach soon. The fit was checked against one sample inside a 32-entry ring
 - a window of milliseconds - and nothing has checked it over minutes.
 
-**The next step, and it is small:** keep verifying. Re-read the guest
-hypervisor's counter periodically after publishing and compare it against
-what the published scale and offset predict, recording the worst
-divergence. If it grows, the fit is the fault and needs a longer baseline;
-if it does not, the halt has another cause and the timer path is where to
-look.
+**The fit was widened and it is not the cause.** The baseline now spans
+four billion time-stamp cycles - about two seconds - anchored on the first
+answer ever seen rather than the two ends of a ring that covers
+milliseconds, and the check is against a sample from the middle of that
+baseline, which the fit did not use. A pair always reproduces itself, so
+the original check proved nothing.
+
+The guest still halts. And the reason it halts is now visible: **the timer
+keeps firing.** Acknowledged vector `0xef` goes 1,014 to 1,074 across
+forty-five seconds while the machine takes four exits a second - so the
+clock is alive at 1.3 ticks a second, which is a kernel that has armed a
+*long* deadline because it has decided it has nothing to do.
+
+So the clock is fixed and the boot is not. Windows is idle, and what it
+is idle *for* is the thing this file has recorded since the vector
+histogram and never explained: **no device raises an interrupt on this
+machine at all** while nested - two vectors in forty minutes, both the
+guest hypervisor's own timer - against seven distinct vectors and live
+device traffic within ninety seconds with nested VMX off.
+
+That is where the next work is, and it is a different problem from every
+one solved so far: not the clock, not scheduling, not priority, not cost.
+It is that the passed-through devices' interrupts do not reach the guest
+once the guest hypervisor is between them.
 
 Still to settle, and read the counters carefully here:
 

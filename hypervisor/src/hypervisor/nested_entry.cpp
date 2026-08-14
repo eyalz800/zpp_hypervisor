@@ -4540,14 +4540,24 @@ void hypervisor::publish_reference_tsc_page(std::size_t cpu)
 
         auto offset = r2 - scaled_tsc(t2, scale);
 
-        // Checked before it is trusted. A fit that cannot reproduce the
-        // oldest sample it was not derived from would step the guest's
-        // clock, which is worse than the polling it replaces.
+        // Checked against a sample from inside the baseline, which the
+        // fit did not use. A pair always reproduces itself, so checking
+        // against either end of it would prove nothing - and that is what
+        // the first version did.
         constexpr std::uint64_t tolerance = 1000;
 
-        auto predicted = scaled_tsc(t1, scale) + offset;
+        auto middle = (count - (reference_sample_capacity / 2)) %
+                      reference_sample_capacity;
+        auto tm = this->reference_read_tsc[cpu][middle];
+        auto rm = this->reference_read_value[cpu][middle];
+
+        if ((0 == tm) || (tm <= t1) || (tm >= t2)) {
+            return;
+        }
+
+        auto predicted = scaled_tsc(tm, scale) + offset;
         auto difference =
-            (predicted > r1) ? (predicted - r1) : (r1 - predicted);
+            (predicted > rm) ? (predicted - rm) : (rm - predicted);
 
         if (difference > tolerance) {
             this->reference_fit_error[cpu] = difference;
