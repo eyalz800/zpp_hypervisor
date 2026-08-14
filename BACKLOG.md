@@ -13225,3 +13225,44 @@ is no other sign of it in the numbers.
 - **A VMWRITE is about 30% cheaper than a VMREAD here** (1,940 against
   2,760), which is worth knowing when choosing which side of a copy to
   eliminate.
+
+## The reference TSC page is right, and the clock lead is closed
+
+Measured rather than assumed, and it refutes the lead recorded above.
+
+The TSC recorded by this VMM advanced 179,446,096,055 counts over a
+90.08 second wall-clock window read from outside: **1.9920 GHz**. The
+fitted `reference_scale` of 0x0148f2db8d6da21a implies **1.9923 GHz**.
+They agree to four significant figures.
+
+So the i7-8565U's invariant TSC runs at 1.992 GHz, not at the 1.80 GHz
+base frequency the previous entry assumed, and 506/575 = 0.880 is not
+explained by a wrong clock. **Do not re-derive this**: the part's
+marketed base frequency is not its TSC frequency, and the way to settle
+it is to sample a recorded TSC twice against wall time, which needs no
+boot and no debugger.
+
+## Whether the silicon has VMCS shadowing does not change the measurement
+
+Asked, reasonably, on the grounds that an 8th generation Core ought to
+have it. The MSRs could not be read - this kernel has no `msr` module
+and `/dev/cpu/0/msr` does not exist - but the question is moot for two
+separate reasons:
+
+- **What we get was measured directly.** A thousand VMREADs of
+  `exit_reason`, which is on KVM's shadow list, cost 2,687 cycles each;
+  a thousand of `guest_gdtr_base`, which is not, cost 2,801. Hardware
+  shadowing would have made the first tens of cycles. Whatever the
+  silicon can do, this VMM is not being given it.
+- **KVM's gate is not only the secondary control.**
+  `cpu_has_vmx_shadow_vmcs()` also requires IA32_VMX_MISC[29], "VMWRITE
+  to any supported field", and the parameter is `S_IRUGO` - so even if
+  the control is present there is nothing to switch on.
+
+What *is* worth knowing, and was mis-stated earlier: the guest
+hypervisor's own shadowed reads are not reaching this VMM - `exit_reason`
+never appears in `vmcs_field_use` though Hyper-V must read it every
+exit - so KVM is emulating VMCS shadowing for our second level, exactly
+as `nested.c` says it does. Those reads still cost a VM exit into KVM;
+they are cheaper than a reflection, not free. The shadow field list is
+still worth having, for a smaller reason than assumed.
