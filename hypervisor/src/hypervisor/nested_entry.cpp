@@ -3952,6 +3952,256 @@ void hypervisor::walk_guest_threads(std::size_t cpu, std::uint64_t thread)
     this->guest_thread_list_count = found;
 }
 
+namespace
+{
+/** What a PE image starts with, and where it keeps its headers. */
+constexpr std::uint16_t dos_signature = 0x5a4d;    // "MZ"
+constexpr std::uint32_t pe_signature = 0x00004550; // "PE\0\0"
+constexpr std::uint64_t dos_lfanew = 0x3c;
+constexpr std::uint64_t optional_header = 0x18;
+constexpr std::uint64_t magic_pe32_plus = 0x20b;
+constexpr std::uint64_t data_directory_64 = 0x70;
+constexpr std::uint64_t data_directory_32 = 0x60;
+constexpr std::uint64_t export_name_field = 0x0c;
+
+/**
+ * The debug directory, and the CodeView record it points at.
+ *
+ * Most drivers export nothing, so they have no export directory and no
+ * name in it - which is why the first attempt at this came back empty for
+ * exactly the image that mattered. What every Windows driver does carry
+ * is a CodeView record naming the symbol file it was built with, and the
+ * stem of that path is the module's name. Data directory six, entries of
+ * 28 bytes, type 2 is CodeView; the record is "RSDS", a 16 byte GUID, a
+ * four byte age, then the path.
+ */
+constexpr std::uint64_t debug_directory_index = 6;
+constexpr std::uint64_t directory_entry_size = 8;
+constexpr std::uint64_t debug_entry_size = 28;
+constexpr std::uint64_t debug_type_field = 0x0c;
+constexpr std::uint64_t debug_address_field = 0x14;
+constexpr std::uint32_t debug_type_codeview = 2;
+constexpr std::uint64_t codeview_path = 24;
+
+/** How far back to look. Larger than any driver on this machine and
+ * bounded so a wrong address cannot walk the address space. */
+constexpr std::uint64_t image_search_pages = 4096;
+} // namespace
+
+std::uint64_t hypervisor::image_base_of(std::size_t cpu,
+                                        std::uint64_t address)
+{
+    constexpr std::uint64_t image_page = 0x1000;
+
+    auto at = address & ~(image_page - 1);
+
+    for (std::uint64_t i{}; i < image_search_pages;
+         ++i, at -= image_page) {
+        std::uint16_t magic{};
+
+        auto physical = translate_guest_linear(at);
+        if (!physical) {
+            continue;
+        }
+
+        if (!read_guest_memory(
+                cpu,
+                *physical,
+                std::span(reinterpret_cast<std::byte *>(&magic),
+                          sizeof(magic)))) {
+            continue;
+        }
+
+        if (dos_signature != magic) {
+            continue;
+        }
+
+        // "MZ" alone is not enough - it is two common bytes. The PE
+        // signature the DOS header points at is what makes it an image.
+        std::uint32_t lfanew{};
+        auto header = translate_guest_linear(at + dos_lfanew);
+        if (!header ||
+            !read_guest_memory(
+                cpu,
+                *header,
+                std::span(reinterpret_cast<std::byte *>(&lfanew),
+                          sizeof(lfanew)))) {
+            continue;
+        }
+
+        std::uint32_t signature{};
+        auto sig = translate_guest_linear(at + lfanew);
+        if (!sig ||
+            !read_guest_memory(
+                cpu,
+                *sig,
+                std::span(reinterpret_cast<std::byte *>(&signature),
+                          sizeof(signature)))) {
+            continue;
+        }
+
+        if (pe_signature == signature) {
+            return at;
+        }
+    }
+
+    return 0;
+}
+
+void hypervisor::image_name_of(std::size_t cpu,
+                               std::uint64_t base,
+                               std::span<char> into)
+{
+    if (into.empty()) {
+        return;
+    }
+
+    into[0] = '\0';
+
+    if (0 == base) {
+        return;
+    }
+
+    auto word = [&](std::uint64_t at, auto & value) {
+        auto physical = translate_guest_linear(at);
+        return physical &&
+               read_guest_memory(
+                   cpu,
+                   *physical,
+                   std::span(reinterpret_cast<std::byte *>(&value),
+                             sizeof(value)))
+                   .has_value();
+    };
+
+    std::uint32_t lfanew{};
+    if (!word(base + dos_lfanew, lfanew)) {
+        return;
+    }
+
+    auto optional = base + lfanew + optional_header;
+
+    std::uint16_t magic{};
+    if (!word(optional, magic)) {
+        return;
+    }
+
+    // The export directory is data directory zero, and where the
+    // directories start depends on the optional header's form.
+    auto directories =
+        optional + ((magic_pe32_plus == magic) ? data_directory_64
+                                               : data_directory_32);
+
+    std::uint32_t export_rva{};
+    if (!word(directories, export_rva) || (0 == export_rva)) {
+        return;
+    }
+
+    std::uint32_t name_rva{};
+    if (!word(base + export_rva + export_name_field, name_rva) ||
+        (0 == name_rva)) {
+        return;
+    }
+
+    copy_image_string(cpu, base + name_rva, into);
+}
+
+void hypervisor::image_debug_name_of(std::size_t cpu,
+                                     std::uint64_t base,
+                                     std::span<char> into)
+{
+    if (into.empty()) {
+        return;
+    }
+
+    into[0] = '\0';
+
+    if (0 == base) {
+        return;
+    }
+
+    auto word = [&](std::uint64_t at, auto & value) {
+        auto physical = translate_guest_linear(at);
+        return physical &&
+               read_guest_memory(
+                   cpu,
+                   *physical,
+                   std::span(reinterpret_cast<std::byte *>(&value),
+                             sizeof(value)))
+                   .has_value();
+    };
+
+    std::uint32_t lfanew{};
+    if (!word(base + dos_lfanew, lfanew)) {
+        return;
+    }
+
+    auto optional = base + lfanew + optional_header;
+
+    std::uint16_t magic{};
+    if (!word(optional, magic)) {
+        return;
+    }
+
+    auto directories =
+        optional + ((magic_pe32_plus == magic) ? data_directory_64
+                                               : data_directory_32);
+
+    std::uint32_t debug_rva{};
+    std::uint32_t debug_size{};
+    auto entry =
+        directories + (debug_directory_index * directory_entry_size);
+
+    if (!word(entry, debug_rva) || !word(entry + 4, debug_size) ||
+        (0 == debug_rva)) {
+        return;
+    }
+
+    for (std::uint64_t at{}; (at + debug_entry_size) <= debug_size;
+         at += debug_entry_size) {
+        std::uint32_t type{};
+        std::uint32_t address{};
+
+        if (!word(base + debug_rva + at + debug_type_field, type) ||
+            !word(base + debug_rva + at + debug_address_field, address)) {
+            return;
+        }
+
+        if ((debug_type_codeview != type) || (0 == address)) {
+            continue;
+        }
+
+        copy_image_string(cpu, base + address + codeview_path, into);
+        return;
+    }
+}
+
+void hypervisor::copy_image_string(std::size_t cpu,
+                                   std::uint64_t at,
+                                   std::span<char> into)
+{
+    auto word = [&](std::uint64_t from, auto & value) {
+        auto physical = translate_guest_linear(from);
+        return physical &&
+               read_guest_memory(
+                   cpu,
+                   *physical,
+                   std::span(reinterpret_cast<std::byte *>(&value),
+                             sizeof(value)))
+                   .has_value();
+    };
+
+    for (std::size_t i{}; i < (into.size() - 1); ++i) {
+        char c{};
+        if (!word(at + i, c) || ('\0' == c)) {
+            into[i] = '\0';
+            return;
+        }
+        into[i] = c;
+    }
+
+    into[into.size() - 1] = '\0';
+}
+
 void hypervisor::capture_poll_site(std::size_t cpu)
 {
     auto rip = this->vmcs.guest_rip();
@@ -3995,6 +4245,37 @@ void hypervisor::capture_poll_site(std::size_t cpu)
     this->l2_poll_code_base = from;
     this->l2_poll_rip = rip;
     this->l2_poll_rsp = rsp;
+
+    // Which images those addresses belong to. The poll is in the kernel;
+    // the interesting one is the first return address that is not.
+    this->l2_kernel_base = image_base_of(cpu, rip);
+    image_name_of(cpu, this->l2_kernel_base, this->l2_kernel_name);
+
+    constexpr std::uint64_t kernel_space = 0xffff800000000000;
+
+    for (auto entry : this->l2_poll_stack) {
+        if (entry < kernel_space) {
+            continue;
+        }
+
+        auto base = image_base_of(cpu, entry);
+        if ((0 == base) || (base == this->l2_kernel_base)) {
+            continue;
+        }
+
+        this->l2_driver_base = base;
+        this->l2_driver_address = entry;
+
+        // Exports first, then the symbol file, since most drivers export
+        // nothing and only the second names them.
+        image_name_of(cpu, base, this->l2_driver_name);
+
+        if ('\0' == this->l2_driver_name[0]) {
+            image_debug_name_of(cpu, base, this->l2_driver_name);
+        }
+
+        break;
+    }
 
     // Last, so a reader that sees this set sees everything above it.
     this->l2_poll_captured = 1;

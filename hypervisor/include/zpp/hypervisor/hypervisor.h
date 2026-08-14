@@ -4318,6 +4318,26 @@ private:
     void capture_poll_site(std::size_t cpu);
 
     /**
+     * The base of the page-aligned PE image containing an address, found
+     * by scanning back for `MZ`, and the name from its export directory.
+     * Zero when neither is found within the bound.
+     */
+    std::uint64_t image_base_of(std::size_t cpu, std::uint64_t address);
+    void image_name_of(std::size_t cpu,
+                       std::uint64_t base,
+                       std::span<char> into);
+
+    /** The name from the image's CodeView record, for the drivers that
+     * export nothing and so have no export directory to name them. */
+    void image_debug_name_of(std::size_t cpu,
+                             std::uint64_t base,
+                             std::span<char> into);
+
+    void copy_image_string(std::size_t cpu,
+                           std::uint64_t at,
+                           std::span<char> into);
+
+    /**
      * Every thread of the running thread's process, with what each is
      * doing.
      *
@@ -4678,7 +4698,13 @@ private:
      * outside is whichever trust level exited last.
      */
     static constexpr std::size_t l2_poll_code_size = 128;
-    static constexpr std::size_t l2_poll_stack_words = 16;
+    // Sixty-four, not sixteen. A sixteen-word window caught the driver
+    // frames in one capture and nothing but the kernel in the next: the
+    // call path varies, and 128 bytes of stack is shallower than the
+    // frames that matter. Also visible in that window and worth knowing
+    // it is expected - the value `0x61a8`, 25,000, appearing several
+    // times over, which is the 2.5 ms delay this loop asks for.
+    static constexpr std::size_t l2_poll_stack_words = 64;
 
     std::uint8_t l2_poll_code[l2_poll_code_size]{};
     std::uint64_t l2_poll_stack[l2_poll_stack_words]{};
@@ -4686,6 +4712,29 @@ private:
     std::uint64_t l2_poll_rip{};
     std::uint64_t l2_poll_rsp{};
     volatile std::uint64_t l2_poll_captured{};
+
+    /**
+     * The images the retry loop's return addresses belong to, found
+     * without symbols.
+     *
+     * A loaded driver is a page-aligned PE image, so scanning back from
+     * any address inside it reaches `MZ`, and the export directory's Name
+     * field is the file name it was built as. That is the whole trick,
+     * and it needs no `PsLoadedModuleList` and no symbol server - which
+     * matters because neither is available from here.
+     *
+     * `l2_kernel_base` is whatever image the poll itself is in, which is
+     * the kernel. `l2_driver_base` is the first return address on the
+     * stack that resolves to a *different* image, and that is the one
+     * worth naming: the loop's caller is not in the kernel.
+     */
+    static constexpr std::size_t l2_image_name_size = 96;
+
+    std::uint64_t l2_kernel_base{};
+    std::uint64_t l2_driver_base{};
+    std::uint64_t l2_driver_address{};
+    char l2_kernel_name[l2_image_name_size]{};
+    char l2_driver_name[l2_image_name_size]{};
 
     /**
      * Records one synthetic interrupt command the second-level guest

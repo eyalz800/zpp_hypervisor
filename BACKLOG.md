@@ -11783,10 +11783,38 @@ acknowledged, `0xef` and `0x20`, both the guest hypervisor's own timer,
 and no device raises one at all. The driver polls because nothing is
 answering it.
 
-Which driver is the remaining question, and it is answerable: walk
-`PsLoadedModuleList` and find the image containing `0xfffff8032eb3c7e0`.
-The candidates are what this rig passes through - the NVMe the guest boots
-from, and the GPU.
+**The driver is located, not yet named.** `image_base_of` scans back from
+a return address for `MZ` and validates the `PE\0\0` signature the DOS
+header points at, which needs no symbols and no `PsLoadedModuleList`. It
+works: the poll site resolves to `ntoskrnl.exe`, named from its own export
+directory, at a base whose RVA for the poll is `0x3a597c` - the same value
+derived independently earlier.
+
+The caller resolves to a **separate driver image**, and the offset into it
+is stable across runs with different address-space layouts:
+
+| run | image base | return address | RVA |
+|---|---|---|---|
+| 1 | `0xfffff80452ee7000` | `0xfffff80452f8ccd0` | `0xa5cd0` |
+| 2 | `0xfffff80056d97000` | `0xfffff80056e3ccd0` | `0xa5cd0` |
+
+Identical RVA from two independent bases, which is what says the base
+detection is right rather than a lucky `MZ`.
+
+**Its name is not in its headers.** The export directory route returns
+nothing because most drivers export nothing, and the CodeView fallback -
+data directory six, type 2, the `RSDS` record's path - returns nothing
+either, because that data is discardable and Windows drops it after load.
+Both were implemented and both come back empty for this image while
+working on `ntoskrnl.exe`.
+
+So naming it needs the loaded-module list. The route that does not need
+symbols: `image_name_of` already parses an export directory, so extend it
+to *look up* a name rather than only read the module's own - find
+`PsLoadedModuleList` among ntoskrnl's exports, walk the
+`LDR_DATA_TABLE_ENTRY` list, match `DllBase` against the base above and
+read `BaseDllName`. That is the last step, and everything it needs is
+already in `capture_poll_site`.
 
 This is the first reading that says what the guest is *waiting for*
 rather than what it is spending time on, and it moves the question again:
