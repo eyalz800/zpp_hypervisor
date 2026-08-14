@@ -11808,13 +11808,35 @@ either, because that data is discardable and Windows drops it after load.
 Both were implemented and both come back empty for this image while
 working on `ntoskrnl.exe`.
 
-So naming it needs the loaded-module list. The route that does not need
-symbols: `image_name_of` already parses an export directory, so extend it
-to *look up* a name rather than only read the module's own - find
-`PsLoadedModuleList` among ntoskrnl's exports, walk the
-`LDR_DATA_TABLE_ENTRY` list, match `DllBase` against the base above and
-read `BaseDllName`. That is the last step, and everything it needs is
-already in `capture_poll_site`.
+The base is now confirmed three times, from three boots with three
+different address-space layouts, always at RVA `0xa5cd0`:
+
+    0xfffff80452ee7000   0xfffff80056d97000   0xfffff8067dd67000
+
+**The loaded-module walk is written and does not yet work.**
+`image_export` looks a name up in an export directory and `module_name_of`
+walks `PsLoadedModuleList` matching `DllBase`, which is the route that
+needs no symbols. Both are in the tree, both run, and the name comes back
+empty.
+
+The suspect is in this VMM rather than in Windows, and it is a
+performance bug with a correctness face: `image_export` compares export
+names **one byte at a time**, and every byte is a
+`translate_guest_linear` - a full guest page-table walk followed by the
+guest hypervisor's extended one. ntoskrnl exports thousands of names, so
+that is millions of walks inside a single VM exit. It either does not
+finish or gives up partway, and either way it returns zero and the caller
+falls through silently.
+
+The fix is to translate once per page and read a span, the way
+`capture_poll_site` reads the code bytes, rather than once per character.
+That is the next step and it is small.
+
+Also worth keeping: the capture had to become a *retry* rather than a
+one-shot. The loop reaches the poll by more than one call path, and a
+sixty-four word stack window caught the driver's frames in one boot and
+nothing but the kernel in the next two. Retrying every 512 polls until a
+frame outside the kernel appears removed the reboot from the loop.
 
 This is the first reading that says what the guest is *waiting for*
 rather than what it is spending time on, and it moves the question again:

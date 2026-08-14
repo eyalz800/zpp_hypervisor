@@ -3975,6 +3975,19 @@ constexpr std::uint64_t export_name_field = 0x0c;
  * 28 bytes, type 2 is CodeView; the record is "RSDS", a 16 byte GUID, a
  * four byte age, then the path.
  */
+/** IMAGE_EXPORT_DIRECTORY, past the Name field already used above. */
+constexpr std::uint64_t export_count_names = 0x18;
+constexpr std::uint64_t export_functions = 0x1c;
+constexpr std::uint64_t export_names = 0x20;
+constexpr std::uint64_t export_ordinals = 0x24;
+
+/** LDR_DATA_TABLE_ENTRY, linked through its first member. */
+constexpr std::uint64_t ldr_dll_base = 0x30;
+constexpr std::uint64_t ldr_base_name = 0x58;
+constexpr std::uint64_t unicode_length = 0x00;
+constexpr std::uint64_t unicode_buffer = 0x08;
+constexpr std::uint64_t module_walk_limit = 512;
+
 constexpr std::uint64_t debug_directory_index = 6;
 constexpr std::uint64_t directory_entry_size = 8;
 constexpr std::uint64_t debug_entry_size = 28;
@@ -4202,6 +4215,167 @@ void hypervisor::copy_image_string(std::size_t cpu,
     into[into.size() - 1] = '\0';
 }
 
+std::uint64_t hypervisor::image_export(std::size_t cpu,
+                                       std::uint64_t base,
+                                       const char * name)
+{
+    auto word = [&](std::uint64_t at, auto & value) {
+        auto physical = translate_guest_linear(at);
+        return physical &&
+               read_guest_memory(
+                   cpu,
+                   *physical,
+                   std::span(reinterpret_cast<std::byte *>(&value),
+                             sizeof(value)))
+                   .has_value();
+    };
+
+    std::uint32_t lfanew{};
+    if ((0 == base) || !word(base + dos_lfanew, lfanew)) {
+        return 0;
+    }
+
+    auto optional = base + lfanew + optional_header;
+
+    std::uint16_t magic{};
+    if (!word(optional, magic)) {
+        return 0;
+    }
+
+    auto directories =
+        optional + ((magic_pe32_plus == magic) ? data_directory_64
+                                               : data_directory_32);
+
+    std::uint32_t exports{};
+    if (!word(directories, exports) || (0 == exports)) {
+        return 0;
+    }
+
+    std::uint32_t count{};
+    std::uint32_t names{};
+    std::uint32_t ordinals{};
+    std::uint32_t functions{};
+
+    if (!word(base + exports + export_count_names, count) ||
+        !word(base + exports + export_names, names) ||
+        !word(base + exports + export_ordinals, ordinals) ||
+        !word(base + exports + export_functions, functions)) {
+        return 0;
+    }
+
+    for (std::uint32_t i{}; i < count; ++i) {
+        std::uint32_t name_rva{};
+        if (!word(base + names + (i * 4), name_rva)) {
+            return 0;
+        }
+
+        auto matched = true;
+        for (std::size_t k{};; ++k) {
+            char c{};
+            if (!word(base + name_rva + k, c)) {
+                return 0;
+            }
+
+            if (c != name[k]) {
+                matched = false;
+                break;
+            }
+
+            if ('\0' == c) {
+                break;
+            }
+        }
+
+        if (!matched) {
+            continue;
+        }
+
+        std::uint16_t ordinal{};
+        std::uint32_t address{};
+
+        if (!word(base + ordinals + (i * 2), ordinal) ||
+            !word(base + functions + (ordinal * 4), address)) {
+            return 0;
+        }
+
+        return base + address;
+    }
+
+    return 0;
+}
+
+void hypervisor::module_name_of(std::size_t cpu,
+                                std::uint64_t kernel,
+                                std::uint64_t image,
+                                std::span<char> into)
+{
+    if (into.empty()) {
+        return;
+    }
+
+    into[0] = '\0';
+
+    auto word = [&](std::uint64_t at, auto & value) {
+        auto physical = translate_guest_linear(at);
+        return physical &&
+               read_guest_memory(
+                   cpu,
+                   *physical,
+                   std::span(reinterpret_cast<std::byte *>(&value),
+                             sizeof(value)))
+                   .has_value();
+    };
+
+    auto head = image_export(cpu, kernel, "PsLoadedModuleList");
+    if (0 == head) {
+        return;
+    }
+
+    std::uint64_t entry{};
+    if (!word(head, entry)) {
+        return;
+    }
+
+    for (std::uint64_t i{};
+         (i < module_walk_limit) && (entry != head) && (0 != entry);
+         ++i) {
+        std::uint64_t dll_base{};
+        if (!word(entry + ldr_dll_base, dll_base)) {
+            return;
+        }
+
+        if (dll_base == image) {
+            std::uint16_t length{};
+            std::uint64_t buffer{};
+
+            if (!word(entry + ldr_base_name + unicode_length, length) ||
+                !word(entry + ldr_base_name + unicode_buffer, buffer)) {
+                return;
+            }
+
+            // UTF-16 in, and the names are ASCII, so the high byte is
+            // dropped rather than decoded.
+            auto characters = static_cast<std::size_t>(length) / 2;
+            std::size_t k{};
+
+            for (; (k < characters) && (k < (into.size() - 1)); ++k) {
+                std::uint16_t wide{};
+                if (!word(buffer + (k * 2), wide)) {
+                    break;
+                }
+                into[k] = static_cast<char>(wide & 0xff);
+            }
+
+            into[k] = '\0';
+            return;
+        }
+
+        if (!word(entry, entry)) {
+            return;
+        }
+    }
+}
+
 void hypervisor::capture_poll_site(std::size_t cpu)
 {
     auto rip = this->vmcs.guest_rip();
@@ -4272,6 +4446,14 @@ void hypervisor::capture_poll_site(std::size_t cpu)
 
         if ('\0' == this->l2_driver_name[0]) {
             image_debug_name_of(cpu, base, this->l2_driver_name);
+        }
+
+        // And the kernel's own list last, which is the only one that
+        // works for a driver that exports nothing and whose symbol-file
+        // record is not resident - which is this one.
+        if ('\0' == this->l2_driver_name[0]) {
+            module_name_of(
+                cpu, this->l2_kernel_base, base, this->l2_driver_name);
         }
 
         break;
@@ -5038,9 +5220,23 @@ hypervisor::on_l2_exit(std::size_t cpu,
                 constexpr std::uint64_t reference_count_slot = 0x20;
                 constexpr std::uint64_t settled = 200000;
 
+                // Retried, not one-shot, and throttled because the
+                // scan behind it walks pages looking for a PE header.
+                //
+                // One capture per boot was the first shape and it is not
+                // enough: the loop reaches the poll by more than one call
+                // path, and a sixty-four word window caught the driver's
+                // frames in one boot and nothing but the kernel in the
+                // next two. Retrying until a frame outside the kernel
+                // turns up costs a few hundred scans and removes the
+                // reboot from the loop.
+                constexpr std::uint64_t retry_every = 512;
+
                 if ((reference_count_slot == slot) &&
-                    (0 == this->l2_poll_captured) &&
-                    (this->l2_synthetic_msr_reads[cpu][slot] > settled)) {
+                    (0 == this->l2_driver_base) &&
+                    (this->l2_synthetic_msr_reads[cpu][slot] > settled) &&
+                    (0 == (this->l2_synthetic_msr_reads[cpu][slot] %
+                           retry_every))) {
                     capture_poll_site(cpu);
                 }
             } else if (basic_reason::wrmsr == reason.basic()) {

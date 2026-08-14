@@ -4338,6 +4338,28 @@ private:
                            std::span<char> into);
 
     /**
+     * The address an image exports a name at, or zero. Needed because
+     * the driver holding the boot exports nothing and carries no
+     * resident symbol-file record, so the only thing left that names it
+     * is the kernel's own loaded-module list - and finding that list
+     * means looking `PsLoadedModuleList` up in ntoskrnl's exports.
+     */
+    std::uint64_t image_export(std::size_t cpu,
+                               std::uint64_t base,
+                               const char * name);
+
+    /**
+     * Walks the kernel's loaded-module list for the image based at
+     * `image` and copies its `BaseDllName`. The list is
+     * `LDR_DATA_TABLE_ENTRY`s linked through their first member, with
+     * `DllBase` at `0x30` and `BaseDllName` at `0x58`.
+     */
+    void module_name_of(std::size_t cpu,
+                        std::uint64_t kernel,
+                        std::uint64_t image,
+                        std::span<char> into);
+
+    /**
      * Every thread of the running thread's process, with what each is
      * doing.
      *
