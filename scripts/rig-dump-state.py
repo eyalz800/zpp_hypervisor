@@ -67,7 +67,8 @@ RIP_OWNER = {0: "", 1: " [l2-rip]", 2: " [l1-rip]"}
 VTL_SLOTS = ["rax", "rbx", "rcx", "rdx", "rsp", "rbp", "rsi", "rdi",
              "r8", "r9", "r10", "r11", "r12", "r13", "r14", "r15",
              "rip", "cr3", "rflags", "eptp"]
-VTL_KINDS = ["HvCallVtlCall 0x11", "HvCallVtlReturn 0x12"]
+VTL_KINDS = ["HvCallVtlCall 0x11", "HvCallVtlReturn 0x12",
+             "STIMER0 periodic arm"]
 
 
 def gdb_offsets(elf, members):

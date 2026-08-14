@@ -4812,7 +4812,13 @@ private:
      * address spaces from each other.
      */
     static constexpr std::size_t vtl_slot_count = 20;
-    static constexpr std::size_t vtl_kinds = 2;
+
+    /** Two trust-level sides and one synthetic-timer arm; see
+     * `timer_arm_kind`, which shares this machinery because what is
+     * wanted of it is the same - a stack and an image name for a call
+     * site whose instruction pointer says nothing on its own. */
+    static constexpr std::size_t vtl_kinds = 3;
+    static constexpr std::size_t timer_arm_kind = 2;
 
     std::uint64_t vtl_switches[max_cpus][vtl_kinds]{};
     std::uint64_t vtl_previous[max_cpus][vtl_kinds][vtl_slot_count]{};
@@ -4845,6 +4851,13 @@ private:
     char vtl_image_name[vtl_kinds][l2_image_name_size]{};
     char vtl_caller_name[vtl_kinds][l2_image_name_size]{};
     volatile std::uint64_t vtl_captured[vtl_kinds]{};
+
+    /** The last value written to `HV_X64_MSR_STIMER0_CONFIG`, so the
+     * count that follows can be read as a period or as an absolute
+     * deadline - the interface makes it one or the other depending on
+     * the periodic bit, and a capture that could not tell them apart
+     * would fire on every one-shot re-arm. */
+    std::uint64_t l2_stimer_config[max_cpus]{};
 
     /**
      * What the loaded-module walk got as far as, so a run that produces

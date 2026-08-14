@@ -5067,7 +5067,11 @@ void hypervisor::capture_vtl_switch(std::size_t cpu,
 
     this->vtl_switches[cpu][kind] = count + 1;
 
-    if (vtl_capture_at != count) {
+    // The trust-level sides are captured well inside their loop, where
+    // an early capture would show the boot reaching it rather than the
+    // loop itself. The timer arm has no loop - it happens eight times in
+    // a whole boot - so its one capture is the first.
+    if (count != ((timer_arm_kind == kind) ? 0 : vtl_capture_at)) {
         return;
     }
 
@@ -6238,6 +6242,42 @@ hypervisor::on_l2_exit(std::size_t cpu,
                 this->stimer_arm_kind[cpu][slot] = tag;
                 this->stimer_arm_count[cpu] =
                     this->stimer_arm_count[cpu] + 1;
+
+                // And who asked, the first time a periodic count is
+                // programmed short enough to matter.
+                //
+                // The tick rate is the binding constraint on this whole
+                // boot and it is the second-level guest's own choice.
+                // Measured on the rig: it arms 156,250 - 15.625 ms, the
+                // ordinary 64 Hz tick - and then seventy-eight seconds
+                // later re-arms at **17,400**, 1.74 ms, and never
+                // changes it again. Three of the four round trips a
+                // tick costs are synthetic-MSR writes that exit
+                // unconditionally, so at 575 Hz they alone are most of
+                // the wall clock; at 64 Hz the same four are seven per
+                // cent of it. Nothing about that is fixable from
+                // underneath unless it is known which component asked.
+                //
+                // One capture, on the first short periodic count, and
+                // nothing after it: the register diff would be
+                // meaningless across eight arms in a whole boot, and
+                // what is wanted is the stack.
+                constexpr std::uint64_t short_period = 100000;
+                constexpr std::uint64_t config_periodic = 1ull << 1;
+
+                if ((1 == tag) && (cpu < max_cpus) &&
+                    (0 == this->vtl_captured[timer_arm_kind]) &&
+                    (0 !=
+                     (this->l2_stimer_config[cpu] & config_periodic)) &&
+                    (0 != this->stimer_arm_value[cpu][slot]) &&
+                    (this->stimer_arm_value[cpu][slot] < short_period)) {
+                    capture_vtl_switch(cpu, timer_arm_kind, context);
+                }
+
+                if (2 == tag) {
+                    this->l2_stimer_config[cpu] =
+                        this->stimer_arm_value[cpu][slot];
+                }
             }
         }
     }
