@@ -13669,3 +13669,47 @@ For the run that tests it, ask the launcher for
 stops and stays paused instead of resetting, so `info status` reads
 `paused` and every counter and the memory behind them survive for the
 monitor - which is what the sixteen-load stretched run destroyed.
+
+## reflected_permission is zero. The reflect path exists and is never taken
+
+Read off the running guest, no boot needed - the dispositions were
+already counted:
+
+    reflected_walk             130
+    reflected_misconfiguration   0
+    reflected_permission         0
+    watched                      0
+    installed              448,311
+
+So the previous entry's hypothesis is **wrong**: `on_l2_ept_fault` does
+have a `reflected_permission` path, and it has never once been taken.
+Every fault composed successfully and installed. The guest hypervisor's
+own tables permit every access its guest makes.
+
+Which means **the VTL protection is not expressed in the extended page
+tables this VMM is shadowing.** If `HvCallModifyVtlProtectionMask` had
+restricted a page in the EPT we walk, a touch of that page would
+compose to a denial and `reflected_permission` would be non-zero. It is
+zero, so either the mask is applied somewhere else entirely, or - and
+this is the reading that fits the hypercall pair - **each virtual trust
+level has its own extended page tables and Hyper-V switches the EPT
+pointer across `HvCallVtlCall` and `HvCallVtlReturn`.**
+
+That reframes the loop. It is not a protection that fails to bite; it is
+two address spaces being entered alternately, and what to look at is
+what this VMM does with the EPT pointer on each switch. The shadows are
+already per guest EPT pointer, so both should exist - but
+`shadow_ept_builds` is 16,129 against 92,856 hypercall pairs, which does
+not obviously match either a rebuild per switch or none.
+
+Next, and still without a boot: record the EPT pointer in vmcs12 at each
+`HvCallVtlCall` and `HvCallVtlReturn` and see whether it changes. Two
+distinct pointers alternating confirms per-VTL tables and makes the
+question "what does `shadow_ept_pointer_for` do when it alternates";
+one pointer throughout kills that too and the loop is elsewhere.
+
+**Four hypotheses about this loop have now been killed by measurement in
+a row** - lost permission in the composition, l0 claiming the exit, a
+missing reflect path, and the reflect path never firing. Each took
+minutes because the counters already existed. Keep reading counters
+before changing code.
