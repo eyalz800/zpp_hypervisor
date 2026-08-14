@@ -13362,3 +13362,55 @@ INVEPT's descriptor type instead of discarding the shadow wholesale is
 the change; whether Hyper-V issues single-context or global
 invalidations decides how much it is worth, and that is one counter
 away.
+
+## Watching the guest hypervisor's EPT pages: the change, and its size
+
+The shadow-EPT refault cost is now the largest single item - 451,132
+violations against 16,129 INVEPTs, 41.5% of every exit - and both
+obvious ways out are already closed. Honouring the descriptor type is
+done. Refreshing eagerly on INVEPT works, is 28 times cheaper, and is
+**unsound**: measured on 2026-08-13 it reset the machine in a loop, and
+the second-level ring caught `vmcall rcx=0x1000c`,
+`HvCallModifyVtlProtectionMask`, before every reset. Hyper-V invalidates
+*around* a protection change rather than after it, so a refresh driven
+by the INVEPT recomposes from tables that are about to change, the
+entry is present, no fault ever occurs to pick the change up, and the
+level asking for the protection asks for ever.
+
+What is left is the third option the existing comment names in one line
+and does not develop. Stated properly, because it is now the work:
+
+**Write-watch the guest hypervisor's extended page tables, and stop
+taking invalidation instructions as the signal.**
+
+- The pages are already known: the shadow walk reads them, so every
+  guest-physical page it touches as a table is a page to watch.
+- `watch_guest_page_writes` exists and is unused - the dump reports
+  "watched writes: emulated 0, stepped 0, filtered 0" on every run.
+- On a write to one, drop only the shadow leaves composed from the
+  entry written, then let the write through. The guest faults those
+  back on next use and the composition is redone against tables that
+  have finished changing.
+- INVEPT then needs to discard nothing. Over-invalidating stays legal -
+  SDM 31.4.3.2 - so keeping the discard as a fallback costs only
+  performance and can be left in behind a switch until the watch is
+  trusted.
+
+**Why this is sound where the refresh is not.** The refresh recomposes
+at a moment the guest hypervisor chose for its own reasons; the watch
+recomposes at the moment the source actually changed, which is the same
+moment the fault path would have discovered it. It never installs an
+entry that the fault path would have left absent, which is the property
+`install_shadow_leaf`'s own note turns on: "the table holds only what is
+unconditionally true".
+
+**Expected size.** Hyper-V changes about one page per INVEPT call, so
+16,129 write faults would replace 451,132 refaults - roughly 28 times
+fewer, on 41.5% of all exits. That is the first change proposed here
+that is worth more than a rounding error against a guest running two to
+three orders of magnitude below native.
+
+**What would falsify it before it is built**: count writes to the
+watched pages for one boot with the watch armed but the discard left in
+place. If Hyper-V writes those pages far more often than it invalidates
+them, the trade inverts and this is not worth building.
