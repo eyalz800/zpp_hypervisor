@@ -11875,11 +11875,52 @@ timed retries.
 So the question is not "which driver" but "what is the kernel waiting
 for", and answering it needs symbols rather than more instrumentation.
 
-### Everything the investigation pinned, as ntoskrnl RVAs
+### Named, against the guest's own kernel and its symbols
+
+The Windows install is on the passed-through NVMe, so with the guest down
+the host owns the disk again and `ntfs-3g -o ro` reaches it -
+`/dev/nvme0n1p4`, `Windows/System32/ntoskrnl.exe`. Its CodeView record
+gives `ntkrnlmp.pdb` with GUID+age
+`C8A7F11B37FE28227B6B11412E3A05191`, which the Microsoft symbol server
+serves directly, and `llvm-symbolizer` then resolves every address at
+`ImageBase 0x140000000` plus the RVA.
+
+**First the RVAs were verified against the on-disk bytes**, which is what
+makes the rest trustworthy: `0x3a597c` disassembles to `rdmsr; shl rdx,32;
+or rax,rdx; mov [r9],rax; ret` in the file, byte for byte what was
+captured out of guest memory, and `0x3a57f8` to `wrmsr; ...; ret`. Guest
+capture, base derivation from ASLR, and the shipped binary all agree.
+
+| RVA | symbol |
+|---|---|
+| `0x6fb520` | **`Phase1Initialization`** - the looping thread |
+| `0x363e91` | `KeQueryPerformanceCounter` |
+| `0x3a597c` | `HvlpGetRegister64` |
+| `0x3a57f8` | `HalpHvTimerArm` |
+| `0x3100e4` | `HalpHvTimerAcknowledgeInterrupt` |
+| `0x42890b` | `HvlWriteApicCommandRegister` |
+| `0x6a768c` | `HvlEndSystemInterrupt` |
+| `0x30dde7`, `0x30de06` | `KiSetClockTickRate` |
+| `0x30d8f0` | `KiSetNextClockTickDueTime` |
+| `0x29ff3a` | `KiUpdateTime` |
+| `0x3121cf` | `RtlGetInterruptTimePrecise` |
+
+**The thread is `Phase1Initialization`.** Windows' boot never leaves phase
+one, and the loop it is stuck in is the clock: `KiSetClockTickRate` and
+`KiSetNextClockTickDueTime` arming the hypervisor timer through
+`HalpHvTimerArm`, `KeQueryPerformanceCounter` reading the reference
+counter back through `HvlpGetRegister64`, and
+`HalpHvTimerAcknowledgeInterrupt` consuming the expiry - round and round.
+
+So it is not a driver waiting on a device after all, and not the
+scheduler. **Phase one is trying to establish the system clock and cannot
+finish doing it.** That is where to look next, and every symbol above is
+a name to search for rather than an address to derive.
+
+### The addresses, as ntoskrnl RVAs
 
 Stable across boots, derived from the poll's own RVA and cross-checked
-between runs at different address-space layouts. Resolving these against
-this Windows build's `ntoskrnl.exe` names the whole loop at once:
+between runs at different address-space layouts:
 
 | RVA | what it is |
 |---|---|
