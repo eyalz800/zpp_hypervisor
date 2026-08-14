@@ -4464,8 +4464,8 @@ namespace
  * runtime library here to supply `__udivti3` and a link failure at this
  * depth is a bad way to find that out. Sixty-four iterations, once.
  */
-constexpr std::uint64_t shifted_quotient(std::uint64_t numerator,
-                                         std::uint64_t denominator)
+[[maybe_unused]] constexpr std::uint64_t
+shifted_quotient(std::uint64_t numerator, std::uint64_t denominator)
 {
     if ((0 == denominator) || (numerator >= denominator)) {
         return 0;
@@ -4489,7 +4489,8 @@ constexpr std::uint64_t shifted_quotient(std::uint64_t numerator,
 }
 
 /** `((tsc * scale) >> 64)`, the reference TSC page's own arithmetic. */
-constexpr std::uint64_t scaled_tsc(std::uint64_t tsc, std::uint64_t scale)
+[[maybe_unused]] constexpr std::uint64_t scaled_tsc(std::uint64_t tsc,
+                                                    std::uint64_t scale)
 {
     return static_cast<std::uint64_t>(
         (static_cast<unsigned __int128>(tsc) * scale) >> 64);
