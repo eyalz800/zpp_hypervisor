@@ -13139,3 +13139,89 @@ canary field would be 1 read against 52 writes. It is a heuristic and
 the hazard is a field that moves while the canary does not, so it needs
 the same treatment as the last attempt: a switch, a boot, and a
 willingness to find it does not work.
+
+## The delivered tick rate did not move when the machine got faster
+
+Steady state, measured at the wall over a 60 second window, one
+processor, `ZPP_STRETCH_GUEST_TIMER=1`:
+
+    clock 0xd1 delivered   506 /s   (the guest programs 575)
+    dpc   0x2f delivered     0 /s
+    l2 entries           2,091 /s
+    exits                4,403 /s
+
+**506, after an 11.5% cut to the nested round trip that took it from
+659,678 to 583,716 cycles.** The previous reading was 507. The round
+trip is about 68% of the machine at this entry rate, so a tenth off it
+should have shown up as several per cent more ticks, and it showed up
+as none.
+
+That contradicts the model the last several sessions have been working
+from. "The guest asks 575 Hz, a tick costs us 1.97 ms, so we saturate"
+predicts that a faster machine delivers more ticks - and the earlier
+progression 426 -> 454 -> 507 was read as exactly that. It has now
+stopped responding to speed. Whatever pins it at 506 is not throughput.
+
+**The lead worth taking next, and it is a number rather than a
+feeling.** 506/575 = 0.880. The reference TSC page this VMM publishes
+carries a scale implying a **1.992 GHz** time stamp counter; the part
+is an i7-8565U, whose invariant TSC runs at its 1.80 GHz base
+frequency, and 1.992/1.80 = 1.107. A guest that computes a 1.74 ms
+period against a clock it believes is 10.7% faster than it is waits
+10.7% longer in real time, and 575/1.107 = 519. That is within noise of
+506 and it is the same direction. Check how `reference_scale` is
+derived before assuming the page is right - the earlier session
+concluded "1.992 GHz, an ordinary value" and did not compare it against
+this part's actual base frequency.
+
+If that is the cause, the livelock has been mis-modelled: the guest is
+not being starved by a slow VMM, it is being told the wrong time.
+
+## The timer stretch does not establish price over block
+
+Recorded because this session drew the wrong conclusion from it first
+and the wrong conclusion is instructive.
+
+`ZPP_STRETCH_GUEST_TIMER=8` produced what looked like a clean result -
+the deferred-procedure interrupt started being delivered, the task
+priority moved through four levels instead of sitting at 0xd0, device
+interrupts and IPIs that had never arrived once arrived, and the
+second-level guest reached its idle loop. Read as "eight times the
+budget breaks the livelock, therefore it is price".
+
+**It boot-loops.** `grep -c "allocate_rwx done at"` on the run's serial
+gives **16** loads against **2** for the unstretched run before it, so
+Windows bugchecked and restarted fifteen times, which is also what the
+screen showed. Every counter read was a sum over sixteen short boots,
+and the healthy-looking early-boot state was early boot.
+
+It cannot be made clean either. Stretching the period without slowing
+the reference counter leaves the guest's two time sources disagreeing,
+and this part reports no `tsc_scaling` in its VMX flags, so the second
+one cannot be slowed to match. The switch stays as a diagnostic and its
+result is only the narrow one: the deferred-procedure starvation is
+downstream of the tick rate. It says nothing about whether more speed
+would fix the boot.
+
+**Count the boots before believing any nested measurement.** A guest
+that resets makes every cumulative counter a sum over runs, and there
+is no other sign of it in the numbers.
+
+## Settled about this rig, so it is not re-derived
+
+- **VMCS shadowing is unavailable and cannot be turned on.**
+  `/sys/module/kvm_intel/parameters/enable_shadow_vmcs` reads N, and
+  `vmx flags` in /proc/cpuinfo carries no `shadow_vmcs`, so
+  `cpu_has_vmx_shadow_vmcs()` is false and `nested_vmx_hardware_setup`
+  cleared it. Priced field by field to be sure: `exit_reason` 2,687
+  cycles, `guest_rip` 2,780, `guest_gdtr_base` 2,801, VMWRITE of
+  `guest_rsp` 1,933, of `guest_gdtr_limit` 1,952 - the first three are
+  on KVM's shadow list, the last two are not, and they cost the same.
+  There is no cheap half of the VMCS to move the hot path onto.
+- **The two VMPTRLDs of a round trip cost 5,127 and 5,072 cycles**,
+  1.5% of it. Merging vmcs01 and vmcs02 into one region to avoid them
+  is not worth doing; it was the leading candidate before it was
+  priced.
+- **A VMWRITE is about 30% cheaper than a VMREAD here** (1,940 against
+  2,760), which is worth knowing when choosing which side of a copy to
+  eliminate.
