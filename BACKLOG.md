@@ -13468,3 +13468,38 @@ everything, against 9% for the EPT watch at a fraction of the risk.
 The obstacle is that `transfer_window_first_page` is shared and
 lock-protected, so this needs a window of its own rather than a pinned
 borrow of that one. That is the whole of the work.
+
+## The bitmap merge is three guest page reads, not one
+
+Splitting the merge into the guest read and the union that follows it
+corrects two things written above, one of them a commit's premise.
+
+    merge_nested_bitmaps   230,543 calls   73,751 cycles each
+      of which guest read  691,578 calls   21,818 cycles each
+
+**691,578 is exactly three times 230,543.** Every one of the three
+pages takes the read path, so the guest hypervisor uses I/O bitmaps as
+well as an MSR bitmap, and `nested_bitmap_is_ours` - added on the stated
+grounds that "Hyper-V uses MSR bitmaps and no I/O bitmaps, so
+`read_theirs` is false for both I/O pages" - **never fires**. That
+premise was never checked against the guest in front of it, which is the
+exact failure the comment above `shadow_read_write_fields` warns about.
+The 77,000 cycles `build_vmcs02` did lose came from caching the two
+`virtual_to_physical` walks and from nothing else.
+
+So the merge is 3 x 21,818 = 65,454 cycles of reading and about 8,300 of
+or-ing: **the read is 89% of it, and the merge is 11% of everything.**
+Twelve kilobytes of guest memory copied on every VM entry.
+
+That does now point at the mapping window, but it is still not sized:
+21,818 cycles buys one `map_page`, one `invlpg` and a 4 KB `memcpy` over
+cold lines, and only the first two go away if the mapping is kept.
+**Split those before building it.** Two changes in this file have now
+been sized off the wrong number and a third off an unchecked premise.
+
+Worth considering instead, and cheaper than either: our own I/O bitmaps
+intercept almost nothing - one port - so vmcs02 could name the guest
+hypervisor's own I/O bitmap pages directly and skip two of the three
+copies entirely. That trades this VMM's interception of that port while
+a second-level guest runs, which is a decision rather than an
+optimisation, and it wants the port list checked before it is taken.

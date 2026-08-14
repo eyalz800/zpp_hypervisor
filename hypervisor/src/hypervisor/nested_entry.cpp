@@ -838,9 +838,22 @@ hypervisor::merge_nested_bitmaps(std::size_t cpu)
 
         this->nested_bitmap_is_ours[cpu][which] = false;
 
+        // Phase 10 is the guest page read alone, so it can be told apart
+        // from the union that follows it. The proposed fix - keeping the
+        // mapping across entries - only removes `map_window_at`, and the
+        // copy through it is cold-cache traffic that the fix would not
+        // touch. Sizing the change off the merge total would repeat a
+        // mistake made twice already in this file.
+        auto read_start = arch::x86_64::rdtsc();
         auto read = read_guest_physical(
             from,
             std::span(reinterpret_cast<std::byte *>(into), page_size));
+        if (cpu < max_cpus) {
+            this->phase_cycles[cpu][10] +=
+                arch::x86_64::rdtsc() - read_start;
+            this->phase_calls[cpu][10] += 1;
+        }
+
         if (!read) {
             return std::unexpected(read.error());
         }
