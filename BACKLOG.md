@@ -13914,3 +13914,60 @@ measure, and the first thing to establish is whether VTPR on the guest
 hypervisor's virtual-APIC page is being updated by TPR virtualization in
 hardware or only by the guest hypervisor's own writes, because the
 notification can only fire on the former.
+
+## Flooring the tick period kills the guest too
+
+`ZPP_TICK_FLOOR=156250` was run on 2026-08-15. `guest_tick_floored`
+read **1** - so it reached the compiler, fired, and refused exactly one
+period - and the guest then died: `info status` answered **`paused
+(shutdown)`**, QEMU's user time stopped advancing entirely, and every
+counter froze at 730,987 exits and 99,255 second-level entries. That is
+a guest resetting itself, caught by `-no-reboot`, not a livelock.
+`stimer_arm_count` reached 12 against 8 on an unfloored boot, so the
+guest reacted to the refusal by re-arming and then gave up.
+
+The floor was the careful version of this idea and it still failed. It
+refused only a *periodic* period, only one shorter than 15.625 ms, and
+15.625 ms is what this same guest ran with for its own first
+seventy-eight seconds - not a number invented here. A request for
+anything longer passed through untouched.
+
+**Three interventions from underneath, three deaths, and they are the
+same result.** Taken together they are worth more than any one of them:
+
+| intervention | outcome |
+|---|---|
+| `ZPP_STRETCH_GUEST_TIMER=8` - multiply the period | 16 module loads in one boot; bugcheck loop |
+| `ZPP_DELIVER_SELF_IPI` - inject the vector the guest asked for | one delivery, then the guest hypervisor spinning on one instruction for ever |
+| `ZPP_TICK_FLOOR=156250` - refuse a period shorter than its own | one refusal, then `paused (shutdown)` |
+
+Each was gated more carefully than the one before it and each died
+faster. The generalisation is that **this guest cannot be helped to cope
+with being slow**; it can only be made faster. Stop looking for a
+cleverer lie about time or interrupts - the failure is not in how the
+lie was told.
+
+What remains is honest speed, and its ceiling is known: 65% of the wall
+clock is inside this VMM, so removing all of it is 2.9x, and the sound
+and easy parts of it sum to about 8 points, which is 1.2x. The dominant
+term is not this VMM's own work at all - it is that **every VMCS access
+costs about 2,700 cycles here against roughly 40 on bare metal**,
+because a VMREAD or VMWRITE executed by a KVM guest exits to KVM
+unconditionally. A round trip is about a hundred of them.
+
+Two directions are left, and they are the only two:
+
+- **Bare metal**, with nothing underneath. The same hundred accesses at
+  40 cycles is about 4 us against the 286 us measured here, and the
+  tick arithmetic that makes 575 Hz impossible becomes 7% of the wall
+  clock at 64 Hz and nothing at all at 575. This is not an optimisation,
+  it is the removal of a 70x tax that is not ours.
+- **Make vmcs02 the shadow VMCS** named by vmcs01's VMCS-link pointer,
+  so the guest hypervisor's own VMREADs and VMWRITEs land on the VMCS
+  that actually runs its guest and no copying is needed at all. That
+  would collapse `save_l2_state`, `load_l1_host_state` and both shadow
+  copies - 49% of the wall clock - into nothing. **Unverified**: it
+  needs the SDM checked on whether a VMCS may be a shadow VMCS and later
+  be VMPTRLDed as an ordinary one, and KVM checked on what its emulated
+  shadowing does with such a region. Do not build it before reading
+  both.
