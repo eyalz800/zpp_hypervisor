@@ -32,6 +32,9 @@ option(ZPP_NESTED_SHADOW_VMCS
 set(ZPP_SLOW_EXITS "0" CACHE STRING
     "Extra cycles burned in every VM exit, to test whether the stall moves with throughput")
 
+set(ZPP_TICK_FLOOR "0" CACHE STRING
+    "Least periodic tick period, in 100 ns units, this VMM will let\n     the second-level guest arm; 0 leaves every request untouched.\n     156250 is 15.625 ms, the 64 Hz tick Windows itself uses before\n     it re-arms at 1.74 ms. Only periods are floored, never one-shot\n     deadlines.")
+
 set(ZPP_STRETCH_GUEST_TIMER "1" CACHE STRING
     "Multiply the second-level guest's synthetic timer period by this before its hypervisor sees it. 1 is off. Diagnostic only - see the top-level CMakeLists for what it separates.")
 
@@ -168,6 +171,7 @@ target_compile_options(zpp_hypervisor PRIVATE
     -DZPP_PROFILE_L2=$<BOOL:${ZPP_PROFILE_L2}>
     -DZPP_SLOW_EXITS=${ZPP_SLOW_EXITS}
     -DZPP_STRETCH_GUEST_TIMER=${ZPP_STRETCH_GUEST_TIMER}
+    -DZPP_TICK_FLOOR=${ZPP_TICK_FLOOR}
     # The guest coverage suite, which lives in the loader but turns on two
     # VM-execution controls here. Same always-defined 0/1 shape as the two
     # above. Off by default and off in every build that is not a test one;

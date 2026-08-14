@@ -4859,6 +4859,13 @@ private:
      * would fire on every one-shot re-arm. */
     std::uint64_t l2_stimer_config[max_cpus]{};
 
+    /** How many periodic tick periods `ZPP_TICK_FLOOR` refused. Zero on
+     * a run with the floor compiled in means it never fired, which is a
+     * different answer from "it fired and changed nothing" - and telling
+     * those two apart is exactly what `guest_timer_stretched` was added
+     * for after a switch that silently never reached the compiler. */
+    volatile std::uint64_t guest_tick_floored[max_cpus]{};
+
     /**
      * What the loaded-module walk got as far as, so a run that produces
      * no name says *which* step failed rather than only that one did.

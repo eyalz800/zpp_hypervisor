@@ -6073,6 +6073,15 @@ hypervisor::on_l2_exit(std::size_t cpu,
         // **Diagnostic only.** A guest whose clock is eight times slow
         // is a guest being lied to about time, which is the one thing
         // this VMM is otherwise careful never to do.
+//
+// **Superseded by the floor below, and kept because the two are
+// different claims.** A multiplier scales whatever the guest
+// asked for, so it is a lie of unbounded size and it is what
+// turned a 64 Hz tick into a 2 Hz one and bugchecked the guest
+// sixteen times in one boot. A floor only ever refuses a period
+// *shorter* than one the same guest chose for itself minutes
+// earlier, and stops refusing the moment it asks for anything
+// longer.
 #ifndef ZPP_STRETCH_GUEST_TIMER
 #define ZPP_STRETCH_GUEST_TIMER 1
 #endif
@@ -6092,6 +6101,71 @@ hypervisor::on_l2_exit(std::size_t cpu,
                         this->guest_timer_stretched[cpu] =
                             this->guest_timer_stretched[cpu] + 1;
                     }
+                }
+            }
+        }
+
+        // A floor under the second-level guest's tick period, off
+        // unless asked for. See ZPP_TICK_FLOOR, in 100 ns units.
+        //
+        // The tick rate is the binding constraint on this boot and
+        // nothing else here can move it. Three of the four round trips a
+        // tick costs are the guest's writes of the synthetic
+        // end-of-interrupt, interrupt command and end-of-message
+        // registers, and those lie outside both ranges an MSR bitmap can
+        // describe - SDM 26.6.9 - so they exit *unconditionally*. They
+        // cannot be filtered, they cannot be made cheaper, and each is a
+        // full reflection. The only variable is how many ticks there
+        // are.
+        //
+        // Measured on the rig on 2026-08-15: the guest arms 156,250 -
+        // 15.625 ms, the ordinary 64 Hz tick - and then seventy-eight
+        // seconds later re-arms *periodic* at 17,400, 1.74 ms, and never
+        // changes it again. `capture_vtl_switch`'s third kind caught the
+        // site: `ntoskrnl.exe`+0x3a57f8, called from +0x35d4ed, with
+        // vector 0xd1 and IRQL 0xd on the stack - so the clock handler
+        // re-arms its own period from inside itself. At 64 Hz those four
+        // round trips are 7% of the wall clock. At 575 Hz they are most
+        // of it, and the guest is at CLOCK_LEVEL on 68% of its entries
+        // with ring 3 never entered once.
+        //
+        // **This is still a lie about time and it is bounded.** The
+        // floor is the period this same guest ran with for its first
+        // seventy-eight seconds, not a number invented here, and a
+        // request for anything longer passes through untouched. What it
+        // costs is that the guest's tick-driven system time advances
+        // more slowly than its reference counter, which stays honest -
+        // the two disagreeing is what is being traded for the budget to
+        // finish a tick inside a tick.
+        //
+        // Periods only, by the same size test the stretch above uses and
+        // for the same reason: the interface defines a periodic count as
+        // a period and a one-shot count as an absolute expiry, and a
+        // floor under an absolute time would push every deadline into
+        // the future. `l2_stimer_config`'s periodic bit is checked as
+        // well, so the test is the interface's own answer and not only
+        // the magnitude.
+#ifndef ZPP_TICK_FLOOR
+#define ZPP_TICK_FLOOR 0
+#endif
+        if constexpr (0 != ZPP_TICK_FLOOR) {
+            constexpr std::uint64_t floor_value = ZPP_TICK_FLOOR;
+            constexpr std::uint64_t period_limit = 10000000;
+            constexpr std::uint64_t config_periodic = 1ull << 1;
+
+            if ((basic_reason::wrmsr == reason.basic()) &&
+                (synthetic_timer0_count == index) && (cpu < max_cpus) &&
+                (0 != (this->l2_stimer_config[cpu] & config_periodic))) {
+                auto value =
+                    (context.rax & 0xffffffff) | (context.rdx << 32);
+
+                if ((0 != value) && (value < period_limit) &&
+                    (value < floor_value)) {
+                    context.rax = floor_value & 0xffffffff;
+                    context.rdx = floor_value >> 32;
+
+                    this->guest_tick_floored[cpu] =
+                        this->guest_tick_floored[cpu] + 1;
                 }
             }
         }
