@@ -11961,6 +11961,44 @@ not "why is it slow" and not "why does it never lower its priority", but
 **what condition does that thread retry on, and who was supposed to
 signal it.**
 
+### Where the nested boot stands, in one chain
+
+Assembled 2026-08-14. Each step is measured; the last is the open end.
+
+1. **The guest hypervisor leaves the reference TSC page invalid.** Windows
+   enables it - `0x40000021` written with the enable bit, page at a known
+   address - and that page reads back all zeroes, `TscSequence` 0, which
+   the Hyper-V interface defines as "do not use, ask the counter MSR".
+2. **So Windows takes the MSR fallback.** `KeQueryPerformanceCounter`
+   reaches `HvlpGetRegister64`, which is `rdmsr 0x40000020`. With a valid
+   page that read is arithmetic on `RDTSC` and costs nothing.
+3. **Each of those reads costs two exits** - the reflection to the guest
+   hypervisor and the resume after it - at a measured 188 us each. They
+   are about 42% of every exit on the machine.
+4. **And `Phase1Initialization` is the thread doing it**, spinning on
+   `KeQueryPerformanceCounter`, never leaving phase one. Every symbol
+   found around it belongs to the clock.
+
+Which puts the whole investigation on one question: **why does the guest
+hypervisor refuse to publish a scale for a counter it is happy to answer
+by MSR?** Eliminated so far, each by measurement: that it lacks TSC
+scaling (offered, and it declined to use it); that it distrusts a
+non-invariant counter (the host reports `constant_tsc` and `nonstop_tsc`
+and CPUID `0x80000007` passes through untouched); and that it knows it is
+nested and declines on that basis (the hypervisor-present bit is cleared -
+it believes it is on bare metal).
+
+The remaining candidate, unproven and the reason this is hard to settle
+from here: a hypervisor that believes it is on bare metal calibrates the
+counter as if it were, and every access it makes while calibrating costs
+188 us because it is not. Samples that far out fail their own sanity
+check, and a hypervisor that cannot calibrate publishes no scale.
+
+**If that is right the wall is the rig's nesting depth**, and the
+experiment that settles it is a bare-metal boot - which removes KVM from
+under this VMM and drops the per-exit cost by about two orders of
+magnitude. It needs a reboot and therefore the machine's owner.
+
 ### The reference TSC page is enabled, empty, and costs 42% of every exit
 
 Found 2026-08-13, and it is a chain that runs from this VMM's own CPUID
