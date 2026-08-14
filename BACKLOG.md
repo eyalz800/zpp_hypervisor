@@ -12077,6 +12077,45 @@ Still to settle, and read the counters carefully here:
 The screen is the ground truth for whether the animation turns, and
 nothing in here can substitute for it.
 
+### The guest runs the drawing code and nothing appears on the panel
+
+Observed 2026-08-14, and it corrects a reading taken from counters alone.
+
+With the reference TSC page published and `ZPP_VIRTUALIZE_APIC` at its
+default off, the guest runs continuously - about 4,800 exits a second
+sustained over ten minutes, no halt - and the instruction pointer at its
+interrupt-window exits lands in `RaspAntiAlias` and then `RaspScanConvert`,
+two different boot-graphics routines. That was read here as "it is drawing
+the boot animation, so the circle should be turning".
+
+**It is not. The machine's owner reports no boot animation on the panel.**
+
+So executing the rasteriser is not evidence that pixels arrive, and the
+inference was too strong. What the two facts together say is narrower and
+more useful: **the guest is running Windows' boot-graphics code and its
+output is not reaching the display.**
+
+That is a new question and a well-shaped one, because the display
+demonstrably worked earlier in this investigation - a single dot of the
+animation was seen before any of these changes. So the framebuffer is
+reachable in principle and something about the nested path stops the
+writes landing. Where to look, none of it tested:
+
+- the boot framebuffer is UEFI's linear one on the passed-through GPU, so
+  it is device memory reached through the shadow extended page tables -
+  and `compose_ept` takes the memory *type* from this VMM's tables, which
+  is right for RAM and is worth re-checking for a write-combining
+  framebuffer;
+- whether the guest ever faults on that range at all, which the
+  second-level ring answers directly by physical address;
+- and whether it is drawing to a back buffer it never presents, which
+  would make this Windows' behaviour rather than ours.
+
+**The general lesson is the one this session keeps paying for.** A counter
+saying the guest is in a drawing routine answers "what code is running",
+not "is anything drawn", and those are different questions. The panel is
+the only instrument that answers the second one.
+
 ### Where the nested boot stands, in one chain
 
 Assembled 2026-08-14. Each step is measured; the last is the open end.
