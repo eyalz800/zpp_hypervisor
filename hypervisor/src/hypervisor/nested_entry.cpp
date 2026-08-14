@@ -2593,6 +2593,40 @@ bool hypervisor::l1_wants_l2_exit(std::size_t cpu,
 
 void hypervisor::save_l2_state(std::size_t cpu)
 {
+    // Two histograms, sampled on every second-level exit, because the
+    // whole investigation so far has read one value at one instruction
+    // and generalised from it.
+    //
+    // `interrupt_request_vtpr` samples the task priority only when the
+    // guest writes the synthetic interrupt command, which is a request
+    // made *at* DISPATCH_LEVEL - so of course every sample said
+    // DISPATCH_LEVEL. It cannot say what the distribution is, and the
+    // distribution is the question: a guest that never returns to
+    // PASSIVE_LEVEL and a guest that returns constantly look identical
+    // through that keyhole.
+    //
+    // The privilege level is here for a blunter reason. The condition
+    // this VMM is being built to meet is a guest that reaches user
+    // mode, and nothing in the tree has ever counted whether it does.
+    // Ring 3 entries appearing at all is the difference between "slow"
+    // and "never got there".
+    if (cpu < max_cpus) {
+        auto selector = this->vmcs.guest_cs_selector();
+        this->l2_cpl_seen[cpu][selector & 3] += 1;
+
+        constexpr std::uint64_t virtual_task_priority_offset = 0x80;
+        auto page = this->nested_virtual_apic_address[cpu];
+
+        if (0 != page) {
+            std::uint8_t vtpr{};
+            static_cast<void>(read_guest_physical(
+                page + virtual_task_priority_offset,
+                std::span(reinterpret_cast<std::byte *>(&vtpr),
+                          sizeof(vtpr))));
+            this->l2_vtpr_class_seen[cpu][vtpr >> 4] += 1;
+        }
+    }
+
     // Phase timing; see `phase_cycles`.
     auto phase_start = arch::x86_64::rdtsc();
     auto phase_stop = zpp::scope_exit([&] {

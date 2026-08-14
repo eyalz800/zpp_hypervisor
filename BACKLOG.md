@@ -13308,3 +13308,57 @@ the *distribution* of task priority is visible instead of the value at
 one particular instruction. If it is 0xd0 and 0x20 and nothing else,
 the guest has a permanently non-empty deferred-procedure queue, and the
 question becomes what keeps refilling it.
+
+## The privilege level and priority distributions, measured at last
+
+Sampled on every second-level exit rather than at one chosen
+instruction, over 320,370 entries, one processor, honest build:
+
+    ring 0   320,369   100.0%
+    ring 3         0     0.0%
+
+    vtpr class 0x0 (PASSIVE)     13,745    4.3%
+    vtpr class 0x1               2,766     0.9%
+    vtpr class 0x2 (DISPATCH)   115,087   35.9%
+    vtpr class 0x4               26,464    8.3%
+    vtpr class 0xd (CLOCK)      161,825   50.5%
+    vtpr class 0xf                 415     0.1%
+
+Three things follow, and two of them correct entries above.
+
+- **The guest does return to PASSIVE_LEVEL**, 4.3% of the time. The
+  previous entry's "it never goes below IRQL 2" was drawn from
+  `interrupt_request_vtpr`, which samples only at the instruction that
+  writes the synthetic interrupt command - an instruction executed *at*
+  DISPATCH_LEVEL. That keyhole could not have shown anything else.
+  **A histogram over every exit was needed and is cheap; the narrow
+  sample produced two wrong conclusions in two sessions.**
+
+- **Half of everything the guest does is its clock handler.** 50.5% at
+  CLOCK_LEVEL is not a kernel doing work, it is a kernel servicing a
+  clock that fires 575 times a second while each of its exits costs a
+  quarter of a millisecond. The saturation reading was right in
+  substance even though the two symptoms used to argue it were red
+  herrings.
+
+- **Ring 3 has never been entered.** This is the first time the
+  condition the whole project is aimed at has actually been counted.
+  Windows reaching user mode needs the session manager to start, which
+  is a long way past where this gets to.
+
+**The scale of the problem, stated as a number for once.** 320,370
+second-level entries in about 200 seconds is 1,600 a second, and the
+guest runs a handful of instructions between exits. That is two to
+three orders of magnitude below native. A boot that takes half a minute
+on the metal does not finish in an afternoon at this rate, and no
+sequence of ten-per-cent improvements closes that.
+
+**The largest remaining lever is the shadow extended page tables.**
+EPT violations are 41.5% of all exits - 451,132 of them, against 16,129
+INVEPTs, and `shadow_ept_leaves_filled` of 451,002 says essentially
+every violation fills a leaf that was there before the last
+invalidation. Twenty-eight leaves are refaulted per INVEPT. Honouring
+INVEPT's descriptor type instead of discarding the shadow wholesale is
+the change; whether Hyper-V issues single-context or global
+invalidations decides how much it is worth, and that is one counter
+away.

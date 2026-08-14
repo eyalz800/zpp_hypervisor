@@ -7147,6 +7147,24 @@ private:
     bool nested_bitmap_is_ours[max_cpus][3]{};
 
     /**
+     * Every second-level exit, by the privilege level it came from and
+     * by the class of the virtual task priority in force.
+     *
+     * Sampled in `save_l2_state`, so once per second-level exit and
+     * without choosing the moment - which is the whole point. Every
+     * priority reading taken so far was at the instruction that writes
+     * the synthetic interrupt command, an instruction only executed
+     * *at* DISPATCH_LEVEL, so the samples could not have said anything
+     * else and were read as though they could.
+     *
+     * `l2_cpl_seen[3]` is the one that answers the question this VMM
+     * exists to answer. Nothing in the tree has ever counted whether
+     * the guest reaches user mode.
+     */
+    std::uint64_t l2_cpl_seen[max_cpus][4]{};
+    std::uint64_t l2_vtpr_class_seen[max_cpus][16]{};
+
+    /**
      * How many synthetic-timer periods `ZPP_STRETCH_GUEST_TIMER`
      * lengthened, per processor.
      *
