@@ -13538,3 +13538,38 @@ Between them those are about 11% of everything. Nothing else in the
 round trip is reducible without the unsound elisions already rejected:
 `reflect_l2_exit` is a hundred VMCS accesses at four thousand cycles
 each, and on this machine there is no cheap subset of them.
+
+## One of the three bitmap copies is provably free to remove
+
+The entry above called naming the guest hypervisor's own I/O bitmap
+pages in vmcs02 "a decision, not an optimisation", because it gives up
+this VMM's port interception while a second-level guest runs. For
+**io_bitmap_b that is not true, and the check is two lines.**
+
+`intercept_io_port` selects `io_bitmap_a` for ports below 0x8000 and
+`io_bitmap_b` above. The only ports this VMM ever intercepts are
+`sleep_control_port` and `sleep_control_port_secondary`, taken from the
+ACPI FADT, and the rig logs `watching sleep control port 0x604`. Both
+are below 0x8000. **So `io_bitmap_b` is all zeroes**, the union of the
+guest hypervisor's B page with ours is its B page unchanged, and vmcs02
+can name that page directly.
+
+- One of three 4 KB copies per VM entry disappears: about 20,700 cycles
+  of 69,953, so a third of the merge and **roughly 3.7% of everything**.
+- No behaviour changes at all. This is not a trade.
+- The address in vmcs12 is a first-level guest-physical address, and the
+  extended tables are an identity map, so it can be used as written -
+  the same assumption `record_interrupt_request` already makes about the
+  virtual-APIC page, and it should be spelled out at the call site the
+  same way.
+
+The work: vmcs02's `io_bitmap_a` and `io_bitmap_b` currently come from
+one contiguous two-page buffer via `nested_io_bitmap_physical`, so B
+needs a physical address of its own before it can point elsewhere. Guard
+it on the guest hypervisor actually using I/O bitmaps - when it does
+not, the existing all-zero page is still the right answer - and on
+`io_bitmap_b` being zero rather than assuming it, since a future
+interception above 0x8000 would silently lose itself otherwise.
+
+`io_bitmap_a` cannot follow: 0x604 lives in it, and that interception is
+how this VMM sees the guest trying to power the machine down.
