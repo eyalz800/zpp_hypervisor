@@ -13414,3 +13414,57 @@ three orders of magnitude below native.
 watched pages for one boot with the watch armed but the discard left in
 place. If Hyper-V writes those pages far more often than it invalidates
 them, the trade inverts and this is not worth building.
+
+## Counting exits is not spending cycles: the EPT plan is wrong
+
+`on_l2_ept_fault` is now timed, and it refutes the entry above it.
+
+    on_l2_ept_fault      450,088 calls    22,277,123,092 cycles   49,495 each
+    the round trip       327,451 calls   209,500,000,000 approx  583,716 each
+
+**41.5% of the exits, 9.6% of the time.** An exit handled entirely
+inside this VMM - no reflection, no VMCS switch, no second-level state
+save - costs a twelfth of a round trip. A 28-fold reduction there is
+worth about nine per cent, for a change adjacent to the one that reset
+the machine in a loop. **Do not build the EPT page watch on the
+strength of the 41.5%.** The share of the count and the share of the
+time differ by four times here, and every plan in this file that quoted
+an exit percentage as though it were a cost was quoting the wrong one.
+
+## Where the cycles actually are, and the one sound win left
+
+Per call, and per run, measured together for the first time:
+
+    reflect_l2_exit     413,015    135.2 G   65%
+      save_l2_state       198,188    64.9 G      48 VMREADs at 4,129
+      load_l1_host_state ~210,000   ~68.7 G     ~52 VMWRITEs at ~4,000
+      vmptrld->vmcs01       5,096     1.7 G
+    build_vmcs02        143,588     47.0 G   22%
+      merge_nested_bitmaps 66,747    21.9 G      <- 46% of build_vmcs02
+      vmptrld->vmcs02       5,000     1.6 G
+    shadow copies        69,834     27.3 G   13%
+
+`reflect_l2_exit` is a hundred VMCS accesses at four thousand cycles
+each and is irreducible without the unsound elision already rejected.
+
+**`merge_nested_bitmaps` is the exception, and the earlier fix missed
+why.** It went from 68,109 to 66,747 - essentially unchanged - while
+`build_vmcs02` fell 220,653 to 143,588. So the 77,000 cycles that were
+saved came from caching the two `virtual_to_physical` walks, and the
+byte-to-quadword loop was worth almost nothing. What remains is **one
+4 KB `read_guest_physical` costing about sixty thousand cycles**, which
+is fifteen cycles a byte for what is a `memcpy` behind a mapping window.
+The copy is not what costs; `map_window_at` is, and it is paid once per
+VM entry to map a page whose address almost never changes.
+
+The fix, sound and small: keep the mapping for the guest hypervisor's
+MSR bitmap across entries and re-map only when the *address* in vmcs12
+changes. Reading through it every entry keeps the property the existing
+comment insists on - the guest hypervisor edits its bitmap with no
+VMWRITE and no exit, so the contents must still be re-read - while
+paying for the window once instead of 327,452 times. Worth about 9% of
+everything, against 9% for the EPT watch at a fraction of the risk.
+
+The obstacle is that `transfer_window_first_page` is shared and
+lock-protected, so this needs a window of its own rather than a pinned
+borrow of that one. That is the whole of the work.

@@ -7372,7 +7372,7 @@ private:
      * place. If they are cheap, the cost is somewhere nobody has looked
      * and this says so instead.
      */
-    static constexpr std::size_t phase_count = 9;
+    static constexpr std::size_t phase_count = 10;
     std::uint64_t phase_cycles[max_cpus][phase_count]{};
     std::uint64_t phase_calls[max_cpus][phase_count]{};
     /** @} */

@@ -5189,6 +5189,22 @@ hypervisor::on_l2_ept_fault(std::size_t cpu,
                             arch::x86_64::context & context,
                             bool & advance_rip)
 {
+    // Phase timing; see `phase_cycles`. Added because the plan built on
+    // this being 41.5% of exits assumes it is also a large share of the
+    // *time*, and an exit handled here never leaves this VMM - no
+    // reflection, no VMCS switch, no second-level state save - so it may
+    // be an order of magnitude cheaper than a round trip and worth a
+    // twentieth of what the count suggests. Counting exits and spending
+    // cycles are different things and this tree has confused them before.
+    auto fault_start = arch::x86_64::rdtsc();
+    auto fault_stop = zpp::scope_exit([&] {
+        if (cpu < max_cpus) {
+            this->phase_cycles[cpu][9] +=
+                arch::x86_64::rdtsc() - fault_start;
+            this->phase_calls[cpu][9] += 1;
+        }
+    });
+
     auto & vmcs = this->vmcs;
     auto & shadow = this->guest_vmcs12[cpu];
 
