@@ -32,6 +32,9 @@ option(ZPP_NESTED_SHADOW_VMCS
 set(ZPP_SLOW_EXITS "0" CACHE STRING
     "Extra cycles burned in every VM exit, to test whether the stall moves with throughput")
 
+set(ZPP_STRETCH_GUEST_TIMER "1" CACHE STRING
+    "Multiply the second-level guest's synthetic timer period by this before its hypervisor sees it. 1 is off. Diagnostic only - see the top-level CMakeLists for what it separates.")
+
 option(ZPP_PROFILE_L2
     "Sample a second-level guest's instruction pointer on the VMX-preemption timer. A profiler: it costs an exit per interval and is the only instrument that can see a guest spinning on memory."
     OFF)
@@ -164,6 +167,7 @@ target_compile_options(zpp_hypervisor PRIVATE
     -DZPP_VIRTUALIZE_APIC=$<BOOL:${ZPP_VIRTUALIZE_APIC}>
     -DZPP_PROFILE_L2=$<BOOL:${ZPP_PROFILE_L2}>
     -DZPP_SLOW_EXITS=${ZPP_SLOW_EXITS}
+    -DZPP_STRETCH_GUEST_TIMER=${ZPP_STRETCH_GUEST_TIMER}
     # The guest coverage suite, which lives in the loader but turns on two
     # VM-execution controls here. Same always-defined 0/1 shape as the two
     # above. Off by default and off in every build that is not a test one;

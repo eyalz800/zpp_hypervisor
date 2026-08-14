@@ -5756,6 +5756,65 @@ hypervisor::on_l2_exit(std::size_t cpu,
 
         auto index = static_cast<std::uint32_t>(context.rcx);
 
+        // A deliberate stretch of the second-level guest's own timer
+        // period, off unless asked for. See ZPP_STRETCH_GUEST_TIMER.
+        //
+        // This exists to separate two explanations that every
+        // measurement so far is equally consistent with. The guest arms
+        // its synthetic timer for 1.74 ms and a tick costs this VMM
+        // about 1.97 ms, so it never leaves its clock handler: 92,116
+        // consecutive requests for vector 0x2f, every one of them with
+        // the virtual-APIC page's task priority at 0xd0, which refuses
+        // priority 2 correctly. That is either a machine too slow to
+        // finish a tick inside a tick - a price - or a handler that
+        // would not finish however long it were given - a block. The
+        // two look identical from outside, and no amount of further
+        // optimisation distinguishes them, because optimisation only
+        // moves the machine along the axis they share.
+        //
+        // Multiplying the period does distinguish them, and does it
+        // without needing the 2.3x that would otherwise be required:
+        // give the handler eight times its budget and either it
+        // completes and the guest makes progress, or it does not and
+        // speed was never the question. `ZPP_SLOW_EXITS` is the same
+        // experiment pointed the other way and can only retreat from
+        // the threshold, never cross it.
+        //
+        // Only a *period* is scaled. The Hyper-V interface defines the
+        // count of a periodic timer as a period in 100 ns units and the
+        // count of a one-shot as an absolute expiry in reference-counter
+        // units, and multiplying an absolute time is meaningless. The
+        // two are separated by size, as measured on this rig: periods
+        // are 17,400 and 156,250, absolute deadlines are around 1.5e9.
+        // One second in 100 ns units sits between them with three orders
+        // of magnitude either side.
+        //
+        // **Diagnostic only.** A guest whose clock is eight times slow
+        // is a guest being lied to about time, which is the one thing
+        // this VMM is otherwise careful never to do.
+#ifndef ZPP_STRETCH_GUEST_TIMER
+#define ZPP_STRETCH_GUEST_TIMER 1
+#endif
+        if constexpr (1 != ZPP_STRETCH_GUEST_TIMER) {
+            if ((basic_reason::wrmsr == reason.basic()) &&
+                (synthetic_timer0_count == index)) {
+                constexpr std::uint64_t period_limit = 10000000;
+                auto value =
+                    (context.rax & 0xffffffff) | (context.rdx << 32);
+
+                if ((0 != value) && (value < period_limit)) {
+                    value *= ZPP_STRETCH_GUEST_TIMER;
+                    context.rax = value & 0xffffffff;
+                    context.rdx = value >> 32;
+
+                    if (cpu < max_cpus) {
+                        this->guest_timer_stretched[cpu] =
+                            this->guest_timer_stretched[cpu] + 1;
+                    }
+                }
+            }
+        }
+
         // Every synthetic MSR the second-level guest touches, counted.
         // See the declaration for what this settles; the short version is
         // that the end-of-message register at 0x40000084 is the one thing

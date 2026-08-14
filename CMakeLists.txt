@@ -109,6 +109,9 @@ option(ZPP_NESTED_SHADOW_VMCS
 set(ZPP_SLOW_EXITS "0" CACHE STRING
     "Burn this many extra cycles in every VM exit. A deliberate slowdown, to find out whether the nested stall moves with throughput or sits at a fixed point - making a machine faster cannot distinguish a throughput limit from a wall, making it slower can.")
 
+set(ZPP_STRETCH_GUEST_TIMER "1" CACHE STRING
+    "Multiply the second-level guest's synthetic timer *period* by this before its hypervisor sees it. 1 is off. A diagnostic, and the only one that can cross the threshold rather than retreat from it: the guest arms 1.74 ms and a tick costs 1.97 ms, so 'too slow to finish a tick inside a tick' and 'a handler that would never finish' look identical from outside. Eight gives the handler eight times the budget without needing the 2.3x of speed. Absolute one-shot deadlines are left alone - only values under one second are treated as periods. A guest run this way is being lied to about time, so never leave it on.")
+
 option(ZPP_PROFILE_L2
     "Sample a second-level guest's instruction pointer on the VMX-preemption timer. A profiler: it costs an exit per interval and is the only instrument that can see a guest spinning on memory."
     OFF)
@@ -190,6 +193,7 @@ ExternalProject_Add(hypervisor
         -DZPP_REQUEUE_INTERRUPTED_EVENTS=${ZPP_REQUEUE_INTERRUPTED_EVENTS}
         -DZPP_NESTED_TPR_SHADOW=${ZPP_NESTED_TPR_SHADOW}
         -DZPP_SLOW_EXITS=${ZPP_SLOW_EXITS}
+        -DZPP_STRETCH_GUEST_TIMER=${ZPP_STRETCH_GUEST_TIMER}
         -DZPP_NESTED_SHADOW_VMCS=${ZPP_NESTED_SHADOW_VMCS}
         -DZPP_PUBLISH_REFERENCE_TSC=${ZPP_PUBLISH_REFERENCE_TSC}
         -DZPP_DELIVER_SELF_IPI=${ZPP_DELIVER_SELF_IPI}
@@ -275,6 +279,7 @@ ExternalProject_Add(uefi_loader
         -DZPP_REQUEUE_INTERRUPTED_EVENTS=${ZPP_REQUEUE_INTERRUPTED_EVENTS}
         -DZPP_NESTED_TPR_SHADOW=${ZPP_NESTED_TPR_SHADOW}
         -DZPP_SLOW_EXITS=${ZPP_SLOW_EXITS}
+        -DZPP_STRETCH_GUEST_TIMER=${ZPP_STRETCH_GUEST_TIMER}
         -DZPP_NESTED_SHADOW_VMCS=${ZPP_NESTED_SHADOW_VMCS}
         -DZPP_PUBLISH_REFERENCE_TSC=${ZPP_PUBLISH_REFERENCE_TSC}
         -DZPP_DELIVER_SELF_IPI=${ZPP_DELIVER_SELF_IPI}

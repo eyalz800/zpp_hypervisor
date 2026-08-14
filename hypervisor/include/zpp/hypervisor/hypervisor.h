@@ -7147,6 +7147,17 @@ private:
     bool nested_bitmap_is_ours[max_cpus][3]{};
 
     /**
+     * How many synthetic-timer periods `ZPP_STRETCH_GUEST_TIMER`
+     * lengthened, per processor.
+     *
+     * Zero on a build that did not ask for it, and zero on a build that
+     * did but whose guest only ever wrote absolute deadlines - which
+     * are deliberately left alone and would otherwise make a stretched
+     * run look like an unstretched one.
+     */
+    std::uint64_t guest_timer_stretched[max_cpus]{};
+
+    /**
      * Drops that cache on every processor.
      *
      * Called wherever this VMM edits one of its own bitmaps after the
