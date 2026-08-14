@@ -13573,3 +13573,44 @@ interception above 0x8000 would silently lose itself otherwise.
 
 `io_bitmap_a` cannot follow: 0x604 lives in it, and that interception is
 how this VMM sees the guest trying to power the machine down.
+
+## Stop optimising. The guest is in a two-instruction loop with identical inputs
+
+The evidence was on screen early and was walked past for a session of
+performance work. The "working" second-level exits - the ones that are
+not clock, not EOI, not interrupt window - are these, and only these:
+
+    vmcall rip=...beb0019  code=0x11  value=0x7280783000000000
+    vmcall rip=...beb0032  code=0x12  value=0x1
+
+92,856 of them, two instructions 25 bytes apart, alternating, **and the
+inputs are byte-identical on every iteration**. 0x0011 is
+`HvCallVtlCall` and 0x0012 is `HvCallVtlReturn`. A guest making progress
+does not call the same hypercall with the same argument a hundred
+thousand times.
+
+That is a stuck loop, not a slow machine, and the spinner not moving at
+all rather than crawling says the same thing: at 1,600 second-level
+entries a second, a merely slow guest would still visibly advance.
+
+**The hypothesis to test first**, because it is the only one that
+explains a *two-instruction* loop and it is in code this VMM owns:
+`BACKLOG.md` already records `HvCallModifyVtlProtectionMask` (0x000c)
+preceding every reset in an earlier run, with the note "the level asking
+for the protection asks again for ever". If the shadow extended page
+tables compose a page more permissively than the second virtual trust
+level asked for, the protection never bites, the first level never
+faults, and the second re-applies for ever - which is exactly this
+shape. `install_shadow_leaf` holds "only what is unconditionally true",
+which is the right rule for whether an entry is *present* and the wrong
+one if it also drops a *restriction*.
+
+The measurement: capture the hypercall inputs around a 0x000c and check
+whether the same guest-physical page is re-protected every iteration,
+then read what permission the shadow leaf for that page ended up with.
+If the shadow is more permissive than vmcs12's tables say, that is the
+bug and none of the performance work touches it.
+
+**Everything in the four entries above this one is worth about 15% put
+together and none of it matters if this is right.** Recorded so the next
+session starts here and not there.
