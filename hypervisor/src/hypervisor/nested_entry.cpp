@@ -4418,6 +4418,156 @@ void hypervisor::module_name_of(std::size_t cpu,
     }
 }
 
+namespace
+{
+/**
+ * `floor((numerator << 64) / denominator)`, for `numerator <
+ * denominator` so the result fits.
+ *
+ * Shift and subtract rather than a 128-bit division, because there is no
+ * runtime library here to supply `__udivti3` and a link failure at this
+ * depth is a bad way to find that out. Sixty-four iterations, once.
+ */
+constexpr std::uint64_t shifted_quotient(std::uint64_t numerator,
+                                         std::uint64_t denominator)
+{
+    if ((0 == denominator) || (numerator >= denominator)) {
+        return 0;
+    }
+
+    std::uint64_t quotient{};
+    std::uint64_t remainder = numerator;
+
+    for (int i{}; i < 64; ++i) {
+        auto carry = remainder >> 63;
+        remainder <<= 1;
+        quotient <<= 1;
+
+        if ((0 != carry) || (remainder >= denominator)) {
+            remainder -= denominator;
+            quotient |= 1;
+        }
+    }
+
+    return quotient;
+}
+
+/** `((tsc * scale) >> 64)`, the reference TSC page's own arithmetic. */
+constexpr std::uint64_t scaled_tsc(std::uint64_t tsc, std::uint64_t scale)
+{
+    return static_cast<std::uint64_t>(
+        (static_cast<unsigned __int128>(tsc) * scale) >> 64);
+}
+} // namespace
+
+void hypervisor::publish_reference_tsc_page(std::size_t cpu)
+{
+    if constexpr (!nested_vmx::publish_reference_tsc) {
+        return;
+    } else {
+        if ((cpu >= max_cpus) || (0 != this->reference_published[cpu])) {
+            return;
+        }
+
+        auto enabled = this->l2_reference_tsc_written[cpu];
+        if (0 == (enabled & 1)) {
+            return;
+        }
+
+        // Three samples: two to fit with, and the newest to check the fit
+        // against. Fitting to two adjacent reads would divide by a tiny
+        // time-stamp delta and amplify every rounding error in it, so the
+        // pair is taken from opposite ends of the ring.
+        auto count = this->reference_read_count[cpu];
+        if (count < reference_sample_capacity) {
+            return;
+        }
+
+        auto newest = (count - 1) % reference_sample_capacity;
+        auto oldest = count % reference_sample_capacity;
+
+        auto t1 = this->reference_read_tsc[cpu][oldest];
+        auto r1 = this->reference_read_value[cpu][oldest];
+        auto t2 = this->reference_read_tsc[cpu][newest];
+        auto r2 = this->reference_read_value[cpu][newest];
+
+        if ((t2 <= t1) || (r2 <= r1)) {
+            return;
+        }
+
+        // The counter is 10 MHz and the time-stamp counter is gigahertz,
+        // so the ratio is well under one and the quotient fits.
+        auto scale = shifted_quotient(r2 - r1, t2 - t1);
+        if (0 == scale) {
+            return;
+        }
+
+        auto offset = r2 - scaled_tsc(t2, scale);
+
+        // Checked before it is trusted. A fit that cannot reproduce the
+        // oldest sample it was not derived from would step the guest's
+        // clock, which is worse than the polling it replaces.
+        constexpr std::uint64_t tolerance = 1000;
+
+        auto predicted = scaled_tsc(t1, scale) + offset;
+        auto difference =
+            (predicted > r1) ? (predicted - r1) : (r1 - predicted);
+
+        if (difference > tolerance) {
+            this->reference_fit_error[cpu] = difference;
+            return;
+        }
+
+        this->reference_scale[cpu] = scale;
+        this->reference_offset[cpu] = offset;
+
+        // The page is a second-level guest-physical address, so it needs
+        // the guest hypervisor's extended tables to reach.
+        constexpr std::uint64_t page_bits = ~std::uint64_t{0xfff};
+        auto physical = l2_physical_to_l1(cpu, enabled & page_bits);
+        if (!physical) {
+            return;
+        }
+
+        // Scale and offset first, sequence last. The interface has the
+        // guest read the sequence, the data, then the sequence again, so
+        // a non-zero sequence must never be visible before what it
+        // describes.
+        struct
+        {
+            std::uint32_t sequence;
+            std::uint32_t reserved;
+            std::uint64_t scale;
+            std::uint64_t offset;
+        } page{0, 0, scale, offset};
+
+        auto body = std::span(reinterpret_cast<const std::byte *>(&page) +
+                                  sizeof(std::uint64_t),
+                              sizeof(page) - sizeof(std::uint64_t));
+
+        if (!write_guest_physical(*physical + sizeof(std::uint64_t),
+                                  body)) {
+            return;
+        }
+
+        std::uint32_t sequence = 1;
+        if (!write_guest_physical(
+                *physical,
+                std::span(reinterpret_cast<const std::byte *>(&sequence),
+                          sizeof(sequence)))) {
+            return;
+        }
+
+        this->reference_published[cpu] = 1;
+
+        log("cpu {} published reference tsc page at {} scale {} offset {}",
+            cpu,
+            enabled & page_bits,
+            scale,
+            offset);
+    }
+}
+
 void hypervisor::capture_poll_site(std::size_t cpu)
 {
     auto rip = this->vmcs.guest_rip();

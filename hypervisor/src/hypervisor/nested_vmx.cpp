@@ -1802,6 +1802,8 @@ bool hypervisor::on_guest_vmlaunch(std::size_t cpu,
             this->reference_read_count[cpu] =
                 this->reference_read_count[cpu] + 1;
         }
+
+        publish_reference_tsc_page(cpu);
     }
 
     if (!this->l2_entry_logged[cpu]) {

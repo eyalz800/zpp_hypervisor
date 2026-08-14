@@ -200,6 +200,16 @@ std::expected<void, zpp::error> hypervisor::write_guest_physical(
     return {};
 }
 
+/**
+ * Publishing the reference TSC page needs the guest hypervisor's extended
+ * tables and a write into its guest's memory, neither of which this
+ * harness models - and with the switch off, which is how this suite
+ * builds, the real one returns immediately anyway.
+ */
+void hypervisor::publish_reference_tsc_page(std::size_t)
+{
+}
+
 void hypervisor::discard_shadow_ept(std::size_t)
 {
     g_observed.ept_discards = g_observed.ept_discards + 1;

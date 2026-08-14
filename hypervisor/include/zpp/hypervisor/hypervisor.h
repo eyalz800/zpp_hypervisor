@@ -5399,6 +5399,24 @@ private:
      */
     std::uint64_t l2_reference_tsc_written[max_cpus]{};
 
+    /**
+     * The fit of the guest hypervisor's own reference counter against the
+     * time stamp counter, and whether the page has been published from
+     * it. See `nested_vmx::publish_reference_tsc`.
+     */
+    std::uint64_t reference_scale[max_cpus]{};
+    std::uint64_t reference_offset[max_cpus]{};
+    volatile std::uint64_t reference_published[max_cpus]{};
+    volatile std::uint64_t reference_fit_error[max_cpus]{};
+
+    /**
+     * Fits that pair from the answers already recorded in
+     * `reference_read_value` and `reference_read_tsc`, checks the fit
+     * against a later sample, and only then writes the page and makes its
+     * sequence non-zero. Called on entry; does nothing until it can.
+     */
+    void publish_reference_tsc_page(std::size_t cpu);
+
     std::uint32_t l2_synthetic_msr_reads[max_cpus][256]{};
     std::uint32_t l2_synthetic_msr_writes[max_cpus][256]{};
     /**

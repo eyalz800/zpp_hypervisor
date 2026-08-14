@@ -94,6 +94,10 @@ option(ZPP_INTERCEPT_APIC
     "Watch the guest's local APIC - the page in xAPIC mode, the interrupt command MSR in x2APIC mode. Off only makes sense with one processor, since the watch is what stops a start-up IPI handing a processor over unvirtualized."
     ON)
 
+option(ZPP_PUBLISH_REFERENCE_TSC
+    "Fill in the reference TSC page the guest hypervisor enables for its guest and then leaves invalid, fitting the scale and offset to the answers it gave for the counter MSR. Measured: without it the guest reads that MSR about fifteen times per clock tick, ~42% of every exit, and Phase1Initialization never leaves phase one. OFF by default - it writes into guest memory the level above believes it owns."
+    OFF)
+
 option(ZPP_NESTED_SHADOW_VMCS
     "Let the processor shadow a guest hypervisor's VMCS, so its vmreads and vmwrites do not exit. ON, with the field list cut to the measured hot set - measured at the wall, the handler holds 90.1% of the wall clock with the old 36 field list and 89.2% with the short one, so the guest gets a tenth more of the machine. Do NOT compare settings by cost per exit; the flag changes the exit count several fold and only handler share of wall clock survives that. Turn it OFF to read vmcs_field_use, which is blind to every field it shadows and is the only way to re-measure the hot set."
     ON)
@@ -183,6 +187,7 @@ ExternalProject_Add(hypervisor
         -DZPP_NESTED_TPR_SHADOW=${ZPP_NESTED_TPR_SHADOW}
         -DZPP_SLOW_EXITS=${ZPP_SLOW_EXITS}
         -DZPP_NESTED_SHADOW_VMCS=${ZPP_NESTED_SHADOW_VMCS}
+        -DZPP_PUBLISH_REFERENCE_TSC=${ZPP_PUBLISH_REFERENCE_TSC}
         -DZPP_INTERCEPT_APIC=${ZPP_INTERCEPT_APIC}
         -DZPP_VIRTUALIZE_APIC=${ZPP_VIRTUALIZE_APIC}
         -DZPP_PROFILE_L2=${ZPP_PROFILE_L2}
@@ -266,6 +271,7 @@ ExternalProject_Add(uefi_loader
         -DZPP_NESTED_TPR_SHADOW=${ZPP_NESTED_TPR_SHADOW}
         -DZPP_SLOW_EXITS=${ZPP_SLOW_EXITS}
         -DZPP_NESTED_SHADOW_VMCS=${ZPP_NESTED_SHADOW_VMCS}
+        -DZPP_PUBLISH_REFERENCE_TSC=${ZPP_PUBLISH_REFERENCE_TSC}
         -DZPP_INTERCEPT_APIC=${ZPP_INTERCEPT_APIC}
         -DZPP_VIRTUALIZE_APIC=${ZPP_VIRTUALIZE_APIC}
         -DZPP_PROFILE_L2=${ZPP_PROFILE_L2}

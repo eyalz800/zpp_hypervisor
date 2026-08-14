@@ -157,6 +157,40 @@ inline constexpr bool enabled =
 #endif
 
 /**
+ * Whether this VMM fills in the reference TSC page the guest hypervisor
+ * enables for its guest and then leaves invalid.
+ *
+ * The measured chain this exists to break: Windows enables the page,
+ * `0x40000021` written with the enable bit; the guest hypervisor never
+ * writes it, so its sequence stays zero, which the interface defines as
+ * "invalid, ask the counter MSR"; Windows therefore reads `0x40000020`
+ * about fifteen times per clock tick; each costs a reflection and the
+ * resume after it, about 42% of every exit on the machine; and
+ * `Phase1Initialization` spins on `KeQueryPerformanceCounter` and never
+ * leaves phase one of the boot.
+ *
+ * With a *valid* page the same query is arithmetic on RDTSC and takes no
+ * exit at all: `reference = ((tsc * scale) >> 64) + offset`.
+ *
+ * **Nothing is invented.** The scale and offset are fitted to the guest
+ * hypervisor's own answers - `reference_read_value` and
+ * `reference_read_tsc` already record what came back from every reflected
+ * read and the counter when it did - so what is published reproduces the
+ * MSR rather than competing with it. A wrong fit would step the guest's
+ * clock, so it is checked against a sample it was not derived from before
+ * the sequence is made non-zero.
+ *
+ * Off by default: it writes into guest memory the level above believes it
+ * owns.
+ */
+inline constexpr bool publish_reference_tsc =
+#if defined(ZPP_PUBLISH_REFERENCE_TSC) && ZPP_PUBLISH_REFERENCE_TSC
+    true;
+#else
+    false;
+#endif
+
+/**
  * Whether the guest hypervisor's own VMREADs and VMWRITEs are served from
  * a shadow VMCS region instead of exiting.
  *
@@ -204,8 +238,7 @@ inline constexpr bool enabled =
 #define ZPP_NESTED_SHADOW_VMCS 1
 #endif
 
-inline constexpr bool shadow_vmcs_enabled =
-    (0 != ZPP_NESTED_SHADOW_VMCS);
+inline constexpr bool shadow_vmcs_enabled = (0 != ZPP_NESTED_SHADOW_VMCS);
 
 /**
  * Whether a guest hypervisor's TPR shadow is handed to the processor, or

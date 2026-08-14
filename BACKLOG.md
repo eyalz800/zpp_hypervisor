@@ -11961,6 +11961,49 @@ not "why is it slow" and not "why does it never lower its priority", but
 **what condition does that thread retry on, and who was supposed to
 signal it.**
 
+### Fixed: publishing the reference TSC page the guest hypervisor will not
+
+`ZPP_PUBLISH_REFERENCE_TSC`, and it moved the boot.
+
+The guest hypervisor enables a reference TSC page for its guest and never
+fills it in, so its sequence stays zero and the guest falls back to the
+counter MSR - about fifteen reads per clock tick, two exits each, some 42%
+of every exit on the machine, with `Phase1Initialization` spinning on
+`KeQueryPerformanceCounter` and never leaving phase one.
+
+This VMM now fills that page in. The scale and offset are **fitted to the
+guest hypervisor's own answers** rather than invented -
+`reference_read_value` and `reference_read_tsc` already recorded what came
+back from every reflected read and the counter when it did - so what is
+published reproduces the MSR instead of competing with it. The fit is
+checked against a sample it was not derived from, to a thousand
+hundred-nanosecond units, before the sequence is made non-zero, and scale
+and offset are written before the sequence so a reader never sees a
+sequence describing data that is not there yet. The division is shift and
+subtract, because there is no runtime library here to supply `__udivti3`.
+
+Measured, one boot:
+
+    published reference tsc page at 0x117dff000
+      scale 0x14900c840a0c59d  offset 0xfffffffffc3ae6d9
+
+| | before | after |
+|---|---|---|
+| `0x40000020` reads | ~236,000 | **32** |
+| `rdmsr` share of exits | 21% | out of the top six |
+| second-level loop | poll, arm, EOI, self-IPI | EOM, EOI, self-IPI, interrupt window |
+| where the guest sits | `HvlpGetRegister64` | **`RaspAntiAlias`** |
+
+`RaspAntiAlias` is the boot graphics anti-aliasing routine. **The guest
+stopped polling the clock and started drawing the boot animation**, which
+is the first time anything in this investigation has moved the boot rather
+than explained it.
+
+Still to settle: the guest has not reached user mode, and the remaining
+loop is the clock tick plus a repeated request for vector `0x2f`. Whether
+that is now ordinary boot progress being watched too closely, or a second
+wall behind the first, needs the screen and a longer run.
+
 ### Where the nested boot stands, in one chain
 
 Assembled 2026-08-14. Each step is measured; the last is the open end.
