@@ -45,6 +45,14 @@ EXIT_REASON = {
 
 ACTIVITY = {0: "active", 1: "hlt", 2: "shutdown", 3: "wait-sipi"}
 
+# The order the hypervisor writes them in - phase_cycles is indexed by
+# position, not by name, so this list is the only thing that says which
+# is which. Keep it beside the indices in the sources that fill them.
+PHASE_NAMES = ["save_l2_state", "reflect_l2_exit", "build_vmcs02",
+               "shadow_ept_pointer_for", "copy_vmcs12_to_shadow",
+               "copy_shadow_to_vmcs12", "vmptrld->vmcs02",
+               "vmptrld->vmcs01", "merge_nested_bitmaps"]
+
 # Whose instruction pointer a record holds - see exit_trace_entry's
 # rip_owner. An address attributed to the wrong guest reads as a
 # perfectly ordinary address, so it is marked rather than left implicit,
@@ -377,7 +385,10 @@ def main():
                "vmcs_field_write_encoding", "vmcs_field_write_count",
                "vmcs_field_use_overflow",
                "external_interrupt_vector_counts",
-               "l2_injected_vector"]
+               "l2_injected_vector",
+               "phase_cycles", "phase_calls",
+               "guest_state_writes_skipped", "guest_state_writes_done",
+               "control_writes_skipped", "control_writes_done"]
     off = gdb_offsets(args.elf, members)
     instance = base + gdb_symbol(
         args.elf, "zpp::hypervisor::hypervisor::instance()::instance")
@@ -414,9 +425,19 @@ def main():
                "pending_event", "shadow_ept_builds", "shadow_ept_cache_hits",
                "shadow_ept_evictions", "shadow_ept_resets",
                "shadow_ept_leaves_filled", "vmcs_shadow_loads",
-               "vmcs_shadow_stores"]
+               "vmcs_shadow_stores",
+               "guest_state_writes_skipped", "guest_state_writes_done",
+               "control_writes_skipped", "control_writes_done"]
     for name in scalars:
         monitor.queue(instance + off[name], scalar_cpus)
+    # The phase rows are [cpu][phase_count], so each processor's row has
+    # to be queued separately rather than as one run of scalars.
+    phase_count = gdb_lengths(args.elf, ["phase_cycles"])["phase_cycles"]
+    for cpu in range(args.cpus):
+        monitor.queue(instance + off["phase_cycles"]
+                      + cpu * phase_count * 8, phase_count)
+        monitor.queue(instance + off["phase_calls"]
+                      + cpu * phase_count * 8, phase_count)
     monitor.queue(instance + off["running_l2"], (scalar_cpus + 7) // 8)
     monitor.queue(instance + off["unhandled_exit"], 6)
     monitor.queue(instance + off["vm_entry_failure"], 6)
@@ -451,6 +472,30 @@ def main():
     for cpu in range(args.cpus):
         print(f"{cpu:3d}  {read('vmcs_shadow_loads', cpu):-12d}  "
               f"{read('vmcs_shadow_stores', cpu):-13d}")
+
+    # Where the nested round trip's time actually goes. Cycles a call is
+    # the number to compare against the price of one VMCS access, since
+    # on this rig every one of them traps to the layer below - a phase
+    # is, to a first approximation, a count of accesses in disguise.
+    print("\ncpu  phase                    calls        cycles  "
+          "cycles/call")
+    for cpu in range(args.cpus):
+        for index, name in enumerate(PHASE_NAMES[:phase_count]):
+            calls = words.get(instance + off["phase_calls"]
+                              + (cpu * phase_count + index) * 8, 0)
+            cycles = words.get(instance + off["phase_cycles"]
+                               + (cpu * phase_count + index) * 8, 0)
+            if not calls:
+                continue
+            print(f"{cpu:3d}  {name:<20} {calls:10d}  {cycles:12d}  "
+                  f"{cycles // calls:11d}")
+
+    print("\ncpu  guest-state skipped/done   control skipped/done")
+    for cpu in range(args.cpus):
+        print(f"{cpu:3d}  {read('guest_state_writes_skipped', cpu):11d}/"
+              f"{read('guest_state_writes_done', cpu):-11d}  "
+              f"{read('control_writes_skipped', cpu):11d}/"
+              f"{read('control_writes_done', cpu):-11d}")
 
     print("\nvmcs fields the guest hypervisor uses")
     dump_field_use(args, instance, off)

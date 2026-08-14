@@ -7125,6 +7125,48 @@ private:
      * had the same dependency all along and no check that noticed.
      */
     void forget_vmcs02_contents(std::size_t cpu);
+
+    /**
+     * Whether each merged bitmap currently holds this VMM's own page
+     * and nothing else: MSR, then I/O A, then I/O B.
+     *
+     * A guest hypervisor that does not use a bitmap leaves the union
+     * equal to this VMM's side of it, and that side does not change
+     * between VM entries - so the merge produces the same page every
+     * time and need not be produced again. Measured on Hyper-V: two of
+     * the three pages take that branch on every entry, and
+     * `merge_nested_bitmaps` was rebuilding all three of them, a byte
+     * at a time, more than a thousand times a second.
+     *
+     * The flag is about *this VMM's* bitmap, never the guest
+     * hypervisor's. The guest hypervisor writes its own pages with no
+     * VMWRITE and no exit, which is why caching on the bitmap address
+     * is wrong - argued at length in `merge_nested_bitmaps` - and this
+     * caches only the case where no guest page is in the answer at all.
+     */
+    bool nested_bitmap_is_ours[max_cpus][3]{};
+
+    /**
+     * Drops that cache on every processor.
+     *
+     * Called wherever this VMM edits one of its own bitmaps after the
+     * first merge, which today is `intercept_interrupt_command`. It has
+     * to be every processor rather than one: the bitmaps being edited
+     * are shared, and each processor holds its own merged copy of them.
+     *
+     * Defined here rather than beside `merge_nested_bitmaps`, which is
+     * where it belongs by subject: `tests/local_apic` links
+     * `local_apic.cpp` and not `nested_entry.cpp`, so a definition
+     * there is an undefined symbol in the host suite.
+     */
+    constexpr void forget_nested_bitmaps()
+    {
+        for (auto & per_cpu : this->nested_bitmap_is_ours) {
+            for (auto & flag : per_cpu) {
+                flag = false;
+            }
+        }
+    }
     /** @} */
     /** @} */
 
@@ -7240,10 +7282,68 @@ private:
      */
     std::uint32_t external_interrupt_vector_counts[max_cpus][256]{};
 
+    /**
+     * What a VMCS access costs here, measured rather than inferred.
+     *
+     * Cycles for a thousand accesses, taken once on the first exit.
+     *
+     * The field choice is the whole point, and it is not arbitrary.
+     * This VMM is KVM's guest, so every VMX instruction it issues may
+     * be emulated - but KVM offers *VMCS shadowing* to its guests, and
+     * a shadowed field is answered by hardware out of a shadow VMCS
+     * with no exit at all. Which fields those are is a fixed list in
+     * KVM: `.references/kvm/vmcs_shadow_fields.h`.
+     *
+     * So the five numbers price the two halves separately:
+     *
+     * - `exit_reason` is `SHADOW_FIELD_RO`,
+     * - `guest_rip` and `guest_rsp` are `SHADOW_FIELD_RW`,
+     * - `guest_gdtr_base` and `guest_gdtr_limit` are on neither list.
+     *
+     * If the shadowed ones come out at tens of cycles and the others at
+     * thousands, then the nested path's cost is not "VMCS traffic" at
+     * all - it is *the traffic that leaves the shadow list*, and the
+     * fix is to move the hot path onto shadowed fields rather than to
+     * cache anything. If all five agree, shadowing is not in play and
+     * every access has to be removed rather than redirected.
+     *
+     * The previous measurement priced only `exit_reason` and concluded
+     * 3,433 cycles for every access, which assumes the answer to
+     * exactly this question.
+     */
     std::uint64_t vmread_benchmark_cycles{};
+    std::uint64_t vmread_shadowed_cycles{};
+    std::uint64_t vmread_unshadowed_cycles{};
+    std::uint64_t vmwrite_shadowed_cycles{};
+    std::uint64_t vmwrite_unshadowed_cycles{};
+    std::uint64_t vmread_benchmark_sink{};
     bool vmread_benchmark_done{};
 
-    static constexpr std::size_t phase_count = 6;
+    /**
+     * Phases 6 and 7 are the two VMPTRLDs of a nested round trip.
+     *
+     * They are timed separately because the elisions made everything
+     * else in `build_vmcs02` nearly free and the phase did not move:
+     * measured 178,639 cycles a call while the call performed **0.6**
+     * VMCS writes (51,068,656 skipped against 551,900 done). Whatever
+     * costs that is not a VMWRITE, and the only other trapping
+     * instruction in there is the VMPTRLD that makes vmcs02 current.
+     *
+     * The suspicion is specific rather than general. KVM emulates a
+     * guest's VMPTRLD in `handle_vmptrld`: it maps the guest page,
+     * copies the whole 4 KB region, syncs its shadow VMCS both ways -
+     * `copy_shadow_to_vmcs12`, which VMPTRLDs the shadow region, reads
+     * thirty fields and VMPTRLDs back - and sets `dirty_vmcs12`, which
+     * makes the *next* entry take `prepare_vmcs02`'s slow path instead
+     * of its fast one. That is a lot of work for one instruction, and
+     * this VMM issues two of them on every single second-level exit.
+     *
+     * If they are what the two phases suggest, the fix is structural
+     * and worth its size: one VMCS region rather than two, rewritten in
+     * place. If they are cheap, the cost is somewhere nobody has looked
+     * and this says so instead.
+     */
+    static constexpr std::size_t phase_count = 9;
     std::uint64_t phase_cycles[max_cpus][phase_count]{};
     std::uint64_t phase_calls[max_cpus][phase_count]{};
     /** @} */

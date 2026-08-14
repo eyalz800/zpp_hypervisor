@@ -93,6 +93,11 @@ void hypervisor::intercept_interrupt_command(bool intercept)
     } else {
         byte &= static_cast<std::uint8_t>(~mask);
     }
+
+    // Every processor's merged bitmap was built from the page just
+    // edited, and `nested_bitmap_is_ours` says some of them need not be
+    // rebuilt. That is true only until this runs.
+    forget_nested_bitmaps();
 }
 
 void hypervisor::note_apic_mode(std::size_t cpu)

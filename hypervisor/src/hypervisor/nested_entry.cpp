@@ -752,6 +752,19 @@ bool hypervisor::own_io_port_intercepted(std::uint16_t port) const
 std::expected<void, zpp::error>
 hypervisor::merge_nested_bitmaps(std::size_t cpu)
 {
+    // Phase timing; see `phase_cycles`. Timed because `build_vmcs02`
+    // costs 220,653 cycles a call while issuing fifteen VMCS writes and
+    // one 5,127 cycle VMPTRLD, and this is the only other thing in it
+    // big enough to hold the rest.
+    auto merge_start = arch::x86_64::rdtsc();
+    auto merge_stop = zpp::scope_exit([&] {
+        if (cpu < max_cpus) {
+            this->phase_cycles[cpu][8] +=
+                arch::x86_64::rdtsc() - merge_start;
+            this->phase_calls[cpu][8] += 1;
+        }
+    });
+
     auto & shadow = this->guest_vmcs12[cpu];
 
     auto msr_source = shadow.read(field::msr_bitmap);
@@ -798,21 +811,49 @@ hypervisor::merge_nested_bitmaps(std::size_t cpu)
         [&](std::uint64_t from,
             const void * ours,
             std::uint8_t * into,
-            bool read_theirs) -> std::expected<void, zpp::error> {
-        if (read_theirs) {
-            auto read = read_guest_physical(
-                from,
-                std::span(reinterpret_cast<std::byte *>(into), page_size));
-            if (!read) {
-                return std::unexpected(read.error());
+            bool read_theirs,
+            std::size_t which) -> std::expected<void, zpp::error> {
+        // The union with nothing is this VMM's own page, unchanged.
+        //
+        // Worth the flag rather than the memset-and-or it replaces,
+        // because it is the *usual* case and it was being recomputed
+        // from scratch on every entry: a guest hypervisor that uses MSR
+        // bitmaps and no I/O bitmaps - which is Hyper-V's shape, and
+        // the shape the comment above predicted - took two of these
+        // three pages down this branch every time, so two thirds of the
+        // work produced a value that could not have changed.
+        //
+        // What invalidates it is a write to *this VMM's* own bitmap,
+        // which happens outside this function: `forget_nested_bitmaps`
+        // exists for that and `intercept_interrupt_command` calls it.
+        if (!read_theirs) {
+            if (this->nested_bitmap_is_ours[cpu][which]) {
+                return {};
             }
-        } else {
-            std::memset(into, 0, page_size);
+
+            std::memcpy(into, ours, page_size);
+            this->nested_bitmap_is_ours[cpu][which] = true;
+            return {};
         }
 
-        auto mine = static_cast<const std::uint8_t *>(ours);
-        for (std::size_t i{}; i < page_size; ++i) {
-            into[i] = static_cast<std::uint8_t>(into[i] | mine[i]);
+        this->nested_bitmap_is_ours[cpu][which] = false;
+
+        auto read = read_guest_physical(
+            from,
+            std::span(reinterpret_cast<std::byte *>(into), page_size));
+        if (!read) {
+            return std::unexpected(read.error());
+        }
+
+        // Quadwords rather than bytes: the same union in an eighth of
+        // the iterations. Both sides are whole VMCS-referenced pages and
+        // so are page aligned by construction, which is what makes the
+        // wider access well defined here.
+        auto mine = static_cast<const std::uint64_t *>(ours);
+        auto target = reinterpret_cast<std::uint64_t *>(into);
+
+        for (std::size_t i{}; i < page_size / sizeof(std::uint64_t); ++i) {
+            target[i] |= mine[i];
         }
 
         return {};
@@ -827,7 +868,8 @@ hypervisor::merge_nested_bitmaps(std::size_t cpu)
     if (auto merged = merge_page(msr_source,
                                  this->msr_bitmap,
                                  this->nested_msr_bitmap[cpu],
-                                 their_msr_bitmap);
+                                 their_msr_bitmap,
+                                 0);
         !merged) {
         return merged;
     }
@@ -835,7 +877,8 @@ hypervisor::merge_nested_bitmaps(std::size_t cpu)
     if (auto merged = merge_page(io_a_source,
                                  this->io_bitmap_a,
                                  this->nested_io_bitmap[cpu],
-                                 their_io_bitmaps);
+                                 their_io_bitmaps,
+                                 1);
         !merged) {
         return merged;
     }
@@ -843,17 +886,24 @@ hypervisor::merge_nested_bitmaps(std::size_t cpu)
     if (auto merged = merge_page(io_b_source,
                                  this->io_bitmap_b,
                                  this->nested_io_bitmap[cpu] + page_size,
-                                 their_io_bitmaps);
+                                 their_io_bitmaps,
+                                 2);
         !merged) {
         return merged;
     }
 
-    this->nested_msr_bitmap_physical[cpu] =
-        this->host_page_table.virtual_to_physical(
-            this->nested_msr_bitmap[cpu]);
-    this->nested_io_bitmap_physical[cpu] =
-        this->host_page_table.virtual_to_physical(
-            this->nested_io_bitmap[cpu]);
+    // Once, not per entry. These name fixed per-processor buffers, so
+    // the answer cannot change, and asking for it walks the host page
+    // table - which is the same kind of work this function was already
+    // doing three times over for no reason.
+    if (0 == this->nested_msr_bitmap_physical[cpu]) {
+        this->nested_msr_bitmap_physical[cpu] =
+            this->host_page_table.virtual_to_physical(
+                this->nested_msr_bitmap[cpu]);
+        this->nested_io_bitmap_physical[cpu] =
+            this->host_page_table.virtual_to_physical(
+                this->nested_io_bitmap[cpu]);
+    }
 
     return {};
 }
@@ -1319,7 +1369,17 @@ std::expected<void, zpp::error> hypervisor::build_vmcs02(std::size_t cpu)
     // From here nothing may fail: vmcs02 is about to become current, and a
     // caller that answered VMfail with it current would resume the guest
     // hypervisor on the wrong VMCS.
-    if (arch::x86_64::vmx::vmptrld(&this->vmcs02_physical[cpu])) {
+    // Phase timing; see `phase_cycles`. Timed on its own because the
+    // rest of this function is now nearly free and the phase is not.
+    auto switch_start = arch::x86_64::rdtsc();
+    auto switch_failed = arch::x86_64::vmx::vmptrld(&this->vmcs02_physical[cpu]);
+
+    if (cpu < max_cpus) {
+        this->phase_cycles[cpu][6] += arch::x86_64::rdtsc() - switch_start;
+        this->phase_calls[cpu][6] += 1;
+    }
+
+    if (switch_failed) {
         return std::unexpected(zpp::error{error::vmptrld_failed});
     }
 
@@ -3285,8 +3345,20 @@ void hypervisor::reflect_l2_exit(std::size_t cpu,
     }
 
     // Back onto the VMCS that runs the guest hypervisor.
+    //
+    // Phase timing; see `phase_cycles`. The pair with the one in
+    // build_vmcs02: together they are every VMCS switch a round trip
+    // makes, so phases 6 and 7 price the whole of it.
     auto region = own_vmcs_region_physical();
-    if ((0 == region) || arch::x86_64::vmx::vmptrld(&region)) {
+    auto switch_start = arch::x86_64::rdtsc();
+    auto switch_failed = (0 == region) || arch::x86_64::vmx::vmptrld(&region);
+
+    if (cpu < max_cpus) {
+        this->phase_cycles[cpu][7] += arch::x86_64::rdtsc() - switch_start;
+        this->phase_calls[cpu][7] += 1;
+    }
+
+    if (switch_failed) {
         // Not recoverable: without its own VMCS there is no guest
         // hypervisor to return to and nothing to resume. Same reasoning as
         // vmcs::write.

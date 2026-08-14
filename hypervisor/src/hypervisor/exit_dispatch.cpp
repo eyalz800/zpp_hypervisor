@@ -69,17 +69,53 @@ void hypervisor::on_vm_exit(std::uint64_t cpuid,
     using basic_reason = arch::x86_64::vmx::exit_reason::basic_reason;
     auto & vmcs = this->vmcs;
 
-    // One thousand VMREADs, once, to price the instruction the whole
-    // optimisation question turns on. See `vmread_benchmark_cycles`.
+    // One thousand accesses each, once, to price the instructions the
+    // whole optimisation question turns on. See
+    // `vmread_benchmark_cycles`, and the field choice below.
     if (!this->vmread_benchmark_done) {
+        using bench_field = arch::x86_64::vmx::vmcs::field;
         this->vmread_benchmark_done = true;
-        auto before = arch::x86_64::rdtsc();
+
         std::uint64_t sink{};
-        for (int i = 0; i < 1000; ++i) {
-            sink += vmcs.read(arch::x86_64::vmx::vmcs::field::exit_reason);
-        }
+
+        auto price_read = [&](bench_field which) {
+            auto before = arch::x86_64::rdtsc();
+            for (int i = 0; i < 1000; ++i) {
+                sink += vmcs.read(which);
+            }
+            return arch::x86_64::rdtsc() - before;
+        };
+
+        // The value is read first and written back unchanged, so this
+        // prices the instruction without altering any state.
+        auto price_write = [&](bench_field which) {
+            auto value = vmcs.read(which);
+            auto before = arch::x86_64::rdtsc();
+            for (int i = 0; i < 1000; ++i) {
+                vmcs.write(which, value);
+            }
+            return arch::x86_64::rdtsc() - before;
+        };
+
         this->vmread_benchmark_cycles =
-            (arch::x86_64::rdtsc() - before) | (sink & 0);
+            price_read(bench_field::exit_reason);
+        this->vmread_shadowed_cycles =
+            price_read(bench_field::guest_rip);
+        this->vmread_unshadowed_cycles =
+            price_read(bench_field::guest_gdtr_base);
+        this->vmwrite_shadowed_cycles =
+            price_write(bench_field::guest_rsp);
+        this->vmwrite_unshadowed_cycles =
+            price_write(bench_field::guest_gdtr_limit);
+        this->vmread_benchmark_sink = sink;
+
+        log("vmcs price per 1000: exit_reason {} rip {} gdtr_base {}",
+            this->vmread_benchmark_cycles,
+            this->vmread_shadowed_cycles,
+            this->vmread_unshadowed_cycles);
+        log("vmcs price per 1000: write rsp {} write gdtr_limit {}",
+            this->vmwrite_shadowed_cycles,
+            this->vmwrite_unshadowed_cycles);
     }
 
     // A deliberate slowdown, off unless asked for. See ZPP_SLOW_EXITS.
