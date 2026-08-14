@@ -13851,3 +13851,66 @@ fields, 98.8% of them `vm_exit_interruption_information`.
 
 `ZPP_DELIVER_SELF_IPI` is off in this build, so all three
 `l2_self_ipi_*` counters are zero and say nothing either way.
+
+## Delivering the self-IPI ourselves kills the guest hypervisor
+
+`ZPP_DELIVER_SELF_IPI` was run to completion for the first time on
+2026-08-15, after two defects in it were fixed - it tested destination
+shorthand 01 where this guest uses shorthand 00 with a physical
+destination of APIC id 0, so it could never have fired, and it checked
+the task priority without checking RFLAGS.IF or the STI/MOV-SS shadow.
+See `35ff588` for both.
+
+**Result: `l2_self_ipi_delivered` = 1, `l2_self_ipi_held` = 357, and
+then every counter in the module froze.** Frozen means frozen:
+`exit_trace_count` read 213,772 three times over nine minutes,
+`l2_entries` 34,212, and the guest's RIP sampled three times through the
+monitor was `0xfffff8307c5a6b5e` each time, with RFLAGS.IF set and
+HLT=0. QEMU was burning a full processor - 500 ticks of user time in
+five seconds - so the processor was executing, not blocked.
+
+`running_l2` was **0**, so the thing spinning is the guest hypervisor
+and not its guest. `unhandled_exit`, `vm_entry_failure` and
+`host_exception` were all clear, so this VMM did not stop; it simply
+stopped being asked. A single instruction executing for ever with
+interrupts enabled and no VM exit is what a hypervisor's own bugcheck
+loop looks like from outside.
+
+The last five reflected second-level exits before it, newest last:
+
+```
+vmcall rcx=0x10001000c   HvCallModifyVtlProtectionMask, fast, rep 1
+vmcall rcx=0x12          HvCallVtlReturn
+vmcall rcx=0x11          HvCallVtlCall
+vmcall rcx=0x100010003   fast, rep 1
+vmcall rcx=0x1fe0000000c HvCallModifyVtlProtectionMask, rep 510
+hlt                      the second-level guest going idle
+```
+
+So the second level executed HLT, the guest hypervisor took it, and
+never ran anything again.
+
+**What this settles.** The interrupt is the guest hypervisor's to
+deliver, and putting it in from underneath is not a conservative
+substitute for its own path - it is a state change that level cannot
+reconcile. The switch's own comment called it "defensible only because
+the guest itself did ask and can be shown not to be masking it"; the
+measurement says that is not sufficient. Both extra gates added before
+the run - the interruptibility check and the priority rule - were in
+force at the one delivery that killed it, so making the gate stricter
+is not the repair.
+
+**The switch stays off, and the two fixes stay**, because without them a
+future run reads all three counters as zero and concludes the guest
+never asks for the interrupt, when it asks 297,465 times.
+
+So the DPC vector has to be made to arrive by the mechanism the guest
+hypervisor is actually waiting on. It arms a TPR-below-threshold
+notification: that exit fires 1,141 times against 297,465 writes of the
+synthetic interrupt command register, and vector 0x2f is injected 1,116
+times - so every exit that fires does produce a delivery, and the
+question is entirely why it fires so rarely. That is the next thing to
+measure, and the first thing to establish is whether VTPR on the guest
+hypervisor's virtual-APIC page is being updated by TPR virtualization in
+hardware or only by the guest hypervisor's own writes, because the
+notification can only fire on the former.
