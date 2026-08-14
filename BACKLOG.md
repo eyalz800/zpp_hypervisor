@@ -13773,3 +13773,81 @@ different top 16. So it varies with the boot and not within it, which is
 what a per-boot address or handle looks like and confirms the loop is
 wedged rather than progressing slowly. The next question stands: capture
 what the two hypercalls *return*, which nothing records today.
+
+## Nothing is stuck: the second-level guest is timer-livelocked
+
+Measured on the rig on 2026-08-15, with `capture_vtl_switch` (`cbe77b1`)
+and a 90 second steady-state window rather than cumulative counters.
+
+**The VTL loop advances.** The alternation of `HvCallVtlCall` and
+`HvCallVtlReturn` that two sessions read as a wedge is ordinary work.
+Against the previous switch of the same kind, over 27,205 of each:
+
+| register | changed on the call side |
+|---|---|
+| rsp | 12,389 |
+| rdx | 12,387 |
+| rbx | 13,318 |
+| r10 | 14,153 |
+| r11 | 17,327 |
+| r13 | 16,276 |
+| cr3 | **1** |
+| eptp | **0** |
+
+Half of every switch carries a different stack pointer, so these are
+different call sites and different threads, in one address space
+(cr3 `0x1ae002` throughout). The caller is `ntoskrnl.exe` at
++0x6a774b and the callee `securekernel.exe` at +0xd93a4, each with its
+own cr3 and its own guest EPT pointer - `0x101b1b01e` for the ordinary
+trust level, `0x101b1e01e` for the secure one. Nothing about the switch
+is broken.
+
+**What is wrong is throughput, and the shape of it is timer livelock.**
+
+- `l2_cpl_seen` is ring 0 = 1,443,205, **ring 3 = 0**. Windows has not
+  executed one user-mode instruction.
+- `l2_entry_vtpr`: 68.0% of second-level entries are at `0xd0`,
+  CLOCK_LEVEL; 26.0% at `0x20`, DISPATCH; 3.5% at PASSIVE. The guest is
+  inside the clock interrupt handler more than two thirds of the time.
+- Steady state: 4,299 exits/s, 2,044 second-level entries/s, and
+  **489 injections of vector 0xd1 per second**. About four second-level
+  round trips per clock tick, against a tick period of about 2 ms.
+- One round trip costs 286 us of this VMM's own time - 218 us in
+  `reflect_l2_exit`, 68 us in `build_vmcs02`. At 2,044 per second that
+  is 58% of the wall clock before the guest executes anything.
+
+**64.6% of wall time is inside this VMM**, so the layer below is not the
+bottleneck. Where it goes, as a share of the wall clock over the window:
+
+| phase | share |
+|---|---|
+| `reflect_l2_exit` | 44.5% |
+| &nbsp;&nbsp;of which `save_l2_state` | 21.4% |
+| `build_vmcs02` | 13.9% |
+| &nbsp;&nbsp;of which `merge_nested_bitmaps` | 6.2% |
+| &nbsp;&nbsp;&nbsp;&nbsp;of which the guest bitmap reads | 5.5% |
+| `copy_shadow_to_vmcs12` | 5.3% |
+| `copy_vmcs12_to_shadow` | 2.4% |
+| the two VMPTRLDs | 1.1% |
+
+`save_l2_state` is 48 VMREADs at 4,340 cycles each, and every one of them
+traps to the layer below. The guest hypervisor *reads* sixteen distinct
+fields, 98.8% of them `vm_exit_interruption_information`.
+
+**Two leads are dead and should not be re-run.**
+
+- *The shadow EPT discard on INVEPT.* Cumulatively it looks enormous -
+  435,406 extended-page-table violations, 79% of all reflected exits, and
+  `shadow_ept_builds` exactly equal to the 15,880 INVEPTs. In steady
+  state `shadow_ept_leaves_filled` grows by **zero per second**. All of it
+  was the boot, and the composition already installs at the largest size
+  both walks agree on. Cumulative counters said "the dominant cost"; the
+  90 second window said "finished twenty minutes ago". Measure the delta.
+- *The extended-page-table fault as an expensive path.* It is already the
+  cheap one: a fault that installs a leaf returns `handled` and resumes
+  the second-level guest without `save_l2_state`, `reflect_l2_exit` or
+  `build_vmcs02`. `l2_exit_trace_count` counts *reflections*, not exits,
+  which is what made the two look equal.
+
+`ZPP_DELIVER_SELF_IPI` is off in this build, so all three
+`l2_self_ipi_*` counters are zero and say nothing either way.
