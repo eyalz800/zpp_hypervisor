@@ -4701,6 +4701,13 @@ private:
      */
     std::uint32_t l2_entry_vtpr[max_cpus][256]{};
 
+    /** A self-directed interrupt the second-level guest asked for and the
+     * level above has not delivered. See `nested_vmx::deliver_self_ipi`.
+     */
+    std::uint64_t l2_self_ipi_pending[max_cpus]{};
+    volatile std::uint64_t l2_self_ipi_delivered[max_cpus]{};
+    volatile std::uint64_t l2_self_ipi_held[max_cpus]{};
+
     /**
      * One capture of the code and stack at the reference-counter poll,
      * taken once per boot.

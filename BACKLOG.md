@@ -12011,9 +12011,16 @@ Still to settle, and read the counters carefully here:
   no longer evidence of a stall. Anything read off it after this change is
   meaningless; use the thread samples or the screen.
 - Vector `0x2f` is still injected 6 times against a request on every
-  cycle. That may not matter: `0xd1` is injected 165,687 times and is
-  SINT3, so the deferred procedure call may be arriving as a synthetic
-  message rather than as that vector. Not established either way.
+  cycle. **Tested, and it is not the blocker.** `ZPP_DELIVER_SELF_IPI`
+  delivers it when the guest hypervisor will not, by the guest's own
+  local-APIC rule - priority class strictly greater, SDM 12.8.4 - and only
+  when the level above staged nothing. It works and it almost never
+  fires: `l2_self_ipi_delivered` 1 against `l2_self_ipi_held` **2,005**.
+  The guest's own virtual task priority blocks it nearly every time,
+  which means the guest is masking it deliberately and would drain its
+  deferred-procedure-call queue in software when it lowers priority. So
+  the interrupt is not owed and not missing. Switch kept, off, because
+  the measurement is worth more than the code.
 
 The screen is the ground truth for whether the animation turns, and
 nothing in here can substitute for it.

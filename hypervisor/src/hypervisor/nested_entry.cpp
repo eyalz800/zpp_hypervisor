@@ -1792,6 +1792,42 @@ std::expected<void, zpp::error> hypervisor::build_vmcs02(std::size_t cpu)
     // whether the other two are read at all.
     auto injection =
         shadow.read(field::vm_entry_interruption_information_field);
+
+    // Nothing staged, and the guest is asking for something its own
+    // priority allows: deliver it. The guest hypervisor's own injection
+    // always wins, because this only runs when it made none.
+    if constexpr (nested_vmx::deliver_self_ipi) {
+        constexpr std::uint64_t valid = 1ull << 31;
+        constexpr std::uint64_t external = 0ull << 8;
+        constexpr std::uint64_t priority_class = 4;
+
+        if ((cpu < max_cpus) && (0 == (injection & valid)) &&
+            (0 != this->l2_self_ipi_pending[cpu]) &&
+            (0 != this->nested_virtual_apic_address[cpu])) {
+            constexpr std::uint64_t virtual_task_priority = 0x80;
+            std::uint8_t vtpr{};
+
+            auto read = read_guest_physical(
+                this->nested_virtual_apic_address[cpu] +
+                    virtual_task_priority,
+                std::span(reinterpret_cast<std::byte *>(&vtpr),
+                          sizeof(vtpr)));
+
+            auto vector = this->l2_self_ipi_pending[cpu];
+
+            if (read && ((vector >> priority_class) >
+                         (std::uint64_t{vtpr} >> priority_class))) {
+                injection = valid | external | vector;
+                this->l2_self_ipi_pending[cpu] = 0;
+                this->l2_self_ipi_delivered[cpu] =
+                    this->l2_self_ipi_delivered[cpu] + 1;
+            } else {
+                this->l2_self_ipi_held[cpu] =
+                    this->l2_self_ipi_held[cpu] + 1;
+            }
+        }
+    }
+
     vmcs.write(field::vm_entry_interruption_information_field, injection);
 
     if (0 != (injection & interruption_valid)) {
@@ -5540,8 +5576,24 @@ hypervisor::on_l2_exit(std::size_t cpu,
 
         if ((basic_reason::wrmsr == reason.basic()) &&
             (synthetic_interrupt_command == index)) {
-            record_interrupt_request(
-                cpu, (context.rax & 0xffffffff) | (context.rdx << 32));
+            auto command =
+                (context.rax & 0xffffffff) | (context.rdx << 32);
+
+            record_interrupt_request(cpu, command);
+
+            // Held until the guest's own priority allows it. See
+            // `nested_vmx::deliver_self_ipi`; SDM Figure 12-12 puts the
+            // vector in bits 7:0 and the destination shorthand in 19:18,
+            // and 01 there is "self".
+            if constexpr (nested_vmx::deliver_self_ipi) {
+                constexpr std::uint64_t shorthand_mask = 3ull << 18;
+                constexpr std::uint64_t shorthand_self = 1ull << 18;
+
+                if ((cpu < max_cpus) &&
+                    (shorthand_self == (command & shorthand_mask))) {
+                    this->l2_self_ipi_pending[cpu] = command & 0xff;
+                }
+            }
         }
 
         if ((basic_reason::rdmsr == reason.basic()) &&

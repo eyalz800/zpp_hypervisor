@@ -183,6 +183,41 @@ inline constexpr bool enabled =
  * Off by default: it writes into guest memory the level above believes it
  * owns.
  */
+/**
+ * Whether this VMM delivers a second-level guest's self-directed
+ * interrupt when the guest hypervisor does not.
+ *
+ * Measured: the guest writes the synthetic interrupt command register
+ * with `0x4002f` - a self-IPI of vector `0x2f`, the deferred-procedure
+ * call - on every clock cycle, tens of thousands of times, and
+ * `l2_injected_vector` shows the guest hypervisor delivering it **six**
+ * times. It is not the guest masking it: `l2_entry_vtpr` has the guest at
+ * task priority zero or `0x10` on about a tenth of entries, where vector
+ * `0x2f` outranks it comfortably.
+ *
+ * What the guest hypervisor appears to be waiting for is a
+ * TPR-below-threshold exit - it writes `tpr_threshold` on 11% of its
+ * VMWRITEs - and that exit fires 33 times in 3.6 million. So it arms a
+ * notification it never receives and holds an interrupt it never
+ * delivers.
+ *
+ * With this on, the vector is delivered on the next entry where the
+ * guest's own virtual task priority permits it, by the rule its local
+ * APIC would use: priority class strictly greater, SDM 12.8.4. Only when
+ * the guest hypervisor has staged nothing itself, so its own injections
+ * always win.
+ *
+ * Off by default. It puts an interrupt into a guest that the level owning
+ * that guest did not ask for, which is defensible only because the guest
+ * itself did ask and can be shown not to be masking it.
+ */
+inline constexpr bool deliver_self_ipi =
+#if defined(ZPP_DELIVER_SELF_IPI) && ZPP_DELIVER_SELF_IPI
+    true;
+#else
+    false;
+#endif
+
 inline constexpr bool publish_reference_tsc =
 #if defined(ZPP_PUBLISH_REFERENCE_TSC) && ZPP_PUBLISH_REFERENCE_TSC
     true;
