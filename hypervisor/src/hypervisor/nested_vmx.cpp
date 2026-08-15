@@ -1772,6 +1772,53 @@ bool hypervisor::on_guest_vmlaunch(std::size_t cpu,
     this->nested_rip_settled[cpu] = true;
     this->l2_entries[cpu] = this->l2_entries[cpu] + 1;
 
+    // Which instruction pointer the second-level guest is *entered* at,
+    // as a small table of distinct values.
+    //
+    // This separates the two explanations of the livelock, and nothing
+    // else recorded here does. If the guest loops in its own software it
+    // is entered just past the VMCALL and goes round a branch further
+    // out. If the guest hypervisor resumes it **at** the VMCALL, never
+    // having advanced the instruction pointer past it, then it is
+    // entered at the hypercall stub itself and executes nothing at all -
+    // which is exactly why its registers and its whole sixty-four word
+    // stack are byte-identical across thousands of switches, a
+    // coincidence a software loop would have to work at.
+    //
+    // Read from the VMCS rather than from vmcs12, and read here, because
+    // this is the point the comment above already establishes: vmcs02 is
+    // current and its guest state is loaded, so this is the address the
+    // processor is about to execute rather than a value that still has
+    // to survive a merge.
+    //
+    // Distinct values with counts, not a ring: a ring of a hundred
+    // thousand identical entries answers nothing and "how many different
+    // ones are there" is the whole question.
+    if (cpu < max_cpus) {
+        auto rip = this->vmcs.guest_rip();
+
+        for (std::size_t i{}; i < l2_entry_rip_slots; ++i) {
+            if (this->l2_entry_rip[cpu][i] == rip) {
+                this->l2_entry_rip_count[cpu][i] =
+                    this->l2_entry_rip_count[cpu][i] + 1;
+                break;
+            }
+
+            if (0 == this->l2_entry_rip_count[cpu][i]) {
+                this->l2_entry_rip[cpu][i] = rip;
+                this->l2_entry_rip_count[cpu][i] = 1;
+                break;
+            }
+
+            // Full and none matched: entered at more than eight
+            // addresses, which is itself the answer.
+            if ((l2_entry_rip_slots - 1) == i) {
+                this->l2_entry_rip_other[cpu] =
+                    this->l2_entry_rip_other[cpu] + 1;
+            }
+        }
+    }
+
     // Which thread this guest is running, once every few thousand
     // entries. Here rather than on the exit path because the guest state
     // is loaded and vmcs02 is current, which is what the walk needs.
