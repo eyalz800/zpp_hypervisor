@@ -14466,3 +14466,27 @@ controller's admin queue - `diag::sink::esp_blocks`, which is what
 `ZPP_DIAG` arms. A storage request enqueued at boot and never dispatched
 is exactly the shape a contended controller would produce, and the
 channel is a switch that can be turned off for one boot.
+
+### The disk channel is not the cause either
+
+Run with `-DZPP_DIAG=OFF` on 2026-08-15, one variable against the boot
+above it. The channel and its admin-queue borrow against the real
+controller are compiled out - `DZPP_DIAG=0` checked on the compile line,
+not assumed - and the guest reaches 858,910 second-level entries.
+
+**The livelock is identical.** Over 90 seconds and 2,282 working exits
+the guest still executes exactly two instruction addresses, `+0x19` and
+`+0x32` of the hypercall page, alternating, with no third address
+appearing and none retiring. Ring 3 is still zero.
+
+So contention for the controller is not what stops the storage request
+being issued, and the `ClassPnP` finding does not point at this VMM's
+channel. It stands as evidence of *which* subsystem is stuck, not of
+why.
+
+(The first read of this boot came back all zeroes because the helper
+script carried a hardcoded module base from an earlier run and the base
+had moved. Caught by reading it off serial, which is what
+`rig-dump-state.py` does and what an ad-hoc script must also do - the
+fourth time in this session that a diagnostic's own failure had to be
+told apart from its answer.)
