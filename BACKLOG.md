@@ -14363,3 +14363,47 @@ Two things to do, in order, and the first is not optional:
 The boot also re-confirms the finding it was meant to explain, on fresh
 numbers: threshold 2 armed 5,632 times, reason-43 exits **37**, vector
 0x2f injected **13**.
+
+## The shadow composition is not the fault either
+
+| permissions installed | leaves | |
+|---|---|---|
+| `rw-` | 350,671 | 78.4% |
+| `r-x` | 91,763 | 20.5% |
+| `r--` | 4,881 | 1.1% |
+| `rwx` | 168 | 0.03% |
+
+447,483 leaves, and **99.97% of them have something removed**. So the
+composition is doing its job, and the suspicion that it grants what the
+level above took away is wrong.
+
+Read against `reflected_permission` being 0 of 448,441, that resolves
+the ambiguity the histogram was added for, and in the direction that
+takes this VMM out of it: every restriction above comes from *our* host
+extended page tables, and **the guest hypervisor's own tables have never
+once refused an access**. `HvCallModifyVtlProtectionMask` is therefore
+not expressed through the extended page tables this VMM shadows - there
+was never anything there for the composition to drop.
+
+### Where the elimination now stands
+
+Everything below has been measured, not argued, and each is dead:
+
+| candidate | how it died |
+|---|---|
+| the instruction pointer is not advanced | entered at hypercall page +0x1c and +0x35, three bytes past both VMCALLs |
+| the dispatch vector is withheld by this VMM | 124 exits owed, 124 taken - exact |
+| the guest hypervisor never arms its notification | it arms it 5,146 times |
+| the TPR-below-threshold rule is misapplied here | 5,022 armings are made while the guest is already at or above the threshold, where SDM 27.6.7 owes nothing |
+| an I/O that never completed | no disk traffic is issued at all - no controller MMIO, no vector but the clock |
+| the shadow drops the trust level's protections | 99.97% of leaves have permissions removed, and the guest's own walk never refuses |
+| the machine is merely slow | two captures 2,256 switches apart are byte-identical, and the guest executes two addresses |
+
+What is left is a single secure call, made from `ntoskrnl`+0x6a774b with
+`ArcName` and `multi(0)disk(0)rdisk(0)partition(4)` in the frames above
+it, which `securekernel` answers from +0xd93a4 and which never
+completes. The interrupt path, the extended page tables, the instruction
+pointer and the timing are all now excluded, so what remains is the
+content of that call - and the only place its content can live, given
+registers and stack are identical every time, is memory this VMM has not
+yet read.
