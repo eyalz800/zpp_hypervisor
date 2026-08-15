@@ -16428,3 +16428,91 @@ That is not a reason to skip it - it is the only term in the identified
 cause that is ours to move, and both items are correct on their own
 terms regardless of the boot. It is a reason not to expect the circle to
 turn when it lands, and to say so now rather than after.
+
+## The round trip is 54% nesting tax, and that is the number the decision turns on
+
+Per `HvCallVtlCall` → `HvCallVtlReturn` → next call, in the 1.74 ms
+regime, split by who executed the instruction that exited:
+
+| reason | per round trip | whose |
+|---|---|---|
+| `vmresume` | 71.1 | the guest hypervisor's own |
+| `wrmsr` | 46.0 | its guest's, reflected |
+| `int-window` | 18.1 | its guest's, reflected |
+| `ext-int` | 5.1 | its guest's, reflected |
+| `vmread` | 5.1 | the guest hypervisor's own |
+| `vmptrld` | 4.0 | the guest hypervisor's own |
+| `vmcall` | **2.0** | **the two hypercalls - the actual work** |
+| | **151.4** | |
+
+- **82.2 per round trip (54%) are the guest hypervisor's own VMX
+  instructions trapping to this VMM.** On bare metal a root-mode
+  hypervisor executes `VMRESUME`, `VMPTRLD`, `VMREAD` and `VMWRITE`
+  natively, at tens of cycles and with no exit at all. Every one of
+  these exists *only because this VMM is between Hyper-V and the
+  processor*.
+- **69.1 (46%) are its guest's exits, reflected.** Those are real on any
+  host - but on bare metal each costs Hyper-V *one* exit, where here it
+  costs an exit to us, a reflection, and the `VMRESUME` back, which is
+  where the 71.1 comes from.
+- **2.0 are the trust-level switch itself.**
+
+So the switch costs two exits of work and a hundred and forty-nine of
+tax. **This is not a code-quality number and no amount of care here
+moves it** - it is the shape of being nested, and the only thing that
+removes it is not being.
+
+That is the fact the open decision turns on, and it is why the census's
+1.4x is the whole of what is reachable: the reachable part is the cost
+*per* exit, and more than half the exits should not exist at all.
+
+### And the guest hypervisor is not polling anything
+
+`vm_exit_interruption_information` is 98.4% of its VMREADs, which read
+as a hypervisor spinning on a field this VMM answers wrongly. It is not:
+`vmread` is **5.1 per round trip against 71.2 second-level entries**, so
+it reads that field about **once every fourteen exits** - which is
+simply "when the exit it is handling needs it".
+
+**The 227-to-1 was entirely this VMM's over-copying, not its
+over-reading.** `save_l2_state` pushes 46 fields at it every exit and it
+reads 16, rarely. There is no interface being answered badly here, and
+the asymmetry is ours to fix rather than a symptom of anything.
+
+## Withdrawn: `load_l1_host_state` cannot be cached, and the code already said so
+
+The census proposed caching its 36 writes "exactly the way
+`build_vmcs02` already caches its own". **That is wrong, and the
+refutation was already written in the function, with a citation:**
+
+> "it cannot be elided against a cache of what was last written: SDM
+> 30.3.2 has every VM exit save the guest hypervisor's own segment
+> bases, limits and access rights over them, so the cache describes
+> something the processor has since overwritten. That is exactly what
+> killed `ZPP_LAZY_GUEST_STATE` one VMCS over."
+
+The writes go into vmcs01's **guest** fields. The processor saves the
+guest hypervisor's live state over them on every exit, so a cache of
+what this VMM last wrote is stale by construction, and eliding against
+it skips a write that is owed.
+
+I read the census's own conclusion back into a function whose comment
+refutes it, and would have shipped it. The general form is worth
+keeping: **when a phase looks obviously cacheable, read what the code
+already says about caching it** - this tree writes its refutations down
+precisely so they are not re-derived, and the cost of skipping that is a
+wrong change with an SDM citation sitting three lines above it.
+
+### The sound version needs a measurement that has been running unread
+
+The same comment says what *would* justify eliding a field: knowing the
+processor never changes it, as a measurement rather than an assumption.
+`l1_host_changed` does exactly that - one field per reflection, round
+robin, so each is sampled at thousands of moments across a boot - and
+**nothing has ever read it.** It has been running since it was written
+and no reader printed it.
+
+That is its own lesson, and a new one for the methodology notes: a
+counter nobody prints is a measurement nobody has. `rig-dump-state.py`
+now reports it, and a slot at zero across a whole boot is a write that
+can be dropped.

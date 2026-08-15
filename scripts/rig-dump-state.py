@@ -580,6 +580,64 @@ def dump_priority(args, elf, instance):
                       f"{exits / n:.1f} exits")
 
 
+def dump_l1_host_audit(args, elf, instance):
+    """Which of `load_l1_host_state`'s writes the processor undoes.
+
+    The audit has been running since it was written and **nothing has
+    ever read it**, which is its own lesson: a counter nobody prints is
+    a measurement nobody has.
+
+    It exists because the obvious optimisation here is unsound. Those
+    writes go into vmcs01's *guest* fields, and SDM 30.3.2 has every VM
+    exit save the guest hypervisor's own state over them - so a cache of
+    what this VMM last wrote describes something the processor has since
+    overwritten, and eliding against it would skip a write that is owed.
+    That is what killed `ZPP_LAZY_GUEST_STATE`.
+
+    What *is* sound is dropping a write the processor demonstrably never
+    undoes, and that is a measurement. A slot at zero across a whole
+    boot is one whose write can go; a slot that is not is one that never
+    could have.
+    """
+    members = ["l1_host_field", "l1_host_changed", "l1_host_count",
+               "l1_host_audits"]
+    off = gdb_offsets(elf, members)
+    slots = gdb_values(elf, [
+        "sizeof(('zpp::hypervisor::hypervisor' *)0)->l1_host_field[0] / 8"
+    ])[0]
+
+    reader = Monitor(args.rig, args.port)
+    for member in ("l1_host_field", "l1_host_changed"):
+        reader.queue(instance + off[member], args.cpus * slots)
+    for member in ("l1_host_count", "l1_host_audits"):
+        reader.queue(instance + off[member], args.cpus)
+    got = reader.run()
+
+    def word(member, index):
+        return got.get(instance + off[member] + 8 * index, 0)
+
+    for cpu in range(args.cpus):
+        used = word("l1_host_count", cpu)
+        if not used:
+            continue
+
+        audits = word("l1_host_audits", cpu)
+        rows = [(i, word("l1_host_field", cpu * slots + i),
+                 word("l1_host_changed", cpu * slots + i))
+                for i in range(min(used, slots))]
+        stable = [r for r in rows if 0 == r[2]]
+
+        print(f"\ncpu {cpu} load_l1_host_state audit "
+              f"({used} fields written, {audits:,} samples)")
+        print(f"  {len(stable)} of {len(rows)} slots never observed "
+              f"changed - those writes are the elidable set")
+        for index, encoding, changed in rows:
+            if changed:
+                print(f"    slot {index:>2}  field 0x{encoding:04x}  "
+                      f"changed {changed:>8}  <- the processor undoes "
+                      f"this one")
+
+
 def dump_vtl(args, elf, instance):
     """The trust-level switch loop: whether it advances, and who calls it.
 
@@ -958,6 +1016,7 @@ def main():
 
     dump_entry_rips(args, args.elf, instance)
     dump_priority(args, args.elf, instance)
+    dump_l1_host_audit(args, args.elf, instance)
     dump_vtl(args, args.elf, instance)
     dump_vtl_steps(args, args.elf, instance)
 
