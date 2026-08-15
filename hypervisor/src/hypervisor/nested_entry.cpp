@@ -989,10 +989,6 @@ void hypervisor::forget_vmcs02_contents(std::size_t cpu)
 
     this->vmcs02_host_written[cpu] = false;
 
-    // And the deferred guest state, which describes contents this call
-    // is about to invalidate. See `guest_state_deferred_vmcs`.
-    this->guest_state_deferred[cpu] = false;
-
     for (auto & valid : this->control_cache_valid[cpu]) {
         valid = false;
     }
@@ -2075,44 +2071,7 @@ std::expected<void, zpp::error> hypervisor::build_vmcs02(std::size_t cpu)
         auto fresh = this->guest_state_fresh[cpu];
         std::size_t index{};
 
-        auto dirty = (cpu < max_cpus) ? this->guest_state_dirty[cpu]
-                                      : ~std::uint64_t{};
-
-        // What licenses skipping a deferred field's write-back: vmcs02
-        // has run at least once, and what it last saved was an exit
-        // from the guest about to be entered. See
-        // `guest_state_deferred_vmcs` - the first attempt checked
-        // neither and launched the guest with a zeroed guest state.
-        auto may_defer = may_defer_guest_state(cpu);
-
         for (auto guest_field : guest_state_fields) {
-            // A deferred field is left exactly as the processor saved
-            // it, unless the guest hypervisor has written one - in which
-            // case its value is owed. Writing the rest back would push
-            // whatever vmcs12 happens to hold over the state vmcs02
-            // already has, which is the dependency the census missed.
-            if (guest_state_deferrable(index)) {
-                if (!may_defer) {
-                    // Unconditionally, not merely un-elided:
-                    // `guest_state_cache` is stale for exactly these
-                    // indices, so comparing against it could skip a
-                    // write that is owed.
-                    auto value = shadow.read(guest_field);
-                    vmcs.write(guest_field, value);
-                    this->guest_state_cache[cpu][index] = value;
-                    this->guest_state_writes_done[cpu] += 1;
-                } else if (0 != (dirty & (1ull << index))) {
-                    auto value = shadow.read(guest_field);
-                    vmcs.write(guest_field, value);
-                    this->guest_state_cache[cpu][index] = value;
-                    this->guest_state_dirty_writes[cpu] += 1;
-                } else {
-                    this->guest_state_writes_skipped[cpu] += 1;
-                }
-                ++index;
-                continue;
-            }
-
             auto value = shadow.read(guest_field);
 
             if (fresh && (this->guest_state_cache[cpu][index] == value)) {
@@ -2129,10 +2088,6 @@ std::expected<void, zpp::error> hypervisor::build_vmcs02(std::size_t cpu)
 
         // Consumed: the next elision needs its own save to justify it.
         this->guest_state_fresh[cpu] = false;
-
-        if (cpu < max_cpus) {
-            this->guest_state_dirty[cpu] = 0;
-        }
     }
 
     // The activity state is decided, never copied.
@@ -2966,14 +2921,6 @@ void hypervisor::save_l2_state(std::size_t cpu)
     {
         std::size_t index{};
         for (auto guest_field : guest_state_fields) {
-            // Deferred: the processor has already saved this into
-            // vmcs02 and nothing reads it from vmcs12 unless it asks.
-            // See `guest_state_deferred`.
-            if (guest_state_deferrable(index)) {
-                ++index;
-                continue;
-            }
-
             auto value = vmcs.read(guest_field);
             shadow.write(guest_field, value);
 
@@ -2987,12 +2934,6 @@ void hypervisor::save_l2_state(std::size_t cpu)
         }
         if (cpu < max_cpus) {
             this->guest_state_fresh[cpu] = true;
-            this->guest_state_deferred[cpu] = true;
-            this->guest_state_deferred_vmcs[cpu] =
-                this->guest_current_vmcs[cpu];
-            this->guest_state_dirty[cpu] = 0;
-            this->guest_state_defers[cpu] =
-                this->guest_state_defers[cpu] + 1;
         }
     }
 
@@ -6012,129 +5953,6 @@ void hypervisor::settle_vp_assist_page(std::size_t cpu)
                 (1ull << 32);
         }
     }
-}
-
-bool hypervisor::may_defer_guest_state(std::size_t cpu) const
-{
-    // Both halves, and both were missing from the first attempt: vmcs02
-    // has run at least once, so the processor has actually saved
-    // something into it; and what it saved was an exit from the guest
-    // about to be entered, since vmcs02 is reused per processor. See
-    // `guest_state_deferred_vmcs`.
-    return (cpu < max_cpus) && this->guest_state_deferred[cpu] &&
-           this->vmcs02_launched[cpu] &&
-           (this->guest_state_deferred_vmcs[cpu] ==
-            this->guest_current_vmcs[cpu]);
-}
-
-bool hypervisor::guest_state_deferrable(std::size_t index)
-{
-    // The two on `shadow_read_write_fields`, which the guest hypervisor
-    // reads out of the hardware shadow region without exiting - so there
-    // is no point at which a deferred value could be materialised, and a
-    // stale one would be handed over invisibly. See
-    // `guest_state_deferred`.
-    if (index >= std::size(guest_state_fields)) {
-        return false;
-    }
-
-    auto which = guest_state_fields[index];
-
-    return (field::guest_cs_access_rights != which) &&
-           (field::guest_ss_access_rights != which);
-}
-
-std::optional<std::size_t>
-hypervisor::guest_state_index_of(std::uint64_t encoding)
-{
-    // A linear scan over forty-six constants, on a path the guest
-    // hypervisor takes 494 times in a whole boot for writes and rarely
-    // for reads. A table would be a second copy of the list to keep in
-    // step with `guest_state_fields`, which is the defect this tree
-    // records under "the capacity carried here is a second copy of a
-    // constant that lives in the header".
-    for (std::size_t index{}; index < std::size(guest_state_fields);
-         ++index) {
-        if (encoding ==
-            static_cast<std::uint64_t>(guest_state_fields[index])) {
-            return index;
-        }
-    }
-
-    return {};
-}
-
-void hypervisor::mark_l2_guest_state_dirty(std::size_t cpu,
-                                           std::uint64_t encoding)
-{
-    if (cpu >= max_cpus) {
-        return;
-    }
-
-    if (auto index = guest_state_index_of(encoding); index) {
-        this->guest_state_dirty[cpu] |= (1ull << *index);
-    }
-}
-
-void hypervisor::materialise_l2_guest_state_for(std::size_t cpu,
-                                                std::uint64_t encoding)
-{
-    if (cpu >= max_cpus) {
-        return;
-    }
-
-    auto index = guest_state_index_of(encoding);
-
-    if (index && guest_state_deferrable(*index)) {
-        materialise_l2_guest_state(cpu);
-    }
-}
-
-void hypervisor::materialise_l2_guest_state(std::size_t cpu)
-{
-    if ((cpu >= max_cpus) || !this->guest_state_deferred[cpu]) {
-        return;
-    }
-
-    // vmcs01 is current here - the guest hypervisor is running and has
-    // just taken an exit - so vmcs02 has to be made current to read the
-    // state the processor saved into it, and put back afterwards.
-    //
-    // Nothing has entered the second-level guest since that exit, so
-    // those values are still the ones it stopped with. A VMPTRLD pair
-    // is about 10,000 cycles against the 121,000 this deferral saves on
-    // every exit that does not come here.
-    auto region = this->vmcs02_physical[cpu];
-
-    if ((0 == region) || arch::x86_64::vmx::vmptrld(&region)) {
-        return;
-    }
-
-    auto & shadow = this->guest_vmcs12[cpu];
-    auto dirty = this->guest_state_dirty[cpu];
-
-    std::size_t index{};
-    for (auto guest_field : guest_state_fields) {
-        // Anything the guest hypervisor has written since the last entry
-        // is **its** value and must not be overwritten with the
-        // processor's.
-        if (guest_state_deferrable(index) &&
-            (0 == (dirty & (1ull << index)))) {
-            shadow.write(guest_field, this->vmcs.read(guest_field));
-        }
-        ++index;
-    }
-
-    auto own = own_vmcs_region_physical();
-    if ((0 == own) || arch::x86_64::vmx::vmptrld(&own)) {
-        // Without its own VMCS there is nothing to return to. Same
-        // reasoning as `enter_or_park_l2`'s switch failure.
-        __builtin_trap();
-    }
-
-    this->guest_state_deferred[cpu] = false;
-    this->guest_state_materialises[cpu] =
-        this->guest_state_materialises[cpu] + 1;
 }
 
 void hypervisor::record_l2_entry_event(std::size_t cpu)
