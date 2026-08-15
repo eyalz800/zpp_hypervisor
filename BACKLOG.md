@@ -14985,3 +14985,53 @@ who turns the switch on inherits the same defect that was just measured
 and rejected. The switch itself returns to its long-standing default so
 the tree ends in the configuration everything else in this file was
 measured against.
+
+## The systematic diff: five capabilities the working configuration has and we do not
+
+Computed from inside, needing no baseline boot - what KVM permits *this
+VMM* is in our own cached capability MSRs, and what we offer the guest
+hypervisor is `supported_secondary_controls`:
+
+```
+KVM permits us (PROCBASED_CTLS2 allowed-1): 0x1378ff
+we offer the guest hypervisor:              0x511cee
+guest hypervisor requests:                  0x1010ae
+```
+
+Permitted by KVM and **not offered** by us:
+
+| bit | control |
+|---|---|
+| 0 | virtualize APIC accesses |
+| 4 | virtualize x2APIC mode |
+| **13** | **enable VMFUNC** |
+| 14 | VMCS shadowing |
+| **17** | **EPT-violation #VE** |
+
+**Bit 13 is the candidate this failure points at.** VMFUNC EPTP
+switching is how a guest changes extended-page-table view *without a
+hypercall*, and it is how virtual secure mode performs fast trust-level
+transitions on hardware that has it. Withheld, the guest hypervisor
+falls back to the hypercall path - which is precisely the
+`HvCallVtlCall`/`HvCallVtlReturn` pair measured looping for ever. Note
+that `nested_vmx.cpp` already answers the VM-function capability MSR
+with "Zero: no VM functions", so this is a deliberate absence with a
+comment, not an oversight.
+
+**Bit 17 is the second.** An EPT violation delivered to the guest as a
+virtualization exception rather than as a VM exit is a mechanism a
+secure kernel can use to enforce page protections without the
+hypervisor reflecting anything - and `reflected_permission` has been 0
+of 448,441 throughout, which is consistent with protections that were
+never meant to arrive as reflected exits at all.
+
+Neither is a one-line change. VMFUNC needs the EPTP list, the
+`vmfunc` exit path and the composition to hold more than one shadow per
+processor; #VE needs the exception-information area and the guest's
+own handler to be respected. But this is the first list in the session
+that is *derived* rather than guessed, and it is short.
+
+**Method worth keeping**: the capability diff is computable offline from
+a single running guest, because what the layer below permits is already
+cached here. It needed no bare-metal run and no second machine, and it
+should have been the first thing done rather than the twenty-second.
