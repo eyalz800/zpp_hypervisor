@@ -15222,3 +15222,27 @@ applies: every field this VMM writes into vmcs02 that the guest
 hypervisor did not put in vmcs12 is an asymmetry of exactly the kind
 just closed three times over, and `guest_state_cache` plus the control
 cache already enumerate what is written.
+
+### The field sweep begins: the exception bitmap is exactly the guest's
+
+`host_controls_cache[4]`, this VMM's own exception bitmap, reads
+**0x0** - so the union written into vmcs02 is exactly what the guest
+hypervisor put in vmcs12, and `exit_reason_counts[0]` confirms it:
+**zero** exception exits across the whole boot.
+
+That was the highest-risk field of the set, because the merge there is a
+union like the controls were - KVM's own shape, on
+`vmx_update_exception_bitmap` - and a bit of ours would make the
+second-level guest exit on an exception its own hypervisor never asked
+to trap, with this VMM then having to decide whether to reflect
+something the level above is not expecting. It adds nothing, so the
+question does not arise.
+
+Four dimensions closed now, all by measurement: pin controls, primary
+controls, secondary controls, and the exception bitmap. The remaining
+fields written into vmcs02 that do not come straight from vmcs12 are the
+addresses and masks - the merged MSR and I/O bitmaps, the control
+register guest/host masks and read shadows, the extended-page-table
+pointer, the VPID, and the entry recovery pointer. Each is enumerable
+from `build_vmcs02` and each is the same question: is what the
+second-level guest runs with what its own hypervisor described?
