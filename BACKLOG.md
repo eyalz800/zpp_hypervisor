@@ -15609,3 +15609,71 @@ phase trace begins at `ntoskrnl+0x6a774b`, which is the instruction
 after the call into the hypercall page - an ordinary return. The
 settled trace begins at the interrupt stub. That difference is the
 livelock arriving, and it is visible in one address.
+
+### The first measurement of the gap, and it is not what a starved guest looks like
+
+`clock_gap_buckets` on the rig, 4,650 gaps in the boot phase:
+
+| bucket | at ~2.6 GHz | share |
+|---|---|---|
+| 2^24 | 6.5 - 12.9 ms | **81.6%** |
+| 2^25 | 12.9 - 25.8 ms | 4.6% |
+| 2^28 | 103 ms + | 6.0% |
+| 2^21 - 2^23 | 0.8 - 6.5 ms | 7.5% |
+
+So the clock interrupts are **six to thirteen milliseconds apart in
+real time**, which is the ordinary 64 Hz tick this guest programs
+first, give or take. The timer is not firing constantly and there is no
+backlog being replayed - the second of the two explanations the counter
+was built to separate is dead.
+
+**And that makes the twenty-instruction gap worse rather than better.**
+On the same boot, the trace armed at `HvCallVtlReturn` shows the guest
+executing *five* instructions after coming back from the secure call
+before the interrupt stub:
+
+```
+ntoskrnl+0x6a774b   movq 8(%rsp), %rdx
+ntoskrnl+0x6a7750   movq %rbx, (%rdx)
+ntoskrnl+0x6a7753   movdqu %xmm10, 8(%rdx)
+ntoskrnl+0x6a7759   movdqu %xmm11, 24(%rdx)
+ntoskrnl+0x6a775f   movdqu %xmm12, 40(%rdx)
+ntoskrnl+0xbbe948   pushq $-47
+```
+
+Five instructions is a few nanoseconds. Ten milliseconds separates the
+interrupts. The only way both are true is that **the round trip the
+guest just made consumed the whole period**: the clock ISR calls into
+the secure kernel, the call takes longer than a tick, and the next tick
+is already due when it returns. Nothing below CLOCK_LEVEL ever gets to
+run, so no deferred procedure call runs, so `ClassPnP`'s boot idle I/O
+never completes and ring 3 is never reached.
+
+That is a complete causal chain from a cost to the symptom, and every
+link in it is measured rather than argued:
+
+1. a `HvCallVtlCall`/`HvCallVtlReturn` round trip costs this VMM more
+   than one guest clock period;
+2. so the clock interrupt is pending again within a few instructions of
+   the previous one being dismissed;
+3. so the guest is at CLOCK_LEVEL or DISPATCH_LEVEL on 95 per cent of
+   its entries;
+4. so the DISPATCH_LEVEL software interrupt it requests about 250 times
+   a second is delivered zero times;
+5. so no deferred procedure call runs, and the boot's remaining work is
+   all deferred procedure calls.
+
+**What this does not settle is where the round trip's cost is.** The
+per-exit figures - 423,101 cycles in `reflect_l2_exit`, 200,956 in
+`save_l2_state` - are dominated by VMREAD and VMWRITE trapping to the
+layer below at about 4,340 cycles each, which is the rig's own tax and
+not a number that exists on bare metal. Whether the round trip is
+expensive because of *that* or because of how many second-level exits
+it takes is the next thing to measure, and it is the difference between
+"this rig cannot run this guest" and "this VMM reflects more than it
+needs to".
+
+The measurement is a counter, not a boot: exits and cycles between one
+`HvCallVtlCall` and its matching `HvCallVtlReturn`, and again between
+that return and the next call. Both halves are already identifiable -
+`capture_vtl_switch` runs on exactly those two exits.
