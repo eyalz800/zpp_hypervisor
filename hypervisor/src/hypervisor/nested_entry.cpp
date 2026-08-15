@@ -3058,18 +3058,56 @@ void hypervisor::host_write(std::size_t cpu,
     // sequence of writes below is fixed by the code and not by the
     // guest, so slot N is the same field on every call and the audit
     // above can compare across reflections without carrying a lookup.
-    if (cpu < max_cpus) {
-        if (auto index = this->l1_host_written[cpu];
-            index < l1_host_field_count) {
-            this->l1_host_field[cpu][index] =
-                static_cast<std::uint64_t>(which);
-            this->l1_host_value[cpu][index] = value;
-        }
-
-        this->l1_host_written[cpu] = this->l1_host_written[cpu] + 1;
+    if (cpu >= max_cpus) {
+        this->vmcs.write(which, value);
+        return;
     }
 
+    auto index = this->l1_host_written[cpu];
+    this->l1_host_written[cpu] = index + 1;
+
+    if (index >= l1_host_field_count) {
+        this->vmcs.write(which, value);
+        return;
+    }
+
+    // Three conditions, and none of them is optional.
+    //
+    // The same field in the same slot, because the index is call order
+    // and a changed code path would otherwise compare against another
+    // field's value. The same value, because vmcs12's host state is the
+    // guest hypervisor's to change and a new value is always owed. And
+    // the audit's verdict, because "the processor left our write alone"
+    // is the only thing that makes not repeating it a no-op rather than
+    // a skipped write.
+    //
+    // SDM 30.3.2 is why the first two are not enough on their own: every
+    // VM exit saves the guest hypervisor's own state over these fields,
+    // so a cache of what was last written describes something the
+    // processor may have overwritten. What the audit adds is the
+    // measurement that, for these particular fields, what it writes back
+    // is the identical value. See `l1_host_samples`.
+    if ((this->l1_host_field[cpu][index] ==
+         static_cast<std::uint64_t>(which)) &&
+        (this->l1_host_value[cpu][index] == value) &&
+        host_field_elidable(cpu, index)) {
+        this->l1_host_elided[cpu] = this->l1_host_elided[cpu] + 1;
+        return;
+    }
+
+    this->l1_host_field[cpu][index] = static_cast<std::uint64_t>(which);
+    this->l1_host_value[cpu][index] = value;
+
     this->vmcs.write(which, value);
+}
+
+bool hypervisor::host_field_elidable(std::size_t cpu,
+                                     std::size_t index) const
+{
+    // Checked often enough, and never once wrong. Both halves matter:
+    // a slot nobody has audited yet is not stable, it is unmeasured.
+    return (this->l1_host_samples[cpu][index] >= l1_host_stable_after) &&
+           (0 == this->l1_host_changed[cpu][index]);
 }
 
 void hypervisor::load_l1_host_state(std::size_t cpu)
@@ -3101,16 +3139,41 @@ void hypervisor::load_l1_host_state(std::size_t cpu)
     // the difference between "stable when I looked" and "stable".
     if (cpu < max_cpus) {
         if (auto recorded = this->l1_host_count[cpu]; 0 != recorded) {
-            auto index = this->l1_host_audits[cpu] % recorded;
+            // A batch rather than a single slot, because the elision
+            // below is live between one check of a slot and the next.
+            // See `l1_host_audit_batch`.
+            for (std::size_t taken{}; taken < l1_host_audit_batch;
+                 ++taken) {
+                auto index = this->l1_host_audits[cpu] % recorded;
+                this->l1_host_audits[cpu] = this->l1_host_audits[cpu] + 1;
 
-            auto now = vmcs.read(
-                static_cast<field>(this->l1_host_field[cpu][index]));
+                auto now = vmcs.read(
+                    static_cast<field>(this->l1_host_field[cpu][index]));
 
-            if (now != this->l1_host_value[cpu][index]) {
-                this->l1_host_changed[cpu][index] += 1;
+                if (now != this->l1_host_value[cpu][index]) {
+                    // Loudly, and once: a slot that diverges after
+                    // being elided means the reasoning that licensed
+                    // the elision was wrong, and that is worth a line
+                    // in the log rather than a counter nobody reads.
+                    if ((0 == this->l1_host_changed[cpu][index]) &&
+                        (this->l1_host_samples[cpu][index] >=
+                         l1_host_stable_after)) {
+                        this->l1_host_diverged[cpu] =
+                            this->l1_host_diverged[cpu] + 1;
+
+                        log("cpu {} host field {} diverged after being "
+                            "elided: wrote {}, found {}",
+                            cpu,
+                            this->l1_host_field[cpu][index],
+                            this->l1_host_value[cpu][index],
+                            now);
+                    }
+
+                    this->l1_host_changed[cpu][index] += 1;
+                }
+
+                this->l1_host_samples[cpu][index] += 1;
             }
-
-            this->l1_host_audits[cpu] = this->l1_host_audits[cpu] + 1;
         }
 
         this->l1_host_written[cpu] = 0;

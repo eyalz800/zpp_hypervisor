@@ -4351,6 +4351,13 @@ private:
     void mark_vtl_half(std::size_t cpu, std::size_t kind);
 
     /**
+     * Whether a `load_l1_host_state` slot has been audited often enough,
+     * and never once found changed, for its write to be skipped. See
+     * `l1_host_samples`.
+     */
+    bool host_field_elidable(std::size_t cpu, std::size_t index) const;
+
+    /**
      * Reads vmcs02's entry-interruption field back at the last
      * instruction before entry, and counts an entry that carries
      * nothing while the guest could have taken a deferred procedure
@@ -5359,6 +5366,44 @@ private:
     std::uint64_t l1_host_written[max_cpus]{};
     std::uint64_t l1_host_count[max_cpus]{};
     std::uint64_t l1_host_audits[max_cpus]{};
+
+    /**
+     * How many times each slot has been audited, and the elision the
+     * audit licenses.
+     *
+     * A slot is elided only once it has been *checked* `l1_host_stable_
+     * after` times with `l1_host_changed` still zero - so the elision is
+     * never an assumption, it is a claim the audit has already tested at
+     * that slot and can go on testing. Measured on the rig before this
+     * existed: 48 of 52 slots never diverged across 84,846 samples, and
+     * the four that do are `guest_rip` and `guest_rflags` every time
+     * plus two segment limits at about 2%.
+     *
+     * **The audit is the whole safety argument and is never compiled
+     * out.** A silently wrong elision here resumes the guest hypervisor
+     * with a stale control register or segment, which is the worst
+     * failure this path has available; the counter that would catch it
+     * must not be the thing that gets switched off.
+     *
+     * Audited in batches rather than one slot a reflection, and that is
+     * the risk window rather than a refinement: sampling one of 52 slots
+     * per reflection leaves a slot unchecked for 52 reflections, and an
+     * elision is live throughout it. Four a reflection costs four
+     * VMREADs against forty-eight VMWRITEs saved and shortens the window
+     * to thirteen.
+     *
+     * A slot that ever diverges has `l1_host_changed` set for ever, so
+     * it stops being elidable permanently rather than recovering - the
+     * safe direction, since one divergence means the reasoning was
+     * wrong and not that the field is merely busy.
+     * @{
+     */
+    static constexpr std::uint64_t l1_host_stable_after = 64;
+    static constexpr std::size_t l1_host_audit_batch = 4;
+
+    std::uint64_t l1_host_samples[max_cpus][l1_host_field_count]{};
+    volatile std::uint64_t l1_host_elided[max_cpus]{};
+    volatile std::uint64_t l1_host_diverged[max_cpus]{};
     /** @} */
 
     /**

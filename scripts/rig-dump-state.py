@@ -600,7 +600,8 @@ def dump_l1_host_audit(args, elf, instance):
     could have.
     """
     members = ["l1_host_field", "l1_host_changed", "l1_host_count",
-               "l1_host_audits"]
+               "l1_host_audits", "l1_host_samples", "l1_host_elided",
+               "l1_host_diverged"]
     off = gdb_offsets(elf, members)
     slots = gdb_values(elf, [
         "sizeof(('zpp::hypervisor::hypervisor' *)0)->l1_host_field[0] / 8"
@@ -609,7 +610,9 @@ def dump_l1_host_audit(args, elf, instance):
     reader = Monitor(args.rig, args.port)
     for member in ("l1_host_field", "l1_host_changed"):
         reader.queue(instance + off[member], args.cpus * slots)
-    for member in ("l1_host_count", "l1_host_audits"):
+    reader.queue(instance + off["l1_host_samples"], args.cpus * slots)
+    for member in ("l1_host_count", "l1_host_audits", "l1_host_elided",
+                   "l1_host_diverged"):
         reader.queue(instance + off[member], args.cpus)
     got = reader.run()
 
@@ -627,10 +630,17 @@ def dump_l1_host_audit(args, elf, instance):
                 for i in range(min(used, slots))]
         stable = [r for r in rows if 0 == r[2]]
 
+        elided = word("l1_host_elided", cpu)
+        diverged = word("l1_host_diverged", cpu)
+
         print(f"\ncpu {cpu} load_l1_host_state audit "
               f"({used} fields written, {audits:,} samples)")
         print(f"  {len(stable)} of {len(rows)} slots never observed "
               f"changed - those writes are the elidable set")
+        print(f"  writes elided: {elided:,}")
+        print(f"  DIVERGED AFTER ELISION: {diverged:,}"
+              + ("   <- the safety property failed, read the log"
+                 if diverged else "   (the safety property holds)"))
         for index, encoding, changed in rows:
             if changed:
                 print(f"    slot {index:>2}  field 0x{encoding:04x}  "

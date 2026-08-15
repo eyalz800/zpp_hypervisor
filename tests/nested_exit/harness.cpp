@@ -2750,6 +2750,73 @@ static void test_l0_precedence()
         hv().stepping_watch[cpu] = false;
     }
 
+    // Eliding a host-state write, which is only safe while the audit
+    // says the processor leaves that slot alone. See `l1_host_samples`.
+    {
+        auto & h = hv();
+        constexpr auto slot = std::size_t{0};
+        constexpr auto some = field::guest_cr3;
+
+        auto reset = [&] {
+            h.l1_host_written[cpu] = 0;
+            h.l1_host_field[cpu][slot] = 0;
+            h.l1_host_value[cpu][slot] = 0;
+            h.l1_host_samples[cpu][slot] = 0;
+            h.l1_host_changed[cpu][slot] = 0;
+            h.l1_host_elided[cpu] = 0;
+        };
+
+        // Unmeasured is not stable. A fresh slot must be written even
+        // when the value repeats, or the very first reflection of a
+        // boot would elide against a table it has never checked.
+        reset();
+        h.host_write(cpu, some, 0x1234);
+        h.l1_host_written[cpu] = 0;
+        h.host_write(cpu, some, 0x1234);
+        check(0 == h.l1_host_elided[cpu],
+              "a slot the audit has not yet checked is unmeasured, not "
+              "stable, and its write is never skipped");
+
+        // Audited enough, never changed: elidable.
+        h.l1_host_samples[cpu][slot] = hypervisor_t::l1_host_stable_after;
+        h.l1_host_written[cpu] = 0;
+        h.host_write(cpu, some, 0x1234);
+        check(1 == h.l1_host_elided[cpu],
+              "a slot checked often enough and never found changed has "
+              "its repeated write skipped");
+
+        // A new value is always owed, however stable the slot.
+        h.l1_host_written[cpu] = 0;
+        h.host_write(cpu, some, 0x5678);
+        check(1 == h.l1_host_elided[cpu],
+              "a changed value is written even on a stable slot - "
+              "vmcs12's host state is the guest hypervisor's to change");
+        check(0x5678 == h.l1_host_value[cpu][slot],
+              "and the cache follows it");
+
+        // A different field in the same slot must not match the cache.
+        h.l1_host_samples[cpu][slot] = hypervisor_t::l1_host_stable_after;
+        h.l1_host_written[cpu] = 0;
+        h.host_write(cpu, field::guest_cr4, 0x5678);
+        check(1 == h.l1_host_elided[cpu],
+              "the slot index is call order, so a different field in it "
+              "is compared against another field's value and must be "
+              "written");
+
+        // One divergence disables the slot for ever.
+        h.l1_host_field[cpu][slot] = static_cast<std::uint64_t>(some);
+        h.l1_host_value[cpu][slot] = 0x1234;
+        h.l1_host_changed[cpu][slot] = 1;
+        h.l1_host_written[cpu] = 0;
+        h.host_write(cpu, some, 0x1234);
+        check(1 == h.l1_host_elided[cpu],
+              "a slot that ever diverged is never elided again - one "
+              "divergence means the reasoning was wrong, not that the "
+              "field is busy");
+
+        reset();
+    }
+
     // The instruction trace of the trust-level loop, which is this VMM's
     // own and belongs to neither level. See `vtl_step_rip`.
     {
