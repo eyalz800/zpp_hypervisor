@@ -4881,6 +4881,20 @@ private:
      */
     static constexpr std::size_t vtl_assist_size = 512;
 
+    /**
+     * The distinct instruction pointers the second-level guest is
+     * *entered* at, with counts. See the comment at the fill site: this
+     * separates "the guest is looping in its own software" from "the
+     * guest hypervisor is resuming it at the VMCALL it never advanced
+     * past", and nothing else this VMM records does.
+     */
+    static constexpr std::size_t l2_entry_rip_slots = 8;
+
+    std::uint64_t l2_entry_rip[max_cpus][l2_entry_rip_slots]{};
+    volatile std::uint64_t l2_entry_rip_count[max_cpus]
+                                             [l2_entry_rip_slots]{};
+    volatile std::uint64_t l2_entry_rip_other[max_cpus]{};
+
     std::uint64_t l2_vp_assist[max_cpus][2]{};
     std::uint64_t l2_vp_assist_eptp[max_cpus][2]{};
     std::uint8_t vtl_assist[vtl_kinds][2][vtl_assist_size]{};

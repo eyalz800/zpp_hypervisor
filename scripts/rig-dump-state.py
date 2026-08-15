@@ -365,6 +365,46 @@ def load_field_names():
 VMCS_FIELD = load_field_names()
 
 
+def dump_entry_rips(args, elf, instance):
+    """The distinct instruction pointers the guest is entered at.
+
+    Two of them, alternating, with the counts equal, is a guest that
+    never executes anything: it is being resumed at the VMCALL it exited
+    on.  Many of them is a guest that is executing and looping in its own
+    software.  Nothing else distinguishes those.
+    """
+    off = gdb_offsets(elf, ["l2_entry_rip", "l2_entry_rip_count",
+                            "l2_entry_rip_other"])
+    slots = gdb_values(elf, [
+        "sizeof(('zpp::hypervisor::hypervisor' *)0)->l2_entry_rip[0] "
+        "/ sizeof(('zpp::hypervisor::hypervisor' *)0)"
+        "->l2_entry_rip[0][0]"])[0]
+
+    reader = Monitor(args.rig, args.port)
+    for member in ("l2_entry_rip", "l2_entry_rip_count"):
+        reader.queue(instance + off[member], args.cpus * slots)
+    reader.queue(instance + off["l2_entry_rip_other"], args.cpus)
+    got = reader.run()
+
+    def word(member, index):
+        return got.get(instance + off[member] + 8 * index, 0)
+
+    for cpu in range(args.cpus):
+        rows = [(word("l2_entry_rip_count", cpu * slots + i),
+                 word("l2_entry_rip", cpu * slots + i))
+                for i in range(slots)]
+        rows = [r for r in rows if r[0]]
+        if not rows:
+            continue
+        total = sum(c for c, _ in rows) or 1
+        print(f"\ncpu {cpu} second-level entry rips "
+              f"({total:,} entries, {len(rows)} distinct, "
+              f"{word('l2_entry_rip_other', cpu):,} beyond the table)")
+        for count, rip in sorted(rows, reverse=True):
+            print(f"  0x{rip:016x}  {count:>10}  "
+                  f"{100.0 * count / total:5.1f}%")
+
+
 def dump_vtl(args, elf, instance):
     """The trust-level switch loop: whether it advances, and who calls it.
 
@@ -652,6 +692,7 @@ def main():
             print(f"{cpu:3d}  {name:<20} {calls:10d}  {cycles:12d}  "
                   f"{cycles // calls:11d}")
 
+    dump_entry_rips(args, args.elf, instance)
     dump_vtl(args, args.elf, instance)
 
     print("\ncpu  guest-state skipped/done   control skipped/done")
