@@ -14080,3 +14080,40 @@ Two things it should distinguish, because they want opposite fixes:
   trust levels' views of that page differ - they have separate guest
   extended-page-table roots here, `0x101b1b01e` and `0x101b1e01e`, each
   with its own shadow.
+
+### The VP assist page is enabled and empty
+
+Read from inside on 2026-08-15, at both sides of the switch, with the
+outcome of the read recorded rather than inferred - the first attempt
+came back all zeroes and would otherwise have been written down as "the
+page is empty" when it might equally have been a read that failed on its
+first quadword.
+
+| side | context | result |
+|---|---|---|
+| `HvCallVtlCall` | VTL0, eptp `0x101b1b01e` | **512 bytes read, no error**, translation identity, and every quadword **zero** |
+| `HvCallVtlReturn` | VTL1, eptp `0x101b1e01e` | **0 bytes**, `l2_physical_to_l1` refused with code 0x10 |
+
+So two things, and they are separate.
+
+**The page is genuinely empty.** `HV_X64_MSR_VP_ASSIST_PAGE` reads
+`0x117a1f001` - enabled, guest physical `0x117a1f000` - and the guest
+hypervisor is what maintains that page on its guest's behalf. Nothing
+has ever been written into it, including the VTL control structure at
+offset 0x100 that carries the entry reason. The read is known good: the
+same path reads the virtual-APIC page eight pages below it, at
+`0x117a17000`, and gets a task priority that varies across 0x00, 0x20
+and 0xd0.
+
+**And the two levels' views of it are disjoint.** The address does not
+translate at all under the second trust level's extended-page-table
+root, which is consistent with a restricted view and is not by itself a
+defect - but it does mean nothing about that page can be shared between
+them, and it is why the second level's own copy could not be read here.
+
+Neither the registers, nor the stack, nor this page carries anything
+that advances between iterations. What has *not* been ruled out is that
+the second trust level keeps its own VP assist page, configured by a
+write this VMM has seen exactly once: `l2_synthetic_msr_writes` for slot
+0x73 is **1** for the whole boot. If only one of the two levels ever
+configured one, the other is being entered with no way to be told why.
