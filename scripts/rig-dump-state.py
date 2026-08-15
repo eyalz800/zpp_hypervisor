@@ -504,8 +504,13 @@ def dump_priority(args, elf, instance):
                   f"({total:,} gaps, TSC 1.992 GHz measured)")
             for i, v in gaps:
                 low = 1 << i
-                print(f"    2^{i:<2} ({low / 1992.0:10.2f} - "
-                      f"{2.0 * low / 1992.0:.2f} ms)  {v:>10}  "
+                # Counts divided by MHz are MICROSECONDS. This
+                # printed "ms" while dividing by 1992, which is the
+                # third unit slip in this reader in one session - after
+                # the 2.6 GHz constant and the unlabelled dead field.
+                # 2^21 counts is 1.05 ms, and the label said 1052 ms.
+                print(f"    2^{i:<2} ({low / 1992000.0:8.2f} - "
+                      f"{2.0 * low / 1992000.0:.2f} ms)  {v:>10}  "
                       f"{100.0 * v / total:5.1f}%")
 
         # PPR, not TPR, is what an arriving interrupt's class must

@@ -16829,3 +16829,50 @@ there was not. **A well-written refutation in this tree usually says
 what would change its mind; that sentence is the valuable half and it is
 the one that gets skipped.** When a comment refuses something, read to
 the end of the argument before recording the refusal as a finding.
+
+## Item 1 measured, against the predictions written before it
+
+| # | predicted | measured | |
+|---|---|---|---|
+| 1 | ~48 elided per reflection after ~832 reflections | **50.7 per reflection**, warm-up ~53,000 | correct after the threshold rose |
+| 2 | `l1_host_diverged` stays 0 | **1 on the first boot**, 0 after the fix | **wrong, and the audit caught it** |
+| 3 | `load_l1_host_state` 30,000-45,000 cycles | **40,450** (from 135,804) | correct |
+| 4 | per-exit cost down 12-16% | **~13.6%** | correct |
+| 5 | tick regime does not move | still re-arms to 1.74 ms | correct |
+| 6 | neither symptom shifts | ring 3 still zero | correct |
+| 7 | the circle does not turn | it does not | correct |
+
+The cleanest figure is the one that is regime-independent, because it is
+per call: **`load_l1_host_state` fell from 135,804 cycles to 40,450, a
+70% reduction on that phase.** Within the same boot, `reflect_l2_exit`
+fell from 430,524 before the warm-up completed to 323,292 after - 25% -
+and it is about 54% of the per-exit cost, which is where the ~13.6%
+comes from.
+
+**Prediction 4 is the one to be careful with.** The whole-phase totals
+across boots are confounded: `build_vmcs02` reads *higher* after
+(162,430 against 134,464) purely because that boot was in the
+extended-page-table fill regime, not because anything got slower. The
+within-boot `reflect_l2_exit` comparison is the honest one and it is
+what the 13.6% rests on.
+
+**Predictions 5, 6 and 7 held, which is the point of having written them
+down.** The guest still re-arms to its 1.74 ms tick, ring 3 is still
+never reached, and the spinner is still frozen. That is this change
+behaving exactly as specified - worth about 1.15x against a requirement
+bracketed at (1, 9] - and **not a fix that failed**.
+
+### A third unit slip in the same reader, in one session
+
+The clock-gap buckets printed `1052.79 - 2105.57 ms`. Counts divided by
+MHz are **microseconds**: 2^21 counts is 1.05 ms, and the label was out
+by a thousand.
+
+That is the third label defect in `rig-dump-state.py` in this session -
+after the 2.6 GHz constant where the TSC is 1.992, and the unlabelled
+dead VPPR field. All three were mine, all three printed confidently, and
+none of them changed a bucket boundary or a conclusion. They are worth
+recording anyway, because the pattern is the same one this file keeps
+naming: **the reader is as much a place for a silent lie as the
+hypervisor is**, and it gets far less scrutiny because it is "just a
+script".
