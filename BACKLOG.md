@@ -17263,3 +17263,37 @@ Note the guard held: two module loads, which is what a healthy boot
 does, against the sixteen the `=8` run produced. The perturbation at 2x
 is far smaller and the installation was never at risk in the way the
 earlier run put it.
+
+### And it is not merely unstuck - it is working
+
+Later in the same boot, the guest reaches `KiIdleLoop`: `hlt` becomes
+5.5% of exits, 42,269 of them, resuming each time at `ntoskrnl`+0x6a6f8f.
+**Windows executing HLT is a system with nothing to do at this instant**,
+which the livelocked boot never once was.
+
+Then it picks up again. A 90-second window, taken after that:
+
+```
+exits          +456,867      l2 entries +51,031
+ept-violation  +311,283      shadow fills - new memory being touched
+vmcall          +48,519      24,260 trust-level round trips
+vmptrld         +29,888
+invept          +10,469      the level above changing its own tables
+0xd1 +2,258   0x40 +961   0x2f +2
+```
+
+Three hundred thousand extended-page-table fills and ten thousand
+INVEPTs in ninety seconds is **hypervisor-enforced code integrity
+validating and protecting pages** - the work virtual secure mode exists
+to do, and work that had never started in any unstretched boot. Task
+priority is now `0x00` on **41.6%** of entries, and the deferred-call
+storm is gone.
+
+So the guest at 2x is not sitting in a different stall. It got past the
+`ClassPnP` boot idle-I/O wall this file has been describing for
+twenty-six boots, idled, and went on to the next phase of a virtual
+secure mode boot.
+
+**Ring 3 is still not reached**, and the boot has plenty left to do -
+but for the first time the failure is "not finished yet" rather than
+"executing two instruction addresses for ever".
