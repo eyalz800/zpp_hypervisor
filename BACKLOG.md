@@ -17482,3 +17482,27 @@ reset-looped. A change whose correctness depends on ordering cannot be
 validated by a unit test of its predicates - and a suite that cannot
 represent the ordering cannot be fixed by adding more predicates to it.
 The shim was the actual gap.
+
+### Predictions for the boot
+
+1. **No reset loop.** Module loads stay at 2. This is the one that
+   decides whether the sequence test earned its keep.
+2. `guest_state_defers` about one per second-level exit;
+   `guest_state_materialises` **0 or near it**, since none of the
+   sixteen fields the level above reads is in the deferred set.
+3. `guest_state_dirty_writes` in the hundreds, tracking the 494 VMWRITEs
+   a boot contains.
+4. `save_l2_state` falls from ~198,000 cycles a call to
+   **~46,000-90,000**.
+5. Per-exit cost down a further **13-17%**; with item 1 banked, about
+   **1.35x** total.
+6. The tick regime still reaches 1.74 ms and `0xd0` stays high.
+7. **The circle does not turn.** 1.35x against a requirement bracketed
+   at (1, 2], where the banked 1.15x alone was measured not to move it.
+
+Before any counter is read, the boot is checked for a **damaged
+installation**: about 250 unclean resets have been put on it, and a
+confusing result could be Windows in recovery rather than anything about
+this change. The check is that the boot follows the same phases every
+healthy boot in this file does - firmware, loader, extended-page-table
+fill, then the clock regime - rather than a different shape.
