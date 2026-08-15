@@ -15341,3 +15341,33 @@ what its own hypervisor asked for. The fix is narrow - exclude 0x491
 from this VMM's contribution to the merge, or narrow the range this VMM
 intercepts for itself to the MSRs it actually answers - and the test is
 one boot.
+
+### The one bit is closed, and the stall is unchanged
+
+With the guest hypervisor's own bytes restored over 0x480-0x497, the
+second-level guest no longer exits on a read of `IA32_VMX_VMFUNC` that
+its own hypervisor left alone. Boot unchanged: ring 3 zero, same
+livelock.
+
+**So the whole "what does the second-level guest run under" surface is
+now exact.** Five dimensions, all closed by measurement rather than
+inspection:
+
+| dimension | result |
+|---|---|
+| pin-based controls | requested `0x3f`, granted `0x3f` |
+| primary controls | requested `0x96a069fe`, granted `0x96a069fe` |
+| secondary controls | requested `0x1010ae`, granted the same plus the ept/vpid this VMM must force |
+| exception bitmap | this VMM's own is `0x0`; zero exception exits all boot |
+| MSR bitmap | reduced from forty added bits to one, and that one now removed |
+
+Nothing the second-level guest executes under differs from what its own
+hypervisor described. That is a complete closure of a dimension, and it
+is worth as much as a fix would have been - it means the fault is not in
+*what* vmcs02 says, and everything still standing is in what this VMM
+*does* with the exits vmcs02 produces, or in state outside the VMCS
+entirely.
+
+The change stands regardless of the boot: reflecting an exit the level
+above never asked for is wrong whether or not it is what stops this
+particular guest.
