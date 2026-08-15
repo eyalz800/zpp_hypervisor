@@ -14630,3 +14630,42 @@ one page for an I/O, answering, and being asked again.
 registers captured, which sample the switch rather than this frame. That
 is the next thing to record, and it is a one-line addition to a capture
 that already exists.
+
+### The page the secure kernel names is mapped, and fully permitted
+
+```
+VtlReturn (VTL1): page 0x139fca000
+                  guest walk mapped -> 0x139fca000 (identity)
+                  shadow status 0, rights rwx
+VtlCall  (VTL0): slot +0x090 is zero on that side - nothing to look up
+```
+
+So the guest hypervisor's own tables map it, this VMM's shadow holds it,
+and it holds it **read-write-execute**. Nothing is being denied. That
+agrees with `reflected_permission` being 0 of 448,441 and it closes the
+hypothesis the capture was built for: the secure kernel is not waiting
+for a fault on that page, because there is nothing about that page that
+could fault.
+
+Eleven candidates are now dead by measurement, and every one of them was
+a mechanism this VMM implements. The pattern is worth stating plainly
+for whoever continues: **nothing this VMM presents to the guest
+hypervisor has been found wrong.** The instruction pointer, the dispatch
+vector, the threshold notification, the extended page tables, the shadow
+permissions, the page in question, the disk channel, the rendezvous
+counter - all correct, all checked against the SDM or against a counter,
+none of them the cause.
+
+That is itself a finding, and it changes what should be tried next.
+Continuing to audit mechanisms has a poor record here now. The
+experiment that splits the question instead of narrowing it is booting
+this same Windows with virtual secure mode disabled - `DeviceGuard\
+EnableVirtualizationBasedSecurity` cleared in the offline hive, with
+Hyper-V left on, so the goal is untouched. If the animation turns, the
+fault is specifically in what this VMM presents to the *secure kernel*
+and every mechanism above was correctly exonerated. If it does not, the
+trust-level loop has been a symptom for fifteen boots and the storage
+path is broken on its own.
+
+It writes to the real installation and there is no overlay, so it needs
+saying yes to first, and a copy of the hive taken before anything.
