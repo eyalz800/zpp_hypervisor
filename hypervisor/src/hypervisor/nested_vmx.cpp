@@ -1797,6 +1797,29 @@ bool hypervisor::on_guest_vmlaunch(std::size_t cpu,
     if (cpu < max_cpus) {
         auto rip = this->vmcs.guest_rip();
 
+        // Cleared every so often, so the table describes a *recent*
+        // window rather than the first eight addresses of the boot.
+        //
+        // Without this it answers nothing at all, and it answered
+        // nothing in a way that looked like an answer: the eight slots
+        // filled with early-boot addresses within the first moments, and
+        // every entry after that fell to the overflow counter - which
+        // then read 682,716 and was briefly taken for "the guest is
+        // entered at hundreds of thousands of addresses" when it means
+        // only "at more than the eight this table happened to catch
+        // first". A full fixed table cannot tell two distinct values
+        // from a million.
+        constexpr std::uint64_t epoch = 1u << 16;
+
+        if (0 == (this->l2_entries[cpu] % epoch)) {
+            for (std::size_t i{}; i < l2_entry_rip_slots; ++i) {
+                this->l2_entry_rip[cpu][i] = 0;
+                this->l2_entry_rip_count[cpu][i] = 0;
+            }
+
+            this->l2_entry_rip_other[cpu] = 0;
+        }
+
         for (std::size_t i{}; i < l2_entry_rip_slots; ++i) {
             if (this->l2_entry_rip[cpu][i] == rip) {
                 this->l2_entry_rip_count[cpu][i] =
