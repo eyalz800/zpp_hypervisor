@@ -411,10 +411,25 @@ std::uint64_t hypervisor::nested_vmx_capability_msr(std::size_t msr)
         return hardware & nested_vmx::supported_ept_vpid_capabilities;
 
     case vmx_msr::vm_functions:
-        // Zero: no VM functions. The secondary control that enables
-        // VMFUNC is not offered either, and VMFUNC itself raises #UD with
-        // that control clear.
-        return 0;
+        // VM-function 0, extended-page-table pointer switching, and
+        // nothing else.
+        //
+        // This used to answer zero, on the grounds that the secondary
+        // control enabling VMFUNC was not offered either - a consistent
+        // pair, and the wrong one. Virtual secure mode switches trust
+        // level by switching the pointer, and where the processor
+        // offers VMFUNC it does that with no hypercall at all; withheld,
+        // the guest hypervisor falls back to the hypercall path, which
+        // is the pair measured alternating for ever on the rig.
+        //
+        // Backed rather than claimed: `on_l2_exit` answers the exit,
+        // reading the guest hypervisor's own list and translating each
+        // entry through `shadow_ept_pointer_for` before the hardware
+        // sees it, and `build_vmcs02` forces vmcs02's VM-function
+        // controls to zero so the processor can never take the switch
+        // itself. The layer below grants it - IA32_VMX_VMFUNC reads 1
+        // on this rig - so this is a capability held and passed on.
+        return 1;
 
     default:
         // Every index in the range is named above. Reaching here means

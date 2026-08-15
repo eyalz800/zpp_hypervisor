@@ -4915,6 +4915,14 @@ private:
     /** Entries where the threshold was armed and SDM 27.6.7's
      * condition held, against those where it was armed and the guest
      * was already at or above it. See the fill site. */
+    /** VMFUNC from the second-level guest: how many, how many were
+     * refused with #UD, and how many switched the extended-page-table
+     * pointer. Refused rising with switched at zero means the guest
+     * hypervisor publishes a list this VMM cannot follow. */
+    volatile std::uint64_t l2_vmfunc_calls[max_cpus]{};
+    volatile std::uint64_t l2_vmfunc_refused[max_cpus]{};
+    volatile std::uint64_t l2_vmfunc_switched[max_cpus]{};
+
     volatile std::uint64_t l2_tpr_would_fire[max_cpus]{};
     volatile std::uint64_t l2_tpr_armed_above[max_cpus]{};
 

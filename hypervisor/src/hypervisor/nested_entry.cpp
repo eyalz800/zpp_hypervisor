@@ -156,6 +156,7 @@ constexpr std::uint64_t signed_scaled_product(std::uint64_t left,
 }
 /** @} */
 constexpr std::uint64_t secondary_mode_based_execute = 1ull << 22;
+constexpr std::uint64_t secondary_enable_vmfunc = 1ull << 13;
 /**
  * @}
  */
@@ -1702,9 +1703,25 @@ std::expected<void, zpp::error> hypervisor::build_vmcs02(std::size_t cpu)
         (secondary01 | secondary12) &
         ~(secondary_mode_based_execute | secondary_unrestricted_guest);
 
-    secondary |= secondary12 & (secondary_unrestricted_guest |
-                                secondary_mode_based_execute);
+    secondary |= secondary12 &
+                 (secondary_unrestricted_guest |
+                  secondary_mode_based_execute | secondary_enable_vmfunc);
     secondary |= secondary_enable_ept | secondary_enable_vpid;
+
+    // And the VM-function controls, which are **always zero** in vmcs02
+    // however the guest hypervisor sets its own.
+    //
+    // This is the safety property the whole feature rests on. With the
+    // enabling control set and the function controls clear, every VMFUNC
+    // the second-level guest executes takes an exit - SDM 26.5.5, a
+    // function whose bit is clear in the VM-function controls causes a
+    // VM exit - and `on_l2_exit` translates the guest hypervisor's
+    // pointer into the shadow built from it. Let the bit through
+    // instead and the processor loads an entry from the guest
+    // hypervisor's own list straight into the real pointer, running a
+    // guest against unshadowed tables: not a stall to debug, a machine
+    // that stops.
+    write_vmcs02_control(cpu, field::vm_function_controls, 0);
 
     auto secondary02 = arch::x86_64::vmx::adjust_msr(
         this->cached_vmx_msr(vmx_msr::processor_based_contorls_2),
@@ -6327,6 +6344,85 @@ hypervisor::on_l2_exit(std::size_t cpu,
     // `nested_vmx_reflect_vmexit` and is the order that matters: an exit
     // this VMM must have is one no reflection may take away, and only
     // after that does the guest hypervisor's own configuration decide.
+    // VMFUNC, function 0: extended-page-table pointer switching.
+    //
+    // **This is ours to answer and must never be the processor's.**
+    // vmcs02's VM-function controls are forced to zero in
+    // `build_vmcs02`, so every VMFUNC the second-level guest executes
+    // takes this exit rather than the processor loading a pointer
+    // itself - which is the whole safety property. The list the guest
+    // hypervisor publishes holds *its* extended-page-table pointers,
+    // and loading one of those into the real pointer would run a guest
+    // against unshadowed tables. Nothing about that failure is
+    // debuggable: it is not a stall, it is a machine that stops.
+    //
+    // SDM 26.5.5.3, "EPTP Switching": EAX selects the function, ECX
+    // indexes the list at the EPTP-list address, and the entry is used
+    // as the new extended-page-table pointer. A function that fails
+    // raises #UD rather than reporting anything, which is also what an
+    // out-of-range index or an absent list gets here.
+    if (basic_reason::vmfunc == reason.basic()) {
+        constexpr std::uint64_t eptp_switching = 0;
+        constexpr std::uint64_t list_entries = 512;
+
+        auto & shadow = this->guest_vmcs12[cpu];
+        auto function = context.rax & 0xffffffff;
+        auto index = context.rcx & 0xffffffff;
+        auto list = shadow.read(field::eptp_list_address);
+
+        this->l2_vmfunc_calls[cpu] = this->l2_vmfunc_calls[cpu] + 1;
+
+        if ((eptp_switching != function) || (index >= list_entries) ||
+            (0 == list)) {
+            this->l2_vmfunc_refused[cpu] =
+                this->l2_vmfunc_refused[cpu] + 1;
+            inject_invalid_opcode_exception();
+            advance_rip = false;
+            return l2_exit_outcome::handled;
+        }
+
+        std::uint64_t eptp12{};
+
+        if (!read_guest_physical(
+                list + (index * sizeof(eptp12)),
+                std::span(reinterpret_cast<std::byte *>(&eptp12),
+                          sizeof(eptp12))) ||
+            (0 == eptp12)) {
+            this->l2_vmfunc_refused[cpu] =
+                this->l2_vmfunc_refused[cpu] + 1;
+            inject_invalid_opcode_exception();
+            advance_rip = false;
+            return l2_exit_outcome::handled;
+        }
+
+        // Through the same cache every other entry uses, so a pointer
+        // switched to here and one entered with resolve to the same
+        // shadow - `shadow_ept_pointer_for` keys by the guest's own
+        // pointer, which is what makes that true.
+        auto pointer = shadow_ept_pointer_for(cpu, eptp12);
+        if (!pointer) {
+            this->l2_vmfunc_refused[cpu] =
+                this->l2_vmfunc_refused[cpu] + 1;
+            inject_invalid_opcode_exception();
+            advance_rip = false;
+            return l2_exit_outcome::handled;
+        }
+
+        this->vmcs.ept_pointer(*pointer);
+
+        // And vmcs12's own field, because everything that walks the
+        // guest hypervisor's tables reads it from there - the fault
+        // path, `l2_physical_to_l1`, the capture. Leaving it stale
+        // would compose the next fault against the pointer the guest
+        // switched *away* from.
+        shadow.write(field::ept_pointer, eptp12);
+
+        this->l2_vmfunc_switched[cpu] = this->l2_vmfunc_switched[cpu] + 1;
+
+        advance_rip = true;
+        return l2_exit_outcome::handled;
+    }
+
     if (l0_wants_l2_exit(cpu, reason, context)) {
         this->l2_exits_handled[cpu] = this->l2_exits_handled[cpu] + 1;
         return l2_exit_outcome::deferred;

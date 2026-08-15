@@ -366,6 +366,13 @@ void hypervisor::inject_general_protection_fault(std::uint64_t)
     ++g_general_protection_faults;
 }
 
+// The VMFUNC path in `on_l2_exit` refuses a function it cannot follow
+// with #UD - SDM 26.5.5 requires that of a VM function that fails - so
+// this harness needs the injector its sibling above already had.
+void hypervisor::inject_invalid_opcode_exception()
+{
+}
+
 /**
  * The two the guest-thread probe reaches through, refused rather than
  * answered.

@@ -52,6 +52,7 @@ static bool g_page_present_only = false;
 struct observations
 {
     std::uint64_t gp_faults{};
+    std::uint64_t ud_faults{};
     std::uint64_t ept_discards{};
     std::uint64_t ept_discards_for{};
     std::uint64_t last_discard_root{};
@@ -128,6 +129,17 @@ std::uint64_t & hypervisor::cached_vmx_msr(std::size_t msr)
 void hypervisor::inject_general_protection_fault(std::uint64_t)
 {
     g_observed.gp_faults = g_observed.gp_faults + 1;
+}
+
+// The VMFUNC path in `on_l2_exit` refuses a function it cannot follow
+// with #UD, which is what SDM 26.5.5 requires of a VM function that
+// fails, so this harness needs the injector its sibling above already
+// had. Counted rather than ignored: a refusal is the interesting
+// outcome, since offering VMFUNC and then refusing every call would be
+// the "announced and not answered" failure this tree keeps finding.
+void hypervisor::inject_invalid_opcode_exception()
+{
+    g_observed.ud_faults = g_observed.ud_faults + 1;
 }
 
 std::expected<std::uint64_t, zpp::error>

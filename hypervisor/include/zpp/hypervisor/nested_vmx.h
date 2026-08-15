@@ -626,8 +626,24 @@ constexpr std::uint64_t supported_secondary_controls =
     (1ull << 10) | // PAUSE-loop exiting.
     (1ull << 11) | // RDRAND exiting.
     (1ull << 12) | // Enable INVPCID.
-    (1ull << 16) | // RDSEED exiting.
-    (1ull << 20) | // Enable XSAVES/XRSTORS.
+
+    // Enable VMFUNC, SDM Table 25-7 bit 13.
+    //
+    // Virtual secure mode switches trust level by switching the
+    // extended-page-table pointer, and where the processor offers
+    // VMFUNC it does that without a hypercall at all. Withheld, the
+    // guest hypervisor falls back to the hypercall path - and that path
+    // is the HvCallVtlCall/HvCallVtlReturn pair measured alternating
+    // for ever with byte-identical state.
+    //
+    // Safe to offer because `build_vmcs02` forces vmcs02's VM-function
+    // *controls* to zero, so every VMFUNC exits to this VMM and the
+    // processor never loads a pointer itself. The list the guest
+    // hypervisor publishes holds its own pointers; each is translated
+    // through `shadow_ept_pointer_for` before anything reaches the
+    // hardware.
+    (1ull << 13) | (1ull << 16) | // RDSEED exiting.
+    (1ull << 20) |                // Enable XSAVES/XRSTORS.
 
     // Mode-based execute control, SDM Table 25-7 bit 22.
     //
