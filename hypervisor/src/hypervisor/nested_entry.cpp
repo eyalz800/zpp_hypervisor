@@ -1539,6 +1539,21 @@ std::expected<void, zpp::error> hypervisor::build_vmcs02(std::size_t cpu)
             cpu, field::virtual_apic_address, virtual_apic12);
         write_vmcs02_control(cpu, field::tpr_threshold, tpr_threshold12);
 
+        // A histogram of what the guest hypervisor arms, because the
+        // whole interrupt question turns on it and nothing recorded it.
+        //
+        // Vector 0x2f is asked for 297,465 times in a boot and delivered
+        // 1,116, and the guest hypervisor's own way of being told it may
+        // now deliver is the TPR-below-threshold exit - which fires
+        // 1,141 times, so every one that fires does produce a delivery.
+        // Either it never arms the notification, in which case the
+        // interrupt is its business and not ours, or it arms it and the
+        // exit does not fire, in which case the fault is here. An
+        // all-zero histogram says the first outright.
+        if (cpu < max_cpus) {
+            this->l2_tpr_threshold_seen[cpu][tpr_threshold12 & 0xf] += 1;
+        }
+
         // Kept so the task priority behind it can be read back. See
         // `interrupt_request_vtpr`.
         this->nested_virtual_apic_address[cpu] = virtual_apic12;

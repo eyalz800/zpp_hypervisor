@@ -4902,6 +4902,11 @@ private:
                                              [l2_entry_rip_slots]{};
     volatile std::uint64_t l2_entry_rip_other[max_cpus]{};
 
+    /** What the guest hypervisor arms as its TPR threshold, by value.
+     * All zero means it never asks to be told, so the undelivered
+     * dispatch vector is its business rather than this VMM's. */
+    volatile std::uint64_t l2_tpr_threshold_seen[max_cpus][16]{};
+
     std::uint64_t l2_vp_assist[max_cpus][2]{};
     std::uint64_t l2_vp_assist_eptp[max_cpus][2]{};
     std::uint8_t vtl_assist[vtl_kinds][2][vtl_assist_size]{};
