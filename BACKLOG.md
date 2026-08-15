@@ -14879,3 +14879,47 @@ gets exactly the previous behaviour. `tests/nested_vmx` asserts the
 pairing either way, so whichever is chosen is checked. **Deciding
 between the two is a real choice and should be made deliberately, not
 inherited.**
+
+## The next hypothesis, and it is one bit
+
+CPUID here is near pass-through - the real instruction runs and three
+bits are edited. One of them is the difference between the working
+baseline and the stall:
+
+```cpp
+if constexpr (pass_through_hypervisor_interface || announce_hypervisor) {
+    cpuid_result[2] |= (1u << 31);   // hypervisor present
+} else {
+    cpuid_result[2] &= ~(1u << 31);  // <- taken, both switches are off
+}
+```
+
+Both switches are **off** in every build this session, so leaf 1 ECX
+bit 31 is **cleared** and the guest hypervisor is told it is running on
+bare metal.
+
+**In the baseline measured today it is told the opposite.** Under KVM
+alone the bit is set - KVM announces itself unconditionally - and that
+Hyper-V boots Windows to ring 3 with virtual secure mode running. So the
+one configuration that works tells Hyper-V it is nested, and the one
+that stalls tells it it is not. The comment above the code already notes
+that "a guest that knows it is virtualized takes the nested path
+instead" and that "the reference this is being compared against
+announces itself unconditionally" - it just was never tested against the
+reference, because until today there was no baseline to compare with.
+
+Why it is plausible rather than merely different: a Hyper-V that
+believes it is on bare metal will use the hardware paths for virtual
+secure mode, and a nested one uses enlightened paths it knows a
+hypervisor beneath it can serve. Every measurement of the stall is
+consistent with the first - protections requested and expressed nowhere,
+a secure call answered instantly and identically for ever, no fault ever
+reflected.
+
+**The caution that makes this an experiment and not a fix**: setting the
+bit without `announce_hypervisor` means claiming a hypervisor is present
+and then faulting its MSRs, which `BACKLOG.md` and the code both record
+as having killed the guest outright - "announcing one and then faulting
+its MSRs" is this project's recurring mistake stated exactly. So the two
+have to move together, or the leaf 0x40000000 range has to answer
+before the bit is set.
