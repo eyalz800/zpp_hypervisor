@@ -14289,3 +14289,42 @@ things to establish are whether the threshold reaching vmcs02 is the one
 the guest hypervisor wrote at the moment it wrote it - the control-write
 cache in `write_vmcs02_control` sits between them - and whether the
 entry-time check is being reached at all.
+
+### The entry-condition probe does not work, and the zeros are not data
+
+First run of it: `l2_tpr_would_fire` **0** and `l2_tpr_armed_above`
+**0**, while the threshold histogram for the same boot shows 5,632
+entries armed at 2, 4 at threshold 4 and 80 at 0xd. The branch therefore
+ran 5,716 times and neither counter moved, which can only mean the
+`read_guest_physical` of the virtual task priority inside it failed
+every single time.
+
+So the two zeros say nothing about SDM 27.6.7's condition. They are the
+probe failing, and failing in the direction that looks like an answer -
+which is the specific trap this file has recorded twice already, once
+for `ZPP_STRETCH_GUEST_TIMER` reaching the compiler as its default and
+once for the VP assist page reading as all zeroes.
+
+The read works elsewhere: `save_l2_state` reads the same offset of the
+same page every exit and gets a priority that varies across 0x00, 0x20,
+0x40 and 0xd0. What differs here is where it is called from -
+`build_vmcs02`, which already reaches the mapping window through
+`merge_nested_bitmaps` on the same call. Whether that is a lock that is
+already held, a window already pointed elsewhere, or something else is
+not yet known, and the fix is to record the error rather than reason
+about it.
+
+Two things to do, in order, and the first is not optional:
+
+1. Record the failure code from that read, exactly as
+   `vtl_assist_error` does. A diagnostic whose failure is
+   indistinguishable from its negative result is worse than none.
+2. Once it reads, the split it was written for still stands: a
+   condition often true with no exit following means what reaches
+   vmcs02 is not doing what the VMCS says; never true means the
+   threshold is only armed while the guest is already above it and the
+   exit can only come from TPR virtualization during execution.
+
+The boot also re-confirms the finding it was meant to explain, on fresh
+numbers: threshold 2 armed 5,632 times, reason-43 exits **37**, vector
+0x2f injected **13**.
