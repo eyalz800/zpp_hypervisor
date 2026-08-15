@@ -33,6 +33,7 @@ is what makes an address comparable across boots - nothing else in the
 guest is at a stable address.
 """
 import argparse
+import concurrent.futures
 import os
 import re
 import subprocess
@@ -53,57 +54,49 @@ def llvm_mc():
     sys.exit("no llvm-mc on PATH; set ZPP_LLVM_MC")
 
 
-# Two bytes that decode to exactly one instruction and appear in no
-# valid prologue: `ud2`.  Prefixed to every block so the output can be
-# split back into blocks - llvm-mc emits a flat stream with no marker
-# for where one input line ended and the next began, and a block whose
-# bytes fail to decode would otherwise shift every block after it.
-SEPARATOR = bytes((0x0f, 0x0b))
-
-
-def decode(tool, blocks):
-    """One instruction per block, as (text, length), keyed by address.
-
-    Every block in one invocation, because a process per address is a
-    minute of fork for a trace this size.
-    """
-    stream = []
-    for raw in blocks.values():
-        stream.append(" ".join(f"0x{b:02x}" for b in SEPARATOR + raw))
+def decode_one(args):
+    """The first instruction of one block, as (text, length)."""
+    tool, raw = args
 
     out = subprocess.run(
         [tool, "--disassemble", "--triple=x86_64", "--show-encoding"],
-        input="\n".join(stream), capture_output=True, text=True).stdout
+        input=" ".join(f"0x{b:02x}" for b in raw),
+        capture_output=True, text=True).stdout
 
-    decoded = []
     for line in out.split("\n"):
         m = re.match(r"^\s*(.+?)\s*# encoding: \[(.*)\]\s*$", line)
         if not m:
             continue
         encoding = bytes(int(b, 16) for b in m.group(2).split(",") if b)
-        decoded.append((m.group(1).replace("\t", " "), encoding))
+        return (m.group(1).replace("\t", " "), len(encoding))
 
-    result = {}
-    at = 0
-    for address, raw in blocks.items():
-        while (at < len(decoded)) and (SEPARATOR != decoded[at][1]):
-            at += 1
-        at += 1
+    return None
 
-        if at >= len(decoded):
-            break
 
-        text, encoding = decoded[at]
+def decode(tool, blocks):
+    """One instruction per block, as (text, length), keyed by address.
 
-        # Checked rather than trusted: a block whose first bytes did not
-        # decode leaves the *next* separator as the next thing in the
-        # stream, and reporting that block's instruction for this one
-        # would be a plausible wrong answer of exactly the kind this
-        # file keeps having to warn about.
-        if encoding == raw[:len(encoding)]:
-            result[address] = (text, len(encoding))
+    **One process per block, and batching them is not available.**
+    llvm-mc decodes its input as one flat stream, does not restart at a
+    newline, and skips bytes it cannot decode without saying where - so
+    neither a separator nor an offset survives a block that ends
+    mid-instruction. Measured: a block ending that way swallowed the
+    next block's first bytes as an immediate and reported `movq
+    %gs:1208684304, %rax` for what was a separator plus a `movq`, and
+    padding the blocks apart instead left every offset after the first
+    warning wrong.
 
-    return result
+    A block is a hundred bytes of input, so this is a few seconds of
+    fork for a trace of two thousand steps, in a tool that is read once
+    per boot.
+    """
+    with concurrent.futures.ThreadPoolExecutor(max_workers=16) as pool:
+        answers = pool.map(decode_one,
+                           ((tool, raw) for raw in blocks.values()))
+
+    return {address: answer
+            for address, answer in zip(blocks, answers)
+            if answer is not None}
 
 
 def resolve_rip(text, address, length):

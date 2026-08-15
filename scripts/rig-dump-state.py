@@ -405,6 +405,69 @@ def dump_entry_rips(args, elf, instance):
                   f"{100.0 * count / total:5.1f}%")
 
 
+def dump_priority(args, elf, instance):
+    """What priority the guest runs at, and what it is told to run at.
+
+    The whole boot turns on this pair.  A software interrupt is
+    delivered only when its class exceeds the virtual task priority's,
+    so a guest that never drops below `0x20` never runs a deferred
+    procedure call however often one is requested - and deferred
+    procedure calls are where the boot's remaining work is.
+
+    `l2_entry_vtpr` is sampled on the page the entry is about to use,
+    which is the only page that is the right one; the threshold
+    histogram is what the guest hypervisor armed beside it.
+    """
+    members = ["l2_entry_vtpr", "l2_tpr_threshold_seen", "l2_cpl_seen",
+               "l2_tpr_would_fire", "l2_tpr_armed_above"]
+    off = gdb_offsets(elf, members)
+    vtpr_slots, threshold_slots, cpl_slots = gdb_values(elf, [
+        "sizeof(('zpp::hypervisor::hypervisor' *)0)->l2_entry_vtpr[0] / 4",
+        "sizeof(('zpp::hypervisor::hypervisor' *)0)"
+        "->l2_tpr_threshold_seen[0] / 8",
+        "sizeof(('zpp::hypervisor::hypervisor' *)0)->l2_cpl_seen[0] / 8"])
+
+    reader = Monitor(args.rig, args.port)
+    # 32 bit counters, so two to a quadword and the reader unpacks.
+    reader.queue(instance + off["l2_entry_vtpr"],
+                 args.cpus * vtpr_slots // 2)
+    reader.queue(instance + off["l2_tpr_threshold_seen"],
+                 args.cpus * threshold_slots)
+    reader.queue(instance + off["l2_cpl_seen"], args.cpus * cpl_slots)
+    for member in ("l2_tpr_would_fire", "l2_tpr_armed_above"):
+        reader.queue(instance + off[member], args.cpus)
+    got = reader.run()
+
+    def word(member, index):
+        return got.get(instance + off[member] + 8 * index, 0)
+
+    for cpu in range(args.cpus):
+        rows = []
+        for i in range(vtpr_slots):
+            pair = word("l2_entry_vtpr", (cpu * vtpr_slots + i) // 2)
+            count = (pair >> (32 * (i % 2))) & 0xffffffff
+            if count:
+                rows.append((count, i))
+        if not rows:
+            continue
+
+        total = sum(c for c, _ in rows) or 1
+        print(f"\ncpu {cpu} virtual task priority at second-level entry "
+              f"({total:,} entries)")
+        for count, vtpr in sorted(rows, reverse=True):
+            print(f"  0x{vtpr:02x}  {count:>10}  "
+                  f"{100.0 * count / total:5.1f}%")
+
+        print(f"  owed by SDM 27.6.7 {word('l2_tpr_would_fire', cpu):,}, "
+              f"armed while already at or above "
+              f"{word('l2_tpr_armed_above', cpu):,}")
+
+        cpl = [word("l2_cpl_seen", cpu * cpl_slots + i)
+               for i in range(cpl_slots)]
+        print("  cpl seen: " + ", ".join(f"{i}={v:,}"
+                                         for i, v in enumerate(cpl) if v))
+
+
 def dump_vtl(args, elf, instance):
     """The trust-level switch loop: whether it advances, and who calls it.
 
@@ -781,6 +844,7 @@ def main():
                   f"{cycles // calls:11d}")
 
     dump_entry_rips(args, args.elf, instance)
+    dump_priority(args, args.elf, instance)
     dump_vtl(args, args.elf, instance)
     dump_vtl_steps(args, args.elf, instance)
 

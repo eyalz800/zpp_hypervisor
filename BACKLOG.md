@@ -15384,3 +15384,156 @@ it is given more; this one turns the same circle faster. Every
 throughput improvement in this file can now be read the same way:
 `merge_nested_bitmaps` at 77,000 cycles saved, the elided guest-state
 writes, this - all real, none of them relevant to the stall.
+
+## Stepping the loop: it is not a fixed point, and the first thing VTL0 does is take the clock
+
+Measured 2026-08-15 with the monitor trap flag, which is the first
+instrument pointed at the *inside* of the trust-level loop. Everything
+before it read state from outside - registers, stacks, pages, both sets
+of extended page tables - and all twelve of those came back correct.
+SDM 26.5.2's flag exits after every retired instruction, needs no
+cooperation from the guest and writes nothing into its memory, so it
+sees the part no counter could: the instructions between the two
+hypercalls.
+
+`vtl_step_rip` records up to 2,048 of them per side with sixteen bytes
+of code each, re-armed every 2,048 switches so the trace is always
+recent, and `scripts/disassemble-trace.py` turns the dump back into
+instructions.
+
+**Three readings in this file are wrong and this corrects them.**
+
+- *"The secure kernel is entered, it decides, and it returns."* It
+  executes **447 instructions across 26 pages** before its
+  `HvCallVtlReturn`, through a call chain five deep. It was inferred
+  from registers and stacks being byte-identical, which they are, and
+  which says nothing about what runs between them.
+- *"The second-level guest executes exactly two instruction
+  addresses."* That was the working ring, which samples only at exits,
+  and the loop takes no exit between the hypercalls. The instruction
+  stream has 999 distinct addresses in 1,024 steps.
+- *"Two captures 2,256 switches apart are byte-identical, so nothing
+  advances."* Both captures are of the same point in a periodic
+  interrupt handler entered from the same stack depth. That is what a
+  clock interrupt looks like, not what a wedge looks like.
+
+**And the finding that changes the shape of the problem.** The
+instruction immediately after `HvCallVtlReturn`'s `vmcall`, every single
+time, is
+
+```
+ntoskrnl+0xbbe948   pushq $-47        ; 0xd1
+ntoskrnl+0xbbe94a   jmp   ...         ; KiInterruptDispatch
+```
+
+`push $0xd1` is the interrupt-descriptor-table stub for **vector 0xd1**,
+the clock. So the ordinary kernel never resumes the code that called
+into the secure kernel: it resumes and immediately takes a clock
+interrupt that was already pending. The 2,048 step ring is not long
+enough to reach the end of that handler.
+
+The loop is therefore: clock interrupt → `KiInterruptDispatch` →
+timer expiry and its call chain → a call into the secure kernel → 447
+instructions there → return → another clock interrupt already pending.
+
+### The steady-state numbers, and what they say the boot is waiting for
+
+Two dumps about 100 seconds apart, in the settled state (entry rips
+27.3 / 26.4 / 26.3 / 16.9 per cent, the signature every boot in this
+file ends in). Deltas, not cumulative counters:
+
+| | delta | per clock tick |
+|---|---|---|
+| second-level exits | 121,467 | 4.1 |
+| clock interrupts injected (`0xd1`) | 29,407 | 1 |
+| synthetic MSR writes | 78,441 | 2.7 |
+| interrupt-window exits | 31,357 | 1.07 |
+| trust-level round trips | 1,938 | one per 15 ticks |
+| extended-page-table violations | **0** | - |
+| **`0x2f` injected** | **0** | **0** |
+
+`0x2f` is the DISPATCH_LEVEL software interrupt. Its count is 207 for
+the whole boot and **identical in both samples**, so in steady state it
+is delivered never. The guest asks for it constantly: one of the three
+synthetic MSR writes per tick is `HV_X64_MSR_ICR` (0x40000071) with
+`0x4002f` - a self-directed interrupt-command write requesting exactly
+that vector - about 250 times a second.
+
+So the boot is blocked on **deferred procedure calls**, and everything
+this file has chased is downstream of that: `ClassPnP`'s boot idle I/O
+completes in a deferred procedure call, the `ArcName` resolution waits
+on it, no storage request is ever issued because nothing dequeues it,
+and ring 3 is never reached because no passive-level work runs.
+
+### Why it is not delivered, as far as the evidence goes
+
+The virtual task priority the second-level guest is entered at, over
+1,320,568 entries:
+
+| priority | share | |
+|---|---|---|
+| `0xd0` | 65.6% | CLOCK_LEVEL |
+| `0x20` | 29.6% | DISPATCH_LEVEL |
+| `0x40` | 3.3% | |
+| `0x00` | 1.3% | PASSIVE |
+| `0x10` | 0.2% | APC |
+
+A software interrupt is delivered only when its class exceeds the
+virtual task priority's, so `0x2f` (class 2) is refused at `0x20` and
+above - which is 95% of entries. The guest hypervisor's own
+notification agrees: it armed the TPR threshold 23,880 times and
+**23,648 of those were while the guest was already at or above it**,
+leaving 232 that were owed, and 232 reason-43 exits were taken. That
+half is exact and was already recorded.
+
+**What this does *not* yet establish** is why the guest stays at
+DISPATCH. It reaches PASSIVE 17,641 times, and it is at DISPATCH on
+nearly a third of entries, which is where the deferred procedure call
+dispatcher runs - so "it never gets the chance" is too simple. Against
+that, `l2_entry_rip` holds **eight distinct addresses with 57 beyond
+the table**: a guest running a dispatcher and passive work would be
+entered all over its kernel, and this one is not.
+
+### Where the time goes, in steady state rather than cumulatively
+
+| phase | cycles/call |
+|---|---|
+| `reflect_l2_exit` | 423,101 |
+| `save_l2_state` | 200,956 |
+| `load_l1_host_state` | 136,755 |
+| `build_vmcs02` | 134,464 |
+| `merge_nested_bitmaps` | 59,460 |
+
+About 300 microseconds per second-level exit and 4.1 exits per tick, so
+roughly 1.2 milliseconds of this VMM per clock tick against a period of
+1.74 milliseconds. The guest asks for 575 ticks a second and receives
+283.
+
+Most of that is VMREAD and VMWRITE trapping to the layer below at about
+4,340 cycles each, which is the rig's own tax - this VMM is KVM's guest,
+see "Rig runs zpp inside KVM". It is not the same number on bare metal
+and should not be optimised against as though it were.
+
+**And it resolves the apparent contradiction with "2.7x faster and no
+progress".** If the machine needs an order of magnitude and was given
+2.7x, no progress is exactly the prediction. That measurement refutes
+small speedups; it does not refute a capacity explanation, and this
+file has been reading it as though it did.
+
+### The next experiment
+
+The trace is armed on trust-level switches, so it can only ever see the
+loop it was built to see. What is wanted now is the same instrument
+armed on **any** second-level entry, periodically: 2,048 instructions
+of whatever the guest is executing, without assuming which loop that
+is. That answers the question the priority histogram leaves open -
+what the guest does with the 30% of entries it spends at DISPATCH and
+the 1.3% at PASSIVE - and it needs one boot and no new mechanism, only
+a third arming site.
+
+Two specific things it should settle:
+
+- whether the deferred procedure call dispatcher runs and finds an
+  empty queue, or never runs at all;
+- whether the eight distinct entry addresses are the whole of what the
+  guest executes, or an artefact of a table filled early.
