@@ -14669,3 +14669,29 @@ path is broken on its own.
 
 It writes to the real installation and there is no overlay, so it needs
 saying yes to first, and a copy of the hive taken before anything.
+
+### The offline hive edit is not feasible on this rig as it stands
+
+Checked read-only, nothing modified:
+
+| tool | |
+|---|---|
+| `ntfs-3g`, `mount.ntfs-3g`, `ntfsfix` | present |
+| `hivexsh`, `hivexget`, `reged`, `chntpw` | **all absent** |
+
+So the volume can be mounted read-write, and there is **no way to edit a
+Windows registry hive on the target**. The plan as written - clear
+`DeviceGuard\EnableVirtualizationBasedSecurity` in the offline `SYSTEM`
+hive - cannot be executed there. It would need the hive copied off,
+edited elsewhere, and copied back, which turns a single reversible edit
+into a file replacement on the real installation.
+
+**A simpler and fully reversible alternative needs no tooling at all:**
+rename `Windows\System32\securekernel.exe`. Virtual secure mode cannot
+launch without it, Hyper-V is unaffected, and undoing it is one more
+rename with the disk back on the host. That is one `mv` against a
+mounted volume rather than a hive rewrite, and it fails in a direction
+that is recoverable by the same means.
+
+Both still write to the real installation and there is no overlay, so
+neither should be done without saying so first.
