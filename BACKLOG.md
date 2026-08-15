@@ -15190,3 +15190,35 @@ own terms: concealing VMX from Processor Trace is a statement about the
 guest hypervisor's guest, not about this VMM's, and giving a guest a
 control its own hypervisor never asked for is the same class of defect
 as withholding one it did.
+
+### The whole control surface is now exact, and it still stalls
+
+The secondary controls were diffed and closed above. The other two had
+never been looked at, and both come back clean:
+
+```
+pin:     requested 0x3f        granted 0x3f        extra 0x0
+primary: requested 0x96a069fe  granted 0x96a069fe  extra 0x0
+secondary: requested 0x1010ae  granted 0x1010ae + ept/vpid
+```
+
+So every VM-execution control the second-level guest runs under is
+either exactly what the guest hypervisor asked for, or one of the two
+this VMM must force for its own shadowing to mean anything. There is no
+remaining asymmetry in any of the three dimensions - and the boot is
+unchanged.
+
+**That closes the control surface completely.** Combined with the
+request set being invariant however much is advertised, it means:
+nothing about *which* controls the second-level guest runs under
+distinguishes the configuration that reaches ring 3 from the one that
+does not. Both halves of that were measured rather than reasoned.
+
+What it leaves is the *contents* of vmcs02 rather than its controls -
+the addresses, the bitmaps, the pointers - and the handling of the
+exits those controls produce. Sixteen of those have been checked one at
+a time. The remaining ones are the fields, and the same diff method
+applies: every field this VMM writes into vmcs02 that the guest
+hypervisor did not put in vmcs12 is an asymmetry of exactly the kind
+just closed three times over, and `guest_state_cache` plus the control
+cache already enumerate what is written.
