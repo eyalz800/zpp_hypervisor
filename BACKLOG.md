@@ -16996,3 +16996,90 @@ path looks like.
 
 Worth about 0.30 `vmread` per tick either way, so it was never the
 prize.
+
+## The enumeration: which 8.85 exits a tick, and how many are reducible
+
+Measured in the settled regime - task priority `0xd0` on 64.6% of
+1,375,852 entries, so the guest has re-armed to its 1.74 ms tick.
+
+**The 2.69 synthetic MSR writes a tick are exactly three MSRs:**
+
+| MSR | writes | per tick | what |
+|---|---|---|---|
+| `0x40000070` | 296,659 | **1.01** | end of interrupt |
+| `0x40000071` | 296,309 | **1.00** | interrupt command |
+| `0x40000084` | 200,468 | **0.68** | end of message |
+
+One end-of-interrupt per clock interrupt, one interrupt-command per
+clock interrupt, and an end-of-message on two ticks in three.
+
+**And the interrupt command is the deferred call, every time.**
+`296,192` requests, **100% vector `0x2f`**, and the task priority when
+it asked was `0xd0` on **296,189 of 296,192** - CLOCK_LEVEL. Against
+`0x2f` actually carried into the guest: **16**.
+
+`int-window` is armed on **50.5% of entries** - 695,542 of 1,376,359.
+The guest hypervisor spends half of every entry waiting for a moment to
+deliver an interrupt that, in this regime, never comes.
+
+### Predictions against measurements
+
+| # | predicted | measured | |
+|---|---|---|---|
+| 1 | three MSRs, roughly equal, ~1.0 each | EOI 1.01, ICR 1.00, EOM 0.68 | correct |
+| 2 | ICR almost entirely `0x4002f` | **100%** vector `0x2f` | correct |
+| 3 | window armed on **>60%** of entries | **50.5%** | **wrong - directionally right, number wrong** |
+| 4 | EOI is the one with a documented way not to exist | stands | see below |
+| 5 | ~2 of 8.85 are the request loop spinning | ICR 1.00 + window 1.06 = **2.06** | correct |
+
+### And the honest verdict: the 8.85 is very largely irreducible
+
+Taking each in turn, and being strict about the difference between "this
+is a symptom" and "this is removable":
+
+- **`vmresume` 4.16** - the return half of the 4.16 reflections a tick
+  already needs. Not independent; it falls only if reflections do.
+- **ICR 1.00** - `KiRequestSoftwareInterrupt` writes the interrupt
+  command each time a deferred call is queued, and the clock handler
+  queues one every tick. That is **ordinary Windows behaviour on any
+  host**, not a re-arm caused by something failing to retire. It is a
+  symptom of the livelock and cannot be removed without ending it.
+- **`int-window` 1.06** - the guest hypervisor arming a window for an
+  interrupt whose priority can never admit it. Also a symptom, and its
+  control comes from vmcs12: **not ours to remove**.
+- **EOM 0.68** - retiring a synthetic-interrupt-controller message.
+  Necessary.
+- **EOI 1.01 - the only one with a documented mechanism that would
+  remove it.** The lazy end-of-interrupt enlightenment retires an
+  interrupt with a single `btr` on the VP assist page and no exit at
+  all. The guest's own code takes that path - it is disassembled in this
+  file - and the branch is never taken because `NoEOIRequired` is never
+  set, because that page was measured **512 bytes of zero**.
+
+So of 8.85 exits a tick, **one** has a mechanism that could remove it,
+worth about 2 with its return, or **22%** - roughly 1.29x. Everything
+else is the guest and its hypervisor doing necessary work given the
+state they are in.
+
+**That closes the exits-per-tick line, and it closes it honestly.** The
+identity that opened it was right - a round trip is made of ticks, and
+8.85 per tick driven to 1 would be worth 8.85x - but the enumeration
+says the 8.85 is not arbitrary. It is one interrupt, its
+acknowledgement, its message retirement, the deferred call it queues,
+and the window the level above opens waiting to deliver that deferred
+call. Nothing there is waste.
+
+### The one thread left, and it is not a speed argument
+
+`NoEOIRequired` is never set because the VP assist page is empty, and
+**why it is empty has never been settled.** This file already records
+the open question: the guest hypervisor owns that page, and either it
+never writes it - which would be its own behaviour and none of our
+business - or its writes do not reach the physical page this VMM reads,
+which would be ours and would be a real bug.
+
+That is worth settling on its own terms, independently of the 22%: a
+page the guest reads and the level above writes, where the two might not
+be the same page, is exactly the class of defect this tree has hit
+before. It needs a write-watch on that guest-physical page rather than
+another census.
