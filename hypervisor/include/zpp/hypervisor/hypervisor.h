@@ -4862,7 +4862,14 @@ private:
     char vtl_caller_name[vtl_kinds][l2_image_name_size]{};
     /** The instructions around each side's caller, so the loop body can
      * be disassembled outside. See `capture_vtl_switch`. */
-    static constexpr std::size_t vtl_code_size = 128;
+    // Wide enough to hold the whole loop body, not just the call.
+    // Measured: the guest is resumed after a reflected synthetic-MSR
+    // write at `ntoskrnl`+0x6a768e and makes the secure call from
+    // +0x6a774b - 0xbd bytes apart, so both are in one function, and
+    // that function is the loop. A 128 byte window centred on the call
+    // could not reach the write.
+    static constexpr std::size_t vtl_code_size = 384;
+    static constexpr std::uint64_t vtl_code_behind = 0x140;
 
     /**
      * The page the two trust levels talk through, sampled at each side

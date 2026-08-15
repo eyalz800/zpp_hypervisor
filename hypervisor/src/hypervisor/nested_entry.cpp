@@ -5243,7 +5243,7 @@ void hypervisor::capture_vtl_switch(std::size_t cpu,
         // Centred rather than forward-only: the call itself and the
         // setup before it say what is being asked, and the test and
         // branch after it say what answer is being refused.
-        constexpr std::uint64_t behind = 0x40;
+        constexpr std::uint64_t behind = vtl_code_behind;
 
         for (std::size_t i{}; i < vtl_code_size; ++i) {
             auto physical = translate_guest_linear(entry - behind + i);
