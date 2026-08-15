@@ -16938,3 +16938,61 @@ and `int-window` 1.06 with its return making up most of the rest.
 If instead the writes turn out to be many distinct MSRs at low counts,
 or the interrupt window is armed rarely, then the 8.85 is genuinely the
 guest doing necessary work and this line closes honestly.
+
+## VMCS shadowing re-checked: the recorded reason was wrong, the effect was right
+
+This file records "**VMCS shadowing is unavailable and cannot be turned
+on**", from `/sys/module/kvm_intel/parameters/enable_shadow_vmcs`
+reading `N` and `vmx flags` in `/proc/cpuinfo` carrying no
+`shadow_vmcs`. Re-checked against KVM's source because the user asked
+directly and an 8th-generation part has had the feature since Haswell.
+
+**The availability half is wrong.** KVM advertises the control to its
+nested guest **unconditionally** - `.references/kvm/nested.c`, in the
+capability MSR setup, outside any `if`:
+
+```c
+	/*
+	 * We can emulate "VMCS shadowing," even if the hardware
+	 * doesn't support it.
+	 */
+	msrs->secondary_ctls_high |=
+		SECONDARY_EXEC_SHADOW_VMCS;
+```
+
+Which is why this VMM's own cached allowed-1 mask for
+`IA32_VMX_PROCBASED_CTLS2` reads `0x1378ff` - **bit 14 is set**. It is
+offered to us and we could legally set it.
+
+**The effect half is right, and for a reason nobody had written down.**
+Three facts from the same source settle what would happen:
+
+- `enable_shadow_vmcs` defaults to **1** (`static bool __read_mostly
+  enable_shadow_vmcs = 1;`) and is `S_IRUGO`, so it cannot be set at
+  runtime. It reads `N` on the rig because KVM's setup cleared it - the
+  host lacks hardware shadowing, corroborated by `vmx flags` listing
+  `mtf`, `vapic`, `ept_mode_based_exec` and so on but **not**
+  `shadow_vmcs`.
+- With it clear, `vmx->vmcs01.shadow_vmcs` is never allocated, and
+  `copy_shadow_to_vmcs12` opens with `if (WARN_ON(!shadow_vmcs))
+  return;` - the path is inert.
+- And when *we* set the bit for our guest, KVM strips it before hardware
+  sees it: in `prepare_vmcs02`, `exec_control &=
+  ~SECONDARY_EXEC_SHADOW_VMCS;` under the comment "VMCS shadowing for L2
+  is emulated for now".
+
+So the guest hypervisor's `VMREAD`s would still trap - to KVM, which
+emulates the shadowing, and the trap still arrives here. **Offering it
+removes no exit on this host.**
+
+**Both halves matter for the record.** "Unavailable" would stop someone
+on a machine that *does* have hardware shadowing, where the same change
+is a real win; "cannot be turned on" is true here but for the host's
+hardware, not for anything about the capability or this VMM. The earlier
+pricing measurement corroborates the effect independently: fields on
+KVM's shadow list cost the same as fields off it - `exit_reason` 2,687
+cycles against `guest_gdtr_limit` 1,952 - which is what an inert shadow
+path looks like.
+
+Worth about 0.30 `vmread` per tick either way, so it was never the
+prize.
