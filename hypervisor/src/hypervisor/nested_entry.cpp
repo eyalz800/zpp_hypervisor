@@ -2832,42 +2832,104 @@ void hypervisor::save_l2_state(std::size_t cpu)
                  vmcs.read(field::guest_ia32_bndcfgs));
 }
 
+void hypervisor::host_write(std::size_t cpu,
+                            field which,
+                            std::uint64_t value)
+{
+    // Recorded in call order, which is what makes the index stable: the
+    // sequence of writes below is fixed by the code and not by the
+    // guest, so slot N is the same field on every call and the audit
+    // above can compare across reflections without carrying a lookup.
+    if (cpu < max_cpus) {
+        if (auto index = this->l1_host_written[cpu];
+            index < l1_host_field_count) {
+            this->l1_host_field[cpu][index] =
+                static_cast<std::uint64_t>(which);
+            this->l1_host_value[cpu][index] = value;
+        }
+
+        this->l1_host_written[cpu] = this->l1_host_written[cpu] + 1;
+    }
+
+    this->vmcs.write(which, value);
+}
+
 void hypervisor::load_l1_host_state(std::size_t cpu)
 {
     auto & vmcs = this->vmcs;
     auto & shadow = this->guest_vmcs12[cpu];
+
+    // One field of the previous call's table, checked against what
+    // vmcs01 holds now, before anything below overwrites it.
+    //
+    // This function is 14.1% of the wall clock in fifty-two VMWRITEs
+    // that almost all restate a constant or an unchanged vmcs12 host
+    // field, and it cannot be elided against a cache of what was last
+    // written: SDM 30.3.2 has every VM exit save the guest hypervisor's
+    // own segment bases, limits and access rights over them, so the
+    // cache describes something the processor has since overwritten.
+    // That is exactly what killed `ZPP_LAZY_GUEST_STATE` one VMCS over.
+    //
+    // What *would* justify eliding a particular field is knowing the
+    // processor never actually changes it - and that is a measurement,
+    // not an assumption about what Hyper-V's exit path does to its own
+    // registers. This tree has been wrong three times running about what
+    // may be assumed of that guest, so it is measured instead.
+    //
+    // One field per reflection, round robin, rather than the whole table
+    // every few thousand. It costs a single VMREAD on a path that makes
+    // a hundred - about 1% - and it samples each field at ten thousand
+    // different moments over a boot instead of at a handful, which is
+    // the difference between "stable when I looked" and "stable".
+    if (cpu < max_cpus) {
+        if (auto recorded = this->l1_host_count[cpu]; 0 != recorded) {
+            auto index = this->l1_host_audits[cpu] % recorded;
+
+            auto now = vmcs.read(
+                static_cast<field>(this->l1_host_field[cpu][index]));
+
+            if (now != this->l1_host_value[cpu][index]) {
+                this->l1_host_changed[cpu][index] += 1;
+            }
+
+            this->l1_host_audits[cpu] = this->l1_host_audits[cpu] + 1;
+        }
+
+        this->l1_host_written[cpu] = 0;
+    }
 
     auto exit12 = shadow.read(field::vm_exit_controls);
 
     auto host_cr0_12 = shadow.read(field::host_cr0);
     auto host_cr4_12 = shadow.read(field::host_cr4);
 
-    vmcs.guest_cr0(host_cr0_12);
-    vmcs.guest_cr3(shadow.read(field::host_cr3));
-    vmcs.guest_cr4(host_cr4_12 | cr4_vmxe);
+    host_write(cpu, field::guest_cr0, host_cr0_12);
+    host_write(cpu, field::guest_cr3, shadow.read(field::host_cr3));
+    host_write(cpu, field::guest_cr4, host_cr4_12 | cr4_vmxe);
 
     // The read shadows have to follow, or the guest hypervisor reads back
     // the state of its own guest. CR4's is the one that matters: VMXE is
     // in this VMM's mask and forced into the register above, so without
     // this the guest hypervisor would read a CR4 it never wrote.
-    vmcs.cr0_read_shadow(host_cr0_12);
-    vmcs.cr4_read_shadow(host_cr4_12);
+    host_write(cpu, field::cr0_read_shadow, host_cr0_12);
+    host_write(cpu, field::cr4_read_shadow, host_cr4_12);
 
-    vmcs.guest_rip(shadow.read(field::host_rip));
-    vmcs.guest_rsp(shadow.read(field::host_rsp));
+    host_write(cpu, field::guest_rip, shadow.read(field::host_rip));
+    host_write(cpu, field::guest_rsp, shadow.read(field::host_rsp));
 
     // SDM 30.5.3 (.references/sdm.txt:204918): "RFLAGS is cleared,
     // except bit 1, which is always set".
     constexpr std::uint64_t rflags_reserved_one = 1ull << 1;
-    vmcs.guest_rflags(rflags_reserved_one);
+    host_write(cpu, field::guest_rflags, rflags_reserved_one);
 
     // SDM 30.5.5 (.references/sdm.txt:204944): "There is no blocking by
     // STI or by MOV SS after a VM exit", and the activity state is
     // active. A hypervisor arriving at its own exit handler is running.
-    vmcs.write(field::guest_interruptibility_state, 0);
-    vmcs.write(field::guest_activity_state,
+    host_write(cpu, field::guest_interruptibility_state, 0);
+    host_write(cpu,
+               field::guest_activity_state,
                arch::x86_64::vmx::activity_state::active);
-    vmcs.write(field::guest_pending_debug_exceptions, 0);
+    host_write(cpu, field::guest_pending_debug_exceptions, 0);
 
     // SDM 30.5.2, "Loading Host Segment and Descriptor-Table Registers"
     // (.references/sdm.txt:204861).
@@ -2888,11 +2950,14 @@ void hypervisor::load_l1_host_state(std::size_t cpu)
 
     auto in_ia32e_mode = 0 != (exit12 & exit_host_address_space_size);
 
-    vmcs.guest_cs_selector(shadow.read(field::host_cs_selector));
-    vmcs.guest_cs_base(0);
-    vmcs.guest_cs_limit(flat_limit);
-    vmcs.guest_cs_access_rights(in_ia32e_mode ? code_access_long
-                                              : code_access_legacy);
+    host_write(cpu,
+               field::guest_cs_selector,
+               shadow.read(field::host_cs_selector));
+    host_write(cpu, field::guest_cs_base, 0);
+    host_write(cpu, field::guest_cs_limit, flat_limit);
+    host_write(cpu,
+               field::guest_cs_access_rights,
+               in_ia32e_mode ? code_access_long : code_access_legacy);
 
     // The five data segments, all with the same fixed shape. FS and GS
     // are the two exceptions and only in the base, which the host-state
@@ -2941,40 +3006,49 @@ void hypervisor::load_l1_host_state(std::size_t cpu)
     };
 
     for (const auto & segment : data_segments) {
-        vmcs.write(segment.vmcs_selector, shadow.read(segment.selector));
-        vmcs.write(segment.vmcs_base, segment.base);
-        vmcs.write(segment.vmcs_limit, flat_limit);
-        vmcs.write(segment.vmcs_access, data_access);
+        host_write(
+            cpu, segment.vmcs_selector, shadow.read(segment.selector));
+        host_write(cpu, segment.vmcs_base, segment.base);
+        host_write(cpu, segment.vmcs_limit, flat_limit);
+        host_write(cpu, segment.vmcs_access, data_access);
     }
 
-    vmcs.guest_tr_selector(shadow.read(field::host_tr_selector));
-    vmcs.guest_tr_base(shadow.read(field::host_tr_base));
-    vmcs.guest_tr_limit(task_limit);
-    vmcs.guest_tr_access_rights(task_access);
+    host_write(cpu,
+               field::guest_tr_selector,
+               shadow.read(field::host_tr_selector));
+    host_write(
+        cpu, field::guest_tr_base, shadow.read(field::host_tr_base));
+    host_write(cpu, field::guest_tr_limit, task_limit);
+    host_write(cpu, field::guest_tr_access_rights, task_access);
 
     // LDTR is unusable after a VM exit, whatever it was.
-    vmcs.guest_ldtr_selector(0);
-    vmcs.guest_ldtr_base(0);
-    vmcs.guest_ldtr_limit(0);
-    vmcs.guest_ldtr_access_rights(unusable_access);
+    host_write(cpu, field::guest_ldtr_selector, 0);
+    host_write(cpu, field::guest_ldtr_base, 0);
+    host_write(cpu, field::guest_ldtr_limit, 0);
+    host_write(cpu, field::guest_ldtr_access_rights, unusable_access);
 
-    vmcs.guest_gdtr_base(shadow.read(field::host_gdtr_base));
-    vmcs.guest_gdtr_limit(descriptor_table_limit);
-    vmcs.guest_idtr_base(shadow.read(field::host_idtr_base));
-    vmcs.guest_idtr_limit(descriptor_table_limit);
+    host_write(
+        cpu, field::guest_gdtr_base, shadow.read(field::host_gdtr_base));
+    host_write(cpu, field::guest_gdtr_limit, descriptor_table_limit);
+    host_write(
+        cpu, field::guest_idtr_base, shadow.read(field::host_idtr_base));
+    host_write(cpu, field::guest_idtr_limit, descriptor_table_limit);
 
-    vmcs.write(field::guest_ia32_sysenter_cs,
+    host_write(cpu,
+               field::guest_ia32_sysenter_cs,
                shadow.read(field::host_ia32_sysenter_cs));
-    vmcs.write(field::guest_ia32_sysenter_esp,
+    host_write(cpu,
+               field::guest_ia32_sysenter_esp,
                shadow.read(field::host_ia32_sysenter_esp));
-    vmcs.write(field::guest_ia32_sysenter_eip,
+    host_write(cpu,
+               field::guest_ia32_sysenter_eip,
                shadow.read(field::host_ia32_sysenter_eip));
 
     // SDM 30.5.1 (.references/sdm.txt:204807): "DR7 is set to 400H", and
     // IA32_DEBUGCTL to 0 two lines below it.
     constexpr std::uint64_t dr7_after_exit = 0x400;
-    vmcs.guest_dr7(dr7_after_exit);
-    vmcs.write(field::guest_ia32_debugctl, 0);
+    host_write(cpu, field::guest_dr7, dr7_after_exit);
+    host_write(cpu, field::guest_ia32_debugctl, 0);
 
     // IA32_PAT and IA32_EFER are written to the *registers* rather than to
     // the guest-state area, and that is not a shortcut - it is the only
@@ -2988,6 +3062,12 @@ void hypervisor::load_l1_host_state(std::size_t cpu)
     // ordinary guest, which is the code path a working Windows boot
     // depends on, for the sake of a path that only exists with nested VMX
     // switched on.
+    // The table is complete from here, so a reader that sees a non-zero
+    // count sees a table whose every entry was filled by this call.
+    if (cpu < max_cpus) {
+        this->l1_host_count[cpu] = this->l1_host_written[cpu];
+    }
+
     if (0 != (exit12 & exit_load_ia32_pat)) {
         arch::x86_64::wrmsr(arch::x86_64::msr::ia32_pat,
                             shadow.read(field::host_ia32_pat));

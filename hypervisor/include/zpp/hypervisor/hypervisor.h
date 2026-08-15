@@ -2674,6 +2674,12 @@ private:
      */
     void load_l1_host_state(std::size_t cpu);
 
+    /** One VMWRITE of vmcs01's guest-state area, recorded in call order
+     * so `l1_host_changed` can be read without a field lookup. */
+    void host_write(std::size_t cpu,
+                    arch::x86_64::vmx::vmcs::field which,
+                    std::uint64_t value);
+
     /**
      * Whatever a transition between the two levels has to invalidate.
      */
@@ -4865,6 +4871,44 @@ private:
      * those two apart is exactly what `guest_timer_stretched` was added
      * for after a switch that silently never reached the compiler. */
     volatile std::uint64_t guest_tick_floored[max_cpus]{};
+
+    /**
+     * What `load_l1_host_state` wrote last time, and how often the
+     * processor had changed it by the next reflection.
+     *
+     * The function is 14.1% of the wall clock in fifty-two VMWRITEs, and
+     * SDM 30.3.2 blocks the obvious elision: a VM exit saves the guest
+     * hypervisor's own segment bases, limits and access rights over
+     * vmcs01's guest-state area, so a cache of what was last written
+     * describes something the processor has since overwritten. Eliding
+     * against it would skip a write that is owed, which is the defect
+     * that killed `ZPP_LAZY_GUEST_STATE`.
+     *
+     * A field the processor demonstrably never changes is a different
+     * matter, and which fields those are is a measurement rather than an
+     * assumption about Hyper-V's exit path. `l1_host_changed` counts, per
+     * slot, how often vmcs01 held something other than what this VMM
+     * wrote there - so a slot that stays zero across a whole boot is one
+     * whose write can be dropped, and a slot that does not is one that
+     * never could have been.
+     *
+     * Indexed by *call order* rather than by field encoding, because the
+     * order of the writes is fixed by the code: slot N is the same field
+     * on every call, so no lookup is needed on the hot path.
+     * `l1_host_field` records which encoding that was, so a reader
+     * outside needs no copy of the list.
+     * @{
+     */
+    static constexpr std::size_t l1_host_field_count = 64;
+
+    std::uint64_t l1_host_field[max_cpus][l1_host_field_count]{};
+    std::uint64_t l1_host_value[max_cpus][l1_host_field_count]{};
+    volatile std::uint64_t l1_host_changed[max_cpus]
+                                          [l1_host_field_count]{};
+    std::uint64_t l1_host_written[max_cpus]{};
+    std::uint64_t l1_host_count[max_cpus]{};
+    std::uint64_t l1_host_audits[max_cpus]{};
+    /** @} */
 
     /**
      * What the loaded-module walk got as far as, so a run that produces
