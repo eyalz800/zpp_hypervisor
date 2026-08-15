@@ -1637,16 +1637,43 @@ std::expected<void, zpp::error> hypervisor::build_vmcs02(std::size_t cpu)
                 this->l2_entry_vtpr[cpu][vtpr] += 1;
             }
 
-            // And the *processor* priority beside it, which is the one
-            // that decides delivery.
+            // Carried to where the event this entry will actually
+            // carry is in hand. See `l2_low_priority_no_event`.
+            this->l2_entry_priority[cpu] = vtpr;
+
+            // And the *processor* priority beside it, which is
+            // **dead in this configuration** and is sampled to prove
+            // it rather than to be read.
             //
             // SDM 12.8.3.1 makes PPR the maximum of the task priority
             // and the highest in-service vector's class, and it is PPR
-            // that an arriving interrupt's class must exceed. Every
-            // reading in this investigation has been of TPR, so a guest
-            // holding an unacknowledged in-service interrupt and a
-            // guest that simply raised its own priority have been
-            // indistinguishable - and they are different faults.
+            // that an arriving interrupt's class must exceed - so it
+            // is the reading this investigation wants and TPR is a
+            // proxy for it. But SDM 32.1.1
+            // (`.references/sdm.txt:206556`) says which fields the
+            // processor maintains: "The VTPR field virtualizes the TPR
+            // whenever the 'use TPR shadow' VM-execution control is 1.
+            // The other fields indicated above virtualize the
+            // corresponding APIC registers whenever the
+            // **'virtual-interrupt delivery'** VM-execution control is
+            // 1." VPPR at offset 0A0H is one of those other fields,
+            // virtual-interrupt delivery is not offered here - and the
+            // layer below does not permit it to this VMM either, since
+            // its own PROCBASED_CTLS2 allowed-1 mask of `0x1378ff` has
+            // no bit 9 - so nothing ever writes that offset and it
+            // reads as whatever the guest hypervisor left there.
+            //
+            // Measured before it was believed: 100% of 15,812 entries
+            // read `0x00` while VTPR on the same entries read 0x00,
+            // 0x10, 0x20 and 0x40. A field that is constant while the
+            // one it is defined as the maximum of is not is a field
+            // nobody maintains.
+            //
+            // Kept, because a zero here is now *evidence* and a
+            // non-zero would mean the configuration changed under this
+            // comment. The real PPR lives in the guest hypervisor's own
+            // emulation of its guest's local APIC and is not reachable
+            // from here at all.
             constexpr std::uint64_t processor_priority = 0xa0;
             std::uint8_t ppr{};
 
@@ -1655,11 +1682,6 @@ std::expected<void, zpp::error> hypervisor::build_vmcs02(std::size_t cpu)
                     std::span(reinterpret_cast<std::byte *>(&ppr),
                               sizeof(ppr)))) {
                 this->l2_entry_ppr[cpu][ppr] += 1;
-
-                // Kept for the crossing, which happens where the event
-                // this entry will actually carry is in hand. See
-                // `l2_low_priority_no_event`.
-                this->l2_entry_ppr_last[cpu] = ppr;
             }
         }
     } else if (tpr_shadow12) {
@@ -5770,9 +5792,16 @@ void hypervisor::record_l2_entry_event(std::size_t cpu)
     // No event, so this entry is a moment the guest hypervisor chose
     // not to deliver one. Whether it *could* have is what the priority
     // decides. See `l2_low_priority_no_event`.
+    //
+    // Against the **task** priority, which the processor maintains,
+    // rather than the processor priority, which in this configuration
+    // it does not - SDM 32.1.1, cited where the sample is taken. TPR is
+    // a lower bound on PPR, so this undercounts rather than over: every
+    // entry it counts is one the interrupt certainly could have been
+    // delivered on.
     constexpr std::uint64_t dispatch_class = 0x20;
 
-    if (this->l2_entry_ppr_last[cpu] < dispatch_class) {
+    if (this->l2_entry_priority[cpu] < dispatch_class) {
         this->l2_low_priority_no_event[cpu] += 1;
     }
 }

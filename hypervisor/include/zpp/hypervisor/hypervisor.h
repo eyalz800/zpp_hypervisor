@@ -5291,8 +5291,15 @@ private:
 
     /** The priority this entry was sampled at, carried from where the
      * virtual-APIC page is read to where the event it will carry is
-     * known. Both are on the same entry, so this never spans one. */
-    std::uint8_t l2_entry_ppr_last[max_cpus]{};
+     * known. Both are on the same entry, so this never spans one.
+     *
+     * It is the **task** priority and not the processor priority,
+     * because the processor priority is not maintained in this
+     * configuration - see the sample site for the SDM citation. TPR is
+     * a lower bound on PPR, so an entry this counts is one where the
+     * priority certainly would have admitted the interrupt, which is
+     * the direction that makes the count mean something. */
+    std::uint8_t l2_entry_priority[max_cpus]{};
 
     /**
      * @}

@@ -15677,3 +15677,66 @@ The measurement is a counter, not a boot: exits and cycles between one
 `HvCallVtlCall` and its matching `HvCallVtlReturn`, and again between
 that return and the next call. Both halves are already identifiable -
 `capture_vtl_switch` runs on exactly those two exits.
+
+### The processor priority is not maintained here, and reading it looked exactly like an answer
+
+The reading this investigation has wanted throughout is **PPR**, not
+TPR. SDM 12.8.3.1 makes PPR the maximum of the task-priority class and
+the highest in-service vector's class, and it is PPR that an arriving
+interrupt's class must exceed - so a guest that raised its own priority
+and a guest holding an in-service interrupt it never acknowledged are
+different faults that TPR alone cannot tell apart. The first is a cost;
+the second is a deadlock.
+
+It was sampled from offset `0A0H` of the virtual-APIC page, beside the
+task priority at `080H`, and the first run came back:
+
+```
+processor priority at entry (15,812)
+  0x00       15812  100.0%
+```
+
+**One hundred per cent at zero, while VTPR on the very same entries
+read 0x00, 0x10, 0x20 and 0x40.** A field that is constant while the
+field it is defined as the maximum of is not is a field nobody
+maintains, and SDM 32.1.1 (`.references/sdm.txt:206556`) says exactly
+which ones are:
+
+> "The VTPR field virtualizes the TPR whenever the 'use TPR shadow'
+> VM-execution control is 1. The other fields indicated above
+> virtualize the corresponding APIC registers whenever the
+> **'virtual-interrupt delivery'** VM-execution control is 1."
+
+VPPR is one of those other fields. Virtual-interrupt delivery is not
+offered here, and cannot be: the layer below does not permit it to this
+VMM either, its own PROCBASED_CTLS2 allowed-1 mask being `0x1378ff`,
+which has no bit 9. So nothing ever writes offset `0A0H` and it reads
+back whatever the guest hypervisor left there, which is zero.
+
+**Caught before it was believed, and it would have been believed.** A
+PPR of zero on every entry reads as "the guest is at PASSIVE the whole
+time and the interrupt should have been delivered" - which is the
+opposite of what TPR says and would have sent the next boot chasing the
+guest hypervisor's delivery logic. It is the same shape as the four
+silent liars this file already lists, and the thing that caught it was
+comparing the new reading against one already known good on the same
+entries.
+
+Two consequences:
+
+- The crossing counter `l2_low_priority_no_event` is now taken against
+  **VTPR**, which the processor does maintain. TPR is a lower bound on
+  PPR, so it undercounts rather than over - every entry it counts is
+  one where the priority certainly would have admitted the interrupt.
+- **The real PPR of the second-level guest is not reachable from here
+  at all.** With no APIC virtualization the guest hypervisor emulates
+  its guest's local APIC entirely in software, so the in-service
+  register lives in its private memory. The "unacknowledged in-service
+  interrupt" hypothesis has to be answered another way, and it already
+  is: in the settled state the guest writes the synthetic
+  end-of-interrupt about once per clock tick against about one clock
+  injection per tick, so nothing is accumulating unacknowledged.
+
+The `l2_entry_ppr` histogram is kept anyway, because a zero there is
+now *evidence* about the configuration and a non-zero would mean the
+configuration changed under the comment that explains it.
