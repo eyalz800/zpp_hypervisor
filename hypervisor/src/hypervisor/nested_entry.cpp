@@ -1673,15 +1673,28 @@ std::expected<void, zpp::error> hypervisor::build_vmcs02(std::size_t cpu)
     // hypervisor's VMCS says is invalid. KVM clears it for the same
     // reason.
     //
-    // Mode-based execute control is cleared, and this is the one that is
-    // not obvious. The capability MSRs do not offer it, so bit 10 of the
-    // guest hypervisor's own extended page-table entries means nothing it
-    // chose - it has no reason ever to set it. The shadow builder
-    // intersects that bit with this VMM's, so composing it would leave
-    // every shadow leaf denying user-mode execute, and the second-level
-    // guest would fault on the first instruction it ran in user mode. With
-    // the control clear the processor ignores bit 10 entirely and bit 2
-    // governs both modes, which is what both levels meant.
+    // Mode-based execute control now comes from the guest hypervisor
+    // alone, for the same reason unrestricted guest does, and the
+    // reasoning that used to clear it unconditionally has expired with
+    // the capability being advertised.
+    //
+    // The old argument was sound while it held: the capability MSRs did
+    // not offer the control, so bit 10 of the guest hypervisor's own
+    // extended page-table entries meant nothing it had chosen, and
+    // composing it would have left every shadow leaf denying user-mode
+    // execute - the second-level guest faulting on its first user-mode
+    // instruction. With the control advertised that is no longer true.
+    // A guest hypervisor that sets it means bit 10, and one that does
+    // not still gets the old behaviour exactly, because the bit is taken
+    // from *its* controls and not from this VMM's.
+    //
+    // Why it matters: splitting execute in two is how a secure kernel
+    // expresses code integrity through the extended page tables. Without
+    // it there is no way to say "the kernel may not execute this page",
+    // which is the whole of what hypervisor-enforced code integrity
+    // does - and it explains the measurement nothing else did, that
+    // `HvCallModifyVtlProtectionMask` is issued repeatedly and
+    // `reflected_permission` stays 0 of 448,441.
     //
     // Extended page tables and VPIDs are always on, because the pointer
     // written below is always a real one and the VPID always non-zero.
@@ -1689,7 +1702,8 @@ std::expected<void, zpp::error> hypervisor::build_vmcs02(std::size_t cpu)
         (secondary01 | secondary12) &
         ~(secondary_mode_based_execute | secondary_unrestricted_guest);
 
-    secondary |= secondary12 & secondary_unrestricted_guest;
+    secondary |= secondary12 & (secondary_unrestricted_guest |
+                                secondary_mode_based_execute);
     secondary |= secondary_enable_ept | secondary_enable_vpid;
 
     auto secondary02 = arch::x86_64::vmx::adjust_msr(

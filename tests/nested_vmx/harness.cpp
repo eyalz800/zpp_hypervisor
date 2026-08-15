@@ -1739,15 +1739,28 @@ static void test_advertised_versus_implemented()
     // --- Mode-based execute control, the asymmetry in the other
     //     direction ---------------------------------------------------
     //
-    // Secondary bit 22 is set by this VMM in its own VMCS and is *not*
-    // offered to a guest hypervisor, and build_vmcs02 strips it from
-    // vmcs02. That is a capability implemented and withheld, which is the
-    // safe direction - but it is asserted so that offering it later is a
-    // deliberate act rather than a side effect.
-    check(0 == (secondary_offered & (1ull << 22)),
-          "secondary control bit 22 (mode-based execute control) is "
-          "offered, and build_vmcs02 strips it from vmcs02 - a guest "
-          "hypervisor would set it and get nothing");
+    // Secondary bit 22 **is** offered now, and `build_vmcs02` takes it
+    // from the guest hypervisor's own controls rather than stripping it.
+    // This assertion used to say the opposite, and its own comment asked
+    // for the reversal to be a deliberate act rather than a side effect.
+    // This is that act, so the assertion moves with it.
+    //
+    // Why: splitting execute in two is how a secure kernel expresses
+    // code integrity through the extended page tables. Withholding it
+    // left `HvCallModifyVtlProtectionMask` issued repeatedly with
+    // `reflected_permission` at 0 of 448,441 - a protection change
+    // accepted and expressible nowhere - while the same guest reaches
+    // ring 3 under KVM alone, which advertises the bit.
+    //
+    // The pairing is what matters and is what this checks: offering the
+    // capability while `build_vmcs02` cleared it unconditionally would
+    // be the worst of both, a guest hypervisor setting the control and
+    // getting nothing. It is taken from *its* controls, so a guest
+    // hypervisor that does not ask still gets the old behaviour exactly.
+    check(0 != (secondary_offered & (1ull << 22)),
+          "secondary control bit 22 (mode-based execute control) is not "
+          "offered - a secure kernel then has nowhere to express code "
+          "integrity, which is the shape of the stall on the rig");
 
     // --- The EPT and VPID capabilities --------------------------------
     //

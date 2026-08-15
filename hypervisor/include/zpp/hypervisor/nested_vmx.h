@@ -596,7 +596,33 @@ constexpr std::uint64_t supported_secondary_controls =
     (1ull << 11) | // RDRAND exiting.
     (1ull << 12) | // Enable INVPCID.
     (1ull << 16) | // RDSEED exiting.
-    (1ull << 20);  // Enable XSAVES/XRSTORS.
+    (1ull << 20) | // Enable XSAVES/XRSTORS.
+
+    // Mode-based execute control, SDM Table 25-7 bit 22.
+    //
+    // **This is how a secure kernel expresses code integrity through the
+    // extended page tables**, by splitting execute permission in two -
+    // executable in supervisor mode, executable in user mode - so a page
+    // can be one and not the other. Without it there is no way to say
+    // "this page may not be executed by the kernel", which is the whole
+    // of what hypervisor-enforced code integrity does.
+    //
+    // Absent until now, and its absence explains the measurement nothing
+    // else did: `HvCallModifyVtlProtectionMask` is issued repeatedly -
+    // once with a repeat count of 510 - and `reflected_permission` is 0
+    // of 448,441, so the protection change is accepted and never appears
+    // in the tables this VMM shadows. A guest hypervisor that cannot
+    // split execute cannot put that policy anywhere.
+    //
+    // The composition already handles it: `nested_ept.h` takes
+    // `mode_based_execute_control` and reads `execute_user()`, and Table
+    // 30-7's rule that bit 6 exists only with the control set is written
+    // there. Only the advertisement was missing.
+    //
+    // Baseline for the comparison, measured 2026-08-15: the same guest
+    // reaches ring 3 in about five minutes under KVM alone, which does
+    // advertise this bit.
+    (1ull << 22);
 
 // Deliberately absent: **use TSC scaling**, SDM Table 25-7 bit 25.
 //
