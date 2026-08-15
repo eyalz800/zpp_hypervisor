@@ -14923,3 +14923,45 @@ as having killed the guest outright - "announcing one and then faulting
 its MSRs" is this project's recurring mistake stated exactly. So the two
 have to move together, or the leaf 0x40000000 range has to answer
 before the bit is set.
+
+## Announcing this VMM: taken cleanly, and it does not unblock
+
+`announce_hypervisor` on, run on the rig:
+
+```
+hyperv_guest_os_id      0x1040a0000271b   <- the guest hypervisor
+                                             registered itself with us
+synthetic_msr_accesses  4
+faulted_msrs            0
+l2 entries              595,636
+ring 0 595,637          ring 3 0
+```
+
+The announcement is **correct**: the guest hypervisor identified itself
+through `HV_X64_MSR_GUEST_OS_ID`, made its accesses, and **nothing
+faulted** - which is the failure this file records as having killed the
+guest outright the last time a hypervisor was announced without its MSRs
+being answered. So the pairing holds and the interface is sound as far
+as it goes.
+
+It does not unblock the boot. The livelock is unchanged and ring 3 is
+still zero.
+
+**Unlike mode-based execute control, this one is exercised**, so the
+"capability nothing has ever used" argument does not apply to it, and it
+now matches the working baseline in the one respect the baseline
+disagreed with us on. It is left on.
+
+What it narrows: the guest hypervisor knowing it is nested is *not*
+sufficient. It registers, and then behaves the same way. So whatever it
+decides about virtual secure mode is decided on something else again -
+and the two candidates left are the rest of the hypervisor CPUID range,
+which is answered only for the three leaves the measurement demanded and
+faults beyond them, and the privilege bits at leaf 0x40000003 which this
+VMM does not populate at all. A guest hypervisor that finds an interface
+announced, identifies itself, and then reads a privilege mask of zero
+has been told it may do nothing - and would fall back exactly as
+observed.
+
+That is the next thing to build, and it is the first candidate in this
+session that both fits every measurement and has never been tested.
