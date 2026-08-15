@@ -17743,3 +17743,72 @@ Prediction 5 is deliberately lower than the 1.35x quoted before: the
 flush materialisation is a real cost that the original design did not
 have, and pretending otherwise would make a worse number look like a
 regression later.
+
+## Item 2 boots clean, and is **not worth having**
+
+Four conditions found, four fixed, and the fourth boot did what three
+could not:
+
+```
+module loads: 2          no reset loop - prediction 1 correct
+l2 entries:   1,051,412  the settled regime, entry rips 8 distinct
+guest_state_defers        1,099,683   (1.00 per second-level entry)
+guest_state_materialises     66,407   (0.06 per entry - the flush)
+guest_state_dirty_writes          0   (the level above never writes one)
+```
+
+**The deferral is correct.** It runs on every exit, it survives a
+million entries, and Windows is not in recovery - the boot follows the
+same phases as every healthy boot in this file.
+
+**And it costs more than it saves.** Steady state, two dumps 90 seconds
+apart:
+
+| phase | with item 1 only | **with the deferral** |
+|---|---|---|
+| `save_l2_state` | 198,309 | **201,977** |
+| `reflect_l2_exit` | 323,292 | 320,658 |
+| `build_vmcs02` | 162,430 | **240,579** |
+| `exit information` | 27,740 | 28,146 |
+| **per exit** | **711,771** | **791,360 (+11.2%)** |
+
+**`save_l2_state` did not move.** That is the cleanest fact here and it
+refutes the premise on its own: the deferral is provably active - one
+defer per entry - and removing 44 of its 60 VMCS reads changed its cost
+by 2%. The 44 reads were never 121,000 cycles, and the whole ~1.16x
+estimate rested on assuming they were.
+
+Meanwhile `build_vmcs02` rose by 78,000 cycles, because a field that
+cannot be deferred is now written **unconditionally** rather than
+elided - the correctness fix from the second attempt - and that is more
+work than the reads it avoided.
+
+So: **`ZPP_DEFER_GUEST_STATE` stays off**, and this is a negative result
+rather than an unfinished one. The reachable total is 1.15x, not 1.35x.
+
+### What it cost and what it bought
+
+Four boots, ~280 unclean resets, and the answer is "no". Set against
+that:
+
+- **the ordering suite**, which now catches all four conditions in
+  seconds and would have caught three of them before any boot;
+- **a shim that can represent VMCS regions at all** - the single most
+  valuable thing, because it turned a class of bug from
+  boot-only-detectable into desk-detectable;
+- `set_guest_current_vmcs` owning its own invalidation;
+- and the knowledge that a bulk `memcpy` of vmcs12 back to guest memory
+  is a consumer of every field in it.
+
+**The estimate was the thing that was wrong, and it was wrong from the
+census onward.** "44 VMREADs at 2,760 cycles is 17% of an exit"
+multiplied two numbers that were each defensible and never checked the
+product against the phase it claimed to explain. `save_l2_state` was
+198,309 cycles for 60 accesses - 3,300 each - and 44 of them leaving
+should have taken it to about 53,000. It did not, which means the phase
+was never dominated by its VMCS accesses and the arithmetic never
+described it.
+
+**Check a cost model against the thing it predicts before building on
+it.** One measurement - remove the reads, see whether the phase moves -
+would have cost nothing and was available from the first census.
