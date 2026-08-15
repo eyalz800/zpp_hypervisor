@@ -5319,10 +5319,36 @@ void hypervisor::capture_vtl_switch(std::size_t cpu,
         // Guest *virtual*, so through translate_guest_linear, and the
         // outcome recorded rather than inferred - an all-zero buffer
         // has already been mistaken for an answer twice in this file.
+        // Any page-aligned kernel pointer on this side's stack, and -
+        // for the first trust level - the one the *second* level was
+        // holding, carried across.
+        //
+        // The second level holds `0xfffff804345dc000` at slot +0x080 and
+        // does not map it; the first level's CR3 is the one its
+        // mappings are under, so the address has to be followed from
+        // there rather than from where it was found. Slot +0x080 is
+        // empty on the first level's own stack, so the two are not the
+        // same shape and neither can be assumed of the other.
         constexpr std::size_t pointer_slot = 0x80 / 8;
 
-        if (auto shared = this->vtl_stack[kind][pointer_slot];
-            (0 != shared) && (0 == (shared & 0xfff))) {
+        if (timer_arm_kind != kind) {
+            auto candidate = this->vtl_stack[kind][pointer_slot];
+
+            if ((0 != candidate) && (0 == (candidate & 0xfff))) {
+                this->vtl_follow_at = candidate;
+            }
+        }
+
+        auto shared = this->vtl_stack[kind][pointer_slot];
+
+        // Nothing page aligned on this side's own stack: fall back to
+        // what the other side was holding, which is the whole point of
+        // carrying it.
+        if ((0 == shared) || (0 != (shared & 0xfff))) {
+            shared = this->vtl_follow_at;
+        }
+
+        if ((0 != shared) && (0 == (shared & 0xfff))) {
             this->vtl_shared_at[kind] = shared;
             this->vtl_shared_read[kind] = 0;
 

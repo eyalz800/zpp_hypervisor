@@ -4938,6 +4938,11 @@ private:
     volatile std::uint64_t vtl_shared_at[vtl_kinds]{};
     volatile std::uint64_t vtl_shared_read[vtl_kinds]{};
     volatile std::uint64_t vtl_shared_error[vtl_kinds]{};
+
+    /** A page-aligned pointer seen on either side's stack, so the side
+     * whose mappings cover it can follow it. The second trust level
+     * holds one it does not itself map. */
+    std::uint64_t vtl_follow_at{};
     volatile std::uint64_t vtl_captured[vtl_kinds]{};
 
     /** The last value written to `HV_X64_MSR_STIMER0_CONFIG`, so the
