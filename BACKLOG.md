@@ -16732,3 +16732,43 @@ hottest and least forgiving path in the tree, its whole value is a share
 of ~1.4x, and the required factor is bracketed at (1, 9]. With 54% of a
 round trip being nesting tax that no code change touches, the open
 question is not whether this VMM can be made 1.4x faster.
+
+### Prediction 2 was wrong: the elision diverged on its first boot, and the audit caught it
+
+```
+writes elided: 762,073
+DIVERGED AFTER ELISION: 1
+  [23] cpu 0 host field 0x4804 diverged after being elided:
+       wrote 0xffffffff, found 0xfffffff
+```
+
+`l1_host_diverged` was predicted to stay zero. It did not. Field
+`0x4804` - a segment limit, one of the two slots the earlier audit had
+already shown moving about 2% of the time - accumulated 64 clean checks,
+was elided on the strength of them, and then moved.
+
+**The arithmetic was there to be done beforehand and was not.** A slot
+that changes 2% of the time has a **27% chance** of showing 64 clean
+samples in a row. Choosing 64 was choosing a coin flip. At 4,096 the
+same slot's chance is 1.15e-36, and the warm-up cost is about 53,000
+reflections against the half-million a boot makes.
+
+**But raising the threshold is not the fix, it is half of it.** Any
+statistical bound is beaten by a rare enough event, and a bound that is
+merely large is still a bound. What makes the elision safe is that the
+check which *notices* a divergence also *repairs* it: the audit runs
+with vmcs01 current, before anything is resumed, so writing the cached
+value back costs one VMWRITE on the only path where it was ever owed.
+The slot is then retired permanently.
+
+So the property is no longer "this field never changes" - which is a
+claim about Hyper-V that this file has been wrong about three times -
+but "if it ever changes, the same reflection puts it back". That is
+checkable, self-correcting, and does not depend on being right about the
+guest.
+
+**The system worked and that is the point worth keeping.** The elision
+shipped with a hole, and the safety counter that the design insisted on
+keeping unconditional found it on the first boot, named the field, and
+disabled itself for that slot. An elision shipped without that counter
+would have skipped an owed write silently and for ever.

@@ -5398,7 +5398,31 @@ private:
      * wrong and not that the field is merely busy.
      * @{
      */
-    static constexpr std::uint64_t l1_host_stable_after = 64;
+    /**
+     * How many clean checks license an elision.
+     *
+     * **64 was measured to be far too weak and the rig proved it on the
+     * first boot.** Two of the 52 slots move about 2% of the time, and
+     * a slot that moves 2% of the time has a **27% chance** of showing
+     * 64 clean samples in a row - so it was elided, and then diverged:
+     * `host field 0x4804 diverged after being elided: wrote 0xffffffff,
+     * found 0xfffffff`. The audit caught it, disabled that slot for
+     * ever and logged, which is the design working - but a write was
+     * skipped that was owed, and that is the failure this path must not
+     * have.
+     *
+     * At 4,096 the same slot's chance of a clean run is 1.15e-36. The
+     * cost is a longer warm-up - 4,096 checks at four slots a
+     * reflection over 52 slots is about 53,000 reflections - which a
+     * boot passes through in its first seconds against the half-million
+     * it makes.
+     *
+     * **A threshold cannot make this safe on its own**, and that is why
+     * the repair below exists: any statistical bound is beaten
+     * eventually by a rare enough event, so the audit also puts the
+     * field back the moment it finds one.
+     */
+    static constexpr std::uint64_t l1_host_stable_after = 4096;
     static constexpr std::size_t l1_host_audit_batch = 4;
 
     std::uint64_t l1_host_samples[max_cpus][l1_host_field_count]{};

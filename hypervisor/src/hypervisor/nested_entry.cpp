@@ -3161,8 +3161,29 @@ void hypervisor::load_l1_host_state(std::size_t cpu)
                         this->l1_host_diverged[cpu] =
                             this->l1_host_diverged[cpu] + 1;
 
+                        // Put it back, here, before the guest
+                        // hypervisor is resumed.
+                        //
+                        // No threshold makes the elision safe on its
+                        // own - a rare enough event beats any of them,
+                        // and one did on the first boot with the
+                        // threshold at 64. What makes it safe is that
+                        // the check which notices also repairs: vmcs01
+                        // is current, nothing has resumed yet, and
+                        // writing the value back costs one VMWRITE on
+                        // the only path where it was ever owed.
+                        //
+                        // The slot stops being elidable for ever
+                        // immediately below, so this fires at most once
+                        // per slot per boot.
+                        vmcs.write(
+                            static_cast<field>(
+                                this->l1_host_field[cpu][index]),
+                            this->l1_host_value[cpu][index]);
+
                         log("cpu {} host field {} diverged after being "
-                            "elided: wrote {}, found {}",
+                            "elided: wrote {}, found {} - repaired, "
+                            "slot retired",
                             cpu,
                             this->l1_host_field[cpu][index],
                             this->l1_host_value[cpu][index],
