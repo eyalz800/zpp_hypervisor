@@ -14427,3 +14427,42 @@ level's mappings are current - rather than from where the pointer was
 found. And the capture that finds it must record which slot it came
 from, because +0x080 is empty on the VtlCall side and the two stacks
 are not the same shape.
+
+## The shared page names the subsystem: ClassPnP boot idle I/O
+
+Followed from the first trust level's side, where its mappings are
+current - `0xfffff8054cfe5000`, 256 bytes, no error. It decodes as
+UTF-16:
+
+```
+ClassPnP_EnqueueIdleIO   ClassPnP_Boot_IdleIO   DispatchCompletion
+Timeout   Error   Retry   Miniport   Queue
+```
+
+That is the Windows storage class driver's own name table, and the names
+are its boot idle-I/O path. The second trust level, which held the
+pointer, still cannot read it - `read 0, error 1` under CR3
+`0x8800002` - which is why it had to be followed from the other side.
+
+Read with the earlier `ArcName` and `multi(0)disk(0)rdisk(0)partition(4)`
+found in the frames above the trust-level wrapper, the two agree: **the
+call that never completes is in disk I/O on the passed-through NVMe**,
+not in the virtual secure mode machinery generally.
+
+That matters because it changes what to look at. Everything eliminated
+so far was a hypervisor mechanism - the instruction pointer, the
+dispatch vector, the notification, the extended page tables, the shadow
+permissions. None of them was wrong. What is left is a storage request
+that is enqueued and never dispatched, and the exit record already says
+it is never *issued*: no controller memory-mapped access, no interrupt
+vector other than the clock, no extended-page-table faults in steady
+state.
+
+So the question is now specific enough to be worth one experiment rather
+than another capture: whether Windows can reach this device at all under
+this VMM. The passed-through NVMe is claimed by VFIO and driven by the
+guest directly, and this VMM's own disk channel borrows that
+controller's admin queue - `diag::sink::esp_blocks`, which is what
+`ZPP_DIAG` arms. A storage request enqueued at boot and never dispatched
+is exactly the shape a contended controller would produce, and the
+channel is a switch that can be turned off for one boot.
