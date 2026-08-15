@@ -507,8 +507,17 @@ def dump_priority(args, elf, instance):
             pair = word(member, (cpu * 256 + index) // 2)
             return (pair >> (32 * (index % 2))) & 0xffffffff
 
+        # The PPR heading says what it is, because it has already been
+        # misread twice in one session. SDM 32.1.1: the processor
+        # maintains VPPR only under "virtual-interrupt delivery", which
+        # is not offered here and which the layer below does not permit
+        # this VMM either - so a constant 0x00 is the field being dead,
+        # not the guest being at PASSIVE, and reported the other way it
+        # says the exact opposite of what VTPR beside it says.
         for member, what in (("l2_entry_ppr",
-                              "processor priority at entry"),
+                              "processor priority at entry "
+                              "[NOT MAINTAINED - expect 0x00, see "
+                              "SDM 32.1.1; use the task priority above]"),
                              ("l2_given_vector",
                               "vectors vmcs02 actually carried")):
             rows = [(packed(member, i), i) for i in range(256)]
@@ -521,9 +530,15 @@ def dump_priority(args, elf, instance):
                 print(f"    0x{value:02x}  {count:>10}  "
                       f"{100.0 * count / total:5.1f}%")
 
+        # Cumulative, and measured to be almost entirely early-boot
+        # residue: over a steady-state window this does not move at
+        # all, because the settled guest is never below DISPATCH. Read
+        # it as a delta between two dumps or not at all.
         print(f"\n  entries carrying nothing while the priority would "
               f"have admitted a deferred call: "
-              f"{word('l2_low_priority_no_event', cpu):,}")
+              f"{word('l2_low_priority_no_event', cpu):,} "
+              f"(cumulative - read as a delta; the settled guest never "
+              f"goes below DISPATCH, so this is early-boot residue)")
 
         for member, what in (
                 ("interrupt_request_vector",
