@@ -14407,3 +14407,23 @@ pointer and the timing are all now excluded, so what remains is the
 content of that call - and the only place its content can live, given
 registers and stack are identical every time, is memory this VMM has not
 yet read.
+
+### The stack pointer at +0x080 does not translate
+
+`VtlCall`: slot +0x080 is zero on that side, so there is nothing to
+follow. `VtlReturn`: it holds `0xfffff804345dc000`, page-aligned and in
+kernel space, and `translate_guest_linear` finds no mapping for it -
+read 0 bytes, error marker `1` in the high half.
+
+The walk runs with vmcs02 current and CR3 `0x8800002`, which is the
+second trust level's own, so this is a kernel-space address that level
+does not map. That is consistent with it being a VTL0 address the secure
+kernel holds a reference to without mapping, and it means the payload is
+not reachable from the side that was sampled.
+
+The next attempt should follow it from the *other* side - capture at the
+`HvCallVtlCall` exit, where CR3 is `0x1ae002` and the first trust
+level's mappings are current - rather than from where the pointer was
+found. And the capture that finds it must record which slot it came
+from, because +0x080 is empty on the VtlCall side and the two stacks
+are not the same shape.
