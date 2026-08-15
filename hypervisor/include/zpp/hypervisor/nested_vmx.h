@@ -178,7 +178,7 @@ inline constexpr bool pass_through_hypervisor_interface = false;
 // What would make it right is one of two things, and both are real
 // work rather than a switch: present a signature that is not `Hv#1`, or
 // populate 0x40000003 with privileges this VMM can actually back.
-inline constexpr bool announce_hypervisor = true;
+inline constexpr bool announce_hypervisor = false;
 
 inline constexpr bool enabled =
 #if defined(ZPP_NESTED_VMX) && ZPP_NESTED_VMX

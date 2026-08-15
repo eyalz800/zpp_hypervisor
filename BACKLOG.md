@@ -14965,3 +14965,23 @@ observed.
 
 That is the next thing to build, and it is the first candidate in this
 session that both fits every measurement and has never been tested.
+
+### And with honest privileges it still does not move
+
+Leaf 0x40000003 now claims bit 5 (the hypercall MSRs) and bit 6 (the
+processor index MSR), which are exactly the three MSRs the handler
+answers - the correction to announcing an interface and then declaring
+the guest entitled to none of it. Run on the rig: **ring 3 still zero,
+livelock unchanged.**
+
+So the announcement is not the block in either of its forms - not with a
+zero privilege mask and not with an honest one. Three shapes of the same
+hypothesis tested and all three negative.
+
+**The privilege-mask correction is kept** and `announce_hypervisor` goes
+back off. They are independent: the mask only has an effect when the
+interface is announced, and leaving it wrong would mean the next person
+who turns the switch on inherits the same defect that was just measured
+and rejected. The switch itself returns to its long-standing default so
+the tree ends in the configuration everything else in this file was
+measured against.
