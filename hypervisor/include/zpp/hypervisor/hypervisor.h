@@ -4907,6 +4907,12 @@ private:
      * dispatch vector is its business rather than this VMM's. */
     volatile std::uint64_t l2_tpr_threshold_seen[max_cpus][16]{};
 
+    /** Entries where the threshold was armed and SDM 27.6.7's
+     * condition held, against those where it was armed and the guest
+     * was already at or above it. See the fill site. */
+    volatile std::uint64_t l2_tpr_would_fire[max_cpus]{};
+    volatile std::uint64_t l2_tpr_armed_above[max_cpus]{};
+
     std::uint64_t l2_vp_assist[max_cpus][2]{};
     std::uint64_t l2_vp_assist_eptp[max_cpus][2]{};
     std::uint8_t vtl_assist[vtl_kinds][2][vtl_assist_size]{};
