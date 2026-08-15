@@ -17211,3 +17211,55 @@ does not relieve the starvation, the requirement is above 2x, the
 reachable ceiling is ~1.35x, and the gap is not arguable. If 2x does
 relieve it, then even ~1.35x is worth landing and the question becomes
 how close it gets.
+
+## The bracket closes at the bottom: **2x relieves the starvation**
+
+`ZPP_STRETCH_GUEST_TIMER=2`, one boot, guarded. The guest re-armed to
+its short tick - 79.3% of clock gaps at **2.11-4.21 ms**, which is its
+own 1.74 ms doubled - so this is the same regime that livelocks
+unstretched, with twice the budget and nothing else changed.
+
+| | unstretched | **stretch=2** |
+|---|---|---|
+| task priority `0xd0` (CLOCK) | 64.6% | **0.8%** |
+| entries **below** DISPATCH | **0** of 184,236 | **25.7%** |
+| `0x2f` requested | 296,192 | **307** |
+| `0x2f` delivered | 16 | **259** (84%) |
+| interrupt window armed | 50.5% of entries | **1.8%** |
+| vectors ever delivered | 3 | **5** - `0xf0` and `0x0d` appear |
+| module loads (bugcheck guard) | - | **2**, no loop |
+
+**Every symptom that defines the livelock is gone.** The guest is not
+pinned at CLOCK_LEVEL, it spends a quarter of its entries below
+DISPATCH, the deferred-call request storm has collapsed from 296,192 to
+307, and 84% of what it does ask for is delivered. Interrupts that had
+never once arrived - `0xf0`, `0x0d` - are arriving.
+
+**All five predictions correct**, including the one recorded with less
+confidence: ring 3 is still not reached, at 101,249 entries.
+
+### What this settles, and it is the opposite of what this file expected
+
+**The threshold is at or below 2x.** The bracket goes from `(1, 9]` to
+`(1, 2]`.
+
+For most of this investigation the reachable ~1.35x was treated as
+hopeless against a requirement "somewhere up to 9x". That framing was
+never measured - the 9 is where the guest's own regime change sits, the
+8 is where a switch was set - and with the bottom of the range finally
+probed, **the reachable and the required are now within a factor of
+1.5 of each other rather than a factor of 7.**
+
+So the honest-speed work is worth real effort, which it demonstrably was
+not under the old framing. What is still unknown is whether ~1.35x
+clears it: the experiment says 2x is enough, not that 1.35x is.
+
+**And it is confirmation of the causal chain, end to end.** Every link
+was measured separately; this moves the one input the chain depends on
+and every downstream symptom follows. Tick pressure is the cause, not a
+correlate.
+
+Note the guard held: two module loads, which is what a healthy boot
+does, against the sixteen the `=8` run produced. The perturbation at 2x
+is far smaller and the installation was never at risk in the way the
+earlier run put it.
