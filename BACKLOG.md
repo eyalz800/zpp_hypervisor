@@ -15163,3 +15163,30 @@ this VMM sets in its own controls and the union carries through, and
 which the guest hypervisor did not ask for. That is the last unexamined
 asymmetry between what is asked and what is given, and it is one bit
 wide.
+
+### The asked-versus-given gap is now zero, and it still stalls
+
+With bit 18 taken out of the union, the guest hypervisor's guest runs
+with exactly the secondary controls the guest hypervisor asked for -
+requested and granted both `0x1010ae` - plus the two this VMM must force
+for its own shadowing to mean anything, extended page tables and VPIDs.
+Boot unchanged: ring 3 zero, same livelock.
+
+**So the entire secondary-control surface is exhausted**, in both
+directions and by measurement rather than by inspection:
+
+- what is *offered* does not matter - the request set is invariant at
+  `0x1010ae` however much is advertised, across three separate
+  capabilities added and measured;
+- what is *given* now matches what is asked, exactly, and the stall is
+  the same.
+
+That is a complete closure of one dimension. Nothing about which
+VM-execution controls the second-level guest runs under distinguishes
+the configuration that reaches ring 3 from the one that does not.
+
+The change is kept regardless of the boot, because it is right on its
+own terms: concealing VMX from Processor Trace is a statement about the
+guest hypervisor's guest, not about this VMM's, and giving a guest a
+control its own hypervisor never asked for is the same class of defect
+as withholding one it did.
