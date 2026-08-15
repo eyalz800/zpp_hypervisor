@@ -14244,3 +14244,48 @@ no interrupt vector other than the clock, and no extended-page-table
 faults in steady state. A guest waiting on an I/O it never issued is a
 different fault from one waiting on an I/O that never completed, and the
 exit histogram already rules the second one out.
+
+## The guest hypervisor arms the notification and it does not fire
+
+Measured 2026-08-15. The TPR threshold this VMM writes into vmcs02, by
+value, over one boot:
+
+| threshold | entries | |
+|---|---|---|
+| `0` | 665,668 | 99.0% - not armed |
+| **`2`** | **6,461** | 1.0% - **the DISPATCH class, which is vector 0x2f** |
+| `0xd` | 80 | 0.0% |
+
+And `l2_injected_vector` for the same boot: `0xd1` 145,102, `0x40`
+5,422, **`0x2f` 40**.
+
+So the guest hypervisor asks 6,461 times to be told when its guest drops
+below DISPATCH level, and the dispatch vector is delivered forty times.
+This settles the question the `deliver_self_ipi` note left open, and it
+settles it the other way: **the interrupt is not being withheld by the
+level that owns it. That level arms the notification the architecture
+provides and the notification does not arrive.**
+
+That is this VMM's side of the interface. What is already known about
+it, so the next attempt does not re-derive it:
+
+- The TPR shadow is honoured on every entry - `tpr_shadow_honoured`
+  counts every one, `tpr_shadow_refused` and `tpr_shadow_absent` are
+  both **0** - and vmcs02 is given the guest hypervisor's own
+  virtual-APIC page.
+- TPR virtualization is live: `mov to cr8` does **not** exit, since
+  `cr-access` exits total 10 in 1.9 million, and the virtual task
+  priority read off that page varies across 0x00, 0x20, 0x40 and 0xd0.
+  So the hardware is updating VTPR from the guest's own writes.
+- Reason 43 fires 1,141 times, and every one that fires produces a
+  delivery. The mechanism works; it is the firing that is rare.
+
+The rule to check it against is SDM 30.1.2: after TPR virtualization, a
+VM exit with reason 43 occurs if virtual-interrupt delivery is 0 **and**
+bits 3:0 of the TPR threshold exceed VTPR bits 7:4. Note *exceed*, not
+"reach": a threshold of 2 against a VTPR of 0x20 is 2 > 2, which is
+false. The same arithmetic applies at VM entry, SDM 27.6.7. So the two
+things to establish are whether the threshold reaching vmcs02 is the one
+the guest hypervisor wrote at the moment it wrote it - the control-write
+cache in `write_vmcs02_control` sits between them - and whether the
+entry-time check is being reached at all.
