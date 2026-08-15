@@ -5360,6 +5360,12 @@ private:
      * @{
      */
     std::uint64_t vp_assist_pending[max_cpus]{};
+
+    /** The extended-page-table pointer in force when the register was
+     * announced. Each trust level has its own root, and VTL0's
+     * addresses do not translate under VTL1's - so a retry taken at an
+     * arbitrary exit walks the wrong tables and refuses for ever. */
+    std::uint64_t vp_assist_eptp[max_cpus]{};
     volatile std::uint64_t vp_assist_l2_physical{};
     volatile std::uint64_t vp_assist_via_ept12{};
     volatile std::uint64_t vp_assist_via_identity{};

@@ -6839,9 +6839,20 @@ hypervisor::on_l2_exit(std::size_t cpu,
     // reports "no writes" exactly like a watch that saw none.
     if ((cpu < max_cpus) && (0 != this->vp_assist_pending[cpu]) &&
         (0 == this->vp_assist_watch_armed)) {
-        constexpr std::uint64_t retry_every = 4096;
+        constexpr std::uint64_t retry_every = 512;
 
-        if (0 == (this->l2_entries[cpu] % retry_every)) {
+        // **Only while the trust level that owns the page is current.**
+        // Each virtual trust level has its own extended-page-table root
+        // here, and this file already records that VTL0's addresses do
+        // not translate at all under VTL1's - so retrying at an
+        // arbitrary exit walks the wrong tables and refuses, for ever,
+        // which is exactly what the first two attempts did. The pointer
+        // in force when the register was announced is the one that
+        // maps it.
+        auto eptp = this->guest_vmcs12[cpu].read(field::ept_pointer);
+
+        if ((eptp == this->vp_assist_eptp[cpu]) &&
+            (0 == (this->l2_entries[cpu] % retry_every))) {
             settle_vp_assist_page(cpu);
         }
     }
@@ -7068,6 +7079,8 @@ hypervisor::on_l2_exit(std::size_t cpu,
                 if (vp_assist_slot == slot) {
                     this->vp_assist_pending[cpu] =
                         this->l2_exit_detail_value[cpu];
+                    this->vp_assist_eptp[cpu] =
+                        this->guest_vmcs12[cpu].read(field::ept_pointer);
                     settle_vp_assist_page(cpu);
 
                     auto eptp =
