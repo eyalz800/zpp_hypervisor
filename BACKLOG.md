@@ -15035,3 +15035,35 @@ that is *derived* rather than guessed, and it is short.
 a single running guest, because what the layer below permits is already
 cached here. It needed no bare-metal run and no second machine, and it
 should have been the first thing done rather than the twenty-second.
+
+### VMFUNC is available to us, so bit 13 is implementable rather than impossible
+
+```
+IA32_VMX_VMFUNC   (0x491) = 0x1          <- EPTP switching supported
+IA32_VMX_EPT_VPID (0x48c) = 0xf0106334041
+IA32_VMX_MISC     (0x485) = 0x20000165
+```
+
+The layer below grants this VMM VM-function 0, extended-page-table
+pointer switching. So the "Zero: no VM functions" this VMM answers its
+guest hypervisor with is a choice, not a limit - the capability is in
+hand and is being withheld.
+
+That settles the one thing that would have killed the candidate outright
+and it costs no boot: the read comes from `vmx_msrs`, which is already
+cached here.
+
+**What implementing it requires**, so the size is known before anyone
+starts: the extended-page-table pointer list page, whose entries are the
+shadow roots this VMM composes; a `vmfunc` exit path for the cases the
+processor does not handle itself; and the shadow builder holding more
+than one root per processor at once with the composition kept per root -
+which `shadow_ept_pointer_for` already keys by guest pointer, so the
+structure is closer than it looks.
+
+**Why it is the strongest remaining candidate.** Virtual secure mode
+uses pointer switching for trust-level transitions on hardware that
+offers it; withheld, the guest hypervisor falls back to the hypercall
+path, and the hypercall path is the pair measured looping for ever with
+byte-identical state. It is the only entry on the capability diff that
+names the exact mechanism the stall is made of.
