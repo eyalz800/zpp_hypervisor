@@ -17868,3 +17868,75 @@ and only the second is interesting.
 If (1) comes back near 100%, the transition is cheap and the cycles are
 genuinely ours - which would be the first good news in several rounds,
 because ours is the only kind that can be removed while staying on KVM.
+
+## Two findings, and the second invalidates most of the last two rounds
+
+### 1. **88.5% of an exit is inside this VMM**
+
+Measured by the region counters that had been running unread, on a
+healthy boot - 2 module loads, 1,017,517 second-level entries, Windows
+not in recovery:
+
+```
+exits handled          2,711,671
+inside this VMM          409,447 cycles/exit
+wall clock per exit      462,843 cycles/exit
+share inside this VMM      88.5%
+everything else           53,396 cycles/exit
+```
+
+**The prediction was 40-70% and it was wrong in the favourable
+direction.** The nesting transition, the level above and its guest
+together account for 11.5% of an exit; the other 88.5% is this VMM's own
+code.
+
+That is the first good news in several rounds, and it matters because
+**ours is the only kind of cycle that can be removed while staying on
+KVM.** The earlier finding that 54% of the *exits* are Hyper-V's own VMX
+instructions stands and is not in tension with this: those exits are
+cheap to take and expensive to *handle*, and the handling is ours.
+
+### 2. **Three build switches never reached the compiler**
+
+`ZPP_STEP_VTL`, `ZPP_DEFER_GUEST_STATE` and `ZPP_SHADOW_GUEST_STATE`
+were declared in the top-level `CMakeLists.txt`, forwarded into the
+hypervisor sub-build's cache, and **never added to that sub-build's
+compile-definition list** in `cmake/hypervisor/CMakeLists.txt`. The
+cache read `ON`, the option existed, `cmake --build` succeeded, and the
+code compiled out.
+
+Caught by the counter added to settle a different question:
+
+```
+guest-state reads: 47,104,921 done, 0 skipped
+```
+
+Forty-seven million reads and **not one skipped**, with
+`ZPP_DEFER_GUEST_STATE:BOOL=ON` in the cache. Corroborated in the
+binary: `may_defer_guest_state` compiled to `xorl %eax, %eax; retq`
+with the switch on.
+
+**What this invalidates:**
+
+- **Item 2's "+11.2% regression" is void.** That boot ran with the
+  read-skip compiled out but with `build_vmcs02`'s unconditional-write
+  path - which is *not* switch-gated - active. It measured all of the
+  change's cost and none of its benefit. Item 2 has never actually run.
+- **"The cost model is refuted" is withdrawn.** `save_l2_state` did not
+  move because the 44 reads were never skipped, not because VMCS
+  accesses are free. The arithmetic - 44 accesses at ~2,984 cycles -
+  may be perfectly good and has simply never been tested.
+- **Shadow mode's zero has a second independent cause.** It was already
+  void for comparing vmcs02 against a copy of itself; it was also never
+  compiled in.
+
+**Seventh instance of the class, and the first at build level** - which
+`CLAUDE.md` already warns about in as many words: *"when a hang survives
+every code change you can think of, suspect the build."* The lesson
+sharpens to: **adding an option to this tree is three edits, not two,
+and the third is the only one the compiler sees.** A switch is not real
+until a built binary shows it.
+
+Fixed, and verified the way it should have been the first time: with
+`DEFER=ON` the predicate is now called rather than folded away, and with
+`OFF` it is folded away.

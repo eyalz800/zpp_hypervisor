@@ -38,6 +38,18 @@ set(ZPP_TICK_FLOOR "0" CACHE STRING
 set(ZPP_STRETCH_GUEST_TIMER "1" CACHE STRING
     "Multiply the second-level guest's synthetic timer period by this before its hypervisor sees it. 1 is off. Diagnostic only - see the top-level CMakeLists for what it separates.")
 
+option(ZPP_STEP_VTL
+    "Step the trust-level loop with the monitor trap flag."
+    OFF)
+
+option(ZPP_DEFER_GUEST_STATE
+    "Defer the bulk copy of the second-level guest's state."
+    OFF)
+
+option(ZPP_SHADOW_GUEST_STATE
+    "Run the deferred guest-state copy in shadow."
+    OFF)
+
 option(ZPP_PROFILE_L2
     "Sample a second-level guest's instruction pointer on the VMX-preemption timer. A profiler: it costs an exit per interval and is the only instrument that can see a guest spinning on memory."
     OFF)
@@ -169,6 +181,17 @@ target_compile_options(zpp_hypervisor PRIVATE
     -DZPP_INTERCEPT_APIC=$<BOOL:${ZPP_INTERCEPT_APIC}>
     -DZPP_VIRTUALIZE_APIC=$<BOOL:${ZPP_VIRTUALIZE_APIC}>
     -DZPP_PROFILE_L2=$<BOOL:${ZPP_PROFILE_L2}>
+    # **Three switches added in one session never reached the compiler
+    # because they were declared in the top-level CMakeLists, forwarded
+    # to this sub-build's cache, and then not added to this list.** The
+    # cache read `ON`, the option existed, `cmake --build` succeeded,
+    # and the code compiled out - so two rig boots measured a change
+    # that was not in the binary, and a diagnostic reported zero
+    # because it was never built. Adding an option is three edits here,
+    # not two, and the third is the only one the compiler sees.
+    -DZPP_STEP_VTL=$<BOOL:${ZPP_STEP_VTL}>
+    -DZPP_DEFER_GUEST_STATE=$<BOOL:${ZPP_DEFER_GUEST_STATE}>
+    -DZPP_SHADOW_GUEST_STATE=$<BOOL:${ZPP_SHADOW_GUEST_STATE}>
     -DZPP_SLOW_EXITS=${ZPP_SLOW_EXITS}
     -DZPP_STRETCH_GUEST_TIMER=${ZPP_STRETCH_GUEST_TIMER}
     -DZPP_TICK_FLOOR=${ZPP_TICK_FLOOR}
