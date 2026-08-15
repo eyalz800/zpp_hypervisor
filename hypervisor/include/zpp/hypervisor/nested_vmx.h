@@ -147,7 +147,24 @@ inline constexpr bool pass_through_hypervisor_interface = false;
  * (`guest_vmxon_count` zero), so the next question is what else
  * virtualization based security wants before it will.
  */
-inline constexpr bool announce_hypervisor = false;
+// **On, as of 2026-08-15, on the strength of the first baseline.**
+//
+// This sets leaf 1 ECX bit 31 and answers the three synthetic MSRs the
+// measurement demanded - identity, hypercall page, processor index -
+// which is the pairing the recorded failure taught: announcing a
+// hypervisor and then faulting its MSRs killed the guest outright, and
+// answering those three is what fixed it.
+//
+// Why now, when it has been off all along: the control run taken today
+// boots the same Windows, the same guest hypervisor and the same
+// virtual secure mode to ring 3 in about five minutes under KVM alone -
+// and KVM announces itself unconditionally. So the one configuration
+// known to work tells the guest hypervisor it is nested, and the one
+// that stalls tells it it is on bare metal. The comment beside the
+// CPUID edit already said "a guest that knows it is virtualized takes
+// the nested path instead"; there was simply never a reference to test
+// it against.
+inline constexpr bool announce_hypervisor = true;
 
 inline constexpr bool enabled =
 #if defined(ZPP_NESTED_VMX) && ZPP_NESTED_VMX
