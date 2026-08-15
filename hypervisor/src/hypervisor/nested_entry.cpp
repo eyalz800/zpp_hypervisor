@@ -878,11 +878,55 @@ hypervisor::merge_nested_bitmaps(std::size_t cpu)
         // the iterations. Both sides are whole VMCS-referenced pages and
         // so are page aligned by construction, which is what makes the
         // wider access well defined here.
+        // Saved before the merge, because the merge is in place: the
+        // guest hypervisor's own page has already been read into
+        // `into`, and the OR below is about to cover it.
+        constexpr std::size_t vmx_capability_first = 0x480 / 8;
+        constexpr std::size_t vmx_capability_bytes = 3;
+
+        std::uint8_t theirs_over_vmx[vmx_capability_bytes]{};
+
+        std::memcpy(theirs_over_vmx,
+                    static_cast<const std::uint8_t *>(into) +
+                        vmx_capability_first,
+                    sizeof(theirs_over_vmx));
+
         auto mine = static_cast<const std::uint64_t *>(ours);
         auto target = reinterpret_cast<std::uint64_t *>(into);
 
         for (std::size_t i{}; i < page_size / sizeof(std::uint64_t); ++i) {
             target[i] |= mine[i];
+        }
+
+        // Except the VMX capability range, where this VMM's bits are
+        // for its *own* guest and must not be imposed on that guest's
+        // guest.
+        //
+        // Measured: the guest hypervisor's own bitmap intercepts every
+        // MSR from 0x480 to 0x491 **except 0x491**,
+        // `IA32_VMX_VMFUNC` - its read-low word over that block is
+        // 0xfffffffffffdffff, one bit clear. This VMM covers the range
+        // whole, because it must answer those MSRs for the guest
+        // hypervisor itself, so the merge added exactly that one bit
+        // and made the second-level guest exit on a read its own
+        // hypervisor deliberately left alone.
+        //
+        // Deliberate on its side: it does not offer VMFUNC to its guest,
+        // so a guest reading the capability cannot act on it, and the
+        // read costs it nothing unintercepted. It therefore has no
+        // reason to expect that exit to arrive, and this VMM reflects it
+        // - `l0_wants_l2_exit` claims no MSR exits - to a level that
+        // never asked.
+        //
+        // Restoring the guest hypervisor's own bytes over 0x480-0x497
+        // rather than clearing one bit, because the whole range is its
+        // business for its own guest and none of it is this VMM's: no
+        // MSR exit from the second level is answered here.
+        if (0 == which) {
+            std::memcpy(static_cast<std::uint8_t *>(into) +
+                            vmx_capability_first,
+                        theirs_over_vmx,
+                        sizeof(theirs_over_vmx));
         }
 
         return {};
