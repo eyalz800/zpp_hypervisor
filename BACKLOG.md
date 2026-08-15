@@ -14529,3 +14529,40 @@ kernel; if it still does not turn, the storage path is broken
 independently of it. That needs the guest's own configuration changed,
 which needs a boot that completes - so it is a decision about how to get
 one, not something reachable from in here.
+
+### The spin globals are zero, so the spin is not where it decides
+
+`VtlReturn` side, under the second trust level's own CR3: 256 bytes read,
+no error, and **every quadword zero**.
+
+Read against its own code that is the fast path, not a stall:
+
+```
+cmp qword [rip+0x73c89], 0
+je  skip                    ; zero -> skip the decrement and the spin
+lock dec qword [rip+0x73c7f]
+cmp qword [rip+0x73c77], 0
+pause
+jne -12
+skip:
+```
+
+The first quadword being zero means the branch is taken and the
+rendezvous is never entered. Which agrees with the exit record - the
+second trust level takes **no** exits between entry and return - and
+means it is not waiting on that counter. So the decision is made
+*before* this window, and the window has ruled out the one candidate it
+was built for rather than finding it.
+
+Two corrections for whoever picks this up:
+
+- The same displacement was applied to **both** sides, and 0x73c89 is
+  from the *secure kernel's* code. On the first trust level's side it
+  lands in `ntoskrnl` instructions, which is why that half of the dump
+  decodes as x86 rather than as data. It is not a second reading of
+  anything; ignore it.
+- The offsets are module-relative and hold across boots, so the window
+  itself is reusable - it just has to be aimed at whatever the deciding
+  code actually references, and that means decoding further back than
+  the 0x40 bytes before the return address that the current capture
+  starts from.
