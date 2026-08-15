@@ -1289,6 +1289,19 @@ bool hypervisor::on_guest_vmread(std::size_t cpu,
 
     record_vmcs_field_use(false, encoding.value());
 
+    // The one interception point a deferred guest-state field can be
+    // asked for, and it **repairs rather than asserts**: if the bulk
+    // copy was skipped and this read wants one of those fields, the
+    // copy happens here, now, before the value is produced. See
+    // `guest_state_deferred`.
+    //
+    // Measured before it was relied on: of the sixteen fields the guest
+    // hypervisor ever reads, none is in the deferred set, so this is
+    // expected never to fire - and `guest_state_materialises` says so
+    // rather than leaving it assumed. A non-zero count is not a fault,
+    // it is this path doing its job.
+    materialise_l2_guest_state_for(cpu, encoding.value());
+
     auto value = this->guest_vmcs12[cpu].read(encoding);
 
     if (operand.is_register) {
@@ -1376,6 +1389,11 @@ bool hypervisor::on_guest_vmwrite(std::size_t cpu,
     }
 
     record_vmcs_field_use(true, encoding.value());
+
+    // And the other half: a guest-state field the level above writes is
+    // **its** value, owed to vmcs02 on the next entry and not to be
+    // overwritten by a later materialisation. See `guest_state_dirty`.
+    mark_l2_guest_state_dirty(cpu, encoding.value());
 
     this->guest_vmcs12[cpu].write(encoding, value);
 

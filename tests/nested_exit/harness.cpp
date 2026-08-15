@@ -2775,6 +2775,50 @@ static void test_l0_precedence()
         hv().stepping_watch[cpu] = false;
     }
 
+    // The deferred bulk guest-state copy, and the one exclusion that
+    // makes it safe. See `guest_state_deferred`.
+    {
+        std::size_t deferrable{};
+        std::size_t kept{};
+
+        for (std::size_t i{}; i < 46; ++i) {
+            if (hypervisor_t::guest_state_deferrable(i)) {
+                ++deferrable;
+            } else {
+                ++kept;
+            }
+        }
+
+        check(2 == kept,
+              "exactly two guest-state fields are kept eager, and they "
+              "are the two on shadow_read_write_fields - the level above "
+              "reads those out of the hardware shadow region with no "
+              "exit here, so there is no point at which a deferred value "
+              "could be materialised and a stale one would be handed "
+              "over invisibly");
+        check(44 == deferrable,
+              "and the other 44 are deferred - SDM 30.3.1 has the "
+              "processor save every one of them into vmcs02 on every VM "
+              "exit, so the copy this VMM was making was of values "
+              "already in the right place");
+
+        auto cs = hypervisor_t::guest_state_index_of(
+            static_cast<std::uint64_t>(field::guest_cs_access_rights));
+        auto ss = hypervisor_t::guest_state_index_of(
+            static_cast<std::uint64_t>(field::guest_ss_access_rights));
+
+        check(cs && ss,
+              "both shadowed access-rights fields are in the bulk list");
+        check(!hypervisor_t::guest_state_deferrable(*cs) &&
+                  !hypervisor_t::guest_state_deferrable(*ss),
+              "and neither is deferrable - anything added to "
+              "shadow_read_write_fields must be excluded here too");
+
+        check(!hypervisor_t::guest_state_index_of(0xdead),
+              "an encoding outside the bulk list names no slot, so a "
+              "vmwrite of an unrelated field marks nothing owed");
+    }
+
     // Eliding a host-state write, which is only safe while the audit
     // says the processor leaves that slot alone. See `l1_host_samples`.
     {

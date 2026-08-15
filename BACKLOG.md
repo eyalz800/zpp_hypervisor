@@ -17401,3 +17401,59 @@ made without room to verify it costs: the VP assist write-watch wedged a
 boot and took a full run to discover. The blocker is cleared, the design
 is written down with its citation, and it is one focused piece of work
 for someone starting fresh.
+
+## Item 2 built: the bulk guest-state copy is deferred
+
+`save_l2_state` no longer reads 44 of `guest_state_fields` out of vmcs02
+on every exit. The processor has already saved them there - SDM 30.3.1
+(`.references/sdm.txt:204498`) and the sections beside it - so the copy
+was moving values that were already where they belong, 8.5 million times
+a boot, to serve 37,389 reads of which **none** is in the deferred set.
+
+**Two fields are kept eager and the exclusion is the whole safety
+argument.** `guest_cs_access_rights` and `guest_ss_access_rights` are on
+`shadow_read_write_fields`, so the guest hypervisor reads them out of
+the hardware shadow region **with no exit at all** - there is no
+interception point at which a deferred value could be materialised, and
+a stale one would be handed over invisibly. Grep found that; the field
+list did not advertise it.
+
+The three pieces:
+
+- **`save_l2_state`** skips the 44 and records that it did.
+- **`build_vmcs02`** writes a deferred field back only when the guest
+  hypervisor has written it - a dirty set fed by its own VMWRITEs, of
+  which there are 494 in a whole boot. Everything else is left exactly
+  as the processor saved it, which is what makes the deferral a no-op
+  rather than a lost write.
+- **`on_guest_vmread`** materialises before producing a value, and
+  **repairs rather than asserts**: if a deferred field is asked for, the
+  copy happens there and then. `materialise_l2_guest_state` skips
+  anything already dirty, so a materialisation cannot overwrite a value
+  the level above wrote.
+
+Nine cases across `nested_vmx` and `nested_exit` lock it down - that a
+write marks the field owed, that a read materialises first, that
+exactly two fields are excluded and they are the shadowed pair, and that
+an unrelated encoding marks nothing. 1,086 and 446 checks, 0 failures.
+`save_l2_state`'s call count drops from about 60 to 41 in the built
+binary, checked there rather than in the diff.
+
+### Predictions, before the boot
+
+1. `guest_state_defers` ≈ one per exit; `guest_state_materialises`
+   **0 or near it**, since none of the sixteen fields the guest
+   hypervisor reads is in the deferred set. A large count is not a fault
+   but would mean the census was wrong about what it reads.
+2. `guest_state_dirty_writes` **small** - hundreds, tracking the 494
+   VMWRITEs a boot.
+3. `save_l2_state` falls from ~198,000 cycles a call to **~75,000-90,000**
+   (44 fewer VMREADs at about 2,760).
+4. Per-exit cost falls a further **13-17%**, so with item 1 banked the
+   total is about **1.35x**.
+5. The tick regime **still reaches 1.74 ms** and `0xd0` stays high.
+6. **The circle does not turn.** 1.35x against a requirement bracketed
+   at (1, 2] is plausibly short, and the banked 1.15x alone was measured
+   not to move it.
+
+5 and 6 are the ones I most want to be wrong about.
