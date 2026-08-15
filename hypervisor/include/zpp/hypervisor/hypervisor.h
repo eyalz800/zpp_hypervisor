@@ -4351,6 +4351,19 @@ private:
     void mark_vtl_half(std::size_t cpu, std::size_t kind);
 
     /**
+     * Records where the VP assist page really is, by two independent
+     * translations, and arms a write-watch on it. See
+     * `vp_assist_l2_physical`.
+     */
+    void settle_vp_assist_page(std::size_t cpu);
+
+    /** The write-watch handler for the VP assist page. See
+     * `vp_assist_writes`. */
+    static void on_vp_assist_write(void * context,
+                                   std::uint64_t page,
+                                   const guest_write * write);
+
+    /**
      * Whether a `load_l1_host_state` slot has been audited often enough,
      * and never once found changed, for its write to be skipped. See
      * `l1_host_samples`.
@@ -5312,6 +5325,47 @@ private:
     /**
      * @}
      */
+    /**
+     * @}
+     */
+
+    /**
+     * Whether the guest hypervisor ever writes the VP assist page.
+     *
+     * **"512 bytes of zero" is a reading, not an explanation**, and it
+     * has been carried as one since the page was first eliminated as
+     * "enabled, empty". Two possibilities that could not be more
+     * different: the guest hypervisor genuinely does not use
+     * `ApicAssist`, which is its business and closes the thread; or it
+     * writes the page and those writes do not reach the frame this VMM
+     * reads, which is **ours** - and would not be confined to lazy
+     * end-of-interrupt, since that page carries the virtual trust level
+     * control structure too. A page resolved to the wrong frame is a
+     * fault of unknown blast radius that happens to have surfaced here
+     * first.
+     *
+     * The mechanism to suspect is address translation.
+     * `HV_X64_MSR_VP_ASSIST_PAGE` is written by *Windows*, so its value
+     * is an **L2 guest-physical** address; reading it here needs
+     * L2-physical to L1-physical to host-physical, and a level got
+     * wrong lands on a different frame that reads as zeros rather than
+     * failing.
+     *
+     * So both translations are recorded and cross-checked - the walk of
+     * the guest hypervisor's own extended page tables, and this VMM's
+     * identity map - because two paths agreeing is worth more than one
+     * path looking sensible. And then the page is *watched*, so that
+     * "nothing writes it" is said on the strength of a watch rather
+     * than on the strength of it being empty.
+     * @{
+     */
+    volatile std::uint64_t vp_assist_l2_physical{};
+    volatile std::uint64_t vp_assist_via_ept12{};
+    volatile std::uint64_t vp_assist_via_identity{};
+    volatile std::uint64_t vp_assist_paths_agree{};
+    volatile std::uint64_t vp_assist_watch_armed{};
+    volatile std::uint64_t vp_assist_writes{};
+    volatile std::uint64_t vp_assist_write_page{};
     /**
      * @}
      */

@@ -491,6 +491,31 @@ void hypervisor::invalidate_ept_locally()
 }
 
 /**
+ * The page-watch arming, which lives in `watched_page.cpp` and reaches
+ * for the extended page tables this harness does not build.
+ *
+ * Recorded rather than ignored, so a case can assert that settling the
+ * VP assist page arms exactly one watch and on the address the two
+ * translations agreed on - the whole point of that path being that it
+ * does not guess which frame it is looking at.
+ */
+std::uint64_t g_watched_page{};
+std::size_t g_watches_armed{};
+
+std::expected<void, zpp::error> hypervisor::watch_guest_page_writes(
+    std::uint64_t guest_physical,
+    page_watch::handler,
+    void *,
+    page_watch::mode,
+    void (*)(void *, std::uint64_t),
+    page_watch::filter)
+{
+    g_watched_page = guest_physical;
+    ++g_watches_armed;
+    return {};
+}
+
+/**
  * The real one is in `local_apic.cpp`, which this harness does not
  * compile - it reaches for the VMX capability MSRs and the live VMCS.
  * Recorded rather than ignored so a test can assert that the

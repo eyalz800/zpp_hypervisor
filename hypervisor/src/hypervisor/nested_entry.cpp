@@ -5859,6 +5859,72 @@ void hypervisor::capture_vtl_switch(std::size_t cpu,
     this->vtl_captured[kind] = 1;
 }
 
+void hypervisor::on_vp_assist_write(void * context,
+                                    std::uint64_t page,
+                                    const guest_write *)
+{
+    auto self = static_cast<hypervisor *>(context);
+
+    self->vp_assist_writes = self->vp_assist_writes + 1;
+    self->vp_assist_write_page = page;
+}
+
+void hypervisor::settle_vp_assist_page(std::size_t cpu)
+{
+    constexpr std::uint64_t enabled = 1;
+    constexpr std::uint64_t page_mask = ~0xfffull;
+
+    auto value = this->l2_exit_detail_value[cpu];
+    if (0 == (value & enabled)) {
+        return;
+    }
+
+    auto l2_physical = value & page_mask;
+    this->vp_assist_l2_physical = l2_physical;
+
+    // Path one: the guest hypervisor's own extended page tables, which
+    // is what its guest's physical address actually means.
+    auto walked = l2_physical_to_l1(cpu, l2_physical);
+    this->vp_assist_via_ept12 = walked ? *walked : 0;
+
+    // Path two: this VMM's own map, which is an identity map of the
+    // first 512 GB - so an L1-physical address is the host-physical one.
+    // Asked of `host_ept_lookup` rather than assumed, because "it is an
+    // identity map" is the assumption under test.
+    auto ours = host_ept_lookup(walked ? *walked : l2_physical);
+    this->vp_assist_via_identity =
+        (arch::x86_64::vmx::ept_walk_status::mapped == ours.status)
+            ? ours.physical_address
+            : 0;
+
+    // Two paths agreeing is worth more than one path looking sensible.
+    this->vp_assist_paths_agree =
+        ((0 != this->vp_assist_via_ept12) &&
+         (this->vp_assist_via_ept12 == this->vp_assist_via_identity))
+            ? 1
+            : 0;
+
+    if (!walked) {
+        return;
+    }
+
+    // And the watch, which is what turns "the page is empty" into
+    // "nothing writes it". The guest hypervisor runs under this VMM's
+    // extended page tables, so clearing write permission on that frame
+    // traps its writes - which is exactly the question.
+    if (auto armed = watch_guest_page_writes(
+            *walked,
+            &hypervisor::on_vp_assist_write,
+            this,
+            page_watch::mode::notify);
+        armed) {
+        this->vp_assist_watch_armed = 1;
+    } else {
+        this->vp_assist_watch_armed =
+            static_cast<std::uint64_t>(armed.error().code()) | (1ull << 32);
+    }
+}
+
 void hypervisor::record_l2_entry_event(std::size_t cpu)
 {
     if (cpu >= max_cpus) {
@@ -6978,6 +7044,8 @@ hypervisor::on_l2_exit(std::size_t cpu,
                 constexpr std::uint64_t vp_assist_slot = 0x73;
 
                 if (vp_assist_slot == slot) {
+                    settle_vp_assist_page(cpu);
+
                     auto eptp =
                         this->guest_vmcs12[cpu].read(field::ept_pointer);
 

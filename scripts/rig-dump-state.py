@@ -637,6 +637,36 @@ def dump_synthetic_msrs(args, elf, instance):
                 print(f"  0x400000{slot:02x}  {count:>10}  "
                       f"{100.0 * count / total:5.1f}%  {name}")
 
+        vp = gdb_offsets(elf, [
+            "vp_assist_l2_physical", "vp_assist_via_ept12",
+            "vp_assist_via_identity", "vp_assist_paths_agree",
+            "vp_assist_watch_armed", "vp_assist_writes",
+            "vp_assist_write_page"])
+        vr = Monitor(args.rig, args.port)
+        for m in vp:
+            vr.queue(instance + vp[m], 1)
+        vg = vr.run()
+
+        def v(m):
+            return vg.get(instance + vp[m], 0)
+
+        if v("vp_assist_l2_physical"):
+            print(f"\ncpu {cpu} VP assist page")
+            print(f"  L2 physical (what Windows wrote) "
+                  f"0x{v('vp_assist_l2_physical'):x}")
+            print(f"  via the guest hypervisor's own EPT "
+                  f"0x{v('vp_assist_via_ept12'):x}")
+            print(f"  via this VMM's identity map        "
+                  f"0x{v('vp_assist_via_identity'):x}")
+            print(f"  the two paths agree: "
+                  f"{'YES' if v('vp_assist_paths_agree') else 'NO'}")
+            print(f"  write-watch armed: "
+                  f"0x{v('vp_assist_watch_armed'):x}")
+            print(f"  WRITES SEEN: {v('vp_assist_writes'):,}"
+                  + ("   <- the guest hypervisor does write it"
+                     if v('vp_assist_writes')
+                     else "   <- nothing writes it, on the watch's word"))
+
         armed = word("l2_int_window_armed", cpu)
         clear = word("l2_int_window_clear", cpu)
         if armed or clear:
