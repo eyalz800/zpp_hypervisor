@@ -15123,3 +15123,28 @@ multiprocessor construct and would have been the obvious suspect.
 So it stands: **one virtual processor, virtual secure mode working under
 KVM alone and stalling under this VMM.** Everything measured against
 that baseline is comparing like with like.
+
+### Next lead: zero descriptor-table exits, when the control is asked for
+
+The guest hypervisor's request set is `0x1010ae`, and **bit 2 is
+descriptor-table exiting** - so every `LGDT`, `LIDT`, `LLDT`, `LTR`,
+`SGDT`, `SIDT`, `SLDT` and `STR` the second-level guest executes should
+take an exit and be reflected to it.
+
+The cumulative exit histogram records `gdtr-idtr` (reason 46) and
+`ldtr-tr` (reason 47) as **0**, across 2.3 million exits covering the
+whole boot.
+
+Windows loads GDTR and IDTR during kernel initialisation, and the secure
+kernel builds its own for the second trust level, so zero of both is
+either a guest that genuinely executes none of them after this VMM
+starts observing - possible, since the boot loader may have left them
+set - or a control that is asked for and does not reach vmcs02.
+
+Worth checking because it is in the one region left: not what the guest
+hypervisor is *permitted* to do, which is now closed, but the fidelity
+of the seven controls it actually asks for. The merge should let bit 2
+through - it is not in the cleared set and KVM permits it, `0x1378ff`
+has it - so if the exits are genuinely absent the answer is the first
+explanation and this is nothing. Establishing which costs one counter
+and no boot of its own.
