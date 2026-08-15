@@ -4844,8 +4844,12 @@ private:
      * captures are in *different address spaces*, so each has to be
      * taken while its own side is the one that exited.
      */
-    static constexpr std::size_t vtl_stack_words = 32;
+    static constexpr std::size_t vtl_stack_words = 64;
     static constexpr std::uint64_t vtl_capture_at = 4096;
+
+    /** How often each trust-level side is re-captured once the loop is
+     * running, so two dumps say whether its state advances. */
+    static constexpr std::uint64_t vtl_recapture = 64;
 
     std::uint64_t vtl_stack[vtl_kinds][vtl_stack_words]{};
     std::uint64_t vtl_rip[vtl_kinds]{};

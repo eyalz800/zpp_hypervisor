@@ -5147,11 +5147,25 @@ void hypervisor::capture_vtl_switch(std::size_t cpu,
 
     this->vtl_switches[cpu][kind] = count + 1;
 
-    // The trust-level sides are captured well inside their loop, where
-    // an early capture would show the boot reaching it rather than the
-    // loop itself. The timer arm has no loop - it happens eight times in
-    // a whole boot - so its one capture is the first.
-    if (count != ((timer_arm_kind == kind) ? 0 : vtl_capture_at)) {
+    // The timer arm happens eight times in a whole boot, so its one
+    // capture is the first. The trust-level sides are **re-captured**,
+    // every `vtl_recapture` switches, and that is the point of them now
+    // rather than a refinement of it.
+    //
+    // A single capture cannot answer the question the loop poses. Over
+    // ninety seconds the second-level guest executes two addresses and
+    // nothing else, so what is wanted is whether the *state* behind
+    // those two addresses advances - a stack that moves, an argument
+    // that counts, a frame that changes - or whether it is the identical
+    // call repeated for ever. One snapshot says neither. Two snapshots
+    // ninety seconds apart say it outright, and the counters beside them
+    // stay cumulative so nothing is lost by overwriting.
+    if (timer_arm_kind == kind) {
+        if (0 != count) {
+            return;
+        }
+    } else if ((count < vtl_capture_at) ||
+               (0 != (count % vtl_recapture))) {
         return;
     }
 
