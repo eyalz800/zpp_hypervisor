@@ -662,10 +662,19 @@ def dump_synthetic_msrs(args, elf, instance):
                   f"{'YES' if v('vp_assist_paths_agree') else 'NO'}")
             print(f"  write-watch armed: "
                   f"0x{v('vp_assist_watch_armed'):x}")
-            print(f"  WRITES SEEN: {v('vp_assist_writes'):,}"
-                  + ("   <- the guest hypervisor does write it"
-                     if v('vp_assist_writes')
-                     else "   <- nothing writes it, on the watch's word"))
+            # An unarmed watch reports "no writes" exactly like a watch
+            # that saw none. Never print the conclusion without the
+            # premise - the first run of this said "nothing writes it,
+            # on the watch's word" when no watch had been armed.
+            if 1 != v("vp_assist_watch_armed"):
+                print(f"  WRITES SEEN: {v('vp_assist_writes'):,}"
+                      f"   <- MEANINGLESS, no watch is armed")
+            else:
+                print(f"  WRITES SEEN: {v('vp_assist_writes'):,}"
+                      + ("   <- the guest hypervisor does write it"
+                         if v("vp_assist_writes")
+                         else "   <- nothing writes it, and a watch was "
+                              "armed the whole time"))
 
         armed = word("l2_int_window_armed", cpu)
         clear = word("l2_int_window_clear", cpu)

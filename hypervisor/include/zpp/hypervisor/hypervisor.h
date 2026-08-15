@@ -5359,6 +5359,7 @@ private:
      * than on the strength of it being empty.
      * @{
      */
+    std::uint64_t vp_assist_pending[max_cpus]{};
     volatile std::uint64_t vp_assist_l2_physical{};
     volatile std::uint64_t vp_assist_via_ept12{};
     volatile std::uint64_t vp_assist_via_identity{};

@@ -5874,7 +5874,7 @@ void hypervisor::settle_vp_assist_page(std::size_t cpu)
     constexpr std::uint64_t enabled = 1;
     constexpr std::uint64_t page_mask = ~0xfffull;
 
-    auto value = this->l2_exit_detail_value[cpu];
+    auto value = this->vp_assist_pending[cpu];
     if (0 == (value & enabled)) {
         return;
     }
@@ -5904,6 +5904,15 @@ void hypervisor::settle_vp_assist_page(std::size_t cpu)
             ? 1
             : 0;
 
+    // Not mapped in the guest hypervisor's tables *yet*, which is the
+    // ordinary case at the moment the register is written: Windows
+    // allocates the page and announces it, and the level above maps it
+    // when it first touches it. Measured - the first attempt at this
+    // settled on the write and came back with the walk refusing, so no
+    // watch was armed and "nothing writes it" was said with nothing
+    // watching.
+    //
+    // So this is retried rather than done once. See the caller.
     if (!walked) {
         return;
     }
@@ -6824,6 +6833,19 @@ hypervisor::on_l2_exit(std::size_t cpu,
         return l2_exit_outcome::reflected;
     }
 
+    // The VP assist page, retried until the level above has mapped it.
+    // See `settle_vp_assist_page`: settling on the register write alone
+    // found the page unmapped and armed nothing, and an unarmed watch
+    // reports "no writes" exactly like a watch that saw none.
+    if ((cpu < max_cpus) && (0 != this->vp_assist_pending[cpu]) &&
+        (0 == this->vp_assist_watch_armed)) {
+        constexpr std::uint64_t retry_every = 4096;
+
+        if (0 == (this->l2_entries[cpu] % retry_every)) {
+            settle_vp_assist_page(cpu);
+        }
+    }
+
     // The free-running trace, armed on an ordinary exit rather than on
     // a hypercall. See `vtl_step_free_kind`: the two trust-level traces
     // can only ever show the loop they were armed for, and what the
@@ -7044,6 +7066,8 @@ hypervisor::on_l2_exit(std::size_t cpu,
                 constexpr std::uint64_t vp_assist_slot = 0x73;
 
                 if (vp_assist_slot == slot) {
+                    this->vp_assist_pending[cpu] =
+                        this->l2_exit_detail_value[cpu];
                     settle_vp_assist_page(cpu);
 
                     auto eptp =
