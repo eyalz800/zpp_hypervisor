@@ -14793,3 +14793,48 @@ directly from its own Limine entry - which would say whether this
 installation reaches the desktop on this hardware at all right now.
 That costs a power cycle and someone at the machine, and it is the only
 remaining control that needs nothing changed.
+
+## The control finally run: Windows reaches ring 3 without this VMM
+
+Run on 2026-08-15, after seventeen boots that all had this VMM in the
+path and none that did not. `boot-windows-rig` says it plainly - "A
+control that fails proves nothing. If Windows will not boot, check that
+it boots *without* the hypervisor in the same configuration before
+blaming the hypervisor" - and it had never been done.
+
+It needs no power cycle and nothing modified. The guest's own firmware
+variables decide what boots: `RELEASEX64_OVMF_VARS.fd.orig` carries no
+boot option for this VMM's loader, so a run with it boots Windows
+directly. That is normally a hazard - it is why
+[[never-reset-the-guest-nvram-from-orig]] exists - and here it is
+exactly the experiment.
+
+```
+RIP=fffff82e653319a6 CPL=0
+RIP=fffff82e653a843d CPL=0     <- the guest hypervisor's exit handler
+RIP=00007fffa04da210 CPL=3     <- user mode
+RIP=00007fffb45860c0 CPL=3
+allocate_rwx in serial: 0      <- this VMM never loaded
+```
+
+**Windows reaches ring 3 in about five minutes**, on the same hardware,
+the same passed-through NVMe and GPU, the same one virtual processor,
+with Hyper-V and virtual secure mode running - just under KVM alone
+rather than under KVM and this VMM. The `fffff82e653a843d` sample is the
+guest hypervisor's own exit handler, the same shape of address seen in
+every nested run, so Hyper-V is running there too.
+
+**What this settles, and it is worth the seventeen boots it took to ask:**
+
+- The installation is healthy and the rig configuration is sound. Every
+  measurement of the stuck boot was of a guest that would otherwise have
+  succeeded.
+- The goal's own comparison - "similar to how Hyper-V boots on top of
+  KVM" - is now a measured baseline rather than an assumption.
+- The thirteen exonerations above stand, and the fault is **ours**.
+  Something this VMM does, or fails to do, stops a boot that works
+  without it.
+
+The nvram was copied to `RELEASEX64_OVMF_VARS.fd.zpp-boot-option` first
+and restored afterwards, verified by hash both ways. Nothing on the
+Windows volume was touched.
