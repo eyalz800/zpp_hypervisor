@@ -4885,6 +4885,14 @@ private:
     std::uint64_t l2_vp_assist_eptp[max_cpus][2]{};
     std::uint8_t vtl_assist[vtl_kinds][2][vtl_assist_size]{};
 
+    /** How many bytes of it were read, why the read stopped - the error
+     * code with 1 in the high half for the address translation and 2 for
+     * the read itself - and what the second level's address translated
+     * to. An all-zero buffer means nothing without these. */
+    volatile std::uint64_t vtl_assist_read[vtl_kinds][2]{};
+    volatile std::uint64_t vtl_assist_error[vtl_kinds][2]{};
+    volatile std::uint64_t vtl_assist_first[vtl_kinds][2]{};
+
     std::uint8_t vtl_code[vtl_kinds][vtl_code_size]{};
     std::uint64_t vtl_code_base[vtl_kinds]{};
     volatile std::uint64_t vtl_captured[vtl_kinds]{};

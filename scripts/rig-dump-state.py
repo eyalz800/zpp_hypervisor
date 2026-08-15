@@ -378,7 +378,8 @@ def dump_vtl(args, elf, instance):
                "vtl_image_base", "vtl_caller_base", "vtl_caller_address",
                "vtl_image_name", "vtl_caller_name", "vtl_captured",
                "vtl_code", "vtl_code_base", "vtl_assist",
-               "l2_vp_assist", "l2_vp_assist_eptp"]
+               "l2_vp_assist", "l2_vp_assist_eptp", "vtl_assist_read",
+               "vtl_assist_error", "vtl_assist_first"]
     off = gdb_offsets(elf, members)
 
     kind = "sizeof(('zpp::hypervisor::hypervisor' *)0)->vtl_differed[0][0]"
@@ -411,6 +412,9 @@ def dump_vtl(args, elf, instance):
                  kinds * 2 * assist_size // 8)
     reader.queue(instance + off["l2_vp_assist"], 2)
     reader.queue(instance + off["l2_vp_assist_eptp"], 2)
+    for member in ("vtl_assist_read", "vtl_assist_error",
+                   "vtl_assist_first"):
+        reader.queue(instance + off[member], kinds * 2)
     for member in ("vtl_image_name", "vtl_caller_name"):
         reader.queue(instance + off[member], kinds * name_size // 8)
     got = reader.run()
@@ -479,10 +483,14 @@ def dump_vtl(args, elf, instance):
             live = [(i * 8, word("vtl_assist", base + i))
                     for i in range(assist_size // 8)
                     if word("vtl_assist", base + i)]
-            if not (msr or live):
+            if not (msr or live
+                    or word("vtl_assist_error", k * 2 + level)):
                 continue
             print(f"  vp assist level {level}: msr 0x{msr:x} "
-                  f"eptp 0x{word('l2_vp_assist_eptp', level):x}")
+                  f"eptp 0x{word('l2_vp_assist_eptp', level):x} "
+                  f"read {word('vtl_assist_read', k * 2 + level)} bytes "
+                  f"err 0x{word('vtl_assist_error', k * 2 + level):x} "
+                  f"first 0x{word('vtl_assist_first', k * 2 + level):x}")
             for at, value in live:
                 mark = "  <- vtl control" if 0x100 <= at < 0x140 else ""
                 print(f"    +0x{at:03x}  0x{value:016x}{mark}")

@@ -5309,19 +5309,37 @@ void hypervisor::capture_vtl_switch(std::size_t cpu,
             continue;
         }
 
+        // How far it got, and why it stopped. Without this an all-zero
+        // buffer is indistinguishable from a read that failed on its
+        // first quadword - and the first attempt at this *did* come back
+        // all zeroes, which is exactly the reading that would have been
+        // recorded as "the page is empty".
+        this->vtl_assist_read[kind][which] = 0;
+        this->vtl_assist_error[kind][which] = 0;
+
         for (std::size_t i{}; i < vtl_assist_size; i += 8) {
             auto first = l2_physical_to_l1(cpu, (msr & page_mask) + i);
             if (!first) {
+                this->vtl_assist_error[kind][which] =
+                    static_cast<std::uint64_t>(first.error().code()) |
+                    (1ull << 32);
                 break;
             }
 
-            if (!read_guest_physical(
+            if (auto got = read_guest_physical(
                     *first,
                     std::span(reinterpret_cast<std::byte *>(
                                   &this->vtl_assist[kind][which][i]),
-                              8))) {
+                              8));
+                !got) {
+                this->vtl_assist_error[kind][which] =
+                    static_cast<std::uint64_t>(got.error().code()) |
+                    (2ull << 32);
                 break;
             }
+
+            this->vtl_assist_read[kind][which] = i + 8;
+            this->vtl_assist_first[kind][which] = *first;
         }
     }
 
