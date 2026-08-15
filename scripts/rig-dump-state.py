@@ -419,7 +419,8 @@ def dump_priority(args, elf, instance):
     histogram is what the guest hypervisor armed beside it.
     """
     members = ["l2_entry_vtpr", "l2_tpr_threshold_seen", "l2_cpl_seen",
-               "l2_tpr_would_fire", "l2_tpr_armed_above"]
+               "l2_tpr_would_fire", "l2_tpr_armed_above",
+               "clock_gap_buckets"]
     off = gdb_offsets(elf, members)
     vtpr_slots, threshold_slots, cpl_slots = gdb_values(elf, [
         "sizeof(('zpp::hypervisor::hypervisor' *)0)->l2_entry_vtpr[0] / 4",
@@ -436,6 +437,11 @@ def dump_priority(args, elf, instance):
     reader.queue(instance + off["l2_cpl_seen"], args.cpus * cpl_slots)
     for member in ("l2_tpr_would_fire", "l2_tpr_armed_above"):
         reader.queue(instance + off[member], args.cpus)
+    gap_slots = gdb_values(elf, [
+        "sizeof(('zpp::hypervisor::hypervisor' *)0)"
+        "->clock_gap_buckets[0] / 8"])[0]
+    reader.queue(instance + off["clock_gap_buckets"],
+                 args.cpus * gap_slots)
     got = reader.run()
 
     def word(member, index):
@@ -466,6 +472,21 @@ def dump_priority(args, elf, instance):
                for i in range(cpl_slots)]
         print("  cpl seen: " + ", ".join(f"{i}={v:,}"
                                          for i, v in enumerate(cpl) if v))
+
+        # How long the guest gets between clock interrupts. The period
+        # it programmed is 1.74 ms; a distribution far below that is a
+        # backlog of expirations being drained rather than a timer.
+        gaps = [(i, word("clock_gap_buckets", cpu * gap_slots + i))
+                for i in range(gap_slots)]
+        gaps = [(i, v) for i, v in gaps if v]
+        if gaps:
+            total = sum(v for _, v in gaps)
+            print(f"  time-stamp counter between clock interrupts "
+                  f"({total:,} gaps, ~2.6 GHz)")
+            for i, v in gaps:
+                low = 1 << i
+                print(f"    2^{i:<2} ({low / 2600.0:10.1f} us)  {v:>10}  "
+                      f"{100.0 * v / total:5.1f}%")
 
 
 def dump_vtl(args, elf, instance):

@@ -5132,6 +5132,41 @@ private:
     /** The kind being stepped plus one, or zero. Per processor, because
      * the flag lives in that processor's vmcs02. */
     std::uint8_t vtl_step_active[max_cpus]{};
+
+    /**
+     * How long the guest gets between one clock interrupt and the next,
+     * as a histogram of the base-two logarithm of the time-stamp
+     * counter delta.
+     *
+     * This is the question the instruction trace ends on and cannot
+     * answer. In the settled state the instruction immediately after
+     * `HvCallVtlReturn` is the interrupt-descriptor-table stub for
+     * vector `0xd1`, and in the boot phase the guest manages twenty
+     * instructions - the epilogue of one function - before the same
+     * stub. Either the timer is genuinely due that often, or
+     * expirations are being replayed, and those want opposite fixes:
+     *
+     * - deltas near the 1.74 millisecond period the guest programmed
+     *   mean the timer is right and the guest is simply not being given
+     *   the processor, which is a cost;
+     * - deltas far below it mean a backlog of expirations is being
+     *   drained one interrupt at a time, which is a defect and is
+     *   somebody's to fix.
+     *
+     * The counter rather than the reference page, because the reference
+     * page is derived from it and this VMM applies no offset - see the
+     * time-stamp composition in `build_vmcs02`. Bucketed by logarithm
+     * so the whole range from a microsecond to a second fits in
+     * sixty-four counters with no constant to choose.
+     * @{
+     */
+    static constexpr std::uint64_t clock_gap_vector = 0xd1;
+
+    std::uint64_t clock_gap_last[max_cpus]{};
+    std::uint64_t clock_gap_buckets[max_cpus][64]{};
+    /**
+     * @}
+     */
     /**
      * @}
      */

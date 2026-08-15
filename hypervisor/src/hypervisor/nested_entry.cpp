@@ -2228,6 +2228,27 @@ std::expected<void, zpp::error> hypervisor::build_vmcs02(std::size_t cpu)
             // ran and failed from a vector that was never taken.
             constexpr std::uint64_t synthetic_interrupt_3 = 0xd1;
 
+            // And how long the guest was given since the last one. See
+            // `clock_gap_buckets`: the instruction trace ends on this
+            // question and cannot answer it.
+            if (clock_gap_vector == vector) {
+                auto now = arch::x86_64::rdtsc();
+                auto previous = this->clock_gap_last[cpu];
+
+                this->clock_gap_last[cpu] = now;
+
+                if (0 != previous) {
+                    auto delta = now - previous;
+                    std::size_t bucket{};
+
+                    while ((delta >>= 1) && (bucket < 63)) {
+                        ++bucket;
+                    }
+
+                    this->clock_gap_buckets[cpu][bucket] += 1;
+                }
+            }
+
             if (synthetic_interrupt_3 == vector) {
                 auto slot = this->injection_landing_count[cpu] %
                             injection_landing_capacity;

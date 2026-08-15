@@ -15537,3 +15537,75 @@ Two specific things it should settle:
   empty queue, or never runs at all;
 - whether the eight distinct entry addresses are the whole of what the
   guest executes, or an artefact of a table filled early.
+
+## The clock is pending again within twenty instructions, and that is the whole loop
+
+Second and third boots with the instruction trace, and the picture is
+now concrete enough to name.
+
+**In the settled state the gap is zero instructions.** The trace armed
+at `HvCallVtlCall` runs the secure kernel's 447 instructions, its
+`HvCallVtlReturn` `vmcall`, and then:
+
+```
+ntoskrnl+0xbbe948   pushq $-47      ; the interrupt stub for 0xd1
+```
+
+with nothing in between. **In the boot phase it is twenty
+instructions**, and they are the epilogue of the very function that
+made the secure call:
+
+```
+ntoskrnl+0x6a774b   movq 8(%rsp), %rdx        ; back from the hypercall
+                    movdqu %xmm10, 8(%rdx)    ; ... the register save area
+                    movaps 48(%rsp), %xmm6    ; ... and the restore
+ntoskrnl+0x6a77af   movaps -64(%rcx), %xmm15
+ntoskrnl+0xbbe948   pushq $-47                ; and the clock again
+```
+
+So the guest is not slow at the scale of a scheduler quantum or of a
+tick. It is being interrupted before it can finish returning from one
+function.
+
+**That rules out the reading this file settled on an hour earlier.**
+"Each tick costs 1.2 milliseconds of this VMM against a 1.74
+millisecond period, so the guest gets 30 per cent" would leave the
+guest half a millisecond of wall clock between ticks - about a million
+instructions at native speed, since a guest instruction is not slowed
+by anything here. It executes twenty. A cost model cannot produce that
+number; only a timer that is already due can.
+
+Two explanations remain and they want opposite work:
+
+- the periodic timer's **expirations are being queued rather than
+  coalesced**, so a backlog accumulated while the machine was slow is
+  being drained one interrupt at a time and never drains, or
+- the guest's view of time is advancing far faster than it should, so
+  the timer is genuinely due every time it is looked at.
+
+Both are distinguishable by one measurement and it needs no reasoning:
+the time-stamp counter delta between successive injections of `0xd1`.
+Near 1.74 milliseconds means the timer is right and the guest is being
+starved of processor; far below means expirations are being replayed.
+`clock_gap_buckets` records it as a histogram of the base-two logarithm
+of the delta, which covers a microsecond to a second in sixty-four
+counters with no threshold to choose.
+
+### Two things settled along the way
+
+**The eight entry addresses are real, not a full table.** In the boot
+phase `l2_entry_rip` reports "8 distinct, 47,909 beyond the table" -
+the table is full and the overflow counter holds everything else. In
+the settled state the same table reports "48,232 entries, 8 distinct,
+57 beyond", so those eight really are almost the whole of where the
+guest is entered. The table is reset periodically, which is what makes
+the second reading mean something; without that it would be the trap
+this file already records under "a full fixed table cannot tell two
+distinct values from a million".
+
+**The return from the secure call is normal in the boot phase and an
+interrupt in the settled one.** Armed at `HvCallVtlReturn`, the boot
+phase trace begins at `ntoskrnl+0x6a774b`, which is the instruction
+after the call into the hypercall page - an ordinary return. The
+settled trace begins at the interrupt stub. That difference is the
+livelock arriving, and it is visible in one address.
