@@ -16202,3 +16202,61 @@ correctly. None of them was the cause because the cause is not a
 mechanism: it is that the tick the guest chose is unaffordable here, and
 the per-tick exit budget contains almost nothing this VMM could stop
 taking.
+
+### Correction: "unreachable from inside the VMM" is not supported by the arithmetic
+
+The entry above concludes that the 1.74 ms tick "cannot be made
+affordable on this rig by anything this VMM does". That is stated more
+strongly than the evidence carries, and the overstatement is worth
+correcting here rather than leaving for someone to inherit.
+
+The argument was: the stretch that unblocked the boot gave the handler
+**eight times** its budget, and removing every cycle this VMM spends is
+**2.9x**, so speed cannot reach it.
+
+**The eight is not a threshold.** It is what the switch happened to be
+set to. Nothing established that eight was the minimum, or that anything
+below it fails - the experiment was run once, at one value, and it
+worked. So the required factor is unknown and lies somewhere in
+`(1, 8]`.
+
+What the numbers actually say about the share the guest gets of each
+tick period:
+
+| | VMM time per 1.74 ms period | left for the guest |
+|---|---|---|
+| today | ~1.25 ms (4.16 reflections at ~300 us) | ~28% |
+| at the 1.2x of "sound and easy" | ~1.04 ms | ~40% |
+| at the 2.9x limit of removing *all* of it | ~0.43 ms | ~75% |
+| the stretch that worked | unchanged, but a 13.9 ms period | ~86% |
+
+75% is not obviously short of 86%, and 40% is not obviously short of
+whatever the true threshold is. **Whether 2.9x suffices has never been
+tested**, and the honest position is that it is unknown rather than
+ruled out.
+
+What remains true and is not weakened:
+
+- the per-tick *exit count* is essentially irreducible - three of the
+  four reflections a tick costs are architecturally unconditional MSR
+  writes (SDM 26.6.9), so any speedup has to come from the cycles per
+  exit and not from taking fewer of them;
+- the cycles per exit are dominated by VMREAD and VMWRITE trapping to
+  the layer below at about 2,700 cycles against roughly 40 on bare
+  metal, which is the rig's tax and not this VMM's work;
+- so the 2.9x is a ceiling on removing *our own* work, and most of the
+  per-exit cost is not ours to remove while we stay on KVM.
+
+Which is what makes the question sharp rather than settled: the
+reachable range is roughly 1.2x, the ceiling is 2.9x, and the threshold
+is somewhere in a range whose lower end has never been probed.
+
+**The experiment that would find the threshold is a lie about time, and
+it should not be run without asking.** `ZPP_STRETCH_GUEST_TIMER=2`
+would say whether twice the budget is enough, which is inside the range
+honest speed might reach. But the same switch at 8 bugcheck-looped
+Windows sixteen times in one boot, every bugcheck is an unclean
+shutdown of the real installation on the passed-through disk, and this
+file already records that enough of those bring Windows up in recovery
+and cost a repair cycle with someone at the machine. That is a decision
+about risk to the user's installation, not one the evidence can settle.
