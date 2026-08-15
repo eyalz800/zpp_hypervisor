@@ -15911,3 +15911,116 @@ increasing order of what they cost:
 The general form: **a probe's value is only evidence once something
 independent says the probe ran.** Prefer an invariant the value must
 satisfy over a plausibility judgement about the value itself.
+
+## Re-arguing the timing rejections against the round-trip measurement
+
+The measured round trip - **4.8 to 5.5 ms and about 31 VM exits**,
+against a 1.74 ms tick - is a different kind of evidence from anything
+available when the "too slow" family was dismissed. So each rejection in
+that family is re-read here against it, the same way
+`ZPP_DELIVER_SELF_IPI` was. Two survive, two do not, and the difference
+matters because a rejected-list entry stops the next person.
+
+### `ZPP_STRETCH_GUEST_TIMER` - rejection survives, and its result was under-weighted
+
+The reason it was rejected is **structural, not evidential**: stretching
+the period without slowing the reference counter leaves the guest's two
+time sources disagreeing, this part reports no `tsc_scaling` in its VMX
+flags, so the second cannot be slowed to match, and the guest bugcheck-
+looped sixteen times in one boot. Nothing measured since changes any of
+that. **It stays rejected as a fix.**
+
+**But its positive half is the most important experiment in this file
+and the entry recording it undersells it.** With the period multiplied
+by eight:
+
+- the deferred-procedure interrupt started being delivered;
+- the task priority moved through four levels instead of sitting at
+  `0xd0`;
+- device interrupts and IPIs that had never arrived once arrived;
+- the second-level guest reached its idle loop.
+
+That is the boot un-blocking. The entry's own summary - "It says nothing
+about whether more speed would fix the boot" - is too weak by half. It
+does not say more speed would fix it, true; but it does establish that
+**relieving tick pressure releases the deferred-procedure starvation**,
+which is exactly the causal link in the chain, tested and confirmed
+rather than inferred. The chain from "a round trip outlasts a tick" to
+"no deferred procedure call runs" is therefore **causal, not
+correlational**, and it did not need a new boot to establish - it needed
+the existing result read for what it showed.
+
+### `ZPP_TICK_FLOOR` - rejection survives
+
+Same class and the same outcome: one refusal, then `paused (shutdown)`.
+It was the careful version - only a periodic period, only one shorter
+than the 15.625 ms this same guest chose for itself - and the guest
+still refused to be helped. Nothing in the round-trip measurement bears
+on it. **Stays rejected.**
+
+### "The delivered tick rate did not move when the machine got faster" - does not survive as a closure
+
+This is the strongest anti-timing datum in the file: 506 ticks/s after
+an 11.5% cut to the nested round trip, against 507 before, read as
+"whatever pins it at 506 is not throughput".
+
+Three reasons it cannot carry that weight:
+
+- **It is one unreplicated pair of 60-second windows.** An 11.5% cut
+  predicts about +8% in delivered ticks; the difference between 506 and
+  507 is inside the variation two windows on this machine show anyway.
+- **Boots land in different regimes**, which was not known then and is
+  now: three consecutive boots this session stayed in an
+  extended-page-table fill regime with the 15.6 ms tick and `0xd0` at
+  0.8% of entries, where the boots that produced the livelock data
+  reached the 1.74 ms tick and sat at `0xd0` on two thirds. A pair of
+  measurements taken across that boundary is comparing two machines.
+- **It is contradicted by the stretch result above**, which moved the
+  same quantity a long way in the same direction.
+
+So it does not close the timing region. It should be re-run before it is
+cited again.
+
+### "2.7x faster and no progress" - does not survive, and was already withdrawn
+
+Recorded earlier in this file. The guest asks 575 ticks a second and
+receives 283, so 2.7x was never enough to test the claim it was used to
+refute.
+
+### The arithmetic ceiling, which constrains what honest speed can reach
+
+Worth stating before any work is done on the exit count, because it
+bounds the answer.
+
+Per clock tick the guest costs **4.1 second-level exits**. Three of them
+are synthetic model-specific register writes - the end-of-interrupt at
+`0x40000070`, the end-of-message at `0x40000084`, and the interrupt
+command at `0x40000071` - and all three lie **outside both ranges an MSR
+bitmap can describe** (SDM 26.6.9: `0` to `0x1fff` and `0xc0000000` to
+`0xc0001fff`). They exit *unconditionally*. No bitmap, no control and no
+cleverness here can stop them.
+
+At about 290 us a reflection that is 1.2 ms per tick against a 1.74 ms
+period - 69% - before the trust-level round trip is counted at all. The
+round trip amortises to about 0.33 ms a tick at one per fifteen ticks,
+bringing it to roughly 1.5 ms of 1.74, or **86%**.
+
+And the comparison that bounds the work: the stretch that unblocked the
+boot gave the handler **eight times** its budget. Reaching the same duty
+cycle by speed needs the service time cut by the same factor, and this
+file's own ceiling for removing *every cycle this VMM spends* is 2.9x.
+**Honest speed on this rig cannot reach what the stretch reached**,
+because three of the four exits a tick costs are architecturally
+unconditional and the fourth is the machine underneath.
+
+That is not an argument against reducing the exits per round trip - 31
+for what is architecturally two hypercalls is this VMM's own number and
+present on any host. It is an argument for knowing, before starting,
+that it will not on its own make a 575 Hz tick affordable here.
+
+**And the regime split says where it would help.** The boots that stayed
+at the 15.6 ms tick did not livelock - they ground forward. 1.5 ms of a
+15.6 ms period is 10%, and the guest has room. The livelock appears only
+after the guest re-arms to 1.74 ms. So the same absolute saving is
+worth nothing at 64 Hz and everything at 575 Hz, and the honest target
+is the round trip's own exit count rather than a global speedup.
