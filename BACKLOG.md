@@ -16260,3 +16260,81 @@ shutdown of the real installation on the passed-through disk, and this
 file already records that enough of those bring Windows up in recovery
 and cost a repair cycle with someone at the machine. That is a decision
 about risk to the user's installation, not one the evidence can settle.
+
+## The 15.6 ms regime is the stretch experiment run honestly, and it corroborates - softly
+
+The guest chooses two tick periods in a boot: 15.625 ms first, then
+1.74 ms after about seventy-eight seconds. The first hands it roughly
+**nine times** the per-tick budget of the second, and it chose it
+itself - so there is no lie about time, no time-source disagreement and
+no bugcheck. It is `ZPP_STRETCH_GUEST_TIMER` run at zero risk, and the
+data was already on disk.
+
+Read as deltas between two dumps of the same boot in each regime:
+
+| | 15.6 ms (dump6→dump7) | 1.74 ms (e1→e2) |
+|---|---|---|
+| clock gap mode | 8.4 - 16.8 ms, 83% | 1.05 - 2.11 ms, 69% |
+| task priority `0xd0` (CLOCK) | **1.2%** | **70.8%** |
+| task priority `0x20` (DISPATCH) | **72.2%** | 27.7% |
+| entries below DISPATCH | 105 of 26,066 (0.4%) | **0 of 184,236** |
+| `0x2f` asked in window | **0** | **31,427** |
+| `0x2f` delivered in window | 2 | 0 |
+| ring 3 | none | none |
+
+**The two symptoms that define the livelock are absent at 15.6 ms.** The
+guest is not pinned at CLOCK_LEVEL - it is at DISPATCH_LEVEL, which is
+where the deferred-procedure dispatcher runs - and it issues *no*
+starved requests at all, because it is keeping up with its own queue
+rather than re-asking thirty thousand times.
+
+So the stretch result is corroborated by a regime the guest entered of
+its own accord. Relieving tick pressure removes the CLOCK pinning and
+the deferred-call starvation together, and that no longer rests on an
+experiment that bugchecked the machine.
+
+### But it is not a clean single-variable comparison, and the bracket stays soft
+
+The two regimes differ in more than tick period, and the difference is
+large:
+
+| | 15.6 ms | 1.74 ms |
+|---|---|---|
+| exits per tick | **114.6** | 8.85 |
+| `ept-violation` | **63.7%** of exits | **0%** |
+| the instruction trace | **on** | off |
+
+The 15.6 ms captures are from boots doing shadow extended-page-table
+fill - one-time work that had plateaued entirely by the time the 1.74 ms
+regime was reached. So this compares two tick periods *and* two
+workloads *and* two build configurations. It corroborates the direction;
+it does not measure the threshold.
+
+**And "no ring 3 at 15.6 ms" is uninformative**, which is worth saying
+because it looks like a finding. The boot that produced the 1.74 ms data
+*passed through* the 15.6 ms regime on its way there, so that regime is
+not a terminal state the guest fails in - it is the earlier phase of the
+same trajectory, and ring 3 was simply still ahead of it.
+
+So the honest bracket on the required factor is unchanged at **(1, 9]**,
+with the upper end now supported by an honest observation rather than by
+a switch that bugchecked. What it does *not* do is tell us whether the
+1.2x - 2.9x this VMM could reach is enough.
+
+### And a wrong constant in this tree's own reader, found while doing it
+
+`rig-dump-state.py` labelled the clock-gap buckets using **2.6 GHz**,
+where this file established years of argument ago that the part's TSC
+runs at **1.992 GHz** - measured, 179,446,096,055 counts over a 90.08
+second window, with the fitted `reference_scale` agreeing to four
+significant figures, and with an explicit "do not re-derive this"
+attached because the marketed 1.80 GHz base frequency is not the TSC
+frequency.
+
+Every microsecond figure that reader printed was understated by 31%.
+The bucket boundaries were right, so no conclusion above changes - the
+1.74 ms period lands in the same bucket either way - but a reader
+checking "does the mode match the programmed period" against the printed
+label would have found it did not, and gone looking for a timer
+delivering faster than its own period. Fixed, with the frequency and its
+provenance in the code.

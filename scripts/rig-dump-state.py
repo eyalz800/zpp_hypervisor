@@ -493,11 +493,19 @@ def dump_priority(args, elf, instance):
         gaps = [(i, v) for i, v in gaps if v]
         if gaps:
             total = sum(v for _, v in gaps)
+            # 1.992 GHz, measured rather than assumed: BACKLOG.md
+            # records the TSC advancing 179,446,096,055 counts over a
+            # 90.08 second wall-clock window, and the fitted
+            # reference_scale agreeing to four significant figures. The
+            # part's marketed 1.80 GHz base frequency is *not* its TSC
+            # frequency, and this label previously used 2.6 GHz, which
+            # understated every period by 31%.
             print(f"  time-stamp counter between clock interrupts "
-                  f"({total:,} gaps, ~2.6 GHz)")
+                  f"({total:,} gaps, TSC 1.992 GHz measured)")
             for i, v in gaps:
                 low = 1 << i
-                print(f"    2^{i:<2} ({low / 2600.0:10.1f} us)  {v:>10}  "
+                print(f"    2^{i:<2} ({low / 1992.0:10.2f} - "
+                      f"{2.0 * low / 1992.0:.2f} ms)  {v:>10}  "
                       f"{100.0 * v / total:5.1f}%")
 
         # PPR, not TPR, is what an arriving interrupt's class must
@@ -568,7 +576,7 @@ def dump_priority(args, elf, instance):
                 exits = word("vtl_half_exits", cpu * 2 + h)
                 print(f"    {halves[h]}")
                 print(f"      {n:,} halves, {cycles // n:,} cycles "
-                      f"({cycles / n / 2600.0:.1f} us), "
+                      f"({cycles / n / 1992.0:.1f} us at 1.992 GHz), "
                       f"{exits / n:.1f} exits")
 
 
