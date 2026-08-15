@@ -361,6 +361,41 @@ inline constexpr bool tpr_shadow_offered = (0 != ZPP_NESTED_TPR_SHADOW);
 inline constexpr bool profile_l2 = (0 != ZPP_PROFILE_L2);
 
 /**
+ * Step the trust-level loop with the monitor trap flag. Off unless
+ * asked for, and that is a correctness requirement rather than tidiness.
+ *
+ * It answered what nothing else could - the loop is a clock interrupt
+ * whose handler makes a secure call that outlasts the next tick, and
+ * three readings in `BACKLOG.md` were wrong until an instruction stream
+ * contradicted them. But it is an exit per retired instruction, and
+ * measured on the rig the traces are **5.8 per cent of every exit the
+ * machine takes**: 28,218 monitor-trap exits against 482,582.
+ *
+ * That is enough to move the guest between regimes. The boots that
+ * produced the livelock data reached the guest's 1.74 ms timer and sat
+ * at CLOCK_LEVEL; the three boots taken with this on stayed in an
+ * extended-page-table fill regime with the 15.6 ms tick and never got
+ * there. Whether the instrument caused that or the boots simply varied
+ * is not established - which is exactly why it must not be on by
+ * default, because every comparison against an earlier boot is
+ * otherwise between two different machines.
+ *
+ * `BACKLOG.md` already records this rule being learned once, on the
+ * single-step-after-injection probe that fired 30,968 times where
+ * sixteen were wanted: "Diagnostics that perturb what they measure
+ * belong behind a switch or not at all."
+ *
+ * The counters that come with it - the round-trip halves, the priority
+ * histograms, the read-back of what vmcs02 carried - are passive and
+ * stay compiled in whatever this says.
+ */
+#ifndef ZPP_STEP_VTL
+#define ZPP_STEP_VTL 0
+#endif
+
+inline constexpr bool step_vtl = (0 != ZPP_STEP_VTL);
+
+/**
  * How long the timer runs before it forces an exit.
  *
  * The counter decrements once per time-stamp counter tick shifted right

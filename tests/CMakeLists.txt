@@ -329,7 +329,12 @@ zpp_add_host_test(nested_exit
     INCLUDES
         "${CMAKE_CURRENT_SOURCE_DIR}/shim"
         "${CMAKE_CURRENT_SOURCE_DIR}/nested_exit"
-    DEFINES ZPP_NESTED_VMX=1 ZPP_HOSTED_TESTS=1)
+    # ZPP_STEP_VTL=1 because the instruction trace is off in a shipped
+    # build - it is an exit per retired guest instruction - and a suite
+    # that inherited that default would compile its arming rules out and
+    # report the cases as passing. The switch belongs to the boot, not
+    # to the rules.
+    DEFINES ZPP_NESTED_VMX=1 ZPP_HOSTED_TESTS=1 ZPP_STEP_VTL=1)
 
 # The nested extended page table rules, exhaustively.
 #

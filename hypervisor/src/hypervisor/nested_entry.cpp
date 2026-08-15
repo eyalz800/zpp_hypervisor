@@ -5843,6 +5843,14 @@ void hypervisor::mark_vtl_half(std::size_t cpu, std::size_t kind)
 
 void hypervisor::arm_vtl_step(std::size_t cpu, std::size_t kind)
 {
+    // Off unless asked for. See `nested_vmx::step_vtl`: this is an exit
+    // per retired guest instruction and it is enough to move the guest
+    // between regimes, so a boot meant to be compared with another must
+    // not carry it.
+    if constexpr (!nested_vmx::step_vtl) {
+        return;
+    }
+
     if ((cpu >= max_cpus) || (kind >= vtl_step_kinds)) {
         return;
     }

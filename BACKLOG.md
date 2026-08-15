@@ -15816,3 +15816,38 @@ That one request was made at task priority `0x00` - PASSIVE - which is
 at least not the self-masking deadlock shape. The reading that matters
 is the same pair in the settled state, where the request rate is about
 250 a second.
+
+### The instrument perturbs, so it is now a switch
+
+The trace costs an exit per retired guest instruction, and on the rig
+that is **5.8 per cent of every exit the machine takes** - 28,218
+monitor-trap exits against 482,582.
+
+That is enough to matter. The boots that produced the livelock data
+reached the guest's 1.74 ms timer and sat at CLOCK_LEVEL on two thirds
+of their entries; the three boots taken with the trace on stayed in an
+extended-page-table fill regime, kept the 15.6 ms tick, and never got
+there - `ept-violation` 58.9 per cent of exits and `0xd0` at 0.8 per
+cent of entries. Whether the instrument caused that or the boots simply
+varied is **not established**, and that is precisely the problem: every
+comparison against an earlier boot is otherwise between two different
+machines.
+
+So `ZPP_STEP_VTL` is off by default and `arm_vtl_step` compiles to a
+bare return without it - checked in the built binary rather than the
+source. `tests/nested_exit` compiles with it on, because the switch
+belongs to the boot and not to the rules, and a suite that inherited the
+shipped default would compile its own cases out and report them
+passing.
+
+`BACKLOG.md` records this rule being learned once already, on the
+single-step-after-injection probe that fired 30,968 times where sixteen
+were wanted: "Diagnostics that perturb what they measure belong behind a
+switch or not at all." It was not applied to this one until the number
+was measured, which is the honest reason it is here now.
+
+The passive counters stay compiled in unconditionally - the round-trip
+halves, the priority histograms, the read-back of what vmcs02 carried,
+the clock gap. Between them they cost one `rdtsc` per trust-level switch
+and one VMREAD per entry, and they answered three of the four questions
+without the trace being on at all.

@@ -115,6 +115,10 @@ set(ZPP_TICK_FLOOR "0" CACHE STRING
 set(ZPP_STRETCH_GUEST_TIMER "1" CACHE STRING
     "Multiply the second-level guest's synthetic timer *period* by this before its hypervisor sees it. 1 is off. A diagnostic, and the only one that can cross the threshold rather than retreat from it: the guest arms 1.74 ms and a tick costs 1.97 ms, so 'too slow to finish a tick inside a tick' and 'a handler that would never finish' look identical from outside. Eight gives the handler eight times the budget without needing the 2.3x of speed. Absolute one-shot deadlines are left alone - only values under one second are treated as periods. A guest run this way is being lied to about time, so never leave it on.")
 
+option(ZPP_STEP_VTL
+    "Step the trust-level loop with the monitor trap flag, recording every instruction each side executes with its bytes. The only instrument that can see inside a loop which takes no exits - and an exit per retired instruction, measured at 5.8% of all exits on the rig, which is enough to move the guest between regimes. Never leave it on for a boot being compared against another."
+    OFF)
+
 option(ZPP_PROFILE_L2
     "Sample a second-level guest's instruction pointer on the VMX-preemption timer. A profiler: it costs an exit per interval and is the only instrument that can see a guest spinning on memory."
     OFF)
@@ -204,6 +208,7 @@ ExternalProject_Add(hypervisor
         -DZPP_INTERCEPT_APIC=${ZPP_INTERCEPT_APIC}
         -DZPP_VIRTUALIZE_APIC=${ZPP_VIRTUALIZE_APIC}
         -DZPP_PROFILE_L2=${ZPP_PROFILE_L2}
+        -DZPP_STEP_VTL=${ZPP_STEP_VTL}
         -DZPP_GUEST_TESTS=${ZPP_GUEST_TESTS}
         -DZPP_TEST_MODULE_PROTECTION=${ZPP_TEST_MODULE_PROTECTION}
     INSTALL_COMMAND ""
@@ -291,6 +296,7 @@ ExternalProject_Add(uefi_loader
         -DZPP_INTERCEPT_APIC=${ZPP_INTERCEPT_APIC}
         -DZPP_VIRTUALIZE_APIC=${ZPP_VIRTUALIZE_APIC}
         -DZPP_PROFILE_L2=${ZPP_PROFILE_L2}
+        -DZPP_STEP_VTL=${ZPP_STEP_VTL}
         -DZPP_TRACE=${ZPP_TRACE}
         -DZPP_CHAINLOAD_ONLY=${ZPP_CHAINLOAD_ONLY}
         -DZPP_SEARCH_ALL_DEVICES=${ZPP_SEARCH_ALL_DEVICES}
