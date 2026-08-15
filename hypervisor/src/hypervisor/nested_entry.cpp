@@ -1706,6 +1706,22 @@ std::expected<void, zpp::error> hypervisor::build_vmcs02(std::size_t cpu)
     secondary |= secondary12 &
                  (secondary_unrestricted_guest |
                   secondary_mode_based_execute | secondary_enable_vmfunc);
+
+    // And concealing VMX from Intel Processor Trace comes from the
+    // guest hypervisor alone too, for the same reason as the three
+    // above: it is a statement about *its* guest and not about this
+    // VMM's.
+    //
+    // It was the last asymmetry between what the guest hypervisor asks
+    // for and what vmcs02 is given - requested 0x1010ae against granted
+    // 0x1050ae, the difference being exactly this bit, carried in by the
+    // union with this VMM's own controls without ever having been asked
+    // for. Every other difference between those two sets was closed by
+    // measurement; this one is closed by not making it.
+    constexpr std::uint64_t secondary_conceal_vmx_from_pt = 1ull << 18;
+
+    secondary &= ~secondary_conceal_vmx_from_pt;
+    secondary |= secondary12 & secondary_conceal_vmx_from_pt;
     secondary |= secondary_enable_ept | secondary_enable_vpid;
 
     // And the VM-function controls, which are **always zero** in vmcs02
