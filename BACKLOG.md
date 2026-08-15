@@ -17141,3 +17141,41 @@ sampling has read that page as 512 bytes of zero on every boot it has
 been read, and the translation behind those reads is now verified rather
 than assumed - which is as far as it is worth taking a question about
 somebody else's data structure.
+
+## The bracketing boot: `ZPP_STRETCH_GUEST_TIMER=2`
+
+Authorised as a diagnostic, one boot, with a bugcheck-loop guard
+watching `allocate_rwx` on serial and a hard stop at 4 module loads. It
+answers one question: **does twice the budget relieve the deferred-call
+starvation?**
+
+- If yes, the threshold is at or below 2x, and the ~1.5x that honest
+  speed can reach becomes plausibly sufficient - which makes lazy
+  end-of-interrupt worth real effort.
+- If no, the threshold is bracketed to **(2, 9]**, and that is the
+  strongest evidence yet that this path is closed on KVM.
+
+**Why the bracket's lower end had never been probed, which is the error
+being corrected.** The 9 is where the guest's own regime change happens
+to sit; the 8 is where a switch happened to be set. Neither is a
+measurement of what is *needed*. This file has been treating `(1, 9]` as
+"probably far short" for the reachable 1.5x, which is the same mistake -
+at the other end - as reading the 8 as a threshold. Nothing has ever
+tested 1.5x or 2x.
+
+### Predictions, before the boot is read
+
+1. `guest_timer_stretched` is **non-zero** - the switch fired and the
+   period the guest asked for was doubled.
+2. Task priority `0xd0` falls from ~65% of entries to **below 40%**.
+3. `0x2f` deliveries in steady state become **non-zero** - they are
+   exactly 0 today over a 100-second window.
+4. Entries below DISPATCH become **non-zero** in steady state - also
+   exactly 0 today across 184,236 entries.
+5. **Ring 3 is still not reached.** Predicted separately and with less
+   confidence: relieving the deferred-call starvation is necessary for
+   the boot to continue, not sufficient for it to finish, and there is a
+   lot of boot left after it.
+
+2, 3 and 4 together are the question. If all three move, 2x relieves it.
+If none moves, it does not, and the bracket closes to (2, 9].
