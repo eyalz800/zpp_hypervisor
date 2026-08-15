@@ -1858,6 +1858,18 @@ std::expected<void, zpp::error> hypervisor::build_vmcs02(std::size_t cpu)
     // `control_pin_requested` - the machine boots under KVM and not here,
     // so a control it set and did not get back is exactly the shape of
     // difference worth looking for.
+    // Whether the guest hypervisor is still waiting to deliver
+    // something. See `l2_int_window_armed`.
+    if (cpu < max_cpus) {
+        if (0 != (primary12 & primary_interrupt_window)) {
+            this->l2_int_window_armed[cpu] =
+                this->l2_int_window_armed[cpu] + 1;
+        } else {
+            this->l2_int_window_clear[cpu] =
+                this->l2_int_window_clear[cpu] + 1;
+        }
+    }
+
     if (cpu < max_cpus) {
         this->control_pin_requested[cpu] = pin12;
         this->control_pin_granted[cpu] =

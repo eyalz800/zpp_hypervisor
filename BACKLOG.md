@@ -16876,3 +16876,65 @@ recording anyway, because the pattern is the same one this file keeps
 naming: **the reader is as much a place for a silent lie as the
 hypervisor is**, and it gets far less scrutiny because it is "just a
 script".
+
+## Correction: "the per-tick exit count is architecturally fixed" was the wrong claim
+
+What the census established is that the three synthetic MSR writes lie
+outside both ranges an MSR bitmap can describe - SDM 26.6.9, `0`-`0x1fff`
+and `0xc0000000`-`0xc0001fff` - so **no bitmap can filter them**. That
+was written down as **irreducible**, and the two are not the same claim.
+"A bitmap cannot stop these" says nothing about why there are 2.69 of
+them per clock tick.
+
+**And the lever was picked wrong as a result.** The identity is
+
+```
+17.1 ticks per round trip  x  8.85 exits per tick  =  151 exits
+```
+
+which is the whole round trip. So a round trip has **no intrinsic cost
+beyond its two `vmcall`s** - it is made of ticks, and the quantity that
+matters is exits per tick.
+
+| lever | ceiling | banked |
+|---|---|---|
+| cycles per exit | 1.4x | 1.15x |
+| **exits per tick, 8.85 today** | **up to 8.85x** | none - never attacked |
+
+The first is at the bottom of the `(1, 9]` bracket. The second is inside
+it. Combined with what is banked, driving exits per tick toward 1 is a
+route to roughly 10x, and it is a different quantity rather than a speed
+argument in new clothes.
+
+Where the budget is, per tick: `wrmsr` 2.69 reflected plus the 4.16
+`vmresume` traps that are those reflections completing - about **61%** -
+and `int-window` 1.06 with its return making up most of the rest.
+
+### Predictions, before the counters are read
+
+1. The 2.69 writes a tick are **three** distinct MSRs: `0x40000070`
+   (EOI), `0x40000084` (EOM) and `0x40000071` (ICR), in roughly equal
+   number, at about 1.0 each with the shortfall from ticks that skip
+   one.
+2. **`0x40000071` will be almost entirely the value `0x4002f`** - the
+   DISPATCH_LEVEL self-IPI the guest has already been measured
+   requesting 31,427 times and receiving 78. One request per tick that
+   never lands.
+3. **`int-window` will be armed on a large majority of entries** and
+   will not balance, because the condition it waits on - the priority
+   dropping below DISPATCH - was measured never to occur in steady
+   state. Predict armed on **more than 60%** of entries.
+4. The EOI at `0x40000070` is the one with a *documented* way not to
+   exist: the lazy-EOI enlightenment, whose `NoEOIRequired` bit lives in
+   the VP assist page this file already measured **empty**. If that page
+   were maintained the guest's own `btr` would retire the interrupt with
+   a memory write and no exit at all.
+5. So of 8.85 exits a tick, I expect **about 2 to be the deferred-call
+   request loop spinning** - one ICR that never lands plus one
+   interrupt-window exit that cannot deliver it - and those two to be
+   the only ones whose removal is a *correctness* argument rather than
+   an optimisation.
+
+If instead the writes turn out to be many distinct MSRs at low counts,
+or the interrupt window is armed rarely, then the 8.85 is genuinely the
+guest doing necessary work and this line closes honestly.

@@ -585,6 +585,59 @@ def dump_priority(args, elf, instance):
                       f"{exits / n:.1f} exits")
 
 
+def dump_synthetic_msrs(args, elf, instance):
+    """Which synthetic MSRs the second-level guest writes, and how often.
+
+    This is the question the exit budget turns on and it had never been
+    asked. 2.69 synthetic-MSR writes per clock tick is a lot for a tick,
+    and "the MSR bitmap cannot filter them" - which is true, they lie
+    outside both ranges SDM 26.6.9 allows - says nothing about whether
+    there should be 2.69 of them.
+    """
+    members = ["l2_synthetic_msr_writes", "l2_synthetic_msr_reads",
+               "l2_int_window_armed", "l2_int_window_clear"]
+    off = gdb_offsets(elf, members)
+
+    reader = Monitor(args.rig, args.port)
+    for member in ("l2_synthetic_msr_writes", "l2_synthetic_msr_reads"):
+        reader.queue(instance + off[member], args.cpus * 256)
+    for member in ("l2_int_window_armed", "l2_int_window_clear"):
+        reader.queue(instance + off[member], args.cpus)
+    got = reader.run()
+
+    def word(member, index):
+        return got.get(instance + off[member] + 8 * index, 0)
+
+    # Named where the name is established; the rest print as addresses.
+    known = {0x70: "EOI", 0x71: "ICR", 0x72: "TPR",
+             0x73: "VP_ASSIST_PAGE", 0x84: "EOM",
+             0x20: "TIME_REF_COUNT", 0x21: "REFERENCE_TSC",
+             0xb0: "STIMER0_CONFIG", 0xb1: "STIMER0_COUNT"}
+
+    for cpu in range(args.cpus):
+        for member, what in (("l2_synthetic_msr_writes", "written"),
+                             ("l2_synthetic_msr_reads", "read")):
+            rows = [(word(member, cpu * 256 + i), i) for i in range(256)]
+            rows = [r for r in rows if r[0]]
+            if not rows:
+                continue
+            total = sum(c for c, _ in rows)
+            print(f"\ncpu {cpu} synthetic MSRs {what} ({total:,})")
+            for count, slot in sorted(rows, reverse=True):
+                name = known.get(slot, "")
+                print(f"  0x400000{slot:02x}  {count:>10}  "
+                      f"{100.0 * count / total:5.1f}%  {name}")
+
+        armed = word("l2_int_window_armed", cpu)
+        clear = word("l2_int_window_clear", cpu)
+        if armed or clear:
+            total = armed + clear
+            print(f"\ncpu {cpu} interrupt-window exiting, as vmcs12 asked "
+                  f"for it at entry")
+            print(f"  armed {armed:,} of {total:,} entries "
+                  f"({100.0 * armed / max(total, 1):.1f}%)")
+
+
 def dump_l1_host_audit(args, elf, instance):
     """Which of `load_l1_host_state`'s writes the processor undoes.
 
@@ -1034,7 +1087,8 @@ def main():
     # the deployed binary - a member renamed in the tree but not yet on
     # the rig killed every section after it, silently, and the dump just
     # looked short. One section failing must not cost the others.
-    for section in (dump_entry_rips, dump_priority, dump_l1_host_audit,
+    for section in (dump_entry_rips, dump_priority,
+                    dump_synthetic_msrs, dump_l1_host_audit,
                     dump_vtl, dump_vtl_steps):
         try:
             section(args, args.elf, instance)

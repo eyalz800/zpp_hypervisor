@@ -5316,6 +5316,30 @@ private:
      * @}
      */
 
+    /**
+     * How often the guest hypervisor asked for interrupt-window exiting
+     * at the moment its guest was entered.
+     *
+     * It arms that control when it holds an interrupt it cannot yet
+     * deliver, and the window opening means "your guest could take one
+     * now". In the settled state its guest sits at CLOCK_LEVEL and
+     * **never** drops below DISPATCH, so the interrupt it is waiting to
+     * deliver - `0x2f` - can never be admitted: the window opens, the
+     * priority still refuses, and it arms again. That is a full
+     * reflection each time, 1.06 per clock tick, achieving nothing.
+     *
+     * Counted as a share of entries rather than as arm/disarm edges,
+     * because the control is recomputed from vmcs12 on every entry and
+     * an edge count would measure this VMM's rebuild rather than the
+     * guest hypervisor's intent.
+     * @{
+     */
+    volatile std::uint64_t l2_int_window_armed[max_cpus]{};
+    volatile std::uint64_t l2_int_window_clear[max_cpus]{};
+    /**
+     * @}
+     */
+
     /** The last value written to `HV_X64_MSR_STIMER0_CONFIG`, so the
      * count that follows can be read as a period or as an absolute
      * deadline - the interface makes it one or the other depending on
