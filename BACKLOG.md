@@ -15302,3 +15302,42 @@ finding is moot rather than a cause.
 That is one read of the page at vmcs12's `msr_bitmap` address, which
 `merge_nested_bitmaps` already maps on every entry, and it settles
 whether there is anything here at all before a line of it is changed.
+
+### The measurement: the merge adds exactly one bit, and it is 0x491
+
+The guest hypervisor's own MSR bitmap, read at `0x117a18000`:
+
+```
+read-low, msr 0x480..0x4bf : 0xfffffffffffdffff
+```
+
+Every bit set but **bit 17** - and bit 17 of that block is MSR
+`0x480 + 17` = **0x491, IA32_VMX_VMFUNC**.
+
+So the guest hypervisor intercepts the whole VMX capability range for
+its own guest, exactly as expected of something presenting nested VMX,
+and deliberately leaves one MSR out. This VMM's bitmap covers
+0x480-0x491 as a range, so `merge_nested_bitmaps` adds **precisely that
+one bit** and nothing else.
+
+That answers both halves of the question the previous section left open.
+The forty bits are redundant over sixteen of the seventeen MSRs, so
+clearing them wholesale is not needed and the "reads would go to
+hardware" trap does not arise for those. And the asymmetry is real but
+one bit wide: the second-level guest exits on a read of
+`IA32_VMX_VMFUNC` that its own hypervisor chose not to intercept, and
+that exit is reflected to a level which - having deliberately not asked
+for it - may have no handler for it at all.
+
+Why the choice is coherent from the guest hypervisor's side: it does not
+offer VMFUNC to its guest, so a guest reading the capability cannot act
+on it, and leaving the read unintercepted costs it nothing. It has no
+reason to expect the read to arrive.
+
+**Not claimed as the cause.** What is claimed is that after four clean
+dimensions and a fifth reduced from forty bits to one, this is the only
+place found where what the second-level guest runs under differs from
+what its own hypervisor asked for. The fix is narrow - exclude 0x491
+from this VMM's contribution to the merge, or narrow the range this VMM
+intercepts for itself to the MSRs it actually answers - and the test is
+one boot.
