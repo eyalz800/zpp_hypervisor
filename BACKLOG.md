@@ -15148,3 +15148,18 @@ through - it is not in the cleared set and KVM permits it, `0x1378ff`
 has it - so if the exits are genuinely absent the answer is the first
 explanation and this is nothing. Establishing which costs one counter
 and no boot of its own.
+
+**Closed immediately, from data already in hand.**
+`control_secondary_granted` reads `0x1050ae`, and bit 2 is set - so
+descriptor-table exiting does reach vmcs02, the control is honoured, and
+the zero count for reasons 46 and 47 is the second-level guest genuinely
+executing none of those instructions while this VMM is observing. Which
+is unremarkable: the boot loader leaves GDTR and IDTR set, and a kernel
+that does not reload them takes no such exit.
+
+So the lead is dead on arrival and cost no boot. The granted set is
+`0x1050ae` against a requested `0x1010ae` - the extra bit is 18, which
+this VMM sets in its own controls and the union carries through, and
+which the guest hypervisor did not ask for. That is the last unexamined
+asymmetry between what is asked and what is given, and it is one bit
+wide.
