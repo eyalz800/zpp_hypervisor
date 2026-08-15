@@ -14024,3 +14024,59 @@ pointless, or a set of assumptions about what the guest hypervisor's
 exit path does to its own segments - which is an assumption about
 Hyper-V rather than about the architecture, and this tree has now been
 wrong three times in a row about what may be assumed of it.
+
+## It is a livelock, and the proof is that nothing at all moves
+
+Established on 2026-08-15, and it overturns this session's earlier
+reading of the same loop.
+
+**Two measurements, both direct.**
+
+- Over 90 seconds and 2,688 working second-level exits, the guest
+  executed **exactly two instruction addresses** - `+0x19` and `+0x32`
+  in the hypercall page, `HvCallVtlCall` and `HvCallVtlReturn`,
+  alternating. No third address appeared and none retired. The working
+  ring drops the idle MSRs and external interrupts, so this is the whole
+  of what the guest does.
+- Two full captures of the `HvCallVtlCall` site, taken two minutes and
+  2,256 switches apart, are **byte-for-byte identical**: instruction
+  pointer, stack pointer, CR3, all sixty-four stack words, and the
+  instructions around the caller. Nothing advances - not a counter, not
+  a frame, not a stack slot.
+
+The loop is `ntoskrnl.exe`+0x6a774b calling into `securekernel.exe`,
+which returns from +0xd93a4, for ever. Each side's wrapper disassembles
+to an ordinary trust-level transition: ntoskrnl saves the XMM registers,
+CR8 and `gs:[0x188]` - the current thread - and calls; securekernel
+returns through a function pointer.
+
+**The earlier conclusion in this file was wrong and the reason is worth
+keeping.** `vtl_differed` counts how often a register *differs from the
+previous switch of the same kind*, and 45% of switches carrying a
+different stack pointer was read as "different call sites, therefore
+varied work". A two-state alternation changes registers too, and so does
+a boot that had varied callers before it entered the loop - the counter
+is cumulative and most of its changes are from before the livelock
+began. **A diff counter cannot answer "how many distinct states are
+there"**; only a distinct-value count or a repeated identical capture
+can, and the repeated capture is what settled it.
+
+**Where the answer must be.** Since VTL0's registers and stack are
+identical on every iteration, the decision to call again is not being
+made from either. It is made from memory that VTL1 writes and VTL0
+reads - which for this interface is the VTL control structure in the VP
+assist page, `HV_X64_MSR_VP_ASSIST_PAGE` at 0x40000073, written once by
+the second-level guest. That page is what the next capture has to read.
+
+Two things it should distinguish, because they want opposite fixes:
+
+- VTL1 is answering "not ready" for ever, in which case what it is
+  waiting for is the bug and it is probably something this VMM does not
+  deliver - the `reflected_permission` count is **0 of 448,441**, so no
+  extended-page-table permission this VMM shadows has ever refused an
+  access to either trust level, which means `HvCallModifyVtlProtection
+  Mask` currently enforces nothing through what we shadow.
+- Or VTL0 is not seeing an answer VTL1 did write, in which case the two
+  trust levels' views of that page differ - they have separate guest
+  extended-page-table roots here, `0x101b1b01e` and `0x101b1e01e`, each
+  with its own shadow.
