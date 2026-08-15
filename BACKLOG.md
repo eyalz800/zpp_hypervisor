@@ -14155,3 +14155,51 @@ after which every entry fell to the overflow counter; that counter then
 read 682,716 and was briefly taken for "entered at hundreds of thousands
 of addresses" when it means only "at more than the eight caught first".
 A full fixed table cannot tell two distinct values from a million.
+
+### The loop body, disassembled: the lazy-EOI path against an empty page
+
+The 384 byte capture around `ntoskrnl`+0x6a774b holds the whole loop,
+and the part before the trust-level wrapper decodes to Windows' own
+end-of-interrupt path:
+
+```
+push rcx / push rax / push rdx
+mov  rdx, gs:[0x8d88]      ; pointer to the APIC assist page
+btr  dword [rdx], 0        ; clear NoEOIRequired, CF = its old value
+jb   skip                  ; it was set - no end-of-interrupt needed
+xor  eax, eax
+mov  edx, eax
+wrmsr                      ; ecx = 0x40000070, the synthetic EOI
+skip:
+pop rdx / pop rax / pop rcx / ret
+```
+
+That is the **lazy end-of-interrupt enlightenment**, and the word it
+tests is at offset 0 of the VP assist page - the page measured empty in
+the section above. `NoEOIRequired` is therefore never set, the branch is
+never taken, and **every interrupt costs a full reflected `wrmsr` round
+trip** where the enlightenment exists precisely to retire it with one
+memory write and no exit at all.
+
+That is 299,267 reflections in one boot, at 286 us each, for something
+the guest hypervisor is supposed to make free. It does not by itself
+explain the retry - the guest still executes and still advances - but it
+is the largest single item in the clock loop and it is *this VMM's* to
+fix only if the page is empty for a reason we caused.
+
+The open question is whose fault the empty page is. Hyper-V owns that
+page on its guest's behalf. What has to be established next, in this
+order:
+
+1. Whether the guest hypervisor ever writes it - a page it has written
+   and left with bit 0 clear is correct behaviour, a page it has never
+   touched is not.
+2. Whether its writes reach the physical page this VMM reads. Both
+   trust levels have their own extended-page-table root here, the shadow
+   for each is filled a fault at a time, and a write landing on a
+   different host frame from the one read back is exactly the shape of
+   defect that would leave this page looking untouched.
+
+The second is the one worth checking first, because it is ours and
+because `reflected_permission` being 0 of 448,441 already says no
+permission this VMM shadows has ever refused either level an access.
