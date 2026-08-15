@@ -17940,3 +17940,44 @@ until a built binary shows it.
 Fixed, and verified the way it should have been the first time: with
 `DEFER=ON` the predicate is now called rather than folded away, and with
 `OFF` it is folded away.
+
+## Item 2, for real: predictions
+
+The switch now reaches the compiler. This boot is that change alone -
+no new timers, so the number is not confounded by measuring it.
+
+**Checked before any timing is read:** `guest_state_reads_skipped` must
+be **non-zero**. That is the standing rule this session earned: *a
+switch is not on until a counter says the code ran*, and the check now
+has to include "did this compile in", not only "did this run".
+
+The arithmetic, which was withdrawn and is now reinstated because it was
+never actually tested:
+
+```
+build_vmcs02 162,430 + save_l2_state 198,309 = 360,739 cycles
+~129 VMCS accesses at ~2,760                 ~ 356,000 cycles
+```
+
+The model fits the measurement almost exactly. It was thrown out on the
+strength of an experiment that never ran.
+
+1. `guest_state_reads_skipped` about **44 per second-level exit**.
+2. `save_l2_state` falls from 198,309 to **70,000-100,000** - 44 reads
+   at ~2,760 is ~121,000.
+3. `build_vmcs02` stays near **162,430** or falls: the unconditional
+   write path is now the rare case rather than the only case.
+4. **`handler_cycles` per exit falls from 409,447 to ~290,000-320,000**,
+   which is the number that matters because it is measured
+   switch-independently and is 88.5% of the wall clock.
+5. No reset loop. Four ordering conditions are covered by the suite.
+6. Windows not in recovery.
+7. **The circle**: genuinely uncertain for the first time. ~1.4x on this
+   change against a requirement bracketed at (1, 2], with 1.15x already
+   banked. I still expect it not to turn, but I would not be surprised
+   to be wrong, and that is a different position from the last four
+   predictions of the same thing.
+
+If (1) is non-zero and (2) does **not** move, that is a real refutation
+of the cost model rather than a measurement of an absence - and it would
+be the first one.
