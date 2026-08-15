@@ -686,6 +686,59 @@ def dump_synthetic_msrs(args, elf, instance):
                   f"({100.0 * armed / max(total, 1):.1f}%)")
 
 
+def dump_regions(args, elf, instance):
+    """Where an exit's cycles are, by region rather than by counting.
+
+    `handler_cycles` over `handler_exits` is the time from the first
+    instruction this VMM controls on an exit to the last before it
+    resumes. Subtracting that from the wall clock between successive
+    exits gives everything else - the transition, the level above, and
+    its guest.
+
+    Both counters have been running since they were written and nothing
+    has ever printed them, which is the fourth in this file found that
+    way. The cost model they can settle - a VMCS read priced at ~2,984
+    cycles against a phase of 198,309 for 60 of them that did not move
+    when 44 were removed - is refuted without them.
+    """
+    members = ["handler_cycles", "handler_exits", "handler_first_tsc",
+               "handler_last_tsc", "guest_state_reads_skipped",
+               "guest_state_reads_done"]
+    off = gdb_offsets(elf, members)
+
+    reader = Monitor(args.rig, args.port)
+    for member in members:
+        reader.queue(instance + off[member], args.cpus)
+    got = reader.run()
+
+    def word(member, cpu):
+        return got.get(instance + off[member] + 8 * cpu, 0)
+
+    for cpu in range(args.cpus):
+        exits = word("handler_exits", cpu)
+        if not exits:
+            continue
+
+        inside = word("handler_cycles", cpu)
+        span = word("handler_last_tsc", cpu) - word("handler_first_tsc", cpu)
+
+        print(f"\ncpu {cpu} where an exit's cycles are")
+        print(f"  exits handled            {exits:,}")
+        print(f"  inside this VMM          {inside // exits:,} cycles/exit")
+        if span > 0:
+            print(f"  wall clock per exit      {span // exits:,} cycles/exit")
+            share = 100.0 * inside / span
+            print(f"  share inside this VMM    {share:.1f}%")
+            print(f"  everything else          {(span - inside) // exits:,} "
+                  f"cycles/exit  (transition, the level above, its guest)")
+
+        skipped = word("guest_state_reads_skipped", cpu)
+        done = word("guest_state_reads_done", cpu)
+        if skipped or done:
+            print(f"  guest-state reads: {done:,} done, {skipped:,} skipped"
+                  f"  ({skipped / max(exits, 1):.1f} skipped per exit)")
+
+
 def dump_guest_state_shadow(args, elf, instance):
     """Where the deferred guest-state copy's model differs from vmcs02.
 
@@ -1197,7 +1250,7 @@ def main():
     # looked short. One section failing must not cost the others.
     for section in (dump_entry_rips, dump_priority,
                     dump_synthetic_msrs, dump_l1_host_audit,
-                    dump_guest_state_shadow,
+                    dump_guest_state_shadow, dump_regions,
                     dump_vtl, dump_vtl_steps):
         try:
             section(args, args.elf, instance)

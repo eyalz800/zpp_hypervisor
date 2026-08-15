@@ -17812,3 +17812,59 @@ described it.
 **Check a cost model against the thing it predicts before building on
 it.** One measurement - remove the reads, see whether the phase moves -
 would have cost nothing and was available from the first census.
+
+## The cost model is refuted, and the profiler was already in the tree
+
+Three facts that cannot all describe the same machine:
+
+- a VMCS read is priced at **~2,984 cycles** by the benchmark in
+  `on_vm_exit` (`vmcs price per 1000: exit_reason 0x2d8bc5`);
+- `save_l2_state` performs **60** of them and costs **198,309 cycles**;
+- **removing 44 of them changed it by 2%**.
+
+If accesses cost what the benchmark says, 44 fewer should have freed
+~131,000 cycles. They freed about 4,000. **So an exit's cost does not
+scale with the number of VMCS accesses in it**, and every estimate in
+this file that multiplied a count by a price is void - the census's
+1.16x, the exits-per-tick reframing, and the cycles-per-exit ceiling
+alike.
+
+That also means **item 2's regression verdict is provisional**. The
++11.2% is measured and stands as a measurement, but the explanation
+offered for it assumed the same arithmetic. What is certain is that the
+change is correct and does not pay; *why* is now open.
+
+### And the region profiler has been running unread since it was written
+
+`handler_cycles` over `handler_exits` is the span from the first
+instruction this VMM controls on an exit to the last before it resumes,
+and `handler_first_tsc`/`handler_last_tsc` bound the wall clock over the
+same exits. Together they give the one split that matters before any
+phase is blamed for anything: **how much of an exit is even ours.**
+
+Nothing has ever printed them. That is the **fourth** counter in this
+file found running unread, after `l1_host_changed`, the synthetic-MSR
+census and the interrupt-window balance - and the reason is always the
+same: adding a counter is a diff, and reading one is a script nobody
+wrote.
+
+`rig-dump-state.py` now reports it, alongside a direct count of the
+reads the deferral actually skips - because "the skip never happened"
+and "the skip happened and cost nothing" have been indistinguishable
+and only the second is interesting.
+
+### Predictions, before the boot
+
+1. **Inside this VMM is far less than 100% of an exit.** If the
+   transition dominates, every optimisation in this file was aimed at a
+   minority of the cost. I expect **40-70%** inside.
+2. `guest_state_reads_skipped` about **44 per exit** with the deferral
+   on - confirming the skip is real, which the phase timing implies is
+   somehow free.
+3. Wall clock per exit around **1.4-2.0 million cycles**, since 711,771
+   of phases is a subset of the handler and the handler is a subset of
+   the whole.
+
+If (1) comes back near 100%, the transition is cheap and the cycles are
+genuinely ours - which would be the first good news in several rounds,
+because ours is the only kind that can be removed while staying on KVM.

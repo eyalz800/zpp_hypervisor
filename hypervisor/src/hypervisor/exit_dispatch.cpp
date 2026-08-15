@@ -69,6 +69,7 @@ void hypervisor::on_vm_exit(std::uint64_t cpuid,
     using basic_reason = arch::x86_64::vmx::exit_reason::basic_reason;
     auto & vmcs = this->vmcs;
 
+
     // One thousand accesses each, once, to price the instructions the
     // whole optimisation question turns on. See
     // `vmread_benchmark_cycles`, and the field choice below.

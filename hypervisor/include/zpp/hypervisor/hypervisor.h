@@ -7953,6 +7953,32 @@ private:
      * @}
      */
 
+    /**
+     * Whether the deferred copy's skip actually happens, and how often.
+     *
+     * **The cost model this investigation reasoned from is refuted.** A
+     * VMCS read is priced at about 2,984 cycles by the benchmark in
+     * `on_vm_exit`, `save_l2_state` performs 60 of them for 198,309
+     * cycles, and removing 44 changed that by 2%. Those three facts
+     * cannot all be about the same machine, and every estimate in this
+     * file - the census's 1.16x, the exits-per-tick reframing, the
+     * cycles-per-exit ceiling - rests on the arithmetic the third
+     * refutes.
+     *
+     * These two settle the first branch of it directly: "the skip never
+     * happened" and "the skip happened and cost nothing" are otherwise
+     * the same reading, and only the second is interesting.
+     *
+     * The region split the rest of the question needs is **already
+     * measured** - `handler_cycles` over `handler_exits` is the time
+     * from the first instruction this VMM controls on an exit to the
+     * last before it resumes, and `handler_last_tsc` gives the gap to
+     * the next one. Nothing has ever printed them, which is the fourth
+     * counter in this file found running unread.
+     */
+    volatile std::uint64_t guest_state_reads_skipped[max_cpus]{};
+    volatile std::uint64_t guest_state_reads_done[max_cpus]{};
+
     volatile std::uint64_t guest_state_defers[max_cpus]{};
     volatile std::uint64_t guest_state_materialises[max_cpus]{};
     volatile std::uint64_t guest_state_dirty_writes[max_cpus]{};

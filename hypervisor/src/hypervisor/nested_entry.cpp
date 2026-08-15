@@ -2986,8 +2986,19 @@ void hypervisor::save_l2_state(std::size_t cpu)
             // See `guest_state_deferred`.
             if (nested_vmx::defer_guest_state &&
                 guest_state_deferrable(index)) {
+                // Counted, because "the skip never happened" and "the
+                // skip happened and cost nothing" are otherwise the
+                // same reading - and the second is what the numbers
+                // currently say, which cannot be right.
+                if (cpu < max_cpus) {
+                    this->guest_state_reads_skipped[cpu] += 1;
+                }
                 ++index;
                 continue;
+            }
+
+            if (cpu < max_cpus) {
+                this->guest_state_reads_done[cpu] += 1;
             }
 
             auto value = vmcs.read(guest_field);
