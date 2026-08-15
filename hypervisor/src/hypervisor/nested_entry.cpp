@@ -2092,6 +2092,21 @@ std::expected<void, zpp::error> hypervisor::build_vmcs02(std::size_t cpu)
             // whatever vmcs12 happens to hold over the state vmcs02
             // already has, which is the dependency the census missed.
             if (guest_state_deferrable(index)) {
+                // Shadow mode: what the deferral *would* leave in
+                // vmcs02 against what the eager path is about to put
+                // there. Reads only - see
+                // `nested_vmx::shadow_guest_state`.
+                if constexpr (nested_vmx::shadow_guest_state) {
+                    if (guest_state_deferral_licensed(cpu) &&
+                        (0 == (dirty & (1ull << index)))) {
+                        record_guest_state_divergence(
+                            cpu,
+                            index,
+                            vmcs.read(guest_field),
+                            shadow.read(guest_field));
+                    }
+                }
+
                 if (!may_defer) {
                     // Unconditionally, not merely un-elided:
                     // `guest_state_cache` is stale for exactly these
@@ -6015,6 +6030,43 @@ void hypervisor::settle_vp_assist_page(std::size_t cpu)
     }
 }
 
+void hypervisor::record_guest_state_divergence(std::size_t cpu,
+                                              std::size_t index,
+                                              std::uint64_t in_vmcs02,
+                                              std::uint64_t in_vmcs12)
+{
+    if ((cpu >= max_cpus) || (in_vmcs02 == in_vmcs12)) {
+        return;
+    }
+
+    // The histogram first, because it is the summary that names the
+    // culprit and it is one increment.
+    if (index < std::size(this->shadow_divergence_by_field)) {
+        this->shadow_divergence_by_field[index] += 1;
+    }
+
+    auto seen = this->shadow_divergences[cpu];
+    this->shadow_divergences[cpu] = seen + 1;
+
+    // And the first few in full, for the context a histogram cannot
+    // carry. Bounded rather than a ring: the first divergence of a boot
+    // is the one that explains it, and a ring would overwrite it with
+    // the thousandth.
+    if (seen >= shadow_divergence_slots) {
+        return;
+    }
+
+    this->shadow_divergence_field[seen] =
+        (index < std::size(guest_state_fields))
+            ? static_cast<std::uint64_t>(guest_state_fields[index])
+            : 0;
+    this->shadow_divergence_in_vmcs02[seen] = in_vmcs02;
+    this->shadow_divergence_in_vmcs12[seen] = in_vmcs12;
+    this->shadow_divergence_owner[seen] = this->guest_current_vmcs[cpu];
+    this->shadow_divergence_dirty[seen] = this->guest_state_dirty[cpu];
+    this->shadow_divergence_entries[seen] = this->l2_entries[cpu];
+}
+
 void hypervisor::set_guest_current_vmcs(std::size_t cpu,
                                         std::uint64_t address)
 {
@@ -6036,13 +6088,8 @@ void hypervisor::set_guest_current_vmcs(std::size_t cpu,
     this->guest_state_deferred[cpu] = false;
 }
 
-bool hypervisor::may_defer_guest_state(std::size_t cpu) const
+bool hypervisor::guest_state_deferral_licensed(std::size_t cpu) const
 {
-    // Off unless asked for. See `nested_vmx::defer_guest_state`: three
-    // conditions found, three fixed, and it still reset the guest.
-    if constexpr (!nested_vmx::defer_guest_state) {
-        return false;
-    }
 
     // Both halves, and both were missing from the first attempt: vmcs02
     // has run at least once, so the processor has actually saved
@@ -6053,6 +6100,21 @@ bool hypervisor::may_defer_guest_state(std::size_t cpu) const
            this->vmcs02_launched[cpu] &&
            (this->guest_state_deferred_vmcs[cpu] ==
             this->guest_current_vmcs[cpu]);
+}
+
+bool hypervisor::may_defer_guest_state(std::size_t cpu) const
+{
+    // **The predicate and the decision are deliberately separate.**
+    // Shadow mode needs to know when the deferral *would* have skipped
+    // a write, and must not cause it to actually skip one - collapsing
+    // the two would turn the diagnostic into the very change it is
+    // meant to observe, which is how this would have reset the guest a
+    // fourth time.
+    if constexpr (!nested_vmx::defer_guest_state) {
+        return false;
+    }
+
+    return guest_state_deferral_licensed(cpu);
 }
 
 bool hypervisor::guest_state_deferrable(std::size_t index)

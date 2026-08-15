@@ -115,6 +115,10 @@ set(ZPP_TICK_FLOOR "0" CACHE STRING
 set(ZPP_STRETCH_GUEST_TIMER "1" CACHE STRING
     "Multiply the second-level guest's synthetic timer *period* by this before its hypervisor sees it. 1 is off. A diagnostic, and the only one that can cross the threshold rather than retreat from it: the guest arms 1.74 ms and a tick costs 1.97 ms, so 'too slow to finish a tick inside a tick' and 'a handler that would never finish' look identical from outside. Eight gives the handler eight times the budget without needing the 2.3x of speed. Absolute one-shot deadlines are left alone - only values under one second are treated as periods. A guest run this way is being lied to about time, so never leave it on.")
 
+option(ZPP_SHADOW_GUEST_STATE
+    "Run the deferred guest-state copy in shadow: compute what it would produce, keep using the eager value, and record where they differ. Behaviour-neutral by construction - it reads and records and takes no decision - so it names the field and the moment instead of resetting the guest. A diagnostic, never a candidate build."
+    OFF)
+
 option(ZPP_DEFER_GUEST_STATE
     "Defer the bulk copy of the second-level guest's state out of vmcs02 into vmcs12 until something reads it. Worth about 1.16x and has reset the rig's guest on all three attempts; three ordering conditions are found and fixed and a fourth is not characterised. Do not enable for a rig boot without a new condition to test."
     OFF)
@@ -214,6 +218,7 @@ ExternalProject_Add(hypervisor
         -DZPP_PROFILE_L2=${ZPP_PROFILE_L2}
         -DZPP_STEP_VTL=${ZPP_STEP_VTL}
         -DZPP_DEFER_GUEST_STATE=${ZPP_DEFER_GUEST_STATE}
+        -DZPP_SHADOW_GUEST_STATE=${ZPP_SHADOW_GUEST_STATE}
         -DZPP_GUEST_TESTS=${ZPP_GUEST_TESTS}
         -DZPP_TEST_MODULE_PROTECTION=${ZPP_TEST_MODULE_PROTECTION}
     INSTALL_COMMAND ""
@@ -303,6 +308,7 @@ ExternalProject_Add(uefi_loader
         -DZPP_PROFILE_L2=${ZPP_PROFILE_L2}
         -DZPP_STEP_VTL=${ZPP_STEP_VTL}
         -DZPP_DEFER_GUEST_STATE=${ZPP_DEFER_GUEST_STATE}
+        -DZPP_SHADOW_GUEST_STATE=${ZPP_SHADOW_GUEST_STATE}
         -DZPP_TRACE=${ZPP_TRACE}
         -DZPP_CHAINLOAD_ONLY=${ZPP_CHAINLOAD_ONLY}
         -DZPP_SEARCH_ALL_DEVICES=${ZPP_SEARCH_ALL_DEVICES}

@@ -456,6 +456,33 @@ inline constexpr bool watch_vp_assist_page = (0 != ZPP_WATCH_VP_ASSIST);
 inline constexpr bool defer_guest_state = (0 != ZPP_DEFER_GUEST_STATE);
 
 /**
+ * Run the deferred guest-state copy in **shadow**: compute what it
+ * would produce, keep using what the eager path produces, and record
+ * where the two differ.
+ *
+ * Three boots have asked "does my fix hold?" and could only answer by
+ * surviving or not. This asks "where does my model of the guest diverge
+ * from the guest?" and answers with a field and a moment. Item 1's
+ * audit is the same technique and caught a hole on its first boot; this
+ * is it applied before shipping rather than after.
+ *
+ * **Behaviour-neutral by construction**: the shadow path performs one
+ * VMREAD of a field this VMM is about to write anyway and compares it
+ * against vmcs12. It writes nothing, changes no VMCS state, and takes
+ * no decision - so it cannot reset the guest, which is the whole point
+ * of using it instead of another live attempt.
+ *
+ * It is slower, and that does not matter. It is a diagnostic and never
+ * a candidate build.
+ */
+#ifndef ZPP_SHADOW_GUEST_STATE
+#define ZPP_SHADOW_GUEST_STATE 0
+#endif
+
+inline constexpr bool shadow_guest_state =
+    (0 != ZPP_SHADOW_GUEST_STATE);
+
+/**
  * How long the timer runs before it forces an exit.
  *
  * The counter decrements once per time-stamp counter tick shifted right

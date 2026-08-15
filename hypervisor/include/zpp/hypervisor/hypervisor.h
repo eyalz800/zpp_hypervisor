@@ -4357,12 +4357,27 @@ private:
      */
     static bool guest_state_deferrable(std::size_t index);
 
+    /** Records one shadow-mode divergence. See
+     * `shadow_divergence_by_field`. */
+    void record_guest_state_divergence(std::size_t cpu,
+                                       std::size_t index,
+                                       std::uint64_t in_vmcs02,
+                                       std::uint64_t in_vmcs12);
+
     /**
      * Sets which vmcs12 is current, and invalidates anything that
      * described the old one. **Always use this rather than assigning
      * `guest_current_vmcs`** - see `guest_state_deferred_vmcs`.
      */
     void set_guest_current_vmcs(std::size_t cpu, std::uint64_t address);
+
+    /**
+     * Whether the ordering conditions for deferral hold - independent
+     * of whether deferral is switched on. Shadow mode asks this; the
+     * write path asks `may_defer_guest_state`, which is this **and**
+     * the switch.
+     */
+    bool guest_state_deferral_licensed(std::size_t cpu) const;
 
     /**
      * Whether the deferred guest-state fields may be left as vmcs02
@@ -7904,6 +7919,39 @@ private:
      * indices and comparing against it could skip a write that is owed.
      */
     std::uint64_t guest_state_deferred_vmcs[max_cpus]{};
+
+    /**
+     * Where the deferral's model of vmcs02 differs from what is
+     * actually in it. See `nested_vmx::shadow_guest_state`.
+     *
+     * A field is recorded when the deferral would have skipped its
+     * write-back - so vmcs02 would keep what it holds - and vmcs12 says
+     * something else. That is exactly the shape of the failure three
+     * boots could only report as a reset.
+     *
+     * Bounded on purpose: a per-field histogram, which is the summary
+     * that names the culprit, plus the first few in full for their
+     * context. Nothing allocates, nothing spins, and nothing logs per
+     * field per exit - the VP assist watch wedged a guest and this must
+     * not repeat it.
+     * @{
+     */
+    static constexpr std::size_t shadow_divergence_slots = 16;
+
+    volatile std::uint64_t shadow_divergences[max_cpus]{};
+    volatile std::uint64_t shadow_divergence_by_field[48]{};
+
+    volatile std::uint64_t shadow_divergence_field[shadow_divergence_slots]{};
+    volatile std::uint64_t
+        shadow_divergence_in_vmcs02[shadow_divergence_slots]{};
+    volatile std::uint64_t
+        shadow_divergence_in_vmcs12[shadow_divergence_slots]{};
+    volatile std::uint64_t shadow_divergence_owner[shadow_divergence_slots]{};
+    volatile std::uint64_t shadow_divergence_dirty[shadow_divergence_slots]{};
+    volatile std::uint64_t shadow_divergence_entries[shadow_divergence_slots]{};
+    /**
+     * @}
+     */
 
     volatile std::uint64_t guest_state_defers[max_cpus]{};
     volatile std::uint64_t guest_state_materialises[max_cpus]{};

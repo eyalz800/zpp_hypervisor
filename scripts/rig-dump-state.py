@@ -686,6 +686,66 @@ def dump_synthetic_msrs(args, elf, instance):
                   f"({100.0 * armed / max(total, 1):.1f}%)")
 
 
+def dump_guest_state_shadow(args, elf, instance):
+    """Where the deferred guest-state copy's model differs from vmcs02.
+
+    Shadow mode computes what the deferral would leave in vmcs02 and
+    compares it against what the eager path is about to write. A
+    divergence is a field the deferral would have got wrong - which is
+    the failure three boots could only report as a reset.
+    """
+    members = ["shadow_divergences", "shadow_divergence_by_field",
+               "shadow_divergence_field", "shadow_divergence_in_vmcs02",
+               "shadow_divergence_in_vmcs12", "shadow_divergence_owner",
+               "shadow_divergence_dirty", "shadow_divergence_entries",
+               "guest_state_defers"]
+    off = gdb_offsets(elf, members)
+    slots = gdb_values(elf, [
+        "sizeof(('zpp::hypervisor::hypervisor' *)0)"
+        "->shadow_divergence_field / 8"])[0]
+
+    reader = Monitor(args.rig, args.port)
+    for member in ("shadow_divergences", "guest_state_defers"):
+        reader.queue(instance + off[member], args.cpus)
+    reader.queue(instance + off["shadow_divergence_by_field"], 48)
+    for member in ("shadow_divergence_field", "shadow_divergence_in_vmcs02",
+                   "shadow_divergence_in_vmcs12", "shadow_divergence_owner",
+                   "shadow_divergence_dirty", "shadow_divergence_entries"):
+        reader.queue(instance + off[member], slots)
+    got = reader.run()
+
+    def word(member, index):
+        return got.get(instance + off[member] + 8 * index, 0)
+
+    total = sum(word("shadow_divergences", c) for c in range(args.cpus))
+    defers = sum(word("guest_state_defers", c) for c in range(args.cpus))
+
+    print(f"\nguest-state shadow: {total:,} divergences over "
+          f"{defers:,} deferrable exits")
+
+    if not total:
+        print("  none - the deferral's model matched vmcs02 every time, "
+              "so the fourth condition is not a stale field value")
+        return
+
+    rows = [(word("shadow_divergence_by_field", i), i) for i in range(48)]
+    rows = [r for r in rows if r[0]]
+    print("  by field index into guest_state_fields:")
+    for count, index in sorted(rows, reverse=True):
+        print(f"    slot {index:>2}  {count:>10}")
+
+    print("  first few, in full:")
+    for i in range(min(slots, total)):
+        if not word("shadow_divergence_field", i):
+            continue
+        print(f"    field 0x{word('shadow_divergence_field', i):04x}  "
+              f"vmcs02 0x{word('shadow_divergence_in_vmcs02', i):x}  "
+              f"vmcs12 0x{word('shadow_divergence_in_vmcs12', i):x}  "
+              f"owner 0x{word('shadow_divergence_owner', i):x}  "
+              f"dirty 0x{word('shadow_divergence_dirty', i):x}  "
+              f"at entry {word('shadow_divergence_entries', i):,}")
+
+
 def dump_l1_host_audit(args, elf, instance):
     """Which of `load_l1_host_state`'s writes the processor undoes.
 
@@ -1137,6 +1197,7 @@ def main():
     # looked short. One section failing must not cost the others.
     for section in (dump_entry_rips, dump_priority,
                     dump_synthetic_msrs, dump_l1_host_audit,
+                    dump_guest_state_shadow,
                     dump_vtl, dump_vtl_steps):
         try:
             section(args, args.elf, instance)
