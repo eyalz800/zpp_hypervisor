@@ -17432,3 +17432,53 @@ reset-looped, because none of them ran a *sequence*.
 
 Item 2 stays sound in principle and worth about 1.16x. It is not worth
 another boot until it can be shown correct without one.
+
+## The sequence test, and the third condition it found for free
+
+`tests/nested_exit` now drives the real `build_vmcs02` and
+`save_l2_state` across **two vmcs02 regions and two vmcs12s**, asserting
+the only property that matters: whatever vmcs02 holds for a guest-state
+field is what the level above put in vmcs12 *for the guest being
+entered*.
+
+**The shim had to change first, and that is the finding underneath the
+finding.** `vmptrld` was a no-op and one array backed every VMCS, so
+vmcs01 and vmcs02 were the same object in the suite. Every property that
+depends on which VMCS is current was untestable, which is why nine
+passing unit cases sat next to a reset loop. The shim now keys eight
+regions by the physical address the real code passes, and a fresh region
+starts zeroed - which is what an unlaunched VMCS looks like and exactly
+the state the first failure launched a guest with.
+
+**And it found the third condition without a boot.** VMCLEAR of the
+current vmcs12 followed by loading it again at the *same address*: the
+address comparison passes, so the deferral is thought licensed, but
+VMPTRLD reloads vmcs12's contents wholesale out of guest memory and its
+data fields survive the clear - so vmcs12 is authoritative and vmcs02
+holds the previous guest's state.
+
+The fix is not another guard beside the others. `set_guest_current_vmcs`
+now owns "which vmcs12 is current" and invalidates the deferral with it,
+because **four assignment sites each needing a paired action is how this
+bug happened**.
+
+### Proven against the failures it cost boots to find
+
+Both bugs were re-introduced and the suite was run:
+
+| injection | failures |
+|---|---|
+| defer always, ignoring whose state vmcs02 holds | **8** |
+| drop the vmcs12-change invalidation | **1** |
+| neither | 0, 23/23 green |
+
+So the suite now catches, on a desk in seconds, both failures that cost
+two boots and about 250 unclean resets of a real Windows installation -
+and it found a third that had not been reached yet.
+
+**The lesson, stated once more because it is the session's sharpest:**
+nine cases asserted every predicate and all nine passed while the guest
+reset-looped. A change whose correctness depends on ordering cannot be
+validated by a unit test of its predicates - and a suite that cannot
+represent the ordering cannot be fixed by adding more predicates to it.
+The shim was the actual gap.

@@ -4351,6 +4351,49 @@ private:
     void mark_vtl_half(std::size_t cpu, std::size_t kind);
 
     /**
+     * Whether a `guest_state_fields` index may be deferred. False for
+     * the two the guest hypervisor reads out of the hardware shadow
+     * region without exiting. See `guest_state_deferred`.
+     */
+    static bool guest_state_deferrable(std::size_t index);
+
+    /**
+     * Sets which vmcs12 is current, and invalidates anything that
+     * described the old one. **Always use this rather than assigning
+     * `guest_current_vmcs`** - see `guest_state_deferred_vmcs`.
+     */
+    void set_guest_current_vmcs(std::size_t cpu, std::uint64_t address);
+
+    /**
+     * Whether the deferred guest-state fields may be left as vmcs02
+     * holds them. See `guest_state_deferred_vmcs`.
+     */
+    bool may_defer_guest_state(std::size_t cpu) const;
+
+    /** Which `guest_state_fields` slot an encoding names, if any. */
+    static std::optional<std::size_t>
+    guest_state_index_of(std::uint64_t encoding);
+
+    /** Marks a guest-state field the level above has written, so the
+     * next entry writes it back and no materialisation overwrites it. */
+    void mark_l2_guest_state_dirty(std::size_t cpu,
+                                   std::uint64_t encoding);
+
+    /** Materialises the deferred fields if this encoding is one. */
+    void materialise_l2_guest_state_for(std::size_t cpu,
+                                        std::uint64_t encoding);
+
+    /**
+     * Copies the deferred guest-state fields out of vmcs02 into vmcs12,
+     * leaving anything the guest hypervisor has written alone.
+     *
+     * Called from the one interception point that can need them, and
+     * **from there as a repair rather than as a precondition** - see
+     * `guest_state_deferred`.
+     */
+    void materialise_l2_guest_state(std::size_t cpu);
+
+    /**
      * Records where the VP assist page really is, by two independent
      * translations, and arms a write-watch on it. See
      * `vp_assist_l2_physical`.
@@ -7803,6 +7846,71 @@ private:
      */
     std::uint64_t guest_state_cache[max_cpus][48]{};
     bool guest_state_fresh[max_cpus]{};
+
+    /**
+     * The bulk guest-state copy, deferred until something asks for it.
+     *
+     * `save_l2_state` read all 46 of `guest_state_fields` out of vmcs02
+     * on every exit and wrote them into vmcs12 - about 121,000 cycles,
+     * 17% of an exit - so that the guest hypervisor could read 16
+     * distinct fields roughly once every fourteen exits, and **none of
+     * the 16 is in this set**. 8.5 million copies to serve 37,389
+     * reads.
+     *
+     * It is safe to stop because the processor has already put the
+     * values where they belong. SDM 30.3.1
+     * (`.references/sdm.txt:204498`) and the sections beside it save
+     * every one of these into the guest-state area on **every** VM
+     * exit, so vmcs02 holds the second-level guest's state whether this
+     * VMM copies it or not. Partitioned by that citation and not by
+     * naming convention - a first pass matched field names by prefix
+     * and invented a three-field hazard out of a mismatch.
+     *
+     * **Two fields are excluded and the exclusion is load bearing.**
+     * `guest_cs_access_rights` and `guest_ss_access_rights` are on
+     * `shadow_read_write_fields`, so the guest hypervisor reads them
+     * out of the hardware shadow region **with no exit at all** - there
+     * is no interception point at which a deferred value could be
+     * materialised, and a stale one would be handed over invisibly.
+     * Anything added to that list must be excluded here too.
+     *
+     * `guest_state_dirty` is which of them the guest hypervisor has
+     * written since the last entry, by index into `guest_state_fields`.
+     * Only those are written back into vmcs02; the rest are left
+     * exactly as the processor saved them, which is what makes the
+     * deferral a no-op rather than a lost write.
+     * @{
+     */
+    bool guest_state_deferred[max_cpus]{};
+    std::uint64_t guest_state_dirty[max_cpus]{};
+
+    /**
+     * Which vmcs12 the deferred state belongs to.
+     *
+     * **This is the condition the first attempt was missing, and it
+     * reset the guest 218 times.** "The processor saves these on every
+     * exit" is true and is not sufficient: what makes skipping the
+     * write-back a no-op is that vmcs02 was last written by an exit
+     * *from the guest about to be entered*. Two ways that fails -
+     * the first entry to a vmcs02, where nothing has been saved and the
+     * region holds what it was cleared to; and the level above
+     * VMPTRLDing a different vmcs12, where vmcs02 is reused per
+     * processor and its contents belong to another second-level guest.
+     *
+     * So the deferral is licensed only while this matches
+     * `guest_current_vmcs` and `vmcs02_launched` is set. When it does
+     * not, every deferred field is written unconditionally - not merely
+     * un-elided, because `guest_state_cache` is stale for exactly those
+     * indices and comparing against it could skip a write that is owed.
+     */
+    std::uint64_t guest_state_deferred_vmcs[max_cpus]{};
+
+    volatile std::uint64_t guest_state_defers[max_cpus]{};
+    volatile std::uint64_t guest_state_materialises[max_cpus]{};
+    volatile std::uint64_t guest_state_dirty_writes[max_cpus]{};
+    /**
+     * @}
+     */
     std::uint64_t guest_state_writes_skipped[max_cpus]{};
     std::uint64_t guest_state_writes_done[max_cpus]{};
     /** @} */

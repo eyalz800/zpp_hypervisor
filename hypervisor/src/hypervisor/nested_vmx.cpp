@@ -1004,7 +1004,8 @@ bool hypervisor::on_guest_vmxon(std::size_t cpu,
 
     this->guest_in_vmx_operation[cpu] = true;
     this->guest_vmxon_pointer[cpu] = *pointer;
-    this->guest_current_vmcs[cpu] = no_current_vmcs;
+    set_guest_current_vmcs(cpu, no_current_vmcs);
+
     this->guest_vmcs12[cpu].clear();
 
     this->guest_vmxon_count[cpu] = this->guest_vmxon_count[cpu] + 1;
@@ -1040,7 +1041,8 @@ bool hypervisor::on_guest_vmxoff(std::size_t cpu)
 
     this->guest_in_vmx_operation[cpu] = false;
     this->guest_vmxon_pointer[cpu] = 0;
-    this->guest_current_vmcs[cpu] = no_current_vmcs;
+    set_guest_current_vmcs(cpu, no_current_vmcs);
+
 
     this->guest_vmxoff_count[cpu] = this->guest_vmxoff_count[cpu] + 1;
 
@@ -1127,7 +1129,8 @@ bool hypervisor::on_guest_vmclear(std::size_t cpu,
         this->guest_vmcs12[cpu].state(vmcs12::launch_state::clear);
         flush_guest_vmcs12(cpu);
         set_vmcs_shadowing(cpu, false);
-        this->guest_current_vmcs[cpu] = no_current_vmcs;
+        set_guest_current_vmcs(cpu, no_current_vmcs);
+
 
         vmx_succeed();
         return true;
@@ -1226,7 +1229,8 @@ bool hypervisor::on_guest_vmptrld(std::size_t cpu,
     flush_guest_vmcs12(cpu);
 
     this->guest_vmcs12[cpu] = loaded;
-    this->guest_current_vmcs[cpu] = *pointer;
+    set_guest_current_vmcs(cpu, *pointer);
+
 
     // A VMCS of the guest hypervisor's is now current, which is the
     // condition VMCS shadowing exists for and the condition the link
@@ -1288,6 +1292,19 @@ bool hypervisor::on_guest_vmread(std::size_t cpu,
     }
 
     record_vmcs_field_use(false, encoding.value());
+
+    // The one interception point a deferred guest-state field can be
+    // asked for, and it **repairs rather than asserts**: if the bulk
+    // copy was skipped and this read wants one of those fields, the
+    // copy happens here, now, before the value is produced. See
+    // `guest_state_deferred`.
+    //
+    // Measured before it was relied on: of the sixteen fields the guest
+    // hypervisor ever reads, none is in the deferred set, so this is
+    // expected never to fire - and `guest_state_materialises` says so
+    // rather than leaving it assumed. A non-zero count is not a fault,
+    // it is this path doing its job.
+    materialise_l2_guest_state_for(cpu, encoding.value());
 
     auto value = this->guest_vmcs12[cpu].read(encoding);
 
@@ -1376,6 +1393,11 @@ bool hypervisor::on_guest_vmwrite(std::size_t cpu,
     }
 
     record_vmcs_field_use(true, encoding.value());
+
+    // And the other half: a guest-state field the level above writes is
+    // **its** value, owed to vmcs02 on the next entry and not to be
+    // overwritten by a later materialisation. See `guest_state_dirty`.
+    mark_l2_guest_state_dirty(cpu, encoding.value());
 
     this->guest_vmcs12[cpu].write(encoding, value);
 

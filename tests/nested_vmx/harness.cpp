@@ -162,6 +162,46 @@ hypervisor::guest_linear_to_physical(std::uint64_t linear)
  * translation, which this harness has neither of - and it is a
  * diagnostic, so doing nothing is a faithful stand-in.
  */
+/**
+ * The two interception points the deferred guest-state copy depends on,
+ * which live in `nested_entry.cpp` and are not compiled here.
+ *
+ * Counted rather than ignored, because they *are* the safety argument:
+ * a guest-state field the level above writes must be marked owed, and
+ * one it reads must materialise before the value is produced. A stub
+ * that silently did nothing would let those cases pass while the
+ * property they assert was absent.
+ */
+std::size_t g_guest_state_marked_dirty{};
+std::size_t g_guest_state_materialised{};
+std::uint64_t g_guest_state_last_encoding{};
+
+/**
+ * The setter that owns "which vmcs12 is current", which lives in
+ * `nested_entry.cpp`. Assigning the member here rather than stubbing it
+ * away, because the suite's own cases read it back.
+ */
+void hypervisor::set_guest_current_vmcs(std::size_t cpu,
+                                        std::uint64_t address)
+{
+    this->guest_current_vmcs[cpu] = address;
+    this->guest_state_deferred[cpu] = false;
+}
+
+void hypervisor::mark_l2_guest_state_dirty(std::size_t,
+                                           std::uint64_t encoding)
+{
+    ++g_guest_state_marked_dirty;
+    g_guest_state_last_encoding = encoding;
+}
+
+void hypervisor::materialise_l2_guest_state_for(std::size_t,
+                                                std::uint64_t encoding)
+{
+    ++g_guest_state_materialised;
+    g_guest_state_last_encoding = encoding;
+}
+
 void hypervisor::sample_guest_thread(std::size_t)
 {
 }
@@ -507,6 +547,19 @@ static result vmwrite_field(std::uint64_t encoding, std::uint64_t value)
                regs,
                register_operand_information(0 /*rax*/, 1 /*rcx*/));
 }
+
+/**
+ * The two interception points the deferred guest-state copy rests on.
+ *
+ * `save_l2_state` no longer copies 44 of `guest_state_fields` out of
+ * vmcs02 on every exit, which is only sound while a field the level
+ * above *writes* is remembered as owed, and a field it *reads* is
+ * materialised before the value is produced. Both are one call on a
+ * path this suite already drives, and a stub that did nothing would let
+ * every other case here pass with the property absent - so they are
+ * asserted directly.
+ */
+static void check_guest_state_interception();
 
 static result vmread_result(std::uint64_t encoding, std::uint64_t & out)
 {
@@ -1984,6 +2037,7 @@ int main()
     test_operand_size();
     test_effective_address();
     test_advertised_versus_implemented();
+    check_guest_state_interception();
 
     std::println("\n{} checks, {} failures", g_checks, g_failures);
     if (!g_findings.empty()) {
@@ -1993,4 +2047,32 @@ int main()
         }
     }
     return g_failures != 0;
+}
+
+static void check_guest_state_interception()
+{
+    constexpr auto guest_es_selector = 0x0800ull;
+    constexpr auto guest_cs_access_rights = 0x4816ull;
+
+    // A write of a guest-state field must be remembered as owed.
+    auto before = zpp::hypervisor::g_guest_state_marked_dirty;
+    static_cast<void>(vmwrite_field(guest_es_selector, 0x1234));
+    check(zpp::hypervisor::g_guest_state_marked_dirty == before + 1,
+          "a vmwrite of a guest-state field marks it owed, or the next "
+          "entry leaves the level above's value in vmcs12 and never "
+          "writes it into vmcs02");
+    check(zpp::hypervisor::g_guest_state_last_encoding == guest_es_selector,
+          "and marks the field it actually wrote");
+
+    // A read must materialise first.
+    auto read_before = zpp::hypervisor::g_guest_state_materialised;
+    std::uint64_t got{};
+    static_cast<void>(vmread_result(guest_es_selector, got));
+    check(zpp::hypervisor::g_guest_state_materialised == read_before + 1,
+          "a vmread of a guest-state field materialises the deferred "
+          "copy before producing a value - the repair, not an assertion");
+
+    // The shadowed pair's exclusion is asserted in `nested_exit`, which
+    // compiles the translation unit those predicates live in.
+    static_cast<void>(guest_cs_access_rights);
 }

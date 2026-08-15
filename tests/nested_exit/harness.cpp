@@ -2775,6 +2775,83 @@ static void test_l0_precedence()
         hv().stepping_watch[cpu] = false;
     }
 
+    // The deferred bulk guest-state copy, and the one exclusion that
+    // makes it safe. See `guest_state_deferred`.
+    {
+        std::size_t deferrable{};
+        std::size_t kept{};
+
+        for (std::size_t i{}; i < 46; ++i) {
+            if (hypervisor_t::guest_state_deferrable(i)) {
+                ++deferrable;
+            } else {
+                ++kept;
+            }
+        }
+
+        check(2 == kept,
+              "exactly two guest-state fields are kept eager, and they "
+              "are the two on shadow_read_write_fields - the level above "
+              "reads those out of the hardware shadow region with no "
+              "exit here, so there is no point at which a deferred value "
+              "could be materialised and a stale one would be handed "
+              "over invisibly");
+        check(44 == deferrable,
+              "and the other 44 are deferred - SDM 30.3.1 has the "
+              "processor save every one of them into vmcs02 on every VM "
+              "exit, so the copy this VMM was making was of values "
+              "already in the right place");
+
+        auto cs = hypervisor_t::guest_state_index_of(
+            static_cast<std::uint64_t>(field::guest_cs_access_rights));
+        auto ss = hypervisor_t::guest_state_index_of(
+            static_cast<std::uint64_t>(field::guest_ss_access_rights));
+
+        check(cs && ss,
+              "both shadowed access-rights fields are in the bulk list");
+        check(!hypervisor_t::guest_state_deferrable(*cs) &&
+                  !hypervisor_t::guest_state_deferrable(*ss),
+              "and neither is deferrable - anything added to "
+              "shadow_read_write_fields must be excluded here too");
+
+        check(!hypervisor_t::guest_state_index_of(0xdead),
+              "an encoding outside the bulk list names no slot, so a "
+              "vmwrite of an unrelated field marks nothing owed");
+
+        // **The case that reset the guest 218 times.** Deferral is
+        // licensed by "vmcs02 was last written by an exit from the
+        // guest about to be entered", not by "the processor saves these
+        // on every exit". Both halves are asserted here because both
+        // were missing.
+        auto & h = hv();
+
+        h.guest_state_deferred[cpu] = true;
+        h.guest_state_deferred_vmcs[cpu] = 0x1000;
+        h.guest_current_vmcs[cpu] = 0x1000;
+        h.vmcs02_launched[cpu] = false;
+        check(!h.may_defer_guest_state(cpu),
+              "a vmcs02 that has never run holds no saved state, so the "
+              "first entry must write every guest-state field - skipping "
+              "them launches the guest with whatever the region was "
+              "cleared to");
+
+        h.vmcs02_launched[cpu] = true;
+        check(h.may_defer_guest_state(cpu),
+              "a launched vmcs02 whose last exit was this guest's may "
+              "defer");
+
+        h.guest_current_vmcs[cpu] = 0x2000;
+        check(!h.may_defer_guest_state(cpu),
+              "and a different vmcs12 may not - vmcs02 is reused per "
+              "processor, so its contents then belong to another "
+              "second-level guest");
+
+        h.guest_state_deferred[cpu] = false;
+        h.guest_state_deferred_vmcs[cpu] = 0;
+        h.guest_current_vmcs[cpu] = 0;
+        h.vmcs02_launched[cpu] = false;
+    }
+
     // Eliding a host-state write, which is only safe while the audit
     // says the processor leaves that slot alone. See `l1_host_samples`.
     {
@@ -4038,16 +4115,25 @@ struct asked_controls
 /**
  * Puts vmcs01 and vmcs12 in place and runs the real `build_vmcs02`.
  *
- * The fake VMCS is one flat array, so vmcs02 lands on top of vmcs01 -
- * which is exactly what the harness wants: `build_vmcs02` reads everything
- * it needs out of vmcs01 before its `vmptrld`, so after the call every
- * field in the array is vmcs02's.
+ * With `vmcs02_physical` left at zero the shim keeps one region, so
+ * vmcs02 lands on top of vmcs01 and after the call every field in the
+ * array is vmcs02's - which is what most cases here want, since
+ * `build_vmcs02` reads everything it needs out of vmcs01 before its
+ * `vmptrld`. A case that sets `vmcs02_physical` gets genuinely separate
+ * regions instead, which is what the ordering cases need.
  */
-static std::expected<void, zpp::error> compose(
-    const asked_controls & asked, zpp::arch::x86_64::context & registers)
+/**
+ * The setup and the entry, **without** the reset.
+ *
+ * `reset` clears vmcs12 and calls `forget_vmcs02_contents`, which is
+ * right for a case that wants a clean slate and fatal for one that is
+ * testing an *ordering* - it destroys the very state the second entry
+ * is supposed to inherit from the first. The ordering cases drive this
+ * directly and reset once, at the start, themselves.
+ */
+static std::expected<void, zpp::error> compose_entered(
+    const asked_controls & asked)
 {
-    reset(registers);
-
     auto & vmcs = hv().vmcs;
     vmcs.write(field::pin_based_vm_execution_controls, own_pin);
     vmcs.write(field::primary_processor_based_vm_execution_controls,
@@ -4072,6 +4158,17 @@ static std::expected<void, zpp::error> compose(
     hv().vmcs12_controls_captured = 0;
 
     return hv().build_vmcs02(cpu);
+}
+
+/**
+ * Puts vmcs01 and vmcs12 in place from a clean slate and runs the real
+ * `build_vmcs02`.
+ */
+static std::expected<void, zpp::error> compose(
+    const asked_controls & asked, zpp::arch::x86_64::context & registers)
+{
+    reset(registers);
+    return compose_entered(asked);
 }
 
 static std::uint64_t vmcs02_exit_controls()
@@ -4511,6 +4608,191 @@ static void test_exit_and_entry_control_composition()
     // The adjust-MSR path: a control the guest hypervisor sets that the
     // hardware underneath does not allow.
     // ------------------------------------------------------------------
+
+    // **The sequence test, and it is the one that was missing.**
+    //
+    // Nine unit cases asserted every predicate the deferred guest-state
+    // copy rests on, all nine passed, and the change reset the guest on
+    // the rig twice - about 250 unclean resets of a real installation -
+    // because none of them ran an *ordering*. A change whose
+    // correctness depends on which VMCS was last written cannot be
+    // validated by testing its predicates.
+    //
+    // This drives the real `build_vmcs02` and `save_l2_state` across
+    // two vmcs02 regions and two vmcs12s and asserts the one property
+    // that matters: **whatever vmcs02 holds for a guest-state field is
+    // what the level above put in vmcs12 for the guest being entered.**
+    {
+        auto & h = hv();
+        namespace vmx = zpp::arch::x86_64::vmx;
+        zpp::arch::x86_64::context registers{};
+
+        constexpr auto probe = field::guest_es_base;
+        constexpr auto probe_two = field::guest_gdtr_base;
+
+        auto own = std::uint64_t{0x1000};
+        auto load_vmcs01 = [&] {
+            static_cast<void>(vmx::vmptrld(&own));
+        };
+
+        // A vmcs02 of its own, so the regions are actually distinct -
+        // with `vmcs02_physical` left at zero the shim keeps one region
+        // and this case would pass without testing anything.
+        // Reset once, here, and never again inside the sequence - the
+        // whole point is that the second entry inherits what the first
+        // left behind.
+        reset(registers);
+
+        h.vmcs02_physical[cpu] = 0x2000;
+        h.vmcs02_launched[cpu] = false;
+        h.guest_state_deferred[cpu] = false;
+        h.forget_vmcs02_contents(cpu);
+
+        auto entry = [&](std::uint64_t owner, std::uint64_t a,
+                         std::uint64_t b) {
+            load_vmcs01();
+            h.set_guest_current_vmcs(cpu, owner);
+            h.guest_vmcs12[cpu].write(probe, a);
+            h.guest_vmcs12[cpu].write(probe_two, b);
+            return compose_entered(asked_controls{}).has_value();
+        };
+
+        // (1) First entry to a vmcs02 that has never run. Nothing has
+        // been saved into it, so every field is owed - this is the case
+        // that launched the guest with a zeroed guest state.
+        auto ok = entry(0xa000, 0x1111000, 0x2222000);
+        check(ok && (0x1111000 == h.vmcs.read(probe)) &&
+                  (0x2222000 == h.vmcs.read(probe_two)),
+              "the first entry to a vmcs02 writes every guest-state "
+              "field - nothing has been saved into it, so deferring the "
+              "write launches the guest with whatever the region was "
+              "cleared to");
+
+        // An exit from that guest, with vmcs02 current, which is the
+        // ordering the real path has.
+        h.vmcs02_launched[cpu] = true;
+        h.save_l2_state(cpu);
+
+        // (2) **The one that reset the guest.** The level above loads a
+        // different vmcs12 and enters. vmcs02 is reused per processor,
+        // so its contents belong to the previous guest.
+        ok = entry(0xb000, 0x3333000, 0x4444000);
+        check(ok && (0x3333000 == h.vmcs.read(probe)) &&
+                  (0x4444000 == h.vmcs.read(probe_two)),
+              "a different vmcs12 entered on the same vmcs02 gets its "
+              "own guest state - vmcs02 is reused per processor, so "
+              "deferring here hands one second-level guest another's "
+              "state");
+
+        // (3) Back to a vmcs12 seen before but not most recently. An
+        // implementation remembering only "some exit happened" passes
+        // (2) and fails this.
+        h.save_l2_state(cpu);
+        ok = entry(0xa000, 0x5555000, 0x6666000);
+        check(ok && (0x5555000 == h.vmcs.read(probe)),
+              "returning to a vmcs12 seen before but not most recently "
+              "is the same hazard - the deferral must name which guest "
+              "the saved state belongs to, not merely that there was "
+              "one");
+
+        // (4) Alternating repeatedly, because a one-shot guard passes
+        // the first switch and not the fifth.
+        for (std::uint64_t round{}; round < 4; ++round) {
+            auto owner = (round & 1) ? 0xa000ull : 0xb000ull;
+            auto value = 0x7000000ull + (round << 16);
+
+            h.save_l2_state(cpu);
+            ok = entry(owner, value, value + 8);
+            check(ok && (value == h.vmcs.read(probe)),
+                  text("alternating vmcs12s, round %llu: each entry "
+                       "still gets its own guest's state",
+                       (unsigned long long)round));
+        }
+
+        // (5) The same guest twice in a row - the case the deferral
+        // exists for - with the level above changing a field in
+        // between.
+        //
+        // **This one failed when it wrote vmcs12 directly, and that is
+        // worth keeping.** A direct write is not something the real
+        // system can do: vmcs12's guest state changes only by the level
+        // above executing VMWRITE, which exits and is marked owed here,
+        // or by it loading a different vmcs12, which the address check
+        // catches. Driving the interception point is therefore the
+        // faithful test - and the failure is the assumption made
+        // explicit, which is exactly what it should have cost.
+        h.save_l2_state(cpu);
+        load_vmcs01();
+        h.guest_current_vmcs[cpu] = 0xa000;
+        h.mark_l2_guest_state_dirty(
+            cpu, static_cast<std::uint64_t>(probe));
+        h.guest_vmcs12[cpu].write(probe, 0x8888000);
+        ok = compose_entered(asked_controls{}).has_value();
+        check(ok && (0x8888000 == h.vmcs.read(probe)),
+              "a field the level above writes while the copy is deferred "
+              "is still written into vmcs02 on the next entry - the "
+              "deferral must not swallow a value it was told about");
+
+        // And the assumption the case above rests on, asserted rather
+        // than left in a comment: the only writer of a deferrable
+        // field's vmcs12 value, other than a vmcs12 switch, is the
+        // VMWRITE path. `copy_shadow_to_vmcs12` is the one other
+        // writer, and every field on its list is either excluded from
+        // deferral or absent from the bulk set.
+        for (auto shadowed : {field::guest_dr7,
+                              field::guest_rip,
+                              field::guest_rflags,
+                              field::guest_interruptibility_state,
+                              field::guest_cs_access_rights,
+                              field::guest_ss_access_rights}) {
+            auto slot = hypervisor_t::guest_state_index_of(
+                static_cast<std::uint64_t>(shadowed));
+
+            check(!slot || !hypervisor_t::guest_state_deferrable(*slot),
+                  "every field the shadow-VMCS copy writes into vmcs12 "
+                  "is either outside the bulk set or excluded from "
+                  "deferral - it is the one writer that does not go "
+                  "through the VMWRITE interception point");
+        }
+
+        // (6) VMCLEAR of the current vmcs12, then load it again and
+        // launch. The address is unchanged, so an implementation that
+        // only compares addresses thinks the saved state still belongs
+        // to this guest - but the level above has just told us the
+        // launch state is clear, and SDM 33.3 keeps the *data* fields
+        // across VMCLEAR, so vmcs12 is authoritative and vmcs02 is not.
+        h.save_l2_state(cpu);
+        load_vmcs01();
+        h.guest_vmcs12[cpu].state(
+            zpp::arch::x86_64::vmx::vmcs12::launch_state::clear);
+        h.set_guest_current_vmcs(cpu, 0);       // VMCLEAR of the current
+        h.set_guest_current_vmcs(cpu, 0xa000);  // and VMPTRLD again
+        h.guest_vmcs12[cpu].write(probe, 0xaaaa000);
+        ok = compose_entered(asked_controls{}).has_value();
+        check(ok && (0xaaaa000 == h.vmcs.read(probe)),
+              "a vmcs12 VMCLEARed and loaded again launches from its own "
+              "data fields, which survive the clear - vmcs02 holds the "
+              "state of the guest that was running before it, and an "
+              "address comparison alone cannot tell the two apart");
+
+        // (7) A read of a deferred field between the exit and the entry
+        // materialises the copy; the entry afterwards must still land
+        // the level above's values, not the materialised ones twice.
+        h.save_l2_state(cpu);
+        load_vmcs01();
+        h.guest_current_vmcs[cpu] = 0xa000;
+        h.materialise_l2_guest_state_for(
+            cpu, static_cast<std::uint64_t>(probe));
+        ok = compose_entered(asked_controls{}).has_value();
+        check(ok, "an entry after a materialisation still composes");
+
+        load_vmcs01();
+        h.vmcs02_physical[cpu] = 0;
+        h.vmcs02_launched[cpu] = false;
+        h.guest_state_deferred[cpu] = false;
+        h.guest_current_vmcs[cpu] = 0;
+        h.forget_vmcs02_contents(cpu);
+    }
 
     {
         // Withdrawn from the *hardware*, not from this VMM's offer, which
