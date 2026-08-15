@@ -15371,3 +15371,16 @@ entirely.
 The change stands regardless of the boot: reflecting an exit the level
 above never asked for is wrong whether or not it is what stops this
 particular guest.
+
+**And the loop got faster while making no more progress.** After the
+MSR-bitmap fix the working ring advances at **69.6 exits/s** against
+25.3/s before - about 2.7 times the rate, from the exits that stopped
+being reflected - and it is still exactly two instruction addresses,
+still `+0x19` and `+0x32`, still no third appearing and none retiring.
+
+That is the cleanest refutation available of anything remaining in the
+"it is too slow" family. A guest that is merely behind goes further when
+it is given more; this one turns the same circle faster. Every
+throughput improvement in this file can now be read the same way:
+`merge_nested_bitmaps` at 77,000 cycles saved, the elided guest-state
+writes, this - all real, none of them relevant to the stall.
