@@ -14203,3 +14203,44 @@ order:
 The second is the one worth checking first, because it is ours and
 because `reflected_permission` being 0 of 448,441 already says no
 permission this VMM shadows has ever refused either level an access.
+
+### The stuck secure call is in boot-device resolution
+
+Resolving the captured VTL0 stack against the module bases - free, from
+a capture already taken - turns up a UTF-16 string sitting in the frames
+above the trust-level wrapper:
+
+```
++0x158  \0 A r c      +0x190  k ( 0 )
++0x160  \0 a m e      +0x198  p a r t
++0x170  t i ( 0       +0x1a0  i t i o
++0x180  k (           +0x1a8  n ( 4 )
+```
+
+which reads `ArcName` and `multi(0)disk(0)rdisk(0)partition(4)`. The
+frames around it are `ntoskrnl`+0x38e108, +0xf8df40 and +0xfd0740.
+
+So the loop is not an abstract secure call - it is **boot-device
+resolution**, and the device is the passed-through NVMe this rig boots
+from. That is a far narrower place to look than "a VTL call that
+retries", and it is consistent with everything measured: the guest
+executes its clock loop and this one call, nothing reaches ring 3, and
+the boot animation draws its first dot and stops - which is exactly
+where a boot stalls if the volume it is about to load from never
+resolves.
+
+**Caveat, and it decides what to do next.** The string is at +0x158 to
++0x1a8, well above the wrapper's own frame, so it may be live argument
+data or it may be stale stack from an earlier call at the same depth.
+Two captures showed byte-identical stacks including this region, which
+is consistent with either. Establishing which is the next step, and the
+cheap way is to capture the same window at a *different* stack depth -
+if the string moves with the frame it is live, and if it sits at the
+same absolute address regardless it is debris.
+
+What this does **not** yet say is why the resolution never completes.
+Nothing in the exit record shows disk traffic: no MMIO to the controller,
+no interrupt vector other than the clock, and no extended-page-table
+faults in steady state. A guest waiting on an I/O it never issued is a
+different fault from one waiting on an I/O that never completed, and the
+exit histogram already rules the second one out.
