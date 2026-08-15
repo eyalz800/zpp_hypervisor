@@ -1552,6 +1552,12 @@ std::expected<void, zpp::error> hypervisor::build_vmcs02(std::size_t cpu)
         // all-zero histogram says the first outright.
         if (cpu < max_cpus) {
             this->l2_tpr_threshold_seen[cpu][tpr_threshold12 & 0xf] += 1;
+
+            // Carried across rather than compared here: from
+            // build_vmcs02 the read of the virtual task priority is
+            // not available, and the same read of the same offset of
+            // the same page works unconditionally from save_l2_state.
+            this->nested_tpr_threshold[cpu] = tpr_threshold12;
         }
 
         // Kept so the task priority behind it can be read back. See
@@ -2682,6 +2688,29 @@ void hypervisor::save_l2_state(std::size_t cpu)
                 std::span(reinterpret_cast<std::byte *>(&vtpr),
                           sizeof(vtpr))));
             this->l2_vtpr_class_seen[cpu][vtpr >> 4] += 1;
+
+            // SDM 27.6.7 and 30.1.2: a TPR-below-threshold exit is
+            // owed when bits 3:0 of the threshold **exceed** bits 7:4
+            // of the virtual task priority - exceed, not reach, so a
+            // threshold of 2 against 0x20 is false. Here, because this
+            // is the one place the read is known to work.
+            //
+            // Often true with no reason-43 exit following means what
+            // reaches vmcs02 is not doing what the VMCS says, and the
+            // fault is here. Never true means the guest hypervisor
+            // only arms the threshold while its guest is already above
+            // it, the check is correctly silent, and delivery can only
+            // come from TPR virtualization during execution.
+            if (auto threshold = this->nested_tpr_threshold[cpu];
+                0 != threshold) {
+                if ((threshold & 0xf) > (std::uint64_t{vtpr} >> 4)) {
+                    this->l2_tpr_would_fire[cpu] =
+                        this->l2_tpr_would_fire[cpu] + 1;
+                } else {
+                    this->l2_tpr_armed_above[cpu] =
+                        this->l2_tpr_armed_above[cpu] + 1;
+                }
+            }
         }
     }
 
