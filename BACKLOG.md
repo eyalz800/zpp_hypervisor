@@ -15851,3 +15851,63 @@ halves, the priority histograms, the read-back of what vmcs02 carried,
 the clock gap. Between them they cost one `rdtsc` per trust-level switch
 and one VMREAD per entry, and they answered three of the four questions
 without the trace being on at all.
+
+## Closed dimension: what the guest hypervisor asks to inject is what its guest gets
+
+Recorded as a closure rather than a null result, because it is one.
+
+`l2_given_vector` reads vmcs02's entry-interruption-information field
+back at the **last instruction before VM entry** - the value the
+processor will act on - and compares against `l2_injected_vector`, which
+is what the guest hypervisor put in vmcs12.
+
+| vector | asked | given |
+|---|---|---|
+| `0xd1` | 1,220 | 1,220 |
+| `0x40` | 364 | 364 |
+| `0x2f` | 1 | 1 |
+
+Three vectors, exact on all three. Beside it, `deliver_self_ipi` is
+verified **absent from the built binary** - `llvm-objdump` finds no
+reference to `l2_self_ipi_delivered` anywhere in the shipped text - so
+there is no code path in this configuration that can add to, remove
+from, or alter the field between vmcs12 and the processor.
+
+**So the event-injection path is closed in both directions**, by the
+same method that closed the five control dimensions: read what the
+hardware will use, not what the source says was written. An interrupt
+the guest hypervisor wants delivered is delivered. Any future account of
+a missing vector has to explain why the level above never asked for it,
+and must not re-open this.
+
+## Methodology: a field that does not vary with what it is defined from is a field nobody maintains
+
+Generalised from the VPPR catch, because this tree has now hit this
+class **three times** and each time the failure looked like an answer:
+
+| probe | what it read | what it meant |
+|---|---|---|
+| `l2_tpr_would_fire` / `l2_tpr_armed_above` | both zero | the increment was never compiled in - the header was edited and the translation unit was not |
+| the VP assist page | 512 bytes of zero | on the first attempt, a read that failed on its first quadword |
+| VPPR at offset `0A0H` | `0x00` on 100% of entries | the processor does not maintain that field without virtual-interrupt delivery |
+
+The three checks that separate a measured zero from a broken probe, in
+increasing order of what they cost:
+
+1. **Grep the built translation unit for the counter**, not the diff. A
+   counter that was never compiled in reads zero and looks like a
+   result.
+2. **Record the failure code beside the value.** A diagnostic whose
+   failure is indistinguishable from its negative result is worse than
+   none.
+3. **Read it against a reading already known good, on the same
+   samples.** This is the new one, and it is what caught VPPR: PPR is
+   *defined* as the maximum of TPR and the in-service class, so PPR
+   constant while TPR varied over four values on the same entries is
+   arithmetically impossible. Whenever a new field has a defined
+   relationship to an old one, that relationship is a free assertion -
+   and it fires without needing to know anything about why.
+
+The general form: **a probe's value is only evidence once something
+independent says the probe ran.** Prefer an invariant the value must
+satisfy over a plausibility judgement about the value itself.
