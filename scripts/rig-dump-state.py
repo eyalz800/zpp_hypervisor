@@ -599,8 +599,13 @@ def dump_synthetic_msrs(args, elf, instance):
     off = gdb_offsets(elf, members)
 
     reader = Monitor(args.rig, args.port)
+    # **32 bit counters, two to a quadword.** Read as 64 bit they come
+    # back as `0x3_00000002` - two adjacent slots welded together, which
+    # printed as 12,884,901,890 writes of one MSR and looked like a
+    # finding rather than a unit error. Same shape as `l2_entry_vtpr`
+    # above, which is why that one already unpacks.
     for member in ("l2_synthetic_msr_writes", "l2_synthetic_msr_reads"):
-        reader.queue(instance + off[member], args.cpus * 256)
+        reader.queue(instance + off[member], args.cpus * 256 // 2)
     for member in ("l2_int_window_armed", "l2_int_window_clear"):
         reader.queue(instance + off[member], args.cpus)
     got = reader.run()
@@ -615,9 +620,13 @@ def dump_synthetic_msrs(args, elf, instance):
              0xb0: "STIMER0_CONFIG", 0xb1: "STIMER0_COUNT"}
 
     for cpu in range(args.cpus):
+        def packed(member, index):
+            pair = word(member, (cpu * 256 + index) // 2)
+            return (pair >> (32 * (index % 2))) & 0xffffffff
+
         for member, what in (("l2_synthetic_msr_writes", "written"),
                              ("l2_synthetic_msr_reads", "read")):
-            rows = [(word(member, cpu * 256 + i), i) for i in range(256)]
+            rows = [(packed(member, i), i) for i in range(256)]
             rows = [r for r in rows if r[0]]
             if not rows:
                 continue
