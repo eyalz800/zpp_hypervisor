@@ -377,7 +377,8 @@ def dump_vtl(args, elf, instance):
                "vtl_stack", "vtl_rip", "vtl_rsp", "vtl_cr3",
                "vtl_image_base", "vtl_caller_base", "vtl_caller_address",
                "vtl_image_name", "vtl_caller_name", "vtl_captured",
-               "vtl_code", "vtl_code_base"]
+               "vtl_code", "vtl_code_base", "vtl_assist",
+               "l2_vp_assist", "l2_vp_assist_eptp"]
     off = gdb_offsets(elf, members)
 
     kind = "sizeof(('zpp::hypervisor::hypervisor' *)0)->vtl_differed[0][0]"
@@ -404,6 +405,12 @@ def dump_vtl(args, elf, instance):
         "sizeof(('zpp::hypervisor::hypervisor' *)0)->vtl_code[0]"])[0]
     reader.queue(instance + off["vtl_code"], kinds * code_size // 8)
     reader.queue(instance + off["vtl_code_base"], kinds)
+    assist_size = gdb_values(elf, [
+        "sizeof(('zpp::hypervisor::hypervisor' *)0)->vtl_assist[0][0]"])[0]
+    reader.queue(instance + off["vtl_assist"],
+                 kinds * 2 * assist_size // 8)
+    reader.queue(instance + off["l2_vp_assist"], 2)
+    reader.queue(instance + off["l2_vp_assist_eptp"], 2)
     for member in ("vtl_image_name", "vtl_caller_name"):
         reader.queue(instance + off[member], kinds * name_size // 8)
     got = reader.run()
@@ -461,6 +468,24 @@ def dump_vtl(args, elf, instance):
         if any(raw):
             print(f"  code at 0x{word('vtl_code_base', k):x}:")
             print("    " + raw.hex())
+
+        # The page the trust levels talk through.  Printed as the
+        # quadwords that are non-zero, because most of it is reserved
+        # and a full hex dump of two 512 byte pages per side buries the
+        # handful of fields that carry anything.
+        for level in range(2):
+            msr = word("l2_vp_assist", level)
+            base = ((k * 2) + level) * assist_size // 8
+            live = [(i * 8, word("vtl_assist", base + i))
+                    for i in range(assist_size // 8)
+                    if word("vtl_assist", base + i)]
+            if not (msr or live):
+                continue
+            print(f"  vp assist level {level}: msr 0x{msr:x} "
+                  f"eptp 0x{word('l2_vp_assist_eptp', level):x}")
+            for at, value in live:
+                mark = "  <- vtl control" if 0x100 <= at < 0x140 else ""
+                print(f"    +0x{at:03x}  0x{value:016x}{mark}")
 
 
 def main():

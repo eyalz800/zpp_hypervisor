@@ -5285,6 +5285,46 @@ void hypervisor::capture_vtl_switch(std::size_t cpu,
         break;
     }
 
+    // And the page the two trust levels talk through, in this side's
+    // own view of guest physical memory.
+    //
+    // The registers and the stack are byte-identical across thousands of
+    // switches, so whatever makes this call happen again is here. The
+    // interface puts the VTL control structure at offset 0x100 - the
+    // entry reason, the pending-event flags and the return registers -
+    // and the APIC assist at offset 0. Both fit in the first 512 bytes.
+    //
+    // Read through `l2_physical_to_l1` first, because the address in the
+    // register is the *second-level* guest's physical address and this
+    // VMM's own mapping window takes the first level's. Each trust level
+    // has its own page and its own extended-page-table root, so a read
+    // that skipped that step would resolve one level's address in the
+    // other's tables and answer with something plausible and wrong.
+    constexpr std::uint64_t vp_assist_enabled = 1;
+    constexpr std::uint64_t page_mask = ~0xfffull;
+
+    for (std::size_t which{}; which < 2; ++which) {
+        auto msr = this->l2_vp_assist[cpu][which];
+        if (0 == (msr & vp_assist_enabled)) {
+            continue;
+        }
+
+        for (std::size_t i{}; i < vtl_assist_size; i += 8) {
+            auto first = l2_physical_to_l1(cpu, (msr & page_mask) + i);
+            if (!first) {
+                break;
+            }
+
+            if (!read_guest_physical(
+                    *first,
+                    std::span(reinterpret_cast<std::byte *>(
+                                  &this->vtl_assist[kind][which][i]),
+                              8))) {
+                break;
+            }
+        }
+    }
+
     // Last, so a reader that sees this set sees everything above it.
     this->vtl_captured[kind] = 1;
 }
@@ -6083,6 +6123,40 @@ hypervisor::on_l2_exit(std::size_t cpu,
                 }
             } else if (basic_reason::wrmsr == reason.basic()) {
                 this->l2_synthetic_msr_writes[cpu][slot] += 1;
+
+                // Where the trust levels talk to each other. See
+                // `l2_vp_assist`: the loop's decision to call again is
+                // made from neither registers nor stack, both of which
+                // are byte-identical across thousands of switches, so it
+                // is made from this page.
+                //
+                // Recorded per trust level, keyed on the extended-page-
+                // table pointer in force, because the register is
+                // per-VTL and each level configures its own - one slot
+                // would hold whichever wrote last and there would be no
+                // way to tell which.
+                constexpr std::uint64_t vp_assist_slot = 0x73;
+
+                if (vp_assist_slot == slot) {
+                    auto eptp =
+                        this->guest_vmcs12[cpu].read(field::ept_pointer);
+
+                    // The slot already claimed by this level, or the
+                    // first free one. Two levels, two slots, and a third
+                    // would mean the assumption that there are two is
+                    // wrong - which `l2_vp_assist_eptp` makes visible
+                    // rather than silently overwriting.
+                    for (std::size_t which{}; which < 2; ++which) {
+                        if ((this->l2_vp_assist_eptp[cpu][which] ==
+                             eptp) ||
+                            (0 == this->l2_vp_assist_eptp[cpu][which])) {
+                            this->l2_vp_assist[cpu][which] =
+                                this->l2_exit_detail_value[cpu];
+                            this->l2_vp_assist_eptp[cpu][which] = eptp;
+                            break;
+                        }
+                    }
+                }
 
                 // Kept so the page can be read from outside. See
                 // `l2_reference_tsc_written`.

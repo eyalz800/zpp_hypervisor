@@ -4864,6 +4864,27 @@ private:
      * be disassembled outside. See `capture_vtl_switch`. */
     static constexpr std::size_t vtl_code_size = 128;
 
+    /**
+     * The page the two trust levels talk through, sampled at each side
+     * of the switch and for each level's own copy of it.
+     *
+     * The loop's registers and stack are byte-identical across thousands
+     * of switches, so the retry decision is made from memory, and this
+     * is the memory the interface defines for it: the VTL control
+     * structure lives at offset 0x100 - entry reason, pending flags,
+     * return registers - and the APIC assist at offset 0.
+     *
+     * Two copies because the register is per trust level and each
+     * configures its own, keyed on the extended-page-table pointer in
+     * force when it was written. One slot would hold whichever wrote
+     * last, with nothing to say which that was.
+     */
+    static constexpr std::size_t vtl_assist_size = 512;
+
+    std::uint64_t l2_vp_assist[max_cpus][2]{};
+    std::uint64_t l2_vp_assist_eptp[max_cpus][2]{};
+    std::uint8_t vtl_assist[vtl_kinds][2][vtl_assist_size]{};
+
     std::uint8_t vtl_code[vtl_kinds][vtl_code_size]{};
     std::uint64_t vtl_code_base[vtl_kinds]{};
     volatile std::uint64_t vtl_captured[vtl_kinds]{};
