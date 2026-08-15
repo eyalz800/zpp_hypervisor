@@ -2755,22 +2755,29 @@ static void test_l0_precedence()
     {
         auto & h = hv();
 
+        constexpr auto rearm = hypervisor_t::vtl_step_rearm;
+
         h.vtl_step_active[cpu] = 0;
         h.vtl_step_count[0] = 0;
         h.vtl_step_count[1] = 0;
         h.vtl_step_code_count[0] = 0;
-        h.vtl_switches[cpu][0] = 0;
-        h.vtl_switches[cpu][1] = hypervisor_t::vtl_step_arm_at;
+        h.vtl_switches[cpu][0] = rearm - 1;
+        h.vtl_switches[cpu][1] = rearm;
 
         h.arm_vtl_step(cpu, 0);
         check(0 == h.vtl_step_active[cpu],
-              "the trace does not arm before the loop has settled - the "
-              "same two hypercalls carry the boot path first");
+              "the trace arms on a multiple of its period and not "
+              "between - the same two hypercalls carry the boot path "
+              "before they carry the livelock, and only a recent window "
+              "tells them apart");
 
-        h.vtl_switches[cpu][0] = hypervisor_t::vtl_step_arm_at;
+        h.vtl_switches[cpu][0] = rearm;
         h.arm_vtl_step(cpu, 0);
         check(1 == h.vtl_step_active[cpu],
-              "the trace arms once the loop has settled");
+              "and does arm on one");
+        check(rearm == h.vtl_step_at[0],
+              "recording which switch it was armed on, so a reader can "
+              "tell a trace taken now from one taken during the boot");
 
         h.arm_vtl_step(cpu, 1);
         check(1 == h.vtl_step_active[cpu],
@@ -2808,14 +2815,20 @@ static void test_l0_precedence()
               "current and the next resume would otherwise take a trap "
               "exit nothing above claims");
 
+        h.vtl_switches[cpu][0] = 2 * rearm;
         h.arm_vtl_step(cpu, 0);
-        check(0 == h.vtl_step_active[cpu],
-              "and does not arm a second time for the same side - one "
-              "trace per side for the life of the boot");
+        check((1 == h.vtl_step_active[cpu]) &&
+                  (0 == h.vtl_step_count[0]) &&
+                  ((2 * rearm) == h.vtl_step_at[0]),
+              "the next period arms again and empties the ring, so a "
+              "dump always holds the most recent trace rather than the "
+              "first one taken");
 
+        h.vtl_step_active[cpu] = 0;
         h.vtl_step_count[0] = 0;
         h.vtl_step_count[1] = 0;
         h.vtl_step_code_count[0] = 0;
+        h.vtl_step_at[0] = 0;
         h.vtl_switches[cpu][0] = 0;
         h.vtl_switches[cpu][1] = 0;
     }

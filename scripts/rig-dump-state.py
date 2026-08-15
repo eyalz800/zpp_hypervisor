@@ -551,7 +551,7 @@ def dump_vtl_steps(args, elf, instance):
     members = ["vtl_step_rip", "vtl_step_cr3", "vtl_step_count",
                "vtl_step_other", "vtl_step_other_reason",
                "vtl_step_code_rip", "vtl_step_code",
-               "vtl_step_code_count"]
+               "vtl_step_code_count", "vtl_step_at"]
     off = gdb_offsets(elf, members)
 
     kinds, capacity, code_slots, code_size = gdb_values(elf, [
@@ -563,7 +563,8 @@ def dump_vtl_steps(args, elf, instance):
 
     reader = Monitor(args.rig, args.port)
     for member in ("vtl_step_count", "vtl_step_other",
-                   "vtl_step_other_reason", "vtl_step_code_count"):
+                   "vtl_step_other_reason", "vtl_step_code_count",
+                   "vtl_step_at"):
         reader.queue(instance + off[member], kinds)
     reader.queue(instance + off["vtl_step_rip"], kinds * capacity)
     reader.queue(instance + off["vtl_step_cr3"], kinds * capacity)
@@ -586,7 +587,11 @@ def dump_vtl_steps(args, elf, instance):
         if not count:
             continue
 
+        # The arming count against the switch total is what says
+        # whether this is a trace of the loop *now* or of the boot -
+        # the same two hypercalls carry both.
         print(f"\n--- instruction trace {armed[k]}: {count} steps, "
+              f"armed at switch {word('vtl_step_at', k):,}, "
               f"{word('vtl_step_other', k)} other exits "
               f"(first reason 0x{word('vtl_step_other_reason', k):x}) ---")
 

@@ -5700,22 +5700,28 @@ void hypervisor::arm_vtl_step(std::size_t cpu, std::size_t kind)
         return;
     }
 
-    // One trace per side for the life of the boot, and never two at
-    // once: the flag lives in this processor's vmcs02 and a second
-    // arming would append one side's instructions to the other's ring.
-    if ((0 != this->vtl_step_active[cpu]) ||
-        (0 != this->vtl_step_count[kind])) {
+    // Never two at once: the flag lives in this processor's vmcs02 and
+    // a second arming would append one side's instructions to the
+    // other's ring.
+    if (0 != this->vtl_step_active[cpu]) {
         return;
     }
 
-    // After the loop has settled, for the reason every other capture
-    // here waits: the same two hypercalls carry the boot path before
-    // they carry the livelock, and a trace of the boot path answers a
-    // question nobody asked.
-    if (this->vtl_switches[cpu][kind] < vtl_step_arm_at) {
+    auto switches = this->vtl_switches[cpu][kind];
+
+    // Every `vtl_step_rearm` switches, overwriting. See there for why a
+    // threshold alone is not enough: at 4,096 switches the trace is of
+    // a guest still booting, and it reads exactly like a guest doing
+    // work because it is one.
+    if ((0 == switches) || (0 != (switches % vtl_step_rearm))) {
         return;
     }
 
+    this->vtl_step_count[kind] = 0;
+    this->vtl_step_code_count[kind] = 0;
+    this->vtl_step_other[kind] = 0;
+    this->vtl_step_other_reason[kind] = 0;
+    this->vtl_step_at[kind] = switches;
     this->vtl_step_active[cpu] = static_cast<std::uint8_t>(kind + 1);
 }
 

@@ -5043,9 +5043,36 @@ private:
     static constexpr std::size_t vtl_step_code_slots = 64;
     static constexpr std::size_t vtl_step_code_size = 32;
 
-    /** Which side of the loop to step next, and when. A trace armed
-     * before the loop has settled would record the boot path instead. */
-    static constexpr std::uint64_t vtl_step_arm_at = 4096;
+    /**
+     * When to step, and how often to step again.
+     *
+     * **Re-armed rather than taken once, and that is the whole of what
+     * the first run of this taught.** Armed at 4,096 switches the trace
+     * came back with 971 distinct addresses out of 1,024 steps on the
+     * secure kernel's side and a walk through six `ntoskrnl` functions
+     * on the other - a guest doing ordinary work, because at four
+     * minutes into a boot that is what it was doing. The same two
+     * hypercalls carry the boot and the livelock, and a threshold
+     * cannot tell them apart; only a *recent* window can, which is the
+     * argument `vtl_recapture` already makes for the register capture
+     * beside this one.
+     *
+     * So the ring is overwritten every `vtl_step_rearm` switches and
+     * `vtl_step_at` records which switch each trace was armed on. A
+     * dump then always holds the most recent trace, and a trace whose
+     * arming count is close to the switch total is one taken now.
+     *
+     * One constant rather than a threshold and a period: the first
+     * arming is simply the first multiple, which is late enough for the
+     * same reason every later one is recent enough.
+     * @{
+     */
+    static constexpr std::uint64_t vtl_step_rearm = 8192;
+
+    volatile std::uint64_t vtl_step_at[vtl_step_kinds]{};
+    /**
+     * @}
+     */
 
     std::uint64_t vtl_step_rip[vtl_step_kinds][vtl_step_capacity]{};
     std::uint64_t vtl_step_cr3[vtl_step_kinds][vtl_step_capacity]{};
