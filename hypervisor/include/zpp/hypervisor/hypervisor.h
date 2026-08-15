@@ -4868,8 +4868,13 @@ private:
     // +0x6a774b - 0xbd bytes apart, so both are in one function, and
     // that function is the loop. A 128 byte window centred on the call
     // could not reach the write.
-    static constexpr std::size_t vtl_code_size = 384;
-    static constexpr std::uint64_t vtl_code_behind = 0x140;
+    // Widened again, backwards. The 384 byte window reached the fast
+    // path - the branch that skips the rendezvous - and proved the
+    // secure kernel does not stall there, so what decides is earlier
+    // still. 1024 bytes starting 0x400 back covers the whole of a
+    // plausible dispatch routine either side of the call.
+    static constexpr std::size_t vtl_code_size = 1024;
+    static constexpr std::uint64_t vtl_code_behind = 0x400;
 
     /**
      * The page the two trust levels talk through, sampled at each side
