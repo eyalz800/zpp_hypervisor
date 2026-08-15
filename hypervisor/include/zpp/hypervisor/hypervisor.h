@@ -4919,6 +4919,11 @@ private:
      * refused with #UD, and how many switched the extended-page-table
      * pointer. Refused rising with switched at zero means the guest
      * hypervisor publishes a list this VMM cannot follow. */
+    /** The guest hypervisor's own MSR bitmap address, so what it
+     * intercepts can be read from outside and compared with what this
+     * VMM merges into it. */
+    std::uint64_t nested_guest_msr_bitmap[max_cpus]{};
+
     volatile std::uint64_t l2_vmfunc_calls[max_cpus]{};
     volatile std::uint64_t l2_vmfunc_refused[max_cpus]{};
     volatile std::uint64_t l2_vmfunc_switched[max_cpus]{};

@@ -769,6 +769,21 @@ hypervisor::merge_nested_bitmaps(std::size_t cpu)
     auto & shadow = this->guest_vmcs12[cpu];
 
     auto msr_source = shadow.read(field::msr_bitmap);
+
+    // Kept so the guest hypervisor's own bitmap can be read from
+    // outside, which is the one thing that says whether this VMM's
+    // forty merged bits over 0x480-0x491 add anything at all.
+    //
+    // If it already intercepts that range - and it must, since it
+    // presents nested VMX to its own guest and cannot do that without
+    // seeing those reads - then the merge is a no-op there and the
+    // asymmetry is only apparent. If it does not, clearing our bits
+    // would send the second-level guest straight to the hardware MSR,
+    // which is worse than the extra exit, so this has to be measured
+    // before anything is changed either way.
+    if (cpu < max_cpus) {
+        this->nested_guest_msr_bitmap[cpu] = msr_source;
+    }
     auto io_a_source = shadow.read(field::io_bitmap_a);
     auto io_b_source = shadow.read(field::io_bitmap_b);
 
