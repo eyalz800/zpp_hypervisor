@@ -334,7 +334,8 @@ zpp_add_host_test(nested_exit
     # that inherited that default would compile its arming rules out and
     # report the cases as passing. The switch belongs to the boot, not
     # to the rules.
-    DEFINES ZPP_NESTED_VMX=1 ZPP_HOSTED_TESTS=1 ZPP_STEP_VTL=1)
+    DEFINES ZPP_NESTED_VMX=1 ZPP_HOSTED_TESTS=1 ZPP_STEP_VTL=1
+            ZPP_DEFER_GUEST_STATE=1)
 
 # The nested extended page table rules, exhaustively.
 #

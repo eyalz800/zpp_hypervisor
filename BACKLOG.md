@@ -17506,3 +17506,41 @@ confusing result could be Windows in recovery rather than anything about
 this change. The check is that the boot follows the same phases every
 healthy boot in this file does - firmware, loader, extended-page-table
 fill, then the clock regime - rather than a different shape.
+
+### The boot: prediction 1 was wrong, and item 2 is off by default
+
+Thirty module loads. **The sequence test was necessary and still not
+sufficient**, and there is a fourth condition that is not
+characterised.
+
+Where that leaves it, honestly:
+
+| | |
+|---|---|
+| conditions found | 3 - unlaunched vmcs02, wrong guest's state, VMCLEAR-and-reload |
+| found by the suite rather than a boot | 1 (the third) |
+| conditions remaining | **at least 1, uncharacterised** |
+| boots spent | 3 |
+| unclean resets of the real installation | **~280** |
+
+`ZPP_DEFER_GUEST_STATE` is **off by default**, with the deferral
+compiled out - `may_defer_guest_state` returns false and the eager copy
+runs. The suite compiles with it on, so every ordering case still
+exercises the real thing.
+
+**A switch rather than a revert, because everything around it is sound
+and was expensive to learn**: the ordering suite, the shim's VMCS
+regions, and `set_guest_current_vmcs` owning its own invalidation are
+all improvements that stand on their own and are not what was wrong.
+
+**And no fourth attempt without a new condition to test.** Three boots
+have gone into this with one hypothesis each, and the last one had no
+hypothesis at all - the suite was green. Continuing to boot against the
+user's real Windows installation to see whether a guess holds is
+spending their hardware, and ~280 unclean resets is already more than
+this investigation should have cost it.
+
+The next person picking this up has: a suite that catches three
+conditions in seconds, a shim that can represent VMCS ordering at all,
+and a 1.16x waiting behind one switch. What they need first is a fourth
+condition, found on a desk.

@@ -423,6 +423,39 @@ inline constexpr bool step_vtl = (0 != ZPP_STEP_VTL);
 inline constexpr bool watch_vp_assist_page = (0 != ZPP_WATCH_VP_ASSIST);
 
 /**
+ * Defer the bulk guest-state copy out of vmcs02 into vmcs12.
+ *
+ * **Off, after three boots and about 280 unclean resets of the rig's
+ * real Windows installation.** Worth roughly 1.16x on paper - 44
+ * VMREADs an exit that the processor has already made unnecessary by
+ * saving the same values into vmcs02 - and every attempt to ship it has
+ * reset the guest.
+ *
+ * Three conditions were found and fixed, the last one on a desk: defer
+ * only when vmcs02 has been launched; only when its saved state belongs
+ * to the guest being entered; and never across a VMCLEAR-and-reload of
+ * the same vmcs12 address. `tests/nested_exit` catches all three, and
+ * the third was found *by* the suite rather than by a boot. It still
+ * reset the guest, so **a fourth condition exists and is not
+ * characterised.**
+ *
+ * The switch exists rather than a revert because everything around it
+ * is sound and was expensive to learn: the ordering suite, the shim's
+ * VMCS regions, `set_guest_current_vmcs` owning its own invalidation.
+ * Turning this on is the only thing that is not.
+ *
+ * **Do not turn it on for a rig boot without a new condition to test.**
+ * One hypothesis per boot against that installation, with nothing to
+ * reason from, is spending the user's hardware on guesses - and this
+ * has already spent three.
+ */
+#ifndef ZPP_DEFER_GUEST_STATE
+#define ZPP_DEFER_GUEST_STATE 0
+#endif
+
+inline constexpr bool defer_guest_state = (0 != ZPP_DEFER_GUEST_STATE);
+
+/**
  * How long the timer runs before it forces an exit.
  *
  * The counter decrements once per time-stamp counter tick shifted right

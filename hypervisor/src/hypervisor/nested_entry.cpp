@@ -2969,7 +2969,8 @@ void hypervisor::save_l2_state(std::size_t cpu)
             // Deferred: the processor has already saved this into
             // vmcs02 and nothing reads it from vmcs12 unless it asks.
             // See `guest_state_deferred`.
-            if (guest_state_deferrable(index)) {
+            if (nested_vmx::defer_guest_state &&
+                guest_state_deferrable(index)) {
                 ++index;
                 continue;
             }
@@ -6037,6 +6038,12 @@ void hypervisor::set_guest_current_vmcs(std::size_t cpu,
 
 bool hypervisor::may_defer_guest_state(std::size_t cpu) const
 {
+    // Off unless asked for. See `nested_vmx::defer_guest_state`: three
+    // conditions found, three fixed, and it still reset the guest.
+    if constexpr (!nested_vmx::defer_guest_state) {
+        return false;
+    }
+
     // Both halves, and both were missing from the first attempt: vmcs02
     // has run at least once, so the processor has actually saved
     // something into it; and what it saved was an exit from the guest
