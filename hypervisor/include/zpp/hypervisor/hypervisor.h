@@ -7805,6 +7805,12 @@ private:
      */
     std::uint64_t shadow_ept_leaves_filled[max_cpus]{};
 
+    /** The permission bits every shadow leaf was installed with. All
+     * of it in slot 7 means the composition never removes anything,
+     * which is what `reflected_permission` being zero would follow
+     * from. See install_shadow_leaf. */
+    volatile std::uint64_t shadow_leaf_permissions[max_cpus][8]{};
+
     /**
      * The mappings a shadow held when the guest hypervisor invalidated
      * it, so they can be re-walked instead of re-faulted.

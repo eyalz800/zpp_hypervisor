@@ -394,6 +394,24 @@ hypervisor::install_shadow_leaf(std::size_t cpu,
     auto page = composition.physical_address & ~((1ull << shift) - 1);
     leaf = epte(leaf.value() | page);
 
+    // What permissions the composition actually granted, as a
+    // histogram of the three bits.
+    //
+    // `reflected_permission` is 0 of 448,441 - no access by either
+    // trust level has ever been refused by anything this VMM shadows -
+    // and that has two possible causes which want opposite work. If the
+    // guest hypervisor's own tables are uniformly read-write-execute,
+    // then `HvCallModifyVtlProtectionMask` is not expressed through the
+    // extended page tables at all and there is nothing here to enforce.
+    // If they are not, and every leaf installed here is still
+    // read-write-execute, then this composition is granting what the
+    // level above removed - which is the one remaining mechanism by
+    // which a secure call could wait for a fault that never arrives.
+    if (cpu < max_cpus) {
+        this->shadow_leaf_permissions[cpu][composition.permissions.bits() &
+                                           7] += 1;
+    }
+
     **entry = leaf;
     return {};
 }
