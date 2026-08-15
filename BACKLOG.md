@@ -14725,3 +14725,33 @@ VBS-disabled experiment recorded in the sections above is **not
 available** and should not be re-proposed. Whatever settles this has to
 be done from inside the VMM or from what the guest can be observed
 doing.
+
+### Only three vectors ever reach the second-level guest, and none is a device
+
+```
+injected into the second level:  0x2f 218,  0x40 12,441,  0xd1 181,775
+external_interrupt_vector_counts: empty
+```
+
+The second-level guest has received the clock, `0x40`, and the dispatch
+vector - **and nothing else, ever**. No storage vector, no device vector
+of any kind, across 181,775 clock ticks. Taken with the exit record
+already showing no memory-mapped access to the controller, the guest's
+storage driver has never spoken to the passed-through NVMe and the
+device has never answered it.
+
+That is consistent with everything: `ClassPnP_Boot_IdleIO` waiting,
+`multi(0)disk(0)rdisk(0)partition(4)` unresolved, a request enqueued and
+never issued, and a secure call retried for ever around it.
+
+**Do not read the empty census as "no interrupts arrive here".** The
+exit histogram counts 56,607 `ext-int` exits, so they do. That counter
+is filled on a particular path - see the comment where it is written,
+which ties it to "acknowledge interrupt on exit" reaching vmcs02 - and
+an empty one means that path did not run, not that the machine is
+quiet. Establishing which is the next thing, and it is a counter
+question rather than a guest question.
+
+What it does establish, because it comes from the other side of the same
+comparison, is the injection list: three vectors, all of them
+synthetic or timer, none of them from a device.
