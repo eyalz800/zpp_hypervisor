@@ -14838,3 +14838,44 @@ every nested run, so Hyper-V is running there too.
 The nvram was copied to `RELEASEX64_OVMF_VARS.fd.zpp-boot-option` first
 and restored afterwards, verified by hash both ways. Nothing on the
 Windows volume was touched.
+
+## Mode-based execute control: offered, and Hyper-V does not ask for it
+
+The hypothesis was the best-fitting one in the session: bit 22 splits
+execute permission by privilege level, which is how a secure kernel
+expresses code integrity through the extended page tables, and
+withholding it would explain `HvCallModifyVtlProtectionMask` being
+issued repeatedly while `reflected_permission` stays 0 of 448,441 - a
+protection change accepted and expressible nowhere.
+
+**Measured, and it is a no-op for this guest:**
+
+```
+secondary requested 0x1010ae   bit 22 = no
+secondary granted   0x1050ae   bit 22 = no
+ring 0 675,151    ring 3 0
+shadow leaf rights unchanged: rw- 351,800, r-x 91,920, r-- 4,624, rwx 169
+```
+
+The control is advertised and **the guest hypervisor never sets it**.
+The livelock is unchanged and ring 3 is still zero. So mode-based
+execute control was not the missing piece, and whatever decides that
+Hyper-V will not express virtual trust level protections through the
+extended page tables is decided elsewhere - plausibly from CPUID rather
+than from the VMX capability MSRs, which is the next thing to look at.
+
+**This is the same shape as the TSC-scaling withdrawal**, recorded in
+`nested_vmx.h`: a control advertised, run on the rig, never requested,
+and withdrawn on the principle that "a capability nothing has ever
+exercised is a claim this VMM cannot back with a measurement". By that
+standard bit 22 should come back out.
+
+It is left in for now, deliberately and with this measurement attached,
+because unlike TSC scaling the capability **is** implemented -
+`nested_ept.h` composes `execute_user()` and Table 30-7's rule that bit
+6 exists only with the control set - and `build_vmcs02` takes the bit
+from the guest hypervisor's own controls, so a guest that does not ask
+gets exactly the previous behaviour. `tests/nested_vmx` asserts the
+pairing either way, so whichever is chosen is checked. **Deciding
+between the two is a real choice and should be made deliberately, not
+inherited.**
