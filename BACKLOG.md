@@ -17338,3 +17338,66 @@ That is a completely different position from the one this file held for
 most of the investigation, where the reachable was compared against a
 requirement believed to be up to 9x. **The remaining work is worth
 doing, and it is the vmcs12 write-log.**
+
+## Item 2's blocker is cleared: every guest-state field is saved by the processor
+
+The proposal was gated on one unknown - "fields the guest hypervisor
+reads but never wrote, and which the processor does not save, must still
+read correctly", called out as the one that needed settling before any
+code was written. It is settled, and the answer is that the set is
+empty.
+
+All 46 entries of `guest_state_fields` are saved into the guest-state
+area on every VM exit. SDM 30.3.1 (`.references/sdm.txt:204498`):
+
+> "The contents of CR0, CR3, CR4, and the IA32_SYSENTER_CS,
+> IA32_SYSENTER_ESP, and IA32_SYSENTER_EIP MSRs are saved into the
+> corresponding fields."
+
+with segment registers, descriptor tables, RIP, RSP, RFLAGS,
+interruptibility and activity state saved unconditionally in the
+sections beside it, and DR7, IA32_DEBUGCTL, IA32_PAT and IA32_EFER saved
+under their own exit controls - which `save_l2_state` already tests
+individually.
+
+**A first pass at this partition got it wrong and is worth recording.**
+Matching field names by prefix put `guest_ia32_sysenter_cs/esp/eip` in
+the "not saved" set, because the prefix list said `guest_sysenter`. That
+would have produced a three-field dangerous set out of nothing but a
+string mismatch, and the SDM says plainly they are saved. **Partition by
+citation, not by naming convention.**
+
+### So the design is now fully specified and sound
+
+- vmcs02 holds the second-level guest's state after every exit, because
+  the processor puts it there.
+- `save_l2_state`'s 46 reads become unnecessary: nothing needs vmcs12's
+  guest-state area populated eagerly.
+- The guest hypervisor's `VMREAD` is served from vmcs02 on demand - it
+  reads 16 distinct fields about once every fourteen exits, so this
+  trades **8.5 million copies for 37,389 reads**.
+- `build_vmcs02` must then write back **only** fields the guest
+  hypervisor wrote via `VMWRITE` since the last entry - a dirty set fed
+  by 494 writes in an entire boot.
+
+The two halves must change together: eliding the reads alone leaves
+`build_vmcs02` pushing stale vmcs12 values over the state the processor
+just saved, which is the dependency the census missed.
+
+### Worth about 1.16x, and honestly it may still not be enough
+
+`save_l2_state` is 198,309 cycles a call of a ~711,000 cycle exit, and
+the 46 reads are most of it.
+
+**But the banked 1.15x was measured not to move the circle** - that was
+prediction 7 and it held. So 1.35x total is not obviously sufficient
+either; the only thing the bracket says is that 2x is. The gap is at
+most 1.5 and possibly nothing, and there is no way to know but to build
+it and boot.
+
+**Not built in this session.** It is a redesign of the hottest path in
+the tree, and this session has direct evidence of what a hot-path change
+made without room to verify it costs: the VP assist write-watch wedged a
+boot and took a full run to discover. The blocker is cleared, the design
+is written down with its citation, and it is one focused piece of work
+for someone starting fresh.
