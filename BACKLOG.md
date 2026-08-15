@@ -16338,3 +16338,93 @@ checking "does the mode match the programmed period" against the printed
 label would have found it did not, and gone looking for a timer
 delivering faster than its own period. Fixed, with the frequency and its
 provenance in the code.
+
+## Census: every VMCS access a round trip makes, before a line of it is changed
+
+The per-tick exit *count* is architecturally fixed, so the only term
+left is cycles per exit, and those are dominated by VMREAD and VMWRITE
+trapping to the layer below at about 2,700 cycles each. This is what
+they are. `shadow.read`/`shadow.write` are memory and are excluded -
+only `vmcs.*` is an instruction.
+
+| phase | accesses | elided? |
+|---|---|---|
+| `save_l2_state` | **46** via `guest_state_fields` + 14 direct | **no** |
+| `load_l1_host_state` | **36** writes via `host_write` | **no** |
+| `build_vmcs02` | 46 guest-state + 23 control + 27 direct | **yes** |
+| `reflect_l2_exit` | 12 direct | no |
+| `enter_or_park_l2`, `record_l2_entry_event` | 2 | no |
+| **total** | **about 137 per round trip** | |
+
+### The write side is already solved and the read side is untouched
+
+Measured over 184,243 second-level entries:
+
+```
+guest-state writes  45.7 skipped, 0.31 done   per entry
+control writes      21.9 skipped, 0.13 done   per entry
+```
+
+`build_vmcs02`'s caches work almost perfectly - 69 of its 69 field
+writes cost 0.44 in practice. Nothing comparable exists on the read
+side: `save_l2_state` performs its 46 unconditionally, every exit,
+forever.
+
+### And what those 46 are for
+
+The guest hypervisor reads **16 distinct fields**, 37,389 times in the
+same window, **98.4% of them `vm_exit_interruption_information`**:
+
+```
+0x4404 vm_exit_interruption_information   36,802   98.4%
+0x6400 exit_qualification                    149    0.4%
+0x640a guest_linear_address                  130    0.3%
+0x4408 idt_vectoring_information_field       130    0.3%
+0x2400 guest_physical_address                130    0.3%
+```
+
+Against `46 x 184,243 = 8.5 million` field values copied to it. **A
+ratio of 227 to 1.**
+
+### Classification, and two are sound
+
+- **`load_l1_host_state`'s 36 writes - cacheable, and exactly the way
+  `build_vmcs02` already caches its own.** They come from vmcs12's
+  host-state area, which the guest hypervisor changes only by VMWRITE,
+  and this VMM intercepts every one: `vmwrite` exits total **494 in a
+  whole boot**. So the invalidation is exact and costs nothing.
+- **`save_l2_state`'s 46 reads - deferrable.** Do not copy on exit;
+  serve the guest hypervisor's VMREAD from vmcs02 when it asks, which
+  this VMM already intercepts. Cost is a VMPTRLD pair per served read:
+  37,389 x ~10,000 cycles against 8.5 million x 2,700, about **60x on
+  that path**.
+
+  **This is not `ZPP_LAZY_GUEST_STATE` and the rejection does not carry
+  over.** That proposed *not copying at all*, which SDM 30.3.2 forbids
+  because a field must still read correctly when unusable. Deferring
+  changes no value, only when it is computed. Two things to check
+  before building it: whether every one of the 16 can be produced with
+  vmcs02 made current on demand, and what the hardware itself writes
+  into vmcs02 on exit that a later read must still see.
+- The remaining ~55 are genuine per-exit work.
+
+### The honest total, and it is not enough
+
+137 accesses at ~2,700 cycles is about 370,000 cycles, against a
+measured ~786,000 per exit - so VMCS accesses are **47%** of it and the
+rest is this VMM's own logic and its guest-memory reads.
+
+Both sound items together remove 82 of 137, which is 60% of the 47%:
+about **28% off the per-exit cost, or 1.4x**.
+
+**Against the bracket from (a) - a required factor somewhere in (1, 9]
+- 1.4x sits at the very bottom of the range, and there is no measurement
+saying it clears the threshold.** Recorded plainly rather than
+engineered anyway: this is the whole of what is soundly reachable on the
+cycles-per-exit axis while staying on KVM, and it is probably not
+enough on its own.
+
+That is not a reason to skip it - it is the only term in the identified
+cause that is ours to move, and both items are correct on their own
+terms regardless of the boot. It is a reason not to expect the circle to
+turn when it lands, and to say so now rather than after.
