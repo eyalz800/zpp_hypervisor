@@ -15740,3 +15740,79 @@ Two consequences:
 The `l2_entry_ppr` histogram is kept anyway, because a zero there is
 now *evidence* about the configuration and a non-zero would mean the
 configuration changed under the comment that explains it.
+
+## The asked-versus-given gap for *events* is zero, and a round trip costs 4.8 ms
+
+Two counters, one boot, and between them they close two of the three
+causes "injected zero times" could have had.
+
+### Nothing this VMM does drops an injection
+
+`l2_given_vector` reads vmcs02's entry-interruption field back at the
+last instruction before entry - what the processor will actually act on,
+rather than what was meant to be written. Against `l2_injected_vector`,
+which is what the guest hypervisor put in vmcs12:
+
+| vector | asked | given |
+|---|---|---|
+| `0xd1` | 1,220 | 1,220 |
+| `0x40` | 364 | 364 |
+| `0x2f` | 1 | 1 |
+
+**Identical.** So an event the guest hypervisor requests is an event its
+guest receives, and the middle of the three explanations - requested and
+dropped - is dead by measurement rather than by reading the handler.
+
+That is the same method that closed the five control dimensions, asked
+of an event instead of a control, and it was worth taking: the first
+explanation ("never requested of us") rests on `l2_injected_vector`
+being read from vmcs12 with the self-IPI branch compiled out, which is
+an argument about the source. This is an argument about the field.
+
+### One trust-level round trip costs 4.8 milliseconds and 31 exits
+
+```
+HvCallVtlCall  -> HvCallVtlReturn   7,372 halves, 2,174 us,  8.5 exits
+HvCallVtlReturn -> HvCallVtlCall    7,371 halves, 2,665 us, 22.2 exits
+```
+
+So the secure call the clock handler makes costs **4.84 milliseconds**
+and **30.7 VM exits**, against a guest clock period of 1.74
+milliseconds once the guest re-arms its timer, and 15.6 milliseconds
+before that. That is the number the instruction trace implied and could
+not measure: a round trip that outlasts a tick, which is why the
+interrupt stub is the next instruction after every `HvCallVtlReturn`.
+
+**And it splits the cost question, which was the point.** 30.7 exits is
+the striking half. Architecturally a trust-level switch is two
+hypercalls; thirty-one VM exits per switch is this VMM's own multiplier,
+and it is a number that exists on any host. The per-exit cost - about
+158 microseconds here - is the rig's, dominated by VMREAD and VMWRITE
+trapping to the layer below at some 4,340 cycles each because this VMM
+is itself KVM's guest.
+
+Only one of those two is worth working on for this goal, and it is the
+count. **Staying on KVM is the instruction**, so a conclusion of the
+form "the per-exit cost would be lower on bare metal" is not an answer:
+the exits per round trip have to come down.
+
+Where they come from is the next thing to enumerate, and the two
+counters above already say the shape - 8.5 exits inside the secure
+kernel's half against 22.2 in the ordinary kernel's, so most of them are
+not the secure call at all but what the clock handler does around it.
+
+### What is still open
+
+The guest had made exactly **one** synthetic interrupt-command write at
+this point in the boot, so the counters built for the `0x2f` question
+have nothing to say yet:
+
+```
+vectors the guest asked for (1)      0x2f  1
+processor priority when it asked     0x00  1
+```
+
+That one request was made at task priority `0x00` - PASSIVE - which is
+at least not the self-masking deadlock shape. The reading that matters
+is the same pair in the settled state, where the request rate is about
+250 a second.
