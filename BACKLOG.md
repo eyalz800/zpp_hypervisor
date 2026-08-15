@@ -14117,3 +14117,41 @@ the second trust level keeps its own VP assist page, configured by a
 write this VMM has seen exactly once: `l2_synthetic_msr_writes` for slot
 0x73 is **1** for the whole boot. If only one of the two levels ever
 configured one, the other is being entered with no way to be told why.
+
+### The instruction pointer *is* advanced, and the guest is running its
+### clock loop around one repeated secure call
+
+The byte-identical captures admitted a second explanation worth ruling
+out: that the guest hypervisor was resuming the second-level guest **at**
+the VMCALL rather than past it, so it re-executed one instruction for
+ever. That would have produced exactly the observed identical registers
+and identical sixty-four word stack without the guest executing anything
+at all.
+
+It is not that. The distinct instruction pointers the guest is *entered*
+at, over a recent window of 9,453 entries:
+
+| entry rip | share | what it is |
+|---|---|---|
+| `ntoskrnl`+0x42890d | 27.3% | resume after a reflected synthetic MSR write |
+| hypercall page +0x1c | 25.0% | **three bytes past the VMCALL at +0x19** |
+| `ntoskrnl`+0x6a768e | 24.6% | resume after a reflected synthetic MSR write |
+| `ntoskrnl`+0x3100e6 | 21.8% | resume after a reflected synthetic MSR write |
+| hypercall page +0x35 | 0.7% | **three bytes past the VMCALL at +0x32** |
+| hypercall page +0x03 | 0.7% | |
+
+`+0x1c` and `+0x35` are the instructions after the two hypercall stubs'
+VMCALLs. So the advance is correct and that explanation is dead.
+
+What the guest actually executes is therefore its clock loop - the
+synthetic end-of-interrupt, interrupt-command and end-of-message writes,
+which the working ring deliberately filters out - plus one secure call
+made from the same instruction with the same arguments and the same
+stack, for ever. It is a **retry**, not a stalled instruction.
+
+**The table had to be a recent window to say any of this.** A fixed
+eight-slot table filled with early-boot addresses in the first moments,
+after which every entry fell to the overflow counter; that counter then
+read 682,716 and was briefly taken for "entered at hundreds of thousands
+of addresses" when it means only "at more than the eight caught first".
+A full fixed table cannot tell two distinct values from a million.
