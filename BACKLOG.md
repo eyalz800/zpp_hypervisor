@@ -15067,3 +15067,41 @@ offers it; withheld, the guest hypervisor falls back to the hypercall
 path, and the hypercall path is the pair measured looping for ever with
 byte-identical state. It is the only entry on the capability diff that
 names the exact mechanism the stall is made of.
+
+## The capability diff is a dead line: the request set never changes
+
+VMFUNC implemented and offered - the handler in `on_l2_exit`, the
+capability MSR reporting function 0, vmcs02's VM-function controls
+forced to zero so every call traps. Result on the rig:
+
+```
+secondary requested 0x1010ae   bit 13 = no
+vmfunc calls 0   refused 0   switched 0
+ring 0 642,854   ring 3 0
+```
+
+**`control_secondary_requested` reads 0x1010ae in every configuration
+tried** - before mode-based execute control was offered, after it was,
+and now with VMFUNC offered as well. The guest hypervisor asks for
+extended page tables, descriptor-table exiting, RDTSCP, VPIDs,
+unrestricted guest, RDSEED and XSAVES, and nothing else, whatever is
+put in front of it.
+
+So the difference between the configuration that boots and the one that
+stalls is **not in the secondary controls**, and the capability diff -
+derived carefully and the best-looking lead of the session - is a dead
+line. Three capabilities offered on the strength of it and none taken.
+
+That is worth as much as a positive would have been, because it closes a
+whole class: what the guest hypervisor is *permitted* to do is not what
+distinguishes the two runs. Something it is told elsewhere, or something
+about how this VMM answers what it already asks for, is.
+
+**VMFUNC is kept**, unlike the announcement that was withdrawn, and the
+distinction is whether the claim is backed. `announce_hypervisor` said
+Microsoft's interface was present and answered leaf 0x40000003 with
+zero - a claim with nothing behind it. VMFUNC has the exit handler, the
+translation through `shadow_ept_pointer_for`, the safety property that
+the processor can never take the switch itself, and coverage in the host
+suite. It is inert until a guest hypervisor asks, and correct if one
+does.
