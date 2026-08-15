@@ -17179,3 +17179,35 @@ tested 1.5x or 2x.
 
 2, 3 and 4 together are the question. If all three move, 2x relieves it.
 If none moves, it does not, and the bracket closes to (2, 9].
+
+### Correction: the lazy end-of-interrupt 1.29x is not ours to take either
+
+Recorded before the bracketing boot is read, because it changes what a
+positive result would even license.
+
+The enumeration named the end-of-interrupt write as "the only one with a
+documented mechanism that would remove it", worth about 22%. **That
+mechanism is not available to this VMM.** The write at `0x40000070` is
+made by *Windows* and answered by *Hyper-V*; the enlightenment that
+retires it without an exit works by Hyper-V setting `NoEOIRequired` in
+the VP assist page, and Hyper-V sets that bit only when it delivered the
+interrupt in a way that needs no acknowledgement. That is a decision
+between those two levels. Nothing this VMM does can cause it, and the
+MSR itself exits unconditionally because it lies outside both ranges an
+MSR bitmap can describe.
+
+So the honest reachable total is **not** ~1.48x. It is:
+
+| | |
+|---|---|
+| banked (host-state elision) | **1.15x** |
+| item 2, the vmcs12 write-log redesign | ~1.16x |
+| **reachable total** | **~1.35x** |
+
+and the 1.29x from lazy end-of-interrupt comes off the table entirely.
+
+**Which sharpens the bracketing boot rather than blunting it.** If 2x
+does not relieve the starvation, the requirement is above 2x, the
+reachable ceiling is ~1.35x, and the gap is not arguable. If 2x does
+relieve it, then even ~1.35x is worth landing and the question becomes
+how close it gets.
