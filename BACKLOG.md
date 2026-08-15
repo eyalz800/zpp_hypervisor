@@ -14566,3 +14566,67 @@ Two corrections for whoever picks this up:
   code actually references, and that means decoding further back than
   the 0x40 bytes before the return address that the current capture
   starts from.
+
+### 1024 bytes of the secure kernel's path, decoded
+
+Two fragments matter.
+
+**The tail is an ordinary scrub-and-return**, not a wait:
+
+```
+mov  rax, cr4
+test rax, 0x40000          ; OSXSAVE
+je   +0x29
+mov  rax, [rip+0x4f98e]
+mov  rdx, gs:[0x900]
+cmp  rdx, rax
+je   +0x14
+...
+xsetbv                     ; restore XCR0
+xor  r8..r11 / xorps xmm0..xmm5
+mov  cr2, rdx
+...
+cmp  qword [rip+0x73c89], 0
+je   skip                  ; measured zero, so always taken
+...
+mov  rax, [rip+0x65cce]
+call rax                   ; HvCallVtlReturn
+```
+
+So it clears the extended state, zeroes the scratch registers and CR2,
+skips the rendezvous on a counter measured to be zero, and returns.
+Nothing there blocks.
+
+**The head is a page-granular operation**, and this is the part worth
+following:
+
+```
+mov  rbx, gs:[0]
+test edi, edi
+je   +0xa4
+mov  rsi, [rbx+0x70]
+lea  r9,  [rsp+0x20]
+mov  rax, rbp
+lea  rcx, [rsp+0x30]
+shr  rax, 12               ; a page frame number
+xor  edx, edx
+mov  r8d, 0x1000           ; one page
+mov  [rsp+0x20], rax
+call ...
+mov  edx, 1
+lea  rcx, [rsp+0x30]
+mov  r8,  rsi
+call ...
+```
+
+`shr rax, 12` with `0x1000` as a size is a single-page request built out
+of `rbp`, handed to two calls in sequence. With `ClassPnP_Boot_IdleIO`
+and `multi(0)disk(0)rdisk(0)partition(4)` already established as the
+surrounding context, a per-page operation on a storage buffer is what
+this looks like - a secure kernel being asked to map, unmap or validate
+one page for an I/O, answering, and being asked again.
+
+`rbp` at that point is the page in question and is **not** among the
+registers captured, which sample the switch rather than this frame. That
+is the next thing to record, and it is a one-line addition to a capture
+that already exists.
