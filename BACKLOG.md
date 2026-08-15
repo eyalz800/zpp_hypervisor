@@ -16151,3 +16151,54 @@ bare metal, where the same accesses cost about 40 cycles instead of
 2,700 and the whole arithmetic dissolves; or a guest that does not
 re-arm to 575 Hz, which `ZPP_TICK_FLOOR` tried to force from underneath
 and killed the guest doing it.
+
+### In the settled regime the priority is never below DISPATCH - not once
+
+The crossing counter had to be read as a delta, and read that way it
+removes the last confound.
+
+Cumulatively `l2_low_priority_no_event` stands at 14,924 - entries made
+with the task priority below the DISPATCH class and no event injected -
+which looks like fifteen thousand moments the guest hypervisor could
+have delivered `0x2f` and did not. **Over a steady-state window it does
+not move at all:**
+
+```
+task priority at entry, delta over the window
+  0x20    51,111   27.7%
+  0x40     2,602    1.4%
+  0xd0   130,521   70.8%
+  0xf0         2    0.0%
+
+low-priority entries carrying nothing:  14,924 -> 14,924   (delta 0)
+0x2f delivered:                              78 -> 78      (delta 0)
+```
+
+**Nothing below `0x20` at all**, across 184,236 second-level entries.
+The whole 14,924 is early-boot residue from before the guest re-armed
+its timer, and there is no pool of missed opportunities: in the settled
+regime the guest hypervisor never once has a moment at which it could
+deliver a DISPATCH_LEVEL interrupt.
+
+So the chain is closed end to end with every link measured and no
+alternative left standing:
+
+1. a trust-level round trip and the clock handler around it cost more
+   than one tick period;
+2. the clock interrupt is therefore pending again within a few
+   instructions of the previous one being dismissed - the interrupt stub
+   is the next instruction after every `HvCallVtlReturn`;
+3. so the task priority never falls below DISPATCH: **zero** entries
+   below `0x20` in a steady-state window;
+4. so the DISPATCH_LEVEL interrupt the guest requests about 250 times a
+   second, from inside its clock handler and correctly, can never be
+   delivered - 78 in a whole boot, none in steady state;
+5. so no deferred procedure call runs, and the boot's remaining work -
+   `ClassPnP`'s idle I/O, the `ArcName` resolution, everything before
+   ring 3 - is all deferred procedure calls.
+
+Each of the twenty-odd mechanisms this file exonerated was exonerated
+correctly. None of them was the cause because the cause is not a
+mechanism: it is that the tick the guest chose is unaffordable here, and
+the per-tick exit budget contains almost nothing this VMM could stop
+taking.
