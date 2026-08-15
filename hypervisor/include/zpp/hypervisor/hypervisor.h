@@ -4943,6 +4943,17 @@ private:
      * whose mappings cover it can follow it. The second trust level
      * holds one it does not itself map. */
     std::uint64_t vtl_follow_at{};
+
+    /** The globals the secure kernel spins on, at a fixed module
+     * offset from its own return address. It takes no exit between the
+     * two hypercalls, so this is the only state it can be deciding
+     * on. See capture_vtl_switch. */
+    static constexpr std::size_t vtl_spin_size = 256;
+
+    std::uint8_t vtl_spin[vtl_kinds][vtl_spin_size]{};
+    volatile std::uint64_t vtl_spin_at[vtl_kinds]{};
+    volatile std::uint64_t vtl_spin_read[vtl_kinds]{};
+    volatile std::uint64_t vtl_spin_error[vtl_kinds]{};
     volatile std::uint64_t vtl_captured[vtl_kinds]{};
 
     /** The last value written to `HV_X64_MSR_STIMER0_CONFIG`, so the

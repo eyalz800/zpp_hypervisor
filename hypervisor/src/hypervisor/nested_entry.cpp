@@ -5379,6 +5379,51 @@ void hypervisor::capture_vtl_switch(std::size_t cpu,
             }
         }
 
+        // The globals the secure kernel spins on, which are the only
+        // state it can be reading: between the two hypercalls it takes
+        // **zero** exits, so whatever it decides on is memory already
+        // mapped to it and already resident.
+        //
+        // Its code, captured above, tests three quadwords through
+        // rip-relative displacements of 0x73c89, 0x73c7f and 0x73c77 -
+        // one compared against zero, one decremented under lock, and
+        // one spun on with PAUSE until it reaches zero. Those
+        // displacements are from instructions about 0x30 before the
+        // return address, so the three land within a few bytes of
+        // `caller + 0x73c61`, and a 256 byte window at `+ 0x73c00`
+        // covers all of them whatever the exact encoding lengths.
+        //
+        // Module-relative, so the window is the same on every boot even
+        // though the base is not.
+        constexpr std::uint64_t spin_window = 0x73c00;
+
+        this->vtl_spin_at[kind] = entry + spin_window;
+        this->vtl_spin_read[kind] = 0;
+
+        for (std::size_t at{}; at < vtl_spin_size; at += 8) {
+            auto physical =
+                translate_guest_linear(entry + spin_window + at);
+            if (!physical) {
+                this->vtl_spin_error[kind] = (1ull << 32);
+                break;
+            }
+
+            if (auto got = read_guest_memory(
+                    cpu,
+                    *physical,
+                    std::span(reinterpret_cast<std::byte *>(
+                                  &this->vtl_spin[kind][at]),
+                              8));
+                !got) {
+                this->vtl_spin_error[kind] =
+                    static_cast<std::uint64_t>(got.error().code()) |
+                    (2ull << 32);
+                break;
+            }
+
+            this->vtl_spin_read[kind] = at + 8;
+        }
+
         image_name_of(cpu, base, this->vtl_caller_name[kind]);
 
         if ('\0' == this->vtl_caller_name[kind][0]) {
