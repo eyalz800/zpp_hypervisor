@@ -15284,3 +15284,21 @@ times over, and that it is the only one the field sweep has turned up so
 far. `merge_nested_bitmaps` is where it would be fixed - the merge is
 unconditional today and would have to become "ours, except the ranges
 that belong to the level above".
+
+**And the obvious fix is a trap - check this first.** Clearing those
+bits from the merge is only safe if the guest hypervisor sets them
+itself. If it does not, the second-level guest's read of `0x480` stops
+exiting altogether and goes to the *hardware* MSR - so Windows would
+read this machine's real VMX capabilities directly, bypassing Hyper-V
+entirely, which is strictly worse than an extra exit.
+
+So the first step is not the fix, it is the measurement: **does the
+guest hypervisor's own MSR bitmap already cover 0x480-0x491?** It
+almost certainly must, since it presents nested VMX to its own guest and
+cannot do that without intercepting those reads - and if it does, our
+forty bits are redundant, the merge is a no-op over that range, and this
+finding is moot rather than a cause.
+
+That is one read of the page at vmcs12's `msr_bitmap` address, which
+`merge_nested_bitmaps` already maps on every entry, and it settles
+whether there is anything here at all before a line of it is changed.
