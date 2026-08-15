@@ -17637,3 +17637,53 @@ grepped is the fourth condition.
 Not built here. The rig is idle with the known-good loader, and the
 honest state is that this round produced a corrected understanding and a
 void measurement rather than a diagnosis.
+
+## The fourth condition, found on a desk: **the flush writes vmcs12 back to guest memory**
+
+`flush_guest_vmcs12` copies the **entire** `vmcs12` structure into the
+guest hypervisor's own VMCS page:
+
+```cpp
+write_guest_physical(this->guest_current_vmcs[cpu],
+                     std::span(reinterpret_cast<const std::byte *>(&shadow),
+                               sizeof(shadow)));
+```
+
+and it runs on `VMXOFF`, `VMCLEAR` **and `VMPTRLD`** - the last about
+four times per trust-level round trip. With the bulk guest-state copy
+deferred, that area holds what it held before the guest last ran, so the
+flush replaces the level above's record of its guest with a stale one,
+constantly. That frequency is what a reset loop looks like.
+
+**This is the consumer no field-name search could find**, and the reason
+is worth keeping: it reads vmcs12 by copying the whole structure rather
+than by field, and it lives **inside this VMM** rather than being
+something the guest hypervisor does. Every attempt to enumerate
+consumers reasoned about what Hyper-V reads. The answer was that *we*
+read it.
+
+**And it survived three fixes because it shares their trigger without
+being their question.** VMCLEAR and VMPTRLD both invalidate the deferral
+- that was condition three - and **invalidating is not flushing**. The
+same event needed two different things done about it, and fixing one
+made the other look handled.
+
+### Every condition now falls to the suite
+
+| condition | injected | failures |
+|---|---|---|
+| defer always, ignoring whose state vmcs02 holds | 218 resets | **8** |
+| no invalidation when the current vmcs12 changes | 30 resets | **1** |
+| no materialisation before the flush | 30 resets | **1** |
+| none | - | 0, 23/23 |
+
+Three of the four cost a boot each. The third was found by the suite,
+and the fourth by the coordinator asking a question the suite could
+answer for nothing: *the trigger is the same, is the requirement?*
+
+**The lesson to carry, in the terms the last one deserves:** the
+enumeration of consumers was done by grepping field names and by
+reasoning about the guest hypervisor's behaviour. Both were careful and
+both were about the wrong reader. **A bulk `memcpy` of a structure is a
+read of every field in it**, and it is invisible to every search that
+looks for field names.

@@ -1064,6 +1064,24 @@ void hypervisor::flush_guest_vmcs12(std::size_t cpu)
         return;
     }
 
+    // **And the deferred guest state, or this writes over it.**
+    //
+    // The line below copies the *entire* vmcs12 structure into the
+    // guest hypervisor's own VMCS page. With the bulk guest-state copy
+    // deferred that area holds what it held before its guest last ran,
+    // so the flush replaces the level above's record of its guest with
+    // a stale one - on every VMPTRLD, which is about four per
+    // trust-level round trip.
+    //
+    // This is the consumer no field-name search could find: it reads
+    // vmcs12 by copying the whole structure, and it lives *inside this
+    // VMM* rather than being something the guest hypervisor does. Three
+    // ordering conditions were found and fixed before it, and it
+    // survived all three because it shares their trigger without being
+    // the same question - VMCLEAR and VMPTRLD invalidate the deferral,
+    // and invalidating is not flushing.
+    materialise_l2_guest_state(cpu);
+
     // What reaches the guest's own region has to include the writes it
     // made into the shadow without exiting, or a VMCS it reads back is
     // missing everything it wrote since the last VM entry.

@@ -188,6 +188,13 @@ void hypervisor::set_guest_current_vmcs(std::size_t cpu,
     this->guest_state_deferred[cpu] = false;
 }
 
+std::size_t g_guest_state_full_materialise{};
+
+void hypervisor::materialise_l2_guest_state(std::size_t)
+{
+    ++g_guest_state_full_materialise;
+}
+
 void hypervisor::mark_l2_guest_state_dirty(std::size_t,
                                            std::uint64_t encoding)
 {
@@ -2075,4 +2082,29 @@ static void check_guest_state_interception()
     // The shadowed pair's exclusion is asserted in `nested_exit`, which
     // compiles the translation unit those predicates live in.
     static_cast<void>(guest_cs_access_rights);
+
+    // **The flush is a bulk consumer of vmcs12's guest-state area, and
+    // it is the one no field-name grep could find.**
+    //
+    // `flush_guest_vmcs12` writes the *entire* vmcs12 structure back to
+    // the guest hypervisor's own VMCS page, and it runs on VMPTRLD,
+    // VMCLEAR and VMXOFF - VMPTRLD about four times per trust-level
+    // round trip. With the guest-state copy deferred that area is
+    // stale, so the flush overwrites the level above's record of its
+    // guest with values from before the guest ran.
+    //
+    // Reasoning about what Hyper-V reads could never have found this:
+    // the reader is inside this VMM, and it reads by `memcpy` of the
+    // whole structure rather than by field.
+    auto flushes = zpp::hypervisor::g_guest_state_full_materialise;
+    hv().guest_current_vmcs[0] = 0x9000;
+    hv().flush_guest_vmcs12(0);
+
+    check(zpp::hypervisor::g_guest_state_full_materialise == flushes + 1,
+          "flushing vmcs12 to the guest's own page materialises the "
+          "deferred guest state first - otherwise the flush writes a "
+          "stale guest-state area over the level above's record, on "
+          "every VMPTRLD");
+
+    hv().guest_current_vmcs[0] = 0;
 }
