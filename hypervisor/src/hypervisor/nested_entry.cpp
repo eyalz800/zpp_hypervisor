@@ -6161,27 +6161,15 @@ void hypervisor::record_interrupt_request(std::size_t cpu,
                       sizeof(vtpr))));
     }
 
-    // And the processor priority beside it, off the same page and in
-    // the same read pattern. See `interrupt_request_ppr`: it is PPR and
-    // not TPR that an arriving interrupt's class must exceed, so this
-    // is the reading that says whether the request could ever have been
-    // granted at the moment it was made.
-    constexpr std::uint64_t processor_priority_offset = 0xa0;
-
-    std::uint8_t ppr{};
-
-    if (0 != page) {
-        static_cast<void>(read_guest_physical(
-            page + processor_priority_offset,
-            std::span(reinterpret_cast<std::byte *>(&ppr), sizeof(ppr))));
-    }
-
-    this->interrupt_request_ppr_seen[cpu][ppr] += 1;
+    // As a histogram too, because the ring holds sixty-four requests
+    // and the guest makes tens of thousands. The *task* priority and
+    // not the processor priority - see `interrupt_request_vtpr_seen`
+    // for the field that was tried first and is not maintained here.
+    this->interrupt_request_vtpr_seen[cpu][vtpr] += 1;
 
     auto slot =
         this->interrupt_request_count[cpu] % interrupt_request_capacity;
     this->interrupt_request_vtpr[cpu][slot] = vtpr;
-    this->interrupt_request_ppr[cpu][slot] = ppr;
     this->interrupt_request_command[cpu][slot] = command;
     this->interrupt_request_count[cpu] =
         this->interrupt_request_count[cpu] + 1;

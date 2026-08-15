@@ -421,7 +421,7 @@ def dump_priority(args, elf, instance):
     members = ["l2_entry_vtpr", "l2_tpr_threshold_seen", "l2_cpl_seen",
                "l2_tpr_would_fire", "l2_tpr_armed_above",
                "clock_gap_buckets", "l2_entry_ppr", "l2_given_vector",
-               "l2_low_priority_no_event", "interrupt_request_ppr_seen",
+               "l2_low_priority_no_event", "interrupt_request_vtpr_seen",
                "interrupt_request_vector", "vtl_half_cycles",
                "vtl_half_exits", "vtl_half_count"]
     off = gdb_offsets(elf, members)
@@ -448,7 +448,7 @@ def dump_priority(args, elf, instance):
     # 32 bit counters, two to a quadword, same as l2_entry_vtpr.
     for member in ("l2_entry_ppr", "l2_given_vector"):
         reader.queue(instance + off[member], args.cpus * 256 // 2)
-    for member in ("interrupt_request_ppr_seen",
+    for member in ("interrupt_request_vtpr_seen",
                    "interrupt_request_vector"):
         reader.queue(instance + off[member], args.cpus * 256)
     reader.queue(instance + off["l2_low_priority_no_event"], args.cpus)
@@ -528,8 +528,8 @@ def dump_priority(args, elf, instance):
         for member, what in (
                 ("interrupt_request_vector",
                  "vectors the guest asked for"),
-                ("interrupt_request_ppr_seen",
-                 "processor priority when it asked")):
+                ("interrupt_request_vtpr_seen",
+                 "task priority when it asked")):
             rows = [(word(member, cpu * 256 + i), i) for i in range(256)]
             rows = [r for r in rows if r[0]]
             if not rows:

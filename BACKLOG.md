@@ -16024,3 +16024,130 @@ at the 15.6 ms tick did not livelock - they ground forward. 1.5 ms of a
 after the guest re-arms to 1.74 ms. So the same absolute saving is
 worth nothing at 64 Hz and everything at 575 Hz, and the honest target
 is the round trip's own exit count rather than a global speedup.
+
+## The `0x2f` storm reproduces without the instrument, and the guest asks from inside its clock handler
+
+The original reading was taken on a build carrying the instruction
+trace, which was later measured at 5.8% of all exits and suspected of
+moving the guest between regimes. Re-run on the **default build with
+`ZPP_STEP_VTL` off**, and it reproduces exactly:
+
+```
+clock gaps            60.8% at 806-1613 us, 25.5% at 1613-3226 us
+                      -> the guest has re-armed to its 1.74 ms tick
+virtual task priority 0xd0 42.1%, 0x20 39.3%   -> 81.4% at or above DISPATCH
+vectors asked for     0x2f  31,427
+vectors delivered     0x2f      78            -> 0.25%
+tpr-below armed       3,035, of which 2,930 while already at or above
+```
+
+So the observation stands and is not an artefact of the instrument. The
+guest requests the DISPATCH_LEVEL software interrupt about thirty
+thousand times and receives it seventy-eight.
+
+**And the reading that says whose fault that is.** At the moment the
+guest asks, its *task* priority - the field the processor maintains - is
+`0xd0` on **64 of the newest 64 requests**, every one of them command
+`0x4002f`:
+
+```
+VTPR at the moment the guest asked (newest 64 requests):
+  0xd0    64  100.0%
+```
+
+CLOCK_LEVEL. The guest is asking from inside its own clock interrupt
+handler, which is **exactly right and completely ordinary**: a clock
+handler queues deferred procedure calls and requests the dispatch
+interrupt, and the request is taken when the priority falls on the way
+out of the handler.
+
+So there is no self-masking deadlock and nothing in the delivery path is
+broken. The interrupt is not delivered because the priority never falls,
+and the priority never falls because the next tick is already pending
+when the handler tries to finish - which is what the instruction trace
+showed directly from the other end, the interrupt stub being the next
+instruction after every `HvCallVtlReturn`.
+
+**The categorical failure is therefore not an independent cause. It is
+the timing chain's symptom**, and the two accounts meet in the middle.
+
+### And the same dead field caught it out a second time
+
+`interrupt_request_ppr_seen` sampled VPPR at the request site and read
+`0x00` on 100% of 31,427 requests. Reported, that is "the guest asks
+while at PASSIVE, so the level above is failing to deliver" - the exact
+opposite of the truth, and it would have sent the next boot at Hyper-V's
+delivery logic.
+
+It was walked into **one commit after the same trap was documented in
+this file**. The check that caught it is the one that trap's own note
+prescribes: read the new field against one already known good on the
+same samples. `interrupt_request_vtpr` was sitting in the same function,
+sampling the maintained field, and disagreed. The PPR sample is gone and
+a task-priority histogram replaces it.
+
+## Enumerating the exits: almost none of them are this VMM's to remove
+
+Measured on the live guest in the 1.74 ms regime, as deltas between two
+dumps rather than cumulative counters.
+
+**First, a correction to this file's own framing.** "31 exits per
+trust-level round trip" was measured in the 15.6 ms regime; in the
+1.74 ms regime the same quantity is **151**. Both are the same thing
+counted with a different number of clock ticks inside them - there are
+**17.1 ticks per round trip** here. The exits belong to the ticks, not
+to the switch, and "31 exits for what is architecturally two hypercalls"
+was the wrong unit and the wrong conclusion. The stable quantity is
+exits per clock tick.
+
+| reason | per tick | per round trip |
+|---|---|---|
+| `vmresume` | 4.16 | 71.1 |
+| `wrmsr` | 2.69 | 46.0 |
+| `int-window` | 1.06 | 18.1 |
+| `vmread` | 0.30 | 5.1 |
+| `ext-int` | 0.30 | 5.1 |
+| `vmptrld` | 0.24 | 4.0 |
+| `vmcall` | 0.12 | 2.0 |
+| **total** | **8.85** | **151.4** |
+
+`vmcall` at 2.0 per round trip is the arithmetic checking itself: the
+two hypercalls, exactly.
+
+**What each one is, and whether it can go:**
+
+- **`wrmsr` 2.69** - the synthetic end-of-interrupt, end-of-message and
+  interrupt-command writes. All three lie outside both ranges an MSR
+  bitmap can describe (SDM 26.6.9), so they exit *unconditionally*.
+  **Irreducible, architecturally.**
+- **`vmresume` 4.16** - the guest hypervisor's own VMRESUME, one per
+  second-level entry. Not an independent cost: it is the second half of
+  each of the 4.16 reflections a tick already needs. **Reducible only by
+  reducing reflections.**
+- **`int-window` 1.06** - one a tick, and it is the guest hypervisor's
+  own control taken from vmcs12. It arms the window, cannot deliver
+  because the priority is too high, and re-arms. **Not ours to remove.**
+- **`vmread` 0.30** - the guest hypervisor reading its own vmcs12.
+  VMCS shadowing would remove it and is unavailable on this silicon:
+  `enable_shadow_vmcs` reads N and `vmx flags` carries no `shadow_vmcs`.
+- `ext-int`, `vmptrld`, `vmcall` - 0.66 between them.
+
+**So the per-tick exit budget contains essentially nothing this VMM
+could stop taking.** The largest single item is architecturally
+unconditional, the second is a consequence of the first, the third
+belongs to the level above, and the fourth needs hardware this part does
+not have.
+
+That is a negative result and it is worth more than a speedup would
+have been: it closes the last region this file had flagged as "ours,
+reducible, and present on any host". Combined with the ceiling
+arithmetic above - the stretch that unblocked the boot gave eight times
+the budget, and removing *every* cycle this VMM spends is 2.9x - the
+conclusion is that **the 1.74 ms tick cannot be made affordable on this
+rig by anything this VMM does.**
+
+What that leaves, and neither is reachable from inside the VMM alone:
+bare metal, where the same accesses cost about 40 cycles instead of
+2,700 and the whole arithmetic dissolves; or a guest that does not
+re-arm to 575 Hz, which `ZPP_TICK_FLOOR` tried to force from underneath
+and killed the guest doing it.

@@ -4715,27 +4715,28 @@ private:
     std::uint64_t interrupt_request_count[max_cpus]{};
 
     /**
-     * And the *processor* priority at the same instant, which is the
-     * one that decides whether the request can ever be granted.
+     * The same task priority as a histogram, because the ring above
+     * holds only the newest `interrupt_request_capacity` requests and
+     * the guest makes tens of thousands of them.
      *
-     * SDM 12.8.3.1 makes PPR the maximum of the task priority and the
-     * highest in-service vector's class, and an arriving interrupt's
-     * class must exceed **PPR**, not TPR. Every reading in this
-     * investigation has been of TPR, so two different faults have been
-     * indistinguishable: a guest that raised its own priority to
-     * DISPATCH and has not lowered it, and a guest holding an
-     * in-service interrupt it never acknowledged. The second is a
-     * deadlock and the first is a cost.
+     * **The processor priority was sampled here first and it was the
+     * dead field again.** SDM 12.8.3.1 makes PPR the value an arriving
+     * interrupt's class must exceed, so PPR is the reading this
+     * question wants - but SDM 32.1.1 only has the processor maintain
+     * VPPR under "virtual-interrupt delivery", which is not offered
+     * here and which the layer below does not permit this VMM either.
+     * It read `0x00` on 100% of 31,427 requests and would have been
+     * reported as "the guest asks while at PASSIVE, so the guest
+     * hypervisor is failing to deliver" - the exact opposite of what
+     * the maintained field says, which is `0xd0` on 64 of the newest
+     * 64.
      *
-     * Sampled where the request is made rather than at entry, because
-     * the question is what the guest's own priority was **when it asked
-     * for the interrupt** - a guest asking for a DISPATCH_LEVEL
-     * interrupt while already at DISPATCH_LEVEL is asking for something
-     * it has masked, and that is visible nowhere else.
+     * That trap was documented in this header one commit before it was
+     * walked into a second time. The lesson stands and is now applied:
+     * sample the field the processor maintains, and cross-check any new
+     * one against a reading already known good on the same samples.
      */
-    std::uint8_t interrupt_request_ppr[max_cpus]
-                                      [interrupt_request_capacity]{};
-    std::uint64_t interrupt_request_ppr_seen[max_cpus][256]{};
+    std::uint64_t interrupt_request_vtpr_seen[max_cpus][256]{};
 
     /**
      * Every vector the second-level guest asked for, counted, so the
