@@ -147,24 +147,38 @@ inline constexpr bool pass_through_hypervisor_interface = false;
  * (`guest_vmxon_count` zero), so the next question is what else
  * virtualization based security wants before it will.
  */
-// **On, as of 2026-08-15, on the strength of the first baseline.**
+// **Tried on 2026-08-15 against the first baseline, and withdrawn.**
 //
-// This sets leaf 1 ECX bit 31 and answers the three synthetic MSRs the
-// measurement demanded - identity, hypercall page, processor index -
-// which is the pairing the recorded failure taught: announcing a
-// hypervisor and then faulting its MSRs killed the guest outright, and
-// answering those three is what fixed it.
+// The reasoning was sound and the measurement refuted it. The control
+// run boots the same Windows, guest hypervisor and virtual secure mode
+// to ring 3 under KVM alone, and KVM announces itself unconditionally
+// while this VMM did not - so the one configuration that works told the
+// guest hypervisor it was nested and the one that stalls told it it was
+// on bare metal.
 //
-// Why now, when it has been off all along: the control run taken today
-// boots the same Windows, the same guest hypervisor and the same
-// virtual secure mode to ring 3 in about five minutes under KVM alone -
-// and KVM announces itself unconditionally. So the one configuration
-// known to work tells the guest hypervisor it is nested, and the one
-// that stalls tells it it is on bare metal. The comment beside the
-// CPUID edit already said "a guest that knows it is virtualized takes
-// the nested path instead"; there was simply never a reference to test
-// it against.
-inline constexpr bool announce_hypervisor = true;
+// Turned on, the announcement was taken **cleanly**: the guest
+// hypervisor wrote its identity to HV_X64_MSR_GUEST_OS_ID -
+// 0x1040a0000271b - made four synthetic accesses and faulted none,
+// which is the failure that killed the guest the last time a hypervisor
+// was announced without its MSRs answered. And the boot was unchanged:
+// same livelock, ring 3 still zero.
+//
+// **Withdrawn because it is not the same claim the baseline makes, and
+// the difference is the dangerous direction.** KVM presents its *own*
+// signature and the rig passes no `hv-` flags at all - checked in the
+// launcher, see CLAUDE.md - so under KVM the guest hypervisor sees a
+// hypervisor that is not Microsoft's. This VMM announces `Hv#1`, the
+// Microsoft interface, and then answers leaf 0x40000003 - the privilege
+// mask - as **zero**, deliberately, because nothing is implemented. So
+// a guest hypervisor is told Microsoft's interface is present and that
+// it is entitled to none of it. That is this project's recurring
+// mistake in its purest form: announcing an interface and answering
+// part of it.
+//
+// What would make it right is one of two things, and both are real
+// work rather than a switch: present a signature that is not `Hv#1`, or
+// populate 0x40000003 with privileges this VMM can actually back.
+inline constexpr bool announce_hypervisor = false;
 
 inline constexpr bool enabled =
 #if defined(ZPP_NESTED_VMX) && ZPP_NESTED_VMX
