@@ -396,6 +396,33 @@ inline constexpr bool profile_l2 = (0 != ZPP_PROFILE_L2);
 inline constexpr bool step_vtl = (0 != ZPP_STEP_VTL);
 
 /**
+ * Watch writes to the second-level guest's VP assist page.
+ *
+ * **Off, because it wedged the guest.** Armed on the frame the two
+ * translations agree on, the machine stopped at 90,226 exits with the
+ * counters frozen across three reads, the monitor still reporting
+ * `running`, and the hypervisor log clean - no unhandled exit, no
+ * unwatched-page complaint. A processor taking no exits at all is a
+ * spin on memory, and that page carries structures both trust levels
+ * touch.
+ *
+ * The reason for looking was that a page resolved to the *wrong frame*
+ * would have been this VMM's bug with a blast radius past lazy
+ * end-of-interrupt. That is settled without the watch: the guest
+ * hypervisor's own extended-page-table walk and this VMM's map both
+ * resolve `0x117a1f000` to `0x117a1f000`.
+ *
+ * Anyone turning it back on should arm it late and release it after a
+ * bounded number of exits rather than arming it for the life of the
+ * boot.
+ */
+#ifndef ZPP_WATCH_VP_ASSIST
+#define ZPP_WATCH_VP_ASSIST 0
+#endif
+
+inline constexpr bool watch_vp_assist_page = (0 != ZPP_WATCH_VP_ASSIST);
+
+/**
  * How long the timer runs before it forces an exit.
  *
  * The counter decrements once per time-stamp counter tick shifted right

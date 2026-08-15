@@ -17083,3 +17083,61 @@ page the guest reads and the level above writes, where the two might not
 be the same page, is exactly the class of defect this tree has hit
 before. It needs a write-watch on that guest-physical page rather than
 another census.
+
+## The VP assist page: the half that could have been ours is settled, and the watch wedged the guest
+
+**Settled, and it is not a translation bug.** `HV_X64_MSR_VP_ASSIST_PAGE`
+is written by Windows, so its value is an L2 guest-physical address, and
+reading it here needs two levels. Both were measured independently:
+
+```
+L2 physical (what Windows wrote)      0x117a1f000
+via the guest hypervisor's own EPT    0x117a1f000
+via this VMM's identity map           0x117a1f000
+the two paths agree: YES
+```
+
+That was the half that could have been **this VMM's** bug, and with a
+blast radius past lazy end-of-interrupt - the page carries the virtual
+trust level control structure too. It is not wrong. The frame this VMM
+reads is the frame Windows named and the frame the level above resolves.
+
+**Two wrong turns on the way, both instructive.**
+
+The first settle ran at the register write and found the walk refusing -
+`via ept12 0x0` against `via identity 0x117a1f000` - which reads as
+exactly the translation bug being hunted. It is not: the level above
+maps the page when it first touches it, so at the instant of the
+announcement it is legitimately absent. **And the reader printed
+"nothing writes it, on the watch's word" with no watch armed**, which is
+the fifth instance this session of a probe answering without having run,
+and the first where the false claim was in the sentence rather than the
+number.
+
+The second retried at arbitrary exits and kept refusing. Each virtual
+trust level has its own extended-page-table root, and this file already
+records that VTL0's addresses do not translate under VTL1's - so the
+retry was walking whichever root happened to be current. Conditioning it
+on the pointer that was in force when the register was announced fixed
+it immediately.
+
+### And the watch itself wedged the boot
+
+With the arming finally succeeding - the one variable in that boot - the
+machine **stopped at 90,226 exits**. Counters frozen across three reads
+minutes apart, `info status` still `running`, and the hypervisor log
+completely clean: no unhandled exit, no "which nothing here watches", no
+complaint of any kind. A processor executing in the guest and taking
+**no exits at all** is a spin on memory, and that page carries
+structures both levels touch.
+
+`ZPP_WATCH_VP_ASSIST` is off by default with this recorded on it. Anyone
+turning it on should arm late and release after a bounded number of
+exits rather than arming for the life of the boot.
+
+**What is left unproven is only the half that was never ours**: whether
+the level above ever writes a page it owns. The existing periodic
+sampling has read that page as 512 bytes of zero on every boot it has
+been read, and the translation behind those reads is now verified rather
+than assumed - which is as far as it is worth taking a question about
+somebody else's data structure.

@@ -5917,20 +5917,41 @@ void hypervisor::settle_vp_assist_page(std::size_t cpu)
         return;
     }
 
-    // And the watch, which is what turns "the page is empty" into
-    // "nothing writes it". The guest hypervisor runs under this VMM's
-    // extended page tables, so clearing write permission on that frame
-    // traps its writes - which is exactly the question.
-    if (auto armed = watch_guest_page_writes(
-            *walked,
-            &hypervisor::on_vp_assist_write,
-            this,
-            page_watch::mode::notify);
-        armed) {
-        this->vp_assist_watch_armed = 1;
-    } else {
-        this->vp_assist_watch_armed =
-            static_cast<std::uint64_t>(armed.error().code()) | (1ull << 32);
+    // **The write-watch is off, and it is off because it wedged the
+    // guest.**
+    //
+    // Armed on this frame - the one variable in that boot, the first on
+    // which the arming succeeded - the machine stopped at 90,226 exits
+    // with the counters frozen across three reads minutes apart, the
+    // monitor still reporting `running`, and the log clean: no
+    // unhandled exit, no "which nothing here watches", nothing. A
+    // processor executing inside the guest and taking no exits at all
+    // is what a spin on memory looks like, and the page carries
+    // structures both levels touch.
+    //
+    // Not diagnosed further, deliberately. The half of the question
+    // that could have been *this VMM's bug* - a page resolved to the
+    // wrong frame - is settled above by two independent translations
+    // agreeing, and that was the reason to look. Whether the level
+    // above ever writes a page it owns is its business, and it is not
+    // worth wedging the boot to watch it.
+    //
+    // `nested_vmx::watch_vp_assist_page` turns it back on for anyone
+    // who wants to take that on with a bounded arm-and-release rather
+    // than an arm-for-ever.
+    if constexpr (nested_vmx::watch_vp_assist_page) {
+        if (auto armed = watch_guest_page_writes(
+                *walked,
+                &hypervisor::on_vp_assist_write,
+                this,
+                page_watch::mode::notify);
+            armed) {
+            this->vp_assist_watch_armed = 1;
+        } else {
+            this->vp_assist_watch_armed =
+                static_cast<std::uint64_t>(armed.error().code()) |
+                (1ull << 32);
+        }
     }
 }
 
