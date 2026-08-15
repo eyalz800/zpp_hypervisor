@@ -17578,3 +17578,62 @@ is the first instrument that can say "wrong *here*", including by saying
 confirming the shadow path is actually running rather than reporting a
 clean zero because nothing reached it - the failure mode this file has
 recorded five times.
+
+## Shadow mode returned zero divergences, and **the result is void**
+
+```
+guest-state shadow: 0 divergences over 1,041,116 deferrable exits
+module loads: 2          (healthy - it cannot reset, by construction)
+```
+
+Read at face value that says the fourth condition is not a stale field
+value. **It says nothing of the kind, and the instrument is the reason.**
+
+In a shadow build `ZPP_DEFER_GUEST_STATE` is off, so `save_l2_state`
+runs the **eager** copy: it reads all 44 fields out of vmcs02 and writes
+them into vmcs12. The shadow comparison then, a few microseconds later
+in the same round trip, reads vmcs02 and compares it against vmcs12.
+
+**It is comparing vmcs02 against a copy of vmcs02.** Zero divergences is
+guaranteed by construction. The instrument cannot report anything else,
+whatever the guest does.
+
+That is the sixth instance in this investigation of a probe that answers
+without having measured, and the first one I built *deliberately* while
+reasoning carefully about neutrality - I checked that it could not
+perturb the guest and never checked that it could observe anything. The
+neutrality argument was sound and complete, and it was an argument about
+the wrong half.
+
+**And it explains why the prediction was unfalsifiable.** The PDPTEs
+were ranked first on a real reading of SDM 30.3 - they are saved only
+for a guest using PAE paging, so a 64-bit guest never updates them - and
+that reasoning may still be right. The boot could not have told me
+either way.
+
+### What the corrected instrument has to do, and the tension in it
+
+To observe the deferral's assumption failing, vmcs12 has to actually go
+stale - which is what the real deferral does and what breaks the guest.
+So a genuinely observing shadow is not behaviour-neutral, and a
+behaviour-neutral one observes nothing. That tension is real and the way
+around it is to stop asking about *values*:
+
+**Zero divergences of value is consistent with everything measured**, so
+the fourth condition is probably not "a field holds the wrong number".
+The remaining question is **who reads vmcs12's bulk guest-state area**,
+because with deferral on that area is stale and something evidently
+minds. The grep found build_vmcs02, enter_or_park_l2 and
+load_l1_host_state, none of which touch the bulk 44; the generic paths
+are `on_guest_vmread`, which materialises, and the shadow-VMCS copies,
+whose overlapping fields are excluded.
+
+So the instrument that would actually answer it is a **read-tracker on
+`guest_vmcs12`'s bulk fields** - recording who reads them and when, with
+the eager copy left in place. That is behaviour-neutral *and* observing,
+because it measures consumption rather than content. A consumer nobody
+grepped is the fourth condition.
+
+Not built here. The rig is idle with the known-good loader, and the
+honest state is that this round produced a corrected understanding and a
+void measurement rather than a diagnosis.
