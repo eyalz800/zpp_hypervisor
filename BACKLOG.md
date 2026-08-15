@@ -17715,3 +17715,31 @@ So the check to add to the list, and it is now six long:
    to find will report its absence instead, confidently. Neutrality and
    observability are separate properties and proving one says nothing
    about the other.
+
+### Predictions for the deferral's fourth boot
+
+Four conditions found, four fixed, all four caught by the suite. The
+first three cost a boot each; the fourth cost nothing.
+
+1. **No reset loop.** Module loads stay at 2. Three boots have failed
+   this and each failure named a condition; a fourth failure would name
+   a fifth.
+2. Windows is not in recovery - the boot follows the same phases every
+   healthy boot here does.
+3. `guest_state_defers` about one per second-level exit;
+   `guest_state_materialises` now **non-zero but small**, driven by the
+   flush on every VMPTRLD rather than by reads - which is a change from
+   the last prediction and a direct consequence of the fourth fix.
+4. `save_l2_state` falls from ~198,000 cycles a call to
+   **~46,000-90,000**.
+5. Per-exit cost down a further **10-17%** - less than the earlier
+   estimate, because materialising on every VMPTRLD gives some of it
+   back. With item 1 banked, about **1.30x**.
+6. The tick regime still reaches 1.74 ms and `0xd0` stays high.
+7. **The circle does not turn.** 1.30x against a requirement bracketed
+   at (1, 2].
+
+Prediction 5 is deliberately lower than the 1.35x quoted before: the
+flush materialisation is a real cost that the original design did not
+have, and pretending otherwise would make a worse number look like a
+regression later.
