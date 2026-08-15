@@ -16772,3 +16772,60 @@ shipped with a hole, and the safety counter that the design insisted on
 keeping unconditional found it on the first boot, named the field, and
 disabled itself for that slot. An elision shipped without that counter
 would have skipped an owed write silently and for ever.
+
+## Methodology: the recurring failure is a probe that answers without having run
+
+The constant-field catch was recorded as a class with three instances.
+It now has five, and they are one pattern rather than five accidents.
+**Every one of them produced a confident number, and none of them was a
+measurement.**
+
+| instance | what it read | what it actually was |
+|---|---|---|
+| `l2_tpr_would_fire` | zero | the increment was never compiled in - header edited, translation unit not |
+| the VP assist page | 512 bytes of zero | a read that failed on its first quadword |
+| VPPR at `0A0H` | `0x00` on 100% of entries | a field the processor does not maintain without virtual-interrupt delivery |
+| `l1_host_changed` | nothing | a counter that ran from the day it was written and **nothing ever printed** |
+| every section after `dump_priority` | absent | the reader exiting on a missing member and looking merely short |
+
+The last two are new and are the ones that generalise furthest, because
+in both the *code* was right and the *reading* never happened.
+
+**The checks, in increasing order of cost:**
+
+1. **Grep the built translation unit for the counter.** A counter never
+   compiled in reads zero and looks like a result.
+2. **Record the failure code beside the value.** A diagnostic whose
+   failure is indistinguishable from its negative result is worse than
+   none.
+3. **Read a new field against one already known good, on the same
+   samples.** Whenever a new quantity has a defined relationship to an
+   old one - PPR being the maximum of TPR and the in-service class -
+   that relationship is a free assertion that fires without needing to
+   know why.
+4. **Check that something prints it.** A counter nobody reads is a
+   measurement nobody has, and it will sit there for months looking like
+   diligence.
+5. **Make a reader fail loudly and partially.** One section that cannot
+   resolve a symbol must not silently delete every section after it.
+
+### And its sibling: reading the refutation is not reading the argument
+
+A different failure, from the same round, worth naming beside them.
+
+`load_l1_host_state` carries a comment refuting the obvious
+optimisation, with an SDM citation. The census proposed exactly that
+optimisation; the comment was read, the proposal was withdrawn, and the
+item was declared dead.
+
+**The comment's very next paragraph prescribed the measurement that
+overturned the withdrawal** - "what *would* justify eliding a particular
+field is knowing the processor never actually changes it, and that is a
+measurement" - and named the counter that produces it, which was already
+running. 48 of 52 fields turned out elidable.
+
+So the refutation was correct, deferring to it was correct, and stopping
+there was not. **A well-written refutation in this tree usually says
+what would change its mind; that sentence is the valuable half and it is
+the one that gets skipped.** When a comment refuses something, read to
+the end of the argument before recording the refusal as a finding.
