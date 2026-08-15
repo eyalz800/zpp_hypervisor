@@ -5032,16 +5032,30 @@ private:
      * `HvCallVtlReturn` the ordinary kernel; the recorded control
      * register says which it actually was.
      *
-     * The distinct addresses are collected with 32 bytes of code each,
-     * because a trace of bare addresses cannot be disassembled outside -
-     * the tree has no copy of either image, and the 1024 byte window
-     * `capture_vtl_switch` takes covers only the call site.
+     * Sixteen bytes of code come with **every** step, because a trace of
+     * bare addresses cannot be disassembled outside - the tree has no
+     * copy of either image, and the 1024 byte window
+     * `capture_vtl_switch` takes covers only the call site. Sixteen is
+     * the longest instruction x86-64 admits, so it is always enough for
+     * the one instruction each address begins.
+     *
+     * Per step rather than per distinct address, which the first run
+     * settled: a 64 slot table of distinct addresses covered 64 of the
+     * **971** the secure kernel's side turned out to have, so 94 per
+     * cent of the trace came back as addresses with no instruction. The
+     * dedicated table was sized for a loop that repeats and the trace is
+     * not one.
      * @{
      */
     static constexpr std::size_t vtl_step_kinds = 2;
-    static constexpr std::size_t vtl_step_capacity = 1024;
-    static constexpr std::size_t vtl_step_code_slots = 64;
-    static constexpr std::size_t vtl_step_code_size = 32;
+
+    /** Long enough for a whole round trip. Measured on the rig: the
+     * secure kernel's side is 447 instructions and the ordinary
+     * kernel's is at least 577, so a 1,024 step ring ends in the middle
+     * of the second half and never reaches the call that starts the
+     * next iteration. */
+    static constexpr std::size_t vtl_step_capacity = 2048;
+    static constexpr std::size_t vtl_step_code_size = 16;
 
     /**
      * When to step, and how often to step again.
@@ -5065,9 +5079,17 @@ private:
      * One constant rather than a threshold and a period: the first
      * arming is simply the first multiple, which is late enough for the
      * same reason every later one is recent enough.
+     *
+     * **The two sides are staggered by half a period and that is not
+     * cosmetic.** Both counts advance together - the loop is one call
+     * and one return - so they reach the same multiple within a switch
+     * of each other, and with both arming on the same multiple the
+     * second always found the first's trace still running and was
+     * refused. Measured: `HvCallVtlReturn`'s ring was empty after
+     * 23,690 switches while `HvCallVtlCall`'s had been rearmed twice.
      * @{
      */
-    static constexpr std::uint64_t vtl_step_rearm = 8192;
+    static constexpr std::uint64_t vtl_step_rearm = 2048;
 
     volatile std::uint64_t vtl_step_at[vtl_step_kinds]{};
     /**
@@ -5083,10 +5105,8 @@ private:
     volatile std::uint64_t vtl_step_other[vtl_step_kinds]{};
     volatile std::uint64_t vtl_step_other_reason[vtl_step_kinds]{};
 
-    std::uint64_t vtl_step_code_rip[vtl_step_kinds][vtl_step_code_slots]{};
-    std::uint8_t vtl_step_code[vtl_step_kinds][vtl_step_code_slots]
+    std::uint8_t vtl_step_code[vtl_step_kinds][vtl_step_capacity]
                               [vtl_step_code_size]{};
-    volatile std::uint64_t vtl_step_code_count[vtl_step_kinds]{};
 
     /** The kind being stepped plus one, or zero. Per processor, because
      * the flag lives in that processor's vmcs02. */

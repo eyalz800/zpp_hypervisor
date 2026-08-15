@@ -2760,9 +2760,8 @@ static void test_l0_precedence()
         h.vtl_step_active[cpu] = 0;
         h.vtl_step_count[0] = 0;
         h.vtl_step_count[1] = 0;
-        h.vtl_step_code_count[0] = 0;
         h.vtl_switches[cpu][0] = rearm - 1;
-        h.vtl_switches[cpu][1] = rearm;
+        h.vtl_switches[cpu][1] = rearm + (rearm / 2);
 
         h.arm_vtl_step(cpu, 0);
         check(0 == h.vtl_step_active[cpu],
@@ -2785,6 +2784,30 @@ static void test_l0_precedence()
               "vmcs02 and a second arming would append one side's "
               "instructions to the other's ring");
 
+        // And the stagger, which is what stops that rule from starving
+        // one side outright. Both counts advance together, so on a
+        // shared multiple the second side is refused every time.
+        check(0 == (rearm % (2 * hypervisor_t::vtl_step_kinds)),
+              "the period divides evenly by the number of sides, so no "
+              "side's phase lands on another's");
+
+        h.vtl_step_active[cpu] = 0;
+        h.vtl_switches[cpu][1] = 2 * rearm;
+        h.arm_vtl_step(cpu, 1);
+        check(0 == h.vtl_step_active[cpu],
+              "the second side does not arm on the first's multiple");
+
+        h.vtl_switches[cpu][1] = (2 * rearm) + (rearm / 2);
+        h.arm_vtl_step(cpu, 1);
+        check(2 == h.vtl_step_active[cpu],
+              "it arms half a period later, where the first side's "
+              "trace has already finished");
+
+        h.vtl_step_active[cpu] = 1;
+        h.vtl_step_count[1] = 0;
+        h.vtl_step_at[1] = 0;
+        h.vtl_switches[cpu][1] = 0;
+
         h.vmcs.guest_rip(0x1234);
         h.record_vtl_step(cpu);
         h.vmcs.guest_rip(0x1234);
@@ -2794,8 +2817,6 @@ static void test_l0_precedence()
         check(0x1234 == h.vtl_step_rip[0][1],
               "and it is the second-level guest's own instruction "
               "pointer");
-        check(1 == h.vtl_step_code_count[0],
-              "a repeated address takes one code slot, not two");
 
         g_monitor_trap_flag = true;
         g_monitor_trap_flag_writes = 0;
@@ -2827,7 +2848,6 @@ static void test_l0_precedence()
         h.vtl_step_active[cpu] = 0;
         h.vtl_step_count[0] = 0;
         h.vtl_step_count[1] = 0;
-        h.vtl_step_code_count[0] = 0;
         h.vtl_step_at[0] = 0;
         h.vtl_switches[cpu][0] = 0;
         h.vtl_switches[cpu][1] = 0;

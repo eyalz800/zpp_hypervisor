@@ -5709,16 +5709,18 @@ void hypervisor::arm_vtl_step(std::size_t cpu, std::size_t kind)
 
     auto switches = this->vtl_switches[cpu][kind];
 
-    // Every `vtl_step_rearm` switches, overwriting. See there for why a
-    // threshold alone is not enough: at 4,096 switches the trace is of
-    // a guest still booting, and it reads exactly like a guest doing
-    // work because it is one.
-    if ((0 == switches) || (0 != (switches % vtl_step_rearm))) {
+    // Every `vtl_step_rearm` switches, overwriting, and the two sides
+    // half a period apart. See there for both: why a threshold alone is
+    // not enough, and why arming both on the same multiple starves the
+    // second side entirely.
+    auto phase = (kind * vtl_step_rearm) / vtl_step_kinds;
+
+    if ((switches < vtl_step_rearm) ||
+        (phase != (switches % vtl_step_rearm))) {
         return;
     }
 
     this->vtl_step_count[kind] = 0;
-    this->vtl_step_code_count[kind] = 0;
     this->vtl_step_other[kind] = 0;
     this->vtl_step_other_reason[kind] = 0;
     this->vtl_step_at[kind] = switches;
@@ -5756,25 +5758,17 @@ void hypervisor::record_vtl_step(std::size_t cpu)
     this->vtl_step_cr3[kind][index] = this->vmcs.guest_cr3();
     this->vtl_step_count[kind] = index + 1;
 
-    // And the instructions themselves, once per distinct address.
+    // And the instruction itself, for every step. See
+    // `vtl_step_code_size` for why it is not once per distinct address:
+    // the secure kernel's side ran 971 distinct addresses in 1,024
+    // steps, so a table of distinct ones is a table of all of them with
+    // a scan in front of it.
     //
-    // A trace of bare addresses cannot be read outside: there is no copy
-    // of `ntoskrnl.exe` or `securekernel.exe` anywhere in this tree, and
-    // the window `capture_vtl_switch` takes covers the call site only. A
-    // linear scan over sixty-four slots per step costs nothing next to
-    // the exit that produced the step.
-    auto slots = this->vtl_step_code_count[kind];
-
-    for (std::size_t i{}; i < slots; ++i) {
-        if (rip == this->vtl_step_code_rip[kind][i]) {
-            return;
-        }
-    }
-
-    if (slots >= vtl_step_code_slots) {
-        return;
-    }
-
+    // A byte at a time, because a sixteen byte read can straddle a page
+    // boundary and the guest's next page may not be mapped - the same
+    // reason `capture_vtl_switch` reads its window that way. A short
+    // read leaves the rest zero, which the decoder outside reports as
+    // an instruction it could not decode rather than as one it could.
     for (std::size_t i{}; i < vtl_step_code_size; ++i) {
         auto physical = translate_guest_linear(rip + i);
         if (!physical) {
@@ -5785,14 +5779,11 @@ void hypervisor::record_vtl_step(std::size_t cpu)
                 cpu,
                 *physical,
                 std::span(reinterpret_cast<std::byte *>(
-                              &this->vtl_step_code[kind][slots][i]),
+                              &this->vtl_step_code[kind][index][i]),
                           1))) {
             break;
         }
     }
-
-    this->vtl_step_code_rip[kind][slots] = rip;
-    this->vtl_step_code_count[kind] = slots + 1;
 }
 
 void hypervisor::sample_guest_thread(std::size_t cpu)

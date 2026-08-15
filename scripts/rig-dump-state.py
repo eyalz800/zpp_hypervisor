@@ -550,27 +550,22 @@ def dump_vtl_steps(args, elf, instance):
     """
     members = ["vtl_step_rip", "vtl_step_cr3", "vtl_step_count",
                "vtl_step_other", "vtl_step_other_reason",
-               "vtl_step_code_rip", "vtl_step_code",
-               "vtl_step_code_count", "vtl_step_at"]
+               "vtl_step_code", "vtl_step_at"]
     off = gdb_offsets(elf, members)
 
-    kinds, capacity, code_slots, code_size = gdb_values(elf, [
+    kinds, capacity, code_size = gdb_values(elf, [
         "sizeof(('zpp::hypervisor::hypervisor' *)0)->vtl_step_count / 8",
         "sizeof(('zpp::hypervisor::hypervisor' *)0)->vtl_step_rip[0] / 8",
-        "sizeof(('zpp::hypervisor::hypervisor' *)0)->vtl_step_code[0] / "
-        "sizeof(('zpp::hypervisor::hypervisor' *)0)->vtl_step_code[0][0]",
         "sizeof(('zpp::hypervisor::hypervisor' *)0)->vtl_step_code[0][0]"])
 
     reader = Monitor(args.rig, args.port)
     for member in ("vtl_step_count", "vtl_step_other",
-                   "vtl_step_other_reason", "vtl_step_code_count",
-                   "vtl_step_at"):
+                   "vtl_step_other_reason", "vtl_step_at"):
         reader.queue(instance + off[member], kinds)
     reader.queue(instance + off["vtl_step_rip"], kinds * capacity)
     reader.queue(instance + off["vtl_step_cr3"], kinds * capacity)
-    reader.queue(instance + off["vtl_step_code_rip"], kinds * code_slots)
     reader.queue(instance + off["vtl_step_code"],
-                 kinds * code_slots * code_size // 8)
+                 kinds * capacity * code_size // 8)
     got = reader.run()
 
     def word(member, index):
@@ -595,32 +590,38 @@ def dump_vtl_steps(args, elf, instance):
               f"{word('vtl_step_other', k)} other exits "
               f"(first reason 0x{word('vtl_step_other_reason', k):x}) ---")
 
+        # The bytes go on the step's own line rather than in a table
+        # beside it, so `disassemble-trace.py` needs no join and a
+        # reader with neither script can still see what ran.
+        #
         # Runs rather than lines: a loop of three addresses spun a
         # thousand times is three lines and a count, and the count is
         # the finding.
-        run_rip, run_cr3, run_len = None, None, 0
-        for i in range(count):
-            rip = word("vtl_step_rip", k * capacity + i)
-            cr3 = word("vtl_step_cr3", k * capacity + i)
-            if (rip, cr3) == (run_rip, run_cr3):
-                run_len += 1
-                continue
-            if run_rip is not None:
-                print(f"    0x{run_rip:016x}  cr3 0x{run_cr3:x}"
-                      + (f"  x{run_len}" if run_len > 1 else ""))
-            run_rip, run_cr3, run_len = rip, cr3, 1
-        if run_rip is not None:
-            print(f"    0x{run_rip:016x}  cr3 0x{run_cr3:x}"
-                  + (f"  x{run_len}" if run_len > 1 else ""))
-
-        print(f"  {word('vtl_step_code_count', k)} distinct addresses:")
-        for i in range(word("vtl_step_code_count", k)):
-            rip = word("vtl_step_code_rip", k * code_slots + i)
-            base = (k * code_slots + i) * code_size // 8
+        def step(i):
+            base = (k * capacity + i) * code_size // 8
             raw = b"".join(word("vtl_step_code", base + j)
                            .to_bytes(8, "little")
                            for j in range(code_size // 8))
-            print(f"    0x{rip:016x}  {raw.hex()}")
+            return (word("vtl_step_rip", k * capacity + i),
+                    word("vtl_step_cr3", k * capacity + i),
+                    raw)
+
+        def show(entry, repeats):
+            rip, cr3, raw = entry
+            print(f"    0x{rip:016x}  cr3 0x{cr3:<9x} {raw.hex()}"
+                  + (f"  x{repeats}" if repeats > 1 else ""))
+
+        previous, repeats = None, 0
+        for i in range(count):
+            entry = step(i)
+            if entry == previous:
+                repeats += 1
+                continue
+            if previous is not None:
+                show(previous, repeats)
+            previous, repeats = entry, 1
+        if previous is not None:
+            show(previous, repeats)
 
 
 def main():
