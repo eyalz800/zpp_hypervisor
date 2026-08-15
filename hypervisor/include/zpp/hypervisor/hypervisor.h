@@ -4927,6 +4927,17 @@ private:
 
     std::uint8_t vtl_code[vtl_kinds][vtl_code_size]{};
     std::uint64_t vtl_code_base[vtl_kinds]{};
+
+    /** Whatever the page-aligned pointer on each side's stack refers
+     * to. Registers and stack are identical every iteration, so the
+     * secure call's content is in memory, and this is the only
+     * candidate the captures have produced. See capture_vtl_switch. */
+    static constexpr std::size_t vtl_shared_size = 256;
+
+    std::uint8_t vtl_shared[vtl_kinds][vtl_shared_size]{};
+    volatile std::uint64_t vtl_shared_at[vtl_kinds]{};
+    volatile std::uint64_t vtl_shared_read[vtl_kinds]{};
+    volatile std::uint64_t vtl_shared_error[vtl_kinds]{};
     volatile std::uint64_t vtl_captured[vtl_kinds]{};
 
     /** The last value written to `HV_X64_MSR_STIMER0_CONFIG`, so the

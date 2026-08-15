@@ -5306,6 +5306,53 @@ void hypervisor::capture_vtl_switch(std::size_t cpu,
 
         this->vtl_code_base[kind] = entry - behind;
 
+        // And whatever the page-aligned pointer on the stack refers to.
+        //
+        // Registers and stack are byte-identical every iteration, so
+        // the content of the secure call is in memory - and the only
+        // candidate the captures have turned up is slot +0x080 of the
+        // securekernel side, which holds a page-aligned address and
+        // holds the same one again at +0x098. A structure pointer
+        // passed by both levels is exactly what a call whose arguments
+        // are not in registers looks like.
+        //
+        // Guest *virtual*, so through translate_guest_linear, and the
+        // outcome recorded rather than inferred - an all-zero buffer
+        // has already been mistaken for an answer twice in this file.
+        constexpr std::size_t pointer_slot = 0x80 / 8;
+
+        if (auto shared = this->vtl_stack[kind][pointer_slot];
+            (0 != shared) && (0 == (shared & 0xfff))) {
+            this->vtl_shared_at[kind] = shared;
+            this->vtl_shared_read[kind] = 0;
+
+            for (std::size_t at{}; at < vtl_shared_size; at += 8) {
+                auto physical = translate_guest_linear(shared + at);
+                if (!physical) {
+                    // An optional, not an expected - the walk says only
+                    // that it found nothing, so the marker is the whole
+                    // of what can be recorded.
+                    this->vtl_shared_error[kind] = (1ull << 32);
+                    break;
+                }
+
+                if (auto got = read_guest_memory(
+                        cpu,
+                        *physical,
+                        std::span(reinterpret_cast<std::byte *>(
+                                      &this->vtl_shared[kind][at]),
+                                  8));
+                    !got) {
+                    this->vtl_shared_error[kind] =
+                        static_cast<std::uint64_t>(got.error().code()) |
+                        (2ull << 32);
+                    break;
+                }
+
+                this->vtl_shared_read[kind] = at + 8;
+            }
+        }
+
         image_name_of(cpu, base, this->vtl_caller_name[kind]);
 
         if ('\0' == this->vtl_caller_name[kind][0]) {
