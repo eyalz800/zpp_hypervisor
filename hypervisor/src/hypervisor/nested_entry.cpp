@@ -5424,6 +5424,42 @@ void hypervisor::capture_vtl_switch(std::size_t cpu,
             this->vtl_spin_read[kind] = at + 8;
         }
 
+        // The page the secure kernel is being asked about, and what
+        // this VMM's tables say about it.
+        //
+        // Its code builds a request out of `rbp`: `mov rax, rbp; shr
+        // rax, 12; mov r8d, 0x1000`, a single page, and stores the
+        // frame number to the stack. That store lands at slot +0x090,
+        // which holds 0x11ad2c here and 0x11ad2a and 0x11ad8f on other
+        // boots - shifted up twelve, `0x11ad2c000`, squarely in the
+        // guest-physical range everything else on this rig sits in.
+        //
+        // So the question the whole livelock reduces to is answerable
+        // in two reads: does the guest hypervisor's own walk map that
+        // page for this trust level, and does this VMM's shadow hold
+        // it with the permissions the walk asked for. A page absent
+        // from the shadow, or present with less than the walk grants,
+        // is a secure kernel answering the same way for ever because
+        // the fault it expects to change the answer never arrives.
+        constexpr std::size_t frame_slot = 0x90 / 8;
+        constexpr std::uint64_t frame_shift = 12;
+
+        if (auto frame = this->vtl_stack[kind][frame_slot];
+            (0 != frame) && (frame < (1ull << 40))) {
+            auto page = frame << frame_shift;
+
+            this->vtl_page[kind] = page;
+
+            auto first = l2_physical_to_l1(cpu, page);
+            this->vtl_page_first[kind] = first ? *first : 0;
+            this->vtl_page_mapped[kind] = first ? 1 : 0;
+
+            auto held = shadow_ept_lookup(cpu, page);
+            this->vtl_page_shadow[kind] =
+                static_cast<std::uint64_t>(held.status);
+            this->vtl_page_rights[kind] = held.permissions.bits();
+        }
+
         image_name_of(cpu, base, this->vtl_caller_name[kind]);
 
         if ('\0' == this->vtl_caller_name[kind][0]) {

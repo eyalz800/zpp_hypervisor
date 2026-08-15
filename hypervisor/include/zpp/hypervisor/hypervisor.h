@@ -4959,6 +4959,14 @@ private:
     volatile std::uint64_t vtl_spin_at[vtl_kinds]{};
     volatile std::uint64_t vtl_spin_read[vtl_kinds]{};
     volatile std::uint64_t vtl_spin_error[vtl_kinds]{};
+
+    /** The page the secure kernel's request names, and what both sets
+     * of tables say about it. See capture_vtl_switch. */
+    volatile std::uint64_t vtl_page[vtl_kinds]{};
+    volatile std::uint64_t vtl_page_first[vtl_kinds]{};
+    volatile std::uint64_t vtl_page_mapped[vtl_kinds]{};
+    volatile std::uint64_t vtl_page_shadow[vtl_kinds]{};
+    volatile std::uint64_t vtl_page_rights[vtl_kinds]{};
     volatile std::uint64_t vtl_captured[vtl_kinds]{};
 
     /** The last value written to `HV_X64_MSR_STIMER0_CONFIG`, so the
