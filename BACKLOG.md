@@ -14290,7 +14290,42 @@ the guest hypervisor wrote at the moment it wrote it - the control-write
 cache in `write_vmcs02_control` sits between them - and whether the
 entry-time check is being reached at all.
 
-### The entry-condition probe does not work, and the zeros are not data
+### The entry-condition probe was never compiled in - and the answer, once it was
+
+**Corrected.** The account below was written from two zero counters and
+blamed a failing guest read. That was wrong: the increment code had been
+lost by an edit that wrote the header and not the translation unit, so
+the members were declared and nothing ever touched them. The build
+succeeded and the histogram beside them worked, so two zeroes came back
+looking exactly like a measured negative. The check that catches this is
+grepping the built translation unit for the counter, not reading the
+diff.
+
+**With it actually present, the answer is decisive and this whole lead
+is dead:**
+
+| | |
+|---|---|
+| armed, and SDM 27.6.7's condition held | **124** |
+| armed, guest already at or above the threshold | **5,022** |
+| reason-43 exits taken | **124** |
+
+Owed 124, delivered 124. **The TPR-below-threshold path is correct** -
+every time an exit is owed it fires, and there is nothing here to fix.
+
+What the 5,022 says is the real shape: the guest hypervisor arms a
+threshold of 2 while its guest is already at 0x20, and 2 > 2 is false,
+so no exit is owed and none should fire. It is not being denied a
+notification. Its guest simply never drops below DISPATCH while the
+interrupt is pending - which is the livelock restated, not a cause of
+it: the trust-level loop runs at DISPATCH, what it waits for would be
+completed by a deferred procedure call, and a deferred procedure call
+cannot run while the processor is at DISPATCH. On real hardware that
+resolves because the secure call *completes*. So the question returns,
+narrowed and with the whole interrupt path now eliminated: why does that
+one secure call never complete?
+
+#### The original, wrong account follows
 
 First run of it: `l2_tpr_would_fire` **0** and `l2_tpr_armed_above`
 **0**, while the threshold histogram for the same boot shows 5,632
