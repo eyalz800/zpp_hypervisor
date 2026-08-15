@@ -16649,3 +16649,86 @@ Each section now runs in its own try, and a failure prints which section
 was skipped and why. **A diagnostic that fails silently is the specific
 thing this file keeps recording**, and this time the reader itself was
 the one doing it.
+
+## Item 1 shipped, with the predictions recorded before the boot
+
+`load_l1_host_state` now skips a write when three things hold at once:
+the slot holds the same field, the value is unchanged, and the audit has
+checked that slot at least 64 times and never once found the processor
+had altered it. The audit runs in batches of four slots a reflection -
+that is the risk window, since an elision is live between one check of a
+slot and the next - and a slot that ever diverges stops being elidable
+permanently and says so in the log.
+
+**Predictions, written before reading the boot:**
+
+1. `l1_host_elided` settles at about **48 per reflection**, after a
+   warm-up of roughly **832 reflections** (52 slots, 4 checked per
+   reflection, 64 checks needed).
+2. `l1_host_diverged` stays **0**.
+3. `load_l1_host_state` falls from **135,804 cycles a call** to roughly
+   **30,000-45,000** - four writes plus four audit reads is eight VMCS
+   accesses at ~2,700, plus the function's own work.
+4. Per-exit cost falls from ~786,000 cycles by **12-16%**: 48 writes
+   saved less 3 extra audit reads is about 45 accesses.
+5. The tick regime **does not move**. The guest still re-arms to 1.74 ms
+   and still pins at CLOCK_LEVEL.
+6. Neither defining symptom shifts: `0x2f` delivered stays ~0 in steady
+   state, entries below DISPATCH stay ~0.
+7. **The circle does not turn.**
+
+**This is an improvement and it is not a fix.** The identified cause is
+that a trust-level round trip outlasts a clock tick; the required factor
+is bracketed at (1, 9]; this is worth about 1.15x. It is recorded here
+so that a still-frozen spinner on the next boot reads as prediction 7
+being met rather than as a fix that failed.
+
+## Proposal, not started: vmcs02 holds the guest state, vmcs12 becomes a write-log
+
+The other half of the census, specified for someone starting fresh
+rather than begun at the end of a long session.
+
+**What it is.** `save_l2_state` copies 46 guest-state fields out of
+vmcs02 into vmcs12 on every exit, and `build_vmcs02` copies them back on
+every entry. Neither copy is read by anything in between except the
+guest hypervisor's own VMREADs - **16 distinct fields, about one read
+every fourteen exits.** The proposal is to stop copying in either
+direction: let vmcs02 hold the second-level guest's state, which is
+where the processor already puts it, and treat vmcs12 as a log of what
+the guest hypervisor has *written*, fed by its own VMWRITEs - of which
+there are **494 in an entire boot**.
+
+**What it buys.** The 46 reads at ~2,700 cycles each are about 124,000
+cycles a reflection, or **16% of the per-exit cost**, on top of item 1's
+similar share from the write side. Together roughly 1.4x-1.5x.
+
+**What has to be true for it to be sound:**
+
+- The guest hypervisor's VMREAD of a guest-state field must be servable
+  from vmcs02 at the moment it asks. It can be: vmcs02 is untouched
+  between the reflection and its `VMRESUME`, which exits here - so
+  nothing has re-entered the second-level guest and overwritten it. Cost
+  is a VMPTRLD pair per served read, about 12,700 cycles against 37,389
+  reads a boot, which is nothing beside 8.5 million copies.
+- Fields the guest hypervisor reads but never wrote, and which the
+  processor does not save on exit, must still read correctly. **This is
+  the one that needs checking before any code is written** - the field
+  list has to be partitioned into "processor writes it on exit", "the
+  guest hypervisor wrote it", and "neither", and the third set is the
+  dangerous one.
+- `build_vmcs02` must stop writing guest state from vmcs12 except for
+  fields the write-log marks dirty, or it will push stale values over
+  what the processor saved.
+
+**The SDM boundary that makes this legal.** 30.3.2 forbids *omitting* a
+value - a field must read correctly even when the segment is unusable -
+and says nothing against computing it later. Deferring changes **when**
+a value is produced, not **whether**. That is the distinction that
+killed `ZPP_LAZY_GUEST_STATE`, which proposed not producing it at all,
+and that this proposal stays on the right side of.
+
+**Why it is not started here.** It is an architecture change to the
+hottest and least forgiving path in the tree, its whole value is a share
+of ~1.4x, and the required factor is bracketed at (1, 9]. With 54% of a
+round trip being nesting tax that no code change touches, the open
+question is not whether this VMM can be made 1.4x faster.
