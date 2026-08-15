@@ -7,16 +7,43 @@
 
 namespace zpp::arch::x86_64::vmx
 {
-// The whole encoding space vmcs_fields.h uses fits in 0x8000.
+/**
+ * One backing region per VMCS, selected by `vmptrld`.
+ *
+ * **This used to be a single array and `vmptrld` used to be a no-op**,
+ * which made vmcs01 and vmcs02 the same object here. Every ordering
+ * property that depends on *which* VMCS is current was therefore
+ * untestable, and a change resting on one - the deferred guest-state
+ * copy - passed nine unit cases and then reset the guest on the rig,
+ * twice, for about 250 unclean resets of a real Windows installation.
+ *
+ * A suite that cannot tell two VMCS regions apart cannot check anything
+ * about switching between them, and that is worth more machinery than
+ * it costs: this is sixteen regions keyed by the physical address the
+ * real code passes, and nothing else changes.
+ */
+inline constexpr std::size_t g_vmcs_regions = 8;
+
+/** Region zero, which every existing case means when it reaches for
+ * `g_vmcs` directly - it is the region loaded until something calls
+ * `vmptrld` with a second address. */
 inline std::uint64_t g_vmcs[0x8000]{};
+inline std::uint64_t g_vmcs_other[g_vmcs_regions - 1][0x8000]{};
+inline std::uint64_t g_vmcs_address[g_vmcs_regions]{};
+inline std::uint64_t * g_vmcs_loaded = g_vmcs;
 inline bool g_vmcs_valid = true;
+
+inline std::uint64_t * g_vmcs_region(std::size_t index)
+{
+    return (0 == index) ? g_vmcs : g_vmcs_other[index - 1];
+}
 
 inline int vmread(std::uint64_t field, void * out)
 {
     if (!g_vmcs_valid || (field >= 0x8000)) {
         return 1;
     }
-    *static_cast<std::uint64_t *>(out) = g_vmcs[field];
+    *static_cast<std::uint64_t *>(out) = g_vmcs_loaded[field];
     return 0;
 }
 
@@ -25,7 +52,7 @@ inline int vmwrite(std::uint64_t field, std::uint64_t value)
     if (!g_vmcs_valid || (field >= 0x8000)) {
         return 1;
     }
-    g_vmcs[field] = value;
+    g_vmcs_loaded[field] = value;
     return 0;
 }
 
@@ -37,9 +64,33 @@ inline int vmxoff()
 {
     return 0;
 }
-inline int vmptrld(void *)
+inline int vmptrld(void * pointer)
 {
-    return 0;
+    // The real code passes the address *of* the physical address, which
+    // is what the instruction takes - SDM 33.3, VMPTRLD, "the operand
+    // is the address of a 64-bit field containing the address of the
+    // VMCS".
+    auto address = *static_cast<std::uint64_t *>(pointer);
+
+    for (std::size_t i{}; i < g_vmcs_regions; ++i) {
+        if ((0 != g_vmcs_address[i]) && (g_vmcs_address[i] == address)) {
+            g_vmcs_loaded = g_vmcs_region(i);
+            return 0;
+        }
+    }
+
+    // First sight of this VMCS: take a free slot. A region starts
+    // zeroed, which is what a freshly allocated VMCS looks like and is
+    // exactly the state the first failure launched a guest with.
+    for (std::size_t i{}; i < g_vmcs_regions; ++i) {
+        if (0 == g_vmcs_address[i]) {
+            g_vmcs_address[i] = address;
+            g_vmcs_loaded = g_vmcs_region(i);
+            return 0;
+        }
+    }
+
+    return 1;
 }
 inline int vmptrst(void *)
 {
