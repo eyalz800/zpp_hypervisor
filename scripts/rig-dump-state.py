@@ -638,7 +638,8 @@ def dump_vtl_steps(args, elf, instance):
         return
 
     armed = ["after HvCallVtlCall (expected VTL1)",
-             "after HvCallVtlReturn (expected VTL0)"]
+             "after HvCallVtlReturn (expected VTL0)",
+             "free-running, on an ordinary second-level entry"]
 
     for k in range(kinds):
         count = word("vtl_step_count", k)

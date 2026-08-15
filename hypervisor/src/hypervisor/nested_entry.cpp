@@ -5707,23 +5707,29 @@ void hypervisor::arm_vtl_step(std::size_t cpu, std::size_t kind)
         return;
     }
 
-    auto switches = this->vtl_switches[cpu][kind];
+    // The free-running kind counts second-level entries and the two
+    // trust-level kinds count switches, so which counter drives the
+    // period is the one thing that differs between them.
+    auto free_running = vtl_step_free_kind == kind;
 
-    // Every `vtl_step_rearm` switches, overwriting, and the two sides
-    // half a period apart. See there for both: why a threshold alone is
-    // not enough, and why arming both on the same multiple starves the
-    // second side entirely.
-    auto phase = (kind * vtl_step_rearm) / vtl_step_kinds;
+    auto count = free_running ? this->l2_entries[cpu]
+                              : this->vtl_switches[cpu][kind];
+    auto period = free_running ? vtl_step_free_period : vtl_step_rearm;
 
-    if ((switches < vtl_step_rearm) ||
-        (phase != (switches % vtl_step_rearm))) {
+    // Every period, overwriting, and the two trust-level sides half a
+    // period apart. See `vtl_step_rearm` for both: why a threshold
+    // alone is not enough, and why arming both on the same multiple
+    // starves the second side entirely.
+    auto phase = free_running ? 0 : (kind * (vtl_step_rearm / 2));
+
+    if ((count < period) || (phase != (count % period))) {
         return;
     }
 
     this->vtl_step_count[kind] = 0;
     this->vtl_step_other[kind] = 0;
     this->vtl_step_other_reason[kind] = 0;
-    this->vtl_step_at[kind] = switches;
+    this->vtl_step_at[kind] = count;
     this->vtl_step_active[cpu] = static_cast<std::uint8_t>(kind + 1);
 }
 
@@ -6494,6 +6500,17 @@ hypervisor::on_l2_exit(std::size_t cpu,
         advance_rip = false;
         return l2_exit_outcome::reflected;
     }
+
+    // The free-running trace, armed on an ordinary exit rather than on
+    // a hypercall. See `vtl_step_free_kind`: the two trust-level traces
+    // can only ever show the loop they were armed for, and what the
+    // priority histogram leaves open is what the guest executes on the
+    // 30 per cent of entries it spends at DISPATCH.
+    //
+    // Before the extended-page-table branch, because that one returns
+    // and a shadow fill is as much a part of what the guest is doing as
+    // anything else.
+    arm_vtl_step(cpu, vtl_step_free_kind);
 
     // Extended page-table faults are decided by composing the two levels
     // rather than by the table below, because which level refused the

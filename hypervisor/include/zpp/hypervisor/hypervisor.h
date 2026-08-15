@@ -5047,7 +5047,28 @@ private:
      * not one.
      * @{
      */
-    static constexpr std::size_t vtl_step_kinds = 2;
+    /**
+     * Two sides of the trust-level loop, and one that assumes nothing.
+     *
+     * Kind 2 is armed on an ordinary second-level entry rather than on a
+     * hypercall, every `vtl_step_free_period` entries, and it exists
+     * because the other two can only ever see the loop they were built
+     * to see. The priority histogram says the guest is at DISPATCH on
+     * 30 per cent of its entries and at PASSIVE on 1.3 per cent, which
+     * is where its deferred procedure calls would run - and `2,048`
+     * instructions of *whatever is executing* is the only way to find
+     * out whether they do.
+     *
+     * Its period is in second-level entries rather than switches, and
+     * is long enough that it does not starve the other two: the settled
+     * loop takes about 62 entries per trust-level switch, so 2,048
+     * switches is roughly 128,000 entries and 60,000 makes the free
+     * trace arm about twice as often. A collision costs one period,
+     * since all three rings are overwritten anyway.
+     */
+    static constexpr std::size_t vtl_step_kinds = 3;
+    static constexpr std::size_t vtl_step_free_kind = 2;
+    static constexpr std::uint64_t vtl_step_free_period = 60000;
 
     /** Long enough for a whole round trip. Measured on the rig: the
      * secure kernel's side is 447 instructions and the ordinary

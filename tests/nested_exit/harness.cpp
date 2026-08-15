@@ -2787,9 +2787,9 @@ static void test_l0_precedence()
         // And the stagger, which is what stops that rule from starving
         // one side outright. Both counts advance together, so on a
         // shared multiple the second side is refused every time.
-        check(0 == (rearm % (2 * hypervisor_t::vtl_step_kinds)),
-              "the period divides evenly by the number of sides, so no "
-              "side's phase lands on another's");
+        check(0 == (rearm % 2),
+              "the period halves evenly, so the second side's phase "
+              "never lands on the first's");
 
         h.vtl_step_active[cpu] = 0;
         h.vtl_switches[cpu][1] = 2 * rearm;
