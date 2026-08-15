@@ -16516,3 +16516,53 @@ That is its own lesson, and a new one for the methodology notes: a
 counter nobody prints is a measurement nobody has. `rig-dump-state.py`
 now reports it, and a slot at zero across a whole boot is a write that
 can be dropped.
+
+### And the deferred-read item is not a narrow change either
+
+The census called `save_l2_state`'s 46 reads "deferrable - serve the
+VMREAD from vmcs02 on demand". The two preconditions check out: vmcs02
+is untouched between the reflection and the guest hypervisor's
+`VMRESUME` (which exits here), so the exit-information and guest-state
+fields the processor wrote are all still there to be read.
+
+**But there is a third dependency the census missed.** `build_vmcs02`
+reads vmcs12's guest-state area to write it into vmcs02 - that is the
+46-write loop whose elision is measured at 45.7 skipped. If
+`save_l2_state` stops populating vmcs12, those writes push *stale*
+values into vmcs02 and clobber the state the processor just saved there.
+
+So deferring the reads alone is unsound. The sound form is bigger:
+**vmcs02 holds the second-level guest's state, and vmcs12 becomes a
+write-log** fed by the guest hypervisor's own `VMWRITE`s - of which
+there are 494 in an entire boot - with nothing copied in either
+direction otherwise. That collapses the 46 reads and the 46 writes
+together and is worth far more than the census credited.
+
+It is also a redesign of the nested state path with real correctness
+risk, and its whole value is a share of a 1.4x against a requirement
+bracketed at (1, 9]. **Not built here**, deliberately: with 54% of a
+round trip being nesting tax that no code change touches, spending the
+risk budget on this before the open decision is settled is the wrong
+order. Recorded in full so it is a design on the shelf rather than a
+line in a census.
+
+### Predictions, written before the audit is read
+
+Recorded first so 1.4x cannot be read as progress toward a 9x question,
+and so a wrong prediction is visible as one:
+
+1. `l1_host_count` will read **36**, matching the `host_write` call
+   sites.
+2. **Most slots will show non-zero `changed`, and the elidable set will
+   be small or empty.** The reasoning: these are vmcs01's *guest*
+   fields, and vmcs01 is what runs the guest hypervisor - so every exit
+   *from it*, of which there are 82 per round trip, saves its live state
+   over them. That is not the L2 exit path, it is the ordinary one, and
+   it fires constantly.
+3. If (2) holds, the write side of the cycles-per-exit work is closed
+   entirely and the reachable total falls **below** 1.4x.
+
+If instead a large set reads zero, that is a surprise worth
+understanding before exploiting - it would mean the guest hypervisor's
+own state genuinely does not move across its exits, which is not what
+"every VM exit saves guest state" predicts.
