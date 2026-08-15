@@ -99,8 +99,7 @@ void hypervisor::on_vm_exit(std::uint64_t cpuid,
 
         this->vmread_benchmark_cycles =
             price_read(bench_field::exit_reason);
-        this->vmread_shadowed_cycles =
-            price_read(bench_field::guest_rip);
+        this->vmread_shadowed_cycles = price_read(bench_field::guest_rip);
         this->vmread_unshadowed_cycles =
             price_read(bench_field::guest_gdtr_base);
         this->vmwrite_shadowed_cycles =
@@ -828,13 +827,47 @@ void hypervisor::on_vm_exit(std::uint64_t cpuid,
                 // hypercall legal. Nothing is recommended, so a guest
                 // has been told to use no enlightenment, and a guest
                 // that uses none never issues a hypercall this VMM
-                // would have to answer. Features zero says the same
-                // for the synthetic MSRs: none is claimed, so none has
-                // been invited.
+                // would have to answer.
                 cpuid_result[0] = 0;
                 cpuid_result[1] = 0;
                 cpuid_result[2] = 0;
                 cpuid_result[3] = 0;
+
+                // The **privileges**, which are not zero and must not
+                // be, and this is the correction to an earlier version
+                // of this block that made them so.
+                //
+                // Zero here says "this interface is present and you are
+                // entitled to none of it", which is this project's
+                // recurring mistake exactly - announcing an interface
+                // and answering part of it. Measured on the rig: the
+                // guest hypervisor announced to, registered itself
+                // through HV_X64_MSR_GUEST_OS_ID and then behaved as
+                // though nothing were there.
+                //
+                // So it claims precisely the two privileges this VMM
+                // backs and no others. Bit 5 is the hypercall MSRs -
+                // the guest OS identity and the hypercall page, both
+                // answered above - and bit 6 is the processor index
+                // MSR, answered from `cpuid`. Everything else stays
+                // clear because nothing else is implemented: the
+                // synthetic interrupt controller, the synthetic timers
+                // and the reference counter are all absent, and a
+                // guest invited to use them would fault on the first
+                // access.
+                //
+                // The pairing is the point. A privilege bit set here is
+                // a promise that the matching MSRs answer, and the two
+                // lists must be read together - the switch in the MSR
+                // handler answers 0x40000000, 0x40000001 and
+                // 0x40000002, which is bits 5 and 6 and nothing more.
+                constexpr std::uint32_t privilege_hypercall_msrs = 1u << 5;
+                constexpr std::uint32_t privilege_vp_index_msr = 1u << 6;
+
+                if (features_leaf == leaf) {
+                    cpuid_result[0] =
+                        privilege_hypercall_msrs | privilege_vp_index_msr;
+                }
             } else if (nested_vmx::announce_hypervisor &&
                        (limits_leaf == leaf)) {
                 // Implementation limits, of which the only one this
