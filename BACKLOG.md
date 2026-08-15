@@ -14695,3 +14695,33 @@ that is recoverable by the same means.
 
 Both still write to the real installation and there is no overlay, so
 neither should be done without saying so first.
+
+### The guest hypervisor does not restrict the page either
+
+```
+VtlReturn (VTL1): page 0x1361de000
+   this VMM's shadow : status 0, rights rwx
+   the guest hypervisor's own walk : status 0, rights rwx
+```
+
+Walked directly rather than inferred from the shadow, because the
+shadow's permissions are the *intersection* with ours and cannot tell a
+restriction of its making from one of ours.
+
+So `HvCallModifyVtlProtectionMask` is issued - `rcx` 0x1000c, and once
+0x1fe0000000c with a repeat count of 510 - and the guest hypervisor
+never expresses it in its extended page tables at all. Virtual secure
+mode's page protections are simply not enforced through the second-level
+tables in this configuration, so the secure kernel cannot be waiting on
+one taking effect through anything this VMM shadows.
+
+**Twelfth candidate, twelfth negative, and every one of them a mechanism
+this VMM implements or shadows.** None has been found wrong.
+
+**Note for anyone continuing: Windows must not be renamed or modified.**
+The rig's installation is not to be touched - no hive edit, no file
+rename, no `bcdedit`. Ruled out by the owner on 2026-08-15, so the
+VBS-disabled experiment recorded in the sections above is **not
+available** and should not be re-proposed. Whatever settles this has to
+be done from inside the VMM or from what the guest can be observed
+doing.
