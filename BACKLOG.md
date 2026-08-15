@@ -17401,3 +17401,34 @@ made without room to verify it costs: the VP assist write-watch wedged a
 boot and took a full run to discover. The blocker is cleared, the design
 is written down with its citation, and it is one focused piece of work
 for someone starting fresh.
+
+### Item 2's second attempt failed too, and the rig has paid enough
+
+Thirty module loads with the licensing condition in place. It was
+necessary and not sufficient, and there is no working theory left for
+what else is missing.
+
+**Reverted, and no third attempt this session.** Two boots have put 218
+and 30 unclean resets on the real Windows installation on the
+passed-through NVMe. This file already records that enough of those
+bring Windows up in recovery and cost a repair cycle with someone at the
+machine. One hypothesis per boot, against the user's hardware, with
+nothing left to reason from, is spending their machine to test guesses.
+
+**What the next attempt owes before it touches the rig.**
+`tests/nested_exit` already compiles the real `build_vmcs02` and
+`save_l2_state`. A case that drives an exit, a VMPTRLD of a second
+vmcs12, and an entry - asserting that every guest-state field vmcs02
+ends up holding is the one the level above put in vmcs12 - would have
+caught **both** of these failures on a desk, in seconds, for free. That
+it did not exist is why two boots were spent discovering it.
+
+The general form, and it is the sharpest lesson of the session:
+**a change whose correctness depends on ordering cannot be validated by
+a unit test of its predicates.** Nine cases asserted what may be
+deferred, which fields are excluded, that a write marks a field owed and
+a read materialises - and every one of them passed while the guest
+reset-looped, because none of them ran a *sequence*.
+
+Item 2 stays sound in principle and worth about 1.16x. It is not worth
+another boot until it can be shown correct without one.
