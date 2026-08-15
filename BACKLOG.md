@@ -17544,3 +17544,37 @@ The next person picking this up has: a suite that catches three
 conditions in seconds, a shim that can represent VMCS ordering at all,
 and a 1.16x waiting behind one switch. What they need first is a fourth
 condition, found on a desk.
+
+## Shadow mode: predictions before the boot
+
+The deferral computes what it would leave in vmcs02, the eager path
+still supplies the value, and the two are compared. Behaviour-neutral -
+`may_defer_guest_state` compiles to `xorl %eax, %eax; retq` with shadow
+on, and the recorder contains no VMCS access - so it **cannot** reset
+the guest, which is why it is worth a boot where a fourth blind attempt
+is not.
+
+**Which field, and why.** Ranked, so a wrong ranking is visible as one:
+
+1. **`guest_pdpte_0` through `guest_pdpte_3`.** SDM 30.3 saves these
+   into the guest-state area **only** when the guest was using PAE
+   paging; a 64-bit guest never updates them, so vmcs02 keeps whatever
+   was last written while vmcs12 can hold something else entirely. They
+   are in the bulk set and nothing excluded them. This is the strongest
+   candidate and it is the one I expect.
+2. **`guest_cr3`.** CR3-load exiting is off, so the guest changes it
+   without exiting; the processor saves the new value on the next exit,
+   but the level above may also write its own into vmcs12.
+3. `guest_pending_debug_exceptions`, which VM *entry* can modify.
+
+**And the outcome I would find most informative is zero.** If nothing
+diverges at all, the fourth condition is not a stale field value - it is
+something structural about when the deferral is licensed, and the search
+moves somewhere quite different. Three boots have said "wrong" and this
+is the first instrument that can say "wrong *here*", including by saying
+"not here at all".
+
+`guest_state_defers` should be roughly one per second-level exit,
+confirming the shadow path is actually running rather than reporting a
+clean zero because nothing reached it - the failure mode this file has
+recorded five times.
