@@ -1014,11 +1014,17 @@ def main():
             print(f"{cpu:3d}  {name:<20} {calls:10d}  {cycles:12d}  "
                   f"{cycles // calls:11d}")
 
-    dump_entry_rips(args, args.elf, instance)
-    dump_priority(args, args.elf, instance)
-    dump_l1_host_audit(args, args.elf, instance)
-    dump_vtl(args, args.elf, instance)
-    dump_vtl_steps(args, args.elf, instance)
+    # Each section separately, because `gdb_offsets` exits the process
+    # when a member is missing and the reader routinely runs ahead of
+    # the deployed binary - a member renamed in the tree but not yet on
+    # the rig killed every section after it, silently, and the dump just
+    # looked short. One section failing must not cost the others.
+    for section in (dump_entry_rips, dump_priority, dump_l1_host_audit,
+                    dump_vtl, dump_vtl_steps):
+        try:
+            section(args, args.elf, instance)
+        except SystemExit as failure:
+            print(f"\n[{section.__name__} skipped: {failure}]")
 
     print("\ncpu  guest-state skipped/done   control skipped/done")
     for cpu in range(args.cpus):

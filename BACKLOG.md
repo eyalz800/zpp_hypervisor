@@ -16566,3 +16566,86 @@ If instead a large set reads zero, that is a surprise worth
 understanding before exploiting - it would mean the guest hypervisor's
 own state genuinely does not move across its exits, which is not what
 "every VM exit saves guest state" predicts.
+
+## The audit answers, the prediction was wrong, and the elision is sound after all
+
+Read at last - the counter had been running unread since it was written.
+**48 of 52 host-state writes are never observed changed**, across
+84,846 samples:
+
+```
+fields written per reflection : 52
+NEVER observed changed        : 48
+observed changed              :  4
+
+   slot  5  field 0x681e  guest_rip      changed 1007 of ~1007 samples
+   slot  7  field 0x6820  guest_rflags   changed 1007 of ~1007
+   slot 13  field 0x4802                 changed   25 of ~1007
+   slot 17  field 0x4804                 changed   17 of ~1007
+```
+
+**The prediction recorded above was wrong, and wrong in the direction
+that matters.** It said "most slots will show non-zero `changed`, and
+the elidable set will be small or empty", reasoning that every exit from
+vmcs01 saves the guest hypervisor's live state over these fields. Exits
+from vmcs01 do save that state - but the value saved is *the same value*
+for everything except the instruction pointer and flags, because the
+guest hypervisor runs its exit path in the same flat 64-bit segments it
+was already in. Saving a field and changing it are not the same thing,
+and the prediction confused them.
+
+So the four that move are exactly the four that must: `guest_rip` and
+`guest_rflags` every single time, because a reflection has to redirect
+the guest hypervisor to its own exit handler, plus two segment limits
+that move about 2% of the time.
+
+### Which means the withdrawal above was half wrong
+
+The blanket cache *is* unsound and the function's comment is right about
+that. But the same comment continues: "What *would* justify eliding a
+particular field is knowing the processor never actually changes it -
+and that is a measurement, not an assumption." I read the refutation,
+stopped there, and declared the item dead - when the next paragraph
+prescribed the measurement that has now come back strongly positive.
+
+**Reading the refutation is not the same as reading the argument.** The
+comment was not saying "this cannot be done"; it was saying "this needs
+a number, and here is the counter that produces it".
+
+### The revised arithmetic
+
+`load_l1_host_state` costs 135,804 cycles a call and 48 of its 52
+writes are elidable - about **125,000 cycles per reflection**, against a
+measured ~786,000 per exit. That is **16% off the per-exit cost on its
+own**, or about 1.19x, from the item the census scored lowest and this
+file withdrew.
+
+With the deferred-read redesign it is roughly 32%, or ~1.47x - so the
+census's 1.4x total was about right while its composition was not.
+
+**The design, which is not a blanket cache.** Elide only the proven-
+stable slots, keep the round-robin audit running *on the elided ones*,
+and log loudly if any of them ever moves. That turns "stable across
+84,846 samples" from an assumption into a continuously checked one, and
+it costs the single VMREAD the audit already spends. `write_vmcs02_
+control` is the same pattern one VMCS over.
+
+**Not built in this session.** It is a change to the reflection path -
+the hottest and least forgiving path here - at the end of a very long
+one, and this tree's own record is that rushed changes there cost boots.
+It is first in the queue, fully specified, with the measurement that
+justifies it recorded above.
+
+### And a reader that had been truncating itself
+
+`gdb_offsets` exits the process when a member is missing, and the reader
+routinely runs ahead of the deployed binary. Renaming
+`interrupt_request_ppr_seen` in the tree, without redeploying, made
+every section after `dump_priority` vanish - including the audit above,
+which is why the first attempt to read it printed nothing at all. The
+dump just looked short.
+
+Each section now runs in its own try, and a failure prints which section
+was skipped and why. **A diagnostic that fails silently is the specific
+thing this file keeps recording**, and this time the reader itself was
+the one doing it.
