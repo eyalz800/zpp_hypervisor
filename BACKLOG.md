@@ -17297,3 +17297,44 @@ secure mode boot.
 **Ring 3 is still not reached**, and the boot has plenty left to do -
 but for the first time the failure is "not finished yet" rather than
 "executing two instruction addresses for ever".
+
+### And it bugchecked anyway - the stretch stays a diagnostic
+
+The guard was watching `allocate_rwx` on serial with a hard stop past 4
+module loads. It reached **4** - two resets beyond the two a healthy
+boot makes - and the counters went *backwards* between reads, 761,242
+exits down to 706,019, which is the tell that the hypervisor was
+reloaded under a guest that restarted. Killed there by PID, and the
+known-good loader restored and hash-verified from a fresh mount
+(`ff9b8c87f90ef0ce41fe06c6dd7211f5`).
+
+**So 2x relieves the starvation and still eventually kills the guest.**
+That is the same fault as `=8`, slower to bite: stretching the period
+without slowing the reference counter leaves the guest's two time
+sources disagreeing, and this part reports no `tsc_scaling` so the
+second cannot be slowed to match. The switch remains a diagnostic and
+must not be read as a fix.
+
+It answered the question it was authorised for and nothing more:
+
+- **the threshold is at or below 2x**, so the bracket is `(1, 2]`;
+- the causal chain is confirmed end to end by moving its one input;
+- and the guest, given that budget, gets past the `ClassPnP` wall.
+
+### Where that leaves the goal
+
+| | |
+|---|---|
+| required | **at or below 2x** |
+| banked (host-state elision) | 1.15x |
+| remaining sound item (vmcs12 write-log) | ~1.16x |
+| **honest reachable** | **~1.35x** |
+
+The gap is at most a factor of **1.5**, and possibly nothing - the
+experiment shows 2x is *sufficient*, not that it is necessary. Nothing
+has tested 1.35x.
+
+That is a completely different position from the one this file held for
+most of the investigation, where the reachable was compared against a
+requirement believed to be up to 9x. **The remaining work is worth
+doing, and it is the vmcs12 write-log.**
