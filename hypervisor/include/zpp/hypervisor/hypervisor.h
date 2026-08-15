@@ -4345,6 +4345,20 @@ private:
     void arm_vtl_step(std::size_t cpu, std::size_t kind);
 
     /**
+     * Closes the half of the round trip that ends at this switch and
+     * opens the next one. See `vtl_half_cycles`.
+     */
+    void mark_vtl_half(std::size_t cpu, std::size_t kind);
+
+    /**
+     * Reads vmcs02's entry-interruption field back at the last
+     * instruction before entry, and counts an entry that carries
+     * nothing while the guest could have taken a deferred procedure
+     * call. See `l2_given_vector`.
+     */
+    void record_l2_entry_event(std::size_t cpu);
+
+    /**
      * The base of the page-aligned PE image containing an address, found
      * by scanning back for `MZ`, and the name from its export directory.
      * Zero when neither is found within the bound.
@@ -4699,6 +4713,29 @@ private:
     std::uint64_t interrupt_request_command[max_cpus]
                                            [interrupt_request_capacity]{};
     std::uint64_t interrupt_request_count[max_cpus]{};
+
+    /**
+     * And the *processor* priority at the same instant, which is the
+     * one that decides whether the request can ever be granted.
+     *
+     * SDM 12.8.3.1 makes PPR the maximum of the task priority and the
+     * highest in-service vector's class, and an arriving interrupt's
+     * class must exceed **PPR**, not TPR. Every reading in this
+     * investigation has been of TPR, so two different faults have been
+     * indistinguishable: a guest that raised its own priority to
+     * DISPATCH and has not lowered it, and a guest holding an
+     * in-service interrupt it never acknowledged. The second is a
+     * deadlock and the first is a cost.
+     *
+     * Sampled where the request is made rather than at entry, because
+     * the question is what the guest's own priority was **when it asked
+     * for the interrupt** - a guest asking for a DISPATCH_LEVEL
+     * interrupt while already at DISPATCH_LEVEL is asking for something
+     * it has masked, and that is visible nowhere else.
+     */
+    std::uint8_t interrupt_request_ppr[max_cpus]
+                                      [interrupt_request_capacity]{};
+    std::uint64_t interrupt_request_ppr_seen[max_cpus][256]{};
 
     /**
      * Every vector the second-level guest asked for, counted, so the
@@ -5164,6 +5201,99 @@ private:
 
     std::uint64_t clock_gap_last[max_cpus]{};
     std::uint64_t clock_gap_buckets[max_cpus][64]{};
+    /**
+     * @}
+     */
+
+    /**
+     * What one trust-level round trip costs, split into its two halves.
+     *
+     * The chain from cost to symptom is measured and closed - a round
+     * trip costs more than a guest clock period, so the clock is
+     * pending again within a few instructions, so nothing below
+     * CLOCK_LEVEL ever runs. What is *not* settled is where that cost
+     * is, and the two candidates want opposite work:
+     *
+     * - if it is the number of second-level exits a round trip takes,
+     *   it is this VMM's, and reflecting fewer of them is the fix;
+     * - if it is the cycles per exit, it is largely the rig's - a
+     *   VMREAD traps to the layer below at about 4,340 cycles here
+     *   because this VMM is itself KVM's guest, and that number does
+     *   not exist on bare metal.
+     *
+     * Halves rather than a total, because they are different code and
+     * only one of them is the secure kernel's. Half 0 is
+     * `HvCallVtlCall` to the matching `HvCallVtlReturn` - the second
+     * trust level - and half 1 is that return to the next call, which
+     * is the ordinary kernel's clock handler.
+     *
+     * Accumulated rather than sampled, so a reader divides by the count
+     * and gets a mean over the whole boot; and `capture_vtl_switch`
+     * already runs on exactly these two exits, so this costs one
+     * `rdtsc` per switch and no new decision about when to measure.
+     * @{
+     */
+    static constexpr std::size_t vtl_halves = 2;
+
+    std::uint64_t vtl_half_cycles[max_cpus][vtl_halves]{};
+    std::uint64_t vtl_half_exits[max_cpus][vtl_halves]{};
+    std::uint64_t vtl_half_count[max_cpus][vtl_halves]{};
+
+    /** Where the last switch left the two counters, and which side it
+     * was, plus one. Zero means no switch has been seen yet, so the
+     * first half of a boot is dropped rather than measured against an
+     * unset mark. */
+    std::uint64_t vtl_half_mark_cycles[max_cpus]{};
+    std::uint64_t vtl_half_mark_exits[max_cpus]{};
+    std::uint8_t vtl_half_mark_kind[max_cpus]{};
+    /**
+     * @}
+     */
+
+    /**
+     * Why the DISPATCH_LEVEL software interrupt is never delivered.
+     *
+     * The guest writes `HV_X64_MSR_ICR` (0x40000071) with `0x4002f` -
+     * a self-directed interrupt of vector 0x2f - about 250 times a
+     * second, and `l2_injected_vector[0x2f]` is 207 for a whole boot.
+     * "Injected zero times" has three distinct causes and they want
+     * opposite work, so each gets a counter rather than an argument:
+     *
+     * - **never requested of us.** `l2_injected_vector` is written from
+     *   vmcs12's own entry-interruption field with the self-IPI branch
+     *   compiled out (checked in the built binary: `llvm-objdump` finds
+     *   no reference to `l2_self_ipi_delivered`), so it already *is*
+     *   what the guest hypervisor asked for. `l2_given_vector` is the
+     *   same field read back out of vmcs02 at the last instruction
+     *   before entry, which closes the asked-versus-given gap the same
+     *   way the control sweep did - by reading what the processor will
+     *   actually act on rather than what was meant to be written.
+     * - **requested and dropped.** That is the two disagreeing.
+     * - **queued and never eligible.** `l2_entry_ppr` is the processor
+     *   priority register, not the task priority: SDM 12.8.3.1 makes
+     *   PPR the value an interrupt's class must exceed, and it is the
+     *   maximum of TPR and the highest in-service vector - so a guest
+     *   that raised to DISPATCH and never lowered, and a guest with an
+     *   unacknowledged in-service interrupt, are different faults and
+     *   TPR alone cannot tell them apart.
+     *
+     * `l2_low_priority_no_event` is the crossing that decides it: an
+     * entry made with PPR below the DISPATCH class and no event
+     * injected is a moment the guest hypervisor *could* have delivered
+     * `0x2f` and did not. Many of those and the fault is above us; none
+     * of them and the priority never drops, which is a deadlock with a
+     * different fix and not a cost.
+     * @{
+     */
+    std::uint32_t l2_given_vector[max_cpus][256]{};
+    std::uint32_t l2_entry_ppr[max_cpus][256]{};
+    std::uint64_t l2_low_priority_no_event[max_cpus]{};
+
+    /** The priority this entry was sampled at, carried from where the
+     * virtual-APIC page is read to where the event it will carry is
+     * known. Both are on the same entry, so this never spans one. */
+    std::uint8_t l2_entry_ppr_last[max_cpus]{};
+
     /**
      * @}
      */

@@ -1636,6 +1636,31 @@ std::expected<void, zpp::error> hypervisor::build_vmcs02(std::size_t cpu)
                               sizeof(vtpr)))) {
                 this->l2_entry_vtpr[cpu][vtpr] += 1;
             }
+
+            // And the *processor* priority beside it, which is the one
+            // that decides delivery.
+            //
+            // SDM 12.8.3.1 makes PPR the maximum of the task priority
+            // and the highest in-service vector's class, and it is PPR
+            // that an arriving interrupt's class must exceed. Every
+            // reading in this investigation has been of TPR, so a guest
+            // holding an unacknowledged in-service interrupt and a
+            // guest that simply raised its own priority have been
+            // indistinguishable - and they are different faults.
+            constexpr std::uint64_t processor_priority = 0xa0;
+            std::uint8_t ppr{};
+
+            if (read_guest_physical(
+                    virtual_apic12 + processor_priority,
+                    std::span(reinterpret_cast<std::byte *>(&ppr),
+                              sizeof(ppr)))) {
+                this->l2_entry_ppr[cpu][ppr] += 1;
+
+                // Kept for the crossing, which happens where the event
+                // this entry will actually carry is in hand. See
+                // `l2_low_priority_no_event`.
+                this->l2_entry_ppr_last[cpu] = ppr;
+            }
         }
     } else if (tpr_shadow12) {
         // Asked for and not honoured, which the branch above only reaches
@@ -3353,6 +3378,7 @@ hypervisor::l2_entry_outcome hypervisor::enter_or_park_l2(std::size_t cpu)
         // true of the other two inactive states, which is why only they
         // are refused or held.
         vmcs.write(field::guest_activity_state, activity12);
+        record_l2_entry_event(cpu);
         return l2_entry_outcome::entered;
     }
 
@@ -5715,6 +5741,77 @@ void hypervisor::capture_vtl_switch(std::size_t cpu,
     this->vtl_captured[kind] = 1;
 }
 
+void hypervisor::record_l2_entry_event(std::size_t cpu)
+{
+    if (cpu >= max_cpus) {
+        return;
+    }
+
+    // Read back out of vmcs02 rather than remembered from where it was
+    // written, which is the whole point: what the processor acts on is
+    // the field, and every other account of it is a claim about the
+    // field. The control sweep closed five dimensions this way and this
+    // is the same question asked of an event instead of a control.
+    //
+    // One VMREAD, about 4,340 cycles here, against roughly 300
+    // microseconds an exit - under two per cent, and only on the entry
+    // path.
+    constexpr std::uint64_t valid = 1ull << 31;
+    constexpr std::uint64_t vector_mask = 0xff;
+
+    auto given =
+        this->vmcs.read(field::vm_entry_interruption_information_field);
+
+    if (0 != (given & valid)) {
+        this->l2_given_vector[cpu][given & vector_mask] += 1;
+        return;
+    }
+
+    // No event, so this entry is a moment the guest hypervisor chose
+    // not to deliver one. Whether it *could* have is what the priority
+    // decides. See `l2_low_priority_no_event`.
+    constexpr std::uint64_t dispatch_class = 0x20;
+
+    if (this->l2_entry_ppr_last[cpu] < dispatch_class) {
+        this->l2_low_priority_no_event[cpu] += 1;
+    }
+}
+
+void hypervisor::mark_vtl_half(std::size_t cpu, std::size_t kind)
+{
+    if ((cpu >= max_cpus) || (kind >= vtl_halves)) {
+        return;
+    }
+
+    auto now = arch::x86_64::rdtsc();
+    auto exits = this->exit_total[cpu];
+    auto previous = this->vtl_half_mark_kind[cpu];
+
+    // The half that just ended is named by the switch that *opened* it,
+    // not by this one: `HvCallVtlCall` opens the secure kernel's half
+    // and `HvCallVtlReturn` closes it.
+    //
+    // A repeat of the same kind is dropped rather than counted. It
+    // means a switch was missed - the ring is per processor and the
+    // capture runs before the reflection, so nothing here guarantees
+    // the pair - and attributing an unmatched interval to a half would
+    // put the other half's cost into it.
+    if ((0 != previous) && (static_cast<std::uint8_t>(kind + 1) !=
+                            previous)) {
+        auto half = static_cast<std::size_t>(previous - 1);
+
+        this->vtl_half_cycles[cpu][half] +=
+            now - this->vtl_half_mark_cycles[cpu];
+        this->vtl_half_exits[cpu][half] +=
+            exits - this->vtl_half_mark_exits[cpu];
+        this->vtl_half_count[cpu][half] += 1;
+    }
+
+    this->vtl_half_mark_cycles[cpu] = now;
+    this->vtl_half_mark_exits[cpu] = exits;
+    this->vtl_half_mark_kind[cpu] = static_cast<std::uint8_t>(kind + 1);
+}
+
 void hypervisor::arm_vtl_step(std::size_t cpu, std::size_t kind)
 {
     if ((cpu >= max_cpus) || (kind >= vtl_step_kinds)) {
@@ -6027,9 +6124,27 @@ void hypervisor::record_interrupt_request(std::size_t cpu,
                       sizeof(vtpr))));
     }
 
+    // And the processor priority beside it, off the same page and in
+    // the same read pattern. See `interrupt_request_ppr`: it is PPR and
+    // not TPR that an arriving interrupt's class must exceed, so this
+    // is the reading that says whether the request could ever have been
+    // granted at the moment it was made.
+    constexpr std::uint64_t processor_priority_offset = 0xa0;
+
+    std::uint8_t ppr{};
+
+    if (0 != page) {
+        static_cast<void>(read_guest_physical(
+            page + processor_priority_offset,
+            std::span(reinterpret_cast<std::byte *>(&ppr), sizeof(ppr))));
+    }
+
+    this->interrupt_request_ppr_seen[cpu][ppr] += 1;
+
     auto slot =
         this->interrupt_request_count[cpu] % interrupt_request_capacity;
     this->interrupt_request_vtpr[cpu][slot] = vtpr;
+    this->interrupt_request_ppr[cpu][slot] = ppr;
     this->interrupt_request_command[cpu][slot] = command;
     this->interrupt_request_count[cpu] =
         this->interrupt_request_count[cpu] + 1;
@@ -6790,9 +6905,11 @@ hypervisor::on_l2_exit(std::size_t cpu,
 
             if (vtl_call_code == code) {
                 capture_vtl_switch(cpu, 0, context);
+                mark_vtl_half(cpu, 0);
                 arm_vtl_step(cpu, 0);
             } else if (vtl_return_code == code) {
                 capture_vtl_switch(cpu, 1, context);
+                mark_vtl_half(cpu, 1);
                 arm_vtl_step(cpu, 1);
             }
         }

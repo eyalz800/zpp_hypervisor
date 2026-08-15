@@ -420,7 +420,10 @@ def dump_priority(args, elf, instance):
     """
     members = ["l2_entry_vtpr", "l2_tpr_threshold_seen", "l2_cpl_seen",
                "l2_tpr_would_fire", "l2_tpr_armed_above",
-               "clock_gap_buckets"]
+               "clock_gap_buckets", "l2_entry_ppr", "l2_given_vector",
+               "l2_low_priority_no_event", "interrupt_request_ppr_seen",
+               "interrupt_request_vector", "vtl_half_cycles",
+               "vtl_half_exits", "vtl_half_count"]
     off = gdb_offsets(elf, members)
     vtpr_slots, threshold_slots, cpl_slots = gdb_values(elf, [
         "sizeof(('zpp::hypervisor::hypervisor' *)0)->l2_entry_vtpr[0] / 4",
@@ -442,6 +445,15 @@ def dump_priority(args, elf, instance):
         "->clock_gap_buckets[0] / 8"])[0]
     reader.queue(instance + off["clock_gap_buckets"],
                  args.cpus * gap_slots)
+    # 32 bit counters, two to a quadword, same as l2_entry_vtpr.
+    for member in ("l2_entry_ppr", "l2_given_vector"):
+        reader.queue(instance + off[member], args.cpus * 256 // 2)
+    for member in ("interrupt_request_ppr_seen",
+                   "interrupt_request_vector"):
+        reader.queue(instance + off[member], args.cpus * 256)
+    reader.queue(instance + off["l2_low_priority_no_event"], args.cpus)
+    for member in ("vtl_half_cycles", "vtl_half_exits", "vtl_half_count"):
+        reader.queue(instance + off[member], args.cpus * 2)
     got = reader.run()
 
     def word(member, index):
@@ -487,6 +499,62 @@ def dump_priority(args, elf, instance):
                 low = 1 << i
                 print(f"    2^{i:<2} ({low / 2600.0:10.1f} us)  {v:>10}  "
                       f"{100.0 * v / total:5.1f}%")
+
+        # PPR, not TPR, is what an arriving interrupt's class must
+        # exceed - SDM 12.8.3.1 - so this is the reading that says
+        # whether the DISPATCH_LEVEL request could ever be granted.
+        def packed(member, index):
+            pair = word(member, (cpu * 256 + index) // 2)
+            return (pair >> (32 * (index % 2))) & 0xffffffff
+
+        for member, what in (("l2_entry_ppr",
+                              "processor priority at entry"),
+                             ("l2_given_vector",
+                              "vectors vmcs02 actually carried")):
+            rows = [(packed(member, i), i) for i in range(256)]
+            rows = [r for r in rows if r[0]]
+            if not rows:
+                continue
+            total = sum(c for c, _ in rows) or 1
+            print(f"\n  {what} ({total:,})")
+            for count, value in sorted(rows, reverse=True)[:8]:
+                print(f"    0x{value:02x}  {count:>10}  "
+                      f"{100.0 * count / total:5.1f}%")
+
+        print(f"\n  entries carrying nothing while the priority would "
+              f"have admitted a deferred call: "
+              f"{word('l2_low_priority_no_event', cpu):,}")
+
+        for member, what in (
+                ("interrupt_request_vector",
+                 "vectors the guest asked for"),
+                ("interrupt_request_ppr_seen",
+                 "processor priority when it asked")):
+            rows = [(word(member, cpu * 256 + i), i) for i in range(256)]
+            rows = [r for r in rows if r[0]]
+            if not rows:
+                continue
+            total = sum(c for c, _ in rows) or 1
+            print(f"\n  {what} ({total:,})")
+            for count, value in sorted(rows, reverse=True)[:8]:
+                print(f"    0x{value:02x}  {count:>10}  "
+                      f"{100.0 * count / total:5.1f}%")
+
+        # And what a round trip costs, split into its two halves.
+        halves = ["HvCallVtlCall -> HvCallVtlReturn (secure kernel)",
+                  "HvCallVtlReturn -> HvCallVtlCall (ordinary kernel)"]
+        if any(word("vtl_half_count", cpu * 2 + h) for h in range(2)):
+            print("\n  what one trust-level round trip costs")
+            for h in range(2):
+                n = word("vtl_half_count", cpu * 2 + h)
+                if not n:
+                    continue
+                cycles = word("vtl_half_cycles", cpu * 2 + h)
+                exits = word("vtl_half_exits", cpu * 2 + h)
+                print(f"    {halves[h]}")
+                print(f"      {n:,} halves, {cycles // n:,} cycles "
+                      f"({cycles / n / 2600.0:.1f} us), "
+                      f"{exits / n:.1f} exits")
 
 
 def dump_vtl(args, elf, instance):
