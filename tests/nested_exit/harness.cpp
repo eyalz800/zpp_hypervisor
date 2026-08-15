@@ -81,6 +81,11 @@ static std::map<std::uint64_t, bool> g_host_denied;
 // below for why it is counted rather than performed.
 static std::size_t g_general_protection_faults;
 
+// The monitor trap flag, as the instruction trace leaves it. See the
+// stub below for why it is recorded rather than written.
+static std::size_t g_monitor_trap_flag_writes;
+static bool g_monitor_trap_flag;
+
 namespace zpp::arch::x86_64
 {
 std::uint64_t rdmsr(std::uint32_t index)
@@ -483,6 +488,18 @@ bool hypervisor::on_ept_violation(std::size_t,
 
 void hypervisor::invalidate_ept_locally()
 {
+}
+
+/**
+ * The real one is in `local_apic.cpp`, which this harness does not
+ * compile - it reaches for the VMX capability MSRs and the live VMCS.
+ * Recorded rather than ignored so a test can assert that the
+ * instruction trace disarms the flag when its ring fills.
+ */
+void hypervisor::monitor_trap_flag(bool value)
+{
+    g_monitor_trap_flag = value;
+    ++g_monitor_trap_flag_writes;
 }
 
 } // namespace zpp::hypervisor
@@ -2731,6 +2748,76 @@ static void test_l0_precedence()
               "MTF: a step in progress outranks the guest hypervisor's "
               "control");
         hv().stepping_watch[cpu] = false;
+    }
+
+    // The instruction trace of the trust-level loop, which is this VMM's
+    // own and belongs to neither level. See `vtl_step_rip`.
+    {
+        auto & h = hv();
+
+        h.vtl_step_active[cpu] = 0;
+        h.vtl_step_count[0] = 0;
+        h.vtl_step_count[1] = 0;
+        h.vtl_step_code_count[0] = 0;
+        h.vtl_switches[cpu][0] = 0;
+        h.vtl_switches[cpu][1] = hypervisor_t::vtl_step_arm_at;
+
+        h.arm_vtl_step(cpu, 0);
+        check(0 == h.vtl_step_active[cpu],
+              "the trace does not arm before the loop has settled - the "
+              "same two hypercalls carry the boot path first");
+
+        h.vtl_switches[cpu][0] = hypervisor_t::vtl_step_arm_at;
+        h.arm_vtl_step(cpu, 0);
+        check(1 == h.vtl_step_active[cpu],
+              "the trace arms once the loop has settled");
+
+        h.arm_vtl_step(cpu, 1);
+        check(1 == h.vtl_step_active[cpu],
+              "one trace at a time: the flag lives in this processor's "
+              "vmcs02 and a second arming would append one side's "
+              "instructions to the other's ring");
+
+        h.vmcs.guest_rip(0x1234);
+        h.record_vtl_step(cpu);
+        h.vmcs.guest_rip(0x1234);
+        h.record_vtl_step(cpu);
+
+        check(2 == h.vtl_step_count[0], "every step is recorded");
+        check(0x1234 == h.vtl_step_rip[0][1],
+              "and it is the second-level guest's own instruction "
+              "pointer");
+        check(1 == h.vtl_step_code_count[0],
+              "a repeated address takes one code slot, not two");
+
+        g_monitor_trap_flag = true;
+        g_monitor_trap_flag_writes = 0;
+
+        for (std::size_t i{}; i <= hypervisor_t::vtl_step_capacity; ++i) {
+            h.vmcs.guest_rip(0x2000 + i);
+            h.record_vtl_step(cpu);
+        }
+
+        check(hypervisor_t::vtl_step_capacity == h.vtl_step_count[0],
+              "the ring fills and stops rather than wrapping - a wrapped "
+              "trace of a loop reads as a different loop");
+        check(0 == h.vtl_step_active[cpu],
+              "and the trace disarms itself");
+        check((1 == g_monitor_trap_flag_writes) && !g_monitor_trap_flag,
+              "clearing the flag in the VMCS too, because vmcs02 is "
+              "current and the next resume would otherwise take a trap "
+              "exit nothing above claims");
+
+        h.arm_vtl_step(cpu, 0);
+        check(0 == h.vtl_step_active[cpu],
+              "and does not arm a second time for the same side - one "
+              "trace per side for the life of the boot");
+
+        h.vtl_step_count[0] = 0;
+        h.vtl_step_count[1] = 0;
+        h.vtl_step_code_count[0] = 0;
+        h.vtl_switches[cpu][0] = 0;
+        h.vtl_switches[cpu][1] = 0;
     }
 
     // The two exits that are always this VMM's whatever vmcs12 says.

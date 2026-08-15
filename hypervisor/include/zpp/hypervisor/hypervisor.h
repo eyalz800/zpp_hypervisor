@@ -4332,6 +4332,19 @@ private:
                             arch::x86_64::context & context);
 
     /**
+     * Records one monitor-trap-flag step of the trust-level loop and
+     * disarms the trace when its ring is full. See `vtl_step_rip`.
+     */
+    void record_vtl_step(std::size_t cpu);
+
+    /**
+     * Arms the instruction trace for whichever trust level the processor
+     * comes back in, once per side and only after the loop has settled.
+     * See `vtl_step_rip`.
+     */
+    void arm_vtl_step(std::size_t cpu, std::size_t kind);
+
+    /**
      * The base of the page-aligned PE image containing an address, found
      * by scanning back for `MZ`, and the name from its export directory.
      * Zero when neither is found within the bound.
@@ -4988,6 +5001,72 @@ private:
     volatile std::uint64_t vtl_page_guest_status[vtl_kinds]{};
     volatile std::uint64_t vtl_page_guest_rights[vtl_kinds]{};
     volatile std::uint64_t vtl_captured[vtl_kinds]{};
+
+    /**
+     * Every instruction one side of the trust-level loop executes, taken
+     * with the monitor trap flag.
+     *
+     * This is the one question the whole investigation has left and the
+     * only instrument that can ask it. Between `HvCallVtlCall` and
+     * `HvCallVtlReturn` the second trust level takes **zero** exits, so
+     * nothing this VMM records says what it does - and the first level's
+     * registers and stack are byte-identical every iteration, so its
+     * decision to call again is invisible too. Both sides are therefore
+     * black boxes made of instructions nothing observes, and the monitor
+     * trap flag observes exactly that: SDM 26.5.2 makes it an exit after
+     * every retired instruction, with no cooperation from the guest and
+     * nothing written into its memory.
+     *
+     * Armed once per side, after the loop has clearly settled, and it
+     * disarms itself when the ring is full. Bounded on purpose: it is a
+     * VM exit per instruction and a guest stepped for ever would not be
+     * the guest being measured. `vtl_step_active` holds the kind plus
+     * one while a trace runs, which is also what `build_vmcs02` reads to
+     * keep the flag set across the rebuild every entry does.
+     *
+     * `vtl_step_cr3` is recorded per step rather than once, because the
+     * trace is armed from the exit *before* the entry and which trust
+     * level the processor comes back in is the thing being established,
+     * not something to assume. A trace armed after `HvCallVtlCall` is
+     * expected to be the secure kernel and one armed after
+     * `HvCallVtlReturn` the ordinary kernel; the recorded control
+     * register says which it actually was.
+     *
+     * The distinct addresses are collected with 32 bytes of code each,
+     * because a trace of bare addresses cannot be disassembled outside -
+     * the tree has no copy of either image, and the 1024 byte window
+     * `capture_vtl_switch` takes covers only the call site.
+     * @{
+     */
+    static constexpr std::size_t vtl_step_kinds = 2;
+    static constexpr std::size_t vtl_step_capacity = 1024;
+    static constexpr std::size_t vtl_step_code_slots = 64;
+    static constexpr std::size_t vtl_step_code_size = 32;
+
+    /** Which side of the loop to step next, and when. A trace armed
+     * before the loop has settled would record the boot path instead. */
+    static constexpr std::uint64_t vtl_step_arm_at = 4096;
+
+    std::uint64_t vtl_step_rip[vtl_step_kinds][vtl_step_capacity]{};
+    std::uint64_t vtl_step_cr3[vtl_step_kinds][vtl_step_capacity]{};
+    volatile std::uint64_t vtl_step_count[vtl_step_kinds]{};
+
+    /** Non-monitor-trap exits taken while a trace was running, which
+     * are the trace being interrupted rather than the trace itself. */
+    volatile std::uint64_t vtl_step_other[vtl_step_kinds]{};
+    volatile std::uint64_t vtl_step_other_reason[vtl_step_kinds]{};
+
+    std::uint64_t vtl_step_code_rip[vtl_step_kinds][vtl_step_code_slots]{};
+    std::uint8_t vtl_step_code[vtl_step_kinds][vtl_step_code_slots]
+                              [vtl_step_code_size]{};
+    volatile std::uint64_t vtl_step_code_count[vtl_step_kinds]{};
+
+    /** The kind being stepped plus one, or zero. Per processor, because
+     * the flag lives in that processor's vmcs02. */
+    std::uint8_t vtl_step_active[max_cpus]{};
+    /**
+     * @}
+     */
 
     /** The last value written to `HV_X64_MSR_STIMER0_CONFIG`, so the
      * count that follows can be read as a period or as an absolute

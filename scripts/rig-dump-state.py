@@ -536,6 +536,88 @@ def dump_vtl(args, elf, instance):
                 print(f"    +0x{at:03x}  0x{value:016x}{mark}")
 
 
+def dump_vtl_steps(args, elf, instance):
+    """The instruction trace of each side of the trust-level loop.
+
+    Printed as the ordered addresses with their repeat counts collapsed,
+    plus the distinct addresses with their bytes, because the loop is
+    expected to be short and a thousand lines of the same three
+    addresses buries what they are.
+
+    The bytes are not disassembled here for the reason `dump_vtl` gives
+    about the call site's window: there is no x86 decoder in this script
+    and llvm-objdump takes the hex directly.
+    """
+    members = ["vtl_step_rip", "vtl_step_cr3", "vtl_step_count",
+               "vtl_step_other", "vtl_step_other_reason",
+               "vtl_step_code_rip", "vtl_step_code",
+               "vtl_step_code_count"]
+    off = gdb_offsets(elf, members)
+
+    kinds, capacity, code_slots, code_size = gdb_values(elf, [
+        "sizeof(('zpp::hypervisor::hypervisor' *)0)->vtl_step_count / 8",
+        "sizeof(('zpp::hypervisor::hypervisor' *)0)->vtl_step_rip[0] / 8",
+        "sizeof(('zpp::hypervisor::hypervisor' *)0)->vtl_step_code[0] / "
+        "sizeof(('zpp::hypervisor::hypervisor' *)0)->vtl_step_code[0][0]",
+        "sizeof(('zpp::hypervisor::hypervisor' *)0)->vtl_step_code[0][0]"])
+
+    reader = Monitor(args.rig, args.port)
+    for member in ("vtl_step_count", "vtl_step_other",
+                   "vtl_step_other_reason", "vtl_step_code_count"):
+        reader.queue(instance + off[member], kinds)
+    reader.queue(instance + off["vtl_step_rip"], kinds * capacity)
+    reader.queue(instance + off["vtl_step_cr3"], kinds * capacity)
+    reader.queue(instance + off["vtl_step_code_rip"], kinds * code_slots)
+    reader.queue(instance + off["vtl_step_code"],
+                 kinds * code_slots * code_size // 8)
+    got = reader.run()
+
+    def word(member, index):
+        return got.get(instance + off[member] + 8 * index, 0)
+
+    if not any(word("vtl_step_count", k) for k in range(kinds)):
+        return
+
+    armed = ["after HvCallVtlCall (expected VTL1)",
+             "after HvCallVtlReturn (expected VTL0)"]
+
+    for k in range(kinds):
+        count = word("vtl_step_count", k)
+        if not count:
+            continue
+
+        print(f"\n--- instruction trace {armed[k]}: {count} steps, "
+              f"{word('vtl_step_other', k)} other exits "
+              f"(first reason 0x{word('vtl_step_other_reason', k):x}) ---")
+
+        # Runs rather than lines: a loop of three addresses spun a
+        # thousand times is three lines and a count, and the count is
+        # the finding.
+        run_rip, run_cr3, run_len = None, None, 0
+        for i in range(count):
+            rip = word("vtl_step_rip", k * capacity + i)
+            cr3 = word("vtl_step_cr3", k * capacity + i)
+            if (rip, cr3) == (run_rip, run_cr3):
+                run_len += 1
+                continue
+            if run_rip is not None:
+                print(f"    0x{run_rip:016x}  cr3 0x{run_cr3:x}"
+                      + (f"  x{run_len}" if run_len > 1 else ""))
+            run_rip, run_cr3, run_len = rip, cr3, 1
+        if run_rip is not None:
+            print(f"    0x{run_rip:016x}  cr3 0x{run_cr3:x}"
+                  + (f"  x{run_len}" if run_len > 1 else ""))
+
+        print(f"  {word('vtl_step_code_count', k)} distinct addresses:")
+        for i in range(word("vtl_step_code_count", k)):
+            rip = word("vtl_step_code_rip", k * code_slots + i)
+            base = (k * code_slots + i) * code_size // 8
+            raw = b"".join(word("vtl_step_code", base + j)
+                           .to_bytes(8, "little")
+                           for j in range(code_size // 8))
+            print(f"    0x{rip:016x}  {raw.hex()}")
+
+
 def main():
     ap = argparse.ArgumentParser()
     # The archived copy first, because it is the binary the guest is
@@ -694,6 +776,7 @@ def main():
 
     dump_entry_rips(args, args.elf, instance)
     dump_vtl(args, args.elf, instance)
+    dump_vtl_steps(args, args.elf, instance)
 
     print("\ncpu  guest-state skipped/done   control skipped/done")
     for cpu in range(args.cpus):

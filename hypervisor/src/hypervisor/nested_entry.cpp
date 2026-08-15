@@ -1557,7 +1557,7 @@ std::expected<void, zpp::error> hypervisor::build_vmcs02(std::size_t cpu)
     // records `nested.mtf_pending` and `vmx_check_nested_events`
     // delivers it as a monitor-trap-flag VM exit, so it survives round
     // trips through L1 and is even part of migration state.
-    if (this->stepping_watch[cpu]) {
+    if (this->stepping_watch[cpu] || (0 != this->vtl_step_active[cpu])) {
         primary |= primary_monitor_trap_flag;
     }
 
@@ -5694,6 +5694,101 @@ void hypervisor::capture_vtl_switch(std::size_t cpu,
     this->vtl_captured[kind] = 1;
 }
 
+void hypervisor::arm_vtl_step(std::size_t cpu, std::size_t kind)
+{
+    if ((cpu >= max_cpus) || (kind >= vtl_step_kinds)) {
+        return;
+    }
+
+    // One trace per side for the life of the boot, and never two at
+    // once: the flag lives in this processor's vmcs02 and a second
+    // arming would append one side's instructions to the other's ring.
+    if ((0 != this->vtl_step_active[cpu]) ||
+        (0 != this->vtl_step_count[kind])) {
+        return;
+    }
+
+    // After the loop has settled, for the reason every other capture
+    // here waits: the same two hypercalls carry the boot path before
+    // they carry the livelock, and a trace of the boot path answers a
+    // question nobody asked.
+    if (this->vtl_switches[cpu][kind] < vtl_step_arm_at) {
+        return;
+    }
+
+    this->vtl_step_active[cpu] = static_cast<std::uint8_t>(kind + 1);
+}
+
+void hypervisor::record_vtl_step(std::size_t cpu)
+{
+    if (cpu >= max_cpus) {
+        return;
+    }
+
+    auto active = this->vtl_step_active[cpu];
+    if (0 == active) {
+        return;
+    }
+
+    auto kind = static_cast<std::size_t>(active - 1);
+    auto index = this->vtl_step_count[kind];
+
+    if (index >= vtl_step_capacity) {
+        // Disarmed here and in the VMCS both, because vmcs02 is current
+        // and the next resume would otherwise take one more trap exit
+        // that nothing above claims - it would fall through to "neither
+        // side asked for it" and reach the watched-page handler, which
+        // is not this trace's.
+        this->vtl_step_active[cpu] = 0;
+        monitor_trap_flag(false);
+        return;
+    }
+
+    auto rip = this->vmcs.guest_rip();
+
+    this->vtl_step_rip[kind][index] = rip;
+    this->vtl_step_cr3[kind][index] = this->vmcs.guest_cr3();
+    this->vtl_step_count[kind] = index + 1;
+
+    // And the instructions themselves, once per distinct address.
+    //
+    // A trace of bare addresses cannot be read outside: there is no copy
+    // of `ntoskrnl.exe` or `securekernel.exe` anywhere in this tree, and
+    // the window `capture_vtl_switch` takes covers the call site only. A
+    // linear scan over sixty-four slots per step costs nothing next to
+    // the exit that produced the step.
+    auto slots = this->vtl_step_code_count[kind];
+
+    for (std::size_t i{}; i < slots; ++i) {
+        if (rip == this->vtl_step_code_rip[kind][i]) {
+            return;
+        }
+    }
+
+    if (slots >= vtl_step_code_slots) {
+        return;
+    }
+
+    for (std::size_t i{}; i < vtl_step_code_size; ++i) {
+        auto physical = translate_guest_linear(rip + i);
+        if (!physical) {
+            break;
+        }
+
+        if (!read_guest_memory(
+                cpu,
+                *physical,
+                std::span(reinterpret_cast<std::byte *>(
+                              &this->vtl_step_code[kind][slots][i]),
+                          1))) {
+            break;
+        }
+    }
+
+    this->vtl_step_code_rip[kind][slots] = rip;
+    this->vtl_step_code_count[kind] = slots + 1;
+}
+
 void hypervisor::sample_guest_thread(std::size_t cpu)
 {
     if (cpu >= max_cpus) {
@@ -6498,6 +6593,36 @@ hypervisor::on_l2_exit(std::size_t cpu,
         return l2_exit_outcome::handled;
     }
 
+    // The instruction trace, which is this VMM's own exit and belongs to
+    // neither level. See `vtl_step_rip`.
+    //
+    // Answered here rather than through `l0_wants_l2_exit` and the
+    // ordinary dispatcher, because that path is the watched-page
+    // stepper's and its handler closes a page this trace never opened.
+    // The two never overlap - `stepping_watch` is tested first - and if
+    // they ever did, the watch is the one that must not be lost.
+    if ((basic_reason::monitor_trap_flag == reason.basic()) &&
+        !this->stepping_watch[cpu] && (0 != this->vtl_step_active[cpu])) {
+        record_vtl_step(cpu);
+        advance_rip = false;
+        return l2_exit_outcome::handled;
+    }
+
+    // Anything else taken while a trace runs is the trace being
+    // interrupted, and is recorded rather than left to be inferred from
+    // a gap in the addresses.
+    if ((0 != this->vtl_step_active[cpu]) && (cpu < max_cpus)) {
+        auto kind = static_cast<std::size_t>(this->vtl_step_active[cpu]) - 1;
+
+        if (kind < vtl_step_kinds) {
+            if (0 == this->vtl_step_other[kind]) {
+                this->vtl_step_other_reason[kind] = reason.value();
+            }
+
+            this->vtl_step_other[kind] = this->vtl_step_other[kind] + 1;
+        }
+    }
+
     if (l0_wants_l2_exit(cpu, reason, context)) {
         this->l2_exits_handled[cpu] = this->l2_exits_handled[cpu] + 1;
         return l2_exit_outcome::deferred;
@@ -6630,8 +6755,10 @@ hypervisor::on_l2_exit(std::size_t cpu,
 
             if (vtl_call_code == code) {
                 capture_vtl_switch(cpu, 0, context);
+                arm_vtl_step(cpu, 0);
             } else if (vtl_return_code == code) {
                 capture_vtl_switch(cpu, 1, context);
+                arm_vtl_step(cpu, 1);
             }
         }
 
