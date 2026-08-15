@@ -14490,3 +14490,42 @@ had moved. Caught by reading it off serial, which is what
 `rig-dump-state.py` does and what an ad-hoc script must also do - the
 fourth time in this session that a diagnostic's own failure had to be
 told apart from its answer.)
+
+### The sharpest remaining lead: the secure kernel decides without asking anything
+
+Worth recording because it is the one observation that has never been
+followed and it narrows hard.
+
+Between the `HvCallVtlCall` and the `HvCallVtlReturn` the second trust
+level takes **zero exits**. Not a hypercall, not an MSR access, not an
+extended-page-table fault - nothing. It is entered, it decides, and it
+returns, entirely out of memory it can already read.
+
+That rules out a whole class of explanation: the secure kernel is not
+waiting on anything this VMM could supply, and it is not failing to
+reach anything. It is looking at some state and answering immediately,
+with the same answer every time - and the first trust level, whose
+registers and whole stack are identical on every iteration, asks again.
+
+So the thing to find is what the secure kernel reads and rejects. Two
+places it can be, and only two, since it makes no exit:
+
+- memory mapped in its own view but not the first level's, which is
+  where its own private state lives, or
+- the register context the switch hands it, which is the same every
+  time by measurement.
+
+Neither has been read. The first needs a walk of the second level's own
+CR3 - `0x8800002` - which this VMM can do from the `HvCallVtlReturn`
+capture, where that CR3 is current. That is the next capture worth
+building, and it is a different one from every capture so far, all of
+which have read the *first* level's view.
+
+**And one experiment has never been run that would separate the two
+halves of this whole question**: booting the rig's Windows with VBS
+disabled. If the circle turns without virtual secure mode, the storage
+path is fine and the fault is in what this VMM presents to the secure
+kernel; if it still does not turn, the storage path is broken
+independently of it. That needs the guest's own configuration changed,
+which needs a boot that completes - so it is a decision about how to get
+one, not something reachable from in here.
