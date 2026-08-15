@@ -4967,6 +4967,13 @@ private:
     volatile std::uint64_t vtl_page_mapped[vtl_kinds]{};
     volatile std::uint64_t vtl_page_shadow[vtl_kinds]{};
     volatile std::uint64_t vtl_page_rights[vtl_kinds]{};
+
+    /** What the guest hypervisor's own tables grant that page, walked
+     * directly - the shadow's permissions are the intersection with
+     * ours and so cannot tell a restriction of its making from one of
+     * ours. */
+    volatile std::uint64_t vtl_page_guest_status[vtl_kinds]{};
+    volatile std::uint64_t vtl_page_guest_rights[vtl_kinds]{};
     volatile std::uint64_t vtl_captured[vtl_kinds]{};
 
     /** The last value written to `HV_X64_MSR_STIMER0_CONFIG`, so the

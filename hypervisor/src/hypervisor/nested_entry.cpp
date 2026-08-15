@@ -5458,6 +5458,49 @@ void hypervisor::capture_vtl_switch(std::size_t cpu,
             this->vtl_page_shadow[kind] =
                 static_cast<std::uint64_t>(held.status);
             this->vtl_page_rights[kind] = held.permissions.bits();
+
+            // And what the guest hypervisor's *own* tables grant it.
+            //
+            // This is the twelfth question and the first one in a while
+            // worth a boot. HvCallModifyVtlProtectionMask is issued -
+            // rcx 0x1000c, and once 0x1fe0000000c with a repeat count of
+            // 510 - and `reflected_permission` is 0 of 448,441, so no
+            // permission in the tables this VMM shadows has ever refused
+            // either trust level. Those two together say the guest
+            // hypervisor accepts the protection change and never
+            // expresses it where we would see it, which is exactly the
+            // shape of the loop: the secure kernel asks for a page's
+            // protection to change, it does not take effect, it checks,
+            // and it asks again with identical state for ever.
+            //
+            // The shadow's own permissions cannot answer it, because
+            // they are the *intersection* with ours - a page we restrict
+            // for our own reasons looks the same as one the level above
+            // restricted. Walking its tables directly separates them.
+            auto eptp12 = this->guest_vmcs12[cpu].read(field::ept_pointer);
+
+            auto walk = arch::x86_64::vmx::walk_ept(
+                eptp12 & (((1ull << 52) - 1) & ~0xfffull),
+                page,
+                physical_address_bits(),
+                execute_only_translations_offered,
+                [&](std::uint64_t at)
+                    -> std::optional<arch::x86_64::vmx::epte> {
+                    std::uint64_t value{};
+                    if (!read_guest_physical(
+                            at,
+                            std::span(
+                                reinterpret_cast<std::byte *>(&value),
+                                sizeof(value)))) {
+                        return std::nullopt;
+                    }
+
+                    return arch::x86_64::vmx::epte(value);
+                });
+
+            this->vtl_page_guest_status[kind] =
+                static_cast<std::uint64_t>(walk.status);
+            this->vtl_page_guest_rights[kind] = walk.permissions.bits();
         }
 
         image_name_of(cpu, base, this->vtl_caller_name[kind]);
