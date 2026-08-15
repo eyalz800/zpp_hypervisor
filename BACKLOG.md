@@ -17687,3 +17687,31 @@ reasoning about the guest hypervisor's behaviour. Both were careful and
 both were about the wrong reader. **A bulk `memcpy` of a structure is a
 read of every field in it**, and it is invisible to every search that
 looks for field names.
+
+## Methodology: six probes that answered without measuring, and the sixth is the instructive one
+
+The class now has six instances. The first five were carelessness of
+one kind or another. **The sixth was careful, complete, and about the
+wrong half**, which is why it is the one that will stop the seventh.
+
+Shadow mode was specified to be behaviour-neutral and it was - proved in
+the built binary, `may_defer_guest_state` compiling to `xorl %eax, %eax;
+retq`, the recorder containing no VMCS access at all. What was never
+specified, and never checked, was whether it could **observe** anything.
+It compared vmcs02 against a copy of vmcs02 made microseconds earlier in
+the same round trip, so its zero was guaranteed by construction.
+
+**The neutrality argument was sound and about the wrong half.**
+
+So the check to add to the list, and it is now six long:
+
+1. Grep the built translation unit for the counter.
+2. Record the failure code beside the value.
+3. Read a new field against one already known good, on the same samples.
+4. Check that something prints it.
+5. Make a reader fail loudly and partially.
+6. **Ask what result would falsify the probe, and check the probe can
+   produce it.** A diagnostic that cannot report the thing it was built
+   to find will report its absence instead, confidently. Neutrality and
+   observability are separate properties and proving one says nothing
+   about the other.
