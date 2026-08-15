@@ -5214,6 +5214,40 @@ void hypervisor::capture_vtl_switch(std::size_t cpu,
         this->vtl_caller_base[kind] = base;
         this->vtl_caller_address[kind] = entry;
 
+        // And the instructions around it, because the loop's whole body
+        // is here and nothing else can show it.
+        //
+        // Over ninety seconds and 2,688 working exits the second-level
+        // guest executed exactly two addresses - the two hypercall stubs
+        // - alternating, with no third address appearing and none
+        // retiring. So there is no other work to find: whatever it tests
+        // between the return of one call and the start of the next is
+        // the whole of what it is waiting for, it takes no exit doing
+        // it, and it is a few instructions either side of this return
+        // address.
+        //
+        // Centred rather than forward-only: the call itself and the
+        // setup before it say what is being asked, and the test and
+        // branch after it say what answer is being refused.
+        constexpr std::uint64_t behind = 0x40;
+
+        for (std::size_t i{}; i < vtl_code_size; ++i) {
+            auto physical = translate_guest_linear(entry - behind + i);
+            if (!physical) {
+                break;
+            }
+
+            if (!read_guest_memory(cpu,
+                                   *physical,
+                                   std::span(reinterpret_cast<std::byte *>(
+                                                 &this->vtl_code[kind][i]),
+                                             1))) {
+                break;
+            }
+        }
+
+        this->vtl_code_base[kind] = entry - behind;
+
         image_name_of(cpu, base, this->vtl_caller_name[kind]);
 
         if ('\0' == this->vtl_caller_name[kind][0]) {

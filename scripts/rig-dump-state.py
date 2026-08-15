@@ -376,7 +376,8 @@ def dump_vtl(args, elf, instance):
     members = ["vtl_switches", "vtl_differed", "vtl_first", "vtl_latest",
                "vtl_stack", "vtl_rip", "vtl_rsp", "vtl_cr3",
                "vtl_image_base", "vtl_caller_base", "vtl_caller_address",
-               "vtl_image_name", "vtl_caller_name", "vtl_captured"]
+               "vtl_image_name", "vtl_caller_name", "vtl_captured",
+               "vtl_code", "vtl_code_base"]
     off = gdb_offsets(elf, members)
 
     kind = "sizeof(('zpp::hypervisor::hypervisor' *)0)->vtl_differed[0][0]"
@@ -399,6 +400,10 @@ def dump_vtl(args, elf, instance):
                    "vtl_captured"):
         reader.queue(instance + off[member], kinds)
     reader.queue(instance + off["vtl_stack"], kinds * stack_words)
+    code_size = gdb_values(elf, [
+        "sizeof(('zpp::hypervisor::hypervisor' *)0)->vtl_code[0]"])[0]
+    reader.queue(instance + off["vtl_code"], kinds * code_size // 8)
+    reader.queue(instance + off["vtl_code_base"], kinds)
     for member in ("vtl_image_name", "vtl_caller_name"):
         reader.queue(instance + off[member], kinds * name_size // 8)
     got = reader.run()
@@ -445,6 +450,17 @@ def dump_vtl(args, elf, instance):
             value = word("vtl_stack", k * stack_words + i)
             if value:
                 print(f"    +0x{i * 8:03x}  0x{value:x}")
+
+        # The loop body, as bytes.  Disassembled outside rather than
+        # here: there is no x86 decoder in this script and adding one to
+        # print a dozen instructions would be a second decoder to keep
+        # right.  llvm-objdump takes it from the hex directly.
+        raw = b"".join(word("vtl_code", k * code_size // 8 + i)
+                       .to_bytes(8, "little")
+                       for i in range(code_size // 8))
+        if any(raw):
+            print(f"  code at 0x{word('vtl_code_base', k):x}:")
+            print("    " + raw.hex())
 
 
 def main():

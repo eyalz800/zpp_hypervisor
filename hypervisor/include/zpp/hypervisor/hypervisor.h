@@ -4856,6 +4856,12 @@ private:
     std::uint64_t vtl_caller_address[vtl_kinds]{};
     char vtl_image_name[vtl_kinds][l2_image_name_size]{};
     char vtl_caller_name[vtl_kinds][l2_image_name_size]{};
+    /** The instructions around each side's caller, so the loop body can
+     * be disassembled outside. See `capture_vtl_switch`. */
+    static constexpr std::size_t vtl_code_size = 128;
+
+    std::uint8_t vtl_code[vtl_kinds][vtl_code_size]{};
+    std::uint64_t vtl_code_base[vtl_kinds]{};
     volatile std::uint64_t vtl_captured[vtl_kinds]{};
 
     /** The last value written to `HV_X64_MSR_STIMER0_CONFIG`, so the
