@@ -14755,3 +14755,41 @@ question rather than a guest question.
 What it does establish, because it comes from the other side of the same
 comparison, is the injection list: three vectors, all of them
 synthetic or timer, none of them from a device.
+
+### And the external-interrupt path is correct too
+
+The 56,607 `ext-int` exits are not this VMM taking interrupts away from
+anyone. `ZPP_VIRTUALIZE_APIC` is **0** in these builds and nothing else
+here sets external-interrupt exiting in vmcs01, so while the guest
+hypervisor runs, a device interrupt goes straight to its own IDT without
+exiting at all - the design is that the guest owns the controller. The
+exits that are counted come from **vmcs02**, where the control is set
+because the guest hypervisor asked for it, and they are reflected to it.
+
+So `external_interrupt_vector_counts` being empty is the counter not
+being on that path, exactly as suspected, and **not** a sign that
+interrupts are being lost. Device interrupts do reach the guest
+hypervisor.
+
+Thirteenth candidate, thirteenth negative.
+
+**The state of the search, for whoever picks this up.** Thirteen
+mechanisms checked, every one correct:
+
+instruction pointer advance · dispatch vector delivery (124 owed, 124
+taken) · threshold arming · SDM 27.6.7's rule · I/O completion · shadow
+extended-page-table permissions · raw throughput · the disk channel ·
+the rendezvous counter · the VP assist page · the requested page's
+mapping · the guest hypervisor's own permissions on it · the
+external-interrupt path.
+
+The guest is stuck with a request enqueued in `ClassPnP`'s boot idle
+I/O path and never issued, having never seen a device interrupt or
+touched the controller. Nothing this VMM does has been found wrong, and
+the Windows installation may not be modified to bisect it
+(see the note above). What has *not* been tried is observing the same
+boot without the hypervisor in the path at all - the rig boots Windows
+directly from its own Limine entry - which would say whether this
+installation reaches the desktop on this hardware at all right now.
+That costs a power cycle and someone at the machine, and it is the only
+remaining control that needs nothing changed.
