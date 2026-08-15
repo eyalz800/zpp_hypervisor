@@ -15246,3 +15246,41 @@ register guest/host masks and read shadows, the extended-page-table
 pointer, the VPID, and the entry recovery pointer. Each is enumerable
 from `build_vmcs02` and each is the same question: is what the
 second-level guest runs with what its own hypervisor described?
+
+### The MSR bitmap does add bits, and they are the VMX capability range
+
+This VMM's own bitmap has **40 bits** set, and `merge_nested_bitmaps`
+ORs them into the one vmcs02 uses:
+
+```
+read low  0x1b          IA32_APIC_BASE
+read low  0x3a          IA32_FEATURE_CONTROL
+read low  0x480 - 0x491 the whole VMX capability range
+```
+
+So the second-level guest takes an exit on every read of a VMX
+capability MSR, of the feature-control MSR and of the APIC base -
+**whether or not its own hypervisor asked to intercept them**. This is
+the first asymmetry the field sweep has found after four clean
+dimensions.
+
+`l0_wants_l2_exit` claims only NMIs, extended-page-table violations, the
+preemption timer and the monitor trap flag, so these are not answered
+here - they are reflected to the guest hypervisor, which then emulates
+an access it never asked to see.
+
+**Why it is defensible and still worth removing.** Those bits exist
+because this VMM must answer the VMX capability MSRs for *its own*
+guest - the guest hypervisor - and one bitmap serves both. But for the
+second-level guest the interface belongs to the guest hypervisor, not to
+this VMM: Windows reading `IA32_VMX_PROCBASED_CTLS2` is asking Hyper-V
+what Hyper-V offers, and the answer should be Hyper-V's without an exit
+that Hyper-V did not configure.
+
+Whether that breaks anything or merely costs exits is not established
+here and should not be assumed either way. What is established is that
+it is an asymmetry of exactly the kind the control sweep closed three
+times over, and that it is the only one the field sweep has turned up so
+far. `merge_nested_bitmaps` is where it would be fixed - the merge is
+unconditional today and would have to become "ours, except the ranges
+that belong to the level above".
