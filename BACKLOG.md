@@ -15105,3 +15105,21 @@ translation through `shadow_ept_pointer_for`, the safety property that
 the processor can never take the switch itself, and coverage in the host
 suite. It is inert until a guest hypervisor asks, and correct if one
 does.
+
+### The baseline is apples-to-apples, checked rather than assumed
+
+`ZPP_CPUS` is read by the launcher, not by this VMM -
+`cpus=${ZPP_CPUS:-$(grep -c ^processor /proc/cpuinfo)}` feeding `-smp
+cpus=$cpus` - so setting it to 1 gives the guest one virtual processor
+whether or not this VMM is in the path. The bare run used the same
+variable as every other run.
+
+That matters because the alternative would have invalidated the whole
+comparison: a bare run with eight processors against a nested run with
+one is not a control, and the secure kernel's own code contains a
+rendezvous - `lock dec`, `pause`, a spin on a counter - which is a
+multiprocessor construct and would have been the obvious suspect.
+
+So it stands: **one virtual processor, virtual secure mode working under
+KVM alone and stalling under this VMM.** Everything measured against
+that baseline is comparing like with like.
