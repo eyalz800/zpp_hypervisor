@@ -18167,3 +18167,65 @@ a desk rather than by a boot - which is what that harness exists for.
 7. **The circle**: genuinely uncertain. The requirement is bracketed at
    (1, 2] and this is the first change that could plausibly reach the
    middle of it.
+
+### Measured: the copy is 4.8x faster and the exit is 1.058x faster
+
+| | byte loop | word loop | predicted |
+|---|---|---|---|
+| guest page read | 20,005 | **4,173** | 3,500-6,000 ✓ |
+| `merge_nested_bitmaps` | 67,909 | **20,387** | 15,000-25,000 ✓ |
+| `build_vmcs02` | 156,171 | **107,918** | - |
+| `copy_shadow_to_vmcs12` | 53,100 | 52,605 | falls somewhat ✗ |
+| `save_l2_state` | 52,792 | 52,285 | - |
+| inside this VMM | 353,618 | **330,899** | 270,000-310,000 ✗ |
+| wall clock per exit | 407,257 | **384,759** | 320,000-360,000 ✗ |
+| CPL 3 entries | 0 | **0** | uncertain |
+
+Predictions 1, 2, 3 (partly), 6 correct; **4 and 5 wrong in the same
+direction** - the named phases fell exactly as the byte-count arithmetic
+said, and the total fell about a third as much as that implied. 1.058x,
+not the 1.13-1.27x predicted.
+
+**The lesson is the one this file keeps re-learning from the other end.**
+Earlier the mistake was multiplying a count by a unit cost and never
+checking the product against the phase. Here the phases were checked and
+the *sum* was not: `merge_nested_bitmaps` gave up 47,522 cycles and
+`build_vmcs02`, which contains it, gave up 48,253 - so that saving is
+real and singly counted. But the handler as a whole gave up only 22,719.
+**A phase falling is not the handler falling**, and the difference is
+cost that is not inside any named phase.
+
+**What the null result identifies is worth as much as the gain.**
+`copy_shadow_to_vmcs12` did not move at all (53,100 -> 52,605) across a
+change that made copying 4.8x cheaper. It is therefore **not copy-bound**
+- it is VMCS-access bound, about 19 accesses at ~2,760 - and no amount of
+copy work will touch it. Same for `save_l2_state`, which is now almost
+entirely its residual VMCS traffic.
+
+### Where the remaining cycles are, after three changes
+
+Cumulative from the item-1-only baseline: 462,843 -> 384,759, **1.203x**;
+about **1.38x** counting item 1 itself. The requirement is bracketed at
+(1, 2].
+
+Per second-level entry, of 384,759:
+
+| term | cycles | note |
+|---|---|---|
+| `reflect_l2_exit` | 187,493 | container |
+| ...`copy_shadow_to_vmcs12` | 52,605 | VMCS-bound, ~19 accesses |
+| ...`save_l2_state` | 52,285 | VMCS-bound residual |
+| ...`load_l1_host_state` | 43,250 | already elided; residual |
+| `build_vmcs02` | 107,918 | container |
+| ...`copy_vmcs12_to_shadow` | 23,365 | VMCS-bound |
+| ...`merge_nested_bitmaps` | 20,387 | now mostly the union |
+
+**The two shadow-VMCS copies together are 75,970 cycles an entry, 20% of
+the exit**, and they run about 1.06 times per entry. That is the largest
+remaining ours-to-remove term. The question to settle before touching
+them is whether they are needed at all for this guest: KVM strips
+`SECONDARY_EXEC_SHADOW_VMCS` before hardware sees it, so no VMCS
+shadowing is in effect, and what these copies serve is this VMM's own
+nested-VMX emulation. If Hyper-V never enables shadow VMCS for its own
+guest, the copies may be maintaining a structure nothing reads - which is
+exactly the shape of `flush_guest_vmcs12`, found the same way.
