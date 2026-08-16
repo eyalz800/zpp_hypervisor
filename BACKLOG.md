@@ -21969,3 +21969,50 @@ Not another sample. Either
   answered instantly and unambiguously by looking at the machine, and
   that is the one instrument this investigation has never used for a
   question it settles completely.
+
+## Census, not sample: the default build livelocks, and 0xf0 tracks the reference TSC page
+
+Read from a live nested guest with the reader proven in the same dump,
+and using `l2_cpl_seen` - a **count over every second-level entry**,
+which is the instrument the CPL sampling was not:
+
+```
+exits 12,258,992   l2-entries 5,900,863
+cpl seen: 0 = 5,948,378        (not one entry at ring 3)
+priority: 0xd0 52.0%   0xf0 39.3%   0x20 8.1%
+```
+
+**91.3% of entries at CLOCK level or above**, and ring 3 never, over an
+order of magnitude more entries than any earlier boot. The livelock in
+the default configuration is now established by a census rather than
+inferred from samples, which is worth having on the record after this
+session retired two conclusions built on surveys.
+
+### And the `0xf0` state tracks `ZPP_PUBLISH_REFERENCE_TSC` exactly
+
+| | `reftsc=0` (default) | `reftsc=1` |
+|---|---|---|
+| priority `0xf0` | **39.3%** | **0.2%** |
+| priority `0xd0` | 52.0% | 41.6% |
+| `rdmsr` exits | the 26.3% storm | 0.1% |
+| CPL 3 | never | never |
+
+Two measurements, opposite switch positions, and the `0xf0` share moves
+by two orders of magnitude. That is not noise and it is not a mix
+artifact: without the page the guest reads `HV_X64_MSR_TIME_REF_COUNT`
+about fifteen times per tick, every read is an exit, and it does so at
+high interrupt level - which is exactly what `0xf0` means.
+
+**So the page fixes a real, measurable pathology and does not fix the
+boot.** Both things are true and neither should be dropped:
+
+- **Its benefit is measured**: 1,357,878 `rdmsr` exits removed, 26.3% of
+  all exits, and the `0xf0` state with them.
+- **Its safety is not**: it writes into guest memory the level above
+  believes it owns, which is why its author left it `OFF`, and nothing in
+  this session established that the write is harmless. The bisect that
+  tried could not have detected the fault it was looking for.
+
+It is therefore left at its documented default of `OFF`, and the honest
+statement is that **this project has never had a build in which that page
+was both compiled in and demonstrated safe.**
