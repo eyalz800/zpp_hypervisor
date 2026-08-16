@@ -18042,3 +18042,49 @@ cached merge still costs that per entry.
 
 Next after it by size: `copy_shadow_to_vmcs12` at 53,100 on 957,822
 calls, and `load_l1_host_state`'s residual 44,000.
+
+### The bitmap merge reads 12 KB of guest memory on every VM entry
+
+The largest single removable term now that item 2 has landed, and the
+code that does it predicted this measurement would be the thing that
+justified fixing it:
+
+> Caching it correctly needs a way to notice a write to those pages, and
+> this VMM has one: `watch_guest_page_writes`. That is the optimisation,
+> and the measurement that would justify it is the entry rate of a real
+> guest hypervisor, which nothing has yet run.
+
+One has now run. Measured over 904,307 second-level entries:
+
+| | calls | cycles/call | share of the handler |
+|---|---|---|---|
+| `merge_nested_bitmaps` | 904,307 | 67,909 | ~19% |
+| of which the guest page read | 2,712,870 | 20,005 | ~15% |
+
+**2,712,870 reads over 904,307 entries is exactly 3.0 per entry**, so
+all three bitmaps are being copied out of guest memory every time - 12 KB
+per VM entry - and `nested_bitmap_is_ours` never takes its cached branch.
+The comment above it predicts the opposite shape, "two of these three
+pages down this branch every time", so either Hyper-V names I/O bitmaps
+as well as an MSR bitmap or the flag is not reached. **Establish which
+before building the cache**; the answer changes what has to be watched.
+
+The guest page read is **88%** of the merge (54.3 of 61.4 billion
+cycles), so the merge itself - the union - is not the cost. Removing it
+is worth about 1.17x on wall clock per exit, which against 1.31x banked
+and a requirement bracketed at (1, 2] is the largest remaining item that
+is unambiguously ours.
+
+Re-reading every entry is *correct* and must stay correct: the contents
+live in guest memory the guest hypervisor writes directly with no VMWRITE
+and no exit, so a cache keyed on the bitmap *addresses* would trap what
+it stopped asking for and miss what it started asking for. KVM re-merges
+every entry too, in `nested_vmx_prepare_msr_bitmap`. Any cache has to be
+keyed on writes to the pages themselves.
+
+**Fifth reader defect this effort.** `phase_cycles[10]` is written only
+by `merge_nested_bitmaps` (nested_entry.cpp:868), and the dump script
+displayed it indented under `on_l2_ept_fault` as "of which guest read",
+so this cost has been reading as part of the extended-page-table fault
+path. Nothing above changes - the cycles were always in the merge - but
+the attribution did, and it is the term that matters most now.
