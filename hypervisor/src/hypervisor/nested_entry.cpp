@@ -7132,6 +7132,13 @@ hypervisor::on_l2_ept_fault(std::size_t cpu,
         this->shadow_ept_leaves_filled[cpu] =
             this->shadow_ept_leaves_filled[cpu] + 1;
 
+        // Noted so a rebuild of this same root can install it without an
+        // exit. See `shadow_ept_recall`: the guest hypervisor discards
+        // this root on every trust-level protection change and wants it
+        // back on the next entry, and the pages it wants are scattered,
+        // so the set has to be remembered rather than guessed.
+        remember_shadow_page(cpu, page);
+
         // The handler's own work, read back.
         //
         // Installing a mapping is the one disposition here that claims to

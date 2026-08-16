@@ -650,6 +650,18 @@ hypervisor::shadow_ept_pointer_for(std::size_t cpu, std::uint64_t eptp12)
     this->shadow_ept_current_slot[cpu] = chosen;
     this->shadow_ept_builds[cpu] = this->shadow_ept_builds[cpu] + 1;
 
+    // Put back what this root had before it was discarded, if this slot
+    // is holding the same root again - which is the common case, because
+    // a guest hypervisor changing one page's trust-level protection
+    // issues INVEPT, that discards the root, and the very next entry
+    // wants it back. See `shadow_ept_recall`.
+    if (root == this->shadow_ept_recall_root[cpu][chosen]) {
+        replay_shadow_recall(cpu, chosen, root);
+    } else {
+        this->shadow_ept_recall_root[cpu][chosen] = root;
+        this->shadow_ept_recall_count[cpu][chosen] = 0;
+    }
+
     // This processor may hold mappings from whatever was in this slot
     // before, against a pointer that has just been reused.
     invalidate_ept_locally();
@@ -709,6 +721,114 @@ std::expected<void, zpp::error> hypervisor::fill_shadow_leaf(
     log("cpu {} shadow ept reset: one shadow does not fit the pool", cpu);
 
     return install_shadow_leaf(cpu, guest_physical, guest, shift);
+}
+
+/**
+ * Notes that this root needed a page, so a rebuild of it can install the
+ * page without an exit. Called from the fault path only - one address
+ * per fault, which is exactly the set worth replaying.
+ */
+void hypervisor::remember_shadow_page(std::size_t cpu,
+                                      std::uint64_t guest_physical)
+{
+    if (cpu >= max_cpus) {
+        return;
+    }
+
+    auto slot = this->shadow_ept_current_slot[cpu];
+    if (slot >= shadow_ept_slots) {
+        return;
+    }
+
+    if (this->shadow_ept_source[cpu][slot] !=
+        this->shadow_ept_recall_root[cpu][slot]) {
+        return;
+    }
+
+    auto page = guest_physical & ~((1ull << page_shift_4kb) - 1);
+    auto & count = this->shadow_ept_recall_count[cpu][slot];
+
+    // Linear over at most 64, on a path that is already taking a VM
+    // exit. A duplicate would waste a replay walk rather than break
+    // anything, but the set is small and worth keeping exact.
+    for (std::size_t i{}; i < count; ++i) {
+        if (page == this->shadow_ept_recall[cpu][slot][i]) {
+            return;
+        }
+    }
+
+    if (count >= shadow_ept_recall_capacity) {
+        return;
+    }
+
+    this->shadow_ept_recall[cpu][slot][count] = page;
+    count = count + 1;
+}
+
+/**
+ * Installs what this root had before it was discarded, by walking the
+ * guest hypervisor's tables **as they are now**.
+ *
+ * That timing is the entire soundness argument, and it is what separates
+ * this from `refresh_shadow_on_invept`, which deadlocked. That refreshed
+ * at the INVEPT, and Hyper-V invalidates *around* a trust-level
+ * protection change - so it read tables about to change, left the entry
+ * present, and no fault ever occurred to pick the change up. This runs
+ * at a rebuild, inside the entry that follows the INVEPT, by which point
+ * the change has been made whichever order it was done in.
+ *
+ * Everything else matches what a fault would have done: the same
+ * `walk_ept`, the same `compose_ept`, the same `fill_shadow_leaf`.
+ * Anything not composable now is skipped and left to fault, which is the
+ * behaviour without this.
+ */
+void hypervisor::replay_shadow_recall(std::size_t cpu,
+                                      std::size_t slot,
+                                      std::uint64_t root)
+{
+    auto count = this->shadow_ept_recall_count[cpu][slot];
+
+    for (std::size_t i{}; i < count; ++i) {
+        auto page = this->shadow_ept_recall[cpu][slot][i];
+
+        auto walk = arch::x86_64::vmx::walk_ept(
+            root,
+            page,
+            physical_address_bits(),
+            execute_only_translations_offered,
+            [&](std::uint64_t at)
+                -> std::optional<arch::x86_64::vmx::epte> {
+                std::uint64_t value{};
+                auto read = read_guest_physical(
+                    at,
+                    std::span(reinterpret_cast<std::byte *>(&value),
+                              sizeof(value)));
+                if (!read) {
+                    return std::nullopt;
+                }
+                return arch::x86_64::vmx::epte(value);
+            });
+
+        if (arch::x86_64::vmx::ept_walk_status::mapped != walk.status) {
+            continue;
+        }
+
+        auto composed = arch::x86_64::vmx::compose_ept(
+            walk,
+            host_ept_lookup(walk.physical_address),
+            execute_only_translations_offered);
+
+        if (arch::x86_64::vmx::ept_compose_outcome::composed !=
+            composed.outcome) {
+            continue;
+        }
+
+        if (!fill_shadow_leaf(cpu, page, walk, composed.page_shift)) {
+            continue;
+        }
+
+        this->shadow_ept_replayed[cpu] = this->shadow_ept_replayed[cpu] + 1;
+    }
 }
 
 void hypervisor::release_shadow_slot(std::size_t cpu, std::size_t slot)

@@ -378,6 +378,15 @@ void hypervisor::inject_invalid_opcode_exception()
 {
 }
 
+// The shadow-root recall lives in nested_ept.cpp, which this harness does
+// not compile - it has no guest memory to walk and no extended page
+// tables to compose against. `on_l2_ept_fault` notes each page it
+// installs so a rebuild can replay the set, and the note is the only part
+// that reaches this translation unit.
+void hypervisor::remember_shadow_page(std::size_t, std::uint64_t)
+{
+}
+
 /**
  * The two the guest-thread probe reaches through, refused rather than
  * answered.

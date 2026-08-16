@@ -8480,6 +8480,36 @@ private:
      * every processor. Each discard is then refilled one extended-page-
      * table fault at a time.
      */
+    /**
+     * The guest-physical addresses each shadow slot's root actually had
+     * mapped, so a rebuild of that same root can install them again
+     * instead of taking an extended-page-table exit per page.
+     *
+     * **Why a remembered set rather than a heuristic.** Installing the
+     * eight pages *after* each faulting one was tried and reverted:
+     * 1,407,690 leaves prefetched, 3.2 a fault, and the fault count fell
+     * 5% - so about 95% was never touched, and the fault got 60% dearer
+     * paying for it. The 26.7 refaults a rebuilt root takes are scattered
+     * addresses, not a run, and adjacency cannot find them. This does not
+     * guess: it replays what the guest itself demonstrated it needs.
+     *
+     * Sized at 64 against a measured 26.7. A root that maps more than
+     * that keeps the first 64 and faults for the rest, which degrades to
+     * exactly the behaviour without this.
+     */
+    static constexpr std::size_t shadow_ept_recall_capacity = 64;
+    std::uint64_t shadow_ept_recall[max_cpus][shadow_ept_slots]
+                                   [shadow_ept_recall_capacity]{};
+    std::size_t shadow_ept_recall_count[max_cpus][shadow_ept_slots]{};
+    std::uint64_t shadow_ept_recall_root[max_cpus][shadow_ept_slots]{};
+    std::uint64_t shadow_ept_replayed[max_cpus]{};
+
+    void remember_shadow_page(std::size_t cpu,
+                              std::uint64_t guest_physical);
+    void replay_shadow_recall(std::size_t cpu,
+                              std::size_t slot,
+                              std::uint64_t root);
+
     std::uint64_t shadow_ept_rebuild_new_root[max_cpus]{};
     std::uint64_t shadow_ept_rebuild_stale[max_cpus]{};
 
