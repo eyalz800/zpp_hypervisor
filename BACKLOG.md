@@ -21752,3 +21752,62 @@ one mechanism that removes those transitions is the one the hardware
 does not have. **And it is a rig artifact.** On bare metal a `vmread` is
 tens of cycles rather than a trap, so two thirds of this VMM's measured
 wall clock does not exist there.
+
+## Correction: "the host is not where the time is" was wrong
+
+An earlier entry in this file - *Leveraging KVM: where the machine's
+time actually goes* - reports, correctly, that
+
+```
+user=22892  guest=22886  sys=1126  idle=0        (of 24000 jiffies)
+```
+
+and concludes from it: **"KVM's own exit handling is 4.7% of the
+machine. The host is not where the time is."** The measurement stands.
+**The conclusion is wrong, and it exonerates the rig when the opposite
+is true.**
+
+Four hundred instruction-pointer samples say what the accounting cannot:
+
+| samples | where |
+|---|---|
+| 229 (57.3%) | `arch::x86_64::vmx::vmread` |
+| 29 (7.3%) | `arch::x86_64::vmx::vmwrite` |
+| 15 | `vmptrld`, `vmptrst` |
+
+**68.3% of the machine's wall clock is this VMM stalled on its own VMX
+instructions**, against 4.7% of it spent inside KVM's code. Both numbers
+are right and they measure different things:
+
+- `sys` counts time executing **KVM's handler**;
+- the sample counts time the vCPU is **stopped at the instruction**,
+  which is the handler *plus* the hardware VM exit and VM entry round
+  trip either side of it - and that transition is charged to **guest**
+  time by the tick-based accounting, because the processor is in guest
+  mode when the tick lands.
+
+So the tax is real, it is roughly fourteen times what `sys` suggests,
+and **almost none of it is software KVM could be tuned out of.** That is
+the clean explanation for the whole host sweep finding nothing:
+`nx_huge_pages`, `ple_gap`, `halt_poll_ns`, processor pinning and vCPU
+count all address KVM's software, and the cost is in transitions.
+
+It also promotes `enable_shadow_vmcs` from "a lever that turned out to
+be unavailable" to **the only lever that would have mattered**, since
+VMCS shadowing is precisely the mechanism that stops a VMREAD becoming a
+transition - and this processor does not implement it.
+
+**And it is a rig artifact, which is the part that matters for the
+goal.** A `vmread` on bare metal is tens of cycles, not a trap. Two
+thirds of this VMM's measured wall clock on this rig does not exist on
+the machine the hypervisor is actually for.
+
+**The general lesson, which is the third instance of its shape here.**
+`sys` versus `guest` is an *attribution* boundary, not a cost boundary:
+it says which code was running, not which code caused the time. The same
+error in a different dress as pricing one exit reason with an average
+over all of them - a denominator that counts something other than what
+is being claimed. When the question is "what is this machine waiting
+on", sample the instruction pointer; when it is "whose code ran", read
+the accounting. They are not interchangeable and this file has now
+mistaken one for the other twice.

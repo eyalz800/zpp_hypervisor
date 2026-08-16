@@ -589,6 +589,31 @@ without perturbing it. Or arm the Monitor Trap Flag from inside the VMM, which
 forces an exit after one retired instruction and answers "is it executing?"
 without a debugger at all.
 
+### Read device registers narrow, and repeat
+
+`xp` is trustworthy on RAM and **not** across a passed-through device's
+BAR. Measured on the rig's NVMe: `xp /16xw` over the controller's
+registers reported `CC.EN = 0` and `CSTS.RDY = 0` — a disabled
+controller — while `xp /2xw` of the same address, repeated sixty times
+without one disagreement, reported `CC = 0x00460001` and `CSTS = 1`.
+The wide read was about to be reported as "the disk is dead".
+
+The tell was **possibility, not plausibility**: the wide dump carried
+`0x00000030` at offsets 0x04, 0x14 *and* 0x24, and three unrelated
+registers do not hold the same value at the same position in three
+consecutive lines. Ask whether a reading is possible before asking
+whether it is believable.
+
+Two rules follow, and they sit beside the reader-proof rule that
+`rig-dump-state.py` prints (`reader proven: host_page_table[0] = …023`):
+
+- **On memory-mapped device registers, read one or two words at a time
+  and sample repeatedly.** Wide reads are for RAM.
+- **NVMe doorbells are write-only.** Reading one is architecturally
+  undefined, so a doorbell reading zero says nothing about whether
+  anything was submitted — and it looks exactly like proof that no I/O
+  was issued.
+
 ### KVM's own statistics are on the rig, and they are the cheapest instrument
 
 **This section used to say the target had no tracefs and no

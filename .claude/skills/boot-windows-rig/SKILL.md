@@ -647,10 +647,40 @@ here - a truncated stream otherwise looks exactly like a short partition.
 Reading total-sectors-32 at offset `0x20` of the ESP boot sector says whether
 the reservation has already run: equal to the partition size means untouched.
 
-## Reading VMM memory through the monitor: four ways to get a plausible lie
+## Reading VMM memory through the monitor: six ways to get a plausible lie
 
 Every one of these produced a confident, wrong number in one session. All
-four are silent - none of them looks like an error.
+of them are silent - none looks like an error.
+
+**A wide `xp` across a passed-through device's registers does not agree
+with targeted reads of the same addresses.** Measured on the rig's NVMe:
+
+    xp /16xw 0x7011108000
+    7011108010: 0x00000000 0x00000030 ...      -> CC = 0x30, EN clear
+    xp /2xw  0x7011108014
+    7011108014: 0x00460001 ...                 -> CC = 0x00460001, EN set
+
+Sixty repeats of the narrow read never disagreed. The wide one said the
+controller was disabled and it is not, and "the disk is dead" was one
+sentence from being written down as the finding of a session.
+
+**The tell is possibility, not plausibility.** The wide dump had
+`0x00000030` at offsets 0x04, 0x14 **and** 0x24 - the same value at the
+same position in three consecutive lines, which three unrelated
+registers do not produce. Ask whether a reading is *possible*, not
+whether it is believable.
+
+So: **on device registers, read narrow and read repeatedly.** Wide `xp`
+is right for RAM and is what the log and state dumps use; it is not
+trustworthy across a VFIO BAR.
+
+**NVMe doorbells are write-only. Zeros read from one are not evidence.**
+Reading a doorbell is architecturally undefined, so "the submission
+queue tail doorbell reads 0" says nothing whatever about whether
+anything was submitted. It looks exactly like proof that no I/O was
+issued, which is the conclusion it was about to be used for.
+
+The four that came before, all still current:
 
 **A reading of `0x00010102464c457f` is a failed symbol lookup, not data.**
 That is `\x7fELF`. A helper like
