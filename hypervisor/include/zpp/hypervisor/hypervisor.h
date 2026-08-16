@@ -6625,39 +6625,6 @@ private:
      */
     spin_lock mapping_window_lock{};
 
-    /**
-     * What each processor last pointed each window page at, plus one in
-     * the low bit so that "never recorded" cannot match physical page
-     * zero.
-     *
-     * Per processor because `invlpg` is per processor: this is the half
-     * of the elision test that says *this* processor's cached
-     * translation is the one the entry describes. The other half is the
-     * live page-table entry, read at the point of use, because the
-     * window is shared and another processor may have moved it since -
-     * see `map_window_at`, where the two are applied together and
-     * neither is sufficient alone.
-     *
-     * Not protected by `mapping_window_lock` and not needing to be: a
-     * processor only ever reads and writes its own row, and every use of
-     * the window holds the lock across the map and the bytes read
-     * through it, so a row cannot be observed mid-update by anyone.
-     */
-    std::uint64_t window_mapped_page[max_cpus][mapping_window_pages]{};
-
-    /**
-     * How often the mapping was skipped against how often it was done.
-     *
-     * The pair, not the ratio, and both because the elision is only
-     * worth anything if the first dominates - and because a fast path
-     * that never fires and one that fires wrongly look identical from a
-     * single number. `map_window_at` was measured at 48,001,634 calls
-     * and 45.9 billion cycles before this existed.
-     * @{
-     */
-    std::uint64_t window_map_elided[max_cpus]{};
-    std::uint64_t window_map_done[max_cpus]{};
-    /** @} */
 
     /**
      * What the window self check found: 0 not run, 1 correct, 2 wrong.
@@ -7330,6 +7297,19 @@ private:
      * cannot drift. That is also the only place `host_gs_base` is
      * written - application processors reach it through the same
      * function - so there is no second path to keep in step.
+     *
+     * **It has no caller on a hot path today, and it is kept anyway.**
+     * The `map_window_at` elision it was built for was measured and
+     * reverted (BACKLOG), but the mechanism itself was proven correct in
+     * that boot - per-processor counters indexed by it landed entirely
+     * on processor zero, which is where the work was. Removing it would
+     * mean re-deriving it the next time something on an exit path needs
+     * to name its own processor, and the alternative that path would
+     * otherwise reach for - `vmcs.vpid()` - is a VMREAD.
+     *
+     * Any user must gate on CR4.VMXE first. The GS base is only this
+     * VMM's while the processor is in root mode, and code reached from
+     * the launch path runs before that, with whatever the loader left.
      */
     static constexpr std::size_t host_gs_processor_index = 0;
     alignas(page_size) std::uint8_t gs_data[max_cpus][page_size]{};

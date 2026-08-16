@@ -1436,77 +1436,12 @@ void * hypervisor::map_window_at(std::size_t first_page,
         return nullptr;
     }
 
-    // Which processor this is, from its own GS base rather than from the
-    // VPID: see `gs_data`. A VMREAD here would cost more than the whole
-    // of what the elision below saves, because this function is called
-    // 48 million times in a boot.
-    //
-    // **Gated on being in VMX operation, and that is not caution.** The
-    // GS base is only this VMM's while the processor is in root mode -
-    // the VMCS host-state field is what puts it there. This function
-    // also runs *before* that, from the launch path, where GS still
-    // holds whatever the loader left: reading `gs:[0]` there reads an
-    // address this VMM did not choose and may not be able to read at
-    // all. `invalidate_ept_locally` gates on the same bit for the same
-    // kind of reason, and the bit is the right test - CR4.VMXE must be
-    // set to execute `vmxon` and may not be cleared while in VMX
-    // operation, so clear means certainly outside it.
-    //
-    // Outside root mode `cpu` is left out of range, which takes every
-    // slot below down the unconditional path it had before this existed.
-    constexpr std::uint64_t cr4_vmxe = 1ull << 13;
-    auto cpu = max_cpus;
-
-    if (0 != (arch::x86_64::cr4() & cr4_vmxe)) {
-        cpu = arch::x86_64::gs_qword(host_gs_processor_index);
-    }
-
     for (std::size_t i{}; i < span; ++i) {
-        auto slot = first_page + i;
-        auto at = mapping_window + (slot * page_size);
-        auto want = page + (i * page_size);
-
-        // **Both conditions, and neither is sufficient alone.**
-        //
-        // Measured cause: this is 48,001,634 calls and 45.9 billion
-        // cycles in one boot - about a third of every cycle this VMM
-        // spends - and most of them re-point the window at the page it
-        // is already pointing at. A four-level walk of the guest
-        // hypervisor's tables re-points it four times, and consecutive
-        // replays of nearby pages share upper levels constantly.
-        //
-        // - `window_mapped_page` is what **this** processor last put
-        //   here and issued `invlpg` for, so it is the only thing that
-        //   licenses skipping the `invlpg`. A record kept globally would
-        //   not: another processor's mapping leaves this one's cached
-        //   translation stale.
-        // - and the live entry, because this processor's own record is
-        //   not enough either. The window is one address shared by every
-        //   processor, so another may have re-pointed it since - and
-        //   then this processor's record describes an intention, not the
-        //   table. Trusting a remembered intention is exactly the
-        //   failure `merge_nested_bitmaps` documents for bitmap
-        //   addresses: correct-looking, and wrong the moment somebody
-        //   else moves what it describes.
-        //
-        // The entry is read through `page_table_entry`, which stops at
-        // whichever level terminates the walk - so a large-page entry
-        // answers for itself rather than sending the comparison to a
-        // leaf the processor never consults.
-        auto & entry = this->host_page_table.page_table_entry(at);
-
-        if ((cpu < max_cpus) &&
-            (this->window_mapped_page[cpu][slot] == (want | 1)) &&
-            entry.present() && !entry.large() &&
-            ((entry.page_number() << 12) == want)) {
-            this->window_map_elided[cpu] =
-                this->window_map_elided[cpu] + 1;
-            continue;
-        }
+        auto at = mapping_window + ((first_page + i) * page_size);
 
         this->host_page_table.map_page(
             at,
-            want,
+            page + (i * page_size),
             arch::x86_64::page_table::protection::read |
                 arch::x86_64::page_table::protection::write);
 
@@ -1514,14 +1449,14 @@ void * hypervisor::map_window_at(std::size_t first_page,
         // whoever used the window last, pointing at their page. Without
         // this a read through it answers with their bytes, which is the
         // entire failure mode a shared window has.
+        //
+        // **Not elidable by remembering what this slot last held.** That
+        // was built and measured: it fired on 11.5% of 11.4 million
+        // calls and moved this phase's cost by nothing, because a
+        // four-level walk asks one slot for four *different* table
+        // frames in a row, so the immediately preceding use of a slot is
+        // essentially never the page the next one wants. See BACKLOG.
         arch::x86_64::invlpg(reinterpret_cast<const void *>(at));
-
-        if (cpu < max_cpus) {
-            // The low bit marks the slot as recorded at all, so that a
-            // never-written record cannot match physical page zero.
-            this->window_mapped_page[cpu][slot] = want | 1;
-            this->window_map_done[cpu] = this->window_map_done[cpu] + 1;
-        }
     }
 
     return reinterpret_cast<std::uint8_t *>(mapping_window +

@@ -21551,3 +21551,99 @@ What it has to contend with, and none of it is settled:
   first**, because retaining without it is the `refresh_shadow_on_invept`
   deadlock again - tables read before a change, left present, and no
   fault ever raised to pick the change up.
+
+## `map_window_at`: the blocker came off, the elision did not fire
+
+Blocker 1 is gone and the mechanism works. The optimisation it unblocked
+does not, and the reason is worth more than the change would have been.
+
+### Naming the processor without a VMREAD
+
+`setup_vmcs` already writes `vmcs.host_gs_base(...)`, and host state is
+per-VMCS and therefore per processor by construction - so the only thing
+stopping a processor naming itself in one memory access was that
+`gs_data` was **a single page shared by every processor**. Nothing read
+it: there is no `gs:` access anywhere in this tree, and the page existed
+only because `host_gs_base` has to name a canonical address. The sharing
+was safe by never being used.
+
+One page per processor, the index in its first quadword, written beside
+the `host_gs_base` write in the one function that writes it - so
+application processors get theirs by the same path and there is no
+second place to keep in step. `arch::x86_64::gs_qword` reads it.
+
+**Gated on CR4.VMXE, and that is not caution.** `map_window_at` also
+runs from the launch path, before root mode, where GS holds whatever the
+loader left - reading `gs:[0]` there reads an address this VMM did not
+choose and may not be able to read at all. `invalidate_ept_locally`
+gates on the same bit for the same kind of reason.
+
+**Proven, in the boot below**: the per-processor counters indexed by it
+landed entirely on processor zero, which is where all the work is.
+
+### The elision fired on 11.5% of calls and moved nothing
+
+Predicted before the boot, and recorded in the commit that built it:
+70-85% of calls elided, phase 11 from 955 to ~300 cycles a call,
+`nested_run/s` from ~4,236 to ~4,800-5,300.
+
+Measured:
+
+| | predicted | measured |
+|---|---|---|
+| calls elided | 70-85% | **11.5%** (1,307,619 of 11,374,645) |
+| phase 11, cycles/call | ~300 | **968** (was 955) |
+| `nested_run/s` | 4,800-5,300 | 3,943 / 3,937 |
+
+**The premise was wrong.** "Most calls re-point the window at the page it
+is already pointing at" is false, and the reason is structural: a
+four-level extended-page-table walk asks **one slot for four different
+table frames in a row**. `read_guest_physical` maps a page per call, and
+successive calls in a walk are successive *levels* - a PML4 frame, then
+a PDPT frame, then a PD, then a PT - which are different pages by
+definition. The next page's walk starts again at the PML4. So the
+immediately preceding use of a slot is almost never the page the next
+use wants, and a per-slot record of "what was here last" has almost
+nothing to match.
+
+The 11.5% is the residue: two adjacent walks that happen to share a
+frame at the same position.
+
+Reverted, with the reason left in `map_window_at` so it is not rebuilt.
+The GS mechanism stays - it is proven, it is the enabler for anything
+else on an exit path that needs to name its own processor, and the
+alternative that path would otherwise reach for is a VMREAD.
+
+### What would work, and it follows directly from why this did not
+
+**Give each walk level its own window slot.** Then a slot sees the same
+frame over and over: the PML4 frame is constant for a whole root, the
+PDPT usually is, the PD often is across neighbouring pages - and an
+elision keyed on "what was here last" would fire on three levels out of
+four instead of on none of them.
+
+Two things it has to solve, and neither is settled:
+
+- the walk lambda in `walk_ept` calls `read_guest_physical`, which takes
+  an address and no level, so the level has to be threaded through or
+  the window choice made by the caller;
+- `mapping_window_pages` is ten and the header refuses to grow it - the
+  window's address is not freely chosen and enlarging it once coincided
+  with the hypervisor no longer initialising on the rig. Four slots for
+  four levels have to come out of the ten that exist.
+
+### And the pattern is now worth naming
+
+**Three interventions have moved intermediate numbers and none has moved
+CPL 3**: the reference TSC page removed 26.3% of all exits and restored
+the guest's clock; `ZPP_CPUS=2` gave the shortest trust-level round trip
+recorded and took DISPATCH from 41.6% to 0.7%; this one was neutral. The
+guest still never reaches user mode.
+
+That is no longer a coincidence, and the working mode should change with
+it. **Stop optimising.** The question is what the guest is waiting for
+that is not time, and the instrument for it is the monitor on a running
+guest - `info registers -a`, `xp` on what it is executing, sampled - not
+another counter. This file already records that four monitor samples
+reframed a failure that eleven boots of counters had mischaracterised
+twice.
