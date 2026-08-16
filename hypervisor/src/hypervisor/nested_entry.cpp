@@ -7568,6 +7568,55 @@ hypervisor::on_l2_exit(std::size_t cpu,
                 mark_vtl_half(cpu, 1);
                 arm_vtl_step(cpu, 1);
             }
+
+            // `HvCallModifyVtlProtectionMask`, which this file has
+            // watched being issued for ever without ever asking the one
+            // question that separates the two explanations: **is it the
+            // same page every time, or a different one?**
+            //
+            // A different page each time is the guest making progress -
+            // grinding a large set, one trust-level round trip per page,
+            // which is what validating memory looks like. The same page
+            // repeatedly is a loop, and the question becomes what the
+            // caller tests afterwards that is still not satisfied.
+            //
+            // An earlier capture reported "alternating until the reset,
+            // every entry identical", but that was identical
+            // *registers* at one instant, which is not an identical
+            // page, and nobody separated them.
+            //
+            // **A ring, not a table.** This file records a fixed table
+            // that filled with early-boot values and then counted every
+            // later one as overflow, which was read as "hundreds of
+            // thousands of distinct addresses" when it means only "more
+            // than the eight caught first". A ring always describes a
+            // recent window and cannot fill.
+            //
+            // Registers rather than the hypercall input page: the input
+            // is a second-level guest-physical address and reading it
+            // would cost a walk of the level above's tables on a path
+            // taken twice per round trip. Both candidates are recorded
+            // so the data can say which one carries the page, rather
+            // than this comment guessing.
+            constexpr std::uint64_t modify_vtl_protection_code = 0x0c;
+
+            if ((modify_vtl_protection_code == code) && (cpu < max_cpus)) {
+                auto & count = this->vtl_protect_count[cpu];
+                auto slot = count % vtl_protect_capacity;
+
+                this->vtl_protect_rdx[cpu][slot] = context.rdx;
+                this->vtl_protect_rbp[cpu][slot] = context.rbp;
+
+                // Consecutive repetition, which is the cheapest form of
+                // the question and needs no ring to read.
+                if (count && (context.rdx == this->vtl_protect_last[cpu])) {
+                    this->vtl_protect_repeated[cpu] =
+                        this->vtl_protect_repeated[cpu] + 1;
+                }
+
+                this->vtl_protect_last[cpu] = context.rdx;
+                count = count + 1;
+            }
         }
 
         // The vector of an external interrupt on its way to the guest

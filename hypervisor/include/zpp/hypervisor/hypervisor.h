@@ -8846,6 +8846,40 @@ private:
     volatile std::uint64_t guest_leaf_permissions[max_cpus][8]{};
 
     /**
+     * The last `vtl_protect_capacity` requests of
+     * `HvCallModifyVtlProtectionMask`, and how many repeated the one
+     * before them.
+     *
+     * The question these answer has never been asked: the call is issued
+     * for ever, the protections it asks for **do** land - measured, see
+     * `install_shadow_leaf` - so the caller is not asking again because
+     * the change failed. Either it is a different page each time, which
+     * is progress through a large set, or the same page, which is a
+     * loop. An earlier capture said "every entry identical", but that
+     * was identical registers at one instant rather than an identical
+     * page, and the two were never separated.
+     *
+     * **A ring rather than a table**, because this file records a fixed
+     * table filling with early-boot values and its overflow counter then
+     * being read as "hundreds of thousands of distinct addresses" when
+     * it meant "more than the few caught first". A ring always describes
+     * a recent window.
+     *
+     * Two registers, because which one carries the page is not something
+     * this declaration should guess. Reading the hypercall's input page
+     * instead would cost a walk of the level above's tables on a path
+     * taken twice per trust-level round trip.
+     * @{
+     */
+    static constexpr std::size_t vtl_protect_capacity = 32;
+    std::uint64_t vtl_protect_rdx[max_cpus][vtl_protect_capacity]{};
+    std::uint64_t vtl_protect_rbp[max_cpus][vtl_protect_capacity]{};
+    std::uint64_t vtl_protect_count[max_cpus]{};
+    std::uint64_t vtl_protect_repeated[max_cpus]{};
+    std::uint64_t vtl_protect_last[max_cpus]{};
+    /** @} */
+
+    /**
      * The mappings a shadow held when the guest hypervisor invalidated
      * it, so they can be re-walked instead of re-faulted.
      *

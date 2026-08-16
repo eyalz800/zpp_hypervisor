@@ -1126,6 +1126,8 @@ def main():
     base = int(base, 16)
 
     members = ["cpl_seen", "guest_leaf_permissions",
+               "vtl_protect_rdx", "vtl_protect_rbp",
+               "vtl_protect_count", "vtl_protect_repeated",
                "shadow_leaf_permissions", "exit_trace", "exit_trace_count", "l2_exit_trace",
                "l2_exit_trace_count", "l2_working_trace",
                "l2_working_trace_count", "l2_entries", "l2_activity_state",
@@ -1244,6 +1246,10 @@ def main():
     # permission histograms are [max_cpus][8], so each needs the whole
     # array, not one word.
     monitor.queue(instance + off["cpl_seen"], scalar_cpus * 4)
+    monitor.queue(instance + off["vtl_protect_rdx"], scalar_cpus * 32)
+    monitor.queue(instance + off["vtl_protect_rbp"], scalar_cpus * 32)
+    monitor.queue(instance + off["vtl_protect_count"], scalar_cpus)
+    monitor.queue(instance + off["vtl_protect_repeated"], scalar_cpus)
     monitor.queue(instance + off["guest_leaf_permissions"], scalar_cpus * 8)
     monitor.queue(instance + off["shadow_leaf_permissions"],
                   scalar_cpus * 8)
@@ -1310,6 +1316,29 @@ def main():
             if g or c:
                 print(f"  cpu {cpu}  {i:03b}  guest {g:>12,}  "
                       f"composed {c:>12,}")
+
+    # Same page every time, or a different one? The ring is always
+    # recent, so it cannot fill with early-boot values the way the fixed
+    # table this script's notes describe did.
+    for cpu in range(args.cpus):
+        total = read('vtl_protect_count', cpu) or 0
+        if not total:
+            continue
+        repeated = read('vtl_protect_repeated', cpu) or 0
+        print(f"\ncpu {cpu} HvCallModifyVtlProtectionMask: {total:,} calls, "
+              f"{repeated:,} repeating the one before "
+              f"({100.0 * repeated / total:.1f}%)")
+        cap = 32
+        rdx = [read('vtl_protect_rdx', cpu * cap + i) for i in range(cap)]
+        rbp = [read('vtl_protect_rbp', cpu * cap + i) for i in range(cap)]
+        order = [(total - cap + i) % cap for i in range(cap)] \
+            if total >= cap else list(range(min(total, cap)))
+        seen_rdx = {rdx[i] for i in order if rdx[i] is not None}
+        seen_rbp = {rbp[i] for i in order if rbp[i] is not None}
+        print(f"  distinct in the last {len(order)}: "
+              f"rdx {len(seen_rdx)}, rbp {len(seen_rbp)}")
+        for i in order[-12:]:
+            print(f"    rdx 0x{(rdx[i] or 0):016x}  rbp 0x{(rbp[i] or 0):016x}")
 
     print("\ncpu  shadow-builds  cache-hits  evictions  resets  leaves-filled")
     for cpu in range(args.cpus):
