@@ -22304,3 +22304,85 @@ a wrap count. A monotonic sweep has a wrap count near zero; a guest
 re-doing work has one that climbs. That is the next reading, and unlike
 everything before it, the answer changes what to fix rather than how
 fast to make it.
+
+## Retraction: RBP is not the page, and "a sweep, not a loop" is withdrawn
+
+The bounded census was built to settle whether the sweep wraps. It
+settled something else: **the register it reads does not carry a page.**
+
+This boot, same binary lineage, settled regime:
+
+```
+cpu 0 HvCallModifyVtlProtectionMask: 14,092 calls
+  distinct in the last 32: rdx 1, rbp 1
+    rdx 0xffffffffffffffff  rbp 0x0000000000000000      x32
+```
+
+**RBP is zero on every one of the last thirty-two calls**, and the
+census section prints nothing because no value was admitted at all.
+Earlier boots showed `0x11a532, 0x11a533, 0x11a534` and `0x121296,
+0x121297, 0x121298` in the same field.
+
+So RBP holds an incrementing value during some phases and zero during
+others. It is a frame pointer, and it was believed because
+`0x11a532 << 12` is 4.70 GiB - a perfectly plausible place for a page of
+an 11 GiB guest. **Plausible is not possible-only**, which is this
+file's own rule, and it was not applied to the thing the rule was
+written about.
+
+### What is withdrawn
+
+- **"A different page every time, and consecutive."** Withdrawn. An
+  incrementing value was observed in a register; attributing it to the
+  guest-physical page of the protection request was inference, and this
+  boot refutes the register as a reliable source.
+- **"2,883,584 pages at 107 a second is 7.5 hours."** Withdrawn - it
+  rests entirely on the above.
+- The wrap census is **inconclusive**, not negative. Its input was the
+  wrong field, so `backward 25 of 7,388` measures the behaviour of a
+  frame pointer.
+
+### What survives, and it is not nothing
+
+- **The call rate**: `HvCallModifyVtlProtectionMask` is issued
+  continuously at about 107 calls a second, measured as a delta over
+  three minutes. That is a count of calls and needs no page.
+- **The protections land**: `eptp12` grants and this VMM installs are
+  identical bucket for bucket - 001, 011, 101, 111 - which was measured
+  independently of any register interpretation and is unaffected.
+- So the caller still is not asking again because the change failed, and
+  the same-page-or-different question is still **open**.
+
+### Why the two-field rule did not save this, which is the finding
+
+The rule filed one commit earlier says: a single-field instrument cannot
+tell you it is aimed at the wrong field, so census two and let them
+disagree. Two fields *were* censused. It still failed, and the reason is
+a limit on the rule that has to go with it:
+
+**A second field disambiguates only if both are candidates for the same
+quantity.** RDX and RBP are not two possible encodings of a page - one
+is a sentinel and the other is a frame pointer. Censusing two fields
+neither of which carries the value produces exactly what happened: one
+constant, one that moves for unrelated reasons, and the moving one is
+believed because it moves.
+
+What was missing is an **independent check that the value is what it is
+claimed to be** - not that it is plausible, which `0x11a532` certainly
+was, but that it *cannot be anything else*. Here it could: it was zero
+in another phase, and a page number does not become zero.
+
+### The instrument that would actually answer it
+
+Not another register. `HvCallModifyVtlProtectionMask` is a rep call, and
+`RDX = 0xffffffffffffffff` says it is not the memory-based form - a slow
+hypercall would carry an input guest-physical address there. So the
+input is in the fast form, which puts it in **R8 and the XMM registers**,
+and none of those is captured on this path.
+
+The honest next step is to capture the fast-hypercall input registers at
+this exit and decode the documented input header - target partition,
+map flags, target VTL, then the page numbers - rather than guessing
+which general-purpose register happens to look like an address. Until
+then, whether the guest sweeps or loops is unknown, and this file should
+not say otherwise.
