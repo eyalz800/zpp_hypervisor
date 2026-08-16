@@ -18684,3 +18684,35 @@ What that points at, in order of measured size:
 
 **No further per-exit optimisation.** It is measurably the wrong factor,
 and this file now has four changes and about eight boots proving it.
+
+### What 5.8% implies for the two remaining routes
+
+The share is `exits per second x cost per exit`. Both routes attack it,
+but they attack different factors and the sizes are now known.
+
+**Stay on KVM: attack the exit count.** The only block large enough to
+matter is extended-page-table violations at 20% of exits. Removing all of
+them takes this VMM from 86% to about 69% and the guest from 5.80% to
+roughly 12% - a bit over 2x, which is the right order for a threshold
+bracketed at (1, 2] but only if that whole 20% can be taken. The safe
+route to it is watching the guest hypervisor's own table pages with
+`watch_guest_page_writes`; the unsafe ones are already refuted, and the
+lazy fill must stay.
+
+That is real work with real risk: the watch machinery wedged a guest once
+this session, and the pages to watch are the guest hypervisor's extended
+page tables, which it writes exactly when it is doing the thing being
+measured.
+
+**Bare metal: attack the cost per exit, by a factor no code change can.**
+Under KVM every VMCS access in the handler traps to L0 at a measured
+~2,760 cycles against ~40 native, and the exit itself is mediated rather
+than direct. An exit costing about 390,000 cycles here is a low
+five-figure number on the same silicon with nothing underneath. This
+VMM's share does not improve by a few points on bare metal - it
+collapses, and the 5.80% the guest gets becomes most of the machine.
+
+**This is the first quantified statement of that difference.** Until now
+bare metal was argued from the 54% nesting-tax figure, which said the
+exits exist; the 5.8% says what they cost the guest. The user declined
+bare metal when the evidence was the former. It is now the latter.
