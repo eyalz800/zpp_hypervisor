@@ -4709,6 +4709,98 @@ static void test_exit_and_entry_control_composition()
                        (unsigned long long)round));
         }
 
+        // (4b) **The write side, which is a different elision with the
+        // same hazards.** `guest_rip`, `guest_rsp`, `guest_rflags`,
+        // `guest_interruptibility_state` and `guest_activity_state` are
+        // not in the bulk set - they are written unconditionally after
+        // the VMPTRLD, and were most of that half's 79,687 cycles a
+        // call. They are elided against what the *processor* saved into
+        // vmcs02, recorded by `save_l2_state`.
+        //
+        // The property asserted is the same one as above and the only
+        // one that matters: after an entry, vmcs02 holds what vmcs12
+        // said for the guest being entered. Ordering, not predicates.
+        {
+            h.vmcs02_launched[cpu] = false;
+            h.forget_vmcs02_contents(cpu);
+
+            auto enter_with_rip = [&](std::uint64_t owner,
+                                      std::uint64_t rip) {
+                load_vmcs01();
+                h.set_guest_current_vmcs(cpu, owner);
+                h.guest_vmcs12[cpu].write(field::guest_rip, rip);
+                return compose_entered(asked_controls{}).has_value();
+            };
+
+            // First entry to a never-launched vmcs02: nothing was
+            // saved, so the write is owed however the values compare.
+            ok = enter_with_rip(0xa000, 0xdead000);
+            check(ok && (0xdead000 == h.vmcs.read(field::guest_rip)),
+                  "the first entry to a never-launched vmcs02 writes "
+                  "guest_rip - the processor has saved nothing into it, "
+                  "so there is no recording to elide against");
+
+            h.vmcs02_launched[cpu] = true;
+            h.save_l2_state(cpu);
+
+            // Unchanged: the elision may skip the write, and vmcs02
+            // must still hold the value regardless. This is the case
+            // the change exists for.
+            ok = enter_with_rip(0xa000, h.guest_vmcs12[cpu].read(
+                                            field::guest_rip));
+            check(ok && (h.guest_vmcs12[cpu].read(field::guest_rip) ==
+                         h.vmcs.read(field::guest_rip)),
+                  "re-entering the same guest with an unchanged rip "
+                  "leaves vmcs02 holding it - skipping the write is "
+                  "only sound because the processor saved that value "
+                  "there on the way out");
+
+            // Changed by the level above: the comparison is on the
+            // value, so this needs no dirty bit to be caught.
+            h.save_l2_state(cpu);
+            ok = enter_with_rip(0xa000, 0xbeef000);
+            check(ok && (0xbeef000 == h.vmcs.read(field::guest_rip)),
+                  "a rip the level above changed is written - the "
+                  "elision compares the value, so it catches every "
+                  "writer without being told who they are");
+
+            // A different vmcs12 on the same vmcs02, which is the
+            // ordering that reset the guest for the read side.
+            h.save_l2_state(cpu);
+            ok = enter_with_rip(0xb000, 0xfeed000);
+            check(ok && (0xfeed000 == h.vmcs.read(field::guest_rip)),
+                  "a different vmcs12 entered on the same vmcs02 gets "
+                  "its own rip - vmcs02 is reused per processor and the "
+                  "recording belongs to the guest it was saved from");
+
+            // Alternating, because a one-shot guard passes the first
+            // switch and not the fifth.
+            for (std::uint64_t round{}; round < 4; ++round) {
+                auto owner = (round & 1) ? 0xa000ull : 0xb000ull;
+                auto rip = 0x9000000ull + (round << 16);
+
+                h.save_l2_state(cpu);
+                ok = enter_with_rip(owner, rip);
+                check(ok && (rip == h.vmcs.read(field::guest_rip)),
+                      text("alternating vmcs12s, write side, round "
+                           "%llu: vmcs02 holds the entered guest's rip",
+                           (unsigned long long)round));
+            }
+
+            // And the region being forgotten, which is what a VMCLEAR
+            // of vmcs02 does: the recording describes contents that no
+            // longer exist.
+            h.save_l2_state(cpu);
+            h.forget_vmcs02_contents(cpu);
+            ok = enter_with_rip(0xa000, 0xc0de000);
+            check(ok && (0xc0de000 == h.vmcs.read(field::guest_rip)),
+                  "forgetting vmcs02's contents forces the write back - "
+                  "the recording says what the region held, and after a "
+                  "VMCLEAR it holds nothing");
+
+            h.vmcs02_launched[cpu] = true;
+        }
+
         // (5) The same guest twice in a row - the case the deferral
         // exists for - with the level above changing a field in
         // between.

@@ -1133,6 +1133,7 @@ def main():
                "exit_reason_counts",
                "shadow_ept_builds", "shadow_ept_cache_hits",
                "shadow_ept_rebuild_new_root", "shadow_ept_rebuild_stale",
+               "hot_state_writes_skipped", "hot_state_writes_done",
                "shadow_ept_evictions", "shadow_ept_resets",
                "shadow_ept_leaves_filled",
                "vmcs_shadow_loads", "vmcs_shadow_stores",
@@ -1179,6 +1180,7 @@ def main():
                "l2_activity_state", "events_requeued", "events_deferred",
                "pending_event", "shadow_ept_builds", "shadow_ept_cache_hits",
                "shadow_ept_rebuild_new_root", "shadow_ept_rebuild_stale",
+               "hot_state_writes_skipped", "hot_state_writes_done",
                "shadow_ept_evictions", "shadow_ept_resets",
                "shadow_ept_leaves_filled", "vmcs_shadow_loads",
                "vmcs_shadow_stores",
@@ -1233,6 +1235,15 @@ def main():
     for cpu in range(args.cpus):
         print(f"{cpu:3d}  {read('shadow_ept_rebuild_new_root', cpu):-16d}  "
               f"{read('shadow_ept_rebuild_stale', cpu):-24d}")
+
+    # The five the processor saves into vmcs02 on exit, written back
+    # only when they differ from what it saved. Zero skipped means the
+    # elision did not compile in - a switch is not on until a counter
+    # says the code ran.
+    print("\ncpu  hot-state skipped/done")
+    for cpu in range(args.cpus):
+        print(f"{cpu:3d}  {read('hot_state_writes_skipped', cpu):-12d}/"
+              f"{read('hot_state_writes_done', cpu):-10d}")
 
     print("\ncpu  shadow-loads  shadow-stores")
     for cpu in range(args.cpus):

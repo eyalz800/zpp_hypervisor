@@ -993,6 +993,14 @@ void hypervisor::forget_vmcs02_contents(std::size_t cpu)
     // is about to invalidate. See `guest_state_deferred_vmcs`.
     this->guest_state_deferred[cpu] = false;
 
+    // And the five the processor saves, for the same reason: the
+    // recording says what vmcs02 holds, and after this it holds
+    // nothing. `vmcs02_launched` is cleared beside the VMCLEAR that
+    // calls this and would refuse the elision on its own, so this is
+    // the belt to that braces - but the recording is the thing being
+    // invalidated, so it is invalidated here.
+    this->hot_state_valid[cpu] = false;
+
     for (auto & valid : this->control_cache_valid[cpu]) {
         valid = false;
     }
@@ -2195,12 +2203,58 @@ std::expected<void, zpp::error> hypervisor::build_vmcs02(std::size_t cpu)
     // interrupts, NMIs, INIT and SMIs (SDM 29.7.2) with nothing in vmcs02
     // able to end it - not even this VMM's preemption timer, which
     // build_vmcs02 strips.
-    vmcs.write(field::guest_activity_state,
-               arch::x86_64::vmx::activity_state::active);
+    // The five the processor itself saves into vmcs02 on every VM exit,
+    // written back only when they differ from what it saved. See
+    // `hot_state_saved`: the comparison is against the value, so it
+    // covers the guest hypervisor's VMWRITEs, this VMM's own RIP
+    // advance, and the injection path alike, and vmcs02 provably still
+    // holds the recorded value because nothing else ever makes it
+    // current.
+    //
+    // Measured before this existed: the ten writes after the VMPTRLD
+    // that never went through any elision were most of `build_vmcs02`'s
+    // post-switch 79,687 cycles a call, which was 20% of the whole exit
+    // - while the elision that does exist covered only the cold fields,
+    // the segments and bases that never change.
+    auto reuse_hot_state = (cpu < max_cpus) && this->hot_state_valid[cpu] &&
+                           this->vmcs02_launched[cpu] &&
+                           (this->hot_state_vmcs[cpu] ==
+                            this->guest_current_vmcs[cpu]);
 
-    vmcs.guest_rip(shadow.read(field::guest_rip));
-    vmcs.guest_rsp(shadow.read(field::guest_rsp));
-    vmcs.guest_rflags(shadow.read(field::guest_rflags));
+    auto put_hot = [&](std::size_t slot,
+                       std::uint64_t value,
+                       auto && write) {
+        if (reuse_hot_state && (this->hot_state_saved[cpu][slot] == value)) {
+            this->hot_state_writes_skipped[cpu] += 1;
+            return;
+        }
+
+        write(value);
+
+        // Kept in step so a second build without an intervening entry -
+        // an entry that fails, and is retried - compares against what
+        // vmcs02 now holds rather than against what it held before.
+        if (cpu < max_cpus) {
+            this->hot_state_saved[cpu][slot] = value;
+            this->hot_state_writes_done[cpu] += 1;
+        }
+    };
+
+    put_hot(4,
+            arch::x86_64::vmx::activity_state::active,
+            [&](std::uint64_t value) {
+                vmcs.write(field::guest_activity_state, value);
+            });
+
+    put_hot(0, shadow.read(field::guest_rip), [&](std::uint64_t value) {
+        vmcs.guest_rip(value);
+    });
+    put_hot(1, shadow.read(field::guest_rsp), [&](std::uint64_t value) {
+        vmcs.guest_rsp(value);
+    });
+    put_hot(2, shadow.read(field::guest_rflags), [&](std::uint64_t value) {
+        vmcs.guest_rflags(value);
+    });
     vmcs.guest_dr7(shadow.read(field::guest_dr7));
     vmcs.write(field::guest_ia32_pat, shadow.read(field::guest_ia32_pat));
     vmcs.write(field::guest_ia32_efer,
@@ -2218,8 +2272,11 @@ std::expected<void, zpp::error> hypervisor::build_vmcs02(std::size_t cpu)
     // only be another thing to get wrong.
     vmcs.write(field::guest_ia32_bndcfgs,
                shadow.read(field::guest_ia32_bndcfgs));
-    vmcs.write(field::guest_interruptibility_state,
-               shadow.read(field::guest_interruptibility_state));
+    put_hot(3,
+            shadow.read(field::guest_interruptibility_state),
+            [&](std::uint64_t value) {
+                vmcs.write(field::guest_interruptibility_state, value);
+            });
 
     // The time stamp counter offset composes across levels: what this VMM
     // applies to the guest hypervisor, plus what the guest hypervisor
@@ -3123,6 +3180,27 @@ void hypervisor::save_l2_state(std::size_t cpu)
 
     shadow.write(field::guest_interruptibility_state, interruptibility12);
     shadow.write(field::guest_activity_state, activity12);
+
+    // Recorded here, where vmcs02 is current and these five values came
+    // straight out of it, so `build_vmcs02` can skip writing back what
+    // vmcs02 already holds. See `hot_state_saved` for why comparing the
+    // value rather than tracking a writer is what makes this safe.
+    //
+    // The activity state is the one that is *composed* rather than read
+    // - `enter_or_park_l2` holds it outside the VMCS for a guest that
+    // never ran - so what is recorded is what was written to vmcs12,
+    // which is the value the comparison will be made against. Recording
+    // the composed value rather than a re-read keeps the two sides of
+    // the comparison the same quantity.
+    if (cpu < max_cpus) {
+        this->hot_state_saved[cpu][0] = shadow.read(field::guest_rip);
+        this->hot_state_saved[cpu][1] = shadow.read(field::guest_rsp);
+        this->hot_state_saved[cpu][2] = shadow.read(field::guest_rflags);
+        this->hot_state_saved[cpu][3] = interruptibility12;
+        this->hot_state_saved[cpu][4] = activity12;
+        this->hot_state_vmcs[cpu] = this->guest_current_vmcs[cpu];
+        this->hot_state_valid[cpu] = true;
+    }
 
     // The control registers, put back through the same masks they were
     // built with. What the second-level guest owns is the real register;

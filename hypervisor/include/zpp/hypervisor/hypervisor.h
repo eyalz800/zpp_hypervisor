@@ -8482,6 +8482,39 @@ private:
      */
     std::uint64_t shadow_ept_rebuild_new_root[max_cpus]{};
     std::uint64_t shadow_ept_rebuild_stale[max_cpus]{};
+
+    /**
+     * The five guest-state fields the processor saves into vmcs02 on
+     * every VM exit, as `save_l2_state` read them out - so that
+     * `build_vmcs02` can skip writing back a value vmcs02 demonstrably
+     * still holds.
+     *
+     * **Why this is sound without tracking who wrote what.** The
+     * comparison is against the *value*, not against a dirty bit, so it
+     * covers every writer of the cached vmcs12 alike: the guest
+     * hypervisor's intercepted VMWRITEs, this VMM's own RIP advance, the
+     * injection path. If any of them changed the value, it differs from
+     * what was saved and the write happens.
+     *
+     * And vmcs02 cannot change underneath the recording: `save_l2_state`
+     * reads these while vmcs02 is current, immediately after the exit;
+     * vmcs01 is then made current to run the guest hypervisor; and the
+     * only VMPTRLD of vmcs02 in the tree is the one in `build_vmcs02`
+     * itself. So between the record and the use, no instruction can
+     * write vmcs02's guest state.
+     *
+     * The two preconditions are the ones the deferred read copy already
+     * pays for and `tests/nested_exit` already covers: vmcs02 must have
+     * been launched, or nothing was ever saved into it; and the vmcs12
+     * being entered must be the one that was saved from, since vmcs02 is
+     * reused per processor.
+     */
+    static constexpr std::size_t hot_state_count = 5;
+    std::uint64_t hot_state_saved[max_cpus][hot_state_count]{};
+    std::uint64_t hot_state_vmcs[max_cpus]{};
+    bool hot_state_valid[max_cpus]{};
+    std::uint64_t hot_state_writes_skipped[max_cpus]{};
+    std::uint64_t hot_state_writes_done[max_cpus]{};
     std::uint64_t shadow_ept_evictions[max_cpus]{};
 
     /**
