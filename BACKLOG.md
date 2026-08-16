@@ -19987,3 +19987,49 @@ without also being offered to Windows, which stops on it.
 evidence allows**: tell Hyper-V about the enlightenment without telling
 Windows. Every other question this session opened is closed or
 instrumented.
+
+### The gate opened - so it is probably Hyper-V failing, not Windows
+
+`cpuid` in the CPUID handler **is** the processor index: it is
+`on_vm_exit`'s first parameter, used as one throughout. So the gate was
+correct and it *opened* - `guest_in_vmx_operation` was already true when
+the recommendations leaf was read.
+
+Which means the reader of that leaf had already executed VMXON, and that
+is not Windows. **It is the guest hypervisor.**
+
+That reframes the failure, and the reframing fits the numbers better than
+the previous story did:
+
+- Hyper-V starts, executes VMXON, reads the leaf, and is told an
+  enlightened VMCS is available.
+- It then sets up an enlightened VM entry against **this VMM's
+  implementation** - the assist page, the structure, the entry path - and
+  something in that handling is wrong.
+- It stops before launching its guest, which is exactly what
+  `l2-entries 0` with ~2,760 exits says.
+
+**So the hang is most likely this VMM's enlightenment handling being
+broken, not Windows choking on an advertisement it should not have
+seen.** The whole "tell Hyper-V without telling Windows" framing in the
+entry above may be solving a problem that does not exist.
+
+### What that makes the next step
+
+Not the gate, and not the advertisement. **The handling.** The counters
+for it were added and are the ones to read first, on the now-proven
+reader and with the columns actually wired:
+
+- `hyperv_vp_assist_writes` - did it register an assist page?
+- `evmcs_reads` / `evmcs_writes` - did `load_enlightened_vmcs` ever fire?
+
+If the assist page is written and the reads never happen, the hookup is
+not reached. If the reads happen and it still stops, the structure or the
+copy is wrong - and `tests/nested_exit` can drive that on a desk against
+a hand-built structure, which it already does for the two copy
+directions.
+
+**This is a better place to resume than anything earlier in this file.**
+The failure is inside code that exists, is desk-testable, and has
+instruments already written for it - rather than in a guess about which
+guest read a CPUID leaf.
