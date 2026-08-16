@@ -1186,7 +1186,6 @@ def main():
                "pending_event", "shadow_ept_builds", "shadow_ept_cache_hits",
                "shadow_ept_rebuild_new_root", "shadow_ept_rebuild_stale",
                "shadow_ept_replayed", "hyperv_vp_assist_writes", "hypercalls_seen",
-               "hypercall_codes", "hypercall_code_counts",
                "evmcs_reads", "evmcs_writes",
                "hot_state_writes_skipped", "hot_state_writes_done",
                "l2_run_cycles", "l1_run_cycles", "handler_cycles",
@@ -1206,6 +1205,18 @@ def main():
                       + cpu * phase_count * 8, phase_count)
         monitor.queue(instance + off["phase_calls"]
                       + cpu * phase_count * 8, phase_count)
+    # Arrays that are not per-processor have to be queued with **their
+    # own length**, not with the processor count. Queued as scalars they
+    # fetch eight words and the rest resolves against whatever the next
+    # queue covers - which is how sixteen hypercall slots read back as
+    # eight populated ones with the same values from a different binary
+    # and fresh guest memory. The same failure gdb_lengths was written
+    # for: a capacity carried in the reader is a second copy of a
+    # constant that lives in the header.
+    hypercall_slots = 16
+    monitor.queue(instance + off["hypercall_codes"], hypercall_slots)
+    monitor.queue(instance + off["hypercall_code_counts"], hypercall_slots)
+
     monitor.queue(instance + off["running_l2"], (scalar_cpus + 7) // 8)
     monitor.queue(instance + off["unhandled_exit"], 6)
     monitor.queue(instance + off["vm_entry_failure"], 6)

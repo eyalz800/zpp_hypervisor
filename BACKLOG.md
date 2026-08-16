@@ -19459,3 +19459,45 @@ than with the processor count.
 that**, `vp-assist-writes` included. Its zero is as unproven as the
 hypercall codes were, so whether the guest hypervisor declines the
 enlightenment is once again an open question rather than a finding.
+
+### With the reader fixed: zero hypercalls, and the 104 was fiction
+
+Queued at their own length, booted, re-read: **`hypercalls_seen` is
+zero.** The dump prints nothing, because there is nothing.
+
+So the guest hypervisor makes **no hypercalls to this VMM at all**, and
+the 104 reported by two boots was the queue-length fault throughout. The
+entry above that reasoned from it - "it does establish the page and does
+use the interface, so the offer is declined after that conversation" -
+was reasoning about a number that did not exist.
+
+**What that leaves standing, and it is little.** The enlightenment is
+offered: vendor "Microsoft Hv", `Hv#1`, the hypercall and processor-index
+privileges, bit 14 recommending an enlightened VMCS, version 1 in the
+nested-features leaf, and the maximum leaf extended to reach it. The
+guest hypervisor writes neither the hypercall page nor the assist page
+register, and issues no hypercall. It is not partway through accepting -
+it is not engaging at all.
+
+**And the reset loop is now genuinely unexplained.** Both boots that
+looped ran the trapping hypercall page, and with zero hypercalls that
+page's `vmcall` was never executed by the guest hypervisor - so the loop
+came from somewhere else in that build, or from the second-level guest
+whose calls the trapping page also caught before the layer fix.
+
+### Where to start next
+
+**Not with more counters read through this path.** Two of the three
+findings this session drew from high-offset members were fiction, and the
+one structural rule that would have caught both is already in this file
+under `gdb_lengths`. Anything added there now gets cross-checked against
+a member whose value is independently known, in the same dump, before it
+is believed - which is the fifth methodology entry and the one that keeps
+being skipped.
+
+The question to answer first is the simplest one available: **does the
+guest hypervisor read the hypervisor CPUID range at all under this
+build?** `vmcs_field_use` and the exit trace can say so without any new
+member. If it never reads the leaves, the advertisement is invisible for
+a reason that has nothing to do with its content, and every hour spent on
+the content is wasted.
