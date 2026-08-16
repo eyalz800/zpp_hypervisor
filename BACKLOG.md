@@ -18550,3 +18550,71 @@ is zero in both runs.
   aggregate.** This is the cheapest measurement in the whole file - one
   boot of an already-deployed binary - and it should have been made
   before the first optimisation, not after the fourth.
+
+## 1.9x of handler cycles buys no relief, and that redirects everything
+
+The optimisations were measured against *this VMM's* cost. The bracket
+they were aimed at was defined by `ZPP_STRETCH_GUEST_TIMER=2`, which
+moved a different quantity - the guest's wall-clock budget between ticks.
+Those are not the same thing, and the difference is now measured rather
+than suspected.
+
+Booted with all four changes, 2,111,268 second-level entries:
+
+| indicator | livelocked baseline | stretch=2, relieved | **now** |
+|---|---|---|---|
+| at CLOCK or above | 64.6% | ~1% | **89.1%** |
+| below DISPATCH | 0 of 184,236 | 25.7% | **0** |
+| CPL 3 entries | 0 | reached `KiIdleLoop` | **0** |
+
+**The near-miss that nearly went in this file as progress.** At 748,562
+entries the same run showed 15,085 entries below DISPATCH - the first
+non-zero reading of that counter in more than twenty boots - and
+DISPATCH requests down 25x per entry. Both looked like partial relief.
+
+Left to run to 2,111,268 entries, `0x00` reads **12,293** and `0x10`
+reads **2,792**: *identical to the earlier sample, to the digit*, while
+`0xd0` grew by 725,000 and `0xf0` by 546,000. So every one of those
+15,085 happened during early boot and **not one occurred in the last 1.36
+million entries.** The steady state is the same hard zero as every
+previous boot. Three counters frozen while their neighbours grow is not a
+dump artifact - it is those events having stopped.
+
+The tick also settled at 4.21-8.42 ms, 94.9% of gaps, rather than the
+1.74 ms of the baseline. **That makes the negative result stronger, not
+weaker**: the guest has roughly three times longer between ticks *and* a
+handler 1.9x cheaper per entry, and it still never drops below DISPATCH.
+
+### What it means
+
+Handler cycles per second-level entry is **not** the axis the relief
+threshold lives on. Reducing it 1.9x - measured on the reproducible
+metric, four changes, every one verified by its own counter - produces no
+movement in any guest-facing indicator.
+
+Two candidate explanations, neither yet tested:
+
+- **The number of entries per unit of guest work is what matters**, not
+  the cost of each. A VTL round trip is ~151 exits; making each cheaper
+  shortens the round trip in wall time but leaves the guest needing the
+  same number of round trips, and the tick arrives per unit wall time
+  either way. The stretch changed the *ratio* of guest time to tick
+  period directly; this changes it only through our share, which is
+  already only part of the wall clock.
+- **The block is not purely timing.** The stretch relieved it, which is
+  strong evidence timing is *sufficient* to unblock; it is not evidence
+  that timing is the only thing holding it. A guest given 2x the period
+  may cross some other threshold as a side effect.
+
+### The measurement that should come next
+
+Not another optimisation. **What fraction of wall-clock time is the guest
+actually executing, and how does it compare with the stretch=2 run?**
+That is the quantity the stretch moved and the one nothing here has ever
+measured directly - every figure in this file is cycles per exit, per
+entry, or per phase, all of them denominated in *our* work rather than
+the guest's.
+
+Until that number exists for both a livelocked and a relieved run, no
+further optimisation is justified: four changes worth a genuine 1.9x
+moved no guest-facing indicator at all.
