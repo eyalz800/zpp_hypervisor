@@ -22929,3 +22929,81 @@ appended to a long run.
 - **The clock is correct** - 10.000 MHz, monotonic, twice.
 - **6 to 7 distinct second-level entry RIPs across 10,000-20,000
   entries** - the progress metric. When a fix works, this moves first.
+
+## MSI-X is never enabled, in either configuration - read directly, with a positive control
+
+The criterion that works, and it needed no boot to prove itself. The
+MSI-X enable bit is in the device's own configuration space and VFIO
+programs the **physical** bit when the guest enables it, so it answers
+"did the guest bring the controller up" with no inference about how
+Linux names an interrupt.
+
+| configuration | reading |
+|---|---|
+| **no guest, disk on the host `nvme` driver** | **`MSI-X: Enable+ Count=17 Masked-`** |
+| guest running, `nested=1` (the goal) | `MSI-X: Enable- Count=17 Masked-` |
+| guest running, `nested=0` (control) | `MSI-X: Enable- Count=17 Masked-` |
+
+The first row is the positive control and it is what makes the other two
+mean anything: the same device, the same capability at the same offset,
+the same seventeen vectors, read by the same command - **enabled** when
+a driver that works has it. So the reading is not blind, which is
+exactly what `/proc/interrupts` could not establish about itself.
+
+`Masked-` matters too: an enabled table with every vector masked is a
+different state from never enabled and looks identical in any yes/no
+instrument. It is not that state.
+
+**And the control says this is not a nesting bug.** `Enable-` with
+nested VMX off as well as on. On the evidence in hand, **Windows has
+never enabled interrupt-driven disk I/O on the passed-through NVMe under
+this VMM in any configuration** - which is a larger finding than the one
+being tested for, and it retires the nested-cost framing of this file
+rather than extending it.
+
+It also reconciles the earlier `/proc/interrupts` reading: no device
+shows an MSI-X line because no device has MSI-X enabled. The absence was
+consistent, not blind - but it could not have been known to be
+consistent without this bit, which is the whole argument for reading the
+thing itself rather than a proxy for it.
+
+### The one gap left, and it is the plain-KVM control
+
+The positive control is a **host Linux driver**, not a Windows guest.
+It proves the reading works; it does not prove that a *working* Windows
+guest on this rig shows `Enable+`. If QEMU presents a virtual MSI-X
+capability and drives the physical device by another means, `Enable-`
+could be normal for every VFIO guest here and the finding evaporates -
+the same shape as the admin-queue lead.
+
+**And the plain-KVM launcher is not currently a clean control.** Diffed
+before running it, as it should be:
+
+```
+boot.sh      -cpu host,kvm=on,hv-passthrough,topoext
+boot-zpp.sh  -cpu host,kvm=on,topoext
+
+boot.sh      qemu-system-x86_64                        (system binary)
+boot-zpp.sh  /home/tc/vm/qemu-system-x86_64-new
+
+boot.sh      mem = MemTotal - 2500
+boot-zpp.sh  mem = MemTotal - 4000
+```
+
+**Four substantive differences**, not one. Running it as-is would
+compare this VMM's absence against a different QEMU, a different guest
+memory size and a different CPU model at once - which is the mistake
+this file records launchers causing before.
+
+**And one of them corrects `CLAUDE.md`.** That file states, as a checked
+fact with a date on it, that "the rig does not pass `hv-passthrough`;
+both launchers run plain `-cpu host,kvm=on,topoext` and neither mentions
+`hv-` at all". `boot.sh` passes `hv-passthrough`. Corrected there - and
+it is the very section that warns "read the launcher before arguing from
+what is underneath it", which is what re-reading it just did.
+
+So the decisive experiment is one boot of `boot.sh` **with
+`hv-passthrough` removed and the same QEMU binary and memory**, reading
+the same bit. That is a launcher edit on the rig, which needs backing up
+to survive, and it is the right first act of the next session rather
+than the last of this one.
