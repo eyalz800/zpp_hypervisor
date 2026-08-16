@@ -529,6 +529,35 @@ answers it in seconds, and it is how this was finally found: the working
 binary lacked `hypervisor_bit=` and `leaf 0x40000000 ebx=`, which only
 `verify.h` emits.
 
+### A CMake cache reading ON is not evidence. Read the manifest.
+
+That class has now cost this project three separate things: a build
+switch declared and forwarded but never added to the compiler's list
+(`cmake/hypervisor/CMakeLists.txt` records it), four counter readings
+that were fiction, and `ZPP_PUBLISH_REFERENCE_TSC` - ON in both caches
+and in `compile_commands.json`, with a *stale object file*, so
+`publish_reference_tsc_page` linked in as a bare `ret` and two sessions
+of measurements were taken of a configuration nobody had built. It was
+the switch aimed at the largest exit reason on the machine.
+
+So the binary now says what it is:
+
+```sh
+strings out/debug/x86_64/zpp_hypervisor | grep 'zpp switches'
+zpp switches: nested=1 evmcs=0 shadowvmcs=1 tpr=1 reftsc=1 selfipi=0 \
+              defer=1 shadowgs=0 stepvtl=0 profile=0 stretch=1
+```
+
+`hypervisor/src/hypervisor/build_switches.cpp` assembles that from the
+same `constexpr bool`s the code branches on - **not** from the `-D`
+macros behind them, which would have agreed with the cache and been just
+as wrong. `check-bootable.sh` prints it on every deploy, so it is on the
+path to the rig and cannot be skipped.
+
+**Check it before turning anything on, and before believing any run.**
+Adding a switch is now four edits, not three: the option, the forward,
+the compiler's list, and a field here.
+
 ## Debugging
 
 Run Bochs and gdb **inside a named tmux session**, never as a detached one-shot command, so
@@ -560,12 +589,42 @@ without perturbing it. Or arm the Monitor Trap Flag from inside the VMM, which
 forces an exit after one retired instruction and answers "is it executing?"
 without a debugger at all.
 
-### The bare-metal target has no ftrace
+### KVM's own statistics are on the rig, and they are the cheapest instrument
 
-The development target runs a TinyCore kernel with **no tracefs, no
-`/sys/kernel/debug/kvm`, and no `/proc/<tid>/stack`**. KVM tracepoints and the
-per-vCPU debugfs stats are simply unavailable there, so any plan that depends on
-them needs a different kernel. Check before designing around them.
+**This section used to say the target had no tracefs and no
+`/sys/kernel/debug/kvm`. That was wrong about both, and designing around
+their absence cost a session.** The rig runs a KVM built with tracepoints
+(93 events under `/sys/kernel/tracing/events/kvm`), and debugfs simply is
+not mounted at boot:
+
+```sh
+sudo mount -t debugfs none /sys/kernel/debug
+ls /sys/kernel/debug/kvm/<pid>-<fd>/          # ~60 per-VM counters
+```
+
+Two of them answer, from the host, without touching the guest, what
+otherwise needs a full state dump:
+
+- **`nested_run`** - second-level entries, the same quantity the resident
+  `l2-entries` counts.
+- **`exits`** - every VM exit L0 took. Divided by `nested_run` it gives
+  VMCS accesses per second-level entry, which is the nesting tax in one
+  number.
+
+**Read them as deltas over a window**, never cumulatively - a boot has
+phases and the cumulative figure averages them. Three consecutive 20 s
+windows on a settled guest agreed to 1.5%, which makes `nested_run/s` the
+most reproducible metric in this tree and the right headline for any
+comparison. Prefer it to anything needing a dump.
+
+`/proc/<tid>/stack` really is absent. `/proc/<pid>/task/*/schedstat` is
+not, and its `run_time wait_time` pair settles "is this thread waiting to
+be scheduled" in one reading - measured 0.2% wait on every vCPU thread,
+which retired a whole theory for the cost of one command.
+
+For streaming tracepoints rather than counters, the `trace-kvm` skill's
+FIFO recipe still applies and its warnings still stand: `trace_pipe`
+only, never `trace`, and never as an ssh child.
 
 ### Use hardware breakpoints only
 
