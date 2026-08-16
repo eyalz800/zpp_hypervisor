@@ -1,5 +1,6 @@
 #pragma once
 #include "zpp/arch/x86_64/ap_start_up.h"
+#include "zpp/hypervisor/enlightened_vmcs.h"
 #include "zpp/arch/x86_64/context.h"
 #include "zpp/arch/x86_64/decoder.h"
 #include "zpp/arch/x86_64/exception_entry.h"
@@ -8506,6 +8507,18 @@ private:
 
     void remember_shadow_page(std::size_t cpu,
                               std::uint64_t guest_physical);
+
+    /**
+     * Reads an enlightened VMCS into the cached vmcs12. Nothing calls it
+     * yet: the advertisement that makes the guest hypervisor use the
+     * structure is deliberately the last step, because advertising an
+     * interface with nothing behind it is the failure
+     * `announce_hypervisor` already made.
+     */
+    void copy_enlightened_to_vmcs12(
+        std::size_t cpu, const hyperv::enlightened_vmcs & evmcs);
+
+    std::uint64_t evmcs_reads[max_cpus]{};
     void replay_shadow_recall(std::size_t cpu,
                               std::size_t slot,
                               std::uint64_t root);
