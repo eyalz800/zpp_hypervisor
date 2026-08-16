@@ -1050,6 +1050,20 @@ std::expected<void, zpp::error> hypervisor::build_vmcs02(std::size_t cpu)
         }
     });
 
+    // Everything before the VMPTRLD, as its own phase. `merge_nested_
+    // bitmaps`, `copy_vmcs12_to_shadow` and `shadow_ept_pointer_for` are
+    // nested inside it and timed separately, so what this minus those
+    // three shows is the reading and validation of vmcs12 that nothing
+    // has ever measured.
+    auto before_start = arch::x86_64::rdtsc();
+    auto before_stop = zpp::scope_exit([&] {
+        if (cpu < max_cpus) {
+            this->phase_cycles[cpu][14] +=
+                arch::x86_64::rdtsc() - before_start;
+            this->phase_calls[cpu][14] += 1;
+        }
+    });
+
     namespace vmx_msr = arch::x86_64::vmx::msr;
 
     if constexpr (!nested_vmx::enabled) {
@@ -1448,6 +1462,14 @@ std::expected<void, zpp::error> hypervisor::build_vmcs02(std::size_t cpu)
     // hypervisor on the wrong VMCS.
     // Phase timing; see `phase_cycles`. Timed on its own because the
     // rest of this function is now nearly free and the phase is not.
+    // The first half ends here, before the VMPTRLD rather than after, so
+    // the switch itself stays in its own phase 6 and is not counted twice.
+    if (cpu < max_cpus) {
+        this->phase_cycles[cpu][14] += arch::x86_64::rdtsc() - before_start;
+        this->phase_calls[cpu][14] += 1;
+    }
+    before_stop.release();
+
     auto switch_start = arch::x86_64::rdtsc();
     auto switch_failed =
         arch::x86_64::vmx::vmptrld(&this->vmcs02_physical[cpu]);
@@ -1456,6 +1478,18 @@ std::expected<void, zpp::error> hypervisor::build_vmcs02(std::size_t cpu)
         this->phase_cycles[cpu][6] += arch::x86_64::rdtsc() - switch_start;
         this->phase_calls[cpu][6] += 1;
     }
+
+    // And everything after it: the control writes and the guest-state
+    // writes, both of which are elided against a cache, so this is
+    // expected to be small and is measured rather than assumed.
+    auto after_start = arch::x86_64::rdtsc();
+    auto after_stop = zpp::scope_exit([&] {
+        if (cpu < max_cpus) {
+            this->phase_cycles[cpu][15] +=
+                arch::x86_64::rdtsc() - after_start;
+            this->phase_calls[cpu][15] += 1;
+        }
+    });
 
     if (switch_failed) {
         return std::unexpected(zpp::error{error::vmptrld_failed});

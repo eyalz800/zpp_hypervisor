@@ -18354,3 +18354,72 @@ shape of the idea and its blocker, not as a plan.
 the cost model that turned out to be right and the VMCS-shadowing
 stand-down that turned out to be unnecessary. Each cost one diagnostic
 boot and no correctness risk, which is the trade the counters exist for.
+
+## Where the unattributed 27% is: ten unelided writes after the VMPTRLD
+
+Adding `build_vmcs02`'s named children up left about 59,500 cycles an
+entry unexplained, and `reflect_l2_exit` about 40,000 - together 27% of a
+390,000 cycle exit, larger than any remaining named term. Split at the
+VMPTRLD:
+
+```
+build: before vmptrld     752,090 calls    24,592 cycles/call
+build: after  vmptrld     752,090 calls    79,687 cycles/call
+```
+
+The half that was expected to be **nearly free** - "the control writes
+and the guest-state writes, both of which are elided against a cache" -
+is **79,687 cycles, 72% of `build_vmcs02` and 20% of the whole exit**.
+
+`copy_vmcs12_to_shadow` is *not* in that region (checked, zero call
+sites), so none of it is the shadow copy. The elision is not broken
+either: `write_vmcs02_control` compares against a cached value and does
+no VMREAD, and the guest-state loop's `vmcs.read` is inside
+`if constexpr (nested_vmx::shadow_guest_state)`, which is off.
+
+**What is there is ten VMCS writes that never go through the elision at
+all:**
+
+```
+vmx_preemption_timer_value          guest_ia32_pat
+guest_activity_state                guest_ia32_efer
+guest_rip                           guest_ia32_bndcfgs
+guest_rsp                           guest_interruptibility_state
+guest_rflags                        vm_entry_interruption_information_field
+```
+
+At the ~4,500 cycles this file already measures for a VMWRITE here, ten
+of them is ~45,000 - the bulk of the 79,687, with the elided controls'
+scans and the guest-state loop's cached reads making up the rest.
+
+### The fix, specified and deliberately not built here
+
+This is the **write-side analogue of item 2**. Item 2 deferred the reads
+out of vmcs02 into vmcs12; these are the writes back the other way, and
+they are unconditional.
+
+Two groups, with different arguments:
+
+- `guest_rip`, `guest_rsp`, `guest_rflags`, `guest_interruptibility_state`,
+  `guest_activity_state` are **saved by the processor into vmcs02 on every
+  VM exit**. So after an exit vmcs02 already holds what `save_l2_state`
+  copied out, and writing it back is redundant *unless the guest
+  hypervisor changed it* - which this VMM knows exactly, because it
+  intercepts every VMWRITE and there are only 494 in a whole boot. The
+  `dirty` mask the deferrable set already uses is the mechanism.
+- `guest_ia32_pat`, `guest_ia32_efer`, `guest_ia32_bndcfgs` are only
+  saved on exit when the corresponding VM-exit control asks for it.
+  **Check those controls before eliding these** - the elision is sound
+  only for a field the processor does not touch behind us.
+
+Worth roughly 25,000 + 13,500 cycles an entry, about **1.10x**, which
+would take the cumulative from 1.38x to about 1.52x.
+
+**Not built in this session, on purpose.** The identical change on the
+read side took four boots and about 280 unclean resets of the user's
+Windows installation to get right, and its four ordering conditions were
+only found once `tests/nested_exit` could represent VMCS sequences. That
+harness now exists and this change must go through it first - the same
+sequences, plus one for "the processor wrote the field behind us". A
+1.10x is not worth a reset loop, and the specification above is worth
+more than a rushed attempt.

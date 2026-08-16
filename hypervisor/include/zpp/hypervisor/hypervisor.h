@@ -8304,7 +8304,15 @@ private:
      * place. If they are cheap, the cost is somewhere nobody has looked
      * and this says so instead.
      */
-    static constexpr std::size_t phase_count = 14;
+    /**
+     * 14 and 15 split `build_vmcs02` at its VMPTRLD, because adding its
+     * named children up leaves about 59,500 cycles an entry unaccounted
+     * for - the largest single unexplained term in the handler once the
+     * copies were made cheap. A container's total minus its children is
+     * where cost hides, which this file learned when three phases fell
+     * and the handler did not.
+     */
+    static constexpr std::size_t phase_count = 16;
     std::uint64_t phase_cycles[max_cpus][phase_count]{};
     std::uint64_t phase_calls[max_cpus][phase_count]{};
     /** @} */
