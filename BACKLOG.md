@@ -22484,3 +22484,82 @@ Two things, in this order:
 The second is the more interesting, and it is the first question in this
 file that points at what the guest is *told* rather than at how fast it
 is served.
+
+## And the protection phase finishes. It is not the block.
+
+The follow-up reading, taken from the same boot and costing nothing:
+
+```
+                     calls      l2-entries
+t                   32,791          80,466
+t + ~10 min         39,237       1,033,757
+t + 12 min          39,237       1,373,416
+```
+
+**The call count is frozen at 39,237 and the guest is running hard** -
+2,830 second-level entries a second, 5,682 exits a second, sustained
+across twelve minutes in which not one further protection call was
+issued.
+
+And 39,237 is not an arbitrary place to stop: an earlier boot of a
+different binary read **exactly 39,237** at the moment it was sampled.
+The same total twice is the size of the set, not a coincidence.
+
+So `HvCallModifyVtlProtectionMask` is a **finite phase**:
+
+- 39,237 calls, one page each, **153 MiB** of protected memory;
+- about **6.1 minutes** at the measured rate;
+- every call answered `HV_STATUS_SUCCESS` with one rep completed;
+- and then it **stops**, while the guest carries on livelocked.
+
+**That retires the entire line, including everything built on it in the
+last several entries.** The protection mask is not what blocks the boot:
+it completes, it completes successfully, and the machine is still stuck
+afterwards. The throughput framing - 2,883,584 pages, 7.5 hours - is
+dead outright: the set is 39,237 pages and it is done in six minutes.
+
+### The methodological point, and it is a new one
+
+**A rate measured over one window says nothing about how long the
+activity lasts.** 107 calls a second was measured correctly, twice, over
+180-second windows - and both windows happened to fall inside a phase
+that ends. From inside such a window an ending phase and an unbounded
+one are identical, and the inference to "a sweep that takes 7.5 hours"
+required the second property, which was never measured.
+
+This is not the wrong-field error that preceded it. The instrument was
+right, the decode was verified against a control, the numbers were real.
+**The error was extrapolating a rate past the window that produced it.**
+The cheap defence is the one that caught it here: sample the same
+counter again much later and see whether it still moves. It costs one
+command and it would have prevented the whole framing.
+
+Three errors of three different shapes in one investigation, worth
+listing together because the defences differ:
+
+| error | shape | defence |
+|---|---|---|
+| RBP read as a page | wrong field | check the value cannot be anything else |
+| wall-clock-per-exit as a marginal cost | wrong denominator | measure the phase being priced |
+| 107 calls a second extrapolated | wrong duration | re-read the counter much later |
+
+### Where that leaves the search
+
+**Back to the guest, with the protection phase eliminated by
+measurement.** What is known now and was not before:
+
+- the guest is not waiting - 2,830 second-level entries a second;
+- it is not blocked on a protection change - that phase finished six
+  minutes in and succeeded on every call;
+- it is not blocked on the reference clock - that was removed and the
+  boot did not complete;
+- the trust-level round trip is not the limit - it was shortened and the
+  boot did not complete;
+- and CPL 3 never arrives, on a census over every entry.
+
+The next question is what those 2,830 entries a second consist of
+**after** the protection phase ends, which is a different population
+from anything measured so far - every exit census in this file mixes the
+two phases together. Splitting the exit histogram at the last protection
+call would say what the livelocked steady state is actually made of,
+and that is one counter and no new boot.
