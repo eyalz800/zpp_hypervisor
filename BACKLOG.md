@@ -21647,3 +21647,108 @@ guest - `info registers -a`, `xp` on what it is executing, sampled - not
 another counter. This file already records that four monitor samples
 reframed a failure that eleven boots of counters had mischaracterised
 twice.
+
+## The monitor on a running guest: three answers, and one instrument trap
+
+Following the `ClassPnP` lead with `xp` and `info registers` rather than
+counters, in the default nested configuration on a settled guest.
+
+### First, a trap that nearly produced a confident wrong answer
+
+A wide `xp` over a passed-through device's memory-mapped registers does
+**not** return what targeted reads of the same addresses return.
+
+```
+xp /16xw 0x7011108000
+7011108010: 0x00000000 0x00000030 0x00000000 0x00000000   <- CC reads 0x30
+xp /2xw  0x7011108014
+7011108014: 0x00460001 0x00000000                          <- CC reads 0x00460001
+```
+
+The first says `CC.EN = 0` - the controller disabled - and `CSTS.RDY =
+0`. The second, repeated sixty times without a single disagreement, says
+`CC.EN = 1` and `CSTS.RDY = 1`. **The controller is enabled and ready**,
+and "the disk is dead" was one sentence away from being written down.
+
+Note also the tell that should have stopped it being believed: the wide
+dump showed `0x00000030` at offsets 0x04, 0x14 **and** 0x24 - the same
+value at the same position in three consecutive lines, which is a
+pattern no three unrelated registers produce.
+
+**So: on device registers, read narrow and read repeatedly.** A wide
+`xp` is fine on RAM and is what the log and ring dumps use; it is not
+trustworthy across a VFIO BAR. And **NVMe doorbells are write-only** -
+reading them returns nothing meaningful, so a doorbell reading zero is
+not evidence that nothing was submitted. Both of those were nearly used
+as findings.
+
+### The controller is up, and its admin queues are still the firmware's
+
+Targeted reads, replicated:
+
+```
+CAP  0x30140103ff    MQES 1024, timeout 10 s, doorbell stride 4
+VS   0x00010300      NVMe 1.3.0
+CC   0x00460001      EN=1, IOSQES=6, IOCQES=4
+CSTS 0x00000001      RDY=1
+AQA  0x00010001      admin queues of **two entries each**
+ASQ  0x000000007dd0d000
+ACQ  0x000000007dd0e000
+```
+
+`CC` and `CSTS` say a live controller. `AQA`, `ASQ` and `ACQ` say **whose**
+it is: two-entry admin queues at `0x7dd0xxxx`, which is the UEFI
+firmware's own memory - the same range the firmware executes from
+(`0x7ed5xxxx`, `0x7f96b030`) and nowhere near where Windows would put
+them. Windows' storage driver resets a controller and programs its own,
+far larger, queues in its own memory before it will issue anything.
+
+**That is a complete explanation of "a request enqueued and never
+issued" that owes nothing to timing**, and it fits every negative result
+in this file: relieving tick pressure cannot help a guest whose storage
+driver never took ownership of the device.
+
+It is a strong reading rather than a proof, and the difference matters.
+What is measured is the queue configuration; what is inferred is that
+Windows never re-initialised the controller. The next step is to settle
+that from the guest's own side rather than from the device's - and it is
+a question about Windows' driver state, not about this VMM's counters.
+
+### Both trust levels are executing, and 68% of the machine is one instruction
+
+Four hundred `info registers` samples, issued from the rig so the round
+trip is microseconds, symbolised against the deployed ELF:
+
+| samples | where |
+|---|---|
+| 229 (57.3%) | `arch::x86_64::vmx::vmread` |
+| 29 (7.3%) | `arch::x86_64::vmx::vmwrite` |
+| 11 + 4 | `vmptrld`, `vmptrst` |
+| 19 | `vm_exit_entry` |
+| 13 | `page_table::virtual_to_physical` |
+| ~30 | Windows, at **two** kernel bases - `fffff84f3b...` and `fffff8048c/d...`, each at many varied addresses |
+
+**Two things, and both matter.**
+
+The guest is not wedged. Two distinct kernel images are executing, at
+varied addresses, which is the ordinary kernel and the secure kernel
+both alive and moving. Nothing here is spinning on one instruction.
+
+And **68.3% of the machine's wall clock is this VMM's own VMX
+instructions** - `vmread` alone is 57%. Those are the instructions that
+trap to L0, and this is the first direct measurement of that cost rather
+than an inference from counters.
+
+**It also corrects an earlier reading in this file.** The host's own
+accounting said KVM's exit handling is 4.7% of the machine, and that was
+read as "the L0 tax is not where the time is". Both are true: 4.7% is
+time in KVM's *code*, while 68% is time this VMM's vCPU is *stalled* on
+the instruction - the difference being the hardware VM exit and entry
+round trips, which are charged to guest time and are most of the cost.
+
+Which is why no KVM tuning moved anything, and why `enable_shadow_vmcs`
+being absent from this processor is fatal rather than inconvenient: the
+one mechanism that removes those transitions is the one the hardware
+does not have. **And it is a rig artifact.** On bare metal a `vmread` is
+tens of cycles rather than a trap, so two thirds of this VMM's measured
+wall clock does not exist there.
