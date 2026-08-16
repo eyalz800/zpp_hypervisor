@@ -20033,3 +20033,44 @@ directions.
 The failure is inside code that exists, is desk-testable, and has
 instruments already written for it - rather than in a guess about which
 guest read a CPUID leaf.
+
+### It stops before registering an assist page
+
+The reading was already in hand from the `ZPP_EVMCS=ON` boot and does not
+need another: with the reader proven in the same dump,
+
+```
+cpu  vp-assist-writes  evmcs-reads  evmcs-writes
+  0                 0            0             0
+```
+
+**Zero assist-page writes.** So the guest hypervisor never registers a
+page, `load_enlightened_vmcs` never has anything to read, and the hookup
+is never reached. It fails *between* being told the enlightenment exists
+and taking the first step to use it.
+
+That narrows it once more, and usefully: the fault is not in the
+structure, not in either copy direction, and not in the entry hookup -
+none of which ever run. It is in what the guest hypervisor reads
+**after** the recommendation and **before** writing
+`HV_X64_MSR_VP_ASSIST_PAGE`.
+
+The candidates are few and all are CPUID:
+
+- the **nested-features leaf** at 0x4000000A, where this VMM reports
+  version 1. KVM reports `KVM_EVMCS_VERSION`, also 1, so the value is
+  probably right - but it is reported in eax with the rest zero, and
+  whether the guest hypervisor requires anything of ebx/ecx/edx there has
+  not been checked against the reference.
+- the leaves between the recommendation and it - **0x40000005 through
+  0x40000009** - which this VMM answers as zero because they fall through
+  the block. A guest hypervisor reading implementation limits or hardware
+  features and finding zeros may reasonably stop.
+
+**Both are answerable by reading, not booting**: the leaves' meanings are
+in `hyperv-tlfs.h` and KVM's answers to the same leaves are in
+`.references/kvm/`. Comparing what this VMM reports against what KVM
+reports, leaf by leaf, is the next step and costs no hardware time at
+all.
+
+That is where to start, and it is the narrowest the problem has been.
