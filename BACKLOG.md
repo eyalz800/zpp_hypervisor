@@ -19275,3 +19275,40 @@ that did nothing is what this file has warned about a dozen times, and
 against a guest hypervisor that is already willing to bugcheck over a
 refusal, it would be acted on immediately and fail somewhere further
 away.
+
+### The codes read back are contaminated, and the fix is serial
+
+A second boot captured them, and they must not be trusted:
+
+```
+hypercalls seen: 104
+  0x003a  1     0x0000  3     0xeaa0  9     0x22e0  1
+  0x2c02  1     0x843d  1     0x0010  1     0x0020  5
+```
+
+**Two things say this is wrong.** The counts sum to 22 against a total of
+104. And `0xeaa0`, `0x843d`, `0x22e0`, `0x2c02` are not plausible call
+codes - the interface numbers them from 1 upward and they are small.
+
+The cause is the reset loop the refusals provoke. **Each reset reloads
+the module**, so the counters start again, and the dump reads them
+through many separate monitor round trips - so different reads land in
+different generations of the same array. It is the cross-regime confound
+this file already records, in its sharpest form: the thing being measured
+is being destroyed and recreated while it is read.
+
+**The way out is the serial log, because it survives what the counters do
+not.** `serial.out` on the host is appended across guest resets - it is
+where `allocate_rwx done at` appears once per module load, which is how
+the reset loop was counted in the first place. Writing each distinct call
+code there with `trace::raw` gives a record that outlives every reset and
+needs no dump at all.
+
+That is the next step, and it is small: log the code on its first
+occurrence, boot, kill at the guard, and read `serial.out`. It costs one
+boot, the same reset loop as before, and returns codes that can actually
+be relied on - after which each is a decision on its own terms.
+
+**The counters stay** - they are right when the guest is not resetting,
+and they will be the check that the answers work once the calls are
+answered.

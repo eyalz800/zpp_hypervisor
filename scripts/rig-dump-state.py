@@ -1134,6 +1134,7 @@ def main():
                "shadow_ept_builds", "shadow_ept_cache_hits",
                "shadow_ept_rebuild_new_root", "shadow_ept_rebuild_stale",
                "shadow_ept_replayed", "hyperv_vp_assist_writes", "hypercalls_seen",
+               "hypercall_codes", "hypercall_code_counts",
                "evmcs_reads", "evmcs_writes",
                "hot_state_writes_skipped", "hot_state_writes_done",
                "l2_run_cycles", "l1_run_cycles", "handler_cycles",
@@ -1185,6 +1186,7 @@ def main():
                "pending_event", "shadow_ept_builds", "shadow_ept_cache_hits",
                "shadow_ept_rebuild_new_root", "shadow_ept_rebuild_stale",
                "shadow_ept_replayed", "hyperv_vp_assist_writes", "hypercalls_seen",
+               "hypercall_codes", "hypercall_code_counts",
                "evmcs_reads", "evmcs_writes",
                "hot_state_writes_skipped", "hot_state_writes_done",
                "l2_run_cycles", "l1_run_cycles", "handler_cycles",
@@ -1244,8 +1246,14 @@ def main():
     # Which hypercalls the guest hypervisor makes before declining the
     # enlightenment. Not per cpu - the codes are what matter.
     seen = read('hypercalls_seen', 0)
-    if seen is not None:
+    if seen:
         print(f"\nhypercalls seen: {seen}")
+        print("  code    count   (which calls the guest hypervisor makes)")
+        for i in range(16):
+            count = read('hypercall_code_counts', i)
+            if not count:
+                continue
+            print(f"  0x{read('hypercall_codes', i):04x}  {count:-6d}")
 
     print("\ncpu  vp-assist-writes  evmcs-reads  evmcs-writes")
     for cpu in range(args.cpus):
