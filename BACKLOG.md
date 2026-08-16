@@ -20795,3 +20795,171 @@ that the next step is not "look at this instruction" but "find what
 changed about the interception itself" - which is a question about this
 VMM's own controls, and is where a fresh session should start rather than
 where an exhausted one should guess.
+
+## Leveraging KVM: what the host says, and the one thing it named
+
+The mandate was to use the host rather than the guest. The host was read
+first and it retired three ideas before any of them cost a boot, then
+named the defect that had been invisible for two sessions.
+
+### The two module parameters are hardware-absent, not policy
+
+`enable_shadow_vmcs=N` and `enable_apicv=N` on the rig are **not**
+settings anyone chose and cannot be turned on with a module parameter.
+KVM clears both in its own setup when the processor does not offer the
+control - `.references/kvm/nested.c:7236` (`if (!cpu_has_vmx_shadow_vmcs())
+enable_shadow_vmcs = 0;`) and `.references/kvm/vmx.c:8479`
+(`if (!cpu_has_vmx_apicv()) enable_apicv = 0;`) - and the rig's
+i7-8565U reports neither. `/proc/cpuinfo`'s `vmx flags` line is a direct
+read of the capability MSRs by the kernel at boot, and it lists
+
+```
+vnmi preemption_timer invvpid ept_x_only ept_ad ept_1gb flexpriority
+tsc_offset vtpr mtf vapic ept vpid unrestricted_guest ple pml
+ept_violation_ve ept_mode_based_exec
+```
+
+with **no** `shadow_vmcs`, `posted_intr`, `vapic_reg` or `vid`. So the
+first suggestion in the brief - reload `kvm_intel` with
+`enable_shadow_vmcs=1` - would have been silently undone by KVM, and the
+reload would have risked the module swap for nothing.
+
+**But KVM offers L1 the control anyway, and honours it in software.**
+`.references/kvm/nested.c:7068`:
+
+> We can emulate "VMCS shadowing," even if the hardware doesn't support
+> it.
+
+so `msrs->secondary_ctls_high |= SECONDARY_EXEC_SHADOW_VMCS`
+unconditionally, while `prepare_vmcs02_early` strips the same bit from
+vmcs02 (`nested.c:2428`, "VMCS shadowing for L2 is emulated for now").
+The emulation is real: `handle_vmread` answers from
+`get_shadow_vmcs12(vcpu)` when the exit came from L2. Measured here -
+VMREAD is **1.1%** of exits and VMWRITE **0.0%** - so this tree's
+`ZPP_NESTED_SHADOW_VMCS` machinery earns its keep on the rig even though
+the processor underneath cannot shadow anything.
+
+### `/sys/kernel/debug/kvm` exists, and it is the cheapest instrument here
+
+`CLAUDE.md` says the target has no `/sys/kernel/debug/kvm`. It has one -
+debugfs simply was not mounted:
+
+```sh
+sudo mount -t debugfs none /sys/kernel/debug
+ls /sys/kernel/debug/kvm/<pid>-<fd>/
+```
+
+Two counters answer questions that previously needed a guest dump, and
+they answer them as **deltas over a window**, from the host, without
+touching the guest:
+
+- `nested_run` - second-level entries, the same quantity as `l2-entries`;
+- `exits` - every VM exit L0 took.
+
+Baseline, settled, eight processors, three consecutive 20 s windows:
+
+```
+nested_run/s=5321  exits/s=387149  per-entry=72
+nested_run/s=5485  exits/s=395177  per-entry=72
+nested_run/s=5411  exits/s=391899  per-entry=72
+```
+
+Stable to 1.5%, which makes it the first metric in this file that does
+not need two boots to be believed. **Use it as the headline number.**
+
+### Where the machine's time actually goes
+
+From `/proc/stat` deltas over 30 s on eight processors, and per-thread
+`schedstat`:
+
+```
+user=22892  guest=22886  sys=1126  idle=0        (of 24000 jiffies)
+vCPU threads: 59.9 s of run time in 60 s, 0.2% waiting on a runqueue
+```
+
+- **KVM's own exit handling is 4.7% of the machine.** At 391,000
+  exits/s that is ~1.15 us per exit, which agrees with the 2,760 cycles
+  measured from inside the guest. The host is not where the time is.
+- **Nothing waits to be scheduled.** The runqueue-wait theory is dead.
+- **95% of the machine is in guest mode**, and `info registers -a` says
+  what it is doing: seven of eight processors sit at one firmware
+  address (`0x7f96b030`, CPL 0, HLT 0) - the application processors
+  parked in EDK2's wait loop - **spinning**, not halted, because
+  `-overcommit cpu-pm=on` disables HLT, MWAIT and PAUSE exiting. Only
+  processor 0 is in this module. The guest dump agrees: cpu 0 has
+  2,100,005 exits and 787,896 second-level entries, cpus 1-7 have 107
+  exits and zero entries each.
+
+That costs the working processor its turbo headroom: all eight cores sit
+at exactly 3.10 GHz against a 4.6 GHz single-core ceiling, at 77-79 C.
+
+**Measured, not assumed.** Pinning the seven parked processors onto one
+host CPU and processor 0 onto its own, live, in the same boot:
+
+```
+pre   nested_run/s = 5321 / 5485 / 5411     cpu0 3.10 GHz
+post  nested_run/s = 5796 / 5691 / 5817     cpu0 3.30 GHz
+```
+
+**+6.7%.** Real, free, and far too small to be the block - so the
+parked-processor theory is retired as a cause, and the within-run A/B
+that retired it cost no boot at all. That shape - change it live,
+sample the same counter either side - is worth reusing.
+
+### What the exit histogram says, and it is one MSR
+
+```
+cpu 0 exit reasons (total 5,169,959)
+  vmresume        2160875  41.8%
+  rdmsr           1357878  26.3%
+  ept-violation    719788  13.9%
+  wrmsr            526754  10.2%
+```
+
+and of the reads,
+
+```
+cpu 0 synthetic MSRs read (1,385,216)
+  0x40000020     1385199  100.0%  TIME_REF_COUNT
+```
+
+**One MSR is 26.3% of every exit on the machine.** Windows enables the
+reference TSC page, the guest hypervisor never fills it in, so its
+sequence stays zero - which the interface defines as "invalid, ask the
+counter MSR" - and Windows then polls `HV_X64_MSR_TIME_REF_COUNT`
+forever. `nested_vmx::publish_reference_tsc` exists precisely to break
+that chain, and `ZPP_PUBLISH_REFERENCE_TSC:BOOL=ON` was in every cache.
+
+### The switch was on in the cache and absent from the binary
+
+`reference_published = 0`, `reference_scale = 0`, `reference_offset = 0`,
+`reference_fit_error = 0` after 1.6 million samples - a shape that no
+early return in `publish_reference_tsc_page` explains, because the ring
+read out of the guest fits a straight line **exactly**: over 32 samples
+spanning 33 ms, the mid-point prediction reproduced the recorded value to
+the unit, against a tolerance of 1000.
+
+So the code cannot have run. It had not:
+
+```sh
+llvm-objdump -d --disassemble-symbols=_ZN3zpp10hypervisor10hypervisor26publish_reference_tsc_pageEm \
+  .rig-deployed-hypervisor.elf
+# push rbp; mov rsp,rbp; sub 0x10,rsp; mov rdi,-8; mov rsi,-16; leave; ret
+```
+
+**An empty function.** `compile_commands.json` carried
+`-DZPP_PUBLISH_REFERENCE_TSC=1`, both CMake caches read `ON`, and the
+object file was stale: touching `nested_entry.cpp` and rebuilding turned
+the same symbol into a body with a 0x380-byte frame, and moved it from
+`0x49740` to `0x46700`.
+
+So every measurement of this configuration - this session's and the
+previous one's - was taken against a binary in which the one switch aimed
+at the dominant exit reason was compiled out.
+
+**This is the third time this file records the same lesson and the first
+time it names a stale object rather than a missing `-D`.** The rule that
+survives all three: *check the switch in the binary, never in the cache.*
+`llvm-objdump` on the one function the switch controls answers it in a
+second, and `if constexpr` makes the answer unambiguous - the body is
+either there or it is a bare `ret`.
