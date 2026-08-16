@@ -18113,3 +18113,57 @@ before a real guest hypervisor had ever run here.
 and the write-watch has to be armed on three guest-physical pages whose
 addresses come from vmcs12 and can change. The cached-branch flag stays
 useful only for a guest hypervisor that does *not* name a given bitmap.
+
+## The CRT copied a byte at a time, and everything goes through it
+
+The bitmap merge's page read cost 20,005 cycles for four kilobytes with
+the mapping accounted separately at 976. Nineteen thousand cycles to move
+4,096 bytes is **4.6 cycles a byte**, which is not a cache effect and not
+a slow mapping - it is a byte loop, and `hypervisor/src/crt/crt.cpp` had
+one:
+
+```cpp
+for (std::size_t i{}; i < count; ++i) {
+    *(static_cast<unsigned char *>(dest) + i) =
+        *(static_cast<const unsigned char *>(src) + i);
+}
+```
+
+**This is not one phase's problem.** Every copy in the tree lands here:
+`merge_page` copies three guest pages per VM entry, `flush_guest_vmcs12`
+copies a whole vmcs12 on every VMPTRLD - four times a trust-level round
+trip - `copy_shadow_to_vmcs12` and `copy_vmcs12_to_shadow` run about 1.06
+times per entry between them, and every guest-memory read in the
+extended-page-table fault path goes through `read_guest_physical`. So the
+byte loop multiplies across the whole handler rather than one phase of
+it.
+
+Replaced with a word-at-a-time loop and a byte tail, in `memcpy` and
+`memset`; `memmove`'s overlapping branch is left alone and its
+non-overlapping path now forwards to `memcpy`. Unaligned 64-bit accesses,
+which x86-64 permits, so there is no head-alignment step - and word-wise
+access through a cast is the shape already used next door in
+`merge_page`'s union.
+
+`rep movsb` was rejected: faster still on a part with fast-short-rep, but
+it is inline assembly and this tree confines that to
+`zpp/arch/x86_64/`. An architecture-neutral CRT is worth more than the
+last factor of two.
+
+`tests/crt` covers `memcpy`/`memmove`/`memset` at every combination of
+offset and size against the host's as an oracle, so this is validated on
+a desk rather than by a boot - which is what that harness exists for.
+
+### Predictions
+
+1. Guest page read falls from 20,005 to **3,500-6,000** cycles.
+2. `merge_nested_bitmaps` falls from 67,909 to **15,000-25,000**.
+3. `copy_shadow_to_vmcs12` falls from 53,100, by less in proportion,
+   since it is part VMCS access and part copy.
+4. Inside this VMM falls from 353,618 to **270,000-310,000**.
+5. Wall clock per exit falls from 407,257 to **320,000-360,000** - about
+   1.13-1.27x, for **~1.5-1.65x cumulative**.
+6. No reset loop; Windows not in recovery.
+7. **The circle**: genuinely uncertain. The requirement is bracketed at
+   (1, 2] and this is the first change that could plausibly reach the
+   middle of it.
