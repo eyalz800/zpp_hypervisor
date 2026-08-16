@@ -20963,3 +20963,85 @@ survives all three: *check the switch in the binary, never in the cache.*
 `llvm-objdump` on the one function the switch controls answers it in a
 second, and `if constexpr` makes the answer unambiguous - the body is
 either there or it is a bare `ret`.
+
+## The reference TSC page, built in at last, measured either side
+
+Same source, same options, one rebuild. Everything below is processor
+zero of eight, settled, on the rig, with the reader proven in the same
+dump.
+
+| | stale binary (`reftsc` absent) | rebuilt (`reftsc=1`) |
+|---|---|---|
+| `rdmsr` exits | 1,357,878 (**26.3%**) | 943 (**0.1%**) |
+| `TIME_REF_COUNT` reads | 1,385,199 | **32** |
+| `STIMER0_COUNT` writes | 137,376 | **2** |
+| `vmcall` exits | 1.6% | **10.6%** |
+| task priority 0xd0 at entry | 48.9% | 41.6% |
+| task priority 0xf0 at entry | 35.8% | **0.2%** |
+| task priority 0x20 at entry | 11.3% | **41.9%** |
+| clock-interrupt gap, modal bucket | 4.21-8.42 ms (90.8%) | **1.05-2.11 ms (72.3%)** |
+| `reference_published` | 0 | 1 |
+
+Read the last two rows together, because they are the ones that matter.
+**The guest's clock is ticking at its own period again** - 1.05-2.11 ms
+is the 1.74 ms the guest asks for, where before every gap was stretched
+to two to four times that - and **the guest is no longer pinned at
+DISPATCH and HIGH**: the modal priority moved from 0xf0/0xd0 down to
+0x20. Those are the two indicators the `ZPP_STRETCH_GUEST_TIMER=2`
+diagnostic produced by lying about time, reached here by telling the
+truth faster.
+
+The mechanism is exactly what `nested_vmx.h` predicted and no part of it
+was invented: Windows enables the reference TSC page, the guest
+hypervisor leaves its sequence zero, the interface defines zero as
+"invalid, ask the counter MSR", and Windows then polls
+`HV_X64_MSR_TIME_REF_COUNT` forever - one exit each. Filling the page in
+with a scale and offset **fitted to the guest hypervisor's own answers**
+turns the same query into arithmetic on RDTSC. It took 32 samples to fit
+and the guest stopped asking: `reference_read_count` is frozen at 32
+twenty minutes later.
+
+`STIMER0_COUNT` falling from 137,376 writes to 2 is the same story from
+the other end. The guest was re-arming its synthetic timer on every pass
+because it never finished a tick inside a tick; it now arms it once.
+
+### It is not enough on its own
+
+**Still no CPL 3 after twenty minutes.** `cpl seen: 0=552,104`, and the
+processor-count and parked-application-processor picture is unchanged.
+So the reference TSC page removes the largest single source of exits and
+restores the guest's clock without finishing the boot.
+
+What it changed is which question is next. The exit histogram after it:
+
+```
+ept-violation   316367  34.9%      (was 13.9%)
+vmresume        240186  26.5%
+vmcall           96089  10.6%      (was 1.6%)
+wrmsr            85847   9.5%
+vmptrld          71098   7.8%
+```
+
+**Extended-page-table violations are now the largest reason**, and the
+shadow tables behind them stop moving: `shadow-builds` and
+`leaves-filled` were 16,374 and 316,237 ten minutes apart, identical -
+so the 316,367 violations are a burst that has already happened rather
+than a rate. `vmcall` rising sixfold is the guest hypervisor doing trust
+level work instead of reading a clock, which is the shape wanted.
+
+The trust-level round trip did **not** shrink - 6.5 ms before, 8.5 ms
+after, and its ordinary-kernel half is the part that grew. Read with the
+priority and the clock gap, the honest reading is that the ordinary
+kernel is now running for longer between calls because it has work to
+do, not that a round trip got dearer; but that is an interpretation and
+the round trip is a number, so it is recorded as a number and not as a
+win.
+
+### What is next, in order
+
+1. **The extended-page-table violations**, now a third of all exits.
+2. **`wrmsr` at 9.5%**, which is 42,504 EOI, 42,129 ICR and 23,356 EOM
+   writes - the synthetic APIC registers. KVM's answer to the first is
+   the APIC assist page, where the guest clears a word in memory instead
+   of writing the EOI register.
+3. The parked application processors, worth a measured 6.7% and free.
