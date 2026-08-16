@@ -8825,6 +8825,27 @@ private:
     volatile std::uint64_t shadow_leaf_permissions[max_cpus][8]{};
 
     /**
+     * What the guest hypervisor's own tables grant for the same leaf,
+     * before this VMM's are composed in - the logical-AND of read, write
+     * and execute across every entry `eptp12`'s walk used.
+     *
+     * The pair is the instrument, not either one alone.
+     * `shadow_leaf_permissions` says what this VMM installed; this says
+     * what it was given. A composed side stuck at 7 means nothing until
+     * it is known whether the guest side was ever anything else.
+     *
+     * The question it settles has been open in this file for several
+     * sessions: `HvCallModifyVtlProtectionMask` is issued for ever and
+     * no access has ever been refused by anything this VMM shadows.
+     * Either the level above does not express that protection through
+     * its extended page tables - and this histogram is all sevens - or
+     * it does and the composition is discarding it, which would be this
+     * VMM's bug and would explain a protection change that never takes
+     * effect and is therefore asked for again.
+     */
+    volatile std::uint64_t guest_leaf_permissions[max_cpus][8]{};
+
+    /**
      * The mappings a shadow held when the guest hypervisor invalidated
      * it, so they can be re-walked instead of re-faulted.
      *

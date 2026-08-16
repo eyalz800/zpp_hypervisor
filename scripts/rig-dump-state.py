@@ -1125,7 +1125,8 @@ def main():
         base = m.group(1)
     base = int(base, 16)
 
-    members = ["cpl_seen", "exit_trace", "exit_trace_count", "l2_exit_trace",
+    members = ["cpl_seen", "guest_leaf_permissions",
+               "shadow_leaf_permissions", "exit_trace", "exit_trace_count", "l2_exit_trace",
                "l2_exit_trace_count", "l2_working_trace",
                "l2_working_trace_count", "l2_entries", "l2_activity_state",
                "running_l2", "events_requeued", "events_deferred",
@@ -1276,6 +1277,28 @@ def main():
               f"{read('cpl_seen', cpu * 4 + 1):-7d}  "
               f"{read('cpl_seen', cpu * 4 + 2):-7d}  "
               f"{read('cpl_seen', cpu * 4 + 3):-7d}")
+
+    # The pair that decides whether HvCallModifyVtlProtectionMask is
+    # expressed through the extended page tables at all. Neither column
+    # means anything alone: a composed side stuck at 7 is only a bug if
+    # the guest side was ever something else.
+    #
+    # bit 0 read, bit 1 write, bit 2 execute - so 7 is read-write-execute
+    # and anything less is a permission the level above withheld.
+    print("\nept leaf permissions, as bits rwx (guest = eptp12 alone, "
+          "composed = installed)")
+    for cpu in range(args.cpus):
+        guest = [read('guest_leaf_permissions', cpu * 8 + i)
+                 for i in range(8)]
+        composed = [read('shadow_leaf_permissions', cpu * 8 + i)
+                    for i in range(8)]
+        if not any(guest or []) and not any(composed or []):
+            continue
+        for i in range(8):
+            g, c = guest[i] or 0, composed[i] or 0
+            if g or c:
+                print(f"  cpu {cpu}  {i:03b}  guest {g:>12,}  "
+                      f"composed {c:>12,}")
 
     print("\ncpu  shadow-builds  cache-hits  evictions  resets  leaves-filled")
     for cpu in range(args.cpus):

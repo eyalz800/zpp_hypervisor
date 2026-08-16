@@ -99,7 +99,7 @@ option(ZPP_DELIVER_SELF_IPI
     OFF)
 
 option(ZPP_PUBLISH_REFERENCE_TSC
-    "Fill in the reference TSC page the guest hypervisor enables for its guest and then leaves invalid, fitting the scale and offset to the answers it gave for the counter MSR. Measured: without it the guest reads that MSR about fifteen times per clock tick, ~42% of every exit, and Phase1Initialization never leaves phase one. OFF by default - it writes into guest memory the level above believes it owns."
+    "Fill in the reference TSC page the guest hypervisor enables for its guest and then leaves invalid, fitting the scale and offset to the answers it gave for the counter MSR. Measured: without it the guest reads that MSR about fifteen times per clock tick, 26.3% of every exit on the machine, and the guest sits at 0xf0 on 39.3% of entries against 0.2% with the page. OFF by default, and the reason is a bug rather than a design objection: the target frame is resolved by walking the guest hypervisor's OWN extended page tables (l2_physical_to_l1 over eptp12) and then written by a separate call, with NOTHING pinning or re-validating the mapping in between - so a level that remaps guest frames as ordinary business, and is never asked, can reassign that frame between the check and the write. That is time-of-check-to-time-of-use writing to an address somebody else now owns: arbitrary memory corruption, not a boundary violation. Refusing to overwrite a non-zero sequence would be worth doing and does NOT fix this - the race is on the address, not the contents. See BACKLOG.md."
     OFF)
 
 option(ZPP_NESTED_SHADOW_VMCS

@@ -410,6 +410,29 @@ hypervisor::install_shadow_leaf(std::size_t cpu,
     if (cpu < max_cpus) {
         this->shadow_leaf_permissions[cpu][composition.permissions.bits() &
                                            7] += 1;
+
+        // The other half of the same question, and without it the first
+        // half cannot be read. The comment above sets out two causes for
+        // `reflected_permission` being zero which want opposite work -
+        // either the guest hypervisor's tables are uniformly permissive,
+        // in which case `HvCallModifyVtlProtectionMask` is not expressed
+        // through the extended page tables and there is nothing here to
+        // enforce, or they are not and this composition is granting what
+        // the level above removed.
+        //
+        // `guest.permissions` is what **eptp12 alone** grants, before
+        // this VMM's own tables are composed in. Comparing the two
+        // histograms decides between the two causes with no page to
+        // identify and no capture to build:
+        //
+        // - guest side uniformly 7 -> the protection is not in the
+        //   extended page tables, and the loop is elsewhere;
+        // - guest side showing anything else while the composed side
+        //   stays 7 -> the composition drops what the level above
+        //   removed, and that is this VMM's bug and a complete
+        //   explanation of a protection change requested for ever.
+        this->guest_leaf_permissions[cpu][guest.permissions.bits() & 7] +=
+            1;
     }
 
     **entry = leaf;
