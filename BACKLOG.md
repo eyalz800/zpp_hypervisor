@@ -20379,3 +20379,37 @@ lines and one boot, and it distinguishes "never registered" from
 **Do not use the counters for this.** Six instrument failures in one
 session, the last of which destroyed a correct result, and the log ring
 is the only thing here that has been checked against an outcome.
+
+### Not the launch path: VMLAUNCH is never reached
+
+The three-line test, run: a line on every `on_guest_vmlaunch` saying
+whether the entry was enlightened. **The ring contains none of them.**
+
+So the guest hypervisor never attempts a VM launch at all with bit 14
+set, which eliminates the launch path and the VMfailInvalid theory built
+on it. Together with what is already known, the failure window is now
+very narrow:
+
+- it reads the recommendation (bit 14 is what separates the two
+  outcomes, six boots);
+- it never writes `HV_X64_MSR_VP_ASSIST_PAGE`;
+- it never issues a hypercall;
+- it never executes VMLAUNCH or VMRESUME;
+- it stops at ~2,780 exits.
+
+**So it stops between reading a CPUID leaf and doing anything else this
+VMM can observe.** Nothing it does after that leaf reaches any of the
+paths instrumented here, which means either it fails internally on what
+the leaf said, or it takes an action this VMM does not intercept and
+faults on the result.
+
+The second is the more testable of the two and has not been looked at:
+`exit_trace` records what the guest was doing at each of those 2,780
+exits, and the last few before it stops say what it attempted. That is
+the reading to take next - not a counter, not a new log line, but the
+ring of exits that already exists and has recorded every one of them.
+
+**This is the seventh instrument added in this session and the fourth
+that answered by silence.** The exit trace is the one that has never
+lied here, and it should have been the first thing read rather than the
+last thing suggested.
