@@ -4117,6 +4117,13 @@ void hypervisor::reflect_l2_exit(std::size_t cpu,
     // hypervisor has not run since on_guest_vmlaunch collected its silent
     // writes, so the shadow's writable fields and the cache agree.
     copy_vmcs12_to_shadow(cpu);
+
+    // And the enlightened structure, for exactly the same reason and at
+    // exactly the same moment: a guest hypervisor using an enlightened
+    // VM entry reads its exit information out of that structure rather
+    // than with VMREAD, so it has to hold what was just written. Inert
+    // unless the enlightenment is armed. See `store_enlightened_vmcs`.
+    store_enlightened_vmcs(cpu);
 }
 
 namespace

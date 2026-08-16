@@ -1,7 +1,9 @@
 #include "zpp/arch/x86_64/vmx/vmcs_fields.h"
 #include "zpp/hypervisor/enlightened_vmcs.h"
 #include "zpp/hypervisor/hypervisor.h"
+#include "zpp/hypervisor/nested_vmx.h"
 #include <cstdint>
+#include <span>
 
 namespace zpp::hypervisor
 {
@@ -310,6 +312,117 @@ void hypervisor::copy_vmcs12_to_enlightened(
         get(field::guest_pending_debug_exceptions);
 
     this->evmcs_writes[cpu] = this->evmcs_writes[cpu] + 1;
+}
+
+/**
+ * Reads the guest hypervisor's assist page, and if the enlightenment is
+ * armed, pulls the structure it names into the cached vmcs12.
+ *
+ * **This is what replaces VMPTRLD.** With an enlightened VM entry the
+ * guest hypervisor never executes it - it writes the structure's
+ * guest-physical address into `current_nested_vmcs` and sets
+ * `enlighten_vmentry`. So a launch can arrive with no current VMCS by
+ * the architecture's reckoning and still be perfectly well formed, and
+ * `guest_current_vmcs` is set from the structure's address here so every
+ * path downstream that keys on it keeps working unchanged.
+ *
+ * Returns whether the enlightenment was armed. False means nothing was
+ * touched and the ordinary VMPTRLD path applies.
+ */
+bool hypervisor::load_enlightened_vmcs(std::size_t cpu)
+{
+    if constexpr (!nested_vmx::evmcs_offered) {
+        static_cast<void>(cpu);
+        return false;
+    } else {
+        if (cpu >= max_cpus) {
+            return false;
+        }
+
+        constexpr std::uint64_t enabled = 1;
+        constexpr std::uint64_t page_mask = ~0xfffull;
+
+        auto assist = this->hyperv_vp_assist[cpu];
+        if (0 == (assist & enabled)) {
+            return false;
+        }
+
+        hyperv::vp_assist_page page{};
+        auto read_page = read_guest_physical(
+            assist & page_mask,
+            std::span(reinterpret_cast<std::byte *>(&page),
+                      sizeof(page)));
+        if (!read_page) {
+            return false;
+        }
+
+        if (0 == page.enlighten_vmentry) {
+            return false;
+        }
+
+        auto where = page.current_nested_vmcs;
+        if (0 == where) {
+            return false;
+        }
+
+        hyperv::enlightened_vmcs evmcs{};
+        auto read_structure = read_guest_physical(
+            where,
+            std::span(reinterpret_cast<std::byte *>(&evmcs),
+                      sizeof(evmcs)));
+        if (!read_structure) {
+            return false;
+        }
+
+        copy_enlightened_to_vmcs12(cpu, evmcs);
+
+        // So that everything keyed on "which VMCS is current" keeps
+        // working without knowing the enlightenment exists.
+        this->guest_current_vmcs[cpu] = where;
+        this->evmcs_armed[cpu] = 1;
+        return true;
+    }
+}
+
+/**
+ * Puts the exit back where the guest hypervisor will look for it.
+ *
+ * The mirror of the load, and required for the same reason: it can no
+ * longer VMREAD the answers.
+ */
+void hypervisor::store_enlightened_vmcs(std::size_t cpu)
+{
+    if constexpr (!nested_vmx::evmcs_offered) {
+        static_cast<void>(cpu);
+        return;
+    } else {
+        if ((cpu >= max_cpus) || (0 == this->evmcs_armed[cpu])) {
+            return;
+        }
+
+        auto where = this->guest_current_vmcs[cpu];
+        if (0 == where) {
+            return;
+        }
+
+        // Read back rather than kept, because the guest hypervisor owns
+        // the structure between entries and may have written it.
+        hyperv::enlightened_vmcs evmcs{};
+        auto read = read_guest_physical(
+            where,
+            std::span(reinterpret_cast<std::byte *>(&evmcs),
+                      sizeof(evmcs)));
+        if (!read) {
+            return;
+        }
+
+        copy_vmcs12_to_enlightened(cpu, evmcs);
+
+        static_cast<void>(write_guest_physical(
+            where,
+            std::span(reinterpret_cast<const std::byte *>(&evmcs),
+                      sizeof(evmcs))));
+    }
 }
 
 } // namespace zpp::hypervisor

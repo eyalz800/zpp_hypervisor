@@ -8525,6 +8525,22 @@ private:
     void copy_vmcs12_to_enlightened(std::size_t cpu,
                                     hyperv::enlightened_vmcs & evmcs);
 
+    /**
+     * Where the *guest hypervisor* put its own assist page, written
+     * through HV_X64_MSR_VP_ASSIST_PAGE.
+     *
+     * Not to be confused with `l2_vp_assist`, which is the second
+     * level's page - Windows registering with Hyper-V, observed from
+     * outside. This one is Hyper-V registering with *this VMM*, and it
+     * only ever arrives because the enlightenment is advertised.
+     */
+    std::uint64_t hyperv_vp_assist[max_cpus]{};
+    std::uint8_t evmcs_armed[max_cpus]{};
+
+    bool load_enlightened_vmcs(std::size_t cpu);
+    void store_enlightened_vmcs(std::size_t cpu);
+    std::uint64_t hyperv_vp_assist_writes[max_cpus]{};
+
     std::uint64_t evmcs_reads[max_cpus]{};
     std::uint64_t evmcs_writes[max_cpus]{};
     void replay_shadow_recall(std::size_t cpu,

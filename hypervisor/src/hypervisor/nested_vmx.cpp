@@ -1688,11 +1688,20 @@ bool hypervisor::on_guest_vmlaunch(std::size_t cpu,
                                    basic_reason reason,
                                    arch::x86_64::context & context)
 {
+    // The enlightenment first, because it decides whether there *is* a
+    // current VMCS by the architecture's reckoning. A guest hypervisor
+    // using an enlightened VM entry never executes VMPTRLD - it names
+    // the structure through its assist page - so the check below would
+    // refuse a perfectly well formed launch. See
+    // `load_enlightened_vmcs`, which sets `guest_current_vmcs` from the
+    // structure's address so nothing downstream needs to know.
+    auto enlightened = load_enlightened_vmcs(cpu);
+
     // The launch-state checks first, because they are the ones the
     // architecture puts before any consistency check and the ones a
     // first-level hypervisor's own error handling is written around. SDM
     // 33.3, VMLAUNCH/VMRESUME.
-    if (no_current_vmcs == this->guest_current_vmcs[cpu]) {
+    if (!enlightened && (no_current_vmcs == this->guest_current_vmcs[cpu])) {
         vmx_fail_invalid();
         return true;
     }
@@ -1701,7 +1710,14 @@ bool hypervisor::on_guest_vmlaunch(std::size_t cpu,
     // has had a chance to write the shadowed fields since this VMM last
     // looked - silently, which is the point. So they are collected first.
     // This is the same place KVM does it, in nested_vmx_run.
-    copy_shadow_to_vmcs12(cpu);
+    //
+    // Skipped when the structure was just read: with an enlightened VM
+    // entry the guest hypervisor states everything there, and the
+    // hardware shadow region it would otherwise have written is not what
+    // it used.
+    if (!enlightened) {
+        copy_shadow_to_vmcs12(cpu);
+    }
 
     auto & shadow = this->guest_vmcs12[cpu];
 

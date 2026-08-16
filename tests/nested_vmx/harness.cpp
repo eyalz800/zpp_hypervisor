@@ -137,6 +137,20 @@ void hypervisor::inject_general_protection_fault(std::uint64_t)
 // had. Counted rather than ignored: a refusal is the interesting
 // outcome, since offering VMFUNC and then refusing every call would be
 // the "announced and not answered" failure this tree keeps finding.
+// The enlightened VMCS lives in nested_evmcs.cpp, which this harness does
+// not compile - it has no guest memory to read the structure out of. The
+// launch path calls the loader, so that is the one symbol that reaches
+// here, and answering false is the un-armed case: the ordinary VMPTRLD
+// path applies, which is what every case in this suite exercises.
+bool hypervisor::load_enlightened_vmcs(std::size_t)
+{
+    return false;
+}
+
+void hypervisor::store_enlightened_vmcs(std::size_t)
+{
+}
+
 void hypervisor::inject_invalid_opcode_exception()
 {
     g_observed.ud_faults = g_observed.ud_faults + 1;

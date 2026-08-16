@@ -1312,6 +1312,19 @@ void hypervisor::on_vm_exit(std::uint64_t cpuid,
             constexpr std::uint32_t hypercall_msr = 0x40000001;
             constexpr std::uint32_t vp_index_msr = 0x40000002;
 
+            // Where the guest hypervisor puts its own assist page, and
+            // the reason the enlightenment can work at all: with an
+            // enlightened VMCS it writes the structure's address into
+            // that page rather than executing VMPTRLD, so this register
+            // is how this VMM learns where to look. See
+            // `hyperv::vp_assist_page`.
+            //
+            // Answered only with the enlightenment offered, because
+            // outside it nothing reads the page and accepting the write
+            // would be claiming a feature that does nothing - which is
+            // the failure the privilege list above is careful to avoid.
+            constexpr std::uint32_t vp_assist_msr = 0x40000073;
+
             auto index = static_cast<std::uint32_t>(context.rcx);
             auto answered = true;
 
@@ -1327,6 +1340,15 @@ void hypervisor::on_vm_exit(std::uint64_t cpuid,
                     break;
                 case vp_index_msr:
                     value = cpuid;
+                    break;
+                case vp_assist_msr:
+                    if constexpr (!nested_vmx::evmcs_offered) {
+                        answered = false;
+                    } else {
+                        value = (cpuid < max_cpus)
+                                    ? this->hyperv_vp_assist[cpuid]
+                                    : 0;
+                    }
                     break;
                 default:
                     answered = false;
@@ -1351,6 +1373,16 @@ void hypervisor::on_vm_exit(std::uint64_t cpuid,
                     if (0 == value) {
                         this->hyperv_hypercall =
                             this->hyperv_hypercall & ~std::uint64_t{1};
+                    }
+                    break;
+
+                case vp_assist_msr:
+                    if constexpr (!nested_vmx::evmcs_offered) {
+                        answered = false;
+                    } else if (cpuid < max_cpus) {
+                        this->hyperv_vp_assist[cpuid] = value;
+                        this->hyperv_vp_assist_writes[cpuid] =
+                            this->hyperv_vp_assist_writes[cpuid] + 1;
                     }
                     break;
 
