@@ -22225,3 +22225,82 @@ agrees with `l2_cpl_seen` and is the expected reading for the nested
 livelock - the value of it is that the *same* instrument now works with
 nested VMX off, where only sampling was available before and sampling
 could not tell a booted idle machine from a livelocked one.
+
+## It is a sweep, not a loop - and the pages are consecutive
+
+The question the previous entry left: the protections land, so the
+caller is not asking again because the change failed - is it the same
+page every time, or a different one? Measured, with a ring so it cannot
+fill with early-boot values:
+
+```
+cpu 0 HvCallModifyVtlProtectionMask: 15,006 calls, 14,969 repeating the one before (99.8%)
+  distinct in the last 32: rdx 1, rbp 9
+    rdx 0xffffffffffffffff  rbp 0x000000000011a532
+    rdx 0xffffffffffffffff  rbp 0x000000000011a533
+    rdx 0xffffffffffffffff  rbp 0x000000000011a534
+```
+
+**A different page every time, and consecutive.** `0x11a532`,
+`0x11a533`, `0x11a534` are adjacent guest-physical page numbers. The
+guest is walking sequentially, one trust-level round trip per page,
+which is what validating memory looks like - **not** a loop, and not a
+protection change that fails to take.
+
+**And the 99.8% "repeating" figure is an artifact of censusing the wrong
+register.** RDX is `0xffffffffffffffff` on every call - a sentinel, not
+an address - so a census over it reports near-total repetition while the
+register that carries the page changes every time. Recording *both*
+candidates rather than picking one is what caught it; a single-register
+instrument would have reported "the same request 99.8% of the time" and
+confirmed the loop hypothesis that the other register refutes.
+
+That is the same shape as the wide-`xp` trap and the doorbell read: **an
+instrument aimed one field off produces a confident answer to a question
+nobody asked.**
+
+### The rate, and what it implies
+
+Two readings three minutes apart:
+
+```
+t0        20,022 calls
+t0+180s   39,237 calls      -> 106.8 calls a second
+```
+
+Guest RAM is about 11 GiB, or 2,883,584 pages. At 107 calls a second a
+single sweep of it is **7.5 hours**. So the machine is not stuck; it is
+doing an amount of work proportional to memory, at a per-operation cost
+this file has measured at 6.64 ms a trust-level round trip, and the
+product is hours.
+
+**That is why relieving tick pressure never helped, and it is consistent
+with every negative result in this file.** A guest grinding through
+three million sequential operations is not waiting for time, so making
+its clock more truthful, cutting its processor count, or shortening the
+round trip by a third changes when it finishes and not whether it is
+blocked. Nothing that was tried addressed the *number* of operations.
+
+### The sharper question, and it is not settled
+
+The page number is **not monotonic**. At `t0` the ring held `0x12d015`
+- 4.70 GiB in. Three minutes later it held `0x7620` - 118 MiB in.
+
+At 107 pages a second, sweeping from 118 MiB to 4.70 GiB takes over
+three hours, so the machine cannot have swept forward and wrapped in
+three minutes. It went **backwards**, and two ring samples cannot say
+whether that is
+
+- several regions swept in some order, which is ordinary; or
+- **the same region swept again**, which would be the guest re-doing
+  work it has already done - and this file has a candidate mechanism for
+  exactly that, since our shadow discards a root's tables on every
+  `invept` where KVM retains its shadow pages and revalidates them.
+
+**Do not conclude from two samples.** The instrument that settles it is
+small and belongs in the same place: the least and greatest page number
+seen, and a counter of how often the next page is lower than the last -
+a wrap count. A monotonic sweep has a wrap count near zero; a guest
+re-doing work has one that climbs. That is the next reading, and unlike
+everything before it, the answer changes what to fix rather than how
+fast to make it.
