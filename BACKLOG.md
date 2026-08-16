@@ -21181,3 +21181,73 @@ than rebuilt from a fault at a time. `evictions 0` says nothing is being
 thrown out under pressure here - the leaves are being discarded on
 purpose, by an invalidation, and repopulated because there is nowhere
 they were kept.
+
+## Retired: the round-trip-to-tick ratio is not what holds the boot
+
+This is the organising theory of the whole effort and it has to come
+down, because everything queued behind it is aimed at a quantity that has
+now been moved twice without the boot completing.
+
+**The theory.** A trust-level round trip costs 6.64 ms against a guest
+tick of 1.74 ms. The ratio must fall below 1.0 or the guest resumes into
+an already-pending clock and never reaches deferred work. It is 3.8.
+`ZPP_STRETCH_GUEST_TIMER=2` relieved everything - deferred calls flowed,
+the priority moved off `0xd0`, the guest cleared the `ClassPnP` wall and
+reached `KiIdleLoop` - which was read as proof that relieving tick
+pressure is *sufficient*, and the threshold was bracketed to `(1, 2]`.
+Four optimisations, an enlightened VMCS implementation and most of two
+sessions follow from that reading.
+
+**Two independent interventions have now moved the ratio hard, honestly,
+and neither reached CPL 3.**
+
+| | baseline | reference TSC page | two processors |
+|---|---|---|---|
+| round trip | 6,522 us / 26.3 exits | 8,482 us / 34.2 exits | **5,869 us / 24.6 exits** |
+| clock gap, modal | 4.21-8.42 ms | **1.05-2.11 ms** | almost no ticks at all |
+| priority 0xd0 at entry | 48.9% | 41.6% | **0.7%** |
+| priority 0xf0 at entry | 35.8% | 0.2% | 0.2% |
+| CPL 3 | never | never | **never** |
+
+The two-processor run is the one that settles it. The round trip is the
+shortest this file has recorded, the clock has all but stopped - 4,647
+gaps in twenty-two minutes - and the guest sits at PASSIVE and APC level
+with DISPATCH at **0.7%**. Every term in the ratio argument is satisfied.
+The guest still never reaches user mode, and accumulates second-level
+entries at a tenth the rate of the eight-processor run.
+
+**So `ZPP_STRETCH_GUEST_TIMER=2` did not work by relieving tick
+pressure.** It changed two things at once - the pressure, and the
+*absolute period* of a timer the guest arms and the level above
+services - and nobody separated them. Multiplying a period does not only
+give the handler more budget; it changes what the guest hypervisor is
+asked to schedule, and this file already records that the multiplier is
+"a lie of unbounded size" that "turned a 64 Hz tick into a 2 Hz one and
+bugchecked the guest sixteen times in one boot". A diagnostic that
+bugchecks is not evidence about what an honest fix would do, and it was
+read as though it were.
+
+**What this retires**, and it is a lot of this file:
+
+- the `(1, 2]` bracket, and the whole idea that the threshold is a
+  number on this axis;
+- "the ratio must go under 1.0", as a statement of the done-condition;
+- the argument that a further 1.5x from honest speed would be
+  sufficient - it is aimed at a quantity that is no longer binding;
+- by extension, the exits-per-tick census's conclusion that removing one
+  exit a tick was "the only one with a documented mechanism", since the
+  mechanism it named is working anyway (see the `NoEOIRequired` section)
+  and the census answered a question that turns out not to be the one.
+
+**What survives**: the reference TSC page is a real fix on its own terms
+- 26.3% of exits removed, the guest's clock restored to its own period -
+and it should stay whatever the block turns out to be. The four earlier
+optimisations are the same: cheaper is cheaper. What does not survive is
+*the reason* any of them was thought to be sufficient.
+
+**What has to happen next is identification, not optimisation.** Two
+interventions moved the ratio a long way and the outcome did not change,
+so a third aimed at the same axis should not be started. The guest is at
+PASSIVE level, not starved of deferred work, and still not progressing -
+which is a different failure from the one this file has been describing,
+and it has never been characterised on its own terms.
