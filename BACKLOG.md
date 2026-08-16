@@ -19501,3 +19501,38 @@ build?** `vmcs_field_use` and the exit trace can say so without any new
 member. If it never reads the leaves, the advertisement is invisible for
 a reason that has nothing to do with its content, and every hour spent on
 the content is wasted.
+
+### The exit trace cannot answer which CPUID leaves are read
+
+Asked of it directly, with the enlightenment offered:
+
+```
+cpuid  3043  70.4%   of all exits
+[76] cpuid  active cs=0x0038 rip=0x7ed5fbd7 x3
+```
+
+Two things, and the second is why the question is still open.
+
+**CPUID is 70.4% of exits** in the sampled window - by far the largest
+single reason - but at `cs=0x0038` and a `0x7ed5xxxx` instruction
+pointer, which is the loader and firmware, not a guest hypervisor. That
+is the early-boot storm, and it says nothing about who reads the
+hypervisor range later.
+
+**And the trace does not record the leaf.** `detail=` is empty for a
+cpuid entry, so the ring can say a CPUID happened and where from, and
+cannot say *which leaf was asked for*. The question this was meant to
+settle - does the guest hypervisor ever read 0x40000000 - is therefore
+unanswerable with the instruments that exist.
+
+**Recording the leaf is a new member**, and that goes through the reader
+whose queue-length fault produced two fictional findings this session. So
+it comes with the cross-check attached rather than after: a member whose
+value is independently known, printed in the same dump, before anything
+read through it is believed. That is the fifth methodology entry in this
+file and the one that has now been skipped twice.
+
+A cheaper alternative exists and should be tried first: the log. `log()`
+writes to the in-memory ring with a format string, so one line on the
+first read of each hypervisor leaf costs no new member, no queue entry
+and no reader change - and `zpplog` already prints the ring.
