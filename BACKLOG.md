@@ -18618,3 +18618,69 @@ the guest's.
 Until that number exists for both a livelocked and a relieved run, no
 further optimisation is justified: four changes worth a genuine 1.9x
 moved no guest-facing indicator at all.
+
+## The guest gets 5.8% of the machine
+
+The measurement nothing in this file had ever made, because every figure
+here is denominated in this VMM's own work:
+
+```
+cpu  l2-run%  l1-run%  vmm%   (share of wall clock)
+  0    5.80     8.23   85.97
+```
+
+**The second-level guest - Windows - executes for 5.80% of wall clock.
+The guest hypervisor gets 8.23%. This VMM takes 85.97%.** Windows is
+running on about a seventeenth of the machine. That is not a subtle
+deficit and it is a complete explanation of a boot that never finishes.
+
+### Why 1.9x of handler cycles bought nothing
+
+What matters is this VMM's **share**, and per-exit cost is not that
+share. Share is cost per exit times exits per second, and the four
+optimisations moved only the first factor - the second rose to meet it.
+That is exactly what the flat aggregate was saying all along: wall clock
+per exit read 384,759, 392,079, 396,058, 400,843 across builds that
+provably removed 45,000 cycles of phase work, because the same total time
+was being spread over more exits.
+
+**So the earlier entry's conclusion was half right.** "Handler cycles per
+entry is not the axis" is correct. "The block may not be timing" is not
+supported - it is timing, and the axis is *this VMM's share of wall
+clock*, which is the one quantity that had never been on a chart.
+
+### And what the timer stretch actually did
+
+`ZPP_STRETCH_GUEST_TIMER=2` never made anything faster. Doubling the tick
+period **halves the tick-driven exits**, which cuts this VMM's total time
+and hands the difference to the guest. It moved the share by removing
+work, not by doing work more quickly - which is why it relieved the block
+and why 1.9x of per-exit speed did not.
+
+That reconciles every measurement in this file, including the ones that
+looked contradictory: the stretch working, the exits-per-tick census
+finding nothing removable, the flat aggregate, and the frozen
+guest-facing indicators.
+
+### The axis, stated properly
+
+**Fewer exits, not cheaper exits.** At 86% share, the guest cannot be
+given a meaningful fraction of the machine by making each exit cheaper;
+it can only be given one by taking fewer.
+
+What that points at, in order of measured size:
+
+- **Extended-page-table violations: 467,335 of 2,304,695 exits, 20%.**
+  Caused by 16,860 new shadow roots at 26.7 refaults each, which is
+  Hyper-V's root churn around VTL protection changes. The lazy fill is
+  correct and must not be reverted - the eager refresh deadlocks, argued
+  at `refresh_shadow_on_invept` - but 20% of exits is the largest single
+  block and the recorded idea for attacking it safely is watching the
+  guest hypervisor's own table pages with `watch_guest_page_writes`.
+- The reflections a tick forces, which the census found architecturally
+  unavoidable *per tick* - so the only lever there is the tick rate,
+  which is the guest's to choose and `ZPP_TICK_FLOOR` proved it refuses
+  help on.
+
+**No further per-exit optimisation.** It is measurably the wrong factor,
+and this file now has four changes and about eight boots proving it.
