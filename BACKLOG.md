@@ -22827,3 +22827,105 @@ Four outcomes and each says something:
 
 Until that is run, "the disk is never brought up" is the best-supported
 hypothesis in this file and is **not** established.
+
+## The control is inconclusive, and it is the criterion that failed
+
+Run as specified - `ZPP_NESTED_VMX=OFF`, one variable from the default,
+manifest checked as `nested=0 ... reftsc=0` before the boot. Both
+criteria came back, and **neither discriminates**.
+
+### The MSI-X criterion is not valid on this rig
+
+```
+control, ~9 minutes in:
+  msix lines for 0000:02:00.0 ............ 0
+  msix lines for ANY device .............. 0
+  the NVMe sits on the same shared IR-IO-APIC 16 INTx line
+```
+
+Absent, exactly as in the nested build - which read as the larger
+finding until the second-field check was applied: **not one device in
+the whole of `/proc/interrupts` has an MSI-X line while the guest runs**,
+including the GPU, which is driven hard enough to put a picture on the
+screen.
+
+And they do exist on this kernel. The reading taken with **no guest
+running**, when the disk is on the host's own driver, is full of them:
+
+```
+124: IR-PCI-MSIX-0000:02:00.0  0-edge  nvme0q0
+126: IR-PCI-MSIX-0000:02:00.0  2-edge  nvme0q2
+...
+```
+
+So MSI-X lines appear for a host driver and never for a VFIO-assigned
+device on this rig. Whatever the mechanism - irqfd delivery that
+registers no named handler is the obvious candidate - **the absence of a
+`vfio-msix` line says nothing about whether the guest programmed MSI-X.**
+
+That is the fourth instrument this session to give a confident answer to
+a question it cannot see: after a wide `xp` over a BAR, a write-only
+doorbell, and a frame pointer read as a page. It was caught the same way
+all of them were - by reading a second thing, here "does *any* device
+have one", which costs one command and would have prevented the claim.
+
+### And the secondary criterion is too sparse to carry anything
+
+```
+cpu  cpl0   cpl1  cpl2  cpl3
+  0  1,632     0     0     0
+```
+
+`cpl_seen[3]` is zero, and it means nothing: **the whole census is 1,632
+exits.** With nested VMX off the guest runs nearly natively and takes
+almost none, so a census over them is a survey by another name. The
+declaration for that counter says exactly this - "a zero is weaker,
+because the exits this VMM takes are biased towards kernel work and
+there are few of them when nested VMX is off" - and it is worth noting
+that the caveat written when the instrument was built turned out to be
+the thing that mattered.
+
+Also, and this stands whatever the counter says: **CPL 3 was the wrong
+criterion anyway.** `smss.exe` reaches user mode long before the storage
+stack has the controller doing I/O, so ring 3 is consistent with a
+machine stuck in exactly the place under investigation. The file's
+55.74% record may always have been that, which would explain why
+"Windows reaches ring 3 with nesting off" never translated into a
+booting machine.
+
+### So the mechanism is neither established nor refuted
+
+"The disk is never brought up" remains the best-supported hypothesis in
+this file and is **exactly as unproven as it was before this boot**. What
+changed is that its intended test is known not to work.
+
+**The control that would settle it is the plain-KVM boot** - `~/vm/boot.sh`
+rather than `boot-zpp.sh`, this VMM entirely out of the picture, which
+this file records booting Windows in about five minutes. One reading
+from it decides everything:
+
+- if a `vfio-msix` line appears for `0000:02:00.0` there, the instrument
+  is valid, its absence under this VMM is real, and the mechanism is
+  established;
+- if no line appears there either, the instrument is dead for good and
+  the question needs an entirely different one - most likely the
+  controller's own doorbell and completion queue state, read narrow and
+  repeatedly, which is the only thing that observes I/O without relying
+  on how the host reports interrupts.
+
+It is deliberately **not** run at the end of this session: it is a
+different launcher, it boots the real Windows installation without this
+VMM in the path, and it deserves a deliberate decision rather than being
+appended to a long run.
+
+### What to carry forward regardless
+
+- **39,237 protection calls, four boots, identical** - the phase is real,
+  finite, and completes.
+- **The post-phase steady state has no `vmcall` and no `ept-violation`** -
+  measured on an isolated population, and it retires the trust-level
+  round trip and the shadow extended-page-table path as explanations of
+  the state the machine is stuck in.
+- **The clock is correct** - 10.000 MHz, monotonic, twice.
+- **6 to 7 distinct second-level entry RIPs across 10,000-20,000
+  entries** - the progress metric. When a fix works, this moves first.
