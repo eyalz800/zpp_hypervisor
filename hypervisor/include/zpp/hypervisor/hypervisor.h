@@ -6626,6 +6626,40 @@ private:
     spin_lock mapping_window_lock{};
 
     /**
+     * What each processor last pointed each window page at, plus one in
+     * the low bit so that "never recorded" cannot match physical page
+     * zero.
+     *
+     * Per processor because `invlpg` is per processor: this is the half
+     * of the elision test that says *this* processor's cached
+     * translation is the one the entry describes. The other half is the
+     * live page-table entry, read at the point of use, because the
+     * window is shared and another processor may have moved it since -
+     * see `map_window_at`, where the two are applied together and
+     * neither is sufficient alone.
+     *
+     * Not protected by `mapping_window_lock` and not needing to be: a
+     * processor only ever reads and writes its own row, and every use of
+     * the window holds the lock across the map and the bytes read
+     * through it, so a row cannot be observed mid-update by anyone.
+     */
+    std::uint64_t window_mapped_page[max_cpus][mapping_window_pages]{};
+
+    /**
+     * How often the mapping was skipped against how often it was done.
+     *
+     * The pair, not the ratio, and both because the elision is only
+     * worth anything if the first dominates - and because a fast path
+     * that never fires and one that fires wrongly look identical from a
+     * single number. `map_window_at` was measured at 48,001,634 calls
+     * and 45.9 billion cycles before this existed.
+     * @{
+     */
+    std::uint64_t window_map_elided[max_cpus]{};
+    std::uint64_t window_map_done[max_cpus]{};
+    /** @} */
+
+    /**
      * What the window self check found: 0 not run, 1 correct, 2 wrong.
      *
      * A member rather than a log line because the log is not on the wire
@@ -7272,10 +7306,33 @@ private:
     alignas(page_size) std::uint8_t fs_data[page_size]{};
 
     /**
-     * The data pointed to by the GS register to be used by
-     * the host VMM.
+     * The data pointed to by the GS register to be used by the host VMM,
+     * **one page per processor**, with that processor's index in the
+     * first quadword.
+     *
+     * It was a single shared page and nothing read it: `host_gs_base` has
+     * to name a canonical address because the VMCS requires one, and this
+     * page existed only to be that address. Nothing in this tree reads
+     * through GS - there is no `gs:` access anywhere - so the sharing was
+     * safe by never being used rather than by design.
+     *
+     * Per processor now, because the VMCS's `host_gs_base` is host state
+     * and therefore already per processor: point each processor's at its
+     * own row and **"which processor am I" becomes one memory access**,
+     * `arch::x86_64::gs_qword(host_gs_processor_index)`. The alternative
+     * this tree uses everywhere else is `vmcs.vpid()`, which is a VMREAD,
+     * and a VMREAD traps to the level above at ~2,760 cycles whenever
+     * this VMM is itself a guest - which rules it out of anything called
+     * often. `map_window_at` is called 48 million times in a boot.
+     *
+     * Written in `setup_vmcs`, which runs once per processor and already
+     * has the index, and beside the `host_gs_base` write so the two
+     * cannot drift. That is also the only place `host_gs_base` is
+     * written - application processors reach it through the same
+     * function - so there is no second path to keep in step.
      */
-    alignas(page_size) std::uint8_t gs_data[page_size]{};
+    static constexpr std::size_t host_gs_processor_index = 0;
+    alignas(page_size) std::uint8_t gs_data[max_cpus][page_size]{};
 
     /**
      * The task segment to be used by the host VMM.

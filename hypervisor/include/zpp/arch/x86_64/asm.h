@@ -419,6 +419,34 @@ inline std::uint64_t rdtsc()
     return __builtin_ia32_rdtsc();
 }
 
+/**
+ * Reads a quadword through the GS segment, at `offset` bytes from the
+ * base the GS register names.
+ *
+ * The point of it is that **the base is per-processor without any state
+ * of ours saying so**: the VMCS carries `host_gs_base` as a host-state
+ * field, so a processor entering root mode loads its own VMCS's value
+ * and nothing has to be looked up. That makes "which processor am I"
+ * one memory access, where the alternative in this tree - deriving it
+ * from `vmcs.vpid()` - is a VMREAD, and a VMREAD costs a trap to the
+ * level above whenever this VMM is itself a guest. Measured on the rig
+ * at ~2,760 cycles, which rules it out of anything hot.
+ *
+ * Naked, and the offset arrives in RDI, because the whole body is one
+ * addressing mode. The segment override is the only reason this cannot
+ * be written in C++ here: `__seg_gs` would express it, but this tree
+ * keeps segment and control register access in one place rather than
+ * spreading compiler extensions through the hypervisor.
+ */
+inline std::uint64_t __attribute__((naked)) gs_qword(std::uint64_t)
+{
+    asm(R"!!(
+        .intel_syntax noprefix
+        mov rax, gs:[rdi]
+        ret
+    )!!");
+}
+
 inline std::uint64_t __attribute__((naked)) rflags()
 {
     asm(R"!!(

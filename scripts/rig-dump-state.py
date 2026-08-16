@@ -1134,6 +1134,7 @@ def main():
                "shadow_ept_builds", "shadow_ept_cache_hits",
                "shadow_ept_rebuild_new_root", "shadow_ept_rebuild_stale",
                "l2_invept_single_context", "l2_invept_all_context",
+               "window_map_elided", "window_map_done",
                "shadow_ept_replayed", "hyperv_vp_assist_writes", "hypercalls_seen",
                "host_exception", "host_exception_cr2",
                "cpuid_trace", "cpuid_trace_count", "host_page_table",
@@ -1190,6 +1191,7 @@ def main():
                "pending_event", "shadow_ept_builds", "shadow_ept_cache_hits",
                "shadow_ept_rebuild_new_root", "shadow_ept_rebuild_stale",
                "l2_invept_single_context", "l2_invept_all_context",
+               "window_map_elided", "window_map_done",
                "shadow_ept_replayed", "hyperv_vp_assist_writes", "hypercalls_seen",
                "host_exception", "host_exception_cr2",
                "cpuid_trace", "cpuid_trace_count", "host_page_table",
@@ -1357,6 +1359,13 @@ def main():
     for cpu in range(args.cpus):
         print(f"{cpu:3d}  {read('l2_invept_single_context', cpu):-21d}  "
               f"{read('l2_invept_all_context', cpu):-18d}")
+
+    # The pair, not the ratio: a fast path that never fires and one that
+    # fires wrongly look identical from a single number.
+    print("\ncpu  window-map-elided  window-map-done")
+    for cpu in range(args.cpus):
+        print(f"{cpu:3d}  {read('window_map_elided', cpu):-17d}  "
+              f"{read('window_map_done', cpu):-15d}")
 
     # The five the processor saves into vmcs02 on exit, written back
     # only when they differ from what it saved. Zero skipped means the
