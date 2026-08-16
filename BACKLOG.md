@@ -19427,3 +19427,35 @@ similar offset whose value is known to be zero at rest, and one low
 member, in the same dump. If the high one returns non-zero nonsense while
 the low one is right, the reader's reach is the bug and every high-offset
 counter added this session has been fiction.
+
+#### And the fault is the queue, not the reach
+
+The reader does not fetch by offset on demand. It **queues bounded runs**
+and resolves them afterwards:
+
+```python
+for name in scalars:
+    monitor.queue(instance + off[name], scalar_cpus)
+```
+
+`scalar_cpus` words per member - eight. That is right for a
+per-processor scalar and wrong for anything longer.
+`hypercall_codes` and `hypercall_code_counts` are **sixteen** entries
+each, so only the first eight words of each were ever fetched, and the
+rest resolved against whatever the neighbouring queue covered.
+
+**That is exactly the shape of what came back**: eight populated slots
+out of sixteen, the same eight every time, values that are not call
+codes. Not contamination, not reach, not the offsets - a length.
+
+So the rule this file already carries for `gdb_lengths` applies here
+too, and for the same reason it was written: *a capacity carried in the
+reader is a second copy of a constant that lives in the header, and when
+the header moved this did not.* The fix is to queue each array with its
+own length - `gdb_lengths` already asks the ELF for exactly that - rather
+than with the processor count.
+
+**Every high-offset counter added this session must be re-read after
+that**, `vp-assist-writes` included. Its zero is as unproven as the
+hypercall codes were, so whether the guest hypervisor declines the
+enlightenment is once again an open question rather than a finding.
