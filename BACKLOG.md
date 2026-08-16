@@ -18229,3 +18229,72 @@ shadowing is in effect, and what these copies serve is this VMM's own
 nested-VMX emulation. If Hyper-V never enables shadow VMCS for its own
 guest, the copies may be maintaining a structure nothing reads - which is
 exactly the shape of `flush_guest_vmcs12`, found the same way.
+
+## VMCS shadowing *is* in force, and the recorded reading of KVM was wrong
+
+I proposed standing shadowing down. The premise was that KVM advertises
+`SECONDARY_EXEC_SHADOW_VMCS` unconditionally while `enable_shadow_vmcs`
+gates whether it is honoured, and that the rig has it clear - which it
+does:
+
+```
+/sys/module/kvm_intel/parameters/enable_shadow_vmcs = N
+```
+
+From that this file concluded "no VMCS shadowing is in effect", and I
+built a stand-down on top of it: `note_shadowing_ineffective` disables
+the feature when the guest hypervisor exits for a field the shadow
+bitmaps permit, since that is exactly the exit shadowing prevents.
+
+**It never fired, and the reason is that shadowing works.** Measured over
+807,199 second-level entries, the fields the guest hypervisor actually
+exits for are:
+
+```
+vmread, 11,031 total, 16 distinct:
+  0x4404 vm_exit_interruption_information   10,454  94.8%
+  0x6400 exit_qualification                    146
+  0x640a guest_linear_address                  129
+  ... every remaining entry likewise unshadowed
+```
+
+`exit_reason` (0x4402) and `vm_exit_instruction_length` (0x440c) - the
+two entries in `shadow_read_only_fields` - **do not appear at all**, and
+neither does any field in `shadow_read_write_fields`. No exit handler
+processes 807,199 exits without reading its exit reason, so those reads
+are being answered from the shadow region. The correlation is exact:
+every shadowed field is absent, every present field is unshadowed.
+
+For scale, this file records 62 VMCS accesses per second-level exit
+before the lists were trimmed, and the pre-shadowing measurement of this
+guest hypervisor was 5,095,645 reads and 2,176,011 writes in one run.
+It is now **0.014 exits per entry**.
+
+### What was actually wrong
+
+The claim in this file that `prepare_vmcs02` strips the control so "the
+VMREADs still trap" is **refuted by effect**. Whatever `enable_shadow_vmcs`
+gates on this host, the second-level guest's reads of shadowed fields are
+not reaching this VMM. The module parameter was read correctly and the
+inference from it was wrong, and no amount of further reading of KVM
+would have settled it - one field-use table did.
+
+**So `copy_vmcs12_to_shadow` and `copy_shadow_to_vmcs12` are earning their
+75,970 cycles an entry**, and the 20% I expected to recover from them is
+not available. The two copies cost twenty VMCS accesses per entry and buy
+the elimination of several times that many guest exits.
+
+### The check is kept, and is now the proof
+
+`note_shadowing_ineffective` stays. It costs one bitmap test on the
+11,528 VMREAD/VMWRITE exits in a whole run, it never fires here, and its
+silence is the standing evidence that shadowing is in force - which is
+worth more than the assumption it replaced. On a machine that offers the
+control and does not honour it, it saves twenty accesses an entry.
+
+**Fifth instance of believing an advertisement instead of measuring an
+effect** - and the first where the advertisement was believed in the
+*pessimistic* direction. The other four (the build switch reading ON with
+the code compiled out, the PPR field nobody maintains, `flush_guest_vmcs12`
+as an unlooked-for consumer, the capability MSR here) all cost work by
+being too optimistic. This one nearly cost a working feature.

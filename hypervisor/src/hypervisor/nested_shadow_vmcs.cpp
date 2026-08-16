@@ -137,7 +137,108 @@ constexpr field shadow_read_write_fields[] = {
         static_cast<std::uint8_t>(~(1u << (encoding % 8)));
 }
 
+/**
+ * Whether a field is answered from the shadow region rather than by an
+ * exit - the inverse of what `permit_field` leaves behind, since a clear
+ * bit is the permission.
+ */
+constexpr bool field_shadowed(const std::uint8_t * bitmap,
+                              std::uint64_t encoding)
+{
+    if (encoding >= 0x8000) {
+        return false;
+    }
+
+    return 0 ==
+           (bitmap[encoding / 8] & static_cast<std::uint8_t>(
+                                       1u << (encoding % 8)));
+}
+
 } // namespace
+
+/**
+ * Stands VMCS shadowing down when the guest hypervisor keeps exiting for
+ * fields the shadow bitmaps permit.
+ *
+ * **The capability MSR is not evidence that the feature works.** This
+ * VMM sets `vmcs_shadowing_enabled` from the allowed-1 half of
+ * IA32_VMX_PROCBASED_CTLS2, and under KVM that bit is advertised
+ * *unconditionally* - `nested_vmx_setup_ctls_msrs` sets
+ * SECONDARY_EXEC_SHADOW_VMCS outside any test, under the comment "We can
+ * emulate 'VMCS shadowing,' even if the hardware doesn't support it".
+ * Whether it is then honoured depends on the `enable_shadow_vmcs` module
+ * parameter, and with it clear `prepare_vmcs02` strips the control before
+ * hardware ever sees it. Measured on the rig: `enable_shadow_vmcs` is
+ * **N**.
+ *
+ * The cost of believing it is exact and large: `copy_vmcs12_to_shadow`
+ * and `copy_shadow_to_vmcs12` maintain the region on every second-level
+ * exit at twenty VMCS accesses, measured together at **75,970 cycles an
+ * entry - 20% of the exit** - and the guest hypervisor's reads and writes
+ * trap anyway, because the control was removed. Twenty accesses spent to
+ * avoid exits that are not being avoided.
+ *
+ * So the test is the *effect*, not the capability: an exit for a field
+ * the read or write bitmap permits is proof the control is not in force,
+ * because that is precisely the exit it exists to prevent. On a processor
+ * where shadowing works this never fires and nothing changes.
+ *
+ * The threshold is not a confidence interval - one such exit already
+ * proves it. It is there because the control is armed per VMCS and a
+ * handful of exits can precede the arming, and 64 is far above that while
+ * being reached in milliseconds when the feature is dead.
+ *
+ * Standing down is always safe: it reverts to exiting for every field,
+ * which is what the guest hypervisor is already experiencing, and it is
+ * what this VMM did before shadowing existed. The control is cleared
+ * before the flag, because `set_vmcs_shadowing` returns early once the
+ * flag is false.
+ */
+void hypervisor::note_shadowing_ineffective(std::size_t cpu,
+                                            std::uint64_t encoding,
+                                            bool write)
+{
+    if constexpr (!nested_vmx::enabled) {
+        static_cast<void>(cpu);
+        static_cast<void>(encoding);
+        static_cast<void>(write);
+        return;
+    } else {
+        if (!this->vmcs_shadowing_enabled) {
+            return;
+        }
+
+        const auto * bitmap = write ? this->vmcs_shadow_write_bitmap
+                                    : this->vmcs_shadow_read_bitmap;
+
+        if (!field_shadowed(bitmap, encoding)) {
+            return;
+        }
+
+        if (cpu < max_cpus) {
+            this->shadowing_ineffective[cpu] =
+                this->shadowing_ineffective[cpu] + 1;
+        }
+
+        constexpr std::uint64_t enough = 64;
+
+        std::uint64_t seen{};
+        for (auto count : this->shadowing_ineffective) {
+            seen += count;
+        }
+
+        if (seen < enough) {
+            return;
+        }
+
+        log("vmcs shadowing is offered but not in force - {} exits for "
+            "shadowed fields; standing it down and saving the copies",
+            seen);
+
+        set_vmcs_shadowing(cpu, false);
+        this->vmcs_shadowing_enabled = false;
+    }
+}
 
 /**
  * Builds the VMREAD and VMWRITE bitmaps, once, and records whether the

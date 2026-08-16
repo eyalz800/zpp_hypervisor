@@ -1311,6 +1311,10 @@ bool hypervisor::on_guest_vmread(std::size_t cpu,
 
     record_vmcs_field_use(false, encoding.value());
 
+    // Reaching here for a field the read bitmap permits means shadowing
+    // is not in force, whatever the capability MSR says.
+    note_shadowing_ineffective(cpu, encoding.value(), false);
+
     // The one interception point a deferred guest-state field can be
     // asked for, and it **repairs rather than asserts**: if the bulk
     // copy was skipped and this read wants one of those fields, the
@@ -1411,6 +1415,10 @@ bool hypervisor::on_guest_vmwrite(std::size_t cpu,
     }
 
     record_vmcs_field_use(true, encoding.value());
+
+    // Reaching here for a field the write bitmap permits means shadowing
+    // is not in force, whatever the capability MSR says.
+    note_shadowing_ineffective(cpu, encoding.value(), true);
 
     // And the other half: a guest-state field the level above writes is
     // **its** value, owed to vmcs02 on the next entry and not to be

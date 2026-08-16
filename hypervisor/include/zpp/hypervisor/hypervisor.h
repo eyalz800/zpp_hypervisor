@@ -8311,10 +8311,22 @@ private:
 
     std::uint64_t vmcs_shadow_loads[max_cpus]{};
     std::uint64_t vmcs_shadow_stores[max_cpus]{};
+
+    /**
+     * Exits taken for a field the shadow bitmaps permit, which is the
+     * exit VMCS shadowing exists to prevent - so a non-zero count means
+     * the control is offered and not in force. See
+     * `note_shadowing_ineffective`, which stands the feature down rather
+     * than going on paying twenty VMCS accesses an entry for it.
+     */
+    std::uint64_t shadowing_ineffective[max_cpus]{};
     /** @} */
 
     void initialize_vmcs_shadowing();
     void set_vmcs_shadowing(std::size_t cpu, bool enabled);
+    void note_shadowing_ineffective(std::size_t cpu,
+                                    std::uint64_t encoding,
+                                    bool write);
     void copy_vmcs12_to_shadow(std::size_t cpu);
     void copy_shadow_to_vmcs12(std::size_t cpu);
     /**
