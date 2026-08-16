@@ -147,6 +147,20 @@ void hypervisor::on_vm_exit(std::uint64_t cpuid,
         if (0 == this->handler_first_tsc[cpuid]) {
             this->handler_first_tsc[cpuid] = now;
         }
+
+        // Closes the span opened at the resume, and attributes it to
+        // whichever level was entered. See `l2_run_cycles`: this is the
+        // only measurement in the tree denominated in the guest's work
+        // rather than this VMM's, and it is the quantity the timer
+        // stretch moved.
+        if (0 != this->level_run_tsc[cpuid]) {
+            auto ran = now - this->level_run_tsc[cpuid];
+            if (this->level_run_was_l2[cpuid]) {
+                this->l2_run_cycles[cpuid] += ran;
+            } else {
+                this->l1_run_cycles[cpuid] += ran;
+            }
+        }
     }
 
     // Notice a controller that has come back, if the write that

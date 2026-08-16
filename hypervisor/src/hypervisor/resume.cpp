@@ -870,6 +870,12 @@ void hypervisor::resume_guest(arch::x86_64::context & context,
             this->handler_exits[cpu] = this->handler_exits[cpu] + 1;
         }
         this->handler_last_tsc[cpu] = now;
+
+        // Opens the span the *guest* runs in, closed at the top of
+        // `on_vm_exit`. `running_l2` is already set for the entry about
+        // to happen, so it names which level this span belongs to.
+        this->level_run_tsc[cpu] = now;
+        this->level_run_was_l2[cpu] = this->running_l2[cpu];
     }
 
     // Put back an external interrupt this VMM took on the guest's

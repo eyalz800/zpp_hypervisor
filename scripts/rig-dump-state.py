@@ -1134,6 +1134,7 @@ def main():
                "shadow_ept_builds", "shadow_ept_cache_hits",
                "shadow_ept_rebuild_new_root", "shadow_ept_rebuild_stale",
                "hot_state_writes_skipped", "hot_state_writes_done",
+               "l2_run_cycles", "l1_run_cycles",
                "shadow_ept_evictions", "shadow_ept_resets",
                "shadow_ept_leaves_filled",
                "vmcs_shadow_loads", "vmcs_shadow_stores",
@@ -1181,6 +1182,7 @@ def main():
                "pending_event", "shadow_ept_builds", "shadow_ept_cache_hits",
                "shadow_ept_rebuild_new_root", "shadow_ept_rebuild_stale",
                "hot_state_writes_skipped", "hot_state_writes_done",
+               "l2_run_cycles", "l1_run_cycles",
                "shadow_ept_evictions", "shadow_ept_resets",
                "shadow_ept_leaves_filled", "vmcs_shadow_loads",
                "vmcs_shadow_stores",
@@ -1240,6 +1242,22 @@ def main():
     # only when they differ from what it saved. Zero skipped means the
     # elision did not compile in - a switch is not on until a counter
     # says the code ran.
+    # The only figures denominated in the guest's work rather than
+    # ours. Four changes worth 1.9x of handler cycles moved no
+    # guest-facing indicator, so this is the quantity that matters.
+    print("\ncpu  l2-run%  l1-run%  vmm%   (share of wall clock)")
+    for cpu in range(args.cpus):
+        first = read('handler_first_tsc', cpu) or 0
+        last = read('handler_last_tsc', cpu) or 0
+        span = last - first
+        if span <= 0:
+            continue
+        l2 = read('l2_run_cycles', cpu) or 0
+        l1 = read('l1_run_cycles', cpu) or 0
+        vmm = read('handler_cycles', cpu) or 0
+        print(f"{cpu:3d}  {100.0*l2/span:6.2f}  {100.0*l1/span:7.2f}  "
+              f"{100.0*vmm/span:5.2f}")
+
     print("\ncpu  hot-state skipped/done")
     for cpu in range(args.cpus):
         print(f"{cpu:3d}  {read('hot_state_writes_skipped', cpu):-12d}/"

@@ -8515,6 +8515,28 @@ private:
     bool hot_state_valid[max_cpus]{};
     std::uint64_t hot_state_writes_skipped[max_cpus]{};
     std::uint64_t hot_state_writes_done[max_cpus]{};
+
+    /**
+     * How much wall clock each level actually executes for, split by
+     * which one was resumed into.
+     *
+     * **Every other figure in this tree is denominated in this VMM's own
+     * work** - cycles per exit, per entry, per phase - and four changes
+     * worth a reproducible 1.9x of that moved no guest-facing indicator
+     * at all. The quantity `ZPP_STRETCH_GUEST_TIMER` moved was the
+     * second-level guest's wall-clock budget between ticks, and nothing
+     * here has ever measured it.
+     *
+     * The span runs from the resume that enters a level to the first
+     * instruction of this VMM's code after the exit that leaves it, so
+     * it carries the VM transition with it. That overstates both levels
+     * slightly and by the same amount each way; the ratio is what is
+     * being asked for.
+     */
+    std::uint64_t level_run_tsc[max_cpus]{};
+    bool level_run_was_l2[max_cpus]{};
+    std::uint64_t l2_run_cycles[max_cpus]{};
+    std::uint64_t l1_run_cycles[max_cpus]{};
     std::uint64_t shadow_ept_evictions[max_cpus]{};
 
     /**
