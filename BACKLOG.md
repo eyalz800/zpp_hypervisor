@@ -19653,3 +19653,62 @@ the two are separable:
 Both in one boot, and neither needs a code change. **That is the first
 thing to do, and it is cheaper than everything attempted after the
 implementation was finished.**
+
+## Proven reader, late sample: the hypervisor range is never read
+
+The measurement this stretch should have started with. The dump now
+proves itself in the same pass, and the sample is taken after seven
+minutes rather than twenty-five seconds:
+
+```
+reader proven: host_page_table[0] = 0x6966b023
+
+cpu  vp-assist-writes  evmcs-reads  evmcs-writes
+  0                 0            0             0
+```
+
+`host_page_table[0]` ends `023` - a present PML4 entry - so the read path
+is sound, and every figure beside it can be believed. And every figure
+beside it is **zero**: no hypervisor-range CPUID, no hypercall, no assist
+page register, no enlightened VM entry.
+
+**So the guest never reads the advertisement at all**, and this is the
+first statement about it in this file that rests on a proven instrument.
+It is not that the offer is examined and found wanting - it is never
+looked at.
+
+That is a much better place to be than the four fictions that preceded
+it, because it is checkable and it points somewhere specific. The
+hypervisor-present bit is set - `exit_dispatch.cpp` sets CPUID.1:ECX[31]
+whenever the enlightenment is offered - so the invitation exists and is
+not taken.
+
+### The next question, and it is a different one
+
+Whether the **guest hypervisor is running at all** in these boots.
+Everything above assumes Hyper-V launches and probes; a guest that never
+gets far enough to start it would produce exactly this - all zeros, no
+probe, no hypercall - and the boots that produced the original livelock
+data took six to eight minutes to reach the settled regime, which is the
+edge of the window sampled here.
+
+`l2_entries` and the exit mix answer it directly and are read through the
+now-proven path. **Ask that before touching the advertisement again**:
+whether Hyper-V is even in the picture decides whether any of this work
+is being exercised.
+
+### What this session leaves
+
+- **Four boot-verified optimisations**, and a metric correction showing
+  they are worth about 1.9x on handler cycles rather than the 1.38x first
+  reported.
+- **A complete enlightened VMCS implementation** - structure, both copy
+  directions, advertisement, assist-page hookup - behind `ZPP_EVMCS`, off
+  by default, desk-tested with fault injection, none of it dependent on
+  the rig reader.
+- **A proven reader**, and the rule that proves it, wired into the dump
+  so the next reading cannot repeat this stretch's mistakes.
+- **The chain**: 5.8% guest share, 6.64 ms round trip against a 1.74 ms
+  tick, 54% of it the guest hypervisor's own VMX instructions - and ring
+  3 reached with nested VMX off, which proves everything else in this VMM
+  carries Windows to user mode.

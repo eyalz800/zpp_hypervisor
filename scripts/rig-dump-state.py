@@ -1134,7 +1134,7 @@ def main():
                "shadow_ept_builds", "shadow_ept_cache_hits",
                "shadow_ept_rebuild_new_root", "shadow_ept_rebuild_stale",
                "shadow_ept_replayed", "hyperv_vp_assist_writes", "hypercalls_seen",
-               "cpuid_trace", "cpuid_trace_count",
+               "cpuid_trace", "cpuid_trace_count", "host_page_table",
                "cpuid_hypervisor_leaves_asked",
                "hypercall_codes", "hypercall_code_counts",
                "evmcs_reads", "evmcs_writes",
@@ -1188,7 +1188,7 @@ def main():
                "pending_event", "shadow_ept_builds", "shadow_ept_cache_hits",
                "shadow_ept_rebuild_new_root", "shadow_ept_rebuild_stale",
                "shadow_ept_replayed", "hyperv_vp_assist_writes", "hypercalls_seen",
-               "cpuid_trace", "cpuid_trace_count",
+               "cpuid_trace", "cpuid_trace_count", "host_page_table",
                "cpuid_hypervisor_leaves_asked",
                "evmcs_reads", "evmcs_writes",
                "hot_state_writes_skipped", "hot_state_writes_done",
@@ -1228,6 +1228,7 @@ def main():
     # is exactly what this file keeps warning is not a measurement.
     monitor.queue(instance + off["cpuid_trace_count"], 1)
     monitor.queue(instance + off["cpuid_hypervisor_leaves_asked"], 1)
+    monitor.queue(instance + off["host_page_table"], 1)
 
     hypercall_slots = 16
     monitor.queue(instance + off["hypercall_codes"], hypercall_slots)
@@ -1272,6 +1273,20 @@ def main():
     # switch is not on until a counter says the code ran.
     # Which hypercalls the guest hypervisor makes before declining the
     # enlightenment. Not per cpu - the codes are what matter.
+    # **Prove the reader before believing anything it says.** The first
+    # quadword of the host page table is a present PML4 entry and ends
+    # 023; if that does not read back, no other number in this dump is
+    # evidence. Four readings were believed this session that were not
+    # measurements, and this is the check that would have caught them.
+    proof = read('host_page_table', 0)
+    if proof is None:
+        print("\nREADER UNPROVEN: host_page_table did not read back")
+    elif 0x023 == (proof & 0xfff):
+        print(f"\nreader proven: host_page_table[0] = 0x{proof:x}")
+    else:
+        print(f"\nREADER SUSPECT: host_page_table[0] = 0x{proof:x}, "
+              f"expected a present entry ending 023")
+
     # Which hypervisor-range CPUID leaves the guest actually asks for.
     # The question the exit trace cannot answer: it records that a cpuid
     # happened, not which leaf.
