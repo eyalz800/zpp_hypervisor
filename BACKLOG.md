@@ -20670,3 +20670,54 @@ are different from everything used this session:
 
 Both read a *running* guest without perturbing it, which is what the rig
 notes prescribe and what nothing in this session actually did.
+
+## What is actually happening: Windows runs, Hyper-V never starts
+
+Sampled through the monitor on the low-exit build, forty samples:
+
+```
+34 x RIP=00000000xxxxxxxx   (firmware and boot)
+ 6 x RIP=fffff855xxxxxxxx   (Windows kernel)
+```
+
+and from the dump at the same moment:
+
+```
+exits 2,783   l2-entries 0   CPL sampled 30 times: all 0
+host exception: none
+```
+
+**So Windows is running.** It gets past firmware into kernel code. What
+does *not* happen is Hyper-V starting - zero second-level entries, ever -
+and Windows never reaches ring 3, while taking 2,783 exits where a
+working boot takes millions.
+
+**That is a third distinct failure, and it was called two wrong things
+before this.** Not "stops in firmware": it leaves firmware. Not "hangs":
+it executes. What it does is run Windows without the guest hypervisor and
+without progressing to user mode.
+
+### Which is the same shape as the ZPP_NESTED_VMX=OFF case, and is not
+
+With nested VMX off, Hyper-V finds no VMX, stands down, and Windows boots
+to ring 3 with 55.74% of wall clock. Here Hyper-V also never runs - but
+Windows does *not* reach ring 3, and the exit rate is a thousandth of
+what it should be.
+
+So this build has taken Hyper-V out of the picture **and** broken
+Windows' own progress, which is strictly worse than either the working
+nested build or the working non-nested one.
+
+### The next reading, and it is cheap
+
+`xp` on the guest's own memory at the `fffff855` addresses says what
+Windows is executing, and repeated sampling says whether it is a loop.
+Both read a running guest through the monitor without perturbing it -
+which is what the rig notes prescribe for exactly this and what took this
+session far too long to reach for.
+
+**And the sampling itself is the lesson**: four monitor samples reframed
+a failure that eleven boots' worth of counters had mischaracterised
+twice. The counters describe what this VMM did; the monitor describes
+what the machine is doing, and the second is what "the circle is stuck"
+is a statement about.
