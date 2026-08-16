@@ -21110,3 +21110,74 @@ this file had already written down as a confirmed gain and would have
 been asked to bank. **`nested_run/s` is stable to 1.5% across windows and
 that is not the same as being stable across boots.** Replicate on a
 second boot, not merely a second window.
+
+## Two processors: the tick-pressure model runs out
+
+One launcher variable, `ZPP_CPUS=2`, same binary as the eight-processor
+run above, both read at a settled point.
+
+| | 8 processors | 2 processors |
+|---|---|---|
+| `nested_run/s` | 4,236 | 4,028 |
+| L0 exits per second-level entry | 81 | 74 |
+| task priority 0x20 at entry | 41.9% | **57.9%** |
+| task priority 0xd0 at entry | 41.6% | **0.7%** |
+| task priority 0xf0 at entry | 0.2% | 0.2% |
+| trust-level round trip | 8,482 us / 34.2 exits | **5,869 us / 24.6 exits** |
+| cpu0 clock | 2.87-3.10 GHz | 3.30 GHz |
+| CPL 3 | never | **never** |
+
+**Every intermediate indicator improves and the outcome does not.** The
+round trip is the shortest this file has recorded, the guest sits at
+PASSIVE and APC level rather than DISPATCH - 0xd0 falls from 41.6% to
+0.7% - and it still never reaches user mode. Second-level entries
+accumulate at about 40/s against 456/s on eight processors, so it is
+also slower in absolute terms.
+
+**That is the tick-pressure model failing.** The whole of the previous
+session, and the `ZPP_STRETCH_GUEST_TIMER=2` result that motivated it,
+says the block is a trust-level round trip that outruns the guest's
+clock, so the guest resumes into an already-pending tick and never
+reaches deferred work. Here the round trip is 5.9 ms against a clock
+that has almost stopped ticking - 4,647 gaps in twenty-two minutes - the
+priority is off DISPATCH, and nothing is waiting on a deferred call.
+**The pressure is gone and the boot is still not progressing.**
+
+So whatever holds it is not the ratio. Something else has to be
+identified before more effort goes into making round trips cheaper,
+because two independent interventions have now moved that ratio a long
+way in the right direction - the reference TSC page and the processor
+count - and neither reached CPL 3.
+
+### Where the exits are now, and it is steady state
+
+```
+ept-violation   221779  53.3%
+vmresume         69079  16.6%
+vmcall           65189  15.7%
+vmptrld          36758   8.8%
+invept           12511   3.0%
+```
+
+**And the extended-page-table work is not a start-up burst.** Two dumps
+seven minutes apart on the same boot:
+
+```
+shadow-builds  11,790 -> 15,562      (about 9 rebuilds a second)
+leaves-filled 206,631 -> 284,318     (about 180 refills a second)
+cache-hits    260,682 -> 353,172
+evictions           0 -> 0
+```
+
+Eighteen leaves refilled per rebuild, for ever. Every `invept` the guest
+hypervisor issues costs a rebuild and the faults that repopulate it, and
+that is now over half of all exits.
+
+**That is the next thing to look at, and KVM has the shape of the
+answer**: it keeps previous roots rather than discarding them
+(`KVM_MMU_NUM_PREV_ROOTS`, and `kvm_mmu_free_roots` freeing only the
+matching one), so a root invalidated and re-established is reused rather
+than rebuilt from a fault at a time. `evictions 0` says nothing is being
+thrown out under pressure here - the leaves are being discarded on
+purpose, by an invalidation, and repopulated because there is nowhere
+they were kept.
