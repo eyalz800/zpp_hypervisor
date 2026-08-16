@@ -8552,6 +8552,10 @@ private:
     void store_enlightened_vmcs(std::size_t cpu);
     std::uint64_t hyperv_vp_assist_writes[max_cpus]{};
 
+    /** How often the enlightenment was recommended - to a guest in VMX
+     * operation, which is the only kind it is meant for. */
+    std::uint64_t evmcs_recommended[max_cpus]{};
+
     std::uint64_t evmcs_reads[max_cpus]{};
     std::uint64_t evmcs_writes[max_cpus]{};
     void replay_shadow_recall(std::size_t cpu,

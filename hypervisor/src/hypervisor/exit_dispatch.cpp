@@ -941,9 +941,30 @@ void hypervisor::on_vm_exit(std::uint64_t cpuid,
                 constexpr std::uint32_t recommend_enlightened_vmcs =
                     1u << 14;
 
+                // **Only to a guest that is a hypervisor.** Measured:
+                // recommending this to Windows stops it dead - 2,768
+                // exits and no second-level entry, against 1,423,672 and
+                // 481,082 with the bit cleared and everything else,
+                // vendor included, unchanged. The recommendation is
+                // aimed at a guest hypervisor and an operating system
+                // that will never launch one acts on it and fails.
+                //
+                // VMXON is what separates them: a guest that has entered
+                // VMX operation is a hypervisor, and one that has not is
+                // the thing booting before it. The state is already
+                // tracked because this VMM emulates the instruction.
+                //
+                // The ordering this depends on: the guest hypervisor
+                // must read the leaf *after* its VMXON. If it probes
+                // once and earlier, it never sees the recommendation and
+                // this fails silently - which is why the counters for
+                // both are read together.
                 if (nested_vmx::evmcs_offered &&
-                    (recommendations_leaf == leaf)) {
+                    (recommendations_leaf == leaf) && (cpuid < max_cpus) &&
+                    this->guest_in_vmx_operation[cpuid]) {
                     cpuid_result[0] = recommend_enlightened_vmcs;
+                    this->evmcs_recommended[cpuid] =
+                        this->evmcs_recommended[cpuid] + 1;
                 }
             } else if (nested_vmx::evmcs_offered &&
                        (nested_features_leaf == leaf)) {

@@ -19905,3 +19905,54 @@ VMXON count, in one boot, on the proven reader.
 advertisement is otherwise accepted, the guest hypervisor runs with the
 interface claimed, and what remains is telling the right one of two
 guests about it.
+
+### The VMXON gate does not save it
+
+Implemented and booted: bit 14 set only when
+`guest_in_vmx_operation[cpuid]` is true. Result, on the proven reader:
+
+```
+cpu 0  exits 2,757   l2-entries 0
+```
+
+Unchanged from the ungated build's 2,768. **The gate does not prevent the
+hang**, and there are two candidate reasons, neither yet distinguished:
+
+- **The ordering assumption is wrong.** The guest that reads the
+  recommendations leaf may already be in VMX operation on that processor
+  by the time it reads it - the boot path and the hypervisor are the same
+  first-level guest, and `guest_in_vmx_operation` is per processor, not
+  per guest. Anything that executed VMXON once leaves the flag set for
+  everything that runs afterwards on that processor.
+- **`cpuid` in the CPUID handler may not be the processor index** the
+  flag is keyed by. It is used as one two hundred lines below, for the
+  processor-index MSR, but that has not been checked against
+  `vmcs.vpid()`, which is what every other per-processor lookup in this
+  file uses.
+
+The second is checkable without a boot and should be checked first -
+`evmcs_recommended` was added beside the gate for exactly this and its
+value distinguishes the two: non-zero means the gate opened and the
+recommendation went out anyway; zero means it never opened and something
+else stops the guest.
+
+**That reading was not taken.** The dump was edited to print it and the
+column did not appear in the output, so the wiring is wrong as well -
+which is the fifth reader mistake of this session and the reason the
+answer is not in hand.
+
+### Honest state of the enlightenment work
+
+Implemented in full, desk-tested, and **not yet demonstrable**: with the
+recommendation reaching Windows the guest stops at ~2,760 exits; with it
+withheld the guest boots and the guest hypervisor runs, but nothing is
+enlightened. The separation between the two guests is the whole remaining
+problem, and the one instrument that would show whether the gate fires
+was mis-wired.
+
+**Start there**: fix the column, read `evmcs_recommended` against
+`guest_in_vmx_operation`, and decide from that whether the signal can
+separate an operating system from a hypervisor at all on this path. If it
+cannot, the recommendation has to be withheld until the guest does
+something only a hypervisor does *and* re-reads the leaf - and whether
+Hyper-V re-reads it is the question that decides the whole approach.

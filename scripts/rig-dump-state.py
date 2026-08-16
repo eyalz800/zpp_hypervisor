@@ -1137,7 +1137,7 @@ def main():
                "cpuid_trace", "cpuid_trace_count", "host_page_table",
                "cpuid_hypervisor_leaves_asked",
                "hypercall_codes", "hypercall_code_counts",
-               "evmcs_reads", "evmcs_writes",
+               "evmcs_reads", "evmcs_writes", "evmcs_recommended",
                "hot_state_writes_skipped", "hot_state_writes_done",
                "l2_run_cycles", "l1_run_cycles", "handler_cycles",
                "handler_first_tsc", "handler_last_tsc",
@@ -1190,7 +1190,7 @@ def main():
                "shadow_ept_replayed", "hyperv_vp_assist_writes", "hypercalls_seen",
                "cpuid_trace", "cpuid_trace_count", "host_page_table",
                "cpuid_hypervisor_leaves_asked",
-               "evmcs_reads", "evmcs_writes",
+               "evmcs_reads", "evmcs_writes", "evmcs_recommended",
                "hot_state_writes_skipped", "hot_state_writes_done",
                "l2_run_cycles", "l1_run_cycles", "handler_cycles",
                "handler_first_tsc", "handler_last_tsc",
@@ -1315,9 +1315,10 @@ def main():
                 continue
             print(f"  0x{read('hypercall_codes', i):04x}  {count:-6d}")
 
-    print("\ncpu  vp-assist-writes  evmcs-reads  evmcs-writes")
+    print("\ncpu  rec  vp-assist-writes  evmcs-reads  evmcs-writes")
     for cpu in range(args.cpus):
-        print(f"{cpu:3d}  {read('hyperv_vp_assist_writes', cpu):-16d}  "
+        print(f"{cpu:3d}  {read('evmcs_recommended', cpu):-4d}  "
+              f"{read('hyperv_vp_assist_writes', cpu):-16d}  "
               f"{read('evmcs_reads', cpu):-11d}  "
               f"{read('evmcs_writes', cpu):-12d}")
 
