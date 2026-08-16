@@ -18488,3 +18488,65 @@ The change itself stays: it is correct, its ordering cases are in
 carries the safety argument, and it removes 9,260 cycles a call from the
 phase it targets. It is simply not worth what the arithmetic said, and
 neither were the two before it.
+
+## The metric was wrong: wall clock per exit is mix-dependent
+
+The same binary (`2227ffa6…`, hash verified), booted twice:
+
+| | run 1 | run 2 | delta |
+|---|---|---|---|
+| `reflect_l2_exit` | 190,168 | 190,168 | **0.00%** |
+| `build: after vmptrld` | 70,427 | 70,448 | **0.03%** |
+| `build_vmcs02` | 101,045 | 101,133 | 0.09% |
+| `save_l2_state` | 53,131 | 52,878 | 0.48% |
+| inside this VMM | 341,689 | 346,162 | 1.3% |
+| **wall clock per exit** | **396,058** | **400,843** | **1.2%** |
+
+**The phase timers are reproducible to three hundredths of a percent.
+The aggregates are not.** That is not noise in the timer - it is what
+the aggregate measures: total cycles divided by *exits handled*, and the
+mix of exit types varies per boot. Run 1 took 2,279,699 exits over
+766,992 second-level entries; run 2 took 2,193,817 over 742,115. A boot
+with proportionally more cheap extended-page-table faults has a lower
+average and a slower hypervisor would score better on it.
+
+**So the metric this file has been comparing builds on for the last three
+changes is the one metric that moves with workload mix**, and the stable
+one showed every change landing as predicted. Recomputed on handler
+cycles per second-level entry, which is per-call and reproducible:
+
+| build | `reflect_l2_exit` + `build_vmcs02` |
+|---|---|
+| item 1 only | 485,722 |
+| + item 2, deferred guest-state reads | 346,323 |
+| + CRT word-loop | 299,574 |
+| + write-side elision | **291,301** |
+
+**1.67x**, and about **1.9x** counting item 1's own 13.6%. Not the 1.38x
+reported, and not the "three changes in a row that did nothing" either -
+they all worked, and the ruler was wrong.
+
+### What this does and does not settle
+
+It settles the previous entry's open question. The two readings offered
+there were "boot-to-boot variance dominates" and "the exit total is not
+the sum of its phases". The answer is **neither, quite**: the phases are
+stable, the aggregate is mix-dependent, and comparing two builds by it
+compares two workloads.
+
+It does **not** mean the guest got 1.9x more time. Handler cycles per
+entry is what this VMM spends per second-level entry; what the guest
+experiences also depends on how many entries and exits its work costs,
+which is the mix that varies. **The circle has still not moved** - CPL 3
+is zero in both runs.
+
+### Rules this changes
+
+- **Compare builds on phase cycles per call.** Reproducible to 0.03% and
+  attributable to the code that changed.
+- **Never compare builds on wall clock per exit.** It is an average over
+  a mix nobody controls.
+- **A single boot is enough for a phase figure and never enough for an
+  aggregate.** This is the cheapest measurement in the whole file - one
+  boot of an already-deployed binary - and it should have been made
+  before the first optimisation, not after the fourth.
