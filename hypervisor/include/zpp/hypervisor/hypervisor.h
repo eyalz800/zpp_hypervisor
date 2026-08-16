@@ -8518,7 +8518,15 @@ private:
     void copy_enlightened_to_vmcs12(
         std::size_t cpu, const hyperv::enlightened_vmcs & evmcs);
 
+    /**
+     * Writes back what the guest hypervisor reads after an exit, since
+     * with the enlightenment armed it cannot VMREAD them.
+     */
+    void copy_vmcs12_to_enlightened(std::size_t cpu,
+                                    hyperv::enlightened_vmcs & evmcs);
+
     std::uint64_t evmcs_reads[max_cpus]{};
+    std::uint64_t evmcs_writes[max_cpus]{};
     void replay_shadow_recall(std::size_t cpu,
                               std::size_t slot,
                               std::uint64_t root);
