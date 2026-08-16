@@ -1462,6 +1462,21 @@ void hypervisor::on_vm_exit(std::uint64_t cpuid,
                             0xc3,
                         };
 
+                        // With the enlightenment offered the page has to
+                        // **trap** instead of answering locally, or the
+                        // calls never reach this VMM and cannot be seen
+                        // at all - which is why two boots showed the
+                        // offer declined with nothing recorded about
+                        // why. `vmcall` then `ret`: the exit handler
+                        // gives the same refusal the bytes above give,
+                        // and records the code on the way.
+                        constexpr std::uint8_t trapping[]{
+                            0x0f,
+                            0x01,
+                            0xc1,
+                            0xc3,
+                        };
+
                         // Through the mapping window, not through a
                         // store against the host page table.
                         //
@@ -1475,9 +1490,19 @@ void hypervisor::on_vm_exit(std::uint64_t cpuid,
                         // deliberately never maps. The window is how
                         // guest memory is reached, and it takes the
                         // lock itself.
-                        if (!write_guest_physical(
-                                (value >> 12) << 12,
-                                std::as_bytes(std::span{instructions}))) {
+                        // Dynamic extent, because the two differ in
+                        // length and a conditional over two fixed-extent
+                        // spans has no common type.
+                        std::span<const std::byte> page_bytes =
+                            nested_vmx::evmcs_offered
+                                ? std::span<const std::byte>(
+                                      std::as_bytes(std::span{trapping}))
+                                : std::span<const std::byte>(
+                                      std::as_bytes(
+                                          std::span{instructions}));
+
+                        if (!write_guest_physical((value >> 12) << 12,
+                                                  page_bytes)) {
                             this->hypercall_page_unwritable =
                                 this->hypercall_page_unwritable + 1;
                         }
@@ -2110,6 +2135,63 @@ void hypervisor::on_vm_exit(std::uint64_t cpuid,
         // the flags - so this is the one place in this handler where
         // advancing past an instruction that did not do what the guest
         // asked is correct.
+        // A hypercall, not a VMX instruction, whenever the
+        // enlightenment is offered and the guest hypervisor has
+        // installed a hypercall page.
+        //
+        // **The #UD below is right for the build it was written for and
+        // wrong here.** With VMX hidden, VMCALL is an invalid opcode and
+        // that is the architecturally correct answer. But a guest
+        // hypervisor that has been told an interface exists and has
+        // written HV_X64_MSR_HYPERCALL is making a hypercall, and
+        // answering #UD to it is the "answered part of an interface"
+        // failure this file records everywhere else.
+        //
+        // The answer is still a refusal - `HV_STATUS_INVALID_HYPERCALL_
+        // CODE`, 2, exactly what the page returned when it answered
+        // locally - because nothing is implemented and saying otherwise
+        // is worse. What changes is that the call is now *seen*, and the
+        // codes are recorded: this VMM offers the enlightened VMCS, the
+        // guest hypervisor declines it, and which calls it makes before
+        // declining is the question that decides what to implement next.
+        if constexpr (nested_vmx::evmcs_offered) {
+            constexpr std::uint64_t hypercall_page_enabled = 1;
+
+            if (0 != (this->hyperv_hypercall & hypercall_page_enabled)) {
+                constexpr std::uint64_t invalid_hypercall_code = 2;
+
+                auto code = context.rcx & 0xffff;
+
+                this->hypercalls_seen = this->hypercalls_seen + 1;
+
+                // Distinct codes with counts. Which, not how many.
+                auto found = false;
+                for (std::size_t i{}; i < hypercall_code_slots; ++i) {
+                    if (this->hypercall_code_counts[i] &&
+                        (this->hypercall_codes[i] == code)) {
+                        this->hypercall_code_counts[i] =
+                            this->hypercall_code_counts[i] + 1;
+                        found = true;
+                        break;
+                    }
+                }
+
+                if (!found) {
+                    for (std::size_t i{}; i < hypercall_code_slots; ++i) {
+                        if (0 == this->hypercall_code_counts[i]) {
+                            this->hypercall_codes[i] = code;
+                            this->hypercall_code_counts[i] = 1;
+                            break;
+                        }
+                    }
+                }
+
+                context.rax = invalid_hypercall_code;
+                context.rdx = 0;
+                break;
+            }
+        }
+
         if (on_vmx_instruction(full_reason, context)) {
             // Unless it was a VMLAUNCH or VMRESUME that settled where
             // RIP goes for itself, which is either of the two

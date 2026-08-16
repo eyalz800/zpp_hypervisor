@@ -8534,6 +8534,17 @@ private:
      * outside. This one is Hyper-V registering with *this VMM*, and it
      * only ever arrives because the enlightenment is advertised.
      */
+    /**
+     * Which hypercalls the guest hypervisor makes before declining the
+     * enlightenment, and how often. Recorded rather than guessed from
+     * the specification: it offers many and this VMM needs to know the
+     * few that are actually asked for.
+     */
+    static constexpr std::size_t hypercall_code_slots = 16;
+    std::uint64_t hypercall_codes[hypercall_code_slots]{};
+    std::uint64_t hypercall_code_counts[hypercall_code_slots]{};
+    std::uint64_t hypercalls_seen{};
+
     std::uint64_t hyperv_vp_assist[max_cpus]{};
     std::uint8_t evmcs_armed[max_cpus]{};
 

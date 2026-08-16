@@ -1133,7 +1133,7 @@ def main():
                "exit_reason_counts",
                "shadow_ept_builds", "shadow_ept_cache_hits",
                "shadow_ept_rebuild_new_root", "shadow_ept_rebuild_stale",
-               "shadow_ept_replayed", "hyperv_vp_assist_writes",
+               "shadow_ept_replayed", "hyperv_vp_assist_writes", "hypercalls_seen",
                "evmcs_reads", "evmcs_writes",
                "hot_state_writes_skipped", "hot_state_writes_done",
                "l2_run_cycles", "l1_run_cycles", "handler_cycles",
@@ -1184,7 +1184,7 @@ def main():
                "l2_activity_state", "events_requeued", "events_deferred",
                "pending_event", "shadow_ept_builds", "shadow_ept_cache_hits",
                "shadow_ept_rebuild_new_root", "shadow_ept_rebuild_stale",
-               "shadow_ept_replayed", "hyperv_vp_assist_writes",
+               "shadow_ept_replayed", "hyperv_vp_assist_writes", "hypercalls_seen",
                "evmcs_reads", "evmcs_writes",
                "hot_state_writes_skipped", "hot_state_writes_done",
                "l2_run_cycles", "l1_run_cycles", "handler_cycles",
@@ -1241,6 +1241,12 @@ def main():
     # each is refilled a fault at a time.
     # Did the guest hypervisor accept the enlightened VMCS offer? A
     # switch is not on until a counter says the code ran.
+    # Which hypercalls the guest hypervisor makes before declining the
+    # enlightenment. Not per cpu - the codes are what matter.
+    seen = read('hypercalls_seen', 0)
+    if seen is not None:
+        print(f"\nhypercalls seen: {seen}")
+
     print("\ncpu  vp-assist-writes  evmcs-reads  evmcs-writes")
     for cpu in range(args.cpus):
         print(f"{cpu:3d}  {read('hyperv_vp_assist_writes', cpu):-16d}  "

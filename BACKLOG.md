@@ -19226,3 +19226,52 @@ After that, one boot names the codes, and each is then a decision on its
 own terms - implement it, or find that the guest hypervisor accepts the
 refusal for that particular call and moves on. That is a much smaller and
 better-defined problem than "why is the offer declined".
+
+## The guest hypervisor does make hypercalls, and refusing them is fatal
+
+The hypercall page now issues `vmcall` instead of answering locally, so
+the calls reach this VMM and can be counted. One boot:
+
+```
+hypercalls seen: 104
+module loads:    2 -> 8   (reset loop, killed at the guard)
+```
+
+**Both halves matter.**
+
+The 104 answers the question the previous two boots could not: the guest
+hypervisor does establish the page and does use it. It is not ignoring
+the interface - it is exercising it, and the enlightened VMCS offer is
+being declined *after* that conversation rather than before it.
+
+The reset loop answers the next one. Refused with
+`HV_STATUS_INVALID_HYPERCALL_CODE` - the same status the local page
+returned, so the *answer* did not change, only its visibility - the guest
+hypervisor made 104 calls and then failed. So these are not calls it can
+do without: it needs them, and being told the code is invalid is fatal
+rather than merely disappointing.
+
+That is a **better** result than the two silent boots, and it is exactly
+what the guard exists for: capped at 8 loads, killed, known-good loader
+restored, guest untouched otherwise.
+
+### What it means
+
+The enlightenment cannot be reached by advertisement alone. A guest
+hypervisor offered it will use the hypercall interface, and this VMM has
+to answer the calls it actually makes - which is now a bounded, named
+problem rather than a guess, because the codes are recorded in
+`hypercall_codes` beside their counts.
+
+**Reading them is the next step and needs no boot**: the module is
+`allocate_rwx`'d and never freed, so the recorded codes are still in
+memory at the addresses `llvm-nm` gives, and the dump script's reader
+needs only to print the two arrays. That was written and left broken in
+this session - the print references a helper that does not exist in that
+scope - and fixing it is the first thing to do.
+
+**And do not answer them with success.** Returning 0 from a hypercall
+that did nothing is what this file has warned about a dozen times, and
+against a guest hypervisor that is already willing to bugcheck over a
+refusal, it would be acted on immediately and fail somewhere further
+away.
