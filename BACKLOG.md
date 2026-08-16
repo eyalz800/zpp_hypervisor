@@ -18765,3 +18765,38 @@ composed into a shadow leaf is silent corruption of the guest rather than
 a visible fault. It belongs at the start of a session with the
 `tests/nested_exit` sequence harness extended to cover rebuild-then-
 populate, not at the end of one.
+
+## Spatial prefetch fails: the refaulted pages are scattered
+
+First change aimed at the axis the 5.8% measurement identified - fewer
+exits rather than cheaper ones. Installing the eight pages after each
+faulting one, from the guest hypervisor's current tables:
+
+| | baseline | with prefetch |
+|---|---|---|
+| prefetched leaves | - | 1,407,690 |
+| faulted leaves | 467,335 | **442,305** |
+| `on_l2_ept_fault` | 53,392 | **85,572** cycles |
+| l2-run% | 5.80 | **5.67** |
+| vmm% | 85.97 | **86.34** |
+
+**3.2 leaves installed per fault, and the fault count fell 5%.** So about
+95% of what was prefetched was never touched, while the fault that paid
+for it got 60% more expensive. Net slightly worse, and reverted.
+
+**What it establishes**: the 26.7 refaults a rebuilt root takes are **not
+a contiguous run**. They are scattered addresses, so guessing by
+adjacency cannot find them. That was the assumption behind the cheap
+variant and it is now measured false.
+
+**And it is evidence *for* the recall design.** The specification above -
+remember which guest-physical addresses a root actually had mapped, and
+walk those at rebuild - does not guess. It replays a set the guest itself
+demonstrated it needs, which is exactly what scattered access defeats
+adjacency at. The measurement that killed the cheap version is the reason
+to expect the specified one to work: a 5% hit rate by adjacency against a
+set that is known exactly.
+
+The revert keeps the counter machinery out of the tree; the design entry
+above stands unchanged, with this as the evidence for preferring recall
+over any spatial heuristic.
