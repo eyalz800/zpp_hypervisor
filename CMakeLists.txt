@@ -119,6 +119,10 @@ option(ZPP_SHADOW_GUEST_STATE
     "Run the deferred guest-state copy in shadow: compute what it would produce, keep using the eager value, and record where they differ. Behaviour-neutral by construction - it reads and records and takes no decision - so it names the field and the moment instead of resetting the guest. A diagnostic, never a candidate build."
     OFF)
 
+option(ZPP_EVMCS
+    "Offer Hyper-V's enlightened VMCS, so the guest hypervisor states its VMCS in a shared structure instead of executing VMREAD and VMWRITE - 54% of a trust-level round trip measured on the rig. Off by default: the advertisement and the handling cannot be staged separately, so the first boot with this on exercises the whole mechanism at once."
+    OFF)
+
 option(ZPP_DEFER_GUEST_STATE
     "Defer the bulk copy of the second-level guest's state out of vmcs02 into vmcs12 until something reads it. Measured on the rig at 1.136x: save_l2_state 198,309 -> 52,792 cycles/call, wall clock per exit 462,843 -> 407,257. Four ordering conditions are found, fixed, and covered by tests/nested_exit's sequence cases; the fourth was flush_guest_vmcs12 copying the whole vmcs12 back on every VMPTRLD."
     ON)
@@ -217,6 +221,7 @@ ExternalProject_Add(hypervisor
         -DZPP_VIRTUALIZE_APIC=${ZPP_VIRTUALIZE_APIC}
         -DZPP_PROFILE_L2=${ZPP_PROFILE_L2}
         -DZPP_STEP_VTL=${ZPP_STEP_VTL}
+        -DZPP_EVMCS=${ZPP_EVMCS}
         -DZPP_DEFER_GUEST_STATE=${ZPP_DEFER_GUEST_STATE}
         -DZPP_SHADOW_GUEST_STATE=${ZPP_SHADOW_GUEST_STATE}
         -DZPP_GUEST_TESTS=${ZPP_GUEST_TESTS}
@@ -307,6 +312,7 @@ ExternalProject_Add(uefi_loader
         -DZPP_VIRTUALIZE_APIC=${ZPP_VIRTUALIZE_APIC}
         -DZPP_PROFILE_L2=${ZPP_PROFILE_L2}
         -DZPP_STEP_VTL=${ZPP_STEP_VTL}
+        -DZPP_EVMCS=${ZPP_EVMCS}
         -DZPP_DEFER_GUEST_STATE=${ZPP_DEFER_GUEST_STATE}
         -DZPP_SHADOW_GUEST_STATE=${ZPP_SHADOW_GUEST_STATE}
         -DZPP_TRACE=${ZPP_TRACE}

@@ -178,7 +178,36 @@ inline constexpr bool pass_through_hypervisor_interface = false;
 // What would make it right is one of two things, and both are real
 // work rather than a switch: present a signature that is not `Hv#1`, or
 // populate 0x40000003 with privileges this VMM can actually back.
-inline constexpr bool announce_hypervisor = false;
+// **Enlightened VMCS makes this the right thing to do rather than the
+// wrong one**, which is why it is the switch below rather than a
+// hard-coded false.
+//
+// The objection above is to announcing an interface and backing none of
+// it. Enlightened VMCS is an interface this VMM *can* back: the guest
+// hypervisor writes its VMCS into a shared structure instead of
+// executing VMREAD and VMWRITE, and both directions of that copy are
+// implemented in `nested_evmcs.cpp` and driven by `tests/nested_exit`
+// against a hand-built structure.
+//
+// It is also the only candidate large enough to matter. Measured on the
+// rig, the guest hypervisor's own VMX instructions are **54% of a
+// trust-level round trip** - and a round trip is 6.64 ms against a 1.74
+// ms tick, which is why Windows with virtualization-based security
+// livelocks here and boots on KVM alone in five minutes. KVM implements
+// enlightened VMCS; this VMM did not.
+//
+// Off by default because the advertisement and the handling cannot be
+// staged separately - the guest hypervisor registers no assist page
+// until it sees the advertisement - so the first boot with this on
+// exercises the whole mechanism at once.
+inline constexpr bool evmcs_offered =
+#if defined(ZPP_EVMCS) && ZPP_EVMCS
+    true;
+#else
+    false;
+#endif
+
+inline constexpr bool announce_hypervisor = evmcs_offered;
 
 inline constexpr bool enabled =
 #if defined(ZPP_NESTED_VMX) && ZPP_NESTED_VMX

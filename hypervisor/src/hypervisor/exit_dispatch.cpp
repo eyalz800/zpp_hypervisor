@@ -571,6 +571,13 @@ void hypervisor::on_vm_exit(std::uint64_t cpuid,
             hypervisor_leaf_first + 4;
         constexpr std::uint32_t limits_leaf = hypervisor_leaf_first + 5;
 
+        // Where the enlightened VMCS version is reported. The guest
+        // hypervisor reads it to decide whether the layer below speaks a
+        // version it knows; KVM checks the same leaf against its own
+        // KVM_EVMCS_VERSION at `.references/kvm/vmx.c:565-567`.
+        constexpr std::uint32_t nested_features_leaf =
+            hypervisor_leaf_first + 0xa;
+
         // The highest leaf of that block, which is what EAX at the
         // base means: KVM's own reader takes it that way -
         // kvm_get_hypervisor_cpuid in arch/x86/kvm/cpuid.c matches the
@@ -583,9 +590,15 @@ void hypervisor::on_vm_exit(std::uint64_t cpuid,
         // in both directions at once: it under-reported the block
         // while more leaves were answered above it, and it named a
         // leaf that is not part of this block at all.
+        // With the enlightenment offered the block reaches the nested
+        // features leaf, and the maximum has to say so - a guest that
+        // stops at `limits_leaf` never reads the version and never turns
+        // the enlightenment on.
         constexpr std::uint32_t hypervisor_leaf_maximum =
-            nested_vmx::announce_hypervisor ? limits_leaf
-                                            : hypervisor_leaf_first;
+            nested_vmx::evmcs_offered ? nested_features_leaf
+            : nested_vmx::announce_hypervisor
+                ? limits_leaf
+                : hypervisor_leaf_first;
 
         // Reports a given processor's most recent exit, selected by
         // ecx. Inside the range this VMM already owns, so it costs no
@@ -883,6 +896,37 @@ void hypervisor::on_vm_exit(std::uint64_t cpuid,
                     cpuid_result[0] =
                         privilege_hypercall_msrs | privilege_vp_index_msr;
                 }
+
+                // The one recommendation this VMM makes, and it is a
+                // promise in the same way the privileges above are: bit
+                // 14 says "use an enlightened VMCS rather than VMREAD
+                // and VMWRITE", and the guest hypervisor will then state
+                // its VMCS through the structure in
+                // `zpp/hypervisor/enlightened_vmcs.h` and stop executing
+                // the instructions - which is 54% of a trust-level round
+                // trip here.
+                //
+                // Set only with `evmcs_offered`, because a recommendation
+                // whose handling is absent is the announce-an-interface
+                // failure this file warns about everywhere.
+                constexpr std::uint32_t recommend_enlightened_vmcs =
+                    1u << 14;
+
+                if (nested_vmx::evmcs_offered &&
+                    (recommendations_leaf == leaf)) {
+                    cpuid_result[0] = recommend_enlightened_vmcs;
+                }
+            } else if (nested_vmx::evmcs_offered &&
+                       (nested_features_leaf == leaf)) {
+                // The enlightened VMCS version, in the low half of eax.
+                // One is the only version defined, and the only one the
+                // structure transcribed here describes.
+                constexpr std::uint32_t enlightened_vmcs_version = 1;
+
+                cpuid_result[0] = enlightened_vmcs_version;
+                cpuid_result[1] = 0;
+                cpuid_result[2] = 0;
+                cpuid_result[3] = 0;
             } else if (nested_vmx::announce_hypervisor &&
                        (limits_leaf == leaf)) {
                 // Implementation limits, of which the only one this
