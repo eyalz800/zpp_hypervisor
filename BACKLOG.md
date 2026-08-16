@@ -21888,3 +21888,84 @@ is two runs of `ZPP_NESTED_VMX=OFF` before anything is concluded - and,
 if it replicates, a bisect against the reference TSC page first, since
 that is the one change of the session that alters what the guest is
 told.
+
+## Retraction: CPL sampling cannot establish "never reached ring 3"
+
+The regression report in the entry above is withdrawn, and the
+instrument that produced it is the thing to fix.
+
+**The bisect was run and both arms agree.** `ZPP_NESTED_VMX=OFF` with
+`ZPP_PUBLISH_REFERENCE_TSC` **off** - the project default, manifest
+checked as `nested=0 ... reftsc=0` before the boot - gives
+
+```
+2,400 samples of `info registers -a` across eight processors: 2,400 x CPL=0
+```
+
+and the same configuration with it **on** gave 320 x `CPL=0`. **Same
+answer either way, so the reference TSC page is not implicated in what
+was reported as a regression.**
+
+**But the reading itself does not mean what it was taken to mean.** The
+instruction-pointer histogram from the same run:
+
+```
+164 of 200  fffff801e5befa3c     one Windows kernel address
+ 21 of 200  fffff801e5eaeb0c
+ 15 of 200  fffff801e6429130
+  0 of 200  anywhere in this module
+```
+
+**A booted, idle Windows spends essentially all of its time at CPL 0 in
+the kernel idle loop.** Nothing in our module, one hot kernel address,
+everything else spread thinly - that is the profile of a machine with
+nothing to do, and it is *indistinguishable by CPL sampling* from a
+machine livelocked in kernel code. Sampling can only report the state
+the machine spends most of its time in, which is exactly the error this
+session already recorded for `NoEOIRequired`: **a probe slower than what
+it measures reports the common case and calls it the only case.**
+
+So "the control did not reach ring 3" was never established. What was
+established is that no user-mode thread happened to be scheduled at any
+of 2,400 sampling instants, which on an idle machine is unremarkable.
+
+**Why the earlier ring-3 measurements in this file are sound and this
+one is not.** They used `l2_cpl_seen`, a counter incremented on **every
+second-level entry** - millions of them - so it sees every privilege
+level the guest ever ran at. With nested VMX off there is no second
+level and no such counter, and the fallback to sampling silently
+swapped a census for a survey. **A counter over every event and a sample
+of a few hundred instants are not the same instrument and must not be
+compared.**
+
+### What that leaves
+
+- The reference TSC page is **not** shown to have broken anything. It is
+  also **not** cleared: the bisect that would have cleared it could not
+  have detected the fault it was looking for.
+- `ZPP_PUBLISH_REFERENCE_TSC` remains **off by default and off on the
+  ESP**, which is the right resting state and was not true for most of
+  this session. Its option text gives the reason - *"it writes into
+  guest memory the level above believes it owns"* - and this session
+  enabled it for the first time in the project's history by rebuilding a
+  tree whose cache said `ON` while its object file said otherwise.
+- **Its measured benefit stands and its safety does not.** Removing
+  1,357,878 `rdmsr` exits is a fact; that the guest is better off for it
+  is not established, and the nested improvements measured with it on -
+  the clock returning to its own period, `0xf0` falling to 0.2% - must
+  be held as *unexplained changes* rather than as repair until something
+  can tell being told the time correctly from being told something
+  nobody asked for.
+
+### The instrument that would answer it
+
+Not another sample. Either
+
+- a counter on **every** exit recording the guest's `CS.RPL`, which
+  works in both configurations and is a census rather than a survey -
+  though with nested off the guest takes so few exits that even this is
+  thin; or
+- **the screen.** The GPU is passed through, so "did Windows boot" is
+  answered instantly and unambiguously by looking at the machine, and
+  that is the one instrument this investigation has never used for a
+  question it settles completely.
