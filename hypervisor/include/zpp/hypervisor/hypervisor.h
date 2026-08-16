@@ -8480,21 +8480,6 @@ private:
      * every processor. Each discard is then refilled one extended-page-
      * table fault at a time.
      */
-    /**
-     * Leaves installed ahead of a fault rather than by one.
-     *
-     * A rebuilt shadow root is emptied by design and filled lazily, so
-     * the guest hypervisor's root churn costs about 26.7 extended-page-
-     * table exits per root - 20% of all exits. Against a measured 86%
-     * share of wall clock for this VMM and 5.8% for the second-level
-     * guest, the number of exits is the axis that matters, so each
-     * neighbour walked and installed here is one exit not taken.
-     *
-     * Against `shadow_ept_leaves_filled`, which counts the ones a fault
-     * paid for, this says whether the trade is working.
-     */
-    std::uint64_t shadow_ept_prefetched[max_cpus]{};
-
     std::uint64_t shadow_ept_rebuild_new_root[max_cpus]{};
     std::uint64_t shadow_ept_rebuild_stale[max_cpus]{};
 
