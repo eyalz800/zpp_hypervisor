@@ -245,3 +245,26 @@ fi
 [ "${ZPP_ALLOW_CHAINLOAD_ONLY:-0}" = "1" ] &&
     summary="$summary; chainload-only NOT checked"
 echo "$summary"
+
+# What the compiler actually saw, printed on every deploy.
+#
+# **A CMake cache reading ON is not evidence.** ZPP_PUBLISH_REFERENCE_TSC
+# was ON in both caches and in compile_commands.json while the object
+# file consuming it was stale, so the function it controls linked in as
+# a bare `ret` - and two sessions of measurements were taken against a
+# configuration nobody had built, of the switch aimed at the largest exit
+# reason on the machine. `zpp_build_switches` is assembled from the same
+# constexpr bools the code branches on, so this line is the binary's own
+# account of itself. Printed rather than checked, because which switches
+# *should* be on is the caller's question and differs per experiment -
+# the failure this prevents is not noticing that they are not.
+switches=$(LC_ALL=C strings "$loader" 2>/dev/null |
+    LC_ALL=C grep -a 'zpp switches:' | head -1)
+if [ -n "$switches" ]; then
+    echo "    $switches"
+else
+    echo "    WARNING: no switch manifest in $loader - it predates" >&2
+    echo "             build_switches.cpp, so what is compiled into it" >&2
+    echo "             cannot be read back. Rebuild before trusting a" >&2
+    echo "             measurement taken with it." >&2
+fi
