@@ -20074,3 +20074,54 @@ reports, leaf by leaf, is the next step and costs no hardware time at
 all.
 
 That is where to start, and it is the narrowest the problem has been.
+
+### The leaf looks right, and KVM records a Hyper-V bug worth knowing
+
+Compared against the references, no hardware:
+
+- **0x4000000A.EAX[0:15]** carries the supported enlightened-VMCS
+  versions. This VMM reports 1; `KVM_EVMCS_VERSION` is also 1, so the
+  value is right.
+- The other nested-feature bits - `HV_X64_NESTED_DIRECT_FLUSH` (17),
+  `GUEST_MAPPING_FLUSH` (18), `NESTED_MSR_BITMAP` (19),
+  `hyperv-tlfs.h:191-193` - are all things this VMM does not offer and
+  reports as zero, which is the honest answer.
+
+So the leaf content is not obviously the fault, and the search has to
+move to what the guest hypervisor does with it.
+
+**And KVM records something about Hyper-V specifically that will matter
+the moment the structure is reached** - `.references/kvm/nested.c:2122`:
+
+> However, it turns out that Microsoft Hyper-V fails to comply to their
+> own invented interface: When Hyper-V use eVMCS, it just sets first u32
+> field of eVMCS to revision_id specified in MSR_IA32_VMX_BASIC. Instead
+> of used eVMCS version number which is one of the supported versions
+> specified in CPUID.0x4000000A.EAX[0:15].
+
+KVM therefore accepts **either** the eVMCS version **or** the VMCS12
+revision identifier in `revision_id`. This VMM's
+`copy_enlightened_to_vmcs12` does not look at `revision_id` at all, so it
+is not yet wrong - but any validation added later must accept both, and a
+check written from the specification alone would reject what Hyper-V
+actually writes.
+
+That is the kind of detail this whole file exists to record: the
+reference implementation documents a deviation in the thing being
+integrated with, and finding it by experiment would cost boots.
+
+### Session end
+
+The goal is not met: the spinner has not moved. The state, precisely:
+
+- **Four boot-verified optimisations**, worth about 1.9x on handler
+  cycles once measured on a metric that is not mix-dependent.
+- **A complete enlightened VMCS implementation** behind `ZPP_EVMCS`, off
+  by default, desk-tested with fault injection on both copy directions.
+- **A self-proving reader** - `host_page_table[0]` must end `023` - wired
+  into the dump, after four fictional findings taught what its absence
+  costs.
+- **The failure localised** to what the guest hypervisor does between
+  reading the recommendation and registering an assist page, with the
+  structure, both copies and the hookup all cleared by measurement
+  because none of them run.
