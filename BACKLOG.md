@@ -18888,3 +18888,50 @@ stuck. Nothing in this entry should be read as the nested path working.
 
 The known-good nested loader is restored to the ESP; this build was a
 diagnostic and must not be what sits on that disk.
+
+## The round trip is 3.8 tick periods, and that is the closure
+
+The quantity the causal chain is actually about - measured with all four
+optimisations in, on the restored nested build:
+
+```
+HvCallVtlCall  -> HvCallVtlReturn (secure kernel)   2,851 us,  7.0 exits
+HvCallVtlReturn -> HvCallVtlCall  (ordinary kernel) 3,793 us, 19.7 exits
+                                        round trip: 6,644 us, 26.7 exits
+```
+
+Against a guest that programs a **1.74 ms** tick, the round trip is
+**3.8 tick periods**. It has to be under one for the guest to resume what
+it was doing rather than into an already-pending clock.
+
+**The optimisations did land**: exits per round trip fell from 33.3 to
+26.7. Wall time per round trip did not follow, because each exit costs
+**249 us** and that is dominated by what a nested exit costs on this rig
+rather than by what this VMM computes.
+
+### Why no further work here can close it
+
+Fitting 26.7 exits into 1.74 ms requires **65 us an exit**. Of the 249 us
+one costs now, this VMM's handler is about 166 us and the remainder - the
+VM transition through L0, plus the guest hypervisor's own execution - is
+the rest. **Driving this VMM's handler to zero does not reach 65 us**
+unless the non-handler remainder is at the very bottom of its plausible
+range, and nothing this VMM does can move that remainder at all: it is
+the cost of an exit being mediated by KVM instead of taken directly.
+
+That is the arithmetic closure the earlier entries kept approaching from
+one side or another:
+
+- share cannot be improved, because a livelocked guest re-enters as fast
+  as it is served - measured at the very start as "2.7x faster and makes
+  exactly as much progress: none", and again at 1.9x;
+- exit *count* per round trip has come down 20% and the wall time has
+  not;
+- and the per-exit wall cost is not this VMM's to spend.
+
+**On bare metal every term in that 249 us collapses.** The VMCS accesses
+stop trapping at ~2,760 cycles for ~40, and the exit is taken directly
+rather than through L0. The same 26.7 exits at a low single-digit
+microsecond cost put the round trip an order of magnitude inside the
+tick, which is the condition the timer stretch created artificially and
+which relieved the block.
