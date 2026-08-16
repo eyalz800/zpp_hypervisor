@@ -19093,3 +19093,64 @@ first level rather than the second, reading `enlighten_vmentry` and
 with the structure it points at on entry, calling the write-back before
 resuming the guest hypervisor, and the two CPUID leaves - all behind one
 switch, with the ordering cases in the sequence harness first.
+
+## The enlightenment is complete, offered, and still declined
+
+Two boots with `ZPP_EVMCS=ON`, both healthy - 2 module loads, no reset
+loop, guest running normally - and both with every counter at zero:
+
+```
+cpu  vp-assist-writes  evmcs-reads  evmcs-writes
+  0                 0            0             0
+```
+
+**Zero is the important result.** It does not say the handling is wrong;
+it says the guest hypervisor never took the offer, so none of the
+handling ran. A boot that reset would have been a bug in the copies. This
+is a bug in the *advertisement*, which is a much smaller space.
+
+### What the first boot found
+
+The vendor at 0x40000000. A guest hypervisor's probe matches it before
+anything else - Xen's `hyperv_probe`,
+`.references/xen/xen/arch/x86/guest/hyperv/hyperv.c:46`:
+
+```c
+if ( !((ebx == 0x7263694d) &&  /* "Micr" */
+       (ecx == 0x666f736f) &&  /* "osof" */
+       (edx == 0x76482074)) )  /* "t Hv" */
+    return NULL;
+```
+
+With `ZppZppZppZpp` there the probe stops at its first instruction and
+never reads `Hv#1`, the feature mask, or the hints leaf carrying the
+recommendation. Fixed and gated on the enlightenment being offered.
+
+### What the second boot says
+
+Still zero. So the vendor was **necessary and not sufficient**, and what
+remains is whatever else the guest hypervisor checks before it will use
+an enlightened VM entry. Ruled out on the way:
+
+- the interface signature `Hv#1` at 0x40000001 - answered;
+- `HV_X64_MSR_HYPERCALL_AVAILABLE` and `HV_X64_MSR_VP_INDEX_AVAILABLE`,
+  which the same probe requires from the privilege mask - both set;
+- `HV_X64_MSR_APIC_ACCESS_AVAILABLE`, bit 4, checked and **not** it: the
+  reference says it covers the EOI, ICR and TPR MSRs
+  (`hyperv-tlfs.h:62-66`), not the assist page.
+
+### Where to look next
+
+The probe above is Xen's, and Xen is a guest hypervisor consuming the
+enlightenment - the right shape, but not the same implementation as the
+one on the rig. What is needed is what **Hyper-V** checks, and the
+candidates are the leaves this VMM answers as zero between the
+recommendation and the nested-features leaf: 0x40000005 through
+0x40000009, the implementation limits and hardware-feature leaves. A
+hypervisor deciding whether to trust an enlightenment has more reason to
+read those than an operating system does.
+
+The instrument is already in place: `vp-assist-writes` going non-zero is
+the whole test, it costs one boot, and a boot with the enlightenment
+declined is provably harmless - two of them have now run without
+disturbing the guest at all.
