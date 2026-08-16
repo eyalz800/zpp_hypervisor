@@ -19814,3 +19814,50 @@ the vendor on, and read which synthetic MSRs are accessed before the
 2,783 exits run out. That is the next measurement, it is one boot, and
 unlike everything attempted in the middle of this session it rests on a
 reader that has been checked against a known value.
+
+### Where it stops: 187 leaf reads, no synthetic MSR, 2,768 exits
+
+With the vendor on and the reader proven in the same dump:
+
+```
+reader proven: host_page_table[0] = 0x6966b023
+hypervisor-range cpuid leaves asked: 187
+cpu 0  exits 2,768   l2-entries 0
+(no synthetic MSR written)
+```
+
+**The 187 is real**, on a proven reader and with the counter explicitly
+queued - so the earlier withdrawal of it was over-corrected, and the
+figure stands after all. What it means is now unambiguous: the guest
+reads the hypervisor range 187 times, writes **no synthetic MSR at all**,
+and stops.
+
+That places the failure **in what the leaves say**, not in an
+unimplemented MSR being reached. Windows probes, decides something from
+the answers, and stops before touching the interface those answers
+describe. So the fault is in the *content* of the five leaves - the
+privileges claimed at 0x40000003 being the obvious suspect, since that is
+the one a guest acts on directly - rather than in the machinery behind
+them.
+
+**That is a much smaller problem than "implement the Hyper-V interface
+for Windows".** It is five leaves' worth of values against a reference
+that is available: KVM answers the same leaves in
+`.references/kvm/x86.c`, and the difference between what it reports and
+what this VMM reports is readable without a boot.
+
+### The measurement that closes it
+
+Print the five leaves this VMM answers beside KVM's for the same leaf
+numbers, and look for a bit claimed here that is not claimed there. The
+privilege mask is `privilege_hypercall_msrs | privilege_vp_index_msr`,
+bits 5 and 6, and both are backed - but the *recommendations* leaf now
+carries bit 14, and bit 14 recommends an enlightened VMCS to **whoever
+reads it**, including an operating system that will never launch a guest
+hypervisor and has no use for it.
+
+**That is the first thing to check**: whether recommending the
+enlightenment to Windows itself - which the current gating cannot avoid,
+since both are the first-level guest - is what stops it. One boot with
+bit 14 cleared and everything else on answers it, and the verdict is
+`l2-entries` going non-zero.
