@@ -20413,3 +20413,50 @@ ring of exits that already exists and has recorded every one of them.
 that answered by silence.** The exit trace is the one that has never
 lied here, and it should have been the first thing read rather than the
 last thing suggested.
+
+## The exit trace names it: the machine stops in firmware, not in a guest
+
+The instrument that has never lied here, read at last. The final entries
+before the stop:
+
+```
+[103] rdmsr  cs=0x0038 rip=0x7ed50775 detail=0x1b value=0xfee00800
+[104] cpuid  cs=0x0038 rip=0x7ed5fbd7
+[105] cpuid  cs=0x0038 rip=0x7ed5fba8
+[106] cpuid  cs=0x0038 rip=0x7ed5fbd7
+```
+
+**`cs=0x0038` is the loader and firmware**, which this tree's own notes
+identify by that selector, and `0x7ed5xxxx` is the firmware's address
+range. So with the enlightenment recommended the machine stops **during
+UEFI**, before Windows starts and long before any hypervisor exists - in
+a loop of CPUID at `0x7ed5fbd7` interleaved with reads of
+`IA32_APIC_BASE`.
+
+**Every explanation built this session is therefore wrong about who
+stops.** Not Hyper-V declining an offer, not Windows taking an enlightened
+path, not the launch path answering VMfailInvalid. The firmware reads a
+CPUID answer it does not like and never gets to the operating system.
+
+That also explains, at last, why nothing downstream was ever observed: no
+hypervisor-range leaf logged, no assist page, no hypercall, no VMLAUNCH.
+There was no guest hypervisor. There was barely a guest.
+
+### What to do with that
+
+The suspects are the leaves the *firmware* reads, and the trace gives the
+instruction pointer: `0x7ed5fbd7`, the CPUID it loops on. Two readings
+settle it and both are cheap:
+
+- **which leaf that instruction asks for** - the exit trace records the
+  reason but not the leaf, and `cpuid_trace` records leaf and answers
+  together, which is the pairing needed;
+- **whether the loop is the firmware's own retry** or this VMM resuming
+  it wrongly - the repeat counts in the ring (`x3`, `x4`) say the same
+  instruction pointer recurs, which is a loop rather than progress.
+
+**And the general lesson, which is the expensive one from today**: the
+exit trace was available from the first boot of this build and would have
+said "the firmware is looping" immediately. Six instruments were added
+and four answered by silence while the one that already existed, and had
+recorded every exit, went unread until the end.
