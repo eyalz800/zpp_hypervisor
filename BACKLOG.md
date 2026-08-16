@@ -20193,3 +20193,51 @@ survives what counters do not and which `zpplog` already prints: one line
 per hypervisor leaf answered, with the value, and one at the assist-page
 write. That names what it read and what it did last, in order, which no
 counter in this file can.
+
+## Log-verified: the hypervisor range is never read at all
+
+The instrument that survives what counters do not, and the first
+trustworthy answer to the question four boots failed to settle. A line is
+logged on every hypervisor-range CPUID, deduplicated so each distinct
+leaf costs one slot:
+
+```
+87 log lines in the ring
+0 of them "hv cpuid leaf"
+```
+
+**Not one.** The branch is never taken, so the guest never reads
+0x40000000-0x4fffffff under this build - which confirms the 187 was
+fiction, explains every zero downstream of it, and means the guest
+hypervisor never sees the advertisement, the recommendation, or the
+version.
+
+It also means everything reasoned about *why the offer was declined* was
+reasoning about an offer that was never presented. The vendor, bit 14,
+the nested-features leaf, the logical-processor count - all of them were
+answers to a question nobody asked.
+
+### What that leaves, stated carefully
+
+The build still stops at ~2,760 exits, and the difference between it and
+the booting one is now known to be something **other** than the
+hypervisor CPUID leaves, because those are never read. What
+`ZPP_EVMCS=ON` still changes:
+
+- `CPUID.1:ECX[31]`, the hypervisor-present bit, set by
+  `announce_hypervisor`;
+- `HV_X64_MSR_VP_ASSIST_PAGE` accepted rather than faulted;
+- the hypercall page written with `vmcall` rather than a local answer;
+- the `vmcall` exit answering first-level hypercalls instead of #UD.
+
+**The bit-14 experiment argues against the first**: with bit 14 withheld
+and `announce_hypervisor` still on - so `ECX[31]` still set - the guest
+booted with 481,082 second-level entries. So the present bit alone is
+survivable, and what differed was the recommendation... which is in a
+leaf that is never read.
+
+**Those two findings cannot both be right**, and that contradiction is
+the most valuable thing here. One of the two boots is not measuring what
+it appears to. Resolving it is the next task, and the log ring is now the
+instrument to do it with - a line at each of the four changes above, and
+one boot, says which of them the guest actually encounters.

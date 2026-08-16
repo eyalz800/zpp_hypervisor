@@ -540,6 +540,19 @@ void hypervisor::on_vm_exit(std::uint64_t cpuid,
         if ((leaf >= 0x40000000u) && (leaf <= 0x4fffffffu)) {
             this->cpuid_hypervisor_leaves_asked =
                 this->cpuid_hypervisor_leaves_asked + 1;
+
+            // One line per distinct leaf, which the log's own
+            // deduplication makes cheap - an identical line grows a
+            // [times=N] marker rather than taking a slot.
+            //
+            // **This is the instrument the counters could not be.** A
+            // count says how many leaves were read; the ring says
+            // *which*, and in what order, and what the guest hypervisor
+            // did last before it stopped. It also survives a guest reset,
+            // which the counters do not.
+            if constexpr (nested_vmx::evmcs_offered) {
+                log("hv cpuid leaf {}", leaf);
+            }
         }
 
         scope_exit record_cpuid{[&] {
@@ -1450,6 +1463,7 @@ void hypervisor::on_vm_exit(std::uint64_t cpuid,
                         this->hyperv_vp_assist[cpuid] = value;
                         this->hyperv_vp_assist_writes[cpuid] =
                             this->hyperv_vp_assist_writes[cpuid] + 1;
+                        log("hv assist page {}", value);
                     }
                     break;
 
