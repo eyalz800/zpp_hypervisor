@@ -1292,16 +1292,16 @@ def main():
     # happened, not which leaf.
     asked = read('cpuid_hypervisor_leaves_asked', 0)
     count = read('cpuid_trace_count', 0) or 0
-    if asked:
-        print(f"\nhypervisor-range cpuid leaves asked: {asked}")
+    if count:
+        print(f"\ncpuid leaves recorded ({count} entries, "
+              f"{asked} in the hypervisor range)")
         leaves = {}
         for i in range(min(count, 512)):
             word = read('cpuid_trace', i * 2)
             if word is None:
                 continue
             leaf = word & 0xffffffff
-            if 0x40000000 <= leaf <= 0x4fffffff:
-                leaves[leaf] = leaves.get(leaf, 0) + 1
+            leaves[leaf] = leaves.get(leaf, 0) + 1
         for leaf in sorted(leaves):
             print(f"  0x{leaf:08x}  {leaves[leaf]}")
 

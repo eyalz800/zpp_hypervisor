@@ -20460,3 +20460,48 @@ exit trace was available from the first boot of this build and would have
 said "the firmware is looping" immediately. Six instruments were added
 and four answered by silence while the one that already existed, and had
 recorded every exit, went unread until the end.
+
+## The firmware loops on leaf 1 and never reads the hypervisor range
+
+`cpuid_trace` records leaf and answers together, which is the pairing the
+exit trace lacks. With the enlightenment offered:
+
+```
+cpuid leaves recorded (18 entries, 0 in the hypervisor range)
+  0x00000000   6
+  0x00000001  12
+```
+
+**Leaf 1, twelve times, and the hypervisor range not once.** Leaf 1 is
+where `announce_hypervisor` sets `CPUID.1:ECX[31]`, the hypervisor-present
+bit, and the exit trace shows the firmware looping on a single CPUID
+instruction at `0x7ed5fbd7` interleaved with `IA32_APIC_BASE` reads.
+
+**So the entire enlightened-VMCS advertisement is ruled out as the
+cause.** Its content - the vendor, the recommendation, the version, the
+privileges - is never read by anybody in a run that stops. Every
+explanation in this file that turns on what those leaves say is
+explaining something that never happens.
+
+What is left is leaf 1, and what changes there when the enlightenment is
+offered is exactly one bit: the hypervisor-present bit.
+
+**But that bit alone is survivable**, which is measured: the boots with
+bit 14 withheld had `announce_hypervisor` on and therefore `ECX[31]` set,
+and they ran to 481,082 and 552,546 second-level entries. So the bit is
+not sufficient to cause the stop, and yet nothing else the guest reads
+differs.
+
+**That contradiction is the honest end state of this session**, and it is
+sharper than any of the wrong answers that preceded it: two boots that
+differ only in a bit nobody reads land on opposite sides, and the
+instrument that would resolve it - a `cpuid_trace` from a *booting* run,
+to see whether the firmware reads leaf 1 twelve times there too - has
+never been taken.
+
+**That is the first measurement of the next session**, and it needs no
+new code: the same dump, the same build with bit 14 withheld, and the
+leaf histogram compared against the one above. If the booting run shows
+the same twelve reads of leaf 1, the loop is normal and the stop is
+elsewhere entirely. If it shows fewer, the loop is the failure and leaf 1
+is where to look.
