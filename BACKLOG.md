@@ -18991,3 +18991,63 @@ toward the 2 that are actual work, which is an order of magnitude, not a
 few per cent. **That is the first candidate in this entire investigation
 large enough to close a 3.8x gap**, and it is squarely this VMM's to
 implement rather than KVM's to grant.
+
+### Implementing enlightened VMCS: what it needs
+
+Everything below was located rather than recalled, and the citations are
+what the next session should start from.
+
+**The structure.** `struct hv_enlightened_vmcs`,
+`.references/xen/xen/arch/x86/include/asm/guest/hyperv-tlfs.h:583` -
+148 fields, one page, laid out by the TLFS rather than by the
+architecture. It must be transcribed exactly; a field at the wrong offset
+is silent guest corruption, not a fault.
+
+**How it is armed.** `struct hv_vp_assist_page`, same header line 573,
+carries `enlighten_vmentry` (line 578) and `current_nested_vmcs` (line
+580). The guest hypervisor sets the byte and writes the eVMCS
+guest-physical address there **instead of executing VMPTRLD**. That is
+the hook: this VMM already reads the VP assist page - `vtl_assist_read`
+records it - and already knows the address from
+`HV_X64_MSR_VP_ASSIST_PAGE`.
+
+**What replaces the exits.** With it armed, Hyper-V reads and writes the
+structure in memory. `VMREAD` and `VMWRITE` stop being executed, so the
+5.1 `vmread` and the VMWRITEs a round trip disappear outright, and
+`VMPTRLD`'s 4.0 go with them. Only `VMLAUNCH`/`VMRESUME` and `VMCALL`
+still exit.
+
+**What replaces the copying.** `hv_clean_fields` (structure offset near
+the end, bits at
+`hyperv-tlfs.h:769-787`: `IO_BITMAP`, `MSR_BITMAP`, `CONTROL_GRP1/2`,
+`CONTROL_PROC`, `CONTROL_EVENT`, `CONTROL_ENTRY`, `CONTROL_EXCPN`,
+`CRDR`, `CONTROL_XLAT`, `GUEST_BASIC`, `GUEST_GRP1/2`, `HOST_POINTER`,
+`HOST_GRP1`, `ENLIGHTENMENTSCONTROL`, and `_ALL = 0xFFFF`) is the guest
+hypervisor **telling** this VMM which groups changed. KVM consumes it in
+`copy_enlightened_to_vmcs12`, `.references/kvm/nested.c:1654`, with one
+`if (unlikely(!(hv_clean_fields & ...)))` per group.
+
+**The advertisement.** `HV_X64_ENLIGHTENED_VMCS_RECOMMENDED` in the
+hints leaf and a version in the nested-features leaf, which KVM checks at
+`.references/kvm/vmx.c:565-567` against `KVM_EVMCS_VERSION`. The earlier
+`announce_hypervisor` attempt failed precisely because it stopped here -
+"Hv#1 with zero privileges" - and this file's own rule is **answer the
+whole of an interface or fault**. The advertisement without the structure
+handling is worse than neither.
+
+**Order of work**, so the first boot is not the first test:
+1. the structure and the clean-field constants, transcribed and
+   `static_assert`ed against their TLFS offsets;
+2. reading an eVMCS into the existing vmcs12 cache, group by group, under
+   `hv_clean_fields` - `tests/nested_exit` can drive this with no
+   hardware at all;
+3. writing exit information back into it, which is the reflection path;
+4. the VP assist hookup and the `VMPTRLD` replacement, with the sequence
+   harness extended for "armed mid-run" and "disarmed mid-run";
+5. only then the advertisement, which is what makes Hyper-V start using
+   it - and therefore the last thing to turn on, not the first.
+
+**Expected**: exits per trust-level round trip from 26.7 toward the 2
+that are actual work. Against a round trip of 6.64 ms that needs to fit
+inside 1.74 ms, that is the order of magnitude required, and it is the
+only candidate this investigation has found that is.
