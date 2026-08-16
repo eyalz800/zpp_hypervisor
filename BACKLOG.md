@@ -19051,3 +19051,45 @@ handling is worse than neither.
 that are actual work. Against a round trip of 6.64 ms that needs to fit
 inside 1.74 ms, that is the order of magnitude required, and it is the
 only candidate this investigation has found that is.
+
+### Steps 4 and 5 are coupled and cannot be tested separately
+
+Found while wiring the virtual-processor assist hookup. The existing
+`settle_vp_assist_page` and `l2_vp_assist` machinery is for the **second
+level's** page - Windows registering with Hyper-V, which this VMM
+observes from outside. That is not the page enlightened VMCS uses.
+
+The one that matters is **Hyper-V's own**, registered with the layer
+*below* it through `HV_X64_MSR_VP_ASSIST_PAGE`. Hyper-V only writes that
+register to a hypervisor that advertises the Hyper-V interface - and this
+VMM deliberately does not, which is why the register has never been seen
+arriving from the first level.
+
+So the order recorded earlier is wrong in one respect. Steps 4 and 5 -
+the hookup and the advertisement - **land in the same boot**, because
+until the advertisement exists Hyper-V never registers a page, never sets
+`enlighten_vmentry`, and the hookup has nothing to observe. There is no
+intermediate state where the handling can be exercised against a real
+guest hypervisor with the advertisement still off.
+
+What that changes about how to build it:
+
+- **Everything goes in behind one switch, defaulting off**, so the tree
+  carries a complete implementation that is inert until deliberately
+  enabled. Half of it landing is the `announce_hypervisor` failure again.
+- **The desk has to carry more of the weight**, since the first boot
+  tests the whole mechanism at once rather than a layer of it.
+  `tests/nested_exit` can drive `copy_enlightened_to_vmcs12` and
+  `copy_vmcs12_to_enlightened` against a hand-built structure with no
+  hardware, and should, before either is trusted.
+- The advertisement itself is two CPUID leaves - the Hyper-V signature
+  and interface, plus `HV_X64_ENLIGHTENED_VMCS_RECOMMENDED` with a
+  version in the nested-features leaf, which KVM checks at
+  `.references/kvm/vmx.c:565-567`.
+
+**Still to build**: intercepting `HV_X64_MSR_VP_ASSIST_PAGE` from the
+first level rather than the second, reading `enlighten_vmentry` and
+`current_nested_vmcs` from that page, replacing the VMPTRLD-named vmcs12
+with the structure it points at on entry, calling the write-back before
+resuming the guest hypervisor, and the two CPUID leaves - all behind one
+switch, with the ordering cases in the sequence harness first.
