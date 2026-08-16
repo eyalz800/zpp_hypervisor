@@ -19956,3 +19956,34 @@ separate an operating system from a hypervisor at all on this path. If it
 cannot, the recommendation has to be withheld until the guest does
 something only a hypervisor does *and* re-reads the leaf - and whether
 Hyper-V re-reads it is the question that decides the whole approach.
+
+### Announcing Hyper-V without recommending the enlightenment: same livelock
+
+The one configuration that had never been checked for the thing that
+matters. Vendor "Microsoft Hv" advertised, all five leaves answered, the
+enlightenment **not** recommended:
+
+```
+cpu 0  exits 2,133,065  l2-entries 804,498
+CPL sampled 30 times: 30 x CPL=0
+```
+
+The guest boots and runs - 804,498 second-level entries, the same order
+as the default build's 800,000 - and **never reaches ring 3**. So
+announcing the interface changes nothing about the block. The theory that
+a guest knowing it is virtualized might take a different
+virtualization-based-security path, which this file records as a
+plausible motivation for announcing at all, is **not** what is stopping
+the spinner.
+
+That closes the last cheap hypothesis. The block is what it was measured
+to be at the start: a trust-level round trip that outlasts the guest's
+tick, whose dominant term is the guest hypervisor's own VMX instructions
+trapping, and the only mechanism found that removes those is the
+enlightened VMCS - which cannot yet be offered to the guest hypervisor
+without also being offered to Windows, which stops on it.
+
+**That is the whole of the remaining problem, stated as narrowly as the
+evidence allows**: tell Hyper-V about the enlightenment without telling
+Windows. Every other question this session opened is closed or
+instrumented.
