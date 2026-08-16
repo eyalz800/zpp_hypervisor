@@ -18423,3 +18423,68 @@ harness now exists and this change must go through it first - the same
 sequences, plus one for "the processor wrote the field behind us". A
 1.10x is not worth a reset loop, and the specification above is worth
 more than a rushed attempt.
+
+## The write-side elision works, and the exit does not get faster
+
+Gate first, as the rule now requires: `hot_state_writes_skipped`
+**2,799,887** against 886,313 done - 3.65 of the five hot fields elided
+per entry. The change ran.
+
+| | before | after |
+|---|---|---|
+| `build: after vmptrld` | 79,687 | **70,427** |
+| `build_vmcs02` | 110,082 | **101,045** |
+| `reflect_l2_exit` | 189,492 | 190,168 |
+| inside this VMM | 337,638 | 341,689 |
+| wall clock per exit | 392,079 | **396,058** |
+| CPL 3 entries | 0 | **0** |
+
+The phase fell 11.6%, close to what 3.65 skipped writes should buy. **The
+exit did not fall at all.**
+
+### Three in a row, and that is the finding
+
+Wall clock per exit across three consecutive builds, each removing real,
+measured work:
+
+```
+word-loop memcpy      384,759
++ phase decomposition 392,079
++ write-side elision  396,058
+```
+
+It goes **up**. The measured spread between boots of nominally improving
+builds is about 3%, which is larger than what any of these changes was
+worth, so the honest statement is that **per-exit wall clock has been
+flat at 385-396k cycles while roughly 45,000 cycles of phase work was
+removed from it.**
+
+Two readings, and they are not distinguished yet:
+
+- **Boot-to-boot variance dominates.** Each figure is one boot in one
+  regime; nothing here has ever been repeated. Every comparison in this
+  file rests on single boots, which was tolerable while changes were
+  worth 10-70% of a phase and is not now.
+- **The exit total is not the sum of its phases.** This file already
+  recorded that once - "a phase falling is not the handler falling" -
+  when merge gave up 47,522 cycles and the handler gave up 22,719. It has
+  now happened three times, and the residue is not shrinking.
+
+**What this means for the goal.** The cumulative figure stays at about
+**1.38x**, unchanged by the last two changes, against a requirement
+bracketed at (1, 2]. Continuing to remove phase work is not moving the
+quantity the guest actually experiences, and no further phase-level
+change should be made until it is known which of the two readings above
+is true.
+
+**The measurement that settles it** is a repeat: build the same binary
+twice and boot each twice, to get a variance figure for wall clock per
+exit. Every conclusion in this file about a change worth less than ~5%
+depends on it, and none of them has it. That is one boot's worth of
+discipline that would have saved several here.
+
+The change itself stays: it is correct, its ordering cases are in
+`tests/nested_exit`, fault injection shows the value comparison is what
+carries the safety argument, and it removes 9,260 cycles a call from the
+phase it targets. It is simply not worth what the arithmetic said, and
+neither were the two before it.
