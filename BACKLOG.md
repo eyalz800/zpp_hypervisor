@@ -18716,3 +18716,52 @@ collapses, and the 5.80% the guest gets becomes most of the machine.
 bare metal was argued from the 54% nesting-tax figure, which said the
 exits exist; the 5.8% says what they cost the guest. The user declined
 bare metal when the evidence was the former. It is now the latter.
+
+### Pre-populating a rebuilt shadow root: the design, and why it is sound
+
+The 20% is 16,860 roots at 26.7 refaults each, and each refault is an
+exit costing this VMM a full handler pass. The refaults exist because
+`release_shadow_slot` empties the root and the fill is lazy.
+
+**Remember, per root, the guest-physical addresses that were installed in
+it; on rebuild, walk the guest hypervisor's *current* tables for each and
+install them.** 26.7 table walks - a few memory reads apiece - instead of
+26.7 VM exits.
+
+**Why this is not `refresh_shadow_on_invept`, which deadlocks.** That
+refreshed *at the INVEPT*, and Hyper-V invalidates **around** a VTL
+protection change - so the refresh read tables that were about to change,
+left the entry present, and no fault ever occurred to pick the change up.
+This populates at the **rebuild**, which happens inside `build_vmcs02` on
+the entry *after* the INVEPT. By then the protection change has been
+made, whichever order Hyper-V did it in, so the walk reads current
+tables. The distinction is *when the tables are read*, and it is the
+whole argument.
+
+**Why it is not the eager build that was removed either.** That walked
+the whole address space and cost twenty-two thousand region walks to
+answer one INVEPT. This walks only the addresses that root had actually
+mapped - a bounded set, measured at 26.7 - and installs through
+`install_shadow_leaf`, the same path a fault would take, so permissions
+are composed identically.
+
+What it needs:
+
+- a small per-root set of guest-physical addresses, capped and counted,
+  surviving `release_shadow_slot` since that is what discards the root;
+- the walk `on_l2_ept_fault` already performs, called for each remembered
+  address at rebuild;
+- a counter for pre-populated leaves against faulted ones, so the effect
+  is measured rather than assumed - and a cap so a root that mapped
+  thousands of pages degrades to lazy fill rather than stalling an entry.
+
+Expected: extended-page-table exits from 467,335 toward the low tens of
+thousands, this VMM's share from 86% to about 69%, and the guest's from
+5.80% to roughly 12%.
+
+**Not built here.** It is the most delicate file in the tree - the shadow
+fill is what the eager refresh deadlocked in - and a wrong permission
+composed into a shadow leaf is silent corruption of the guest rather than
+a visible fault. It belongs at the start of a session with the
+`tests/nested_exit` sequence harness extended to cover rebuild-then-
+populate, not at the end of one.
