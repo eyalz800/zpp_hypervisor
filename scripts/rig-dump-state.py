@@ -1134,6 +1134,7 @@ def main():
                "shadow_ept_builds", "shadow_ept_cache_hits",
                "shadow_ept_rebuild_new_root", "shadow_ept_rebuild_stale",
                "shadow_ept_replayed", "hyperv_vp_assist_writes", "hypercalls_seen",
+               "host_exception", "host_exception_cr2",
                "cpuid_trace", "cpuid_trace_count", "host_page_table",
                "cpuid_hypervisor_leaves_asked",
                "hypercall_codes", "hypercall_code_counts",
@@ -1188,6 +1189,7 @@ def main():
                "pending_event", "shadow_ept_builds", "shadow_ept_cache_hits",
                "shadow_ept_rebuild_new_root", "shadow_ept_rebuild_stale",
                "shadow_ept_replayed", "hyperv_vp_assist_writes", "hypercalls_seen",
+               "host_exception", "host_exception_cr2",
                "cpuid_trace", "cpuid_trace_count", "host_page_table",
                "cpuid_hypervisor_leaves_asked",
                "evmcs_reads", "evmcs_writes", "evmcs_recommended",
@@ -1226,6 +1228,12 @@ def main():
     # registered and not queued, so it read as absent, the loop below saw
     # zero entries and printed nothing - and silence from an instrument
     # is exactly what this file keeps warning is not a measurement.
+    # Seven words - vector, error code, rip, cs, rflags, rsp, ss - queued
+    # at its own length. The rig notes say to read this first for a
+    # failure before the guest gets going, and it was never read.
+    monitor.queue(instance + off["host_exception"], 7)
+    monitor.queue(instance + off["host_exception_cr2"], 1)
+
     monitor.queue(instance + off["cpuid_trace_count"], 1)
     monitor.queue(instance + off["cpuid_hypervisor_leaves_asked"], 1)
     monitor.queue(instance + off["host_page_table"], 1)
@@ -1278,6 +1286,13 @@ def main():
     # 023; if that does not read back, no other number in this dump is
     # evidence. Four readings were believed this session that were not
     # measurements, and this is the check that would have caught them.
+    vec = read('host_exception', 0)
+    if vec is not None:
+        print(f"\nhost exception: vector {vec} error 0x"
+              f"{read('host_exception', 1):x} rip 0x{read('host_exception', 2):x} "
+              f"cs 0x{read('host_exception', 3):x} cr2 0x"
+              f"{read('host_exception_cr2', 0):x}")
+
     proof = read('host_page_table', 0)
     if proof is None:
         print("\nREADER UNPROVEN: host_page_table did not read back")

@@ -20612,3 +20612,61 @@ Two readings settle it, both cheap and neither needing a guest:
   failure this early. **It was never read this session.**
 
 The second is one dump away and would have named this on the first boot.
+
+## It is not a hang: the guest runs and stops exiting
+
+Two readings that should have been the first two taken, both from the
+stopping build:
+
+```
+host exception: vector 0 error 0x0 rip 0x0 cs 0x0 cr2 0x0
+reader proven:  host_page_table[0] = 0x6966b023
+```
+
+**No host exception.** This VMM never faulted - it is not crashing, and
+every theory about a fault in the module's protections or its layout is
+answered: nothing took one.
+
+And sampling the guest's instruction pointer through the monitor:
+
+```
+RIP=0x7e68c069 CS=0038   RIP=0x0208ab16 CS=0010
+RIP=0x7e9ee92c CS=0038   RIP=0x7ed8411a CS=0038
+```
+
+**Different addresses every sample.** The guest is *executing* - firmware
+at 0x7exxxxxx and something else at CS=0x10 - not stopped, not halted,
+not looping on one instruction.
+
+### So the failure is the opposite of what it was called all session
+
+Not a hang. The guest runs and **stops taking VM exits** - 390 in four
+minutes, against millions in a working boot - and never reaches Windows.
+That is a guest making progress through code that does not exit, or being
+starved of the exits it needs to make progress.
+
+Every characterisation before this - "stops at 2,780 exits", "stops in
+firmware", "the firmware loops on leaf 1" - described the *exit count*
+and read it as the guest stopping. The exit count fell; the guest did
+not.
+
+**And the low exit count is what makes every counter here unreadable.**
+`cpuid_trace` showing 18 entries, `hypercalls_seen` zero, no
+hypervisor-range leaves: all of that is the guest not *reaching* the code
+that would exit, not the guest declining anything.
+
+### What to do with that
+
+The question is no longer "why does it stop" but **"what is it doing
+between exits, and what is it waiting for"**. The instruments for that
+are different from everything used this session:
+
+- **The monitor, repeatedly**: `info registers` sampled over a minute
+  gives the distribution of where it executes. Four samples already show
+  two distinct segments; a hundred would show whether it is in a loop and
+  where.
+- **`xp` on the guest's own memory** at those addresses, to see what code
+  it is running - which needs no hypervisor instrumentation at all.
+
+Both read a *running* guest without perturbing it, which is what the rig
+notes prescribe and what nothing in this session actually did.
