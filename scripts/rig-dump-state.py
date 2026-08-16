@@ -1237,6 +1237,17 @@ def main():
     monitor.queue(instance + off["host_exception"], 7)
     monitor.queue(instance + off["host_exception_cr2"], 1)
 
+    # Queued at their own length, which is the difference between a
+    # reading and a plausible lie. A member resolved for its offset and
+    # not queued reads as absent; one queued short reads as zero past the
+    # end. Both look like data. cpl_seen is [max_cpus][4] and the two
+    # permission histograms are [max_cpus][8], so each needs the whole
+    # array, not one word.
+    monitor.queue(instance + off["cpl_seen"], scalar_cpus * 4)
+    monitor.queue(instance + off["guest_leaf_permissions"], scalar_cpus * 8)
+    monitor.queue(instance + off["shadow_leaf_permissions"],
+                  scalar_cpus * 8)
+
     monitor.queue(instance + off["cpuid_trace_count"], 1)
     monitor.queue(instance + off["cpuid_hypervisor_leaves_asked"], 1)
     monitor.queue(instance + off["host_page_table"], 1)

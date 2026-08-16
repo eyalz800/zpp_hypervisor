@@ -22155,3 +22155,73 @@ tree whose cache disagreed with its object file.
 Item 3 is a few lines and would be worth doing whatever happens to the
 rest, because it converts "we answer for the level above" into "we
 answer only where the level above has said nothing".
+
+## `HvCallModifyVtlProtectionMask` is not the block: the protections arrive intact
+
+The hypothesis was the strongest non-timing one left: Windows asks the
+secure kernel to change a page's protection, Hyper-V edits its own
+extended page tables and issues `invept`, our shadow discards the root
+and refaults - and if the new protection does not survive that round
+trip, the page reads back unchanged and the caller asks for ever.
+
+**It survives.** One boot, one reading, no page to identify:
+
+```
+ept leaf permissions, as bits rwx   eptp12 alone      installed here
+  001  read only                          12,400            12,400
+  011  read write                        372,205           372,205
+  101  read execute                       47,249            47,249
+  111  read write execute                  15,347            15,347
+```
+
+Two facts, and they close the question from both ends:
+
+- **The guest hypervisor's tables are not uniformly permissive.**
+  Read-write-execute is 3.4% of leaves; read-write without execute is
+  the majority. So `HvCallModifyVtlProtectionMask` **is** expressed
+  through the extended page tables this VMM shadows - the first branch
+  of the old dichotomy is refuted.
+- **The composition preserves them exactly.** Every bucket is identical
+  on both sides. Nothing is dropped, nothing is granted that was
+  removed - the second branch is refuted too.
+
+So the protection change does take effect, and "a protection change
+requested for ever because it never lands" is not what is happening.
+
+### The dichotomy in the code was false, and that is the transferable part
+
+`install_shadow_leaf` carried this reasoning for several sessions:
+`reflected_permission` is 0 of 448,441 - no access by either trust level
+ever refused - and *therefore* either the protections are not expressed
+or this VMM is granting what was removed.
+
+**Both alternatives assumed that zero refusals is anomalous. It is
+not.** The third possibility, omitted, is the ordinary one: the
+protections are expressed, they are installed correctly, and **the guest
+does not violate them**. A guest respecting the protections it asked for
+produces exactly zero violations. The observation that started the whole
+line was never evidence of anything.
+
+That is worth more than the specific answer. A dichotomy written into a
+comment reads as exhaustive to everyone who comes after, and this one
+sent three sessions looking for a fault in the one mechanism that was
+working. **When a comment says "either X or Y", the useful question is
+what it is not offering** - and here it was not offering "nothing is
+wrong".
+
+The comment has been corrected in place with the measurement, so the
+next reader inherits the answer rather than the dichotomy.
+
+### And the new census, on its first run
+
+```
+cpu  cpl0        cpl1     cpl2     cpl3   (first level, every exit)
+  0      194,885        0        0        0
+```
+
+`cpl_seen` counts the first level's privilege on every exit this VMM
+takes, so this is a census and not a survey. Ring 3 is absent, which
+agrees with `l2_cpl_seen` and is the expected reading for the nested
+livelock - the value of it is that the *same* instrument now works with
+nested VMX off, where only sampling was available before and sampling
+could not tell a booted idle machine from a livelocked one.

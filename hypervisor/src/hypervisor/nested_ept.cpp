@@ -397,16 +397,33 @@ hypervisor::install_shadow_leaf(std::size_t cpu,
     // What permissions the composition actually granted, as a
     // histogram of the three bits.
     //
-    // `reflected_permission` is 0 of 448,441 - no access by either
-    // trust level has ever been refused by anything this VMM shadows -
-    // and that has two possible causes which want opposite work. If the
-    // guest hypervisor's own tables are uniformly read-write-execute,
-    // then `HvCallModifyVtlProtectionMask` is not expressed through the
-    // extended page tables at all and there is nothing here to enforce.
-    // If they are not, and every leaf installed here is still
-    // read-write-execute, then this composition is granting what the
-    // level above removed - which is the one remaining mechanism by
-    // which a secure call could wait for a fault that never arrives.
+    // **Measured, and the dichotomy this comment used to pose was
+    // false.** It said `reflected_permission` being 0 of 448,441 had two
+    // possible causes wanting opposite work - either the guest
+    // hypervisor's tables are uniformly read-write-execute, so
+    // `HvCallModifyVtlProtectionMask` is not expressed through the
+    // extended page tables, or they are not and this composition grants
+    // what the level above removed. Both halves are wrong:
+    //
+    //     bits rwx    eptp12 alone      installed here
+    //     001               12,400              12,400
+    //     011              372,205             372,205
+    //     101               47,249              47,249
+    //     111               15,347              15,347
+    //
+    // The guest hypervisor's tables are **not** uniformly permissive -
+    // read-write-execute is 3.4% of leaves and read-write without
+    // execute is the majority - so the protection *is* expressed here.
+    // And the composition preserves it exactly: every bucket is
+    // identical on both sides, so nothing is dropped and nothing is
+    // granted that was removed.
+    //
+    // Which leaves the third possibility the dichotomy omitted, and it
+    // is the ordinary one: **the protections are expressed, they are
+    // installed correctly, and the guest does not violate them.** No
+    // access being refused is what a guest respecting its own
+    // protections looks like, not evidence of a fault that never
+    // arrives.
     if (cpu < max_cpus) {
         this->shadow_leaf_permissions[cpu][composition.permissions.bits() &
                                            7] += 1;
