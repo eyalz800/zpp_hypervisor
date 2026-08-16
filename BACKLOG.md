@@ -19396,3 +19396,34 @@ untrustworthy numbers.
    copies, the advertisement and the hookup are implemented and desk
    tested, and `vp-assist-writes` staying at zero is a reading from the
    *same* suspect path and is equally unproven.
+
+#### The offset resolver is not the fault
+
+Checked directly against the ELF, no hardware:
+
+```
+hypercalls_seen:  0x364da00
+hypercall_codes:  0x364d900
+evmcs_reads:      0x364dc28
+handler_cycles:   0x14a6058
+```
+
+All four resolve, and `gdb_offsets` exits rather than guessing when one
+does not - so the addresses being read are the right ones. **That
+eliminates the most likely explanation and narrows the fault to the step
+between the offset and the value**: the physical read itself, or how the
+reader keys the fetched words back to a member.
+
+Worth noting the scale, which is the next thing to check: the singleton
+is large enough that `hypercalls_seen` sits about **57 MB** into it,
+against `handler_cycles` at 21 MB. The counters that read correctly all
+live low; the ones that read as fixed nonsense live high. A read that
+silently fails or wraps past some window would produce exactly this - the
+same bytes every time, from a different binary, from fresh guest memory.
+
+So the question to settle first is whether the monitor read reaches that
+far at all, and it is answerable without a guest: read a member at a
+similar offset whose value is known to be zero at rest, and one low
+member, in the same dump. If the high one returns non-zero nonsense while
+the low one is right, the reader's reach is the bug and every high-offset
+counter added this session has been fiction.
