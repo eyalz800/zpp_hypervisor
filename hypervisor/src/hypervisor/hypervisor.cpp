@@ -4995,6 +4995,27 @@ void hypervisor::record_exit(arch::x86_64::vmx::exit_reason reason,
     recorded.rip = vmcs.guest_rip();
     recorded.repeated = 1;
 
+    // The privilege level of the *first* level guest, on every exit it
+    // takes. Free: the selector was read one line above for the ring.
+    //
+    // This exists because sampling cannot answer the question it kept
+    // being asked. `l2_cpl_seen` is a census over every second-level
+    // entry and settles the nested case beyond argument; with nested VMX
+    // off there is no second level and no such counter, and the fallback
+    // was hundreds of `info registers` samples - which reported CPL 0
+    // every time and was read as "ring 3 was never reached". A booted,
+    // idle Windows is at CPL 0 in its idle loop essentially all of the
+    // time, so that reading was equally consistent with a machine at the
+    // desktop and one livelocked in kernel code.
+    //
+    // **Read `cpl_seen[3]` as a proof of existence, not as a
+    // distribution.** One exit taken at ring 3 proves the guest reached
+    // user mode; a zero is weaker, because the exits this VMM takes are
+    // biased towards kernel work and there are few of them when nested
+    // VMX is off. That asymmetry is the point - the question is whether
+    // user mode is reached at all.
+    this->cpl_seen[cpu][recorded.cs_selector & 3] += 1;
+
     // Whose instruction pointer that is. `running_l2` is cleared by
     // `reflect_l2_exit` on its way out, so a processor that was running a
     // second-level guest and is not now is one whose exit was reflected -

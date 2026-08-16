@@ -1125,7 +1125,7 @@ def main():
         base = m.group(1)
     base = int(base, 16)
 
-    members = ["exit_trace", "exit_trace_count", "l2_exit_trace",
+    members = ["cpl_seen", "exit_trace", "exit_trace_count", "l2_exit_trace",
                "l2_exit_trace_count", "l2_working_trace",
                "l2_working_trace_count", "l2_entries", "l2_activity_state",
                "running_l2", "events_requeued", "events_deferred",
@@ -1265,6 +1265,17 @@ def main():
               f"{read('events_deferred', cpu):-8d}  "
               f"0x{read('pending_event', cpu):-6x}  "
               f"{ACTIVITY.get(read('l2_activity_state', cpu), '?')}")
+
+    # A census over every exit, not a sample. One entry at ring 3 proves
+    # the guest reached user mode; hundreds of `info registers` samples
+    # reading CPL 0 prove only that nothing user-mode was scheduled at
+    # those instants, which on an idle machine is unremarkable.
+    print("\ncpu  cpl0        cpl1     cpl2     cpl3 (first level, every exit)")
+    for cpu in range(args.cpus):
+        print(f"{cpu:3d}  {read('cpl_seen', cpu * 4):-10d}  "
+              f"{read('cpl_seen', cpu * 4 + 1):-7d}  "
+              f"{read('cpl_seen', cpu * 4 + 2):-7d}  "
+              f"{read('cpl_seen', cpu * 4 + 3):-7d}")
 
     print("\ncpu  shadow-builds  cache-hits  evictions  resets  leaves-filled")
     for cpu in range(args.cpus):

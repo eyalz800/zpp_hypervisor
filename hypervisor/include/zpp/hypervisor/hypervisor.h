@@ -8132,6 +8132,28 @@ private:
      * the guest reaches user mode.
      */
     std::uint64_t l2_cpl_seen[max_cpus][4]{};
+
+    /**
+     * The same census for the **first** level guest, indexed by
+     * privilege level, incremented on every exit this VMM takes.
+     *
+     * `l2_cpl_seen` only exists when nested VMX is on, and the question
+     * it answers - does the guest reach user mode - is asked in both
+     * configurations. With nested off the fallback was hundreds of
+     * `info registers` samples, all of which read CPL 0, and that was
+     * reported as "ring 3 was never reached". It establishes no such
+     * thing: a booted, idle Windows is at CPL 0 in its idle loop
+     * essentially all of the time, so the reading is equally consistent
+     * with a machine at the desktop and one livelocked in kernel code.
+     * A census over every exit cannot make that mistake.
+     *
+     * **A proof of existence, not a distribution.** One exit at ring 3
+     * proves user mode was reached. A zero is weaker: the exits this VMM
+     * takes are biased towards kernel work, and with nested VMX off the
+     * guest takes very few of them. The asymmetry is deliberate, because
+     * the question is whether user mode happens at all.
+     */
+    std::uint64_t cpl_seen[max_cpus][4]{};
     std::uint64_t l2_vtpr_class_seen[max_cpus][16]{};
 
     /**

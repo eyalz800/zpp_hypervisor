@@ -22016,3 +22016,142 @@ boot.** Both things are true and neither should be dropped:
 It is therefore left at its documented default of `OFF`, and the honest
 statement is that **this project has never had a build in which that page
 was both compiled in and demonstrated safe.**
+
+## The reference TSC page: whose memory it is, and why it is not safe yet
+
+Settled by reading, as it should have been before it was ever switched
+on. Three questions, and the third one is the answer.
+
+### Whose page is it
+
+The chain, each link from the code:
+
+- **Windows - the guest hypervisor's guest - writes
+  `HV_X64_MSR_REFERENCE_TSC`** naming a page. That WRMSR is captured in
+  `nested_entry.cpp` into `l2_reference_tsc_written[cpu]`, on the
+  reflection path, which is the path for exits **belonging to the level
+  above**.
+- The value is therefore a **second-level guest-physical address**, which
+  `publish_reference_tsc_page` says in its own comment and acts on:
+  `l2_physical_to_l1` walks **`eptp12` - the guest hypervisor's own
+  extended page tables** - to turn it into a frame this VMM can write.
+- The contract for filling that page belongs to **Hyper-V**, not to this
+  VMM. Windows enabled the page with *its* hypervisor; this VMM only sees
+  the request because a synthetic MSR is outside both bitmap ranges and
+  exits unconditionally.
+
+So the write goes **into the guest of the level above, through that
+level's own tables, to honour a contract that level declined to
+honour.** That is exactly what the option text warns about, and it is
+worse than "writes into guest memory" alone: the page is reached through
+a mapping owned by a party that is not asked and cannot object.
+
+The same file already states the principle for the neighbouring case -
+`nested_entry.cpp` on the VMX capability MSRs: *"the whole range is its
+business for its own guest and none of it is this VMM's: no MSR exit
+from the second level is answered here."* Publishing the page is that
+rule broken deliberately.
+
+### What can go wrong, in order of severity
+
+**1. The frame can move between resolution and write. This is a memory
+safety hazard, not a contract one.** `l2_physical_to_l1` walks `eptp12`
+and returns a frame; `write_guest_physical` then takes the mapping
+window lock and writes it. **Nothing pins the mapping in between and
+nothing re-validates it.** The guest hypervisor owns those tables and may
+remap the page at any moment - it is a hypervisor, remapping guest
+frames is its job - and the write then lands in whatever now occupies
+that frame, which may be another page of its guest or its own state.
+The window is small; it is not zero, and there is no mechanism here that
+makes it zero.
+
+**2. A sequence of 1 is an answer the level above chose not to give.**
+The interface defines sequence zero as *"invalid, use the counter MSR"*.
+Hyper-V leaving it zero may be a deliberate statement - it cannot offer
+a stable time base, or has not decided one yet. Writing 1 tells the
+guest to compute time from RDTSC when the party responsible for its
+clock declined to. The guest then has a clock the level above did not
+sanction and does not know about.
+
+**3. Two writers, one protocol built for one.** The sequence dance -
+read sequence, read data, read sequence again - protects a reader from
+**one** writer mid-update. If Hyper-V writes the page while this VMM is
+writing it, a reader can take the sequence from one writer and the scale
+and offset from the other, and the protocol will report the read as
+clean. Nothing here detects that Hyper-V ever writes it.
+
+**4. The fit is per processor and the page is not obviously so.**
+`reference_scale`, `reference_offset` and `reference_published` are all
+`[max_cpus]`, fitted from that processor's own samples. The page is per
+virtual processor by the interface, so normally each processor writes a
+different page - but nothing checks it, and two processors resolving the
+same frame would write two slightly different fits over each other.
+
+### Is there a version with no write at all
+
+**No, and the reason is architectural rather than a matter of effort.**
+The obvious alternative - stop the read exiting, rather than stop the
+guest reading - cannot be built: `HV_X64_MSR_TIME_REF_COUNT` is
+`0x40000020`, and `CLAUDE.md` records the rule that decides it. An MSR
+access outside `0`-`0x1fff` and `0xc0000000`-`0xc0001fff` **exits
+unconditionally; no bitmap can stop it.** Every synthetic MSR is outside
+those ranges. So the MSR bitmap and `l0_wants_l2_exit` have no say here
+at all, and there is no configuration of them that makes this read cheap.
+
+That leaves exactly three ways to remove 1,357,878 exits, and it is
+worth writing them down because two of them are not fixes:
+
+- **make the guest stop asking** - which is the page, with the ownership
+  problem above;
+- **make each exit cheaper** - reflection cost, which is the general
+  problem this whole file is about and is not specific to this MSR;
+- **answer it here instead of reflecting it** - which is the same
+  boundary violation as the page in a different place, and worse,
+  because it would answer for the level above continuously rather than
+  once.
+
+### Can it prove it owns the page
+
+The machinery exists and **has already been measured as dangerous on the
+neighbouring page.** Write-tracking is the right shape - arm a watch,
+stand down if the level above ever writes it - and `watch_guest_page_writes`
+is what would do it. But this file records what happened when that was
+armed on the VP assist page, which is the same class of structure owned
+by the same party: **the machine stopped at 90,226 exits**, counters
+frozen across three reads minutes apart, no unhandled exit, no
+complaint. `ZPP_WATCH_VP_ASSIST` is off by default with that recorded
+on it.
+
+So the instrument that would establish ownership is the one that wedged
+the boot the last time it was pointed at a page both levels touch.
+
+### Where that leaves the switch
+
+**Its benefit is measured and its safety is not established.** Removing
+1,357,878 `rdmsr` exits is a fact; so is the coordinator's census
+showing `0xf0` at 39.3% without the page against 0.2% with it, which is
+the same pathology seen from the other end. None of that makes the write
+sound.
+
+It stays **off**, which is its documented default and where it was for
+every measurement in this project's history until this session rebuilt a
+tree whose cache disagreed with its object file.
+
+**What would make it defensible**, in the order the work would go:
+
+1. **Re-validate the mapping at the point of writing**, not before it -
+   or better, do the resolution and the write under one hold with the
+   walk repeated, so hazard 1 becomes a detectable failure rather than a
+   silent one.
+2. **Refuse to publish if the page is not exclusively reachable** - if
+   the frame resolves through `eptp12` to something this VMM can also
+   reach by another path, that is the case where two owners exist.
+3. **Do not overwrite a non-zero sequence.** If the level above has
+   published anything at all, it is answering and this VMM must not.
+   Cheap, and it removes hazard 2 entirely for the case that matters.
+4. Only then consider watch-based ownership, with the boot-wedging
+   result above treated as the expected outcome rather than a surprise.
+
+Item 3 is a few lines and would be worth doing whatever happens to the
+rest, because it converts "we answer for the level above" into "we
+answer only where the level above has said nothing".
