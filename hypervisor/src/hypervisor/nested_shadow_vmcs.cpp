@@ -142,8 +142,8 @@ constexpr field shadow_read_write_fields[] = {
  * exit - the inverse of what `permit_field` leaves behind, since a clear
  * bit is the permission.
  */
-constexpr bool field_shadowed(const std::uint8_t * bitmap,
-                              std::uint64_t encoding)
+[[maybe_unused]] constexpr bool field_shadowed(
+    const std::uint8_t * bitmap, std::uint64_t encoding)
 {
     if (encoding >= 0x8000) {
         return false;

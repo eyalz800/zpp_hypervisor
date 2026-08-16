@@ -18846,3 +18846,45 @@ rather than direct.
 The recall stays. It removes 13% of exits, it is correct, and it costs a
 bounded 64 addresses a root - it simply is not what stands between this
 guest and its spinner.
+
+## Ring 3, with nested VMX switched off - the block is isolated
+
+`check-bootable.sh` refuses a build without `ZPP_NESTED_VMX` and says why:
+"VMX is hidden from the guest, so Hyper-V will find none and stand down.
+Windows boots and the screen looks right - which is why this is refused
+rather than warned about." It also sanctions the deliberate case: "asking
+'is this failure nested at all' is a fair question, and one boot answers
+it." This is that boot, run through `ZPP_ALLOW_NO_NESTED=1`.
+
+| | nested (VBS live) | nested VMX off |
+|---|---|---|
+| guest share of wall clock | **5.80%** | **55.74%** |
+| guest instruction pointers | 2, byte-identical captures | varied kernel addresses |
+| CPL 3 | **0**, over millions of entries | **reached**, 1/24 then 1/30 then 2/30 |
+
+Windows executes kernel code at `fffff80075e4b38c`, `fffff80075e80820`,
+`fffff80075ebc974` - different every sample, which is forward progress
+rather than a loop - and reaches user mode, with the user-mode share
+growing as the boot proceeds.
+
+### What this settles
+
+- **This VMM is sound.** The loader, the extended page tables, the host
+  page tables, the exception paths, the local APIC handling, the CRT and
+  everything else carry Windows from firmware to ring 3. None of it was
+  ever the problem, and thirty-odd boots of nested debugging never
+  established that.
+- **The block is entirely the cost of nested VMX.** One build flag moves
+  the guest's share by a factor of nearly ten and takes it from a
+  two-address livelock to a booting operating system. That is the same
+  conclusion the share measurement reached, demonstrated by removing the
+  cost outright instead of chipping at it.
+
+### What it does not settle
+
+**The goal.** The spinner moves here because Hyper-V stood down. The
+scenario that is stuck is Windows *with* VBS above us, and it is still
+stuck. Nothing in this entry should be read as the nested path working.
+
+The known-good nested loader is restored to the ESP; this build was a
+diagnostic and must not be what sits on that disk.
