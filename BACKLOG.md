@@ -22967,6 +22967,30 @@ consistent, not blind - but it could not have been known to be
 consistent without this bit, which is the whole argument for reading the
 thing itself rather than a proxy for it.
 
+### A near miss worth recording: a delayed reading reads the host
+
+A backgrounded `/proc/interrupts` check armed at the control boot landed
+**after** that guest had been killed, by which point the launcher had
+rebound the disk to the host driver. It came back full of
+
+```
+124: IR-PCI-MSIX-0000:02:00.0  0-edge  nvme0q0
+127: ... delta 153 ...   130: ... delta 40 ...
+```
+
+- MSI-X lines present, with live interrupt deltas. **Taken as the
+control reading it says the exact opposite of the truth**, because it is
+not a reading of the guest at all.
+
+What prevented it being used is that every reading actually relied on
+printed the device's driver binding in the *same command*
+(`driver: vfio-pci`), so a reading of the host cannot be mistaken for a
+reading of the guest. That is the cheap defence and it should be
+standing practice: **on a rig where the device changes hands, print who
+owns the device beside every measurement of it.** A timestamp is not
+enough - the question is not when the reading was taken but what owned
+the hardware when it was.
+
 ### The one gap left, and it is the plain-KVM control
 
 The positive control is a **host Linux driver**, not a Windows guest.
