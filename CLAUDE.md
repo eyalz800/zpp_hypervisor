@@ -655,8 +655,13 @@ ls /sys/kernel/debug/kvm/<pid>-<fd>/          # ~60 per-VM counters
 Two of them answer, from the host, without touching the guest, what
 otherwise needs a full state dump:
 
-- **`nested_run`** - second-level entries, the same quantity the resident
-  `l2-entries` counts.
+- **`nested_run`** - KVM's entries into *its* guest, which is this VMM
+  plus everything under it. **Not the same quantity as the resident
+  `l2-entries`**, and this section said it was. Measured over one
+  352-second window on a settled guest: `nested_run/s` 5,334 against
+  this VMM's own `exits/s` 5,319 and its `l2-entries/s` 2,653. It tracks
+  **our exit count** - every exit we take is one re-entry by KVM - and
+  is about twice the second-level entry count.
 - **`exits`** - every VM exit L0 took. Divided by `nested_run` it gives
   VMCS accesses per second-level entry, which is the nesting tax in one
   number.

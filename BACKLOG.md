@@ -22570,3 +22570,110 @@ from anything measured so far - every exit census in this file mixes the
 two phases together. Splitting the exit histogram at the last protection
 call would say what the livelocked steady state is actually made of,
 and that is one counter and no new boot.
+
+## The post-phase census: no hypercalls, no page faults, a timer loop
+
+The first population in this file that is **not** a mixture. The
+protection counter was confirmed static at 39,237 across three
+consecutive reads over five minutes before the window opened - and
+39,237 is now the third boot to reach exactly that total.
+
+352 seconds, delta between two readings, both well after the freeze:
+
+```
+1,873,239 exits over 352 s = 5,322 a second
+
+vmresume        934,348   49.9%
+rdmsr           621,389   33.2%
+wrmsr           246,272   13.1%
+int-window       62,142    3.3%
+ext-int           4,544    0.2%
+vmread            4,544    0.2%
+
+ept-violation           0    0.0%     <- ABSENT
+vmcall                  0    0.0%     <- ABSENT
+```
+
+**Two absences, and they are the finding.**
+
+- **Extended-page-table violations are zero.** The cumulative histogram
+  shows 304,454 of them, 8.8%, and **every one belongs to the protection
+  phase.** The opening symptom of this whole investigation - a repeated
+  EPT violation at one RIP in the shadow path - describes a phase that
+  ends after six minutes. The shadow extended-page-table machinery is
+  completely quiet in the state the machine is actually stuck in.
+- **`vmcall` is zero.** No hypercalls at all, therefore **no trust-level
+  switches**. The `HvCallVtlCall`/`HvCallVtlReturn` round trip that this
+  file has spent its entire length measuring, optimising and reasoning
+  about **does not happen in the steady state.**
+
+So every census in this file before this one averaged a six-minute
+startup phase together with an unbounded steady state, and reported the
+startup phase - which is the wrong-denominator error one level up, and
+the third appearance of that shape.
+
+### What the steady state actually is
+
+The working second-level ring - the one that filters the idle-loop MSRs
+- is one instruction, repeated:
+
+```
+wrmsr  rip=0xfffff805daba57e7  phys=0x400000b0  value=0x3000a
+wrmsr  rip=0xfffff805daba57e7  phys=0x400000b0  value=0x30008
+      ... alternating, for the whole ring
+```
+
+`0x400000b0` is **`HV_X64_MSR_STIMER0_CONFIG`**, the synthetic timer's
+configuration register, and the two values differ in exactly one bit.
+Entry RIPs across 20,481 entries: **7 distinct**.
+
+Read with the exit histogram, the steady state is a **timer loop**: the
+guest reads the reference counter (`rdmsr`, 33.2%), rewrites the
+synthetic timer configuration twice (`wrmsr`, 13.1%), is resumed
+(`vmresume`, 49.9%), and does it again - about 1,765 clock reads a
+second, for ever. Nothing else happens. No hypercall, no fault, no
+trust-level transition.
+
+**By this file's own two-field rule that is a livelock**: the
+instruction pointer is pinned at one address and the register index is
+pinned at one MSR, and both are candidates for the same quantity -
+progress. The one field that does move is the written value, and it only
+alternates between two.
+
+### The instrument cross-check, which found a documentation error
+
+Asked of the same window:
+
+```
+nested_run/s      5,334      (KVM's counter)
+our exits/s       5,319
+our l2-entries/s  2,653
+```
+
+`nested_run` tracks **our exit count**, not our second-level entries -
+every exit we take is one re-entry by KVM. `CLAUDE.md` said it was "the
+same quantity the resident `l2-entries` counts", which is wrong by a
+factor of two, and it was written into that file earlier in this same
+session. Corrected there.
+
+The two instruments agree to 0.3% once they are matched to the same
+quantity, which is the useful half of the check.
+
+### What this reopens, and what it points at
+
+The reference TSC page is aimed **directly** at the dominant steady-state
+cost - `rdmsr` is a third of all exits and this file has already measured
+that essentially all synthetic MSR reads are `TIME_REF_COUNT`. And this
+file also records that publishing the page took `STIMER0_COUNT` writes
+from 137,376 to 2.
+
+So the page addresses both halves of the loop that is actually running.
+It was measured with it on and did not reach user mode - **but that
+measurement, like every other one before this entry, was taken over a
+window that mixed the protection phase in.** Whether it changes the
+steady state has not been measured, and now can be.
+
+That is the next reading, and it is one boot: `reftsc=1`, wait for the
+protection counter to freeze, then take the post-phase histogram the
+same way. It is also the first time this file will have compared two
+configurations on the same population.
