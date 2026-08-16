@@ -19312,3 +19312,37 @@ be relied on - after which each is a decision on its own terms.
 **The counters stay** - they are right when the guest is not resetting,
 and they will be the check that the answers work once the calls are
 answered.
+
+### The reset loop was mine: L2's hypercalls were answered by the wrong layer
+
+The local page and the trapping page return the *same status*, yet the
+local one boots and the trapping one reset-loops. That difference cannot
+be the answer - so it is the path.
+
+`basic_reason::vmcall` in `exit_dispatch.cpp` handles exits from **both
+levels**. The guest hypervisor's own hypercalls arrive from the first
+level and are this VMM's to answer. **Windows's hypercalls to Hyper-V
+arrive from the second level and are not** - they must be reflected, the
+way every other second-level exit is. The hypercall block added here
+answered both, so every call Windows made to its own hypervisor was
+intercepted one layer too low and refused.
+
+That is a complete explanation of the loop, and of why the 104 counted
+calls looked so unlike an interface probe: most of them were not the
+guest hypervisor's at all.
+
+**The fix is a condition, not a redesign**: handle the hypercall only
+when the exit did not come from a second-level guest - `running_l2` is
+what says so, and it is already maintained per processor. With that in
+place the counted codes become the guest hypervisor's own, which is what
+the measurement was for.
+
+This also removes the need for the serial workaround above: without the
+loop the module is not reloaded, the counters do not restart, and the
+existing dump reads them consistently. **Do the condition first.**
+
+It is worth naming what caught it: the local and trapping pages return
+identical values, so any difference between them had to be structural.
+Reasoning from "same answer, different outcome" is what located a bug
+that the codes themselves - contaminated, implausible, and mine - would
+have sent someone chasing in the wrong direction entirely.
