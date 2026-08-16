@@ -22386,3 +22386,101 @@ map flags, target VTL, then the page numbers - rather than guessing
 which general-purpose register happens to look like an address. Until
 then, whether the guest sweeps or loops is unknown, and this file should
 not say otherwise.
+
+## The control word, decoded and verified: one page a call, every call succeeds
+
+The instrument that should have been built three attempts ago. RCX is
+structured, not opaque, and it was captured all along - the call code
+came out of it. `.references/xen/xen/arch/x86/include/asm/guest/hyperv-tlfs.h:419-425`:
+code in bits 15:0, fast form in bit 16, **rep count in 43:32**, **rep
+start index in 59:48**. RDX is not a sentinel either -
+`0xffffffffffffffff` is `HV_PARTITION_ID_SELF`, the first field of the
+input header, so it confirms the register order rather than carrying
+data.
+
+**The decode's own control passed first**, which is the check that was
+missing when a frame pointer was believed to be a page:
+
+```
+decode check: HvCallVtlCall rcx=0x0000000000000011
+              code=0x11 fast=0 reps=0 start=0   <- DECODE OK
+```
+
+`HvCallVtlCall` carries no reps, and the rep fields decode to zero. The
+shifts are right, so what follows counts.
+
+```
+code=0x00c fast=1 reps=1 start=0 | answer status=0x0000 done=1 | partition=SELF
+   ... identical for all fourteen printed, and rep start has
+       1 distinct value over the last 32
+```
+
+Four facts, and together they close both open questions:
+
+- **Rep count is 1.** A rep hypercall whose maximum is 4,095 is being
+  used one page at a time, so **the page rate is the call rate**: 107
+  pages a second, one every 9.35 ms. The hoped-for outcome - a large rep
+  count making the whole of memory a few seconds of work - does not
+  happen.
+- **Rep start is always 0.** Every call is a fresh request, never a
+  resumption. So this is not a call that times out and is reissued from
+  where it stopped.
+- **The status is `HV_STATUS_SUCCESS` and reps-completed is 1.** The
+  guest hypervisor **completes every one**. There is no failing call
+  being retried.
+- **The partition is SELF**, as the header requires.
+
+### What that settles, including one lead it closes
+
+**It is not a livelock in the sense that was suspected.** Nothing is
+being refused, nothing times out, nothing is reissued from a stalled
+position. The guest asks to protect a page, Hyper-V protects it and says
+so, and the guest asks about the next one.
+
+**And it closes the "what are we doing to Hyper-V that stops it
+finishing a rep" question with a negative**: nothing. It finishes every
+rep it is given. The shadow-table retention lead does **not** reconnect
+here - it may still be worth doing for its own reasons, but this is not
+evidence for it, and saying otherwise would be the analogy this file
+keeps warning about.
+
+### The arithmetic, stated conditionally because the set size is unknown
+
+At one page per call and 107 calls a second:
+
+| pages to protect | time |
+|---|---|
+| all guest RAM, 2,883,584 | **7.5 hours** |
+| a tenth of it | 45 minutes |
+| a hundredth | 4.5 minutes |
+
+**The set size is still not measured**, and this is deliberately not
+guessed - the page number lives in the fast-hypercall input, which is in
+R8 and the XMM registers and is not captured here. The earlier 7.5-hour
+figure was withdrawn because it rested on reading a frame pointer as a
+page; it returns here on a sound basis for the *rate*, and remains
+conditional on a count nobody has.
+
+So the shape of the problem is now known exactly and its size is not:
+**a guest making steady, successful, unbatched progress at one page per
+9.35 ms.** Whether that finishes in minutes or hours turns entirely on
+how many pages HVCI wants to protect at boot.
+
+### The next reading, and it is small
+
+Two things, in this order:
+
+1. **Does the rate hold, or does the call stop?** Sample
+   `vtl_protect_count` as a delta over ten minutes. A rate that decays
+   to zero means the set is finite and the guest finished it - and the
+   block is elsewhere. A flat 107 a second for an hour means the set is
+   very large or unbounded.
+2. **Why rep count 1?** A guest that batches would issue far fewer
+   calls, and `HvCallModifyVtlProtectionMask` exists to take up to 4,095
+   pages at once. If Windows normally batches this and does not here,
+   what makes it degrade is a question about what it is told - and that
+   is a question this VMM may own.
+
+The second is the more interesting, and it is the first question in this
+file that points at what the guest is *told* rather than at how fast it
+is served.
