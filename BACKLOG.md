@@ -21359,3 +21359,131 @@ keeping the guest hypervisor's own pointer per slot - which it does".
 It does keep it. `discard_shadow_ept_for` already releases only the
 matching slot. The all-context path is the one discarding more than it
 must.
+
+## Methodology: an average over a mixed population is not a marginal cost
+
+Three instances now, and the third turned a predicted win into a
+measured loss, so it gets its own entry.
+
+The error has the same shape every time. A total is divided by a count
+to get an average, the average is then used as the price of **one
+particular member** of the population, and the arithmetic built on it is
+off by whatever the spread is.
+
+| where | the average used | what it actually cost | error |
+|---|---|---|---|
+| "44 VMREADs at 2,760 cycles" | a VMCS access, averaged | the product was never checked against the phase it claimed to explain | unbounded |
+| "8.85 exits a tick driven to 1 is 8.85x" | an exit, averaged | the 8.85 are five different reasons, four of them necessary | ~8x |
+| the shadow-EPT recall at 256 | 600,000 cycles - **wall clock per exit** | `on_l2_ept_fault`, **41,826 cycles** | **14x** |
+
+The last one is the clearest. Wall clock per exit is an average over
+`vmresume`, `vmcall`, `vmptrld`, `rdmsr` and extended-page-table
+violations together, and it was used as the price of avoiding one
+extended-page-table violation. At the true price the trade needed three
+replays a fault to break even and was being asked to carry ten - which
+the per-phase counters, in the same dump, would have said before the
+change was written.
+
+**The rule: never price one exit reason, one instruction, or one phase
+with a number whose denominator counts something else.** The check is
+always the same and always available here - `phase_cycles` divided by
+`phase_calls` gives the marginal cost of the phase directly, and if the
+phase being priced has no counter, add one before doing the arithmetic
+rather than after being surprised by it.
+
+`CLAUDE.md` already says not to compare *builds* on wall clock per exit
+because the workload mix varies. This is the stronger form of the same
+statement: do not compare **anything** with it. It is a summary
+statistic and it has no marginal meaning at all.
+
+## The two leads that remain, specified rather than guessed
+
+Both come out of the recall measurement and both are better than a
+bigger cap. Neither is built, and what stops each is recorded so the
+next attempt does not rediscover it.
+
+### `map_window_at`, and the reason it is not a two-line change
+
+It is the largest thing in the tree that is unambiguously ours -
+**48,001,634 calls, 45.9 billion cycles, about a third of everything** -
+and its body is `page_table::map_page` plus `invlpg`, issued
+unconditionally for a page the window is very often already pointing at.
+A four-level extended-page-table walk re-points the window four times,
+and consecutive replays of nearby pages share upper-level tables.
+
+**The fast path needs two conditions, not one.** The window is one
+address shared by every processor and `invlpg` is per-processor, so:
+
+- **what *this* processor last pointed that window page at** - a
+  remembered intention is not enough on its own, because another
+  processor can have moved the window since;
+- **and the live page-table entry** - because this processor's own
+  record is not enough either: it says what this processor did, not what
+  the entry says now.
+
+A cache on the intention alone is exactly the failure
+`merge_nested_bitmaps` already documents for bitmap addresses -
+correct-looking, and wrong the moment another processor moves the window
+underneath.
+
+**Two things block a straightforward implementation, both found by
+looking rather than by trying:**
+
+1. **`map_window_at` does not know which processor it is on, and finding
+   out is expensive.** Every call site in this tree derives `cpu` from
+   `this->vmcs.vpid()`, which is a VMREAD - and a VMREAD here traps to
+   L0 at ~2,760 cycles, measured. Putting one inside a function called 48
+   million times would cost more than the entire optimisation saves.
+   Threading `cpu` down from the callers is the answer, and
+   `read_guest_physical` is the awkward one because it is reached from
+   inside walk lambdas.
+2. **Per-processor windows are not available as a shortcut.** The
+   obvious way to make the cache trivially sound is to give each
+   processor its own window page, and the header for
+   `mapping_window_pages` refuses it in terms: the window's address is
+   not freely chosen, every page has to be checked against the aliasing
+   the host page table's fixed storage produces, and **enlarging it once
+   coincided with the hypervisor no longer initialising on the real
+   rig**. Ten pages is deliberate.
+
+**And the lock question is separate.** `read_guest_physical` holds
+`mapping_window_lock` across the map *and* the copy, deliberately - "the
+point of the window is the bytes reached through it". A fast path that
+skips the mapping must still hold it for the copy. Whether the lock can
+then be narrowed is a different question and should be answered on its
+own, not folded in.
+
+**Measure the phase, not the aggregate.** Phase 11 already times the
+mapping alone and phase 10 the read containing it, so the before and
+after is instrumented already. Predict both first. Read `nested_run/s`
+as the verdict, and remember it is stable to 1.5% *within* a boot and
+not across boots.
+
+### Keeping the tables, and the premise nobody has checked
+
+The better bet, because it removes rebuilds rather than making them
+cheaper - which is the axis the recall experiment showed matters. KVM
+does not repopulate a root it has invalidated: it keeps the current root
+plus `prev_roots[KVM_MMU_NUM_PREV_ROOTS]` and frees only the one an
+invalidation names (`kvm_mmu_free_roots`).
+
+**But the premise has never been measured, and half of it is already
+false.** `discard_shadow_ept_for` - the single-context path - already
+releases only the slot naming that root, so if the guest hypervisor
+issues single-context `invept`, this VMM is as targeted as the
+instruction allows and there is nothing to narrow. Only
+`discard_shadow_ept`, the all-context path, releases every slot, and its
+comment admits it discards more than was asked for.
+
+So the question is entirely: **which type arrives?** Nothing in this
+tree has ever counted it. `l2_invept_single_context` and
+`l2_invept_all_context` now do, counted before the branch so a rejected
+type cannot be mistaken for either, and printed by the dump beside the
+rebuild split. Read them before touching the discard.
+
+If single-context dominates, the all-context idea is dead and what is
+left is the harder change: keeping a released slot's *tables* rather
+than zeroing them, so a root that comes back is revalidated instead of
+refaulted. `release_shadow_slot` memsets the root and hands the tables
+back to the pool, which is what makes a return trip cost 63 replays and
+18 faults.

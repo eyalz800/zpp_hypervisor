@@ -1586,6 +1586,20 @@ bool hypervisor::on_guest_invept(std::size_t cpu,
     // `watch_guest_page_writes` could do; it does not mean this switch.
     constexpr bool refresh_shadow_on_invept = false;
 
+    // Counted before the branch, so a type that reaches neither arm
+    // cannot be mistaken for one that did. See the declarations: which
+    // type arrives decides whether the all-context discard is costing
+    // anything at all, and no run has ever recorded it.
+    if (cpu < max_cpus) {
+        if (single_context == type) {
+            this->l2_invept_single_context[cpu] =
+                this->l2_invept_single_context[cpu] + 1;
+        } else {
+            this->l2_invept_all_context[cpu] =
+                this->l2_invept_all_context[cpu] + 1;
+        }
+    }
+
     if (single_context == type) {
         if constexpr (refresh_shadow_on_invept) {
             refresh_shadow_ept_for(cpu,

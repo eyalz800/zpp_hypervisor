@@ -8609,6 +8609,29 @@ private:
     std::uint64_t shadow_ept_rebuild_stale[max_cpus]{};
 
     /**
+     * Which `invept` type the guest hypervisor issues, split because the
+     * two reach different code and only one of them is a candidate.
+     *
+     * `single_context` already releases only the slot naming that root -
+     * `discard_shadow_ept_for` - so if it dominates, this VMM is already
+     * as targeted as the instruction allows and there is nothing to win
+     * by narrowing the discard. `all_context` releases **every** slot,
+     * and `discard_shadow_ept`'s own comment says it discards more than
+     * was asked for because that is "the safe direction". Whether that
+     * is costing anything depends entirely on which type arrives, and
+     * nothing in this tree has ever counted it.
+     *
+     * Measured first, changed second. The premise of the whole
+     * "keep the tables the way KVM keeps previous roots" idea is that
+     * roots are being thrown away that were not named, and that premise
+     * is false if the guest hypervisor only ever issues single-context.
+     * @{
+     */
+    std::uint64_t l2_invept_single_context[max_cpus]{};
+    std::uint64_t l2_invept_all_context[max_cpus]{};
+    /** @} */
+
+    /**
      * The five guest-state fields the processor saves into vmcs02 on
      * every VM exit, as `save_l2_state` read them out - so that
      * `build_vmcs02` can skip writing back a value vmcs02 demonstrably
