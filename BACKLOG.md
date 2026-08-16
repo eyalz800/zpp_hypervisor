@@ -20340,3 +20340,42 @@ reads that leaf, and identifying that reader is the next step.
 an outcome, doubt the instrument. Six boots separating cleanly is
 evidence; a counter that reads zero in a run that demonstrably works is
 not.
+
+### Why bit 14 stops it: the likeliest mechanism, and how to test it
+
+With the bisect restored, the reader of that leaf is post-VMXON - the
+gate keyed on `guest_in_vmx_operation` opened and the hang persisted - so
+it is the guest hypervisor, not Windows.
+
+**The likeliest mechanism is this VMM's own launch path.** With an
+enlightened VM entry armed, the guest hypervisor stops executing VMPTRLD:
+it names the structure through its assist page instead. `on_guest_vmlaunch`
+calls `load_enlightened_vmcs` first, and that returns **false** whenever
+the assist page has not been registered yet - which is exactly the state
+during arming. The launch then falls through to
+
+```cpp
+if (!enlightened && (no_current_vmcs == this->guest_current_vmcs[cpu])) {
+    vmx_fail_invalid();
+```
+
+and answers VMfailInvalid to a launch the guest hypervisor believes is
+well formed. A hypervisor told its first enlightened entry is invalid has
+no recovery path, which fits a stop at ~2,780 exits with no second-level
+entry and no assist-page write.
+
+**The ordering assumption is the bug, if this is right**: the code
+assumes the assist page is registered before the first enlightened
+launch, and `hyperv_vp_assist_writes` reading zero says it is not - the
+guest hypervisor may arm the enlightenment and launch before writing the
+register, or write it in a form this VMM does not accept.
+
+**How to test it without guessing**: log at the three points - the
+assist-page MSR write, `load_enlightened_vmcs` returning false, and
+`vmx_fail_invalid` on the launch path - and read the ring. That is three
+lines and one boot, and it distinguishes "never registered" from
+"registered and not found" from "found and refused anyway".
+
+**Do not use the counters for this.** Six instrument failures in one
+session, the last of which destroyed a correct result, and the log ring
+is the only thing here that has been checked against an outcome.
