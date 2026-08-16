@@ -22740,3 +22740,90 @@ that the phase counter is frozen *immediately before* opening the
 window, not once at the start of the boot. A wait long enough on one
 boot is not long enough on the next - this boot's phase was still
 running fifteen minutes in, where an earlier one finished in six.
+
+## The passed-through disk raises no interrupt, and MSI-X was never enabled
+
+Taken from the **host**, with the guest untouched and the protection
+counter confirmed static at 39,237 - the fourth boot to reach exactly
+that total - immediately before the window opened.
+
+```
+irq   delta(60s)   total   device
+16:            0   14230   IR-IO-APIC 16-fasteoi
+                           idma64.0, i2c_designware.0,
+                           vfio-intx(0000:00:14.3),
+                           vfio-intx(0000:02:00.0),      <- the NVMe
+                           vfio-intx(0000:00:1f.3),
+                           vfio-intx(0000:00:02.0)
+```
+
+**Two things, and the first is the sharper.**
+
+- **There is no `vfio-msix` line for `0000:02:00.0` at all.** VFIO
+  registers legacy INTx when a device is opened; an MSI-X line appears
+  only once the guest programs the MSI-X table and the eventfds are
+  wired. Its absence says **the guest has never enabled MSI-X on the
+  disk**, which no working NVMe driver omits.
+- **The shared INTx line has a delta of zero over sixty seconds.** The
+  device raises nothing.
+
+The guest side agrees, from the same moment:
+
+```
+vectors injected into the second level (23,769 over 3 distinct)
+  0xd1  22,268  93.7%      the clock
+  0x40   1,496   6.3%
+  0x2f       5   0.0%
+```
+
+**Three vectors, all synthetic, in a machine with a passed-through NVMe,
+GPU and WiFi.** Not one device vector has ever been delivered.
+
+And the progress metric: **6 distinct second-level entry RIPs across
+10,872 entries.** That is the number to carry forward - it is far
+stronger than a pinned `wrmsr` address, since a timer reprogram having
+one call site is ordinary while six entry points across ten thousand
+entries is not.
+
+### Why this fits everything
+
+The protection phase is pure memory work needing no disk, and it
+**completes** - 39,237 calls, every one successful, four boots running.
+Then Windows needs the disk. Extended-page-table violations fall to zero
+because no new memory is being touched; hypercalls fall to zero because
+there is no more trust-level work to do; and what is left is a timer
+loop, which is what a kernel waiting on I/O looks like from outside.
+
+Read with the `ClassPnP` capture this file already holds - a request
+enqueued in the boot idle-I/O path, `multi(0)disk(0)rdisk(0)partition(4)`
+unresolved - **the storage stack never got the controller to the point
+of doing I/O**, and everything downstream of that is the wait.
+
+### The caveat, stated first-class because it killed the last lead
+
+**This has not been checked against a configuration known to boot.** The
+identical argument was made from the admin-queue registers - two-entry
+queues in firmware memory, "no storage driver leaves that in place" -
+and the control showed exactly the same registers, which retired it.
+
+The difference now is that **the control is finally measurable.**
+`cpl_seen` is a census over every exit and works with nested VMX off,
+where previously only sampling was available and sampling could not tell
+a booted idle machine from a livelocked one. So the decisive experiment
+is one boot:
+
+- `ZPP_NESTED_VMX=OFF`, wait for whatever phase counter applies, then
+  read **`cpl_seen[3]`** - non-zero proves ring 3, a census cannot be
+  fooled the way 2,400 `info registers` samples were;
+- and `/proc/interrupts` for `0000:02:00.0` in the same run.
+
+Four outcomes and each says something:
+
+| control reaches ring 3 | control has an NVMe MSI-X line | reading |
+|---|---|---|
+| yes | yes | **the absence is the root cause and it is ours** |
+| yes | no | the disk is not how that build boots; look elsewhere |
+| no | either | the control does not boot either, and the file's 55.74% record is stale |
+
+Until that is run, "the disk is never brought up" is the best-supported
+hypothesis in this file and is **not** established.
