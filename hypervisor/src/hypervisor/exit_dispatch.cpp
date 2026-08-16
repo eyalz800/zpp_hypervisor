@@ -2157,7 +2157,26 @@ void hypervisor::on_vm_exit(std::uint64_t cpuid,
         if constexpr (nested_vmx::evmcs_offered) {
             constexpr std::uint64_t hypercall_page_enabled = 1;
 
-            if (0 != (this->hyperv_hypercall & hypercall_page_enabled)) {
+            // **Only the guest hypervisor's own calls.** This case sees
+            // exits from both levels, and a second-level guest's
+            // hypercall belongs to the level above - it must be
+            // reflected like every other second-level exit, not answered
+            // here.
+            //
+            // Answering both is what made the trapping page reset-loop
+            // while the local page, returning the *identical* status,
+            // did not: every call Windows made to Hyper-V was
+            // intercepted a layer too low and refused. Same answer,
+            // different outcome, so the difference had to be structural.
+            auto slot = vmcs.vpid();
+            auto caller = ((0 != slot) && (slot <= max_cpus))
+                              ? (slot - 1)
+                              : max_cpus;
+            auto from_guest_hypervisor =
+                (caller < max_cpus) && !this->running_l2[caller];
+
+            if (from_guest_hypervisor &&
+                (0 != (this->hyperv_hypercall & hypercall_page_enabled))) {
                 constexpr std::uint64_t invalid_hypercall_code = 2;
 
                 auto code = context.rcx & 0xffff;
