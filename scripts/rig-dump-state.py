@@ -1131,6 +1131,7 @@ def main():
                "vtl_protect_pages", "vtl_protect_page_low",
                "vtl_protect_page_high", "vtl_protect_forward",
                "vtl_protect_backward", "vtl_protect_step_same",
+               "vtl_protect_rejected",
                "shadow_leaf_permissions", "exit_trace", "exit_trace_count", "l2_exit_trace",
                "l2_exit_trace_count", "l2_working_trace",
                "l2_working_trace_count", "l2_entries", "l2_activity_state",
@@ -1255,7 +1256,9 @@ def main():
     monitor.queue(instance + off["vtl_protect_repeated"], scalar_cpus)
     for name in ("vtl_protect_pages", "vtl_protect_page_low",
                  "vtl_protect_page_high", "vtl_protect_forward",
-                 "vtl_protect_backward", "vtl_protect_step_same"):
+                 "vtl_protect_backward", "vtl_protect_step_same",
+               "vtl_protect_rejected",
+                 "vtl_protect_rejected"):
         monitor.queue(instance + off[name], scalar_cpus)
     monitor.queue(instance + off["guest_leaf_permissions"], scalar_cpus * 8)
     monitor.queue(instance + off["shadow_leaf_permissions"],
@@ -1359,6 +1362,9 @@ def main():
             back = read('vtl_protect_backward', cpu) or 0
             same = read('vtl_protect_step_same', cpu) or 0
             span = high - low + 1
+            rejected = read('vtl_protect_rejected', cpu) or 0
+            print(f"  rejected as not-a-page {rejected:,}  "
+                  f"(large = RBP is the wrong source)")
             print(f"  pages carried {pages:,}   steps forward {fwd:,}  "
                   f"BACKWARD {back:,}  same {same:,}")
             print(f"  page range 0x{low:x}..0x{high:x}  = "

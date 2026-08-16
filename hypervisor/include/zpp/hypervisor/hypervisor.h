@@ -8910,6 +8910,23 @@ private:
     std::uint64_t vtl_protect_backward[max_cpus]{};
     std::uint64_t vtl_protect_step_same[max_cpus]{};
     std::uint64_t vtl_protect_last_page[max_cpus]{};
+
+    /**
+     * Requests whose RBP could not be a page frame of this guest.
+     *
+     * Counted rather than silently skipped, because a filter that drops
+     * what it dislikes is its own way of lying. The first census over
+     * this register reported a range ending at `0xffe3ffffffffffff`,
+     * which is not an address in any guest - so RBP carries something
+     * else on some of these calls, and a minimum and maximum taken over
+     * it described nothing. The ring did not reveal it: thirty-two
+     * recent entries happened to be clean.
+     *
+     * If this is large, the register is the wrong source and the answer
+     * is to read the hypercall's own input structure - whatever the
+     * admitted values happen to look like.
+     */
+    std::uint64_t vtl_protect_rejected[max_cpus]{};
     /** @} */
     /** @} */
 

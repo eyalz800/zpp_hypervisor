@@ -7636,7 +7636,33 @@ hypervisor::on_l2_exit(std::size_t cpu,
                 // in forty-five minutes is a different problem from one
                 // over the whole taking seven hours, and only the least
                 // and greatest actually seen can tell them apart.
-                if (0 != context.rbp) {
+                // **Bounded before it is admitted, and the rejects
+                // counted rather than dropped.** The first census over
+                // this register reported a range ending at
+                // `0xffe3ffffffffffff` - seventy thousand petabytes -
+                // which is not a page number, so RBP carries other
+                // things on some of these calls and a min/max over it
+                // is meaningless. The ring did not show that, because a
+                // ring of the last thirty-two entries happened to hold
+                // only clean ones.
+                //
+                // A filter that silently drops what it dislikes is its
+                // own way of lying, so the rejects are counted: if
+                // `rejected` is large the register is the wrong source
+                // and the answer is to read the hypercall's own input
+                // structure instead, whatever the admitted values look
+                // like.
+                //
+                // The bound is the guest's physical address width rather
+                // than a round number - anything at or above it cannot
+                // be a page frame this guest owns.
+                auto page_bound = std::uint64_t{1}
+                                  << (physical_address_bits() - 12);
+
+                if ((0 != context.rbp) && (context.rbp >= page_bound)) {
+                    this->vtl_protect_rejected[cpu] =
+                        this->vtl_protect_rejected[cpu] + 1;
+                } else if (0 != context.rbp) {
                     auto page = context.rbp;
                     auto & low = this->vtl_protect_page_low[cpu];
                     auto & high = this->vtl_protect_page_high[cpu];
