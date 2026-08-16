@@ -23031,3 +23031,92 @@ So the decisive experiment is one boot of `boot.sh` **with
 the same bit. That is a launcher edit on the rig, which needs backing up
 to survive, and it is the right first act of the next session rather
 than the last of this one.
+
+## Established: Windows enables MSI-X under plain KVM and never under this VMM
+
+The missing cell, filled - **assigned device, successfully booting
+Windows** - and it validates both instruments rather than retiring them.
+
+`boot-kvm.sh`, this VMM out of the path, `driver: vfio-pci` printed in
+the same command:
+
+```
+MSI-X: Enable+ Count=17 Masked-
+
+124: ...  253  IR-PCI-MSIX-0000:02:00.0  0-edge  vfio-msix[0](0000:02:00.0)
+125: ... 11466                                   vfio-msix[1](0000:02:00.0)
+126: ... 13748                                   vfio-msix[2](0000:02:00.0)
+127: ... 10830   128: ... 10727   129: ...  6654
+130: ...  7830   131: ...  5206   132: ... 13294
+150: ... 12521  IR-PCI-MSI-0000:00:02.0          vfio-msi[0](0000:00:02.0)
+msix line count: 33
+```
+
+**Both worries are answered.**
+
+- **VFIO does propagate a guest's MSI-X enable to the physical device.**
+  The positive control before this was the host `nvme` driver, which
+  sets the bit itself and therefore proved only that the *reading*
+  works. This proves the *mechanism*: a guest enabling MSI-X shows up as
+  `Enable+` on the assigned device. So `Enable-` under this VMM is a
+  real statement about what the guest did.
+- **`/proc/interrupts` is not blind for assigned devices.** Seventeen
+  `vfio-msix[n](0000:02:00.0)` lines, with tens of thousands of
+  interrupts on eight of them. Its emptiness under this VMM was
+  consistent, not blind - which could not have been known without this.
+
+The full table, one row per configuration, `driver:` printed beside
+every reading:
+
+| configuration | MSI-X | vfio-msix lines |
+|---|---|---|
+| no guest, host `nvme` driver | `Enable+` | 9 (`nvme0q0..8`) |
+| **plain KVM, Windows booting** | **`Enable+`** | **17, tens of thousands of interrupts** |
+| this VMM, `nested=1` | `Enable-` | 0 |
+| this VMM, `nested=0` | `Enable-` | 0 |
+
+### And the control is genuinely single-variable
+
+`boot.sh` was the wrong launcher and would have wasted the boot twice
+over. It shares `RELEASEX64_OVMF_VARS.fd` with `boot-zpp.sh` - the
+variable store that currently holds exactly one boot option, pointing at
+`\EFI\zpp\zpp_loader.efi` - so **it would have booted this VMM and been
+recorded as plain KVM.** It also differs in `hv-passthrough`, the QEMU
+binary and 1.5 GB of memory.
+
+`boot-kvm.sh` exists for this and is clean:
+
+```
+              boot-kvm.sh                    boot-zpp.sh
+-cpu          host,kvm=on,topoext            host,kvm=on,topoext
+qemu          qemu-system-x86_64-new         qemu-system-x86_64-new
+mem           MemTotal - 4000                MemTotal - 4000
+pflash vars   RELEASEX64_OVMF_VARS.fd.kvmrun RELEASEX64_OVMF_VARS.fd
+```
+
+**One difference: which variable store, and therefore what boots.** Same
+processor model, same binary, same memory, same devices. That is the
+comparison of degree the four-way diff would have wrecked, available
+without editing anything.
+
+### What this establishes, and what it does not
+
+**Established: under this VMM, Windows never enables interrupt-driven
+disk I/O on the passed-through NVMe, and under plain KVM on the same
+hardware it does.** Both instruments are validated by a positive control
+on the assigned device. This is the best-supported statement in this
+file and it is the first one to survive its own control.
+
+**And it is not a nesting bug**, which bears on the trust-level
+hypothesis raised against it: `Enable-` holds with `ZPP_NESTED_VMX=OFF`,
+where Hyper-V stands down and **there are no virtual trust levels at
+all**. A VTL0 that never gets returned to cannot explain a configuration
+that has no VTL0. So whatever stops the storage stack is upstream of
+nesting and upstream of any trust-level return.
+
+**Not established: why.** The bit is not set; nothing here says what
+prevents it. The next reading is what the guest does with the device's
+configuration space - the MSI-X capability lives at `[b0]` and the
+enable is one bit in one word, so a write-watch on that offset, or the
+config-space accesses this VMM already sees, would say whether Windows
+tries and is refused or never tries at all.
