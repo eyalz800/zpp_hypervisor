@@ -21811,3 +21811,80 @@ is being claimed. When the question is "what is this machine waiting
 on", sample the instruction pointer; when it is "whose code ran", read
 the accounting. They are not interchangeable and this file has now
 mistaken one for the other twice.
+
+## The admin-queue lead is dead: the control shows the same registers
+
+The measurement the previous entry asked for, taken both ways. It
+retires the reading it was meant to confirm, which is why it was worth
+taking.
+
+### Nested on: the registers never move, for ten minutes
+
+Captured the instant the loader chainloads Windows' boot manager, then
+every forty-five seconds for ten minutes, narrow reads, four samples per
+register per round:
+
+```
+CC   0x00460001   EN=1        CSTS 0x00000001   RDY=1
+AQA  0x00010001   two-entry admin queues
+ASQ  0x7dd3d000   ACQ 0x7dd3e000                (firmware memory)
+```
+
+**Not one value changed across the whole run**, and the ten-minute
+values are byte-identical to the chainload capture. On its own that
+reads exactly like "Windows never claims the controller", which is what
+the previous entry inferred.
+
+### Nested off - a machine the file records as reaching ring 3 - is identical
+
+Same registers, same method, on `ZPP_NESTED_VMX=OFF`:
+
+```
+CC   0x00460001   CSTS 0x00000001
+AQA  0x00010001
+ASQ  0x7dd3d000   ACQ 0x7dd3e000
+```
+
+**The same values, equally unchanging.** So the admin-queue
+configuration does not distinguish a blocked machine from one that is
+not, and **"Windows never re-initialises the controller" is retired as a
+discriminator.** Whatever Windows does with this device, it does not
+show up in `AQA`, `ASQ` or `ACQ` - the driver evidently inherits the
+enabled controller rather than resetting it and reprogramming its admin
+queues, which the specification permits and which no amount of reasoning
+about what a driver "must" do was going to establish.
+
+That is the eighth confident wrong answer this investigation has been
+one step away from publishing, and the first one a *control* caught
+rather than a replication. The inference was careful, it was labelled as
+an inference, and it was still wrong - which is the argument for taking
+the control even when the reading looks decisive.
+
+One difference was observed and is **not** explained: in the nested run
+`ASQ` already read `0x7dd3d000` at the chainload capture, while in the
+control it read `0x7dd18000` there and `0x7dd3d000` from the first watch
+sample onward. So the queues moved once after chainload in one run and
+not the other. That is a single unreplicated pair across two different
+binaries, which this file has been burned by before, and it is recorded
+as an observation rather than a finding.
+
+### And the control did not reach ring 3 either
+
+320 samples of `info registers -a` across all eight processors, ten
+minutes in: **`CPL=0` on every one**. The file records
+`ZPP_NESTED_VMX=OFF` reaching ring 3 with Windows at 55.74% of wall
+clock, and this build does not.
+
+It is **not the same binary** as the one that measurement came from - it
+carries the reference TSC page, the per-processor GS base and everything
+else this session added - so the honest statement is that the control
+did not deliver the comparison it was run for, and that a
+non-nested build no longer reaching user mode is either a regression in
+this session's changes or a property of this boot.
+
+**Do not act on it from one boot.** Single-boot attribution is the
+mistake this file records more than any other, and the correct next step
+is two runs of `ZPP_NESTED_VMX=OFF` before anything is concluded - and,
+if it replicates, a bisect against the reference TSC page first, since
+that is the one change of the session that alters what the guest is
+told.
