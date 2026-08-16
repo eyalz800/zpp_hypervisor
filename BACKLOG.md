@@ -21045,3 +21045,68 @@ win.
    the APIC assist page, where the guest clears a word in memory instead
    of writing the EOI register.
 3. The parked application processors, worth a measured 6.7% and free.
+
+## Two candidates closed by measurement, one of them a retraction
+
+Both items queued after the reference TSC page turned out not to be
+work. Neither cost a code change and one of them corrects this file.
+
+### `NoEOIRequired` **is** set. The empty page was a sampling artifact.
+
+This file has said for several sections that the lazy end-of-interrupt
+enlightenment never fires because the VP assist page is "512 bytes of
+zero on every boot it has been read", and built a 22% estimate on it.
+That reading is wrong, and the way it was wrong is the interesting part.
+
+Sampled properly - four hundred reads of the first quadword, issued from
+the rig itself so the round trip is microseconds rather than the
+milliseconds an ssh-mediated monitor costs:
+
+```
+349  117a22000: 0x0000000000000000
+ 51  117a22000: 0x0000000000000001
+```
+
+**Bit 0 is set 12.75% of the time.** The guest hypervisor sets it, the
+guest's `btr` clears it, and the enlightenment works exactly as the
+disassembled loop in this file says it should. The earlier readings took
+a handful of samples of a bit that is set and cleared thousands of times
+a second and concluded it was never set.
+
+So the 42,504 `wrmsr` of `HV_X64_MSR_EOI` are the interrupts that
+genuinely need acknowledging, not a broken enlightenment - and the "one
+exit a tick with a documented mechanism to remove it, worth 22%" is
+retired. **There is nothing here for this VMM to fix.**
+
+The general form, and it is a new one for this file: *a probe that reads
+a value which changes faster than the probe runs reports the value it
+spends most of its time at.* An all-zero answer from an under-sampled
+transient is indistinguishable from an all-zero answer from a dead
+mechanism. Where a bit is expected to toggle, sample hundreds of times
+and count both states - and issue the samples from the rig, because an
+ssh round trip per sample is itself the sampling limit.
+
+### The parked-processor pin does not replicate
+
+Measured live, in-run, the same way it was measured the first time, on
+the next boot of the same binary:
+
+| | boot 1 | boot 2 |
+|---|---|---|
+| before pinning | 5321 / 5485 / 5411 | 4240 / 4236 / 4232 |
+| after pinning | 5796 / 5691 / 5817 | 3828 / 3914 / 3737 |
+| change | **+6.7%** | **-9.7%** |
+| cpu0 clock | 3.10 -> 3.30 GHz | 2.87 -> 3.27 GHz |
+
+The clock rose both times and `nested_run/s` moved in opposite
+directions, so **the turbo headroom the pin recovers is not what governs
+this rate** and the +6.7% is withdrawn. Note `per-entry` rose 81 -> 90
+across the second pin, so the work behind an entry changed inside the
+window: the regime moves during a boot even where the metric is stable
+within one.
+
+That is the two-runs rule paying for itself immediately, on a number
+this file had already written down as a confirmed gain and would have
+been asked to bank. **`nested_run/s` is stable to 1.5% across windows and
+that is not the same as being stable across boots.** Replicate on a
+second boot, not merely a second window.
