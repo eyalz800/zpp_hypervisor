@@ -20291,3 +20291,52 @@ conclusion is written down.
 That single discipline would have saved most of this session, and its
 absence is why the enlightenment - which may well be correct - still has
 no honest verdict.
+
+## Correction: the bisect was valid. The log line is what is broken.
+
+The previous entry declared the hang intermittent and voided four
+attributions. **That was wrong**, and the tally across every boot in this
+stretch says so:
+
+| bit 14 | boots | result |
+|---|---|---|
+| set | 2,768 / 2,757 / 2,784 / 2,783 exits | **4 of 4 hang, no second-level entry** |
+| withheld | 481,082 / 552,546 second-level entries | **2 of 2 boot** |
+
+Six boots, perfectly separated. That is not an intermittent fault; it is
+as clean a single-variable result as this file contains.
+
+**What misled me was the instrument, again.** The log line added to the
+hypervisor-range CPUID branch reports **zero occurrences even in the
+builds that boot** - so it is not firing, and its silence says nothing
+about whether the leaves are read. I read that silence as evidence, built
+a contradiction on it, and threw out a correct bisect to resolve the
+contradiction.
+
+**That is the sixth instrument failure of this session and the most
+expensive**: the first five produced wrong answers, this one destroyed a
+right one. `cpuid_hypervisor_leaves_asked` and the log line disagree with
+the boot outcomes, and *the boot outcomes are the measurement* - a guest
+that runs to 552,546 second-level entries with bit 14 withheld and stops
+at 2,780 with it set is telling you something no counter needs to
+confirm.
+
+### So the state, corrected
+
+**Bit 14 - recommending an enlightened VMCS - stops the guest.** Six
+boots, cleanly separated, no counter required. Everything else in the
+offer is survivable: with the vendor "Microsoft Hv" advertised, all five
+leaves answered, the assist-page MSR accepted and the hypercall page
+trapping, the guest boots and the guest hypervisor runs.
+
+The question that remains is the one from before the detour, and it is
+unchanged: **why does recommending the enlightenment stop it**, and can
+the recommendation be made only to a reader that will use it correctly.
+The VMXON gate was the first attempt and did not change the outcome -
+which, with the bisect now restored, means the gate opened for whoever
+reads that leaf, and identifying that reader is the next step.
+
+**And the rule, for the seventh time**: when an instrument disagrees with
+an outcome, doubt the instrument. Six boots separating cleanly is
+evidence; a counter that reads zero in a run that demonstrably works is
+not.
