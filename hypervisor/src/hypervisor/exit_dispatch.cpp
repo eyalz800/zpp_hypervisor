@@ -984,8 +984,25 @@ void hypervisor::on_vm_exit(std::uint64_t cpuid,
                 // it can track - max_cpus, the dimension of every
                 // per-processor array here. A guest reading zero would
                 // be reading a claim that no processor is supported.
+                // eax is the highest virtual processor index and **ebx
+                // is the highest logical processor index** - Xen reads
+                // them as `max_vp_index` and `max_lp_index` in
+                // `hyperv_probe`,
+                // `.references/xen/xen/arch/x86/guest/hyperv/hyperv.c`.
+                //
+                // ebx was zero, which says *no logical processor exists*.
+                // For an operating system that is harmless because
+                // nothing consults it; for a guest hypervisor deciding
+                // whether the interface below it is usable it is a claim
+                // that the machine has no processors, and this VMM stops
+                // exactly between reading these leaves and using the
+                // interface they describe.
+                //
+                // Both are the same number here, and honestly so: this
+                // VMM tracks `max_cpus` processors and presents no
+                // distinction between virtual and logical ones.
                 cpuid_result[0] = static_cast<std::uint32_t>(max_cpus);
-                cpuid_result[1] = 0;
+                cpuid_result[1] = static_cast<std::uint32_t>(max_cpus);
                 cpuid_result[2] = 0;
                 cpuid_result[3] = 0;
             } else if (diagnostic_leaf == leaf) {

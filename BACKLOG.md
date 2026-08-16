@@ -20125,3 +20125,34 @@ The goal is not met: the spinner has not moved. The state, precisely:
   reading the recommendation and registering an assist page, with the
   structure, both copies and the hookup all cleared by measurement
   because none of them run.
+
+### The logical-processor count was wrong and is not the cause
+
+`hyperv_probe` reads the implementation-limits leaf as `max_vp_index =
+eax` and `max_lp_index = ebx`, and this VMM reported `max_cpus` in eax
+and **zero in ebx** - a claim that the machine has no logical processors.
+Corrected to report the same count in both, which is honest here since
+this VMM makes no distinction between virtual and logical processors.
+
+**It changed nothing**: 2,784 exits, no second-level entry, against 2,768
+before. So the zero was a real defect and not the one that stops the
+guest hypervisor. The fix stays - reporting no logical processors is
+wrong whatever else is true - but the search continues.
+
+**Ruled out so far**, each by a boot with everything else held:
+
+| candidate | result |
+|---|---|
+| the vendor string | not it - guest boots with `Microsoft Hv` |
+| bit 14 reaching Windows | not it - the gate opened, the reader is Hyper-V |
+| gating bit 14 on VMX operation | no change |
+| `max_lp_index` reported as zero | no change |
+| the nested-features leaf value | matches KVM's, read not booted |
+
+What remains between the recommendation and the assist page is the
+leaves this VMM answers as zero by falling through - **0x40000006
+through 0x40000009** - and whatever the guest hypervisor concludes from
+them. Those are hardware-feature and implementation leaves, and the
+reference lists what each bit means; comparing them one at a time is
+reading rather than booting, and it is the only avenue left that has not
+been tried.
