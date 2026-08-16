@@ -19861,3 +19861,47 @@ enlightenment to Windows itself - which the current gating cannot avoid,
 since both are the first-level guest - is what stops it. One boot with
 bit 14 cleared and everything else on answers it, and the verdict is
 `l2-entries` going non-zero.
+
+## It is bit 14, not the vendor - and the path forward is narrow
+
+One boot, vendor left as "Microsoft Hv" and only the enlightened-VMCS
+recommendation cleared:
+
+| | vendor + bit 14 | vendor, no bit 14 |
+|---|---|---|
+| exits | 2,768 | **1,423,672** |
+| second-level entries | 0 | **481,082** |
+
+**So the vendor is not the offender after all**, and the entry above that
+concluded it was is corrected here. The earlier bisect reverted the
+vendor and the guest booted - but reverting the vendor also stops
+`hyperv_probe` at its first check, so bit 14 was never read either. Two
+changes in one, and the wrong one got the credit.
+
+**This VMM can advertise the Hyper-V interface and Hyper-V still runs**:
+481,082 second-level entries with "Microsoft Hv" reported. What stops
+Windows is being *recommended an enlightened VMCS* - a recommendation
+aimed at a guest hypervisor, read by an operating system that will never
+launch one.
+
+### The fix, and it is implementable
+
+Bit 14 has to reach the guest hypervisor and not the operating system,
+and there is a signal that separates them: **Hyper-V enters VMX
+operation and Windows does not.** A guest that has executed VMXON is a
+hypervisor; a guest that has not is the thing booting before it. This VMM
+already sees VMXON - it emulates the instruction - so gating the
+recommendation on "this guest has entered VMX operation" is a condition
+on state already tracked, not new machinery.
+
+The ordering works: Windows boots, reads the leaves, is recommended
+nothing, and proceeds; Hyper-V starts, executes VMXON, and reads the
+leaves again when it probes - by which point the recommendation is
+there. If it probes only once and before VMXON, this fails, and that is
+the thing to measure first - `cpuid_hypervisor_leaves_asked` against the
+VMXON count, in one boot, on the proven reader.
+
+**That is the last piece.** The enlightenment is implemented, the
+advertisement is otherwise accepted, the guest hypervisor runs with the
+interface claimed, and what remains is telling the right one of two
+guests about it.
