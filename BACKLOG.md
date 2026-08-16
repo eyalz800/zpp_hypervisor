@@ -18935,3 +18935,59 @@ rather than through L0. The same 26.7 exits at a low single-digit
 microsecond cost put the round trip an order of magnitude inside the
 tick, which is the condition the timer stretch created artificially and
 which relieved the block.
+
+## Why Hyper-V runs on KVM and not on us: enlightened VMCS
+
+The question that reframed this, and it is the right one: **Windows with
+VBS boots on KVM alone in about five minutes** - that baseline is
+recorded in this file - so KVM carries Hyper-V as its guest hypervisor
+perfectly well. Adding this VMM between them turns it into a livelock.
+"Nesting is expensive" does not explain that, because KVM is doing the
+same nesting.
+
+The difference is in `.references/kvm/`:
+
+```
+nested.c:1654  copy_enlightened_to_vmcs12(struct vcpu_vmx *vmx, u32 hv_clean_fields)
+nested.c:249   nested_evmcs_handle_vmclear(...)
+nested.c:646   evmcs->hv_clean_fields & HV_VMX_ENLIGHTENED_CLEAN_FIELD_MSR_BITMAP
+vmx.c:565      ms_hyperv.hints & HV_X64_ENLIGHTENED_VMCS_RECOMMENDED
+x86.c:4775     KVM_CAP_HYPERV_ENLIGHTENED_VMCS
+```
+
+**KVM implements enlightened VMCS. This VMM does not.**
+
+What that changes, and it is not a percentage:
+
+- **Hyper-V stops executing VMREAD and VMWRITE at all.** With eVMCS it
+  reads and writes a shared memory structure instead, so none of it
+  traps. This file measured Hyper-V's own VMX instructions at **54% of a
+  trust-level round trip** - `vmresume` 71.1, `vmread` 5.1, `vmptrld` 4.0
+  against 2.0 `vmcall` of actual work - and recorded that as
+  unavoidable nesting tax. **It is not unavoidable. It is the thing
+  eVMCS removes.**
+- **`hv_clean_fields` says which fields actually changed**, so the layer
+  below copies only those into its real VMCS. Every elision this session
+  built - the host-state cache, the deferred guest-state reads, the
+  write-side hot-field elision - is a worse re-derivation of what
+  Hyper-V would simply have *told* us.
+
+### Why the earlier `announce_hypervisor` attempt failed, and what it means
+
+It was tried and withdrawn as "Hv#1 with zero privileges" - the interface
+was advertised without being implemented, so the guest hypervisor found a
+signature and nothing behind it. That is the same failure mode this file
+records for every partial interface: **answer the whole of it or fault.**
+eVMCS is the part worth implementing, and it needs the advertisement
+(`HV_X64_ENLIGHTENED_VMCS_RECOMMENDED`, a version in the nested-features
+leaf) *and* the structure handling behind it.
+
+### What this does to the arithmetic
+
+The closure recorded above - 26.7 exits at 249 us, 6.64 ms against a 1.74
+ms tick - assumed the exit count was architectural. It is not. Removing
+Hyper-V's VMX instruction exits takes the round trip from 26.7 exits
+toward the 2 that are actual work, which is an order of magnitude, not a
+few per cent. **That is the first candidate in this entire investigation
+large enough to close a 3.8x gap**, and it is squarely this VMM's to
+implement rather than KVM's to grant.
