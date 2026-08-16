@@ -19154,3 +19154,45 @@ The instrument is already in place: `vp-assist-writes` going non-zero is
 the whole test, it costs one boot, and a boot with the enlightenment
 declined is provably harmless - two of them have now run without
 disturbing the guest at all.
+
+### The likely reason it is declined: every hypercall is refused
+
+The hypercall page this VMM installs, at the `hypercall_msr` write, is
+eight bytes:
+
+```
+31 d2       xor edx, edx
+b8 02 00 00 00  mov eax, 2      ; HV_STATUS_INVALID_HYPERCALL_CODE
+c3          ret
+```
+
+So **every hypercall a guest hypervisor makes is answered "invalid
+hypercall code"**. That page was written to be honest about implementing
+nothing, and against an operating system it is: a guest that finds no
+enlightenment recommended never calls.
+
+A guest *hypervisor* offered an enlightenment behaves differently. It
+establishes the page - which this VMM sees, `hyperv_hypercall` is written
+- and then validates the interface by using it. Being refused is a
+truthful answer to "does this hypercall work", and the honest conclusion
+from it is that the interface is not usable, which is exactly the
+behaviour observed: the vendor now matches, `Hv#1` matches, the required
+feature bits are set, the recommendation is made, the version is
+reported, and the assist page register is never written.
+
+**This is the same shape as every other finding in this file**, and it is
+worth naming for the last time: an interface answered in part. The
+advertisement is now complete enough to be believed and the mechanism
+behind it still refuses the first question asked of it.
+
+What that means for the next step: enlightened VMCS does not itself need
+a hypercall - the structure and the assist page are memory - but being
+*trusted* evidently does. So the work is to answer the hypercalls a guest
+hypervisor uses to validate, and the way to find out which is the log:
+the page can be changed to record the call code before returning the
+refusal, which costs one boot and names them exactly rather than guessing
+from the specification.
+
+**Do not simply return success.** Answering `0` to a hypercall that did
+nothing is the failure this file has recorded a dozen times, and against
+a guest hypervisor it would be acted on immediately.
