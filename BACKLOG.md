@@ -20156,3 +20156,40 @@ them. Those are hardware-feature and implementation leaves, and the
 reference lists what each bit means; comparing them one at a time is
 reading rather than booting, and it is the only avenue left that has not
 been tried.
+
+### The reading-based avenues are exhausted
+
+`0x40000006` through `0x40000009` are **not part of the probe** - the
+reference names only 0x40000000-0x40000005 and 0x4000000A
+(`hyperv-tlfs.h:30-36`), so answering them as zero is not what stops the
+guest hypervisor.
+
+The features leaf's **EDX** bits, which Xen reads as `misc_features`, are
+all optional capabilities: MWAIT, guest debugging, performance
+monitoring, dynamic partitioning, XMM hypercall parameters, guest idle
+state, frequency MSRs, crash MSR, stimer direct mode
+(`hyperv-tlfs.h:112-134`). This VMM reports zero for every one, which is
+honest because it implements none, and none of them is plausibly required
+for a probe to proceed.
+
+So every leaf in the probe has now been checked against the reference and
+none is obviously wrong:
+
+| leaf | what this VMM says | verdict |
+|---|---|---|
+| 0x40000000 | `Microsoft Hv`, max 0x4000000A | matches what the probe wants |
+| 0x40000001 | `Hv#1` | matches |
+| 0x40000002 | zero | version, not consulted by the probe |
+| 0x40000003 | eax bits 5,6; ebx, edx zero | privileges backed; edx all optional |
+| 0x40000004 | bit 14 | the recommendation itself |
+| 0x40000005 | max_cpus in eax **and ebx** | fixed this session |
+| 0x4000000A | version 1 | matches `KVM_EVMCS_VERSION` |
+
+**That closes what can be settled by reading.** The guest hypervisor is
+told a coherent story and still stops between hearing it and acting on
+it, so the next evidence has to come from the guest rather than from the
+specification - and the cheapest form of it is the log ring, which
+survives what counters do not and which `zpplog` already prints: one line
+per hypervisor leaf answered, with the value, and one at the assist-page
+write. That names what it read and what it did last, in order, which no
+counter in this file can.
