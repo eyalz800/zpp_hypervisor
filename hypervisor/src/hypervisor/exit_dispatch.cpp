@@ -819,10 +819,39 @@ void hypervisor::on_vm_exit(std::uint64_t cpuid,
                 // answered below and nothing else.
                 cpuid_result[0] = hypervisor_leaf_maximum;
 
-                // HyperVisor Name: ZppZppZppZpp.
-                cpuid_result[1] = 0x5a70705a;
-                cpuid_result[2] = 0x705a7070;
-                cpuid_result[3] = 0x70705a70;
+                // HyperVisor Name: ZppZppZppZpp - except when the
+                // enlightened VMCS is offered, where it must be
+                // "Microsoft Hv".
+                //
+                // **Measured, and it is why the first attempt was
+                // declined.** A guest hypervisor probing for the
+                // interface matches the *vendor* here before it looks at
+                // anything else - Xen's `hyperv_probe`,
+                // `.references/xen/xen/arch/x86/guest/hyperv/hyperv.c:46`,
+                // returns NULL unless ebx/ecx/edx spell "Micr", "osof",
+                // "t Hv", and only then reads `Hv#1` at 0x40000001, the
+                // features, and the hints leaf carrying the
+                // enlightenment recommendation. With `ZppZppZppZpp` here
+                // the probe stops at the first check: booted on the rig
+                // with everything else in place, the guest hypervisor
+                // never wrote HV_X64_MSR_VP_ASSIST_PAGE and all three
+                // counters read zero.
+                //
+                // Claiming the name is not claiming the whole interface:
+                // the same probe then requires the hypercall and
+                // processor-index MSRs from the privilege mask below and
+                // gives up if they are missing, so what a guest is
+                // entitled to is still what 0x40000003 says. That is the
+                // contract KVM works to as well.
+                if constexpr (nested_vmx::evmcs_offered) {
+                    cpuid_result[1] = 0x7263694d;
+                    cpuid_result[2] = 0x666f736f;
+                    cpuid_result[3] = 0x76482074;
+                } else {
+                    cpuid_result[1] = 0x5a70705a;
+                    cpuid_result[2] = 0x705a7070;
+                    cpuid_result[3] = 0x70705a70;
+                }
             } else if (nested_vmx::announce_hypervisor &&
                        (interface_leaf == leaf)) {
                 // The interface signature, which is what a guest

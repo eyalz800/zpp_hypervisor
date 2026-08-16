@@ -1133,7 +1133,8 @@ def main():
                "exit_reason_counts",
                "shadow_ept_builds", "shadow_ept_cache_hits",
                "shadow_ept_rebuild_new_root", "shadow_ept_rebuild_stale",
-               "shadow_ept_replayed",
+               "shadow_ept_replayed", "hyperv_vp_assist_writes",
+               "evmcs_reads", "evmcs_writes",
                "hot_state_writes_skipped", "hot_state_writes_done",
                "l2_run_cycles", "l1_run_cycles", "handler_cycles",
                "handler_first_tsc", "handler_last_tsc",
@@ -1183,7 +1184,8 @@ def main():
                "l2_activity_state", "events_requeued", "events_deferred",
                "pending_event", "shadow_ept_builds", "shadow_ept_cache_hits",
                "shadow_ept_rebuild_new_root", "shadow_ept_rebuild_stale",
-               "shadow_ept_replayed",
+               "shadow_ept_replayed", "hyperv_vp_assist_writes",
+               "evmcs_reads", "evmcs_writes",
                "hot_state_writes_skipped", "hot_state_writes_done",
                "l2_run_cycles", "l1_run_cycles", "handler_cycles",
                "handler_first_tsc", "handler_last_tsc",
@@ -1237,6 +1239,14 @@ def main():
     # already shadowed - `invalidate_ept` bumps one global counter, so a
     # permission change on a single page discards every shadow root and
     # each is refilled a fault at a time.
+    # Did the guest hypervisor accept the enlightened VMCS offer? A
+    # switch is not on until a counter says the code ran.
+    print("\ncpu  vp-assist-writes  evmcs-reads  evmcs-writes")
+    for cpu in range(args.cpus):
+        print(f"{cpu:3d}  {read('hyperv_vp_assist_writes', cpu):-16d}  "
+              f"{read('evmcs_reads', cpu):-11d}  "
+              f"{read('evmcs_writes', cpu):-12d}")
+
     print("\ncpu  replayed-leaves  faulted-leaves")
     for cpu in range(args.cpus):
         print(f"{cpu:3d}  {read('shadow_ept_replayed', cpu):-15d}  "
