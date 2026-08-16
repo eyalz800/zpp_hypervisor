@@ -352,10 +352,22 @@ somewhere else entirely.
   on the more specific claim, and starts using synthetic MSRs that do not exist
   here.
 
-  **Checked on 2026-08-10: the rig does not pass `hv-passthrough`.** Both
-  launchers run plain `-cpu host,kvm=on,topoext` and neither mentions `hv-` at
-  all, so what is underneath advertises its own interface rather than a
-  Hyper-V one. This paragraph used to assert the opposite, and asserting it
+  **Re-read on 2026-08-17: that check was wrong, and only half of it was
+  ever true.** It said "the rig does not pass `hv-passthrough`; both
+  launchers run plain `-cpu host,kvm=on,topoext` and neither mentions
+  `hv-` at all". Only `boot-zpp.sh` does. **`boot.sh` - the plain-KVM
+  launcher, the one reached for as a control - runs
+  `-cpu host,kvm=on,hv-passthrough,topoext`**, and also uses a different
+  QEMU binary (`qemu-system-x86_64` against
+  `/home/tc/vm/qemu-system-x86_64-new`) and 1.5 GB more guest RAM. So the
+  two launchers differ in four substantive ways and a comparison between
+  them is **not** a single-variable control until they are equalised.
+
+  What survives of the original point is what matters under
+  `boot-zpp.sh`, which is the launcher every measurement in this tree
+  uses: it passes no `hv-` flag, so nothing underneath advertises a
+  Hyper-V interface to us there. The paragraph before it asserted the
+  opposite of that, and asserting it
   cost a boot and a wrong conclusion: an experiment that forwarded the whole
   range downward was read as "the guest was given the Hyper-V frequency MSRs
   and still failed", when those MSRs were never there to give. **Read the
