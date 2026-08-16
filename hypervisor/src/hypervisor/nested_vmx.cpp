@@ -1966,6 +1966,24 @@ bool hypervisor::on_guest_vmlaunch(std::size_t cpu,
                 this->reference_read_count[cpu] + 1;
         }
 
+        // The answer to a reflected `HvCallModifyVtlProtectionMask`,
+        // readable here for the same reason and at the same instant as
+        // the reference-counter answer above: the guest hypervisor has
+        // loaded its guest's registers and RAX holds what it is about to
+        // be told. Bits 15:0 are the status, bits 43:32 the reps
+        // completed.
+        //
+        // Cleared either way, so an answer that is never collected
+        // cannot attach itself to a later unrelated entry.
+        if (this->vtl_protect_answer_pending[cpu]) {
+            this->vtl_protect_answer_pending[cpu] = false;
+
+            auto slot = this->vtl_protect_answer_slot[cpu];
+            if (slot < vtl_protect_capacity) {
+                this->vtl_protect_rax[cpu][slot] = context.rax;
+            }
+        }
+
         publish_reference_tsc_page(cpu);
     }
 

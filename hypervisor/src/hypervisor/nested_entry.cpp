@@ -7569,134 +7569,64 @@ hypervisor::on_l2_exit(std::size_t cpu,
                 arm_vtl_step(cpu, 1);
             }
 
-            // `HvCallModifyVtlProtectionMask`, which this file has
-            // watched being issued for ever without ever asking the one
-            // question that separates the two explanations: **is it the
-            // same page every time, or a different one?**
+            // `HvCallModifyVtlProtectionMask`, decoded rather than
+            // censused raw.
             //
-            // A different page each time is the guest making progress -
-            // grinding a large set, one trust-level round trip per page,
-            // which is what validating memory looks like. The same page
-            // repeatedly is a loop, and the question becomes what the
-            // caller tests afterwards that is still not satisfied.
+            // RCX is a structured control word, not an opaque value -
+            // `.references/xen/xen/arch/x86/include/asm/guest/hyperv-tlfs.h:419-425`:
+            // bits 15:0 the call code, bit 16 the fast form, bits 43:32
+            // the **rep count**, bits 59:48 the **rep start index**.
+            // This is a rep hypercall, and those two fields answer both
+            // open questions without interpreting any address:
             //
-            // An earlier capture reported "alternating until the reset,
-            // every entry identical", but that was identical
-            // *registers* at one instant, which is not an identical
-            // page, and nobody separated them.
+            // - rep count multiplies the call rate into a page rate. At
+            //   107 calls a second, a count near the 4,095 maximum makes
+            //   the whole of guest memory a few seconds of work and
+            //   kills the throughput framing outright; a count of one
+            //   makes it real.
+            // - rep start says whether the guest is *resuming*. A rep
+            //   call that cannot finish its slice returns
+            //   `HV_STATUS_TIMEOUT` with reps-completed set, and the
+            //   caller reissues with rep start advanced. Advancing is
+            //   progress; returning to zero is a fresh request; **not
+            //   advancing while the call repeats is a livelock**.
             //
-            // **A ring, not a table.** This file records a fixed table
-            // that filled with early-boot values and then counted every
-            // later one as overflow, which was read as "hundreds of
-            // thousands of distinct addresses" when it means only "more
-            // than the eight caught first". A ring always describes a
-            // recent window and cannot fill.
+            // And RDX is not a meaningless sentinel: `0xffffffffffffffff`
+            // is `HV_PARTITION_ID_SELF`, the first field of the input
+            // header, so it is behaving exactly as the interface says
+            // and it is kept as a check on the register order rather
+            // than as data.
             //
-            // Registers rather than the hypercall input page: the input
-            // is a second-level guest-physical address and reading it
-            // would cost a walk of the level above's tables on a path
-            // taken twice per round trip. Both candidates are recorded
-            // so the data can say which one carries the page, rather
-            // than this comment guessing.
+            // The answer is collected where the reference-counter answer
+            // already is - at the next second-level entry, where the
+            // guest hypervisor has loaded its guest's registers and RAX
+            // holds what it is about to be told. Bits 15:0 are the
+            // status and 43:32 the reps completed.
             constexpr std::uint64_t modify_vtl_protection_code = 0x0c;
 
             if ((modify_vtl_protection_code == code) && (cpu < max_cpus)) {
                 auto & count = this->vtl_protect_count[cpu];
                 auto slot = count % vtl_protect_capacity;
 
+                this->vtl_protect_rcx[cpu][slot] = context.rcx;
                 this->vtl_protect_rdx[cpu][slot] = context.rdx;
-                this->vtl_protect_rbp[cpu][slot] = context.rbp;
+                this->vtl_protect_rax[cpu][slot] = 0;
 
-                // Consecutive repetition, which is the cheapest form of
-                // the question and needs no ring to read.
-                if (count && (context.rdx == this->vtl_protect_last[cpu])) {
-                    this->vtl_protect_repeated[cpu] =
-                        this->vtl_protect_repeated[cpu] + 1;
-                }
+                this->vtl_protect_answer_slot[cpu] = slot;
+                this->vtl_protect_answer_pending[cpu] = true;
 
-                this->vtl_protect_last[cpu] = context.rdx;
                 count = count + 1;
+            }
 
-                // **Does it sweep forward and finish, or go back over
-                // ground it has already covered?** The two futures are
-                // different problems: a monotonic sweep is a throughput
-                // question with a concrete factor attached, and a guest
-                // re-doing work points at something this VMM discards
-                // that the guest expects to persist.
-                //
-                // RBP is the register that carries the page - RDX is
-                // `0xffffffffffffffff` on every call, a sentinel, which
-                // is why both are recorded. Zero entries are the other
-                // half of the pair and are skipped rather than treated
-                // as page zero.
-                //
-                // The bounds are taken from the data, not assumed. All
-                // of guest RAM is 2.8 million pages and the guest may
-                // sweep a fraction of it; a sweep of a tenth finishing
-                // in forty-five minutes is a different problem from one
-                // over the whole taking seven hours, and only the least
-                // and greatest actually seen can tell them apart.
-                // **Bounded before it is admitted, and the rejects
-                // counted rather than dropped.** The first census over
-                // this register reported a range ending at
-                // `0xffe3ffffffffffff` - seventy thousand petabytes -
-                // which is not a page number, so RBP carries other
-                // things on some of these calls and a min/max over it
-                // is meaningless. The ring did not show that, because a
-                // ring of the last thirty-two entries happened to hold
-                // only clean ones.
-                //
-                // A filter that silently drops what it dislikes is its
-                // own way of lying, so the rejects are counted: if
-                // `rejected` is large the register is the wrong source
-                // and the answer is to read the hypercall's own input
-                // structure instead, whatever the admitted values look
-                // like.
-                //
-                // The bound is the guest's physical address width rather
-                // than a round number - anything at or above it cannot
-                // be a page frame this guest owns.
-                auto page_bound = std::uint64_t{1}
-                                  << (physical_address_bits() - 12);
-
-                if ((0 != context.rbp) && (context.rbp >= page_bound)) {
-                    this->vtl_protect_rejected[cpu] =
-                        this->vtl_protect_rejected[cpu] + 1;
-                } else if (0 != context.rbp) {
-                    auto page = context.rbp;
-                    auto & low = this->vtl_protect_page_low[cpu];
-                    auto & high = this->vtl_protect_page_high[cpu];
-
-                    if ((0 == this->vtl_protect_pages[cpu]) ||
-                        (page < low)) {
-                        low = page;
-                    }
-                    if (page > high) {
-                        high = page;
-                    }
-
-                    if (this->vtl_protect_pages[cpu]) {
-                        auto previous = this->vtl_protect_last_page[cpu];
-
-                        if (page > previous) {
-                            this->vtl_protect_forward[cpu] =
-                                this->vtl_protect_forward[cpu] + 1;
-                        } else if (page < previous) {
-                            // The wrap count. Near zero over a long run
-                            // means one pass in order; climbing means
-                            // the guest keeps starting again.
-                            this->vtl_protect_backward[cpu] =
-                                this->vtl_protect_backward[cpu] + 1;
-                        } else {
-                            this->vtl_protect_step_same[cpu] =
-                                this->vtl_protect_step_same[cpu] + 1;
-                        }
-                    }
-
-                    this->vtl_protect_last_page[cpu] = page;
-                    this->vtl_protect_pages[cpu] =
-                        this->vtl_protect_pages[cpu] + 1;
-                }
+            // The decode's own control, and the reason it is here rather
+            // than in a comment: `HvCallVtlCall` is **not** a rep
+            // hypercall, so its rep count and rep start must both be
+            // zero. If they are not, the shifts above are wrong and
+            // nothing measured with them counts. That is the "cannot be
+            // anything else" check this session found missing when a
+            // frame pointer was read as a page number.
+            if ((vtl_call_code == code) && (cpu < max_cpus)) {
+                this->vtl_call_rcx[cpu] = context.rcx;
             }
         }
 

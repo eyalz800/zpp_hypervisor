@@ -1126,12 +1126,9 @@ def main():
     base = int(base, 16)
 
     members = ["cpl_seen", "guest_leaf_permissions",
-               "vtl_protect_rdx", "vtl_protect_rbp",
-               "vtl_protect_count", "vtl_protect_repeated",
-               "vtl_protect_pages", "vtl_protect_page_low",
-               "vtl_protect_page_high", "vtl_protect_forward",
-               "vtl_protect_backward", "vtl_protect_step_same",
-               "vtl_protect_rejected",
+               "vtl_protect_rcx", "vtl_protect_rdx",
+               "vtl_protect_rax", "vtl_protect_count",
+               "vtl_call_rcx",
                "shadow_leaf_permissions", "exit_trace", "exit_trace_count", "l2_exit_trace",
                "l2_exit_trace_count", "l2_working_trace",
                "l2_working_trace_count", "l2_entries", "l2_activity_state",
@@ -1250,16 +1247,10 @@ def main():
     # permission histograms are [max_cpus][8], so each needs the whole
     # array, not one word.
     monitor.queue(instance + off["cpl_seen"], scalar_cpus * 4)
-    monitor.queue(instance + off["vtl_protect_rdx"], scalar_cpus * 32)
-    monitor.queue(instance + off["vtl_protect_rbp"], scalar_cpus * 32)
+    for name in ("vtl_protect_rcx", "vtl_protect_rdx", "vtl_protect_rax"):
+        monitor.queue(instance + off[name], scalar_cpus * 32)
     monitor.queue(instance + off["vtl_protect_count"], scalar_cpus)
-    monitor.queue(instance + off["vtl_protect_repeated"], scalar_cpus)
-    for name in ("vtl_protect_pages", "vtl_protect_page_low",
-                 "vtl_protect_page_high", "vtl_protect_forward",
-                 "vtl_protect_backward", "vtl_protect_step_same",
-               "vtl_protect_rejected",
-                 "vtl_protect_rejected"):
-        monitor.queue(instance + off[name], scalar_cpus)
+    monitor.queue(instance + off["vtl_call_rcx"], scalar_cpus)
     monitor.queue(instance + off["guest_leaf_permissions"], scalar_cpus * 8)
     monitor.queue(instance + off["shadow_leaf_permissions"],
                   scalar_cpus * 8)
@@ -1327,51 +1318,55 @@ def main():
                 print(f"  cpu {cpu}  {i:03b}  guest {g:>12,}  "
                       f"composed {c:>12,}")
 
-    # Same page every time, or a different one? The ring is always
-    # recent, so it cannot fill with early-boot values the way the fixed
-    # table this script's notes describe did.
+    # HvCallModifyVtlProtectionMask, decoded rather than censused raw.
+    # RCX is structured: bits 15:0 call code, bit 16 fast, bits 43:32 rep
+    # count, bits 59:48 rep start. Printed in full for a handful of calls
+    # before any aggregate, because an aggregate over a misdecoded field
+    # is exactly the failure this replaces.
+    def decode(rcx):
+        return (rcx & 0xffff, (rcx >> 16) & 1,
+                (rcx >> 32) & 0xfff, (rcx >> 48) & 0xfff)
+
     for cpu in range(args.cpus):
         total = read('vtl_protect_count', cpu) or 0
         if not total:
             continue
-        repeated = read('vtl_protect_repeated', cpu) or 0
-        print(f"\ncpu {cpu} HvCallModifyVtlProtectionMask: {total:,} calls, "
-              f"{repeated:,} repeating the one before "
-              f"({100.0 * repeated / total:.1f}%)")
-        cap = 32
-        rdx = [read('vtl_protect_rdx', cpu * cap + i) for i in range(cap)]
-        rbp = [read('vtl_protect_rbp', cpu * cap + i) for i in range(cap)]
-        order = [(total - cap + i) % cap for i in range(cap)] \
-            if total >= cap else list(range(min(total, cap)))
-        seen_rdx = {rdx[i] for i in order if rdx[i] is not None}
-        seen_rbp = {rbp[i] for i in order if rbp[i] is not None}
-        print(f"  distinct in the last {len(order)}: "
-              f"rdx {len(seen_rdx)}, rbp {len(seen_rbp)}")
-        for i in order[-12:]:
-            print(f"    rdx 0x{(rdx[i] or 0):016x}  rbp 0x{(rbp[i] or 0):016x}")
 
-        # The census, which the ring cannot give: one pass in order has a
-        # backward count near zero, a guest re-doing work has one that
-        # climbs. Bounds from what was seen, never assumed - the guest
-        # may sweep a fraction of memory.
-        pages = read('vtl_protect_pages', cpu) or 0
-        if pages:
-            low = read('vtl_protect_page_low', cpu) or 0
-            high = read('vtl_protect_page_high', cpu) or 0
-            fwd = read('vtl_protect_forward', cpu) or 0
-            back = read('vtl_protect_backward', cpu) or 0
-            same = read('vtl_protect_step_same', cpu) or 0
-            span = high - low + 1
-            rejected = read('vtl_protect_rejected', cpu) or 0
-            print(f"  rejected as not-a-page {rejected:,}  "
-                  f"(large = RBP is the wrong source)")
-            print(f"  pages carried {pages:,}   steps forward {fwd:,}  "
-                  f"BACKWARD {back:,}  same {same:,}")
-            print(f"  page range 0x{low:x}..0x{high:x}  = "
-                  f"{span:,} pages, {span * 4096 / 2**30:.2f} GiB")
-            if pages > 1:
-                print(f"  backward share {100.0 * back / (pages - 1):.2f}%"
-                      "  (near zero = one pass in order)")
+        # The decode's control first. HvCallVtlCall carries no reps, so
+        # a nonzero rep count here means the shifts are wrong and
+        # nothing below counts.
+        control = read('vtl_call_rcx', cpu) or 0
+        c_code, c_fast, c_reps, c_start = decode(control)
+        verdict = ("DECODE OK" if (c_reps == 0 and c_start == 0)
+                   else "DECODE WRONG - rep fields nonzero on a non-rep call")
+        print(f"\ncpu {cpu} decode check: HvCallVtlCall rcx=0x{control:016x} "
+              f"code=0x{c_code:x} fast={c_fast} reps={c_reps} "
+              f"start={c_start}  <- {verdict}")
+
+        print(f"cpu {cpu} HvCallModifyVtlProtectionMask: {total:,} calls")
+        cap = 32
+        order = ([(total - cap + i) % cap for i in range(cap)]
+                 if total >= cap else list(range(min(total, cap))))
+        starts = []
+        for i in order[-14:]:
+            rcx = read('vtl_protect_rcx', cpu * cap + i) or 0
+            rdx = read('vtl_protect_rdx', cpu * cap + i) or 0
+            rax = read('vtl_protect_rax', cpu * cap + i) or 0
+            code, fast, reps, start = decode(rcx)
+            done = (rax >> 32) & 0xfff
+            status = rax & 0xffff
+            self_id = "SELF" if rdx == 0xffffffffffffffff else f"0x{rdx:x}"
+            print(f"    code=0x{code:03x} fast={fast} reps={reps:5d} "
+                  f"start={start:5d} | answer status=0x{status:04x} "
+                  f"done={done:5d} | partition={self_id}")
+        for i in order:
+            rcx = read('vtl_protect_rcx', cpu * cap + i)
+            if rcx:
+                starts.append(decode(rcx)[3])
+        if starts:
+            print(f"  rep start over the last {len(starts)}: "
+                  f"{len(set(starts))} distinct, "
+                  f"min {min(starts)} max {max(starts)}")
 
     print("\ncpu  shadow-builds  cache-hits  evictions  resets  leaves-filled")
     for cpu in range(args.cpus):

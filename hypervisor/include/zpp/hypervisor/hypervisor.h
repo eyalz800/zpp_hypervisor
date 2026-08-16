@@ -8846,87 +8846,68 @@ private:
     volatile std::uint64_t guest_leaf_permissions[max_cpus][8]{};
 
     /**
-     * The last `vtl_protect_capacity` requests of
-     * `HvCallModifyVtlProtectionMask`, and how many repeated the one
-     * before them.
+     * The last `vtl_protect_capacity` `HvCallModifyVtlProtectionMask`
+     * control words, the partition id beside each, and the answer the
+     * guest hypervisor gave.
      *
-     * The question these answer has never been asked: the call is issued
-     * for ever, the protections it asks for **do** land - measured, see
-     * `install_shadow_leaf` - so the caller is not asking again because
-     * the change failed. Either it is a different page each time, which
-     * is progress through a large set, or the same page, which is a
-     * loop. An earlier capture said "every entry identical", but that
-     * was identical registers at one instant rather than an identical
-     * page, and the two were never separated.
+     * **Decoded, never censused raw.** RCX is structured -
+     * `.references/xen/xen/arch/x86/include/asm/guest/hyperv-tlfs.h:419-425`
+     * - with the call code in bits 15:0, the fast form in bit 16, the
+     * rep count in bits 43:32 and the rep start index in bits 59:48. A
+     * census over the whole register would report one distinct value
+     * whenever the rep start happens to be stable and would hide the
+     * field being read, which is the failure this replaces: the previous
+     * instrument censused RBP, a frame pointer, and its incrementing
+     * values were read as page numbers until a later boot showed the
+     * same field at zero.
      *
-     * **A ring rather than a table**, because this file records a fixed
-     * table filling with early-boot values and its overflow counter then
-     * being read as "hundreds of thousands of distinct addresses" when
-     * it meant "more than the few caught first". A ring always describes
-     * a recent window.
+     * The two fields answer the two open questions with no address to
+     * interpret. Rep count turns a call rate into a page rate. Rep start
+     * says whether the caller is resuming a call that timed out - a rep
+     * hypercall that cannot finish its slice returns
+     * `HV_STATUS_TIMEOUT` with reps-completed set, and the caller
+     * reissues from where it stopped. Advancing is progress; returning
+     * to zero is a new request; **not advancing while the call repeats
+     * is a livelock**.
      *
-     * Two registers, because which one carries the page is not something
-     * this declaration should guess. Reading the hypercall's input page
-     * instead would cost a walk of the level above's tables on a path
-     * taken twice per trust-level round trip.
+     * `vtl_protect_rdx` is kept as a check rather than as data: the
+     * value is `HV_PARTITION_ID_SELF`, the first field of the input
+     * header, so it confirms the register order the decode assumes.
+     *
+     * The answer is collected at the next second-level entry, where the
+     * guest hypervisor has loaded its guest's registers - the same point
+     * and the same mechanism the reference-counter answer uses. Bits
+     * 15:0 of RAX are the status, bits 43:32 the reps completed. **Note
+     * which level answers**: this call is the guest hypervisor's guest
+     * asking the guest hypervisor, so the status is Hyper-V's and not
+     * this VMM's. Reps completed coming back zero would make the
+     * question "what is this VMM doing to Hyper-V that stops it
+     * finishing a rep", which is where shadow-table retention would
+     * reconnect on evidence rather than by analogy.
      * @{
      */
     static constexpr std::size_t vtl_protect_capacity = 32;
+    std::uint64_t vtl_protect_rcx[max_cpus][vtl_protect_capacity]{};
     std::uint64_t vtl_protect_rdx[max_cpus][vtl_protect_capacity]{};
-    std::uint64_t vtl_protect_rbp[max_cpus][vtl_protect_capacity]{};
+    std::uint64_t vtl_protect_rax[max_cpus][vtl_protect_capacity]{};
     std::uint64_t vtl_protect_count[max_cpus]{};
-    std::uint64_t vtl_protect_repeated[max_cpus]{};
-    std::uint64_t vtl_protect_last[max_cpus]{};
+    std::size_t vtl_protect_answer_slot[max_cpus]{};
+    bool vtl_protect_answer_pending[max_cpus]{};
 
     /**
-     * Whether the sweep goes forward and finishes, or keeps starting
-     * again - as a census over every request, not a ring.
+     * The control word of an `HvCallVtlCall`, which is **not** a rep
+     * hypercall - so its rep count and rep start must both decode to
+     * zero.
      *
-     * The ring above says the pages are distinct and consecutive; it
-     * cannot say whether the sequence is one pass. Two samples of it
-     * three minutes apart held 4.70 GiB and then 118 MiB, which at the
-     * measured 107 pages a second cannot be a forward wrap - so it went
-     * backwards, and two samples cannot distinguish several regions
-     * swept in some order from the same region swept twice.
-     *
-     * `backward` is the number that decides it. Near zero over a long
-     * run is one pass in order, and the problem is throughput. Climbing
-     * is the guest re-doing work it has already done, and this file
-     * already holds the mechanism for that: our shadow discards a root's
-     * tables on every `invept`, where KVM keeps its shadow pages and
-     * revalidates them.
-     *
-     * `low` and `high` are taken from what is actually seen. All of
-     * guest RAM is 2,883,584 pages and the guest may sweep a fraction of
-     * it - a sweep over a tenth finishing in forty-five minutes is a
-     * different problem from one over the whole taking seven hours, and
-     * assuming the bound would answer the wrong one.
-     * @{
+     * The decode's own control. If a call known to carry no reps comes
+     * back with a nonzero rep count, the shifts are wrong and nothing
+     * measured with them counts. This is the "cannot be anything else"
+     * check that was missing when an incrementing frame pointer was
+     * believed to be a page number because 4.70 GiB is a plausible place
+     * for one.
      */
-    std::uint64_t vtl_protect_pages[max_cpus]{};
-    std::uint64_t vtl_protect_page_low[max_cpus]{};
-    std::uint64_t vtl_protect_page_high[max_cpus]{};
-    std::uint64_t vtl_protect_forward[max_cpus]{};
-    std::uint64_t vtl_protect_backward[max_cpus]{};
-    std::uint64_t vtl_protect_step_same[max_cpus]{};
-    std::uint64_t vtl_protect_last_page[max_cpus]{};
-
-    /**
-     * Requests whose RBP could not be a page frame of this guest.
-     *
-     * Counted rather than silently skipped, because a filter that drops
-     * what it dislikes is its own way of lying. The first census over
-     * this register reported a range ending at `0xffe3ffffffffffff`,
-     * which is not an address in any guest - so RBP carries something
-     * else on some of these calls, and a minimum and maximum taken over
-     * it described nothing. The ring did not reveal it: thirty-two
-     * recent entries happened to be clean.
-     *
-     * If this is large, the register is the wrong source and the answer
-     * is to read the hypercall's own input structure - whatever the
-     * admitted values happen to look like.
-     */
-    std::uint64_t vtl_protect_rejected[max_cpus]{};
+    std::uint64_t vtl_call_rcx[max_cpus]{};
+    /** @} */
     /** @} */
     /** @} */
 
