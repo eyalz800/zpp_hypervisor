@@ -44,7 +44,7 @@ option(ZPP_STEP_VTL
 
 option(ZPP_DEFER_GUEST_STATE
     "Defer the bulk copy of the second-level guest's state."
-    OFF)
+    ON)
 
 option(ZPP_SHADOW_GUEST_STATE
     "Run the deferred guest-state copy in shadow."

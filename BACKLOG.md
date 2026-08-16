@@ -17981,3 +17981,64 @@ strength of an experiment that never ran.
 If (1) is non-zero and (2) does **not** move, that is a real refutation
 of the cost model rather than a measurement of an absence - and it would
 be the first one.
+
+## Item 2, measured for real: 1.136x, and the cost model is confirmed
+
+The first boot in which the deferral actually ran. Gate checked before
+any timing was read, as the predictions demanded:
+`guest_state_reads_skipped` **36,864,520** against 1,675,660 done. The
+four previous "measurements" of this change were measurements of its
+absence.
+
+Like for like against the item-1-only profile, both in the settled
+regime at comparable exit counts (2.42 M against 2.71 M):
+
+| | item 1 only | with item 2 |
+|---|---|---|
+| `save_l2_state` | 198,309 | **52,792** |
+| `reflect_l2_exit` | 323,292 | **190,152** |
+| `build_vmcs02` | 162,430 | 156,171 |
+| `load_l1_host_state` | 40,450 | 44,000 |
+| inside this VMM | 409,447 | **353,618** |
+| wall clock per exit | 462,843 | **407,257** |
+| CPL 3 entries | 0 | **0** |
+
+**1.136x on wall clock per exit**, about **1.31x** cumulative with item 1.
+
+**The cost model is confirmed and is no longer withdrawn.** 44 reads at
+~2,760 cycles predicted ~121,000; `save_l2_state` fell by ~145,500. Exit
+cost does scale with VMCS access count. The "refutation" recorded two
+rounds ago was produced by a build in which the switch never reached the
+compiler, and it is void - as is the "+11.2% regression" that preceded
+it.
+
+Predictions: 1 correct (skip non-zero), 2 correct and beaten (52,792
+against a predicted 70,000-100,000), 3 correct (`build_vmcs02` steady),
+4 **wrong** - handler cycles fell to 353,618 against a predicted
+290,000-320,000, so the saving is real but smaller than the phase
+arithmetic alone implied, 5 correct (2 module loads, no reset loop), 6
+correct (Windows not in recovery), 7 correct (**the circle did not
+move**).
+
+**A cross-regime reading was avoided and is worth recording as a
+near miss.** The first dump of this boot showed `save_l2_state` at
+51,237 with `load_l1_host_state` at 157,735 and `build_vmcs02` at
+230,939 - both far above their item-1 figures - because the guest was
+still in the extended-page-table fill regime with a 15.6 ms tick. Read
+then, it would have said item 2 made two unrelated phases four times
+worse. The same confound produced a wrong conclusion earlier in this
+file. **Compare only at comparable exit counts and tick regimes.**
+
+### Where the remaining cycles are
+
+`reflect_l2_exit` 190,152 and `build_vmcs02` 156,171 sum to 346,323
+against a measured 353,618 inside this VMM, so those two containers are
+substantially the whole handler and everything else is nested in them.
+The largest named term inside is **`merge_nested_bitmaps` at 67,909
+cycles on 904,307 calls - once per second-level entry, about 19% of the
+handler.** It has a cache (`nested_bitmap_is_ours`, invalidated by
+`forget_nested_bitmaps`), so the question for the next round is why a
+cached merge still costs that per entry.
+
+Next after it by size: `copy_shadow_to_vmcs12` at 53,100 on 957,822
+calls, and `load_l1_host_state`'s residual 44,000.

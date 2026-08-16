@@ -120,8 +120,8 @@ option(ZPP_SHADOW_GUEST_STATE
     OFF)
 
 option(ZPP_DEFER_GUEST_STATE
-    "Defer the bulk copy of the second-level guest's state out of vmcs02 into vmcs12 until something reads it. Worth about 1.16x and has reset the rig's guest on all three attempts; three ordering conditions are found and fixed and a fourth is not characterised. Do not enable for a rig boot without a new condition to test."
-    OFF)
+    "Defer the bulk copy of the second-level guest's state out of vmcs02 into vmcs12 until something reads it. Measured on the rig at 1.136x: save_l2_state 198,309 -> 52,792 cycles/call, wall clock per exit 462,843 -> 407,257. Four ordering conditions are found, fixed, and covered by tests/nested_exit's sequence cases; the fourth was flush_guest_vmcs12 copying the whole vmcs12 back on every VMPTRLD."
+    ON)
 
 option(ZPP_STEP_VTL
     "Step the trust-level loop with the monitor trap flag, recording every instruction each side executes with its bytes. The only instrument that can see inside a loop which takes no exits - and an exit per retired instruction, measured at 5.8% of all exits on the rig, which is enough to move the guest between regimes. Never leave it on for a boot being compared against another."
