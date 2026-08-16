@@ -20721,3 +20721,43 @@ a failure that eleven boots' worth of counters had mischaracterised
 twice. The counters describe what this VMM did; the monitor describes
 what the machine is doing, and the second is what "the circle is stuck"
 is a statement about.
+
+## The eVMCS build: firmware loops on one function, forever
+
+Eight minutes on the `ZPP_EVMCS=ON` build, read through the monitor and
+the proven reader:
+
+```
+exits 2,783 -> 2,831 over eight minutes   l2-entries 0   CPL 30/30 zero
+RIP samples: 6 of 8 at 0x7ed8411a
+xp 0x7ed84118:  da ed 48 83 c4 40 5b 5e
+```
+
+`0x7ed8411a` is `48 83 c4 40` - `add rsp, 0x40` - followed by `pop rbx`,
+`pop rsi`. **A function epilogue.** So the firmware is not spinning on one
+instruction; it is calling one function over and over and the sampler
+keeps landing in its return path.
+
+**And it never leaves.** Forty-eight exits in eight minutes, no
+second-level entry, no ring 3, no host exception, and Windows kernel
+addresses seen earlier in the same run - so it got into Windows, came
+back, and is now looping in firmware indefinitely.
+
+**This also refutes the VBS theory.** The idea was that announcing a
+hypervisor makes Windows decline virtualization-based security and boot
+plainly - which would have made this build harmless and the whole eVMCS
+approach self-defeating. It does not: Windows does not reach ring 3 in
+this build either, so it is not booting-without-VBS, it is not booting.
+
+### The next step is now a single address
+
+`0x7ed8411a` is in the firmware's range and the function around it can be
+disassembled directly from guest memory with `xp` - no hypervisor
+instrumentation, no boot needed beyond one to hold the state. Walking
+back from that epilogue to the function's entry, and reading what it
+polls, names what the firmware is waiting for.
+
+**That is the narrowest the problem has ever been**, and it took reading
+a running guest through the monitor rather than adding counters - which
+is what the rig notes prescribe for a guest that is up, and what this
+session reached for last instead of first.
