@@ -18088,3 +18088,28 @@ displayed it indented under `on_l2_ept_fault` as "of which guest read",
 so this cost has been reading as part of the extended-page-table fault
 path. Nothing above changes - the cycles were always in the merge - but
 the attribution did, and it is the term that matters most now.
+
+#### Why all three pages are read: Hyper-V uses I/O bitmaps too
+
+Settled without a boot, from the primary controls already measured.
+`merge_page`'s `read_theirs` comes from vmcs12's primary controls, and
+Hyper-V's are **`0x96a069fe`**. SDM Table 25-6 puts "Use I/O bitmaps" at
+bit 25 (`.references/sdm.txt:199497`) and "Use MSR bitmaps" at bit 28,
+and both are set:
+
+```
+bit 25 (use I/O bitmaps):   SET
+bit 28 (use MSR bitmaps):   SET
+```
+
+So `their_msr_bitmap` and `their_io_bitmaps` are both true, all three
+pages take the read branch, and `nested_bitmap_is_ours` is never
+consulted. The comment above the flag predicts the opposite - "a guest
+hypervisor that uses MSR bitmaps and no I/O bitmaps, which is Hyper-V's
+shape" - and that prediction is wrong for this guest. It was written
+before a real guest hypervisor had ever run here.
+
+**Consequence for the cache**: it must cover all three pages, not one,
+and the write-watch has to be armed on three guest-physical pages whose
+addresses come from vmcs12 and can change. The cached-branch flag stays
+useful only for a guest hypervisor that does *not* name a given bitmap.
