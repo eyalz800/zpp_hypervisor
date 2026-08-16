@@ -19712,3 +19712,56 @@ is being exercised.
   tick, 54% of it the guest hypervisor's own VMX instructions - and ring
   3 reached with nested VMX off, which proves everything else in this VMM
   carries Windows to user mode.
+
+## The enlightenment build hangs the guest early - every zero explained
+
+Read through the proven reader, seven and a half minutes in:
+
+```
+reader proven: host_page_table[0] = 0x6966b023
+
+cpu  exits   l2-entries
+  0    2783           0
+```
+
+**2,783 exits and no second-level entry at all.** A boot of the default
+build runs millions of exits and about 800,000 second-level entries in
+the same window. So the `ZPP_EVMCS=ON` build does not get far enough for
+the guest hypervisor to exist, let alone to read an advertisement.
+
+**That explains every zero in this stretch at once** - no
+hypervisor-range CPUID, no hypercall, no assist page register, no
+enlightened VM entry - and it retires the whole line of reasoning built
+on them. The offer is not declined. The guest never reaches the point of
+considering it.
+
+It also retires the sampling-time hypothesis in the entry above: seven
+minutes was long enough, and the guest was not slow, it was stopped.
+
+### What is wrong is in the advertisement itself
+
+The default build boots; the same tree with `ZPP_EVMCS=ON` stops in the
+first few thousand exits. The switch changes exactly four things:
+
+1. the vendor at 0x40000000 becomes "Microsoft Hv";
+2. `announce_hypervisor` turns on, which also sets CPUID.1:ECX[31] and
+   answers the interface, version, features, recommendations and limits
+   leaves;
+3. a nested-features leaf at 0x4000000A and a higher maximum leaf;
+4. `HV_X64_MSR_VP_ASSIST_PAGE` is accepted, the hypercall page traps, and
+   the vmcall case answers first-level hypercalls.
+
+One of those stops the guest in the first few thousand exits, and the
+first two are the ones that change what *Windows itself* sees before any
+hypervisor starts - which is the right place to look, because 2,783
+exits is far too early for Hyper-V.
+
+**The bisect is cheap and needs no new instrument**: the switch already
+gates all four, and splitting it into two - the CPUID half and the MSR
+half - names the offender in one boot each, with `exits` and
+`l2-entries` as the verdict and the reader now proven.
+
+**This is the first honest statement of the problem's shape**, and it
+took proving the reader to get here: three fictions and a wrong theory
+came from believing an instrument that had never been checked against a
+known value.
