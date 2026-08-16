@@ -19578,3 +19578,46 @@ Leave it alone until the reader is proven against a known value.
   independently known, in the same dump, **before** believing anything
   read through it. Three findings this session were fiction for want of
   that, and the rule was already written down.
+
+### And the 187 does not reproduce - the reader is the problem, not the guest
+
+Queued explicitly rather than merely registered, booted again:
+`cpuid_hypervisor_leaves_asked` printed **nothing** - falsy - where the
+previous boot read **187** through a path where it was never queued at
+all.
+
+A counter that reads 187 when unfetched and 0 when fetched is not
+measuring anything. **So the 187 joins the 104**: withdrawn, and the
+entry above it that reasoned from it - "the offer is seen, so what is
+missing is in what the leaves say" - is unfounded. Whether the guest
+hypervisor reads the advertisement is **unknown**.
+
+**Four fictions from this reader in one session.** The pattern is now
+unmistakable and worth stating plainly for whoever picks this up: this
+dump script's read path produces confident, plausible, *wrong* numbers
+for members that were added without being queued correctly, and it does
+so silently in both directions - absent members returning values,
+present ones returning nothing.
+
+**Nothing further should be read through it until it is proven.** Not
+narrowed, not worked around: proven, by printing a member whose value is
+independently known - the module base is in `serial.out`, and
+`host_page_table`'s first quadword is a present PML4 entry ending `023`,
+which this file already prescribes as the arithmetic sanity check and
+which nobody has run against these additions.
+
+### What is actually known, after all of it
+
+- The enlightened VMCS implementation exists, is complete, and is
+  desk-tested with fault injection that fails on a field mix-up. **None
+  of that depended on the rig reader.**
+- The chain that motivated it is measured and stands: 5.8% guest share,
+  a 6.64 ms trust-level round trip against a 1.74 ms tick, 54% of that
+  round trip being the guest hypervisor's own VMX instructions, and ring
+  3 reached with nested VMX off.
+- **Whether the enlightenment is offered, seen, accepted or declined is
+  not known**, because every reading that spoke to it came through the
+  broken path.
+
+The first task on resume is the reader, and it is worth doing properly
+rather than quickly. Everything else is blocked behind it.

@@ -1222,6 +1222,13 @@ def main():
     cpuid_trace_words = 512 * 2
     monitor.queue(instance + off["cpuid_trace"], cpuid_trace_words)
 
+    # Resolved for its offset is not the same as fetched. This was
+    # registered and not queued, so it read as absent, the loop below saw
+    # zero entries and printed nothing - and silence from an instrument
+    # is exactly what this file keeps warning is not a measurement.
+    monitor.queue(instance + off["cpuid_trace_count"], 1)
+    monitor.queue(instance + off["cpuid_hypervisor_leaves_asked"], 1)
+
     hypercall_slots = 16
     monitor.queue(instance + off["hypercall_codes"], hypercall_slots)
     monitor.queue(instance + off["hypercall_code_counts"], hypercall_slots)
