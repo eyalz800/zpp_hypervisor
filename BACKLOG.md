@@ -19346,3 +19346,53 @@ identical values, so any difference between them had to be structural.
 Reasoning from "same answer, different outcome" is what located a bug
 that the codes themselves - contaminated, implausible, and mine - would
 have sent someone chasing in the wrong direction entirely.
+
+### The hypercall readings are not real - identical across two builds
+
+The layer fix was deployed and booted. The result:
+
+```
+hypercalls seen: 104
+  0x003a 1   0x0000 3   0xeaa0 9   0x22e0 1
+  0x2c02 1   0x843d 1   0x0010 1   0x0020 5
+```
+
+**Byte for byte what the previous boot reported** - same total, same
+eight codes, same eight counts - from a different binary, a different
+deployed hash, a fresh QEMU with fresh guest memory. That cannot happen
+if these are counters this VMM is writing.
+
+So the readings are **not the counters**. They are whatever the dump
+script's arithmetic lands on, and they have been the same fixed bytes
+every time. Which retires two conclusions drawn from them:
+
+- "104 hypercalls, so the guest hypervisor does use the interface" -
+  **withdrawn**. Nothing here says a hypercall was ever made.
+- "the codes are contaminated by the reset loop" - **wrong diagnosis**.
+  They are not contaminated, they are not the codes.
+
+The implausible values were the tell and they were read correctly as a
+tell: `0xeaa0` and `0x843d` are not call codes for an interface numbered
+from 1. The mistake was explaining them instead of doubting the reader -
+which is exactly the failure this file has recorded five times before,
+and the fifth entry names the fix: **cross-check a new counter against a
+known-good one on the same samples before believing it.**
+
+**The reset loop is also unexplained again.** The layer fix did not stop
+it - 2 loads to 8 - so either the guard is not doing what it reads as
+doing, or the loop never came from the hypercall path at all. Both
+readings that pointed at the hypercall path came from the same
+untrustworthy numbers.
+
+### What has to happen before any of this is believed again
+
+1. **Prove the reader.** Print a member whose value is known - the module
+   base, or a counter the dump already displays correctly elsewhere -
+   through the same path used for `hypercalls_seen`. Until that agrees,
+   nothing read through it means anything.
+2. **Then re-establish whether hypercalls happen at all**, which is the
+   question two boots have now failed to answer.
+3. The enlightened VMCS work stands regardless: the structure, both
+   copies, the advertisement and the hookup are implemented and desk
+   tested, and `vp-assist-writes` staying at zero is a reading from the
+   *same* suspect path and is equally unproven.
