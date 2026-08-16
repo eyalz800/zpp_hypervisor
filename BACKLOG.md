@@ -20241,3 +20241,53 @@ the most valuable thing here. One of the two boots is not measuring what
 it appears to. Resolving it is the next task, and the log ring is now the
 instrument to do it with - a line at each of the four changes above, and
 one boot, says which of them the guest actually encounters.
+
+## The bisect is invalid: the hang is intermittent
+
+The controlled A/B that should have been run first. Both builds carry the
+leaf logging; the only difference is whether bit 14 is set:
+
+| | hanging build | "fixed" build |
+|---|---|---|
+| `hv cpuid leaf` lines | **0** | **0** |
+| exits | 2,760 | 1,584,709 |
+| second-level entries | 0 | 552,546 |
+
+**Neither reads the hypervisor CPUID range.** So bit 14 cannot be the
+difference between them - the leaf carrying it is never read in either
+case - and the two builds differ in nothing the guest can observe. One
+hung and one ran to 1.58 million exits anyway.
+
+**Therefore the hang is intermittent, and every attribution built on
+single boots in this stretch is void**: the vendor string, bit 14, the
+VMXON gate, the logical processor count. Each was "confirmed" by one boot
+against one other boot, and this pair shows that two runs of what the
+guest sees as the same machine land on opposite sides.
+
+That is the failure this file already records under its own name - *one
+unreplicated pair of measurements, taken across a boundary nobody knew
+existed* - written after the same mistake with delivered tick rates. I
+made it four times in a row.
+
+### What survives
+
+- **The enlightenment work**: structure, both copies, advertisement,
+  hookup - implemented, desk-tested with fault injection, and untouched
+  by any of this, because none of it depended on a boot.
+- **The chain**: 5.8% guest share, a 6.64 ms round trip against a 1.74 ms
+  tick, 54% of it the guest hypervisor's own VMX instructions - all
+  measured repeatedly and consistently, unlike anything in this stretch.
+- **The instruments**: a self-proving reader, and the log ring, which is
+  what finally exposed this.
+
+### What has to happen first, next time
+
+**Replicate before attributing.** A change is not established by one boot
+against one boot on this rig - the same binary reached CPL 3 in one run
+and hung in another, and the settled-regime data took six to eight
+minutes to appear. Two runs per configuration, minimum, before any
+conclusion is written down.
+
+That single discipline would have saved most of this session, and its
+absence is why the enlightenment - which may well be correct - still has
+no honest verdict.
