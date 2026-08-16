@@ -18800,3 +18800,49 @@ set that is known exactly.
 The revert keeps the counter machinery out of the tree; the design entry
 above stands unchanged, with this as the evidence for preferring recall
 over any spatial heuristic.
+
+## The recall works, removes 13% of all exits, and the guest gains nothing
+
+| | baseline | with recall |
+|---|---|---|
+| extended-page-table faults | 467,335 at 2.30 M exits, still growing | **298,710, frozen** at 4.23 M exits |
+| replayed leaves | - | 1,009,119 |
+| `on_l2_ept_fault` | 53,392 cycles | 44,441 |
+| `l2-run%` | 5.80 | **4.67** (7.13 earlier in the same run) |
+| CPL 3 entries | 0 | **0** |
+
+**The mechanism does exactly what it was built to do.** After the initial
+fill, `on_l2_ept_fault` stops being called at all - 298,710 and frozen
+while the run went on to 4.23 million exits. At the baseline rate that
+would have been about 850,000 faults, so **roughly 550,000 exits removed,
+about 13% of every exit taken.** The scattered-address problem is solved:
+a remembered set replays what adjacency could not find.
+
+**And the second-level guest's share did not rise.** 4.67% against 5.80%,
+having read 7.13% earlier in the same run - so the variation is which
+phase the sample was taken in, not an effect of the change.
+
+### Both axes are now closed by measurement
+
+- **Cost per exit.** Four changes, a reproducible 1.9x on handler cycles
+  per entry, every one verified by its own counter. No guest-facing
+  indicator moved.
+- **Count of exits.** 13% of all exits removed outright, the single
+  largest removable block in the census. The guest's share did not move.
+
+What remains is what the per-tick census already found architecturally
+unavoidable: the synthetic-MSR writes that exit unconditionally because
+no bitmap covers `0x4000xxxx`, and the `vmresume` traps that are the
+return half of reflecting them. Those are not this VMM's to remove while
+it is KVM's guest, and they are 54% of a trust-level round trip.
+
+**So the KVM path is closed on measurement rather than on argument.** The
+guest gets about 5% of the machine, both levers that exist here have been
+pulled, and neither moved it. The remaining difference is the one no code
+change can reach: under KVM every VMCS access in the handler traps to L0
+at ~2,760 cycles against ~40 native, and the exit itself is mediated
+rather than direct.
+
+The recall stays. It removes 13% of exits, it is correct, and it costs a
+bounded 64 addresses a root - it simply is not what stands between this
+guest and its spinner.
