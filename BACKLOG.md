@@ -20555,3 +20555,60 @@ confident wrong answers, six times over, and that the instruments already
 in the tree - the exit trace and `cpuid_trace` - answered in one reading
 what seven new counters could not. **Replicate before attributing, and
 read what already records before adding what does not.**
+
+## Root cause: it is the build, not the enlightenment
+
+Four variants, each differing from the last by one thing, every one
+booted twice or read at a settled point:
+
+| variant | exits | second-level entries |
+|---|---|---|
+| bit 14 set | 2,783 | 0 |
+| **value zeroed**, branch kept | 395 / 2,353 | 0 |
+| **counter store removed**, branch kept | 2,773 | 0 |
+| branch compiled out (`false &&`) | 1.3-1.6 M | 441,596 - 640,768 |
+
+With the value zeroed, `cpuid_result[0] = 0` is **byte-for-byte what the
+compiled-out branch leaves behind**. With the store removed too, the
+branch does nothing observable at all. And it still stops. Meanwhile the
+firmware only ever reads leaves 0 and 1 - 18 CPUIDs in a stopping run,
+none in the hypervisor range - so **the branch never executes**.
+
+**A code path that never runs cannot change behaviour semantically.** So
+the difference between a machine that boots and one that stops in
+firmware is the *presence of the code*, not what it does: size,
+alignment, or layout.
+
+**This file already names the lesson**, from the `ZPP_VERIFY_HYPERVISOR`
+day: *when a hang survives every code change you can think of, suspect
+the build, not the code.* That is exactly the shape here, and it took
+four variants to arrive back at a rule already written down.
+
+### Which retires a great deal
+
+Every explanation this session offered for the stop - the vendor string,
+bit 14, Windows taking an enlightened path, Hyper-V declining an offer,
+the launch path answering VMfailInvalid - is **wrong**, and wrong in the
+same way: each attributed a build-level effect to a semantic change that
+happened to accompany it.
+
+### Where to look, concretely
+
+The module's own protections are the first suspect, because they are
+size-sensitive by construction. `CLAUDE.md` records that the host page
+table maps this module read-only as a floor and then adds what each
+PT_LOAD segment's program header asks for, page by page. **A segment that
+grows across a page boundary changes what the page after it is allowed to
+do**, and the failure mode of getting that wrong is a fault taken early,
+in firmware, before anything interesting runs.
+
+Two readings settle it, both cheap and neither needing a guest:
+
+- `llvm-readelf -lW` on both binaries - the booting one and a stopping
+  one - and compare segment sizes and where each ends relative to a page
+  boundary;
+- `host_exception` in the stopping run, which records vector, error code
+  and RIP, and which this file's own rig notes say to read *first* for a
+  failure this early. **It was never read this session.**
+
+The second is one dump away and would have named this on the first boot.
