@@ -553,9 +553,30 @@ hypervisor::shadow_ept_pointer_for(std::size_t cpu, std::uint64_t eptp12)
     // granting what our tables no longer do.
     auto generation = this->ept_generation.load(std::memory_order_acquire);
 
+    // Which of the two reasons a rebuild happens, because they have
+    // completely different fixes and the totals cannot tell them apart.
+    //
+    // A new root is the guest hypervisor naming extended page tables this
+    // processor has not shadowed - unavoidable, and what the slot set
+    // exists for. A stale generation is *this VMM's own* tables having
+    // moved: `invalidate_ept` bumps a single global counter, so a
+    // permission change on one page invalidates every shadow root on
+    // every processor, and each one is then emptied and refilled a fault
+    // at a time. The watched-page step path calls it twice per stepped
+    // write - once to open the page and once to close it.
+    //
+    // If the second dominates, the amplification is ours and targeted
+    // invalidation replaces a global counter. If the first dominates,
+    // the slot set is the thing to look at. Counted rather than argued.
+    auto stale_generation = false;
+
     for (std::size_t slot{}; slot < shadow_ept_slots; ++slot) {
-        if ((root != this->shadow_ept_source[cpu][slot]) ||
-            (generation != this->shadow_ept_generation_seen[cpu][slot])) {
+        if (root != this->shadow_ept_source[cpu][slot]) {
+            continue;
+        }
+
+        if (generation != this->shadow_ept_generation_seen[cpu][slot]) {
+            stale_generation = true;
             continue;
         }
 
@@ -567,6 +588,16 @@ hypervisor::shadow_ept_pointer_for(std::size_t cpu, std::uint64_t eptp12)
         this->shadow_ept_cache_hits[cpu] =
             this->shadow_ept_cache_hits[cpu] + 1;
         return this->shadow_ept_pointer[cpu][slot];
+    }
+
+    if (cpu < max_cpus) {
+        if (stale_generation) {
+            this->shadow_ept_rebuild_stale[cpu] =
+                this->shadow_ept_rebuild_stale[cpu] + 1;
+        } else {
+            this->shadow_ept_rebuild_new_root[cpu] =
+                this->shadow_ept_rebuild_new_root[cpu] + 1;
+        }
     }
 
     // Nothing matched, so one has to be built. A slot never used is taken

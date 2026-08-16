@@ -8459,6 +8459,21 @@ private:
      */
     std::uint64_t shadow_ept_cache_hits[max_cpus]{};
     std::uint64_t shadow_ept_builds[max_cpus]{};
+
+    /**
+     * Why a shadow root had to be rebuilt, split because the two have
+     * different fixes and the total cannot tell them apart.
+     *
+     * `new_root` is the guest hypervisor naming tables this processor has
+     * not shadowed, which is what the slot set exists to absorb.
+     * `stale` is a root this processor *had* shadowed, discarded because
+     * `ept_generation` moved - and that counter is global, so a
+     * permission change on a single page invalidates every shadow root on
+     * every processor. Each discard is then refilled one extended-page-
+     * table fault at a time.
+     */
+    std::uint64_t shadow_ept_rebuild_new_root[max_cpus]{};
+    std::uint64_t shadow_ept_rebuild_stale[max_cpus]{};
     std::uint64_t shadow_ept_evictions[max_cpus]{};
 
     /**

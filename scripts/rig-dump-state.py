@@ -1131,6 +1131,7 @@ def main():
                "pending_event", "unhandled_exit", "vm_entry_failure",
                "exit_reason_counts",
                "shadow_ept_builds", "shadow_ept_cache_hits",
+               "shadow_ept_rebuild_new_root", "shadow_ept_rebuild_stale",
                "shadow_ept_evictions", "shadow_ept_resets",
                "shadow_ept_leaves_filled",
                "vmcs_shadow_loads", "vmcs_shadow_stores",
@@ -1176,6 +1177,7 @@ def main():
                "l2_working_trace_count", "l2_entries",
                "l2_activity_state", "events_requeued", "events_deferred",
                "pending_event", "shadow_ept_builds", "shadow_ept_cache_hits",
+               "shadow_ept_rebuild_new_root", "shadow_ept_rebuild_stale",
                "shadow_ept_evictions", "shadow_ept_resets",
                "shadow_ept_leaves_filled", "vmcs_shadow_loads",
                "vmcs_shadow_stores",
@@ -1220,6 +1222,16 @@ def main():
               f"{read('shadow_ept_evictions', cpu):-9d}  "
               f"{read('shadow_ept_resets', cpu):-6d}  "
               f"{read('shadow_ept_leaves_filled', cpu):-13d}")
+
+    # Why a rebuild happened, which the total above cannot say. A stale
+    # generation is this VMM's own tables moving under a root it had
+    # already shadowed - `invalidate_ept` bumps one global counter, so a
+    # permission change on a single page discards every shadow root and
+    # each is refilled a fault at a time.
+    print("\ncpu  rebuild-new-root  rebuild-stale-generation")
+    for cpu in range(args.cpus):
+        print(f"{cpu:3d}  {read('shadow_ept_rebuild_new_root', cpu):-16d}  "
+              f"{read('shadow_ept_rebuild_stale', cpu):-24d}")
 
     print("\ncpu  shadow-loads  shadow-stores")
     for cpu in range(args.cpus):

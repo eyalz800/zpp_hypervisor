@@ -18298,3 +18298,59 @@ effect** - and the first where the advertisement was believed in the
 the code compiled out, the PPR field nobody maintains, `flush_guest_vmcs12`
 as an unlooked-for consumer, the capability MSR here) all cost work by
 being too optimistic. This one nearly cost a working feature.
+
+## The shadow-EPT rebuilds are new roots, not stale generations
+
+I proposed that the extended-page-table faults were an amplification of
+this VMM's own making. The structure supports it: `invalidate_ept` bumps
+a **single global** `ept_generation`, `shadow_ept_pointer_for` discards
+any shadow root whose recorded generation differs, a discarded root is
+emptied and refilled a fault at a time, and the watched-page step path
+calls `invalidate_ept` **twice per stepped write** - once to open the
+page and once to close it. One guest write to a watched page could
+therefore cost every shadow root on every processor.
+
+Counted rather than argued, over 2,304,695 exits:
+
+```
+cpu  shadow-builds  cache-hits  evictions  resets  leaves-filled
+  0          16860     1194239          0       0         449917
+
+cpu  rebuild-new-root  rebuild-stale-generation
+  0             16860                         0
+```
+
+**Zero.** Not one rebuild in a whole run comes from a stale generation.
+The amplification does not happen, the twice-per-stepped-write call is
+not costing shadow roots, and the theory is dead. Cache hit rate is
+98.6%, evictions are zero, so the slot set is not the constraint either.
+
+### What it does say
+
+The guest hypervisor names a **genuinely new extended-page-table root
+about every 48 second-level entries** - 16,860 of them - and each starts
+empty by design, so it costs 449,917 / 16,860 = **26.7 faults to refill**.
+That is 467,335 extended-page-table exits, **20% of all exits**.
+
+So the cost is real and it is the largest single exit source, but its
+cause is root churn in the guest hypervisor rather than invalidation
+churn here. Removing all of it would be worth about **1.25x**, not the
+2x the amplification theory implied - which is exactly why the split was
+measured before anything was built on it.
+
+The lazy fill itself is not the mistake and must not be reverted: the
+eager build it replaced walked twenty-two thousand regions to answer one
+INVEPT, recorded above.
+
+**What would attack it** is seeding a new shadow root from the one it
+replaces instead of emptying it, since a guest hypervisor changing one
+page's protection produces a root that differs from the last in one
+entry. That is *not* safe as stated - a seeded entry could grant what the
+new root does not - and making it safe needs the new root's own tables
+consulted, which is the eager walk that was removed. Recorded as the
+shape of the idea and its blocker, not as a plan.
+
+**Third hypothesis of mine refuted by measurement in this stretch**, after
+the cost model that turned out to be right and the VMCS-shadowing
+stand-down that turned out to be unnecessary. Each cost one diagnostic
+boot and no correctness risk, which is the trade the counters exist for.
