@@ -20505,3 +20505,53 @@ leaf histogram compared against the one above. If the booting run shows
 the same twelve reads of leaf 1, the loop is normal and the stop is
 elsewhere entirely. If it shows fewer, the loop is the failure and leaf 1
 is where to look.
+
+## The control run settles it: bit 14 cannot be causal
+
+The measurement the previous entry asked for, taken:
+
+| | stopping run | booting run |
+|---|---|---|
+| cpuid entries recorded | 18 | **6,664** |
+| leaf 0x00000000 | 6 | 171 |
+| leaf 0x00000001 | 12 | 341 |
+| **hypervisor range** | **0** | **0** |
+
+**Neither run reads the hypervisor range.** The two histograms are the
+same shape - leaf 0 and leaf 1 and nothing else - and the stopping run's
+is simply cut short. There is no leaf whose *answer* differs between a
+run that boots and one that does not, because the only leaf that differs
+between the builds is never asked for in either.
+
+**So bit 14 cannot be the cause, and it correlated six times out of
+six.** The only mechanism left is that removing the branch changes code
+layout, and the hang is sensitive to something layout perturbs - timing,
+alignment, a cache effect. Which means the retracted "intermittent"
+conclusion was closer to right than the bisect that replaced it, and both
+were reached by attributing a boot outcome to the one source change that
+accompanied it.
+
+### The honest end state
+
+**The enlightenment cannot currently be tested on this rig**, because the
+build that offers it stops during firmware for a reason that is not in
+what it offers. Until that is understood, `ZPP_EVMCS=ON` measures the
+hang and not the enlightenment.
+
+**What is solid**, and none of it depends on the boots above:
+
+- four boot-verified optimisations, about 1.9x on handler cycles;
+- a complete enlightened VMCS implementation, desk-tested with fault
+  injection on both copy directions;
+- the causal chain, measured repeatedly: 5.8% guest share, a 6.64 ms
+  trust-level round trip against a 1.74 ms tick, 54% of it the guest
+  hypervisor's own VMX instructions;
+- ring 3 reached with nested VMX off, proving the rest of this VMM
+  carries Windows to user mode.
+
+**What this session should be read for**, above any of its findings: a
+sustained demonstration that single-boot attribution on this rig produces
+confident wrong answers, six times over, and that the instruments already
+in the tree - the exit trace and `cpuid_trace` - answered in one reading
+what seven new counters could not. **Replicate before attributing, and
+read what already records before adding what does not.**
