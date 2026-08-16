@@ -19621,3 +19621,35 @@ which nobody has run against these additions.
 
 The first task on resume is the reader, and it is worth doing properly
 rather than quickly. Everything else is blocked behind it.
+
+### The zero may be a sampling time, not a reader fault
+
+Checked in the source rather than guessed: the hypervisor-present bit,
+CPUID.1:ECX[31], **is** set whenever the enlightenment is offered -
+`exit_dispatch.cpp`, the `pass_through_hypervisor_interface ||
+announce_hypervisor` branch. So a guest has every reason to probe
+0x40000000, and the advertisement is not invisible for want of the bit
+that invites it.
+
+Which makes the more likely reading of the zero **when it was sampled**.
+Every dump in this stretch was taken about 25 seconds after the module
+loaded, and the guest hypervisor does not start that early - the boots
+that produced the livelock data ran for six to eight minutes before
+reaching the settled regime. A counter that is zero at 25 seconds is
+consistent with nothing having happened yet.
+
+That does not restore the 187 - a counter that reads a value when
+unqueued is still not a measurement, and the withdrawal stands. But it
+means the reader may be less broken than the last entry concluded, and
+the two are separable:
+
+- **Sample late.** Re-read `cpuid_hypervisor_leaves_asked` after the
+  guest hypervisor is actually running, which is minutes rather than
+  seconds, and with the counter explicitly queued.
+- **Prove the reader alongside it**, in the same dump, against
+  `host_page_table`'s first quadword - a present PML4 entry ending
+  `023`. If that is right and the counter is zero, the zero is real.
+
+Both in one boot, and neither needs a code change. **That is the first
+thing to do, and it is cheaper than everything attempted after the
+implementation was finished.**
