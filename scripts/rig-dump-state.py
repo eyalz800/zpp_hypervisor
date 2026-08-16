@@ -1133,6 +1133,7 @@ def main():
                "exit_reason_counts",
                "shadow_ept_builds", "shadow_ept_cache_hits",
                "shadow_ept_rebuild_new_root", "shadow_ept_rebuild_stale",
+               "shadow_ept_prefetched",
                "hot_state_writes_skipped", "hot_state_writes_done",
                "l2_run_cycles", "l1_run_cycles", "handler_cycles",
                "handler_first_tsc", "handler_last_tsc",
@@ -1182,6 +1183,7 @@ def main():
                "l2_activity_state", "events_requeued", "events_deferred",
                "pending_event", "shadow_ept_builds", "shadow_ept_cache_hits",
                "shadow_ept_rebuild_new_root", "shadow_ept_rebuild_stale",
+               "shadow_ept_prefetched",
                "hot_state_writes_skipped", "hot_state_writes_done",
                "l2_run_cycles", "l1_run_cycles", "handler_cycles",
                "handler_first_tsc", "handler_last_tsc",
@@ -1235,6 +1237,11 @@ def main():
     # already shadowed - `invalidate_ept` bumps one global counter, so a
     # permission change on a single page discards every shadow root and
     # each is refilled a fault at a time.
+    print("\ncpu  prefetched-leaves  faulted-leaves")
+    for cpu in range(args.cpus):
+        print(f"{cpu:3d}  {read('shadow_ept_prefetched', cpu):-17d}  "
+              f"{read('shadow_ept_leaves_filled', cpu):-14d}")
+
     print("\ncpu  rebuild-new-root  rebuild-stale-generation")
     for cpu in range(args.cpus):
         print(f"{cpu:3d}  {read('shadow_ept_rebuild_new_root', cpu):-16d}  "

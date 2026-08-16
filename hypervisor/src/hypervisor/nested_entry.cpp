@@ -7132,6 +7132,98 @@ hypervisor::on_l2_ept_fault(std::size_t cpu,
         this->shadow_ept_leaves_filled[cpu] =
             this->shadow_ept_leaves_filled[cpu] + 1;
 
+        // And the pages after it, because the fault that got here is one
+        // of about **26.7 this root will take** - `shadow_ept_pointer_for`
+        // empties a rebuilt root by design and the fill is lazy, so a
+        // guest hypervisor that churns roots around its trust-level
+        // protection changes pays a VM exit per page it touches again.
+        //
+        // Measured: extended-page-table violations are **467,335 of
+        // 2,304,695 exits, 20%**, and this VMM's share of wall clock is
+        // 86% against the second-level guest's 5.8%. The axis that
+        // matters is the *number* of exits - four changes worth 1.9x of
+        // cost per exit moved no guest-facing indicator at all - so this
+        // trades a walk for an exit. A walk is four reads of guest
+        // memory; an exit is a whole handler pass.
+        //
+        // **Sound for the same reason the fault is.** Each neighbour is
+        // walked in the guest hypervisor's *current* tables and composed
+        // through the same `compose_ept`, so it installs exactly what a
+        // fault on that page would have installed at this moment.
+        // Anything not composable is skipped and left to fault, which is
+        // the existing behaviour. This is emphatically not
+        // `refresh_shadow_on_invept`: that read the tables *at the
+        // INVEPT*, which Hyper-V issues around a protection change, and
+        // reinstalled state that was about to change. Nothing here runs
+        // at an INVEPT - it runs on a fault, after any change that
+        // caused it.
+        //
+        // Only for four-kilobyte compositions. A larger one already
+        // takes the splitting path in `install_shadow_leaf`, which fills
+        // the whole region in one go and needs no help.
+        constexpr std::uint64_t four_kilobyte_shift = 12;
+
+        if (four_kilobyte_shift == composition.page_shift) {
+            constexpr std::uint64_t prefetch_pages = 8;
+
+            for (std::uint64_t ahead{1}; ahead <= prefetch_pages;
+                 ++ahead) {
+                auto next = page + (ahead << four_kilobyte_shift);
+
+                auto walk = arch::x86_64::vmx::walk_ept(
+                    eptp12 & (((1ull << 52) - 1) & ~0xfffull),
+                    next,
+                    physical_address_bits(),
+                    execute_only_translations_offered,
+                    [&](std::uint64_t at)
+                        -> std::optional<arch::x86_64::vmx::epte> {
+                        std::uint64_t value{};
+                        auto read = read_guest_physical(
+                            at,
+                            std::span(
+                                reinterpret_cast<std::byte *>(&value),
+                                sizeof(value)));
+                        if (!read) {
+                            return std::nullopt;
+                        }
+                        return arch::x86_64::vmx::epte(value);
+                    });
+
+                if (arch::x86_64::vmx::ept_walk_status::mapped !=
+                    walk.status) {
+                    break;
+                }
+
+                auto composed = arch::x86_64::vmx::compose_ept(
+                    walk,
+                    host_ept_lookup(walk.physical_address),
+                    execute_only_translations_offered);
+
+                if (arch::x86_64::vmx::ept_compose_outcome::composed !=
+                    composed.outcome) {
+                    continue;
+                }
+
+                // Only where the guest hypervisor also maps four
+                // kilobytes. A larger mapping here would splice a
+                // region this fault knows nothing about.
+                if (four_kilobyte_shift != composed.page_shift) {
+                    break;
+                }
+
+                if (auto filled = fill_shadow_leaf(
+                        cpu, next, walk, composed.page_shift);
+                    !filled) {
+                    break;
+                }
+
+                this->shadow_ept_prefetched[cpu] =
+                    this->shadow_ept_prefetched[cpu] + 1;
+            }
+
+            invalidate_ept_locally();
+        }
+
         // The handler's own work, read back.
         //
         // Installing a mapping is the one disposition here that claims to
