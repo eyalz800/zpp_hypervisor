@@ -19196,3 +19196,33 @@ from the specification.
 **Do not simply return success.** Answering `0` to a hypercall that did
 nothing is the failure this file has recorded a dozen times, and against
 a guest hypervisor it would be acted on immediately.
+
+#### Naming the hypercalls costs one boot, and needs the page to trap
+
+The page as written answers *locally* - `mov eax, 2; ret` - so the calls
+never reach this VMM and cannot be logged. Learning which ones a guest
+hypervisor makes therefore needs two small changes together:
+
+1. **The page issues `vmcall`** instead of answering: `0f 01 c1` then
+   `c3`. That is what makes the call exit, which is the only way to see
+   it. Gate it on the enlightenment, so the honest local refusal stays
+   the behaviour everywhere else.
+2. **The `vmcall` case records the call code and still refuses it.** The
+   code is in `rcx` - its low 16 bits - and the answer goes in `rax` as
+   `HV_STATUS_INVALID_HYPERCALL_CODE`, which is 2, the same status the
+   page returns today. A small ring of distinct codes with counts is
+   enough; the question is *which*, not how many.
+
+Note the `vmcall` case in `exit_dispatch.cpp` currently answers `#UD`,
+and that is correct for the build it was written for - VMX is hidden, so
+`VMCALL` is an invalid opcode. **With the enlightenment offered it is
+not**: a guest hypervisor that has been told an interface exists and has
+installed a hypercall page is making a hypercall, and `#UD` is the wrong
+answer to it. The two cases have to be distinguished by whether the
+enlightenment is offered, which is the same gate everything else here
+uses.
+
+After that, one boot names the codes, and each is then a decision on its
+own terms - implement it, or find that the guest hypervisor accepts the
+refusal for that particular call and moves on. That is a much smaller and
+better-defined problem than "why is the offer declined".
