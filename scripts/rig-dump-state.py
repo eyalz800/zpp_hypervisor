@@ -1134,6 +1134,8 @@ def main():
                "shadow_ept_builds", "shadow_ept_cache_hits",
                "shadow_ept_rebuild_new_root", "shadow_ept_rebuild_stale",
                "shadow_ept_replayed", "hyperv_vp_assist_writes", "hypercalls_seen",
+               "cpuid_trace", "cpuid_trace_count",
+               "cpuid_hypervisor_leaves_asked",
                "hypercall_codes", "hypercall_code_counts",
                "evmcs_reads", "evmcs_writes",
                "hot_state_writes_skipped", "hot_state_writes_done",
@@ -1186,6 +1188,8 @@ def main():
                "pending_event", "shadow_ept_builds", "shadow_ept_cache_hits",
                "shadow_ept_rebuild_new_root", "shadow_ept_rebuild_stale",
                "shadow_ept_replayed", "hyperv_vp_assist_writes", "hypercalls_seen",
+               "cpuid_trace", "cpuid_trace_count",
+               "cpuid_hypervisor_leaves_asked",
                "evmcs_reads", "evmcs_writes",
                "hot_state_writes_skipped", "hot_state_writes_done",
                "l2_run_cycles", "l1_run_cycles", "handler_cycles",
@@ -1213,6 +1217,11 @@ def main():
     # and fresh guest memory. The same failure gdb_lengths was written
     # for: a capacity carried in the reader is a second copy of a
     # constant that lives in the header.
+    # 512 entries of four 32-bit words - two words each - queued at its
+    # own length for the reason the entry above records.
+    cpuid_trace_words = 512 * 2
+    monitor.queue(instance + off["cpuid_trace"], cpuid_trace_words)
+
     hypercall_slots = 16
     monitor.queue(instance + off["hypercall_codes"], hypercall_slots)
     monitor.queue(instance + off["hypercall_code_counts"], hypercall_slots)
@@ -1256,6 +1265,24 @@ def main():
     # switch is not on until a counter says the code ran.
     # Which hypercalls the guest hypervisor makes before declining the
     # enlightenment. Not per cpu - the codes are what matter.
+    # Which hypervisor-range CPUID leaves the guest actually asks for.
+    # The question the exit trace cannot answer: it records that a cpuid
+    # happened, not which leaf.
+    asked = read('cpuid_hypervisor_leaves_asked', 0)
+    count = read('cpuid_trace_count', 0) or 0
+    if asked:
+        print(f"\nhypervisor-range cpuid leaves asked: {asked}")
+        leaves = {}
+        for i in range(min(count, 512)):
+            word = read('cpuid_trace', i * 2)
+            if word is None:
+                continue
+            leaf = word & 0xffffffff
+            if 0x40000000 <= leaf <= 0x4fffffff:
+                leaves[leaf] = leaves.get(leaf, 0) + 1
+        for leaf in sorted(leaves):
+            print(f"  0x{leaf:08x}  {leaves[leaf]}")
+
     seen = read('hypercalls_seen', 0)
     if seen:
         print(f"\nhypercalls seen: {seen}")

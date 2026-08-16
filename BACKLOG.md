@@ -19536,3 +19536,45 @@ A cheaper alternative exists and should be tried first: the log. `log()`
 writes to the in-memory ring with a format string, so one line on the
 first read of each hypervisor leaf costs no new member, no queue entry
 and no reader change - and `zpplog` already prints the ring.
+
+### The advertisement *is* read: 187 hypervisor-range CPUID leaves
+
+From `cpuid_hypervisor_leaves_asked` - a counter that predates this
+session and does not go through the queue that produced the fictions
+above:
+
+```
+hypervisor-range cpuid leaves asked: 187
+```
+
+**So the offer is seen.** The guest reads 0x40000000-0x4fffffff 187
+times with the enlightenment advertised, which retires the worry that the
+advertisement is invisible for some reason unrelated to its content. It
+is read, and then not acted on: no hypercall page, no assist page
+register, no enlightened VM entry.
+
+That narrows the remaining question sharply. The interface is *offered*
+and *read* and *declined*, so what is missing is something in what the
+leaves say rather than whether they are reached.
+
+**The per-leaf breakdown did not print**, because `cpuid_trace` is a ring
+of 512 four-word entries and the reader walked it as pairs - the stride
+is wrong, and it is the same class of mistake as the queue length, one
+layer along. Nothing was concluded from its silence, which is the only
+reason it is not a fourth withdrawal.
+
+**And the hypercall figures are still not to be trusted.** The same boot
+reported 104 again, but with eleven distinct codes rather than eight and
+one value changed, which is not consistent with either a real counter or
+a fixed misread. Whatever that path reads, it is not what it claims.
+Leave it alone until the reader is proven against a known value.
+
+### The state to resume from
+
+- Offered, read, declined. The next question is *what in the leaves* the
+  guest hypervisor finds insufficient - and the per-leaf breakdown is how
+  to see it, once `cpuid_trace` is walked with its real four-word stride.
+- Cross-check any reader change against a member whose value is
+  independently known, in the same dump, **before** believing anything
+  read through it. Three findings this session were fiction for want of
+  that, and the rule was already written down.
