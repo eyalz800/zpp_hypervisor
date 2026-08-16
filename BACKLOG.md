@@ -21487,3 +21487,67 @@ than zeroing them, so a root that comes back is revalidated instead of
 refaulted. `release_shadow_slot` memsets the root and hands the tables
 back to the pool, which is what makes a return trip cost 63 replays and
 18 faults.
+
+### Measured: every `invept` is single-context, and the over-discard does not exist
+
+The counter added above, read on the first boot that carried it:
+
+```
+cpu  rebuild-new-root  rebuild-stale-generation
+  0              8314                         0
+
+cpu  invept-single-context  invept-all-context
+  0                   8314                      0
+```
+
+**Not one all-context `invept` in the whole run.** So
+`discard_shadow_ept` - the path whose comment admits it "discards more
+than was asked for because that is the safe direction" - is **never
+called**, and the idea built on it is dead. Every invalidation goes to
+`discard_shadow_ept_for`, which already releases only the slot naming
+that root.
+
+The three numbers are the same number: 8,314 single-context
+invalidations, 8,314 rebuilds, and `rebuild-stale-generation` zero. The
+guest hypervisor invalidates the root it is using and immediately uses
+it again, and each round trip costs 63 replays and 17 faults.
+
+**And KVM does exactly what this VMM does at the root level.**
+`handle_invept`'s `VMX_EPT_EXTENT_CONTEXT` arm builds `roots_to_free`
+from whichever of the current root and `prev_roots[]` match the operand's
+EPTP, and calls `kvm_mmu_free_roots` on those alone
+(`.references/kvm/nested.c:5887-5904`). Freeing the named root is not
+where the two differ.
+
+**Where they differ is what "freeing" leaves behind.** KVM's shadow
+pages outlive the root that referenced them - they stay in the MMU's
+page hash and `kvm_mmu_get_shadow_page` finds them again on the next
+fault, so a root that comes straight back is reassembled from pages that
+still hold their entries. `release_shadow_slot` here memsets the root
+table and returns **every** table to the pool, so nothing survives and
+the whole mapping has to be walked out of the guest hypervisor's tables
+again - which is precisely what the recall exists to paper over, and why
+it is 63 replays deep.
+
+So the remaining lead is neither "narrow the discard" nor "a bigger
+recall". It is: **keep a released slot's tables, keyed so a returning
+root can claim them, instead of handing them back to the pool.** That
+removes the rebuild rather than making it cheaper, needs no replay at
+all, and is the thing KVM is actually doing that this VMM is not.
+
+What it has to contend with, and none of it is settled:
+
+- the tables are a fixed pool of 96 per processor
+  (`shadow_ept_tables_per_cpu`), shared between four slots, and the two
+  live shadows already need 27 and 57 of them - so retention needs a
+  reclaim policy, which is the pressure `evictions 0` says does not
+  exist *yet*;
+- a retained table has to be proved still valid when the root returns,
+  and the guest hypervisor's tables may have changed while it was gone.
+  KVM answers this with write-tracking on guest page tables
+  (`mmu_unsync`, `kvm_mmu_pte_write`); this VMM has
+  `watch_guest_page_writes`, which is the same instrument and is
+  currently used for something else. **That is the piece to design
+  first**, because retaining without it is the `refresh_shadow_on_invept`
+  deadlock again - tables read before a change, left present, and no
+  fault ever raised to pick the change up.
