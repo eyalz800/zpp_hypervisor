@@ -22543,6 +22543,13 @@ listing together because the defences differ:
 | wall-clock-per-exit as a marginal cost | wrong denominator | measure the phase being priced |
 | 107 calls a second extrapolated | wrong duration | re-read the counter much later |
 
+**And the defence is cheap and asymmetric**, which is why it should be
+automatic rather than considered. Re-reading a counter ten minutes later
+costs one command and no boot; extrapolating a rate past its window has
+now cost this investigation an entire reframing. **Any rate that is
+going to carry a conclusion gets a second reading much later, as a
+matter of course.**
+
 ### Where that leaves the search
 
 **Back to the guest, with the protection phase eliminated by
