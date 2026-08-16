@@ -8877,6 +8877,40 @@ private:
     std::uint64_t vtl_protect_count[max_cpus]{};
     std::uint64_t vtl_protect_repeated[max_cpus]{};
     std::uint64_t vtl_protect_last[max_cpus]{};
+
+    /**
+     * Whether the sweep goes forward and finishes, or keeps starting
+     * again - as a census over every request, not a ring.
+     *
+     * The ring above says the pages are distinct and consecutive; it
+     * cannot say whether the sequence is one pass. Two samples of it
+     * three minutes apart held 4.70 GiB and then 118 MiB, which at the
+     * measured 107 pages a second cannot be a forward wrap - so it went
+     * backwards, and two samples cannot distinguish several regions
+     * swept in some order from the same region swept twice.
+     *
+     * `backward` is the number that decides it. Near zero over a long
+     * run is one pass in order, and the problem is throughput. Climbing
+     * is the guest re-doing work it has already done, and this file
+     * already holds the mechanism for that: our shadow discards a root's
+     * tables on every `invept`, where KVM keeps its shadow pages and
+     * revalidates them.
+     *
+     * `low` and `high` are taken from what is actually seen. All of
+     * guest RAM is 2,883,584 pages and the guest may sweep a fraction of
+     * it - a sweep over a tenth finishing in forty-five minutes is a
+     * different problem from one over the whole taking seven hours, and
+     * assuming the bound would answer the wrong one.
+     * @{
+     */
+    std::uint64_t vtl_protect_pages[max_cpus]{};
+    std::uint64_t vtl_protect_page_low[max_cpus]{};
+    std::uint64_t vtl_protect_page_high[max_cpus]{};
+    std::uint64_t vtl_protect_forward[max_cpus]{};
+    std::uint64_t vtl_protect_backward[max_cpus]{};
+    std::uint64_t vtl_protect_step_same[max_cpus]{};
+    std::uint64_t vtl_protect_last_page[max_cpus]{};
+    /** @} */
     /** @} */
 
     /**

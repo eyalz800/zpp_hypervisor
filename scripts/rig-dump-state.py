@@ -1128,6 +1128,9 @@ def main():
     members = ["cpl_seen", "guest_leaf_permissions",
                "vtl_protect_rdx", "vtl_protect_rbp",
                "vtl_protect_count", "vtl_protect_repeated",
+               "vtl_protect_pages", "vtl_protect_page_low",
+               "vtl_protect_page_high", "vtl_protect_forward",
+               "vtl_protect_backward", "vtl_protect_step_same",
                "shadow_leaf_permissions", "exit_trace", "exit_trace_count", "l2_exit_trace",
                "l2_exit_trace_count", "l2_working_trace",
                "l2_working_trace_count", "l2_entries", "l2_activity_state",
@@ -1250,6 +1253,10 @@ def main():
     monitor.queue(instance + off["vtl_protect_rbp"], scalar_cpus * 32)
     monitor.queue(instance + off["vtl_protect_count"], scalar_cpus)
     monitor.queue(instance + off["vtl_protect_repeated"], scalar_cpus)
+    for name in ("vtl_protect_pages", "vtl_protect_page_low",
+                 "vtl_protect_page_high", "vtl_protect_forward",
+                 "vtl_protect_backward", "vtl_protect_step_same"):
+        monitor.queue(instance + off[name], scalar_cpus)
     monitor.queue(instance + off["guest_leaf_permissions"], scalar_cpus * 8)
     monitor.queue(instance + off["shadow_leaf_permissions"],
                   scalar_cpus * 8)
@@ -1339,6 +1346,26 @@ def main():
               f"rdx {len(seen_rdx)}, rbp {len(seen_rbp)}")
         for i in order[-12:]:
             print(f"    rdx 0x{(rdx[i] or 0):016x}  rbp 0x{(rbp[i] or 0):016x}")
+
+        # The census, which the ring cannot give: one pass in order has a
+        # backward count near zero, a guest re-doing work has one that
+        # climbs. Bounds from what was seen, never assumed - the guest
+        # may sweep a fraction of memory.
+        pages = read('vtl_protect_pages', cpu) or 0
+        if pages:
+            low = read('vtl_protect_page_low', cpu) or 0
+            high = read('vtl_protect_page_high', cpu) or 0
+            fwd = read('vtl_protect_forward', cpu) or 0
+            back = read('vtl_protect_backward', cpu) or 0
+            same = read('vtl_protect_step_same', cpu) or 0
+            span = high - low + 1
+            print(f"  pages carried {pages:,}   steps forward {fwd:,}  "
+                  f"BACKWARD {back:,}  same {same:,}")
+            print(f"  page range 0x{low:x}..0x{high:x}  = "
+                  f"{span:,} pages, {span * 4096 / 2**30:.2f} GiB")
+            if pages > 1:
+                print(f"  backward share {100.0 * back / (pages - 1):.2f}%"
+                      "  (near zero = one pass in order)")
 
     print("\ncpu  shadow-builds  cache-hits  evictions  resets  leaves-filled")
     for cpu in range(args.cpus):

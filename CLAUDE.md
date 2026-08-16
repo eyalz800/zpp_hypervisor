@@ -614,6 +614,31 @@ Two rules follow, and they sit beside the reader-proof rule that
   anything was submitted — and it looks exactly like proof that no I/O
   was issued.
 
+### Census two fields, not one, and let them disagree
+
+Three instruments in one session gave confident answers to questions
+nobody asked, and none of the three looked wrong:
+
+| instrument | what it reported | what was true |
+|---|---|---|
+| wide `xp` over a VFIO BAR | `CC.EN = 0`, controller disabled | enabled and ready |
+| an NVMe doorbell read | zero, "no I/O submitted" | write-only, undefined |
+| a census over RDX at a hypercall | "the same request 99.8% of the time" | RDX is a sentinel; RBP changes every call |
+
+The last is the sharpest, because it did not merely mislead — it would
+have **confirmed** the hypothesis under test. A loop was suspected, and
+censusing the wrong register reported near-total repetition.
+
+**A single-field instrument cannot tell you it is aimed at the wrong
+field.** It has nothing to disagree with. All three of these were caught
+by reading a *second* thing — a narrower read, the specification, the
+other register — and none by doubting the first.
+
+So when the field that carries the value is not certain, **record both
+candidates and let the data say which one moves.** It costs one more
+word per sample and it is the only thing that distinguishes "this value
+never changes" from "I am not reading the value".
+
 ### KVM's own statistics are on the rig, and they are the cheapest instrument
 
 **This section used to say the target had no tracefs and no

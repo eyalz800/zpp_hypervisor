@@ -7616,6 +7616,61 @@ hypervisor::on_l2_exit(std::size_t cpu,
 
                 this->vtl_protect_last[cpu] = context.rdx;
                 count = count + 1;
+
+                // **Does it sweep forward and finish, or go back over
+                // ground it has already covered?** The two futures are
+                // different problems: a monotonic sweep is a throughput
+                // question with a concrete factor attached, and a guest
+                // re-doing work points at something this VMM discards
+                // that the guest expects to persist.
+                //
+                // RBP is the register that carries the page - RDX is
+                // `0xffffffffffffffff` on every call, a sentinel, which
+                // is why both are recorded. Zero entries are the other
+                // half of the pair and are skipped rather than treated
+                // as page zero.
+                //
+                // The bounds are taken from the data, not assumed. All
+                // of guest RAM is 2.8 million pages and the guest may
+                // sweep a fraction of it; a sweep of a tenth finishing
+                // in forty-five minutes is a different problem from one
+                // over the whole taking seven hours, and only the least
+                // and greatest actually seen can tell them apart.
+                if (0 != context.rbp) {
+                    auto page = context.rbp;
+                    auto & low = this->vtl_protect_page_low[cpu];
+                    auto & high = this->vtl_protect_page_high[cpu];
+
+                    if ((0 == this->vtl_protect_pages[cpu]) ||
+                        (page < low)) {
+                        low = page;
+                    }
+                    if (page > high) {
+                        high = page;
+                    }
+
+                    if (this->vtl_protect_pages[cpu]) {
+                        auto previous = this->vtl_protect_last_page[cpu];
+
+                        if (page > previous) {
+                            this->vtl_protect_forward[cpu] =
+                                this->vtl_protect_forward[cpu] + 1;
+                        } else if (page < previous) {
+                            // The wrap count. Near zero over a long run
+                            // means one pass in order; climbing means
+                            // the guest keeps starting again.
+                            this->vtl_protect_backward[cpu] =
+                                this->vtl_protect_backward[cpu] + 1;
+                        } else {
+                            this->vtl_protect_step_same[cpu] =
+                                this->vtl_protect_step_same[cpu] + 1;
+                        }
+                    }
+
+                    this->vtl_protect_last_page[cpu] = page;
+                    this->vtl_protect_pages[cpu] =
+                        this->vtl_protect_pages[cpu] + 1;
+                }
             }
         }
 
