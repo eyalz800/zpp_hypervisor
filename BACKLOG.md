@@ -21251,3 +21251,111 @@ so a third aimed at the same axis should not be started. The guest is at
 PASSIVE level, not starved of deferred work, and still not progressing -
 which is a different failure from the one this file has been describing,
 and it has never been characterised on its own terms.
+
+## The extended-page-table churn: what it is, and one measured negative
+
+The lead was right and the fix was not. Both halves are worth keeping.
+
+### Not our invalidation, and the recall is saturated
+
+The dump already splits the two reasons a shadow root gets rebuilt, and
+the split had never been read:
+
+```
+cpu  rebuild-new-root  rebuild-stale-generation
+  0              9531                         0
+```
+
+**Zero stale-generation rebuilds.** So this VMM's global `ept_generation`
+counter - which the header warns "a permission change on a single page
+invalidates every shadow root on every processor" - is not the amplifier.
+Every rebuild is the guest hypervisor's own `invept` discarding a root
+this processor had. That retires the targeted-invalidation idea before
+it cost anything.
+
+What is happening instead:
+
+```
+shadow-builds  9,531      replayed-leaves 600,295   = 63.0 a rebuild
+                          faulted-leaves  159,015   = 17.9 a rebuild
+ept-violation  51.1% of all exits
+```
+
+`shadow_ept_recall_capacity` is 64 and the set is **pinned at it**. The
+header says it was "sized at 64 against a measured 26.7"; the workload
+now needs about 81 pages per rebuilt root, so the recall replays the
+first 64 and the remaining 18 fault one exit each.
+
+### Raising it to 256 does exactly what it should, and is slower
+
+| | 64 | 256 |
+|---|---|---|
+| faults a rebuild | 17.9 | **1.17** |
+| extended-page-table violations | 51.1% of exits | **7.6%** |
+| replays a rebuild | 63.0 | 230.1 |
+| `shadow_ept_pointer_for` | 7,079 cycles/call | **247,362** |
+| `build_vmcs02` | 101,642 cycles/call | **603,822** |
+| wall clock per exit | 387,072 | 827,989 |
+| `nested_run/s` | ~4,236 | ~2,276 |
+
+The prediction was right in every particular and the change is still a
+loss. **The error was the price of one replay.**
+
+It was estimated at "a table walk of a few thousand cycles" against a
+fault worth ~600,000 - and that 600,000 is *wall clock per exit averaged
+over every reason*, not the marginal cost of an extended-page-table
+fault. Measured properly:
+
+- a fault is `on_l2_ept_fault`, **41,826 cycles**;
+- a replay walks four levels through `read_guest_physical`, each level
+  re-pointing the shared mapping window at ~955 cycles - **48,001,634
+  `map_window` calls and 45.9 billion cycles** in one run, about
+  **15,000 cycles a replay**.
+
+Break-even is about three replays per fault avoided. At 64 the ratio is
+already 3.5. Going to 256 bought 16.7 fewer faults for 167 more replays -
+**ten replays a fault** - because the set is only reset when a slot
+changes root, so it accumulates everything a long-lived root has ever
+touched rather than what it needs now.
+
+Reverted to 64, with all of the above in the constant's comment so the
+next person does not re-derive it. The tree is unchanged in behaviour and
+better documented.
+
+### The lesson, which is about the denominator
+
+**Never divide by "wall clock per exit".** It is an average over a
+workload mix, `CLAUDE.md` already says not to compare builds on it, and
+here it was used for something worse - as the marginal cost of one
+specific exit reason, which it over-stated by 14x and turned a losing
+trade into an apparently winning one. The per-phase counters give the
+marginal cost directly and were in the same dump.
+
+### What is actually worth doing, and it is not a bigger cap
+
+**`map_window_at` is the real target.** 48 million calls and 45.9 billion
+cycles - about a third of everything - and its body is
+`page_table::map_page` plus `invlpg`, issued unconditionally. A four
+level walk re-points the window four times, and consecutive replays of
+nearby pages share upper-level tables constantly, so most of those calls
+map a page the window is *already* pointing at.
+
+Skipping the remap when this processor's own last mapping of that slot is
+the page being asked for is sound - both conditions, because the window
+is shared and `invlpg` is per-processor, so the page-table entry agreeing
+is not on its own enough. That makes replays, guest page reads and the
+whole `merge` path cheaper at once, and it changes the recall's economics
+enough that the cap is worth revisiting afterwards.
+
+Second, and larger: **keep the tables rather than replaying them.** KVM
+does not repopulate a root it has invalidated - it keeps several previous
+roots (`KVM_MMU_NUM_PREV_ROOTS`) and frees only the one an invalidation
+names (`kvm_mmu_free_roots`). `evictions 0` says the slot set is not
+under pressure here, so what this VMM throws away on `invept` it throws
+away by choice: `discard_shadow_ept` releases **every** slot because the
+all-context type names them all, and its own comment admits single
+context "names one this VMM cannot distinguish from the others without
+keeping the guest hypervisor's own pointer per slot - which it does".
+It does keep it. `discard_shadow_ept_for` already releases only the
+matching slot. The all-context path is the one discarding more than it
+must.

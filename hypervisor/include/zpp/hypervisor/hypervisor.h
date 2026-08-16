@@ -8497,6 +8497,49 @@ private:
      * Sized at 64 against a measured 26.7. A root that maps more than
      * that keeps the first 64 and faults for the rest, which degrades to
      * exactly the behaviour without this.
+     *
+     * **256 was tried on the rig and is a net loss. Do not raise this
+     * without re-measuring the replay's cost, which is far higher than
+     * it looks.** The case for raising it was good and the arithmetic
+     * behind it was wrong:
+     *
+     * - the set was *saturated* at 64 - 600,295 replays over 9,531
+     *   rebuilds is 63.0 each, one below the cap - with 159,015 faults,
+     *   17.9 a rebuild, on top. Extended-page-table violations were
+     *   51.1% of every exit on the machine.
+     * - at 256 the faults collapsed exactly as predicted: **17.9 a
+     *   rebuild became 1.17**, and violations fell from 51.1% of exits
+     *   to **7.6%**.
+     * - and it was still slower. `shadow_ept_pointer_for` went from
+     *   **7,079 to 247,362 cycles a call**, `build_vmcs02` from 101,642
+     *   to 603,822, wall clock per exit from 387,072 to 827,989, and
+     *   `nested_run/s` roughly halved.
+     *
+     * **What the estimate got wrong is the price of one replay.** It was
+     * taken as "a table walk of a few thousand cycles" against a fault
+     * worth ~600,000 - the latter being wall clock per exit averaged
+     * over every reason, which is not the marginal cost of an
+     * extended-page-table fault. The real numbers: `on_l2_ept_fault` is
+     * **41,826 cycles**, and a replay walks four levels through
+     * `read_guest_physical`, each level re-pointing the shared mapping
+     * window at ~955 cycles - 48,001,634 `map_window` calls and 45.9
+     * billion cycles in one run, about **15,000 cycles a replay**.
+     *
+     * So break-even is around three replays per fault avoided. At 64 the
+     * ratio is already 3.5; going to 256 bought 16.7 fewer faults for
+     * 167 more replays, or **ten replays a fault**. The mechanism is
+     * paying for pages a long-lived root once touched and no longer
+     * needs, because the set is only reset when a slot changes root.
+     *
+     * Two things would change this verdict and both are worth more than
+     * a bigger cap:
+     *
+     * - **make a replay cheap.** Two thirds of it is `map_window_at`
+     *   re-pointing the window and issuing `invlpg` for a page it may
+     *   already be pointing at. A walk's four levels and consecutive
+     *   replays share upper-level tables constantly.
+     * - **give the set an eviction policy**, so it holds what the root
+     *   currently needs rather than everything it has ever touched.
      */
     static constexpr std::size_t shadow_ept_recall_capacity = 64;
     std::uint64_t shadow_ept_recall[max_cpus][shadow_ept_slots]
