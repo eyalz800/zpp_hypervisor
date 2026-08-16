@@ -19765,3 +19765,52 @@ half - names the offender in one boot each, with `exits` and
 took proving the reader to get here: three fictions and a wrong theory
 came from believing an instrument that had never been checked against a
 known value.
+
+## Bisected: the vendor string is what stops the guest
+
+One boot, everything in the enlightenment left on and only the vendor at
+0x40000000 reverted from "Microsoft Hv" to "ZppZppZppZpp":
+
+| | `Microsoft Hv` | vendor reverted |
+|---|---|---|
+| exits | 2,783 | **1,769,954** |
+| second-level entries | 0 | **640,768** |
+
+Both read through the proven reader. **The vendor is the offender**, and
+every other part - `announce_hypervisor` with CPUID.1:ECX[31] and its
+five leaves, the nested-features leaf, the accepted
+`HV_X64_MSR_VP_ASSIST_PAGE`, the trapping hypercall page, the first-level
+hypercall answers - leaves the guest booting normally.
+
+### Why, and it is the constraint this whole approach runs into
+
+**Windows sees this VMM's CPUID before Hyper-V exists.** The boot path
+runs as this VMM's direct guest, exactly as Hyper-V later does, and there
+is no level to distinguish them by - both are the first-level guest at
+the point the leaf is read. So claiming "Microsoft Hv" tells *Windows*
+it is running on Hyper-V, and Windows then takes enlightened paths -
+synthetic interrupt controller, synthetic timers, reference counter -
+which this VMM does not implement. It stops in the first few thousand
+exits.
+
+This is the file's own rule arriving with full force: **answer the whole
+of an interface or fault.** The earlier `announce_hypervisor` entry
+argued exactly this and was written off as a signature question. It is
+not a signature question. The signature is what makes an operating system
+*use* the interface.
+
+### What that means for enlightened VMCS here
+
+The enlightenment needs the vendor - `hyperv_probe` matches it before
+anything else - and the vendor cannot be given without also implementing
+enough of the Hyper-V interface for **Windows** to run on it, not just
+for a guest hypervisor to enlighten against. That is a much larger piece
+of work than the enlightenment itself: the synthetic MSRs behind the
+privileges claimed, at minimum, and honestly measured by which ones
+Windows touches before it stops.
+
+**The instrument for that already exists and is now proven**: boot with
+the vendor on, and read which synthetic MSRs are accessed before the
+2,783 exits run out. That is the next measurement, it is one boot, and
+unlike everything attempted in the middle of this session it rests on a
+reader that has been checked against a known value.
