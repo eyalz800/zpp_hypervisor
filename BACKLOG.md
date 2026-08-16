@@ -22677,3 +22677,66 @@ That is the next reading, and it is one boot: `reftsc=1`, wait for the
 protection counter to freeze, then take the post-phase histogram the
 same way. It is also the first time this file will have compared two
 configurations on the same population.
+
+## The clock Windows is reading is correct
+
+Measured before flipping anything, because a reference TSC page would
+publish a wrong count faster rather than fix it. The instrument already
+existed - `reference_read_value` and `reference_read_tsc` are a
+per-processor ring of the last 32 answers, recorded with the time-stamp
+counter beside each, which is the two-field census in the honest form:
+both are real quantities and both must move.
+
+Two readings, minutes apart, and the ring is always recent so it
+describes the current regime whatever phase the boot is in:
+
+```
+reader proven: host_page_table[0] = 0x69685023
+cpu 0: 4,700 reads  span 392.75 ms  rate  9.998 MHz  non-monotonic 0/31
+cpu 0: 6,850 reads  span 212.83 ms  rate 10.000 MHz  non-monotonic 0/31
+```
+
+- **Rate is 10 MHz**, which is what the interface documents for
+  `HV_X64_MSR_TIME_REF_COUNT` in 100 ns units. Error 0.02% on the first
+  reading and none on the second.
+- **Strictly monotonic** - zero backward steps in either window.
+- **Cross-processor skew cannot arise**: only processor 0 ever reads the
+  counter, which agrees with everything else in this file about where
+  the work is.
+
+All three properties pass. **Windows is not waiting on a broken clock**,
+and the reference TSC page is therefore a pure throughput question - it
+would publish a correct value more cheaply, not fix a wrong one. Which
+also means the unresolved safety objection to it is not offset by a
+correctness argument.
+
+**One correction to how this was framed.** The counter is *not* answered
+by this VMM. `nested_entry.cpp` sets `reference_read_pending` at the
+`rdmsr` and nothing else - the exit is **reflected**, and the value is
+produced by the guest hypervisor, which is why the answer has to be
+collected at the next second-level entry out of RAX and RDX. So a wrong
+count would have been Hyper-V's arithmetic on a time base this VMM
+presents, not this VMM's own answer. It is right either way, but the
+ownership matters for where a fault would have been.
+
+### The interrupt census was taken too early and is not reported as a result
+
+The prediction to test next was that the guest arms a timer whose
+interrupt never arrives. The reading taken for it is **void**: the
+protection counter read 29,623 and climbing, so the window was inside
+the six-minute startup phase and mixes the two populations - exactly the
+error the post-phase census was built to remove, made again one entry
+later by not re-checking the freeze before sampling.
+
+For the record and not as evidence, it showed 4,861 vectors injected
+into the second level - 75.4% `0xd1`, 24.6% `0x40` - and an
+interrupt window armed on 1.6% of entries. If that holds after the
+freeze it says interrupts *are* being delivered and the prediction is
+wrong; but it has to be retaken with the counter static first, and
+until it is, it says nothing.
+
+**The discipline that failed here is the one this session added**: check
+that the phase counter is frozen *immediately before* opening the
+window, not once at the start of the boot. A wait long enough on one
+boot is not long enough on the next - this boot's phase was still
+running fifteen minutes in, where an earlier one finished in six.
