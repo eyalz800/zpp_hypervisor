@@ -20761,3 +20761,37 @@ polls, names what the firmware is waiting for.
 a running guest through the monitor rather than adding counters - which
 is what the rig notes prescribe for a guest that is up, and what this
 session reached for last instead of first.
+
+### And the loop address is not stable across boots
+
+Same binary, next boot, sampled the same way:
+
+```
+fffff80e1a267a4a  fffff80e1a3487e8  fffff80e1a267a31  fffff80e1a257efe
+0000000067206ca3
+exits 2,333   l2-entries 0   CPL 25/25 zero
+```
+
+**Windows kernel addresses, varied** - not the firmware epilogue at
+`0x7ed8411a` that six of eight samples hit last time. So where it ends up
+differs between runs of the same binary, while the *outcome* does not:
+~2,300-2,800 exits, no second-level entry, no ring 3, every time.
+
+That rules out chasing the specific address. `0x7ed8411a` was where one
+run happened to be, not a fixed point the machine converges on.
+
+### The stable description, which is all that is warranted
+
+Across every `ZPP_EVMCS=ON` boot: **the guest executes - firmware or
+Windows kernel, varying - takes two to three thousand exits in place of
+millions, never starts the guest hypervisor, and never reaches user
+mode.** Two to three thousand exits over eight minutes is not a guest
+using a hypervisor; it is a guest that has stopped needing one, or has
+stopped being given what it asks for.
+
+**That is where this session ends.** The description is stable and
+measured; the mechanism is not identified; and the addresses vary enough
+that the next step is not "look at this instruction" but "find what
+changed about the interception itself" - which is a question about this
+VMM's own controls, and is where a fresh session should start rather than
+where an exhausted one should guess.
