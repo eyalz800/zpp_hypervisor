@@ -4810,6 +4810,96 @@ static void test_exit_and_entry_control_composition()
             h.vmcs02_launched[cpu] = true;
         }
 
+        // **The enlightened VMCS, both directions.**
+        //
+        // With it armed the guest hypervisor stops executing VMREAD and
+        // VMWRITE - 54% of a trust-level round trip on the rig - and
+        // states its VMCS in a shared structure instead. That only helps
+        // if what this VMM reads out of the structure is what the guest
+        // hypervisor put in, and if what it writes back is what the
+        // guest hypervisor then reads.
+        //
+        // A round trip through both copies is the check, and it needs no
+        // hardware: values in, values out, compared field by field. The
+        // structure's layout is Hyper-V's rather than the
+        // architecture's, so a field read from the wrong offset is a
+        // plausible-looking wrong number rather than a fault - which is
+        // exactly what a desk test catches and a boot does not.
+        {
+            auto & h = hv();
+            zpp::hypervisor::hyperv::enlightened_vmcs evmcs{};
+
+            // Distinct values per field, so a copy that reads the
+            // neighbouring member fails rather than coincidentally
+            // matching.
+            evmcs.guest_rip = 0x1111000;
+            evmcs.guest_rsp = 0x2222000;
+            evmcs.guest_rflags = 0x3333000;
+            evmcs.guest_cr3 = 0x4444000;
+            evmcs.ept_pointer = 0x5555000;
+            evmcs.tpr_threshold = 0x66;
+            evmcs.exception_bitmap = 0x77777;
+            evmcs.guest_cs_base = 0x8888000;
+            evmcs.guest_idtr_base = 0x9999000;
+            evmcs.host_rip = 0xaaaa000;
+            evmcs.msr_bitmap = 0xbbbb000;
+            evmcs.guest_interruptibility_info = 0x3;
+            evmcs.guest_es_selector = 0x10;
+            evmcs.guest_tr_selector = 0x40;
+            evmcs.guest_cs_ar_bytes = 0xa09b;
+
+            h.copy_enlightened_to_vmcs12(cpu, evmcs);
+
+            auto & v = h.guest_vmcs12[cpu];
+            auto ok_in =
+                (0x1111000 == v.read(field::guest_rip)) &&
+                (0x2222000 == v.read(field::guest_rsp)) &&
+                (0x3333000 == v.read(field::guest_rflags)) &&
+                (0x4444000 == v.read(field::guest_cr3)) &&
+                (0x5555000 == v.read(field::ept_pointer)) &&
+                (0x66 == v.read(field::tpr_threshold)) &&
+                (0x77777 == v.read(field::exception_bitmap)) &&
+                (0x8888000 == v.read(field::guest_cs_base)) &&
+                (0x9999000 == v.read(field::guest_idtr_base)) &&
+                (0xaaaa000 == v.read(field::host_rip)) &&
+                (0xbbbb000 == v.read(field::msr_bitmap)) &&
+                (0x3 == v.read(field::guest_interruptibility_state)) &&
+                (0x10 == v.read(field::guest_es_selector)) &&
+                (0x40 == v.read(field::guest_tr_selector)) &&
+                (0xa09b == v.read(field::guest_cs_access_rights));
+
+            check(ok_in,
+                  "an enlightened VMCS reads into vmcs12 field for field "
+                  "- the layout is Hyper-V's, so a field taken from the "
+                  "wrong offset is a plausible wrong number rather than "
+                  "a fault");
+
+            // And back out, which is what the guest hypervisor reads
+            // after an exit now that it cannot VMREAD.
+            v.write(field::exit_reason, 0x1234);
+            v.write(field::exit_qualification, 0x5678000);
+            v.write(field::vm_exit_interruption_information, 0x80000b0e);
+            v.write(field::vm_exit_instruction_length, 3);
+            v.write(field::guest_rip, 0xc0de000);
+            v.write(field::guest_physical_address, 0xfeed000);
+
+            zpp::hypervisor::hyperv::enlightened_vmcs out{};
+            h.copy_vmcs12_to_enlightened(cpu, out);
+
+            auto ok_out = (0x1234 == out.vm_exit_reason) &&
+                          (0x5678000 == out.exit_qualification) &&
+                          (0x80000b0eu == out.vm_exit_intr_info) &&
+                          (3 == out.vm_exit_instruction_len) &&
+                          (0xc0de000 == out.guest_rip) &&
+                          (0xfeed000 == out.guest_physical_address);
+
+            check(ok_out,
+                  "exit information written back into an enlightened "
+                  "VMCS is what the guest hypervisor will read - without "
+                  "this it collects the same fields with VMREAD, which "
+                  "is the 54% the enlightenment removes");
+        }
+
         // (5) The same guest twice in a row - the case the deferral
         // exists for - with the level above changing a field in
         // between.

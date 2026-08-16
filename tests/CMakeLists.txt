@@ -324,6 +324,7 @@ zpp_add_host_test(nested_exit
         support/host_heap.cpp
         "${ZPP_HYPERVISOR_SRC}/hypervisor/nested_entry.cpp"
         "${ZPP_HYPERVISOR_SRC}/hypervisor/nested_shadow_vmcs.cpp"
+        "${ZPP_HYPERVISOR_SRC}/hypervisor/nested_evmcs.cpp"
         "${ZPP_HYPERVISOR_SRC}/arch/x86_64/page_table.cpp"
         "${ZPP_HYPERVISOR_SRC}/crt/heap.cpp"
     INCLUDES
