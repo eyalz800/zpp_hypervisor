@@ -24230,3 +24230,60 @@ The accesses cannot be made cheaper, so there must be fewer of them.
 878,468 done). What is left is the write side of `build_vmcs02` and the
 read side of `reflect_l2_exit`, and the question for each field is
 whether its value can have changed since the last entry.
+
+## Where the exit cost actually is, and why two correct optimisations changed nothing
+
+Both changes below are right and both are worth keeping - they are
+strictly less work for the same result - and neither moved the number.
+Recorded because the *pattern* is the lesson: this file has now spent
+three attempts attacking `map_window_at` and none of them touched the
+cost, because the cost is not there.
+
+| change | remaps/exit | cycles/exit |
+|---|---|---|
+| control | 131.4 | 423,565 |
+| MSR areas read in chunks | 126.6 | 420,659 |
+| VTL assist: one walk, one read | ~126 | 418,668 |
+
+The VTL assist loop really was doing 64 identical extended-page-table
+walks for 512 bytes inside one page. It is simply not hot - the capture
+is gated by `vtl_capture_at`/`vtl_recapture` and runs rarely, and EPT
+walks per exit went 11.4 -> 11.9 across the change, which is noise.
+
+### The measurement that does account for it
+
+New counters, `l2_translate_walks` and `l2_translate_entries`, with the
+reader proven against `host_page_table[0] = …023` each time:
+
+```
+exits    2,128,980
+walks   25,240,275     11.9 per exit
+entries 84,151,408     39.5 per exit, so 3.33 levels per walk
+```
+
+So EPT walks are 39.5 of the ~126 window repoints, about 43,000 cycles
+an exit. Real, and a third of phase 11 at most.
+
+**The other 87 repoints are still unlocated.** Two hypotheses have been
+tested and both were wrong, so the next step is a counter per call site
+of `read_guest_physical`, not a third guess.
+
+### The number that matters
+
+Phases 1 and 2 - `reflect_l2_exit` at 209,099 cycles and `build_vmcs02`
+at 136,581 - divided by this VMM's measured price for one trapping
+VMREAD (~3,735 cycles) come to roughly **93 VMCS accesses per exit**,
+which is ~347,000 of the 418,668 cycles.
+
+Stated plainly: **every exit this VMM takes costs about ninety-three
+exits to the layer below.** That is the whole slowdown, it matches the
+~100x the boot behaves like, and with `enable_shadow_vmcs` absent in
+hardware there is no way to make an individual access cheap.
+
+So the only remaining direction is **fewer accesses**, and it is a
+redesign rather than a fix: carrying vmcs02 state across entries and
+writing only what changed, extending what `defer` already does on the
+read side (76% of hot-state reads skipped). Nothing smaller than that
+will move a 93x amplification, and the three optimisations above are
+evidence for that rather than against it - each removed real work and
+each left the number where it was.
