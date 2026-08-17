@@ -23120,3 +23120,74 @@ configuration space - the MSI-X capability lives at `[b0]` and the
 enable is one bit in one word, so a write-watch on that offset, or the
 config-space accesses this VMM already sees, would say whether Windows
 tries and is refused or never tries at all.
+
+## The device is exactly as the firmware left it: memory and DMA on, interrupts untouched
+
+The `lspci` diff, free and taken before the trace, with `driver:` printed
+beside every reading.
+
+```
+                    no guest (host nvme)        this VMM, nested=1
+Control:            I/O+ Mem+ BusMaster+        I/O+ Mem+ BusMaster+
+                    ... DisINTx+                ... DisINTx-
+Region 0:           Memory at b1100000 [16K]    Memory at b1100000 [16K]
+MSI      [90]:      Enable- Count=1/32          Enable- Count=1/32
+MSI-X    [b0]:      Enable+ Count=17 Masked-    Enable- Count=17 Masked-
+```
+
+**`Mem+` and `BusMaster+` are identical.** Memory decoding is on and the
+controller is allowed to master the bus, so it can fetch commands and
+post completions - the fork's "several steps removed" branch is closed.
+The BAR assignment is identical too, so nobody is looking at the
+controller in the wrong place.
+
+**The whole difference is interrupt configuration**: MSI-X enabled
+against not, and `DisINTx` set against clear.
+
+### And `DisINTx-` is the tell
+
+A driver that switches a device to MSI-X sets `DisINTx` to turn the
+legacy pin off - which is exactly what the host `nvme` driver's
+`DisINTx+` is. Under this VMM the bit is **clear**, meaning the device is
+still configured for the legacy pin, which is what a controller looks
+like when firmware has finished with it and no operating-system driver
+has started.
+
+Read with what this file already measured, the readings agree and they
+say the same thing three ways:
+
+| observation | says |
+|---|---|
+| `AQA 0x00010001`, `ASQ`/`ACQ` at `0x7dd3xxxx` | admin queues are two entries in **firmware** memory |
+| `MSI-X: Enable-`, `MSI: Enable-`, `DisINTx-` | interrupts as firmware left them |
+| `Mem+ BusMaster+`, BAR assigned | firmware brought the controller up, and it works |
+
+**So the controller is in exactly the state the UEFI firmware left it
+in, and Windows' storage driver has never touched it.** That is a
+narrower statement than "interrupt setup is broken": nothing in the
+driver's initialisation sequence has happened, not the reset, not the
+queue programming, not the interrupt selection.
+
+`Mem+ BusMaster+` does not distinguish firmware from Windows on its own -
+both would set them - but the admin queues do, and they are firmware's.
+
+### Which changes what the trace is for
+
+The trace was framed as "does Windows try to set the enable bit and get
+refused, or never try". On this evidence the expected answer is **never
+try**, and a trace showing no write to `[b0]` would confirm a conclusion
+already reached rather than distinguish anything.
+
+The question it should be pointed at instead is one step earlier:
+**does Windows see the device at all?** A `vfio_pci_read_config` trace
+answers that - a driver that enumerates a device reads its vendor,
+device and class before it writes anything, so the presence or absence of
+*reads* against `02:00.0` separates "the driver ran and declined" from
+"the device was never enumerated". That is the same one-boot experiment
+with the trace point changed, and `vfio_pci_read_config` is confirmed
+present in `qemu-system-x86_64-new` alongside `vfio_pci_write_config`.
+
+Run it against `boot-kvm.sh` as well, which is now a proven
+single-variable control with a working boot - the read sequence a
+successful enumeration produces is the shape a failed one has to be
+compared against.
