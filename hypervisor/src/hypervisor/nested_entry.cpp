@@ -6120,30 +6120,46 @@ void hypervisor::capture_vtl_switch(std::size_t cpu,
         this->vtl_assist_read[kind][which] = 0;
         this->vtl_assist_error[kind][which] = 0;
 
-        for (std::size_t i{}; i < vtl_assist_size; i += 8) {
-            auto first = l2_physical_to_l1(cpu, (msr & page_mask) + i);
-            if (!first) {
-                this->vtl_assist_error[kind][which] =
-                    static_cast<std::uint64_t>(first.error().code()) |
-                    (1ull << 32);
-                break;
-            }
-
-            if (auto got = read_guest_physical(
-                    *first,
-                    std::span(reinterpret_cast<std::byte *>(
-                                  &this->vtl_assist[kind][which][i]),
-                              8));
-                !got) {
-                this->vtl_assist_error[kind][which] =
-                    static_cast<std::uint64_t>(got.error().code()) |
-                    (2ull << 32);
-                break;
-            }
-
-            this->vtl_assist_read[kind][which] = i + 8;
-            this->vtl_assist_first[kind][which] = *first;
+        // One translation and one read for the whole area, where this
+        // used to walk and read eight bytes at a time.
+        //
+        // `vtl_assist_size` is 512 and the address is page-aligned, so
+        // every byte of it is in **one** page - which made the loop 64
+        // identical extended-page-table walks, each three or four levels
+        // deep and each level a repoint of the mapping window, to fetch
+        // 512 bytes that one map could reach. Measured: walks cost 3.33
+        // entry reads each and the whole VMM was doing 38 of those per
+        // exit at 1,088 cycles a repoint.
+        //
+        // The per-quadword progress this used to record could never
+        // distinguish anything, for the same reason: the page either
+        // maps or it does not, so a partial read was not a state that
+        // existed. What the counters are for - telling an empty page
+        // from a failed read - is preserved, and the error code still
+        // says which half failed.
+        auto first = l2_physical_to_l1(cpu, msr & page_mask);
+        if (!first) {
+            this->vtl_assist_error[kind][which] =
+                static_cast<std::uint64_t>(first.error().code()) |
+                (1ull << 32);
+            continue;
         }
+
+        this->vtl_assist_first[kind][which] = *first;
+
+        if (auto got = read_guest_physical(
+                *first,
+                std::span(reinterpret_cast<std::byte *>(
+                              &this->vtl_assist[kind][which][0]),
+                          vtl_assist_size));
+            !got) {
+            this->vtl_assist_error[kind][which] =
+                static_cast<std::uint64_t>(got.error().code()) |
+                (2ull << 32);
+            continue;
+        }
+
+        this->vtl_assist_read[kind][which] = vtl_assist_size;
     }
 
     // Last, so a reader that sees this set sees everything above it.

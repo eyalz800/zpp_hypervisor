@@ -194,12 +194,19 @@ std::expected<std::uint64_t, zpp::error> hypervisor::l2_physical_to_l1(
 
     auto eptp12 = shadow.read(arch::x86_64::vmx::vmcs::field::ept_pointer);
 
+    // Counted here rather than at entry: the two returns above answer
+    // without reading anything. See `l2_translate_walks`.
+    this->l2_translate_walks[cpu] = this->l2_translate_walks[cpu] + 1;
+
     auto walk = arch::x86_64::vmx::walk_ept(
         eptp12 & (((1ull << 52) - 1) & ~0xfffull),
         guest_physical,
         physical_address_bits(),
         execute_only_translations_offered,
         [&](std::uint64_t at) -> std::optional<epte> {
+            this->l2_translate_entries[cpu] =
+                this->l2_translate_entries[cpu] + 1;
+
             std::uint64_t value{};
             auto read = read_guest_physical(
                 at,

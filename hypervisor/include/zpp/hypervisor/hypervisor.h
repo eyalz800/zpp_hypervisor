@@ -3519,6 +3519,25 @@ private:
     volatile std::uint64_t handler_last_tsc[max_cpus]{};
     /** @} */
 
+    /**
+     * How many second-level physical addresses were actually *walked*
+     * into first-level ones, and how many extended-page-table entries
+     * that walking read.
+     *
+     * Both, because one without the other cannot say where the mapping
+     * window's cost comes from. `map_window_at` was measured at 126.6
+     * calls per exit and 1,088 cycles each, and an attempt to account
+     * for them by batching the MSR areas removed five - so the rest are
+     * somewhere else, and every level of every walk is one of these.
+     *
+     * The counter sits after the two early returns that answer without
+     * walking, since those cost nothing and counting them would hide the
+     * ratio this exists to show: entries read divided by walks is the
+     * depth, and walks per exit is what a caller could avoid.
+     */
+    volatile std::uint64_t l2_translate_walks[max_cpus]{};
+    volatile std::uint64_t l2_translate_entries[max_cpus]{};
+
     volatile std::uint64_t reference_count_backwards[max_cpus]{};
     std::uint64_t reference_count_previous[max_cpus]{};
     /** @} */
