@@ -24100,3 +24100,68 @@ spinning on memory**". A loop that touches no new memory and takes no
 exits between its trust-level switches is exactly that, and nothing
 else in this tree can see it: the exit trace only shows instructions
 that trap, and this loop's body does not.
+
+## Correction: it is not a loop. Windows is running, and rendering the boot animation
+
+The previous entry concluded "the second stall is a loop, not
+slowness", from EPT violations frozen at 296,950 across nine minutes
+while trust-level switches climbed. **That conclusion is wrong**, and
+the instrument that overturns it is the one that entry ended by naming.
+
+`ZPP_PROFILE_L2=ON` samples the second-level instruction pointer on the
+VMX-preemption timer, so it sees instructions that never trap. 1,742
+samples, and the top of the table symbolized against the guest's own
+`ntoskrnl.exe`:
+
+```
+  9  HalpHvTimerAcknowledgeInterrupt
+  8  KiIsrThunkShadow
+  7  HvlWriteApicCommandRegister
+  5  HvlEndSystemInterrupt
+  2  RaspScanConvert
+  1  RaspAntiAlias            x3
+  1  GxpAdjustRectangleToFrameBuffer
+  1  SmProcessCreateNotification
+  1  SepSetTokenTrust / RtlCreateAcl / SeDeleteAccessState
+  1  SLQueryLicenseValueInternal
+  1  ObpCreateSymbolicLinkName
+  1  KiSetSystemTimeDpc
+```
+
+`Rasp*` is the rasterizer and `Gxp*` the boot frame buffer - **that is
+the boot animation being drawn**. `SmProcessCreateNotification` is the
+Session Manager creating processes. Security tokens, ACLs, licensing,
+object manager, a timer DPC. This is a Windows that is *booting*.
+
+And the shape says so independently of any symbol: the 64-slot table
+filled and **overflowed**, with a maximum of 9 hits. 1,742 samples over
+more than a thousand distinct addresses is the opposite of a spin.
+
+### Where the reasoning went wrong
+
+"No new EPT violations" was read as "no progress". It is not: a guest
+running code and data already present in the shadow EPT takes no
+violations at all, and by that point most of what Windows was touching
+had been mapped. The inference held only if the guest's *working set*
+were still growing, which was assumed rather than checked.
+
+The general form, and it is the fifth distinct shape this file has
+collected: **an absence of exits is not an absence of execution.**
+Every exit-driven instrument in this tree shares that blind spot, and
+`profile_l2`'s own comment says so - "the guest being chased takes
+none". Wrong field, wrong denominator, wrong duration, wrong source,
+and now **wrong visibility**.
+
+### What is actually true
+
+The machine is progressing, far too slowly to see. `DisINTx+` now reads
+set on the passed-through NVMe with `driver: vfio-pci` - a driver
+action, taken when moving a device off the legacy interrupt pin, and
+every earlier guest reading in this session was `DisINTx-`. MSI-X is
+still `Enable-`, so the storage stack is mid-initialisation rather than
+finished.
+
+So the correct statement of the problem is the one this file spent a
+long time trying to escape: **it is the per-exit cost**, 423,565 cycles
+inside this VMM at 86.6% of wall clock. Optimisation is the right tool
+after all, and the phase table says where to point it.
