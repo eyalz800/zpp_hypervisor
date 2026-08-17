@@ -23605,3 +23605,97 @@ What is left is a specific, positional question with a specific
 instrument now pointed at it: the guest brings a processor up, points a
 synthetic interrupt at the clock, and never executes another
 instruction of work.
+
+## Named at last: Windows stops inside Phase1Initialization, in the HAL's hypervisor timer
+
+Public symbols for the exact build on the machine - `ntkrnlmp.pdb`
+GUID `C8A7F11B37FE28227B6B11412E3A0519` age 1, which is **the same GUID
+`guest_windows.h` records its structure offsets from**, so the thread
+walk below is reading fields verified against the image it is walking.
+`ntoskrnl.exe` loaded at `0xfffff80291a00000`, preferred base
+`0x140000000`.
+
+### The thread
+
+Sampled 175 times, every sample identical:
+
+```
+thread        0xffff808bc34a4040
+idle_thread   0xfffff802929d25c0     <- different, so not the idle thread
+start_address 0xfffff802920fb520     -> Phase1Initialization
+state         2                      -> Running, not Waiting
+wait_reason   0
+```
+
+**`Phase1Initialization`.** The thread that starts drivers, starts the
+other processors and brings the system up. It is *Running*, not blocked
+on anything, and it is the only thread this processor ever runs.
+
+### The last work it ever did
+
+```
+HalpPciReadMmConfigUshort        the qual=0x181 sweep - PCI configuration
+                                 space, 2 MB apart because that is our
+                                 EPT page size, monotonic to 0xefe00000
+HalpInterruptBuildStartupStub    reads IA32_PAT and IA32_EFER
+HalpApicX2WriteRegister          LVT LINT1 <- NMI, LVT <- 0xfe
+HalpIsMicrosoftCompatibleHvLoaded
+HalpIsPartitionCpuManager
+HalpTimerInitializeHypervisorTimer
+HalpHvTimerSetInterruptVector    synthetic interrupt source <- 0xd1
+                                 <- nothing further, ever
+```
+
+### And the loop it never leaves
+
+```
+HvlGetRegister64                 73.2% of second-level entries
+HalpHvTimerArm
+HalpHvTimerAcknowledgeInterrupt
+HvlEndSystemInterrupt
+HvlWriteApicCommandRegister      the self-IPI, via the synthetic ICR
+HalpPCIReleaseConfigSpaceLock
+```
+
+Every one is HAL timer or HAL interrupt plumbing. There is no kernel
+work in it at all.
+
+That also explains the priority census without any appeal to a
+rendezvous: `HalpPCIReleaseConfigSpaceLock` is the configuration-space
+lock, which is held at high interrupt priority - so `0xf0` at a third
+of entries is the HAL holding that lock, not a processor rendezvous,
+and the earlier reading of it was wrong.
+
+### What this retires
+
+**The deferred-call starvation story is dead, killed by its own probe.**
+`guest_interrupt_requested` 70 against `guest_interrupt_idle` 83 - the
+software-interrupt byte is *clear* on 54% of samples, and
+`guest_windows.h` states the criterion in advance: "If it is clear, the
+requests are being serviced and the low delivery count of vector `0x2f`
+means only that Windows drains the queue inline when it lowers
+priority, which it does on real hardware too." So the 13,765-to-0
+self-IPI ratio is normal behaviour and not the fault. Recorded because
+it was my own leading theory two entries ago.
+
+The priority finding itself survives - the unbiased sample, one per
+4096 entries, gives class 13 = 77, class 15 = 59, class 2 = 17 and
+class 0 = **zero**, matching the per-entry census. Windows really never
+returns to PASSIVE_LEVEL. But that is now a *symptom* of never leaving
+HAL timer code, not a mechanism of its own.
+
+### What it points at
+
+Windows reaches the end of its hardware bring-up - PCI enumerated, the
+application-processor startup stub built, the hypervisor timer
+initialised and given its vector - and then executes nothing but the
+timer arm/acknowledge loop for ever. The next question is therefore
+narrow and, for the first time, has a name attached: **what does
+`HalpHvTimerArm` do after `HalpHvTimerSetInterruptVector`, and why does
+it never return to its caller.**
+
+Note this is consistent with `ZPP_CPUS=1` stalling identically. The
+stub is *built* before any processor is started, and the stall is after
+it - so a machine with no application processors to start reaches the
+same instruction and stops in the same place, which is exactly what was
+measured.
