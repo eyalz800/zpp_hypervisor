@@ -24053,3 +24053,50 @@ That is the wrong-population error, made here after this same session
 recorded it twice in other forms. The guard is cheap and was available:
 **check that the workload exists before pricing it** - `l2_entries` was
 one line above the cycle counters in the same dump.
+
+## The second stall is a loop, not slowness - measured, so optimisation is the wrong tool
+
+Nine minutes, settled state, `reftsc=1`:
+
+```
+ept-violation        296,950  ->  296,950     unchanged
+HvCallVtlCall         47,795  ->   74,817     +27,022, about 50/s
+HvCallModifyVtl...    39,239  ->   39,239     unchanged
+second-level entry rips: 8 distinct
+```
+
+**Fifty trust-level round trips a second for nine minutes, and not one
+byte of new memory touched.** A guest making slow progress walks into
+new pages; this one does not. So the second stall is a logic problem
+and the per-exit cost is not what is holding it.
+
+That matters because the cost is spectacular and would otherwise be the
+obvious thing to attack:
+
+| phase | what | cycles/call | calls/exit | share |
+|---|---|---|---|---|
+| 1 | `reflect_l2_exit` | 208,093 | 1.0 | 22.0% |
+| 11 | `map_window_at` | 1,088 | **131.4** | 15.1% |
+| 2 | `build_vmcs02` | 137,538 | 1.0 | 14.5% |
+| 15 | (nested_entry) | 85,152 | 1.0 | 9.0% |
+
+131 window remaps per exit is a striking number and `guest_memory.cpp`
+already flags the mapping as the removable half. It is still the wrong
+thing to work on right now: removing **all** of phase 11 is 1.18x, and
+a loop does not finish 18% sooner.
+
+`map_window_at` also already records why the obvious fix fails - a
+single-slot cache "fired on 11.5% of 11.4 million calls and moved this
+phase's cost by nothing, because a four-level walk asks one slot for
+four *different* table frames in a row". The diagnosis points at
+per-level slots rather than one shared slot, and that is worth doing
+**after** the loop, not instead of it.
+
+### The instrument for what comes next
+
+`ZPP_PROFILE_L2` - "sample a second-level guest's instruction pointer on
+the VMX-preemption timer... **the only instrument that can see a guest
+spinning on memory**". A loop that touches no new memory and takes no
+exits between its trust-level switches is exactly that, and nothing
+else in this tree can see it: the exit trace only shows instructions
+that trap, and this loop's body does not.
