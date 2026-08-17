@@ -23283,3 +23283,119 @@ each, no new code, no new boot beyond the goal configuration itself.
 look: a broadcast INIT-SIPI-SIPI proven delivered to all seven
 application processors *while zpp was refusing it*. That failure has
 happened here before and took KVM tracing to see.
+
+## The two IPI instruments read zero because the guest uses neither register
+
+Reproduced from scratch this session, and the reason both instruments
+were silent is worth more than the silence.
+
+Under the goal configuration, with the protection counter confirmed
+frozen at **39,237** - a fourth boot, the same total again - every
+architectural instrument for "did the guest ask for a processor" reads
+zero:
+
+```
+ipi_init_seen           0      watched_access_count   0
+ipi_start_up_seen       0      observed_apic_mode[0]  2  (xapic)
+ipi_refused_shorthand   0      observed_apic_mode[1..7] 0 (never launched)
+ipi_refused_logical     0
+ipi_last_command        0
+```
+
+`ipi_last_command` is set on *every* command, not only the two that
+start a processor, so zero there is not a filter that missed something -
+it is no x2APIC interrupt command register write ever occurring. And
+`intercept_interrupt_command(intercept_apic && any_x2apic)` explains
+why nothing armed it: the processor is in **xAPIC** mode, so the
+register is not an MSR at all, and arming it there would be wrong
+(`local_apic.cpp`, SDM 13.12.1).
+
+The page watch is armed - `any_xapic` is true - and never fires either.
+
+**Neither is aimed at a register this guest uses.** The exit trace says
+what it uses instead:
+
+```
+wrmsr detail=0x40000070              HV_X64_MSR_EOI
+wrmsr detail=0x40000071 value=0x4002f   HV_X64_MSR_ICR
+```
+
+A census of one boot's synthetic writes, at the point the protection
+phase has frozen:
+
+```
+0x40000070   51,881  24.9%  EOI
+0x40000071   51,564  24.7%  ICR
+0x400000b1   51,561  24.7%  STIMER0_COUNT
+0x40000084   49,241  23.6%  EOM
+0x400000b0    4,293   2.1%  STIMER0_CONFIG
+```
+
+Four counters in near-lockstep is one loop, once around per clock tick.
+
+So this is the sixth instrument this session to answer a question it
+could not see, and the first whose blindness was *by design and
+correct*: the architectural registers are genuinely unused, and a VMM
+watching them is not broken, it is watching a guest that talks to its
+own hypervisor instead. **Before believing a zero, establish that the
+guest uses the register at all.** `driver:` beside every device
+reading, run state beside every device reading, and now: the register
+the guest actually writes beside every interception counter.
+
+### The self-IPI is sent constantly and delivered never
+
+Two counters that are candidates for the same quantity, as deltas, both
+snapshots taken with the protection counter frozen at 39,237 so the
+population is the settled one:
+
+| counter | t0 | t1 | delta |
+|---|---|---|---|
+| synthetic ICR writes `0x40000071` | 63,183 | 76,948 | **+13,765** |
+| injected vector `0x2f` | 5 | 5 | **0** |
+| injected vector `0xd1`, the clock | 69,946 | 83,780 | +13,834 |
+
+**13,765 self-directed interrupts requested, none delivered**, while
+the clock is injected 13,834 times over the same window. The injection
+machinery works; this one vector does not arrive. One self-IPI per
+clock tick, for ever.
+
+That matches `nested_vmx.h`'s `deliver_self_ipi` note exactly, which
+reached it independently and earlier - and the agreement matters,
+because that note is the one that names the real fault a level deeper:
+the guest hypervisor **arms a TPR-below-threshold notification it never
+receives**, writing `tpr_threshold` on 11% of its VMWRITEs while that
+exit fires 33 times in 3.6 million.
+
+### Why this is upstream of every disk finding
+
+Vector `0x2f` is the deferred-procedure-call dispatch. A Windows whose
+DPCs never run never finishes the driver initialisation that is done at
+that level - so the storage stack never brings the controller up, which
+is precisely the state the controller was found in: memory and bus
+mastering on, admin queues still firmware's two entries, MSI-X never
+enabled, `DisINTx` clear, and no interrupt ever raised. It also
+accounts for the processors: an operating system still stuck in early
+initialisation has not reached the point of starting the other seven,
+which is why all the interception counters above read zero rather than
+"asked and refused".
+
+One chain, in order, each link measured rather than argued:
+
+```
+self-IPI requested 13,765x -> held, never delivered
+   -> DPCs never dispatch
+   -> driver initialisation never completes
+   -> stornvme never touches the controller
+   -> no MSI-X, no disk interrupt, no I/O
+   -> seven processors never started
+   -> the spinner never moves
+```
+
+### What it does not license
+
+`ZPP_DELIVER_SELF_IPI` is not the fix and has already been run:
+`l2_self_ipi_delivered` **1** against `l2_self_ipi_held` **2,005**. The
+workaround is refused by the same condition that refuses the guest
+hypervisor's own delivery, so it does not even test the chain above -
+it stops at the same place. The thing to fix is the TPR-below-threshold
+exit, and it is ours.
