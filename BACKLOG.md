@@ -23191,3 +23191,95 @@ Run it against `boot-kvm.sh` as well, which is now a proven
 single-variable control with a working boot - the read sequence a
 successful enumeration produces is the shape a failed one has to be
 compared against.
+
+## Seven processors never start: the control runs eight, we run one
+
+The reading the disk findings were a consequence of. Under plain KVM,
+with a Windows that has fully booted, all eight processors execute
+kernel code at eight *distinct* addresses, and every address moves
+between two samples taken seconds apart:
+
+```
+CPU#0 RIP=fffff81ad662779c   CPU#4 RIP=fffff804d5294286
+CPU#1 RIP=fffff81ad67a8544   CPU#5 RIP=fffff81ad67a843d
+CPU#2 RIP=fffff81ad66cb9ba   CPU#6 RIP=fffff81ad6657efe
+CPU#3 RIP=fffff81ad66296da   CPU#7 RIP=fffff804d54a768e
+   second sample: all eight different again
+```
+
+Two distinct image bases (`fffff81ad6…`, `fffff804d5…`), every
+processor at CPL 0 with `HLT=0`. That is a live multiprocessor
+Windows.
+
+Under this VMM, at the same point: **processor 0 is inside our module
+and processors 1-7 are all parked at one firmware address, spinning
+with `HLT=0`.** Seven processors at the *same* address is a firmware
+parking loop, not seven threads of an operating system.
+
+So the storage stack never running is downstream. Windows starts its
+application processors in phase 1 initialisation, *before* the plug and
+play manager starts drivers - a kernel still waiting for processors
+that never arrive never reaches the point of starting `stornvme` at
+all. That accounts for the whole set at once: the controller left
+exactly as firmware configured it, MSI-X never enabled, no device
+interrupt ever raised, and 6-7 distinct entry RIPs in the steady state,
+which is one processor in a loop rather than a scheduler running
+threads.
+
+The interrupt distribution in the control is worth recording beside
+it, because it is the same fact from the other end:
+
+```
+126: 70   0   0 ... vfio-msix[0](0000:02:00.0)
+127:  0 133   0 ... vfio-msix[1](0000:02:00.0)
+128:  0   0  63 ... vfio-msix[2](0000:02:00.0)
+```
+
+One queue per processor, each bound to a different one. A working
+Windows builds an NVMe queue pair per processor; a Windows with one
+processor cannot produce that pattern whatever the disk does.
+
+### The control was suspended, and reading it in that state would have inverted the result
+
+Found by asking `info status` before believing a device reading, and
+worth the line because the trap is invisible:
+
+```
+VM status: paused (suspended)
+   Control: I/O- Mem- BusMaster- ... DisINTx+
+   MSI-X: Enable- Count=17 Masked-
+```
+
+`Enable-`, `Mem-`, `BusMaster-` - *identical to the signature this file
+has just established as the failure*, produced by a fully booted
+Windows that had simply gone to sleep. After `system_wakeup`:
+
+```
+VM status: running
+   Control: I/O- Mem+ BusMaster+ ... DisINTx+
+   MSI-X: Enable+ Count=17 Masked-
+```
+
+Same guest, same device, four minutes apart. **A device reading is
+meaningless without the guest's run state beside it**, exactly as it is
+meaningless without `driver:` beside it - and for the same reason, that
+the state which produces the reading is not visible in the reading.
+`paused (suspended)` also means the boot *succeeded*: a guest reaches
+idle suspend only by finishing.
+
+### What it does not yet say
+
+Whether Windows ever *asks* for those processors. Two shapes remain and
+they are opposite: the guest sends INIT-SIPI-SIPI and we refuse or lose
+it, or the guest never sends one because it is already stuck. The
+counters to separate them exist already - `ipi_init_seen`,
+`ipi_start_up_seen`, `ipi_refused_shorthand`, `ipi_refused_logical`,
+`ipi_last_command` - and their own comment says why they were added:
+with `number_of_known_processors` still 1 and no processor virtualized,
+every early refusal looks identical from outside. One monitor read
+each, no new code, no new boot beyond the goal configuration itself.
+
+`trace-kvm` records the precedent that makes this the first place to
+look: a broadcast INIT-SIPI-SIPI proven delivered to all seven
+application processors *while zpp was refusing it*. That failure has
+happened here before and took KVM tracing to see.
