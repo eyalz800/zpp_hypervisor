@@ -237,6 +237,33 @@ static_assert(sizeof(msr_area_entry) == 16);
 constexpr std::uint64_t msr_area_capacity = 512;
 
 /**
+ * How many entries to fetch per read of guest memory.
+ *
+ * The three functions below used to read one 16-byte entry at a time,
+ * and `read_guest_physical` repoints the mapping window for every call
+ * it is given - so a 40-entry area cost forty window repoints, each of
+ * which is a page-table write and an INVLPG.
+ *
+ * That was **the** cost of an exit. Phase 11 measured `map_window_at`
+ * at 131.4 calls per exit and 1,088 cycles each - about 143,000 of the
+ * 423,565 cycles an exit spent inside this VMM - and the MSR areas are
+ * where the calls came from: three of them, checked on every entry
+ * (SDM 29.2.1.1 and `check_nested_msr_area`'s own comment on why the
+ * check is up front and stateless), then loaded and stored.
+ *
+ * A chunk is 512 bytes, so it is one window repoint rather than 32, and
+ * it is small enough to sit on a stack this VMM shares with everything
+ * else - a whole area would be 8 KB.
+ *
+ * The re-check before WRMSR is not weakened by reading ahead. It was
+ * never a defence against the area changing under us, which it cannot
+ * be: the value validated and the value written both come from the same
+ * local copy, before and after, so what reaches WRMSR is still exactly
+ * what was checked.
+ */
+constexpr std::uint64_t msr_area_chunk = 32;
+
+/**
  * Whether an MSR area may name this index at all.
  *
  * The three rules SDM 29.4 and SDM 30.4 share, and KVM's
@@ -595,17 +622,27 @@ std::expected<void, zpp::error> hypervisor::check_nested_msr_area(
     // buys is that the exit path cannot fail on anything but memory that
     // stopped being readable, which is the one case left for the abort
     // below.
-    for (std::uint64_t i{}; i < count; ++i) {
-        msr_area_entry entry{};
+    msr_area_entry chunk[msr_area_chunk]{};
+    std::uint64_t chunk_first{};
+    std::uint64_t chunk_count{};
 
-        auto read = read_guest_physical(
-            address + (i * sizeof(entry)),
-            std::span(reinterpret_cast<std::byte *>(&entry),
-                      sizeof(entry)));
-        if (!read) {
-            return std::unexpected(
-                zpp::error{error::nested_msr_area_unsupported});
+    for (std::uint64_t i{}; i < count; ++i) {
+        if (i >= (chunk_first + chunk_count)) {
+            chunk_first = i;
+            chunk_count = ((count - i) < msr_area_chunk) ? (count - i)
+                                                         : msr_area_chunk;
+
+            auto read = read_guest_physical(
+                address + (i * sizeof(msr_area_entry)),
+                std::span(reinterpret_cast<std::byte *>(chunk),
+                          chunk_count * sizeof(msr_area_entry)));
+            if (!read) {
+                return std::unexpected(
+                    zpp::error{error::nested_msr_area_unsupported});
+            }
         }
+
+        auto & entry = chunk[i - chunk_first];
 
         if (!msr_area_index_allowed(entry) ||
             !msr_area_index_handled(entry.index) ||
@@ -638,22 +675,32 @@ std::expected<void, zpp::error> hypervisor::check_nested_msr_area(
 std::expected<void, zpp::error> hypervisor::load_nested_msrs(
     std::size_t cpu, std::uint64_t address, std::uint64_t count)
 {
+    msr_area_entry chunk[msr_area_chunk]{};
+    std::uint64_t chunk_first{};
+    std::uint64_t chunk_count{};
+
     for (std::uint64_t i{}; i < count; ++i) {
         // SDM 29.8: the exit qualification of an MSR-loading failure is
         // "the number of the entry that caused the problem (1 for the
         // first entry, 2 for the second, etc.)".
         this->nested_msr_failure_entry[cpu] = i + 1;
 
-        msr_area_entry entry{};
+        if (i >= (chunk_first + chunk_count)) {
+            chunk_first = i;
+            chunk_count = ((count - i) < msr_area_chunk) ? (count - i)
+                                                         : msr_area_chunk;
 
-        auto read = read_guest_physical(
-            address + (i * sizeof(entry)),
-            std::span(reinterpret_cast<std::byte *>(&entry),
-                      sizeof(entry)));
-        if (!read) {
-            return std::unexpected(
-                zpp::error{error::guest_memory_unreachable});
+            auto read = read_guest_physical(
+                address + (i * sizeof(msr_area_entry)),
+                std::span(reinterpret_cast<std::byte *>(chunk),
+                          chunk_count * sizeof(msr_area_entry)));
+            if (!read) {
+                return std::unexpected(
+                    zpp::error{error::guest_memory_unreachable});
+            }
         }
+
+        auto & entry = chunk[i - chunk_first];
 
         // Re-checked rather than trusted, because the area is guest memory
         // and nothing stops a guest hypervisor rewriting it between the
@@ -675,33 +722,57 @@ std::expected<void, zpp::error> hypervisor::load_nested_msrs(
 std::expected<void, zpp::error>
 hypervisor::store_nested_msrs(std::uint64_t address, std::uint64_t count)
 {
-    for (std::uint64_t i{}; i < count; ++i) {
-        msr_area_entry entry{};
+    for (std::uint64_t first{}; first < count; first += msr_area_chunk) {
+        auto chunk_count = ((count - first) < msr_area_chunk)
+                               ? (count - first)
+                               : msr_area_chunk;
+        auto at = address + (first * sizeof(msr_area_entry));
+
+        msr_area_entry chunk[msr_area_chunk]{};
 
         auto read = read_guest_physical(
-            address + (i * sizeof(entry)),
-            std::span(reinterpret_cast<std::byte *>(&entry),
-                      sizeof(entry)));
+            at,
+            std::span(reinterpret_cast<std::byte *>(chunk),
+                      chunk_count * sizeof(msr_area_entry)));
         if (!read) {
             return std::unexpected(
                 zpp::error{error::guest_memory_unreachable});
         }
 
-        if (!msr_area_index_allowed(entry) ||
-            !msr_area_index_handled(entry.index)) {
-            return std::unexpected(
-                zpp::error{error::nested_msr_area_unsupported});
+        // Filled first, written back once. A refusal part way through
+        // still writes back the entries already read, which is what
+        // one-entry-at-a-time did: those stores had happened by the time
+        // the bad entry was reached, and a guest hypervisor reading the
+        // area afterwards must see them.
+        std::uint64_t done{};
+        auto refused = false;
+
+        for (; done < chunk_count; ++done) {
+            auto & entry = chunk[done];
+
+            if (!msr_area_index_allowed(entry) ||
+                !msr_area_index_handled(entry.index)) {
+                refused = true;
+                break;
+            }
+
+            entry.value = arch::x86_64::rdmsr(entry.index);
         }
 
-        entry.value = arch::x86_64::rdmsr(entry.index);
+        if (0 != done) {
+            auto written = write_guest_physical(
+                at,
+                std::span(reinterpret_cast<const std::byte *>(chunk),
+                          done * sizeof(msr_area_entry)));
+            if (!written) {
+                return std::unexpected(
+                    zpp::error{error::guest_memory_unreachable});
+            }
+        }
 
-        auto written = write_guest_physical(
-            address + (i * sizeof(entry)),
-            std::span(reinterpret_cast<const std::byte *>(&entry),
-                      sizeof(entry)));
-        if (!written) {
+        if (refused) {
             return std::unexpected(
-                zpp::error{error::guest_memory_unreachable});
+                zpp::error{error::nested_msr_area_unsupported});
         }
     }
 
