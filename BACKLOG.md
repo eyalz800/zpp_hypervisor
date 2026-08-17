@@ -23866,3 +23866,55 @@ filter, the protection phase had to be known to end so a window could
 sit after it, and the guest's own symbols had to name
 `HalpHvTimerArm` so the re-arm count meant something. Any one missing
 and this reads as "a performance switch that did not fix it".
+
+## Past the first stall, into a second one
+
+Honest position after about half an hour of the `reftsc=1` boot. The
+guest is not frozen and it has not arrived.
+
+**What moved, and stopped moving:**
+
+| | frozen boot | now |
+|---|---|---|
+| `ept-violation` | 0 | 313,425, then **frozen** |
+| `HvCallModifyVtlProtectionMask` | 39,237 | 39,239, then frozen |
+| working ring | frozen | **climbing, ~150/s** |
+| `HvCallVtlCall`/`Return` | frozen ~23,029 | climbing, ~75 pairs/s |
+| clock vector `0xd1` injected | 230/s | **550/s** |
+| MSI-X on the disk | `Enable-` | `Enable-` |
+
+So the guest walked into 313,425 pages of new memory, made two more
+protection calls than any earlier boot, and then stopped touching new
+memory while continuing to switch trust levels and service interrupts
+indefinitely. That is a **second stall, further on**, not the first one
+returning - the first one had no EPT violations and no trust-level
+switches at all.
+
+**What it is doing now**, from the guest's own symbols:
+
+```
+KiIsrThunkShadow                interrupt dispatch
+HalPerformEndOfInterrupt
+HvlEndSystemInterrupt
+HvlWriteApicCommandRegister     the self-IPI
+HalpHvTimerAcknowledgeInterrupt
+   + HvCallVtlCall / HvCallVtlReturn pairs
+```
+
+`HvlGetRegister64` is **gone** from the entry list, which is the
+reference TSC page confirming itself from a second direction: the
+function that was 73% of second-level entries no longer appears at all.
+
+**Interrupt plumbing, and no kernel work.** 630 interrupts a second
+serviced, no new memory, no progress toward the storage stack.
+
+### One number that has not changed and should be watched
+
+Vector `0x2f` is injected **17** times against 451,352 writes of the
+synthetic interrupt command register. Task priority is now `0x20`
+(DISPATCH_LEVEL) on 35.2% of entries, and a vector of class 2 is still
+masked at exactly class 2 - the rule is strictly-greater. Whether that
+matters is already answered for the first stall (`guest_interrupt_
+requested` clear on 54% of samples, so the queue is drained inline) but
+that measurement was taken in the *frozen* state and does not
+automatically carry over. It is the first thing to re-read here.
