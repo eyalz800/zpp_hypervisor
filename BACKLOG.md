@@ -23533,3 +23533,75 @@ replace** - and it still reports a large count, so it looks like it is
 working. This is the same failure as a census aimed at the wrong field,
 one level up: the instrument was not wrong about any single entry, it
 was wrong about which entries were worth keeping.
+
+## The last thing the guest ever does is bring a processor up
+
+With the timer config register filtered out, the working ring holds
+what it was built to hold, and its count is **frozen at 85,881** across
+two samples minutes apart while the exit counters climb. Its own
+criterion: "the working count frozen while the other climbs is a guest
+that has stopped working and is only waiting." So these are the last
+real instructions the guest ever executed.
+
+They are, in order:
+
+```
+ept-violation qual=0x181 rip=0xfffff801ebea72f3 phys=0xea000000
+ept-violation qual=0x181 rip=0xfffff801ebea72f3 phys=0xea200000
+   ... exactly 0x200000 apart, monotonic, one instruction pointer ...
+ept-violation qual=0x181 rip=0xfffff801ebea72f3 phys=0xefe00000
+rdmsr  phys=0x277           IA32_PAT
+rdmsr  phys=0xc0000080      IA32_EFER
+wrmsr  phys=0x836 value=0x400   x2APIC LVT LINT1, delivery mode NMI
+wrmsr  phys=0x834 value=0xfe    x2APIC LVT, vector 0xfe
+cpuid  0x40000001 / 0x40000003 / 0x40000006
+rdmsr  phys=0x40000083
+wrmsr  phys=0x40000093 value=0xd1   synthetic interrupt source <- clock
+                          <- and nothing, ever again
+```
+
+Two things in that, and both are new.
+
+**The sweep is finite, monotonic and completes.** 2 MB stride, one
+instruction pointer, ending at `0xefe00000` - the last 2 MB below
+`0xf0000000`, which is the top of low memory before the PCI hole. It is
+a region being walked to its end, not a loop. This is also the first
+sighting in this file of the *opening symptom* - a repeated
+`qual=0x181` EPT violation at a fixed RIP in the shadow path - located
+in time rather than inferred: it belongs to a sweep that finishes.
+
+**What follows it is processor bring-up.** Reading the page-attribute
+table and EFER, programming two local-vector-table entries, asking the
+hypervisor CPUID leaves, then pointing a synthetic interrupt source at
+the clock vector. That is the sequence a kernel runs when it starts
+executing on a processor - and it is the last thing this guest does.
+
+`tpr-below` exits appear in the same window, roughly one per eleven EPT
+violations, so that exit is **not** dead - it fires while the guest is
+working and stops when the guest stops. The "33 in 3.6 million" figure
+was measured entirely after the stall, where there is nothing left to
+notify.
+
+### Two address ranges, not one
+
+The working ring runs at `0xfffff801eb…` while the second-level entry
+RIPs are at `0xfffff801db…`, a quarter of a gigabyte apart. Those are
+two different images, which is what a machine running both virtual
+trust levels looks like: the secure kernel and the normal kernel are
+separate. So "the guest" in the paragraphs above is not one program,
+and which of the two stopped is now a question worth asking directly
+rather than assuming - `stepvtl` exists for it.
+
+### What this rules out
+
+The stall is not the seven processors (one processor stops in the same
+place), not the clock (10.000 MHz, monotonic), not the disk (never
+touched, and downstream), not the VTL protection sweep (finished,
+39,237 calls, five boots), not a lost self-IPI (masked, correctly), and
+not an unarmed TPR notification (`tpr_threshold` is zero on 99.99% of
+entries, and the exit fires when there is work).
+
+What is left is a specific, positional question with a specific
+instrument now pointed at it: the guest brings a processor up, points a
+synthetic interrupt at the clock, and never executes another
+instruction of work.
