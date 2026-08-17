@@ -24006,3 +24006,50 @@ until ssh $RIG '[ "$(basename $(readlink /sys/bus/pci/devices/0000:02:00.0/drive
 ```
 
 Windows has still never enabled MSI-X under this VMM.
+
+## Enlightened VMCS: the second level never starts
+
+Tested on top of `reftsc=1`, manifest verified off the binary
+(`evmcs=1 reftsc=1 nested=1`), one variable changed. It is a
+regression, and a large one.
+
+```
+exits total          5,645        (against 4.6 million with evmcs=0)
+l2-entries               0        <- the second level never runs
+vmlaunch                 1
+vmclear                  1
+vmwrite                 99
+cpuid                4,870  86.3%
+```
+
+The guest hypervisor sets up its enlightened structure, issues **one**
+VMLAUNCH, and its guest never executes. `l2_entries` stays at zero on
+every sample while the machine keeps running. So this is not "slower",
+it is a boot that stops before the nested guest exists - much earlier
+than the frozen `reftsc=0` state, which at least reached the settled
+timer loop.
+
+`ZPP_EVMCS` stays off. The implementation is complete and desk-tested
+and it does not work against this Hyper-V, and the thing to fix is
+whichever field `build_vmcs02` now takes from the enlightened structure
+rather than from a VMREAD.
+
+### And a measurement of mine that was invalid
+
+Before checking `l2_entries` I recorded this comparison:
+
+| | reftsc only | + eVMCS |
+|---|---|---|
+| inside this VMM | 410,071 cyc/exit | 85,906 |
+| wall clock per exit | 477,092 | 1,329,389 |
+
+**Both eVMCS figures are meaningless.** They are cycles-per-exit over
+5,645 exits on a machine whose guest never started - mostly CPUID from
+the guest hypervisor's own feature detection, with the processor idle
+between them. Dividing a wall clock by that exit count measures how
+long the machine sat still, not what an exit costs.
+
+That is the wrong-population error, made here after this same session
+recorded it twice in other forms. The guard is cheap and was available:
+**check that the workload exists before pricing it** - `l2_entries` was
+one line above the cycle counters in the same dump.
