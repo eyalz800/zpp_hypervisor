@@ -23758,3 +23758,53 @@ MSI-X on the disk still reads `Enable-`, so the storage stack has not
 started. Progress is not arrival. The question now is whether this
 finishes or stalls again further on, and the working ring answers it
 without any new instrument: it either keeps climbing or it stops.
+
+## What the reference TSC page actually changed, in exits
+
+The mechanism, measured rather than assumed. Exit histogram in the
+settled state, `reftsc=1`, against the frozen state it replaced:
+
+| exit reason | frozen (`reftsc=0`) | working (`reftsc=1`) |
+|---|---|---|
+| `rdmsr` | 33.2% | **0.0%** (899 in 4.6 M) |
+| `ept-violation` | **0.0%** | 6.8% (313,425) |
+| `int-window` | 3.3% | 10.5% |
+| `vmcall` | 0.0% | 4.4% (201,756) |
+| `vmresume` | 49.9% | 41.5% |
+
+Two of those rows are the finding and neither is the one the switch was
+turned on for.
+
+**`rdmsr` collapsing from a third of all exits to 899** is the switch
+doing its job: the guest reads the reference counter from a published
+page instead of trapping. That was always the expected benefit and it
+is confirmed.
+
+**`ept-violation` returning from exactly zero to 6.8%** is the one that
+matters. A guest taking no EPT violations at all is a guest touching no
+memory it has not already touched. 313,425 of them is a guest walking
+into new memory again. The same is true of `vmcall` going from zero to
+201,756 - trust-level switches had stopped entirely and have resumed,
+balanced call-for-return, at about 75 a second and climbing.
+
+So the page did not merely make the same loop cheaper. **The loop
+ended.** That distinction is why the earlier measurement of this switch
+concluded nothing: it priced the benefit, which was real, without a
+metric that could show the guest leaving the state it was stuck in.
+
+### Rate
+
+- working (non-idle) second-level exits: **~178/s**, from frozen
+- `HvCallVtlCall` / `HvCallVtlReturn`: 71,052 -> 75,568 in 60 s,
+  **~75 pairs/s**, exactly balanced
+- `HvCallModifyVtlProtectionMask`: **39,239**, two beyond the 39,237
+  that five earlier boots stopped at
+
+### Still not arrived
+
+MSI-X on the disk remains `Enable-` after ten minutes of this. The
+storage stack has not started, so this is progress and not a boot. The
+honest statement of where it stands: the guest was frozen and is now
+executing continuously and varied - `HvCallVtlCall`'s arguments differ
+on 18% of switches, so the switches are not one repeated call - and
+whether that reaches a running Windows is not yet known.
