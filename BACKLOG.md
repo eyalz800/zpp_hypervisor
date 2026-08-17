@@ -23399,3 +23399,77 @@ workaround is refused by the same condition that refuses the guest
 hypervisor's own delivery, so it does not even test the chain above -
 it stops at the same place. The thing to fix is the TPR-below-threshold
 exit, and it is ours.
+
+## Windows never lowers its interrupt priority, so the self-IPI is masked rather than lost
+
+The census that turns the self-IPI finding from "we drop an interrupt"
+into something quite different. Virtual task priority read from the
+guest hypervisor's own virtual-APIC page at each second-level entry,
+1,664,212 entries, protection phase frozen at 39,237:
+
+```
+0xd0   834,223  50.1%      IRQL 13
+0xf0   627,647  37.7%      IRQL 15, HIGH_LEVEL
+0x20   163,692   9.8%      IRQL 2
+0x40    23,493   1.4%
+0x00    12,399   0.7%
+0x10     2,752   0.2%
+```
+
+**Eighty-eight percent of entries are at IRQL 13 or 15.** Vector `0x2f`
+is priority class 2, and SDM 12.8.4 delivers only where the class is
+strictly greater than the task priority's - so it is deliverable on
+0.9% of entries and masked on the rest.
+
+So the self-IPI is **not being lost by this VMM**. It is being held
+because the guest is at a priority that forbids it, which is the
+architecturally correct answer, and `l2_self_ipi_held` 2,005 against
+`l2_self_ipi_delivered` 1 was `ZPP_DELIVER_SELF_IPI` computing that
+same rule and reaching that same conclusion. Both counters were right.
+
+That also retires the reading in `nested_vmx.h`'s `deliver_self_ipi`
+note that "it is not the guest masking it: `l2_entry_vtpr` has the
+guest at task priority zero or `0x10` on about a tenth of entries".
+On this boot that pair is **0.9%**, not a tenth, and the conclusion
+inverts with it: the guest is masking it, essentially always.
+
+### And the TPR-below-threshold notification is never armed
+
+The histogram written to settle exactly this, whose own comment says
+"an all-zero histogram says the first outright" - that the interrupt is
+the guest hypervisor's business and not ours:
+
+```
+threshold  0   1,585,799        tpr_shadow_honoured  1,585,908
+threshold  2          63
+threshold  4           3
+threshold 13          22
+```
+
+Not all zero, but 88 arms in 1.59 million entries. A threshold of zero
+cannot be undercut, so that exit **cannot** fire, and the earlier
+reading that the guest hypervisor "arms a notification it never
+receives" was measuring how often it *writes* the field, not what it
+writes into it. Writing zero is disarming. So the fault is not in our
+delivery of that exit, and looking there further is looking in the
+wrong place.
+
+### What the priority itself says
+
+A Windows at HIGH_LEVEL for over a third of its entries is not a
+Windows that is merely slow. HIGH_LEVEL is where the boot processor
+spins during a processor rendezvous - `KeStartAllProcessors` raises to
+it and waits for each application processor to signal - and this
+machine has seven that never left the firmware's parking loop.
+
+That predicts something cheap and falsifiable: **with one processor
+there is no rendezvous to wait for.** `ZPP_CPUS=1` is expressible in
+the launcher, so it is one boot and a single variable, and the two
+outcomes are both worth having:
+
+- **Windows proceeds** - the block is the seven processors that never
+  start, every other finding in this file is downstream of it, and the
+  priority census is the mechanism by which it stalls.
+- **Windows still stalls at the same priorities** - the rendezvous
+  reading is wrong, high IRQL has another cause, and this file has
+  eliminated the largest remaining candidate for one boot.
