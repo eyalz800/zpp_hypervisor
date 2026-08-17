@@ -23808,3 +23808,61 @@ honest statement of where it stands: the guest was frozen and is now
 executing continuously and varied - `HvCallVtlCall`'s arguments differ
 on 18% of switches, so the switches are not one repeated call - and
 whether that reaches a running Windows is not yet known.
+
+## The stall was the timer re-arm loop, and the round-trip cost drove it
+
+The mechanism, and it corrects a reading made two entries ago in this
+same session. Synthetic MSR writes, settled state, one boot each:
+
+| MSR | `reftsc=0` (frozen) | `reftsc=1` (working) |
+|---|---|---|
+| `0x400000b1` STIMER0_COUNT | 51,561 | **2** |
+| `0x400000b0` STIMER0_CONFIG | 4,293 | **6** |
+| `0x40000070` EOI | 51,881 | 451,753 |
+| `0x40000071` ICR | 51,564 | 451,352 |
+| `0x40000084` EOM | 49,241 | 231,448 |
+
+**The timer is armed twice instead of fifty-one thousand times.** The
+HAL arms it once, it works, and the guest goes on to do interrupt work
+- which is what the other three rows growing eight-fold is.
+
+So `HalpHvTimerArm` was not servicing a healthy clock. It was
+re-arming, endlessly, and never returning to `Phase1Initialization`.
+
+### The correction
+
+Earlier in this session the arm and reference rings were read together
+and the conclusion recorded was "the timer is working correctly -
+deadline 12.07 ms in the future, successive deadlines 3.8-6.7 ms apart,
+matching the measured clock period, so 'the deadline is always in the
+past' is refuted."
+
+Every number there was right and the conclusion was wrong. The
+deadlines *were* in the future at the moment of arming. What that
+reading could not see is that the guest never got far enough to use one
+before computing another - and the 3.8-6.7 ms spacing was not the
+clock's period at all, it was **the cost of one round trip through this
+VMM**. The tell was available and unused: a period that matches your
+own overhead is not a period, it is your overhead.
+
+**A rate that matches the instrument's own cost should be suspected of
+being the instrument's cost.** That is a new shape and it belongs with
+the other three - wrong field, wrong denominator, wrong duration - as
+*wrong source*: the quantity is real, measured correctly, and generated
+by the measurer.
+
+### Why the earlier evaluation of this switch concluded nothing
+
+It priced the benefit - `rdmsr` exits, which are real and now 0.0% -
+over a window that mixed the protection phase with the settled state,
+and judged it by whether Windows reached ring 3. There was no metric
+that could show the guest leaving the stuck state, because the working
+ring was saturated with idle traffic until the timer config register
+was added to its filter earlier in this session.
+
+Three things had to be true at once for this to be visible, and they
+were established in this order: the working ring had to be a real
+filter, the protection phase had to be known to end so a window could
+sit after it, and the guest's own symbols had to name
+`HalpHvTimerArm` so the re-arm count meant something. Any one missing
+and this reads as "a performance switch that did not fix it".
