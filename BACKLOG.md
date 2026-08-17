@@ -23473,3 +23473,63 @@ outcomes are both worth having:
 - **Windows still stalls at the same priorities** - the rendezvous
   reading is wrong, high IRQL has another cause, and this file has
   eliminated the largest remaining candidate for one boot.
+
+## One processor stalls in exactly the same place as eight
+
+The rendezvous reading from the priority census, tested the way it
+asked to be. `ZPP_CPUS=1`, one boot, one variable - and with one
+processor there is no `KeStartAllProcessors` rendezvous to wait for.
+
+It stalls anyway, and the numbers are the interesting part:
+
+| | 8 processors | 1 processor |
+|---|---|---|
+| `HvCallModifyVtlProtectionMask` | 39,237 | **39,237** |
+| distinct second-level entry RIPs | 8 | **8** |
+| entries at task priority `0x00` | 12,399 | **12,396** |
+| entries at task priority `0x10` | 2,752 | **2,752** |
+| entries at `0x40` | 23,493 | 23,498 |
+| MSI-X on the disk | `Enable-` | `Enable-` |
+
+**Those are not similar figures, they are the same figures.** Two boots
+with a different number of processors reach identical counts of a
+quantity nobody arranged to be identical. The protection sweep is the
+same 39,237 it has been on all five boots that reached it.
+
+So the stall is **deterministic and positional**: the guest does a
+fixed amount of work, arrives at one point, and stops. It is not a
+race, not a timing window, not a lost interrupt in flight, and not the
+seven processors - a machine with one processor stops in the same place
+having never had any to wait for.
+
+That retires the rendezvous reading of the `0xf0` entries. It does not
+retire the priority finding itself, which is measured; it retires the
+*explanation* offered for it.
+
+It also means every remaining candidate has to explain a guest that
+reaches IRQL 0 exactly 12,39x times and then never again.
+
+### The instrument built to answer this was answering with idle traffic
+
+The working ring exists so the last thing the guest *did* is not
+evicted by the loop it is stuck in - "minutes of work rather than
+seconds of waiting", as its comment puts it. All 4096 of its slots
+held this:
+
+```
+wrmsr rip=0xfffff801dbfa57e7 phys=0x400000b0 value=0x3000a
+wrmsr rip=0xfffff801dbfa57e7 phys=0x400000b0 value=0x30008
+```
+
+One instruction pointer, two values, alternating - the guest toggling
+the periodic bit of a synthetic timer it re-arms every tick. The idle
+filter lists `0x400000b1`, the timer *count*, and not `0x400000b0`, the
+timer *config*, so half of the timer re-arm was classified as work.
+
+Fixed by adding it. The general shape is worth more than the fix:
+**an incomplete filter on a filtered ring does not degrade the ring, it
+silently converts it back into the unfiltered one it was built to
+replace** - and it still reports a large count, so it looks like it is
+working. This is the same failure as a census aimed at the wrong field,
+one level up: the instrument was not wrong about any single entry, it
+was wrong about which entries were worth keeping.

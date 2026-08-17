@@ -3870,10 +3870,24 @@ void hypervisor::reflect_l2_exit(std::size_t cpu,
         // Filtered by what the loop is made of rather than by where it
         // is: the addresses move with every boot, the synthetic MSR
         // indices do not. What is left is the work.
+        //
+        // The timer *config* register belongs in this list beside the
+        // count, and leaving it out cost this ring its whole purpose.
+        // Measured: 4096 slots holding nothing but
+        // `wrmsr 0x400000b0 value=0x3000a` alternating with `0x30008` at
+        // one instruction pointer - the guest toggling the periodic bit
+        // on a timer it re-arms every tick. So the ring built to hold
+        // "minutes of work rather than seconds of waiting" was holding
+        // seconds of waiting, and the last thing the guest actually did
+        // before it stopped had been evicted by the same idle loop this
+        // list exists to exclude. An incomplete filter on a filtered ring
+        // does not degrade it, it silently converts it back into the
+        // unfiltered one it was built to replace.
         constexpr std::uint32_t reference_count_msr = 0x40000020;
         constexpr std::uint32_t synthetic_eoi_msr = 0x40000070;
         constexpr std::uint32_t synthetic_icr_msr = 0x40000071;
         constexpr std::uint32_t end_of_message_msr = 0x40000084;
+        constexpr std::uint32_t synthetic_timer_config_msr = 0x400000b0;
         constexpr std::uint32_t synthetic_timer_count_msr = 0x400000b1;
 
         auto index = static_cast<std::uint32_t>(msr_index);
@@ -3883,6 +3897,7 @@ void hypervisor::reflect_l2_exit(std::size_t cpu,
                             (synthetic_eoi_msr == index) ||
                             (synthetic_icr_msr == index) ||
                             (end_of_message_msr == index) ||
+                            (synthetic_timer_config_msr == index) ||
                             (synthetic_timer_count_msr == index));
 
         // External interrupts go too, and they are most of what the
