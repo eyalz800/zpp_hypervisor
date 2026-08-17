@@ -24165,3 +24165,68 @@ So the correct statement of the problem is the one this file spent a
 long time trying to escape: **it is the per-exit cost**, 423,565 cycles
 inside this VMM at 86.6% of wall clock. Optimisation is the right tool
 after all, and the phase table says where to point it.
+
+## The MSR-area batching was aimed at the wrong 126 calls
+
+Tested as a single variable against the 423,565 cycles/exit control,
+same switches (`reftsc=1 evmcs=0 profile=0`):
+
+| | before | after |
+|---|---|---|
+| `map_window_at` calls/exit | 131.4 | **126.6** |
+| cycles/exit inside this VMM | 423,565 | 420,659 |
+
+Reading the three MSR areas in 32-entry chunks instead of one entry at
+a time removed **five** window repoints per exit, not a hundred. The
+hypothesis was that Hyper-V's autoload lists held tens of entries each;
+they hold a handful. The change is correct and stays - it is strictly
+fewer guest reads for the same checks - but it is not the cost.
+
+So 126 of the remaps are still unaccounted for, and the honest state is
+that **no measurement has yet located them**. The candidates left are
+`l2_physical_to_l1`, which walks four levels and therefore costs four
+remaps per translation, and the VTL assist capture, which resolves
+`(msr & page_mask) + i` for i in steps of 8 across 512 bytes - 64 full
+EPT walks for 64 addresses that are all in the same page. The second is
+a diagnostic and obviously wasteful; whether either is hot is not
+established, and guessing again would repeat the error above. The way
+to settle it is a counter per call site, not another hypothesis.
+
+## VMCS shadowing is genuinely absent, so our VMREADs cannot be made cheap
+
+The largest imaginable lever, checked and unavailable. Phases 1 and 2 -
+`reflect_l2_exit` at 209,099 cycles and `build_vmcs02` at 136,581 -
+divided by this VMM's own measured price for one trapping VMREAD
+(~3,735 cycles, printed at launch) come to roughly **93 VMCS accesses
+per exit**. If those executed natively the exit cost would collapse.
+
+They cannot:
+
+```
+/sys/module/kvm_intel/parameters/enable_shadow_vmcs   N   (read-only, set at load)
+/proc/cpuinfo vmx flags: invvpid ept_x_only ept_ad ept_1gb ept vpid
+                         ept_violation_ve ept_mode_based_exec
+                         <- no shadow_vmcs, on an i7-8565U
+```
+
+Two independent readings agree, and the kernel lists `shadow_vmcs` in
+that same flags line when the processor reports it - five other
+secondary-execution features are listed, so the line is not truncated.
+This confirms the earlier note that it is hardware-absent rather than
+merely switched off.
+
+**Do not reload `kvm_intel` to try `enable_shadow_vmcs=1`.**
+`use-traced-kvm.sh` records that reloading cost three failures in one
+session, including leaving the module at refcount -1, "which only a
+power cycle clears" - and a power cycle is the one thing this rig must
+not need. The parameter is read-only at runtime precisely because it is
+load-time, so there is no cheap version of the experiment, and the two
+readings above say it would be clamped straight back to N.
+
+### Which leaves one direction
+
+The accesses cannot be made cheaper, so there must be fewer of them.
+`defer` already skips 76% of hot-state reads (2,873,957 skipped against
+878,468 done). What is left is the write side of `build_vmcs02` and the
+read side of `reflect_l2_exit`, and the question for each field is
+whether its value can have changed since the last entry.
