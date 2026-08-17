@@ -23699,3 +23699,62 @@ stub is *built* before any processor is started, and the stall is after
 it - so a machine with no application processors to start reaches the
 same instruction and stops in the same place, which is exactly what was
 measured.
+
+## The guest starts doing work: reference TSC page, and the freeze ends
+
+First forward progress in the settled state that this file has ever
+recorded. `ZPP_PUBLISH_REFERENCE_TSC=ON`, manifest read off the binary
+rather than the cache (`reftsc=1 nested=1`), everything else unchanged.
+
+**The working ring advances.** It counts second-level exits that are
+not the idle loop, and on every previous boot it froze - 85,881, then
+86,109 across a five minute window with not one entry added. With the
+page published:
+
+```
+103,447 -> 110,987 -> 118,656      +7,540, +7,669 per 45 s
+                                   about 170 working exits a second
+```
+
+That is the progress metric this file settled on, and it moved.
+
+**The priority distribution changes shape.**
+
+| task priority | page off | page on |
+|---|---|---|
+| `0xf0` HIGH_LEVEL | 35.5% | **0.1%** |
+| `0xd0` | 47.9% | 54.3% |
+| `0x20` DISPATCH_LEVEL | 12.4% | **35.2%** |
+
+The guest stops sitting at HIGH_LEVEL and starts spending a third of
+its time at DISPATCH_LEVEL, which is where deferred procedure calls
+run. This reproduces the `39.3% -> 0.2%` figure recorded earlier for
+`0xf0` and adds what that entry did not have: where the time went
+instead.
+
+**And it gets further than any boot before it.**
+`HvCallModifyVtlProtectionMask` reads **39,239**. Five previous boots -
+with eight processors, with one processor, across three different
+binaries - all stopped at exactly 39,237. Two more calls is not a
+performance difference; it is a guest that reached an instruction the
+others never reached.
+
+### Why this was not visible before
+
+The benefit was measured before and dismissed, because the thing being
+watched was whether Windows reached ring 3, over a window that mixed
+the protection phase with the settled state. The instrument that shows
+it is the working ring - and until the timer *config* register was
+added to its idle filter one entry ago, that ring was saturated with
+idle traffic and could not have shown a freeze or its ending.
+
+So this is one measurement enabled by another, and the order mattered:
+`0xf0 -> 0.2%` was known and meant nothing without a progress metric to
+put beside it.
+
+### What it does not yet show
+
+MSI-X on the disk still reads `Enable-`, so the storage stack has not
+started. Progress is not arrival. The question now is whether this
+finishes or stalls again further on, and the working ring answers it
+without any new instrument: it either keeps climbing or it stops.
