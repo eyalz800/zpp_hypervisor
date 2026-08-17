@@ -23918,3 +23918,48 @@ matters is already answered for the first stall (`guest_interrupt_
 requested` clear on 54% of samples, so the queue is drained inline) but
 that measurement was taken in the *frozen* state and does not
 automatically carry over. It is the first thing to re-read here.
+
+## What remains is 410,071 cycles per exit, and 86% of it is ours
+
+Measured in the working (`reftsc=1`) state, so it is the cost of the
+machine that is now running rather than the one that was frozen:
+
+```
+exits handled          11,407,320
+inside this VMM           410,071 cycles/exit
+wall clock per exit       477,092 cycles/exit
+share inside this VMM        86.0%
+everything else            67,020 cycles/exit
+guest-state reads: 9,984,052 done, 219,649,144 skipped (19.3 per exit)
+```
+
+**Two hundred microseconds per exit, and the layer below us accounts
+for 14% of it.** Every previous framing of the nesting tax in this file
+put the cost underneath; at 86% inside, the cost is here.
+
+Divided by the price list this VMM prints at launch - `vmcs price per
+1000: exit_reason 0x39013e`, about 3,735 cycles for a single VMREAD of
+one field - 410,071 cycles is on the order of **110 VMCS accesses per
+exit**. That is the whole budget, and it is arithmetic rather than a
+theory: we are KVM's guest, `enable_shadow_vmcs` is hardware-absent
+here, so each of our own VMREADs and VMWRITEs traps a level down.
+
+The deferral work is doing its job - 19.3 guest-state reads skipped per
+exit, 219 million skipped against 10 million done - and 410,071 cycles
+is what is left *after* it.
+
+### Which names the next lever precisely
+
+`ZPP_EVMCS`. An enlightened VMCS replaces the guest hypervisor's
+VMWRITEs into vmcs12 with writes into a plain memory structure, which
+this VMM then reads with ordinary loads instead of VMREAD. Those reads
+are exactly the ~110 accesses above. The implementation is complete and
+desk-tested and the switch is off.
+
+It is off for a good reason - an earlier attempt hung, and the hang
+produced six wrong causal attributions before the root cause turned out
+to be a single-boot A/B rather than any of them. So the way to test it
+is with the metrics this session established: the working ring's rate,
+`HvCallVtlCall`'s rate, and cycles per exit, all read in a window with
+the protection counter confirmed frozen, against the `reftsc=1` numbers
+above as the control.
