@@ -23963,3 +23963,46 @@ is with the metrics this session established: the working ring's rate,
 `HvCallVtlCall`'s rate, and cycles per exit, all read in a window with
 the protection counter confirmed frozen, against the `reftsc=1` numbers
 above as the control.
+
+## A watcher without `driver:` beside it reported the boot succeeding
+
+Recorded because it is the second time this session the same trap
+fired, the rule to prevent it was already written down, and it still
+caught me.
+
+A background watcher polled for `MSI-X: Enable+` on the disk and
+reported **MSI-X ENABLED**. It is false. The reading it captured:
+
+```
+Control: ... DisINTx+
+MSI-X: Enable+ Count=17 Masked-
+vfio-msix lines: 0
+```
+
+Three things say it is the **host** `nvme` driver and not Windows:
+
+- `DisINTx+`, where every reading taken from the guest has been
+  `DisINTx-`;
+- **zero** `vfio-msix` lines, which a guest enabling MSI-X through VFIO
+  must produce;
+- it fired at the moment `rig-kill-qemu.sh` ran, and killing the guest
+  makes the launcher rebind the NVMe to the host driver, which enables
+  MSI-X for itself.
+
+The rule already in this file is "on a rig where the device changes
+hands, print who owns the device beside every measurement of it". The
+watcher printed the capability and the interrupt count and **not
+`driver:`**, so it had nothing to disagree with - a single-field
+instrument again, in the one place a second field was already known to
+be mandatory.
+
+The fix is not to remember harder. **Any polling watcher on this rig
+must include `driver:` in the condition, not merely in the report** -
+so that a rebind cannot satisfy it at all:
+
+```sh
+until ssh $RIG '[ "$(basename $(readlink /sys/bus/pci/devices/0000:02:00.0/driver))" = vfio-pci ] \
+      && sudo lspci -vv -s 02:00.0 | grep -q "MSI-X: Enable+"'; do sleep 60; done
+```
+
+Windows has still never enabled MSI-X under this VMM.
