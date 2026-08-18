@@ -25406,3 +25406,55 @@ those 60.7. That is the largest block left and it is the one the
 `vmcs02_split` already decomposes: 51.4% of it is the two elided blocks
 after the VMPTRLD, at ~3,100 cycles an access, and the elision is
 correct - the accesses that remain are the ones it does not cover.
+
+## The capture translates once per *byte*, and that is where 9,500 reads a capture come from
+
+Established from the source while the progress run was going, so it cost
+no boot. `capture_vtl_switch` calls `translate_guest_linear` in four
+loops:
+
+```
+5886  for (i < vtl_stack_words)          translate(rsp + i * 8)      64 calls
+5951  for (i < vtl_code_size)            translate(entry - behind + i)
+                                                              1,024 calls
+6014  for (at < vtl_shared_size; at += 8) translate(shared + at)     32 calls
+6062  for (at < vtl_spin_size;   at += 8) translate(entry + ... + at) 32 calls
+```
+
+**The code window translates once per byte.** One thousand and
+twenty-four address translations for a 1,024 byte window that lies in at
+most two pages. The other three are once per quadword, which is the
+defect `0f5d6c1` already fixed for the VTL assist area - "one walk, one
+read ... not sixty-four of each" - and this is the same shape eight times
+worse in the loop next to it.
+
+And a translation is not cheap. `translate_guest_linear` reads
+**three VMCS fields** every call - `vm_entry_controls`, `guest_cr3` and
+`vpid`, at `hypervisor.cpp:2928-2965` - and then walks four levels, each
+level calling `l2_physical_to_l1` and `map_window_at`. The vmcs12 reads
+inside `l2_physical_to_l1` are `shadow.read`, which is memory and costs
+nothing here, so the VMCS traffic is exactly the three per call:
+
+```
+1,152 translations a capture x 3 VMCS reads = 3,456 reads a capture
+3,456 x 1.45% of vmcalls                    =    50 reads a vmcall
+```
+
+against the **137.6** measured. Same order, and the remainder is the
+walks' own `map_window_at` traffic and the image-name scanning beside
+them. **So the measured total stands on its own and the source explains
+its shape**; the two agree without either being derived from the other.
+
+### Which makes the diagnostic keepable rather than merely switchable off
+
+`ZPP_VTL_CAPTURE` is gated and that was the right first move - it was the
+fastest decisive test and it proved the attribution. But the defect is
+not the capture, it is **translating per byte and per quadword instead of
+per page**: 1,152 translations become 3 or 4 if each loop resolves a page
+once and reads through the window, which is precisely what the VTL assist
+fix did. A capture that costs four translations instead of 1,152 can be
+on by default, and a diagnostic that costs nothing is worth more than one
+that is switched off.
+
+That is the work, and it is the first item queued behind the progress
+question rather than ahead of it.
