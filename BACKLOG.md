@@ -26252,3 +26252,54 @@ every time, and `HvlSwitchToVsmVtl1`'s caller at `ntoskrnl`+0x6a774b -
 already symbolized - is the code that decides to ask again. Disassembling
 what it does with that return value is a read of the guest's own image,
 which is on disk and needs no boot.
+
+### The caller is not named, and the reason is worth more than a guess
+
+The stack at the VtlCall, read live at `rsp = 0xffff9983aecc9f88` with
+the module ranges from a fresh `PsLoadedModuleList` walk:
+
+```
++0x000  ntoskrnl.exe +0x6a774b   HvlSwitchToVsmVtl1
++0x020  ntoskrnl.exe +0x2cea94
+```
+
+**Two words of twenty-four resolve to any loaded module.** The return
+into the wrapper is at `+0x000` as expected; the caller's return address
+is not in the first twenty-four qwords, so either the wrapper's frame is
+larger than that or it is reached by a tail call. **The caller was not
+named**, and saying so is the result.
+
+The one other word resolves into a neighbourhood that is hard to ignore
+and must be treated carefully:
+
+```
++0x2ce900  KiRemoveCurrentlyEnumeratedThreadFromReadyQueue
++0x2cea00  KiRemoveThreadFromSharedReadyQueue
++0x2cea94  KiUpdateLocalReadyQueueStatisticsOnRemoval
+```
+
+Scheduler ready-queue code, on a machine with ten threads Ready that
+never run. **That is a coincidence and not a finding**, for a specific
+reason: `ntkrnlmp.pdb` is a *public* symbol file, so `llvm-symbolizer`
+returns the nearest preceding **public** symbol, and every static or
+internal function in the image resolves to whichever exported neighbour
+happens to sit below it. A name from a public PDB is an upper bound on
+the address, not an identification.
+
+That is the same class as the export-table trap and the wrong-ImageBase
+trap this session already recorded, and it is the third coat it has worn:
+**a symbolizer that answers is not a symbolizer that is right**, and with
+public symbols it always answers.
+
+### One more base trap, paid for in the same read
+
+The first attempt at this walk returned **0 modules** because the kernel
+base was carried over from a symbolization done earlier in the session -
+`0xfffff8029a000000` against the true `0xfffff80299e00000`, off by
+0x200000. `PsLoadedModuleList` at the wrong base is an unmapped address
+and the walk returns nothing, which reads as "the guest has no modules"
+rather than as "you are reading the wrong place".
+
+Third instance of the class this session, after the singleton offsets and
+the module base itself. The rule that keeps working: **read it per run
+from the thing that prints it**, never from an earlier answer.
