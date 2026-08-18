@@ -25325,3 +25325,84 @@ is 76 of the 91 accesses a tick the guest needs back. At the other
 measured rate, 0.1 a tick, it is 17 - and then it has to be paired with
 the read side of `build_vmcs02`. Both numbers come from windows recorded
 above; neither is a prediction.
+
+## The capture was the residue. Tick 1.66 ms against a 1.74 ms period
+
+`ZPP_VTL_CAPTURE=OFF`, manifest verified off the binary
+(`vtlcap=0 dilate=01 reftsc=1`), settled with the protection counter
+frozen. The prediction was committed before the boot; here it is against
+what happened:
+
+| | predicted | measured |
+|---|---|---|
+| vmcall accesses an exit | 217.2 -> "about 51-64" | 217.2 -> **74.5** |
+| vmcall cycles an exit | 1,740,797 -> 280,000-400,000 | -> **320,847** |
+| the residue | gone | **-5.4 reads**, matching wrmsr's -7.6 |
+
+**The mechanism prediction was exact and my band was not.** The
+components are right - reads fall to 46.6 against the wrmsr baseline's
+44.4, and the writes stay at 27.9 against 6.6, which is the +20.9 the
+elision guard accounts for and which gating was predicted not to remove.
+51.0 + 20.9 is 71.9, and 74.5 was measured. I wrote "51-64" while my own
+arithmetic in the same paragraph gave 72. **The band was stated
+carelessly next to a mechanism that was stated correctly**, and only the
+mechanism was worth anything.
+
+The residue is the finding: **-5.4 reads, the same ~10% over-count the
+wrmsr control shows.** A vmcall reflection is now the same three phases
+as any other, plus the write excess. 137.6 reads an exit came from the
+deep capture, taken on 1.45% of switches at roughly 9,500 reads each.
+
+### What it did to the machine
+
+```
+                     before        after
+cycles/exit inside  378,092      255,894    -32.3%
+wall clock/exit     421,072      339,249
+vmcall share          31.2%        12.2%
+clock delivered     406-514/s      565.4/s   (the guest programs 574.7)
+tick                1.98-2.20 ms   1.66 ms
+ratio to 1.74 ms      1.14-1.26     0.95
+```
+
+**A tick now costs less than a tick period, for the first time in this
+investigation**, and the guest receives 98.4% of the interrupts it asks
+for against 71-89% before. Both of those are the condition the boot has
+been failing, stated in the terms this file has used for months.
+
+### And the guest has still not moved
+
+Reported first rather than last, because it is the part that matters:
+
+```
+ept-violation        0.0/s   frozen
+shadow rebuilds      0.0/s   frozen
+second-level entry rips  8 distinct, every one in the clock path
+0x2f delivered       17 against 183,898 asked
+task priority        0xd0 48.1%, 0x20 39.5%, 0x00 1.4%
+```
+
+The priority distribution moved in the right direction - `0xd0` from
+60.3% to 48.1%, `0x00` from 0.8% to 1.4% - and nothing else did.
+
+**The arithmetic says why, and it was in this file already.** A tick
+costing 1.66 ms of a 1.74 ms period leaves the guest 0.08 ms, which is
+**4.6% of its own clock**. Breaking even is not the condition; the
+condition is the *remainder*, and an earlier entry put it exactly: "to
+leave the guest half the machine a tick must cost about 0.87 ms". 0.95x
+is the threshold crossed and 0.48x is the target.
+
+So this is the largest measured improvement in the investigation, it
+clears the noise floor by a factor of three, it took the machine a third
+of the way from 1.26 to 0.48 - and **the spinner will not have moved**,
+because 4.6% of a clock is not visibly different from 0%.
+
+### What is left, in the unit that works
+
+At 0.5 vmcalls a tick the capture was ~71 accesses a tick of the 544. The
+remaining budget is dominated by `vmresume` - 4.37 a tick at 60.7
+accesses is 265, **45% of the total** - and `build_vmcs02` is 26.9 of
+those 60.7. That is the largest block left and it is the one the
+`vmcs02_split` already decomposes: 51.4% of it is the two elided blocks
+after the VMPTRLD, at ~3,100 cycles an access, and the elision is
+correct - the accesses that remain are the ones it does not cover.
