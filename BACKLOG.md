@@ -25066,3 +25066,84 @@ this investigation that clears the ten per cent a single boot can
 resolve. That is where the next boot goes - and it goes on an
 *instrument* first, because the difference is established and the cause
 is not.
+
+## Retraction: the VTL capture *is* sampled, and the observer is 0.5% of a vmcall
+
+The previous entry said `capture_vtl_switch` "runs on **every** switch,
+not on the sampled ones" and named it, with `mark_vtl_half`,
+`arm_vtl_step` and the protection-mask decode, as the candidate for the
+8.7x. **The source refutes it**, and reading the gate before changing
+anything is the only reason a boot was not spent on it.
+
+The gate is there and it is correct:
+
+```cpp
+if (timer_arm_kind == kind) {
+    if (0 != count) { return; }
+} else if ((count < vtl_capture_at) || (0 != (count % vtl_recapture))) {
+    return;
+}
+```
+
+`vtl_capture_at` is 4,096 and `vtl_recapture` is 64, so everything
+expensive - the sixty-four stack words, the image resolution, the 1,024
+byte code window, the VP assist page, the shared and spin captures, the
+page walks behind all of them - runs on **one switch in sixty-four,
+after the first four thousand**. Exactly as designed.
+
+The other two are cheaper still. `arm_vtl_step` opens with
+`if constexpr (!nested_vmx::step_vtl) { return; }` and the manifest reads
+`stepvtl=0`, so it is not compiled in at all. `mark_vtl_half` is one
+`rdtsc` and some arithmetic. `HvCallModifyVtlProtectionMask` is frozen at
+39,246 and runs 0.00 a second.
+
+### What really is unconditional, and it is small
+
+The prologue before the gate, which builds the twenty-slot register
+snapshot. Sixteen of those slots are the context this VMM already holds;
+the other four are **VMCS reads** - `guest_rsp`, `guest_rip`,
+`guest_cr3`, `guest_rflags` - plus a memory read of vmcs12's
+extended-page-table pointer, and two twenty-element loops over members.
+
+At the 3,095 cycles an access measured today that is on the order of
+**12,000 cycles a switch**: real, unquestionably diagnostic, and
+**0.5% of the 2,407,393 a vmcall costs.** At 187.5 switches a second it
+is 0.12% of the processor.
+
+**So the observer effect is measured and it is not the 22%.** Gating the
+capture would be a change below the noise floor aimed at a premise that
+is false, which is precisely the pattern this file has spent the session
+learning to refuse. The switch is not worth adding and the capture stays
+as it is.
+
+### The error, and it is the third of the same shape today
+
+Twice already: a cost divided by an imagined count of forty fields, and a
+share of the tick taken from one window. This one is a *mechanism*
+asserted from a call site without reading the gate twenty lines inside
+the callee. All three are the same failure - **a quantity used as
+evidence before it was looked at** - and all three were caught by being
+asked for the number rather than the story.
+
+The rule that would have prevented it is the one already in this file,
+applied one level deeper: *establish the denominator*, and when the claim
+is "this runs unconditionally", the denominator is the gate.
+
+### And the by-reason table is free, by construction rather than by hope
+
+The coordinator's assumption is worth confirming since the next
+measurement depends on it: `handler_reason_cycles` takes no VMCS access
+at all. It reads `full_reason`, which `resume_guest` already has as a
+parameter, and two members. The split above shows it: the slots that
+contain only counter work - "controls read and validated" and "the three
+MSR areas checked" - read **0.00** reads and **0.00** writes a call.
+
+### What is left, unchanged and still the largest thing above the floor
+
+A `vmcall` costs 2,407,393 cycles against a `wrmsr`'s 278,066 for what is
+the same reflection by the same path, and 100.0% of them are trust-level
+switches. **That difference is real, it is ours, and its cause is now
+established to be none of the four things named for it.** What settles
+it is the instrument that has worked three times today - adjacent
+intervals, VMCS accesses counted beside cycles, coverage reported -
+placed *inside* the vmcall path. Not a change. An instrument.
