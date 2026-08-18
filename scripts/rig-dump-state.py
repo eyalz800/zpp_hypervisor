@@ -1090,13 +1090,21 @@ def dump_profile(args, elf, instance):
     top = rows[0][0] if rows else 0
     covered = sum(h for h, _ in rows)
 
+    # `profile_overflow` counts *flushes*, not rejected samples:
+    # `record_profile_sample` empties the whole table when it fills, so
+    # the hits below are only those since the last flush. Reporting them
+    # as a share of all samples would divide a partial fill by the whole
+    # run and read as "the table holds 1.4%", which says nothing.
     print(f"\ncpu 0 second-level profile: {samples:,} samples, "
-          f"{len(rows)} slots filled, {overflow:,} overflowed")
-    print(f"  the shape: top slot {top:,} hits "
-          f"({100.0 * top / max(samples, 1):.1f}% of samples), "
-          f"the table holds {100.0 * covered / max(samples, 1):.1f}%")
-    print("  a filled-and-overflowing table with a low maximum is a guest "
-          "executing widely; a few slots holding most of it is a spin")
+          f"{len(rows)} slots filled since the last flush, "
+          f"{overflow:,} flushes")
+    print(f"  the shape: {overflow:,} flushes means the table filled with "
+          f"{slots} distinct addresses that many times - about "
+          f"{overflow * slots:,} distinct-address fills over {samples:,} "
+          f"samples")
+    print(f"  top slot {top:,} hits of the {covered:,} since the last flush")
+    print("  many flushes with a low maximum is a guest executing widely; "
+          "a spin fills the table once and then never flushes again")
     for hits, rip in rows[:24]:
         print(f"    0x{rip:016x}  {hits:>8,}  "
               f"{100.0 * hits / max(samples, 1):5.1f}%")

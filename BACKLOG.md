@@ -25535,3 +25535,91 @@ zpp switches: ... stretch=01 vtlcap=0 dilate=01
 
 Small, and exactly the class this array exists to catch: **a manifest
 that disagrees with the build is worse than no manifest.**
+
+## The profile at 0.95x: still wide, still varied, still no new memory
+
+One switch changed - `profile=1` against `reftsc=1 vtlcap=0 dilate=01` -
+so this is one variable against the profile already in this file.
+Settled, protection counter frozen.
+
+```
+1,798 samples, 19 slots filled since the last flush, 11 flushes
+```
+
+**`profile_overflow` counts flushes, not rejects.** `record_profile_
+sample` empties the whole 64-slot table when it fills, so eleven flushes
+means the table filled with sixty-four *distinct* addresses eleven
+times - about seven hundred distinct-address fills across 1,798 samples.
+A spin fills the table once and then never flushes again.
+
+So the reading is unambiguous and it is the same one the earlier profile
+gave at a 25% worse tick: **the guest is executing widely.** The nineteen
+slots standing since the last flush, symbolized against the guest's own
+image at `0xfffff807ec400000`:
+
+```
+HvlWriteApicCommandRegister   4     KiCallInterruptServiceRoutine  1
+HvlEndSystemInterrupt         3     KeClockInterruptNotify         1
+KiIsrThunkShadow              2     RtlBeginReadTickLock           1
+PspAcquirePushLockExclusive   1     RtlpHpVsSlotAllocate           1
+KeAbPreAcquire                1     SepDesktopAppxSubProcessToken  1
+```
+
+Half of it is the clock path, as every instrument here has said. **The
+other half is not**: a heap slot allocation, a security token, a pushlock
+acquired exclusively, and `KeAbPreAcquire` - autoboost's pre-acquire
+hook, which runs on a lock that is *contended*.
+
+### So it is the first of the three outcomes, and it is a second block
+
+Wide, varied, and **`ept-violation` frozen at 311,826 throughout**. Those
+two facts together are the thing this file has never explained, and the
+tick falling 25% did not change either of them.
+
+A guest making slow forward progress allocates: it faults in new pages
+continuously, and the earlier boots walked into 313,888 of them in their
+first minutes. A guest executing seven hundred distinct addresses' worth
+of varied kernel work while touching **not one new page** is going around
+a large body of code it has already mapped.
+
+That is not starvation, and it is not a tight spin either - which is why
+eight second-level *entry* pointers never showed it. Entries sample where
+exits happen, and this loop does not exit.
+
+**The eight entry RIPs and the wide profile are not in conflict; they are
+measuring different things, and only one of them can see a loop that
+takes no exits.** That is the fifth instance in this file of an
+exit-driven instrument being blind to exactly the thing being chased, and
+the rule it keeps teaching - *an absence of exits is not an absence of
+execution* - now has to be read the other way round as well: **a presence
+of varied execution is not a presence of progress.**
+
+### The one concentration in the sample, and it is not in the kernel
+
+Seven of the nineteen addresses sit within 1.4 kilobytes of each other -
+`0xfffff8077e9479d9` through `0xfffff8077e947f6f` - in an image that is
+**not** `ntoskrnl`, whose base this boot is `0xfffff807ec400000`. Two
+more, `0xfffff8077e9dbfff` and `0xfffff8077ea09a30`, are in the same
+image further out.
+
+So the most concentrated thing in the profile is a single function in
+another module, and identifying it needs that module's base - which
+`vtl_image_base` would have given and which is empty in this build,
+because `vtlcap=0` gated the capture that fills it. **That is the first
+cost the gating has had**, it is worth recording, and the answer is not
+to turn the capture back on but to fix its per-byte translation so it can
+be on for nothing.
+
+### What this closes and what it opens
+
+Closed: "the tick is the block". It was *a* block, it has been removed as
+far as 0.95x, and the guest did not move.
+
+Open, and now the whole question: **what is the loop waiting for?** The
+instruments that can say are ones this session built or already had - the
+profile's distribution rather than its top entries, `guest_thread_samples`
+which has read the same `Phase1Initialization` thread at `state = 2` in
+every regime measured, and the guest page-table walk, which can read any
+kernel variable the PDB names. `PspAcquirePushLockExclusive` and
+`KeAbPreAcquire` in the same nineteen samples say the next thing to read
+is which lock.
