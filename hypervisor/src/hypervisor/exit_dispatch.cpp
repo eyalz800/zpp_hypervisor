@@ -338,7 +338,7 @@ void hypervisor::on_vm_exit(std::uint64_t cpuid,
                                      this->running_l2[slot - 1]) {
             if (l2_exit_outcome::deferred !=
                 on_l2_exit(slot - 1, full_reason, context, advance_rip)) {
-                resume_guest(context, full_reason, advance_rip);
+                resume_guest(cpuid, context, full_reason, advance_rip);
             }
         }
     }
@@ -2665,7 +2665,7 @@ void hypervisor::on_vm_exit(std::uint64_t cpuid,
     }
     }
 
-    resume_guest(context, full_reason, advance_rip);
+    resume_guest(cpuid, context, full_reason, advance_rip);
 }
 
 } // namespace zpp::hypervisor

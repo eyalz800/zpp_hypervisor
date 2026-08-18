@@ -435,10 +435,13 @@ void interrupt_the_delivery_of(machine & built,
  * readable afterwards, and the context it was about to restore is in
  * `g_restored_context`.
  */
-void resume(machine & built, bool advance_rip = true)
+void resume(machine & built,
+            bool advance_rip = true,
+            std::uint64_t cpuid = cpu)
 {
     if (0 == setjmp(zpp::arch::x86_64::g_resume_escape)) {
         built.state->resume_guest(
+            cpuid,
             built.context,
             zpp::arch::x86_64::vmx::exit_reason(static_cast<std::uint64_t>(
                 zpp::arch::x86_64::vmx::exit_reason::basic_reason::
@@ -1215,29 +1218,36 @@ void the_clock_interrupt_the_rig_destroys_is_put_back()
 }
 
 /**
- * A VPID outside the table is not an index.
+ * A slot outside the table is not an index.
  *
- * Every per-processor array here is `max_cpus` long and the VPID is the
- * slot plus one, so zero means "no slot" and anything past the table is a
- * write off the end of it.
+ * Every per-processor array here is `max_cpus` long and the slot is the
+ * processor index plus one, so zero means "no slot" and anything past
+ * the table is a write off the end of it.
+ *
+ * The slot used to be read out of the VMCS, so this drove it by writing
+ * `vpid`. `resume_guest` now takes the processor index from its caller -
+ * reading the field cost an exit to the layer below on every use, and
+ * `on_vm_exit` already had the value - so the out-of-range slot arrives
+ * as an argument instead, and that is what this passes. The property
+ * under test is unchanged and so are the bounds checks it exercises:
+ * `~0ull` makes the slot zero and `max_cpus` makes it one past the end.
  */
 void a_slot_outside_the_table_is_left_alone()
 {
-    for (auto vpid : {0ull,
-                      static_cast<unsigned long long>(
-                          zpp::hypervisor::hypervisor::max_cpus + 1)}) {
+    for (auto cpuid : {~0ull,
+                       static_cast<unsigned long long>(
+                           zpp::hypervisor::hypervisor::max_cpus)}) {
         auto built = make();
 
-        built.state->vmcs.vpid(vpid);
         interrupt_the_delivery_of(built,
                                   original_event::valid |
                                       original_event::external_interrupt |
                                       clock_interrupt_vector);
-        resume(built);
+        resume(built, true, cpuid);
 
         check_equal(0,
                     entry_field(built),
-                    "vpid " + std::to_string(vpid) +
+                    "cpuid " + std::to_string(cpuid) +
                         " names no slot, so nothing is put back");
         check_equal(0,
                     built.state->resumes_reached[cpu],

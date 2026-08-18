@@ -2786,7 +2786,15 @@ private:
      */
     bool deliver_pending_external_interrupt(std::size_t cpu);
 
-    [[noreturn]] void resume_guest(arch::x86_64::context & context,
+    /**
+     * `cpuid` is this processor's index, passed rather than re-derived.
+     * Both callers are inside `on_vm_exit`, which has it as a parameter,
+     * and the seven places in here that used to say `vmcs.vpid()` were
+     * seven exits to the layer below apiece - see the comment at the top
+     * of `on_vm_exit`.
+     */
+    [[noreturn]] void resume_guest(std::uint64_t cpuid,
+                                   arch::x86_64::context & context,
                                    arch::x86_64::vmx::exit_reason reason,
                                    bool advance_rip);
 

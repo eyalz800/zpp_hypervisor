@@ -365,7 +365,8 @@ bool hypervisor::deliver_pending_external_interrupt(std::size_t cpu)
     return true;
 }
 
-void hypervisor::resume_guest(arch::x86_64::context & context,
+void hypervisor::resume_guest(std::uint64_t cpuid,
+                              arch::x86_64::context & context,
                               arch::x86_64::vmx::exit_reason full_reason,
                               bool advance_rip)
 {
@@ -445,7 +446,7 @@ void hypervisor::resume_guest(arch::x86_64::context & context,
 
     if constexpr (!requeue_interrupted_events) {
         (void)0;
-    } else if (auto slot = vmcs.vpid();
+    } else if (auto slot = (cpuid + 1);
                (0 != slot) && (slot <= max_cpus)) {
         auto cpu = slot - 1;
         constexpr std::uint64_t injection_valid = 1ull << 31;
@@ -702,7 +703,7 @@ void hypervisor::resume_guest(arch::x86_64::context & context,
         // traffic is throttled, and an idle guest now writes nothing
         // at all - which is the correct behaviour, not a regression.
         constexpr std::uint64_t heartbeat_exits = 1000;
-        auto cpu = vmcs.vpid();
+        auto cpu = (cpuid + 1);
         if ((0 != cpu) && (cpu <= max_cpus)) {
             auto & seen = this->heartbeat_exits_seen[cpu - 1];
             if (0 == (++seen % heartbeat_exits)) {
@@ -728,7 +729,7 @@ void hypervisor::resume_guest(arch::x86_64::context & context,
 
     // Counted here, at the last point before control leaves this
     // handler, so a frozen exit count can be read two ways round.
-    if (auto slot = vmcs.vpid(); (0 != slot) && (slot <= max_cpus)) {
+    if (auto slot = (cpuid + 1); (0 != slot) && (slot <= max_cpus)) {
         this->resumes_reached[slot - 1] =
             this->resumes_reached[slot - 1] + 1;
 
@@ -766,7 +767,7 @@ void hypervisor::resume_guest(arch::x86_64::context & context,
     // launched (SDM 27.1) - so that one case has to leave through
     // VMLAUNCH instead. Consumed here, so the next exit resumes.
     auto relaunch = false;
-    if (auto slot = vmcs.vpid(); (0 != slot) && (slot <= max_cpus)) {
+    if (auto slot = (cpuid + 1); (0 != slot) && (slot <= max_cpus)) {
         relaunch = this->relaunch_after_sleep[slot - 1];
         this->relaunch_after_sleep[slot - 1] = false;
     }
@@ -788,7 +789,7 @@ void hypervisor::resume_guest(arch::x86_64::context & context,
                           : arch::x86_64::vmx::vmresume;
 
     if constexpr (nested_vmx::enabled) {
-        if (auto slot = vmcs.vpid(); (0 != slot) && (slot <= max_cpus) &&
+        if (auto slot = (cpuid + 1); (0 != slot) && (slot <= max_cpus) &&
                                      this->running_l2[slot - 1]) {
             entry = this->vmcs02_launched[slot - 1]
                         ? arch::x86_64::vmx::nested_vmresume
@@ -860,7 +861,7 @@ void hypervisor::resume_guest(arch::x86_64::context & context,
     // Close the span opened at the top of `on_vm_exit`. Here rather
     // than anywhere earlier because everything this VMM does for an exit
     // has now been done, and the next instruction is the entry itself.
-    if (auto slot = vmcs.vpid(); (0 != slot) && (slot <= max_cpus)) {
+    if (auto slot = (cpuid + 1); (0 != slot) && (slot <= max_cpus)) {
         auto cpu = slot - 1;
         auto now = arch::x86_64::rdtsc();
         if (0 != this->handler_entry_tsc[cpu]) {
@@ -889,7 +890,7 @@ void hypervisor::resume_guest(arch::x86_64::context & context,
 #define ZPP_VIRTUALIZE_APIC 0
 #endif
     if constexpr (0 != ZPP_VIRTUALIZE_APIC) {
-        if (auto slot = vmcs.vpid(); (0 != slot) && (slot <= max_cpus)) {
+        if (auto slot = (cpuid + 1); (0 != slot) && (slot <= max_cpus)) {
             deliver_pending_external_interrupt(slot - 1);
         }
     }
