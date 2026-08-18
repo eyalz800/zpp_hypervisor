@@ -585,6 +585,87 @@ tmux attach -t zpp-debug
 Bound every wait on the emulator to something short (30–60s) and then report state. A long
 blocking wait is indistinguishable from a hang.
 
+### Reading the guest's own memory, including its blue screen
+
+The guest's kernel is readable from outside with **no rebuild and
+nothing perturbed**: walk its page tables by hand with the QEMU
+monitor's `xp`, using a guest CR3 the state dump already prints. The
+guest hypervisor's extended page tables have measured identity for
+these pages - the VP assist page reads the same address by all three
+paths - so a second-level physical address is an `xp` address directly.
+
+```python
+# index by (va >> 39) & 0x1ff, then 30, then 21, then 12
+# `xp /1gx` prints the address column with NO `0x` prefix
+```
+
+This is the only way to see a blue screen on this rig: the display is a
+passed-through GPU, so QEMU answers `screendump` with **"There is no
+console to take a screendump from"**. Read `KiBugCheckData` instead -
+five words, the stop code and its four parameters, written before
+anything is displayed. Its address comes from the PDB, and the kernel
+base from the hypervisor's own log (`second-level guest kernel image at
+...`, different every boot: KASLR).
+
+Two things this has already settled that nothing else could:
+
+- **`KeQuantumEndTimerIncrement` = 17,400.** Windows' 574.7 Hz tick is
+  its own hardcoded constant, not anything this VMM tells it.
+- **Bugcheck `0x1CA` from `HalpWatchdogCheckPreResetNMI`**, which is
+  what a guest lied to about time does here.
+
+Traps:
+
+- **The monitor takes one connection.** A socket left open makes
+  `rig-dump-state.py` fail with no diagnosis, and a poller that leaks
+  one reports every field as `None` for ever after. Close it.
+- **`-no-reboot` alone destroys what you were about to read**: QEMU
+  *exits* on the guest's reset, taking its memory with it. Use
+  `-no-reboot -no-shutdown`, which leaves `paused (shutdown)` with
+  everything intact. Pass both through `ZPP_QEMU_EXTRA`.
+- The guest's symbols are per build. `llvm-pdbutil dump --publics`
+  gives `segment:offset` with the **offset in decimal**, and the
+  segment indexes the PE section table - reading either as hex puts
+  every symbol somewhere plausible and wrong.
+
+### Windows' tick is 574.7 Hz and that is not negotiable
+
+Settled by disassembly and confirmed against the running guest, so it
+does not need re-deriving: the guest arms a *periodic* 1.74 ms
+synthetic timer because `KeQuantumEndTimerIncrement` is a literal in
+`ntoskrnl.exe`, behind a `Feature_ShortThreadQuantum` gate whose test is
+constant-folded on. `KeMinimumIncrement` is 5,000 and
+`KeMaximumIncrement` is 156,250, so 17,400 is neither a clamp nor a
+rounding of either.
+
+A tick costs this VMM about 2.46 ms, so the clock handler cannot finish
+inside its own period and the guest never leaves it - 99.76% of
+second-level entries at one of eight instruction pointers, every one in
+the clock path, with zero new memory touched over 191 seconds.
+
+**Four attempts to help the guest cope have now failed**, and the
+fourth is the one that closes the class:
+
+| intervention | outcome |
+|---|---|
+| `ZPP_STRETCH_GUEST_TIMER=8` - multiply the period | bugcheck loop |
+| `ZPP_DELIVER_SELF_IPI` - inject the vector it asked for | one delivery, then a spin |
+| `ZPP_TICK_FLOOR=156250` - refuse a shorter period | one refusal, then shutdown |
+| `ZPP_TIME_DILATION=8` - slow *every* clock together | bugcheck `0x1CA` |
+
+The fourth was built specifically to avoid what the first three shared -
+changing one thing and leaving the rest honest - and it failed for two
+independent reasons, both measured. **The guest hypervisor's clock is
+not the time-stamp counter**, so a VMCS TSC offset does not reach it:
+the fitted reference-page scale came out 3.59x larger and the clock-gap
+histogram did not move at all. And Windows *checks its clocks against
+each other* - `HalpWatchdogCheckPreResetNMI` is the only reachable
+caller of bugcheck `0x1CA`.
+
+So there is no lie about time left to tell, and the tick rate cannot be
+moved from underneath. What remains is the per-exit cost, which is a
+different question and is not this one.
+
 ### Never single-step the guest through QEMU's gdbstub
 
 `stepi` on a guest thread under QEMU/KVM does not just fail, it **destroys what
