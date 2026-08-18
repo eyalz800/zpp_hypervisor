@@ -69,6 +69,27 @@ void hypervisor::on_vm_exit(std::uint64_t cpuid,
     using basic_reason = arch::x86_64::vmx::exit_reason::basic_reason;
     auto & vmcs = this->vmcs;
 
+    // `cpuid + 1` throughout, where this used to say `vmcs.vpid()`.
+    //
+    // They are the same number: `setup_vmcs` writes `vpid(cpu + 1)` and
+    // `build_vmcs02` gives vmcs02 the same `vpid01`, so on a processor
+    // the field is a constant for the whole boot - and `cpuid` is that
+    // processor's index, taken from `main`'s scope and captured by value
+    // into the launch lambda, so it costs nothing to have.
+    //
+    // The field did not. Nested under a hypervisor that does not offer
+    // VMCS shadowing every VMREAD is an exit to the layer below, and
+    // this one was measured at **14.03 reads per exit** across the
+    // twenty-two places in this function that asked it - about 52,000 of
+    // the 418,211 cycles an exit spent inside this VMM, 12.5%, to ask a
+    // question whose answer was already a parameter.
+    //
+    // KVM does not do this: it keeps the vCPU in a per-CPU pointer and
+    // reads the VMCS only for VMCS state. The comment beside the launch
+    // in `main` still describes the old habit - "everything else on the
+    // exit path already answers 'which processor am I' with
+    // vmcs.vpid()" - and that is exactly what this removes.
+
 
     // One thousand accesses each, once, to price the instructions the
     // whole optimisation question turns on. See
@@ -209,7 +230,7 @@ void hypervisor::on_vm_exit(std::uint64_t cpuid,
     // on the way out of the guest rather than on the way in, because
     // the handlers below are what act on watches and they have to see
     // an armed one as armed.
-    if (auto cpu = vmcs.vpid(); (0 != cpu) && (cpu <= max_cpus)) {
+    if (auto cpu = (cpuid + 1); (0 != cpu) && (cpu <= max_cpus)) {
         auto generation =
             this->ept_generation.load(std::memory_order_acquire);
         if (this->ept_generation_seen[cpu - 1] != generation) {
@@ -257,7 +278,7 @@ void hypervisor::on_vm_exit(std::uint64_t cpuid,
     // middle of delivering? One VMREAD, before anything decides what
     // to do with the exit, because the answer is destroyed by the
     // next entry.
-    if (auto slot = vmcs.vpid(); (0 != slot) && (slot <= max_cpus)) {
+    if (auto slot = (cpuid + 1); (0 != slot) && (slot <= max_cpus)) {
         auto cpu = slot - 1;
         constexpr std::uint64_t vectoring_valid = 1ull << 31;
 
@@ -313,7 +334,7 @@ void hypervisor::on_vm_exit(std::uint64_t cpuid,
     }
 
     if constexpr (nested_vmx::enabled) {
-        if (auto slot = vmcs.vpid(); (0 != slot) && (slot <= max_cpus) &&
+        if (auto slot = (cpuid + 1); (0 != slot) && (slot <= max_cpus) &&
                                      this->running_l2[slot - 1]) {
             if (l2_exit_outcome::deferred !=
                 on_l2_exit(slot - 1, full_reason, context, advance_rip)) {
@@ -404,7 +425,7 @@ void hypervisor::on_vm_exit(std::uint64_t cpuid,
         auto information = vmcs.read(arch::x86_64::vmx::vmcs::field::
                                          vm_exit_interruption_information);
 
-        if (auto slot = vmcs.vpid();
+        if (auto slot = (cpuid + 1);
             (0 != slot) && (slot <= max_cpus) &&
             (0 != (information & interruption_valid))) {
             // Queued, not held in a single slot. The acknowledge has
@@ -465,7 +486,7 @@ void hypervisor::on_vm_exit(std::uint64_t cpuid,
         constexpr std::uint32_t valid = 1u << 31;
 
         auto is_nmi = ((information & type_mask) == type_nmi);
-        auto cpu = vmcs.vpid();
+        auto cpu = (cpuid + 1);
 
         // Nothing retired to produce this exit. The instruction
         // length field is defined only for exits due to instruction
@@ -1233,7 +1254,7 @@ void hypervisor::on_vm_exit(std::uint64_t cpuid,
             // processor. Losing one processor's entry is a missed
             // observation; refusing to re-derive would be a missed
             // IPI.
-            note_apic_mode(vmcs.vpid() - 1);
+            note_apic_mode((cpuid + 1) - 1);
             break;
         }
 
@@ -1634,7 +1655,7 @@ void hypervisor::on_vm_exit(std::uint64_t cpuid,
         advance_rip = false;
 
         log("cpu {} refused a task switch, selector {} rip {}",
-            vmcs.vpid(),
+            (cpuid + 1),
             vmcs.exit_qualification() & 0xffff,
             vmcs.guest_rip());
         break;
@@ -1672,7 +1693,7 @@ void hypervisor::on_vm_exit(std::uint64_t cpuid,
             "took an exception calling its own double-fault "
             "handler, which is a guest failure and not an "
             "unimplemented exit",
-            vmcs.vpid(),
+            (cpuid + 1),
             vmcs.guest_rip(),
             vmcs.guest_cs_selector());
 
@@ -1790,7 +1811,7 @@ void hypervisor::on_vm_exit(std::uint64_t cpuid,
         // distinguishes a guest that is idling from one that is
         // spinning. KVM logs once for the same reason
         // (kvm_emulate_monitor_mwait).
-        if (auto cpu = this->vmcs.vpid() - 1;
+        if (auto cpu = (cpuid + 1) - 1;
             (cpu < max_cpus) && !this->monitor_logged[cpu]) {
             this->monitor_logged[cpu] = true;
             log("cpu {} {} rip {} cs {} armed {}",
@@ -1831,13 +1852,13 @@ void hypervisor::on_vm_exit(std::uint64_t cpuid,
         // next VM entry, through the descriptor tables the reset below
         // is about to zero.
         log("sipi cpu {} entry_intr {} idt_vectoring {}",
-            vmcs.vpid(),
+            (cpuid + 1),
             vmcs.read(arch::x86_64::vmx::vmcs::field::
                           vm_entry_interruption_information_field),
             vmcs.read(arch::x86_64::vmx::vmcs::field::
                           idt_vectoring_information_field));
         log("sipi cpu {} interruptibility {} pending_dbg {}",
-            vmcs.vpid(),
+            (cpuid + 1),
             vmcs.guest_interruptibility_state(),
             vmcs.guest_pending_debug_exceptions());
         emulate_start_up_ipi(context, vector);
@@ -1892,7 +1913,7 @@ void hypervisor::on_vm_exit(std::uint64_t cpuid,
         // that test refuses everything but CR0 and CR4 and refusing means
         // stopping the processor.
         if (on_nested_cr8_access(
-                vmcs.vpid() - 1, qualification, context, advance_rip)) {
+                (cpuid + 1) - 1, qualification, context, advance_rip)) {
             break;
         }
 
@@ -2009,7 +2030,7 @@ void hypervisor::on_vm_exit(std::uint64_t cpuid,
 
         if constexpr (!nested_vmx::enabled) {
             shadow &= ~cr4_vmxe;
-        } else if (auto cpu = vmcs.vpid() - 1;
+        } else if (auto cpu = (cpuid + 1) - 1;
                    (cpu < max_cpus) && this->guest_in_vmx_operation[cpu] &&
                    (0 == (value & cr4_vmxe))) {
             inject_general_protection_fault();
@@ -2093,7 +2114,7 @@ void hypervisor::on_vm_exit(std::uint64_t cpuid,
         // guest. This is the only sample in the tree taken on a clock the
         // guest does not control - see `nested_vmx::profile_l2`.
         if constexpr (nested_vmx::profile_l2) {
-            if (auto slot = vmcs.vpid(); (0 != slot) &&
+            if (auto slot = (cpuid + 1); (0 != slot) &&
                                          (slot <= max_cpus) &&
                                          this->running_l2[slot - 1]) {
                 auto where = vmcs.guest_rip();
@@ -2220,7 +2241,7 @@ void hypervisor::on_vm_exit(std::uint64_t cpuid,
             // did not: every call Windows made to Hyper-V was
             // intercepted a layer too low and refused. Same answer,
             // different outcome, so the difference had to be structural.
-            auto slot = vmcs.vpid();
+            auto slot = (cpuid + 1);
             auto caller = ((0 != slot) && (slot <= max_cpus))
                               ? (slot - 1)
                               : max_cpus;
@@ -2272,7 +2293,7 @@ void hypervisor::on_vm_exit(std::uint64_t cpuid,
             // hypervisor has been put back at its own host RIP.
             // Advancing in either case moves a RIP somebody else owns.
             if constexpr (nested_vmx::enabled) {
-                if (auto slot = vmcs.vpid();
+                if (auto slot = (cpuid + 1);
                     (0 != slot) && (slot <= max_cpus) &&
                     this->nested_rip_settled[slot - 1]) {
                     this->nested_rip_settled[slot - 1] = false;
@@ -2307,7 +2328,7 @@ void hypervisor::on_vm_exit(std::uint64_t cpuid,
         // one line plus a counter answers it without an idle-loop's
         // worth of noise. The count is readable from the exit ring's
         // neighbourhood in a debugger; the line survives a restart.
-        if (auto cpu = vmcs.vpid() - 1; cpu < max_cpus) {
+        if (auto cpu = (cpuid + 1) - 1; cpu < max_cpus) {
             this->vmx_instructions_refused[cpu] =
                 this->vmx_instructions_refused[cpu] + 1;
 
@@ -2446,13 +2467,13 @@ void hypervisor::on_vm_exit(std::uint64_t cpuid,
 
         constexpr std::uint64_t invvpid_individual_address = 0;
 
-        invvpid_descriptor descriptor{vmcs.vpid(),
+        invvpid_descriptor descriptor{(cpuid + 1),
                                       vmcs.exit_qualification()};
 
         if (arch::x86_64::vmx::invvpid(invvpid_individual_address,
                                        &descriptor)) {
             log("cpu {} invlpg: invvpid refused address {}",
-                vmcs.vpid() - 1,
+                (cpuid + 1) - 1,
                 vmcs.exit_qualification());
         }
         break;
@@ -2490,13 +2511,13 @@ void hypervisor::on_vm_exit(std::uint64_t cpuid,
 
         constexpr std::uint64_t invvpid_single_context = 1;
 
-        invvpid_descriptor descriptor{vmcs.vpid(), 0};
+        invvpid_descriptor descriptor{(cpuid + 1), 0};
 
         if (arch::x86_64::vmx::invvpid(invvpid_single_context,
                                        &descriptor)) {
             log("cpu {} invpcid: invvpid refused vpid {}",
-                vmcs.vpid() - 1,
-                vmcs.vpid());
+                (cpuid + 1) - 1,
+                (cpuid + 1));
         }
         break;
     }
