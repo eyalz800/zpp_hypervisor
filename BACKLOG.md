@@ -25996,3 +25996,68 @@ autoboost sample points at.
 
 And it is not answerable by making exits cheaper, which is now the third
 independent line of evidence pointing away from that work.
+
+## World C: nothing deferred is running, one call is queued for ever, and `QuantumEnd` is set
+
+`KPRCB` read twice, sixty seconds apart, every offset taken from
+`ntkrnlmp.pdb` rather than recalled - `DpcData` 14400 with
+`DpcQueueDepth` at +24 inside each `_KDPC_DATA`,
+`MaximumDpcQueueDepth` 14504, `DpcRequestRate` 14508, `DpcLastCount`
+14516, `QuantumEnd` 14521, `DpcRoutineActive` 14522:
+
+```
+                       t0     t1
+DpcData[0].QueueDepth   1      1
+DpcData[1].QueueDepth   0      0
+MaximumDpcQueueDepth    4      4
+DpcRequestRate          0      0
+DpcLastCount            0      0
+QuantumEnd              1      1
+DpcRoutineActive        0      0
+```
+
+- **`DpcRoutineActive = 0`** - the guest is *not* inside a deferred
+  routine. **World A is dead**: no DPC that never returned.
+- **Queue depth 1, unchanged over sixty seconds, and the maximum ever
+  reached is 4.** Not a storm, and - the test that matters rather than
+  the depth - **not growing**. **World B is dead**, and with it the last
+  route by which the tick rate could have been the block after all.
+- **`QuantumEnd = 1`.**
+
+### The flag is the finding
+
+`KPRCB.QuantumEnd` is set by the clock interrupt when the running
+thread's quantum expires and is cleared by the dispatcher when it acts on
+it. **It has been set for the whole window**, with no deferred routine
+running and one deferred call queued that never drains.
+
+So the guest's own bookkeeping says, in its own field: *this thread's
+quantum has expired, the dispatcher must run, and it has not run.* That
+is the same fact as ten Ready threads and zero context switches, read for
+the first time from the guest's own flag rather than inferred from the
+outside - and it is the fourth independent instrument to agree.
+
+**Which leaves World C, by elimination and with all three arms
+measured**: nothing is running deferred, nothing is queueing up, and the
+interrupt priority is nevertheless pinned at or above DISPATCH_LEVEL. So
+something **raised** it and did not lower it, and while it is raised the
+one queued call cannot be dequeued and the dispatcher cannot run.
+
+That is the signature of a lock held at raised priority across something
+that never completes - which makes `KeAbPreAcquire` and
+`PspAcquirePushLockExclusive` in the profile the clue after all, twice
+set aside and now the only candidates left standing.
+
+### Where this leaves the whole investigation
+
+Every mechanism this file has blamed is now measured and eliminated:
+the tick (0.95x changed nothing), the missing dispatch interrupt
+(correctly masked at DISPATCH), the wrong virtual-APIC page (the page is
+live), a runaway DPC (queue stable at 1), a DPC that never returns
+(`DpcRoutineActive = 0`), and per-exit cost (three independent lines).
+
+What is left is a single question with a single shape: **what does this
+guest acquire at DISPATCH_LEVEL and never release?** The instruments to
+answer it are built and the offsets are verified - the profile filtered
+to samples where the priority reads `0x20`, and whatever lock the
+autoboost sample points at, read through the page-table walk.
