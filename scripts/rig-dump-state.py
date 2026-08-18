@@ -805,7 +805,7 @@ def dump_handler_by_reason(args, elf, instance):
     from the one it is being compared against.
     """
     members = ["handler_reason_cycles", "handler_reason_exits",
-               "handler_cycles", "handler_exits"]
+               "handler_cycles", "handler_exits", "handler_reason_from_l2"]
     off = gdb_offsets(elf, members, optional=True)
     if len(off) != len(members):
         print("\n[handler by reason: not in this binary]")
@@ -813,7 +813,8 @@ def dump_handler_by_reason(args, elf, instance):
 
     slots = 64
     reader = Monitor(args.rig, args.port)
-    for member in ("handler_reason_cycles", "handler_reason_exits"):
+    for member in ("handler_reason_cycles", "handler_reason_exits",
+                   "handler_reason_from_l2"):
         reader.queue(instance + off[member], slots)
     reader.queue(instance + off["handler_cycles"], 1)
     reader.queue(instance + off["handler_exits"], 1)
@@ -840,14 +841,71 @@ def dump_handler_by_reason(args, elf, instance):
     print(f"\ncpu 0 where the handler's time goes, by exit reason "
           f"({total_cycles / total_exits:,.0f} cycles/exit overall)")
     for cycles, exits, i in sorted(rows, reverse=True):
+        # Whose exit it was. A second-level exit is reflected and comes
+        # back as the guest hypervisor's VMRESUME, so the two are one
+        # round trip rather than two costs.
+        l2 = row("handler_reason_from_l2", i)
+        whose = f"{100.0 * l2 / max(exits, 1):5.1f}% from L2"
         print(f"  {EXIT_REASON.get(i, i):<18} {exits:>10,} exits  "
               f"{cycles // max(exits, 1):>9,} cyc/exit  "
               f"{100.0 * cycles / max(total_cycles, 1):>5.1f}% of the handler"
-              f"  {cycles / total_exits:>9,.0f} cyc per exit overall")
+              f"  {cycles / total_exits:>9,.0f} overall  {whose}")
 
     print(f"  --- split covers {100.0 * split_cycles / max(total_cycles, 1):.1f}% "
           f"of the cycles and {100.0 * split_exits / total_exits:.1f}% "
           f"of the exits")
+
+
+VMCS02_SPLIT = ["controls read and validated",
+                "the three MSR areas checked",
+                "ept pointer and TPR shadow decided",
+                "bitmaps merged, own controls in hand",
+                "the VMPTRLD itself",
+                "host state once, then every control",
+                "every guest-state field",
+                "the event to inject, transition flush"]
+
+
+def dump_vmcs02_split(args, elf, instance):
+    """`build_vmcs02` split into adjacent intervals, with its coverage.
+
+    Adjacent rather than nested, so the slots sum to the span between the
+    first mark and the last by construction - a cost cannot fall between
+    two of them.  What they can miss is a call that returned early, and
+    the coverage line against `phase_cycles[2]` is what says so.
+    """
+    members = ["vmcs02_split_cycles", "vmcs02_split_calls",
+               "phase_cycles", "phase_calls"]
+    off = gdb_offsets(elf, members, optional=True)
+    if len(off) != len(members):
+        print("\n[build_vmcs02 split: not in this binary]")
+        return
+
+    slots = len(VMCS02_SPLIT)
+    reader = Monitor(args.rig, args.port)
+    reader.queue(instance + off["vmcs02_split_cycles"], slots)
+    reader.queue(instance + off["vmcs02_split_calls"], 1)
+    # phase 2 of processor 0, which is build_vmcs02's own bracket.
+    reader.queue(instance + off["phase_cycles"] + 8 * 2, 1)
+    reader.queue(instance + off["phase_calls"] + 8 * 2, 1)
+    got = reader.run()
+
+    split = [got.get(instance + off["vmcs02_split_cycles"] + 8 * i, 0)
+             for i in range(slots)]
+    calls = got.get(instance + off["vmcs02_split_calls"], 0)
+    whole = got.get(instance + off["phase_cycles"] + 8 * 2, 0)
+    whole_calls = got.get(instance + off["phase_calls"] + 8 * 2, 0) or 1
+
+    total = sum(split) or 1
+    print(f"\ncpu 0 build_vmcs02, split ({whole // whole_calls:,} cycles a "
+          f"call over {whole_calls:,} calls)")
+    for i, cycles in sorted(enumerate(split), key=lambda kv: -kv[1]):
+        print(f"  {VMCS02_SPLIT[i]:<40} {cycles // whole_calls:>8,} cyc/call"
+              f"  {100.0 * cycles / total:>5.1f}%")
+
+    print(f"  --- coverage {100.0 * total / max(whole, 1):.1f}% of the "
+          f"phase's cycles, {100.0 * calls / whole_calls:.1f}% of its calls "
+          f"reached the end")
 
 
 def dump_guest_state_shadow(args, elf, instance):
@@ -1642,6 +1700,7 @@ def main():
     dump_field_use(args, instance, off)
 
     dump_handler_by_reason(args, args.elf, instance)
+    dump_vmcs02_split(args, args.elf, instance)
 
     # Every processor, not only the boot processor.  The application
     # processors are where "did this one participate at all" is decided,

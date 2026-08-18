@@ -1129,6 +1129,16 @@ std::expected<void, zpp::error> hypervisor::build_vmcs02(std::size_t cpu)
         }
     });
 
+    // The split; see `vmcs02_split_cycles`. Adjacent intervals rather
+    // than nested brackets, so the slots cannot fail to sum to the whole.
+    auto split_mark = phase_start;
+    auto stamp = [&](std::size_t slot) {
+        auto now = arch::x86_64::rdtsc();
+        this->vmcs02_split_cycles[slot] =
+            this->vmcs02_split_cycles[slot] + (now - split_mark);
+        split_mark = now;
+    };
+
     // Everything before the VMPTRLD, as its own phase. `merge_nested_
     // bitmaps`, `copy_vmcs12_to_shadow` and `shadow_ept_pointer_for` are
     // nested inside it and timed separately, so what this minus those
@@ -1223,6 +1233,8 @@ std::expected<void, zpp::error> hypervisor::build_vmcs02(std::size_t cpu)
             zpp::error{error::nested_controls_unsupported});
     }
 
+    stamp(0);   // controls read out of vmcs12 and validated
+
     // All three MSR areas are checked here, up front, rather than each
     // where a processor would look at it. See check_nested_msr_area for
     // why: a failure in either exit area is a VMX abort, and a VMX abort
@@ -1263,6 +1275,8 @@ std::expected<void, zpp::error> hypervisor::build_vmcs02(std::size_t cpu)
         return std::unexpected(
             zpp::error{error::nested_host_state_unsupported});
     }
+
+    stamp(1);   // the three MSR areas checked
 
     // The second level of address translation, which is either a shadow
     // composed out of the guest hypervisor's tables or - when it uses
@@ -1491,6 +1505,8 @@ std::expected<void, zpp::error> hypervisor::build_vmcs02(std::size_t cpu)
         }
     }
 
+    stamp(2);   // extended-page-table pointer and TPR shadow decided
+
     if (auto merged = merge_nested_bitmaps(cpu); !merged) {
         return merged;
     }
@@ -1549,6 +1565,8 @@ std::expected<void, zpp::error> hypervisor::build_vmcs02(std::size_t cpu)
     }
     before_stop.release();
 
+    stamp(3);   // bitmaps merged, this VMM's own controls in hand
+
     auto switch_start = arch::x86_64::rdtsc();
     auto switch_failed =
         arch::x86_64::vmx::vmptrld(&this->vmcs02_physical[cpu]);
@@ -1577,6 +1595,8 @@ std::expected<void, zpp::error> hypervisor::build_vmcs02(std::size_t cpu)
     // Once per vmcs02, not once per entry. See `vmcs02_host_written`:
     // the region is cleared where it is created and never again, so what
     // was written the first time is still there.
+    stamp(4);   // the VMPTRLD itself
+
     if (!this->vmcs02_host_written[cpu]) {
         for (std::size_t i{}; i < std::size(host_state_fields); ++i) {
             vmcs.write(host_state_fields[i], host_values[i]);
@@ -2185,6 +2205,8 @@ std::expected<void, zpp::error> hypervisor::build_vmcs02(std::size_t cpu)
     vmcs.guest_cr4((cr4_12 | cr4_vmxe) & ~cr4_smxe);
 
     {
+        stamp(5);   // host state written once, then every control
+
         auto fresh = this->guest_state_fresh[cpu];
         std::size_t index{};
 
@@ -2430,6 +2452,8 @@ std::expected<void, zpp::error> hypervisor::build_vmcs02(std::size_t cpu)
                    : multiplier01);
     }
 
+    stamp(6);   // every guest-state field, hot and cold, and the counter
+
     // The event the guest hypervisor asked to inject, taken from its VMCS
     // on the entry that starts its guest running. SDM 27.8.3 makes the
     // three fields a set: the information field's valid bit decides
@@ -2591,6 +2615,13 @@ std::expected<void, zpp::error> hypervisor::build_vmcs02(std::size_t cpu)
     // VMM's VPID - so the flush has to be performed rather than left to
     // hardware, which will not do it for a non-zero VPID.
     nested_transition_flush();
+
+    // The last slot, and the counter that says how many calls the split
+    // saw whole. Against `phase_calls[2]` it names the early returns:
+    // every refusal above leaves this function without reaching here,
+    // so a shortfall is failures rather than a hole in the split.
+    stamp(7);   // the event to inject, and the transition flush
+    this->vmcs02_split_calls = this->vmcs02_split_calls + 1;
 
     return {};
 }

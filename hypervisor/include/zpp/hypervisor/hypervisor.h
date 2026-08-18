@@ -3558,6 +3558,54 @@ private:
     static constexpr std::size_t handler_reason_slots = 64;
     volatile std::uint64_t handler_reason_cycles[handler_reason_slots]{};
     volatile std::uint64_t handler_reason_exits[handler_reason_slots]{};
+
+    /**
+     * How many of those exits came from the *second* level.
+     *
+     * The question it settles: whether `wrmsr` at 2.4 an exit and
+     * `vmresume` at 4.5 are two ends of one round trip or two
+     * independent costs. Every exit taken from a second-level guest is
+     * reflected, and the guest hypervisor answers it with a VMRESUME
+     * that comes straight back here - so if the wrmsr exits are second
+     * level, the tick has fewer independent costs than the table implies
+     * and halving either one halves both.
+     *
+     * Sampled at the top of `on_vm_exit`, because `load_l1_host_state`
+     * clears `running_l2` during the reflection and by `resume_guest` it
+     * always reads false.
+     */
+    volatile std::uint64_t handler_reason_from_l2[handler_reason_slots]{};
+    bool handler_was_l2[max_cpus]{};
+
+    /**
+     * `build_vmcs02` split the way the handler was, and for the same
+     * reason.
+     *
+     * It is 144,136 cycles of the 331,584 a `vmresume` exit costs, and
+     * `vmresume` is 58% of a clock tick - so this is 43% of the largest
+     * item in the only budget that decides the boot. What it is made of
+     * has never been measured beyond three coarse buckets, and the
+     * largest of those, "after vmptrld", carries a comment predicting it
+     * is "expected to be small ... because both are elided against a
+     * cache". That prediction has never been checked, and it is exactly
+     * the kind of thing the coverage rule exists to catch.
+     *
+     * **Adjacent intervals, not nested brackets.** Each slot is the time
+     * from the previous mark to this one, so the slots sum to the span
+     * between the first mark and the last *by construction* - there is
+     * no way for a cost to fall between two of them. What they can miss
+     * is a path that returns early, and `vmcs02_split_calls` against
+     * `phase_calls[2]` says how often that happened; the reader prints
+     * the sum against `phase_cycles[2]` as its coverage figure, because
+     * a split that does not add up is not a result.
+     * @{
+     */
+    static constexpr std::size_t vmcs02_split_slots = 8;
+    volatile std::uint64_t vmcs02_split_cycles[vmcs02_split_slots]{};
+    volatile std::uint64_t vmcs02_split_calls{};
+    /**
+     * @}
+     */
     /**
      * @}
      */

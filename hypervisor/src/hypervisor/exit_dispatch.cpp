@@ -169,6 +169,11 @@ void hypervisor::on_vm_exit(std::uint64_t cpuid,
             this->handler_first_tsc[cpuid] = now;
         }
 
+        // Which level this exit came from, for
+        // `handler_reason_from_l2`. Here rather than in `resume_guest`
+        // because the reflection clears `running_l2` on its way past.
+        this->handler_was_l2[cpuid] = this->running_l2[cpuid];
+
         // Where root operation began, for `apply_time_dilation`. Its own
         // field rather than `handler_entry_tsc`, because that one is a
         // measurement of this VMM and this one decides what the guest's

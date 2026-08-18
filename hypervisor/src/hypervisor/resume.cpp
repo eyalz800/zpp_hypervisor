@@ -935,6 +935,11 @@ void hypervisor::resume_guest(std::uint64_t cpuid,
                     this->handler_reason_cycles[slot] + span;
                 this->handler_reason_exits[slot] =
                     this->handler_reason_exits[slot] + 1;
+
+                if (this->handler_was_l2[cpu]) {
+                    this->handler_reason_from_l2[slot] =
+                        this->handler_reason_from_l2[slot] + 1;
+                }
             }
         }
         this->handler_last_tsc[cpu] = now;
