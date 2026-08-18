@@ -24428,3 +24428,132 @@ arrives as an argument, so the test passes `~0ull` and `max_cpus`
 directly. Same property, same bounds checks exercised, different
 injection point - and the suite refusing to build was the thing that
 noticed.
+
+## Settled: 574.7 Hz is Windows' own constant. Nothing we told it produced it
+
+The number this file has circled for many sessions - the guest arms its
+synthetic timer *periodic* at 17,400 (1.74 ms, 574.7 Hz) after seventy
+eight seconds and never changes it - is a **hardcoded literal in
+`ntoskrnl.exe`**. It is `KeQuantumEndTimerIncrement`, Microsoft's
+"short thread quantum" constant, and it is what any Windows running on
+any Hyper-V with per-processor tick scheduling arms.
+
+Established by disassembling the guest's own image against its PDB, and
+then confirmed by reading the running guest's memory. `0x43F8` appears
+**exactly once** as an immediate in the whole 3.09-million-line
+disassembly:
+
+```
+KeInitializeClock+0x12a   (RVA 0xc6259a)
+  testl $0x40000, KiVelocityFlags(%rip)     ; bit 18
+  movl  $0x43f8, %ecx                       ; 17,400
+  movl  KeMaximumIncrement(%rip), %eax      ; 156,250
+  cmovnel %ecx, %eax
+  movl  %eax, KeQuantumEndTimerIncrement(%rip)
+```
+
+Bit 18 is set unconditionally by `KiInitializeVelocity` - the
+`Feature_ShortThreadQuantum` enablement test is constant-folded away in
+this build, leaving a bare `btsl $0x12`. From there:
+
+`KiUpdateRunTime` arms a clock-timer deadline at `now +
+KeQuantumEndTimerIncrement` on every run-time update, gated on
+`KiClockTimerPerCpuTickScheduling`. `KiSetNextClockTickDueTime` finds
+that deadline is the earliest, takes the branch at RVA 0x30d958 which
+sets `EBX = KeQuantumEndTimerIncrement` **and clears the one-shot
+argument** - so the quantum-end path is the one that arms *periodic*,
+which is exactly the shape observed. `KiSetClockTickRate` then calls
+`HalpTimerClockArm` through `HalPrivateDispatchTable+0x300`, which
+converts 100 ns to counter ticks and calls `HalpHvTimerArm`, which is
+the `wrmsr 0x400000b1` this VMM sees.
+
+### Read out of the running guest, which is what makes it a measurement
+
+Guest virtual memory is readable through the QEMU monitor with no
+rebuild and nothing perturbed: walk the four-level tables with the
+guest's own CR3 using `xp`, since Hyper-V's extended page tables are
+identity for these pages. `scripts/` gained nothing for this - it was
+thirty lines in the scratchpad - but the recipe is worth keeping:
+`xp /1gx` on `cr3 & ~0xfff`, index by `(va >> 39) & 0x1ff`, and so on
+down. The `xp` output has no `0x` prefix on the address column.
+
+```
+KeQuantumEndTimerIncrement   0x43f8      = 17,400   <- the literal
+KiVelocityFlags              0x1da70000  bit 18 = 1 <- ShortThreadQuantum on
+KiClockTimerPerCpuTickSched  1                      <- the gate is open
+KiClockTimerPerCpu           1
+KeTimeIncrement              0x43f8      = 17,400   <- in force
+KiLastRequestedTimeIncrement 0x43f8      = 17,400
+KeMaximumIncrement           156,250     = 15.625 ms
+KeMinimumIncrement           5,000       = 0.5 ms
+```
+
+`KeMinimumIncrement` is 5,000 and `KeMaximumIncrement` is 156,250, so
+17,400 is **neither a clamp nor a rounding** - it is between them, and
+it divides neither. Every arithmetic explanation this file entertained
+is refuted by that one line.
+
+### What this closes, and what it does not
+
+Closed: "the guest computes 1.74 ms from something we tell it" - the
+reference-TSC scale, `HV_X64_MSR_TSC_FREQUENCY`, `APIC_FREQUENCY`,
+CPUID `0x40000003/6/0x10`. **None of them appears anywhere on the data
+flow from `KiSetNextClockTickDueTime` to that `wrmsr`.** Also closed:
+"the kernel notices it is behind and shortens its own period" -
+`KeQuantumEndTimerIncrement` has exactly one writer and it runs at
+boot, and the clock interrupt path (`HalpHvTimerAcknowledgeInterrupt`,
+`HvlEndSystemInterrupt`, `HvlWriteApicCommandRegister`,
+`HalpTimerClockInterrupt`, `KeClockInterruptNotify`) contains no
+elapsed-time comparison that reaches the period.
+
+Not closed, and now stated without an escape: **575 Hz is the tick this
+guest will always run, and a tick costs this VMM about 2.46 ms against
+a 1.74 ms period.** The livelock is arithmetic.
+
+### The one hypervisor-visible lever, and why it is not the one to pull
+
+`HalpClockTimer->Flags` bit 0 - "per-processor timer" - is what sets
+`KiClockTimerPerCpu`, which sets `KiClockTimerPerCpuTickScheduling`,
+which is the `je` that decides whether `KiUpdateRunTime` arms a
+quantum-end deadline at all. The HAL registers `flags = 0x8861` in
+`HalpHvDiscover` when it finds synthetic timers, so a guest with no
+synthetic timers takes `KeInitializeClock`'s legacy branch and arms
+`HalTimerClockArm(periodic, KeMaximumIncrement)` = 15.625 ms instead.
+
+That is a real lever and it is the wrong one: the synthetic timers are
+advertised by **Hyper-V**, in its own CPUID leaves, to its own guest.
+Suppressing them means forging Hyper-V's interface from underneath -
+the exact failure mode `CLAUDE.md` records as answering part of an
+interface - and it would take the dynamic tick and per-processor tick
+scheduling with it.
+
+### Which leaves exactly one direction, and it is not any of the three that died
+
+`ZPP_STRETCH_GUEST_TIMER`, `ZPP_DELIVER_SELF_IPI` and `ZPP_TICK_FLOOR`
+all failed, and this file generalised that to "this guest cannot be
+helped to cope with being slow". The generalisation is too strong, and
+the reason is in the stretch's own post mortem: *"stretching the period
+without slowing the reference counter leaves the guest's two time
+sources disagreeing"*.
+
+All three changed **one** thing the guest sees and left the rest
+honest. What none of them did is slow **every** clock in the virtual
+machine at once - which is what a suspended virtual machine experiences
+and what every guest is built to tolerate. Everything inside derives
+from the time-stamp counter: the reference counter through the page
+this VMM publishes, the performance counter, system time, and Hyper-V's
+own synthetic-timer deadlines. Divide the time-stamp counter and they
+all divide together, and nothing disagrees with anything.
+
+Hardware TSC scaling is absent on this part - already measured, no
+`tsc_scaling` in the VMX flags - but the **offset** is not, and the
+offset is enough: at each exit, subtract from it the part of the
+elapsed real time the guest is not to see. The guest's counter still
+advances monotonically, by `delta / k` instead of `delta`. That is
+software TSC scaling, it costs one VMWRITE an exit against 426,931
+cycles, and `build_vmcs02` already composes this VMM's offset with the
+guest hypervisor's - the comment there says "this VMM applies none
+today ... writing it as a sum is what keeps it correct if that
+changes".
+
+Next: `ZPP_TIME_DILATION`, default 1.
