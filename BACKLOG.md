@@ -25458,3 +25458,80 @@ that is switched off.
 
 That is the work, and it is the first item queued behind the progress
 question rather than ahead of it.
+
+## Fifty-five minutes at 0.95x: the progress counters have not moved
+
+The question was whether "frozen" at 2.20 ms a tick and "frozen" at
+1.66 ms are the same state or the same *window* on two different states.
+Time was the instrument. Seven samples, nine minutes apart, gated build,
+settled, protection counter frozen throughout:
+
+```
+[14:45] prot=39246 ept=313888 exits= 3,588,438  rips=8
+[14:54] prot=39246 ept=313888 exits= 6,628,108  rips=8
+[15:03] prot=39246 ept=313888 exits= 9,680,078  rips=8
+[15:13] prot=39246 ept=313888 exits=12,736,565  rips=8
+[15:22] prot=39246 ept=313888 exits=15,696,690  rips=8
+[15:31] prot=39246 ept=313888 exits=18,725,374  rips=8
+[15:40] prot=39246 ept=313888 exits=21,777,164  rips=8
+```
+
+**Eighteen million exits, and not one extended-page-table violation, not
+one protection call, and the same eight instruction pointers.** The
+machine is unmistakably running - 5,500 exits a second, steadily - and
+the guest is unmistakably not arriving anywhere.
+
+### The caveat, which is the same shape as the question
+
+At `l2-run 4.87%` of the wall clock, fifty-five minutes of wall is about
+**2.7 minutes of second-level execution**. So this does not refute "slow"
+on its own: a boot phase needing more than 2.7 minutes of guest time
+would look exactly like this.
+
+What makes it evidence anyway is *which* counter is frozen. A guest
+executing 2.7 minutes of ordinary kernel work touches new pages
+continuously - the earlier boots walked into 296,950 and 313,888 of them
+in their first few minutes. **Zero new pages across 2.7 minutes of
+execution is not a slow boot, it is the same settled loop**, and the
+entry-pointer table says the same thing independently: eight addresses,
+all in the clock path, unchanged.
+
+### So the tick was not the only block, and that is the result
+
+`0.95x` was reached, the guest now receives 98.4% of the interrupts it
+programs, and **its behaviour did not change**. The condition this file
+has treated as the boot's blocker for months has been met and the boot
+did not resume.
+
+Two readings of that, and they are not equivalent:
+
+- **4.87% is still not enough.** Breaking even leaves the guest the
+  remainder, and the remainder is 5% of its own clock. The target stated
+  earlier - a tick at 0.87 ms, 0.48x - is a fivefold further reduction,
+  and nothing here says the guest starts moving before it.
+- **Something else holds it too.** The signature has been identical
+  across every regime measured this session: eight entry pointers, all
+  clock path, no new memory, `0x2f` requested constantly and delivered
+  seventeen times. That did not shift when the tick fell 25%.
+
+**Neither can be chosen from this window**, and choosing wrongly costs a
+lot: the first says grind the remaining 45% out of `vmresume`, the
+second says stop optimising and find the other block. The measurement
+that separates them is the one this file has not taken - **run at 0.48x
+and see** - and the honest position until then is that the tick was
+necessary and has not been shown sufficient.
+
+## Manifest: `stretch` printed one digit while its own comment said two
+
+`ZPP_STRETCH_GUEST_TIMER` is a free-form `CACHE STRING`, run at 1, 2 and
+8 in this file, and nothing stops 16 - at which the manifest would have
+read `stretch=6`. The two-digit comment was added beside it and applied
+to `dilate` two lines below, so the switch the comment was about kept one
+digit for a session. Both multipliers print two digits now:
+
+```
+zpp switches: ... stretch=01 vtlcap=0 dilate=01
+```
+
+Small, and exactly the class this array exists to catch: **a manifest
+that disagrees with the build is worse than no manifest.**

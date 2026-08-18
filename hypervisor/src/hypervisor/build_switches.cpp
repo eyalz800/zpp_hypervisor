@@ -69,12 +69,20 @@ extern "C" [[gnu::used, gnu::retain]] constinit const char
         digit(nested_vmx::step_vtl),
         ' ', 'p', 'r', 'o', 'f', 'i', 'l', 'e', '=',
         digit(nested_vmx::profile_l2),
+        // Two digits for both multipliers, where every switch above
+        // needs one. They are free-form `CACHE STRING`s rather than
+        // booleans - `BACKLOG.md` records the stretch run at 1, 2 and 8,
+        // and nothing stops 16 - and at 16 a single digit prints `6`.
+        // **A manifest that disagrees with the build is worse than no
+        // manifest**, which is the whole argument for this array, so a
+        // place where it could disagree is a place to widen.
+        //
+        // The comment used to sit between `stretch` and the switch after
+        // it while applying only to `dilate` two lines further down,
+        // which is how `stretch` kept one digit for a session.
         ' ', 's', 't', 'r', 'e', 't', 'c', 'h', '=',
+        digit(static_cast<unsigned>(ZPP_STRETCH_GUEST_TIMER) / 10),
         digit(static_cast<unsigned>(ZPP_STRETCH_GUEST_TIMER)),
-        // Two digits, where every switch above needs one: the values
-        // worth running are 8 and 16, and one digit would print 16 as
-        // `6` - a manifest that disagrees with the build is worse than
-        // no manifest, which is the whole argument for this array.
         ' ', 'v', 't', 'l', 'c', 'a', 'p', '=',
         digit(nested_vmx::capture_vtl_deeply),
         ' ', 'd', 'i', 'l', 'a', 't', 'e', '=',
