@@ -25932,3 +25932,67 @@ previous three died. It is checkable without a boot - census the
 virtual-APIC address per trust level against the extended-page-table
 pointer that identifies the level, which `l2_vp_assist_eptp` already does
 for the VP assist page and which nothing yet does for this one.
+
+## The page is live, and the guest never leaves DISPATCH_LEVEL
+
+Sixty narrow reads of the TPR byte in the virtual-APIC page vmcs12 names,
+no code and no boot:
+
+```
+TPR byte over 60 reads: {0x20: 32, 0xd0: 28}
+IRR dwords: all zero
+```
+
+**It varies.** So the page is not stale, not the wrong trust level's, and
+not disconnected from the guest's `CR8` writes - the fourth hypothesis is
+dead, killed by the first and cheapest step, exactly as it should have
+been. `nested_virtual_apic_address` may still hold whichever page was
+built last, and on this machine it does not matter, because the one it
+holds is live.
+
+### And the reading that matters is the pair of values, not their variance
+
+`0x20` is **DISPATCH_LEVEL** and `0xd0` is **CLOCK_LEVEL**. Sixty reads
+found nothing else, and the per-entry histogram agrees - `0xd0` 48%,
+`0x20` 39%, `0x40` 11%, and `0x00` on 1.4%.
+
+Vector `0x2f` is class 2. The delivery rule is **strictly greater**, so
+class 2 is refused at task priority `0x20` and at everything above it.
+**The guest sits at or above DISPATCH_LEVEL essentially always, and the
+guest hypervisor is therefore correct to refuse the vector 183,898
+times.** There is no lost interrupt. There never was one.
+
+### Which turns the previous entry's conclusion round
+
+That entry said "the dispatch interrupt is the block". It is not: the
+interrupt is correctly masked because the guest is at DISPATCH, and
+**Windows cannot context-switch at or above DISPATCH_LEVEL at all** - the
+scheduler is only reachable below it. So the ten Ready threads, the zero
+context switches, the one thread Running for ever and the undelivered
+`0x2f` are not four symptoms of a missing interrupt. They are four
+symptoms of one fact:
+
+> **The guest never returns below DISPATCH_LEVEL.**
+
+Everything follows from that without needing anything to be lost, and it
+is consistent with every reading this session took, including the ones
+that looked contradictory: `SymCryptFdefRawSquareAsm` executing while the
+priority reads `0x20` is not a contradiction at all, because a spinlock
+or a deferred-procedure-call dispatch raises to exactly that level and
+code runs there normally.
+
+`KeAbPreAcquire` and `PspAcquirePushLockExclusive` in the same nineteen
+profile samples are then worth re-reading rather than dismissing: they
+are what a thread does while holding something at raised priority.
+
+### The question, finally narrow and finally the guest's
+
+**What raised the guest to DISPATCH_LEVEL and never lowered it?** That is
+answerable from inside the guest with instruments this session already
+built - the profile, the thread walk, and the page-table reader that can
+read any structure `ntkrnlmp.pdb` or `ci.pdb` names, including
+`KPRCB.DpcRoutineActive`, the DPC queue depth, and whatever lock the
+autoboost sample points at.
+
+And it is not answerable by making exits cheaper, which is now the third
+independent line of evidence pointing away from that work.
