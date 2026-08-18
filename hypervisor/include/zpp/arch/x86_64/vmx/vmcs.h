@@ -8,6 +8,30 @@
 namespace zpp::arch::x86_64::vmx
 {
 /**
+ * How many VMCS field accesses this processor has executed.
+ *
+ * A diagnostic, and the only way to stop guessing at the number that
+ * decides everything about this VMM's cost. Nested under a hypervisor
+ * that does not offer VMCS shadowing, every one of these is an exit to
+ * the layer below - measured at about 3,735 cycles for a read and 2,542
+ * for a write, which this VMM prints at launch - so the access *count*
+ * per exit is the cost, and it had been estimated twice from cycles
+ * divided by those prices and both estimates informed a wrong decision.
+ *
+ * Deliberately not per-processor and not atomic. One counter that is
+ * occasionally short by a racing increment answers "about how many per
+ * exit" exactly as well as an exact one, and a `lock` prefix here would
+ * be a real cost added to the hot path to measure the hot path.
+ *
+ * `constinit` and never read by anything that decides: it is compiled
+ * in unconditionally because a switch would leave the number available
+ * only in a build nobody runs, which is how `ZPP_PUBLISH_REFERENCE_TSC`
+ * came to be measured against a stale object file.
+ */
+inline constinit std::uint64_t vmcs_reads_taken{};
+inline constinit std::uint64_t vmcs_writes_taken{};
+
+/**
  * The VMCS error type.
  */
 enum class vmcs_error : int
@@ -104,6 +128,8 @@ public:
      */
     void write(field field, std::uint64_t value) const
     {
+        vmcs_writes_taken = vmcs_writes_taken + 1;
+
         if (0 != vmwrite(field, value)) {
             __builtin_trap();
         }
@@ -115,6 +141,8 @@ public:
      */
     std::uint64_t read(field field) const
     {
+        vmcs_reads_taken = vmcs_reads_taken + 1;
+
         std::uint64_t value{};
         if (0 != vmread(field, &value)) {
             __builtin_trap();
