@@ -26697,3 +26697,111 @@ And if nothing in `ntoskrnl` writes `1` or `6` to that offset, the writer
 is `securekernel.exe`, which is already fetched - **at which point this
 becomes the first thing in the whole investigation pointing at what this
 VMM presents to VTL1**, with evidence rather than by elimination.
+
+## The descriptor is built on the caller's stack, and nothing in the Vsl code writes the byte
+
+**Grep one - `VslSetPlaceholderPages`' initialiser:**
+
+```
+14038ccd0:  subq $0xa0, %rsp
+14038ccf7:  leaq 0x20(%rsp), %rcx      ; the descriptor
+14038cd00:  callq ...                  ; zeroed
+14038cd05:  movl $0x101, %edx
+14038cd0a:  movq %rbx, 0x28(%rsp)      ; +0x08
+14038cd0f:  leaq 0x20(%rsp), %r9       ; <- R9, exactly as the frame walk found
+14038cd14:  movq %rdi, 0x30(%rsp)      ; +0x10
+14038cd1c:  movq %rsi, 0x38(%rsp)      ; +0x18
+14038cd21:  movb $0x2, %cl
+14038cd28:  callq 0x14038dd60          ; VslpEnterIumSecureMode
+```
+
+**`leaq 0x20(%rsp), %r9` confirms the frame walk independently**: the
+descriptor is a local of `VslSetPlaceholderPages` at `rsp+0x20`, passed
+in R9, which is what the arithmetic said and what `rbx` in the callee
+holds. Two derivations, one answer.
+
+It is **zeroed at initialisation** and the caller writes `+0x08`, `+0x10`
+and `+0x18` - not `+1`. So the byte does not start at 4; **something
+sets it to 4 after the descriptor is built**, and it is not this
+initialiser. (`0x101` at `0x14038cd05` is the same value the census
+records in `r15`, and `movb $0x2` is a separate argument - neither is the
+state byte.)
+
+**Grep two - every access to `0x1(%rbx)` in the Vsl region:**
+
+```
+14038df01:  movzbl 0x1(%rbx), %eax     ; the loop head
+14038df0e:  movzbl 0x1(%rbx), %eax     ; after the assert
+14038df2e:  movzbl 0x1(%rbx), %ecx
+14038ee13:  movzbl 0x1(%r13), %eax
+```
+
+**Four accesses, all `movzbl` - all reads. No store.** Within
+`VslSetPlaceholderPages` and `VslpEnterIumSecureMode` the byte is
+read-only.
+
+**And that is "not found by this method", not proof.** A compiler will
+write a byte through a register, as part of a wider store, or via a
+pointer this search does not resolve - so absence of `movb $1, 0x1(...)`
+does not establish absence of a writer, exactly as a public-symbol name
+does not establish a function. What it does establish is that the two
+functions in this chain do not visibly advance their own state machine,
+which makes the next reading `securekernel.exe` rather than more of
+`ntoskrnl`.
+
+**That is where this stops.** It is a new question with a fetched image
+behind it and it deserves a clean start.
+
+## Where this leaves the project
+
+The stall that has resisted this project for its whole life is located to
+**one byte holding the value 4**, in a stack descriptor at
+`VslSetPlaceholderPages`+`0x20`, tested against `1` and `6` by
+`VslpEnterIumSecureMode`'s loop head at `0x14038df01`.
+
+The chain, every hop either read out of the image or read out of the
+guest with a self-check beside it:
+
+```
+Phase1Initialization          the only runnable thread, pinned at DISPATCH
+  VslSetPlaceholderPages      builds the descriptor at rsp+0x20, passes it in R9
+    VslpEnterIumSecureMode    loops on [rbx+1], dispatching on 1 and 6
+      HvlSwitchToVsmVtl1      subq $0x138, saves rbx at rsp+0x100
+        vmcall                rcx=0x11, 131 a second, rax=1 back, discarded
+```
+
+**Two self-checks make it usable.** The return slot at `rsp+0x140` reads
+`ntoskrnl+0x38e108`, exactly after the call at `0x14038e103`; the one at
+`rsp+0x200` reads `+0x38cd2d`, exactly after the call at `0x14038cd28`.
+Neither name was taken on trust, and the technique - **frame arithmetic
+with a return-address self-check** - is the thing to reach for next time,
+because it is what unlocked everything after five sessions of counters.
+
+### The eight eliminations
+
+| candidate | eliminated by |
+|---|---|
+| the tick rate | 1.26x -> 0.95x, guest unchanged for 55 minutes |
+| a lost dispatch interrupt | correctly masked - the guest is at DISPATCH |
+| the wrong virtual-APIC page | live, `0x20`/`0xd0` over 60 reads |
+| a deferred-call storm | queue depth 1, stable, maximum ever 4 |
+| a routine that never returns | `DpcRoutineActive = 0` |
+| the per-exit cost | three independent lines |
+| a page-handover loop | 967 MB of arithmetic, identical registers |
+| a lock held at DISPATCH | `state = 2`, thirty-two consecutive samples |
+
+### The six instrument shapes
+
+*Wrong field, wrong denominator, wrong duration, wrong source, wrong
+visibility* - and now **wrong direction**, which is the most expensive
+because the instrument is correct, the reading is correct, and it is
+equally consistent with the opposite of what it was taken to mean.
+`ept-violation` frozen genuinely means "no new pages", and that is
+produced by a guest doing nothing **and** by a guest freeing memory.
+
+### And the oldest lesson, for the fifth time
+
+`rdx` in the trust-level register census has held the descriptor pointer
+since the very first capture - the call site does `movq %rbx, %rdx` -
+sitting in a printed column beside `rsp` for five sessions. **The data
+was already there and nothing had asked the right question of it.**
