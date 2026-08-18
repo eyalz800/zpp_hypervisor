@@ -26376,3 +26376,79 @@ That decides the two open questions at once:
   and the watched-page machinery can answer.
 
 `rax = 1` was never the answer. It was the thing being ignored.
+
+## The loop is a state machine on a caller-supplied structure, dispatching on a byte
+
+`VslpEnterIumSecureMode` read end to end out of the disassembly already
+on disk. Two facts settle what the loop is.
+
+**`rbx` is the fourth argument.** At the entry:
+
+```
+14038dd60:  pushq %rbx ... pushq %r15
+14038dd6c:  subq  $0x80, %rsp
+14038dd73:  movq  0xa7c9c6(%rip), %rax   ; the stack cookie
+14038dd9c:  movq  %r9, %rbx              ; <- R9, the fourth parameter
+```
+
+So the structure the loop tests is **passed in by whatever calls
+`VslpEnterIumSecureMode`** - it is not a global, not the PRCB and not the
+thread. The register census cannot supply it, and the caveat about the
+captured `rbx` reading `0x100000400` is confirmed: that is
+`HvlSwitchToVsmVtl1` using the register for the hypercall, not this
+pointer.
+
+**And the loop head is a dispatch on a byte:**
+
+```
+14038df01:  movzbl 0x1(%rbx), %eax     ; a BYTE at +1
+14038df05:  testb  %al, %al
+14038df07:  jns    0x14038df12
+14038df09:  int3                       ; assertion if the high bit is set
+14038df0a:  andb   $0x7f, 0x1(%rbx)
+14038df0e:  movzbl 0x1(%rbx), %eax
+14038df12:  cmpb   $0x1, %al           ; state 1 -> one exit
+14038df14:  je     0x14038df8f
+14038df16:  cmpb   $0x6, %al           ; state 6 -> another
+14038df18:  je     0x14038df77
+...
+14038df25:  movl   0x4(%rbx), %eax     ; and a dword at +4
+```
+
+So the shape is: **read a state byte, dispatch on it, make a secure call,
+come back, read `[rbx+8]`, jump to the head and read the state byte
+again.** Three fields in play - a byte at `+1`, a dword at `+4`, a dword
+at `+8` - and the hypercall's own return value used for none of them.
+
+**That is a state machine being driven round its loop without ever
+advancing.** The byte at `+1` is whatever it was, every time, for
+202,683 switches - which is the same statement as the byte-identical
+registers, now located to one field of one structure.
+
+### What is deliberately not concluded here
+
+Who writes `[rbx+1]`. The disassembly says the structure is
+caller-supplied and says nothing about whether the secure kernel can
+reach it. **The obvious next hypothesis - that it is a page shared
+between trust levels which VTL1 writes and VTL0 never sees - is not
+made here**, because five hypotheses have died this session and every
+one of them was named before it was needed. The reading that would
+justify it is `VslpEnterIumSecureMode`'s own callers, which the same
+cross-reference technique gives, and then what they pass in R9.
+
+### Where the whole investigation now stands
+
+The stall is located to a single byte:
+
+- one thread, Running, priority pinned above the dispatcher;
+- inside `VslpEnterIumSecureMode`, called from something the
+  cross-reference will name;
+- looping on a state byte at `[rbx+1]` in a structure it was handed;
+- making 131 secure calls a second whose registers never vary and whose
+  return value it discards;
+- with ten threads Ready, `QuantumEnd = 1`, and one deferred call queued
+  behind it.
+
+Every earlier candidate is eliminated by measurement rather than by
+argument, and the per-exit cost - which this file spent most of its life
+on - is not among the survivors.
