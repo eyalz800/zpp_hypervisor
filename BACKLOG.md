@@ -25702,3 +25702,67 @@ A machine that is starved gets better when it is fed. This one did not.
 So the remaining 45% behind `vmresume` and the 51.4% inside
 `build_vmcs02` are real costs and they are not this bug, and the next
 reading is `CI.dll+0x17xxx` against that module's own symbols.
+
+## Named at last: `CI.dll`, and the loop is RSA signature verification
+
+`ci.dll` off the guest's volume, its PDB fetched by CodeView GUID
+(`ci.pdb/BB3A10CDB1E4F4249D698B7C0BDCE9AF1`), symbolized at the image's
+own preferred base of `0x180000000` - **not** `0x140000000`, which is
+`ntoskrnl`'s and which silently produced `__guard_fids_table` for every
+address:
+
+```
+CI.dll+0x179d9   SymCryptFdefRawMulAsm
+CI.dll+0x17b70   SymCryptFdefRawSquareAsm
+CI.dll+0x17bc0   SymCryptFdefRawSquareAsm
+CI.dll+0x17be0   SymCryptFdefRawSquareAsm
+CI.dll+0x17c7d   SymCryptFdefRawSquareAsm
+CI.dll+0x17f5d   SymCryptFdefMontgomeryReduceAsm
+CI.dll+0x17f6f   SymCryptFdefMontgomeryReduceAsm
+```
+
+**Raw multiply, raw square and Montgomery reduction are the inner loop of
+modular exponentiation, which is RSA.** Seven of the profile's addresses
+are inside SymCrypt's bignum arithmetic in Code Integrity, called from a
+thread whose start address is `Phase1Initialization`.
+
+So the account is complete for the first time: **Windows is in phase one
+initialization, Code Integrity is verifying signatures, and the profile
+catches it inside the modular-exponentiation loop.** That also explains
+the trust-level traffic this investigation has watched from the
+beginning without a caller - Code Integrity is the component whose page
+validation goes to the secure kernel, and the balanced
+`HvCallVtlCall`/`HvCallVtlReturn` pairs are what it does there.
+
+### What it does not yet establish
+
+Signature verification is *ordinary work for this phase*. An RSA-2048
+verify is on the order of a millisecond natively, and at `l2-run 4.87%`
+a few thousand of them is minutes rather than hours. So this is
+consistent with **a guest doing real work very slowly** and equally with
+**a guest verifying the same thing for ever**, and nothing measured here
+separates those.
+
+What weighs against "slow but progressing" is the same fact as before:
+fifty-five minutes, no new pages, no context switch. Verification
+allocates from pool, which is already-mapped, so it need not fault - but
+it also never *finishes*, and finishing is what would let the thread
+yield.
+
+The next reading is which signature, and it is now reachable: the
+profile's register capture holds the arguments at a sample, and the
+guest page-table walk reads any structure `ci.pdb` names.
+
+### Two traps, both paid for here
+
+- **`ntfscat` is case sensitive.** `/Windows/System32/CI.dll` returned
+  `Couldn't open inode` and zero bytes; `ci.dll` returned 1,170,872. A
+  zero-length file is the same shape as "the guest still holds the disk",
+  which is what the script's own header warns about, so the wrong lesson
+  was one step away.
+- **A DLL's preferred base is not the kernel's.** `llvm-symbolizer` at
+  `0x140000000` answered `__guard_fids_table` for every address in
+  `ci.dll` rather than failing. `ImageBase` is in the file
+  (`llvm-readobj --file-headers`) and it is `0x180000000`. This is the
+  export-table trap in a new coat: **a symbolizer that answers is not a
+  symbolizer that is right.**
