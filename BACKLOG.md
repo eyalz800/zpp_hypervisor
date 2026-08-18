@@ -26537,3 +26537,91 @@ denominator, wrong duration, wrong source, wrong visibility* - and now
 **wrong direction**, where the instrument is correct, the reading is
 correct, and it is consistent with the opposite of what it was taken to
 mean.
+
+## The frame closes, the self-check passes, and the state byte is 4
+
+The hypercall page stub, read live and decoded:
+
+```
++0x10  8b c1                    mov  eax, ecx
++0x12  48 c7 c1 11 00 00 00     mov  rcx, 0x11
++0x19  0f 01 c1                 vmcall      <- the captured RIP
++0x1c  c3                       ret
++0x1d  8b c8 / b8 12 00 00 00 / 0f 01 c1 / c3   <- the VtlReturn stub
+```
+
+So the stub is **called**, and `[rsp]` at the `vmcall` is the return into
+`HvlSwitchToVsmVtl1`. And that function's prologue has **no pushes at
+all** - it opens `subq $0x138, %rsp` and then saves registers *into* the
+frame, `movq %rbx, (%rax)` with `rax = rsp+0x100`. So:
+
+```
+rsp_Hvl          = rsp_vmcall + 8
+saved rbx        = rsp_vmcall + 0x108
+return into Vslp = rsp_vmcall + 0x140
+```
+
+### The self-check, and it passes
+
+```
+return slot +0x140 = 0xfffff8029a18e108 -> ntoskrnl+0x38e108
+SELF-CHECK: PASS
+```
+
+`0x14038e108` is **exactly the instruction after `callq 0x1406a76a0` at
+`0x14038e103`** - one of the four call sites enumerated earlier. The
+arithmetic is right, so everything read through it counts. That is the
+same self-check as `reader proven: host_page_table[0] = ...023`, applied
+to a frame instead of a page table, and it is what separates this from
+the scan that found nothing an entry ago.
+
+**Which also names which of the four calls the loop is stuck in:** the
+one at `0x14038e103`.
+
+### The structure, and it is not moving
+
+```
+saved rbx = 0xffff9983aecca1b0
+[t0] [rbx+0]=0x0000000000000400  [rbx+8]=0  ->  state byte [+1] = 4
+[t1] [rbx+0]=0x0000000000000400  [rbx+8]=0  ->  state byte [+1] = 4
+```
+
+Forty-five seconds apart, **nothing in it changes**. The loop head tests
+that byte against `1` and against `6`; **it is `4`**, which is neither,
+so it falls through the dispatch, makes the secure call, returns, and
+reads `4` again. `[rbx+4]` and `[rbx+8]` are zero.
+
+**The whole stall is one byte holding the value 4.**
+
+### And the census had it all along
+
+`rbx` is `0xffff9983aecca1b0`, and the `HvCallVtlCall` census recorded
+`rdx = 0xffff9983aecca1b0` - the same value. The call site does
+`movq %rbx, %rdx` at `0x14038e0fe` before calling, so **the structure
+pointer has been in the register census since the first day it was
+taken**, sitting in the column beside `rsp`, unrecognised because nothing
+knew what `rdx` was.
+
+That is a fifth instance of this file's oldest lesson, and the sharpest:
+*the data was already there and nothing had asked the right question of
+it.*
+
+### What it rules out, and what it does not
+
+The structure is at `rsp + 0x228` on the same kernel stack the call is
+made from - **a stack local of `VslpEnterIumSecureMode`'s caller**, not a
+page allocated to be shared. So the "shared mailbox page" shape is wrong
+as stated.
+
+It does **not** rule out the secure kernel writing it: VTL1 can reach
+VTL0's memory, and a stack-local descriptor is an ordinary way to pass
+one. What it changes is the question - not "is a shared page not
+propagating" but "**what is supposed to advance this byte from 4, and is
+it VTL1 or VTL0's own code**". Both are answerable from the disassembly
+that is already on disk: every write to a `+1` byte offset in this
+structure, in `VslpEnterIumSecureMode` and in whichever caller allocated
+it.
+
+The caller is reachable the same way this frame was: the return address
+at `rsp_vmcall + 0x140` names the call site, and the frame above it names
+the caller.
