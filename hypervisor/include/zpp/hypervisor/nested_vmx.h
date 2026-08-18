@@ -334,12 +334,45 @@ inline constexpr bool deliver_self_ipi =
  * swallowed, and only while undeliverable, so a command that outranks
  * the priority still reflects and the level above still sees it.
  *
- * What would have to change to turn it on by default: a boot showing
- * `l2_self_ipi_swallowed` rising, `l2_self_ipi_delivered` following it,
- * and the trust-level notification rate falling from 1.00 per call. The
- * prediction that would refute the whole model is the notification
- * staying at 1.00 with the reflection stopped - something other than
- * `0x2f` keeps it asserted.
+ * **It was tried on the rig and it is refuted. Do not turn it on.**
+ *
+ * Two boots, one variable, same tree, both deployed hash-verified and
+ * both module bases read per run:
+ *
+ * | | `swallow=1` | `swallow=0` control |
+ * |---|---|---|
+ * | `l2_entries` | 38,974 then **frozen 6+ minutes** | 571,550 -> 1,052,033, climbing |
+ * | `vtl_switches` | 8,611, frozen | 51,524 -> 80,027, climbing |
+ * | last exit | **`hlt` at the L1 rip** | still running |
+ *
+ * The mechanism is in that last exit. The guest hypervisor took a
+ * trust-level call, two more hypercalls, and then **halted** - and
+ * nothing woke it, so this VMM stopped taking exits entirely at 204,225.
+ * The machine was not paused, not faulted, and no host exception,
+ * unhandled exit or entry failure was recorded.
+ *
+ * **The level above uses the pending interrupt as its own wake
+ * condition.** It cannot deliver `0x2f` and it does not idle while it is
+ * outstanding; withhold the write and it has nothing left to wait for.
+ * So the interrupt being permanently pending is not only the thing that
+ * keeps the notification asserted - it is also the thing that keeps the
+ * level above running at all, and the two cannot be separated from here.
+ *
+ * Note what it is **not**: `l2_self_ipi_pending` was `0` at the freeze
+ * and the single swallowed request had been delivered normally, held
+ * 2,691 entries and then injected. The delivery half worked exactly as
+ * designed. The harm is not a vector held for ever - it is that the
+ * level above must *see* the request even when it cannot act on it.
+ *
+ * The prediction this was built to test - the notification rate falling
+ * from 1.00 per call - was never reached, because the guest never got as
+ * far as the secure-call loop. That is a failure to test rather than a
+ * test that passed, and it is recorded as one.
+ *
+ * What would have to change before this is worth another boot: something
+ * that keeps the level above awake while still withholding the vector -
+ * which means understanding what it waits on, and that is above this VMM
+ * and not visible from it.
  */
 inline constexpr bool intercept_self_ipi =
 #if defined(ZPP_INTERCEPT_SELF_IPI) && ZPP_INTERCEPT_SELF_IPI

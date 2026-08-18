@@ -26918,3 +26918,57 @@ Predicted, so it can fail:
 **If the notification still asserts at ~1.00 per call, the model is
 wrong** - something other than `0x2f` holds it - and that is worth one
 boot to learn.
+
+### It was booted, and it is refuted. The reflection is not removable.
+
+Two boots, one variable, same tree, both hash-verified on deploy and both
+module bases read per run (`0x6720f000` and `0x67210000` - they differ,
+which is the trap this file records twice):
+
+| | `swallow=1` | `swallow=0` control |
+|---|---|---|
+| `l2_entries` | 38,974 then **frozen 6+ min** | 571,550 -> 823,296 -> 1,052,033 |
+| `vtl_switches` | 8,611, frozen | 51,524 -> 66,412 -> 80,027 |
+| last exit | **`hlt` at the L1 rip** | still climbing |
+
+The exit trace names the mechanism. The final exits were `vmcall 0x11`
+(a trust-level call), `vmresume`, two more hypercalls, and then **`hlt`
+at the guest hypervisor's own rip** - after which this VMM took no
+further exit at all, at 204,225. `VM status: running`; no host exception,
+no unhandled exit, no entry failure. The machine simply went to sleep.
+
+**The level above uses the pending interrupt as its own wake condition.**
+It cannot deliver `0x2f`, and it does not idle while `0x2f` is
+outstanding. Withhold the write and it has nothing to wait for and halts.
+So "the vector is permanently pending" is not only what keeps the
+notification asserted - it is also what keeps the guest hypervisor
+*running*, and from here the two cannot be separated.
+
+What it is **not**: `l2_self_ipi_pending` read `0` at the freeze, and the
+one request that was swallowed had been held 2,691 entries and then
+**delivered**, exactly as designed. The delivery half is correct. The
+failure is that the request must be *visible* above us even when it
+cannot be acted on.
+
+And the prediction was never reached - the guest never got as far as the
+secure-call loop, so the notification rate was not measured under the
+switch. **A failure to test, not a test that passed**, and recorded as
+one.
+
+### Which closes the last lever on this side
+
+`ZPP_DELIVER_SELF_IPI` alone: the write is reflected, the vector stays
+pending, the notification stays asserted - useless. `ZPP_INTERCEPT_SELF_IPI`:
+the write is withheld, the level above halts - worse. There is no third
+arrangement available from here, because the same fact serves both
+purposes above us.
+
+So the finding stands exactly as measured, and it is above this VMM:
+
+> **The guest hypervisor asserts a trust-level notification for an
+> interrupt it will not deliver, and needs that same interrupt pending in
+> order to keep running.**
+
+Both switches stay OFF and their comments carry the boot that refuted
+them. Anything further needs to know what the level above waits on, which
+is not visible from underneath it.
