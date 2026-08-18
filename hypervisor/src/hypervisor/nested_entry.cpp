@@ -1131,12 +1131,40 @@ std::expected<void, zpp::error> hypervisor::build_vmcs02(std::size_t cpu)
 
     // The split; see `vmcs02_split_cycles`. Adjacent intervals rather
     // than nested brackets, so the slots cannot fail to sum to the whole.
+    //
+    // VMCS accesses beside the cycles, because 49,269 cycles over forty
+    // guest-state fields is 1,230 a field and **that is not a memory
+    // read**: `vmcs12::read` is a three-dimensional subscript and a
+    // load, and comparing the result against a cache is a load and a
+    // compare. So the block is doing something else per field, and
+    // there are only two candidates - it is still touching the hardware
+    // VMCS on some fraction of fields, or it is 1,230 cycles of pure
+    // software and that is its own bug. Those demand opposite work,
+    // which is why the counters are sampled here rather than either
+    // being assumed.
+    //
+    // `vmcs_reads_taken` and `vmcs_writes_taken` are free-standing and
+    // already incremented inside `vmcs::read` and `vmcs::write`, so this
+    // is a difference of two counters and costs nothing but the loads.
     auto split_mark = phase_start;
+    auto split_reads = arch::x86_64::vmx::vmcs_reads_taken;
+    auto split_writes = arch::x86_64::vmx::vmcs_writes_taken;
+
     auto stamp = [&](std::size_t slot) {
         auto now = arch::x86_64::rdtsc();
+        auto reads = arch::x86_64::vmx::vmcs_reads_taken;
+        auto writes = arch::x86_64::vmx::vmcs_writes_taken;
+
         this->vmcs02_split_cycles[slot] =
             this->vmcs02_split_cycles[slot] + (now - split_mark);
+        this->vmcs02_split_reads[slot] =
+            this->vmcs02_split_reads[slot] + (reads - split_reads);
+        this->vmcs02_split_writes[slot] =
+            this->vmcs02_split_writes[slot] + (writes - split_writes);
+
         split_mark = now;
+        split_reads = reads;
+        split_writes = writes;
     };
 
     // Everything before the VMPTRLD, as its own phase. `merge_nested_

@@ -3602,6 +3602,34 @@ private:
      */
     static constexpr std::size_t vmcs02_split_slots = 8;
     volatile std::uint64_t vmcs02_split_cycles[vmcs02_split_slots]{};
+
+    /**
+     * The VMCS accesses each slot takes, which is what says whether its
+     * cycles are hardware or software.
+     *
+     * The question they settle: 49,269 cycles over forty guest-state
+     * fields is 1,230 a field, and this VMM's launch-time price for one
+     * trapping VMCS access is about 3,100 cycles. 1,230 / 3,100 is 0.4,
+     * which is the shape of an elision that still reaches the hardware
+     * on a fraction of fields - so either that is what it is doing, and
+     * the fix is fewer accesses rather than a cheaper comparison, or the
+     * count is zero and 1,230 cycles of pure software a field is a
+     * different bug entirely.
+     *
+     * They also close the contradiction this file has carried since a
+     * controlled removal of 5.4 reads an exit moved nothing: cycles
+     * divided by accesses, per slot, in the *settled* state, is the
+     * marginal price the launch-time benchmark was only ever a proxy
+     * for. A benchmark of a thousand back-to-back VMREADs is not the
+     * access pattern of a real exit, and nothing here has ever measured
+     * the difference.
+     * @{
+     */
+    volatile std::uint64_t vmcs02_split_reads[vmcs02_split_slots]{};
+    volatile std::uint64_t vmcs02_split_writes[vmcs02_split_slots]{};
+    /**
+     * @}
+     */
     volatile std::uint64_t vmcs02_split_calls{};
     /**
      * @}

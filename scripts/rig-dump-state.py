@@ -875,6 +875,7 @@ def dump_vmcs02_split(args, elf, instance):
     the coverage line against `phase_cycles[2]` is what says so.
     """
     members = ["vmcs02_split_cycles", "vmcs02_split_calls",
+               "vmcs02_split_reads", "vmcs02_split_writes",
                "phase_cycles", "phase_calls"]
     off = gdb_offsets(elf, members, optional=True)
     if len(off) != len(members):
@@ -884,6 +885,8 @@ def dump_vmcs02_split(args, elf, instance):
     slots = len(VMCS02_SPLIT)
     reader = Monitor(args.rig, args.port)
     reader.queue(instance + off["vmcs02_split_cycles"], slots)
+    reader.queue(instance + off["vmcs02_split_reads"], slots)
+    reader.queue(instance + off["vmcs02_split_writes"], slots)
     reader.queue(instance + off["vmcs02_split_calls"], 1)
     # phase 2 of processor 0, which is build_vmcs02's own bracket.
     reader.queue(instance + off["phase_cycles"] + 8 * 2, 1)
@@ -892,6 +895,10 @@ def dump_vmcs02_split(args, elf, instance):
 
     split = [got.get(instance + off["vmcs02_split_cycles"] + 8 * i, 0)
              for i in range(slots)]
+    reads = [got.get(instance + off["vmcs02_split_reads"] + 8 * i, 0)
+             for i in range(slots)]
+    writes = [got.get(instance + off["vmcs02_split_writes"] + 8 * i, 0)
+              for i in range(slots)]
     calls = got.get(instance + off["vmcs02_split_calls"], 0)
     whole = got.get(instance + off["phase_cycles"] + 8 * 2, 0)
     whole_calls = got.get(instance + off["phase_calls"] + 8 * 2, 0) or 1
@@ -899,13 +906,27 @@ def dump_vmcs02_split(args, elf, instance):
     total = sum(split) or 1
     print(f"\ncpu 0 build_vmcs02, split ({whole // whole_calls:,} cycles a "
           f"call over {whole_calls:,} calls)")
+    print(f"  {'slot':<40} {'cyc/call':>9} {'share':>6} "
+          f"{'rd/call':>8} {'wr/call':>8} {'cyc/access':>11}")
     for i, cycles in sorted(enumerate(split), key=lambda kv: -kv[1]):
-        print(f"  {VMCS02_SPLIT[i]:<40} {cycles // whole_calls:>8,} cyc/call"
-              f"  {100.0 * cycles / total:>5.1f}%")
+        access = reads[i] + writes[i]
+        # The number the whole cost model turns on. A slot whose cycles
+        # over its accesses lands near the launch-time price vindicates
+        # that price in the settled state; one that lands far from it
+        # tells us the marginal price for the first time.
+        each = f"{cycles / access:>11,.0f}" if access else f"{'-':>11}"
+        print(f"  {VMCS02_SPLIT[i]:<40} {cycles // whole_calls:>9,} "
+              f"{100.0 * cycles / total:>5.1f}% "
+              f"{reads[i] / whole_calls:>8.2f} {writes[i] / whole_calls:>8.2f}"
+              f" {each}")
 
+    all_access = sum(reads) + sum(writes)
     print(f"  --- coverage {100.0 * total / max(whole, 1):.1f}% of the "
           f"phase's cycles, {100.0 * calls / whole_calls:.1f}% of its calls "
           f"reached the end")
+    print(f"  --- {all_access / whole_calls:.1f} VMCS accesses a call, "
+          f"{total / max(all_access, 1):,.0f} cycles each overall "
+          f"(launch-time price list says ~3,100 a read, ~2,200 a write)")
 
 
 def dump_guest_state_shadow(args, elf, instance):
