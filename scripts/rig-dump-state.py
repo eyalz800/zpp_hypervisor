@@ -1048,6 +1048,60 @@ def dump_reflect_buckets(args, elf, instance):
               f"{100.0 * (sr + sw) / max(wr + ww, 1):.1f}% of the accesses")
 
 
+def dump_profile(args, elf, instance):
+    """Where the second-level guest is, sampled on a clock it cannot see.
+
+    The *distribution* is the reading, not the top entries.  A table that
+    fills and overflows with a low maximum is a guest executing widely; a
+    table with a few slots holding most of the samples is a spin, and the
+    addresses name it.  So `profile_overflow` and the maximum are printed
+    before the list rather than after it.
+    """
+    members = ["profile_rip", "profile_hits", "profile_samples",
+               "profile_overflow"]
+    off = gdb_offsets(elf, members, optional=True)
+    if len(off) != len(members):
+        print("\n[l2 profile: not in this binary]")
+        return
+
+    slots = 64
+    reader = Monitor(args.rig, args.port)
+    reader.queue(instance + off["profile_rip"], slots)
+    reader.queue(instance + off["profile_hits"], slots)
+    reader.queue(instance + off["profile_samples"], 1)
+    reader.queue(instance + off["profile_overflow"], 1)
+    got = reader.run()
+
+    rows = []
+    for i in range(slots):
+        rip = got.get(instance + off["profile_rip"] + 8 * i, 0)
+        hits = got.get(instance + off["profile_hits"] + 8 * i, 0)
+        if hits:
+            rows.append((hits, rip))
+
+    samples = got.get(instance + off["profile_samples"], 0)
+    overflow = got.get(instance + off["profile_overflow"], 0)
+
+    if not samples:
+        print("\n[l2 profile: no samples - is ZPP_PROFILE_L2 on?]")
+        return
+
+    rows.sort(reverse=True)
+    top = rows[0][0] if rows else 0
+    covered = sum(h for h, _ in rows)
+
+    print(f"\ncpu 0 second-level profile: {samples:,} samples, "
+          f"{len(rows)} slots filled, {overflow:,} overflowed")
+    print(f"  the shape: top slot {top:,} hits "
+          f"({100.0 * top / max(samples, 1):.1f}% of samples), "
+          f"the table holds {100.0 * covered / max(samples, 1):.1f}%")
+    print("  a filled-and-overflowing table with a low maximum is a guest "
+          "executing widely; a few slots holding most of it is a spin")
+    for hits, rip in rows[:24]:
+        print(f"    0x{rip:016x}  {hits:>8,}  "
+              f"{100.0 * hits / max(samples, 1):5.1f}%")
+
+
 def dump_guest_state_shadow(args, elf, instance):
     """Where the deferred guest-state copy's model differs from vmcs02.
 
@@ -1842,6 +1896,7 @@ def main():
     dump_handler_by_reason(args, args.elf, instance)
     dump_vmcs02_split(args, args.elf, instance)
     dump_reflect_buckets(args, args.elf, instance)
+    dump_profile(args, args.elf, instance)
 
     # Every processor, not only the boot processor.  The application
     # processors are where "did this one participate at all" is decided,
