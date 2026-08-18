@@ -25244,3 +25244,84 @@ hardcoded reported **every counter as zero for eight minutes** - which
 reads exactly like a guest that never started. `CLAUDE.md` already says
 the base "is **not** stable across configurations, so read it per run
 rather than reusing it". The script now reads it from serial itself.
+
+## The vmcall excess is in neither shared phase: 137.6 reads outside the reflection
+
+`vmcall` and `wrmsr` reflections, phase by phase, same window, settled:
+
+```
+vmcall (113,261 exits, 1,740,797 cyc, 217.2 accesses an exit)
+  save_l2_state         56,564 cyc   13.0rd    0.0wr
+  reflect_l2_exit      252,381 cyc   31.0rd   27.6wr
+  exit information      32,522 cyc    8.0rd    0.0wr
+  residue            1,399,330 cyc  137.6rd    0.0wr
+  --- the three phases hold 19.6% of the cycles, 36.6% of the accesses
+
+wrmsr (133,556 exits, 270,881 cyc, 51.4 accesses an exit)
+  save_l2_state         59,157 cyc   13.0rd    0.0wr
+  reflect_l2_exit      204,707 cyc   31.0rd    6.7wr
+  exit information      34,691 cyc    8.0rd    0.0wr
+  residue              -27,673 cyc   -7.3rd    0.0wr
+  --- the three phases hold 110.2% of the cycles, 114.2% of the accesses
+```
+
+**The shared phases are identical.** `save_l2_state` reads 13.0 for both,
+`reflect_l2_exit` reads 31.0 for both, the exit-information block reads
+8.0 for both. Not close - the same number.
+
+So:
+
+- **The read-deferral hypothesis is dead.** It predicted a vmcall would
+  be forced to read guest state a wrmsr defers, landing the excess in
+  `save_l2_state`. That phase is 13.0 reads either way.
+- **The write-elision hypothesis is alive and small, exactly as before.**
+  `reflect_l2_exit` writes 27.6 against 6.7 - **+20.9**, which is the
+  guard failing on every trust-level switch. It is the whole of the write
+  excess and about 12% of the total.
+- **A `wrmsr` reflection *is* those three phases**, to within the
+  instrument's slop, which is the control this needed.
+- **A `vmcall`'s 137.6 extra reads and 1.4 million cycles are outside all
+  three.**
+
+### Instrument caveat, reported rather than hidden
+
+The wrmsr residue is *negative* - the three phases hold 110.2% of its
+cycles and 114.2% of its accesses. That is an over-count of about ten per
+cent, not a hole: the phases are entered on some exits more than once, or
+across a span boundary the per-reason totals do not see. It does not
+touch the finding - a 10% over-count cannot manufacture a 137.6-read
+difference against a 51.4-access baseline - but the split does **not**
+sum, and by this file's own rule that has to be said rather than rounded
+away.
+
+### Which leaves one candidate, by elimination rather than by assertion
+
+The only vmcall-specific code in that residue is the trust-level
+hypercall block, and its parts were all measured earlier:
+`arm_vtl_step` is not compiled in, `mark_vtl_half` is an `rdtsc`, the
+protection-mask decode runs 0.00 a second, and `capture_vtl_switch`'s
+prologue is four VMCS reads.
+
+**But the retraction two entries ago proved only that the capture does
+not run on every switch - not that it is cheap.** It runs on one switch
+in sixty-four after the first 4,096, which for 113,261 vmcalls is about
+1,642 captures, 1.45% of them. For those to carry 137.6 reads on average
+each capture would have to take about **9,500 VMCS reads**, and the
+capture does walk sixty-four stack words, a 1,024 byte code window, the
+VP assist page, the shared and spin regions and the page tables behind
+all of them.
+
+That is a number, it is large, and **it is not established** - it is what
+is left after everything else in the residue has been excluded. The test
+is the switch that was declined an entry ago for lack of evidence:
+gate the capture, and see whether a vmcall's accesses fall from 217.2
+toward the 51.4 every other reflection costs. There is now evidence, and
+that is what changed.
+
+**Sizing it, from this window and no other**: 113,261 vmcalls in the same
+window that gives 51.4 accesses for a wrmsr. If the capture is the source
+and gating it removes 166 accesses a vmcall, at 0.46 vmcalls a tick that
+is 76 of the 91 accesses a tick the guest needs back. At the other
+measured rate, 0.1 a tick, it is 17 - and then it has to be paired with
+the read side of `build_vmcs02`. Both numbers come from windows recorded
+above; neither is a prediction.
