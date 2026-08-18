@@ -75,6 +75,8 @@ extern "C" [[gnu::used, gnu::retain]] constinit const char
         // worth running are 8 and 16, and one digit would print 16 as
         // `6` - a manifest that disagrees with the build is worse than
         // no manifest, which is the whole argument for this array.
+        ' ', 'v', 't', 'l', 'c', 'a', 'p', '=',
+        digit(nested_vmx::capture_vtl_deeply),
         ' ', 'd', 'i', 'l', 'a', 't', 'e', '=',
         digit(static_cast<unsigned>(nested_vmx::time_dilation / 10)),
         digit(static_cast<unsigned>(nested_vmx::time_dilation)),

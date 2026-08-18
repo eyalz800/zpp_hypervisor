@@ -5854,6 +5854,15 @@ void hypervisor::capture_vtl_switch(std::size_t cpu,
     // call repeated for ever. One snapshot says neither. Two snapshots
     // ninety seconds apart say it outright, and the counters beside them
     // stay cumulative so nothing is lost by overwriting.
+    // Everything from here is the deep capture, and it is behind a
+    // switch. See `nested_vmx::capture_vtl_deeply`: the census above is
+    // cheap and unconditional, this walks guest memory and the tables
+    // behind it, and it is the last candidate for the 137.6 VMCS reads
+    // a vmcall costs over an identical reflection.
+    if constexpr (!nested_vmx::capture_vtl_deeply) {
+        return;
+    }
+
     if (timer_arm_kind == kind) {
         if (0 != count) {
             return;

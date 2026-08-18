@@ -452,6 +452,39 @@ inline constexpr bool step_vtl = (0 != ZPP_STEP_VTL);
 inline constexpr bool watch_vp_assist_page = (0 != ZPP_WATCH_VP_ASSIST);
 
 /**
+ * Take the deep capture on each trust-level switch: the stack, the code
+ * window, the VP assist page, the shared and spin regions.
+ *
+ * **Off, because it is the last candidate standing for 137.6 VMCS reads
+ * a `vmcall`.** The register census before it is cheap and stays; this
+ * is the part that walks sixty-four stack words, a 1,024 byte code
+ * window, the VP assist page and the shared and spin regions, with the
+ * guest page tables behind every one of them.
+ *
+ * It runs on one switch in sixty-four after the first 4,096 - 1.45% of
+ * vmcalls - and an earlier entry retracted it as the cause on exactly
+ * that ground. **That retraction proved it does not run unconditionally;
+ * it did not prove it is cheap.** A sampled thing dominates if each
+ * sample is large enough, and the sampling rate is the multiplier that
+ * says how large: 137.6 reads averaged over 1.45% is about 9,500 reads
+ * a capture.
+ *
+ * It has earned its place - it produced `HvlSwitchToVsmVtl1`,
+ * `SkpReturnFromNormalMode`, the balanced call and return counts and the
+ * protection-mask decode - so it is gated rather than deleted, and a
+ * session that needs it again switches it on.
+ *
+ * If gating this does **not** move a vmcall's accesses, the capture is
+ * not the residue and the mechanism behind those reads is still unfound.
+ * That is the outcome this switch exists to make possible.
+ */
+#ifndef ZPP_VTL_CAPTURE
+#define ZPP_VTL_CAPTURE 0
+#endif
+
+inline constexpr bool capture_vtl_deeply = (0 != ZPP_VTL_CAPTURE);
+
+/**
  * Charge the guest only a fraction of the time this VMM spends in root
  * operation, by moving its time-stamp counter offset. 1 is off, and is
  * the default.

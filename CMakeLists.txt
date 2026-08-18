@@ -130,6 +130,10 @@ option(ZPP_DEFER_GUEST_STATE
     "Defer the bulk copy of the second-level guest's state out of vmcs02 into vmcs12 until something reads it. Measured on the rig at 1.136x: save_l2_state 198,309 -> 52,792 cycles/call, wall clock per exit 462,843 -> 407,257. Four ordering conditions are found, fixed, and covered by tests/nested_exit's sequence cases; the fourth was flush_guest_vmcs12 copying the whole vmcs12 back on every VMPTRLD."
     ON)
 
+option(ZPP_VTL_CAPTURE
+    "Take the deep per-switch trust-level capture - the stack, the code window, the VP assist page, the shared and spin regions. OFF: it is the last candidate for 137.6 VMCS reads a vmcall, which is 19% of the machine. The cheap register census beside it stays either way. See nested_vmx.h."
+    OFF)
+
 option(ZPP_STEP_VTL
     "Step the trust-level loop with the monitor trap flag, recording every instruction each side executes with its bytes. The only instrument that can see inside a loop which takes no exits - and an exit per retired instruction, measured at 5.8% of all exits on the rig, which is enough to move the guest between regimes. Never leave it on for a boot being compared against another."
     OFF)
@@ -217,6 +221,7 @@ ExternalProject_Add(hypervisor
         -DZPP_SLOW_EXITS=${ZPP_SLOW_EXITS}
         -DZPP_STRETCH_GUEST_TIMER=${ZPP_STRETCH_GUEST_TIMER}
         -DZPP_TIME_DILATION=${ZPP_TIME_DILATION}
+        -DZPP_VTL_CAPTURE=$<BOOL:${ZPP_VTL_CAPTURE}>
         -DZPP_TICK_FLOOR=${ZPP_TICK_FLOOR}
         -DZPP_NESTED_SHADOW_VMCS=${ZPP_NESTED_SHADOW_VMCS}
         -DZPP_PUBLISH_REFERENCE_TSC=${ZPP_PUBLISH_REFERENCE_TSC}

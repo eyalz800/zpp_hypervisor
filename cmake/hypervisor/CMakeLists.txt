@@ -41,6 +41,10 @@ set(ZPP_TIME_DILATION "1" CACHE STRING
 set(ZPP_STRETCH_GUEST_TIMER "1" CACHE STRING
     "Multiply the second-level guest's synthetic timer period by this before its hypervisor sees it. 1 is off. Diagnostic only - see the top-level CMakeLists for what it separates.")
 
+option(ZPP_VTL_CAPTURE
+    "Take the deep per-switch trust-level capture. OFF. See the root CMakeLists and nested_vmx.h."
+    OFF)
+
 option(ZPP_STEP_VTL
     "Step the trust-level loop with the monitor trap flag."
     OFF)
@@ -203,6 +207,7 @@ target_compile_options(zpp_hypervisor PRIVATE
     -DZPP_SLOW_EXITS=${ZPP_SLOW_EXITS}
     -DZPP_STRETCH_GUEST_TIMER=${ZPP_STRETCH_GUEST_TIMER}
     -DZPP_TIME_DILATION=${ZPP_TIME_DILATION}
+    -DZPP_VTL_CAPTURE=$<BOOL:${ZPP_VTL_CAPTURE}>
     -DZPP_TICK_FLOOR=${ZPP_TICK_FLOOR}
     # The guest coverage suite, which lives in the loader but turns on two
     # VM-execution controls here. Same always-defined 0/1 shape as the two
