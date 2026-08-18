@@ -26303,3 +26303,76 @@ rather than as "you are reading the wrong place".
 Third instance of the class this session, after the singleton offsets and
 the module base itself. The rule that keeps working: **read it per run
 from the thing that prints it**, never from an earlier answer.
+
+## Named statically: `VslpEnterIumSecureMode`, and the retry tests memory, not `rax`
+
+The stack fight was unnecessary. `ntoskrnl.exe` is on disk and was
+already disassembled to 3.09M lines earlier in this session, so the
+caller is a cross-reference rather than an unwind - and **a `call`
+target is an address, so a public PDB cannot corrupt it.**
+
+`HvlSwitchToVsmVtl1` is at RVA `0x6a76a0`. Every call to it in the whole
+image:
+
+```
+14038deb2:  callq 0x1406a76a0
+14038e103:  callq 0x1406a76a0
+14038e15d:  callq 0x1406a76a0
+14038e1ce:  callq 0x1406a76a0
+```
+
+**Four, and all four are inside `VslpEnterIumSecureMode`** (RVA
+`0x38dd60`). Nothing else in `ntoskrnl` calls it. The caller is named,
+and it is the function the stale stack had already shown directly above
+the wrapper.
+
+### Two things that fall out of the same disassembly
+
+**The failed stack read is explained rather than excused.**
+`HvlSwitchToVsmVtl1` opens with `subq $0x138, %rsp` - a 312 byte frame.
+The census `rsp` is deeper still, taken at the `vmcall` inside the
+hypercall page, so the caller's return address was never going to be in
+a 24 qword window. Arithmetic, not luck.
+
+**And the "stale stack" caveat was half wrong.** The word at
+`ntoskrnl+0x38e108` is *exactly* the instruction after
+`callq 0x1406a76a0` at `0x14038e103`. It was a **genuine return
+address**, not a leftover. What differed was the *thread* - the sample
+was `ExpWorkerThread`'s - so the frame was real and the attribution to
+the current loop was what did not hold. Worth separating: a stale
+*sample* is not a stale *frame*.
+
+### The branch, and it answers the question that was set in advance
+
+The instruction after the call:
+
+```
+14038e103:  callq 0x1406a76a0            <- HvlSwitchToVsmVtl1
+14038e108:  movl  0x8(%rbx), %r15d       <- reads [rbx+8]
+14038e10c:  xorl  %edi, %edi
+14038e10e:  jmp   0x14038df01            <- backwards, into the loop body
+```
+
+**`rax` is not tested.** The return value the secure kernel hands back -
+the `rax = 1` that never varies across 202,683 switches - is discarded
+at the call site. What the code reads instead is **`[rbx+8]`, a field in
+a structure**, and then jumps backwards.
+
+So of the two outcomes named before the reading: **it is a state check,
+not a timeout and not a retry count.** The loop is waiting for a *memory
+field* to change, and the hypercall's own status is not the condition.
+
+That decides the two open questions at once:
+
+- **The round trip's cost is not the loop's condition.** The 958 us to
+  328 us the gating bought does not touch a comparison on memory, and
+  the two questions do not merge. Whatever else that work was worth, it
+  cannot end this.
+- **"Is it ours" is now a specific question about one word.** The loop
+  ends when `[rbx+8]` changes, and the only thing that can change it is
+  the secure kernel writing to memory the ordinary kernel reads. So the
+  next reading is what `rbx` points at when the call is made, and whether
+  anything ever writes to it - which the guest page-table walker can read
+  and the watched-page machinery can answer.
+
+`rax = 1` was never the answer. It was the thing being ignored.
