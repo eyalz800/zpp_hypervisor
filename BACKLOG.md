@@ -26625,3 +26625,75 @@ it.
 The caller is reachable the same way this frame was: the return address
 at `rsp_vmcall + 0x140` names the call site, and the frame above it names
 the caller.
+
+## The caller is `VslSetPlaceholderPages`, and the "stale" stack was the live chain
+
+One frame further up, by the same arithmetic and the same self-check.
+`VslpEnterIumSecureMode` pushes seven registers and subtracts `0x80`, so
+its frame is `0xb8` and its caller's return address sits at
+`rsp_vmcall + 0x200`:
+
+```
++0x200 = 0xfffff8029a18cd2d -> ntoskrnl+0x38cd2d
+```
+
+**Self-check: `0x14038cd2d` is exactly the instruction after
+`callq 0x14038dd60` at `0x14038cd28`** - one of the twelve call sites
+enumerated earlier. The frame is right, so the name counts:
+
+```
+ntoskrnl+0x38ccc0   VslSetPlaceholderPages   <- the function
+ntoskrnl+0x38cd28   VslSetPlaceholderPages   <- the call
+ntoskrnl+0x38cd2d   VslSetPlaceholderPages   <- the return
+```
+
+### Which retires the "stale stack" correction, in the other direction
+
+Two entries ago the driver-unload stack was demoted to stale because the
+thread it was sampled on - `ExpWorkerThread` - is not the thread that is
+current. The frame walk on the **live** loop lands in the same place:
+
+```
+VslSetPlaceholderPages
+  -> VslpEnterIumSecureMode
+    -> HvlSwitchToVsmVtl1
+      -> vmcall
+```
+
+`Mm` -> `Vsl` -> `Hvl` was the right chain all along. **The sample was
+stale and the chain was not** - which is precisely the distinction that
+entry drew and then applied too broadly. The unload's *thread* had moved
+on; the *code path* is what the current loop is executing.
+
+So the account is one thing from end to end, and every step of it is
+either read out of the image or read out of the guest with a self-check
+beside it:
+
+- `Phase1Initialization`, the only thread that can run, at DISPATCH;
+- calling `VslSetPlaceholderPages` - handing page state to the secure
+  kernel;
+- which calls `VslpEnterIumSecureMode` at `0x14038cd28`;
+- which loops on a state byte at `[rbx+1]` in a stack-local descriptor,
+  dispatching on `1` and `6`;
+- the byte reads **4**, and has read 4 for as long as anything has
+  looked;
+- so it falls through, makes the hypercall at `0x14038e103`, discards
+  the `rax = 1` it gets back, re-reads 4, and goes round - 131 times a
+  second, 202,683 times and counting;
+- ten threads Ready behind it, `QuantumEnd = 1`, one deferred call
+  queued, no page faulted, nothing in the descriptor moving.
+
+### What is left, and it is two greps over files already on disk
+
+**What writes that byte, and what 4 means.** `VslSetPlaceholderPages`
+allocates the descriptor and initialises it, so its own disassembly says
+what state it started in and what transitions it expects - which is what
+distinguishes "4 is an ordinary intermediate state whose advance never
+comes" from "4 is a state it should never have been in". Those need
+opposite work and this file has been careful all session not to guess
+between two such branches.
+
+And if nothing in `ntoskrnl` writes `1` or `6` to that offset, the writer
+is `securekernel.exe`, which is already fetched - **at which point this
+becomes the first thing in the whole investigation pointing at what this
+VMM presents to VTL1**, with evidence rather than by elimination.
