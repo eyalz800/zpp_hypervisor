@@ -25147,3 +25147,100 @@ established to be none of the four things named for it.** What settles
 it is the instrument that has worked three times today - adjacent
 intervals, VMCS accesses counted beside cycles, coverage reported -
 placed *inside* the vmcall path. Not a change. An instrument.
+
+## Accesses by exit reason: the whole exit cost is VMCS traffic, and a tick is ~544 accesses
+
+The cheapest possible instrument - the two counters `vmcs::read` and
+`vmcs::write` already keep, sampled on the span the by-reason table
+already brackets - and it answers more than it was asked.
+
+```
+cpu 0, settled, 378,092 cycles/exit overall, 100.0% coverage
+reason           exits    cyc/exit  share   rd/exit  wr/exit  cyc/access
+vmresume     1,307,716     306,943  31.8%      33.9     21.9      5,505   L1
+vmcall         199,209   1,976,654  31.2%     211.3     19.1      8,579   L2
+wrmsr          663,017     278,904  14.6%      44.4      6.6      5,470   L2
+vmptrld        277,776     402,472   8.9%      68.1      8.9      5,229   L1
+int-window     337,105     276,541   7.4%      44.0      7.3      5,390   L2
+ept-violation  315,407     101,516   2.5%      17.0      1.0      5,635   L2
+ext-int        107,392     282,662   2.4%      45.4      7.2      5,379   L2
+vmread         107,979     106,488   0.9%      21.0      2.0      4,626   L1
+```
+
+### The finding nobody was looking for
+
+**Cycles per VMCS access is between 5,229 and 5,635 for every reflection
+reason in the table** - `vmresume`, `wrmsr`, `vmptrld`, `int-window`,
+`ept-violation`, `ext-int` - six reasons with wildly different jobs,
+exit counts spanning 12x, and cost per exit spanning 4x, all landing
+within 8% of each other on cycles per access.
+
+**So an exit costs what its VMCS accesses cost and almost nothing else.**
+That is the cost model this file has argued about for a year, and it is
+now measured rather than assumed. It also puts the marginal price at
+about 5,400 cycles rather than the 3,095 measured inside `build_vmcs02`
+and the ~3,100 the launch benchmark gives - the difference being the
+non-VMCS work each exit also does, so 5,400 is an upper bound and 3,100
+a lower one.
+
+The two outliers are informative rather than awkward: `cpuid` and
+`rdmsr` come in at 3,850-3,897, and they are the reasons that answer
+from this VMM's own tables without touching guest state.
+
+### And the tick, in the only unit that turns out to matter
+
+```
+per tick     rate   accesses/exit   accesses
+vmresume     4.37            55.8      243.8
+wrmsr        2.31            51.0      117.8
+vmcall       0.46           230.4      106.0
+int-window   1.23            51.3       63.1
+ext-int      0.26            52.6       13.7
+                                      ------
+                                       544.4 VMCS accesses a clock tick
+```
+
+**544 trapping VMCS accesses per 1.74 ms tick.** At ~5,400 cycles each
+that is 2.94 million cycles, 1.48 ms, against a period of 1.74 ms - and
+the measured tick is 1.98-2.20 ms once the rest is added. To fit inside
+the period with the 1.20x headroom the ratio needs, **about 91 accesses a
+tick have to go.**
+
+That is the whole boot problem in one number, and it is the first time
+it has had one.
+
+## The elision hypothesis is dead, and what killed it names the search
+
+The proposal was that a trust-level switch changes the current vmcs12,
+`reuse_hot_state`'s guard `hot_state_vmcs[cpu] == guest_current_vmcs[cpu]`
+therefore fails on every vmcall, and the write elision never applies - so
+an elided ~15-write entry becomes a full rebuild.
+
+**It predicts writes and the excess is reads.** A vmcall takes 19.1
+writes against a wrmsr's 6.6, which is +12.5 and consistent with losing
+the elision; it takes **211.3 reads against 44.4, which is +167**. The
+write side is 7% of the excess and the read side is 93%. So the
+mechanism is real at the margin and it is not the answer.
+
+`vmcall` takes **4.52x** the accesses of a `wrmsr` and costs **7.09x**
+the cycles, so the excess is predominantly hardware - 179 extra accesses
+at ~5,500 is about 985,000 of the ~1.70M excess - with a software
+remainder that is real but secondary.
+
+**What reads 167 extra VMCS fields on a trust-level switch is not
+established and is not guessed at.** Four mechanisms have now been named
+for this cost and refuted - the sampled capture, `arm_vtl_step`,
+`mark_vtl_half`, the protection-mask decode - and a fifth, the write
+elision, is refuted here by its own prediction. The next step is the
+adjacent-interval split inside the vmcall path, and it should count
+accesses beside cycles, because on this machine that is the same
+question.
+
+### One trap, paid for again
+
+The module base moved from `0x67210000` to `0x6720f000` because the
+binary grew by a few counters, and a settle script with the old base
+hardcoded reported **every counter as zero for eight minutes** - which
+reads exactly like a guest that never started. `CLAUDE.md` already says
+the base "is **not** stable across configurations, so read it per run
+rather than reusing it". The script now reads it from serial itself.
