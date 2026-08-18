@@ -26061,3 +26061,83 @@ guest acquire at DISPATCH_LEVEL and never release?** The instruments to
 answer it are built and the offsets are verified - the profile filtered
 to samples where the priority reads `0x20`, and whatever lock the
 autoboost sample points at, read through the page-table walk.
+
+## The stack scan: a driver unload, decommitting pages, one secure call per page
+
+A **scan, not an unwind** - x64 has no frame pointer, so this keeps every
+qword on the sampled kernel stack that falls inside one of the 78 modules
+the `PsLoadedModuleList` walk found, in stack order, stale frames
+included. Read as a set of functions that were on that stack, not as a
+frame list.
+
+Symbolized against `ntoskrnl`, oldest last:
+
+```
+HvlSwitchToVsmVtl1                     <- the trust-level hypercall
+VslpEnterIumSecureMode                 <- entering isolated user mode
+VslSetPlaceholderPages                 <- telling VTL1 about page state
+MiUpdateSlabPagePlaceholderState
+MiFreePageToSlabAllocator      x2
+MiInsertPageInFreeOrZeroedList
+MiDecommitFreePage / MiDecommitPrivatePageTail / MiFlushTbList
+MiDecommitFreePagesTail / MiDecommitAddToList
+MiDecommitPagesTail / MiDecommitPages
+MiUnlockDriverCode
+MiUnloadSystemImage
+KeReleaseGuardedMutex
+MmUnloadSystemImage
+ExpWorkerThread
+PspSystemThreadStartup / KxStartSystemThread
+```
+
+**That is a system worker thread unloading a driver image**: freeing its
+pages, decommitting them, updating the slab allocator - and for each page
+state change calling `VslSetPlaceholderPages`, which enters isolated user
+mode through `HvlSwitchToVsmVtl1`.
+
+So the trust-level traffic this investigation has watched from its first
+day, balanced call-for-return and never attributed, is **a page-by-page
+handover of a driver image's memory to the secure kernel.**
+
+### Which makes the fifth hypothesis the live one
+
+It was offered as a hypothesis and the stack is the first evidence for
+it: **a trust-level round trip costs 958 microseconds on this machine**
+(1,575,118 + 332,428 cycles at 1.992 GHz, measured). A driver unload
+that makes one secure call per page, holding whatever `MmUnloadSystemImage`
+holds, would take a thousand times longer than Windows was built for -
+and everything behind it waits.
+
+That also explains what nothing else did: **extended-page-table
+violations frozen while the guest executes.** Pages are being *freed*,
+not faulted in. A decommit loop touches no new memory by construction,
+which is why the one instrument this file trusted most read "no progress"
+for an hour of real work.
+
+### Two honesties about this reading
+
+- **The scan's thread is `ExpWorkerThread`, not `Phase1Initialization`.**
+  `guest_stack_*` is a sample from whenever it was last filled, and the
+  thread walk says the current thread is the phase-one one. So this is
+  *a* stack that existed, not necessarily the one live now - it names a
+  mechanism, not the instant.
+- Stale frames are included by construction, so the ordering above is
+  suggestive rather than exact.
+
+Neither weakens the finding, because the finding is the *chain*:
+`MmUnloadSystemImage` to `VslSetPlaceholderPages` to
+`HvlSwitchToVsmVtl1` is not a coincidence of stale words, and no other
+path in this file's evidence produces balanced VTL pairs at a steady
+rate with no new memory.
+
+### What it makes of the tick work, finally
+
+**Aimed one level too low rather than at the wrong thing.** The per-exit
+cost is not the block, and the trust-level *round trip* built out of
+those exits may well be - 958 microseconds each, one per page, inside a
+lock. That is the same cycles seen at the granularity that matters, and
+it is why "make exits cheaper" moved nothing while the thing built out of
+exits went unexamined.
+
+The next reading is how many pages that unload has left, which
+`MiDecommitPages`' own arguments would give, and whether the count falls.
