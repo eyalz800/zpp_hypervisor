@@ -24738,3 +24738,78 @@ That answers in one line what four boots of optimisation could not:
 whether the cycles are in the reflection this file has spent a year on,
 or in the guest hypervisor's own `vmresume` and `vmptrld`, which nothing
 has ever looked at.
+
+## The split by exit reason: `vmcall` is 31% of the handler, and the phases never saw it
+
+`handler_reason_cycles` splits the same span `handler_cycles` measures,
+so completeness is checkable rather than assumed - and it checks out:
+**the split covers 100.0% of the cycles and 100.0% of the exits.**
+Settled boot, protection counter frozen, 361,190 cycles an exit inside
+this VMM:
+
+```
+reason        exits      cyc/exit   share   cyc per exit overall
+vmresume    541,097       331,584   31.7%       114,318
+vmcall      112,527     1,569,083   31.2%       112,499
+wrmsr       266,179       298,732   14.0%        50,664
+vmptrld     104,158       407,393    7.5%        27,037
+int-window  117,909       294,480    6.1%        22,123
+ept-viol    315,298       101,851    5.7%        20,461
+ext-int      43,599       304,296    2.3%         8,453
+vmread       44,186       112,426    0.9%         3,165
+```
+
+**A `vmcall` costs 1,569,083 cycles - 788 microseconds, 4.7x the
+average exit - and is 31.2% of everything this VMM does on 7% of its
+exits.** Nothing in this file has ever looked at that path. It is the
+largest single line in the table and it was invisible to the phases,
+which time the reflection and nothing else.
+
+`build_vmcs02` is 144,136 cycles a call against the 331,584 a `vmresume`
+exit costs, so **57% of the guest hypervisor's own re-entry is outside
+every phase** as well.
+
+### But `vmcall` is not what makes a tick expensive, and that matters
+
+The tick is what decides the boot, and the mix per tick is not the mix
+per exit. Measured: 9.4 exits a tick, of which about 4.5 are `vmresume`,
+2.4 `wrmsr` - the synthetic end-of-interrupt, interrupt command and
+end-of-message writes - 1.2 `int-window`, and **0.1 `vmcall`**, since
+trust-level switches run at 20-110 a second against 490-515 ticks.
+
+```
+vmresume   4.5 x 331,584 = 1,492,000
+wrmsr      2.4 x 298,732 =   717,000
+int-window 1.2 x 294,480 =   353,000
+vmptrld    0.6 x 407,393 =   261,000
+```
+
+So the per-tick budget is **`vmresume` first and `wrmsr` second**, and
+the 1.14-1.25x that is left has to come out of those two. `vmcall` is
+worth attacking for the machine as a whole and is worth nothing for the
+tick.
+
+### The measurement's own noise, which is the reason four optimisations "changed nothing"
+
+Three settled measurements, protection frozen in all three, of what a
+tick costs against its 1.74 ms period:
+
+| build | wall/exit | exits/tick | tick | ratio |
+|---|---|---|---|---|
+| control, full walk | 451,433 | 9.46 | 2.14 ms | **1.23** |
+| cached leaf | 448,076 | 9.71 | 2.18 ms | **1.25** |
+| cached leaf + this diagnostic | 421,072 | 9.36 | 1.98 ms | **1.14** |
+
+The last two are the same code apart from one counter pair. **So a
+single boot of this metric cannot resolve better than about ten per
+cent**, and every optimisation this file has tried was smaller than
+that. "Removed 5.4 VMCS reads and nothing moved", "the batching removed
+five remaps", "the VTL assist walk removed none", and now "the mapping
+window is 4.3x cheaper and the tick did not move" are all the same
+sentence: **a change below the noise floor, measured once.**
+
+That is a methodology finding, not a result about any of the four. What
+it demands next is either a change large enough to clear ten per cent -
+which the table above says means `vmresume` or `wrmsr`, not anything
+smaller - or repeated windows across several boots before a number is
+believed.
