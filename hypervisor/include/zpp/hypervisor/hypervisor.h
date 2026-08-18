@@ -3578,6 +3578,38 @@ private:
     bool handler_was_l2[max_cpus]{};
 
     /**
+     * The VMCS accesses each reason takes, on the same span as its
+     * cycles.
+     *
+     * The question: a `vmcall` costs 2,407,393 cycles against a
+     * `wrmsr`'s 278,066 for what is the same reflection by the same
+     * path, and four separate explanations for that have now been
+     * named and refuted - the capture is sampled, `arm_vtl_step` is not
+     * compiled in, `mark_vtl_half` is an `rdtsc`, and the
+     * protection-mask decode runs 0.00 a second. **So the excess is
+     * either hardware or software, and this is one number that says
+     * which**: if a vmcall takes about eight times the accesses of a
+     * wrmsr the cost is VMCS traffic and there is a place to look; if
+     * it takes about the same, the vmcall path is doing something
+     * expensive that touches nothing and the search is a different one.
+     *
+     * Sampled where `handler_entry_tsc` is and closed where
+     * `handler_cycles` is, so the accesses and the cycles describe the
+     * same span by construction rather than by agreement. Costs two
+     * loads at each end of a span already bracketed, and the by-reason
+     * table itself takes no VMCS access - the split shows its slots at
+     * 0.00 reads and 0.00 writes a call.
+     * @{
+     */
+    volatile std::uint64_t handler_reason_reads[handler_reason_slots]{};
+    volatile std::uint64_t handler_reason_writes[handler_reason_slots]{};
+    std::uint64_t handler_entry_reads[max_cpus]{};
+    std::uint64_t handler_entry_writes[max_cpus]{};
+    /**
+     * @}
+     */
+
+    /**
      * `build_vmcs02` split the way the handler was, and for the same
      * reason.
      *

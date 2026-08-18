@@ -169,6 +169,15 @@ void hypervisor::on_vm_exit(std::uint64_t cpuid,
             this->handler_first_tsc[cpuid] = now;
         }
 
+        // The access counters at the span's open, for
+        // `handler_reason_reads`. Two loads, and they have to be taken
+        // here rather than anywhere later or they would describe a
+        // shorter span than the cycles beside them.
+        this->handler_entry_reads[cpuid] =
+            arch::x86_64::vmx::vmcs_reads_taken;
+        this->handler_entry_writes[cpuid] =
+            arch::x86_64::vmx::vmcs_writes_taken;
+
         // Which level this exit came from, for
         // `handler_reason_from_l2`. Here rather than in `resume_guest`
         // because the reflection clears `running_l2` on its way past.

@@ -940,6 +940,19 @@ void hypervisor::resume_guest(std::uint64_t cpuid,
                     this->handler_reason_from_l2[slot] =
                         this->handler_reason_from_l2[slot] + 1;
                 }
+
+                // And the accesses over the same span. See
+                // `handler_reason_reads` - this is what separates a
+                // vmcall's excess being hardware from its being
+                // software, and the two answers need opposite work.
+                this->handler_reason_reads[slot] =
+                    this->handler_reason_reads[slot] +
+                    (arch::x86_64::vmx::vmcs_reads_taken -
+                     this->handler_entry_reads[cpu]);
+                this->handler_reason_writes[slot] =
+                    this->handler_reason_writes[slot] +
+                    (arch::x86_64::vmx::vmcs_writes_taken -
+                     this->handler_entry_writes[cpu]);
             }
         }
         this->handler_last_tsc[cpu] = now;

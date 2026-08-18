@@ -805,7 +805,8 @@ def dump_handler_by_reason(args, elf, instance):
     from the one it is being compared against.
     """
     members = ["handler_reason_cycles", "handler_reason_exits",
-               "handler_cycles", "handler_exits", "handler_reason_from_l2"]
+               "handler_cycles", "handler_exits", "handler_reason_from_l2",
+               "handler_reason_reads", "handler_reason_writes"]
     off = gdb_offsets(elf, members, optional=True)
     if len(off) != len(members):
         print("\n[handler by reason: not in this binary]")
@@ -814,7 +815,8 @@ def dump_handler_by_reason(args, elf, instance):
     slots = 64
     reader = Monitor(args.rig, args.port)
     for member in ("handler_reason_cycles", "handler_reason_exits",
-                   "handler_reason_from_l2"):
+                   "handler_reason_from_l2", "handler_reason_reads",
+                   "handler_reason_writes"):
         reader.queue(instance + off[member], slots)
     reader.queue(instance + off["handler_cycles"], 1)
     reader.queue(instance + off["handler_exits"], 1)
@@ -845,15 +847,45 @@ def dump_handler_by_reason(args, elf, instance):
         # back as the guest hypervisor's VMRESUME, so the two are one
         # round trip rather than two costs.
         l2 = row("handler_reason_from_l2", i)
-        whose = f"{100.0 * l2 / max(exits, 1):5.1f}% from L2"
-        print(f"  {EXIT_REASON.get(i, i):<18} {exits:>10,} exits  "
-              f"{cycles // max(exits, 1):>9,} cyc/exit  "
-              f"{100.0 * cycles / max(total_cycles, 1):>5.1f}% of the handler"
-              f"  {cycles / total_exits:>9,.0f} overall  {whose}")
+        whose = "L2" if l2 == exits else ("L1" if l2 == 0 else f"{l2}/{exits}")
+
+        # Accesses beside cycles, over the same span. This is what says
+        # whether a reason's cost is VMCS traffic or software: cycles
+        # over accesses near the ~3,100 measured price means hardware,
+        # far above it means the path is doing something that touches
+        # nothing.
+        rd = row("handler_reason_reads", i)
+        wr = row("handler_reason_writes", i)
+        access = rd + wr
+        each = (f"{cycles / access:>8,.0f}" if access else f"{'-':>8}")
+        print(f"  {EXIT_REASON.get(i, i):<14} {exits:>9,} "
+              f"{cycles // max(exits, 1):>9,}cyc "
+              f"{100.0 * cycles / max(total_cycles, 1):>5.1f}% "
+              f"{rd / max(exits, 1):>7.1f}rd {wr / max(exits, 1):>7.1f}wr "
+              f"{each}/acc  {whose}")
 
     print(f"  --- split covers {100.0 * split_cycles / max(total_cycles, 1):.1f}% "
           f"of the cycles and {100.0 * split_exits / total_exits:.1f}% "
           f"of the exits")
+
+    # The one comparison the whole hypothesis turns on, printed rather
+    # than left to be computed by hand from two rows.
+    def per(reason_name):
+        for i, name in EXIT_REASON.items():
+            if name != reason_name:
+                continue
+            exits = row("handler_reason_exits", i) or 1
+            return ((row("handler_reason_reads", i) +
+                     row("handler_reason_writes", i)) / exits,
+                    row("handler_reason_cycles", i) / exits)
+        return None
+
+    call, msr = per("vmcall"), per("wrmsr")
+    if call and msr and msr[0]:
+        print(f"  --- vmcall takes {call[0] / msr[0]:.2f}x the VMCS accesses "
+              f"of a wrmsr and costs {call[1] / max(msr[1], 1):.2f}x the "
+              f"cycles; near-equal ratios mean the excess is hardware, a "
+              f"cost ratio far above the access ratio means it is software")
 
 
 VMCS02_SPLIT = ["controls read and validated",
