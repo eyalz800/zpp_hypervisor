@@ -26452,3 +26452,88 @@ The stall is located to a single byte:
 Every earlier candidate is eliminated by measurement rather than by
 argument, and the per-exit cost - which this file spent most of its life
 on - is not among the survivors.
+
+## `VslpEnterIumSecureMode` is a gateway, and the live structure was not recovered
+
+**Twelve or more callers**, by the same address cross-reference:
+
+```
+14025db69  14025ff26  14038c958  14038cafb  14038cb7e  14038cd28
+14038cf0d  14038d605  14038da99  1403a6968  1403ab149  1403ab2a7
+```
+
+So it is **a general secure-call gateway, not one operation** - the R9
+structure is whatever the particular service passes, and naming "which
+secure call" needs the caller, not the callee.
+
+### And the live read failed, which is worth saying
+
+Frame arithmetic gives the saved `rbx` at
+`rsp_func + 0x80 + 0x30` and `rsp_func` at some fixed distance above the
+captured `rsp` - but the captured `rsp` is taken at the `vmcall` *inside
+the hypercall page*, and how many frames sit between it and
+`VslpEnterIumSecureMode` is not established. Scanning
+`rsp+0x100 .. rsp+0x280` for kernel pointers returned ten candidates -
+the thread, two stack addresses, three `ntoskrnl` code addresses, and two
+pool-looking pointers that appear twice each - and **none of them is
+identifiable as the structure**. Dereferencing the six most plausible
+gave state bytes of 0, 4, 139 and 0: no candidate matches a state machine
+that dispatches on 1 and 6.
+
+**The structure pointer was not recovered and the state byte was not
+read.** The way to get it is the arithmetic done from the other end -
+disassemble the hypercall page stub and `HvlSwitchToVsmVtl1` to fix the
+exact distance - or capture `rbx` at the call rather than at the
+`vmcall`, which is a one-line change to where the census is taken.
+
+## The session's largest result, stated plainly
+
+**Every candidate this project pursued for most of its life is eliminated
+by measurement.**
+
+| candidate | eliminated by |
+|---|---|
+| the tick rate | 1.26x -> 0.95x, guest unchanged for 55 minutes |
+| a lost dispatch interrupt | correctly masked - the guest is at DISPATCH |
+| the wrong virtual-APIC page | the page is live, `0x20`/`0xd0` over 60 reads |
+| a deferred-call storm | queue depth 1, stable, maximum ever 4 |
+| a deferred routine that never returns | `DpcRoutineActive = 0` |
+| the per-exit cost | three independent lines |
+| a page handover loop | 967 MB of arithmetic, and identical registers |
+| a lock held at DISPATCH | `state = 2`, thirty-two consecutive samples |
+
+**None of it was the block.** The block is a guest state machine in
+`VslpEnterIumSecureMode` looping on a byte in a structure it was handed.
+
+The work is not wasted and the distinction matters: the tick measurement
+stands, `0.95x` is real, the VTL capture gating cut a round trip 3x, and
+**the instruments built along the way are what found this**. But the
+thing being optimised was never the thing being blocked.
+
+### The lesson that cost this investigation the most
+
+Two instruments, blind in the same direction, agreeing:
+
+- **An exit-driven instrument cannot see a loop that does not exit.**
+  The exit trace, the working ring, the entry-pointer table and the
+  per-reason split all sample where exits happen. This loop's body is
+  two hypercalls and the code between them, so every one of them saw the
+  clock path and nothing else.
+- **A memory-fault instrument cannot see a loop that touches no new
+  memory.** `ept-violation` frozen was read as "no progress" for weeks.
+  It is what a state machine re-reading one byte produces, and it is
+  also what freeing pages produces - the same reading for two opposite
+  behaviours.
+
+Every measurement agreed the guest was doing nothing, **because every
+measurement was blind in the same direction.** What finally saw it was
+the guest's own code, read off disk, and the guest's own structures,
+read through its own page tables - neither of which depends on the guest
+exiting or faulting.
+
+That is the fifth and sixth entries in this file's list of instrument
+shapes, and the pair is the general form: *wrong field, wrong
+denominator, wrong duration, wrong source, wrong visibility* - and now
+**wrong direction**, where the instrument is correct, the reading is
+correct, and it is consistent with the opposite of what it was taken to
+mean.
