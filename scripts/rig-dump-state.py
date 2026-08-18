@@ -704,7 +704,8 @@ def dump_regions(args, elf, instance):
     """
     members = ["handler_cycles", "handler_exits", "handler_first_tsc",
                "handler_last_tsc", "guest_state_reads_skipped",
-               "guest_state_reads_done"]
+               "guest_state_reads_done", "dilation_hidden",
+               "dilation_charged", "dilation_offset"]
     off = gdb_offsets(elf, members)
 
     reader = Monitor(args.rig, args.port)
@@ -738,6 +739,23 @@ def dump_regions(args, elf, instance):
         if skipped or done:
             print(f"  guest-state reads: {done:,} done, {skipped:,} skipped"
                   f"  ({skipped / max(exits, 1):.1f} skipped per exit)")
+
+        # What the guest's own clock was told about all of that. Both
+        # halves, because the dilation actually achieved is not the one
+        # asked for - the guest's own execution is never scaled, so the
+        # ratio depends on how much of the machine the guest was getting,
+        # and the asked-for figure alone would say nothing about that.
+        hidden = word("dilation_hidden", cpu)
+        charged = word("dilation_charged", cpu)
+        if hidden or charged:
+            offset = word("dilation_offset", cpu)
+            print(f"  time dilation: {hidden:,} cycles hidden, "
+                  f"{charged:,} charged, offset -0x{(-offset) & (2**64-1):x}")
+            if span > 0:
+                print(f"    the guest's clock runs at "
+                      f"{100.0 * (span - hidden) / span:.1f}% of the wall")
+                print(f"    so its {17400} unit tick is "
+                      f"{1.74 * span / max(span - hidden, 1):.2f} ms of it")
 
 
 def dump_guest_state_shadow(args, elf, instance):

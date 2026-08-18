@@ -169,6 +169,15 @@ void hypervisor::on_vm_exit(std::uint64_t cpuid,
             this->handler_first_tsc[cpuid] = now;
         }
 
+        // Where root operation began, for `apply_time_dilation`. Its own
+        // field rather than `handler_entry_tsc`, because that one is a
+        // measurement of this VMM and this one decides what the guest's
+        // clock reads - and the second must not be silently rescoped by
+        // a change to the first.
+        if constexpr (nested_vmx::dilate_time) {
+            this->dilation_mark[cpuid] = now;
+        }
+
         // Closes the span opened at the resume, and attributes it to
         // whichever level was entered. See `l2_run_cycles`: this is the
         // only measurement in the tree denominated in the guest's work

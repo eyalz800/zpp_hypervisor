@@ -540,6 +540,13 @@ zpp_add_host_test(resume_guest
         # `#define`d at the top of the stand-in hypervisor.h, which put a
         # build option inside a header - the reason it moved.
         ZPP_REQUEUE_INTERRUPTED_EVENTS=1
+        # Same argument: `apply_time_dilation` lives in resume.cpp and
+        # is a no-op at 1, so the harness would pin nothing about the
+        # one property that matters - that the counter it moves cannot
+        # run backwards. Eight rather than a power the compiler could
+        # not turn into a shift, since the *value* is what the checks
+        # compute against.
+        ZPP_TIME_DILATION=8
     DIAG 1)
 
 # === Compile-only checks ==================================================

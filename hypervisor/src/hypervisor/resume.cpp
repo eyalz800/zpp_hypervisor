@@ -365,6 +365,55 @@ bool hypervisor::deliver_pending_external_interrupt(std::size_t cpu)
     return true;
 }
 
+void hypervisor::apply_time_dilation(std::size_t cpu, std::uint64_t now)
+{
+    if constexpr (!nested_vmx::dilate_time) {
+        // Not merely a cost: without the control set in vmcs01 the
+        // field means nothing to the processor, and writing it would be
+        // a VMWRITE to say so.
+        (void)cpu;
+        (void)now;
+        return;
+    } else {
+        // Only the interval since the exit, and only the part of it the
+        // guest is not to be charged for. `mark` is set at the top of
+        // `on_vm_exit` and set here to `now`, so the span cannot be
+        // counted twice if this is reached twice for one exit - which
+        // the nested path does, since it calls `resume_guest` itself.
+        //
+        // Integer division truncates, so `root - root / n` is at least
+        // `root * (n - 1) / n` and never exceeds `root`. The guest's
+        // counter therefore advances by `root / n >= 0` across the
+        // exit, which is the monotonicity property stated at
+        // `ZPP_TIME_DILATION` - it is arithmetic here, not a check.
+        auto mark = this->dilation_mark[cpu];
+
+        if ((0 != mark) && (now > mark)) {
+            auto root = now - mark;
+            auto hidden = root - (root / nested_vmx::time_dilation);
+
+            this->dilation_offset[cpu] =
+                this->dilation_offset[cpu] - hidden;
+            this->dilation_hidden[cpu] =
+                this->dilation_hidden[cpu] + hidden;
+            this->dilation_charged[cpu] =
+                this->dilation_charged[cpu] + (root - hidden);
+        }
+
+        this->dilation_mark[cpu] = now;
+
+        // Whichever VMCS the next instruction enters. vmcs02's field
+        // carries both levels' offsets - `build_vmcs02` composes them
+        // and leaves the guest hypervisor's half here - and vmcs01's
+        // carries only this VMM's, since there is no level above it.
+        this->vmcs.write(arch::x86_64::vmx::vmcs::field::tsc_offset,
+                         this->running_l2[cpu]
+                             ? (this->dilation_offset[cpu] +
+                                this->tsc_offset_from_guest[cpu])
+                             : this->dilation_offset[cpu]);
+    }
+}
+
 void hypervisor::resume_guest(std::uint64_t cpuid,
                               arch::x86_64::context & context,
                               arch::x86_64::vmx::exit_reason full_reason,
@@ -877,6 +926,13 @@ void hypervisor::resume_guest(std::uint64_t cpuid,
         // to happen, so it names which level this span belongs to.
         this->level_run_tsc[cpu] = now;
         this->level_run_was_l2[cpu] = this->running_l2[cpu];
+
+        // And the clock the guest itself will read. Here for the same
+        // reason the span above is here - the next instruction is the
+        // entry, so this is the last moment root operation owns - and
+        // it needs `running_l2` for the same reason too, to know which
+        // VMCS the offset is going into.
+        apply_time_dilation(cpu, now);
     }
 
     // Put back an external interrupt this VMM took on the guest's

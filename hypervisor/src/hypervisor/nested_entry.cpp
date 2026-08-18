@@ -2352,11 +2352,20 @@ std::expected<void, zpp::error> hypervisor::build_vmcs02(std::size_t cpu)
     // The time stamp counter offset composes across levels: what this VMM
     // applies to the guest hypervisor, plus what the guest hypervisor
     // applies to its own guest. KVM's `kvm_calc_nested_tsc_offset` is the
-    // same sum. This VMM applies none today, so the sum is the guest
-    // hypervisor's, and writing it as a sum is what keeps it correct if
-    // that changes.
+    // same sum. This VMM applied none until `ZPP_TIME_DILATION`, and
+    // writing it as a sum is what kept it correct when that changed.
+    //
+    // **Taken from `dilation_offset` rather than read back out of
+    // vmcs01, and that is correctness rather than a saving.** This
+    // function has already done its VMPTRLD by the time it gets here, so
+    // the current VMCS is vmcs02 - a read of `tsc_offset` now returns
+    // *vmcs02's* field, which is the last entry's composed sum, and
+    // composing that again would double the guest hypervisor's half on
+    // every entry. The value was harmlessly zero for as long as this VMM
+    // applied no offset of its own, which is exactly how a latent bug of
+    // this shape survives being read.
     auto tsc_offset01 = (0 != (primary01 & primary_tsc_offsetting))
-                            ? vmcs.read(field::tsc_offset)
+                            ? this->dilation_offset[cpu]
                             : std::uint64_t{};
     auto tsc_offset12 = (0 != (primary12 & primary_tsc_offsetting))
                             ? shadow.read(field::tsc_offset)
@@ -2393,6 +2402,15 @@ std::expected<void, zpp::error> hypervisor::build_vmcs02(std::size_t cpu)
                                   : tsc_scaling_default;
 
     auto scaled = tsc_scaling_default != multiplier12;
+
+    // What the guest hypervisor contributes, kept so that
+    // `apply_time_dilation` can refresh the sum on an entry that does
+    // not come through here at all - which most entries into a
+    // second-level guest do not, since the controls and the guest state
+    // are elided against their caches. Without it the offset would only
+    // advance on a rebuild, and the dilation would be applied at
+    // whatever rate rebuilds happen to occur.
+    this->tsc_offset_from_guest[cpu] = tsc_offset12;
 
     write_vmcs02_control(
         cpu,

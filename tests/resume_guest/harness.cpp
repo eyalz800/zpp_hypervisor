@@ -1683,6 +1683,124 @@ void the_resume_records_where_it_left_the_guest()
                 "and the guest is entered exactly once");
 }
 
+// === The clock this VMM hands the guest ================================
+
+/**
+ * The one property `ZPP_TIME_DILATION` rests on: the counter every
+ * level reads goes forward, never back.
+ *
+ * It is arithmetic rather than a check in the code - `root - root / n`
+ * can never exceed `root`, so what is left for the guest is `root / n`,
+ * which is at worst zero - and this is what pins that arithmetic in
+ * place. The failure it guards against is somebody making the
+ * subtraction depend on something other than the interval just
+ * measured, at which point a guest whose time-stamp counter steps
+ * backwards bugchecks on a machine nobody can attach a debugger to.
+ */
+void the_dilated_counter_never_runs_backwards()
+{
+    auto built = make();
+    constexpr std::uint64_t divisor = 8;
+
+    // A first entry with no mark charges nothing and only sets one, so
+    // the very first exit of a boot cannot be charged an interval that
+    // began before the counter was read.
+    built.state->apply_time_dilation(cpu, 1000);
+
+    check_equal(0,
+                built.state->dilation_offset[cpu],
+                "the first entry moves the offset by nothing");
+    check_equal(1000,
+                built.state->dilation_mark[cpu],
+                "and leaves the mark where root operation was entered");
+
+    // Then a sequence of exits, each one a different length, with the
+    // guest's own counter read at every entry.
+    std::uint64_t marks[] = {1000, 1080, 1080 + 64, 1080 + 64 + 1000};
+    auto previous = 1000 + built.state->dilation_offset[cpu];
+
+    for (std::size_t i = 1; i < std::size(marks); ++i) {
+        auto root = marks[i] - marks[i - 1];
+
+        built.state->dilation_mark[cpu] = marks[i - 1];
+        built.state->apply_time_dilation(cpu, marks[i]);
+
+        auto seen = marks[i] + built.state->dilation_offset[cpu];
+
+        check_equal(root / divisor,
+                    seen - previous,
+                    "the guest is charged a divisor's worth of the time "
+                    "this VMM spent in root operation");
+        previous = seen;
+    }
+
+    // And the two halves of the wall clock account for all of it.
+    check_equal(marks[std::size(marks) - 1] - marks[0],
+                built.state->dilation_hidden[cpu] +
+                    built.state->dilation_charged[cpu],
+                "hidden and charged sum to the whole interval");
+}
+
+/**
+ * Reaching the same exit twice charges the guest once.
+ *
+ * `resume_guest` is called from the nested path as well as from the end
+ * of `on_vm_exit`, so this is not hypothetical - and charging one span
+ * twice would take the guest's counter backwards by exactly the amount
+ * the test above proves it never goes.
+ */
+void one_exit_is_charged_once()
+{
+    auto built = make();
+
+    built.state->dilation_mark[cpu] = 1000;
+    built.state->apply_time_dilation(cpu, 1800);
+    auto once = built.state->dilation_offset[cpu];
+
+    built.state->apply_time_dilation(cpu, 1800);
+
+    check_equal(once,
+                built.state->dilation_offset[cpu],
+                "the second call over the same instant charges nothing");
+}
+
+/**
+ * Which VMCS the offset lands in, and what it carries there.
+ *
+ * vmcs02's field is the sum of both levels' offsets - the processor
+ * applies one field, so the guest hypervisor's own offset for its guest
+ * has to be inside it - while vmcs01's carries only this VMM's, there
+ * being no level above. Getting this the wrong way round would leave a
+ * second-level guest's counter jumping by the guest hypervisor's offset
+ * every time it was resumed without a rebuild.
+ */
+void the_offset_composes_for_the_level_being_entered()
+{
+    using field = zpp::arch::x86_64::vmx::vmcs::field;
+
+    auto built = make();
+    built.state->tsc_offset_from_guest[cpu] = 0x5000;
+
+    built.state->dilation_mark[cpu] = 1000;
+    built.state->running_l2[cpu] = false;
+    built.state->apply_time_dilation(cpu, 1800);
+
+    auto ours = built.state->dilation_offset[cpu];
+
+    check_equal(ours,
+                built.state->vmcs.read(field::tsc_offset),
+                "the guest hypervisor's own VMCS carries this VMM's "
+                "offset alone");
+
+    built.state->dilation_mark[cpu] = 1800;
+    built.state->running_l2[cpu] = true;
+    built.state->apply_time_dilation(cpu, 2600);
+
+    check_equal(built.state->dilation_offset[cpu] + 0x5000,
+                built.state->vmcs.read(field::tsc_offset),
+                "and a second-level guest's carries both levels'");
+}
+
 } // namespace
 
 int main()
@@ -1721,6 +1839,9 @@ int main()
     the_queue_ignores_a_slot_it_does_not_have();
     the_entry_is_chosen_by_launch_state();
     the_resume_records_where_it_left_the_guest();
+    the_dilated_counter_never_runs_backwards();
+    one_exit_is_charged_once();
+    the_offset_composes_for_the_level_being_entered();
 
     if (!g_findings.empty()) {
         std::println("\nfindings:");

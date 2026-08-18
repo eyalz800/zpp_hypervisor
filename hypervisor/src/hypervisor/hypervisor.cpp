@@ -5644,6 +5644,18 @@ void hypervisor::setup_vmcs(std::size_t cpu,
                    pause_exiting)
             : std::uint64_t{};
 
+    // The one control here that changes a value rather than
+    // intercepting an instruction. Requested only where this build
+    // dilates time, so a default build asks the processor for exactly
+    // what it always did - and the field it enables is zero until
+    // `apply_time_dilation` moves it, so even here nothing changes
+    // until the first entry.
+    auto dilation_controls =
+        nested_vmx::dilate_time
+            ? arch::x86_64::vmx::vm_execution_controls::primary::
+                  use_tsc_offsetting
+            : std::uint64_t{};
+
     vmcs.primary_processor_based_vm_execution_controls(
         arch::x86_64::vmx::adjust_msr(
             this->cached_vmx_msr(vmx_msr::true_processor_based_controls),
@@ -5653,7 +5665,8 @@ void hypervisor::setup_vmcs(std::size_t cpu,
                     enable_msr_bitmaps |
                 arch::x86_64::vmx::vm_execution_controls::primary::
                     enable_io_bitmaps |
-                monitor_controls | quiet_primary_controls));
+                monitor_controls | quiet_primary_controls |
+                dilation_controls));
 
     // The host runs in 64-bit mode after an exit, and DR7 and
     // IA32_DEBUGCTL are saved on the way out so the guest gets back what

@@ -3531,6 +3531,59 @@ private:
     /** @} */
 
     /**
+     * The time-stamp counter offset this VMM applies to everything
+     * inside the virtual machine, and the accounting that says it is
+     * doing what it claims. See `ZPP_TIME_DILATION` in `nested_vmx.h`
+     * for why it exists at all.
+     *
+     * `dilation_offset` is what goes into vmcs01's TSC offset field,
+     * and - through `build_vmcs02`'s composition, which was already
+     * written as a sum for exactly this - into vmcs02's alongside the
+     * guest hypervisor's own. It only ever *decreases*, by `(1 - 1/n)`
+     * of each interval between an exit and the entry after it, so the
+     * counter every level reads stays monotonic without a check.
+     *
+     * `dilation_mark` is when root operation was entered, taken at the
+     * top of `on_vm_exit` and consumed in `resume_guest`. Consuming it
+     * sets it to the instant it was consumed, so a second call within
+     * one exit - the nested path calls `resume_guest` itself - measures
+     * an interval of nothing rather than charging one span twice.
+     *
+     * `dilation_hidden` and `dilation_charged` are the two halves of the
+     * wall clock as the guest sees them, kept apart on purpose: one
+     * figure could not say whether the switch is doing anything, and
+     * their ratio is the dilation actually achieved, which is not the
+     * one asked for - the guest's own execution is never scaled, so what
+     * is achieved depends on how much of the machine the guest was
+     * getting.
+     * @{
+     */
+    std::uint64_t dilation_offset[max_cpus]{};
+    std::uint64_t dilation_mark[max_cpus]{};
+    volatile std::uint64_t dilation_hidden[max_cpus]{};
+    volatile std::uint64_t dilation_charged[max_cpus]{};
+    /** @} */
+
+    /**
+     * What the *guest hypervisor* contributes to vmcs02's TSC offset,
+     * cached by `build_vmcs02` so that `apply_time_dilation` can add
+     * this VMM's own to it without reading vmcs12 again.
+     *
+     * Needed because the offset has to be refreshed on every entry,
+     * including the entries that resume a second-level guest without
+     * rebuilding vmcs02 at all.
+     */
+    std::uint64_t tsc_offset_from_guest[max_cpus]{};
+
+    /**
+     * Moves `dilation_offset` on by whatever this VMM has just spent in
+     * root operation, and writes the result into whichever VMCS is about
+     * to be entered. Called from `resume_guest`, at the point where the
+     * next instruction is the entry.
+     */
+    void apply_time_dilation(std::size_t cpu, std::uint64_t now);
+
+    /**
      * How many second-level physical addresses were actually *walked*
      * into first-level ones, and how many extended-page-table entries
      * that walking read.

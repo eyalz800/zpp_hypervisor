@@ -77,6 +77,16 @@ enum type : std::uint64_t
      * same argument is made at length for MONITOR and MWAIT above.
      * @{
      */
+    /**
+     * SDM Table 25-6 bit 3: "This control determines whether executions
+     * of RDTSC, executions of RDTSCP, and executions of RDMSR that read
+     * from the IA32_TIME_STAMP_COUNTER MSR return a value modified by
+     * the TSC offset field." Unlike the six below it this one
+     * intercepts nothing - it changes what a value reads as - so it is
+     * not part of the ZPP_GUEST_TESTS group.
+     */
+    use_tsc_offsetting = (1ull << 3),
+
     hlt_exiting = (1ull << 7),
     invlpg_exiting = (1ull << 9),
     rdpmc_exiting = (1ull << 11),

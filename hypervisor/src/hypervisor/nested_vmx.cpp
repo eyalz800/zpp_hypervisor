@@ -1961,7 +1961,23 @@ bool hypervisor::on_guest_vmlaunch(std::size_t cpu,
                         reference_sample_capacity;
             this->reference_read_value[cpu][slot] =
                 (context.rax & 0xffffffff) | (context.rdx << 32);
-            this->reference_read_tsc[cpu][slot] = arch::x86_64::rdtsc();
+            // The counter **the guest will read**, not the one this
+            // VMM reads. They are the same number until
+            // `ZPP_TIME_DILATION` moves the offset, and after that they
+            // are not - and the page fitted from these pairs is
+            // evaluated by the guest against its own counter, so a fit
+            // against the host's would drift by exactly the offset and
+            // put the guest's two clocks into the disagreement that
+            // whole switch exists to avoid.
+            //
+            // It also makes the fit *exact* rather than merely current:
+            // the guest hypervisor derives the reference counter from
+            // the same dilated counter, so `reference = a * guest_tsc +
+            // b` holds with constant `a` and `b` for the life of the
+            // boot, where against the host's counter the relation bends
+            // as the two levels' share of the machine changes.
+            this->reference_read_tsc[cpu][slot] =
+                arch::x86_64::rdtsc() + this->dilation_offset[cpu];
             this->reference_read_count[cpu] =
                 this->reference_read_count[cpu] + 1;
         }

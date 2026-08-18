@@ -35,6 +35,9 @@ set(ZPP_SLOW_EXITS "0" CACHE STRING
 set(ZPP_TICK_FLOOR "0" CACHE STRING
     "Least periodic tick period, in 100 ns units, this VMM will let\n     the second-level guest arm; 0 leaves every request untouched.\n     156250 is 15.625 ms, the 64 Hz tick Windows itself uses before\n     it re-arms at 1.74 ms. Only periods are floored, never one-shot\n     deadlines.")
 
+set(ZPP_TIME_DILATION "1" CACHE STRING
+    "Charge the guest only 1/N of the time this VMM spends in root operation, by moving the time-stamp counter offset. 1 is off. See the root CMakeLists and nested_vmx.h.")
+
 set(ZPP_STRETCH_GUEST_TIMER "1" CACHE STRING
     "Multiply the second-level guest's synthetic timer period by this before its hypervisor sees it. 1 is off. Diagnostic only - see the top-level CMakeLists for what it separates.")
 
@@ -199,6 +202,7 @@ target_compile_options(zpp_hypervisor PRIVATE
     -DZPP_SHADOW_GUEST_STATE=$<BOOL:${ZPP_SHADOW_GUEST_STATE}>
     -DZPP_SLOW_EXITS=${ZPP_SLOW_EXITS}
     -DZPP_STRETCH_GUEST_TIMER=${ZPP_STRETCH_GUEST_TIMER}
+    -DZPP_TIME_DILATION=${ZPP_TIME_DILATION}
     -DZPP_TICK_FLOOR=${ZPP_TICK_FLOOR}
     # The guest coverage suite, which lives in the loader but turns on two
     # VM-execution controls here. Same always-defined 0/1 shape as the two

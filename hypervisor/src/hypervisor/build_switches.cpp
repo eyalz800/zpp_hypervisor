@@ -71,6 +71,13 @@ extern "C" [[gnu::used, gnu::retain]] constinit const char
         digit(nested_vmx::profile_l2),
         ' ', 's', 't', 'r', 'e', 't', 'c', 'h', '=',
         digit(static_cast<unsigned>(ZPP_STRETCH_GUEST_TIMER)),
+        // Two digits, where every switch above needs one: the values
+        // worth running are 8 and 16, and one digit would print 16 as
+        // `6` - a manifest that disagrees with the build is worse than
+        // no manifest, which is the whole argument for this array.
+        ' ', 'd', 'i', 'l', 'a', 't', 'e', '=',
+        digit(static_cast<unsigned>(nested_vmx::time_dilation / 10)),
+        digit(static_cast<unsigned>(nested_vmx::time_dilation)),
         '\0'};
 
 } // namespace zpp::hypervisor

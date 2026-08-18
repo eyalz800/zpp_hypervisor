@@ -452,6 +452,60 @@ inline constexpr bool step_vtl = (0 != ZPP_STEP_VTL);
 inline constexpr bool watch_vp_assist_page = (0 != ZPP_WATCH_VP_ASSIST);
 
 /**
+ * Charge the guest only a fraction of the time this VMM spends in root
+ * operation, by moving its time-stamp counter offset. 1 is off, and is
+ * the default.
+ *
+ * **Why this exists, stated as arithmetic rather than as a hope.**
+ * Windows arms a *periodic* 1.74 ms tick - 574.7 Hz - and that number
+ * is `KeQuantumEndTimerIncrement`, a literal in `ntoskrnl.exe` behind
+ * `KiVelocityFlags` bit 18, confirmed both by disassembly and by
+ * reading the running guest's memory (`BACKLOG.md`, "574.7 Hz is
+ * ntoskrnl's own short-thread-quantum literal"). It is what any Windows
+ * on any Hyper-V arms, nothing this VMM says to it changes it, and one
+ * tick costs this VMM about 2.46 ms. A handler that cannot finish
+ * inside its own period runs for ever, and it does: measured over 191
+ * seconds on the rig, zero extended-page-table violations, zero shadow
+ * rebuilds, and 99.76% of second-level entries at one of eight
+ * instruction pointers, every one of them in the clock path.
+ *
+ * **Why it is not the fourth version of a lie that failed three
+ * times.** `ZPP_STRETCH_GUEST_TIMER`, `ZPP_DELIVER_SELF_IPI` and
+ * `ZPP_TICK_FLOOR` each changed *one* thing the guest sees and left the
+ * rest honest, and the stretch's own post mortem says why it died:
+ * "stretching the period without slowing the reference counter leaves
+ * the guest's two time sources disagreeing". Every clock inside this
+ * virtual machine is a function of the time-stamp counter - the
+ * reference counter through the page this VMM publishes, the
+ * performance counter, system time, and the guest hypervisor's own
+ * synthetic-timer deadlines - so moving the counter moves all of them
+ * together and leaves nothing to disagree.
+ *
+ * **What is subtracted, and why monotonicity is a property rather than
+ * a hope.** Only the interval between one VM exit and the entry that
+ * follows it - time in which nothing inside the virtual machine ran at
+ * all - and only `(1 - 1/n)` of it. The guest's own execution is never
+ * scaled. So across an exit the counter advances by `root / n`, which
+ * is never negative, and inside a run it advances at the true rate.
+ * This is the "steal time" a paravirtual guest is told about, applied
+ * to the clock instead of reported beside it.
+ *
+ * Hardware TSC scaling would be the direct instrument and this part does
+ * not have it - no `tsc_scaling` in the VMX flags on this i7-8565U, and
+ * no `shadow_vmcs` beside it. The offset field needs no capability.
+ *
+ * The guest's wall clock runs slow by construction, which is the whole
+ * of the cost: it is a virtual machine being told it was suspended for
+ * most of every millisecond, which is true.
+ */
+#ifndef ZPP_TIME_DILATION
+#define ZPP_TIME_DILATION 1
+#endif
+
+inline constexpr std::uint64_t time_dilation = ZPP_TIME_DILATION;
+inline constexpr bool dilate_time = (1 < time_dilation);
+
+/**
  * Defer the bulk guest-state copy out of vmcs02 into vmcs12.
  *
  * **Off, after three boots and about 280 unclean resets of the rig's
