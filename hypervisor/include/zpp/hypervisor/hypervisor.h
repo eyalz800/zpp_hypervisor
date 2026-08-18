@@ -5142,6 +5142,23 @@ private:
     volatile std::uint64_t l2_self_ipi_held[max_cpus]{};
 
     /**
+     * Self-directed synthetic interrupt commands withheld from the guest
+     * hypervisor because the requesting processor's own task priority
+     * refused the vector at the instant it was asked for. See
+     * `nested_vmx::intercept_self_ipi`.
+     *
+     * The pair to read it against is `l2_self_ipi_reflected`, which
+     * counts the ones that were **not** withheld because the priority
+     * did admit them. A run where the second is zero and the first is
+     * large is the guest never being able to take what it asks for,
+     * which is what was measured; a run where the first is zero means
+     * the swallow rule matched nothing and every number downstream of
+     * it describes a configuration nobody built.
+     */
+    volatile std::uint64_t l2_self_ipi_swallowed[max_cpus]{};
+    volatile std::uint64_t l2_self_ipi_reflected[max_cpus]{};
+
+    /**
      * Synthetic interrupt commands that named somewhere other than this
      * processor, so the assumption behind treating a physical
      * destination of zero as "me" is falsifiable rather than implicit.
@@ -5884,7 +5901,15 @@ private:
      * Records one synthetic interrupt command the second-level guest
      * issued, with the task priority in force as it did.
      */
-    void record_interrupt_request(std::size_t cpu, std::uint64_t command);
+    /**
+     * Records the request and returns the virtual task priority it
+     * sampled, so a caller deciding whether the vector can be delivered
+     * uses **the same byte from the same page** the diagnostic recorded.
+     * Two reads could disagree, and then the histogram would describe a
+     * decision that was not taken.
+     */
+    std::uint8_t record_interrupt_request(std::size_t cpu,
+                                          std::uint64_t command);
     /**
      * @}
      */

@@ -98,6 +98,10 @@ option(ZPP_DELIVER_SELF_IPI
     "Deliver a second-level guest's self-directed interrupt when the guest hypervisor does not. Measured: the guest asks for vector 0x2f on every clock cycle and the level above delivers it six times, while arming a TPR-below-threshold notification that fires 33 times in 3.6 million exits. Delivered only when the guest's own virtual task priority permits, and only when the level above staged nothing itself. OFF by default."
     OFF)
 
+option(ZPP_INTERCEPT_SELF_IPI
+    "Withhold from the guest hypervisor a self-directed synthetic interrupt the requesting processor cannot currently take, and deliver it here at the first entry its own task priority admits it. Gates both halves together, which is the whole point: ZPP_DELIVER_SELF_IPI alone still reflected the write, so the level above kept the vector pending and kept asserting its trust-level notification regardless. Measured on the rig over one 257 second window: vector 0x2f requested 145,300 times and delivered ZERO, the virtual task priority never below 0x20 across 630,418 entries so every refusal was correct, and the notification asserted on 1.0032 of every HvCallVtlCall - which is what stops VTL1 retiring its secure call. Only self-directed commands, and only while undeliverable. OFF by default: the level above may keep bookkeeping that depends on seeing the write. See BACKLOG.md."
+    OFF)
+
 option(ZPP_PUBLISH_REFERENCE_TSC
     "Fill in the reference TSC page the guest hypervisor enables for its guest and then leaves invalid, fitting the scale and offset to the answers it gave for the counter MSR. Measured: without it the guest reads that MSR about fifteen times per clock tick, 26.3% of every exit on the machine, and the guest sits at 0xf0 on 39.3% of entries against 0.2% with the page. OFF by default, and the reason is a bug rather than a design objection: the target frame is resolved by walking the guest hypervisor's OWN extended page tables (l2_physical_to_l1 over eptp12) and then written by a separate call, with NOTHING pinning or re-validating the mapping in between - so a level that remaps guest frames as ordinary business, and is never asked, can reassign that frame between the check and the write. That is time-of-check-to-time-of-use writing to an address somebody else now owns: arbitrary memory corruption, not a boundary violation. Refusing to overwrite a non-zero sequence would be worth doing and does NOT fix this - the race is on the address, not the contents. See BACKLOG.md."
     OFF)
@@ -226,6 +230,7 @@ ExternalProject_Add(hypervisor
         -DZPP_NESTED_SHADOW_VMCS=${ZPP_NESTED_SHADOW_VMCS}
         -DZPP_PUBLISH_REFERENCE_TSC=${ZPP_PUBLISH_REFERENCE_TSC}
         -DZPP_DELIVER_SELF_IPI=${ZPP_DELIVER_SELF_IPI}
+        -DZPP_INTERCEPT_SELF_IPI=${ZPP_INTERCEPT_SELF_IPI}
         -DZPP_INTERCEPT_APIC=${ZPP_INTERCEPT_APIC}
         -DZPP_VIRTUALIZE_APIC=${ZPP_VIRTUALIZE_APIC}
         -DZPP_PROFILE_L2=${ZPP_PROFILE_L2}
@@ -317,6 +322,7 @@ ExternalProject_Add(uefi_loader
         -DZPP_NESTED_SHADOW_VMCS=${ZPP_NESTED_SHADOW_VMCS}
         -DZPP_PUBLISH_REFERENCE_TSC=${ZPP_PUBLISH_REFERENCE_TSC}
         -DZPP_DELIVER_SELF_IPI=${ZPP_DELIVER_SELF_IPI}
+        -DZPP_INTERCEPT_SELF_IPI=${ZPP_INTERCEPT_SELF_IPI}
         -DZPP_INTERCEPT_APIC=${ZPP_INTERCEPT_APIC}
         -DZPP_VIRTUALIZE_APIC=${ZPP_VIRTUALIZE_APIC}
         -DZPP_PROFILE_L2=${ZPP_PROFILE_L2}

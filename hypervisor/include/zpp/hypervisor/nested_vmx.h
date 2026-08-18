@@ -278,6 +278,87 @@ inline constexpr bool deliver_self_ipi =
     false;
 #endif
 
+/**
+ * Whether a self-directed synthetic interrupt the requesting processor
+ * cannot currently take is **withheld from the guest hypervisor** and
+ * delivered here instead, at the first entry the guest's own task
+ * priority admits it.
+ *
+ * `deliver_self_ipi` above is the second half of this and was never
+ * enough on its own. Measured with it alone: one delivery and 2,005
+ * holds - the priority rule was right and the holds were correct - and
+ * the guest was no better off, because the write was **also** reflected,
+ * so the guest hypervisor queued the same vector as pending and behaved
+ * exactly as before. The two halves have never been run together and
+ * each alone does nothing.
+ *
+ * What the reflection costs, measured on the rig over one 257 second
+ * window on a settled guest:
+ *
+ * - vector `0x2f` requested 145,300 times through this register and
+ *   delivered **zero**;
+ * - the virtual task priority never once below `0x20` across 630,418
+ *   second-level entries, at either trust level, so the vector was
+ *   refused correctly every time - `0x2f` is class 2 and the rule is
+ *   strictly greater, SDM 12.8.4;
+ * - and the guest hypervisor asserted its virtual interrupt
+ *   notification into VTL1 on **1.0032 of every `HvCallVtlCall`**,
+ *   because the vector it will not deliver is nevertheless pending.
+ *
+ * VTL1's `ShvlVinaHandler` answers that notification by returning to
+ * VTL0 with secure-call state `4`, `ntoskrnl`'s `VslpEnterIumSecureMode`
+ * has no case for `4` and re-enters, and the secure call never retires -
+ * which is the whole of the stall. The state byte is byte 1 of RBX,
+ * carried across the trust-level boundary by `HvlSwitchToVsmVtl1`, and
+ * it read `4` on 25,659 consecutive returns with every register's
+ * change counter at zero.
+ *
+ * So the lever is the reflection, and it is the only one left on this
+ * side: stop telling the guest hypervisor about a self-directed
+ * interrupt the requesting processor cannot take, and deliver it here
+ * when it can.
+ *
+ * **This misrepresents nothing.** The four interventions before it all
+ * lied about *time* and Windows checked its clocks against each other
+ * and bugchecked. Here the interrupt is genuinely undeliverable at the
+ * instant it is requested, by the guest's own task priority, and it is
+ * delivered at the first instant it is deliverable, by the rule the
+ * processor itself would apply. Nothing observes a value it could not
+ * have observed on hardware.
+ *
+ * **The honest risk, which is why this is off by default**: the guest
+ * hypervisor may keep bookkeeping of its own that depends on seeing the
+ * write - a pending-interrupt count, a synthetic message, an
+ * end-of-message pairing - and swallowing it could desynchronise
+ * something invisible from here. Only self-directed commands are
+ * swallowed, and only while undeliverable, so a command that outranks
+ * the priority still reflects and the level above still sees it.
+ *
+ * What would have to change to turn it on by default: a boot showing
+ * `l2_self_ipi_swallowed` rising, `l2_self_ipi_delivered` following it,
+ * and the trust-level notification rate falling from 1.00 per call. The
+ * prediction that would refute the whole model is the notification
+ * staying at 1.00 with the reflection stopped - something other than
+ * `0x2f` keeps it asserted.
+ */
+inline constexpr bool intercept_self_ipi =
+#if defined(ZPP_INTERCEPT_SELF_IPI) && ZPP_INTERCEPT_SELF_IPI
+    true;
+#else
+    false;
+#endif
+
+/**
+ * Whether the held-self-IPI delivery path runs at all.
+ *
+ * Both switches need it, and they differ only in whether the write is
+ * also reflected - so the delivery site is keyed on this rather than on
+ * either one, and adding a third way to hold a vector does not have to
+ * find that site again.
+ */
+inline constexpr bool self_ipi_delivery =
+    deliver_self_ipi || intercept_self_ipi;
+
 inline constexpr bool publish_reference_tsc =
 #if defined(ZPP_PUBLISH_REFERENCE_TSC) && ZPP_PUBLISH_REFERENCE_TSC
     true;

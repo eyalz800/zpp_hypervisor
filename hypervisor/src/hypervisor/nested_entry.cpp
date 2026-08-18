@@ -2492,7 +2492,7 @@ std::expected<void, zpp::error> hypervisor::build_vmcs02(std::size_t cpu)
     // Nothing staged, and the guest is asking for something its own
     // priority allows: deliver it. The guest hypervisor's own injection
     // always wins, because this only runs when it made none.
-    if constexpr (nested_vmx::deliver_self_ipi) {
+    if constexpr (nested_vmx::self_ipi_delivery) {
         constexpr std::uint64_t valid = 1ull << 31;
         constexpr std::uint64_t external = 0ull << 8;
         constexpr std::uint64_t priority_class = 4;
@@ -6950,11 +6950,11 @@ void hypervisor::sample_guest_thread(std::size_t cpu)
         this->guest_thread_sample_count[cpu] + 1;
 }
 
-void hypervisor::record_interrupt_request(std::size_t cpu,
-                                          std::uint64_t command)
+std::uint8_t hypervisor::record_interrupt_request(std::size_t cpu,
+                                                  std::uint64_t command)
 {
     if (cpu >= max_cpus) {
-        return;
+        return 0;
     }
 
     // SDM 30.1.1: "VTPR: the value of bits 7:0 of the byte at offset 080H
@@ -7003,6 +7003,8 @@ void hypervisor::record_interrupt_request(std::size_t cpu,
     auto vector = command & interrupt_command_vector_mask;
     this->interrupt_request_vector[cpu][vector] =
         this->interrupt_request_vector[cpu][vector] + 1;
+
+    return vtpr;
 }
 
 hypervisor::l2_exit_outcome
@@ -8088,7 +8090,7 @@ hypervisor::on_l2_exit(std::size_t cpu,
             auto command =
                 (context.rax & 0xffffffff) | (context.rdx << 32);
 
-            record_interrupt_request(cpu, command);
+            auto vtpr = record_interrupt_request(cpu, command);
 
             // Held until the guest's own priority allows it. See
             // `nested_vmx::deliver_self_ipi`; SDM Figure 12-12 puts the
@@ -8118,7 +8120,7 @@ hypervisor::on_l2_exit(std::size_t cpu,
             // neither spelling, and a run where it is non-zero has found
             // a destination this rule would deliver to the wrong
             // processor.
-            if constexpr (nested_vmx::deliver_self_ipi) {
+            if constexpr (nested_vmx::self_ipi_delivery) {
                 constexpr std::uint64_t shorthand_mask = 3ull << 18;
                 constexpr std::uint64_t shorthand_self = 1ull << 18;
                 constexpr std::uint64_t destination_shift = 32;
@@ -8134,6 +8136,64 @@ hypervisor::on_l2_exit(std::size_t cpu,
                         this->l2_self_ipi_pending[cpu] = command & 0xff;
                     } else {
                         this->l2_ipi_not_self[cpu] += 1;
+                    }
+                }
+
+                // And withheld from the level above, when the level
+                // above could not have delivered it either.
+                //
+                // The rule is the processor's own, SDM 12.8.4: an
+                // interrupt is admitted only when its priority class is
+                // **strictly greater** than the task priority's, which
+                // is why vector 0x2f - class 2 - is refused at task
+                // priority 0x20 and at everything above it. `vtpr` is
+                // the byte `record_interrupt_request` just sampled, from
+                // the virtual-APIC page of the trust level that is
+                // running, so the histogram it recorded and the decision
+                // taken here cannot disagree.
+                //
+                // Three conditions, and each is a place this could do
+                // harm if it were dropped:
+                //
+                // - **self-directed only.** A command naming another
+                //   processor is the level above's to route, and this
+                //   VMM has no business consuming it. `l2_ipi_not_self`
+                //   counts the ones that are neither spelling.
+                // - **undeliverable only.** If the priority admits the
+                //   vector, the level above can and does deliver it -
+                //   measured 16 times - so the write is reflected
+                //   unchanged and nothing is withheld.
+                // - **the read must have succeeded.** A page this VMM
+                //   could not read leaves `vtpr` zero, which admits
+                //   every vector, so a failed read reflects rather than
+                //   swallows. Failing safe here means giving the write
+                //   to the level above, which is what happens today.
+                //
+                // `advance_rip` is set because the write is being
+                // *completed*, not skipped: the guest asked for an
+                // interrupt, and it will receive it at the first entry
+                // its own priority admits. Resuming without advancing
+                // would re-execute the same `wrmsr` for ever.
+                if constexpr (nested_vmx::intercept_self_ipi) {
+                    constexpr std::uint64_t priority_class = 4;
+
+                    auto vector = command & 0xff;
+
+                    auto admitted =
+                        (vector >> priority_class) >
+                        (std::uint64_t{vtpr} >> priority_class);
+
+                    if ((cpu < max_cpus) && to_self && (0 != vtpr) &&
+                        !admitted) {
+                        this->l2_self_ipi_swallowed[cpu] =
+                            this->l2_self_ipi_swallowed[cpu] + 1;
+                        advance_rip = true;
+                        return l2_exit_outcome::handled;
+                    }
+
+                    if ((cpu < max_cpus) && to_self) {
+                        this->l2_self_ipi_reflected[cpu] =
+                            this->l2_self_ipi_reflected[cpu] + 1;
                     }
                 }
             }

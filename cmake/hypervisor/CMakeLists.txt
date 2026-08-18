@@ -21,6 +21,10 @@ option(ZPP_DELIVER_SELF_IPI
     "Deliver a second-level guest's self-directed interrupt when the guest hypervisor does not. See the root CMakeLists."
     OFF)
 
+option(ZPP_INTERCEPT_SELF_IPI
+    "Withhold a self-directed synthetic interrupt the requesting processor cannot take from the guest hypervisor, and deliver it here when it can. See the root CMakeLists."
+    OFF)
+
 option(ZPP_PUBLISH_REFERENCE_TSC
     "Fill in the reference TSC page the guest hypervisor leaves invalid. See the root CMakeLists."
     OFF)
@@ -189,6 +193,7 @@ target_compile_options(zpp_hypervisor PRIVATE
     -DZPP_NESTED_SHADOW_VMCS=$<BOOL:${ZPP_NESTED_SHADOW_VMCS}>
     -DZPP_PUBLISH_REFERENCE_TSC=$<BOOL:${ZPP_PUBLISH_REFERENCE_TSC}>
     -DZPP_DELIVER_SELF_IPI=$<BOOL:${ZPP_DELIVER_SELF_IPI}>
+    -DZPP_INTERCEPT_SELF_IPI=$<BOOL:${ZPP_INTERCEPT_SELF_IPI}>
     -DZPP_INTERCEPT_APIC=$<BOOL:${ZPP_INTERCEPT_APIC}>
     -DZPP_VIRTUALIZE_APIC=$<BOOL:${ZPP_VIRTUALIZE_APIC}>
     -DZPP_PROFILE_L2=$<BOOL:${ZPP_PROFILE_L2}>

@@ -26805,3 +26805,116 @@ produced by a guest doing nothing **and** by a guest freeing memory.
 since the very first capture - the call site does `movq %rbx, %rdx` -
 sitting in a printed column beside `rsp` for five sessions. **The data
 was already there and nothing had asked the right question of it.**
+
+## The stall is one byte, that byte is a register, and the value is VINA
+
+`ntoskrnl`'s `VslpEnterIumSecureMode` loops on a state byte and the byte
+reads **4**. Where it comes from is settled, statically and then live:
+
+**It is not memory.** `HvlSwitchToVsmVtl1` (RVA `0x6a76a0`) marshals the
+whole descriptor into *shared registers* around the `vmcall` -
+`movq (%rdx), %rbx`, then `movdqu 0x8(%rdx), %xmm10` through
+`0x58(%rdx), %xmm15`, and the mirror stores on return. The state byte is
+**byte 1 of RBX**. `VslSetPlaceholderPages` `memset`s the descriptor to
+`0x68` bytes and `0x68` = 8 + 6x16 exactly, which is the structure's
+definition. `securekernel`'s `SkCallNormalMode` does the same marshalling
+in reverse.
+
+So the obvious hypothesis - that the descriptor's page is not writable in
+VTL1's extended page tables - is **dead without a measurement**: VTL1
+never touches that page. No EPT check was run and none was needed.
+
+**The value 4 is written in exactly one place in either image:**
+`ShvlVinaHandler`, securekernel RVA `0x942cc`. It tests `VinaAsserted`,
+builds a fresh zeroed `0x68`-byte call block, writes `movb $0x4, 0x21(%rsp)`
+and returns to VTL0. Its only caller is `KiVinaInterrupt`, armed by
+`ShvlpEnableVina` with vector `0x40`.
+
+`VslpEnterIumSecureMode` handles states 0, 1, 2, 3, 5 and 6 and has **no
+case for 4 on purpose** - falling through and re-entering *is* the correct
+answer to "go take your interrupt". `IumInvokeSecureService` is what sets
+it to 1 when the call completes, and it never gets to.
+
+### Measured, one 257 second window, settled guest
+
+- `rbx` at `HvCallVtlReturn`: `changed` delta **0** over **25,659**
+  switches, latest `0x100000400` - byte 1 = 4 on every one. Every other
+  register's change counter is zero too.
+- VINA vector `0x40` injected **1.0032** per `HvCallVtlCall` (carried
+  0.9939). There are no notification-free round trips.
+- Vector `0x2f` requested **145,300** times, delivered **zero**.
+- Virtual task priority at second-level entry, delta over 630,418
+  entries: `0x20` 36.2%, `0x40` 5.6%, `0xd0` 58.2%, and **`0x00` and
+  `0x10` exactly zero**. Never once below `0x20`, at either trust level.
+- `entries carrying nothing while the priority would have admitted a
+  deferred call`: delta **0**. The cumulative 14,767 is early-boot
+  residue, as that counter's own note said.
+- `r8` at every `HvCallVtlCall` (`mov %cr8,%r8`) = **2**, frozen.
+
+**The cumulative 0.933 that first suggested notification-free round trips
+was a wrong-duration reading** - a ratio spanning the healthy early boot
+*and* the livelock. The steady-state delta brackets 1.00 from both sides.
+Third instance of that shape in this file.
+
+### Which decided level-versus-edge, and killed a timing target
+
+A round trip is 10.0 ms against a 1.74 ms tick, so "shorten the round
+trip below the tick and the notification is missed" was worth stating.
+**It is refuted**: `0x2f` is pending at the instant of every entry
+because it is *never* delivered; the edge model predicts ~3.7%
+notification-free calls and the measured shortfall is none; and `0x2f` is
+refused by the very IRQL the secure call holds, so **no round-trip speed
+makes it deliverable**. Per-exit work stays ruled out.
+
+### And the page agrees with the register, so the diagnosis ends above us
+
+`l2_entry_vtpr` is sampled in `build_vmcs02` from the `virtual_apic12` of
+the vmcs12 *being entered* - the right page per entry, unlike
+`nested_virtual_apic_address`, which holds whichever level was built
+last. It reads `0x20`, which **is** `CR8 = 2`. The guest hypervisor has
+the correct task priority, correctly refuses `0x2f` 145,300 times, and
+asserts the notification anyway.
+
+The same disagreement shows a second time in a mechanism we only carry:
+**interrupt-window exiting armed 328,523 times in the window against zero
+`0x2f` injections** - and interrupt-window exiting fires on `RFLAGS.IF`
+and blocking state, never on task priority. The level above has a
+pending-test that ignores priority and a delivery-test that honours it.
+
+*The guest hypervisor asserts a notification for an interrupt it will not
+deliver.* That is the finding, and it is complete as measured.
+
+### `ZPP_INTERCEPT_SELF_IPI`, and the prediction written before the boot
+
+The one lever left on this side: `0x2f` reaches the level above **only
+because we reflect it**. So withhold a self-directed synthetic interrupt
+the requesting processor cannot take, and deliver it here when it can.
+
+`ZPP_DELIVER_SELF_IPI` was only ever half of this and is useless alone -
+it delivered 1 and held 2,005, the rule was right, and the write was
+*still* reflected so the vector stayed pending. The halves have never run
+together. One switch now gates both; `nested_vmx::self_ipi_delivery` is
+the derived constant the delivery site keys on.
+
+**Not a lie about time.** The four interventions that bugchecked all
+misrepresented clocks. Here the interrupt is genuinely undeliverable when
+asked for, by the guest's own priority, and delivered at the first
+instant it is deliverable, by SDM 12.8.4 - the rule the processor itself
+applies. The honest risk is bookkeeping above us that depends on seeing
+the write, which is why it is off by default and why only self-directed,
+currently-undeliverable commands are withheld.
+
+Predicted, so it can fail:
+
+- `l2_self_ipi_swallowed` rises and `l2_self_ipi_reflected` stays near zero;
+- VINA `0x40` per `HvCallVtlCall` falls from **1.00** toward 0;
+- `rbx.changed` at `HvCallVtlReturn` becomes **non-zero** - the single
+  cleanest signal, since it has been exactly 0 across every window ever
+  taken;
+- the state byte leaves 4, `IumInvokeSecureService` sets 1, VTL0 lowers
+  IRQL, the held `0x2f` is delivered;
+- ten Ready threads run, `QuantumEnd` clears, context switches appear.
+
+**If the notification still asserts at ~1.00 per call, the model is
+wrong** - something other than `0x2f` holds it - and that is worth one
+boot to learn.
