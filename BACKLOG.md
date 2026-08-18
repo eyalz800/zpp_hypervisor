@@ -26219,3 +26219,36 @@ And the gating cut a round trip from 958 to 328 microseconds after the
 window that showed nothing, so **whether the loop responds to that has
 never been tested** - the one piece of already-completed work whose
 effect on this is unmeasured.
+
+### And the answer never varies either: `rax = 1`, 202,683 times
+
+The `HvCallVtlReturn` side of the same window:
+
+```
+rax    changed 0   latest 0x1        rcx  changed 0  latest 0x12
+rdx    changed 0   latest 0x0        rip  changed 0  latest ...0032
+cr3    changed 0   latest 0x8800002  eptp changed 0  latest 0x101b1d01e
+```
+
+**VTL0 calls with `rax = 0` and VTL1 returns with `rax = 1`, and neither
+value has ever differed from the previous switch.** Both directions
+constant across 202,683 switches.
+
+So the loop is closed at both ends: a request that never changes, and an
+answer that never changes. **That is a poll.** The secure kernel is being
+asked the same question 131 times a second and giving the same reply, and
+the ordinary kernel is not satisfied by it.
+
+Also settled in passing, and worth recording because this file once
+worried about it: the two trust levels really do have separate address
+spaces - `cr3` `0x1ae002` against `0x8800002`, extended-page-table
+pointer `0x101b1a01e` against `0x101b1d01e` - and this VMM keeps them
+apart correctly. Whatever is wrong, it is not that the levels are being
+conflated.
+
+**The last unknown is what `rax = 1` means to the caller.** It is the
+only value crossing the boundary that this VMM can see, it is the same
+every time, and `HvlSwitchToVsmVtl1`'s caller at `ntoskrnl`+0x6a774b -
+already symbolized - is the code that decides to ask again. Disassembling
+what it does with that return value is a read of the guest's own image,
+which is on disk and needs no boot.
