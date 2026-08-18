@@ -32,6 +32,29 @@ inline constinit std::uint64_t vmcs_reads_taken{};
 inline constinit std::uint64_t vmcs_writes_taken{};
 
 /**
+ * Which fields those reads name, as a table rather than a ring.
+ *
+ * The count above says 54 reads an exit and the guest-state deferral
+ * already reports 0.9 of them, so 53 are something else and no
+ * instrument here could say what. KVM's hot exit path reads about eight
+ * fields - `sync_vmcs02_to_vmcs12` reads RFLAGS, two AR bytes and the
+ * interruptibility state, takes RIP and RSP from its own register cache
+ * and computes the activity state - and defers the rest behind
+ * `need_sync_vmcs02_to_vmcs12_rare` until L1 actually reads one. Which
+ * of our fifty-three are that same rare set is the whole question, and
+ * it is answerable only by field.
+ *
+ * Direct-mapped on the low bits of the encoding and never evicted: a
+ * collision loses a field rather than corrupting a count, and the top
+ * of the table is what matters. `overflow` says how much was lost, so a
+ * table that is too small says so rather than quietly under-reporting.
+ */
+inline constexpr std::size_t vmcs_read_slots = 64;
+inline constinit std::uint64_t vmcs_read_field[vmcs_read_slots]{};
+inline constinit std::uint64_t vmcs_read_hits[vmcs_read_slots]{};
+inline constinit std::uint64_t vmcs_read_overflow{};
+
+/**
  * The VMCS error type.
  */
 enum class vmcs_error : int
@@ -142,6 +165,20 @@ public:
     std::uint64_t read(field field) const
     {
         vmcs_reads_taken = vmcs_reads_taken + 1;
+
+        auto encoding = static_cast<std::uint64_t>(field);
+        auto slot = ((encoding >> 1) ^ (encoding >> 9)) &
+                    (vmcs_read_slots - 1);
+
+        if (0 == vmcs_read_hits[slot]) {
+            vmcs_read_field[slot] = encoding;
+        }
+
+        if (vmcs_read_field[slot] == encoding) {
+            vmcs_read_hits[slot] = vmcs_read_hits[slot] + 1;
+        } else {
+            vmcs_read_overflow = vmcs_read_overflow + 1;
+        }
 
         std::uint64_t value{};
         if (0 != vmread(field, &value)) {
