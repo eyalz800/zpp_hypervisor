@@ -25766,3 +25766,86 @@ guest page-table walk reads any structure `ci.pdb` names.
   (`llvm-readobj --file-headers`) and it is `0x180000000`. This is the
   export-table trap in a new coat: **a symbolizer that answers is not a
   symbolizer that is right.**
+
+## Ten threads Ready and never running: the dispatch interrupt is the block
+
+The refutation two entries ago was correct about the wrong thread.
+`state = 2, wait_reason = 0` says *this* thread is not waiting; it is
+silent about everyone else, because `guest_thread_samples` only ever
+reads the current thread. The queue needed its own walk.
+
+`PsActiveProcessHead` was not even needed - the current thread's own
+process reaches it: `KTHREAD.Process` at 544, `EPROCESS.ThreadListHead`
+at 880, `ETHREAD.ThreadListEntry` at 1400, `KTHREAD.State` at 388, all
+already in `guest_windows.h` and verified against this PDB.
+
+```
+current thread 0xffffe78a2f5e3040  process 0xffffe78a2f49e040
+21 threads in this process
+  state 1 Ready          10
+  state 2 Running         1
+  state 5 Waiting        10
+```
+
+**Ten threads runnable and not running**, read twice a minute apart with
+identical counts. One thread Running - the same `Phase1Initialization`
+that has been current in all 234 samples this session - and ten more
+that the scheduler has marked ready and that never get the processor.
+
+### That is one cause for every symptom in this file
+
+- `0x2f` delivered **17 times against 183,898 requested**. Quantum end
+  arms `KeQuantumEndTimerIncrement` and requests the dispatch software
+  interrupt; the dispatch is the self-IPI; if it never arrives the
+  current thread is never preempted.
+- Zero context switches in fifty-five minutes and eighteen million
+  exits, with the idle thread never once current.
+- One thread Running for ever, at `state = 2`, never blocked - because
+  nothing can take the processor away from it.
+- `Phase1Initialization` never finishing, because the work it is waiting
+  on belongs to threads that are Ready and never scheduled.
+
+**And it is ours.** The vector goes into the synthetic interrupt command
+register, `wrmsr 0x40000071` with value `0x4002f`, 183,898 times.
+
+### The acquittal this file recorded was a mechanism, not an acquittal
+
+Earlier: "the self-IPI is sent constantly, delivered never - it is
+correctly *masked*, the guest is at IRQL 13/15", supported by
+`guest_interrupt_requested` clear on 54% of samples, taken to mean the
+queue is drained inline.
+
+Every word of that is true and none of it acquits anything. **Masked and
+harmless are different claims and only the first was measured.** A
+dispatch interrupt that is correctly masked at CLOCK_LEVEL must still be
+delivered when the priority falls, and the priority *does* fall - `0x20`
+on 33-39% of entries and `0x00` on 0.8-1.4%. Ten Ready threads say it
+is not being delivered there either.
+
+The request byte being clear says the *request* was consumed. It does
+not say a thread switch happened, and the thread walk says one never
+has.
+
+### What this makes of the tick work
+
+The tick work stands as measurement and falls as diagnosis. 1.26x to
+0.95x was real, it cleared the noise floor by three, and it was aimed at
+a starvation that is not what holds this boot. **A machine that is
+starved gets better when it is fed; this one did not, because it is not
+starved - it is single-threaded by accident.**
+
+RSA in `CI.dll` is then most likely *the work of the one thread that can
+run*, not a loop: `Phase1Initialization` validating what it can while
+ten threads it needs sit Ready behind it.
+
+### Next, and it is now a narrow question
+
+Why is a requested dispatch interrupt not delivered when the task
+priority falls below its class? Everything needed is already recorded -
+`l2_injected_vector`, `l2_tpr_threshold_seen`, the interrupt-window
+arming, and `guest_interrupt_requested` - and the answer is somewhere
+between what the guest hypervisor writes into the virtual-APIC page and
+what this VMM composes into vmcs02. `ZPP_DELIVER_SELF_IPI` was the
+attempt to force it and it died after one delivery; with the block now
+named, why it died is worth re-reading rather than the switch being
+retried.
