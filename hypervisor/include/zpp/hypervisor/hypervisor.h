@@ -3528,6 +3528,39 @@ private:
     volatile std::uint64_t handler_entry_tsc[max_cpus]{};
     volatile std::uint64_t handler_first_tsc[max_cpus]{};
     volatile std::uint64_t handler_last_tsc[max_cpus]{};
+
+    /**
+     * The same span as `handler_cycles`, split by the exit reason that
+     * caused it.
+     *
+     * **This exists because the phase table accounts for about forty per
+     * cent of the handler and four optimisations in a row have come out
+     * of the other sixty.** Measured on a settled boot: 381,680 cycles
+     * an exit inside this VMM, of which `save_l2_state`, the whole of
+     * `reflect_l2_exit` and the whole of `build_vmcs02` are 144,652.
+     * The phases are timed where somebody once suspected a cost, so they
+     * cover the reflection path and nothing else - and only 35% of exits
+     * reflect. Nothing has ever measured the rest.
+     *
+     * Split by reason rather than by call site because the exit-reason
+     * histogram is already the one distribution this VMM knows exactly,
+     * so the split lands directly on a denominator that is already
+     * trusted: `vmresume` at 38% of exits and `vmptrld` at 8% are the
+     * guest hypervisor's own instructions, handled entirely outside
+     * every phase, and if the cycles are there this says so in one line.
+     *
+     * Taken in `resume_guest`, from the same pair of reads
+     * `handler_cycles` uses, so the two must sum to each other - which
+     * is the check that says the split is complete rather than merely
+     * plausible.
+     * @{
+     */
+    static constexpr std::size_t handler_reason_slots = 64;
+    volatile std::uint64_t handler_reason_cycles[handler_reason_slots]{};
+    volatile std::uint64_t handler_reason_exits[handler_reason_slots]{};
+    /**
+     * @}
+     */
     /** @} */
 
     /**

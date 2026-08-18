@@ -914,10 +914,28 @@ void hypervisor::resume_guest(std::uint64_t cpuid,
         auto cpu = slot - 1;
         auto now = arch::x86_64::rdtsc();
         if (0 != this->handler_entry_tsc[cpu]) {
+            auto span = now - this->handler_entry_tsc[cpu];
+
             this->handler_cycles[cpu] =
-                this->handler_cycles[cpu] +
-                (now - this->handler_entry_tsc[cpu]);
+                this->handler_cycles[cpu] + span;
             this->handler_exits[cpu] = this->handler_exits[cpu] + 1;
+
+            // And the same span against the reason that caused it. See
+            // `handler_reason_cycles`: the phase table covers the
+            // reflection path, only a third of exits take it, and every
+            // optimisation aimed at those phases has left the total
+            // where it was.
+            //
+            // Not per processor, deliberately - one processor runs the
+            // guest being chased, and a second dimension here would cost
+            // 64 cache lines to say so.
+            if (auto slot = static_cast<std::size_t>(full_reason.basic());
+                slot < handler_reason_slots) {
+                this->handler_reason_cycles[slot] =
+                    this->handler_reason_cycles[slot] + span;
+                this->handler_reason_exits[slot] =
+                    this->handler_reason_exits[slot] + 1;
+            }
         }
         this->handler_last_tsc[cpu] = now;
 

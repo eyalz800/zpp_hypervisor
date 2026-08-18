@@ -791,6 +791,65 @@ def dump_regions(args, elf, instance):
                       f"{1.74 * span / max(span - hidden, 1):.2f} ms of it")
 
 
+def dump_handler_by_reason(args, elf, instance):
+    """Where the handler's time goes, by the reason that caused the exit.
+
+    The phase table covers the reflection path and only about a third of
+    exits take it, so roughly sixty per cent of the handler has never
+    been attributed to anything.  Four optimisations aimed at the phases
+    have each removed real work and left the total where it was; this is
+    the split that says whether they were aimed at the wrong third.
+
+    The sum of this must equal `handler_cycles`, and the line at the end
+    says so - a split that does not add up is measuring a different span
+    from the one it is being compared against.
+    """
+    members = ["handler_reason_cycles", "handler_reason_exits",
+               "handler_cycles", "handler_exits"]
+    off = gdb_offsets(elf, members, optional=True)
+    if len(off) != len(members):
+        print("\n[handler by reason: not in this binary]")
+        return
+
+    slots = 64
+    reader = Monitor(args.rig, args.port)
+    for member in ("handler_reason_cycles", "handler_reason_exits"):
+        reader.queue(instance + off[member], slots)
+    reader.queue(instance + off["handler_cycles"], 1)
+    reader.queue(instance + off["handler_exits"], 1)
+    got = reader.run()
+
+    def row(member, i):
+        return got.get(instance + off[member] + 8 * i, 0)
+
+    total_cycles = got.get(instance + off["handler_cycles"], 0)
+    total_exits = got.get(instance + off["handler_exits"], 0) or 1
+
+    rows = []
+    split_cycles = 0
+    split_exits = 0
+    for i in range(slots):
+        cycles = row("handler_reason_cycles", i)
+        exits = row("handler_reason_exits", i)
+        if not exits:
+            continue
+        split_cycles += cycles
+        split_exits += exits
+        rows.append((cycles, exits, i))
+
+    print(f"\ncpu 0 where the handler's time goes, by exit reason "
+          f"({total_cycles / total_exits:,.0f} cycles/exit overall)")
+    for cycles, exits, i in sorted(rows, reverse=True):
+        print(f"  {EXIT_REASON.get(i, i):<18} {exits:>10,} exits  "
+              f"{cycles // max(exits, 1):>9,} cyc/exit  "
+              f"{100.0 * cycles / max(total_cycles, 1):>5.1f}% of the handler"
+              f"  {cycles / total_exits:>9,.0f} cyc per exit overall")
+
+    print(f"  --- split covers {100.0 * split_cycles / max(total_cycles, 1):.1f}% "
+          f"of the cycles and {100.0 * split_exits / total_exits:.1f}% "
+          f"of the exits")
+
+
 def dump_guest_state_shadow(args, elf, instance):
     """Where the deferred guest-state copy's model differs from vmcs02.
 
@@ -1581,6 +1640,8 @@ def main():
 
     print("\nvmcs fields the guest hypervisor uses")
     dump_field_use(args, instance, off)
+
+    dump_handler_by_reason(args, args.elf, instance)
 
     # Every processor, not only the boot processor.  The application
     # processors are where "did this one participate at all" is decided,

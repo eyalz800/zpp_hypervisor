@@ -24658,3 +24658,83 @@ for long: 11,364 gaps at 1.74 ms is about 18 seconds of it.
 **The switch stays at 1.** Anyone tempted by it again should read the
 two measurements at the top: the tick did not move, so there was never
 a benefit to trade the watchdog against.
+
+## The mapping window is 4.3x cheaper and the tick did not move
+
+`map_window_at` called `page_table::map_page`, which forwards to
+`map_page_from`, which rewrites all four levels and resolves three of
+them with `virtual_to_physical` - and *that* is itself a software walk
+of this VMM's own tables. One repoint of one page was **three nested
+walks plus four read-modify-writes plus the INVLPG**.
+
+All of it above the leaf recomputes a constant: the window's virtual
+addresses are fixed at compile time. `map_page_from`'s own comment
+defends rewriting them - "pointing an entry at the table it already
+holds is idempotent and cheaper than the branch that would skip it" -
+which is true of one call and false of a hundred million.
+
+Caching the leaf entry per window page and writing it directly:
+
+```
+map_window_at        1,185 -> 275 cycles/call
+cache hit rate       199,924,902 fast, 3 slow   (100.00%)
+```
+
+**And the tick did not move**, measured settled against settled with the
+protection counter frozen in both:
+
+| | control | cached leaf |
+|---|---|---|
+| wall clock per exit | 451,433 | 448,076 |
+| inside this VMM | 382,087 | 381,680 |
+| clock interrupts delivered | 489.1/s | 432.8/s |
+| exits per tick | 9.46 | 9.71 |
+| tick cost against a 1.74 ms period | 2.14 ms (1.23x) | 2.18 ms (1.25x) |
+
+The change is right and stays - it is strictly less work for the same
+result, verified on the medium at a 100% hit rate, which is more than
+any of the previous three could say. But it is the **fourth** correct
+optimisation in a row to leave the total where it was.
+
+### Why, and it is not subtle once the phases are added up
+
+Settled boot, 381,680 cycles an exit inside this VMM:
+
+```
+save_l2_state       20,361 cyc/exit    5.3%
+reflect_l2_exit     73,756            19.3%
+build_vmcs02        50,535            13.2%
+                   -------           ------
+                   144,652            37.9%
+```
+
+Those three are the whole of the reflection path and they are **38% of
+the handler**. Everything else that has ever been timed here nests
+inside them. So about **sixty per cent of every exit is inside
+`on_vm_exit` and outside every phase this VMM measures**, and it has
+never been attributed to anything.
+
+The reason is structural rather than an oversight: `phase_calls` for
+those three reads **723,184 against 2,062,680 exits**. Only about a
+third of exits reflect. The other two thirds are the guest hypervisor's
+own instructions - `vmresume` at 38% of exits, `vmptrld` at 8%,
+`vmread` at 3%, plus the interrupt-window exits it arms on 46% of
+entries - and *none* of that path is timed.
+
+**Every optimisation this file has attempted was aimed at the third that
+is measured**, because that is the only third anything could see. The
+phase table is not a map of the cost; it is a map of where somebody once
+suspected a cost.
+
+### So the next thing is an instrument, not a change
+
+`handler_reason_cycles` splits the same span `handler_cycles` already
+measures - top of `on_vm_exit` to the last instant of `resume_guest` -
+by the exit reason that caused it. It lands on the one distribution this
+VMM knows exactly, and it must sum to `handler_cycles`, which is the
+check that the split is complete rather than merely plausible.
+
+That answers in one line what four boots of optimisation could not:
+whether the cycles are in the reflection this file has spent a year on,
+or in the guest hypervisor's own `vmresume` and `vmptrld`, which nothing
+has ever looked at.
