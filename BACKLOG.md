@@ -24557,3 +24557,104 @@ today ... writing it as a sum is what keeps it correct if that
 changes".
 
 Next: `ZPP_TIME_DILATION`, default 1.
+
+## `ZPP_TIME_DILATION` fails, and the guest names the failure: bugcheck `0x1CA`
+
+Built, deployed and run on the rig at `dilate=8`, manifest verified off
+the binary. It is a **negative result twice over** - it does not do what
+it was designed to do, and what it does instead kills the guest - and
+both halves are worth more than the switch was.
+
+### It does not slow the tick, because Hyper-V's clock is out of reach
+
+The design assumed every clock inside the virtual machine is a function
+of the time-stamp counter. **It is not.** Two independent readings from
+the dilated boot say so:
+
+- The reference TSC page this VMM fits and publishes came out with
+  scale `0x49e111f0850f30a` against `0x1490822f0de7453` undilated -
+  **3.59x larger**. The fit is `reference = a * guest_tsc + b` over 64
+  sampled pairs with a held-out middle sample inside 100 us, so the
+  relation really is linear with that slope. If the guest hypervisor
+  derived the reference counter from the same counter we offset, `a`
+  would be unchanged. It tracks wall time instead.
+- The clock-gap histogram, which needs no theory at all: 59.8% of gaps
+  in the 1.05-2.11 ms bucket, exactly where the undilated boot's were.
+  **The tick period in real time did not move.**
+
+So the guest hypervisor times its synthetic timer against something we
+do not control - not `rdtsc`, since the VMCS offset would have reached
+it, and not the VMX-preemption timer, which this VMM strips from
+vmcs12. The local APIC timer is the remaining candidate and is driven
+by the bus clock.
+
+### And the guest detects the disagreement it does create
+
+Every dilated boot resets after about four and a half minutes. Fourteen
+module loads in one run before the loop was stopped.
+
+`-no-reboot` alone is not enough to catch it - QEMU *exits*, taking the
+memory with it. `-no-reboot -no-shutdown` leaves it `paused (shutdown)`
+with everything intact, and then the guest's own record reads out
+through the page-table walk described in the entry above:
+
+```
+KiBugCheckData    0x1ca  0  0  0x14e3c5cdd  0
+KiBugCheckActive  0x0000000100000003
+KeTimeIncrement   0x43f8          <- it had reached the 1.74 ms tick
+```
+
+`0x1CA` has exactly three call sites in the whole image, and the one
+that is reachable is in **`HalpWatchdogCheckPreResetNMI`**
+(`ntoskrnl`+0x548894, `movl $0x1ca, %ecx; callq KeBugCheckEx`). The HAL
+arms a watchdog - `HalpHvWatchdogArm`, a second synthetic timer - and
+bugchecks from the pre-reset non-maskable interrupt when it expires.
+
+That is the same class of death as `ZPP_STRETCH_GUEST_TIMER`, and this
+time the guest names it. **The generalisation this file made after
+three failures - "this guest cannot be helped to cope with being slow"
+- survives a fourth attempt built specifically to avoid the flaw the
+first three shared.** Windows on Hyper-V does not merely use several
+clocks, it *checks them against each other*, and it has a watchdog
+whose whole job is to notice.
+
+### What was measured while it ran, and why it is not evidence of progress
+
+The dilated boots looked dramatically better and the comparison is
+**confounded**, which is worth recording because it was nearly reported
+as a success:
+
+| | stuck, settled | dilated, ~4 min in |
+|---|---|---|
+| task priority `0xd0` (CLOCK) | 51.7% | 3.2% |
+| task priority `0x00` (PASSIVE) | 1.3% | 41.8% |
+| `hlt` exits | 0 | 53,107 |
+| `0x2f` delivered | 22 of 211,389 asked | 341 |
+
+Every dilated dump is of a boot four minutes old that then died. The
+stuck dumps are of a boot hours old. A boot in its extended-page-table
+fill phase looks like this on *any* build - this file already records
+that "boots land in different regimes" and that a pair of measurements
+taken across that boundary compares two machines. The guest had reached
+`KeTimeIncrement = 17,400`, so it was in the fast-tick regime, but not
+for long: 11,364 gaps at 1.74 ms is about 18 seconds of it.
+
+### What survives
+
+- Two latent bugs found and fixed on the way, both real independently
+  of the switch: `build_vmcs02` was reading vmcs02's TSC offset where
+  it meant vmcs01's, because its own VMPTRLD had already run; and the
+  reference TSC page was fitted against the host's counter where the
+  guest evaluates it against its own.
+- The instrument: guest virtual memory is readable from outside with no
+  rebuild, by walking the guest's page tables with `xp`. It read
+  `KeQuantumEndTimerIncrement` in the entry above and the bugcheck code
+  here, and it is the only way to see a blue screen on a rig whose
+  display is a passed-through GPU - QEMU answers `screendump` with
+  "there is no console to take a screendump from".
+- `-no-reboot -no-shutdown` as the pair that freezes a resetting guest.
+  `-no-reboot` on its own destroys what you were about to read.
+
+**The switch stays at 1.** Anyone tempted by it again should read the
+two measurements at the top: the tick did not move, so there was never
+a benefit to trade the watchdog against.
