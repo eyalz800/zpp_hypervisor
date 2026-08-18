@@ -25623,3 +25623,82 @@ every regime measured, and the guest page-table walk, which can read any
 kernel variable the PDB names. `PspAcquirePushLockExclusive` and
 `KeAbPreAcquire` in the same nineteen samples say the next thing to read
 is which lock.
+
+## The module is `CI.dll`, and no context switch has ever happened
+
+Two readings, no boot, both against the running profiling build.
+
+### One thread, and the state field refutes the deadlock reading
+
+`guest_thread_samples`, 234 taken this boot, 32 retained:
+
+```
+gs_base 0xfffff8077a213000  prcb 0xfffff8077a213180
+thread  0xffffd386d9496040  idle_thread 0xfffff807ed3d25c0
+start_address 0xfffff807ecafb520 -> Phase1Initialization
+state 0x2   wait_reason 0x0   wait_irql 0x0
+
+distinct thread pointers across 32 samples: 1
+```
+
+**One thread pointer. Every sample. `idle_thread` is a different
+pointer, so the idle thread has never run either** - across eighteen
+million exits and fifty-five minutes.
+
+But `state = 2` is **Running**, and `wait_reason = 0`. A thread blocked
+on a lock is state 5, Waiting. **So `Phase1Initialization` is not blocked
+- it is running, and it never yields.** That is a livelock inside one
+thread, not a deadlock between two, and the distinction matters because
+the two need opposite work: a deadlock needs the holder scheduled, and
+this needs to know what the loop is doing.
+
+`KeAbPreAcquire` in the profile is one sample of nineteen and it does
+mean a contended acquire happened; it does not outweigh thirty-two
+consecutive Running states. **One symbol is a hypothesis and a field
+sampled thirty-two times is a measurement**, which is this file's own
+rule applied to its own most attractive theory.
+
+### The module, named without switching the capture back on
+
+`PsLoadedModuleList` walked with the guest page-table reader - one
+`LIST_ENTRY` walk, 78 modules, every base, size and name:
+
+```
+0xfffff8077e947bc0 -> CI.dll base 0xfffff8077e930000 size 0x11a000 (+0x17bc0)
+0xfffff8077e9479d9 -> CI.dll (+0x179d9)
+0xfffff8077ea09a30 -> CI.dll (+0xd9a30)
+0xfffff8077e9dbfff -> CI.dll (+0xabfff)
+```
+
+**`CI.dll` - Code Integrity.** The seven clustered samples are
+`CI.dll+0x179d9` through `+0x17f6f`, a 1.4 kilobyte span, and two more
+are elsewhere in the same image.
+
+That is the module hypervisor-protected code integrity runs through, and
+it is the one component whose page validation goes to the secure kernel -
+which is the `HvCallVtlCall`/`HvCallVtlReturn` traffic this investigation
+has watched for its whole length without knowing what asked for it.
+
+**And this walk replaces `vtl_image_base` outright.** It names *every*
+module in one pass rather than one image per capture, it needs no
+diagnostic compiled into the hypervisor, and it works on any address for
+the rest of the investigation. The capture's image resolution was the
+expensive way to answer a question a `LIST_ENTRY` walk answers better.
+
+### Where this leaves the tick work
+
+**The fivefold speedup is now firmly the wrong work, and this is what
+establishes it.** The sequence is worth stating because it is the most
+expensive thing this investigation will not now do:
+
+- the tick was measured at 1.26x its period and treated as the block;
+- it was brought to 0.95x - a 32% cut, three times the noise floor, the
+  first change here that ever cleared it;
+- the guest received 98.4% of the interrupts it programs, against 71-89%;
+- and in fifty-five minutes it touched no new memory, ran one thread,
+  and switched context zero times.
+
+A machine that is starved gets better when it is fed. This one did not.
+So the remaining 45% behind `vmresume` and the 51.4% inside
+`build_vmcs02` are real costs and they are not this bug, and the next
+reading is `CI.dll+0x17xxx` against that module's own symbols.
