@@ -25849,3 +25849,86 @@ what this VMM composes into vmcs02. `ZPP_DELIVER_SELF_IPI` was the
 attempt to force it and it died after one delivery; with the block now
 named, why it died is worth re-reading rather than the switch being
 retried.
+
+## All three delivery mechanisms eliminated: the vector is never posted anywhere
+
+Two readings from the settled guest, no boot.
+
+### What vmcs12 asks for, and what it gets
+
+```
+pin       requested 0x0000003f  granted 0x0000003f
+    bit  0 external-interrupt exiting   asked 1 got 1
+    bit  3 nmi exiting                  asked 1 got 1
+    bit  5 virtual nmis                 asked 1 got 1
+secondary requested 0x001010ae  granted 0x001050ae
+    bit  1 enable ept          asked 1 got 1    bit  3 enable rdtscp   asked 1 got 1
+    bit  5 enable vpid         asked 1 got 1    bit  7 unrestricted    asked 1 got 1
+    bit 12 enable invpcid      asked 1 got 1    bit 20 enable xsaves   asked 1 got 1
+    bit 14 vmcs shadowing      asked 0 got 1
+```
+
+**Nothing the guest hypervisor asks for is dropped.** The one bit that
+differs is bit 14, VMCS shadowing, which this VMM grants on top - so the
+grant is a superset, not a subset.
+
+And the three bits that would matter are **not requested at all**:
+process-posted-interrupts (pin bit 7), virtual-interrupt delivery
+(secondary bit 9), APIC-access and x2APIC virtualization (bits 0 and 4).
+So candidates two and three are dead: **Hyper-V never asks for a
+delivery mechanism this VMM fails to provide.**
+
+### And the vector is not posted
+
+The virtual-APIC page vmcs12 names, read directly:
+
+```
+virtual-apic page 0x117a1a000
+  TPR (0x80) = 0xd0
+  ISR vectors set: none
+  IRR vectors set: none
+```
+
+**Both empty.** `0x2f` is not pending in the request register, not in
+service, not anywhere. So the guest hypervisor has not delivered its half
+either - there is nothing sitting in a page nobody reads, which was the
+most attractive of the three explanations.
+
+### Which relocates the question rather than answering it
+
+By elimination the only path left is **event injection through vmcs12's
+VM-entry interruption-information field**, and `build_vmcs02` copies that
+faithfully - `l2_injected_vector` counts what arrives, and it counts
+`0xd1` at 84% and `0x40` at 16% and `0x2f` seventeen times. **Hyper-V
+injects other vectors constantly through the same field on the same
+path.** It simply does not inject this one.
+
+So this is not a control this VMM drops and not a page it fails to read.
+**It is the guest hypervisor deciding, every time, that `0x2f` may not be
+delivered** - and the only input to that decision this VMM supplies is
+what it composes into vmcs02 and what the virtual-APIC page holds when
+Hyper-V looks.
+
+### The hazard already written down beside it
+
+`l2_entry_vtpr`'s comment records exactly the thing to check next, and it
+was written before any of this was known:
+
+> "the guest hypervisor keeps a separate VMCS per virtual trust level,
+> and `nested_virtual_apic_address` holds whichever was built last. A
+> histogram of VTPR-over-entries cannot be read off the wrong page."
+
+**Two trust levels, two virtual-APIC pages, one member holding whichever
+was built last.** The reading above - `TPR = 0xd0` - is from that member
+and therefore inherits the same doubt. If the page this VMM installs in
+vmcs02 for VTL0 is ever the one belonging to VTL1, Hyper-V reads a task
+priority that is not the one the guest set, and a permanently high one
+would refuse `0x2f` for ever while letting `0xd1` through, because a
+clock vector at class 13 is admitted at `0xd0` and a dispatch vector at
+class 2 is not.
+
+**That is a hypothesis and it is the fourth this session**; three of the
+previous three died. It is checkable without a boot - census the
+virtual-APIC address per trust level against the extended-page-table
+pointer that identifies the level, which `l2_vp_assist_eptp` already does
+for the VP assist page and which nothing yet does for this one.
