@@ -26141,3 +26141,81 @@ exits went unexamined.
 
 The next reading is how many pages that unload has left, which
 `MiDecommitPages`' own arguments would give, and whether the count falls.
+
+## It is (1), a loop: 28,073 switches with byte-identical registers
+
+The arithmetic was right and it forced the reading. Fifty-five minutes at
+~75 round trips a second is 247,500 page handovers, which at 4 KB is
+**967 MB** - larger than every module in that list put together. So the
+chain could not be a single driver unload running to completion.
+
+One window, 214 seconds, `vtl_switches` climbing 174,610 -> 202,683, so
+**28,073 new switches at 131 a second**. The register census over that
+window:
+
+```
+register  changed  latest                  register  changed  latest
+rax             0  0x0                      r9             3  0x68
+rbx         14367  0x400                     r10        14107  0x0
+rcx             0  0x11                      r11        18314  0x0
+rdx         12392  0xffff9983aecca1b0        r12           48  0x1
+rsp         12394  0xffff9983aecc9f88        r13        16276  0xf
+rbp             3  0xffffe78a2f5e3040        r14            1  0x2
+rdi             3  0xffffe78a2f5e3040        r15        12189  0x101
+rip             0  0xfffff80228e70019        cr3            1  0x1ae002
+```
+
+**Every `changed` count and every `latest` value is identical in both
+dumps.** The census runs before the gate `vtlcap=0` closes - it is only
+the deep capture that is switched off - and `vtl_switches` proves it ran
+28,073 more times. `vtl_differed` counts a register differing from the
+previous switch, so **frozen counters across 28,073 switches means the
+registers were byte-identical on every one of them.**
+
+That is candidate **(1)**. A page-by-page handover advances its argument;
+this repeats one call exactly. Not (2), which would show a register
+climbing.
+
+### And it identifies the caller, which corrects the stack reading
+
+`rbp` and `rdi` hold `0xffffe78a2f5e3040` - **the same pointer the thread
+walk found as the single Running thread**, the one whose start address is
+`Phase1Initialization`.
+
+So the traffic now is `Phase1Initialization`'s, and the driver-unload
+stack was `ExpWorkerThread`'s and is **stale**, exactly as the caveat
+said and the arithmetic predicted. The `Mm` -> `Vsl` -> `Hvl` chain is a
+real thing this guest did; it is not what it is doing.
+
+**Both halves of that matter.** The chain still explains how a secure
+call reaches VTL1 and why freeing memory raises no extended-page-table
+violations. It does not explain the current loop, and one window of
+registers was enough to say so - where an hour of counters was not.
+
+### What is now known about the loop, and it is a lot
+
+- one thread, `Phase1Initialization`, Running, never yielding;
+- 131 identical secure calls a second, arguments byte-for-byte constant,
+  from a constant stack pointer at a constant instruction pointer;
+- ten threads Ready behind it, `QuantumEnd = 1`, one deferred call queued
+  and never drained;
+- priority pinned at `0x20`/`0xd0`, so the dispatcher cannot run;
+- no page ever faulted in and none handed over.
+
+**A call whose arguments never change, repeated for ever, is a retry.**
+Something is asked, an answer comes back, and the answer does not
+satisfy - which is where this investigation started, before it knew the
+caller, the thread, the priority, or the shape.
+
+### The next reading, and it is now specific
+
+What the secure kernel *answers*. `rax` at the switch is `0` going in and
+the reply comes back in `rax` at the `HvCallVtlReturn` side - which the
+same census already records for kind 1, and which nothing has ever
+compared against the call. If the answer is a status that means "not
+done", this is a poll, and what it is polling for is the last unknown.
+
+And the gating cut a round trip from 958 to 328 microseconds after the
+window that showed nothing, so **whether the loop responds to that has
+never been tested** - the one piece of already-completed work whose
+effect on this is unmeasured.
