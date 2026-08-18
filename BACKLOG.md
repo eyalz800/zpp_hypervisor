@@ -24888,3 +24888,81 @@ ends are not independent targets. `build_vmcs02` is 167,489 of the
 1,575,118, 0.4% apart) and is now the largest single line in the
 machine at 40.2%. It is still worth nothing for the tick - 0.1 vmcalls a
 tick - and everything for anything else this guest does.
+
+## The marginal price of a VMCS access is ~3,100 cycles, measured in the settled state
+
+The contradiction this file has carried since "5.4 fewer VMCS reads an
+exit changed nothing" is closed, and the price list was right all along.
+
+`vmcs02_split_reads` and `vmcs02_split_writes` sample the same
+free-standing counters `vmcs::read` and `vmcs::write` already keep, on
+the same boundaries the TSC uses, so accesses are adjacent and sum
+exactly as the cycles do:
+
+```
+cpu 0 build_vmcs02, split (155,213 cycles a call over 502,925 calls)
+  slot                                    cyc/call  share  rd/call wr/call cyc/access
+  every guest-state field                   46,042  29.7%    0.00   14.88      3,095
+  host state once, then every control       36,755  23.7%    2.00    7.55      3,847
+  ept pointer and TPR shadow decided        24,953  16.1%    0.00    0.00          -
+  bitmaps merged, own controls in hand      23,432  15.1%    0.00    0.00          -
+  the event to inject, transition flush     14,822   9.6%    1.00    1.49      5,950
+  the VMPTRLD itself                         6,492   4.2%    0.00    0.00          -
+  controls read and validated                1,499   1.0%    0.00    0.00          -
+  the three MSR areas checked                1,037   0.7%    0.00    0.00          -
+  --- coverage 99.9% of the cycles, 100.0% of the calls reached the end
+  --- 26.9 accesses a call; over the slots that take them, 3,626 each
+  --- 63.0% touches the VMCS, 37.0% is software that touches nothing
+```
+
+**3,095 cycles a write in the guest-state block against a launch-time
+benchmark of ~2,200 a write and ~3,100 a read.** The benchmark is
+vindicated: a thousand back-to-back VMREADs is not the access pattern of
+a real exit, and it turns out not to matter. **So the cost model can be
+trusted again**, and the reason the 5.4-read removal showed nothing is
+the noise floor and nothing else - 5.4 x 3,100 is 16,700 cycles against
+a floor of tens of thousands.
+
+### "The cost is the deciding, not the writing" was half wrong
+
+The guest-state block takes **14.88 writes and 0.00 reads a call**. It is
+hardware. Forty fields at 0.37 writes each is exactly the shape of an
+elision that still reaches the VMCS on a fraction of them, and it means
+the fix is **fewer accesses, not a cheaper comparison** - the opposite of
+what the previous entry inferred from cycles alone. Two numbers, one
+conclusion each, and only the second one is right.
+
+Worth keeping as the shape: **a cost divided by a count you did not
+measure is a hypothesis, not a finding.** 46,042 over "forty fields" gave
+1,230 cycles a field and an entirely wrong mechanism; 46,042 over 14.88
+*measured* accesses gives 3,095 and the right one.
+
+### And 37% of it touches no hardware at all
+
+Two slots take zero VMCS accesses and 48,385 cycles a call between them:
+
+- **"ept pointer and TPR shadow decided", 24,953 cycles, 16.1%**, of
+  which `shadow_ept_pointer_for` is 11,714 - so about **13,000 cycles an
+  entry in the TPR-shadow decision alone**, which is `host_ept_lookup`
+  on the virtual-APIC page and the arithmetic around it. Nothing has
+  ever looked at it.
+- **"bitmaps merged", 23,432 cycles, 15.1%** - `merge_nested_bitmaps`
+  reading a 4 KB guest page and OR-ing it, every entry, by design.
+
+Those need software work and the other three need fewer VMCS accesses.
+**They are opposite jobs**, which is exactly why the counters were worth
+a boot before either was attempted.
+
+### Targeting, stated against the floor rather than hoped past it
+
+`build_vmcs02` is 155,213-170,328 cycles depending on the window, of
+332,428 for a `vmresume`, of a round trip that also costs 271,337 at the
+`wrmsr` end. About 3.6 round trips a tick, ~4.4M cycles a tick.
+
+So the two blocks after the VMPTRLD - the ones this file has spent three
+sessions eliding - are about 83,000 cycles, **~300,000 a tick out of
+4.4M, which is 7%**. Below the ten per cent a single boot can resolve.
+A complete win there is neither measurable in one boot nor sufficient
+alone: it has to be measured across repeated windows, or bundled with
+the `wrmsr` end of the same round trip so the change clears the floor.
+Anything that does not say which of those it is doing is not a plan.

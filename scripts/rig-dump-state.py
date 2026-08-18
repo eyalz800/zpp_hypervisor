@@ -914,19 +914,39 @@ def dump_vmcs02_split(args, elf, instance):
         # over its accesses lands near the launch-time price vindicates
         # that price in the settled state; one that lands far from it
         # tells us the marginal price for the first time.
-        each = f"{cycles / access:>11,.0f}" if access else f"{'-':>11}"
+        # Blank unless the slot really takes accesses. A slot with one
+        # access in three hundred thousand calls divides to a number in
+        # the hundreds of millions, which reads as a finding and is an
+        # artefact of the denominator.
+        each = (f"{cycles / access:>11,.0f}"
+                if access and (access / whole_calls) >= 0.01
+                else f"{'-':>11}")
         print(f"  {VMCS02_SPLIT[i]:<40} {cycles // whole_calls:>9,} "
               f"{100.0 * cycles / total:>5.1f}% "
               f"{reads[i] / whole_calls:>8.2f} {writes[i] / whole_calls:>8.2f}"
               f" {each}")
 
     all_access = sum(reads) + sum(writes)
+
+    # Over the slots that *take* accesses only. Dividing the whole
+    # phase's cycles by the whole phase's accesses charges the software
+    # slots to the hardware price and answers a question nobody asked.
+    hot = [i for i in range(slots)
+           if (reads[i] + writes[i]) / whole_calls >= 0.01]
+    hot_cycles = sum(split[i] for i in hot)
+    hot_access = sum(reads[i] + writes[i] for i in hot)
+    cold_cycles = total - hot_cycles
+
     print(f"  --- coverage {100.0 * total / max(whole, 1):.1f}% of the "
           f"phase's cycles, {100.0 * calls / whole_calls:.1f}% of its calls "
           f"reached the end")
-    print(f"  --- {all_access / whole_calls:.1f} VMCS accesses a call, "
-          f"{total / max(all_access, 1):,.0f} cycles each overall "
-          f"(launch-time price list says ~3,100 a read, ~2,200 a write)")
+    print(f"  --- {all_access / whole_calls:.1f} VMCS accesses a call; over "
+          f"the slots that take them, {hot_cycles / max(hot_access, 1):,.0f} "
+          f"cycles each (launch-time price list says ~3,100 a read, ~2,200 "
+          f"a write)")
+    print(f"  --- {100.0 * hot_cycles / max(total, 1):.1f}% of the phase is "
+          f"slots that touch the VMCS, {100.0 * cold_cycles / max(total, 1):.1f}%"
+          f" is software that touches nothing")
 
 
 def dump_guest_state_shadow(args, elf, instance):
