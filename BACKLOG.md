@@ -24369,3 +24369,62 @@ of 52 slots never observed changed, 4,601,935,089 writes elided, and
 `DIVERGED AFTER ELISION: 0`. Guest-state reads are deferred too, 20.0
 skipped per exit against 0.9 done. Those are done; the read side of the
 exit path is what was never given the same treatment.
+
+## Following KVM: the vpid reads are gone, and the cost did not move
+
+`vmcs.vpid()` as the idiom for "which processor am I" is removed from
+the two hot paths - all 22 uses in `on_vm_exit` and all 7 in
+`resume_guest`, which now takes the index its two callers already had.
+KVM never reads the VMCS for its own identity and neither do we now.
+
+Measured, three boots, each with the reader proven against
+`host_page_table[0] = …023`:
+
+| | vmcs reads/exit | cycles/exit inside this VMM |
+|---|---|---|
+| before | 53.9 | 418,211 |
+| after `on_vm_exit` | 51.5 | 415,382 |
+| after `resume_guest` too | **48.5** | 417,995 |
+
+**5.4 fewer VMCS reads an exit, and no change in cost.** The spread
+across six boots of this measurement is about 8,000 cycles, and the
+price list this VMM prints at launch on this same boot says a read
+costs about 3,100 cycles:
+
+```
+vmcs price per 1000: exit_reason 0x2e6064  rip 0x3026d0  gdtr_base 0x2fb3b9
+                     write rsp 0x225f89    write gdtr_limit 0x215511
+```
+
+3,038 / 3,156 / 3,126 cycles a read and 2,253 / 2,185 a write. So 5.4
+reads should be ~16,700 cycles, twice the noise, and it is not there.
+
+**Both numbers are measured and they disagree.** Either the marginal
+cost of a read in the settled state is far below what a thousand
+back-to-back reads at launch measure - which is exactly the kind of
+thing a microbenchmark gets wrong, since a tight loop of VMREADs is not
+the access pattern of a real exit - or the reads removed were not on
+the path that dominates. The counter says the reads really did stop
+happening, so it is not that they were never taken.
+
+Recorded as an open contradiction rather than resolved, because the
+cost model built on that price list is what produced "about 93 VMCS
+accesses per exit, which is the whole slowdown", and **that claim now
+has no measurement behind it.** Nothing should be built on it until the
+marginal cost of a read is measured *in the settled state* rather than
+at launch - the obvious way being to remove a known number of reads and
+watch, which is what this entry did, and what it says is "not 3,100".
+
+The changes stay regardless: strictly less work for the same result,
+and they align the code with KVM, where the vCPU identity is a per-CPU
+pointer and the VMCS is read only for VMCS state.
+
+### Also settled this round
+
+The host test suite caught the semantic change these made - `resume_
+guest`'s slot used to come from the VMCS, so `a_slot_outside_the_table_
+is_left_alone` drove it by writing `vpid`. The out-of-range slot now
+arrives as an argument, so the test passes `~0ull` and `max_cpus`
+directly. Same property, same bounds checks exercised, different
+injection point - and the suite refusing to build was the thing that
+noticed.
