@@ -24813,3 +24813,78 @@ it demands next is either a change large enough to clear ten per cent -
 which the table above says means `vmresume` or `wrmsr`, not anything
 smaller - or repeated windows across several boots before a number is
 believed.
+
+## `build_vmcs02` split, with coverage: the elisions do not make the writes cheap
+
+Eight adjacent intervals rather than nested brackets, so the slots sum to
+the whole by construction, and the reader prints what it covers:
+
+```
+cpu 0 build_vmcs02, split (167,489 cycles a call over 365,265 calls)
+  every guest-state field                    49,269 cyc/call   29.4%
+  host state once, then every control        36,858 cyc/call   22.0%
+  ept pointer and TPR shadow decided         33,655 cyc/call   20.1%
+  bitmaps merged, own controls in hand       23,891 cyc/call   14.3%
+  the event to inject, transition flush      14,685 cyc/call    8.8%
+  the VMPTRLD itself                          6,356 cyc/call    3.8%
+  controls read and validated                 1,552 cyc/call    0.9%
+  the three MSR areas checked                 1,038 cyc/call    0.6%
+  --- coverage 99.9% of the phase's cycles, 100.0% of its calls
+      reached the end
+```
+
+**The comment on phase 15 is refuted.** It predicted the part after the
+VMPTRLD is "expected to be small ... because both are elided against a
+cache". The two blocks it names - the control writes and the guest-state
+writes - are **51.4% of `build_vmcs02`**, the two largest slots in the
+table. The audit says 99.4% of those writes are elided and
+`DIVERGED AFTER ELISION: 0`, so the elision is correct and working; what
+it means is that **the cost is the deciding, not the writing.** Forty
+guest-state fields at 49,269 cycles is about 1,230 cycles a field to
+read a value out of memory, compare it against a cache and skip.
+
+That is a different problem from the one every previous attempt attacked,
+and it is the one the coverage rule was supposed to surface: three
+sessions were spent making the *writes* rarer, against a cost that is
+already almost entirely the check.
+
+Third largest and unremarked until now: **"ept pointer and TPR shadow
+decided" at 20.1%.** `shadow_ept_pointer_for` is 11,714 of it, so about
+22,000 cycles an entry are the TPR-shadow decision alone.
+
+## Every second-level exit is one round trip, so the tick has fewer costs than it looks
+
+`handler_reason_from_l2` answers it in one column, and the answer is
+absolute rather than approximate:
+
+```
+reason        exits      cyc/exit   share   whose
+vmcall      115,811     1,575,118   40.2%   100.0% from L2
+vmresume    364,525       332,428   26.7%     0.0% from L2
+vmptrld     110,717       400,725    9.8%     0.0% from L2
+wrmsr       142,671       271,337    8.5%   100.0% from L2
+ept-viol    314,937       102,576    7.1%   100.0% from L2
+int-window   78,752       270,043    4.7%   100.0% from L2
+ext-int      26,420       276,922    1.6%   100.0% from L2
+vmread       27,007       102,104    0.6%     0.0% from L2
+```
+
+Every reason is 100% or 0%; none is mixed. So the second-level exits -
+`wrmsr`, `int-window`, `vmcall`, `ext-int` - are each reflected and each
+answered by the guest hypervisor with a VMRESUME that comes straight
+back. **A round trip is the pair**, and its price is the sum:
+
+```
+wrmsr round trip     271,337 + 332,428 =   603,765 cycles  (303 us)
+vmcall round trip  1,575,118 + 332,428 = 1,907,546 cycles  (958 us)
+```
+
+The tick is about 3.6 of those round trips - 2.4 `wrmsr` and 1.2
+`int-window` - so **halving either end halves the tick**, and the two
+ends are not independent targets. `build_vmcs02` is 167,489 of the
+332,428 at the entry end, which is half of half.
+
+`vmcall` at 1,575,118 cycles reproduces across two boots (1,569,083 and
+1,575,118, 0.4% apart) and is now the largest single line in the
+machine at 40.2%. It is still worth nothing for the tick - 0.1 vmcalls a
+tick - and everything for anything else this guest does.
