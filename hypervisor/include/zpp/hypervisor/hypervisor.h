@@ -626,6 +626,9 @@ private:
 
     std::expected<void, zpp::error> write_guest_physical(
         std::uint64_t guest_physical, std::span<const std::byte> from);
+
+    /** Records a caller of the two above. See its definition. */
+    void note_guest_memory_caller(std::uint64_t caller);
     /**
      * @}
      */
@@ -3545,6 +3548,16 @@ private:
      */
     volatile std::uint64_t l2_translate_walks[max_cpus]{};
     volatile std::uint64_t l2_translate_entries[max_cpus]{};
+
+    /**
+     * Which callers reach guest memory, by return address. See
+     * `note_guest_memory_caller`, which explains why this exists.
+     */
+    static constexpr std::size_t guest_memory_callers = 64;
+
+    std::uint64_t guest_memory_caller[guest_memory_callers]{};
+    std::uint64_t guest_memory_caller_hits[guest_memory_callers]{};
+    volatile std::uint64_t guest_memory_caller_overflow{};
 
     volatile std::uint64_t reference_count_backwards[max_cpus]{};
     std::uint64_t reference_count_previous[max_cpus]{};

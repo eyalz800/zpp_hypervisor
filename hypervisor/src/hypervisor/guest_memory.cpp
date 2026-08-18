@@ -46,9 +46,47 @@ constexpr bool within_guest_physical(std::uint64_t guest_physical,
 
 } // namespace
 
+/**
+ * Which callers reach guest memory, by return address.
+ *
+ * `map_window_at` is 126 calls an exit at 1,088 cycles each - about
+ * 137,000 of the 418,000 an exit spends inside this VMM, a third of it,
+ * and the one large cost here that is *measured directly* rather than
+ * derived from the launch-time price list, which a controlled removal
+ * has since shown does not predict the marginal cost of a VMCS read.
+ *
+ * Only 39.5 of those calls are accounted for - `l2_translate_entries`
+ * says the extended-page-table walks read that many entries an exit,
+ * and each entry is one repoint of the window. The other 86 have twice
+ * been guessed at and twice been wrong: the MSR autoload areas removed
+ * five, the VTL assist capture removed none that mattered.
+ *
+ * So this stops guessing and asks the callers. A return address is a
+ * name once symbolized against the module, and it costs one register.
+ */
+void hypervisor::note_guest_memory_caller(std::uint64_t caller)
+{
+    auto slot = ((caller >> 4) ^ (caller >> 11)) & (guest_memory_callers - 1);
+
+    if (0 == this->guest_memory_caller_hits[slot]) {
+        this->guest_memory_caller[slot] = caller;
+    }
+
+    if (this->guest_memory_caller[slot] == caller) {
+        this->guest_memory_caller_hits[slot] =
+            this->guest_memory_caller_hits[slot] + 1;
+    } else {
+        this->guest_memory_caller_overflow =
+            this->guest_memory_caller_overflow + 1;
+    }
+}
+
 std::expected<void, zpp::error> hypervisor::read_guest_physical(
     std::uint64_t guest_physical, std::span<std::byte> into)
 {
+    note_guest_memory_caller(reinterpret_cast<std::uint64_t>(
+        __builtin_return_address(0)));
+
     // Refused rather than clamped. A short read would leave the caller
     // acting on a half-filled buffer whose tail is whatever it held
     // before, which is the kind of failure that reads as a guest bug.
@@ -92,6 +130,9 @@ std::expected<void, zpp::error> hypervisor::read_guest_physical(
 std::expected<void, zpp::error> hypervisor::write_guest_physical(
     std::uint64_t guest_physical, std::span<const std::byte> from)
 {
+    note_guest_memory_caller(reinterpret_cast<std::uint64_t>(
+        __builtin_return_address(0)));
+
     if (!within_guest_physical(guest_physical, from.size())) {
         return std::unexpected(
             zpp::error{error::guest_memory_unreachable});
