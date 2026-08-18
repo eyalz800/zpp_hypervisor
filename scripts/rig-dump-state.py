@@ -981,6 +981,73 @@ def dump_vmcs02_split(args, elf, instance):
           f" is software that touches nothing")
 
 
+REFLECT_SLOTS = ["save_l2_state", "reflect_l2_exit", "exit information"]
+
+
+def dump_reflect_buckets(args, elf, instance):
+    """A `vmcall` reflection against a `wrmsr` one, phase by phase.
+
+    Every reflection on this machine costs about 51 VMCS accesses except
+    `vmcall`, which costs 230.4, and both take the same path - so the
+    extra accesses are in a phase they share.  These three are the
+    phases an L2 exit takes; they do not bracket the whole handler, so
+    the residue against `handler_reason_*` for the same reason is printed
+    as coverage rather than left implied.
+    """
+    members = ["bucket_phase_cycles", "bucket_phase_reads",
+               "bucket_phase_writes", "bucket_calls",
+               "handler_reason_cycles", "handler_reason_reads",
+               "handler_reason_writes", "handler_reason_exits"]
+    off = gdb_offsets(elf, members, optional=True)
+    if len(off) != len(members):
+        print("\n[reflection buckets: not in this binary]")
+        return
+
+    slots = len(REFLECT_SLOTS)
+    reader = Monitor(args.rig, args.port)
+    for member in ("bucket_phase_cycles", "bucket_phase_reads",
+                   "bucket_phase_writes"):
+        reader.queue(instance + off[member], 2 * slots)
+    reader.queue(instance + off["bucket_calls"], 2)
+    for member in ("handler_reason_cycles", "handler_reason_reads",
+                   "handler_reason_writes", "handler_reason_exits"):
+        reader.queue(instance + off[member], 64)
+    got = reader.run()
+
+    def cell(member, bucket, slot):
+        return got.get(instance + off[member] + 8 * (bucket * slots + slot), 0)
+
+    def whole(member, reason):
+        for i, name in EXIT_REASON.items():
+            if name == reason:
+                return got.get(instance + off[member] + 8 * i, 0)
+        return 0
+
+    print("\ncpu 0 a vmcall reflection against a wrmsr one, by phase")
+    for bucket, reason in ((0, "vmcall"), (1, "wrmsr")):
+        exits = whole("handler_reason_exits", reason) or 1
+        wc = whole("handler_reason_cycles", reason)
+        wr = whole("handler_reason_reads", reason)
+        ww = whole("handler_reason_writes", reason)
+        print(f"  {reason} ({exits:,} exits, {wc // exits:,} cyc, "
+              f"{(wr + ww) / exits:.1f} accesses an exit)")
+        sc = sr = sw = 0
+        for slot in range(slots):
+            c = cell("bucket_phase_cycles", bucket, slot)
+            r = cell("bucket_phase_reads", bucket, slot)
+            w = cell("bucket_phase_writes", bucket, slot)
+            sc += c
+            sr += r
+            sw += w
+            print(f"    {REFLECT_SLOTS[slot]:<18} {c / exits:>10,.0f} cyc "
+                  f"{r / exits:>7.1f}rd {w / exits:>7.1f}wr")
+        print(f"    {'residue':<18} {(wc - sc) / exits:>10,.0f} cyc "
+              f"{(wr - sr) / exits:>7.1f}rd {(ww - sw) / exits:>7.1f}wr")
+        print(f"    --- the three phases hold "
+              f"{100.0 * sc / max(wc, 1):.1f}% of the cycles and "
+              f"{100.0 * (sr + sw) / max(wr + ww, 1):.1f}% of the accesses")
+
+
 def dump_guest_state_shadow(args, elf, instance):
     """Where the deferred guest-state copy's model differs from vmcs02.
 
@@ -1774,6 +1841,7 @@ def main():
 
     dump_handler_by_reason(args, args.elf, instance)
     dump_vmcs02_split(args, args.elf, instance)
+    dump_reflect_buckets(args, args.elf, instance)
 
     # Every processor, not only the boot processor.  The application
     # processors are where "did this one participate at all" is decided,

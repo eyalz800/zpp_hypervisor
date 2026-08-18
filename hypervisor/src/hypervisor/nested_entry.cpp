@@ -3201,12 +3201,15 @@ void hypervisor::save_l2_state(std::size_t cpu)
 
     // Phase timing; see `phase_cycles`.
     auto phase_start = arch::x86_64::rdtsc();
+    auto phase_reads = arch::x86_64::vmx::vmcs_reads_taken;
+    auto phase_writes = arch::x86_64::vmx::vmcs_writes_taken;
     auto phase_stop = zpp::scope_exit([&] {
         if (cpu < max_cpus) {
             this->phase_cycles[cpu][0] +=
                 arch::x86_64::rdtsc() - phase_start;
             this->phase_calls[cpu][0] += 1;
         }
+        note_reflect_phase(cpu, 0, phase_start, phase_reads, phase_writes);
     });
 
     auto & vmcs = this->vmcs;
@@ -3947,12 +3950,16 @@ void hypervisor::reflect_l2_exit(std::size_t cpu,
 {
     // Phase timing; see `phase_cycles`.
     auto reflect_start = arch::x86_64::rdtsc();
+    auto reflect_reads = arch::x86_64::vmx::vmcs_reads_taken;
+    auto reflect_writes = arch::x86_64::vmx::vmcs_writes_taken;
     auto reflect_stop = zpp::scope_exit([&] {
         if (cpu < max_cpus) {
             this->phase_cycles[cpu][1] +=
                 arch::x86_64::rdtsc() - reflect_start;
             this->phase_calls[cpu][1] += 1;
         }
+        note_reflect_phase(
+            cpu, 1, reflect_start, reflect_reads, reflect_writes);
     });
 
     auto & vmcs = this->vmcs;
@@ -4113,6 +4120,8 @@ void hypervisor::reflect_l2_exit(std::size_t cpu,
     // nothing - and eight of the VMREADs in it are unconditional where
     // the architecture defines only three of them for most exits.
     auto info_start = arch::x86_64::rdtsc();
+    auto info_reads = arch::x86_64::vmx::vmcs_reads_taken;
+    auto info_writes = arch::x86_64::vmx::vmcs_writes_taken;
 
     if (!reason.entry_failure()) {
         // SDM 33.3, VMLAUNCH: the launch state becomes launched once an
@@ -4166,6 +4175,8 @@ void hypervisor::reflect_l2_exit(std::size_t cpu,
         this->phase_cycles[cpu][13] += arch::x86_64::rdtsc() - info_start;
         this->phase_calls[cpu][13] += 1;
     }
+
+    note_reflect_phase(cpu, 2, info_start, info_reads, info_writes);
 
     // SDM 30.4: the VM-exit MSR-store area is processed after the guest
     // state is saved and before host state is loaded, so it reads the
@@ -6577,6 +6588,34 @@ void hypervisor::record_l2_entry_event(std::size_t cpu)
     if (this->l2_entry_priority[cpu] < dispatch_class) {
         this->l2_low_priority_no_event[cpu] += 1;
     }
+}
+
+void hypervisor::note_reflect_phase(std::size_t cpu,
+                                   std::size_t slot,
+                                   std::uint64_t start_tsc,
+                                   std::uint64_t start_reads,
+                                   std::uint64_t start_writes)
+{
+    // See `bucket_phase_cycles`. Only the two reasons being compared are
+    // recorded; everything else costs one compare and falls out.
+    if ((cpu >= max_cpus) || (slot >= reflect_slots)) {
+        return;
+    }
+
+    auto bucket = this->reason_bucket[cpu];
+    if (bucket >= reflect_buckets) {
+        return;
+    }
+
+    this->bucket_phase_cycles[bucket][slot] =
+        this->bucket_phase_cycles[bucket][slot] +
+        (arch::x86_64::rdtsc() - start_tsc);
+    this->bucket_phase_reads[bucket][slot] =
+        this->bucket_phase_reads[bucket][slot] +
+        (arch::x86_64::vmx::vmcs_reads_taken - start_reads);
+    this->bucket_phase_writes[bucket][slot] =
+        this->bucket_phase_writes[bucket][slot] +
+        (arch::x86_64::vmx::vmcs_writes_taken - start_writes);
 }
 
 void hypervisor::mark_vtl_half(std::size_t cpu, std::size_t kind)

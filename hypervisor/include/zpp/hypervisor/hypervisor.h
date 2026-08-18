@@ -3605,6 +3605,61 @@ private:
     volatile std::uint64_t handler_reason_writes[handler_reason_slots]{};
     std::uint64_t handler_entry_reads[max_cpus]{};
     std::uint64_t handler_entry_writes[max_cpus]{};
+
+    /**
+     * The reflection's three phases, for a `vmcall` and for a `wrmsr`
+     * side by side.
+     *
+     * **Every reflection on this machine costs about 51 VMCS accesses
+     * except `vmcall`, which costs 230.4** - and the two go through the
+     * same path, so the extra 179 are in a phase they share rather than
+     * in the hypercall block. Reading that block settled that it cannot
+     * be the source: the VTL capture is gated to one switch in
+     * sixty-four, `arm_vtl_step` is not compiled in, `mark_vtl_half` is
+     * an `rdtsc`, and the prologue that does run is four reads.
+     *
+     * So the question is which *shared* phase is bigger when the exit is
+     * a hypercall, and the comparator is another second-level exit
+     * reflected the same way. `wrmsr` is the right one: 2.31 a tick
+     * against `vmcall`'s 0.46, same reflection, 51.0 accesses.
+     *
+     * Bucket 0 is `vmcall` and bucket 1 is `wrmsr`; anything else is not
+     * recorded. Slots are `save_l2_state`, `reflect_l2_exit` and the
+     * exit-information block - the three phases an L2 exit takes - and
+     * the residue against `handler_reason_*` for the same reason is what
+     * the reader prints as coverage, since these three do not bracket
+     * the whole handler and a split that claims to is lying.
+     *
+     * **The hypothesis this is aimed at, named so it can be refuted
+     * rather than confirmed:** a trust-level switch changes the current
+     * vmcs12, and the *read* deferral in `save_l2_state` is keyed the
+     * same way the write elision is - so a vmcall may be forced to read
+     * guest state that a wrmsr defers. That predicts the excess lands in
+     * slot 0. If it lands in slot 1 or in the residue, the hypothesis is
+     * dead and the number says where to look instead.
+     * @{
+     */
+    static constexpr std::size_t reflect_buckets = 2;
+    static constexpr std::size_t reflect_slots = 3;
+    std::uint8_t reason_bucket[max_cpus]{};
+    volatile std::uint64_t
+        bucket_phase_cycles[reflect_buckets][reflect_slots]{};
+    volatile std::uint64_t
+        bucket_phase_reads[reflect_buckets][reflect_slots]{};
+    volatile std::uint64_t
+        bucket_phase_writes[reflect_buckets][reflect_slots]{};
+    volatile std::uint64_t bucket_calls[reflect_buckets]{};
+    /**
+     * @}
+     */
+
+    /** Adds one phase's cycles and accesses to whichever bucket this
+     * exit belongs to. No-op for an exit that is neither. */
+    void note_reflect_phase(std::size_t cpu,
+                            std::size_t slot,
+                            std::uint64_t start_tsc,
+                            std::uint64_t start_reads,
+                            std::uint64_t start_writes);
     /**
      * @}
      */

@@ -272,6 +272,18 @@ void hypervisor::on_vm_exit(std::uint64_t cpuid,
 
     reason = full_reason.basic();
 
+    // Which comparison this exit belongs to, for `bucket_phase_cycles`.
+    // Here rather than beside the other per-exit facts above, because
+    // the reason is not known until the VMCS has been read - and it has
+    // to be set before `on_l2_exit`, which is where the phases it keys
+    // are taken.
+    if (cpuid < max_cpus) {
+        this->reason_bucket[cpuid] =
+            (basic_reason::vmcall == reason)  ? 0
+            : (basic_reason::wrmsr == reason) ? 1
+                                              : 2;
+    }
+
     // Out of the VMCS, because what the exit stub's capture left in
     // this field is its own return address, not the guest's RIP.
     context.rip = vmcs.guest_rip();

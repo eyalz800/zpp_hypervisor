@@ -541,6 +541,33 @@ answers it in seconds, and it is how this was finally found: the working
 binary lacked `hypervisor_bit=` and `leaf 0x40000000 ebx=`, which only
 `verify.h` emits.
 
+### An address that moved is not a guest that never started
+
+Two members added to the singleton grew the binary, the module base
+moved `0x67210000` -> `0x6720f000`, and a script with the old base
+hardcoded read a singleton that was not there. It reported **every
+counter as zero for eight minutes** - `exits 1`, every histogram empty,
+`coverage 0.0%` - which is indistinguishable from a guest that never
+started, and is exactly the failure somebody would then go and debug.
+
+This is the second member of the same class, and the pair is worth
+stating together because the fix is the same both times:
+
+- **The singleton's offsets move when a member is added**, so a reader
+  pointed at a rebuilt ELF against a deployed older binary reads
+  plausible garbage. `rig-dump-state.py` resolves offsets from the ELF
+  for this reason, and `--elf .rig-deployed-hypervisor.elf` is what
+  `deploy-to-rig.sh` keeps so the reader can be pointed at the binary
+  that is actually running.
+- **The module base moves when the binary's size changes.** Read it per
+  run - `grep -ao "allocate_rwx done at 0x[0-9a-f]*" serial.out | tail -1`
+  - never carry one between builds.
+
+The tell that distinguishes them from a real failure, and it takes one
+line: `reader proven: host_page_table[0] = ...023`. A wrong base fails
+that; a stopped guest does not. **Check the reader before believing the
+reading**, which is what that line is for.
+
 ### A CMake cache reading ON is not evidence. Read the manifest.
 
 That class has now cost this project three separate things: a build
