@@ -24287,3 +24287,85 @@ read side (76% of hot-state reads skipped). Nothing smaller than that
 will move a 93x amplification, and the three optimisations above are
 evidence for that rather than against it - each removed real work and
 each left the number where it was.
+
+## Following KVM's design: what it does that we do not, measured by field
+
+The cost was estimated twice from cycles divided by a price and both
+estimates informed a wrong decision, so it is now counted. Every
+`vmcs::read` and `vmcs::write` increments a counter, and reads also
+land in a 64-slot table keyed by field encoding.
+
+```
+exits         2,156,026
+vmcs reads  116,111,131     53.9 per exit
+vmcs writes  25,785,362     12.1 per exit
+```
+
+**Writes are already elided; reads are not.** At this VMM's own measured
+prices (~3,735 cycles a read, ~2,542 a write, printed at launch) that is
+about 233,000 of the 418,211 cycles an exit spends inside this VMM.
+
+The fields, decoded against `vmcs_fields.h`:
+
+```
+0x0000 vpid                                   14.03 / exit
+0x681e guest_rip                               5.43
+0x4012 vm_entry_controls                       3.75
+0x6802 guest_cr3                               3.00
+0x0802 guest_cs_selector                       2.84
+0x4016 vm_entry_interruption_information       2.35
+0x4826 guest_activity_state                    2.27
+0x6400 exit_qualification                      1.61
+0x4408 idt_vectoring_information_field         1.39
+0x4818 guest_ss_access_rights                  1.33
+0x4816 guest_cs_access_rights                  1.33
+0x4402 exit_reason                             1.01
+```
+
+### The top entry is not state at all
+
+`vpid` is read **fourteen times per exit** - about 52,000 cycles, 12.5%
+of everything this VMM does - and it is not being read for its value.
+It is the idiom for *"which processor am I"*, in roughly sixty places
+(22 in `exit_dispatch.cpp` alone), and the comment beside the launch
+says so outright: "Everything else on the exit path already answers
+'which processor am I' with vmcs.vpid()".
+
+**KVM never does this.** It keeps the vCPU in a per-CPU pointer and
+reads the VMCS only for VMCS state.
+
+And the value is already in hand: `on_vm_exit(std::uint64_t cpuid, …)`
+takes it as a parameter, captured by value from `main`'s scope, derived
+without any VMCS access. `build_vmcs02` writes `field::vpid` with
+`vpid01`, so vmcs01 and vmcs02 carry the *same* VPID - the answer is a
+per-processor constant for the whole boot, and re-deriving it costs a
+trap to the layer below every time.
+
+### The same shape in the rest of the table
+
+`guest_rip` 5.43, `vm_entry_controls` 3.75, `guest_cr3` 3.00,
+`guest_cs_selector` 2.84 - these are one field read several times
+within a single exit. KVM avoids exactly this with `vcpu->arch.
+regs_avail` and `kvm_register_is_available()`: read the VMCS at most
+once per exit per field, serve the rest from the cache, and invalidate
+on VM exit and on VMCS switch.
+
+Both invalidation points are ones this VMM already owns - `on_vm_exit`'s
+entry and the VMPTRLD in `build_vmcs02` phase 6 - so the mechanism has
+somewhere correct to hang.
+
+Estimated together: 53.9 reads an exit falling to something near the
+count of *distinct* fields, which the table puts at about 20. That is
+roughly 125,000 cycles an exit, or 30% - not the order of magnitude
+this needs, but the first change since the reference TSC page that is
+both large and certain.
+
+### What was checked and is not available
+
+`prepare_vmcs02_rare` behind `dirty_vmcs12`, KVM's own answer to
+rewriting vmcs02: this VMM already does the equivalent by value
+comparison, and the audit proves it - `load_l1_host_state` reports 48
+of 52 slots never observed changed, 4,601,935,089 writes elided, and
+`DIVERGED AFTER ELISION: 0`. Guest-state reads are deferred too, 20.0
+skipped per exit against 0.9 done. Those are done; the read side of the
+exit path is what was never given the same treatment.
