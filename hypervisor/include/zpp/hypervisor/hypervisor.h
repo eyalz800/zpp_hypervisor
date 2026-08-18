@@ -6692,6 +6692,41 @@ private:
         queue_window_pages + instruction_window_pages_per_cpu;
 
     /**
+     * The leaf page-table entry that translates each window page, found
+     * once and then written directly.
+     *
+     * **This is the whole of what made repointing the window cost about
+     * eleven hundred cycles.** `page_table::map_page` forwards to
+     * `map_page_from`, which rewrites all four levels and resolves three
+     * of them with `virtual_to_physical` - and *that* is itself a
+     * software walk, so one repoint of one page was three nested walks
+     * of this VMM's own tables plus four read-modify-writes plus the
+     * INVLPG. Measured at 14.0% of everything this VMM does, across
+     * 145,222,992 calls in one boot.
+     *
+     * All of it except the leaf write and the INVLPG is recomputing a
+     * constant. The window's virtual addresses are fixed at compile
+     * time, so the entries above the leaf hold the same values on every
+     * call - `map_page_from`'s own comment says it rewrites them
+     * "rather than tested, because ... pointing an entry at the table it
+     * already holds is idempotent and cheaper than the branch that would
+     * skip it", which is true of one call and false of a hundred million.
+     *
+     * Filled on the first mapping of each page, which still goes through
+     * `map_page` and so still establishes every level. A null slot means
+     * "not yet mapped", and the two counters below say which path ran,
+     * because a cache nobody has watched hit is one that may not be
+     * hitting.
+     * @{
+     */
+    arch::x86_64::pte * window_entry[mapping_window_pages]{};
+    volatile std::uint64_t window_entry_fast{};
+    volatile std::uint64_t window_entry_slow{};
+    /**
+     * @}
+     */
+
+    /**
      * Where read_guest_physical and its siblings point the window.
      *
      * The same page as the instruction window, deliberately, and the

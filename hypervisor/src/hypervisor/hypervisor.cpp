@@ -1437,13 +1437,43 @@ void * hypervisor::map_window_at(std::size_t first_page,
     }
 
     for (std::size_t i{}; i < span; ++i) {
-        auto at = mapping_window + ((first_page + i) * page_size);
+        auto slot = first_page + i;
+        auto at = mapping_window + (slot * page_size);
+        auto frame = page + (i * page_size);
 
-        this->host_page_table.map_page(
-            at,
-            page + (i * page_size),
-            arch::x86_64::page_table::protection::read |
-                arch::x86_64::page_table::protection::write);
+        // The leaf entry, found once per window page and written
+        // directly thereafter. See `window_entry`: everything
+        // `map_page` does above the leaf recomputes a constant, and
+        // that recomputation was 14.0% of this VMM's whole time.
+        //
+        // The first mapping of a page still goes the long way, because
+        // that is what establishes the levels above it - and it is what
+        // makes the entry this then caches the one the processor will
+        // consult.
+        if (auto entry = this->window_entry[slot]) {
+            entry->page_number(frame >> 12);
+            this->window_entry_fast = this->window_entry_fast + 1;
+        } else {
+            this->host_page_table.map_page(
+                at,
+                frame,
+                arch::x86_64::page_table::protection::read |
+                    arch::x86_64::page_table::protection::write);
+
+            // Whichever entry terminates the walk - which for a page
+            // this VMM has just mapped with `map_page` is the four
+            // kilobyte leaf, since `map_page_from` points the directory
+            // entry at a page table rather than leaving a large page.
+            // Checked rather than assumed: caching a large-page entry
+            // here would repoint a whole two megabytes on every call.
+            auto & leaf = this->host_page_table.page_table_entry(at);
+
+            if (!leaf.large()) {
+                this->window_entry[slot] = &leaf;
+            }
+
+            this->window_entry_slow = this->window_entry_slow + 1;
+        }
 
         // The processor has a translation cached for this address from
         // whoever used the window last, pointing at their page. Without
@@ -1456,6 +1486,9 @@ void * hypervisor::map_window_at(std::size_t first_page,
         // four-level walk asks one slot for four *different* table
         // frames in a row, so the immediately preceding use of a slot is
         // essentially never the page the next one wants. See BACKLOG.
+        // That measurement still stands, and it is now also the reason
+        // the *walk* had to go instead: the hit rate cannot be improved,
+        // so the miss had to be made cheap.
         arch::x86_64::invlpg(reinterpret_cast<const void *>(at));
     }
 

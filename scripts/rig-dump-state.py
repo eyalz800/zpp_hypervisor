@@ -72,7 +72,7 @@ VTL_KINDS = ["HvCallVtlCall 0x11", "HvCallVtlReturn 0x12",
              "STIMER0 periodic arm"]
 
 
-def gdb_offsets(elf, members):
+def gdb_offsets(elf, members, optional=False, quiet=False):
     """Ask the ELF where each member lives inside the singleton."""
     args = []
     for m in members:
@@ -81,6 +81,19 @@ def gdb_offsets(elf, members):
                          capture_output=True, text=True).stdout
     values = re.findall(r"^\$\d+ = (0x[0-9a-f]+)$", out, re.M)
     if len(values) != len(members):
+        if optional:
+            # One member per call, so a miss can be attributed. Used for
+            # members a *deployed* binary may predate: the reader is
+            # pointed at whichever ELF is running, and a dump of an older
+            # one must lose that section rather than the whole dump.
+            found = {}
+            for m in members:
+                one = gdb_offsets(elf, [m], optional=False, quiet=True)
+                if one:
+                    found.update(one)
+            return found
+        if quiet:
+            return {}
         sys.exit(f"could not read all offsets from {elf}: got {values}")
     return dict(zip(members, (int(v, 16) for v in values)))
 
@@ -708,8 +721,14 @@ def dump_regions(args, elf, instance):
                "dilation_charged", "dilation_offset"]
     off = gdb_offsets(elf, members)
 
+    # Added later than the rest, so a dump of a binary that predates them
+    # loses these two lines and nothing else.
+    later = gdb_offsets(elf, ["window_entry_fast", "window_entry_slow"],
+                        optional=True)
+    off.update(later)
+
     reader = Monitor(args.rig, args.port)
-    for member in members:
+    for member in off:
         reader.queue(instance + off[member], args.cpus)
     got = reader.run()
 
@@ -745,6 +764,20 @@ def dump_regions(args, elf, instance):
         # asked for - the guest's own execution is never scaled, so the
         # ratio depends on how much of the machine the guest was getting,
         # and the asked-for figure alone would say nothing about that.
+        # Which path the mapping window took. Printed for cpu 0 only,
+        # since the counters are not per processor - a cache nobody has
+        # watched hit is one that may not be hitting, which is the whole
+        # reason these exist.
+        if (0 == cpu) and ("window_entry_fast" in off):
+            fast = got.get(instance + off["window_entry_fast"], 0)
+            slow = got.get(instance + off["window_entry_slow"], 0)
+            if fast or slow:
+                total = fast + slow
+                print(f"  mapping window: {fast:,} repoints through the "
+                      f"cached leaf, {slow:,} through the full walk "
+                      f"({100.0 * fast / max(total, 1):.2f}% fast, "
+                      f"{total / max(exits, 1):.1f} per exit)")
+
         hidden = word("dilation_hidden", cpu)
         charged = word("dilation_charged", cpu)
         if hidden or charged:
