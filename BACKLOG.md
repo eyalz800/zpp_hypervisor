@@ -24966,3 +24966,103 @@ A complete win there is neither measurable in one boot nor sufficient
 alone: it has to be measured across repeated windows, or bundled with
 the `wrmsr` end of the same round trip so the change clears the floor.
 Anything that does not say which of those it is doing is not a plan.
+
+## `int-window` is inherent: one window armed, one interrupt injected, exactly
+
+Settled state, 192 second window, protection counter frozen:
+
+```
+int-window exits        500.8/s
+interrupts injected     501.2/s      <- 1.0008 : 1
+of which 0xd1           407.4/s
+clock interrupts        406.5/s      <- the clock accounts for every 0xd1
+```
+
+**Each interrupt-window exit is answered by exactly one injection.** The
+guest hypervisor arms the window because it has an interrupt to deliver
+and the second-level guest cannot take one yet; it gets the exit; it
+injects. It is not a loop, it does not re-arm without being satisfied,
+and the ratio is 1:1 to within a tenth of a per cent.
+
+And the first question - whether any of those windows are *this VMM's*
+and reflected anyway - is answered by construction rather than by
+measurement, which is better:
+
+- `ZPP_VIRTUALIZE_APIC:BOOL=OFF`, read out of the cache **and** confirmed
+  by the only code that arms the control, which is inside
+  `deliver_pending_external_interrupt`, is compiled out with the switch
+  off, and operates on **vmcs01** in any case;
+- `build_vmcs02` composes vmcs02's primary controls as
+  `(primary01 & ~(interrupt_window | nmi_window)) | primary12`, so
+  vmcs01's window bits are stripped and only vmcs12's survive;
+- `l0_wants_l2_exit` answers `primary_set(primary_interrupt_window)`,
+  so the exit is reflected exactly when vmcs12 asked for it.
+
+The `interrupt_window` case in `exit_dispatch.cpp` says so already:
+"Unreachable with ZPP_VIRTUALIZE_APIC off". **No interrupt window on
+this machine is ours.**
+
+### And the round-trip identity is exact
+
+```
+per tick   wrmsr 2.31 + int-window 1.23 + vmcall 0.46 + ext-int ~0.26 = 4.26
+per tick   vmresume                                                    4.37
+```
+
+Every second-level exit is answered by one VMRESUME, measured rather
+than argued. So the tick is 4.37 round trips and three of the four kinds
+are inherent: `wrmsr` is the three synthetic registers that lie outside
+both ranges an MSR bitmap can describe (SDM 26.6.9), `int-window` is one
+per delivered interrupt as above, and `vmresume` is the far end of all
+of them.
+
+## The fourth is not inherent: a `vmcall` costs 8.7x an identical reflection
+
+```
+wrmsr    278,066 cycles/exit    100.0% from L2   reflected
+vmcall 2,407,393 cycles/exit    100.0% from L2   reflected
+```
+
+Both are second-level exits, both reflected by the same path, and one
+costs **8.7 times** the other. That difference is not the architecture's;
+it is this VMM's own code on the hypercall path.
+
+**And every vmcall on this machine is a trust-level switch** - 36,024
+`HvCallVtlCall`/`HvCallVtlReturn` halves against 36,006 vmcalls in the
+same window, which is 100.0%. So what runs for a vmcall and not for a
+wrmsr is exactly the VTL block: `capture_vtl_switch`, `mark_vtl_half`,
+`arm_vtl_step`, and the `HvCallModifyVtlProtectionMask` decode - and
+`capture_vtl_switch` runs on **every** switch, not on the sampled ones.
+
+Sizing it, and it clears the floor: the excess is 2,129,327 cycles a
+vmcall at 187.5 a second, which is **20% of a 1.992 GHz processor**, and
+0.46 vmcalls a tick puts it at **~979,000 of a ~4.4M cycle tick, 22%**.
+
+**Which part of that block carries it is not established, and guessing
+is the error this file recorded three entries ago.** The way to settle it
+is the instrument that has now worked twice: adjacent intervals with
+VMCS-access counts and a reported coverage figure, inside the vmcall
+path rather than around it.
+
+### A correction I owe from two entries ago
+
+I wrote that `vmcall` is "worth nothing for the tick - 0.1 vmcalls a
+tick". That was one window. This window reads **0.46 a tick**, and the
+unit cost has moved from 1,569,083 to 2,407,393 across three windows. So
+the trust-level switch rate and its price both vary by a factor of
+several, and a single window cannot size either.
+
+Same shape as the retraction above it: **one window is a sample, not a
+rate.** The floor rule applies to composition as well as to change - if a
+quantity varies 5x between windows, no single window establishes what
+share of the tick it holds.
+
+## So: not everything is inherent, and the target is named
+
+Three of the four round-trip kinds are architecture and cannot be
+removed. The fourth is 8.7x an identical reflection for reasons that are
+ours, it is 20% of the processor, and it is the only thing measured in
+this investigation that clears the ten per cent a single boot can
+resolve. That is where the next boot goes - and it goes on an
+*instrument* first, because the difference is established and the cause
+is not.
