@@ -5880,6 +5880,33 @@ private:
      * eventually by a rare enough event, so the audit also puts the
      * field back the moment it finds one.
      */
+    /**
+     * **Measured consequence: the elision warms up exactly as the guest
+     * stalls, so it is off throughout the phase that matters.**
+     *
+     * A slot is sampled `l1_host_audit_batch` at a time out of 52, so
+     * once every 13 calls, and needs 4096 samples - **53,248 calls**. At
+     * the clean phase's ~1,024 reflections a second that is 52 seconds,
+     * and the guest enters the stall at t=53.
+     *
+     * Either side of that boundary, measured: **1.9% of writes elided in
+     * the clean phase, 80.7% and 90.6% in the settled loop.** This
+     * mechanism was designed and validated against the stall, where it
+     * works, and contributes nothing to the phase whose cost decides
+     * whether the guest survives its own re-arm - `load_l1_host_state`
+     * runs 55 VMCS accesses a call there instead of 8, which is 73
+     * microseconds a reflection and 266 of the 850 the prevention target
+     * needs.
+     *
+     * **Not simply lowerable.** It was 64 and was raised here after a
+     * real divergence on the first boot. What makes elision safe is not
+     * this number but the check that notices and repairs before the guest
+     * hypervisor resumes - `l1_host_diverged`, and `DIVERGED AFTER
+     * ELISION: 0` in the dump. Lowering it trades a larger repair rate
+     * for a warm-up that finishes inside the clean phase; raising
+     * `l1_host_audit_batch` buys the same warm-up with more VMREADs,
+     * which are the thing being removed. `BACKLOG.md` has both numbers.
+     */
     static constexpr std::uint64_t l1_host_stable_after = 4096;
     static constexpr std::size_t l1_host_audit_batch = 4;
 

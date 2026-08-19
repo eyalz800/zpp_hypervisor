@@ -27544,17 +27544,73 @@ and not the shape the reads have. **The duplicate hypothesis is dead**,
 and with it the `regs_avail` analogy: KVM caches because its handlers
 re-read; ours read 28 distinct fields once each.
 
-### And `load_l1_host_state` reads nothing at all, which is the sharper finding
+### `load_l1_host_state`: the residue was mine, and what is really there is better
 
-**Zero read sites**, and its own audit says 48 of 52 field writes are
-elided with no divergence - so at most four writes, about 25,000 cycles.
-It costs **86 us a call, ~171,000 cycles.** Roughly 146,000 of those are
-neither reads nor writes.
+**The "146,000 cycles of pure software" was an error and there is no
+residue at all.** Two mistakes made it: a static regex that missed
+`vmcs.read(static_cast<field>(...))`, so the function's four audit
+VMREADs were counted as zero; and reading the audit's line *"48 of 52
+slots never observed changed - those writes are the elidable set"* as
+*"48 of 52 writes are elided"*. The first is what **could** be elided
+once proven stable. The second is what **is**. They are not the same
+number and in the clean phase they are nowhere near each other:
 
-That is the one place in the reflection path where the cost is provably
-**not** VMCS traffic, which makes it the only part of the 545 us that a
-software change alone can reach. Nothing has ever looked at what it
-spends that on.
+```
+clean window: 20,488 calls, 1,065,376 writes attempted
+              writes elided        20,193   =  1.9%
+              real VMWRITEs/call     51.0
+              + audit VMREADs         4.0
+              = VMCS accesses/call   55.0
+              measured 170,900 cycles/call -> 3,106 cycles per access
+```
+
+**Fifty-five VMCS accesses at ~3,100 cycles each is the whole 86 us.**
+The function is pure VMCS traffic and always was. `3,106` is also the
+first honest per-access cost this file has - the earlier `6,240` came
+from dividing a whole handler's cycles by its accesses, which counts the
+software too.
+
+### The real finding: the elision warms up exactly as the guest stalls
+
+`l1_host_stable_after` is **4096** and `l1_host_audit_batch` is **4**
+over 52 fields, so a given slot is sampled once every 13 calls and needs
+**4096 x 13 = 53,248 calls** to be believed stable. At the clean phase's
+~1,024 reflections a second that is **52 seconds**.
+
+**The transition happens at t=53.**
+
+So the elision reaches its ceiling at the exact moment the guest enters
+the stall. Measured either side of it: **1.9% elided in the clean phase,
+80.7% and 90.6% in the settled loop.** The mechanism was designed,
+validated and measured against the stall - where it works - and it is
+switched off in practice throughout the only phase whose cost decides
+whether the guest survives its own re-arm.
+
+That is the **wrong-population error again, and this time it is inside an
+optimisation rather than inside a measurement.** The same shape is
+visible in the other two elision counters, which also roughly halve from
+stall to clean phase.
+
+### What it is worth, and why it is a decision rather than a patch
+
+If elision reached its 48-of-52 ceiling during the clean phase,
+`load_l1_host_state` goes from 55 accesses to 8: **73 us a reflection,
+and 266 us of the 850 needed** at 3.63 reflections a round trip. Nearly a
+third of the target, from a warm-up constant, with **no semantic change
+at all** - the same fields, the same values, the same audit.
+
+**It is not a free patch**, and the reason is in the source: the
+threshold was 64 and was raised to 4096 *after a real divergence on the
+first boot*. What makes elision safe is not the threshold but the check
+that notices and repairs - `DIVERGED AFTER ELISION: 0` with a write-back
+before the guest hypervisor resumes. Lowering the threshold trades a
+larger repair rate for a warm-up that finishes inside the clean phase,
+and the repair path is already proven. Raising `l1_host_audit_batch`
+instead buys the same warm-up for more VMREADs, which is the thing being
+removed.
+
+That is a design decision with numbers on both sides rather than a
+guess, and it should be taken deliberately.
 
 ### Which leaves three levers, sized
 
