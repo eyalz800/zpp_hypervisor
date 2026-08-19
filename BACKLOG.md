@@ -11562,6 +11562,66 @@ first write after the drop is the one that kills it.
   `resets` column in the state dump is the existing lever. Until then the
   switch stays off, and its comment says so.
 
+## A VMCS access costs 991 cycles at the margin, not 2,800
+
+**The read-reduction work landed exactly the accesses it projected and a
+third of the microseconds.** That gap is the useful part.
+
+Measured on the rig, same instrument and window as the baseline it replaces:
+
+| | before | after |
+|---|---|---|
+| VMCS accesses per round trip | 133.6 | **110.6** (-23.0) |
+| cycles per round trip | 803,507 (402 us) | **780,707 (390 us)** |
+| `reflect_l2_exit` | 224,914 | 203,958 (-9.3%) |
+| round trips/s | 2,206 | 2,609 |
+| `leaves-filled` | unchanged | unchanged |
+
+The projection was "~22 accesses"; 23.0 came off, so the census and the
+removals were right. But 22,800 cycles were saved across 23 accesses -
+**991 cycles each, about 0.50 microseconds** - against the 1.4-1.8
+microseconds `hypervisor.h` quotes and every estimate in this file has been
+built on. **The price list overstates the marginal cost by roughly three
+times.**
+
+That is not new in kind. The note beside `map_window_at` already says the
+launch-time price list "does not predict the marginal cost of a VMCS read",
+and this is that statement with a number on it, from a controlled removal
+of a known quantity. The likely reason is that these exits pipeline against
+each other and against KVM's own work, so the *n*th access in a burst does
+not cost what the first one did.
+
+**Consequences, and they are the point:**
+
+- **Divide by three before believing any "this saves N microseconds"
+  estimate in this file that was derived from access counts.** Several
+  are. The 200-microseconds-of-402 figure for all VMCS traffic is really
+  closer to 70.
+- Removing the remaining ~110 accesses a round trip, if it were free and
+  complete, is worth about 110 us of 390, not the ~165 the old price
+  implied. Still large; no longer transformative.
+- It is a further reason the tick-margin model failed. Every projection
+  feeding it was inflated by the same factor.
+
+**What did not change: the livelock.** `leaves-filled` 299,410 across the
+window, as in every run. And the round trip rate rose again, 2,206 to
+2,609 - the third time now that making the guest cheaper has made it spin
+faster rather than get further.
+
+Two things verified rather than assumed while landing this:
+
+- `gs_processor_index_disagreements` reads **0** on the running guest, so
+  the GS-based processor identity that replaced the largest single `vpid`
+  reader agrees with the index passed in on every exit. That check exists
+  because the old `gs_data` justification - "counters landed entirely on
+  processor zero" - is equally consistent with GS always reading zero.
+- The per-field census is now lossless. The old 64-slot hash lost 532
+  million accesses and, measured, occupied 60 slots at 64, 128, 256 and 512
+  alike; the 9-bit key from the encoding's own structure collides on none of
+  the 156 encodings. It also corrected two field names that a hand-decode of
+  the hashed table had guessed wrong - `0x4816` is
+  `guest_cs_access_rights`, not the SS one, and `0x4402` is `exit_reason`.
+
 ## The tick-margin model is wrong: 15.5% fewer exits changed nothing
 
 **Measured, with the disarm fixed and the guest surviving it.** With
