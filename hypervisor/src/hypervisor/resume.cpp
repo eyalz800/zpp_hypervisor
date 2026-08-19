@@ -813,9 +813,28 @@ void hypervisor::resume_guest(std::uint64_t cpuid,
     // meaningful, and both handlers have already put RIP where the
     // processor is meant to resume - adding to it would land the
     // guest a few bytes into its own entry point.
+    //
+    // The value is kept, because two things below want it and both used
+    // to read it back out of the VMCS. `guest_rip` was 18.6 reads per
+    // round trip in the census over our own reads, the largest single
+    // field, and every read of it is an exit to the layer below at
+    // 1.4-1.8 microseconds on a host with no VMCS shadowing.
+    //
+    // Two branches rather than one, and the difference matters. Where
+    // RIP was advanced the value was just written, so reading it back
+    // asks the processor a question this frame answered. Where it was
+    // not, `context.rip` is **not** a substitute: a reflected exit
+    // reaches here with vmcs01 current and its guest RIP holding the
+    // guest hypervisor's host entry point, while `context.rip` still
+    // holds the second-level guest's - see `resume_guest_rip`, which is
+    // documented as recording the former.
+    std::uint64_t resume_rip{};
     if (advance_rip) {
         context.rip += vmcs.vm_exit_instruction_length();
         vmcs.guest_rip(context.rip);
+        resume_rip = context.rip;
+    } else {
+        resume_rip = vmcs.guest_rip();
     }
 
     // Record what is about to be resumed, now that the handlers have
@@ -852,7 +871,7 @@ void hypervisor::resume_guest(std::uint64_t cpuid,
                 vmcs.guest_activity_state();
         }
 
-        this->resume_guest_rip[slot - 1] = vmcs.guest_rip();
+        this->resume_guest_rip[slot - 1] = resume_rip;
         this->resume_guest_cs[slot - 1] = vmcs.guest_cs_selector();
     }
 
@@ -919,8 +938,10 @@ void hypervisor::resume_guest(std::uint64_t cpuid,
             // makes two samples comparable - a different caller is
             // reading a different thing and proves nothing about this
             // one.
-            auto guest_rip =
-                vmcs.read(arch::x86_64::vmx::vmcs::field::guest_rip);
+            // The same value `resume_rip` above holds: this block runs
+            // with vmcs02 current, nothing between the two writes the
+            // field, and both want what the guest is about to resume at.
+            auto guest_rip = resume_rip;
             auto value = ((context.rdx & 0xffffffff) << 32) |
                          (context.rax & 0xffffffff);
 

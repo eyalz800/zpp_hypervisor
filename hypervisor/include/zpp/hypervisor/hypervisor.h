@@ -1491,7 +1491,7 @@ private:
      * Handles the monitor trap flag exit that a watched write is stepped
      * with. Returns whether a step was in progress on this CPU.
      */
-    bool on_monitor_trap_flag(std::size_t cpu);
+    bool on_monitor_trap_flag(std::size_t cpu, std::uint64_t rip);
 
     /**
      * Sets or clears the monitor trap flag in the primary processor

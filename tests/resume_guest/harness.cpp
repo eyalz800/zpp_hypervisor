@@ -1300,6 +1300,41 @@ void rip_advances_only_when_asked()
                 held.state->vmcs.guest_rip(),
                 "an INIT or a start-up IPI resumes where its handler "
                 "left the guest");
+
+    // And where it resumes from is read out of the VMCS, not out of
+    // `context.rip`.
+    //
+    // This is the case the elision of `guest_rip` reads must not break.
+    // `resume_guest` computes the value once and hands it to both
+    // `record_exit` and `resume_guest_rip`; where RIP was advanced it
+    // takes the value it just wrote, and where it was not it has to ask
+    // the field - because the two genuinely differ there.
+    //
+    // A reflected exit is exactly that: `reflect_l2_exit` makes vmcs01
+    // current and `load_l1_host_state` puts the guest hypervisor's host
+    // entry point in its guest RIP, while `context.rip` still holds the
+    // second-level guest's address from the top of the exit. Taking
+    // `context.rip` here would record the wrong level's instruction
+    // pointer, which is the one thing `resume_guest_rip` is documented to
+    // get right - and it would read as a plausible address.
+    {
+        constexpr std::uint64_t elsewhere = 0x7fff'0000;
+
+        auto reflected = make();
+        reflected.state->vmcs.guest_rip(elsewhere);
+
+        check_equal(guest_rip,
+                    reflected.context.rip,
+                    "the fixture leaves the two disagreeing, as a "
+                    "reflection does");
+
+        resume(reflected, false);
+
+        check_equal(elsewhere,
+                    reflected.state->resume_guest_rip[cpu],
+                    "with RIP not advanced the record follows the VMCS "
+                    "field and not context.rip");
+    }
 }
 
 // === The external-interrupt queue behind ZPP_VIRTUALIZE_APIC ===========

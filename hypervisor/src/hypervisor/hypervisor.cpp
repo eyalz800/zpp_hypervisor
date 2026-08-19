@@ -3036,7 +3036,12 @@ hypervisor::decode_guest_instruction(std::size_t cpu,
     // The instruction is at the guest's RIP, which is a linear address
     // in the guest's own address space, so it takes the guest's page
     // tables to find - not this VMM's.
-    auto rip = this->vmcs.guest_rip();
+    //
+    // From `context`, which `on_vm_exit` filled from the VMCS at the top
+    // of this exit. This is called from `on_ept_violation`, which is
+    // 23% of exits on the rig, and reading the field again is an exit to
+    // the layer below.
+    auto rip = context.rip;
 
     // Serialised, because the window is now one shared pair of pages -
     // and taken before the walk, which reaches through it too.

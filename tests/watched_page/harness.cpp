@@ -282,9 +282,15 @@ static void write_field(field which, std::uint64_t value)
  * a step that ran from one whose instruction faulted instead - SDM
  * 26.5.2, sdm.txt:201495.
  */
-static void retire_stepped_instruction(std::uint64_t length = 3)
+// Returns where the guest now is, because that is what the exit path
+// hands to `on_monitor_trap_flag`. It reads the field for itself no
+// longer: `on_vm_exit` has already read `guest_rip` once for this exit
+// and a VMREAD is an exit to the layer below on the target.
+static std::uint64_t retire_stepped_instruction(std::uint64_t length = 3)
 {
-    write_field(field::guest_rip, hv().vmcs.guest_rip() + length);
+    auto rip = hv().vmcs.guest_rip() + length;
+    write_field(field::guest_rip, rip);
+    return rip;
 }
 
 static void reset()
@@ -418,6 +424,14 @@ static bool fault(const violation & what,
     write_field(field::guest_physical_address, what.physical);
     write_field(field::guest_rip, what.rip);
     write_field(field::vm_exit_instruction_length, what.reported_length);
+
+    // Into the context as well as the VMCS, because that is what the real
+    // caller does. `on_vm_exit` reads `guest_rip` once at the top of
+    // every exit and puts it in `context.rip`, and everything below -
+    // including `on_ept_violation` - takes it from there rather than
+    // spending another VMREAD. Setting only the field made the harness
+    // drive a state the exit path cannot produce.
+    registers.rip = what.rip;
 
     return hv().on_ept_violation(0, registers, what.physical);
 }
@@ -1581,6 +1595,18 @@ static void test_filter_notify()
               text("%s: emulated_writes counts it too", one.name));
         check(hv().vmcs.guest_rip() == (rip + instruction.length),
               text("%s: and the guest retires the instruction", one.name));
+
+        // And the two accounts of where the guest is agree.
+        //
+        // `context.rip` is what `on_vm_exit` filled from the VMCS and
+        // what everything on the exit path reads instead of asking the
+        // processor again - so a retirement that moves the field and not
+        // the context leaves the two differing by the length of one
+        // instruction, which reads as a perfectly plausible address
+        // everywhere it is then used. Nothing else in this file would
+        // notice.
+        check(registers.rip == hv().vmcs.guest_rip(),
+              text("%s: and context.rip moves with it", one.name));
     }
 
     // A filter that rewrites a plain store: the store's operand is
@@ -1742,9 +1768,10 @@ static void test_filter_notify()
 
         // The guest's own instruction retires here.
         put32(0x300, 0x0c0ffee0);
-        retire_stepped_instruction();
+        auto retired_at = retire_stepped_instruction();
 
-        check(hv().on_monitor_trap_flag(0), "the step completes");
+        check(hv().on_monitor_trap_flag(0, retired_at),
+              "the step completes");
         check(1 == g_notified.size(), "and the notify runs from the step");
         if (1 == g_notified.size()) {
             check(0x0c0ffee0 == g_notified[0].value,
@@ -1789,7 +1816,7 @@ static void test_filter_notify()
     // An MTF exit with no step in progress is refused.
     {
         reset();
-        check(!hv().on_monitor_trap_flag(0),
+        check(!hv().on_monitor_trap_flag(0, 0),
               "an unexpected monitor trap exit is refused");
     }
 
@@ -1839,6 +1866,9 @@ static void test_filter_notify()
               "an agreeing length is fine");
         check(0x400002 == hv().vmcs.guest_rip(),
               "and RIP advances by the decoded length");
+        check(0x400002 == registers.rip,
+              "and context.rip with it - see the refusal cases above for "
+              "what a disagreement costs");
     }
 }
 
@@ -2288,9 +2318,7 @@ static void test_straddle_and_width()
 
         std::memset(g_memory + 0xffe, 0x11, 2);
         std::memset(g_memory + 0x1000, 0x22, 2);
-        retire_stepped_instruction();
-
-        hv().on_monitor_trap_flag(0);
+        hv().on_monitor_trap_flag(0, retire_stepped_instruction());
 
         check(g_notified.empty(),
               "a step resolved to the last bytes of the page notifies "

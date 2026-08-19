@@ -321,6 +321,26 @@ void hypervisor::on_vm_exit(std::uint64_t cpuid,
 
     // Out of the VMCS, because what the exit stub's capture left in
     // this field is its own return address, not the guest's RIP.
+    //
+    // **This is the one read of `guest_rip` an exit needs, and everything
+    // below takes it from here.** The census over our own reads put the
+    // field at 18.6 per round trip, the largest of any - and a VMREAD is
+    // an exit to the layer below at 1.4-1.8 microseconds, since the host
+    // this VMM runs under offers no VMCS shadowing.
+    //
+    // What keeps it true: `resume_guest` writes the field and
+    // `context.rip` together when it advances past an instruction, and
+    // `on_ept_violation` does the same when it retires one it emulated.
+    // Anything that writes one and not the other breaks this silently -
+    // the two would then differ by the length of one instruction, which
+    // reads as a plausible address.
+    //
+    // Where it is **not** the answer, and both are load-bearing: after a
+    // reflection vmcs01 is current and its guest RIP is the guest
+    // hypervisor's host entry point, and after `build_vmcs02` vmcs02's is
+    // the second-level guest's - in neither case what `context.rip`
+    // holds. `record_exit` and `resume_guest_rip` want the field for
+    // exactly that reason and still read it.
     context.rip = vmcs.guest_rip();
 
     // Whether the exit was caused by an instruction the guest should
@@ -1727,7 +1747,7 @@ void hypervisor::on_vm_exit(std::uint64_t cpuid,
         log("cpu {} refused a task switch, selector {} rip {}",
             (cpuid + 1),
             vmcs.exit_qualification() & 0xffff,
-            vmcs.guest_rip());
+            context.rip);
         break;
     }
     case basic_reason::triple_fault: {
@@ -1764,7 +1784,7 @@ void hypervisor::on_vm_exit(std::uint64_t cpuid,
             "handler, which is a guest failure and not an "
             "unimplemented exit",
             (cpuid + 1),
-            vmcs.guest_rip(),
+            context.rip,
             vmcs.guest_cs_selector());
 
         // Stopped through the same path, and the log line above is
@@ -1887,7 +1907,7 @@ void hypervisor::on_vm_exit(std::uint64_t cpuid,
             log("cpu {} {} rip {} cs {} armed {}",
                 cpu,
                 (basic_reason::mwait == reason) ? "mwait" : "monitor",
-                this->vmcs.guest_rip(),
+                context.rip,
                 this->vmcs.guest_cs_selector(),
                 this->vmcs.exit_qualification());
         }
@@ -2151,7 +2171,7 @@ void hypervisor::on_vm_exit(std::uint64_t cpuid,
     case basic_reason::monitor_trap_flag: {
         // One guest instruction has retired since the page was
         // opened. Close it again and tell whoever was watching.
-        if (!on_monitor_trap_flag(cpuid)) {
+        if (!on_monitor_trap_flag(cpuid, context.rip)) {
             // The flag is only ever armed by the watch above, so an
             // MTF exit with no step in progress means someone else
             // set it and there is no correct way to continue.
@@ -2187,7 +2207,7 @@ void hypervisor::on_vm_exit(std::uint64_t cpuid,
             if (auto slot = (cpuid + 1); (0 != slot) &&
                                          (slot <= max_cpus) &&
                                          this->running_l2[slot - 1]) {
-                auto where = vmcs.guest_rip();
+                auto where = context.rip;
                 record_profile_sample(where);
                 record_profile_context(slot - 1, where, context);
 
@@ -2408,7 +2428,7 @@ void hypervisor::on_vm_exit(std::uint64_t cpuid,
                     "cs {}: faulted",
                     cpu,
                     static_cast<std::uint64_t>(full_reason.value()),
-                    vmcs.guest_rip(),
+                    context.rip,
                     vmcs.guest_cs_selector());
             }
         }
