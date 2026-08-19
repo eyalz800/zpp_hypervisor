@@ -1032,14 +1032,28 @@ inline constexpr bool disarm_apic_watch = (0 != ZPP_DISARM_APIC_WATCH);
  * How long after the last start-up IPI the watch is considered to have
  * done its job, in time-stamp counter ticks.
  *
- * Ten thousand million, which is about five seconds on the 2 GHz part this
- * runs on. Deliberately far longer than a boot's worth of start-up IPIs -
- * the seven on this guest arrive inside 90 seconds of each other during
- * bring-up and then stop for ever - and deliberately not derived from a
- * measured frequency, because a wrong frequency would silently make the
- * delay zero and drop the watch during bring-up.
+ * Two hundred and forty thousand million, which is about two minutes on the
+ * 2 GHz part this runs on. Deliberately not derived from a measured
+ * frequency: a wrong frequency would silently make the delay zero and drop
+ * the watch during bring-up.
+ *
+ * **Five seconds was tried first and wedged the guest outright.** The gaps
+ * between this guest's start-up IPIs are far longer than five seconds -
+ * measured armed, the count goes 1 INIT and 2 start-up IPIs early, then
+ * reaches 15 and 16 by ninety seconds, then never moves again. So a
+ * five-second silence fired after the *first* application processor and the
+ * remaining six were started unwatched. What that produced is worth
+ * recording, because it is not the failure that was expected: all eight
+ * processors still reached this VMM and took about 107 exits each, but the
+ * seven application processors never entered the second level at all, and
+ * CPU 0 stopped dead - 28,736 exits and 2,741 shadow leaves, both unchanged
+ * across ninety seconds. Not a livelock. A stop.
+ *
+ * Two minutes clears the ninety-second bring-up with margin. It is still a
+ * heuristic and can still be wrong on a slower boot, which is the whole
+ * reason the switch is off by default.
  */
-inline constexpr std::uint64_t apic_watch_quiet_ticks = 10'000'000'000ull;
+inline constexpr std::uint64_t apic_watch_quiet_ticks = 240'000'000'000ull;
 
 /**
  * How long the timer runs before it forces an exit.
