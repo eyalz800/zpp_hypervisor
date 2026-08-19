@@ -27507,3 +27507,67 @@ the clean-phase measurements say where to aim:
 Reads are half the accesses and the half no existing mechanism touches.
 That is where to look first, and it is the opposite of where the stall's
 numbers pointed.
+
+### The reads are distinct, not duplicated - so the per-exit read cache is dead
+
+**First, an instrument correction.** `vmcs_field_read_encoding` /
+`vmcs_field_read_count` do **not** record this VMM's own reads. They
+record **the guest hypervisor's** VMREADs and VMWRITEs, filled by
+`record_vmcs_field_use`, and they exist to decide which fields are worth
+shadowing. Our own accesses are counted only in aggregate, by exit
+reason, in `handler_reason_reads` / `handler_reason_writes`. **There is
+no per-field breakdown of our own reads anywhere in the tree**, so a
+"read the histogram" step cannot be taken as written - it would answer a
+question about Hyper-V.
+
+The question is answerable statically, and the answer is decisive.
+Counting VMCS reads in the reflection path:
+
+```
+save_l2_state        11 sites,  11 distinct,  0 read twice
+reflect_l2_exit      11 sites,  11 distinct,  0 read twice
+build_vmcs02         11 sites,   9 distinct,  2 read twice
+load_l1_host_state    0 sites,   0 distinct,  0 read twice
+                     -----------------------
+across the four      33 sites,  28 distinct,  5 fields at two sites
+```
+
+**33 static read sites against 33.7 measured reads per reflection** - so
+essentially every site executes once, and the static count *is* the
+dynamic behaviour. Only five fields are read twice
+(`guest_rip`, `guest_activity_state`, `guest_cs_selector` and the two
+execution-control words), each exactly twice.
+
+So a per-exit read cache would remove **5 accesses of 33.7 - about 31 us
+of the 235 needed.** Worth having eventually, nowhere near the target,
+and not the shape the reads have. **The duplicate hypothesis is dead**,
+and with it the `regs_avail` analogy: KVM caches because its handlers
+re-read; ours read 28 distinct fields once each.
+
+### And `load_l1_host_state` reads nothing at all, which is the sharper finding
+
+**Zero read sites**, and its own audit says 48 of 52 field writes are
+elided with no divergence - so at most four writes, about 25,000 cycles.
+It costs **86 us a call, ~171,000 cycles.** Roughly 146,000 of those are
+neither reads nor writes.
+
+That is the one place in the reflection path where the cost is provably
+**not** VMCS traffic, which makes it the only part of the 545 us that a
+software change alone can reach. Nothing has ever looked at what it
+spends that on.
+
+### Which leaves three levers, sized
+
+- **reads** - 33.7, distinct, unconditional. Only fewer *fields* helps,
+  not caching. ~106 us.
+- **writes** - 42.4, already elided 37-46% in the clean phase where it
+  matters, and the residue is genuinely-changed values.
+- **fewer reflections** - 3.63 per round trip, and **untouched**. Each
+  costs 545 us, so removing one is 545 us of the 850 needed, more than
+  reads and writes together could plausibly give.
+
+The third is the largest and the least examined, and the by-reason table
+says what they are: per round trip the guest hypervisor executes ~3.6
+`vmresume`, ~3.5 `vmcall`, ~2.2 `vmptrld` and 0.74 `invept` - all its own
+VMX instructions, all trapping to us. `vmptrld` alone is 2.22 a round
+trip at 413,683 cycles each.
