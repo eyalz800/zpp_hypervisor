@@ -11496,6 +11496,67 @@ hypercall page beside it as the control for the address arithmetic,
 which is the check that made that earlier reading trustworthy.
 
 
+## Dropping the APIC watch stops the guest, and the reason is a stale shadow
+
+**The experiment failed, and what it found is worth more than what it was
+looking for.** `ZPP_DISARM_APIC_WATCH=ON` drops the local APIC page watch
+once no start-up IPI has been seen for long enough, to recover the 23.2% of
+exits the write-protection costs. Run three times:
+
+| quiet period | when it fired | result |
+|---|---|---|
+| 5 s | after 1 INIT and 2 start-up IPIs - the *first* processor | guest stopped |
+| 5 s | (same run) seven processors started unwatched | 107 exits each, no second-level entries |
+| 120 s | after 15 INITs and 16 start-up IPIs - **full bring-up** | guest stopped |
+
+The third is the one that matters: bring-up completed exactly as in the
+armed run, all eight processors healthy at 284 exits and 17 second-level
+entries, and the guest still stopped dead - 1,403,861 exits and 311,571
+shadow leaves, both unchanged across five minutes.
+
+**Not a livelock and not a lost processor. A halt, in our own code.** CPU 0
+sat at module + `0x2e271`, which symbolizes to `zpp::arch::x86_64::halt()`,
+and `unhandled_exit` says why:
+
+    occurred 1  reason 0x30 (EPT violation)  qualification 0x2b
+    guest_linear 0xfffff86e1d400380   guest_rip 0xfffff85a8b857efa
+
+Qualification `0x2b` is a **write to a page that is readable and executable
+and not writable**. But the watch had been dropped and the real entry put
+back: `epd[3][0x1f7]` read `0x6ab84407`, a table pointer with the split
+still in place, and the 4 kB leaf under it read `0xfee00407` - read, write
+and execute all set, memory type 0 for uncacheable, exactly right for a
+device page. **The permission the fault complains about had already been
+restored.**
+
+So the denial is not in the extended page tables this VMM installs. It is in
+the **composed shadow** built from them: shadow leaves created while the page
+was write-protected are still denying the write, because `unwatch_guest_page`
+changes the real entry and nothing invalidates the shadow entries derived
+from it. With no watch armed the resulting violation matches no case, falls
+to `default:` and halts the processor - the failure mode CLAUDE.md warns
+about under "Unhandled exits stop the CPU".
+
+Note the faulting offset, `0x380`: the local APIC timer's initial count,
+which is one of the three registers `filter_local_apic_write` deliberately
+excludes from logging because an idle Hyper-V writes it every tick. The
+first write after the drop is the one that kills it.
+
+**What this changes:**
+
+- **The cost question is unanswered.** Whether removing those 1,586 faults a
+  second gets the round trip under the 1.74 ms tick was not measured, because
+  the guest never ran long enough to measure. Do not read this as "removing
+  the watch does not help".
+- **There is a real defect underneath it, independent of this switch.** Any
+  change to a watched page after shadow leaves exist has the same problem.
+  Nothing else currently disarms a watch at runtime, which is why it has
+  never been seen.
+- **The fix is to invalidate the composed shadow when a watch changes**, next
+  to whatever `shadow_ept_leaves_that_did_not_help` was added to catch - the
+  `resets` column in the state dump is the existing lever. Until then the
+  switch stays off, and its comment says so.
+
 ## Where the 402 microseconds go, measured on the first valid eight-processor run
 
 **The guest is livelocked, and that is now proven rather than inferred.**
