@@ -27257,3 +27257,85 @@ Two prevention routes, and only one is open:
 `ticks/RT` measured at the transition must come out below 1, and the
 counters above must keep moving through t=53. Nothing else needs to be
 argued - the poller reports it in one number.
+
+## And the clean phase profiled, which is a different machine
+
+Every cost measurement in this file - the by-reason split, the
+`build_vmcs02` decomposition, the accesses per tick - was taken **inside
+the stall**, where a round trip is a notification bouncing VTL1 out of
+its entry point. That is not the population the target is about.
+
+Two full dumps bracketed inside the clean phase, at t=28-41 and t=49-61
+against a transition at ~83, and **self-verifying**: the counters that
+stop at the transition all grew between them - entries at `0x00` +167,
+`0x2f` delivered +1, `ept-violation` +87,707, and 0.23 clock ticks per
+round trip, matching the poller's pre-transition 0.15-0.26.
+
+### The exit mix, and it refutes the prediction made for it
+
+| reason | clean phase | per round trip | (in the stall) |
+|---|---|---|---|
+| `ept-violation` | **60.0%** | 15.56 | 52.5%, frozen |
+| `vmresume` | 14.0% | 3.64 | 16.7% |
+| `vmcall` | **13.3%** | 3.45 | 16.0% |
+| `vmptrld` | 8.6% | 2.22 | 8.5% |
+| `invept` | 2.8% | 0.74 | 3.0% |
+
+**25.9 exits per round trip clean against 53.6 in the stall.** The
+prediction was that `vmcall` would matter *more* in the clean phase since
+VTL1 does real work rather than bouncing. It matters **less** - 13.3%
+against 16.0%. What dominates the clean phase is `ept-violation` at 60%,
+the one reason that is frozen in the stall, because a booting guest
+touches new memory and a stalled one touches none.
+
+### Where the 2.4-4.1 ms goes, and the accounting closes
+
+```
+phase                       calls   us/call        us/RT
+build_vmcs02                 3.63     166.9        606.5
+reflect_l2_exit              3.63     162.7        591.2
+on_l2_ept_fault             15.39      21.7        333.9
+load_l1_host_state           3.63      85.8        311.9
+shadow_ept_pointer_for      19.03      14.4        273.5
+copy_shadow_to_vmcs12        5.86      27.4        160.2
+save_l2_state                3.63      27.8        101.2
+copy_vmcs12_to_shadow        5.86      12.7         74.7
+exit information             3.63      16.3         59.4
+merge_nested_bitmaps         3.63      14.4         52.5
+vmptrld x2                   7.26       3.0         22.0
+                                             -------------
+                                              2.59 ms/RT
+```
+
+**2.59 ms accounted against 2.4-4.1 ms measured**, so the round trip is
+almost entirely this VMM's own handler time and there is no missing
+population to look for.
+
+### The split that names the work
+
+```
+per-reflection machinery   1,979 us/RT   77%    3.63 reflections at ~545 us
+shadow-EPT work              607 us/RT   23%    15.4 faults at ~22 us + 19 lookups
+```
+
+**Sixty per cent of the exits are 23% of the time; 14% of the exits are
+77% of it.** A clean round trip is 3.63 reflections to the guest
+hypervisor, and each one costs about 545 microseconds - of which
+`build_vmcs02` 167, `reflect_l2_exit` 163 and `load_l1_host_state` 86 are
+415 on their own.
+
+So the target - 2.59 ms down to under 1.74 ms, a **33% cut** - is
+reachable by either halving the per-reflection cost or reducing the 3.63
+reflections, and **not** by anything aimed at extended-page-table faults,
+which are the majority of exits and a minority of the time. That is the
+distinction the in-stall profile could not have made, because the reason
+that dominates the clean phase does not occur in the stall at all.
+
+### The rule this adds
+
+**A profile taken in a failure state describes the failure, not the
+work.** The in-stall round trip is 7.5 ms and 53.6 exits; the clean one
+is 2.59 ms and 25.9 exits, with a different dominant reason and a
+different bottleneck. Quoting the first would have set a 4.3x target
+instead of 1.4-2.4x, and pointed the work at `vmcall` and the
+notification rather than at reflection cost.
