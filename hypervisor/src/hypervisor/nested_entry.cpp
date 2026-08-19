@@ -6592,15 +6592,34 @@ void hypervisor::materialise_l2_guest_state(std::size_t cpu)
     // those values are still the ones it stopped with. A VMPTRLD pair
     // is about 10,000 cycles against the 121,000 this deferral saves on
     // every exit that does not come here.
+    // Bracketed rather than reasoned about: this is 81% of VMPTRLD and
+    // 273 microseconds a trust-level round trip, and the only question
+    // that matters is how much of it is VMCS traffic - which scales down
+    // on bare metal - against software, which does not. Three adjacent
+    // intervals plus the whole, and a count of the reads beside them.
+    auto whole_start = arch::x86_64::rdtsc();
+    auto whole_stop = zpp::scope_exit([&] {
+        this->phase_cycles[cpu][24] += arch::x86_64::rdtsc() - whole_start;
+        this->phase_calls[cpu][24] += 1;
+    });
+
+    auto mark = [&](std::size_t slot, std::uint64_t since) {
+        this->phase_cycles[cpu][slot] += arch::x86_64::rdtsc() - since;
+        this->phase_calls[cpu][slot] += 1;
+    };
+
     auto region = this->vmcs02_physical[cpu];
 
+    auto in_start = arch::x86_64::rdtsc();
     if ((0 == region) || arch::x86_64::vmx::vmptrld(&region)) {
         return;
     }
+    mark(21, in_start);
 
     auto & shadow = this->guest_vmcs12[cpu];
     auto dirty = this->guest_state_dirty[cpu];
 
+    auto loop_start = arch::x86_64::rdtsc();
     std::size_t index{};
     for (auto guest_field : guest_state_fields) {
         // Anything the guest hypervisor has written since the last entry
@@ -6609,16 +6628,21 @@ void hypervisor::materialise_l2_guest_state(std::size_t cpu)
         if (guest_state_deferrable(index) &&
             (0 == (dirty & (1ull << index)))) {
             shadow.write(guest_field, this->vmcs.read(guest_field));
+            this->materialise_reads[cpu] = this->materialise_reads[cpu] + 1;
         }
         ++index;
     }
+    mark(22, loop_start);
 
+    auto out_start = arch::x86_64::rdtsc();
     auto own = own_vmcs_region_physical();
     if ((0 == own) || arch::x86_64::vmx::vmptrld(&own)) {
         // Without its own VMCS there is nothing to return to. Same
         // reasoning as `enter_or_park_l2`'s switch failure.
         __builtin_trap();
     }
+
+    mark(23, out_start);
 
     this->guest_state_deferred[cpu] = false;
     this->guest_state_materialises[cpu] =

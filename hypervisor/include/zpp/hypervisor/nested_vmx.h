@@ -207,6 +207,33 @@ inline constexpr bool evmcs_offered =
     false;
 #endif
 
+/**
+ * **This coupling is why the enlightenment has never been negotiated,
+ * and it makes `ZPP_EVMCS=ON` two changes rather than one.**
+ *
+ * Offering the enlightened VMCS also announces a Hyper-V-compatible
+ * interface, signature `Hv#1`, because eVMCS is advertised through the
+ * nested-features leaf *inside* the `0x40000000` block - so the two
+ * cannot be separated. Measured either side of the switch: **187 CPUID
+ * entries in the hypervisor range with it on, zero on every other
+ * boot.**
+ *
+ * What the guest does with that: probes the block, then `vmon`,
+ * `vmptrld`, ninety-nine **real** `vmwrite`s, **one** `vmlaunch`,
+ * `vmclear`, `vmoff`. It stands down. `hyperv_vp_assist_writes`,
+ * `evmcs_reads`, `evmcs_writes` and `evmcs_recommended` all read **0**,
+ * and so do `nested_vmfail_count` and `nested_entry_error` - nothing is
+ * refused, because nothing is attempted a second time. Ninety-nine real
+ * VMWRITEs is itself the proof the enlightened path was not taken.
+ *
+ * So the eVMCS defects found by reading the code - the over-imported
+ * MSR-area fields, the VMfail an enlightened guest cannot see, the
+ * unguarded VMCLEAR, the conflated pointer - are all on a path this
+ * machine never reaches. Fixing them changes nothing until Windows' own
+ * hypervisor agrees to run under an announced one, and here it declines.
+ * That is a question about what the whole block claims. `BACKLOG.md` has
+ * the census.
+ */
 inline constexpr bool announce_hypervisor = evmcs_offered;
 
 inline constexpr bool enabled =

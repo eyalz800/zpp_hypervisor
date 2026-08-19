@@ -27871,6 +27871,107 @@ unit. The rule earns another line: *a residue is not attributed until it
 is bracketed.* Reading the code and multiplying is how all three went
 wrong.
 
+## `materialise_l2_guest_state` bracketed: all VMCS traffic, no lever
+
+Four intervals, clean-phase window, **coverage 99.9%**:
+
+```
+interval                   calls/RT     us/call      us/RT   share
+materialise: vmptrld in        2.06         3.7        7.5    3.7%
+materialise: field loop        2.06        89.5      184.4   91.5%
+materialise: vmptrld out       2.06         4.5        9.3    4.6%
+materialise: whole             2.06        97.7      201.4
+```
+
+and the read count beside it: **1,920,292 VMREADs over 43,643 calls =
+44.0 a call**, so the loop is 89.5 us for 44 reads - **2.03 us a VMREAD**,
+against the 1.36 us a VMCS access measured independently.
+
+**So it is 46 VMX instructions and essentially no software.** The
+question it was measured to answer is settled: this **scales down on bare
+metal and is already inside the projection**, so it is not a lever and
+the deferral does not need touching. Which is the answer that costs
+nothing, and it was worth one boot to have it rather than assume it.
+
+## `ZPP_EVMCS=ON` is not a single-variable change, and the enlightenment is never negotiated
+
+The four edges found statically - seven over-imported MSR-area fields, a
+VMfail invisible to an enlightened guest, an unguarded `on_guest_vmclear`,
+the eVMCS pointer conflated with `guest_current_vmcs` - describe a path
+**this boot never reaches**. Measured, on the boot whose log had never
+been read:
+
+```
+hyperv_vp_assist_writes   0        nested_vmfail_count      0
+evmcs_reads               0        nested_last_vmfail       0
+evmcs_writes              0        nested_entry_error       0
+evmcs_recommended         0        nested_msr_load_failed   0
+l2_entries                0
+```
+
+**Every one of them zero.** There is no VMfail to be invisible, no
+MSR-area refusal, no VMCLEAR corruption and no pointer conflation,
+because the guest hypervisor never enables the enlightenment: it never
+writes a VP assist page and never touches the enlightened structure.
+
+### What it does instead, from the exit census
+
+```
+cpuid      5528  87.8%      vmwrite      99  1.6%
+rdmsr       655  10.4%      vmclear/vmlaunch/vmptrld/vmoff/vmon   1 each
+```
+
+`vmon`, `vmptrld`, ninety-nine `vmwrite`, **one** `vmlaunch`, `vmclear`,
+`vmoff`. A minimal probe, once, and then VMX is turned off. Ninety-nine
+real VMWRITEs is itself the proof that the enlightened path was not
+taken - an enlightened guest hypervisor writes its fields to memory and
+executes none.
+
+### And the cause is a coupling in our own switch
+
+`nested_vmx.h:210` is `inline constexpr bool announce_hypervisor =
+evmcs_offered;`, and `announce_hypervisor` is consulted at eight places
+in the CPUID path. So `ZPP_EVMCS=ON` **also announces a Hyper-V-compatible
+interface**, signature `Hv#1`. Measured either side of it:
+
+```
+cpuid leaves in the hypervisor range:  187  with evmcs=1
+                                         0  on every other boot
+```
+
+The guest probes the block 187 times and then stands down. **The
+coupling is intrinsic rather than accidental** - eVMCS is advertised
+through the nested-features leaf *inside* that block, so it cannot be
+offered without announcing - which means "offer the enlightenment" and
+"tell Windows a hypervisor is already here" are the same act, and this
+guest answers the second one by not starting.
+
+So the eVMCS route is not four small edges away from working. Before any
+of them matters, Windows' own hypervisor has to agree to run under an
+announced one, and on this machine it declines. That is a question about
+what the whole `0x40000000` block claims, not about the enlightened
+structure's layout.
+
+### Two instrument fixes made on the way
+
+- **`nested_vmfail_count` / `nested_last_vmfail` now print from the
+  monitor path.** `scripts/zpp.gdb` has shown them for a dozen sessions
+  and `rig-dump-state.py` never did, so the reader that works on a wedged
+  guest could not see the number that names a refused entry.
+- **`reader proven` was weaker than it read**, and it cost a dump this
+  session: it checks `0x023 == (proof & 0xfff)`, twelve bits, so a module
+  base that has moved still lands on some present entry and passes. A
+  stale-base dump printed `reader proven` above a phase table of zeroes
+  and an entry count of four billion. There is now a second, **base
+  sensitive** check beside it - the build manifest is a fixed string at a
+  fixed offset, so reading `zpp_build_switches` back proves the base
+  itself.
+
+Still open: the log ring reads **empty on this build** - the walk finds
+nodes and the count grows, 34 to 37 across dumps, but no string resolves.
+That is a reader bug and it is why the refusal had to be established from
+counters instead.
+
 ## The second-level hypercall census, which nothing had ever taken
 
 `hypercall_codes` is gated on `from_guest_hypervisor`, so it counts the

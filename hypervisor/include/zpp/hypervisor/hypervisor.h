@@ -8770,7 +8770,9 @@ private:
     // 16 through 20 are the VMPTRLD decomposition - three adjacent
     // intervals, the shadow publish, and the whole call, so coverage is
     // computed rather than assumed. See `on_guest_vmptrld`.
-    static constexpr std::size_t phase_count = 24;
+    // 21 through 24 bracket `materialise_l2_guest_state`, which is 81%
+    // of VMPTRLD and had never been measured.
+    static constexpr std::size_t phase_count = 28;
     std::uint64_t phase_cycles[max_cpus][phase_count]{};
     std::uint64_t phase_calls[max_cpus][phase_count]{};
     /** @} */
@@ -9066,6 +9068,16 @@ private:
      * A linear table for the same reason as the one above: the codes are
      * sparse and the interesting set is small.
      */
+    /**
+     * VMREADs issued by `materialise_l2_guest_state`, so its cycles can
+     * be split into VMCS traffic and software.
+     *
+     * The distinction decides whether it is a lever at all: reads scale
+     * down on bare metal and are already inside the projection, software
+     * survives and is the only part worth attacking.
+     */
+    volatile std::uint64_t materialise_reads[max_cpus]{};
+
     std::uint64_t l2_hypercall_codes[hypercall_code_slots]{};
     std::uint64_t l2_hypercall_code_counts[hypercall_code_slots]{};
     std::uint64_t hypercalls_seen{};

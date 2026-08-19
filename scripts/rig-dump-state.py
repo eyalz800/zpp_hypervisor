@@ -58,7 +58,9 @@ PHASE_NAMES = ["save_l2_state", "reflect_l2_exit", "build_vmcs02",
                "build: after vmptrld",
                "  vmptrld: read region", "  vmptrld: flush old",
                "  vmptrld: assign", "  vmptrld: shadow publish",
-               "vmptrld: whole call"]
+               "vmptrld: whole call",
+               "  materialise: vmptrld in", "  materialise: field loop",
+               "  materialise: vmptrld out", "materialise: whole"]
 
 # Whose instruction pointer a record holds - see exit_trace_entry's
 # rip_owner. An address attributed to the wrong guest reads as a
@@ -1530,7 +1532,12 @@ def main():
                "l2_injected_vector",
                "phase_cycles", "phase_calls",
                "guest_state_writes_skipped", "guest_state_writes_done",
-               "control_writes_skipped", "control_writes_done"]
+               "control_writes_skipped", "control_writes_done",
+               # The refusal itself. `scripts/zpp.gdb` has printed these
+               # for a dozen sessions and this reader never did, so the
+               # monitor path - the one that works on a wedged guest -
+               # could not see the number that names a failed entry.
+               "nested_vmfail_count", "nested_last_vmfail"]
     off = gdb_offsets(args.elf, members)
     instance = base + gdb_symbol(
         args.elf, "zpp::hypervisor::hypervisor::instance()::instance")
@@ -1579,7 +1586,12 @@ def main():
                "shadow_ept_leaves_filled", "vmcs_shadow_loads",
                "vmcs_shadow_stores",
                "guest_state_writes_skipped", "guest_state_writes_done",
-               "control_writes_skipped", "control_writes_done"]
+               "control_writes_skipped", "control_writes_done",
+               # The refusal itself. `scripts/zpp.gdb` has printed these
+               # for a dozen sessions and this reader never did, so the
+               # monitor path - the one that works on a wedged guest -
+               # could not see the number that names a failed entry.
+               "nested_vmfail_count", "nested_last_vmfail"]
     for name in scalars:
         monitor.queue(instance + off[name], scalar_cpus)
     # The phase rows are [cpu][phase_count], so each processor's row has
@@ -1770,6 +1782,16 @@ def main():
               f"cs 0x{read('host_exception', 3):x} cr2 0x"
               f"{read('host_exception_cr2', 0):x}")
 
+    # The refusal, by number, before anything else. `l2_entries` at zero
+    # with `exits` climbing is a second level that never started, and
+    # this is the field that says why - SDM 31.4 lists the VM-instruction
+    # error codes.
+    for cpu in range(args.cpus):
+        fails = read('nested_vmfail_count', cpu)
+        if fails:
+            print(f"cpu {cpu} nested VMfail: {fails:,} times, "
+                  f"last error {read('nested_last_vmfail', cpu)}")
+
     proof = read('host_page_table', 0)
     if proof is None:
         print("\nREADER UNPROVEN: host_page_table did not read back")
@@ -1778,6 +1800,30 @@ def main():
     else:
         print(f"\nREADER SUSPECT: host_page_table[0] = 0x{proof:x}, "
               f"expected a present entry ending 023")
+
+    # And a second proof that is sensitive to the BASE, which the one
+    # above is not: it checks twelve bits, so a module base that has
+    # moved still lands on some present entry and passes. Measured - a
+    # dump taken at a stale base printed `reader proven` and then a phase
+    # table of zeroes and an entry count of four billion.
+    #
+    # The build manifest is a fixed string at a fixed offset from the
+    # base, so reading it back is a direct test of the base itself.
+    try:
+        manifest_va = base + gdb_symbol(args.elf, "zpp_build_switches")
+        mon = Monitor(args.rig, args.port)
+        mon.queue(manifest_va, 2)
+        got = mon.run()
+        raw = b"".join(got.get(manifest_va + 8 * i, 0).to_bytes(8, "little")
+                       for i in range(2))
+        if raw.startswith(b"zpp switches:"):
+            print("base proven: zpp_build_switches reads back at the base")
+        else:
+            print(f"BASE SUSPECT: {raw!r} at 0x{manifest_va:x} is not the "
+                  f"manifest - the module base is probably wrong, and "
+                  f"every number above it is fiction")
+    except Exception as failure:
+        print(f"base unproven: {failure}")
 
     # Which hypervisor-range CPUID leaves the guest actually asks for.
     # The question the exit trace cannot answer: it records that a cpuid
