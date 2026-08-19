@@ -3538,8 +3538,34 @@ void hypervisor::load_l1_host_state(std::size_t cpu)
             // A batch rather than a single slot, because the elision
             // below is live between one check of a slot and the next.
             // See `l1_host_audit_batch`.
-            for (std::size_t taken{}; taken < l1_host_audit_batch;
-                 ++taken) {
+            //
+            // **Swept in full until every slot is measured, then at the
+            // maintenance rate.** The two constants answer different
+            // questions and only one of them is about safety:
+            // `l1_host_stable_after` is how much evidence is demanded
+            // before a slot may be elided - raised to 4096 after a real
+            // divergence, and untouched here. The batch is only how fast
+            // that evidence is gathered, and it has no safety content.
+            //
+            // At four a call over 52 fields a slot was sampled once every
+            // thirteen calls and needed 53,248 calls - 52 seconds at the
+            // clean phase's rate, against a guest that stalls at 53. So
+            // the elision reached its ceiling exactly as the phase it
+            // exists for ended: measured 1.9% of writes elided before the
+            // transition against 80.7% after it. A full sweep needs 4,096
+            // calls instead, about four seconds.
+            //
+            // The warm-up costs 48 extra reads a call for those 4,096
+            // calls, roughly 0.3 seconds of work once. It is not left on:
+            // this audit is also the *ongoing* divergence check, so a
+            // permanent full sweep would cost more reads for ever than
+            // the writes it lets us skip - which is why the rate drops
+            // back rather than the constant simply being raised.
+            auto batch = (this->l1_host_stable_count[cpu] >= recorded)
+                             ? l1_host_audit_batch
+                             : recorded;
+
+            for (std::size_t taken{}; taken < batch; ++taken) {
                 auto index = this->l1_host_audits[cpu] % recorded;
                 this->l1_host_audits[cpu] = this->l1_host_audits[cpu] + 1;
 
@@ -3590,6 +3616,14 @@ void hypervisor::load_l1_host_state(std::size_t cpu)
                 }
 
                 this->l1_host_samples[cpu][index] += 1;
+
+                // Counted on the crossing, so the sweep ends exactly once
+                // every slot is measured.
+                if (l1_host_stable_after ==
+                    this->l1_host_samples[cpu][index]) {
+                    this->l1_host_stable_count[cpu] =
+                        this->l1_host_stable_count[cpu] + 1;
+                }
             }
         }
 

@@ -27612,6 +27612,62 @@ removed.
 That is a design decision with numbers on both sides rather than a
 guess, and it should be taken deliberately.
 
+### And the trade-off dissolves: the two constants are separable
+
+`l1_host_stable_after` is *how much evidence* before believing a slot -
+the safety number, raised after a real divergence. `l1_host_audit_batch`
+is *how fast that evidence is gathered* - a rate, with no safety content.
+`l1_host_samples` is per **slot**, checked per slot in
+`host_field_elidable`, so sweeping more slots per call reaches the same
+4096 samples sooner without asking for less evidence.
+
+**But raising the constant is the wrong shape**, because the audit is
+also the ongoing divergence check and runs on every call for ever: a
+permanent full sweep would cost 52 VMREADs a call to save 51 VMWRITEs.
+So the sweep is made **adaptive** - full until every slot is measured,
+then back to the maintenance rate. Warm-up 53,248 calls to 4,096; the
+one-off cost is 48 extra reads a call for four seconds.
+
+### Booted, and the mechanism worked while the result did not
+
+**Mechanism, from the same window:** `l1_host_stable_count` read **52**
+at the first sample and `l1_host_elided` climbed from 3.0M to 10.9M.
+Elision reached its ceiling in the first seconds instead of at t=52.
+Measured in the stall afterwards, `load_l1_host_state` costs **22 us a
+call against 86 in the clean phase before** - so the elision is worth
+about **64 us a reflection, 232 us a round trip**.
+
+**Result, from the same window: the guest still stalls.**
+
+```
+                     BEFORE            AFTER
+inj2f last moved     t=53.6            t=61.8
+eptviol last moved   t=53.6            t=61.8
+clean round trip     3.36 ms           3.50 ms
+settled ticks/RT     4.25              4.79
+```
+
+The eight seconds are boot-timing variance, not a shortened round trip -
+the round trip did not improve, and 232 us of it is **7%**, which is at
+or below the difference between two boots. `ticks/RT` has to go from 4.25
+to **below 1**.
+
+**Keep the change**: it is free, semantically identical, and it makes a
+mechanism work in the phase it was designed for. It is not sufficient and
+it was never going to be - which the acceptance test said and the cycle
+count would not have.
+
+### And the target is bigger than this file has been saying
+
+The 2.59 ms was the **sum of the phase decomposition**; the wall-clock
+round trip measured from `vtl_switches` is **3.36 ms**. So getting under
+the 1.74 ms tick is a **48% cut, not 33%**. Every earlier sizing against
+2.59 ms was optimistic by that much, this one included.
+
+**A phase sum is not a wall clock.** It omits whatever is not inside a
+timed phase, and the gap here is 0.77 ms a round trip - larger than any
+single lever identified so far.
+
 ### Which leaves three levers, sized
 
 - **reads** - 33.7, distinct, unconditional. Only fewer *fields* helps,

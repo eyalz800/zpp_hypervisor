@@ -5911,6 +5911,17 @@ private:
     static constexpr std::size_t l1_host_audit_batch = 4;
 
     std::uint64_t l1_host_samples[max_cpus][l1_host_field_count]{};
+
+    /**
+     * How many slots have gathered `l1_host_stable_after` samples.
+     *
+     * Only so the sweep can tell "still gathering evidence" from "warm"
+     * without rescanning the table. It counts slots that are *measured*,
+     * not slots that are elidable - a slot the processor changes is fully
+     * measured and never elidable, and it must not hold the sweep at its
+     * warm-up rate for ever.
+     */
+    std::uint64_t l1_host_stable_count[max_cpus]{};
     volatile std::uint64_t l1_host_elided[max_cpus]{};
     volatile std::uint64_t l1_host_diverged[max_cpus]{};
     /** @} */
