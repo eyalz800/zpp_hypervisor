@@ -11496,6 +11496,122 @@ hypercall page beside it as the control for the address arithmetic,
 which is the check that made that earlier reading trustworthy.
 
 
+## Where the 402 microseconds go, measured on the first valid eight-processor run
+
+**The guest is livelocked, and that is now proven rather than inferred.**
+Over 120 seconds on a settled guest: `leaves-filled` 314,290 -> 314,290 and
+`shadow-builds` 16,433 -> 16,433, against 886,695 exits and 321,015
+second-level entries in the same window. **Not one new page of guest memory
+was touched while taking nearly a million exits.** That is the instrument to
+reach for first next time - it answers "is it progressing" in two samples and
+needs no symbols.
+
+Steady-state exit mix on CPU 0, 6,832 exits/s, sampled as a delta over 30 s:
+
+| reason | | /s | share |
+|---|---|---|---|
+| 24 | VMRESUME | 2,453 | 35.9% |
+| 48 | EPT violation | 1,586 | 23.2% |
+| 32 | WRMSR | 1,586 | 23.2% |
+| 7 | interrupt window | 570 | 8.3% |
+| 23 | VMREAD | 254 | 3.7% |
+| 1 | external interrupt | 254 | 3.7% |
+
+EPT violation and WRMSR are **exactly equal** - 47,578 each over 30 s. That
+1:1 pairing is a fact about the tick, not a coincidence, and it is what makes
+the two questions below worth separating.
+
+### The round trip costs 803,507 cycles, and half of it is VMCS accesses
+
+Phase timing over 45 s, 99,253 round trips, 88.6% of one 2 GHz core:
+
+| phase | what | cyc/call | share |
+|---|---|---|---|
+| 1 | `reflect_l2_exit` | 224,914 | 28.0% |
+| 2 | | 111,241 | 13.8% |
+| 15 | | 77,905 | 9.7% |
+| 5 | | 63,459 | 8.5% |
+| 0 | | 62,930 | 7.8% |
+| 12 | | 49,862 | 6.2% |
+
+**803,507 cycles per second-level entry - about 402 microseconds at 2 GHz.**
+The tick period is 1.74 ms, so roughly four round trips fill a tick and the
+clock handler cannot finish inside its own period. That is the livelock, in
+one number.
+
+Measured against it, in the same window: **272,540 VMCS accesses a second,
+133.6 per reflection.** At the 1.4-1.8 microseconds a VMCS access costs here -
+we are KVM's guest, so every VMREAD and VMWRITE is another exit to KVM - that
+is roughly 200 of the 402 microseconds. `reflect_l2_exit` alone measures
+119.3 microseconds per call, which its 133.6 accesses account for completely.
+
+**So the lever is the number of VMCS accesses per round trip, not the number
+of exits.** Two things follow, and they point in opposite directions from
+where this was looking:
+
+### The WRMSR exits cannot be removed, only made cheaper
+
+The synthetic-MSR census settles what Windows is writing, and it is not the
+x2APIC range:
+
+| MSR | writes | share |
+|---|---|---|
+| `0x40000070` EOI | 2,853,793 | 38.8% |
+| `0x40000071` ICR | 2,853,187 | 38.8% |
+| `0x40000084` EOM | 1,655,289 | 22.5% |
+
+7,362,297 in total, against 6.76 million WRMSR exits - so **essentially every
+WRMSR exit is a Hyper-V synthetic MSR write.** Those live outside both MSR
+bitmap windows, `0`-`0x1fff` and `0xc0000000`-`0xc0001fff`, so they exit
+**unconditionally**: SDM 28.1.3, and KVM reaches the same answer in
+`nested_vmx_exit_handled_msr` by falling through both range tests. No bitmap
+can suppress them and bare metal would not either.
+
+**This kills the obvious candidate.** Offering Hyper-V the APIC-virtualization
+secondary controls KVM offers its own nested guest - `VIRTUALIZE_X2APIC_MODE`,
+`APIC_REGISTER_VIRT`, `VIRTUAL_INTR_DELIVERY`, which
+`nested_vmx::supported_secondary_controls` withholds and KVM's
+`nested_vmx_setup_secondary_ctls` includes - would remove **zero** of these,
+because they are not x2APIC accesses. Worth knowing before it is proposed
+again: it is the right change for a guest in x2APIC mode and this guest is not
+making x2APIC accesses at all.
+
+### The EPT violations are ours, and have nothing to do with nesting
+
+`l2_ept_dispositions[0]` on the same run: `reflected_walk` 130, `installed`
+314,290, and **`watched` 0**. `installed` equals `leaves-filled` exactly and
+both are frozen. So **not one** of the 1,586/s faults at `0xfee00000` arrives
+through the second-level path - they are the guest hypervisor's own local APIC
+traffic in root operation, which the faulting instruction pointers agree with:
+`0xfffff857ce257a81` and `...a8e`, both inside hvix64.
+
+They are caused by `watch_local_apic` write-protecting the whole 4 KB page to
+catch a start-up IPI, and in steady state - long after the seven application
+processors are up - what they actually catch is end-of-interrupt traffic.
+**23.2% of all exits, entirely self-inflicted, and a single-level problem.**
+
+That makes an APIC-access page with APIC-register virtualization on vmcs01 the
+change to try first: SDM 32.4.3.2 has a write to offset `300H` always take the
+trap-like APIC-write exit for delivery modes `101B` (INIT) and `110B` (SIPI),
+while offset `310H` never exits and is deposited in the virtual-APIC page - so
+the interception gets *stronger* while the traffic that is not an IPI stops
+exiting. It also retires the decoder from the start-up IPI path, which is the
+defect recorded further down where 45% of writes to the page are undecodable.
+Note SDM 32.4.1 ranks the APIC-access exit **below** EPT violations, so the
+write-watch does not merely coexist with that mechanism - it precludes it, and
+the two cannot be measured together.
+
+**What was checked and found correct, so it is not re-audited:** this VMM does
+*not* reflect unconditionally. `on_l2_exit` runs the same two-stage decision as
+KVM's `nested_vmx_reflect_vmexit` - `l0_wants_l2_exit`, then `l1_wants_l2_exit`
+against vmcs12's MSR bitmap, both I/O bitmaps, the CR masks against the read
+shadows, and the exception bitmap with page-fault mask/match - and
+`merge_nested_bitmaps` merges L1's MSR bitmap with ours on every entry, as
+`nested_vmx_prepare_msr_bitmap` does. The 100%-reflected figure measured here
+is real and is not a bug: L1 genuinely wants those exits. One stale pointer
+found while checking: the page-fault mask/match code cites SDM 27.6.3, which
+describes the exception-bitmap field; the rule it implements is stated in 28.2.
+
 ## The switch below leaked out of its experiment, and cost seven processors
 
 **Read this before the section that follows it.** `ZPP_INTERCEPT_APIC=OFF`
