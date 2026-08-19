@@ -15,6 +15,170 @@ The convention for closing an entry: state what was observed afterwards, not
 that the code changed. "Guest now reads `cr4=0x0668`" closes one of these;
 "masked CR4" does not.
 
+## THE CLOSE: why Windows does not finish booting, and where that ends
+
+*Read this first. The investigation below reached a conclusion; this is
+it in one place instead of across forty entries.*
+
+### The mechanism, every hop measured
+
+```
+t=53s   Windows re-arms its own timer 64 Hz -> 574 Hz
+          KeQuantumEndTimerIncrement is 17,400 - a literal in ntoskrnl
+          behind a constant-folded feature gate. Its own choice.
+
+        tick period 15.6 ms -> 1.74 ms, against a trust-level round trip
+        of 2.4-4.1 ms. Ticks per round trip: 0.2 -> 4.3.
+
+        every round trip now contains ~4 clock ticks
+          each tick's ISR requests the deferred-call vector 0x2f by a
+          self-IPI on the synthetic ICR (wrmsr 0x40000071 = 0x4002f)
+
+        0x2f is class 2; the guest sits at task priority 0x20 (DISPATCH)
+        or 0xd0 (CLOCK). Delivery is strictly-greater, so it is REFUSED,
+        and correctly. Measured: requested 145,300 times in 257 s,
+        delivered ZERO. Never once below 0x20 in 630,418 entries.
+
+        a pending VTL0 interrupt makes Hyper-V assert VINA into VTL1
+          measured 1.0032 per HvCallVtlCall - every entry
+
+        VTL1's ShvlVinaHandler answers by returning to VTL0 with
+        secure-call state 4 in byte 1 of RBX
+          (securekernel RVA 0x942cc, the only writer of 4 in the image;
+           HvRegisterVsmVina = 0x740 - vector 0x40, enabled, auto-reset)
+
+        ntoskrnl's VslpEnterIumSecureMode handles states 0,1,2,3,5,6 and
+        has NO CASE for 4 - falling through and re-entering IS the
+        correct answer to "go take your interrupt"
+
+        so the secure call never retires -> IRQL never drops -> 0x2f
+        stays pending -> VINA stays asserted -> the secure call never
+        retires
+
+        ten threads Ready, QuantumEnd=1, one DPC queued, zero context
+        switches, and the spinner stops.
+```
+
+The state byte is **not memory**: `HvlSwitchToVsmVtl1` marshals the
+descriptor through **RBX and XMM10-15** across the boundary, and
+`memset(rsp+0x20, 0, 0x68)` = 8 + 6x16 confirms the shape. `rbx.changed`
+at `HvCallVtlReturn` was **0 across 25,659 consecutive switches**.
+
+Four counters stop in the **same 4.1 second sample** and never move
+again: `0x2f` delivered, entries at priority `0x00`, entries at `0x10`,
+and `ept-violation`. One event, not a sequence.
+
+### The threshold is one tick per round trip, and why
+
+VINA is **auto-reset**, so it is asserted once per entry and cleared on
+return. What makes it permanent is a **new tick landing inside every
+retry**. Below one tick per round trip some retries contain none, the
+call retires, IRQL drops, the deferred call runs and `0x2f` clears.
+
+```
+ticks per round trip < 1   ->  the system works
+ticks per round trip > 1   ->  it deadlocks, and cannot get out
+```
+
+That is exactly why 64 Hz survived at 0.2 and 574 Hz did not at 4.3.
+
+**Escape and entry are different questions and must not be collapsed.**
+Once inside, `0x2f` is permanently pending and the notification is a
+level, so *no round-trip speed reaches it*. Entry is the opposite: the
+round trip is the whole variable.
+
+### Every lever, and what closed it
+
+| lever | worth | outcome |
+|---|---|---|
+| host-state elision warm-up | **232 us/RT** | **LANDED** - the only one |
+| shadow-EPT refresh on INVEPT | 272 us/RT | closed: **unsound** - Hyper-V invalidates *around* a VTL protection change, so a refresh reinstalls tables about to change |
+| vmcs12 retention | 15.8 us/RT | closed: measured 15.8, not the 204 predicted from reading the code |
+| per-exit read cache | 31 us/RT | closed: 33 read sites, **28 distinct**, each read once |
+| TLB-flush handling at L0 | - | closed: flush hypercalls are **0.2%** of second-level calls |
+| withholding the self-IPI | - | closed: the level above **halts** - it needs the interrupt pending to stay awake |
+| forcing one delivery | - | **untested**: the one-shot fired in early boot; "once ever at 0x20" was not selective enough |
+| `materialise_l2_guest_state` | 273 us/RT | closed: 44 VMREADs + 2 VMPTRLDs, **no software** - scales down on bare metal |
+| the tick rate itself | - | closed twice: `STRETCH=8` bugcheck-looped, `TICK_FLOOR` shut down. Windows checks its clocks against each other |
+
+### The rig's ceiling, and its cause
+
+```
+clean round trip  3.36 ms      l2-run 11.64%  l1-run 13.33%  vmm 75.03%
+                               (sums to 100.00%)
+our share         2.52 ms      of which 1.49 ms - 59% - is VMCS accesses
+                               at a measured 1.36 us each
+to clear 1.74 ms  our share must reach 0.90 ms: a 64% cut
+identified levers 0.53 ms, of which 0.23 landed
+measured          1.93 ticks per round trip
+```
+
+**The 1.36 us is KVM emulating every VMREAD and VMWRITE in software**,
+because `enable_shadow_vmcs` is `N`, because `cpu_has_vmx_shadow_vmcs()`
+is false, because the rig's i7-8565U does not report **IA32_VMX_MISC bit
+29**. The parameter is `0444` and a reload would not change it - the
+capability test clears it again.
+
+*(Inference, not a direct reading: the target has no `msr` driver, so
+this is the parameter plus KVM's only auto-disable path.)*
+
+**So the rig cannot reach the threshold by any change to this codebase or
+any setting on the machine.** That is a hardware property of the host.
+
+And the contradiction worth keeping: this VMM *does* shadow successfully
+for Hyper-V, because `nested_vmx_setup_misc_data` advertises bit 29 to
+its guest **unconditionally, whatever the silicon does**. We are offered
+a capability the hardware lacks, take it, and KVM emulates that too. **A
+capability bit read from a virtual CPUID is not a statement about
+silicon.**
+
+### Bare metal, as a number and not a plan
+
+Same 1,095 accesses at native cost: our share ~1.09 ms, round trip ~1.93
+ms, **ticks/RT ~1.11**; with the landed and available changes, **~0.99,
+band +/-15%** from the two instruments' disagreement. A coin flip that
+only a physical boot settles.
+
+**Ruled out by the user: KVM only.** And a trip today would report **one
+bit** - the target has no serial port, no monitor, no debugger, and the
+screen belongs to the guest. `emit_disk_telemetry` is written, compiled
+both ways, tested and **dormant**; enabling its channel is a real write
+to the ESP of the machine's own Windows disk and nobody has authorised
+it.
+
+### The nine instrument shapes - the most portable thing here
+
+1. **Wrong field** - a census on RDX reported "the same request 99.8% of
+   the time"; RDX was a sentinel and RBP was the pointer.
+2. **Wrong denominator.**
+3. **Wrong duration** - the 0.933 notifications per call spanned the
+   healthy phase *and* the livelock; steady state is 1.00.
+4. **Wrong source.**
+5. **Wrong visibility** - an exit-driven instrument cannot see a loop
+   that does not exit.
+6. **Wrong direction** - `ept-violation` frozen means "no new pages",
+   which a guest doing nothing and a guest freeing memory both produce.
+7. **Wrong population** - *a profile taken in a failure state describes
+   the failure, not the work.* In-stall 7.5 ms and 53.6 exits against
+   clean 2.59 ms and 25.9, different dominant reason, different
+   bottleneck. It would have set a 4.3x target instead of 1.4-2.4x.
+8. **A residue is not attributed until it is bracketed** - 204
+   microseconds that were 15.8; a per-access unit derived by assuming
+   what it was used to prove; "the elidable set" read as "the elided
+   set". All three came from reading code and multiplying.
+9. **A self-check must fail on the thing it protects against** -
+   `reader proven` checks twelve bits and passed on a stale base above a
+   phase table of zeroes and an entry count of four billion; batched
+   monitor reads parsed into wrong keys and `words.get(addr, 0)` turned
+   every miss into a plausible zero.
+
+### And the oldest one, five times over
+
+**The data was already there and nothing had asked the right question of
+it.** `rdx` in the trust-level register census held the descriptor
+pointer from the very first capture, in a printed column, for five
+sessions.
+
 ## A hang after the chainload line: what it is, and what it is not
 
 Read this before investigating one, because it cost a day.
@@ -28201,6 +28365,30 @@ emulate them. That projection stays 0.99 with a 15% band.
 **And the user has ruled out bare metal: KVM only.** So the honest end
 state is that the goal is not reachable on this platform, for a reason
 that is neither this VMM's nor fixable from it.
+
+### And `kvm-intel-nove.ko` is not a variant - it is a rebuild
+
+Checked statically, no load, because a module swap needs a reload and the
+reload has left `kvm_intel` at refcount -1:
+
+```
+                        vermagic                    compiler
+kvm-intel.ko            6.12.11-tinycore64          GCC (GNU) 14.2.0, intree=Y
+kvm-intel-nove.ko       6.12.11-tinycore64          GCC (Debian 14.2.0-19)
+kvm-intel-trace.ko      6.12.11-zpptrace            -
+```
+
+Stock and `nove` have **identical module parameters (24, name for name),
+the same five `enable_shadow_vmcs` references and the same
+virtualization-exception strings**. The only differing strings are the
+compiler banner, the absent `intree=Y`, and the `__UNIQUE_ID` counters
+that shift with it - 128 bytes of size difference.
+
+So it is an **out-of-tree rebuild of the same kernel's source on a Debian
+toolchain**, not a functional variant. The "no VE" reading of the name is
+wrong, it would not change `enable_shadow_vmcs` - which is decided by the
+CPU capability test at load, not by a parameter - and it **stops being an
+open question**.
 
 ## The disk telemetry stays dormant, by the user's decision
 
