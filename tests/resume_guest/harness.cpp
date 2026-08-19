@@ -108,6 +108,7 @@ struct observations
 {
     std::uint64_t record_exits{};
     std::uint64_t controller_polls{};
+    std::uint64_t shadow_ept_checks{};
 };
 
 static observations g_observed;
@@ -123,6 +124,22 @@ void hypervisor::record_exit(arch::x86_64::vmx::exit_reason,
 void hypervisor::arm_controller_poll(bool)
 {
     g_observed.controller_polls += 1;
+}
+
+/**
+ * The shadow extended page tables, which are not this harness's subject.
+ *
+ * `resume_guest` calls this on the way into a guest so that a permission
+ * change made by the handler it is returning from cannot be entered
+ * against a shadow composed from the old permissions -
+ * `discard_stale_shadow_ept` says why that has to be the entry path and
+ * not the exit path. What it does is nested_ept.cpp's, and
+ * tests/shadow_ept drives it against a real pool; here it only has to
+ * exist, and the count says the entry path really does reach it.
+ */
+void hypervisor::discard_stale_shadow_ept(std::size_t)
+{
+    g_observed.shadow_ept_checks += 1;
 }
 
 /**

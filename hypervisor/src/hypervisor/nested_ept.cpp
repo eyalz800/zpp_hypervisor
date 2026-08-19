@@ -642,6 +642,21 @@ hypervisor::shadow_ept_pointer_for(std::size_t cpu, std::uint64_t eptp12)
 
         if (generation != this->shadow_ept_generation_seen[cpu][slot]) {
             stale_generation = true;
+
+            // Released rather than stepped over, and it used to be
+            // stepped over. Everything in it was composed from tables
+            // that have since moved, so none of it may be used again -
+            // and leaving it named by this root meant the rebuild below
+            // took a *different* slot for the same root, which cost two
+            // things. Its pool tables stayed allocated until the round
+            // robin happened to evict it, and `shadow_ept_recall_root`
+            // for the slot actually chosen named something else, so the
+            // recall set was thrown away at exactly the moment it was
+            // most wanted - a permission change is followed by the same
+            // pages being wanted straight back. Releasing here leaves
+            // the slot free, the loop below picks it up as the first
+            // unused one, and its recall replays.
+            release_shadow_slot(cpu, slot);
             continue;
         }
 
@@ -1100,6 +1115,51 @@ void hypervisor::discard_shadow_ept_for(std::size_t cpu,
         if (root == this->shadow_ept_source[cpu][slot]) {
             release_shadow_slot(cpu, slot);
         }
+    }
+}
+
+void hypervisor::discard_stale_shadow_ept(std::size_t cpu)
+{
+    if (cpu >= max_cpus) {
+        return;
+    }
+
+    // The fast path, and the whole reason this is affordable before every
+    // entry: one acquire load and one compare when nothing has moved,
+    // which is every entry on a boot that never changes a watch.
+    auto generation = this->ept_generation.load(std::memory_order_acquire);
+    if (generation == this->shadow_ept_generation_applied[cpu]) {
+        return;
+    }
+
+    this->shadow_ept_generation_applied[cpu] = generation;
+
+    auto released = false;
+
+    for (std::size_t slot{}; slot < shadow_ept_slots; ++slot) {
+        // A slot holding nothing has nothing composed in it, and
+        // `release_shadow_slot` on it would only cost the memset.
+        if (0 == this->shadow_ept_source[cpu][slot]) {
+            continue;
+        }
+
+        if (generation == this->shadow_ept_generation_seen[cpu][slot]) {
+            continue;
+        }
+
+        release_shadow_slot(cpu, slot);
+        this->shadow_ept_generation_discards[cpu] =
+            this->shadow_ept_generation_discards[cpu] + 1;
+        released = true;
+    }
+
+    // Only where something was actually dropped. The tables just emptied
+    // are ones this processor may hold translations through, and the
+    // pointer naming them is about to be entered with - but an
+    // invalidation on every generation bump regardless would pay for
+    // slots that were already current.
+    if (released) {
+        invalidate_ept_locally();
     }
 }
 

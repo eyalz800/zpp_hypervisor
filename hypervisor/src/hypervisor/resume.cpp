@@ -1017,6 +1017,33 @@ void hypervisor::resume_guest(std::uint64_t cpuid,
         apply_time_dilation(cpu, now);
     }
 
+    // Drop any composed shadow this processor holds that was built from
+    // an older generation of this VMM's own extended page tables.
+    //
+    // **Here, on the entry path, rather than beside the hardware
+    // catch-up on the exit path, and the difference is a window rather
+    // than a preference.** The exit-path catch-up in `on_vm_exit` runs on
+    // the way *out* of the guest, so a permission change made after it -
+    // by this processor's own handler, or by another processor - is not
+    // acted on until the *next* exit. One entry then runs against a
+    // shadow composed from the old permissions. That is the whole of the
+    // bug: the watched-page step path opens a page, resumes, and the leaf
+    // composed while it was open outlives the close.
+    //
+    // Last thing before the entry for the same reason `apply_time
+    // _dilation` is: this is the last moment root operation owns, and a
+    // handler above may have changed a watch.
+    //
+    // Costs one load and one compare when nothing has moved - see
+    // `shadow_ept_generation_applied` - and only exists at all with
+    // nested VMX, since without it there is no composed shadow to be
+    // stale.
+    if constexpr (nested_vmx::enabled) {
+        if (auto slot = (cpuid + 1); (0 != slot) && (slot <= max_cpus)) {
+            discard_stale_shadow_ept(slot - 1);
+        }
+    }
+
     // Put back an external interrupt this VMM took on the guest's
     // behalf. Only with ZPP_VIRTUALIZE_APIC; otherwise nothing ever
     // queues one and this is a call that is not compiled at all.

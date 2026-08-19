@@ -639,6 +639,26 @@ void test_slot_cache()
     check("generation.bump_is_not_a_hit",
           1,
           hv().shadow_ept_cache_hits[cpu]);
+
+    // And the slot that went stale is gone rather than left behind.
+    //
+    // It used to be stepped over: the loop marked the generation stale,
+    // continued, and the rebuild then took the *first unused* slot - so
+    // two slots named the same root, the stale one kept its pool tables
+    // until the round robin happened to reach it, and the recall set
+    // belonging to the root was discarded because the slot chosen carried
+    // somebody else's `shadow_ept_recall_root`. A permission change is
+    // followed immediately by the same pages being wanted back, so that
+    // is the worst moment to lose the recall.
+    std::size_t naming_root_1{};
+    for (std::size_t slot{};
+         slot < zpp::hypervisor::hypervisor::shadow_ept_slots;
+         ++slot) {
+        if (root_1 == hv().shadow_ept_source[cpu][slot]) {
+            ++naming_root_1;
+        }
+    }
+    check("generation.stale_slot_is_not_left_behind", 1, naming_root_1);
 }
 
 // === install_shadow_leaf, and the livelock invariant
@@ -788,6 +808,117 @@ void test_install_and_lookup()
     check_true("install.leaf_permits_exactly_the_composition", true);
 
     reset_shadows();
+}
+
+// === discard_stale_shadow_ept
+// ============================================
+
+/**
+ * The composed shadow is a second copy of this VMM's own permissions, and
+ * nothing used to rewrite it when the original changed.
+ *
+ * `invalidate_ept` fixes the hardware - our entry, and the processor's
+ * cached translations of it - and reaches no shadow leaf at all, because a
+ * shadow leaf is a value this VMM computed and wrote into a table of its
+ * own. The only thing that ever noticed was the generation compare inside
+ * `shadow_ept_pointer_for`, which happens at a rebuild and not before an
+ * entry.
+ *
+ * The dangerous direction is *arming*, which is what this case drives: a
+ * leaf composed while the page was writable goes on permitting writes, so
+ * the watch does not merely misbehave, it never fires. On the local APIC
+ * page that is a start-up IPI this VMM never learns about.
+ */
+void test_generation_discard()
+{
+    reset_shadows();
+    static_cast<void>(take_slot(root_1));
+
+    auto writable =
+        zpp::arch::x86_64::vmx::ept_permissions(true, true, false, false);
+
+    // A leaf composed while our own tables granted everything, which is
+    // what every leaf on an unwatched page is.
+    check_true(
+        "discard.leaf_installed",
+        hv().install_shadow_leaf(cpu,
+                                 address_a,
+                                 guest_mapping(address_a, shift_4kb),
+                                 shift_4kb)
+            .has_value());
+    check_lookup_permits(
+        "discard.composed_leaf_permits_write", address_a, writable);
+
+    // Arm a watch, which is exactly these two lines inside
+    // `watch_guest_page_writes`: take write away from our own entry, and
+    // announce it through `invalidate_ept`.
+    host_region_of(address_a).write(false);
+    hv().ept_generation.fetch_add(1, std::memory_order_release);
+
+    // Before the fix, nothing between here and the next rebuild looked at
+    // that announcement, so the shadow still granted the write.
+    g_invalidations = 0;
+    hv().discard_stale_shadow_ept(cpu);
+
+    check("discard.stale_leaf_is_gone",
+          static_cast<std::uint64_t>(
+              zpp::arch::x86_64::vmx::ept_walk_status::not_present),
+          static_cast<std::uint64_t>(
+              hv().shadow_ept_lookup(cpu, address_a).status));
+    check("discard.slot_released", 0, hv().shadow_ept_source[cpu][0]);
+    check("discard.counted", 1, hv().shadow_ept_generation_discards[cpu]);
+
+    // The tables just emptied are ones this processor may hold
+    // translations through, so dropping them without an invalidation is
+    // the same stale answer by another route.
+    check_true("discard.invalidated_locally", g_invalidations >= 1);
+
+    // Idempotent, and that is what makes it affordable on the entry path:
+    // a second call with nothing new does no work at all.
+    g_invalidations = 0;
+    hv().discard_stale_shadow_ept(cpu);
+    check("discard.second_call_releases_nothing",
+          1,
+          hv().shadow_ept_generation_discards[cpu]);
+    check("discard.second_call_does_not_invalidate", 0, g_invalidations);
+
+    // And what is composed afterwards honours the watch.
+    static_cast<void>(take_slot(root_1));
+    check_true(
+        "discard.recomposed_leaf_installed",
+        hv().install_shadow_leaf(cpu,
+                                 address_a,
+                                 guest_mapping(address_a, shift_4kb),
+                                 shift_4kb)
+            .has_value());
+
+    auto recomposed = hv().shadow_ept_lookup(cpu, address_a);
+    check("discard.recomposed_leaf_is_present",
+          static_cast<std::uint64_t>(
+              zpp::arch::x86_64::vmx::ept_walk_status::mapped),
+          static_cast<std::uint64_t>(recomposed.status));
+    check_false("discard.recomposed_leaf_denies_write",
+                recomposed.permissions.write());
+    check_true("discard.recomposed_leaf_still_reads",
+               recomposed.permissions.read());
+
+    // Dropping the watch is the other direction, and it is the loud one:
+    // a leaf that refuses a write the tables now permit faults into a
+    // handler with no watch armed. Same mechanism, same fix.
+    host_region_of(address_a).write(true);
+    hv().ept_generation.fetch_add(1, std::memory_order_release);
+    hv().discard_stale_shadow_ept(cpu);
+
+    check("discard.unwatch_drops_the_leaf_too",
+          static_cast<std::uint64_t>(
+              zpp::arch::x86_64::vmx::ept_walk_status::not_present),
+          static_cast<std::uint64_t>(
+              hv().shadow_ept_lookup(cpu, address_a).status));
+
+    // Left as `reset_shadows` found it, since the generation is global and
+    // the host tables are shared with every case after this one.
+    reset_shadows();
+    hv().shadow_ept_generation_discards[cpu] = 0;
 }
 
 void test_install_sizes_and_splitting()
@@ -1411,6 +1542,7 @@ int main()
     test_host_ept_lookup();
     test_slot_cache();
     test_install_and_lookup();
+    test_generation_discard();
     test_install_sizes_and_splitting();
     test_large_entry_in_the_way();
     test_pool_pressure();

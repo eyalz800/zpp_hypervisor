@@ -865,6 +865,14 @@ std::expected<void, zpp::error> hypervisor::watch_guest_page_writes(
     // Reads stay permitted. A driver polls status registers far more
     // often than it writes commands, and every permitted read is a VM
     // exit that does not happen.
+    //
+    // `invalidate_ept` is what tells the composed shadows about this, and
+    // it is not only a hardware flush: it bumps `ept_generation`, and
+    // every processor drops the shadow leaves it composed from the old
+    // permission before its next entry. See `discard_stale_shadow_ept`.
+    // Arming is the direction that fails *silently* without it - a leaf
+    // already granting write goes on granting it and the watch never
+    // fires.
     (*entry)->write(false);
     invalidate_ept();
 
@@ -893,6 +901,12 @@ void hypervisor::unwatch_guest_page(std::uint64_t guest_physical)
         // The entry exists already - the page was split when the watch
         // was armed - so this cannot fail and nothing here has to cope
         // with it failing.
+        //
+        // And `invalidate_ept` here reaches the composed shadows through
+        // `ept_generation`, not only the processor's own translations.
+        // Without that a shadow leaf composed while the page was
+        // write-protected goes on refusing the write, into a handler with
+        // no watch left to answer it. See `discard_stale_shadow_ept`.
         if (auto entry = epte_for(page << 12)) {
             (*entry)->write(true);
             invalidate_ept();

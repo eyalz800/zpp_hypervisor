@@ -1562,6 +1562,7 @@ def main():
                "exit_reason_counts",
                "shadow_ept_builds", "shadow_ept_cache_hits",
                "shadow_ept_rebuild_new_root", "shadow_ept_rebuild_stale",
+               "shadow_ept_generation_discards",
                "l2_invept_single_context", "l2_invept_all_context",
                "shadow_ept_replayed", "hyperv_vp_assist_writes", "hypercalls_seen",
                "host_exception", "host_exception_cr2",
@@ -1623,6 +1624,7 @@ def main():
                "l2_activity_state", "events_requeued", "events_deferred",
                "pending_event", "shadow_ept_builds", "shadow_ept_cache_hits",
                "shadow_ept_rebuild_new_root", "shadow_ept_rebuild_stale",
+               "shadow_ept_generation_discards",
                "l2_invept_single_context", "l2_invept_all_context",
                "shadow_ept_replayed", "hyperv_vp_assist_writes", "hypercalls_seen",
                "host_exception", "host_exception_cr2",
@@ -1915,10 +1917,18 @@ def main():
         print(f"{cpu:3d}  {read('shadow_ept_replayed', cpu):-15d}  "
               f"{read('shadow_ept_leaves_filled', cpu):-14d}")
 
-    print("\ncpu  rebuild-new-root  rebuild-stale-generation")
+    # `generation-discards` is slots dropped on the entry path because
+    # this VMM's own tables moved under them - see
+    # `discard_stale_shadow_ept`. It is zero on a boot that arms every
+    # watch before launch and never changes one, which is every boot so
+    # far; non-zero is the only evidence that a runtime permission change
+    # reached the composed shadows rather than being left to be noticed.
+    print("\ncpu  rebuild-new-root  rebuild-stale-generation  "
+          "generation-discards")
     for cpu in range(args.cpus):
         print(f"{cpu:3d}  {read('shadow_ept_rebuild_new_root', cpu):-16d}  "
-              f"{read('shadow_ept_rebuild_stale', cpu):-24d}")
+              f"{read('shadow_ept_rebuild_stale', cpu):-24d}  "
+              f"{read('shadow_ept_generation_discards', cpu):-19d}")
 
     # Which invept type arrives decides whether the all-context discard
     # is costing anything - single-context already releases only the

@@ -11671,6 +11671,59 @@ re-executes its own instruction against an entry that now permits it, the
 same answer the module-decoy branch at the bottom of the same function
 gives. It cannot loop, because the block is not reached again.
 
+### And the stale shadow is real, in the other direction, without any switch
+
+The defect the section above names does exist. It is just not what stopped
+the guest, and dropping a watch is its *harmless* direction:
+
+- **dropped** - the leaf refuses a write our tables now permit. Loud, and
+  self-healing through `on_l2_ept_fault` as above. Costs one fault.
+- **armed** - the leaf permits a write our tables no longer do, so the
+  write **does not fault at all** and the watch never fires. Silent, and
+  reachable today with no build switch: the watched-page step path
+  (`on_ept_violation`'s fallback when the decoder refuses) opens the page,
+  resumes, and a second-level guest re-faulting inside that window composes
+  a *writable* leaf. `on_monitor_trap_flag` then closes the page and the
+  writable leaf outlives it. Every subsequent second-level write to that
+  page is invisible until something rebuilds the shadow - on the local APIC
+  page, a start-up IPI this VMM never learns about.
+
+The only invalidation that ever existed was the per-slot generation
+compare inside `shadow_ept_pointer_for`, which is reached at a *rebuild*
+and not before an *entry*. `invalidate_ept` fixes the hardware and reaches
+no composed leaf, because a composed leaf is a value this VMM computed and
+wrote into a table of its own.
+
+`discard_stale_shadow_ept` is the fix: called from `resume_guest`, per
+processor, on the processor that owns the pool, it drops every slot whose
+`shadow_ept_generation_seen` is behind `ept_generation`. Whole slots and
+not the one page, deliberately - a shadow leaf is indexed by the *second*
+level guest's addresses and the page that changed is a first-level one, so
+there is no reverse map to find the leaves derived from it, and the lazy
+path this replaces already discarded whole slots. It has to be the entry
+path: the existing catch-up in `on_vm_exit` runs on the way *out*, so a
+change made after it is not acted on until the next exit, and one entry
+runs against the old permissions in between. And it has to be the owning
+processor: `release_shadow_slot` hands tables back to a pool another slot
+allocates from immediately.
+
+Two smaller things found in the same reading and fixed with it:
+
+- `shadow_ept_pointer_for` **stepped over** a stale slot instead of
+  releasing it, so two slots ended up naming one root, the stale one kept
+  its pool tables until the round robin reached it, and - worse - the slot
+  actually chosen carried a different `shadow_ept_recall_root`, so the
+  recall set was discarded at exactly the moment a permission change makes
+  it most valuable. `tests/shadow_ept` now pins that at one slot.
+- `generation-discards` is a new column in `rig-dump-state.py`, beside
+  `rebuild-stale-generation`. Zero on every boot so far, since every watch
+  is armed before launch; non-zero is the only evidence that a runtime
+  permission change reached the composed shadows.
+
+**What is still not known**: whether dropping the watch is worth anything.
+The cost question in the list above is unchanged - the guest never ran long
+enough to measure it, and it has not been re-run.
+
 ## Where the 402 microseconds go, measured on the first valid eight-processor run
 
 **The guest is livelocked, and that is now proven rather than inferred.**

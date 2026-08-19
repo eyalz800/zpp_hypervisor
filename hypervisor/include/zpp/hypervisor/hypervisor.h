@@ -2176,6 +2176,53 @@ private:
     void discard_shadow_ept_for(std::size_t cpu, std::uint64_t root);
 
     /**
+     * Drops every shadow this processor holds that was composed from an
+     * older generation of this VMM's own extended page tables.
+     *
+     * **The composed shadow is a second copy of our permissions, and
+     * nothing used to rewrite it when the original changed.**
+     * `invalidate_ept` bumps `ept_generation` and issues INVEPT, which
+     * between them fix the *hardware* caches - our own tables and the
+     * processor's translations of them. A shadow leaf is neither: it is
+     * a value this VMM computed from `compose_ept(eptp12, ours)` and
+     * wrote into a table of its own, and no invalidation reaches it. The
+     * only thing that ever did was the generation compare inside
+     * `shadow_ept_pointer_for`, which is reached at a rebuild and not
+     * before an entry - so between a permission change and the next
+     * rebuild the second-level guest ran against the old permissions.
+     *
+     * Both directions are wrong and they fail differently:
+     *
+     * - a watch **dropped** leaves a read-only leaf, so the write faults
+     *   into a handler with no watch armed. Loud, and self-healing once
+     *   the fault reaches `on_l2_ept_fault`'s "the shadow is behind"
+     *   case;
+     * - a watch **armed** leaves a writable leaf, so the write does not
+     *   fault at all. Silent, and it is the one that matters: the
+     *   watched-page step path opens a page, lets one instruction retire
+     *   and closes it again, and the leaf composed while it was open
+     *   goes on permitting writes nobody sees. That is a start-up IPI
+     *   this VMM never learns about.
+     *
+     * Whole slots rather than the one page, and that is a decision
+     * rather than laziness: a shadow leaf is indexed by the *second*
+     * level guest's physical addresses and the page that changed is a
+     * first-level one, so finding the leaves derived from it means
+     * walking every table of every slot and comparing addresses. There
+     * is no reverse map, the change is rare - nothing in this tree
+     * changes a watch at runtime except the local APIC disarm - and the
+     * lazy path this replaces already discarded whole slots for the same
+     * reason.
+     *
+     * Called on the entry path, per processor, on the processor that
+     * owns the pool. It has to be that processor: `release_shadow_slot`
+     * hands tables back to a pool another slot immediately allocates
+     * from, so releasing another processor's slot while it is walking
+     * one is two shadows sharing a subtree with no fault to say so.
+     */
+    void discard_stale_shadow_ept(std::size_t cpu);
+
+    /**
      * Marks one slot unused and hands its tables back to the shared pool.
      *
      * Freeing the tables is not optional. A slot that keeps them while
@@ -9298,6 +9345,31 @@ private:
     /**
      * @}
      */
+
+    /**
+     * The generation `discard_stale_shadow_ept` has already acted on for
+     * this processor.
+     *
+     * The fast path, and the only reason that function is affordable on
+     * the entry path: equal to `ept_generation` means every slot this
+     * processor holds was composed from the current tables, so there is
+     * nothing to scan. Distinct from `ept_generation_seen`, which is the
+     * *hardware* catch-up on the exit path - that one flushes cached
+     * translations and leaves the composed tables alone, which is exactly
+     * the gap this closes.
+     */
+    std::uint64_t shadow_ept_generation_applied[max_cpus]{};
+
+    /**
+     * Shadow slots dropped because this VMM's own tables moved under
+     * them.
+     *
+     * Zero on a boot where no watch is armed or dropped after launch,
+     * which is every boot so far. Non-zero says a permission change was
+     * propagated into the composed shadows rather than left to be
+     * noticed, and the count is how many compositions that cost.
+     */
+    std::uint64_t shadow_ept_generation_discards[max_cpus]{};
 
     /**
      * What each processor's last shadow build covered and spent.
