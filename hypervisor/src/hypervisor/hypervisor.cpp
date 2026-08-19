@@ -5049,11 +5049,31 @@ void hypervisor::record_exit(std::size_t cpu,
 
     exit_trace_entry recorded{};
     recorded.reason = reason.value();
-    recorded.qualification = vmcs.exit_qualification();
-    recorded.activity_state = vmcs.guest_activity_state();
-    recorded.cs_selector = vmcs.guest_cs_selector();
     recorded.rip = vmcs.guest_rip();
     recorded.repeated = 1;
+
+    // Three fields, three VMCS reads, on every exit - and behind a switch
+    // for that reason. See `nested_vmx::census_exits`: the census over
+    // our own reads put `exit_qualification` at 6.1 per round trip,
+    // `guest_activity_state` at 7.9 and `guest_cs_selector` at 9.1, and
+    // this is a reader of all three. A VMREAD is an exit to the layer
+    // below at 1.4-1.8 microseconds, because nothing under this VMM
+    // offers VMCS shadowing.
+    //
+    // Off, they read zero, and **zero is a legal value for all three** -
+    // so nothing in the ring says the switch was off. The build manifest
+    // does, `census=`, and `check-bootable.sh` prints it on every deploy.
+    //
+    // The instruction pointer above is not gated, because `on_vm_exit`
+    // has already read it for this exit; this is a second read only
+    // because a reflection makes vmcs01 current and its guest RIP is a
+    // different quantity from `context.rip` - which is the whole of what
+    // `rip_owner` below is about.
+    if constexpr (nested_vmx::census_exits) {
+        recorded.qualification = vmcs.exit_qualification();
+        recorded.activity_state = vmcs.guest_activity_state();
+        recorded.cs_selector = vmcs.guest_cs_selector();
+    }
 
     // The privilege level of the *first* level guest, on every exit it
     // takes. Free: the selector was read one line above for the ring.
@@ -5074,7 +5094,9 @@ void hypervisor::record_exit(std::size_t cpu,
     // biased towards kernel work and there are few of them when nested
     // VMX is off. That asymmetry is the point - the question is whether
     // user mode is reached at all.
-    this->cpl_seen[cpu][recorded.cs_selector & 3] += 1;
+    if constexpr (nested_vmx::census_exits) {
+        this->cpl_seen[cpu][recorded.cs_selector & 3] += 1;
+    }
 
     // Whose instruction pointer that is. `running_l2` is cleared by
     // `reflect_l2_exit` on its way out, so a processor that was running a

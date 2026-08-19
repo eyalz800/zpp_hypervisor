@@ -743,6 +743,45 @@ inline constexpr bool tpr_shadow_offered = (0 != ZPP_NESTED_TPR_SHADOW);
 inline constexpr bool profile_l2 = (0 != ZPP_PROFILE_L2);
 
 /**
+ * Whether the exit ring records the three fields that cost a VMCS read.
+ *
+ * `record_exit` runs once on every exit and read four fields for the
+ * ring: the exit qualification, the guest activity state, the guest CS
+ * selector and the instruction pointer. The census over our own reads
+ * put those four at 6.1, 7.9, 9.1 and 18.6 per round trip respectively -
+ * and the ring is one reader of each. A VMREAD is an exit to the layer
+ * below at 1.4-1.8 microseconds here, because the host this VMM runs
+ * under offers no VMCS shadowing: `enable_shadow_vmcs` reads `N`, and
+ * 1,000 reads of a shadow-listed field timed at 2,687 cycles against
+ * 2,801 for a field that is not listed - identical.
+ *
+ * Off by default, and what that costs is bounded on purpose:
+ *
+ * - The ring keeps the **reason**, the **instruction pointer**, the
+ *   **guest-physical address** on the two extended-page-table reasons,
+ *   and the register detail for RDMSR, WRMSR and VMCALL. None of those
+ *   costs a read that the exit had not already taken.
+ * - `qualification`, `activity_state` and `cs_selector` read **zero**,
+ *   and zero is a legal value for all three. Nothing in the ring can
+ *   tell you the switch was off; the build manifest can, and
+ *   `check-bootable.sh` prints it on every deploy. That is the trade.
+ * - `cpl_seen` is empty, so the "did the guest ever reach ring 3"
+ *   question needs this on.
+ * - **The terminal records are untouched.** `unhandled_exit` and
+ *   `vm_entry_failure` still capture everything, because they run once
+ *   and then the processor stops - they are the records a failure is
+ *   actually read from, and they cost nothing per exit.
+ *
+ * On, when the question is what the guest was doing rather than how much
+ * it cost.
+ */
+#ifndef ZPP_CENSUS_EXITS
+#define ZPP_CENSUS_EXITS 0
+#endif
+
+inline constexpr bool census_exits = (0 != ZPP_CENSUS_EXITS);
+
+/**
  * Step the trust-level loop with the monitor trap flag. Off unless
  * asked for, and that is a correctness requirement rather than tidiness.
  *

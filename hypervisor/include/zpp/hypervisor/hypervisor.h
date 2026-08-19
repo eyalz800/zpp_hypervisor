@@ -2827,7 +2827,8 @@ private:
      * for its start-up IPI, or one inside an STI shadow - and the caller
      * holds the event for a later entry rather than dropping it.
      */
-    bool event_allowed_on_entry(std::uint64_t event) const;
+    bool event_allowed_on_entry(std::uint64_t event,
+                                std::uint64_t activity_state) const;
 
     /**
      * Record an external interrupt this VMM has taken out of the
@@ -4086,9 +4087,33 @@ private:
     struct exit_trace_entry
     {
         std::uint64_t reason{};
+
+        /**
+         * The three fields that cost a VMCS read, and **zero unless
+         * `nested_vmx::census_exits` was on when this was built**.
+         *
+         * Zero is a legal value for all three - activity state zero is
+         * "active", selector zero is a null selector, and an exit
+         * qualification of zero is normal for most reasons - so a reader
+         * cannot tell an unasked field from an answered one. The build
+         * manifest can: `census=` in the `zpp switches` string, which
+         * `check-bootable.sh` prints on every deploy.
+         *
+         * `record_exit` runs once per exit, so these were three exits to
+         * the layer below on every exit this VMM took - 7.8 per round
+         * trip at the measured 2.61 exits per round trip. See
+         * `nested_vmx::census_exits` for what is kept regardless, and
+         * note that `unhandled_exit` and `vm_entry_failure` below are
+         * *not* gated: they run once and then the processor stops.
+         * @{
+         */
         std::uint64_t qualification{};
         std::uint64_t activity_state{};
         std::uint64_t cs_selector{};
+        /**
+         * @}
+         */
+
         std::uint64_t rip{};
 
         /**
@@ -8686,6 +8711,12 @@ private:
      * takes are biased towards kernel work, and with nested VMX off the
      * guest takes very few of them. The asymmetry is deliberate, because
      * the question is whether user mode happens at all.
+     *
+     * **Empty unless `nested_vmx::census_exits` was on.** It is free
+     * given the selector, and the selector is not: it is a VMCS read on
+     * every exit, so the two are gated together. `l2_cpl_seen` above is
+     * unaffected - it is taken on the second-level entry path from state
+     * that path already holds.
      */
     std::uint64_t cpl_seen[max_cpus][4]{};
     std::uint64_t l2_vtpr_class_seen[max_cpus][16]{};

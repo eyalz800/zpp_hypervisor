@@ -31,7 +31,8 @@
 
 namespace zpp::hypervisor
 {
-bool hypervisor::event_allowed_on_entry(std::uint64_t event) const
+bool hypervisor::event_allowed_on_entry(
+    std::uint64_t event, std::uint64_t activity_state) const
 {
     // SDM 29.3.1.5, the activity-state and interruptibility-state checks
     // on VM entry (.references/sdm.txt:202612-202628). Transcribed as a
@@ -57,9 +58,13 @@ bool hypervisor::event_allowed_on_entry(std::uint64_t event) const
     constexpr std::uint64_t vector_pending_mtf = 0;
     constexpr std::uint64_t blocking_by_sti_or_mov_ss = 0x3;
 
+    // The state comes from the caller. It was a VMREAD here, and
+    // `resume_guest` asks this twice on the re-queue path and then reads
+    // the same field again itself - three reads of one value that
+    // nothing between them writes, at 1.4-1.8 microseconds each on a
+    // host with no VMCS shadowing.
     auto type = (event >> type_shift) & type_mask;
     auto vector = event & vector_mask;
-    auto activity_state = this->vmcs.guest_activity_state();
 
     switch (activity_state) {
     case activity::active:
@@ -302,7 +307,8 @@ bool hypervisor::deliver_pending_external_interrupt(std::size_t cpu)
                                 vm_entry_interruption_information_field);
 
     auto deliverable =
-        (0 == (staged & valid)) && event_allowed_on_entry(event);
+        (0 == (staged & valid)) &&
+        event_allowed_on_entry(event, vmcs.guest_activity_state());
 
     auto primary = vmcs.primary_processor_based_vm_execution_controls();
     auto wanted = deliverable ? (primary & ~primary_interrupt_window)
@@ -463,6 +469,47 @@ void hypervisor::resume_guest(std::uint64_t cpuid,
 {
     auto & vmcs = this->vmcs;
 
+    // The activity state, read at most once and only where something
+    // asks for it.
+    //
+    // Three separate readers wanted it - `event_allowed_on_entry`, the
+    // wait-for-SIPI test beside it and `resume_activity_state` at the end
+    // - and nothing between them writes the field. The census over our
+    // own reads put `guest_activity_state` at 7.9 per round trip and this
+    // function is where most of them were.
+    //
+    // Memoised rather than read up front, because the common exit reaches
+    // none of the three and would then pay for a field it never looks at.
+    // `deliver_pending_external_interrupt` does write the field - it
+    // clears HLT when it injects - and runs after the last reader here.
+    std::uint64_t activity_state{};
+    auto activity_state_read = false;
+    auto activity_now = [&] {
+        if (!activity_state_read) {
+            activity_state = vmcs.guest_activity_state();
+            activity_state_read = true;
+        }
+        return activity_state;
+    };
+
+    // And the entry-interruption field, which this function reads,
+    // writes, and then used to read back.
+    //
+    // The read-back is the cheapest class of redundant access there is:
+    // the value is whatever the handlers left, unless the re-queue below
+    // replaced it, and this frame is the only thing that could have.
+    std::uint64_t entry_event{};
+    auto entry_event_read = false;
+    auto entry_event_now = [&] {
+        if (!entry_event_read) {
+            using field = arch::x86_64::vmx::vmcs::field;
+            entry_event = vmcs.read(
+                field::vm_entry_interruption_information_field);
+            entry_event_read = true;
+        }
+        return entry_event;
+    };
+
     // Put back the event whose delivery the exit interrupted.
     //
     // The processor clears the entry-interruption field as it begins a
@@ -542,9 +589,7 @@ void hypervisor::resume_guest(std::uint64_t cpuid,
         auto cpu = slot - 1;
         constexpr std::uint64_t injection_valid = 1ull << 31;
 
-        auto staged =
-            vmcs.read(arch::x86_64::vmx::vmcs::field::
-                          vm_entry_interruption_information_field);
+        auto staged = entry_event_now();
 
         // Defect 1: yield to an event this exit's own handler staged.
         //
@@ -647,12 +692,13 @@ void hypervisor::resume_guest(std::uint64_t cpuid,
             // that has just been reset, an event its previous life was
             // owed.
         } else if (this->pending_event[cpu] &&
-                   !event_allowed_on_entry(this->pending_event[cpu])) {
+                   !event_allowed_on_entry(this->pending_event[cpu],
+                                           activity_now())) {
             this->events_refused_by_state[cpu] =
                 this->events_refused_by_state[cpu] + 1;
 
             if (arch::x86_64::vmx::activity_state::wait_for_start_up_ipi ==
-                vmcs.guest_activity_state()) {
+                activity_now()) {
                 this->pending_event[cpu] = 0;
                 this->events_discarded[cpu] =
                     this->events_discarded[cpu] + 1;
@@ -711,10 +757,16 @@ void hypervisor::resume_guest(std::uint64_t cpuid,
             // processor enumerating FRED. Copying the word verbatim
             // hands the processor a reserved bit and the entry is
             // refused - silently, like every other failed check here.
+            // Kept, because the read-back at the entry census below
+            // wants exactly this and the processor has no other account
+            // of it that we did not just supply.
+            entry_event = event & arch::x86_64::vmx::
+                                      vm_entry_interruption::defined_bits;
+            entry_event_read = true;
+
             vmcs.write(arch::x86_64::vmx::vmcs::field::
                            vm_entry_interruption_information_field,
-                       event & arch::x86_64::vmx::vm_entry_interruption::
-                                   defined_bits);
+                       entry_event);
 
             this->pending_event[cpu] = 0;
             this->events_requeued[cpu] = this->events_requeued[cpu] + 1;
@@ -867,8 +919,7 @@ void hypervisor::resume_guest(std::uint64_t cpuid,
         }
 
         if (!in_l2) {
-            this->resume_activity_state[slot - 1] =
-                vmcs.guest_activity_state();
+            this->resume_activity_state[slot - 1] = activity_now();
         }
 
         this->resume_guest_rip[slot - 1] = resume_rip;
@@ -922,9 +973,7 @@ void hypervisor::resume_guest(std::uint64_t cpuid,
             constexpr std::uint64_t injection_valid = 1ull << 31;
             constexpr std::uint64_t vector_mask = 0xff;
 
-            auto carried =
-                vmcs.read(arch::x86_64::vmx::vmcs::field::
-                              vm_entry_interruption_information_field);
+            auto carried = entry_event_now();
 
             auto cpu = slot - 1;
 

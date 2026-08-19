@@ -75,6 +75,12 @@ extern "C" [[gnu::used, gnu::retain]] constinit const char
         digit(nested_vmx::step_vtl),
         ' ', 'p', 'r', 'o', 'f', 'i', 'l', 'e', '=',
         digit(nested_vmx::profile_l2),
+        // Off leaves three fields of every exit-ring entry reading zero,
+        // and zero is legal for all three - so this field is the only
+        // thing that distinguishes "the guest was in state zero" from
+        // "nobody paid to ask".
+        ' ', 'c', 'e', 'n', 's', 'u', 's', '=',
+        digit(nested_vmx::census_exits),
         // Off hands application processors to the guest unvirtualized,
         // so this is a correctness field and not a tuning one. It was
         // stale-OFF in `build/debug` for a session with nothing on the

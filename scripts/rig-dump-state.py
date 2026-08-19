@@ -1936,12 +1936,26 @@ def main():
     try:
         manifest_va = base + gdb_symbol(args.elf, "zpp_build_switches")
         mon = Monitor(args.rig, args.port)
-        mon.queue(manifest_va, 2)
+        # The whole string, not the first two words. The prefix is all the
+        # base check needs; the rest says what was compiled in, and one
+        # switch below changes what the numbers above *mean*.
+        mon.queue(manifest_va, 32)
         got = mon.run()
         raw = b"".join(got.get(manifest_va + 8 * i, 0).to_bytes(8, "little")
-                       for i in range(2))
+                       for i in range(32))
         if raw.startswith(b"zpp switches:"):
             print("base proven: zpp_build_switches reads back at the base")
+            manifest = raw.split(b"\0")[0].decode("ascii", "replace")
+            print(f"  {manifest}")
+            # `census=0` leaves the exit ring's qualification, activity
+            # state and CS selector reading zero and `cpl_seen` empty -
+            # and zero is a legal value for all three, so nothing in the
+            # data says so. Said here, where it is read.
+            if b"census=0" in raw:
+                print("  NOTE census=0: the exit ring's qualification, "
+                      "activity state and CS selector are NOT filled, and "
+                      "the cpl columns below are empty by construction - "
+                      "build with -DZPP_CENSUS_EXITS=ON to ask")
         else:
             print(f"BASE SUSPECT: {raw!r} at 0x{manifest_va:x} is not the "
                   f"manifest - the module base is probably wrong, and "
