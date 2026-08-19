@@ -535,6 +535,92 @@ inline constexpr bool intercept_self_ipi =
  * can account for. The second of those is the hard one and it may not
  * be reachable from underneath at all.
  */
+/**
+ * Whether an extended-page-table fault installs the pages *around* the
+ * one that faulted, as well as the one that did.
+ *
+ * The one lever nobody had tried: every other change in this file made an
+ * exit cheaper and none made there be fewer. Measured on a verified
+ * build, clean-phase window: `ept-violation` is **16.31 a trust-level
+ * round trip and 61.1% of all exits**, at 18.0 VMCS accesses each - **293
+ * of the 987 accesses a round trip, 30%**. One leaf is installed per
+ * fault, so the count is the whole cost.
+ *
+ * **Soundness, and it is short**: only mappings the guest's own tables
+ * already permit are installed, composed by the same `compose_ept` the
+ * faulting page goes through, at the same page size. A change the guest
+ * makes to those tables obliges it to INVEPT, and `on_guest_invept`
+ * discards the whole root - so an eagerly installed entry cannot outlive
+ * the permission it was composed from. That is the argument
+ * `replay_shadow_recall` already rests on, and it was verified there.
+ *
+ * **The honest risk is not correctness, it is waste.** A neighbour walk
+ * costs four guest-physical reads, about 11.5 microseconds; a fault
+ * avoided is worth about 24.5. So a window whose pages are never touched
+ * is a net loss, and whether it pays depends entirely on the guest's
+ * locality. `shadow_ept_neighbours_filled` counts what was installed and
+ * the fault rate says what it bought - if faults a round trip do not
+ * fall, this is costing and not saving.
+ *
+ * **Sized before building, so it is not discovered afterwards**: taking
+ * 16.31 faults to 4 saves ~222 accesses a round trip, about 302
+ * microseconds of 3,450 - **under 9%**, against the ~50% the round trip
+ * needs to fall below the guest's own tick. This cannot reach the goal on
+ * this machine and is not expected to. It is worth doing because it is
+ * the last untested line, and a line that is asserted rather than tested
+ * is not closed.
+ *
+ * **Built, booted, and it is a net loss. Leave it off.**
+ *
+ * | | baseline | eager |
+ * |---|---|---|
+ * | faults per round trip | 16.31 | **12.92** (-21%) |
+ * | exits per round trip | 26.7 | 23.3 |
+ * | clean round trip | 3.45 ms | **4.07 ms** (+18%) |
+ * | settled ticks/RT | 5.01 | **6.15** |
+ *
+ * **The mechanism worked and the result went backwards.** Faults did
+ * fall - by 21%, not to 4 - and the round trip got *worse*, so the guest
+ * stalls sooner rather than later.
+ *
+ * Attributed rather than guessed, from the phase decomposition:
+ *
+ * ```
+ * on_l2_ept_fault        377.9 -> 735.1 us/RT  (+357)  calls 16.4 -> 12.6
+ *   so per fault           23.0 -> 58.3 us     - 2.5x more expensive
+ * map_window repoints    282.7 -> 580.1 /RT    (+297)
+ * everything else        unchanged to within 17 us
+ * ```
+ *
+ * Each fault now walks seven neighbours, and each walk repoints the
+ * mapping window about four times. That is +357 microseconds a round trip
+ * to save about 3.4 faults worth ~83 - **a four-to-one loss.**
+ *
+ * And the reason it cannot be tuned into profit is structural: **1.1
+ * million neighbours were installed against 209,344 faulting leaves, 5.3
+ * per fault**, while `on_guest_invept` discards the whole root **0.74
+ * times a round trip**. An eagerly installed leaf has less than two round
+ * trips to be used before it is thrown away, and most are not. A smaller
+ * window installs fewer useless leaves and saves proportionally fewer
+ * faults; a larger one is worse. The INVEPT rate is the ceiling, and it
+ * is the guest's.
+ *
+ * That is the same INVEPT behaviour that closed the shadow-refresh lever,
+ * arriving from the other side.
+ */
+inline constexpr bool eager_ept_neighbours =
+#if defined(ZPP_EAGER_EPT_NEIGHBOURS) && ZPP_EAGER_EPT_NEIGHBOURS
+    true;
+#else
+    false;
+#endif
+
+/**
+ * Pages installed per fault, including the faulting one. Aligned, so the
+ * set is the same whichever page of it faults first.
+ */
+inline constexpr std::uint64_t eager_ept_window = 8;
+
 inline constexpr bool force_dispatch_once =
 #if defined(ZPP_FORCE_DISPATCH_ONCE) && ZPP_FORCE_DISPATCH_ONCE
     true;

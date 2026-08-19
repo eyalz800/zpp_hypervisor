@@ -7102,6 +7102,95 @@ std::uint8_t hypervisor::record_interrupt_request(std::size_t cpu,
     return vtpr;
 }
 
+void hypervisor::install_shadow_neighbours(std::size_t cpu,
+                                           std::uint64_t page,
+                                           std::uint64_t shift,
+                                           std::uint64_t eptp12)
+{
+    if constexpr (!nested_vmx::eager_ept_neighbours) {
+        return;
+    }
+
+    if (cpu >= max_cpus) {
+        return;
+    }
+
+    auto size = 1ull << shift;
+    auto root = eptp12 & (((1ull << 52) - 1) & ~0xfffull);
+
+    // Aligned to the window rather than centred on the fault, so whichever
+    // page of a window faults first produces the same set - otherwise two
+    // faults in one window install overlapping and different neighbours.
+    auto base = page & ~((nested_vmx::eager_ept_window * size) - 1);
+
+    for (std::uint64_t index{}; index < nested_vmx::eager_ept_window;
+         ++index) {
+        auto at = base + (index * size);
+
+        if (at == page) {
+            continue;
+        }
+
+        auto walk = arch::x86_64::vmx::walk_ept(
+            root,
+            at,
+            physical_address_bits(),
+            execute_only_translations_offered,
+            [&](std::uint64_t from)
+                -> std::optional<arch::x86_64::vmx::epte> {
+                std::uint64_t value{};
+                auto read = read_guest_physical(
+                    from,
+                    std::span(reinterpret_cast<std::byte *>(&value),
+                              sizeof(value)));
+                if (!read) {
+                    return std::nullopt;
+                }
+                return arch::x86_64::vmx::epte(value);
+            });
+
+        // Only what the guest already maps, and only at the same page
+        // size. A neighbour the guest describes with a different size
+        // belongs to a different region of its tables and composing it
+        // here would be guessing at a boundary rather than following one.
+        if ((arch::x86_64::vmx::ept_walk_status::mapped != walk.status) ||
+            (shift != walk.page_shift)) {
+            this->shadow_ept_neighbours_refused[cpu] =
+                this->shadow_ept_neighbours_refused[cpu] + 1;
+            continue;
+        }
+
+        auto composed = arch::x86_64::vmx::compose_ept(
+            walk,
+            host_ept_lookup(walk.physical_address),
+            execute_only_translations_offered);
+
+        if ((arch::x86_64::vmx::ept_compose_outcome::composed !=
+             composed.outcome) ||
+            (shift != composed.page_shift)) {
+            this->shadow_ept_neighbours_refused[cpu] =
+                this->shadow_ept_neighbours_refused[cpu] + 1;
+            continue;
+        }
+
+        // A failure here is ordinary - the table pool is finite and
+        // `fill_shadow_leaf` reclaims other slots rather than failing -
+        // so it is counted and not reported. The faulting page is already
+        // installed by the caller, so nothing the guest needs depends on
+        // any of this succeeding.
+        if (!fill_shadow_leaf(cpu, at, walk, composed.page_shift)) {
+            this->shadow_ept_neighbours_refused[cpu] =
+                this->shadow_ept_neighbours_refused[cpu] + 1;
+            continue;
+        }
+
+        remember_shadow_page(cpu, at);
+
+        this->shadow_ept_neighbours_filled[cpu] =
+            this->shadow_ept_neighbours_filled[cpu] + 1;
+    }
+}
+
 hypervisor::l2_exit_outcome
 hypervisor::on_l2_ept_fault(std::size_t cpu,
                             arch::x86_64::vmx::exit_reason reason,
@@ -7469,6 +7558,12 @@ hypervisor::on_l2_ept_fault(std::size_t cpu,
         // back on the next entry, and the pages it wants are scattered,
         // so the set has to be remembered rather than guessed.
         remember_shadow_page(cpu, page);
+
+        // And the pages around it, if this build asks for them. After the
+        // faulting page is in and remembered, so a failure in here cannot
+        // affect the access that faulted.
+        install_shadow_neighbours(cpu, page, composition.page_shift,
+                                  eptp12);
 
         // The handler's own work, read back.
         //

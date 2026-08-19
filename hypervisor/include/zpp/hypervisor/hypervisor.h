@@ -9079,6 +9079,23 @@ private:
     volatile std::uint64_t materialise_reads[max_cpus]{};
 
     /**
+     * Leaves installed speculatively beside a faulting one, and the walks
+     * that produced nothing.
+     *
+     * The pair is the point: installs alone cannot say whether the guest
+     * ever used them, and `refused` rising far faster than `filled` means
+     * the window is mostly holes and every one of them cost four
+     * guest-physical reads. See `nested_vmx::eager_ept_neighbours`.
+     */
+    volatile std::uint64_t shadow_ept_neighbours_filled[max_cpus]{};
+    volatile std::uint64_t shadow_ept_neighbours_refused[max_cpus]{};
+
+    void install_shadow_neighbours(std::size_t cpu,
+                                   std::uint64_t page,
+                                   std::uint64_t shift,
+                                   std::uint64_t eptp12);
+
+    /**
      * Periodic telemetry to the disk channel, for a machine with no
      * monitor.
      *

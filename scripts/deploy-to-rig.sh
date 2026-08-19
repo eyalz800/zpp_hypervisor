@@ -96,6 +96,34 @@ if [ "$WANT" != "$GOT" ]; then
     exit 1
 fi
 
+# And the switches, read back off the file that is on the disk.
+#
+# **A hash tells you something changed, not what.** The check above
+# compares the deployed file against the one just built, which is exactly
+# the wrong comparison when the mistake is that the build was never
+# deployed: both sides agree, the hash matches, and the disk carries an
+# older configuration. Measured, and it cost 2.3 hours - the ESP was left
+# carrying an `evmcs=1` loader while a local rebuild said `evmcs=0`, and
+# the machine boot-looped 1,760 times while a report said it was idle.
+#
+# The manifest is the thing that says what a binary *is*, so it is what
+# gets compared. See `hypervisor/src/hypervisor/build_switches.cpp` and
+# the CMake-cache section of CLAUDE.md, which makes the same point one
+# layer up.
+WANT_SWITCHES=$(strings "$LOADER" | grep -m1 'zpp switches')
+GOT_SWITCHES=$($SSH "sudo umount $MOUNT >/dev/null 2>&1; sudo mount -o ro $PART $MOUNT >/dev/null 2>&1; strings $MOUNT$DEST | grep -m1 'zpp switches'; sudo umount $MOUNT >/dev/null 2>&1; sudo mount $PART $MOUNT >/dev/null 2>&1" 2>/dev/null | tr -d '\r')
+
+echo "built  switches: $WANT_SWITCHES"
+echo "ondisk switches: $GOT_SWITCHES"
+if [ -z "$GOT_SWITCHES" ]; then
+    echo "FAIL: no manifest in the deployed loader - it cannot be identified."
+    exit 1
+fi
+if [ "$WANT_SWITCHES" != "$GOT_SWITCHES" ]; then
+    echo "FAIL: the deployed loader's switches are not the built one's."
+    exit 1
+fi
+
 echo "$WANT" > .rig-deployed-hash
 
 # Keep the hypervisor ELF this loader carries, because every later reading

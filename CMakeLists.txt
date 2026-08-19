@@ -106,6 +106,10 @@ option(ZPP_FORCE_DISPATCH_ONCE
     "DIAGNOSTIC, ONE BOOT ONLY. Deliver the deferred-call vector 0x2f ONCE, ever, in deliberate violation of the architectural masking rule (SDM 12.8.4: strictly greater priority class), and only when the sampled virtual task priority is exactly 0x20. The stall is a three-link cycle and two links are closed by measurement: withholding the request halts the level above, and round-trip speed cannot reach a level-triggered notification. This tests the third - one delivery drains the deferred call, the vector stops being pending, the notification deasserts and the priority drops. Armed only after reading DpcRoutineActive=0, queue depth 1, and 0x2f>>4=2 out of the guest. The reflection is NOT withheld. OFF by default and it stays off whatever the outcome - it is an experiment, not a fix. See BACKLOG.md."
     OFF)
 
+option(ZPP_EAGER_EPT_NEIGHBOURS
+    "On an extended-page-table fault, also install the pages around the one that faulted, bounded to an aligned window. Measured on a verified build: ept-violation is 16.31 per trust-level round trip and 61.1% of all exits at 18.0 VMCS accesses each - 30% of all accesses - and one leaf is installed per fault. Sound because only mappings the guest already permits are installed, composed identically, and any change obliges an INVEPT which discards the root. Sized before building: taking faults to 4 is about 302 us of 3,450, under 9%, against the ~50% needed - it cannot reach the goal and is not expected to. OFF by default. See BACKLOG.md."
+    OFF)
+
 option(ZPP_PUBLISH_REFERENCE_TSC
     "Fill in the reference TSC page the guest hypervisor enables for its guest and then leaves invalid, fitting the scale and offset to the answers it gave for the counter MSR. Measured: without it the guest reads that MSR about fifteen times per clock tick, 26.3% of every exit on the machine, and the guest sits at 0xf0 on 39.3% of entries against 0.2% with the page. OFF by default, and the reason is a bug rather than a design objection: the target frame is resolved by walking the guest hypervisor's OWN extended page tables (l2_physical_to_l1 over eptp12) and then written by a separate call, with NOTHING pinning or re-validating the mapping in between - so a level that remaps guest frames as ordinary business, and is never asked, can reassign that frame between the check and the write. That is time-of-check-to-time-of-use writing to an address somebody else now owns: arbitrary memory corruption, not a boundary violation. Refusing to overwrite a non-zero sequence would be worth doing and does NOT fix this - the race is on the address, not the contents. See BACKLOG.md."
     OFF)
@@ -236,6 +240,7 @@ ExternalProject_Add(hypervisor
         -DZPP_DELIVER_SELF_IPI=${ZPP_DELIVER_SELF_IPI}
         -DZPP_INTERCEPT_SELF_IPI=${ZPP_INTERCEPT_SELF_IPI}
         -DZPP_FORCE_DISPATCH_ONCE=${ZPP_FORCE_DISPATCH_ONCE}
+        -DZPP_EAGER_EPT_NEIGHBOURS=${ZPP_EAGER_EPT_NEIGHBOURS}
         -DZPP_INTERCEPT_APIC=${ZPP_INTERCEPT_APIC}
         -DZPP_VIRTUALIZE_APIC=${ZPP_VIRTUALIZE_APIC}
         -DZPP_PROFILE_L2=${ZPP_PROFILE_L2}
@@ -329,6 +334,7 @@ ExternalProject_Add(uefi_loader
         -DZPP_DELIVER_SELF_IPI=${ZPP_DELIVER_SELF_IPI}
         -DZPP_INTERCEPT_SELF_IPI=${ZPP_INTERCEPT_SELF_IPI}
         -DZPP_FORCE_DISPATCH_ONCE=${ZPP_FORCE_DISPATCH_ONCE}
+        -DZPP_EAGER_EPT_NEIGHBOURS=${ZPP_EAGER_EPT_NEIGHBOURS}
         -DZPP_INTERCEPT_APIC=${ZPP_INTERCEPT_APIC}
         -DZPP_VIRTUALIZE_APIC=${ZPP_VIRTUALIZE_APIC}
         -DZPP_PROFILE_L2=${ZPP_PROFILE_L2}

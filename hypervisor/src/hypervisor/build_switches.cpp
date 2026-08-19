@@ -65,6 +65,8 @@ extern "C" [[gnu::used, gnu::retain]] constinit const char
         digit(nested_vmx::intercept_self_ipi),
         ' ', 'f', 'o', 'r', 'c', 'e', 'd', 'p', 'c', '=',
         digit(nested_vmx::force_dispatch_once),
+        ' ', 'e', 'a', 'g', 'e', 'r', 'e', 'p', 't', '=',
+        digit(nested_vmx::eager_ept_neighbours),
         ' ', 'd', 'e', 'f', 'e', 'r', '=',
         digit(nested_vmx::defer_guest_state),
         ' ', 's', 'h', 'a', 'd', 'o', 'w', 'g', 's', '=',

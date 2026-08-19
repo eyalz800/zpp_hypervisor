@@ -100,6 +100,7 @@ round trip is the whole variable.
 | forcing one delivery | - | **untested**: the one-shot fired in early boot; "once ever at 0x20" was not selective enough |
 | `materialise_l2_guest_state` | 273 us/RT | closed: 44 VMREADs + 2 VMPTRLDs, **no software** - scales down on bare metal |
 | the tick rate itself | - | closed twice: `STRETCH=8` bugcheck-looped, `TICK_FLOOR` shut down. Windows checks its clocks against each other |
+| **the exit count** - eager neighbour install | -21% faults | closed: **net loss**, round trip 3.45 -> 4.07 ms. The walks cost four times the faults they save, and INVEPT discards the root 0.74x a round trip so most installs are never used |
 
 ### The rig's ceiling, and its cause
 
@@ -28389,6 +28390,56 @@ toolchain**, not a functional variant. The "no VE" reading of the name is
 wrong, it would not change `enable_shadow_vmcs` - which is decided by the
 CPU capability test at load, not by a parameter - and it **stops being an
 open question**.
+
+## The exit *count*, which nobody had attacked - tested, and a net loss
+
+Every lever before this one made an exit cheaper; none made there be
+fewer. `ept-violation` is **16.31 a round trip and 61.1% of all exits**,
+at 18.0 VMCS accesses each - **293 of 987 accesses, 30%** - and one leaf
+is installed per fault.
+
+Sized before building, and said in the commit rather than discovered
+after: taking faults to 4 would be ~302 us of 3,450, **under 9%**,
+against the ~50% needed. It could not reach the goal and was not expected
+to. It was worth doing because **a line that is asserted rather than
+tested is not closed.**
+
+### Mechanism moved; result went backwards
+
+| | baseline | eager |
+|---|---|---|
+| faults per round trip | 16.31 | **12.92** (-21%) |
+| exits per round trip | 26.7 | 23.3 |
+| clean round trip | 3.45 ms | **4.07 ms** (+18%) |
+| settled ticks/RT | 5.01 | **6.15** |
+
+The guest still stalls, and it stalls *sooner*.
+
+### Attributed, not guessed
+
+```
+on_l2_ept_fault        377.9 -> 735.1 us/RT  (+357)  calls 16.4 -> 12.6
+  so per fault           23.0 -> 58.3 us            2.5x more expensive
+map_window repoints    282.7 -> 580.1 /RT    (+297)
+everything else        unchanged to within 17 us
+```
+
+Seven neighbour walks a fault, each repointing the mapping window about
+four times: **+357 us a round trip to save ~3.4 faults worth ~83. A
+four-to-one loss.**
+
+### And it cannot be tuned into profit
+
+**1,102,225 neighbours installed against 209,344 faulting leaves - 5.3 a
+fault** - while `on_guest_invept` discards the whole root **0.74 times a
+round trip**. An eagerly installed leaf has under two round trips to be
+used before it is thrown away, and most are not. A smaller window
+installs fewer useless leaves and saves proportionally fewer faults; a
+larger one is worse.
+
+**The INVEPT rate is the ceiling and it is the guest's** - the same
+behaviour that closed the shadow-refresh lever, arriving from the other
+side.
 
 ## The disk telemetry stays dormant, by the user's decision
 
