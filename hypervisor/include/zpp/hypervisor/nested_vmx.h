@@ -361,8 +361,18 @@ inline constexpr bool deliver_self_ipi =
  * Note what it is **not**: `l2_self_ipi_pending` was `0` at the freeze
  * and the single swallowed request had been delivered normally, held
  * 2,691 entries and then injected. The delivery half worked exactly as
- * designed. The harm is not a vector held for ever - it is that the
- * level above must *see* the request even when it cannot act on it.
+ * designed. The harm is not a vector held for ever.
+ *
+ * **And the harm is probably not the withholding either - this comment
+ * over-claimed and `force_dispatch_once` caught it.** That switch
+ * withholds *nothing*, reflects every write, and froze the machine the
+ * same way: `hlt` at the L1 rip, `vmptrld` four times, then no exit at
+ * all. The one thing both boots share, and the control does not, is that
+ * **the delivery path injected a vector the level above did not stage**.
+ * `hlt` appears zero times in a known-good boot of 17 million
+ * second-level entries. Read the two comments together: the wake-condition
+ * story is a hypothesis with one supporting boot and one boot against
+ * it, and the injection story fits both.
  *
  * The prediction this was built to test - the notification rate falling
  * from 1.00 per call - was never reached, because the guest never got as
@@ -451,9 +461,44 @@ inline constexpr bool intercept_self_ipi =
  * protecting a critical section rather than setting a priority.
  *
  * Off by default, and it stays off whatever the outcome: it is an
- * experiment, not a fix. If the guest escapes, the block is breakable
- * and what is needed is a legitimate route to the same place. If it
- * bugchecks, `KiBugCheckData` is read *before* the guest is killed.
+ * experiment, not a fix.
+ *
+ * **It was booted. It did not test what it was built to test, and the
+ * instrument is unsound as written.**
+ *
+ * The gate worked exactly as specified - `l2_forced_dispatch` read `1`,
+ * and the log carries `forced dispatch vector 0x2f at task priority
+ * 0x20`. But **the whole boot contained only two self-directed requests**
+ * (`vectors the guest asked for (2)`), where the stall produces 1.27
+ * million. So the single shot was spent during early boot, thousands of
+ * seconds before `VslpEnterIumSecureMode` is ever reached. "Once ever, at
+ * priority `0x20`" is not selective enough: early boot is full of
+ * moments at `0x20`.
+ *
+ * The guest then froze at 54,604 second-level entries - and it froze
+ * **exactly as the `intercept_self_ipi` boot did**: last exit `hlt` at
+ * the L1 rip, then `vmptrld` four times, then no exit at all. No
+ * bugcheck: `KiBugCheckData` read `0` in all five words, taken before
+ * the guest was killed.
+ *
+ * **Which corrects what `intercept_self_ipi`'s comment claims.** That
+ * one blamed the freeze on withholding the write - the level above
+ * losing its wake condition. The simpler explanation is the one thing
+ * both boots share and the control does not: **the delivery path
+ * injected a vector the level above did not stage.** `hlt` appears
+ * **zero times** in a known-good boot of 17 million second-level
+ * entries and **once** in each experimental boot, as the last exit.
+ * Injecting into a nested guest whose virtual interrupt controller is
+ * owned by the level above is not a complete operation - the
+ * acknowledgement protocol belongs to that level - and this is the
+ * failure `CLAUDE.md` describes as answering part of an interface.
+ *
+ * So link one is not closed and not open: it is **untested**, and
+ * testing it needs an instrument that does not exist - one armed only
+ * once the stall is confirmed present (the notification rate at 1.00
+ * over thousands of switches), and an injection that the level above
+ * can account for. The second of those is the hard one and it may not
+ * be reachable from underneath at all.
  */
 inline constexpr bool force_dispatch_once =
 #if defined(ZPP_FORCE_DISPATCH_ONCE) && ZPP_FORCE_DISPATCH_ONCE

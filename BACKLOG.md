@@ -26972,3 +26972,87 @@ So the finding stands exactly as measured, and it is above this VMM:
 Both switches stay OFF and their comments carry the boot that refuted
 them. Anything further needs to know what the level above waits on, which
 is not visible from underneath it.
+
+## Link one: the shot was spent before it reached the target
+
+The cycle has three links and two were closed above. The third - the
+masking itself - was tested with `ZPP_FORCE_DISPATCH_ONCE`: relax SDM
+12.8.4 exactly once, at a sampled task priority of exactly `0x20`.
+
+**Three preconditions were read out of the guest first, on the boot it
+was armed for, each re-derived for that boot** - kernel base
+`0xfffff807e9400000` from the hypervisor's own log, `KiProcessorBlock`
+from the PDB (section 27 + 15,488 decimal), CR3 `0x1ae002` from the VTL
+census:
+
+```
+KPRCB=0xfffff80778700180  DpcData[0].QueueDepth=1  MaximumDpcQueueDepth=4
+                          QuantumEnd=1  DpcRoutineActive=0
+```
+
+read twice, 45 s apart, identical. `DpcRoutineActive = 0` - no dispatcher
+to re-enter. Depth 1 -> 1 - one call, not a storm. And `0x2f >> 4 = 2`,
+so the handler runs at the priority the guest is already at. All three
+pass, and none was taken on trust.
+
+### The gate worked and the experiment still failed
+
+`l2_forced_dispatch` read **1** and the log carries
+`forced dispatch vector 0x2f at task priority 0x20 - one shot`. Exactly
+one delivery, exactly where specified.
+
+**But the entire boot contained two self-directed requests.**
+`vectors the guest asked for (2)` - against 1,272,847 in the stall. The
+single shot was spent in early boot, nowhere near
+`VslpEnterIumSecureMode`. *Once ever, at `0x20`* is not selective enough,
+because early boot is full of moments at `0x20`.
+
+So **link one is untested** - neither closed nor open. Reported as a
+failure to test.
+
+### And it corrected the previous entry, which is the more valuable half
+
+The guest froze at 54,604 second-level entries, ending **exactly as the
+`swallow=1` boot did**: last exit `hlt` at the L1 rip, then `vmptrld`
+four times, then no exit at all. No bugcheck - `KiBugCheckData` read `0`
+in all five words, taken *before* the guest was killed.
+
+`force_dispatch_once` **withholds nothing**. It reflects every write. So
+the previous entry's explanation - that the level above halted because it
+lost its wake condition - cannot be what happened here, and the simpler
+cause fits both boots:
+
+> **The delivery path injected a vector the level above did not stage.**
+
+`hlt` appears **zero times** in a known-good boot of 17 million
+second-level entries, and **once** in each experimental boot, as the last
+exit. Injecting into a nested guest whose virtual interrupt controller is
+owned by the level above is not a complete operation: the acknowledgement
+protocol belongs to that level. This is the failure `CLAUDE.md` names as
+answering *part* of an interface, arriving in the one place nobody had
+looked for it.
+
+The wake-condition story now has one boot for it and one against it. The
+injection story fits both. **Read the two switch comments together** -
+neither is rewritten to agree with the other, because the disagreement is
+the evidence.
+
+### Where the three links actually stand
+
+| link | status |
+|---|---|
+| `0x2f` masked, pending for ever | **untested** - the shot was spent early |
+| pending -> notification asserted | closed: withhold it and the machine dies |
+| notification -> call never retires | closed: it is a level, so speed cannot reach it |
+
+And a fourth thing, which is ours and has zero coverage: **an L1 `hlt`
+has never occurred in a successful boot of this VMM**, and both times one
+did, the machine stopped. `exit_dispatch.cpp`'s `hlt` case is a no-op
+whose comment says the control is off in every deployed build - so either
+that is no longer true, or the freeze is downstream of it. That is a
+specific, local, checkable question and it is the first thing to look at
+next.
+
+Three switches now, all OFF, each with the boot that refuted it in its
+own comment: `ZPP_DELIVER_SELF_IPI`, `ZPP_INTERCEPT_SELF_IPI`,
+`ZPP_FORCE_DISPATCH_ONCE`.
