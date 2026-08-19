@@ -425,7 +425,15 @@ inline constexpr bool intercept_self_ipi =
  * the request and the level above halts, because it uses the pending
  * interrupt as its own wake condition. Link three was tested against the
  * round-trip cost and is closed - the notification is a level on a
- * permanently pending interrupt, so no speed reaches it. **Link one has
+ * permanently pending interrupt, so no speed reaches it.
+ *
+ * **That last statement is about escape and must not be read as being
+ * about entry.** Sampling the transition from boot later showed the
+ * guest running for 53 seconds at 0.2 clock ticks per trust-level round
+ * trip and entering the stall, in one sample, when it re-armed its own
+ * timer from 64 Hz to 574 Hz and the figure went to 3.6. Speed cannot
+ * get the guest *out*; it is exactly what decides whether it goes *in*.
+ * See `BACKLOG.md`. **Link one has
  * never been touched**, and one delivery is all the cycle needs: the
  * deferred call drains, `0x2f` stops being pending, the notification
  * deasserts, the secure service retires, and the priority drops - after

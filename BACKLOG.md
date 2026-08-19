@@ -27154,3 +27154,106 @@ Three experiments establish that it is not reachable from underneath:
 **This is not the spinner moving and should not be dressed up as one.**
 It is the mechanism, the reason it is out of reach from this position,
 and the three measurements that close each route.
+
+## Every measurement above was taken inside the stall. Here is the entry.
+
+The three closed routes establish that the state is self-sustaining and
+unescapable. They say nothing about how it is **entered**, and nobody had
+looked, because by the time any counter is read the guest is always
+already in it.
+
+Sampled from boot: five counters every 4.1 s for 490 s, 120 samples,
+through the transition. `scripts/rig-dump-state.py` is far too heavy for
+this - the poller reads five members in one batched monitor call.
+
+### It is one event, not a sequence
+
+Four counters stop **in the same sample** and never move again over the
+following 436 seconds:
+
+| counter | last moved | final |
+|---|---|---|
+| `l2_injected_vector[0x2f]` - deferred calls delivered | **t=53.6** | 22 |
+| `l2_entry_vtpr[0x00]` - entries at PASSIVE | **t=53.6** | 12,963 |
+| `l2_entry_vtpr[0x10]` - entries at APC | **t=53.6** | 2,759 |
+| `exit_reason_counts[ept-violation]` - new memory | **t=53.6** | 292,020 |
+
+while `l2_entries`, `vtl_switches`, the clock vector, the notification
+and the entries at `0x20`/`0xd0` all run on unchanged to the end.
+
+So one event causes it, and the same window names the event.
+
+### The event is the guest multiplying its own tick rate by nine
+
+```
+t_end   clock/s  vtlRT/s  ms/roundtrip  ticks/RT  2f/s  VINA/s  eptviol/s
+  45.4     62.9    322.4          3.1      0.19   0.0    14.3    4184.8
+  49.5     63.4    423.4          2.4      0.15   0.0    23.4    2393.4
+  53.6    555.9    154.9          6.5      3.59   4.6   152.7     109.8
+  57.7    561.0    129.3          7.7      4.34   0.0   129.3       0.0
+  ...
+ 522.5    569.3    132.4          7.6      4.30   0.0   132.4       0.0
+```
+
+**Before**: 64 Hz, a trust-level round trip of 2.4-4.1 ms, **0.15-0.26
+clock ticks per round trip**, deferred calls delivered, and 4,000-4,900
+extended-page-table violations a second - a guest booting normally.
+
+**After**: 574 Hz, a round trip of 7.5 ms, **4.2-4.4 ticks per round
+trip**, one notification per round trip, and zero of everything else,
+permanently.
+
+This file already knew the event in isolation - "it arms 156,250, the
+ordinary 64 Hz tick, and then seventy-eight seconds later re-arms at
+**17,400**, 1.74 ms, and never changes it again". What was never
+connected is that **the stall begins in that same instant.**
+
+### The threshold is one tick per round trip, and it is quantitative
+
+At 64 Hz the period is 15.6 ms and a round trip is 3 ms, so most round
+trips contain no tick: the secure call retires, the priority drops, the
+deferred call is delivered, the boot proceeds. At 574 Hz the period is
+1.74 ms and every round trip contains four ticks, each raising a request
+that cannot be delivered - so the call can never retire.
+
+```
+ticks per round trip < 1   ->  the system works
+ticks per round trip > 1   ->  it deadlocks, and cannot get out
+```
+
+It crossed from 0.2 to 3.6 in a single step, because the guest changed
+one of its own constants.
+
+### Which reverses a conclusion three entries above, in one direction only
+
+That entry says "**no round-trip speed makes it deliverable**". That is
+**true of escape and stays true**: once inside, `0x2f` is permanently
+pending, the notification is a level, and speed cannot reach it.
+
+**It is false of entry.** The system ran for 53 seconds at 0.2 ticks per
+round trip and died at 3.6. The round trip is exactly the variable, and
+the per-exit cost the user ruled out is what sets it - **for prevention,
+not for escape.** Both statements are true and they are about different
+questions; do not collapse them.
+
+### The target, and it is smaller than the in-stall figure suggests
+
+Measure against the **clean** round trip, before the notification starts
+bouncing it: **2.4-4.1 ms, needing to be under 1.74 ms.** That is
+**1.4x-2.4x**, not the 4.3x the in-stall 7.5 ms implies - the in-stall
+figure is inflated by the bouncing it is supposed to prevent, so quoting
+it as the target measures the disease rather than the cure.
+
+Two prevention routes, and only one is open:
+
+- **Make the round trip shorter than the tick period.** Open, and now
+  has a number attached rather than a hope.
+- **Stop the guest raising its tick.** Closed already, twice, by
+  measurement recorded above: `ZPP_STRETCH_GUEST_TIMER=8` bugcheck
+  looped, `ZPP_TICK_FLOOR=156250` refused one re-arm and the guest shut
+  down. Windows checks its clocks against each other.
+
+**The done-condition for that work is now stateable and falsifiable:**
+`ticks/RT` measured at the transition must come out below 1, and the
+counters above must keep moving through t=53. Nothing else needs to be
+argued - the poller reports it in one number.
