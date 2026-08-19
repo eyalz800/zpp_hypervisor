@@ -11629,7 +11629,22 @@ not evidence of anything.
 Over 120 seconds on a settled guest: `leaves-filled` 314,290 -> 314,290 and
 `shadow-builds` 16,433 -> 16,433, against 886,695 exits and 321,015
 second-level entries in the same window. **Not one new page of guest memory
-was touched while taking nearly a million exits.** That is the instrument to
+was touched while taking nearly a million exits.**
+
+Extended to twenty minutes on a later run, sampled every two minutes, to
+answer whether it is a livelock or merely a very slow boot: `leaves-filled`
+313,070 and `shadow-builds` 16,344 at every single one of nine samples,
+against **8,227,682 exits and 2,963,499 second-level entries** - 6,673
+exits/s and 2,404 entries/s sustained. **Absolute, not glacial.**
+
+That distinction is worth stating because it is easy to misread. Zero
+progress does *not* mean the shortfall is large. The clock handler is
+re-entered every tick, gets some way in, is preempted by the next tick and
+starts again - so it makes no *net* progress whether it is short of the
+budget by 50% or by 5%. The 4.18-4.65 round trips a tick against 402
+microseconds each says the shortfall is small. A livelock that deep can
+still be released by a modest constant-factor cut, and the flat line is not
+evidence against that. That is the instrument to
 reach for first next time - it answers "is it progressing" in two samples and
 needs no symbols.
 
