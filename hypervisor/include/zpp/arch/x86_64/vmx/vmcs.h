@@ -32,7 +32,7 @@ inline constinit std::uint64_t vmcs_reads_taken{};
 inline constinit std::uint64_t vmcs_writes_taken{};
 
 /**
- * Which fields those reads name, as a table rather than a ring.
+ * Which fields those accesses name, as a table rather than a ring.
  *
  * The count above says 54 reads an exit and the guest-state deferral
  * already reports 0.9 of them, so 53 are something else and no
@@ -44,15 +44,80 @@ inline constinit std::uint64_t vmcs_writes_taken{};
  * of our fifty-three are that same rare set is the whole question, and
  * it is answerable only by field.
  *
- * Direct-mapped on the low bits of the encoding and never evicted: a
- * collision loses a field rather than corrupting a count, and the top
- * of the table is what matters. `overflow` says how much was lost, so a
- * table that is too small says so rather than quietly under-reporting.
+ * **Both directions, because a read table alone cannot be checked.** The
+ * write path used to bump `vmcs_writes_taken` and nothing else, so the
+ * 21% of accesses that are writes had no breakdown at all and there was
+ * no second quantity for the read table to disagree with. Same shape,
+ * same slot function, so a field's two rows sit at the same index.
+ *
+ * **Direct-mapped and injective, which the first version was not.** It
+ * hashed `(encoding >> 1) ^ (encoding >> 9)` into 64 slots and reported
+ * `vmcs_read_overflow` of 532,254,425 against 218,870 reads a second
+ * tracked - more accesses lost than kept, so a field's absence from the
+ * table proved nothing at all and the reading had to be published with
+ * that caveat attached.
+ *
+ * Widening it would not have helped: measured over the 156 encodings in
+ * `vmcs_fields.h`, that hash occupies only 60 slots at 64, at 128, at
+ * 256 and at 512, because the encodings differ mostly in bits the two
+ * shifts fold on top of each other. The slot is taken from the
+ * encoding's own structure instead - SDM 25.11.2, "Field Encoding in
+ * VMCS": bits 9:1 the index, bits 11:10 the type, bits 14:13 the width.
+ * Every index in this tree is 25 or less, so five bits of index, two of
+ * type and two of width is a nine-bit key, and over those 156 encodings
+ * it collides **zero** times.
+ *
+ * The identity check and `overflow` are kept anyway, for the case the
+ * five-bit index assumption stops holding - an encoding with an index
+ * above 31 aliases one below it, and this reports that rather than
+ * silently adding the two together.
  */
-inline constexpr std::size_t vmcs_read_slots = 64;
-inline constinit std::uint64_t vmcs_read_field[vmcs_read_slots]{};
-inline constinit std::uint64_t vmcs_read_hits[vmcs_read_slots]{};
+inline constexpr std::size_t vmcs_use_slots = 512;
+
+/**
+ * The slot an encoding occupies in the tables above. See them for why
+ * it is a projection of the encoding's fields rather than a hash.
+ */
+inline constexpr std::size_t vmcs_use_slot(std::uint64_t encoding)
+{
+    return static_cast<std::size_t>(((encoding >> 1) & 0x1f) |
+                                    (((encoding >> 10) & 3) << 5) |
+                                    (((encoding >> 13) & 3) << 7));
+}
+
+inline constinit std::uint64_t vmcs_read_field[vmcs_use_slots]{};
+inline constinit std::uint64_t vmcs_read_hits[vmcs_use_slots]{};
 inline constinit std::uint64_t vmcs_read_overflow{};
+
+inline constinit std::uint64_t vmcs_write_field[vmcs_use_slots]{};
+inline constinit std::uint64_t vmcs_write_hits[vmcs_use_slots]{};
+inline constinit std::uint64_t vmcs_write_overflow{};
+
+/**
+ * Records one access against its field, for either table.
+ *
+ * A slot is claimed by the first encoding to reach it and never evicted,
+ * so a count in the table is always a count of the field named beside
+ * it. Anything that lands on a claimed slot with a different encoding is
+ * counted as overflow rather than added to the sitting tenant.
+ */
+inline void vmcs_record_use(std::uint64_t encoding,
+                            std::uint64_t (&fields)[vmcs_use_slots],
+                            std::uint64_t (&hits)[vmcs_use_slots],
+                            std::uint64_t & overflow)
+{
+    auto slot = vmcs_use_slot(encoding);
+
+    if (0 == hits[slot]) {
+        fields[slot] = encoding;
+    }
+
+    if (fields[slot] == encoding) {
+        hits[slot] = hits[slot] + 1;
+    } else {
+        overflow = overflow + 1;
+    }
+}
 
 /**
  * The VMCS error type.
@@ -152,6 +217,10 @@ public:
     void write(field field, std::uint64_t value) const
     {
         vmcs_writes_taken = vmcs_writes_taken + 1;
+        vmcs_record_use(static_cast<std::uint64_t>(field),
+                        vmcs_write_field,
+                        vmcs_write_hits,
+                        vmcs_write_overflow);
 
         if (0 != vmwrite(field, value)) {
             __builtin_trap();
@@ -165,20 +234,10 @@ public:
     std::uint64_t read(field field) const
     {
         vmcs_reads_taken = vmcs_reads_taken + 1;
-
-        auto encoding = static_cast<std::uint64_t>(field);
-        auto slot = ((encoding >> 1) ^ (encoding >> 9)) &
-                    (vmcs_read_slots - 1);
-
-        if (0 == vmcs_read_hits[slot]) {
-            vmcs_read_field[slot] = encoding;
-        }
-
-        if (vmcs_read_field[slot] == encoding) {
-            vmcs_read_hits[slot] = vmcs_read_hits[slot] + 1;
-        } else {
-            vmcs_read_overflow = vmcs_read_overflow + 1;
-        }
+        vmcs_record_use(static_cast<std::uint64_t>(field),
+                        vmcs_read_field,
+                        vmcs_read_hits,
+                        vmcs_read_overflow);
 
         std::uint64_t value{};
         if (0 != vmread(field, &value)) {

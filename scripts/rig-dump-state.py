@@ -412,6 +412,72 @@ def dump_field_use(args, instance, off, capacity=128):
         print(f"  table full, {overflow} uses not recorded")
 
 
+def dump_own_field_use(args, elf, base):
+    """The VMCS fields **this VMM** reads and writes, by name.
+
+    Different question from `dump_field_use` above, and the two are worth
+    keeping apart: that one counts what the *guest hypervisor* asks for
+    through VMREAD and VMWRITE exits, which is what a shadowing list
+    would have to cover.  This one counts the accesses this VMM executes
+    itself, which is what has to be *removed* - on a host without VMCS
+    shadowing every one of them is an exit to the layer below at 1.4-1.8
+    microseconds, and the round trip spends about half its time here.
+
+    Namespace-scope globals rather than members of the singleton, so they
+    resolve against the module base and not against `instance`.
+
+    These tables had no reader at all for the whole of their existence -
+    they were added, and then the number they answer was estimated twice
+    from cycles divided by a price, and both estimates informed a wrong
+    decision.  That is what this function is for.
+    """
+    slots = 512
+    tables = {}
+    for kind in ("read", "write"):
+        try:
+            tables[kind] = (
+                base + gdb_symbol(
+                    elf, f"zpp::arch::x86_64::vmx::vmcs_{kind}_field"),
+                base + gdb_symbol(
+                    elf, f"zpp::arch::x86_64::vmx::vmcs_{kind}_hits"),
+                base + gdb_symbol(
+                    elf, f"zpp::arch::x86_64::vmx::vmcs_{kind}_overflow"))
+        except SystemExit as failure:
+            print(f"\n[our own vmcs accesses: {failure}]")
+            return
+
+    monitor = Monitor(args.rig, args.port)
+    for fields, hits, overflow in tables.values():
+        monitor.queue(fields, slots)
+        monitor.queue(hits, slots)
+        monitor.queue(overflow, 1)
+    words = monitor.run()
+
+    print("\nvmcs fields this vmm accesses itself")
+    for kind, (fields, hits, overflow) in tables.items():
+        rows = []
+        for i in range(slots):
+            count = words.get(hits + 8 * i, 0)
+            if count:
+                rows.append((count, words.get(fields + 8 * i, 0)))
+        rows.sort(reverse=True)
+        total = sum(count for count, _ in rows) or 1
+        print(f"  --- our {kind}s ({total:,} total, {len(rows)} distinct) ---")
+        for count, encoding in rows[:32]:
+            print(f"    0x{encoding:04x} "
+                  f"{VMCS_FIELD.get(encoding, ''):<44} {count:>12,}  "
+                  f"{100.0 * count / total:5.1f}%")
+        lost = words.get(overflow, 0)
+        if lost:
+            # Only reachable if an encoding with an index above 31 turns
+            # up - see `vmcs_use_slot`.  Measured zero over every
+            # encoding in vmcs_fields.h, so a non-zero here means the
+            # table's assumption has stopped holding and the counts above
+            # may be two fields added together.
+            print(f"    SLOT COLLISION: {lost:,} {kind}s not recorded - the "
+                  f"counts above are not trustworthy")
+
+
 def load_field_names():
     """Field encoding to name, straight out of the header.
 
@@ -2009,6 +2075,11 @@ def main():
 
     print("\nvmcs fields the guest hypervisor uses")
     dump_field_use(args, instance, off)
+
+    try:
+        dump_own_field_use(args, args.elf, base)
+    except SystemExit as failure:
+        print(f"\n[dump_own_field_use skipped: {failure}]")
 
     dump_handler_by_reason(args, args.elf, instance)
     dump_vmcs02_split(args, args.elf, instance)
