@@ -615,6 +615,24 @@ hypervisor::shadow_ept_pointer_for(std::size_t cpu, std::uint64_t eptp12)
     // If the second dominates, the amplification is ours and targeted
     // invalidation replaces a global counter. If the first dominates,
     // the slot set is the thing to look at. Counted rather than argued.
+    //
+    // **Counted, in the clean phase, and it is the first - absolutely.**
+    // Over one window: `rebuild-new-root` 4,104, `rebuild-stale-generation`
+    // **0**, `evictions` **0**. So the global counter amplifies nothing,
+    // targeted invalidation would gain nothing, and the slot set is not
+    // thrashing either - all three of the obvious fixes are answers to
+    // questions this guest does not ask.
+    //
+    // What the rebuilds track is `invept`: 4,162 exits against 4,104
+    // rebuilds in the same window, within 1.4%. The guest hypervisor's
+    // own invalidations release the slot and the next entry rebuilds and
+    // replays it - 258,552 leaves in that window.
+    //
+    // And the cost is all here rather than in the lookup: 3.8% of calls
+    // rebuild, so if the hit path is ~100 cycles one rebuild is about
+    // 746,000 - which is 272 of this function's 273 microseconds per
+    // trust-level round trip. **The mean of this phase is bimodal and
+    // must not be read as a typical call.** `BACKLOG.md` has the window.
     auto stale_generation = false;
 
     for (std::size_t slot{}; slot < shadow_ept_slots; ++slot) {

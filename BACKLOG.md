@@ -27339,3 +27339,95 @@ is 2.59 ms and 25.9 exits, with a different dominant reason and a
 different bottleneck. Quoting the first would have set a 4.3x target
 instead of 1.4-2.4x, and pointed the work at `vmcall` and the
 notification rather than at reflection cost.
+
+## Three reads before optimising, and the third moves the goalposts
+
+### 1. `shadow_ept_pointer_for` is a free lookup with a bimodal mean
+
+14.4 us a call for what its name says is a lookup, 19 calls a round trip,
+273 us of the budget. The fast path is a compare against
+`shadow_ept_slots` entries and a return - tens of cycles. The mean is
+**bimodal**: in the clean window 4,104 of 107,261 calls (3.8%) rebuilt,
+and if the hit path is ~100 cycles then **one rebuild costs ~746,000
+cycles, 374 us**. Rebuilds are 272 of the 273 us. *The lookup is not the
+cost and never was.*
+
+**And the rebuild reason lands opposite to that function's own comment.**
+It says "if stale generation dominates, the amplification is ours and
+targeted invalidation replaces a global counter". Measured, clean window:
+
+```
+rebuild-new-root          4,104   (100%)
+rebuild-stale-generation      0
+evictions                     0
+```
+
+**Zero.** The global `ept_generation` counter is not amplifying anything,
+targeted invalidation would gain nothing, and the slot set is not
+thrashing either. Every rebuild is a root this processor has not
+shadowed - and 4,104 of them against **4,162 `invept` exits** in the same
+window, within 1.4%. The guest hypervisor's own invalidations are
+releasing the slot and forcing the rebuild-and-replay (258,552 leaves
+replayed). That is where to look, and it is a different place from the
+one the comment predicted.
+
+### 2. The clean-phase access split: hardware, and it is the writes
+
+The question was whether `build_vmcs02` costing 167 us clean against ~78
+us in the stall is more accesses or the same accesses and more software.
+It is **more accesses**, and the reads are not involved at all:
+
+| reason | clean rd | stall rd | clean wr | stall wr |
+|---|---|---|---|---|
+| `vmresume` | 33.7 | 33.9 | **42.4** | 18.5 |
+| `vmcall` | 46.5 | 47.8 | **44.8** | 7.9 |
+| `ext-int` | 45.0 | 45.4 | **45.6** | 6.8 |
+
+Reads identical to within 3%; writes 2.3x to 6.7x higher. The elision is
+keyed on value comparison, and in a phase where vmcs12 genuinely changes
+it stops eliding:
+
+```
+hot guest-state writes elided   36.8% clean   80.7% stall
+guest-state writes elided       45.5% clean   90.6% stall
+control writes elided           95.0% clean   98.4% stall
+```
+
+**So the in-stall access counts are a floor, not a typical**, exactly as
+suspected, and every access figure in this file taken from the settled
+loop understates the working case by two to six times.
+
+### 3. And a round trip is 1,095 VMCS accesses, which reframes the target
+
+Summed over the clean window's by-reason table: **1,095 VMCS accesses per
+trust-level round trip**. The rig's own measured cost is about **6,240
+cycles per access**, because this VMM is itself a guest of KVM and every
+VMREAD and VMWRITE it issues is emulated.
+
+```
+                                       ms/RT   ticks/RT
+rig, nested in KVM (6,240 cyc/access)  3.432      1.97
+bare metal (~100 cyc/access)           0.055      0.03
+bare metal, pessimistic (~200 cyc)     0.110      0.06
+```
+
+**The stall condition is `ticks/RT > 1`, and on the rig it is 1.97 while
+on bare metal the same 1,095 accesses put it at 0.03-0.06.**
+
+So the honest reading of everything above: **the stall may be an artifact
+of running this VMM inside KVM**, and the machine it is built for may
+never enter it. That is an *inference from an access count and an assumed
+bare-metal access cost*, not a measurement - but it is a 30x margin, not
+a 30% one, and no plausible correction closes it.
+
+**Which changes what the prevention work is for.** A 43%-per-reflection
+cut is worth having on the rig and would let the rig boot; it is not what
+stands between this project and a booting guest on real hardware, because
+on real hardware the margin is already thirty-fold. **The measurement that
+settles it is one bare-metal boot with `entry_poll.py` running** - does
+the guest survive its own re-arm - and that costs the user a trip to the
+machine rather than any code.
+
+Everything measured on the rig remains true of the rig. What it says
+about bare metal is now a question with a number attached, and it should
+be asked before any of the optimisation is done.
