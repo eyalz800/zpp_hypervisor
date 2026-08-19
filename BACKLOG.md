@@ -27952,6 +27952,103 @@ announced one, and on this machine it declines. That is a question about
 what the whole `0x40000000` block claims, not about the enlightened
 structure's layout.
 
+## The reader returned zeros that were never read, and `reader proven` passed anyway
+
+Three defects in the same reader, all of the same shape - **an answer
+that looks like data and is not** - and they are recorded together
+because the third was found by the first two.
+
+### 1. Batched monitor reads parse into the wrong keys
+
+The monitor echoes each character of a command back with redraws, and
+with several commands in flight that echo interleaves with the output
+**inside a line**. A corrupted line still matches the address pattern, so
+it parses - into an address nobody asked for. `words.get(addr, 0)` then
+turns every miss into a plausible zero.
+
+Measured: **26 reads in one session returned 78 words, all zero**, while
+the same three-word read issued alone returned `0x61`, `0x49` and a valid
+data pointer. That is the whole reason the log ring printed 37 blank
+lines and read as "the log is empty" - the writer was fine, the walk was
+fine, and the bodies were readable one at a time.
+
+`Monitor.run` now issues in chunks of six and **checks that every queued
+address came back**, retrying what did not and recording anything still
+missing in `unanswered`, which `dump_log` reports. The log reads again.
+
+**It is not fully repaired**: the tail of a long ring still comes back
+blank intermittently, and the warning does not fire, so there is a second
+mechanism underneath this one. Recorded as open rather than closed.
+
+### 2. `reader proven` checks twelve bits
+
+```python
+elif 0x023 == (proof & 0xfff):
+    print("reader proven: ...")
+```
+
+A module base that has moved still lands on *some* present entry, so the
+line prints. **It did this session**: a dump taken at a stale base -
+`0x67210000` after the binary grew and the base became `0x6720e000` -
+printed `reader proven` above a phase table of zeroes, `guest-state
+skipped/done` all zero, and a second-level entry count of **4,323,385,374
+with one distinct value**. Everyone has leaned on that line for a dozen
+sessions.
+
+There is now a **base-sensitive** check beside it: `zpp_build_switches`
+is a fixed string at a fixed offset, so reading it back proves the base
+itself rather than the plausibility of one entry. It earned itself
+immediately - the first eVMCS dump printed `base proven` while the
+singleton still read zeroes, which correctly said *the base is right and
+the hypervisor has not launched yet* rather than *the reader is broken*.
+
+### 3. And the two together are the rule
+
+`reader proven` answered a question nobody was asking - "does this look
+like a page table entry" - while the questions that mattered were "is
+this the right base" and "did this read happen at all". **A self-check
+must fail on the thing it is protecting against**, and both of these
+passed on exactly the failure they existed to catch.
+
+## What a bare-metal boot can report, plainly: one bit
+
+This matters more than any of the above, because every instrument this
+investigation relied on goes through the QEMU monitor and **there is no
+monitor on bare metal.**
+
+- **No serial port.** `uefi_loader/src/main.cpp:766` says it outright:
+  the target "has no serial port, no debugger, and the screen belongs to"
+  the guest. So `ZPP_TRACE`, `trace::raw` and the loader's own output
+  reach nothing.
+- **No monitor, no `xp`, no `info registers`, no gdb stub.** That removes
+  `rig-dump-state.py`, `entry_poll.py`, the guest page-table walker and
+  the `KiBugCheckData` read in one stroke.
+- **The disk channel is the only survivor**, and in the deployed build it
+  is **not compiled in**: `ZPP_DIAG:BOOL=OFF`. Even switched on it
+  carries `diag::log` records, of which there are seventeen call sites
+  and **none in the nested or trust-level path** - so it would say
+  nothing about `ticks/RT`, the entry transition, or the counters that
+  every conclusion in this file rests on.
+
+**So a physical boot today answers exactly one question: does the spinner
+move.** `entry_poll.py`'s verdict is not reachable, and nobody should
+expect otherwise.
+
+### What would make the trip worth more, and it is bounded
+
+Emit the five `entry_poll.py` counters - `l2_injected_vector[0x2f]`,
+`l2_injected_vector[0x40]`, the clock vector, the task-priority bins and
+`exit_reason_counts[ept-violation]` - as a periodic `diag::log` record on
+the `esp_blocks` sink, and read them back afterwards with
+`scripts/read-disk-log.py`. That turns the trip from one bit into the
+transition measurement, and it is the one piece of preparation left.
+
+Its hazards are already recorded: `ZPP_DIAG` defaults ON for a debug
+build and the loader establishes the ESP reservation and then **warm
+resets the machine** so the channel is live on the next boot, which is
+why the guest coverage suite needs it OFF. A physical trip has to expect
+that reset rather than read it as a failure.
+
 ### Two instrument fixes made on the way
 
 - **`nested_vmfail_count` / `nested_last_vmfail` now print from the

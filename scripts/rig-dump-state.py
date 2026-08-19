@@ -173,12 +173,30 @@ class Monitor:
     def __init__(self, rig, port):
         self.rig, self.port = rig, port
         self.pending = []
+        # Reads that never came back after retries. Non-empty means some
+        # number printed above is a zero that was never read.
+        self.unanswered = []
 
     def queue(self, address, words):
         self.pending.append((address, words))
 
-    def run(self):
-        script = "".join(f"xp/{n}gx 0x{a:x}\n" for a, n in self.pending)
+    # Batch size, and it is not a performance knob.
+    #
+    # The monitor echoes each character of a command back with redraws,
+    # and with many commands in flight that echo interleaves with the
+    # output *within a line*. A corrupted line still matches the address
+    # pattern, so it parses - into the **wrong key**. The reader then
+    # returns the right *number* of words, none of them at an address
+    # anyone asked for, and `words.get(addr, 0)` turns every one of those
+    # misses into a plausible zero.
+    #
+    # Measured: 26 reads in one session returned 78 words, all zero,
+    # while the same three-word read alone returned the right values.
+    # That is what made the log ring print 37 empty lines.
+    CHUNK = 6
+
+    def _issue(self, batch):
+        script = "".join(f"xp/{n}gx 0x{a:x}\n" for a, n in batch)
         proc = subprocess.run(
             SSH + [self.rig, f"cat | nc -w 30 127.0.0.1 {self.port}"],
             input=script, capture_output=True, text=True, errors="replace")
@@ -191,7 +209,31 @@ class Monitor:
             address = int(m.group(1), 16)
             for i, word in enumerate(m.group(2).split()):
                 words[address + 8 * i] = int(word, 16)
-        self.pending = []
+        return words
+
+    def run(self):
+        pending, self.pending = self.pending, []
+        words = {}
+
+        # Chunked, and then *checked*: a read whose address did not come
+        # back is retried alone rather than left to read as zero. Without
+        # the check this is the same failure shape as `reader proven` -
+        # an answer that looks like data and is not.
+        for start in range(0, len(pending), self.CHUNK):
+            batch = pending[start:start + self.CHUNK]
+            words.update(self._issue(batch))
+
+            for address, count in batch:
+                wanted = [address + 8 * i for i in range(count)]
+                if all(w in words for w in wanted):
+                    continue
+                for _ in range(2):
+                    words.update(self._issue([(address, count)]))
+                    if all(w in words for w in wanted):
+                        break
+                else:
+                    self.unanswered.append((address, count))
+
         return words
 
 
@@ -272,6 +314,14 @@ def dump_log(monitor, elf, base, limit):
     print(f"\nlog ring ({len(lines)} lines, oldest first)")
     for i, text in enumerate(lines):
         print(f"  [{i:4}] {text}")
+
+    # An empty line is either an empty line or a read that never came
+    # back, and those must not look alike - that is exactly what made
+    # this ring print 37 blanks and read as "the log is empty".
+    if monitor.unanswered:
+        print(f"  WARNING: {len(monitor.unanswered)} reads never answered "
+              f"after retries - blank lines above may be unread rather "
+              f"than empty")
 
 
 def name_reason(value):
