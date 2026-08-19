@@ -133,15 +133,54 @@ a capability the hardware lacks, take it, and KVM emulates that too. **A
 capability bit read from a virtual CPUID is not a statement about
 silicon.**
 
-### Bare metal, as a number and not a plan
+### Bare metal, recomputed from verified numbers: it stalls too
 
-Same 1,095 accesses at native cost: our share ~1.09 ms, round trip ~1.93
-ms, **ticks/RT ~1.11**; with the landed and available changes, **~0.99,
-band +/-15%** from the two instruments' disagreement. A coin flip that
-only a physical boot settles.
+**The 0.99 that stood here was wrong.** Recomputed against the
+re-verified clean-phase measurements, with both denominators shown
+because they disagree by 13% and neither is privileged:
 
-**Ruled out by the user: KVM only.** And a trip today would report **one
-bit** - the target has no serial port, no monitor, no debugger, and the
+```
+verified clean round trip                          3.45 ms
+  l2 (guest executing)      13.01%               = 0.45 ms   irreducible
+  l1 (Hyper-V)              13.47%               = 0.46 ms   irreducible from here
+  ours                      73.47%               = 2.53 ms
+  ours, by handler_cycles instead                = 2.86 ms
+
+  VMCS accesses   987/RT at 1.36 us              = 1.34 ms
+  residue         2.53 - 1.34 = 1.19  |  2.86 - 1.34 = 1.52 ms
+
+BARE METAL - accesses ~free (987 x 0.05 us = 0.05 ms), residue unchanged
+  optimistic (split)      our share 1.24 ms  round trip 2.16 ms  ticks/RT 1.24
+  pessimistic (handler)   our share 1.57 ms  round trip 2.48 ms  ticks/RT 1.43
+                                                        threshold  1.00
+```
+
+**Both land above the threshold. On these numbers bare metal stalls too.**
+
+Why the old figure was optimistic, and it is a specific error rather than
+drift: it used 1,095 accesses and a residue of 1.03 ms, then **subtracted
+the 232 microsecond elision saving a second time** - but that change had
+since been built, and the drop from 1,095 accesses to 987 *is* it. A
+change already in the baseline was counted again. The re-verified residue
+is also larger, 1.19-1.52 against 1.03.
+
+**The one term that could still move it**, stated as unquantified rather
+than assumed away: our own software may be inflated by executing as a KVM
+guest - cache and TLB pressure, and any extended-page-table faults our own
+memory accesses take underneath. The direction is known (bare metal can
+only be faster) and the magnitude is not. To cross the threshold it would
+have to fall from 1.19 ms to under **0.78 ms - a 35% reduction in our own
+code purely from not being a guest**, which nothing here evidences.
+
+And the phase decomposition covers only **79% of `handler_cycles`**, so
+0.59 ms a round trip of our own code is still outside every interval -
+uninstrumented, not missing. That gap is where such a claim would have to
+be proved, and it has not been.
+
+**Ruled out by the user: KVM only** - and on the recomputation that is
+the right call rather than a sacrifice, because the projection says the
+trip would have found the same stall. A trip today would also report
+**one bit** - the target has no serial port, no monitor, no debugger, and the
 screen belongs to the guest. `emit_disk_telemetry` is written, compiled
 both ways, tested and **dormant**; enabling its channel is a real write
 to the ESP of the machine's own Windows disk and nobody has authorised
@@ -172,6 +211,27 @@ it.
    phase table of zeroes and an entry count of four billion; batched
    monitor reads parsed into wrong keys and `words.get(addr, 0)` turned
    every miss into a plausible zero.
+
+### The final statement
+
+**The stall is not reachable from underneath on this hardware, and the
+distance is set by the host processor rather than by anything in this
+codebase.**
+
+- Every lever in our own code is measured and closed; one landed, worth
+  232 microseconds of a 3.45 millisecond round trip.
+- The rig sits at **1.93 ticks per round trip against a threshold of
+  1.0**, with 53% of our share being VMCS accesses that KVM emulates in
+  software because the host CPU does not report IA32_VMX_MISC bit 29.
+- **Bare metal is projected at 1.24 to 1.43 - above the threshold too**,
+  and is therefore *unproven rather than promising*. It was never tried,
+  and on these numbers trying it would have found the same stall.
+- What would change the answer is a host processor that can shadow a
+  VMCS, or a guest that does not raise its own tick rate ninefold at
+  t=53. Neither is reachable from here.
+
+That is the result. It is not a booting Windows, and it should not be
+written up as one.
 
 ### And the oldest one, five times over
 
