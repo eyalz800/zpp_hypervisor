@@ -5159,6 +5159,14 @@ private:
     volatile std::uint64_t l2_self_ipi_reflected[max_cpus]{};
 
     /**
+     * Deferred-call vectors delivered against the architectural masking
+     * rule by `nested_vmx::force_dispatch_once`. Bounded at one per
+     * processor by construction - it is both the counter and the gate,
+     * so a reading above 1 means the gate itself is broken.
+     */
+    volatile std::uint64_t l2_forced_dispatch[max_cpus]{};
+
+    /**
      * Synthetic interrupt commands that named somewhere other than this
      * processor, so the assumption behind treating a physical
      * destination of zero as "me" is falsifiable rather than implicit.

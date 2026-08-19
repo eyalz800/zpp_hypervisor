@@ -389,8 +389,81 @@ inline constexpr bool intercept_self_ipi =
  * either one, and adding a third way to hold a vector does not have to
  * find that site again.
  */
+/**
+ * Whether this VMM delivers the deferred-call vector **once, ever**, in
+ * deliberate violation of the architectural masking rule, as a
+ * diagnostic.
+ *
+ * **This is an architectural violation and nothing here pretends
+ * otherwise.** The guest masked the vector; SDM 12.8.4 admits an
+ * interrupt only when its priority class is strictly greater than the
+ * task priority's, and vector `0x2f` is class 2 against a task priority
+ * of `0x20`, which is also class 2. `deliver_self_ipi` computes that
+ * rule correctly and holds - measured, 2,005 holds against one delivery.
+ * This relaxes it exactly once.
+ *
+ * The reason it is worth one boot: the stall is a three-link cycle and
+ * two links are closed by measurement.
+ *
+ * ```
+ * IRQL 2        -> 0x2f masked, pending for ever
+ * 0x2f pending  -> the trust-level notification asserted on 100% of entries
+ * notification  -> the secure call never retires -> IRQL never drops
+ * ```
+ *
+ * Link two was tested by `intercept_self_ipi` and is closed - withhold
+ * the request and the level above halts, because it uses the pending
+ * interrupt as its own wake condition. Link three was tested against the
+ * round-trip cost and is closed - the notification is a level on a
+ * permanently pending interrupt, so no speed reaches it. **Link one has
+ * never been touched**, and one delivery is all the cycle needs: the
+ * deferred call drains, `0x2f` stops being pending, the notification
+ * deasserts, the secure service retires, and the priority drops - after
+ * which the cycle cannot re-form, because the guest is no longer pinned
+ * above the dispatcher.
+ *
+ * Three things make it less reckless than it sounds, and **all three
+ * were read out of the guest on the boot this was armed for** rather
+ * than assumed:
+ *
+ * - `0x2f` is the deferred-call dispatch and its handler runs *at*
+ *   DISPATCH_LEVEL - `0x2f >> 4` is 2 - which is exactly where the guest
+ *   already is. It is entered at the priority it was written for.
+ * - Windows masks it at IRQL >= 2 to stop the dispatcher being
+ *   re-entered, and `KPRCB.DpcRoutineActive` read **0**, twice, 45
+ *   seconds apart - there is no dispatcher to re-enter. It cannot change
+ *   under us either: the guest's registers are byte-identical across
+ *   every switch, so it is executing nothing that could set it.
+ * - `DpcData[0].QueueDepth` read **1 -> 1** with a maximum ever of 4, so
+ *   one delivery drains one deferred call rather than releasing a storm.
+ *
+ * **The reflection is deliberately left alone.** `intercept_self_ipi`
+ * proved the level above needs to see the write, so this switch adds an
+ * injection and withholds nothing - the two are independent and must
+ * stay that way.
+ *
+ * Gated as hard as it can be: once ever per processor, and only when the
+ * sampled virtual task priority is exactly `0x20`. Not `0xd0`, where the
+ * guest is inside the clock interrupt and a dispatch interrupt would be
+ * genuinely wrong; and not `0x40`, which is the other trust level. The
+ * interruptibility test above is **not** relaxed - `RFLAGS.IF` clear or
+ * an `STI`/`MOV SS` shadow still refuses, because those are the guest
+ * protecting a critical section rather than setting a priority.
+ *
+ * Off by default, and it stays off whatever the outcome: it is an
+ * experiment, not a fix. If the guest escapes, the block is breakable
+ * and what is needed is a legitimate route to the same place. If it
+ * bugchecks, `KiBugCheckData` is read *before* the guest is killed.
+ */
+inline constexpr bool force_dispatch_once =
+#if defined(ZPP_FORCE_DISPATCH_ONCE) && ZPP_FORCE_DISPATCH_ONCE
+    true;
+#else
+    false;
+#endif
+
 inline constexpr bool self_ipi_delivery =
-    deliver_self_ipi || intercept_self_ipi;
+    deliver_self_ipi || intercept_self_ipi || force_dispatch_once;
 
 inline constexpr bool publish_reference_tsc =
 #if defined(ZPP_PUBLISH_REFERENCE_TSC) && ZPP_PUBLISH_REFERENCE_TSC

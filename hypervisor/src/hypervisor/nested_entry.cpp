@@ -2539,13 +2539,48 @@ std::expected<void, zpp::error> hypervisor::build_vmcs02(std::size_t cpu)
                        rflags_interrupt_enable)) &&
                 (0 == (blocking & (blocking_by_sti | blocking_by_mov_ss)));
 
-            if (read && interruptible &&
-                ((vector >> priority_class) >
-                 (std::uint64_t{vtpr} >> priority_class))) {
+            auto admitted = (vector >> priority_class) >
+                            (std::uint64_t{vtpr} >> priority_class);
+
+            // The one-shot diagnostic. See
+            // `nested_vmx::force_dispatch_once` for why this violation
+            // is worth one boot and for the three guest readings taken
+            // before it was armed.
+            //
+            // `interruptible` is deliberately still required: RFLAGS.IF
+            // and the STI/MOV-SS shadow are the guest protecting a
+            // critical section, which is a different claim from a task
+            // priority and is not the one being tested.
+            //
+            // The `0x20` test does two jobs - it is DISPATCH_LEVEL, the
+            // priority the vector's own handler runs at, and it excludes
+            // the other trust level, which enters at `0x40`. `0xd0` is
+            // the guest inside its clock interrupt and is excluded too.
+            auto forced = false;
+
+            if constexpr (nested_vmx::force_dispatch_once) {
+                constexpr std::uint8_t dispatch_priority = 0x20;
+
+                forced = (0 == this->l2_forced_dispatch[cpu]) &&
+                         (dispatch_priority == vtpr) && !admitted;
+            }
+
+            if (read && interruptible && (admitted || forced)) {
                 injection = valid | external | vector;
                 this->l2_self_ipi_pending[cpu] = 0;
                 this->l2_self_ipi_delivered[cpu] =
                     this->l2_self_ipi_delivered[cpu] + 1;
+
+                if (forced) {
+                    this->l2_forced_dispatch[cpu] =
+                        this->l2_forced_dispatch[cpu] + 1;
+                    log("cpu {} forced dispatch vector {} at task "
+                        "priority {} - one shot, architectural rule "
+                        "deliberately relaxed",
+                        cpu,
+                        vector,
+                        std::uint64_t{vtpr});
+                }
             } else {
                 this->l2_self_ipi_held[cpu] =
                     this->l2_self_ipi_held[cpu] + 1;
