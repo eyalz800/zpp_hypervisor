@@ -1654,7 +1654,13 @@ def main():
                # for a dozen sessions and this reader never did, so the
                # monitor path - the one that works on a wedged guest -
                # could not see the number that names a failed entry.
-               "nested_vmfail_count", "nested_last_vmfail"]
+               "nested_vmfail_count", "nested_last_vmfail",
+               # Whether GS is telling the truth about which processor it
+               # is on. Two scalars, not per-processor arrays, so they are
+               # read with their own queue below rather than with the
+               # per-processor run.
+               "gs_processor_index_disagreements",
+               "gs_processor_index_checked"]
     off = gdb_offsets(args.elf, members)
     instance = base + gdb_symbol(
         args.elf, "zpp::hypervisor::hypervisor::instance()::instance")
@@ -2075,6 +2081,26 @@ def main():
 
     print("\nvmcs fields the guest hypervisor uses")
     dump_field_use(args, instance, off)
+
+    # Is `hypervisor::this_processor()` right?  The watched-page
+    # callbacks index per-processor state by it because their signature
+    # cannot carry an index, and a wrong index there is silent - one
+    # processor's timer armings land in another's row and every number
+    # still reads plausibly.  `on_vm_exit` compares it against the index
+    # it was handed on every exit, so this is a measurement rather than
+    # an argument.
+    gs = Monitor(args.rig, args.port)
+    gs.queue(instance + off["gs_processor_index_disagreements"], 1)
+    gs.queue(instance + off["gs_processor_index_checked"], 1)
+    got = gs.run()
+    bad = got.get(instance + off["gs_processor_index_disagreements"], 0)
+    seen = got.get(instance + off["gs_processor_index_checked"], 0)
+    if bad:
+        print(f"\nGS PROCESSOR INDEX WRONG: {bad:,} of {seen:,} exits "
+              f"disagreed with the index the exit path was handed - "
+              f"anything indexed by this_processor() is misattributed")
+    else:
+        print(f"\ngs processor index agreed on all {seen:,} exits checked")
 
     try:
         dump_own_field_use(args, args.elf, base)

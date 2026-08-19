@@ -82,4 +82,24 @@ inline std::uint64_t rdtsc()
     return ticks += 1000;
 }
 
+/**
+ * A quadword through GS, which on the target is how a processor names
+ * itself without a VMREAD - `hypervisor::this_processor()`.
+ *
+ * Answered out of a variable rather than fixed at zero, because the
+ * harnesses that exercise the local APIC filter want to drive the same
+ * code as more than one processor. It defaults to zero, which is what a
+ * harness that never sets it gets and what the real GS row for the boot
+ * processor holds.
+ *
+ * There is no GS segment to read on an arm64 Mac, which is the same
+ * reason this whole header exists.
+ */
+inline std::uint64_t g_gs_qword{};
+
+inline std::uint64_t gs_qword(std::uint64_t)
+{
+    return g_gs_qword;
+}
+
 } // namespace zpp::arch::x86_64

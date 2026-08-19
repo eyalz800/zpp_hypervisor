@@ -85,10 +85,23 @@ void hypervisor::on_vm_exit(std::uint64_t cpuid,
     // question whose answer was already a parameter.
     //
     // KVM does not do this: it keeps the vCPU in a per-CPU pointer and
-    // reads the VMCS only for VMCS state. The comment beside the launch
-    // in `main` still describes the old habit - "everything else on the
-    // exit path already answers 'which processor am I' with
-    // vmcs.vpid()" - and that is exactly what this removes.
+    // reads the VMCS only for VMCS state.
+    //
+    // **That first sweep covered this function and nothing else, and the
+    // rest of the tree kept asking.** A per-field census of our own reads
+    // - `vmcs_read_hits` in vmx/vmcs.h, which had been compiled in for
+    // its whole existence with no reader anywhere - put `vpid` at 23,993
+    // reads a second against 2,040 round trips, which is 11.8 per round
+    // trip *after* the twenty-two here were gone. They were in
+    // `record_exit`, `arm_controller_poll`, `translate_guest_linear`,
+    // `own_vmcs_region_physical`, `nested_transition_flush`, the three
+    // nested-VMX entry points and the local APIC write filter, and each
+    // one is now handed the index its caller already had.
+    //
+    // What is left, and why: `record_entry_failure`, `on_nested_entry_
+    // failure` and `on_vm_entry_failure` are entered from assembly stubs
+    // with no index to hand them, and the start-up and sleep paths run a
+    // few dozen times in a boot.
 
 
     // One thousand accesses each, once, to price the instructions the
@@ -156,6 +169,28 @@ void hypervisor::on_vm_exit(std::uint64_t cpuid,
         while (arch::x86_64::rdtsc() < until) {
             zpp::spin_hint();
         }
+    }
+
+    // Does GS agree with the parameter about which processor this is?
+    //
+    // `this_processor()` is what the watched-page callbacks use, since
+    // their signature is fixed by the machinery that calls them and they
+    // cannot be handed an index. It replaced `vmcs.vpid() - 1`, which was
+    // correct by construction, with a chain of three separate facts -
+    // `setup_vmcs` writing the processor's own row and `host_gs_base`
+    // together, `host_state_fields` copying `host_gs_base` into vmcs02,
+    // and nothing in this tree executing `swapgs`. A silently wrong
+    // processor index is the worst kind of wrong here: state lands in
+    // another processor's row and every counter still reads plausibly.
+    //
+    // So it is measured on every exit rather than argued once. One load
+    // through GS and a compare, against the ~800,000 cycles a round trip
+    // costs. See `gs_processor_index_disagreements`.
+    this->gs_processor_index_checked =
+        this->gs_processor_index_checked + 1;
+    if (this_processor() != cpuid) {
+        this->gs_processor_index_disagreements =
+            this->gs_processor_index_disagreements + 1;
     }
 
     // The clock for `handler_cycles`. See its declaration: this is the
@@ -1206,7 +1241,7 @@ void hypervisor::on_vm_exit(std::uint64_t cpuid,
         // this is precisely the case where an in-range MSR access
         // exits for a reason other than being unimplemented.
         if (on_nested_vmx_msr_write(
-                static_cast<std::uint32_t>(context.rcx), context)) {
+                cpuid, static_cast<std::uint32_t>(context.rcx), context)) {
             // A locked IA32_FEATURE_CONTROL or a capability MSR
             // answers with a general protection fault, and a fault is
             // reported at the faulting instruction.
@@ -1335,8 +1370,8 @@ void hypervisor::on_vm_exit(std::uint64_t cpuid,
         // because this VMM asked to see it rather than because it does
         // not exist.
         if ((basic_reason::rdmsr == reason) &&
-            on_nested_vmx_msr_read(static_cast<std::uint32_t>(context.rcx),
-                                   context)) {
+            on_nested_vmx_msr_read(
+                cpuid, static_cast<std::uint32_t>(context.rcx), context)) {
             break;
         }
 
@@ -1739,7 +1774,7 @@ void hypervisor::on_vm_exit(std::uint64_t cpuid,
         // and the log is what survives a restart and what CLAUDE.md
         // says to read first - so a second member would duplicate
         // the weaker half of the evidence.
-        record_exit(full_reason, context);
+        record_exit(cpuid, full_reason, context);
         on_unhandled_exit(full_reason);
         break;
     }
@@ -1906,7 +1941,7 @@ void hypervisor::on_vm_exit(std::uint64_t cpuid,
         // and nothing else.
         bool re_execute = true;
         if (!on_io_instruction(context, re_execute)) {
-            record_exit(full_reason, context);
+            record_exit(cpuid, full_reason, context);
             on_unhandled_exit(full_reason);
             break;
         }
@@ -1965,7 +2000,7 @@ void hypervisor::on_vm_exit(std::uint64_t cpuid,
         // register and to the shadow, and the guest reads back what
         // it wrote.
         if (((0 != number) && (4 != number)) || (0 != access)) {
-            record_exit(full_reason, context);
+            record_exit(cpuid, full_reason, context);
             on_unhandled_exit(full_reason);
             break;
         }
@@ -2107,7 +2142,7 @@ void hypervisor::on_vm_exit(std::uint64_t cpuid,
             // put there by something that is not going to handle the
             // fault - which is a bug here rather than a guest error,
             // and resuming would fault identically forever.
-            record_exit(full_reason, context);
+            record_exit(cpuid, full_reason, context);
             on_unhandled_exit(full_reason);
         }
         advance_rip = false;
@@ -2120,7 +2155,7 @@ void hypervisor::on_vm_exit(std::uint64_t cpuid,
             // The flag is only ever armed by the watch above, so an
             // MTF exit with no step in progress means someone else
             // set it and there is no correct way to continue.
-            record_exit(full_reason, context);
+            record_exit(cpuid, full_reason, context);
             on_unhandled_exit(full_reason);
         }
         advance_rip = false;
@@ -2154,7 +2189,7 @@ void hypervisor::on_vm_exit(std::uint64_t cpuid,
                                          this->running_l2[slot - 1]) {
                 auto where = vmcs.guest_rip();
                 record_profile_sample(where);
-                record_profile_context(where, context);
+                record_profile_context(slot - 1, where, context);
 
                 // And the stack, occasionally, from *here* rather than
                 // from the thread sampler.
@@ -2319,7 +2354,7 @@ void hypervisor::on_vm_exit(std::uint64_t cpuid,
             }
         }
 
-        if (on_vmx_instruction(full_reason, context)) {
+        if (on_vmx_instruction(cpuid, full_reason, context)) {
             // Unless it was a VMLAUNCH or VMRESUME that settled where
             // RIP goes for itself, which is either of the two
             // outcomes that are not a VMfail: the second-level guest
@@ -2707,7 +2742,7 @@ void hypervisor::on_vm_exit(std::uint64_t cpuid,
         // Recorded and stopped on rather than resumed from, because
         // the resume below would advance RIP past an instruction that
         // never took effect.
-        record_exit(full_reason, context);
+        record_exit(cpuid, full_reason, context);
         on_unhandled_exit(full_reason);
     }
     }

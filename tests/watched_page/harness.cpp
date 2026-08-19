@@ -2458,11 +2458,29 @@ static void test_apic_timer()
             &hv(), watched_page(), &write));
     };
 
+    // Which processor the writes below come from.
+    //
+    // Two mechanisms, set together, because the filter changed which of
+    // them it asks and the two must not be allowed to drift apart. The
+    // VPID is what `setup_vmcs` writes and what everything used to read;
+    // GS is what `hypervisor::this_processor()` reads now, and on the
+    // target the two agree because `setup_vmcs` writes the processor's
+    // own `gs_data` row on the line beside `vpid(cpu + 1)`.
+    //
+    // The per-processor cases below are the whole reason the filter's
+    // move to GS is testable at all: with one mechanism set and the other
+    // stale, "each processor recorded its own arming" fails - which is
+    // exactly the silent misattribution the change risks.
+    auto on_processor = [](std::size_t cpu) {
+        hv().vmcs.vpid(cpu + 1);
+        zpp::arch::x86_64::g_gs_qword = cpu;
+    };
+
     // The mode and the divisor are latched as they are written, so that
     // an arming can be recorded with the pair that was in force for it.
     {
         reset();
-        hv().vmcs.vpid(1);
+        on_processor(0);
         write_register(lvt_timer, 0x20005);
         write_register(divide_configuration, 0xb);
 
@@ -2481,7 +2499,7 @@ static void test_apic_timer()
     // processors up, then one-shot at vector 0xef.
     {
         reset();
-        hv().vmcs.vpid(1);
+        on_processor(0);
         write_register(lvt_timer, 0x20005);
         write_register(divide_configuration, 0xb);
         write_register(timer_initial_count, 0x1000);
@@ -2516,7 +2534,7 @@ static void test_apic_timer()
     // because a machine that stopped stopped at the end.
     {
         reset();
-        hv().vmcs.vpid(1);
+        on_processor(0);
         constexpr std::size_t capacity = hypervisor_t::timer_arm_capacity;
 
         for (std::size_t i{}; i < (capacity * 2); ++i) {
@@ -2554,7 +2572,7 @@ static void test_apic_timer()
     // interval this VMM had already stretched.
     {
         reset();
-        hv().vmcs.vpid(1);
+        on_processor(0);
         write_register(timer_initial_count, 0x1000);
         write_register(timer_initial_count, 0x2000);
 
@@ -2574,7 +2592,7 @@ static void test_apic_timer()
     // reader would take it for a deadline.
     {
         reset();
-        hv().vmcs.vpid(1);
+        on_processor(0);
         for (std::uint8_t size : {1, 2, 8}) {
             guest_write write{
                 .address = base() + timer_initial_count,
@@ -2596,11 +2614,11 @@ static void test_apic_timer()
     // clock behaving impossibly.
     {
         reset();
-        hv().vmcs.vpid(1);
+        on_processor(0);
         write_register(timer_initial_count, 0x1111);
-        hv().vmcs.vpid(2);
+        on_processor(1);
         write_register(timer_initial_count, 0x2222);
-        hv().vmcs.vpid(1);
+        on_processor(0);
 
         check(1 == hv().timer_arm_count[0] && 1 == hv().timer_arm_count[1],
               "each processor recorded its own arming");

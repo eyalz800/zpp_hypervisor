@@ -1,5 +1,6 @@
 #pragma once
 #include "zpp/arch/x86_64/ap_start_up.h"
+#include "zpp/arch/x86_64/asm.h"
 #include "zpp/hypervisor/enlightened_vmcs.h"
 #include "zpp/arch/x86_64/context.h"
 #include "zpp/arch/x86_64/decoder.h"
@@ -811,8 +812,12 @@ private:
      * spinning on a memory mapped read of a passed through device takes
      * no exits of its own and that is precisely when the controller's
      * state has to be seen.
+     *
+     * `cpu` is the processor's own index rather than a VPID read: the
+     * control it arms is per VMCS, and the caller is `resume_guest`,
+     * which already has it.
      */
-    void arm_controller_poll(bool armed);
+    void arm_controller_poll(std::size_t cpu, bool armed);
 
     /**
      * Arms or releases the fallback clock: the guest's own timer.
@@ -838,9 +843,15 @@ private:
      * Long mode only. A guest under 32-bit paging has a different table
      * shape, and answering for it with a four level walk would be worse
      * than refusing.
+     *
+     * `cpu` names whose second-level guest this is, because every level
+     * of the walk goes through that processor's shadow extended page
+     * tables when one is running - see `l2_physical_to_l1`. It used to
+     * come from `vmcs.vpid() - 1`, which is a VMREAD of a field that is
+     * `cpu + 1` for the whole life of the processor.
      */
     std::optional<std::uint64_t>
-    translate_guest_linear(std::uint64_t linear);
+    translate_guest_linear(std::size_t cpu, std::uint64_t linear);
 
     /**
      * Where the decoder's instruction length disagreed with the
@@ -1612,10 +1623,16 @@ private:
      * virtualized last. They are gone - enter_root_mode derives its own
      * from its slot - so these are now the only way to ask the question,
      * which is what they should always have been.
+     *
+     * `cpu` is a slot, counting from zero, where the VPID these used to
+     * read counts from one. Every caller has it: the two on the
+     * reflection path take it as a parameter, and `on_nested_entry_
+     * failure` derives it from the VPID once and passes it rather than
+     * having this read the field a second time.
      * @{
      */
-    std::uint64_t own_vmxon_region_physical();
-    std::uint64_t own_vmcs_region_physical();
+    std::uint64_t own_vmxon_region_physical(std::size_t cpu);
+    std::uint64_t own_vmcs_region_physical(std::size_t cpu);
     /**
      * @}
      */
@@ -2060,8 +2077,13 @@ private:
      * hypercall, and both are in the guest's registers rather than in the
      * VMCS. Passed by reference from the exit handler, which already holds
      * it, so nothing is read out of the VMCS for this.
+     *
+     * `cpu` is the processor's index, from the caller's own scope. It
+     * used to be `vmcs.vpid() - 1`, which runs on every exit and reads a
+     * field that has held `cpu + 1` since setup_vmcs wrote it.
      */
-    void record_exit(arch::x86_64::vmx::exit_reason reason,
+    void record_exit(std::size_t cpu,
+                     arch::x86_64::vmx::exit_reason reason,
                      const arch::x86_64::context & context);
 
     /**
@@ -2091,7 +2113,8 @@ private:
      * not advance RIP. Whether the exception was #UD or #GP is decided
      * here.
      */
-    bool on_vmx_instruction(arch::x86_64::vmx::exit_reason reason,
+    bool on_vmx_instruction(std::size_t cpu,
+                            arch::x86_64::vmx::exit_reason reason,
                             arch::x86_64::context & context);
 
     /**
@@ -2104,10 +2127,12 @@ private:
      * intercept_msr.
      * @{
      */
-    bool on_nested_vmx_msr_read(std::uint32_t index,
+    bool on_nested_vmx_msr_read(std::size_t cpu,
+                                std::uint32_t index,
                                 arch::x86_64::context & context);
 
-    bool on_nested_vmx_msr_write(std::uint32_t index,
+    bool on_nested_vmx_msr_write(std::size_t cpu,
+                                 std::uint32_t index,
                                  arch::x86_64::context & context);
     /**
      * @}
@@ -2733,8 +2758,12 @@ private:
 
     /**
      * Whatever a transition between the two levels has to invalidate.
+     *
+     * `cpu` is the slot, and the VPID it names is `cpu + 1` - the same
+     * one `setup_vmcs` wrote and `build_vmcs02` copies into vmcs02, so
+     * the descriptor is the same whichever VMCS happens to be current.
      */
-    void nested_transition_flush();
+    void nested_transition_flush(std::size_t cpu);
 
     /**
      * Ask the processor to deliver an invalid opcode exception to the
@@ -5019,7 +5048,8 @@ private:
     /** @} */
 
     void record_profile_sample(std::uint64_t rip);
-    void record_profile_context(std::uint64_t rip,
+    void record_profile_context(std::size_t cpu,
+                                std::uint64_t rip,
                                 const arch::x86_64::context & context);
     /**
      * @}
@@ -7767,6 +7797,56 @@ private:
      */
     static constexpr std::size_t host_gs_processor_index = 0;
     alignas(page_size) std::uint8_t gs_data[max_cpus][page_size]{};
+
+    /**
+     * Which processor this is, for code that cannot be handed the index.
+     *
+     * One load through GS, against a VMREAD of the VPID at 1.4-1.8
+     * microseconds. See `gs_data` above for the mechanism and
+     * `gs_processor_index_disagreements` for the check that it is telling
+     * the truth.
+     *
+     * **Only for a caller that genuinely cannot know.** Everything
+     * reached from `on_vm_exit` is handed `cpuid` and should thread it;
+     * the reason this exists is the watched-page callbacks, whose
+     * signature is fixed by the machinery that invokes them.
+     *
+     * Valid in root operation only: the base is this VMM's while CR4.VMXE
+     * is set on this processor and whatever the loader left before that.
+     */
+    static std::size_t this_processor()
+    {
+        return static_cast<std::size_t>(
+            arch::x86_64::gs_qword(host_gs_processor_index));
+    }
+
+    /**
+     * How often `this_processor()` disagreed with the index the exit path
+     * was handed, and how many exits the comparison was made on.
+     *
+     * The mechanism above replaces a VMREAD whose answer was correct by
+     * construction with one that is correct by a chain of three separate
+     * things - `setup_vmcs` writing the row, `host_state_fields` copying
+     * `host_gs_base` into vmcs02, and nothing in this tree executing
+     * `swapgs`. Getting a processor index wrong is silent: state is
+     * attributed to the wrong processor's row and every counter still
+     * looks plausible. So the chain is measured rather than argued.
+     *
+     * `on_vm_exit` compares the two on every exit, which is one load and
+     * a compare against the 800,000 cycles a round trip costs. A non-zero
+     * disagreement count means `this_processor()` is lying and everything
+     * indexed by it is suspect; a zero count with a large `checked` is
+     * the proof the old justification for `gs_data` did not have - it
+     * said the mechanism "was proven correct in that boot" on the
+     * evidence that every counter landed on processor zero, which is
+     * equally consistent with GS always reading zero.
+     * @{
+     */
+    std::uint64_t gs_processor_index_disagreements{};
+    std::uint64_t gs_processor_index_checked{};
+    /**
+     * @}
+     */
 
     /**
      * The task segment to be used by the host VMM.

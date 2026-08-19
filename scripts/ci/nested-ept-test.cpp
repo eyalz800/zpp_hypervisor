@@ -1685,7 +1685,9 @@ public:
                           guest_context & context,
                           std::uint64_t physical_address);
 
-    void record_exit(std::uint64_t reason, guest_context & context);
+    void record_exit(std::size_t cpu,
+                     std::uint64_t reason,
+                     guest_context & context);
     void on_unhandled_exit(std::uint64_t reason);
 
     struct page_table_stub
@@ -1776,7 +1778,7 @@ bool hypervisor::on_ept_violation(std::size_t,
     return this->something_here_watches;
 }
 
-void hypervisor::record_exit(std::uint64_t, guest_context &)
+void hypervisor::record_exit(std::size_t, std::uint64_t, guest_context &)
 {
 }
 

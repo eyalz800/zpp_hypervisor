@@ -441,14 +441,14 @@ std::uint64_t hypervisor::nested_vmx_capability_msr(std::size_t msr)
     }
 }
 
-bool hypervisor::on_nested_vmx_msr_read(std::uint32_t index,
+bool hypervisor::on_nested_vmx_msr_read(std::size_t cpu,
+                                        std::uint32_t index,
                                         arch::x86_64::context & context)
 {
     if constexpr (!nested_vmx::enabled) {
         return false;
     }
 
-    auto cpu = this->vmcs.vpid() - 1;
     if (cpu >= max_cpus) {
         return false;
     }
@@ -485,14 +485,14 @@ bool hypervisor::on_nested_vmx_msr_read(std::uint32_t index,
     return true;
 }
 
-bool hypervisor::on_nested_vmx_msr_write(std::uint32_t index,
+bool hypervisor::on_nested_vmx_msr_write(std::size_t cpu,
+                                         std::uint32_t index,
                                          arch::x86_64::context & context)
 {
     if constexpr (!nested_vmx::enabled) {
         return false;
     }
 
-    auto cpu = this->vmcs.vpid() - 1;
     if (cpu >= max_cpus) {
         return false;
     }
@@ -532,7 +532,8 @@ bool hypervisor::on_nested_vmx_msr_write(std::uint32_t index,
     return false;
 }
 
-bool hypervisor::on_vmx_instruction(arch::x86_64::vmx::exit_reason reason,
+bool hypervisor::on_vmx_instruction(std::size_t cpu,
+                                    arch::x86_64::vmx::exit_reason reason,
                                     arch::x86_64::context & context)
 {
     if constexpr (!nested_vmx::enabled) {
@@ -544,7 +545,11 @@ bool hypervisor::on_vmx_instruction(arch::x86_64::vmx::exit_reason reason,
 
     auto & vmcs = this->vmcs;
 
-    auto cpu = vmcs.vpid() - 1;
+    // The index comes from `on_vm_exit`'s own parameter. These three
+    // entry points each opened with `vmcs.vpid() - 1`, and a guest
+    // hypervisor's VMREAD and VMWRITE are the two hottest instructions it
+    // executes - so the answer to "which processor am I" was itself a
+    // VMREAD, on the path whose whole cost is VMREADs.
     if (cpu >= max_cpus) {
         return false;
     }
@@ -1776,7 +1781,7 @@ bool hypervisor::on_guest_invvpid(std::size_t cpu,
     // every INVVPID the guest hypervisor executes, which is the price of
     // not allocating a VPID per second-level guest. BACKLOG.md records the
     // measurement that would justify allocating one.
-    nested_transition_flush();
+    nested_transition_flush(cpu);
 
     vmx_succeed();
     return true;
@@ -2103,6 +2108,12 @@ void hypervisor::on_nested_entry_failure(arch::x86_64::context * recovery)
     // Nothing was switched: a refused VM entry is not a VM exit, so vmcs02
     // is still current and its VM-instruction error field is the only
     // account of why. Read it before anything makes another VMCS current.
+    // The VPID is read here and nowhere else on this path, because this
+    // is one of the two places in the tree that genuinely cannot be told
+    // which processor it is on: it is reached from the entry-failure
+    // stub, which is entered from assembly with a recovery context and
+    // nothing else. Read once and passed on, so `own_vmcs_region_
+    // physical` below no longer reads it a second time.
     auto slot = this->vmcs.vpid();
     auto refusal = this->vmcs.read(
         arch::x86_64::vmx::vmcs::field::vm_instruction_error);
@@ -2114,7 +2125,7 @@ void hypervisor::on_nested_entry_failure(arch::x86_64::context * recovery)
     // vmcs::write gives: the region is this VMM's own and was current a
     // few instructions ago, so a refusal means the state this code
     // believes it is in is not the state the processor is in.
-    auto region = own_vmcs_region_physical();
+    auto region = own_vmcs_region_physical(slot - 1);
     if ((0 == region) || arch::x86_64::vmx::vmptrld(&region)) {
         __builtin_trap();
     }

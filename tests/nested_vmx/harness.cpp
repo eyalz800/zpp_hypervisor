@@ -305,7 +305,7 @@ void hypervisor::refresh_shadow_ept_for(std::size_t, std::uint64_t root)
     g_observed.last_refresh_root = root;
 }
 
-void hypervisor::nested_transition_flush()
+void hypervisor::nested_transition_flush(std::size_t)
 {
     g_observed.flushes = g_observed.flushes + 1;
 }
@@ -332,7 +332,7 @@ void hypervisor::reflect_l2_exit(std::size_t,
 {
 }
 
-std::uint64_t hypervisor::own_vmcs_region_physical()
+std::uint64_t hypervisor::own_vmcs_region_physical(std::size_t)
 {
     return 0x1000;
 }
@@ -445,8 +445,15 @@ static result run(basic_reason reason,
     v.guest_rflags((v.guest_rflags() & ~0x8d5ull) | 0x2);
 
     auto faults = g_observed.gp_faults;
+
+    // The processor index, which `on_vmx_instruction` takes now instead
+    // of reading the VPID for itself. Derived here from the same field it
+    // used to read, so the harness drives it with exactly the number the
+    // real caller does - `on_vm_exit`'s `cpuid`, which `setup_vmcs` wrote
+    // the VPID from.
     auto handled =
-        hv().on_vmx_instruction(zpp::arch::x86_64::vmx::exit_reason(
+        hv().on_vmx_instruction(v.vpid() - 1,
+                                zpp::arch::x86_64::vmx::exit_reason(
                                     static_cast<std::uint64_t>(reason)),
                                 regs);
 
@@ -1317,7 +1324,7 @@ static void test_capability_msrs()
 
     auto read = [&](std::uint32_t index) {
         zpp::arch::x86_64::context regs{};
-        hv().on_nested_vmx_msr_read(index, regs);
+        hv().on_nested_vmx_msr_read(cpu, index, regs);
         return (regs.rax & 0xffffffff) | (regs.rdx << 32);
     };
 
@@ -1385,7 +1392,7 @@ static void test_capability_msrs()
     {
         zpp::arch::x86_64::context regs{};
         auto before = g_observed.gp_faults;
-        hv().on_nested_vmx_msr_write(vmxmsr::basic, regs);
+        hv().on_nested_vmx_msr_write(cpu, vmxmsr::basic, regs);
         check(g_observed.gp_faults == before + 1,
               "a WRMSR to IA32_VMX_BASIC was not a fault");
     }
@@ -1396,12 +1403,12 @@ static void test_capability_msrs()
     {
         zpp::arch::x86_64::context regs{};
         regs.rax = 0x5;
-        hv().on_nested_vmx_msr_write(0x3a, regs);
+        hv().on_nested_vmx_msr_write(cpu, 0x3a, regs);
         check(hv().guest_feature_control[cpu] == 0x5,
               "the first write to IA32_FEATURE_CONTROL was dropped");
         auto before = g_observed.gp_faults;
         regs.rax = 0x1;
-        hv().on_nested_vmx_msr_write(0x3a, regs);
+        hv().on_nested_vmx_msr_write(cpu, 0x3a, regs);
         check(g_observed.gp_faults == before + 1,
               "a second write to a locked IA32_FEATURE_CONTROL was not a "
               "fault");
@@ -1724,7 +1731,7 @@ static void test_advertised_versus_implemented()
 
     auto read = [&](std::uint32_t index) {
         zpp::arch::x86_64::context regs{};
-        hv().on_nested_vmx_msr_read(index, regs);
+        hv().on_nested_vmx_msr_read(cpu, index, regs);
         return (regs.rax & 0xffffffff) | (regs.rdx << 32);
     };
 

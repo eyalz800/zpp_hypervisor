@@ -166,7 +166,31 @@ std::optional<std::uint64_t> hypervisor::filter_local_apic_write(
         constexpr std::uint64_t lvt_timer = 0x320;
         constexpr std::uint64_t divide_configuration = 0x3e0;
 
-        if (auto cpu = self.vmcs.vpid() - 1; cpu < max_cpus) {
+        // Which processor, once, through GS rather than twice through the
+        // VPID.
+        //
+        // This was the single largest reader of `vmcs.vpid()` in the
+        // tree, and it is not obvious from the source: the two reads
+        // below sit behind register tests that look selective and are
+        // not. The census over our own reads put `vpid` at 23,993 a
+        // second, and the watch on this page sees the guest hypervisor
+        // write the end of interrupt and the timer's initial count about
+        // ten thousand times a second on the boot processor alone - both
+        // four bytes and aligned, so both reach here. A VMREAD costs
+        // 1.4-1.8 microseconds under a host without VMCS shadowing, which
+        // is what this VMM runs under.
+        //
+        // A parameter would be better and there is nowhere to put one:
+        // this is a watched-page callback and its signature belongs to
+        // `watched_page.cpp`. `this_processor()` is the mechanism
+        // `gs_data` was built for, and `on_vm_exit` now checks it against
+        // the index it was handed on every exit - see
+        // `gs_processor_index_disagreements`, because an index that is
+        // silently wrong attributes one processor's timer arming to
+        // another and every number still looks plausible.
+        auto cpu = self.this_processor();
+
+        if (cpu < max_cpus) {
             if (lvt_timer == offset) {
                 self.timer_lvt[cpu] = write->value;
             } else if (divide_configuration == offset) {
@@ -194,7 +218,7 @@ std::optional<std::uint64_t> hypervisor::filter_local_apic_write(
         // this guest arms to about 2.38e9 where the same guest with
         // nothing underneath arms to 1,961,755.
         if (timer_initial_count == offset) {
-            if (auto cpu = self.vmcs.vpid() - 1; cpu < max_cpus) {
+            if (cpu < max_cpus) {
                 if (auto slot = self.timer_arm_count[cpu];
                     slot < timer_arm_capacity) {
                     self.timer_arm_value[cpu][slot] = write->value;

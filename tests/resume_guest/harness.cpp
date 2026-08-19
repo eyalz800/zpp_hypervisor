@@ -115,13 +115,14 @@ static observations g_observed;
 
 namespace zpp::hypervisor
 {
-void hypervisor::record_exit(arch::x86_64::vmx::exit_reason,
+void hypervisor::record_exit(std::size_t,
+                             arch::x86_64::vmx::exit_reason,
                              const arch::x86_64::context &)
 {
     g_observed.record_exits += 1;
 }
 
-void hypervisor::arm_controller_poll(bool)
+void hypervisor::arm_controller_poll(std::size_t, bool)
 {
     g_observed.controller_polls += 1;
 }

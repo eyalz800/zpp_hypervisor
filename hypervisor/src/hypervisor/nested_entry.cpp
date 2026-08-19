@@ -1568,7 +1568,11 @@ std::expected<void, zpp::error> hypervisor::build_vmcs02(std::size_t cpu)
             vmcs.read(field::cr0_guest_host_mask);
         this->host_controls_cache[cpu][6] =
             vmcs.read(field::cr4_guest_host_mask);
-        this->host_controls_cache[cpu][7] = vmcs.vpid();
+        // `cpu + 1` rather than a VMREAD of the field holding it. This
+        // is inside the once-per-processor cache fill, so it is not hot -
+        // it goes with the rest because leaving one of these behind is
+        // how the last sweep left twenty-two.
+        this->host_controls_cache[cpu][7] = cpu + 1;
         this->host_state_cached[cpu] = true;
     }
 
@@ -2679,7 +2683,7 @@ std::expected<void, zpp::error> hypervisor::build_vmcs02(std::size_t cpu)
     // expects VM entry to flush, and a second-level guest shares this
     // VMM's VPID - so the flush has to be performed rather than left to
     // hardware, which will not do it for a non-zero VPID.
-    nested_transition_flush();
+    nested_transition_flush(cpu);
 
     // The last slot, and the counter that says how many calls the split
     // saw whole. Against `phase_calls[2]` it names the early returns:
@@ -2691,7 +2695,7 @@ std::expected<void, zpp::error> hypervisor::build_vmcs02(std::size_t cpu)
     return {};
 }
 
-void hypervisor::nested_transition_flush()
+void hypervisor::nested_transition_flush(std::size_t cpu)
 {
     // Single-context, on this VMM's own VPID, which SDM 31.4.3.1 makes
     // invalidate "linear mappings and combined mappings associated with
@@ -2714,11 +2718,18 @@ void hypervisor::nested_transition_flush()
         std::uint64_t linear_address{};
     };
 
-    invvpid_descriptor descriptor{this->vmcs.vpid(), 0};
+    // `cpu + 1` and not `vmcs.vpid()`, which this read twice - once for
+    // the descriptor and once for the log line. `setup_vmcs` writes
+    // `vpid(cpu + 1)` and `build_vmcs02` copies that same value into
+    // vmcs02, so the field holds this number whichever VMCS is current
+    // and has done since before the processor ran a guest instruction.
+    // Reading it is a VMREAD, which is an exit to the layer below at
+    // 1.4-1.8 microseconds, and this runs on every transition between the
+    // two levels.
+    invvpid_descriptor descriptor{cpu + 1, 0};
 
     if (arch::x86_64::vmx::invvpid(single_context, &descriptor)) {
-        log("invvpid failed on a nested transition, cpu {}",
-            this->vmcs.vpid());
+        log("invvpid failed on a nested transition, cpu {}", cpu);
     }
 }
 
@@ -3999,7 +4010,7 @@ hypervisor::l2_entry_outcome hypervisor::enter_or_park_l2(std::size_t cpu)
     // processor is parked rather than lost. The alternative - waiting
     // here for ever - is the same darkness the hardware state produces,
     // only in root mode.
-    auto region = own_vmcs_region_physical();
+    auto region = own_vmcs_region_physical(cpu);
     if ((0 == region) || arch::x86_64::vmx::vmptrld(&region)) {
         // Same reasoning as reflect_l2_exit: without its own VMCS there is
         // no guest hypervisor left to go back to.
@@ -4277,7 +4288,7 @@ void hypervisor::reflect_l2_exit(std::size_t cpu,
     // Phase timing; see `phase_cycles`. The pair with the one in
     // build_vmcs02: together they are every VMCS switch a round trip
     // makes, so phases 6 and 7 price the whole of it.
-    auto region = own_vmcs_region_physical();
+    auto region = own_vmcs_region_physical(cpu);
     auto switch_start = arch::x86_64::rdtsc();
     auto switch_failed =
         (0 == region) || arch::x86_64::vmx::vmptrld(&region);
@@ -4326,7 +4337,7 @@ void hypervisor::reflect_l2_exit(std::size_t cpu,
             loaded.error().code());
     }
 
-    nested_transition_flush();
+    nested_transition_flush(cpu);
 
     this->l2_exits_reflected[cpu] = this->l2_exits_reflected[cpu] + 1;
 
@@ -4592,7 +4603,7 @@ bool hypervisor::is_guest_kernel_image(std::size_t cpu,
     constexpr std::uint64_t export_directory_name = 12;
 
     auto read = [&](std::uint64_t linear, auto & into) -> bool {
-        auto physical = translate_guest_linear(linear);
+        auto physical = translate_guest_linear(cpu, linear);
         if (!physical) {
             return false;
         }
@@ -4660,7 +4671,7 @@ std::uint64_t hypervisor::find_guest_kernel_base(std::size_t cpu)
     constexpr std::uint64_t pe_offset_field = 0x3c;
 
     auto read = [&](std::uint64_t linear, auto & into) -> bool {
-        auto physical = translate_guest_linear(linear);
+        auto physical = translate_guest_linear(cpu, linear);
         if (!physical) {
             return false;
         }
@@ -4751,7 +4762,9 @@ std::uint64_t hypervisor::find_guest_kernel_base(std::size_t cpu)
 }
 
 void hypervisor::record_profile_context(
-    std::uint64_t rip, const arch::x86_64::context & context)
+    std::size_t cpu,
+    std::uint64_t rip,
+    const arch::x86_64::context & context)
 {
     auto slot = this->profile_context_count % profile_context_capacity;
 
@@ -4782,7 +4795,7 @@ void hypervisor::record_profile_context(
     // this counter. When the profiler is quiet this costs almost nothing;
     // when it is loud the guest is spinning and the cost is worth paying.
     if (true) {
-        if (auto physical = translate_guest_linear(context.rcx)) {
+        if (auto physical = translate_guest_linear(cpu, context.rcx)) {
             if (auto reachable =
                     l2_physical_to_l1(this->vmcs.vpid() - 1, *physical)) {
                 this->profile_pointer_virtual = context.rcx;
@@ -4862,7 +4875,7 @@ void hypervisor::sample_guest_stack(std::size_t cpu)
          ++word) {
         auto at = stack + (word * sizeof(std::uint64_t));
 
-        auto physical = translate_guest_linear(at);
+        auto physical = translate_guest_linear(cpu, at);
         if (!physical) {
             // A gap in the stack's mapping ends the scan rather than
             // being stepped over: past an unmapped page the addresses
@@ -4907,7 +4920,7 @@ void hypervisor::sample_interrupted_stack(std::size_t cpu,
     constexpr std::size_t frame_words = 5;
 
     auto read = [&](std::uint64_t at, std::uint64_t & into) -> bool {
-        auto physical = translate_guest_linear(at);
+        auto physical = translate_guest_linear(cpu, at);
         if (!physical) {
             return false;
         }
@@ -5002,7 +5015,7 @@ void hypervisor::refresh_guest_threads(std::size_t cpu)
     }
 
     auto read = [&](std::uint64_t linear, std::uint64_t & into) -> bool {
-        auto physical = translate_guest_linear(linear);
+        auto physical = translate_guest_linear(cpu, linear);
         if (!physical) {
             return false;
         }
@@ -5066,7 +5079,7 @@ void hypervisor::walk_guest_threads(std::size_t cpu, std::uint64_t thread)
     }
 
     auto read = [&](std::uint64_t linear, std::uint64_t & into) -> bool {
-        auto physical = translate_guest_linear(linear);
+        auto physical = translate_guest_linear(cpu, linear);
         if (!physical) {
             return false;
         }
@@ -5212,7 +5225,7 @@ std::uint64_t hypervisor::image_base_of(std::size_t cpu,
          ++i, at -= image_page) {
         std::uint16_t magic{};
 
-        auto physical = translate_guest_linear(at);
+        auto physical = translate_guest_linear(cpu, at);
         if (!physical) {
             continue;
         }
@@ -5232,7 +5245,7 @@ std::uint64_t hypervisor::image_base_of(std::size_t cpu,
         // "MZ" alone is not enough - it is two common bytes. The PE
         // signature the DOS header points at is what makes it an image.
         std::uint32_t lfanew{};
-        auto header = translate_guest_linear(at + dos_lfanew);
+        auto header = translate_guest_linear(cpu, at + dos_lfanew);
         if (!header ||
             !read_guest_memory(
                 cpu,
@@ -5243,7 +5256,7 @@ std::uint64_t hypervisor::image_base_of(std::size_t cpu,
         }
 
         std::uint32_t signature{};
-        auto sig = translate_guest_linear(at + lfanew);
+        auto sig = translate_guest_linear(cpu, at + lfanew);
         if (!sig ||
             !read_guest_memory(
                 cpu,
@@ -5276,7 +5289,7 @@ void hypervisor::image_name_of(std::size_t cpu,
     }
 
     auto word = [&](std::uint64_t at, auto & value) {
-        auto physical = translate_guest_linear(at);
+        auto physical = translate_guest_linear(cpu, at);
         return physical &&
                read_guest_memory(
                    cpu,
@@ -5333,7 +5346,7 @@ void hypervisor::image_debug_name_of(std::size_t cpu,
     }
 
     auto word = [&](std::uint64_t at, auto & value) {
-        auto physical = translate_guest_linear(at);
+        auto physical = translate_guest_linear(cpu, at);
         return physical &&
                read_guest_memory(
                    cpu,
@@ -5393,7 +5406,7 @@ void hypervisor::copy_image_string(std::size_t cpu,
                                    std::span<char> into)
 {
     auto word = [&](std::uint64_t from, auto & value) {
-        auto physical = translate_guest_linear(from);
+        auto physical = translate_guest_linear(cpu, from);
         return physical &&
                read_guest_memory(
                    cpu,
@@ -5441,13 +5454,13 @@ std::uint64_t hypervisor::image_export(std::size_t cpu,
         // the aligned fields here never do - so it is answered the slow
         // way rather than made a special case of.
         if (((at & page_mask) + sizeof(value)) > (page_mask + 1)) {
-            auto physical = translate_guest_linear(at);
+            auto physical = translate_guest_linear(cpu, at);
             return physical &&
                    read_guest_memory(cpu, *physical, into).has_value();
         }
 
         if (auto page = at & ~page_mask; page != cached_page) {
-            auto physical = translate_guest_linear(page);
+            auto physical = translate_guest_linear(cpu, page);
             if (!physical) {
                 return false;
             }
@@ -5547,7 +5560,7 @@ void hypervisor::module_name_of(std::size_t cpu,
     into[0] = '\0';
 
     auto word = [&](std::uint64_t at, auto & value) {
-        auto physical = translate_guest_linear(at);
+        auto physical = translate_guest_linear(cpu, at);
         return physical &&
                read_guest_memory(
                    cpu,
@@ -5790,7 +5803,7 @@ void hypervisor::capture_poll_site(std::size_t cpu)
     auto from = rip - behind;
 
     auto fetch = [&](std::uint64_t linear, std::span<std::byte> into) {
-        auto physical = translate_guest_linear(linear);
+        auto physical = translate_guest_linear(cpu, linear);
         if (!physical) {
             return false;
         }
@@ -5956,7 +5969,7 @@ void hypervisor::capture_vtl_switch(std::size_t cpu,
 
     for (std::size_t i{}; i < vtl_stack_words; ++i) {
         auto physical =
-            translate_guest_linear(rsp + (i * sizeof(std::uint64_t)));
+            translate_guest_linear(cpu, rsp + (i * sizeof(std::uint64_t)));
         if (!physical) {
             break;
         }
@@ -6020,7 +6033,8 @@ void hypervisor::capture_vtl_switch(std::size_t cpu,
         constexpr std::uint64_t behind = vtl_code_behind;
 
         for (std::size_t i{}; i < vtl_code_size; ++i) {
-            auto physical = translate_guest_linear(entry - behind + i);
+            auto physical =
+                translate_guest_linear(cpu, entry - behind + i);
             if (!physical) {
                 break;
             }
@@ -6083,7 +6097,7 @@ void hypervisor::capture_vtl_switch(std::size_t cpu,
             this->vtl_shared_read[kind] = 0;
 
             for (std::size_t at{}; at < vtl_shared_size; at += 8) {
-                auto physical = translate_guest_linear(shared + at);
+                auto physical = translate_guest_linear(cpu, shared + at);
                 if (!physical) {
                     // An optional, not an expected - the walk says only
                     // that it found nothing, so the marker is the whole
@@ -6132,7 +6146,7 @@ void hypervisor::capture_vtl_switch(std::size_t cpu,
 
         for (std::size_t at{}; at < vtl_spin_size; at += 8) {
             auto physical =
-                translate_guest_linear(entry + spin_window + at);
+                translate_guest_linear(cpu, entry + spin_window + at);
             if (!physical) {
                 this->vtl_spin_error[kind] = (1ull << 32);
                 break;
@@ -6637,7 +6651,7 @@ void hypervisor::materialise_l2_guest_state(std::size_t cpu)
     mark(22, loop_start);
 
     auto out_start = arch::x86_64::rdtsc();
-    auto own = own_vmcs_region_physical();
+    auto own = own_vmcs_region_physical(cpu);
     if ((0 == own) || arch::x86_64::vmx::vmptrld(&own)) {
         // Without its own VMCS there is nothing to return to. Same
         // reasoning as `enter_or_park_l2`'s switch failure.
@@ -6847,7 +6861,7 @@ void hypervisor::record_vtl_step(std::size_t cpu)
     // read leaves the rest zero, which the decoder outside reports as
     // an instruction it could not decode rather than as one it could.
     for (std::size_t i{}; i < vtl_step_code_size; ++i) {
-        auto physical = translate_guest_linear(rip + i);
+        auto physical = translate_guest_linear(cpu, rip + i);
         if (!physical) {
             break;
         }
@@ -6881,7 +6895,7 @@ void hypervisor::sample_guest_thread(std::size_t cpu)
     // steps are `translate_guest_linear`'s now - see `l2_physical_to_l1`
     // for why the second exists.
     auto read = [&](std::uint64_t linear, std::uint64_t & into) -> bool {
-        auto physical = translate_guest_linear(linear);
+        auto physical = translate_guest_linear(cpu, linear);
         if (!physical) {
             return false;
         }
@@ -7473,7 +7487,7 @@ hypervisor::on_l2_ept_fault(std::size_t cpu,
                     access_write ? "write" : "access",
                     guest_physical,
                     guest_walk.physical_address);
-                record_exit(reason, context);
+                record_exit(cpu, reason, context);
                 on_unhandled_exit(reason);
 
                 return finish(l2_ept_disposition::unwatched,
@@ -7519,7 +7533,7 @@ hypervisor::on_l2_ept_fault(std::size_t cpu,
                 cpu,
                 guest_physical,
                 pointer.error().code());
-            record_exit(reason, context);
+            record_exit(cpu, reason, context);
             on_unhandled_exit(reason);
             return finish(l2_ept_disposition::pointer_failed,
                           l2_exit_outcome::handled);
@@ -7537,7 +7551,7 @@ hypervisor::on_l2_ept_fault(std::size_t cpu,
                 cpu,
                 page,
                 installed.error().code());
-            record_exit(reason, context);
+            record_exit(cpu, reason, context);
             on_unhandled_exit(reason);
             return finish(l2_ept_disposition::install_failed,
                           l2_exit_outcome::handled);
@@ -7638,7 +7652,7 @@ hypervisor::on_l2_ept_fault(std::size_t cpu,
                 cpu,
                 guest_physical,
                 guest_walk.physical_address);
-            record_exit(reason, context);
+            record_exit(cpu, reason, context);
             on_unhandled_exit(reason);
 
             return finish(l2_ept_disposition::unwatched,

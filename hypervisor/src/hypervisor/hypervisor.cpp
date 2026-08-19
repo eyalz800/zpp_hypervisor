@@ -1261,7 +1261,7 @@ bool hypervisor::wait_for_ept_acknowledgement(std::uint64_t budget,
     return false;
 }
 
-void hypervisor::arm_controller_poll(bool armed)
+void hypervisor::arm_controller_poll(std::size_t cpu, bool armed)
 {
     // Per processor, because the control it guards is per VMCS.
     //
@@ -1273,8 +1273,13 @@ void hypervisor::arm_controller_poll(bool armed)
     // the mirror - the first to disarm cleared the flag and its own
     // control, leaving every other processor's set with nothing able to
     // turn it off again.
-    auto slot = vmcs.vpid();
-    if ((0 == slot) || (slot > max_cpus)) {
+    //
+    // From the caller rather than from `vmcs.vpid()`, which this used to
+    // read. `resume_guest` calls this once on every exit and already has
+    // the index; the VPID it would have read is `cpu + 1` for the life of
+    // the processor, and reading it is a VMREAD - an exit to the layer
+    // below at 1.4-1.8 microseconds on a host with no VMCS shadowing.
+    if (cpu >= max_cpus) {
         return;
     }
 
@@ -1296,12 +1301,12 @@ void hypervisor::arm_controller_poll(bool armed)
     // describes it truthfully and the next exit that returns to the guest
     // hypervisor re-evaluates.
     if constexpr (nested_vmx::enabled) {
-        if (this->running_l2[slot - 1]) {
+        if (this->running_l2[cpu]) {
             return;
         }
     }
 
-    auto & armed_here = this->controller_poll_armed[slot - 1];
+    auto & armed_here = this->controller_poll_armed[cpu];
 
     if (armed == armed_here) {
         return;
@@ -1343,14 +1348,12 @@ void hypervisor::arm_controller_poll(bool armed)
         // and a fine way to corrupt something. The flag is per processor
         // and is never cleared, because a control the processor does not
         // offer will not start being offered later.
-        if (auto slot = vmcs.vpid(); (0 != slot) && (slot <= max_cpus)) {
-            if (!this->timer_refusal_reported[slot - 1]) {
-                this->timer_refusal_reported[slot - 1] = true;
-                diag::log<diag::severity::warning>(
-                    "preemption timer not permitted, allowed-1 {}",
-                    allowed_one);
-                log("preemption timer falling back to the guest's timer");
-            }
+        if (!this->timer_refusal_reported[cpu]) {
+            this->timer_refusal_reported[cpu] = true;
+            diag::log<diag::severity::warning>(
+                "preemption timer not permitted, allowed-1 {}",
+                allowed_one);
+            log("preemption timer falling back to the guest's timer");
         }
 
         // Borrow the guest's own timer instead of asking for one.
@@ -2906,7 +2909,7 @@ void hypervisor::release_guest_page(std::uint64_t guest_physical)
 }
 
 std::optional<std::uint64_t>
-hypervisor::translate_guest_linear(std::uint64_t linear)
+hypervisor::translate_guest_linear(std::size_t cpu, std::uint64_t linear)
 {
     // The guest's own four level page table, walked at exit time from the
     // CR3 the VMCS holds now.
@@ -2955,13 +2958,17 @@ hypervisor::translate_guest_linear(std::uint64_t linear)
         {12, 0}, // the last level always terminates
     };
 
-    // Which processor's second-level guest this is, if any. Every table
-    // read below goes through the guest hypervisor's extended page tables
-    // when one is running, because the addresses in that guest's page
-    // tables are physical in *its* hypervisor's address space and not in
-    // this VMM's - see `l2_physical_to_l1`, which is where the whole of
-    // that reasoning lives.
-    auto cpu = this->vmcs.vpid() - 1;
+    // Which processor's second-level guest this is, if any, is now the
+    // caller's to say. Every table read below goes through the guest
+    // hypervisor's extended page tables when one is running, because the
+    // addresses in that guest's page tables are physical in *its*
+    // hypervisor's address space and not in this VMM's - see
+    // `l2_physical_to_l1`, which is where the whole of that reasoning
+    // lives.
+    //
+    // It was `this->vmcs.vpid() - 1`, which is a VMREAD of a field
+    // `setup_vmcs` set to `cpu + 1` and nothing ever writes again. Every
+    // caller in nested_entry.cpp already had `cpu` as a parameter.
 
     for (std::size_t level{}; level < 4; ++level) {
         auto reachable = l2_physical_to_l1(cpu, table);
@@ -3036,7 +3043,7 @@ hypervisor::decode_guest_instruction(std::size_t cpu,
     this->mapping_window_lock.lock();
     scope_exit release{[&] { this->mapping_window_lock.unlock(); }};
 
-    auto physical = this->translate_guest_linear(rip);
+    auto physical = this->translate_guest_linear(cpu, rip);
     if (!physical) {
         return {};
     }
@@ -3047,7 +3054,7 @@ hypervisor::decode_guest_instruction(std::size_t cpu,
     constexpr std::uint64_t page_mask =
         ~static_cast<std::uint64_t>(page_size - 1);
     auto tail_linear = (rip & page_mask) + page_size;
-    auto tail_physical = this->translate_guest_linear(tail_linear);
+    auto tail_physical = this->translate_guest_linear(cpu, tail_linear);
 
     // Both translations end in the address space of whichever guest is
     // running, so both need the same last step before anything maps them.
@@ -3762,32 +3769,44 @@ bool hypervisor::observe_guest_waking_vector()
     return 0 != found->vector;
 }
 
-std::uint64_t hypervisor::own_vmxon_region_physical()
+std::uint64_t hypervisor::own_vmxon_region_physical(std::size_t cpu)
 {
-    auto cpu = this->vmcs.vpid();
-    if ((0 == cpu) || (cpu > max_cpus)) {
+    if (cpu >= max_cpus) {
         return 0;
     }
-    return this->host_page_table.virtual_to_physical(&this->vmx[cpu - 1]);
+    return this->host_page_table.virtual_to_physical(&this->vmx[cpu]);
 }
 
-std::uint64_t hypervisor::own_vmcs_region_physical()
+std::uint64_t hypervisor::own_vmcs_region_physical(std::size_t cpu)
 {
-    auto cpu = this->vmcs.vpid();
-    if ((0 == cpu) || (cpu > max_cpus)) {
+    // A slot, counting from zero. These read `vmcs.vpid()` - which counts
+    // from one - and subtracted one from it, and the subtraction has
+    // moved to the caller along with the read. `reflect_l2_exit` calls
+    // this on every reflection, so it was a VMREAD on the hottest path
+    // there is to ask a question whose answer is a parameter two frames
+    // up.
+    if (cpu >= max_cpus) {
         return 0;
     }
-    return this->host_page_table.virtual_to_physical(
-        &this->vmx_vmcs[cpu - 1]);
+    return this->host_page_table.virtual_to_physical(&this->vmx_vmcs[cpu]);
 }
 
 std::expected<void, zpp::error> hypervisor::quiesce_and_sleep(
     std::uint16_t port, std::uint32_t value, std::uint8_t bytes)
 {
-    // Which regions this processor is actually using, derived from the
-    // VPID - see own_vmcs_region_physical.
-    auto vmxon_region = own_vmxon_region_physical();
-    auto vmcs_region = own_vmcs_region_physical();
+    // Which regions this processor is actually using.
+    //
+    // Still derived from the VPID here, and deliberately: this is the
+    // sleep path and it runs once per suspend, so threading an index
+    // down through `on_io_instruction` and `on_sleep_request` would be
+    // churn against two calls that never repeat. The read moved out of
+    // the two accessors and up to here, which turns two VMREADs into
+    // one - and everything on an exit path passes its own index instead.
+    // `on_sleep_request` above still reads the field twice for the same
+    // reason.
+    auto slot = this->vmcs.vpid();
+    auto vmxon_region = own_vmxon_region_physical(slot - 1);
+    auto vmcs_region = own_vmcs_region_physical(slot - 1);
     if ((0 == vmxon_region) || (0 == vmcs_region)) {
         return std::unexpected(zpp::error{error::no_region_for_processor});
     }
@@ -5005,15 +5024,18 @@ void hypervisor::start_up_on_this_processor(std::uint64_t slot)
     launch_on_cpu(context);
 }
 
-void hypervisor::record_exit(arch::x86_64::vmx::exit_reason reason,
+void hypervisor::record_exit(std::size_t cpu,
+                             arch::x86_64::vmx::exit_reason reason,
                              const arch::x86_64::context & context)
 {
     auto & vmcs = this->vmcs;
 
-    // The VPID was assigned as the virtual processor number, counting from
-    // one, so this is the CPU index. Guarded anyway: an out of range index
-    // here would corrupt whatever follows the ring.
-    auto cpu = vmcs.vpid() - 1;
+    // The index comes from the caller now. It was `vmcs.vpid() - 1`, and
+    // this function runs once on every exit, so that was one VMREAD per
+    // exit - 1.4-1.8 microseconds under a host with no VMCS shadowing -
+    // to recover a number `on_vm_exit` was handed as its first parameter.
+    // Guarded anyway: an out of range index here would corrupt whatever
+    // follows the ring.
     if (cpu >= max_cpus) {
         return;
     }
@@ -6938,10 +6960,17 @@ hypervisor::main(arch::x86_64::context & caller_context)
     // The two are equal here only because the increment happens later,
     // inside vm_launch, and nothing else has claimed a number in between
     // - which is a property of the *other* processors' timing, not of
-    // this one's state. Everything else on the exit path already answers
-    // "which processor am I" with vmcs.vpid(); a shared mutable counter
-    // is not an identity and reading one as though it were is what makes
-    // a misattributed processor impossible to see.
+    // this one's state. A shared mutable counter is not an identity and
+    // reading one as though it were is what makes a misattributed
+    // processor impossible to see.
+    //
+    // This sentence used to end "everything else on the exit path already
+    // answers 'which processor am I' with vmcs.vpid()", and it no longer
+    // does: the exit path threads `cpuid` instead, because a VMREAD is an
+    // exit to the layer below whenever this VMM is itself a guest. The
+    // field is still the truth about *this* line, which runs once per
+    // processor at launch and is the one place the counter and the VMCS
+    // can be compared at all.
     log("launching guest on virtual processor {}", vmcs.vpid());
 
     // The exit dispatch itself is `on_vm_exit`, in exit_dispatch.cpp.

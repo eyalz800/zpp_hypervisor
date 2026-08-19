@@ -398,7 +398,7 @@ void hypervisor::remember_shadow_page(std::size_t, std::uint64_t)
  * plausible number.
  */
 std::optional<std::uint64_t>
-hypervisor::translate_guest_linear(std::uint64_t)
+hypervisor::translate_guest_linear(std::size_t, std::uint64_t)
 {
     return {};
 }
@@ -456,7 +456,8 @@ hypervisor::host_ept_lookup(std::uint64_t physical_address)
     return result;
 }
 
-void hypervisor::record_exit(arch::x86_64::vmx::exit_reason,
+void hypervisor::record_exit(std::size_t,
+                             arch::x86_64::vmx::exit_reason,
                              const arch::x86_64::context &)
 {
 }
@@ -483,7 +484,7 @@ void hypervisor::on_unhandled_exit(arch::x86_64::vmx::exit_reason)
     __builtin_trap();
 }
 
-std::uint64_t hypervisor::own_vmcs_region_physical()
+std::uint64_t hypervisor::own_vmcs_region_physical(std::size_t)
 {
     return 0x1000;
 }

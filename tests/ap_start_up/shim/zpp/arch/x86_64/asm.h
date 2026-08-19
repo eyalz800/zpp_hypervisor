@@ -134,4 +134,22 @@ inline std::uint64_t rdtsc()
     return ticks += 1000;
 }
 
+/**
+ * A quadword through GS - `hypervisor::this_processor()` on the target,
+ * where the VMCS's `host_gs_base` makes the base per processor with no
+ * lookup of ours.
+ *
+ * `thread_local` rather than global for the reason the control registers
+ * above are: this harness runs four host threads as four logical
+ * processors, and a shared answer here would make every one of them
+ * processor zero - which is exactly the failure the check in
+ * `on_vm_exit` exists to catch on the target.
+ */
+inline thread_local std::uint64_t g_gs_qword{};
+
+inline std::uint64_t gs_qword(std::uint64_t)
+{
+    return g_gs_qword;
+}
+
 } // namespace zpp::arch::x86_64

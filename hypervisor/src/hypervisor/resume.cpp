@@ -756,7 +756,7 @@ void hypervisor::resume_guest(std::uint64_t cpuid,
     // guest would not otherwise have taken - so it is only armed
     // while there is a channel to feed.
     if constexpr (diag::policy_of(diag::sink::esp_blocks).present) {
-        arm_controller_poll(diag::esp_block_sink::ready());
+        arm_controller_poll(cpuid, diag::esp_block_sink::ready());
     }
 
     // A heartbeat, so the channel has something to carry.
@@ -820,7 +820,7 @@ void hypervisor::resume_guest(std::uint64_t cpuid,
 
     // Record what is about to be resumed, now that the handlers have
     // had their say.
-    record_exit(full_reason, context);
+    record_exit(cpuid, full_reason, context);
 
     // Counted here, at the last point before control leaves this
     // handler, so a frozen exit count can be read two ways round.
