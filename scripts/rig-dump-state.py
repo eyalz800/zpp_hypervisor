@@ -55,7 +55,10 @@ PHASE_NAMES = ["save_l2_state", "reflect_l2_exit", "build_vmcs02",
                "on_l2_ept_fault", "  merge: guest page read",
                "    merge: of which map_window", "load_l1_host_state",
                "exit information", "build: before vmptrld",
-               "build: after vmptrld"]
+               "build: after vmptrld",
+               "  vmptrld: read region", "  vmptrld: flush old",
+               "  vmptrld: assign", "  vmptrld: shadow publish",
+               "vmptrld: whole call"]
 
 # Whose instruction pointer a record holds - see exit_trace_entry's
 # rip_owner. An address attributed to the wrong guest reads as a

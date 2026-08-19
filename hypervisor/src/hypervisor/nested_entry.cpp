@@ -7857,6 +7857,21 @@ hypervisor::on_l2_exit(std::size_t cpu,
         if (basic_reason::vmcall == reason.basic()) {
             auto code = context.rcx & hypercall_code_mask;
 
+            // Censused before the decode, so a code with no case here is
+            // counted rather than invisible. See `l2_hypercall_codes`:
+            // two of the 3.46 vmcalls a round trip are the trust-level
+            // pair below, and what the rest are has never been recorded.
+            for (std::size_t slot{}; slot < hypercall_code_slots; ++slot) {
+                if (0 == this->l2_hypercall_code_counts[slot]) {
+                    this->l2_hypercall_codes[slot] = code;
+                }
+
+                if (this->l2_hypercall_codes[slot] == code) {
+                    this->l2_hypercall_code_counts[slot] += 1;
+                    break;
+                }
+            }
+
             if (vtl_call_code == code) {
                 capture_vtl_switch(cpu, 0, context);
                 mark_vtl_half(cpu, 0);

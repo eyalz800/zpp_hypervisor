@@ -4,6 +4,7 @@
 #include "zpp/arch/x86_64/msr.h"
 #include "zpp/diag/log.h"
 #include "zpp/hypervisor/hypervisor.h"
+#include "zpp/scope_exit.h"
 #include <cstddef>
 #include <cstdint>
 #include <iterator>
@@ -1227,40 +1228,67 @@ bool hypervisor::on_guest_vmptrld(std::size_t cpu,
         return true;
     }
 
-    // **Measured: this is 204 microseconds a trust-level round trip that
-    // no bare-metal machine would get back, and it is avoidable.**
+    // **Retaining a vmcs12 per pointer was proposed here, measured, and
+    // is not worth doing.** The reasoning is kept because the conclusion
+    // reversed once it was bracketed rather than computed.
     //
-    // For a pointer that is not already current this function moves
-    // twelve kilobytes: `flush_guest_vmcs12` materialises the deferred
-    // guest state and writes 4096 bytes back to guest memory, the read
-    // below takes 4096 more, and the assignment copies 4096 again -
-    // 2.22 times a round trip. It is also why `vmptrld` carries the
-    // highest VMCS read count of any exit reason here, 78.1, since the
-    // materialisation reads the deferral out of the real VMCS.
+    // The guest alternates between **exactly two** VMCSs - censused live,
+    // `guest_current_vmcs` took `0x117a18000` and `0x117a1b000` and
+    // nothing else over forty samples, VTL0's and VTL1's, mirroring the
+    // two extended-page-table roots. So this reads back a structure this
+    // VMM held moments earlier, twice a trust-level round trip, and it is
+    // the one cache here that does not retain where `shadow_ept_slots`
+    // keeps four slots for two roots and never evicts.
     //
-    // And the guest alternates between **exactly two** VMCSs - censused
-    // live, `guest_current_vmcs` took the values `0x117a18000` and
-    // `0x117a1b000` and nothing else over forty samples, VTL0's and
-    // VTL1's, mirroring the two extended-page-table roots. So every one
-    // of those copies is of a structure this VMM held moments earlier
-    // and discarded.
+    // **And the architecture sanctions retaining it.** SDM 27.1: a
+    // logical processor "may maintain a number of VMCSs that are active"
+    // and "may optimize VMX operation by maintaining the state of an
+    // active VMCS in memory, on the processor, or both"; 27.11.1 forbids
+    // software touching an active VMCS's region with ordinary memory
+    // operations, because the format "is implementation-specific" and the
+    // processor "may maintain some VMCS data of an active VMCS on the
+    // processor and not in the VMCS region". Only VMCLEAR makes a VMCS
+    // inactive, so only VMCLEAR would have to drop a slot.
     //
-    // This is the one cache here that does not retain: `shadow_ept_slots`
-    // keeps four slots for two roots and never evicts, while
-    // `guest_vmcs12[cpu]` is a single slot overwritten on every switch.
-    // KVM has one `cached_vmcs12` too, but nothing switches KVM between
-    // two VMCSs twice per round trip the way a VSM guest switches this.
+    // **What killed it is the cost.** The four intervals below decompose
+    // this function at 97.6% coverage: the region read is 4.9 us a call
+    // and the assignment 2.3, together **15.8 us a round trip** - while
+    // `flush_guest_vmcs12` is **81%** of the whole. Retention avoids the
+    // read and the assignment and nothing else, because the flush's cost
+    // is `materialise_l2_guest_state` capturing the deferred guest state,
+    // which has to happen before any switch or the deferral is lost.
     //
-    // Not changed here: retaining per pointer touches VMPTRLD, VMCLEAR,
-    // the flush and the guest-state deferral together, and the deferral
-    // is where three separate ordering bugs have already been found -
-    // including the one the comment above `materialise_l2_guest_state`
-    // in `flush_guest_vmcs12` records. `BACKLOG.md` has the budget it
-    // would buy.
+    // The estimate this replaced said 204 us, from reading the code and
+    // multiplying twelve kilobytes by a guess. `BACKLOG.md` records it as
+    // the third attribution the instrument had to correct.
+    // Adjacent intervals over what a non-redundant VMPTRLD actually
+    // does, plus the whole call, so the residue can be attributed
+    // instead of guessed. The 204 microseconds a round trip this costs
+    // beyond its VMCS accesses was measured; *which* of these four it is
+    // was not, and a change built on the guess would be the fifth
+    // correct-but-invisible one in this file.
+    auto whole_start = arch::x86_64::rdtsc();
+    auto whole_stop = zpp::scope_exit([&] {
+        if (cpu < max_cpus) {
+            this->phase_cycles[cpu][20] +=
+                arch::x86_64::rdtsc() - whole_start;
+            this->phase_calls[cpu][20] += 1;
+        }
+    });
+
+    auto mark = [&](std::size_t slot, std::uint64_t since) {
+        if (cpu < max_cpus) {
+            this->phase_cycles[cpu][slot] += arch::x86_64::rdtsc() - since;
+            this->phase_calls[cpu][slot] += 1;
+        }
+    };
+
+    auto read_start = arch::x86_64::rdtsc();
     vmcs12 loaded;
     auto read = read_guest_physical(
         *pointer,
         std::span(reinterpret_cast<std::byte *>(&loaded), sizeof(loaded)));
+    mark(16, read_start);
     if (!read) {
         vmx_fail(cpu, instruction_error::vmptrld_invalid_address);
         return true;
@@ -1274,16 +1302,22 @@ bool hypervisor::on_guest_vmptrld(std::size_t cpu,
     // Only now, once the new one is known good, is the old one written
     // back. The pointers differ by the early return above, so there is no
     // longer a case where this flushes over the region just read.
+    auto flush_start = arch::x86_64::rdtsc();
     flush_guest_vmcs12(cpu);
+    mark(17, flush_start);
 
+    auto assign_start = arch::x86_64::rdtsc();
     this->guest_vmcs12[cpu] = loaded;
     set_guest_current_vmcs(cpu, *pointer);
+    mark(18, assign_start);
 
 
     // A VMCS of the guest hypervisor's is now current, which is the
     // condition VMCS shadowing exists for and the condition the link
     // pointer has to be valid under. Publishes the new contents too.
+    auto publish_start = arch::x86_64::rdtsc();
     set_vmcs_shadowing(cpu, true);
+    mark(19, publish_start);
 
     vmx_succeed();
     return true;

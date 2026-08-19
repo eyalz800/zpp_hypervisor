@@ -8767,7 +8767,10 @@ private:
      * where cost hides, which this file learned when three phases fell
      * and the handler did not.
      */
-    static constexpr std::size_t phase_count = 16;
+    // 16 through 20 are the VMPTRLD decomposition - three adjacent
+    // intervals, the shadow publish, and the whole call, so coverage is
+    // computed rather than assumed. See `on_guest_vmptrld`.
+    static constexpr std::size_t phase_count = 24;
     std::uint64_t phase_cycles[max_cpus][phase_count]{};
     std::uint64_t phase_calls[max_cpus][phase_count]{};
     /** @} */
@@ -9040,6 +9043,31 @@ private:
     static constexpr std::size_t hypercall_code_slots = 16;
     std::uint64_t hypercall_codes[hypercall_code_slots]{};
     std::uint64_t hypercall_code_counts[hypercall_code_slots]{};
+
+    /**
+     * The same census for the **second-level** guest's hypercalls, which
+     * nothing has ever taken.
+     *
+     * `hypercall_codes` above is gated on `from_guest_hypervisor`, so it
+     * counts the level above's calls only. `on_l2_exit` decodes exactly
+     * three L2 codes by name - `0x11`, `0x12` and `0x0c` - and counts
+     * none of them as a distribution.
+     *
+     * Why it matters: `vmcall` is 3.46 per trust-level round trip and two
+     * of those are the `HvCallVtlCall`/`HvCallVtlReturn` pair that
+     * *defines* the round trip, so about 1.46 a round trip are something
+     * nobody has named. If they are TLB-flush calls there is an
+     * architecturally sanctioned answer at this level - KVM handles
+     * `EXIT_REASON_VMCALL` in L0 under the direct-flush enlightenment,
+     * `.references/kvm/nested.c` - and that is a whole interface under a
+     * negotiated contract rather than a partial answer. If they are
+     * `0x0c` protection-mask calls, that route is closed.
+     *
+     * A linear table for the same reason as the one above: the codes are
+     * sparse and the interesting set is small.
+     */
+    std::uint64_t l2_hypercall_codes[hypercall_code_slots]{};
+    std::uint64_t l2_hypercall_code_counts[hypercall_code_slots]{};
     std::uint64_t hypercalls_seen{};
 
     std::uint64_t hyperv_vp_assist[max_cpus]{};

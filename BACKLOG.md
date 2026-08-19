@@ -27827,6 +27827,80 @@ deferral is what three separate ordering bugs were already found in. It
 is a design change with a measured 204 us behind it, which is the right
 state to hand it over in.
 
+### Then it was decomposed properly, and the 204 us was mine again
+
+Four adjacent intervals inside `on_guest_vmptrld`, clean-phase window,
+**coverage 97.6%**:
+
+```
+interval                   calls/RT     us/call      us/RT   share
+vmptrld: read region           2.21         4.9       10.8    3.2%
+vmptrld: flush old             2.21       124.0      273.4   80.9%
+vmptrld: assign                2.21         2.3        5.0    1.5%
+vmptrld: shadow publish        2.21        18.5       40.8   12.1%
+vmptrld: whole call            2.21       153.2      338.0
+```
+
+**`flush_guest_vmcs12` is 81% of it.** The twelve kilobytes of copying I
+blamed - the region read and the structure assignment - are **15.8 us a
+round trip, not 204.** A 4096-byte read costs 4.9 us and a 4096-byte
+assignment 2.3 us, which is what a memcpy of that size should cost and
+what I should have suspected before writing the arithmetic down.
+
+The cost is `materialise_l2_guest_state` inside the flush: the deferred
+guest state read back out of the real VMCS, which is why `vmptrld`
+carries the highest read count of any exit reason. **And it is not
+avoidable by retention** - the deferral has to be captured before the
+switch or it is lost, whether or not the incoming vmcs12 is cached.
+
+**So retention is worth 15.8 us a round trip and is not being done.**
+The correctness argument for it holds and was verified before the
+measurement killed it - SDM 27.1 (`.references/sdm.txt:198972`): "A
+logical processor **may maintain a number of VMCSs that are active**...
+may optimize VMX operation by maintaining the state of an active VMCS in
+memory, **on the processor**, or both", and 27.11.1 (`:200472`) forbids
+software touching an active VMCS's region with ordinary memory operations
+precisely because "the format ... is implementation-specific" and the
+processor "may maintain some VMCS data of an active VMCS on the processor
+and not in the VMCS region". Retention here is the optimisation the
+architecture describes. It is simply not worth 15.8 us.
+
+**Third time an attribution has been wrong and the instrument corrected
+it**, after the elidable/elided misreading and the circular per-access
+unit. The rule earns another line: *a residue is not attributed until it
+is bracketed.* Reading the code and multiplying is how all three went
+wrong.
+
+## The second-level hypercall census, which nothing had ever taken
+
+`hypercall_codes` is gated on `from_guest_hypervisor`, so it counts the
+level above's calls only; `on_l2_exit` decoded three L2 codes by name and
+counted none. Added and measured, clean phase:
+
+```
+0x000c  HvCallModifyVtlProtectionMask   26,326   50.1%   2.02 per round trip
+0x0012  HvCallVtlReturn                 13,056   24.8%   1.00
+0x0011  HvCallVtlCall                   13,056   24.8%   1.00
+0x0003  HvCallFlushVirtualAddressList      111    0.2%
+0x0002  HvCallFlushVirtualAddressSpace       6    0.0%
+```
+
+`vmcall` is **4.03 a round trip** with the denominator being a full
+`HvCallVtlCall` to `HvCallVtlCall` cycle, so the split is unambiguous:
+**one VTL call, one VTL return, and two protection-mask calls.**
+
+**The TLB-flush route is dead.** KVM answers `EXIT_REASON_VMCALL` in L0
+under the direct-flush enlightenment, and that would have been a whole
+interface under a negotiated contract rather than a partial answer - but
+flush calls are **117 of 52,591, 0.2%**. There is nothing there to win.
+
+What is there instead is `HvCallModifyVtlProtectionMask` at two a round
+trip, which is the same call the INVEPT analysis already identified as
+the reason a shadow refresh is unsound: Hyper-V invalidates *around* a
+VTL protection change. The two findings are the same guest behaviour seen
+from two sides, and both say the protection-mask traffic is the shape of
+this workload rather than an accident of it.
+
 ### Which leaves three levers, sized
 
 - **reads** - 33.7, distinct, unconditional. Only fewer *fields* helps,
