@@ -11557,6 +11557,72 @@ first write after the drop is the one that kills it.
   `resets` column in the state dump is the existing lever. Until then the
   switch stays off, and its comment says so.
 
+## Our own VMCS reads, finally counted rather than derived
+
+`vmcs_read_field[64]` / `vmcs_read_hits[64]` / `vmcs_read_overflow`
+(`zpp/arch/x86_64/vmx/vmcs.h`) is a hashed per-field census of **this VMM's
+own** reads, incremented on every `vmcs::read`. It has been in the tree with
+**no reader anywhere** - not in `rig-dump-state.py`, not in any script - so
+the note further down saying "there is no per-field breakdown of our own
+reads anywhere in the tree" was wrong: the table existed, nothing looked at
+it. Read straight off the running guest through the monitor, no rebuild.
+
+Measured as a delta over 40 seconds on the settled eight-processor guest, at
+about 2,040 round trips a second, 218,870 tracked reads a second:
+
+| field | reads/s | per round trip | share |
+|---|---|---|---|
+| `guest_rip` | 38,007 | **18.6** | 17.4% |
+| `vpid` | 23,993 | **11.8** | 11.0% |
+| `guest_cs_selector` | 18,599 | 9.1 | 8.5% |
+| `guest_activity_state` | 16,131 | 7.9 | 7.4% |
+| `vm_entry_interruption_information` | 14,120 | 6.9 | 6.5% |
+| `exit_qualification` | 12,428 | 6.1 | 5.7% |
+| `vm_entry_controls` | 9,799 | 4.8 | 4.5% |
+| `guest_ss_access_rights` | 9,452 | 4.6 | 4.3% |
+| `idt_vectoring_information` | 9,186 | 4.5 | 4.2% |
+
+**Six fields are 58.4 of the roughly 105 reads a round trip**, which at the
+1.4-1.8 microseconds a VMCS access costs here is about 88 of the 402
+microseconds. Reads are 79% of all VMCS traffic - 9,651,480 against
+2,612,838 writes over a 45-second window - and the write side already has
+four elision mechanisms where the read side has none.
+
+**`vpid` is the sharp one.** It is a constant: `setup_vmcs` writes
+`vpid(cpu + 1)` and `build_vmcs02` copies it, so on a given processor it
+never changes for the whole boot. `exit_dispatch.cpp` already removed
+twenty-two of these reads for exactly that reason and recorded the
+measurement - 14.03 reads per exit, 12.5% of an exit's cycles, "to ask a
+question whose answer was already a parameter". **The other callers were
+missed**, and they are still asking: 11.8 times per round trip, from
+`hypervisor.cpp`, `start_up.cpp` and `local_apic_write.cpp`.
+
+Two cautions about the instrument itself, so the next reader does not
+over-trust it:
+
+- **`vmcs_read_overflow` was 532,254,425.** The table is a 64-slot hash on
+  the encoding and a collision loses a field rather than corrupting a count,
+  so the fields listed are first-come winners and their counts are real,
+  while an unknown set of others is not represented at all. The top of the
+  table is trustworthy; the absence of a field from it is not evidence.
+- It is process-wide rather than per-processor, and unsynchronised by
+  design. Fine here, where CPU 0 does essentially all the work.
+
+**There is no write-side equivalent.** `vmcs::write` bumps only a total.
+The same 64-slot table on the write path is a few lines and would close the
+other 21%.
+
+And the reason none of this can be dodged rather than removed: **VMCS
+shadowing is not available to us**, so every one of these reads is an exit
+down to KVM. That is measured, not assumed - `enable_shadow_vmcs` reads `N`
+on the rig, the host's `vmx flags` carry no `shadow_vmcs`, and a direct
+timing of 1,000 reads of a shadow-listed field against 1,000 of a
+non-listed one came out 2,687 against 2,801 cycles. Identical. KVM
+advertises the *capability* to its guest unconditionally
+(`nested_vmx_setup_secondary_ctls`, "we can emulate VMCS shadowing even if
+the hardware doesn't support it"), so our capability probe saying "yes" is
+not evidence of anything.
+
 ## Where the 402 microseconds go, measured on the first valid eight-processor run
 
 **The guest is livelocked, and that is now proven rather than inferred.**
