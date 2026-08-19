@@ -27668,6 +27668,85 @@ the 1.74 ms tick is a **48% cut, not 33%**. Every earlier sizing against
 timed phase, and the gap here is 0.77 ms a round trip - larger than any
 single lever identified so far.
 
+### The gap is not missing instrumentation. It is the guest running.
+
+The three-way share of wall clock, read in the clean phase and summing to
+exactly 100%:
+
+```
+                l2-run%   l1-run%   vmm%
+clean (t~35)      8.89     20.20    70.91
+clean (t~55)     11.64     13.33    75.03
+stall             4.96     13.97    81.07
+```
+
+**The guest's share more than doubles** from the stall to the clean phase
+- `l2-run` 4.96% to 11.64% - because VTL1 executes a real secure service
+in the clean phase and nothing in the stall. Which resolves the coverage
+question in the second direction:
+
+```
+clean round trip 3.36 ms
+  guest executing (l2)     0.39 ms   irreducible
+  guest hypervisor (l1)    0.45 ms   falls only with fewer reflections
+  this VMM                 2.52 ms
+```
+
+**The phase decomposition summed to 2.59 ms against our 2.52 ms share -
+103%.** The phases were never missing anything; they account for our code
+completely, with a slight overcount from nested intervals. *"23% outside
+every interval"* was my misattribution: it is the guest and the level
+above executing, which is not ours to remove.
+
+### So the target is 64% of our own code, not 48% of the round trip
+
+Our share must fall from **2.52 ms to 0.90 ms** for the round trip to
+clear the 1.74 ms tick. Against that, every lever identified in this
+investigation:
+
+| lever | worth | state |
+|---|---|---|
+| host-state elision warm-up | 0.23 ms | **done and measured** |
+| shadow-EPT rebuild on INVEPT | 0.27 ms | closed - refresh is unsound |
+| per-exit read cache | 0.03 ms | dead - reads are distinct |
+| | **0.53 ms** | of the **1.62 ms** needed |
+
+The remainder can only come from the reflection boundary - fewer
+reflections - which is the semantic change this file's own recurring
+failure mode argues against starting with.
+
+**Stated plainly: the rig cannot be made to survive the re-arm by the
+optimisations identified.** That is a result, not a step, and it is worth
+more than five more changes each worth 7%.
+
+### And it corrects the bare-metal projection, which was far too optimistic
+
+The per-access cost is now **measured** rather than divided out: the
+adaptive-sweep change removed 47 accesses a reflection and saved 232 us a
+round trip, so **1.36 us (2,709 cycles) per VMCS access** on the rig.
+
+That makes accesses **1.49 ms of our 2.52 ms - 59%**, and the remaining
+1.03 ms does not scale with access cost at all.
+
+```
+                              our share   round trip   ticks/RT
+rig                             2.52 ms      3.36 ms      1.93
+bare metal (~100 cyc/access)    1.09 ms      1.93 ms      1.11
+pessimistic (~200 cyc)          1.14 ms      1.98 ms      1.14
+```
+
+**The earlier projection of `ticks/RT` 0.03-0.06 was wrong.** It treated
+the whole round trip as accesses - 1,095 x 6,240 cycles happens to equal
+the round trip, which is what made it look right - when accesses are 44%
+of it. Corrected, bare metal comes out at **1.11, still above the
+threshold of 1**, though the 1.03 ms non-access residue is itself
+inflated by executing inside KVM and would shrink by an unknown amount.
+
+So bare metal is **a close call rather than a certainty**, which makes
+the physical boot more worth doing than when it looked like a 30x margin,
+not less - it is now the measurement that decides the question rather
+than one confirming a foregone conclusion.
+
 ### Which leaves three levers, sized
 
 - **reads** - 33.7, distinct, unconditional. Only fewer *fields* helps,
