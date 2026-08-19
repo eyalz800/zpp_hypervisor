@@ -11562,6 +11562,59 @@ first write after the drop is the one that kills it.
   `resets` column in the state dump is the existing lever. Until then the
   switch stays off, and its comment says so.
 
+## The tick-margin model is wrong: 15.5% fewer exits changed nothing
+
+**Measured, with the disarm fixed and the guest surviving it.** With
+`ZPP_DISARM_APIC_WATCH=ON` on top of the `return true` fix, the watch is
+dropped after full bring-up (15 INITs, 16 start-up IPIs),
+`unhandled_exit.occurred` stays **0** where it was 1, and the guest keeps
+running. So the cost question that three earlier runs could not reach is
+finally answered:
+
+| | watch armed | watch dropped |
+|---|---|---|
+| exits/s (CPU 0) | 6,832 | **5,775** (-15.5%) |
+| EPT violations/s at 0xfee00000 | 1,586 (23.2%) | **0** |
+| cycles per round trip | 803,507 (402 us) | **879,947 (440 us)** |
+| VMCS accesses/s | 272,540 | **315,523** |
+| round trips/s | 2,206 | 2,533 |
+| `leaves-filled` over the window | unchanged | **unchanged** |
+
+**The livelock is untouched, and the round trip got 9.5% more expensive.**
+
+Both halves of that are worth keeping. The exits removed were *cheap* ones -
+handled locally, no reflection, no vmcs02 rebuild - so removing them raised
+the mean cost of what remained rather than lowering the total. And the time
+recovered went into **more round trips a second**, 2,206 to 2,533, which is
+a guest spinning faster in the same place, not a guest getting further.
+
+**This falsifies the arithmetic the last three sections leaned on.** The
+model was: 4.65 round trips a tick at 402 microseconds is 1.87 ms against a
+1.74 ms period, therefore a cut of about 8% releases it. The cut was made -
+15.5% of exits - and nothing moved. So "get the round trip under the tick"
+does not predict this guest's behaviour, and any future proposal justified
+*only* by "it saves N microseconds a round trip" now has to answer why this
+one did not.
+
+What the model missed is not yet known. Two candidates, neither tested:
+
+- The guest's work per tick is not a fixed quantity that either fits or does
+  not. If the clock handler's cost scales with how far behind it is, there
+  is no margin to cross.
+- Wall-clock per round trip may not be what the guest is waiting on at all.
+  The four failed interventions recorded under "Windows' tick is 574.7 Hz"
+  all assumed time was the variable; so did this one.
+
+**What this does not say.** It does not say the local APIC watch is free -
+it costs 1,586 exits a second and that is real. It does not say reducing
+VMCS accesses is pointless; that work stands on its own as cost. It says
+only that **exit count and round-trip microseconds are not the thing
+standing between this guest and its next page of memory**, and that the next
+idea should be aimed somewhere else or should say why it is different.
+
+The switch stays **off**: it still cannot prove no further processor will
+start, and it now has no measured benefit to weigh against that.
+
 ## Our own VMCS reads, finally counted rather than derived
 
 `vmcs_read_field[64]` / `vmcs_read_hits[64]` / `vmcs_read_overflow`
