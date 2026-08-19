@@ -146,6 +146,8 @@ hypervisor::on_interrupt_command(std::uint64_t command)
 
     if (delivery_mode_init == delivery_mode) {
         this->ipi_init_seen = this->ipi_init_seen + 1;
+        // Bring-up is still going. See `last_start_up_ipi_tsc`.
+        this->last_start_up_ipi_tsc = arch::x86_64::rdtsc();
         log("guest init ipi, command {}", command);
 
         // Forwarded and nothing more, deliberately.
@@ -199,6 +201,8 @@ hypervisor::on_interrupt_command(std::uint64_t command)
     // known processors credited the boot processor with a start-up IPI
     // nobody had sent it.
     this->ipi_start_up_seen = this->ipi_start_up_seen + 1;
+    // Bring-up is still going. See `last_start_up_ipi_tsc`.
+    this->last_start_up_ipi_tsc = arch::x86_64::rdtsc();
 
     // A broadcast names no destination, so there is nothing to look up.
     // It is resolved against the platform's roster instead and every

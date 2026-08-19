@@ -90,6 +90,10 @@ option(ZPP_VIRTUALIZE_APIC
     "Take every external interrupt in the host and inject it into the guest, the way KVM does, instead of letting the guest's own interrupt controller deliver them natively. Off is this VMM's design; on exists to test whether that difference is what stalls the nested guest."
     OFF)
 
+option(ZPP_DISARM_APIC_WATCH
+    "Drop the local APIC page watch once no more processors are going to start. The watch exists to catch a start-up IPI; in steady state it catches end-of-interrupt traffic instead, measured at 23.2% of all exits and every one of them self-inflicted. Off by default: a processor started after the watch is dropped would run unvirtualized."
+    OFF)
+
 option(ZPP_INTERCEPT_APIC
     "Watch the guest's local APIC - the page in xAPIC mode, the interrupt command MSR in x2APIC mode. Off only makes sense with one processor, since the watch is what stops a start-up IPI handing a processor over unvirtualized."
     ON)
@@ -242,6 +246,7 @@ ExternalProject_Add(hypervisor
         -DZPP_FORCE_DISPATCH_ONCE=${ZPP_FORCE_DISPATCH_ONCE}
         -DZPP_EAGER_EPT_NEIGHBOURS=${ZPP_EAGER_EPT_NEIGHBOURS}
         -DZPP_INTERCEPT_APIC=${ZPP_INTERCEPT_APIC}
+        -DZPP_DISARM_APIC_WATCH=${ZPP_DISARM_APIC_WATCH}
         -DZPP_VIRTUALIZE_APIC=${ZPP_VIRTUALIZE_APIC}
         -DZPP_PROFILE_L2=${ZPP_PROFILE_L2}
         -DZPP_STEP_VTL=${ZPP_STEP_VTL}
@@ -336,6 +341,7 @@ ExternalProject_Add(uefi_loader
         -DZPP_FORCE_DISPATCH_ONCE=${ZPP_FORCE_DISPATCH_ONCE}
         -DZPP_EAGER_EPT_NEIGHBOURS=${ZPP_EAGER_EPT_NEIGHBOURS}
         -DZPP_INTERCEPT_APIC=${ZPP_INTERCEPT_APIC}
+        -DZPP_DISARM_APIC_WATCH=${ZPP_DISARM_APIC_WATCH}
         -DZPP_VIRTUALIZE_APIC=${ZPP_VIRTUALIZE_APIC}
         -DZPP_PROFILE_L2=${ZPP_PROFILE_L2}
         -DZPP_STEP_VTL=${ZPP_STEP_VTL}

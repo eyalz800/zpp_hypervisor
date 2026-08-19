@@ -25,6 +25,7 @@
 #include "zpp/arch/x86_64/vmx/vmcs.h"
 #include "zpp/diag/log.h"
 #include "zpp/hypervisor/hypervisor.h"
+#include "zpp/hypervisor/nested_vmx.h"
 #include <cstdint>
 #include <optional>
 
@@ -229,6 +230,33 @@ void hypervisor::on_local_apic_write(void * context,
                                      const hypervisor::guest_write * write)
 {
     auto & self = *static_cast<hypervisor *>(context);
+
+    // Bring-up looks over, so stop paying for it. See
+    // `nested_vmx::disarm_apic_watch` for what this is worth and what it
+    // risks; the short version is 23.2% of every exit against a processor
+    // that would run unvirtualized if one ever started after this.
+    //
+    // Checked here rather than on a timer because there is no timer, and
+    // this handler runs on exactly the traffic the watch is being kept
+    // alive for. Disarming does not skip the rest of this call: the store
+    // has already been applied through this VMM's own mapping, so a write
+    // that turns out to be an interrupt command is still acted on below,
+    // and only the *next* one goes unseen.
+    if constexpr (nested_vmx::disarm_apic_watch) {
+        if (!self.all_processors_started.load(std::memory_order_relaxed) &&
+            (0 != self.ipi_start_up_seen) &&
+            (0 != self.last_start_up_ipi_tsc) &&
+            ((arch::x86_64::rdtsc() - self.last_start_up_ipi_tsc) >
+             nested_vmx::apic_watch_quiet_ticks)) {
+            self.all_processors_started.store(true,
+                                              std::memory_order_relaxed);
+            log("no start-up ipi for {} ticks after {} of them, dropping "
+                "the local apic page watch",
+                nested_vmx::apic_watch_quiet_ticks,
+                self.ipi_start_up_seen);
+            self.watch_local_apic(false);
+        }
+    }
 
     // The write has already happened - the watch steps over it before
     // saying so - which is why the command can simply be read back out

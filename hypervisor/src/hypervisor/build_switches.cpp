@@ -81,6 +81,10 @@ extern "C" [[gnu::used, gnu::retain]] constinit const char
         // deploy path able to say so.
         ' ', 'a', 'p', 'i', 'c', '=',
         digit(nested_vmx::intercept_apic),
+        // Correctness again, not tuning: on, a processor that starts after
+        // the watch is dropped runs outside this VMM.
+        ' ', 'a', 'p', 'i', 'c', 'o', 'f', 'f', '=',
+        digit(nested_vmx::disarm_apic_watch),
         // Two digits for both multipliers, where every switch above
         // needs one. They are free-form `CACHE STRING`s rather than
         // booleans - `BACKLOG.md` records the stretch run at 1, 2 and 8,

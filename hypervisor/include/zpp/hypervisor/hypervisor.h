@@ -6118,6 +6118,18 @@ private:
     std::atomic<bool> all_processors_started{};
 
     /**
+     * When the last start-up or INIT inter-processor interrupt was seen,
+     * as a time-stamp counter reading, or zero if none has been.
+     *
+     * The only evidence available that bring-up is over. Nothing tells a
+     * hypervisor how many processors its guest intends to start, so
+     * `all_processors_started` cannot be derived - it can only be guessed
+     * at from a long enough silence. See `nested_vmx::disarm_apic_watch`
+     * for why that guess is off by default.
+     */
+    volatile std::uint64_t last_start_up_ipi_tsc{};
+
+    /**
      * The memory the loader reserved below one megabyte, or zero when it
      * supplied none. Zero means this VMM cannot start a processor itself,
      * which is the normal state on the platforms where the loader launches

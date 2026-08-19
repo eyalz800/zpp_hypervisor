@@ -122,4 +122,16 @@ inline std::atomic<std::uint64_t> g_apic_base{};
 inline std::atomic<unsigned> g_x2apic_icr_writes{};
 inline std::atomic<std::uint64_t> g_x2apic_icr_last{};
 
+// The time stamp counter. `interrupt_command.cpp` stamps every INIT and
+// start-up IPI with it, so that a long enough silence can stand in for
+// "no more processors are going to start" - see
+// `hypervisor::last_start_up_ipi_tsc`. Monotonic rather than real, as in
+// the shared shim beside this one: a harness cares that successive
+// readings increase, not what they mean.
+inline std::uint64_t rdtsc()
+{
+    static std::uint64_t ticks{};
+    return ticks += 1000;
+}
+
 } // namespace zpp::arch::x86_64

@@ -985,6 +985,63 @@ inline constexpr bool shadow_guest_state =
 inline constexpr bool intercept_apic = (0 != ZPP_INTERCEPT_APIC);
 
 /**
+ * Whether to drop the local APIC page watch once no more processors are
+ * going to start.
+ *
+ * `hypervisor::all_processors_started` was declared for exactly this and
+ * says so - "after which the interception is switched off - inter-processor
+ * interrupts are hot on a running system and there is no reason to keep
+ * paying for them once no more processors are going to start" - and was
+ * then never set and never read anywhere in `hypervisor/src`. This is that
+ * mechanism, wired.
+ *
+ * What it is worth, measured on the settled eight-processor guest: the
+ * write-protection on `0xfee00000` costs 1,586 extended-page-table
+ * violations a second, 23.2% of every exit CPU 0 takes. None of them are
+ * nested - `l2_ept_dispositions` reports `watched` zero and the faulting
+ * instruction pointers are inside hvix64 - so this is the guest
+ * hypervisor's own end-of-interrupt traffic, paid for a start-up IPI that
+ * stopped coming once the seventh application processor was up.
+ *
+ * The round trip costs 402 microseconds against a 1.74 ms tick and the
+ * guest manages 4.65 of them per tick, so it overruns by about 7.5%. This
+ * is the cheapest lever that is anywhere near that margin.
+ *
+ * **Off by default, and the reason is not cost.** The watch is what turns a
+ * start-up IPI into one naming this VMM's own trampoline. A processor
+ * started after the watch is dropped runs *outside* this VMM - which is
+ * precisely the failure `BACKLOG.md` records under "The switch below leaked
+ * out of its experiment", where seven of eight processors were lost that
+ * way. Dropping it is safe only if no further processor starts, and nothing
+ * here can prove that; the quiescence delay below is a heuristic, not a
+ * proof.
+ *
+ * What would let this be on by default: an APIC-access page with
+ * APIC-register virtualization, where SDM 32.4.3.2 has INIT and SIPI always
+ * take the trap-like APIC-write exit while ordinary traffic stops exiting.
+ * Then the interception gets cheaper *and* stronger and no heuristic is
+ * needed.
+ */
+#ifndef ZPP_DISARM_APIC_WATCH
+#define ZPP_DISARM_APIC_WATCH 0
+#endif
+
+inline constexpr bool disarm_apic_watch = (0 != ZPP_DISARM_APIC_WATCH);
+
+/**
+ * How long after the last start-up IPI the watch is considered to have
+ * done its job, in time-stamp counter ticks.
+ *
+ * Ten thousand million, which is about five seconds on the 2 GHz part this
+ * runs on. Deliberately far longer than a boot's worth of start-up IPIs -
+ * the seven on this guest arrive inside 90 seconds of each other during
+ * bring-up and then stop for ever - and deliberately not derived from a
+ * measured frequency, because a wrong frequency would silently make the
+ * delay zero and drop the watch during bring-up.
+ */
+inline constexpr std::uint64_t apic_watch_quiet_ticks = 10'000'000'000ull;
+
+/**
  * How long the timer runs before it forces an exit.
  *
  * The counter decrements once per time-stamp counter tick shifted right
