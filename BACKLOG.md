@@ -29046,3 +29046,115 @@ says what they are: per round trip the guest hypervisor executes ~3.6
 `vmresume`, ~3.5 `vmcall`, ~2.2 `vmptrld` and 0.74 `invept` - all its own
 VMX instructions, all trapping to us. `vmptrld` alone is 2.22 a round
 trip at 413,683 cycles each.
+
+## The read census acted on: what came out, what stayed, and why
+
+Read the section "Our own VMCS reads, finally counted rather than derived"
+above first - this is what was done with it. Nothing here was measured on
+hardware; every figure is a projection from the counts in that table at
+1.4-1.8 microseconds an access, and **no claim is made about the guest**.
+The measurement that would have supported one has been falsified: a 15.5%
+cut in exits moved the livelock not at all.
+
+### The instrument first, because the last reading came with a caveat
+
+`vmcs_read_overflow` was 532,254,425 against 218,870 reads a second
+recorded, so more accesses were lost than kept and a field's absence from
+the table proved nothing. Widening it would not have helped - measured over
+the 156 encodings in `vmcs_fields.h`, `(encoding >> 1) ^ (encoding >> 9)`
+occupies exactly 60 slots at 64, at 128, at 256 and at 512, because the two
+shifts fold the bits the encodings differ in on top of each other. Linear
+probing on that hash is worse than it looks: 105 probes worst case at 256
+slots, since the clustering is in the hash and not the load factor.
+
+The slot is taken from the encoding's structure now - SDM 25.11.2 gives
+bits 9:1 as the index, 11:10 as the type, 14:13 as the width, and every
+index in this tree is 25 or less, so five bits of index plus two of type
+plus two of width is a nine-bit key that collides **zero** times over those
+156 encodings. There is a write-side table of the same shape, and
+`dump_own_field_use` in `rig-dump-state.py` reads both. Neither table had a
+reader for the whole of its existence, which is how the same quantity came
+to be estimated twice from cycles divided by a price.
+
+### What came out
+
+| field | was, per round trip | removed |
+|---|---|---|
+| `vpid` | 11.8 | ~10.5, everything on an exit path |
+| `guest_rip` | 18.6 | ~3, plus 4 per EPT-violation-and-step pair |
+| `guest_activity_state` | 7.9 | ~2 on the re-queue path |
+| `vm_entry_interruption_information` | 6.9 | ~1 per second-level entry |
+| `exit_qualification`, `guest_cs_selector` | 6.1, 9.1 | 1 each, behind `ZPP_CENSUS_EXITS` |
+
+`vpid` is a constant - `setup_vmcs` writes `cpu + 1` and `build_vmcs02`
+copies it - and the index is threaded from the caller everywhere it is
+reachable from an exit. **The largest single reader was not an exit handler
+at all**: `filter_local_apic_write` read it twice per watched APIC write,
+and the guest hypervisor writes the end of interrupt and the timer's
+initial count about ten thousand times a second on the boot processor. It
+is a watched-page callback and cannot take a parameter, so it uses
+`hypervisor::this_processor()` - one load through GS, which is what
+`gs_data` was added for and had had no caller since.
+
+`guest_rip` is read once per exit into `context.rip` and taken from there.
+The invariant that makes that safe - **`context.rip` tracks the current
+VMCS's guest RIP for the whole of an exit** - is now written down and
+tested, and it was not true before: `on_ept_violation` advanced the field
+and left `context.rip` behind by the length of one emulated instruction.
+
+### Where the census misled, which is the part worth keeping
+
+Two of the biggest-looking targets are not redundant reads at all, and
+acting on the table without checking would have produced a silently wrong
+instruction pointer:
+
+- **`record_exit`'s `guest_rip`, and `resume_guest`'s on the non-advancing
+  path.** `context.rip` is the wrong value for both. After a reflection
+  vmcs01 is current and its guest RIP holds the guest hypervisor's host
+  entry point; after `build_vmcs02` vmcs02's holds the second-level
+  guest's. Neither is what `context.rip` carries, and `resume_guest_rip`
+  and the exit ring are documented to record the level the VMCS names. So
+  `resume_guest` branches: advancing reuses the value it just wrote, and
+  the other asks the field.
+- **`record_exit`'s `exit_qualification`** looks like the obvious candidate
+  for an exit-facts cache filled at the top of `on_vm_exit`, and it is not
+  one, for the same reason: after a reflection vmcs01's qualification field
+  holds whatever an earlier first-level exit left there. A cache would be a
+  claim where the ring wants the field.
+
+### What is left, and what it would cost
+
+- **The reads that cross a VMCS switch in `nested_entry.cpp`**, including
+  `save_l2_state`'s copy of `guest_rip` into the shadow. Whether the value
+  is already in hand depends on which VMCS is current at each point, which
+  is not settleable by reading one function. This is the largest remaining
+  block and it needs the VMCS-currency question answered first.
+- **`vm_entry_controls` 4.8, `guest_ss_access_rights` 4.6,
+  `idt_vectoring_information` 4.5** per round trip, untouched. The last is
+  read unconditionally at the top of every exit because the next entry
+  destroys it; the first two have not been looked at.
+- **The cold paths that still read `vpid`**, listed so nobody re-derives
+  the answer: the three assembly-entered failure stubs (`record_entry_
+  failure`, `on_nested_entry_failure`, `on_vm_entry_failure`) have no index
+  to be handed, and `apply_start_up`, `emulate_init_signal` and the sleep
+  path run a few dozen times in a whole boot - 15 INITs and 16 start-up
+  IPIs measured - against three signatures `tests/ap_start_up` drives from
+  fifteen places.
+
+### The one thing to check before believing any of it
+
+`hypervisor::this_processor()` trades a value that was correct by
+construction for one correct by a chain of three facts - `setup_vmcs`
+writing the `gs_data` row, `host_state_fields` copying `host_gs_base` into
+vmcs02, and nothing in this tree executing `swapgs`. A wrong processor
+index is silent. So `on_vm_exit` compares GS against the index it was
+handed on **every** exit, and `rig-dump-state.py` prints the verdict:
+
+```
+gs processor index agreed on all 1,234,567 exits checked
+```
+
+A non-zero disagreement count means everything indexed by it is
+misattributed. The old justification for `gs_data` was that counters
+indexed by it "landed entirely on processor zero, which is where the work
+was" - which is equally consistent with GS always reading zero.
