@@ -11496,7 +11496,88 @@ hypercall page beside it as the control for the address arithmetic,
 which is the check that made that earlier reading trustworthy.
 
 
+## The switch below leaked out of its experiment, and cost seven processors
+
+**Read this before the section that follows it.** `ZPP_INTERCEPT_APIC=OFF`
+stayed in `build/debug`'s CMake cache long after the one-processor
+experiment it was for, while `build/release` and `build/nested` kept ON.
+Every debug deploy inherited it silently, because `zpp_build_switches`
+had no field for this switch - so the manifest that exists to answer
+"what is in this binary", and which `check-bootable.sh` prints on the
+path to the rig, could not answer it. That is the third time a stale
+cache entry has cost this project a session, and the first two are
+written up under `ZPP_VERIFY_HYPERVISOR` and `ZPP_PUBLISH_REFERENCE_TSC`.
+
+The experiment's own precondition is stated in the next section - safe
+**with one processor**, since the watch exists to catch a start-up IPI
+and with no application processors there is none to lose. The rig has
+been running `cpus=8,cores=4,threads=2`. Measured on the wedged guest
+before the fix, against a base-proven reader:
+
+| | with the stale OFF | with the switch restored |
+|---|---|---|
+| `watched_apic_page` | 0 | 0xfee00000 |
+| watch slots armed | 0 of 8 | 1 |
+| `observed_apic_mode[0..7]` | `2 0 0 0 0 0 0 0` | `2 2 2 2 2 2 2 2` |
+| `ipi_init_seen` / `ipi_start_up_seen` | 0 / 0 | 15 / 16 |
+| APIC page extended-page-table entry | `0xfee00487`, unsplit 2 MB rwx | split to 4 kb |
+| CPU 1 | `jmp .` in `hvix64.exe+0x248146`, **0 exits, 0 l2-entries** | in this VMM, halted in the guest idle path |
+| module loads per boot | 2 then 4 - the guest reset twice | 2, no reset |
+
+`epte_for` was never even called: `next_ept_table` was 39 of 1024 and
+`ept_initialized` 1, which excludes both of its refusals, and the entry
+was still large. What settled it was the disassembly, since the source
+reads the same either way - `note_apic_mode` compiled to `xorl %esi,
+%esi` before both `intercept_interrupt_command` and `watch_local_apic`,
+a hard-coded false with the `any_xapic` loop result discarded.
+
+So seven of eight processors were started by an INIT-SIPI-SIPI that
+reached hardware and ran Hyper-V **outside this VMM entirely**. Any
+measurement taken on the rig in that window describes the experiment
+rather than the guest, and the section below - which is a one-processor
+result - is not among them.
+
+The switch now has a manifest field, `apic=`, proven to track: built OFF
+it reads `apic=0` beside the `xorl`, built ON `apic=1` beside a computed
+argument.
+
+**What the restored configuration then showed**, which is new and is the
+thing to attack: the seven application processors come up, take 17
+second-level entries each, and **halt**. RIP on all seven is identical
+and one byte past a `hlt` - the architectural signature of a halted
+processor - in the guest's idle path:
+
+    cli
+    cmpl  $0, %gs:0x340      ; any work?
+    jg    .out
+    sti
+    hlt                      ; <- all seven parked here
+    .out:
+    ret
+
+Their counters are frozen to the exit: 284 exits and 17 second-level
+entries, unchanged across a 60-second window in which CPU 0 took 533,893
+exits and 192,299 second-level entries. So the application processors
+are idle waiting for an interrupt, and CPU 0 alone is in the virtual
+trust level round trip - the alternating `VMRESUME` and `VMCALL` at a
+fixed pair of instruction pointers that fills the log ring. The
+processors are a symptom; CPU 0 is where the guest is stuck.
+
+One number from that run is worth carrying forward: `watched writes:
+emulated 514772, stepped 0, filtered 9`. With the watch armed, half a
+million writes to the local APIC page are emulated and only nine are
+filtered out, every one of them an extended-page-table violation at
+`0xfee00000`. The filter is doing almost nothing, and the only writes
+the interception actually needs are the interrupt command register's.
+That is a cost question rather than the deadlock, so it is recorded and
+not acted on here.
+
 ## Not the local APIC watch, and what KVM does with the same guest
+
+**One processor.** Everything in this section was measured with a single
+processor, where disarming the watch loses nothing - see the section
+above for what the same switch does to an eight-processor guest, and why
+no multiprocessor reading taken with it off means anything.
 
 **The watch is eliminated.** `ZPP_INTERCEPT_APIC=OFF` disarms both
 interceptions - the page watch used in xAPIC mode and the interrupt
