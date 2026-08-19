@@ -28116,6 +28116,99 @@ nodes and the count grows, 34 to 37 across dumps, but no string resolves.
 That is a reader bug and it is why the refusal had to be established from
 counters instead.
 
+## The last unexamined variable: 1.36 us per VMCS access is KVM's, and it is hardware
+
+Every sizing in this file treats the per-access cost as a constant. It is
+not - it is a property of the hypervisor underneath - and at **1,095
+accesses a round trip the whole stall is that number times a count.**
+Checked, cheapest first.
+
+### Tracing is off, so nothing is inflated
+
+Read **as root**, because the `trace-kvm` skill records that an
+unprivileged read returns an empty string rather than an error and that
+is how five captures came back empty:
+
+```
+tracing_on        0
+current_tracer    nop
+set_event         (empty)
+events/enable     0
+kvm events armed  0
+```
+
+**Nothing is armed and nothing has been.** Every cycle figure in this
+file stands: the phase splits, the 1.36 us, our 2.52 ms share, the
+projections.
+
+### And the cost is KVM emulating every VMCS access, because the CPU cannot shadow
+
+```
+/sys/module/kvm_intel/parameters/enable_shadow_vmcs   N   (mode 0444)
+                                 nested               Y
+                                 ept                  Y
+                                 unrestricted_guest   Y
+```
+
+`enable_shadow_vmcs` is **N**, and it was not asked for: the rig loads
+`insmod ./kvm-intel.ko nested=1` with no such parameter, and there is no
+`modprobe.d` entry. KVM's default is `1`, and
+`.references/kvm/nested.c:7238` has the only thing that clears it:
+
+```c
+if (!cpu_has_vmx_shadow_vmcs())
+    enable_shadow_vmcs = 0;
+```
+
+which requires **`VMX_MISC_VMWRITE_SHADOW_RO_FIELDS`, IA32_VMX_MISC bit
+29** (`asm-vmx.h:163`) - the ability to VMWRITE the read-only exit
+information fields. The rig's i7-8565U does not report it, so KVM turns
+hardware VMCS shadowing off for its guest, and **every VMREAD and VMWRITE
+this VMM executes exits to KVM and is emulated in software.** That is the
+1.36 us, and 1,095 of them a round trip is 1.49 ms of our 2.52 ms.
+
+The parameter is `0444`, so changing it needs a module reload - which
+`use-traced-kvm.sh` records leaves the module at refcount -1, recoverable
+only by a power cycle. It would not help anyway: the capability test
+clears it again on load.
+
+### The apparent contradiction, resolved
+
+This VMM logs "vmcs shadowing available" and *uses* it successfully -
+Hyper-V's VMREADs dropped to 1,333 and VMWRITEs to 494 in a clean-phase
+window. That is not inconsistent: `nested_vmx_setup_misc_data`
+(`.references/kvm/nested.c:7131`) sets `VMX_MISC_VMWRITE_SHADOW_RO_FIELDS`
+in what KVM **advertises to its guest unconditionally**, whatever the
+hardware does. So we are told bit 29 is set, offer shadowing to Hyper-V
+on the strength of it, and KVM emulates that too.
+
+**One honesty**: the MSR could not be read directly - the target has no
+`msr` driver and `modprobe msr` fails - so "the CPU lacks bit 29" is an
+inference from KVM's parameter plus KVM's only auto-disable path, not a
+direct reading.
+
+### Which makes the rig conclusion final rather than provisional
+
+The rig sits at **1.93 ticks per round trip against a threshold of 1.0**,
+and 59% of our share is VMCS accesses being emulated because the host CPU
+lacks one capability bit. Nothing in this codebase can reach that, and no
+setting on the machine can either.
+
+**It does not touch the bare-metal projection**, which was already
+computed with those accesses at native cost - there is no KVM there to
+emulate them. That projection stays 0.99 with a 15% band.
+
+**And the user has ruled out bare metal: KVM only.** So the honest end
+state is that the goal is not reachable on this platform, for a reason
+that is neither this VMM's nor fixable from it.
+
+## The disk telemetry stays dormant, by the user's decision
+
+`emit_disk_telemetry` is written, compiled both ways, tested, and
+**switched off**, and it stays that way: no write to the ESP, no
+bare-metal trip. It costs nothing dormant and the reasoning is kept with
+it, because the next person may have authority this one did not.
+
 ## The second-level hypercall census, which nothing had ever taken
 
 `hypercall_codes` is gated on `from_guest_hypervisor`, so it counts the
