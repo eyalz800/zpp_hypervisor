@@ -1021,6 +1021,17 @@ inline constexpr bool intercept_apic = (0 != ZPP_INTERCEPT_APIC);
  * take the trap-like APIC-write exit while ordinary traffic stops exiting.
  * Then the interception gets cheaper *and* stronger and no heuristic is
  * needed.
+ *
+ * **It also used to stop the guest dead on the very first fault after the
+ * drop, and that is fixed.** The disarm runs at the top of
+ * `on_ept_violation` and then fell through into the loop over `watches`,
+ * which - the watch having just been dropped - found nothing, so
+ * `on_ept_violation` answered `false` and both of its callers stop the
+ * processor for it. Three runs died that way, always at local APIC offset
+ * `0x380`. It now returns and lets the guest re-execute its own
+ * instruction. `BACKLOG.md` carries the record and the wrong diagnosis it
+ * was first given. Nothing about the cost has been re-measured since, so
+ * this is still an unanswered experiment rather than a rejected one.
  */
 #ifndef ZPP_DISARM_APIC_WATCH
 #define ZPP_DISARM_APIC_WATCH 0

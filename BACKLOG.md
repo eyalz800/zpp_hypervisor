@@ -11496,7 +11496,12 @@ hypercall page beside it as the control for the address arithmetic,
 which is the check that made that earlier reading trustworthy.
 
 
-## Dropping the APIC watch stops the guest, and the reason is a stale shadow
+## Dropping the APIC watch stops the guest, and the shadow was the wrong suspect
+
+**Re-read from the code and both causes are now fixed, but the diagnosis
+below is wrong and the correction is the useful part.** Read the section
+first and then the correction after it; the reasoning that produced the
+wrong answer is the reason it is left standing.
 
 **The experiment failed, and what it found is worth more than what it was
 looking for.** `ZPP_DISARM_APIC_WATCH=ON` drops the local APIC page watch
@@ -11622,6 +11627,49 @@ advertises the *capability* to its guest unconditionally
 (`nested_vmx_setup_secondary_ctls`, "we can emulate VMCS shadowing even if
 the hardware doesn't support it"), so our capability probe saying "yes" is
 not evidence of anything.
+### Correction: the halt was the disarm eating its own fault
+
+**The stale shadow cannot produce that record, and reading the two call
+sites of `on_ept_violation` is what settles it.** Nothing was measured
+again - the rig was not touched - and nothing needed to be.
+
+`filter_local_apic_write` only *raises a flag*; the disarm itself was
+carried out at the top of `on_ept_violation`, before the loop over
+`watches`, precisely so it could not clear the entry the loop holds. It
+then fell through into that loop - which now finds nothing for the local
+APIC page, because the watch it would have matched has just been dropped.
+`on_ept_violation` answers `false`, and **both** of its callers read
+`false` as "the protection was put there by something that is not going to
+handle the fault" and stop the processor: `exit_dispatch.cpp`'s
+`case basic_reason::ept_violation`, and `on_l2_ept_fault`'s `unwatched`
+disposition. So the *first* EPT violation after the quiet period is
+consumed by the disarm and then killed, whatever it was for. The
+overwhelming majority of them are that APIC page, at 1,586 a second.
+
+That accounts for every detail the record carries and the stale-shadow
+story does not:
+
+- **qualification `0x2b`, write refused, page not writable.** Under the
+  disarm story the fault was taken *before* the disarm restored write,
+  which is exactly what the hardware reports. Under the stale-shadow story
+  hardware would have to have walked the shadow - but a stale shadow leaf
+  reaches `on_l2_ept_fault`, and there the composition of `eptp12` with our
+  own now-writable entry **permits** the write, so it takes the "both
+  levels permit it, the shadow is behind" branch, installs the leaf and
+  resumes. It is self-healing, and it cannot reach `on_unhandled_exit` at
+  all.
+- **offset `0x380` on the first write after the drop.** Both stories
+  predict that, so it discriminates nothing - which is why it read as
+  confirmation.
+- **`unhandled_exit.occurred` = 1, on one processor.** A one-shot: the
+  disarm runs once, `watched_apic_page` is zero afterwards.
+
+The comment on the disarm already said what to do - "acting on it at the
+top of the next fault costs one more fault" - and the code did not do it.
+The fix is `return true` after `watch_local_apic(false)`: the guest
+re-executes its own instruction against an entry that now permits it, the
+same answer the module-decoy branch at the bottom of the same function
+gives. It cannot loop, because the block is not reached again.
 
 ## Where the 402 microseconds go, measured on the first valid eight-processor run
 

@@ -235,10 +235,31 @@ bool hypervisor::on_ept_violation(std::size_t cpu,
     // entry that loop holds a reference to. Acting on it at the top of the
     // next fault costs one more fault and no reasoning about iterator
     // lifetime. See `nested_vmx::disarm_apic_watch`.
+    //
+    // **And the fault it lands on is that one more fault, so it must be
+    // returned from rather than fallen out of.** The disarm clears the
+    // only watch on the local APIC page, so the loop below then finds
+    // nothing for the page that faulted, `on_ept_violation` answers false,
+    // and both callers read false as "the protection was put there by
+    // something that is not going to handle the fault" and stop the
+    // processor. That is what `ZPP_DISARM_APIC_WATCH=ON` measured three
+    // times: bring-up completed, and the first EPT violation after the
+    // quiet period killed the guest with `unhandled_exit` reason 0x30,
+    // qualification 0x2b, at local APIC offset 0x380 - the timer's initial
+    // count, which an idle Hyper-V writes every tick. `BACKLOG.md` records
+    // the run and the wrong diagnosis it was first given.
+    //
+    // Resuming without advancing RIP is the whole answer, and it is the
+    // same answer the module-decoy branch at the bottom of this function
+    // gives: the guest re-executes its own instruction against an entry
+    // that now permits it. It cannot loop, because the disarm happens once
+    // - `watched_apic_page` is zero afterwards, so this block is not
+    // reached again.
     if constexpr (nested_vmx::disarm_apic_watch) {
         if (this->all_processors_started.load(std::memory_order_relaxed) &&
             (0 != this->watched_apic_page)) {
             watch_local_apic(false);
+            return true;
         }
     }
 
