@@ -1590,6 +1590,26 @@ bool hypervisor::on_guest_invept(std::size_t cpu,
     // cannot be mistaken for one that did. See the declarations: which
     // type arrives decides whether the all-context discard is costing
     // anything at all, and no run has ever recorded it.
+    //
+    // **Recorded now, and the answer is that it costs nothing.** One
+    // clean-phase window: `single-context` 4,104, `all-context` **0**.
+    // In the settled stall both are zero, because a guest touching no
+    // new memory invalidates nothing. So `discard_shadow_ept` - the
+    // whole-processor discard that looked like the expensive arm - never
+    // executes on this workload, and the shadow cost is entirely the
+    // single-context arm.
+    //
+    // Which also settles a lead that was set aside three times: the
+    // rebuilds are **not** the two trust levels evicting each other.
+    // Censused live, the four slots held `0x101b1a000` (VTL0) and
+    // `0x101b1d000` (VTL1) **simultaneously**, with two slots spare and
+    // 19 of 96 tables used - `evictions`, `reclaims`,
+    // `refresh_overflows` and `rebuild-stale-generation` all zero.
+    // Retention already works. What drives the 4,104 rebuilds is this
+    // branch, one for one with the 4,162 single-context INVEPTs in the
+    // same window, at about 374 microseconds each - 272 of the 273
+    // microseconds `shadow_ept_pointer_for` costs per trust-level round
+    // trip.
     if (cpu < max_cpus) {
         if (single_context == type) {
             this->l2_invept_single_context[cpu] =

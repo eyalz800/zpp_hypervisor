@@ -27431,3 +27431,79 @@ machine rather than any code.
 Everything measured on the rig remains true of the rig. What it says
 about bare metal is now a question with a number attached, and it should
 be asked before any of the optimisation is done.
+
+## The shadow-EPT lead, censused: retention already works, and the fix is unsound
+
+The lead was that the two trust levels evict each other's shadow on every
+switch - "new root, never stale, never evicted" looking like a cache
+holding one root where two are needed. **Censused live, and it is
+false.** The four slots held both roots at once:
+
+```
+slot  source-root     tables_used
+  0   0x101b1a000     13      <- VTL0
+  1   0x101b1d000      6      <- VTL1
+  2   0x0              0
+  3   0x0              0
+```
+
+`shadow_ept_slots` is 4, `shadow_ept_tables_per_cpu` is 96 and 19 were in
+use. `evictions`, `reclaims`, `refresh_overflows` and
+`rebuild-stale-generation` are **all zero**. Retention is implemented, has
+room to spare, and is not the problem. Two other hypotheses died on the
+way: pool exhaustion via `fill_shadow_leaf`'s reclaim (`reclaims = 0`)
+and refresh overflow (`overflows = 0`).
+
+**What drives the rebuilds is `on_guest_invept`, one for one.** Clean
+window: 4,162 INVEPT exits, 4,104 rebuilds. Each single-context INVEPT
+discards that root and the next entry rebuilds and replays it, ~374 us.
+
+### And the obvious fix is already written, already switched off, and the reason is soundness
+
+`refresh_shadow_ept_for` exists and re-composes instead of discarding.
+`refresh_shadow_on_invept` is **false**, with the reason recorded beside
+it: **Hyper-V invalidates *around* a VTL protection change rather than
+after it**, so a refresh driven by the INVEPT reinstalls from tables that
+are about to change, no fault ever occurs to pick the change up, and the
+level asking for the protection asks for ever. The lazy path is the
+correct one, not merely the conservative one.
+
+So the shadow-EPT route is closed by correctness, not by cost, and the
+source already names what would open it: **watch the guest hypervisor's
+own extended-page-table pages for writes** (`watch_guest_page_writes`),
+which is what makes a refresh sound. That is a project, not a switch.
+
+### One open question closed in passing, which the source asked for
+
+`on_guest_invept`'s comment said which INVEPT type arrives "decides
+whether the all-context discard is costing anything at all, and **no run
+has ever recorded it**". Recorded:
+
+```
+clean phase   single-context 4,104   all-context 0
+stall         single-context     0   all-context 0
+```
+
+**All-context never fires.** The whole-processor discard that looked like
+the expensive arm is dead code on this workload, and the stall
+invalidates nothing at all because it touches no new memory. Both
+comments now carry the answer.
+
+### Where the reflection work starts, with numbers rather than a plan
+
+The shadow route being closed leaves the 43%-per-reflection target, and
+the clean-phase measurements say where to aim:
+
+- a reflection is ~76 VMCS accesses: **33.7 reads and 42.4 writes** for
+  `vmresume`;
+- **the reads do not vary** between clean and stalled (33.7 against
+  33.9), so they are unconditional and value-elision cannot touch them -
+  106 us per reflection at the rig's ~6,240 cycles an access;
+- the writes are already elided at 36.8% (hot) and 45.5% (guest state)
+  in the clean phase, against 80.7% and 90.6% in the stall, so the
+  value-comparison strategy is at its limit where it matters;
+- **235 us has to come off 545**, which is about 38 of the 76 accesses.
+
+Reads are half the accesses and the half no existing mechanism touches.
+That is where to look first, and it is the opposite of where the stall's
+numbers pointed.
