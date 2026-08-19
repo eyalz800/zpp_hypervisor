@@ -27747,6 +27747,86 @@ the physical boot more worth doing than when it looked like a 30x margin,
 not less - it is now the measurement that decides the question rather
 than one confirming a foregone conclusion.
 
+## `vmptrld` decomposed: 12 KB of copying, twice a round trip, for two pointers
+
+The by-reason budget per round trip, clean phase, **with coverage stated
+rather than assumed**:
+
+```
+reason           n/RT     us/RT    acc/RT    acc us   residue
+vmresume         3.65     896.0     277.5     377.4     518.6
+vmcall           3.45     634.4     315.3     428.8     205.7
+vmptrld          2.22     461.0     188.9     256.9     204.1
+ept-violation   15.58     803.2     280.4     381.3     421.9
+invept           0.74      71.4      21.4      29.1      42.3
+ext-int          0.13      24.1      12.1      16.4       7.7
+TOTAL                    2890.1
+```
+
+`acc us` uses the **measured** 1.36 us per access, not a divided-out one.
+**Coverage: 2.89 ms is 86% of the 3.36 ms wall clock but 115% of our 2.52
+ms share** - the by-reason attribution and the three-way run split
+disagree by 15%, so neither is a clean denominator and the residues below
+carry that uncertainty.
+
+### What a VMPTRLD does here
+
+`on_guest_vmptrld`, for a pointer that is not already current:
+
+- `flush_guest_vmcs12` - which first calls `materialise_l2_guest_state`
+  (the deferred guest state, read out of the real VMCS - this is why
+  `vmptrld` has the **highest read count of any reason, 78.1**) and then
+  writes the whole 4096-byte structure back to guest memory;
+- `read_guest_physical` of the new region - another **4096 bytes**;
+- `this->guest_vmcs12[cpu] = loaded` - a third **4096 bytes**.
+
+**Twelve kilobytes of copying, 2.22 times a trust-level round trip**,
+plus a full materialisation of the deferral each time.
+
+### And the guest alternates between exactly two VMCSs
+
+Censused live, 40 samples of `guest_current_vmcs`:
+
+```
+0x117a18000   31
+0x117a1b000    9
+2 distinct
+```
+
+Two pointers, mirroring the two extended-page-table roots - VTL0's VMCS
+and VTL1's. **So every one of those copies is of a structure this VMM
+held moments earlier and threw away.**
+
+This is the one cache in the tree that does *not* retain: the shadow EPT
+keeps four slots for two roots and hits 100% (`evictions = 0`), while
+`guest_vmcs12[cpu]` is a single slot that is overwritten on every switch.
+KVM has the same single `cached_vmcs12`, but KVM is not being switched
+between two VMCSs twice per round trip by a VSM guest.
+
+### Sizing, and it decides the bare-metal question
+
+The 204 us of `vmptrld` residue is the part that is **not** VMCS accesses
+- the copying and mapping - so it is exactly the part that survives to
+bare metal. A pointer-keyed vmcs12 cache with two slots removes it.
+
+```
+                                   our share  round trip  ticks/RT
+rig today                            2.52 ms    3.36 ms      1.93
+bare metal, as measured              1.10 ms    1.94 ms      1.11
+  + elision warm-up (done, 0.23)     0.89 ms    1.73 ms      0.99
+  + vmcs12 retention (0.20)          0.69 ms    1.53 ms      0.88
+```
+
+**The two changes together put the projection below the threshold**, with
+an uncertainty band - the 15% instrument disagreement above - that
+straddles it at one change and clears it at two.
+
+Not implemented here: retaining vmcs12 per pointer touches VMPTRLD,
+VMCLEAR, the flush and the guest-state deferral together, and the
+deferral is what three separate ordering bugs were already found in. It
+is a design change with a measured 204 us behind it, which is the right
+state to hand it over in.
+
 ### Which leaves three levers, sized
 
 - **reads** - 33.7, distinct, unconditional. Only fewer *fields* helps,

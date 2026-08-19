@@ -1227,6 +1227,36 @@ bool hypervisor::on_guest_vmptrld(std::size_t cpu,
         return true;
     }
 
+    // **Measured: this is 204 microseconds a trust-level round trip that
+    // no bare-metal machine would get back, and it is avoidable.**
+    //
+    // For a pointer that is not already current this function moves
+    // twelve kilobytes: `flush_guest_vmcs12` materialises the deferred
+    // guest state and writes 4096 bytes back to guest memory, the read
+    // below takes 4096 more, and the assignment copies 4096 again -
+    // 2.22 times a round trip. It is also why `vmptrld` carries the
+    // highest VMCS read count of any exit reason here, 78.1, since the
+    // materialisation reads the deferral out of the real VMCS.
+    //
+    // And the guest alternates between **exactly two** VMCSs - censused
+    // live, `guest_current_vmcs` took the values `0x117a18000` and
+    // `0x117a1b000` and nothing else over forty samples, VTL0's and
+    // VTL1's, mirroring the two extended-page-table roots. So every one
+    // of those copies is of a structure this VMM held moments earlier
+    // and discarded.
+    //
+    // This is the one cache here that does not retain: `shadow_ept_slots`
+    // keeps four slots for two roots and never evicts, while
+    // `guest_vmcs12[cpu]` is a single slot overwritten on every switch.
+    // KVM has one `cached_vmcs12` too, but nothing switches KVM between
+    // two VMCSs twice per round trip the way a VSM guest switches this.
+    //
+    // Not changed here: retaining per pointer touches VMPTRLD, VMCLEAR,
+    // the flush and the guest-state deferral together, and the deferral
+    // is where three separate ordering bugs have already been found -
+    // including the one the comment above `materialise_l2_guest_state`
+    // in `flush_guest_vmcs12` records. `BACKLOG.md` has the budget it
+    // would buy.
     vmcs12 loaded;
     auto read = read_guest_physical(
         *pointer,
