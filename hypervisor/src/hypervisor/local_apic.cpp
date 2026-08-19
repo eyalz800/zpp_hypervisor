@@ -183,10 +183,11 @@ void hypervisor::note_apic_mode(std::size_t cpu)
     // nothing to hand over unvirtualized. With more than one processor
     // this hands them to the guest and they are lost - see
     // `on_interrupt_command`.
-#ifndef ZPP_INTERCEPT_APIC
-#define ZPP_INTERCEPT_APIC 1
-#endif
-    constexpr bool intercept_apic = (0 != ZPP_INTERCEPT_APIC);
+    // Spelled in nested_vmx.h beside every other build switch, so that
+    // `zpp switches:` on the built binary reports it. A cache reading
+    // OFF is not evidence, and for a whole session this one was not
+    // visible anywhere else - see the declaration.
+    constexpr bool intercept_apic = nested_vmx::intercept_apic;
 
     intercept_interrupt_command(intercept_apic && any_x2apic);
 

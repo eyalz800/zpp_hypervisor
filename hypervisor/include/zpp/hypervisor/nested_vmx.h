@@ -952,6 +952,39 @@ inline constexpr bool shadow_guest_state =
     (0 != ZPP_SHADOW_GUEST_STATE);
 
 /**
+ * Whether the guest's own local APIC is watched - the page in xAPIC
+ * mode, the interrupt command MSR in x2APIC mode.
+ *
+ * Not a nested-VMX switch by subject, and here anyway, because this is
+ * the header the build manifest is assembled from and **a switch the
+ * manifest cannot see is a switch that costs a session**. This one
+ * proved it: `build/debug` held `ZPP_INTERCEPT_APIC:BOOL=OFF` from an
+ * experiment recorded in `BACKLOG.md` - "Not the local APIC watch" -
+ * while release and nested held ON, and every deploy inherited the
+ * stale entry silently. Nothing on the path to the rig could show it,
+ * because `zpp_build_switches` had no field for it.
+ *
+ * What that costs when it is off is not a slower guest, it is a wrong
+ * one: the watch is what catches a start-up IPI and replaces it with
+ * one naming this VMM's own trampoline. Off, the IPI reaches hardware
+ * and the processor it starts runs **outside** this VMM. Measured on
+ * an eight-processor guest with the stale cache: CPU 1 parked in
+ * `hvix64.exe+0x248146` with zero exits and zero second-level entries
+ * against this VMM, every `ipi_*` counter zero, `watched_apic_page`
+ * zero, and the APIC page still an unsplit read-write-execute 2 MB
+ * extended-page-table entry.
+ *
+ * So the experiment it exists for is only valid with one processor,
+ * which is what `BACKLOG.md` says and what the eight-processor run
+ * violated.
+ */
+#ifndef ZPP_INTERCEPT_APIC
+#define ZPP_INTERCEPT_APIC 1
+#endif
+
+inline constexpr bool intercept_apic = (0 != ZPP_INTERCEPT_APIC);
+
+/**
  * How long the timer runs before it forces an exit.
  *
  * The counter decrements once per time-stamp counter tick shifted right

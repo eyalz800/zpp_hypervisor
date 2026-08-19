@@ -75,6 +75,12 @@ extern "C" [[gnu::used, gnu::retain]] constinit const char
         digit(nested_vmx::step_vtl),
         ' ', 'p', 'r', 'o', 'f', 'i', 'l', 'e', '=',
         digit(nested_vmx::profile_l2),
+        // Off hands application processors to the guest unvirtualized,
+        // so this is a correctness field and not a tuning one. It was
+        // stale-OFF in `build/debug` for a session with nothing on the
+        // deploy path able to say so.
+        ' ', 'a', 'p', 'i', 'c', '=',
+        digit(nested_vmx::intercept_apic),
         // Two digits for both multipliers, where every switch above
         // needs one. They are free-form `CACHE STRING`s rather than
         // booleans - `BACKLOG.md` records the stretch run at 1, 2 and 8,
