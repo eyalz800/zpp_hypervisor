@@ -2404,6 +2404,18 @@ void hypervisor::on_vm_exit(std::uint64_t cpuid,
         // asked. A guest that genuinely needs to wait for an interrupt
         // therefore still waits; only the test build spins, and only
         // around the one HLT the coverage suite executes deliberately.
+        //
+        // Re-checked from source after a boot where the machine stopped
+        // just after an `hlt` exit, and the claim above holds: vmcs01's
+        // `hlt_exiting` is inside `trap_the_quiet_instructions ? ... : 0`
+        // and that constant is `ZPP_GUEST_TESTS`. **A second-level
+        // guest's HLT never reaches this case either** - vmcs12 asks for
+        // the intercept, `l1_wants_l2_exit` answers `basic_reason::hlt`
+        // with `primary_set(primary_hlt_exiting)`, and the exit is
+        // reflected to the guest hypervisor before the switch is
+        // reached. So one guest idle produces exactly one reflected exit
+        // and no stream, which is what was measured. `BACKLOG.md` has the
+        // boot.
         break;
     }
     case basic_reason::pause: {

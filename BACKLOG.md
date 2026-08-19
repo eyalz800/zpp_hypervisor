@@ -27056,3 +27056,101 @@ next.
 Three switches now, all OFF, each with the boot that refuted it in its
 own comment: `ZPP_DELIVER_SELF_IPI`, `ZPP_INTERCEPT_SELF_IPI`,
 `ZPP_FORCE_DISPATCH_ONCE`.
+
+## The `hlt` lead: the comment had not drifted, and there is no defect here
+
+Chased from source and counters, no boot. The suspicion was that an L1
+`hlt` exposed an untested path of ours. **It does not, and the reasoning
+is worth keeping because the lead was a good one.**
+
+- **vmcs01 does not intercept `HLT`.** `hlt_exiting` appears exactly once
+  in the vmcs01 controls, inside
+  `trap_the_quiet_instructions ? (...) : 0`, and that constant is
+  `ZPP_GUEST_TESTS` - off in every deployed build. The comment in
+  `exit_dispatch.cpp` saying so is **accurate**; after three drifted
+  comments this session it was right to check, and this one had not
+  drifted.
+- **So the observed exit came from vmcs02.** The *second-level* guest
+  executed `HLT` and Hyper-V had asked for the intercept in vmcs12;
+  `l1_wants_l2_exit` answers `basic_reason::hlt` with
+  `primary_set(primary_hlt_exiting)` and the exit is **reflected**. The
+  `[l1-rip]` tag is the reflection, not Hyper-V executing `HLT`.
+- **Which dissolves the inconsistency.** The worry was that a no-op
+  handler plus an enabled control should produce an unbounded stream of
+  `hlt` exits where exactly one was measured. The no-op case in
+  `exit_dispatch.cpp` is never reached for this exit at all - reflection
+  happens first - and **one reflection is exactly what one guest idle
+  produces.** No contradiction, and no defect established.
+
+What is left is a fact about the *stall*, not about this VMM: `hlt`
+occurs **0 times in 17 million second-level entries** of a known-good
+boot, because a guest spinning in `VslpEnterIumSecureMode` never idles.
+The idle path has no coverage because the stall never reaches it - which
+is a consequence, not a cause.
+
+**And it removes the injection story's only mechanism.** The frozen boot
+wrote the synthetic ICR twice and the synthetic EOI twice - **balanced** -
+so there is no measured desynchronisation of the acknowledgement
+protocol. "The injection was incomplete" was a hypothesis, it predicted
+an EOI imbalance, and the imbalance is not there. It stays a hypothesis
+with the common-factor argument behind it and nothing more.
+
+## Link one is not untested. It is untestable from this position.
+
+The gate is trivially fixable - fire after the *N*th self-directed
+request rather than once ever; the stall shows 1,272,847 and the whole
+early boot shows 2, so a threshold of a thousand cannot fire outside the
+stall. **That is not the obstacle.**
+
+The obstacle is that the injection cannot be shown correct:
+
+- Hyper-V holds `0x2f` in its **synthetic** controller. The request
+  arrives as `wrmsr 0x40000071`, and the virtual-APIC page's IRR and ISR
+  were measured **empty** over sixty reads - consistent with the page
+  being used for `VTPR` alone, since virtual-interrupt delivery is off.
+- So the pending state lives in Hyper-V's private memory, in a layout
+  that is not published and that this VMM has no way to locate.
+- Making an injection agree with it would mean writing into that
+  structure - the same class of hazard `publish_reference_tsc`'s comment
+  already rejects: an address resolved through the level above's own
+  tables, written later, with nothing pinning it in between.
+- And two boots that injected both ended in a state the control never
+  reaches, while the control, which injected nothing, did not.
+
+So there is no route from here to a delivery the level above would agree
+happened. **Not untested-and-reachable - unreachable**, and that is a
+different and final result.
+
+## The finding, final
+
+> The guest hypervisor's **pending test and its delivery test disagree**.
+> It holds vector `0x2f` pending for ever, correctly refuses to deliver
+> it - 145,300 requests, zero deliveries, and a virtual task priority
+> never once below `0x20` across 630,418 entries at either trust level -
+> and asserts its trust-level notification on **1.0032 of every**
+> `HvCallVtlCall` because the vector is pending. VTL1 answers that
+> notification by returning with secure-call state `4`,
+> `VslpEnterIumSecureMode` has no case for `4`, and the secure call never
+> retires.
+
+Every field this VMM was able to check is correct: the task priority it
+presents **is** the one the guest set (`0x20` against `CR8 = 2`, from the
+page of the vmcs12 being entered), the extended-page-table roots are kept
+properly separate per trust level, and the registers carrying the state
+byte are propagated faithfully in both directions.
+
+The same disagreement is visible a second time in a mechanism this VMM
+only carries: **interrupt-window exiting armed 328,523 times against zero
+`0x2f` injections**, and that control never consults task priority.
+
+Three experiments establish that it is not reachable from underneath:
+
+| experiment | outcome |
+|---|---|
+| withhold the request | the level above halts - it needs to see it |
+| shorten the round trip | cannot matter: the notification is a level, not an edge |
+| deliver the vector ourselves | cannot be made to agree with a controller we do not own |
+
+**This is not the spinner moving and should not be dressed up as one.**
+It is the mechanism, the reason it is out of reach from this position,
+and the three measurements that close each route.
