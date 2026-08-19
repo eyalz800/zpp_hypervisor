@@ -414,6 +414,48 @@ void hypervisor::apply_time_dilation(std::size_t cpu, std::uint64_t now)
     }
 }
 
+void hypervisor::emit_disk_telemetry(std::size_t cpu)
+{
+    if constexpr (!diag::enabled) {
+        return;
+    }
+
+    if (cpu >= max_cpus) {
+        return;
+    }
+
+    auto now = arch::x86_64::rdtsc();
+
+    if ((now - this->telemetry_last_tsc[cpu]) < telemetry_period_cycles) {
+        return;
+    }
+
+    this->telemetry_last_tsc[cpu] = now;
+
+    // Named `tlm` and fixed in field order so the reader can be a regular
+    // expression rather than a parser. The sequence is first because a
+    // gap in it is the only thing that distinguishes a lost block from a
+    // guest that stopped moving.
+    //
+    // The values are plain loads of counters this VMM already maintains -
+    // no VMREAD, nothing that costs an exit - which matters because
+    // zpp/diag/log.h warns that arguments are evaluated even when the
+    // facility is off.
+    constexpr std::size_t dispatch_vector = 0x2f;
+    constexpr std::size_t clock_vector = 0xd1;
+    constexpr std::size_t ept_violation = 48;
+
+    diag::log<diag::severity::info>(
+        "tlm seq {} 2f {} p00 {} p10 {} ept {} vtl {} clk {}",
+        this->telemetry_sequence[cpu]++,
+        this->l2_injected_vector[cpu][dispatch_vector],
+        this->l2_entry_vtpr[cpu][0x00],
+        this->l2_entry_vtpr[cpu][0x10],
+        this->exit_reason_counts[cpu][ept_violation],
+        this->vtl_switches[cpu][0],
+        this->l2_injected_vector[cpu][clock_vector]);
+}
+
 void hypervisor::resume_guest(std::uint64_t cpuid,
                               arch::x86_64::context & context,
                               arch::x86_64::vmx::exit_reason full_reason,
@@ -692,6 +734,10 @@ void hypervisor::resume_guest(std::uint64_t cpuid,
     // It compiles to nothing when the facility is off: pump::run
     // is `if constexpr (!enabled) return;` and every sink behind it
     // folds away with it.
+    // Before the pump, so a record produced now leaves on this pass
+    // rather than waiting for the next.
+    emit_disk_telemetry(cpuid);
+
     diag::pump::run();
 
     // Keep the timer running while the channel is live, because

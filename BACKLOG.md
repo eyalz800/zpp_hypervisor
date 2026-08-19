@@ -28034,6 +28034,53 @@ monitor on bare metal.**
 move.** `entry_poll.py`'s verdict is not reachable, and nobody should
 expect otherwise.
 
+### The telemetry is written, and the channel it needs is a decision nobody has taken
+
+`hypervisor::emit_disk_telemetry` now exists and emits the five
+`entry_poll.py` counters - the deferred-call vector, entries at `0x00`
+and `0x10`, extended-page-table faults, `vtl_switches` and the clock -
+with a monotonic sequence so **a lost block reads as a gap rather than a
+plateau**, which is the failure this whole investigation kept meeting. It
+samples about every two seconds, twice the poller's resolution because
+the transition it must catch fits inside one 4.1 second bin. It folds
+away entirely with `ZPP_DIAG=OFF`, which is the deployed configuration.
+
+**But it has no channel, and the reason is not what `config.h` says.**
+
+That file's comment says `sink::esp_blocks` stays off "until the loader
+runs the reservation *before* the self test, hands the resolved target to
+it, and the proof write goes to the reserved region", warning that
+enabling it earlier "would corrupt the volume it is supposed to be
+logging to". **All three conditions now appear met** - the fifth stale
+comment found this session:
+
+- `uefi_loader/src/main.cpp` establishes the reservation **before** the
+  self test and says that ordering is load bearing;
+- the hand-over passes `&nvme_selftest::channel` with the resolved target
+  in it, `channel.target = destination`;
+- and the proof write goes to `target.extents[0].first_lba` - the
+  reservation's own LBA - behind a `target.usable()` refusal, not to a
+  hard coded one.
+
+**And it still was not switched on**, for a reason the stale comment does
+not cover: turning it on makes a **real write to a real disk**, and that
+disk is the machine's own NVMe with Windows on it. The evidence above is
+a *reading of the code*, and this file now records five occasions where a
+reading of the code was confidently wrong about what it measured - the
+elidable/elided misreading, the circular per-access unit, 204 microseconds
+that were 15.8, and two stale comments acted on before being checked. The
+cost of being wrong about those three is not a bad number, it is the boot
+volume.
+
+There is also no way to de-risk it by rehearsal: **the rig's disk *is*
+that disk**, passed through by VFIO. A trial on the rig is a trial on the
+real install.
+
+So it is left as: **written, compiled both ways, tested, and switched
+off** - a decision for whoever owns the machine, taken deliberately,
+rather than a side effect of wanting telemetry. What it would buy is
+below.
+
 ### What would make the trip worth more, and it is bounded
 
 Emit the five `entry_poll.py` counters - `l2_injected_vector[0x2f]`,

@@ -5,6 +5,8 @@
 #include "zpp/arch/x86_64/vmx/nested_ept.h"
 #include "zpp/hypervisor/guest_windows.h"
 #include "zpp/hypervisor/hypervisor.h"
+#include "zpp/diag/config.h"
+#include "zpp/diag/log.h"
 #include "zpp/hypervisor/nested_vmx.h"
 #include "zpp/scope_exit.h"
 #include <cstddef>

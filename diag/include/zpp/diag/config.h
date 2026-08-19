@@ -738,6 +738,33 @@ constexpr policy policy_of(sink which)
         // after it. Enabling it before that would corrupt the volume it
         // is supposed to be logging to.
         //
+        // **Re-read 2026-08-19: all three of those conditions now appear
+        // met, so this paragraph is stale about the blocker - but the
+        // switch stays off, and the reason is different from the one
+        // above.**
+        //
+        // What changed: `uefi_loader/src/main.cpp` establishes the
+        // reservation *before* the self test and says the ordering is
+        // load bearing; the hand-over passes `&nvme_selftest::channel`
+        // with the resolved target in it (`channel.target = destination`);
+        // and the proof write goes to `target.extents[0].first_lba` -
+        // the reservation's own LBA - behind a `target.usable()` refusal,
+        // not to a hard coded one.
+        //
+        // Why it is still off: turning it on makes a **real write to a
+        // real disk**, and the disk in question is the machine's own
+        // NVMe with Windows on it. The evidence above is a *reading of
+        // the code*, and this file records three separate occasions this
+        // year where a reading of the code was confidently wrong about
+        // what it measured. The cost of being wrong here is not a bad
+        // number, it is somebody's boot volume.
+        //
+        // So enabling it is a decision for whoever owns the machine,
+        // taken deliberately, and not a side effect of wanting
+        // telemetry. `hypervisor::emit_disk_telemetry` is written and
+        // waiting for it - see `BACKLOG.md` for what it would buy and
+        // what a bare-metal boot reports without it.
+        //
         // The code behind it does not rot while it is off.
         // hypervisor/src/diag/instantiate.cpp explicitly instantiates
         // every sink so the freestanding toolchain compiles all of it

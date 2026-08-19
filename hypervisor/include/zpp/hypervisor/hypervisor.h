@@ -9078,6 +9078,47 @@ private:
      */
     volatile std::uint64_t materialise_reads[max_cpus]{};
 
+    /**
+     * Periodic telemetry to the disk channel, for a machine with no
+     * monitor.
+     *
+     * **Every instrument this project's investigation used goes through
+     * the QEMU monitor, and bare metal has none** - no serial port, no
+     * debugger, and the screen belongs to the guest
+     * (`uefi_loader/src/main.cpp`). Without this a physical boot reports
+     * exactly one bit: does the spinner move.
+     *
+     * What is emitted is the five counters `scripts/entry_poll.py`
+     * samples, because they are what decides the verdict - the deferred
+     * call vector still being delivered, entries still occurring below
+     * DISPATCH, extended-page-table faults still happening, and the
+     * round-trip and tick rates whose ratio is the threshold itself.
+     * Nothing more: every record is disk traffic on the machine under
+     * test.
+     *
+     * The sequence number is not decoration. A lost block has to read as
+     * a **gap** rather than as a plateau, or a silent instrument looks
+     * exactly like a settled guest - which is the failure this whole
+     * investigation kept meeting.
+     * @{
+     */
+    std::uint64_t telemetry_last_tsc[max_cpus]{};
+    std::uint64_t telemetry_sequence[max_cpus]{};
+
+    /**
+     * About two seconds at the rig's measured 1.992 GHz.
+     *
+     * Two rather than the four `entry_poll.py` polls at, because the
+     * transition it has to catch happens at about t=53 and lasts less
+     * than one sample - the poller saw it in a single 4.1 second bin.
+     * Twice the resolution for one record every two seconds, which at
+     * 128 bytes a record fills a 4 KB block about once a minute.
+     */
+    static constexpr std::uint64_t telemetry_period_cycles = 4000000000ull;
+
+    void emit_disk_telemetry(std::size_t cpu);
+    /** @} */
+
     std::uint64_t l2_hypercall_codes[hypercall_code_slots]{};
     std::uint64_t l2_hypercall_code_counts[hypercall_code_slots]{};
     std::uint64_t hypercalls_seen{};
