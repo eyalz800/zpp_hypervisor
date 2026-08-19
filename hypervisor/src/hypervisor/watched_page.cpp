@@ -32,6 +32,7 @@
 #include "zpp/arch/x86_64/vmx/vmcs.h"
 #include "zpp/diag/log.h"
 #include "zpp/hypervisor/hypervisor.h"
+#include "zpp/hypervisor/nested_vmx.h"
 #include <cstdint>
 #include <optional>
 #include <utility>
@@ -227,6 +228,19 @@ bool hypervisor::on_ept_violation(std::size_t cpu,
                                   std::uint64_t guest_physical)
 {
     auto page = guest_physical >> 12;
+
+    // Carried out here because this is the one place it is safe: the
+    // decision is taken in `filter_local_apic_write`, which runs from
+    // *inside* the loop below and cannot drop a watch without clearing the
+    // entry that loop holds a reference to. Acting on it at the top of the
+    // next fault costs one more fault and no reasoning about iterator
+    // lifetime. See `nested_vmx::disarm_apic_watch`.
+    if constexpr (nested_vmx::disarm_apic_watch) {
+        if (this->all_processors_started.load(std::memory_order_relaxed) &&
+            (0 != this->watched_apic_page)) {
+            watch_local_apic(false);
+        }
+    }
 
     for (auto & watch : this->watches) {
         if (!watch.armed || (watch.page != page)) {
