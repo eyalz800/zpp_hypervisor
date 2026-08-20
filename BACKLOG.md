@@ -785,6 +785,69 @@ is not there" and is really "the wrong question was asked". `x` is the
 virtual read. The same distinction is why a wide `xp` over a device BAR
 lied, further down this file.
 
+## KVM has nothing to adopt, and it cannot be what escapes this
+
+**Asked directly, and answered against the sources: there is no mechanism in
+KVM to copy. This is a speed symptom.**
+
+**The decisive fact is that KVM does not implement the mechanism that traps
+us.** `grep -i "vtl|vsm|vina"` over KVM's entire x86 tree returns **nothing**,
+and `HvCallVtlCall`/`HvCallVtlReturn` are absent from `hyperv.c`'s hypercall
+switch. Under the plain-KVM control the identical Hyper-V runs the identical
+virtual-trust-level protocol against the identical Windows. **Only the
+wall-clock cost of a round trip differs.** So "Windows boots on KVM" is not
+evidence of a mechanism KVM has and we lack.
+
+**And KVM's injection path does what ours does, verbatim.**
+`prepare_vmcs02_early` writes `vmcs12->vm_entry_intr_info_field` straight
+through (`nested.c:2488-2504`), as ours does at `nested_entry.cpp:2646`.
+Neither second-guesses the level above. `vmx_interrupt_blocked`
+(`vmx.c:5071-5084`) refuses only for architectural reasons - RFLAGS.IF, an
+interrupt shadow, an event awaiting re-injection - never for policy.
+
+**The three tick-suppression sites KVM does have are host protection, and
+say so:**
+
+- PIT re-injection (`i8254.c:240-266`) withholds while unacknowledged but
+  **accumulates** the backlog in `ps->pending` - the opposite of what would
+  help - and is legacy-PIT only.
+- The LAPIC timer's one-pending-at-a-time (`lapic.c:1902-1908`) is dead on
+  the APICv paths and concerns the emulated LAPIC timer, not this timer.
+- `limit_periodic_timer_frequency` (`lapic.c:1733-1752`) clamps to 200 µs
+  because *"the hrtimers are not throttled by the host scheduler"* - stated
+  host protection. Windows' 1.74 ms is 8.7x above it and the stimer here is
+  mostly one-shot, so it would never fire.
+
+**The one structurally right shape is KVM's Hyper-V lazy-lost-ticks policy**
+(`hyperv.c:812-830`, `:886-889`): a periodic expiry is *discarded* when the
+previous message is unread, and a timer whose message the guest has not
+consumed is **not re-armed**. That is genuine back-pressure keyed on guest
+consumption. But it drops at the **source**, before the message is
+committed, and it serves KVM's own guest - which under `boot-zpp.sh` is this
+VMM, and this VMM does not use synthetic timers at all. The timer that
+livelocks Windows is the one **Hyper-V emulates for VTL0**, and neither KVM
+nor this VMM is on that path in either configuration.
+
+**Architectural coalescing is already free and already happening.** SDM Vol
+3A 13.8.4 - *"Any additional interrupts issued for the same interrupt vector
+are collapsed into the single bit in the IRR"* - so repeated same-vector
+expiries never queue and there is no backlog to drain. There is nothing to
+suppress that is not already suppressed.
+
+**A correction to how the control has been quoted here.** `boot.sh` differs
+from `boot-zpp.sh` in four ways including `hv-passthrough`, so "the same
+Windows with the same VBS boots on plain KVM in five minutes" **understates
+the difference** and is not a single-variable comparison. And ticks per
+virtual-trust-level round trip has never been measured under plain KVM at
+all - the threshold argument in this file is entirely one-sided.
+
+**So the evidence points back where it has pointed since the wall-clock
+split was first read**, and this time with the alternative explicitly
+eliminated rather than merely unexamined: the guest cannot retire two
+instructions between `sti` and the next clock because it has 5-6% of a
+processor, and no hypervisor-side policy - ours or KVM's - changes who wins
+that race.
+
 ## THE DEADLOCK, in the guest's own instructions: preempted at the sti
 
 **Found, and it is not a hypothesis.** `injection_from_rip` /
