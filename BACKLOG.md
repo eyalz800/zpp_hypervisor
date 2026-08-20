@@ -11611,6 +11611,48 @@ eight processors were running outside this VMM entirely, and this file now
 says of that window that no measurement taken in it means anything. It has
 to be re-run in the valid configuration before it can be called a dead end.
 
+## Re-run of ZPP_DELIVER_SELF_IPI in the valid configuration: worse, and differently
+
+The previous result - "one delivery, then a spin" - was void, because it was
+taken while seven of eight processors ran outside this VMM. Re-run on the
+restored eight-processor configuration, `selfipi=1`, everything else as
+deployed. It fails, and **not the way it failed before**, which is the part
+worth keeping.
+
+    CPU 0   RIP 0xfffff80ee39a6b5e   - one byte past `hlt`, the guest idle loop
+    CPU 1-7 RIP 0x7f96b030           - the firmware parking loop
+
+**The application processors never start at all.** In every good run all
+eight come up on this VMM's trampoline, take 284 exits and 17 second-level
+entries each, and report `xapic` in `observed_apic_mode`. Here they never
+leave firmware. CPU 0 reaches `leaves-filled` 104,893 - about a third of the
+299,410 a livelocked run reaches - and then halts in the guest's own idle
+path waiting for an interrupt that never arrives.
+
+Frozen hard: 210,515 -> 210,647 exits across 120 seconds, about one a
+second, with second-level entries and shadow leaves both unchanged. No host
+exception, no unhandled exit, no entry failure. The guest simply went to
+sleep.
+
+So injecting the vector the guest asked for **breaks the start-up IPI
+sequence** rather than merely being unhelpful. That is a coherent story:
+`deliver_self_ipi` injects when the level above staged nothing itself, and
+during bring-up the level above is legitimately staging nothing between an
+INIT and its start-up IPI. Injecting vector 0x2F into that window is not a
+no-op.
+
+**What this does and does not close.** It does not weaken the finding above
+- the guest still asks for a dispatch interrupt every tick and still never
+receives one, and that is still the most likely reason it never advances.
+It closes only the crudest way of answering the request: injecting it from
+here, blind to what the guest hypervisor is doing with its own interrupt
+state. The next attempt has to either understand why Hyper-V declines to
+deliver it, or inject only outside bring-up - and the second is a heuristic
+of exactly the shape that has now failed twice in this file.
+
+The switch stays **off**, and now for a measured reason rather than an
+inherited one.
+
 ## A VMCS access costs 991 cycles at the margin, not 2,800
 
 **The read-reduction work landed exactly the accesses it projected and a
