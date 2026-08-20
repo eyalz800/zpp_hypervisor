@@ -785,6 +785,53 @@ is not there" and is really "the wrong question was asked". `x` is the
 virtual read. The same distinction is why a wide `xp` over a device BAR
 lied, further down this file.
 
+## l2-run% is cumulative, not a rate - and the APIC watch is worth 17.7%
+
+**Every `l2-run%` figure quoted in this file before now is a cumulative
+average since boot, and they are not comparable to each other.** Sampled six
+times, twenty seconds apart, on one unchanged run:
+
+    7.62  7.46  7.32  7.21  7.12  7.05
+
+Monotonically decaying toward a steady state, because it is a running
+average over the whole boot and the early phase - when the guest really does
+work - is being diluted. That is why the same metric read 5.06, 5.42, 7.60,
+7.64 and 7.91 at different moments and those were treated as noise. **They
+were readings at different uptimes.** Same class of error as ring-versus-
+histogram and rate-versus-period, now on the metric this file had just
+declared the only one worth reading.
+
+**Measure it windowed.** `l2_run_cycles`, `l1_run_cycles` and
+`handler_cycles` as deltas over 60 seconds, matched uptime, one variable:
+
+| | watch armed | watch disarmed |
+|---|---|---|
+| **l2-run** | **5.15%** | **6.06%** |
+| l1-run | 16.61% | 15.98% |
+| vmm | 78.24% | 77.96% |
+
+**Dropping the local APIC page watch is worth +17.7% relative to the
+guest's share of the machine.** That is the first change measured in this
+whole investigation to move `l2-run%` at all, and it was previously recorded
+as "no benefit" - because the earlier run measured exits, cycles per round
+trip and `leaves-filled`, and never measured the share.
+
+**And it calibrates the threshold, which had no measurement at all.** The
+disarm buys 17.7% and does **not** unblock the boot. Doubling the per-tick
+budget - +100% - visibly did, taking application processors from 17
+second-level entries to 8,410. So the threshold is **above 17.7% and at or
+below 100%**, which is the first bound either side that rests on measurement
+rather than arithmetic from a retracted timer model.
+
+Two consequences:
+
+- **The 2.8%-to-15.5% reductions were not merely too small, they were below
+  a threshold that is now bounded from below at 17.7%.** They could not have
+  worked and their failure says nothing about whether cost is the variable.
+- Anything proposed from here should be quoted as **percent of `l2-run`,
+  windowed**, and nothing else. `vmm%` moves when `l1-run%` moves; cumulative
+  `l2-run%` moves when the boot ages.
+
 ## The 1.4x target has lost its derivation, and the loop is at a hypercall page
 
 **Two corrections to the framing, before any more work is aimed at it.**
