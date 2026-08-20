@@ -785,6 +785,61 @@ is not there" and is really "the wrong question was asked". `x` is the
 virtual read. The same distinction is why a wide `xp` over a device BAR
 lied, further down this file.
 
+## The timer is LATE by 2.17x, not early. The direction was inverted
+
+**The instrument built to avoid dividing a rate by a period gives the
+opposite answer, and its self-check passes.** `stimer_asked_units` and
+`stimer_given_cycles` record both halves **per arm, on one clock** - the
+guest's periodic `STIMER0_COUNT` write, and the clock vector that answered
+that specific arm:
+
+    asked   17,402.7 x100ns per arm  (1.740 ms, 574.6 Hz)  over 51,012 arms
+    given   37,777.9 x100ns per arm  (3.778 ms, 264.7 Hz)  over 51,012 answered
+    ratio      0.461x   LATE by 2.171x
+    arms asked 51,012, answered 51,012, displaced before an answer 0
+
+Two reasons to trust this over everything above it. The `asked` column
+independently reproduces the 17,400 read out of `rax` at the arming site, to
+0.02% - so the instrument is aimed at the right quantity. And the two arm
+counts are kept apart on purpose: **51,012 against 51,012 with zero
+displaced** is the check that "one vector answered one arm" holds, which is
+the assumption the whole ratio rests on.
+
+**So the guest asks to be interrupted every 1.74 ms and is interrupted every
+3.78 ms.** It is starved of ticks, not drowned in them.
+
+**Everything above that says "over-injection" has the sign backwards**, and
+the reason is now obvious in hindsight: `1,080 injections/s` was divided by
+`574.7 Hz` to get 1.879x. But only **264.7/s** of those injections answer a
+synthetic-timer arm. The other ~815/s of vector `0xd1` are something else
+entirely and were never attributed - they were simply assumed to be the
+guest's clock because they carry the vector the clock uses. **A rate counted
+at one place and a period read at another are not a ratio**, which this file
+already said about the "1213" retirement and then did anyway, twice.
+
+What survives unchanged: the guest's task priority sits at `0xd0`, vector
+`0x2f` is architecturally undeliverable there, and the deferred procedure
+call queue never drains. What changes is *why*. Not "the handler is
+re-entered before it can return" - it has 3.78 ms of wall clock between
+ticks. It is that **the handler cannot finish inside 3.78 ms**, because at
+7.9% of a processor that is only about 300 microseconds of guest execution.
+
+That is the same conclusion cost has been pointing at all along, reached by
+an instrument that could have refuted it. The number to beat is now concrete:
+**the handler needs more than 300 microseconds of guest time and gets that
+much per tick.**
+
+Two further readings from the same section, recorded but not yet understood:
+
+- `STIMER0_CONFIG` reads `0x30008` - **one-shot and DISABLED** - while the
+  arm record calls it periodic. Both cannot be current; one of them is stale
+  and it matters which.
+- The level above's own APIC timer fits at **0.0 MHz over 31 armings**, and
+  the reporter says so rather than printing a plausible number: it is
+  re-arming before expiry, so the interval it *intended* is not the interval
+  it waited. Its last arming of 1,749,348,998 counts is not interpretable
+  until that is resolved.
+
 ## The clock is honest. The 1.879x was our own cost, measured as a ratio
 
 **Read from the failing configuration, which nobody had ever done:**
