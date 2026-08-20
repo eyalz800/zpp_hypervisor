@@ -814,6 +814,20 @@ clock interrupt is delivered two instructions later - before the `call` that
 would drain the deferred-procedure-call queue.** It then re-arms the
 synthetic timer, which is what `to_rip` is, and the cycle repeats.
 
+**Confirmed stable, not a transient.** The landing ring holds the most
+recent sixteen, so "all sixteen identical" could have been one burst. Read
+again after **290,743 further injections** - count 390,119 -> 680,862, same
+guest, same kernel base - `from` and `to` are byte-identical. Every
+injection in that window landed on the same instruction.
+
+**And that pins the cycle exactly.** The guest instruction pointer at
+injection is where the guest will *resume*, so the sequence is: Windows
+returns from the clock handler to `...3692`, the next clock is **already
+pending**, it is taken before `3692` executes, the handler runs, re-arms the
+timer, and returns to `...3692` again. **Windows never executes the
+instruction at `3692`.** It is stuck exactly one instruction short of the
+`call`, and has been for 680,862 interrupts.
+
 **The guest never executes a single deferred procedure call.** That is the
 hang, and every earlier symptom follows from it: no new page touched,
 `leaves-filled` frozen, a narrow instruction-pointer set, the boot spinner
