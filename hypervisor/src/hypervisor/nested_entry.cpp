@@ -1601,6 +1601,22 @@ std::expected<void, zpp::error> hypervisor::build_vmcs02(std::size_t cpu)
         // it goes with the rest because leaving one of these behind is
         // how the last sweep left twenty-two.
         this->host_controls_cache[cpu][7] = cpu + 1;
+
+        // vmcs01's own TSC multiplier, read **here** because here is the
+        // only place in `build_vmcs02` where vmcs01 is still current.
+        // See the declaration: the composition below runs after the
+        // VMPTRLD, so reading the field there returns vmcs02's composed
+        // product and squares the guest hypervisor's half every entry.
+        //
+        // Guarded by the control, because the field does not exist on a
+        // processor that does not offer TSC scaling and a VMREAD of it
+        // would fail there rather than answer.
+        this->host_controls_cache[cpu][8] =
+            (0 !=
+             (this->host_controls_cache[cpu][2] & secondary_tsc_scaling))
+                ? vmcs.read(field::tsc_multiplier)
+                : tsc_scaling_default;
+
         this->host_state_cached[cpu] = true;
     }
 
@@ -2479,9 +2495,14 @@ std::expected<void, zpp::error> hypervisor::build_vmcs02(std::size_t cpu)
     auto scaling12 = (0 != (secondary12 & secondary_tsc_scaling)) &&
                      (0 != (primary12 & primary_tsc_offsetting));
 
-    auto multiplier01 = (0 != (secondary01 & secondary_tsc_scaling))
-                            ? vmcs.read(field::tsc_multiplier)
-                            : tsc_scaling_default;
+    // **Not a VMREAD.** vmcs02 is current by now, so reading
+    // `tsc_multiplier` here would return the last entry's composed
+    // product rather than vmcs01's own - the same shape of mistake the
+    // offset above avoids by taking `dilation_offset`, and the reason
+    // this is cached from vmcs01 in the fill above. KVM reaches for
+    // `vcpu->arch.l1_tsc_scaling_ratio` in `kvm_calc_nested_tsc_
+    // multiplier` for exactly this reason and never reads the VMCS.
+    auto multiplier01 = this->host_controls_cache[cpu][8];
     auto multiplier12 = scaling12 ? shadow.read(field::tsc_multiplier)
                                   : tsc_scaling_default;
 

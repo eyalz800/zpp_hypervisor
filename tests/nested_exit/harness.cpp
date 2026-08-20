@@ -5985,6 +5985,281 @@ static void test_injection_against_activity_state()
           "offered, and IA32_VMX_MISC says so");
 }
 
+// ------------- 16. the time-stamp counter composition
+/**
+ * What a second-level guest's `rdtsc` returns, composed across the two
+ * levels.
+ *
+ * Nothing tested this and it was the primary suspicion in a whole
+ * investigation: a 1.74 ms periodic timer that the level above expires
+ * after 0.926 ms has exactly the shape of a counter offset applied
+ * inconsistently across a calibration interval. The arithmetic is KVM's
+ * `kvm_calc_nested_tsc_offset` and `kvm_calc_nested_tsc_multiplier`, and
+ * the property that matters here is not the algebra - it is that
+ * **neither input may be read out of vmcs02**.
+ *
+ * `build_vmcs02` does its VMPTRLD before it composes, so a read of
+ * `tsc_offset` or `tsc_multiplier` at the composition site returns the
+ * *previous entry's composed value*. Composing that again accumulates,
+ * once per entry, at whatever rate rebuilds happen to occur - which is a
+ * clock that drifts and a timer that expires early, and it would have
+ * looked exactly like the defect being chased.
+ *
+ * The offset avoided it by taking `dilation_offset`; the multiplier did
+ * not, and read vmcs02. That was harmless only because this VMM never
+ * asks for TSC scaling in vmcs01, so the branch was dead. These cases
+ * assert both halves against a *genuinely separate* vmcs02 region, which
+ * is the only arrangement in which the two can disagree - with
+ * `vmcs02_physical` left at zero the shim keeps one region and every
+ * case here would pass without testing anything.
+ */
+static void test_tsc_composition()
+{
+    std::println("\nthe time-stamp counter composition across levels");
+
+    namespace vmx = zpp::arch::x86_64::vmx;
+
+    constexpr std::uint64_t primary_tsc_offsetting = 1ull << 3;
+    constexpr std::uint64_t secondary_tsc_scaling = 1ull << 25;
+    constexpr std::uint64_t scaling_default = 1ull << 48;
+
+    zpp::arch::x86_64::context registers{};
+
+    // vmcs01 and vmcs12 in place, vmcs02 a region of its own, and the
+    // once-per-processor control cache re-filled from *this* vmcs01.
+    // Without clearing `host_state_cached` the cache would answer with
+    // whatever the first case in the whole harness left there.
+    auto compose_over = [&](std::uint64_t primary01,
+                            std::uint64_t secondary01,
+                            std::uint64_t multiplier01,
+                            std::uint64_t primary12,
+                            std::uint64_t secondary12,
+                            std::uint64_t offset12,
+                            std::uint64_t multiplier12) {
+        auto own = std::uint64_t{0x1000};
+        static_cast<void>(vmx::vmptrld(&own));
+
+        auto & vmcs = hv().vmcs;
+        vmcs.write(field::pin_based_vm_execution_controls, own_pin);
+        vmcs.write(field::primary_processor_based_vm_execution_controls,
+                   primary01);
+        vmcs.write(field::secondary_processor_based_vm_execution_controls,
+                   secondary01);
+        vmcs.write(field::vm_exit_controls, own_exit);
+        vmcs.write(field::vm_entry_controls, own_entry);
+        vmcs.write(field::vpid, cpu + 1);
+        vmcs.write(field::tsc_multiplier, multiplier01);
+
+        auto & shadow = hv().guest_vmcs12[cpu];
+        shadow.write(field::pin_based_vm_execution_controls, pin_default1);
+        shadow.write(field::primary_processor_based_vm_execution_controls,
+                     primary12);
+        shadow.write(
+            field::secondary_processor_based_vm_execution_controls,
+            secondary12);
+        // `asked_controls`' own defaults: the host-address-space-size
+        // bit is not optional here, since a guest hypervisor without it
+        // is a 32-bit one and `build_vmcs02` refuses outright.
+        shadow.write(field::vm_exit_controls,
+                     exit_default1 | exit_host_address_space_size);
+        shadow.write(field::vm_entry_controls, entry_default1);
+        shadow.write(field::tsc_offset, offset12);
+        shadow.write(field::tsc_multiplier, multiplier12);
+
+        hv().host_state_cached[cpu] = false;
+        hv().vmcs12_controls_captured = 0;
+
+        return hv().build_vmcs02(cpu);
+    };
+
+    auto fresh = [&] {
+        reset(registers);
+        hv().vmcs02_physical[cpu] = 0x2000;
+        hv().vmcs02_launched[cpu] = false;
+        hv().guest_state_deferred[cpu] = false;
+        hv().dilation_offset[cpu] = 0;
+        hv().tsc_offset_from_guest[cpu] = 0;
+        hv().forget_vmcs02_contents(cpu);
+    };
+
+    // ------------------------------------------- the production shape
+    //
+    // This VMM offsets nothing - `setup_vmcs` names "use TSC offsetting"
+    // only when `ZPP_TIME_DILATION` is on - so vmcs02 must carry the
+    // guest hypervisor's own field verbatim and a second-level `rdtsc`
+    // must read exactly what it would with this VMM absent. Anything
+    // else here is a lie about time told to a guest that never asked for
+    // one, and it is the shape a 1.879x timer error would take.
+    {
+        fresh();
+
+        auto built =
+            compose_over(own_primary,
+                         0,
+                         scaling_default,
+                         primary_default1 | primary_tsc_offsetting,
+                         0,
+                         0x1234,
+                         scaling_default);
+
+        check(built.has_value(), "the pass-through case builds");
+        check(0x1234 == hv().vmcs.read(field::tsc_offset),
+              "with this VMM offsetting nothing, vmcs02 carries the guest "
+              "hypervisor's offset verbatim - a second-level rdtsc reads "
+              "what it would with this VMM absent");
+        check(0x1234 == hv().tsc_offset_from_guest[cpu],
+              "and the guest hypervisor's half is kept, so "
+              "apply_time_dilation can refresh the sum on an entry that "
+              "does not rebuild");
+    }
+
+    // ---------------------------------- and it does not accumulate
+    //
+    // The failure this whole case exists for: composing a value read
+    // back out of vmcs02 adds the guest hypervisor's half again on every
+    // entry, so the second-level counter runs away at the rebuild rate.
+    // A single entry cannot see it; two can.
+    {
+        for (int i{}; i < 4; ++i) {
+            static_cast<void>(
+                compose_over(own_primary,
+                             0,
+                             scaling_default,
+                             primary_default1 | primary_tsc_offsetting,
+                             0,
+                             0x1234,
+                             scaling_default));
+        }
+
+        check(0x1234 == hv().vmcs.read(field::tsc_offset),
+              "four entries later vmcs02 still carries 0x1234 - the "
+              "offset is composed from what this VMM owns, never from "
+              "the field the last entry left in vmcs02");
+    }
+
+    // ------------------------------------ both levels offsetting
+    //
+    // KVM's `kvm_calc_nested_tsc_offset` with an unscaled second level:
+    // `nested_offset = l1_offset; nested_offset += l2_offset`.
+    {
+        fresh();
+        hv().dilation_offset[cpu] = 0x100;
+
+        auto built =
+            compose_over(own_primary | primary_tsc_offsetting,
+                         0,
+                         scaling_default,
+                         primary_default1 | primary_tsc_offsetting,
+                         0,
+                         0x1234,
+                         scaling_default);
+
+        check(built.has_value(), "the two-offset case builds");
+        check(0x1334 == hv().vmcs.read(field::tsc_offset),
+              "vmcs02 carries the sum of both levels' offsets, which is "
+              "KVM's kvm_calc_nested_tsc_offset for an unscaled second "
+              "level");
+    }
+
+    // ------------------------- the guest hypervisor's offset is gated
+    //
+    // `vmx_get_l2_tsc_offset` returns zero unless vmcs12 sets "use TSC
+    // offsetting". A field the processor would ignore must not be added.
+    {
+        fresh();
+        hv().dilation_offset[cpu] = 0x100;
+
+        static_cast<void>(
+            compose_over(own_primary | primary_tsc_offsetting,
+                         0,
+                         scaling_default,
+                         primary_default1,
+                         0,
+                         0x1234,
+                         scaling_default));
+
+        check(0x100 == hv().vmcs.read(field::tsc_offset),
+              "a vmcs12 offset with the control clear is ignored, as "
+              "vmx_get_l2_tsc_offset ignores it");
+        check(0 == hv().tsc_offset_from_guest[cpu],
+              "and nothing is kept for apply_time_dilation to re-add");
+    }
+
+    // ------------------- the multiplier comes from vmcs01, not vmcs02
+    //
+    // **The regression this file was opened for.** vmcs02 is seeded with
+    // a multiplier that is not vmcs01's; before the fix the composition
+    // read the current VMCS - vmcs02 - and wrote the seed straight back,
+    // so a real machine with TSC scaling in vmcs01 would have squared
+    // the guest hypervisor's half on every entry.
+    //
+    // vmcs01 is where the control can be set at all: `build_vmcs02`
+    // refuses a vmcs12 that names TSC scaling, because
+    // `supported_secondary_controls` does not offer bit 25 and
+    // `within_capability` checks vmcs12 against the narrowed MSR. That
+    // is asserted in its own case below.
+    {
+        fresh();
+
+        constexpr std::uint64_t seed = 0x7777ull << 32;
+        constexpr std::uint64_t ours = 3ull << 48;
+
+        auto region = std::uint64_t{0x2000};
+        static_cast<void>(vmx::vmptrld(&region));
+        hv().vmcs.write(field::tsc_multiplier, seed);
+
+        auto built =
+            compose_over(own_primary,
+                         secondary_tsc_scaling,
+                         ours,
+                         primary_default1 | primary_tsc_offsetting,
+                         0,
+                         0x1234,
+                         scaling_default);
+
+        check(built.has_value(), "the vmcs01-scaling case builds");
+        check(ours == hv().vmcs.read(field::tsc_multiplier),
+              "vmcs02's multiplier is vmcs01's own, not the value vmcs02 "
+              "happened to hold - the composition runs after the VMPTRLD, "
+              "so reading the current VMCS there reads the last entry's "
+              "answer and compounds it");
+        check(seed != hv().vmcs.read(field::tsc_multiplier),
+              "and specifically not the seed, which is what a read of the "
+              "current VMCS would have returned");
+    }
+
+    // ------------------- a vmcs12 asking to scale is refused outright
+    //
+    // Which is what makes every branch above that consults `multiplier12`
+    // unreachable today. If this case ever fails, bit 25 has been added
+    // to `supported_secondary_controls` and the scaling arithmetic has
+    // become live - go and test it properly rather than deleting this.
+    {
+        fresh();
+
+        auto built =
+            compose_over(own_primary,
+                         0,
+                         scaling_default,
+                         primary_default1 | primary_tsc_offsetting |
+                             primary_secondary_controls,
+                         secondary_tsc_scaling,
+                         0x1234,
+                         2ull << 48);
+
+        check(!built.has_value(),
+              "a guest hypervisor naming TSC scaling is refused - the "
+              "capability MSRs never offered bit 25, so the scaling half "
+              "of the composition is unreachable and cannot be the source "
+              "of a clock error");
+    }
+
+    // Back to one region, so nothing after this inherits two.
+    hv().vmcs02_physical[cpu] = 0;
+    hv().host_state_cached[cpu] = false;
+    reset(registers);
+}
+
 int main()
 {
     // The real host page table, filled with an identity mapping over the
@@ -6023,6 +6298,7 @@ int main()
     test_the_rest_of_vmcs02();
     test_the_measured_control_words();
     test_injection_against_activity_state();
+    test_tsc_composition();
 
     std::println("\n{} checks, {} failures", g_checks, g_failures);
 

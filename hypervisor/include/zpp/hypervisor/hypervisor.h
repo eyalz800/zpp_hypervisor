@@ -8518,7 +8518,32 @@ private:
      * @{
      */
     std::uint64_t host_state_cache[max_cpus][24]{};
-    std::uint64_t host_controls_cache[max_cpus][8]{};
+
+    /**
+     * Nine words: the pin, primary and secondary controls, the exit
+     * controls, the exception bitmap, the two control-register masks,
+     * the VPID, and **vmcs01's own TSC multiplier**.
+     *
+     * The last one is here rather than read where it is used, and that
+     * is correctness rather than a saving. `build_vmcs02` composes the
+     * two levels' multipliers *after* its VMPTRLD, so a read of
+     * `tsc_multiplier` there returns **vmcs02's** field - the previous
+     * entry's composed product - and composing that again would square
+     * the guest hypervisor's half on every entry. The same mistake in
+     * the offset path was found and fixed by taking the value from a
+     * member this VMM owns; this is that fix applied to the multiplier,
+     * and it is what KVM does too - `kvm_calc_nested_tsc_multiplier`
+     * takes `vcpu->arch.l1_tsc_scaling_ratio`, never a VMCS read.
+     *
+     * Harmless today only because this VMM never asks for TSC scaling in
+     * vmcs01 - `setup_vmcs` does not name the control, and `adjust_msr`
+     * cannot add one: SDM A.3.3 says of IA32_VMX_PROCBASED_CTLS2 that
+     * "bits 31:0 indicate the allowed 0-settings of these controls.
+     * These bits are always 0", so no secondary control is ever forced
+     * on. The branch that read the field was therefore dead, which is
+     * exactly how a latent bug of this shape survives being read.
+     */
+    std::uint64_t host_controls_cache[max_cpus][9]{};
     bool host_state_cached[max_cpus]{};
 
     /**
