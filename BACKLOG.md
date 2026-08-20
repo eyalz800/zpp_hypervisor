@@ -538,6 +538,75 @@ thing to measure, because every named item has either been optimised, tested
 and rejected, or shown too small - and 1.4x cannot come from what is left
 named.
 
+## The accounting is closed, and it corrects two errors in my own arithmetic
+
+**`--- outside the split` reads -341 cycles, -0.1%.** The six adjacent
+intervals sum to `handler_cycles` on the running guest, so the round trip is
+now fully accounted for the first time. `l2-run%` has also risen 5.47 ->
+7.64 as the session's fixes accumulated.
+
+**Two errors in the figures this file quoted before, both mine:**
+
+1. **Six rows were double counted.** `copy_vmcs12_to_shadow` and
+   `vmptrld->vmcs01` nest inside `reflect_l2_exit`; `merge_nested_bitmaps`,
+   `vmptrld->vmcs02` and `shadow_ept_pointer_for` inside `build_vmcs02`.
+   56,892 cycles counted twice, so the named total was ~329,000 and not
+   384,000.
+2. **The denominator included the guests.** Phases live inside
+   `handler_cycles`, which is 78.12% of the round trip - about 610,000
+   cycles, not 780,707. The other 21.88% is Hyper-V and Windows *executing*,
+   which is the quantity this whole exercise exists to increase. "Half the
+   round trip is unattributed" was wrong on both counts; the real figure was
+   281,000 cycles, 46% of our own handler.
+
+**The yardstick in cycles**, which is what should have been used from the
+start: one point of the 78.12% is 7,807 cycles a round trip, so 1.4x means
+removing **172,700 cycles from every round trip**.
+
+### Where it actually goes (582,513 handler cycles/RT)
+
+    exit: prologue                    43,388   7.4%
+    exit: dispatch          self      73,966  12.7%
+      reflect_l2_exit       self       4,611
+        save_l2_state                 53,959   9.3%
+        load_l1_host_state            43,689   7.5%
+        exit information              31,476   5.4%
+        reflect: exit ring            12,883   2.2%
+      on_guest_vmlaunch     self      75,916  32.2%   <- see below
+        build_vmcs02        self         262
+          merge_nested_bitmaps        19,088   3.3%
+
+**And a third error, caught only by reading the reporter's own warning.**
+`on_guest_vmlaunch`'s self of 75,916 looks like the largest unexplained item
+in the tree and is not: `copy_shadow_to_vmcs12` is **cross-cutting** - more
+than one caller, so the reporter deliberately does not subtract it from any
+parent - and it is **58,046 cycles a round trip**, sitting inside that
+number. The genuinely unexplained residue there is about **17,870**. The
+reporter says "Do not add them to the tree" in as many words, and the first
+reading of it did exactly that. That warning earned its place.
+
+### The largest concrete item nobody had costed
+
+The two shadow-VMCS copies together are **84,796 cycles a round trip, 14.6%
+of this VMM**, and the split shows where:
+
+    copy_shadow_to_vmcs12   58,046   of which  field reads   38,067
+    copy_vmcs12_to_shadow   26,750   of which  field writes   8,370
+                                     plus 4 x VMPTRST/VMPTRLD/VMCLEAR ~17,400
+
+`copy in: field reads` alone is 35,716 cycles a call for nine to eleven
+fields - about **3,500 cycles a field**, against the 991 a plain VMREAD
+costs at the margin. That gap is unexplained and is the most interesting
+number in the table.
+
+**And the instruction blind spot behind it:** `vmcs_reads_taken` and
+`vmcs_writes_taken` count only `vmcs::read` and `vmcs::write`, so **every
+VMPTRLD, VMPTRST, VMCLEAR, INVEPT and INVVPID has always been invisible** to
+the access census. Phase 6 prices a single VMPTRLD at 5,673 against a
+VMREAD's 991. The "110.6 accesses a round trip" every estimate in this file
+rests on excludes roughly a dozen instructions that each cost several times
+more than the ones it counts.
+
 ## Windows gets 5.47% of the machine. This VMM takes 78.12%
 
 **The number that reframes everything above, and it was already in the state
