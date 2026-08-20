@@ -11653,6 +11653,46 @@ of exactly the shape that has now failed twice in this file.
 The switch stays **off**, and now for a measured reason rather than an
 inherited one.
 
+## The next stall after the clock: a rendezvous nobody can answer
+
+With `reftsc=0` the guest advances, then stops again in a **different**
+place, and it is worth knowing what that place is before the clock scale is
+repaired, so the repair is not credited or blamed for it.
+
+Where the processors are, several minutes apart and unchanged:
+
+    CPU 0   0xfffff80364da843d   hvix64's VM-exit handler - busy
+    CPU 1   0xfffff803a3f5b1e1   ntoskrnl - frozen at one address
+    CPU 2-7 0xfffff80364da6b5e   one byte past `hlt`, the idle loop
+
+CPU 1's code is a spin-wait, and the guest global it polls is the whole
+story:
+
+    b1df: f3 90                 pause
+    b1e1: 8b 05 a9 ba 46 00     mov  eax, [rip+0x46baa9]
+    b1e7: 85 c0                 test eax, eax
+    b1e9: 89 44 24 38           mov  [rsp+0x38], eax
+    b1ed: 75 ad                 jne  b19c          ; loop while non-zero
+
+The target is `0xfffff803a43c6c90`, and it reads **1 on every sample**. So
+CPU 1 waits for a flag to be cleared and it never is, while six processors
+are halted and the seventh is inside the clock handler. That is a
+cross-processor rendezvous whose other participants are asleep.
+
+**Two cautions on this reading, because both nearly bit.** The first address
+computed for the RIP-relative target was wrong by 0x5000 and read a page of
+plausible zeros - the wrong-reader failure this file already documents
+twice, caught only by re-doing the arithmetic. And "the flag is 1" is worth
+nothing from one sample; it is 1 on three, four seconds apart.
+
+**What it suggests, unproven:** the processors that would answer the
+rendezvous are parked in the guest hypervisor's idle loop and are woken by
+inter-processor interrupt - and interrupt delivery is precisely what is
+still wrong here. So this may be the same defect one level along rather than
+a new one. It is *not* evidence that the clock repair is insufficient, and
+it should be re-measured once the scale is correct rather than attacked on
+its own.
+
 ## The reference scale is fitted when it is defined, and validated against itself
 
 **Why the published scale is wrong, from reading the code and the census
