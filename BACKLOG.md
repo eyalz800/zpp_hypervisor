@@ -785,6 +785,61 @@ is not there" and is really "the wrong question was asked". `x` is the
 virtual read. The same distinction is why a wide `xp` over a device BAR
 lied, further down this file.
 
+## The guest asks for 1,304 us and gets 1,265. The ISR eats 96% of its period
+
+**The arm ring, read in time order, is the cleanest timing measurement in
+this investigation** - both halves on one clock, with the guest's own
+requested value beside the interval it actually got. `stimer_arm_value` /
+`stimer_arm_tsc` / `stimer_arm_kind`, 32 entries, ordered by timestamp:
+
+    expiry-vector 209
+      +47 us    periodic-arm  5,173,195,659
+      +1257 us  expiry-vector 209
+      +47 us    periodic-arm  5,173,208,697
+      +1257 us  expiry-vector 209
+      +47 us    periodic-arm  5,173,221,737
+      ...
+
+Successive arm values differ by **13,034 to 13,298 units of 100 ns - about
+1,304 microseconds**. The measured interval between expiries is **1,256 to
+1,283 microseconds**.
+
+**So the guest asks for 1,304 us and is given about 1,265 us: correct to
+roughly 3%.** Measured with the asked value and the delivered interval side
+by side on one clock, which is what every earlier attempt at this ratio
+failed to do. **Every remaining "the timer is delivered wrongly" theory is
+dead** - early, late, over-injected, coalesced, or otherwise.
+
+**And it gives the budget, which nothing until now has.** The guest re-arms
+**47 microseconds** after each expiry and the next expiry arrives 1,257
+microseconds later. Since the injection always lands at the same instruction
+- the one after the handler returns - the handler must be consuming
+essentially the whole interval:
+
+    period asked      1,304 us
+    interval given    1,265 us
+    re-arm at         +47 us
+    handler consumes  ~1,257 us, about 96% of its own period
+    margin            ~47 us
+
+**That replaces the retracted 1.4x with something measured.** The question is
+not "how much faster must this VMM be" in the abstract - it is that the
+second-level guest's clock handler needs to finish in meaningfully less than
+1,304 microseconds of wall clock, and today it finishes in about 1,257.
+
+Two cautions on reading this, both visible in the same ring:
+
+- **The interval is not uniform.** Most gaps are ~1,260 us, but the ring also
+  holds 2,616, 3,371, 4,626 and 4,676 microsecond gaps. In those the guest
+  had multiples of its budget, so whatever it does with the slack is *not*
+  simply "make progress" - or `leaves-filled` would move, and it does not.
+  **A pure margin argument does not explain the larger gaps**, and any
+  proposal resting on margin alone has to account for them.
+- The arm values step by about 13,040 while the *periodic* arm recorded
+  elsewhere is 17,400. These are one-shot deadlines advancing by a computed
+  delta, not the 1.74 ms period, which is consistent with the earlier finding
+  that STIMER0 is used one-shot with absolute expiry.
+
 ## One withheld clock interrupt wedges the guest. The protocol allows zero
 
 **The last mechanism-based idea, built, run, and refuted in ninety seconds -
