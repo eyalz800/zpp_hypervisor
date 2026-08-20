@@ -11653,6 +11653,57 @@ of exactly the shape that has now failed twice in this file.
 The switch stays **off**, and now for a measured reason rather than an
 inherited one.
 
+## The clock is injected 1.58x too often, and that is the deadlock
+
+**Measured, and it names a mechanism rather than a cost.** The vector census
+on a settled eight-processor guest, as a 60-second delta on CPU 0:
+
+| vector | rate | what it is |
+|---|---|---|
+| `0xd1` | **906/s** | the clock interrupt, injected into vmcs02 |
+| `0x40` | 120/s | |
+| `0x2f` | **0/s**, frozen at 39 since early boot | the dispatch interrupt the guest keeps asking for |
+
+Against a tick the guest itself programmed at **574.7 Hz**. So the clock
+interrupt is being delivered **1.58 times more often than the guest asked
+for it**.
+
+The rest follows without any further assumption, and every number is
+measured:
+
+- The guest asks for vector `0x2f` **129,326 times, 100% of its requests**,
+  and its task priority is `0xd0` on 100% of them.
+- `0xd0` is priority class 13. `0x2f` is class 2. An interrupt is delivered
+  only when its class exceeds the task priority's, so **`0x2f` is
+  architecturally undeliverable at that priority** and the guest hypervisor
+  is right to refuse it - 39 deliveries against 129,326 asks.
+- Task priority `0xd0` is IRQL 13, **CLOCK_LEVEL**. The guest is inside its
+  clock interrupt handler, permanently.
+- `0xd1` is the clock vector, and it is *injected* - event injection through
+  the VM-entry interruption-information field, which is not subject to the
+  task priority at all. So the handler is re-entered before it can return.
+
+**That closes the loop: the clock ISR is restarted 906 times a second, IRQL
+never falls below DISPATCH, and the dispatch interrupt the guest needs in
+order to drain its deferred procedure call queue can never be delivered.**
+
+**This is why every cost reduction failed.** The injection rate is set by
+*time*, not by what a round trip costs, so making the round trip cheaper
+changes how many times the guest spins between clock interrupts and nothing
+else. Three interventions, 2,206 -> 2,533 -> 2,609 round trips a second,
+`leaves-filled` never moving - all consistent with this and none of them
+able to touch it.
+
+It also retires "the handler is too slow to finish inside its period" as the
+framing. The handler is not merely slow; **it is being restarted more often
+than the guest asked to be interrupted**. 1.58x is not a rounding error and
+is not explained by our per-exit cost.
+
+The question is now: what makes the level above fire a 574.7 Hz periodic
+timer at 906 Hz. The clock the guest hypervisor uses to decide a timer has
+expired is the first suspect, and `publish_reference_tsc` is the switch that
+hands it one.
+
 ## A VMCS access costs 991 cycles at the margin, not 2,800
 
 **The read-reduction work landed exactly the accesses it projected and a
