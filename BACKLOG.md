@@ -538,6 +538,53 @@ thing to measure, because every named item has either been optimised, tested
 and rejected, or shown too small - and 1.4x cannot come from what is left
 named.
 
+## Telling the guest hypervisor the TSC frequency: it never asks
+
+**Checked and rejected before building anything.** The reasoning was sound
+and the premise was false, which is worth recording so it is not re-derived.
+
+The timer expires 1.879x early with a provably correct reference page, so
+the level above must be calibrating elapsed time some other way. It sees
+`ZppZppZppZpp` rather than `Hv#1` - `announce_hypervisor` follows
+`evmcs_offered`, which is off - so it will not take Hyper-V enlightenments
+from us and must time natively. And CPUID.15H **reads zero on this rig**,
+confirmed by the reference-page diagnostic printing `(FALLBACK, measured at
+the wall; CPUID.15H read zero)`, because QEMU's `cpu_x86_cpuid` has no case
+for 0x15 or 0x16 and returns zero by default.
+
+So the obvious move is to synthesise leaf 0x15 with the frequency **we
+already know** - 1,992,000,000 Hz, measured at the wall and agreeing with
+24 MHz x 83 for this part - and let the level above compute the truth
+instead of guessing.
+
+**It never asks.** The CPUID census over 32,943 recorded accesses:
+
+    0x00000000   171
+    0x00000001   336
+    0x0000000b     4
+    0x80000000     1
+
+Four leaves. **No 0x15, no 0x16, ever.** A leaf nobody queries cannot be
+the channel, and answering it would have changed nothing while looking like
+a fix.
+
+That leaves the calibration source unidentified. What has *not* been
+excluded, in the order worth trying:
+
+- **A platform timer** - the ACPI power-management timer or HPET, calibrated
+  against RDTSC over an interval. Under a VMM taking 78% of the machine the
+  two clocks still measure the same real time, so this should be *robust* -
+  unless the guest's own RDTSC is being offset inconsistently, which is the
+  next item.
+- **Our TSC offsetting.** If vmcs02's TSC offset is applied inconsistently
+  across a calibration interval, the guest's measured tick delta is wrong by
+  exactly a constant factor - which is the shape of a 1.879x error. Note the
+  latent bug already recorded against `multiplier01`, which reads vmcs02's
+  multiplier after the VMPTRLD rather than vmcs01's; dead on this part for
+  want of TSC scaling, but it shows this area has been got wrong before.
+- **A fixed assumption** baked into the level above for a nested
+  configuration, in which case nothing here reaches it.
+
 ## An uninterrupted hour: 27 million exits, zero new pages. It is stuck
 
 **The "it may simply need an hour" hypothesis is refuted by direct
