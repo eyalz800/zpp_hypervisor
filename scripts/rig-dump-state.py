@@ -771,13 +771,26 @@ def dump_priority(args, elf, instance):
 
         # Cumulative, and measured to be almost entirely early-boot
         # residue: over a steady-state window this does not move at
-        # all, because the settled guest is never below DISPATCH. Read
-        # it as a delta between two dumps or not at all.
+        # Read it as a delta between two dumps or not at all.
+        #
+        # **This used to say "the settled guest never goes below
+        # DISPATCH, so this is early-boot residue". That was wrong, and
+        # wrong in the direction that hides a live fault.** Measured on a
+        # settled guest: 81,895 -> 83,747 across sixty seconds, **30.9 a
+        # second and climbing**. The guest does go below DISPATCH, tens
+        # of times a second, and on every one of those entries the level
+        # above staged no event while the deferred-call vector it had
+        # asked for was outstanding.
+        #
+        # The counter undercounts by construction - the site tests the
+        # task priority, which is a lower bound on the processor
+        # priority - so every entry counted is one the interrupt
+        # certainly could have been delivered on.
         print(f"\n  entries carrying nothing while the priority would "
               f"have admitted a deferred call: "
               f"{word('l2_low_priority_no_event', cpu):,} "
-              f"(cumulative - read as a delta; the settled guest never "
-              f"goes below DISPATCH, so this is early-boot residue)")
+              f"(cumulative - READ AS A DELTA. Non-zero growth is a live "
+              f"fault, not residue: measured 30.9/s on a settled guest)")
 
         for member, what in (
                 ("interrupt_request_vector",

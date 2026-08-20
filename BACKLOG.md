@@ -785,6 +785,60 @@ is not there" and is really "the wrong question was asked". `x` is the
 virtual read. The same distinction is why a wide `xp` over a device BAR
 lied, further down this file.
 
+## The guest DOES drop below DISPATCH, 31 times a second, and gets nothing
+
+**Two corrections, one of them mine and one in the tree, and together they
+change what the fault is.**
+
+**Mine first: "task priority is 0xd0 on 100% of 129,322 samples" is
+tautological.** The member is `interrupt_request_vtpr_seen` - "task priority
+*when it asked*" - and the guest asks from inside its clock handler. Of
+course it reads CLOCK_LEVEL there. That instrument cannot see the priority
+at any other moment, so it never supported "the guest never leaves
+CLOCK_LEVEL", which this file asserted from it repeatedly.
+
+**And `l2_entry_ppr` cannot settle it either**, though for an honest reason:
+it reads `0x00` on 100% of 6,855,149 entries and the reporter says why in
+its own heading - *"NOT MAINTAINED - expect 0x00, see SDM 32.1.1"*. The
+virtual-APIC processor priority is only maintained under APIC
+virtualization, which this VMM does not offer. A good instrument that says
+so.
+
+**The tree's, which was hiding a live fault.** `l2_low_priority_no_event`
+counts entries where the level above staged **no event** and the guest's
+task priority was **below DISPATCH class**, so the deferred-call interrupt
+could certainly have been delivered. The dump labelled it *"the settled
+guest never goes below DISPATCH, so this is early-boot residue"*.
+
+Measured as the delta it asks for, on a settled guest:
+
+    t=0    81,895
+    t=60   83,747
+    delta   1,852  =  30.9 a second, climbing
+
+**Not residue. The guest goes below DISPATCH about thirty-one times a
+second**, and on every one of those entries nothing was delivered while the
+vector it had asked for was outstanding. The counter **undercounts** by
+construction - the site tests the task priority, a lower bound on the
+processor priority - so every entry it counts is one the interrupt certainly
+could have taken.
+
+**What that makes the fault.** Against 46 deliveries a second, there are
+~31 further opportunities a second being passed up: roughly **40% of the
+moments when the guest could have taken its deferred-call interrupt are
+going unused.** So this is not "the guest never leaves CLOCK_LEVEL and
+therefore cannot be interrupted" - it leaves, often, and is *still* not
+given the vector.
+
+The event comes out of vmcs12's own entry-interruption field and is copied
+into vmcs02, so the choice is the level above's, not ours - unless we are
+failing to carry what it staged, which `l2_given_vector` reads back from
+vmcs02 at the last instruction before entry precisely to rule out. That
+read-back is the thing to check next.
+
+The dump's label is corrected in `scripts/rig-dump-state.py`, because a
+wrong label on a live counter is how this stayed invisible.
+
 ## The hot loop is the clock ISR, and 96% of its DPC requests never arrive
 
 **`profile_contexts[32]` captures rip, rax, rcx, rdx, rbx, rsi, rdi and r8
