@@ -752,6 +752,39 @@ thing to measure, because every named item has either been optimised, tested
 and rejected, or shown too small - and 1.4x cannot come from what is left
 named.
 
+## Verified from guest memory: the level above is hvix64.exe
+
+Asked directly, and worth having written down because every conclusion in
+this file assumes it. Not inferred from behaviour - read out of the running
+guest's own PE headers.
+
+The application processors idle at `0xfffff83f3ada6b5e`. Scanning back on
+64 kB boundaries for a PE signature finds `MZ` at **`0xfffff83f3aa00000`**,
+so the idle loop is at image offset `0x3a6b5e`. From there:
+
+    e_lfanew                 0xf8
+    DataDirectory[6] (Debug) RVA 0x11160, size 0x70
+    debug entry 0: type 2    (IMAGE_DEBUG_TYPE_CODEVIEW), raw at RVA 0x14350
+    CodeView record:  "RSDS"
+                      GUID d9af716b-7239-1ed7-a6a2-c97e518215ce  age 1
+                      **"hvix64.pdb"**
+
+`hvix64.exe` is Hyper-V's hypervisor kernel for Intel x64, and that GUID is
+the same one recorded earlier in this investigation from a different boot
+under a different KASLR base.
+
+Corroborated by behaviour, each already measured: `HvCallVtlCall` and
+`HvCallVtlReturn` in matched pairs; the Hyper-V synthetic MSRs 0x40000070
+end-of-interrupt, 0x40000071 interrupt command, 0x40000084 end-of-message
+and the synthetic timer 0 pair; and VMXON from all eight processors.
+
+**A note on reading `x` versus `xp`.** The first scan used `xp`, which is
+*physical*, against a guest *virtual* address and answered "Cannot access
+memory" 160 times in a row - a uniform failure that looks like "the memory
+is not there" and is really "the wrong question was asked". `x` is the
+virtual read. The same distinction is why a wide `xp` over a device BAR
+lied, further down this file.
+
 ## The clock is honest. The 1.879x was our own cost, measured as a ratio
 
 **Read from the failing configuration, which nobody had ever done:**
