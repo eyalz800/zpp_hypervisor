@@ -240,6 +240,56 @@ it.** `rdx` in the trust-level register census held the descriptor
 pointer from the very first capture, in a printed column, for five
 sessions.
 
+## The scale was not the cause, and the timer expires 1.879x early
+
+**Correction, established on hardware.** The claim that the published scale
+runs 1.577x fast was an *inference from the injection rate*, never a
+measurement - no scale was ever read on the boot that livelocked, because by
+the time anyone looked the page had been switched off. With the scale now
+computed and verified it is **right**, and the guest over-injects anyway.
+Worse, in fact:
+
+| | old fitted scale | no page | **computed scale** |
+|---|---|---|---|
+| implied reference frequency | never read | n/a | **10,000,018 Hz** |
+| `0xd1` injected | 906/s | 432/s | **1,080-1,100/s** |
+| `0x2f` delivered | 0/s | 1.7/s | **46/s** |
+| `leaves-filled` reached | flat | 294,809 | **306,000** |
+
+The computed scale gets the guest **furthest** and delivers the dispatch
+interrupt **27 times more often**, while injecting the clock *more*. So it
+is worth having on its own merits, and **it is not what caused the
+over-injection.**
+
+**The target is now measured rather than taken from a constant.** The guest
+arms synthetic timer 0 *periodically* with `rax = 0x43f8` = **17,400**,
+which at the specification's 100-nanosecond unit is 1.74 ms = 574.7 Hz -
+`KeQuantumEndTimerIncrement` observed at the point of arming rather than read
+out of `ntoskrnl` and assumed still to apply.
+
+**And the expiry is early by a clean factor, with nothing double-firing:**
+
+    STIMER0_COUNT arms : 1080.0/s
+    0xd1 injections    : 1080.0/s
+    ratio              :    1.000
+    versus asked       :    1.879x
+
+One injection per arm, exactly. No interrupt is duplicated and nothing
+re-injects: **the timer expires every 0.926 ms where the guest asked for
+1.74 ms.**
+
+That reframes the question a third time. Not the reference page's scale, and
+not a delivery duplication: **the level above decides a 1.74 ms periodic
+timer has expired after 0.926 ms**, against its own notion of elapsed time.
+What Hyper-V calibrates that from - under a VMM that answers `0x40000022` by
+forwarding, and a host whose CPUID.15H reads **zero** - is the open question
+and the next thing to measure.
+
+Note the synthetic-MSR mix has changed completely now the guest gets this
+far: `STIMER0_COUNT` is 32.3% of writes where it was **2 writes in a whole
+boot**, and `STIMER0_CONFIG` 3.2% where it was 6. Any conclusion in this
+file drawn from the old mix describes a guest that never reached this code.
+
 ## A hang after the chainload line: what it is, and what it is not
 
 Read this before investigating one, because it cost a day.
