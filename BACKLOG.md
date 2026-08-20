@@ -785,6 +785,61 @@ is not there" and is really "the wrong question was asked". `x` is the
 virtual read. The same distinction is why a wide `xp` over a device BAR
 lied, further down this file.
 
+## THE DEADLOCK, in the guest's own instructions: preempted at the sti
+
+**Found, and it is not a hypothesis.** `injection_from_rip` /
+`injection_to_rip` / `injection_to_reason` record where the guest was when
+an interrupt was injected and where it went next. **A fourth unread
+instrument** - nothing in `rig-dump-state.py` reports it. Read off the
+running guest, **all sixteen recorded landings are identical**, over 390,119
+recorded:
+
+    from 0xfffff807852b3692  ->  to 0xfffff80784fa57f8  reason WRMSR
+
+Walking the guest's page tables to that address - CR3 `0x1ae002`, PML4 496,
+PDPT 30, PD 41, a 2 MB leaf at `0x119e00000` - and reading the bytes gives:
+
+    3680: sub  rsp, 0x28
+    3684: mov  ecx, 2
+    3689: mov  cr8, rcx        ; lower IRQL to 2 = DISPATCH_LEVEL
+    368d: sti                  ; enable interrupts
+    368e: mov  rcx, [rbp-0x57]
+    3692: lea  rdx, [rbp-0x80] ; <- the clock lands HERE, 16 of 16
+    3696: call <target>        ; never reached
+    369b: cli
+    36a0: ret
+
+**Windows lowers IRQL to DISPATCH_LEVEL, executes `sti`, and the pending
+clock interrupt is delivered two instructions later - before the `call` that
+would drain the deferred-procedure-call queue.** It then re-arms the
+synthetic timer, which is what `to_rip` is, and the cycle repeats.
+
+**The guest never executes a single deferred procedure call.** That is the
+hang, and every earlier symptom follows from it: no new page touched,
+`leaves-filled` frozen, a narrow instruction-pointer set, the boot spinner
+turning while nothing behind it advances.
+
+**The priority arithmetic makes it inevitable rather than unlucky.** The
+clock is vector `0xd1`, priority class 13. At DISPATCH the guest's own
+priority is class 2. Any pending clock interrupt outranks the window the
+guest just opened, so the *instant* interrupts are enabled it is taken -
+which is also why the 46 deliveries a second of vector `0x2f` cannot help:
+at class 2 they are not deliverable at all while the guest sits at DISPATCH.
+
+**What this closes.** It is not the timer, not the clock rate, not injection
+loss, not a missed delivery window - all four were measured and cleared. It
+is that the clock interrupt arrives faster than the guest can get from `sti`
+to `call`, which at 5-6% of a processor is two instructions it cannot afford.
+
+**What it opens**, and it is the first question in this investigation with a
+mechanism rather than a cost behind it: *any* correct hypervisor delivers a
+pending higher-priority interrupt the moment the guest enables interrupts.
+So either this is a real pathology that hypervisors handle - coalescing,
+rate-limiting, or holding back a timer whose previous expiry was never
+consumed - or it is a symptom of slowness that simply never arises at native
+speed. That distinction decides whether there is anything to fix here at
+all, and it is what the KVM comparison must settle.
+
 ## Interrupt delivery is correct end to end. 100% of the "misses" were illegal
 
 **The claim in the section below is refuted, by an instrument built to be
