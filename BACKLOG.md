@@ -785,6 +785,48 @@ is not there" and is really "the wrong question was asked". `x` is the
 virtual read. The same distinction is why a wide `xp` over a device BAR
 lied, further down this file.
 
+## The MSI-X table is unwritten: Windows never asked, it was not refused
+
+**One reading, and it separates the possibilities.** The capability at `[b0]`
+gives `Vector table: BAR=0 offset=0x2000`, so guest-physical
+`0x7011108000 + 0x2000`. Read there:
+
+    701110a000: 0x00000000 0x00000000 0x00000000 0x00000001
+    701110a010: 0x00000000 0x00000000 0x00000000 0x00000001
+    701110a020: 0x00000000 0x00000000 0x00000000 0x00000001
+    701110a030: 0x00000000 0x00000000 0x00000000 0x00000001
+
+Message address low and high **zero**, message data **zero**, and
+`vector_ctrl` **1** - masked - on every entry. That is the architectural
+reset state of an MSI-X table nothing has touched.
+
+**So this is not "the table was programmed and the Enable bit was refused".**
+A guest that intends to use MSI-X writes the vectors *first* and sets Enable
+last. Nothing ever wrote a vector.
+
+**Windows never asked for MSI-X on this device.** The decision is upstream of
+any write this VMM could have mishandled, which retires "we break the
+config-space write" as the leading explanation before any code was read for
+it.
+
+That reframes the question from *which write did we break* to **what does
+Windows check before deciding a device may use MSI-X, and which of those
+checks fails under this VMM but passes under plain KVM.** The candidates are
+things that shape the decision rather than carry it:
+
+- **ACPI `_OSC`**, the firmware-to-OS handshake granting control of PCI
+  Express features including message-signalled interrupts. `uefi_loader`
+  chainloads the boot manager and connects every controller first, so
+  anything it perturbs in firmware PCI enumeration is in scope.
+- **MCFG / extended configuration space** reachability.
+- **Interrupt remapping**, which the rig runs without.
+
+And two facts that bound how much this can explain: the device works on
+legacy INTx - `vfio-intx(0000:02:00.0)`, IRQ 16, 22,904 interrupts - and
+Windows is alive and healthy while asking for nothing new. So MSI-X being
+absent makes the disk *slow*, and slowness alone has not been shown
+sufficient to explain a kernel that ticks and allocates nothing.
+
 ## Alive but allocating nothing - and MSI-X is the one divergence from the control
 
 **Three measurements together, which say more than any one of them.**
