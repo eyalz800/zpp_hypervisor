@@ -785,6 +785,56 @@ is not there" and is really "the wrong question was asked". `x` is the
 virtual read. The same distinction is why a wide `xp` over a device BAR
 lied, further down this file.
 
+## 269 milliseconds of slack changes nothing. The margin story is dead
+
+**`clock_gap_buckets` is a proper distribution where the arm ring is 32
+samples, and it settles the question the arm ring only raised.** Over
+**535,630 gaps**, time-stamp counter between clock interrupts:
+
+| gap | count | share |
+|---|---|---|
+| 0.53 - 1.05 ms | 5,078 | 0.9% |
+| **1.05 - 2.11 ms** | **517,159** | **94.3%** |
+| 2.11 - 4.21 ms | 21,445 | 3.9% |
+| 4.21 - 8.42 ms | 174 | 0.0% |
+| 8.42 - 16.84 ms | 3,469 | 0.6% |
+| 16.84 - 33.69 ms | 424 | 0.1% |
+| 33.69 - 67.38 ms | 403 | 0.1% |
+| 67.38 - 269.51 ms | 20 | 0.0% |
+
+**About 4.7% of gaps exceed 2.11 ms and roughly 4,300 of them exceed 8.42
+ms, some reaching 269 ms.** That is up to **two hundred times** the normal
+budget, thousands of times over, and `leaves-filled` has not moved once in
+any of it.
+
+**So the margin argument is dead.** If the guest merely needed more time
+between clock interrupts, a single 269 millisecond window would have drained
+its deferred-call queue many times over. It has had thousands of such
+windows. Giving it a bigger gap - which is what `ZPP_LAZY_TICK` set out to
+do and what every tick-rate intervention was aimed at - **cannot be the
+answer, because the guest already gets bigger gaps and does nothing with
+them.**
+
+**Which forces a reading of the long gaps that is the opposite of "slack".**
+A long gap means no clock interrupt was due, which means the guest armed a
+distant deadline, which means it had nothing scheduled to run. **The long
+gaps are the guest being idle, not the guest being given room.** It is not
+starved of time. It is starved of *work* - and it is starved of work because
+the queue that would produce work never drains.
+
+That is coherent with everything measured and it is circular in a way that
+matters: the preemption prevents the deferred calls from running, nothing
+schedules further work, the guest idles, and the next clock preempts it
+again. **Breaking the circle needs the handler to return and reach its
+`call` once** - not a longer gap, which it already has and wastes.
+
+**And it retires the target set in the section below.** "The handler must
+finish in meaningfully less than 1,304 microseconds" was derived from the
+94.3% case as though it were the whole distribution. The 4.7% tail says the
+handler is not merely finishing late - in a 269 millisecond gap it has all
+the time it could want and the guest still does not advance, so **finishing
+sooner is not sufficient and may not be necessary.**
+
 ## The guest asks for 1,304 us and gets 1,265. The ISR eats 96% of its period
 
 **The arm ring, read in time order, is the cleanest timing measurement in
