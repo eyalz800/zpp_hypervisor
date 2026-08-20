@@ -49,20 +49,27 @@ constexpr bool within_guest_physical(std::uint64_t guest_physical,
 /**
  * Which callers reach guest memory, by return address.
  *
- * `map_window_at` is 126 calls an exit at 1,088 cycles each - about
- * 137,000 of the 418,000 an exit spends inside this VMM, a third of it,
- * and the one large cost here that is *measured directly* rather than
- * derived from the launch-time price list, which a controlled removal
- * has since shown does not predict the marginal cost of a VMCS read.
+ * **The paragraph this replaces is stale by a factor of fifty and was
+ * still being read as a live lead.** It said `map_window_at` is "126
+ * calls an exit at 1,088 cycles each - about 137,000 of the 418,000 an
+ * exit spends inside this VMM, a third of it". Phase 11 now reads
+ * 112,463,598 calls at **278** cycles each, which over the 5,673,717
+ * round trips the same dump reports is **19.8 calls a round trip and
+ * about 5,500 cycles** - under one per cent of the ~610,000 cycles a
+ * round trip spends inside this VMM.
  *
- * Only 39.5 of those calls are accounted for - `l2_translate_entries`
- * says the extended-page-table walks read that many entries an exit,
- * and each entry is one repoint of the window. The other 86 have twice
- * been guessed at and twice been wrong: the MSR autoload areas removed
- * five, the VTL assist capture removed none that mattered.
+ * The cached leaf entry - `window_entry`, which removed the four-level
+ * walk from every repoint - is what closed it, and nothing updated the
+ * note. So "could the pages that are repeatedly mapped be kept mapped"
+ * is answered before it is asked: the whole of what a kept mapping
+ * removes is 0.9%, and the removal is partial, because the copy through
+ * the window survives it. Phases 38 and 39 time the whole call against
+ * 11 and 37's mapping so the two are never confused again.
  *
- * So this stops guessing and asks the callers. A return address is a
- * name once symbolized against the module, and it costs one register.
+ * The caller census below stays. It answers a different question -
+ * *who* reaches guest memory - and that one is still open: only 39.5 of
+ * the calls were ever accounted for by the extended-page-table walks,
+ * and the rest have twice been guessed at and twice been wrong.
  */
 void hypervisor::note_guest_memory_caller(std::uint64_t caller)
 {

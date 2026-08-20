@@ -871,8 +871,35 @@ hypervisor::merge_nested_bitmaps(std::size_t cpu)
     // hypervisor that stops intercepting an MSR clears a bit in the page
     // it already named. Cached on the address, this VMM would have gone on
     // trapping what the guest hypervisor stopped asking for and, worse,
-    // gone on *not* trapping what it started asking for. KVM re-merges on
-    // every entry too, in `nested_vmx_prepare_msr_bitmap`.
+    // gone on *not* trapping what it started asking for.
+    //
+    // **"KVM re-merges on every entry too" is half right, and the other
+    // half is the whole answer.** `nested_vmx_prepare_msr_bitmap`
+    // (.references/kvm/nested.c:619-720) opens with
+    // `if (!vmx->nested.force_msr_bitmap_recalc)` and skips the merge
+    // outright - but only when the guest hypervisor is using an
+    // enlightened VMCS and has set `HV_VMX_ENLIGHTENED_CLEAN_FIELD_MSR_
+    // BITMAP`. So the exemption is not an optimisation KVM found; it is
+    // a *protocol*, in which L1 states that its bitmap has not changed.
+    // Without it KVM merges every entry, exactly as this does.
+    //
+    // And when it does merge, it does not do what this does. KVM keeps
+    // vmcs02's bitmap as a persistent structure and patches the handful
+    // of MSRs L0 cares about - the x2APIC block, FS/GS base, SPEC_CTRL,
+    // PRED_CMD, FLUSH_CMD - into it. It never copies four kilobytes and
+    // never ORs four kilobytes, because its own intercept set is static
+    // and small. So is this VMM's: IA32_APIC_BASE, IA32_FEATURE_CONTROL
+    // and 0x480-0x491. The union is only necessary because it is written
+    // as a union; the same result is a copy of the guest hypervisor's
+    // page plus twenty-two bit sets, and `nested_guest_msr_bitmap` was
+    // recorded to find out whether even those are needed - a guest
+    // hypervisor presenting VMX to its own guest must already intercept
+    // 0x480-0x491.
+    //
+    // Sized before anything is built on it: this phase is 18,063 cycles
+    // a round trip against the ~610,000 a round trip spends inside this
+    // VMM, so **removing the whole of it is 3.0%**. Worth having and not
+    // a lever.
     //
     // What it costs is one guest page read per area the guest hypervisor
     // actually uses, per entry - four kilobytes for a hypervisor that uses
