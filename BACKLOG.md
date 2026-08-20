@@ -785,6 +785,52 @@ is not there" and is really "the wrong question was asked". `x` is the
 virtual read. The same distinction is why a wide `xp` over a device BAR
 lied, further down this file.
 
+## Asking KVM for enlightenments is the wrong answer, and it also does not work
+
+**Withdrawn on principle before it was withdrawn on evidence, and the
+principle is this project's own.** The section below works out that
+enlightened VMCS toward KVM would remove roughly 286,000 of KVM's 401,393
+exits a second - the first lever measured big enough for the 1.4x. It is
+still true and it is still the wrong thing to build.
+
+**"The goal is to need nothing under us at all, so anything that only works
+while something else implements it is not a fix."** That sentence is already
+in `CLAUDE.md`, about the `hv-passthrough` mistake, and it applies exactly
+here: a VMM that needs `-cpu ...,hv-vapic,hv-evmcs` underneath it is a VMM
+that works only on a host configured to help it. The 49:1 tax is an artifact
+of running under KVM at all; on bare metal there is no tax **and** no
+enlightenment to ask for.
+
+**And measured, it does not work anyway**, which is worth recording so the
+idea is not revived on the assumption that it would have:
+
+- `hv-evmcs` cannot be enabled alone. QEMU 11.0.3 refuses it outright:
+  `Hyper-V enlightened VMCS (hv-evmcs) requires Hyper-V virtual APIC
+  (hv-vapic)`. The two are inseparable.
+- With `hv-vapic,hv-evmcs` the guest boots and **every application processor
+  stops before the second level**: 107 exits and **0** second-level entries
+  on all seven, unchanged across 90 seconds, against 284 and 17 in every
+  healthy run. CPU 0 runs normally. Module loads 2, so nothing reset - the
+  processors simply never get in.
+
+Cause not established, and it does not need to be: one run, one variable,
+and the flag combination is refused on principle regardless. If it is ever
+revisited, `hv-vapic` alone is the isolating test that was not run.
+
+**Method note worth keeping.** The launcher already reads `${ZPP_CPU_EXTRA}`
+and `scripts/rig-boot.sh` already forwards it, so this whole experiment
+needed **no edit to `boot-zpp.sh`** - which matters, because the two
+launchers on this rig have drifted apart before and a comparison across a
+silently edited launcher is not a comparison. Prefer the environment hook to
+editing the script, every time.
+
+**What this leaves.** Under KVM, without enlightenments, the tax is 49:1 and
+the guest gets about 5% of the machine. That is measured, and no change
+inside this VMM has been found worth more than 1.10x against a 1.4x need. So
+either the remaining 1.4x comes from somewhere not yet identified inside our
+own instruction count, or the configuration that boots Windows is one with
+nothing between this VMM and the hardware.
+
 ## KVM cannot emulate shadow VMCS for us - but enlightened VMCS is the same lever
 
 Asked directly: can KVM be made to do shadow VMCS? **Not for our accesses,
