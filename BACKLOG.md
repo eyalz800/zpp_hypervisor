@@ -11562,6 +11562,55 @@ first write after the drop is the one that kills it.
   `resets` column in the state dump is the existing lever. Until then the
   switch stays off, and its comment says so.
 
+## The guest is asking for a DPC dispatch every tick and never getting one
+
+**This is a delivery failure, not a timing one, and it explains why three
+cost reductions in a row moved nothing.**
+
+The exit ring carries the value of every synthetic-MSR write. Every write to
+`0x40000071` - the Hyper-V synthetic interrupt command register, 38.6% of
+56 million synthetic writes - carries the same value:
+
+    wrmsr  detail=0x40000071  value=0x4002f
+
+Decoded against the interrupt command register layout: **vector `0x2f`,
+fixed delivery, destination shorthand `01` = self.** Four of four samples in
+the ring, identical. At 21.6 million of them against a 574.7 Hz tick, that
+is **one self-directed interrupt of vector 0x2F per tick**, paired one for
+one with an end-of-interrupt write to `0x40000070`.
+
+**Vector 0x2F on x64 Windows is the dispatch interrupt** - `KiDpcInterrupt`,
+the one that drains the deferred procedure call queue. So the guest raises a
+DPC dispatch every tick and never receives it, which is the same statement
+as the earlier finding that it sits in `KiDpcInterruptBypass` trying to drain
+that queue and being preempted before an instruction retires.
+
+Two things this settles, both of which were believed and are wrong:
+
+- **"The secure call never retires" is false.** `HvCallVtlCall` and
+  `HvCallVtlReturn` are **exactly equal** on CPU 0 - 2,502,068 each - and
+  advance together. Nothing is stuck inside a virtual trust level call.
+- **The virtual trust level round trip is not the loop.** VTL switches run
+  at 73.7/s against 3,684 second-level entries/s: **0.13 VTL switches per
+  tick against 6.4 entries per tick.** Roughly 98% of the round trips are
+  not VTL transitions at all. Every description in this file calling the hot
+  loop "the VTL round trip" is mis-named; the loop is Hyper-V entering
+  Windows, Windows writing a synthetic MSR, the exit being reflected, and
+  Hyper-V resuming it.
+
+**Why this reframes everything above.** A guest that cannot receive an
+interrupt does not go faster when the hypervisor under it gets cheaper - it
+spins more times in the same place, which is exactly what was measured three
+times: 2,206 -> 2,533 -> 2,609 round trips a second, with `leaves-filled`
+never moving. Cost was never the variable.
+
+**`ZPP_DELIVER_SELF_IPI` exists for precisely this** and is recorded as
+failed - "one delivery, then a spin". **That measurement is void.** It was
+taken before the local APIC watch was restored, in the window when seven of
+eight processors were running outside this VMM entirely, and this file now
+says of that window that no measurement taken in it means anything. It has
+to be re-run in the valid configuration before it can be called a dead end.
+
 ## A VMCS access costs 991 cycles at the margin, not 2,800
 
 **The read-reduction work landed exactly the accesses it projected and a
