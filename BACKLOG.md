@@ -785,6 +785,67 @@ is not there" and is really "the wrong question was asked". `x` is the
 virtual read. The same distinction is why a wide `xp` over a device BAR
 lied, further down this file.
 
+## KVM cannot emulate shadow VMCS for us - but enlightened VMCS is the same lever
+
+Asked directly: can KVM be made to do shadow VMCS? **Not for our accesses,
+and the reason is structural rather than a missing switch. But the mechanism
+that would achieve the same thing exists, is supported by the rig's QEMU, and
+has never been switched on.**
+
+**What KVM's "we can emulate VMCS shadowing" actually covers.**
+`nested.c:7068-7073` sets `SECONDARY_EXEC_SHADOW_VMCS` in the capabilities it
+*advertises to us* regardless of hardware. That is why `shadowvmcs=1` works
+here and why turning it off costs 9.8 extra exits a round trip - KVM services
+the guest hypervisor's VMREADs against our shadow without them reaching us.
+**It says nothing about our own.**
+
+**Why our own cannot be emulated away.** We are L1; KVM is L0. An L1 VMREAD
+executes without exiting only when the hardware shadow-VMCS feature is armed
+in L0's VMCS for us, gated on `cpu_has_vmx_shadow_vmcs()`. This part does not
+have it - eighteen `vmx flags` and no `shadow_vmcs`. **Emulation cannot avoid
+the exit, because the exit is how the emulation is entered.** And
+`enable_shadow_vmcs` is `S_IRUGO` (`nested.c:23`), so it could not be forced
+at runtime even if the hardware had it.
+
+**The substitute, and KVM says so itself.** Both places that gate the fast
+path read:
+
+    nested.c:3650   if (enable_shadow_vmcs || nested_vmx_is_evmptr12_valid(vmx))
+    nested.c:5047   (enable_shadow_vmcs || nested_vmx_is_evmptr12_valid(vmx))
+
+**Enlightened VMCS is KVM's alternative to shadow VMCS when the silicon lacks
+it.** With it, a guest writes VMCS fields into a shared structure and never
+executes VMREAD or VMWRITE at all - so there is no instruction to trap, and
+the hardware feature is not needed.
+
+**It is available and unused.** The rig's QEMU is 11.0.3 and its binary
+carries `hv-evmcs` beside `hv-vapic`. `boot-zpp.sh` passes **no `hv-` flag of
+any kind**, so `guest_cpuid_has_evmcs(vcpu)` (`nested.c:2092`) is false and
+`nested_vmx_handle_enlightened_vmptrld` returns `EVMPTRLD_DISABLED`
+immediately. KVM has never been asked.
+
+**What it would take**, and it is real work rather than a switch:
+
+1. `-cpu host,...,hv-vapic,hv-evmcs` in the launcher, so KVM sets the CPUID
+   bit. Note this changes the launcher, and the two launchers on the rig
+   already differ in four ways - see the `hv-passthrough` correction.
+2. Enable the VP assist page from this VMM and place the enlightened VMCS
+   guest-physical address in it, which is where `nested_get_evmptr` reads it.
+3. Write our VMCS fields into `hv_enlightened_vmcs` with its clean-fields
+   mask instead of executing VMREAD/VMWRITE.
+
+**What it would and would not remove.** Of KVM's measured 401,393 exits a
+second, roughly **286,000 are our VMREAD/VMWRITE** - that is the part eVMCS
+removes outright. The ~26,000/s of VMPTRLD/VMPTRST/VMCLEAR and our own 8,155
+exits/s remain. So the honest projection is a **large fraction, not all** -
+and against a 1.4x target that is the first lever measured big enough.
+
+**Note the direction.** `nested_evmcs.cpp` in this tree implements the
+*provider* side - offering enlightened VMCS to our guest, which is what
+`ZPP_EVMCS` switches on and what boot-loops. This is the **consumer** side,
+toward KVM, and is a different piece of work that happens to share the
+structure layout.
+
 ## No VMCS shadowing on this silicon - confirmed, and for a different reason
 
 The tax above is unavoidable here, and the reason this file gave for it was
