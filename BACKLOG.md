@@ -785,6 +785,52 @@ is not there" and is really "the wrong question was asked". `x` is the
 virtual read. The same distinction is why a wide `xp` over a device BAR
 lied, further down this file.
 
+## Storage is healthy, the TPR path is exact, and I nearly reported a dead disk
+
+Three results, and the third is a near-miss worth more than the other two.
+
+**The TPR-below-threshold path is exact.** `l2_tpr_would_fire` counts entries
+where the guest hypervisor armed a threshold and SDM 27.6.7's condition held,
+so a reason-43 exit is owed. Its own comment gives the criterion: *"often true
+with no reason-43 exit following means what reaches vmcs02 is not doing what
+the VMCS says, and the fault is here."* Measured as deltas:
+
+    SDM 27.6.7 condition held : 24.1/s   (total 28,994)
+    reason 43 exits taken     : 24.1/s   (total 28,994)
+
+Identical, to the unit. Every owed exit is taken. **Not a fault here**, by the
+tree's own stated test.
+
+**Storage is healthy.** `leaves-filled` frozen means no new page is ever paged
+in, and this rig passes through an NVMe, so a controller that never came ready
+would explain the whole stall. It came ready. Guest-physical BAR0 is
+`0x7011108000` (QEMU `info pci`, device 3, `15b7:5003`), and:
+
+    CC   (0x14) = 0x00460001   EN=1
+    CSTS (0x1c) = 0x00000001   RDY=1, six consecutive reads
+    CAP  (0x00) = 0x140103ff   VS (0x08) = 0x00010300, version 1.3.0
+
+Enabled, ready, sane capabilities. **Not the blocker.**
+
+**And the near-miss.** The first reading was `xp/2xw` at `0x14`, which returns
+offsets `0x14` **and `0x18`** - and `0x18` is *reserved*, reading zero. CSTS
+is at `0x1c`. So the first four samples said `CC=1, CSTS=0`: **enabled and
+never ready, a dead disk**, stable across four reads, and it would have
+redirected the entire investigation.
+
+What caught it was narrowing to one register and re-reading, which is the rule
+this file already states two ways - *"read device registers narrow, and
+repeat"* and *"check the reader before believing the reading"*. Note that
+**repetition alone did not help**: four identical wrong reads and then six
+identical right ones. Stability is not correctness when the address is wrong.
+The thing that caught it was reading the register **by itself** and
+sanity-checking neighbours whose correct values are known independently - CAP
+and VS, which would have been nonsense had the window been wrong.
+
+Worth stating because this file records the same shape three times already,
+and every instance was found the same way: by asking whether a reading is
+*possible*, not whether it is plausible.
+
 ## 269 milliseconds of slack changes nothing. The margin story is dead
 
 **`clock_gap_buckets` is a proper distribution where the arm ring is 32
