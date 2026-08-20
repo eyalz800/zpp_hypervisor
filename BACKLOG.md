@@ -785,6 +785,53 @@ is not there" and is really "the wrong question was asked". `x` is the
 virtual read. The same distinction is why a wide `xp` over a device BAR
 lied, further down this file.
 
+## The hot loop is the clock ISR, and 96% of its DPC requests never arrive
+
+**`profile_contexts[32]` captures rip, rax, rcx, rdx, rbx, rsi, rdi and r8
+at every profiler sample, and nothing has ever reported it.** Third unread
+instrument found in this tree. Read straight off the running guest, it names
+the loop by the MSR in `rcx`:
+
+| rip | rcx | what it is |
+|---|---|---|
+| `...da5a57fa` | `0x400000b1` | **STIMER0_COUNT** - the timer arm |
+| `...da62890d` | `0x40000071` | **synthetic ICR**, value `0x4002f` every sample |
+| `...da8a768e` | `0x40000070` | **synthetic end-of-interrupt** |
+| `...da5100e6` | `0x40000084` | **synthetic end-of-message** |
+
+Those four are the hottest guest addresses in the profile, and together they
+are one thing: **the clock interrupt handler.** Re-arm the synthetic timer,
+request a deferred-call dispatch by self-directed interrupt, end the
+interrupt, end the message, repeat. The bitmap loop recorded in the section
+below is real but it is *inside* this, not the whole of it.
+
+**The timer values settle what the guest is asking for.** Deadlines observed
+at `...5a57fa`: `0x3d7d8dc39`, `0x402263828`, `0x4328ea600`, `0x39557408a`,
+`0x3bfa0d938` - 1,540 to 1,800 seconds in 100 ns units, so **absolute
+deadlines far in the future**, and they differ across samples, so reference
+time is advancing normally. Once, `0x43f8` - 17,400, the periodic period.
+So STIMER0 is used mostly one-shot with absolute expiry, which is what
+`STIMER0_CONFIG = 0x30008` said and what the "one-shot arms" finding
+already established.
+
+**And here is the number that matters.** The guest writes the synthetic
+interrupt command register - always `0x4002f`, vector 0x2f self-directed,
+the deferred-call dispatch - at about **1,080 a second**. Vector `0x2f` is
+delivered into vmcs02 at **46 a second**.
+
+**So 96% of the guest's requests to run its deferred procedure calls are
+never delivered.** That is not a performance shortfall, it is the hang: the
+queue cannot drain because the request to drain it is refused, and it is
+refused correctly, because the guest's task priority is `0xd0` on 100% of
+129,322 recorded samples and vector 0x2f is priority class 2.
+
+**What this reframes.** The loop is not a block on a lock or a device, and
+it is not the bitmap builder - it is the guest asking, every tick, for
+permission to do the work that would let it leave `CLOCK_LEVEL`, and being
+refused 24 times out of 25. Whether that is because the clock ISR does not
+finish inside its own interval, or because the priority never drops for
+another reason, is the next question and is now precisely stated.
+
 ## The loop decoded: a bitmap builder, not a block
 
 **Read out of guest memory, so it is code rather than inference.** The
