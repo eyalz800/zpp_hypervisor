@@ -785,6 +785,57 @@ is not there" and is really "the wrong question was asked". `x` is the
 virtual read. The same distinction is why a wide `xp` over a device BAR
 lied, further down this file.
 
+## Eighteen minutes: the clock is perfect, DPCs run, and nothing loads
+
+**The consolidated picture, and it contradicts most of what this file said
+before the `KUSER_SHARED_DATA` reading.** Nine samples, two minutes apart:
+
+    TickCount     +69,135      = 64.0/s, exactly Windows' standard tick
+    InterruptTime +1080.2 s    against 1080 s of wall clock = 100.0%
+
+**Windows keeps real time to within 0.02% over eighteen minutes.** Not
+approximately - exactly. A guest starved of interrupts, or livelocked in its
+clock handler, or fighting a mis-scaled clock, cannot do that.
+
+**And the deferred-interrupt path is clean**: `external_interrupts_deferred_in_l2`
+reads **0**, with 4,148 external-interrupt exits taken. Device interrupts
+reach this VMM and are handled. The known weakness recorded at
+`resume.cpp:249` - that we hold rather than force the exit, where KVM forces
+it - is not firing.
+
+**Put beside the user's observation that the boot spinner is animating**,
+which needs a timer-driven callback to actually run, the state is:
+
+- clock: **perfect**
+- timers and deferred calls: **running** (the spinner redraws)
+- device interrupts: **arriving** (INTx, 22,904 on the shared line)
+- storage controller: **enabled and ready**
+- new memory mapped: **none, ever**
+
+**That is not a hung kernel. It is a kernel that is waiting.** Alive,
+serviced, and blocked on something that never completes - and allocating
+nothing because nothing new is being loaded.
+
+**Which suggests where the boundary is.** The kernel reached the spinner,
+and everything up to that point was read from disk by *firmware* block I/O
+through the boot loader. What happens next is Windows' own storage stack
+taking over the device. If that hand-over does not complete - the driver
+cannot arm its interrupts, or its queues never complete - boot stalls
+exactly here: kernel alive, timers fine, spinner turning, nothing further
+loaded.
+
+**That is consistent with the MSI-X finding above** and gives it a mechanism
+rather than a correlation: the table is unwritten because the driver never
+got far enough to write it, or it declined MSI-X and its INTx fallback does
+not complete. Which of those is the next question, and it is answerable by
+whether the guest is submitting commands at all.
+
+**Recorded as a correction**: this file has said "livelocked", "deadlocked",
+"never executes a single deferred procedure call" and "the guest is stuck one
+instruction short of its `call`". The first three are wrong. The fourth
+described a real hot path but was read from a sixteen-entry ring as though it
+were exclusive.
+
 ## The MSI-X table is unwritten: Windows never asked, it was not refused
 
 **One reading, and it separates the possibilities.** The capability at `[b0]`
