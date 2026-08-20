@@ -785,6 +785,53 @@ is not there" and is really "the wrong question was asked". `x` is the
 virtual read. The same distinction is why a wide `xp` over a device BAR
 lied, further down this file.
 
+## Alive but allocating nothing - and MSI-X is the one divergence from the control
+
+**Three measurements together, which say more than any one of them.**
+
+Over a 120-second window on the settled guest:
+
+- **`TickCount` advances 7,681 and 7,683 per 120 seconds - a steady 64.0 Hz**,
+  Windows' standard tick, and `InterruptTime` tracks real time 1:1.
+- **Exits +1,259,828.** The machine is working hard.
+- **`shadow_ept_leaves_filled` frozen at 300,314.**
+
+**So Windows is alive and servicing its clock, and allocating nothing.** No
+new second-level mapping in two minutes means no driver loaded, no process
+created, no pool grown. **Alive, but not advancing through boot** - which is
+a third statement, distinct from both "deadlocked" and "running normally",
+and it is the one the evidence actually supports.
+
+**And there is exactly one concrete divergence from the configuration that
+boots**, already established in this file and not connected to this until
+now:
+
+| configuration | MSI-X | vfio-msix lines |
+|---|---|---|
+| no guest, host `nvme` driver | `Enable+` | 9 |
+| **plain KVM, Windows booting** | **`Enable+`** | **17, tens of thousands of interrupts** |
+| **this VMM** | **`Enable-`** | **0** |
+
+Confirmed again on the live run: `MSI-X: Enable- Count=17 Masked-`, zero
+`vfio-msix` lines. **Windows enables MSI-X on the assigned NVMe under plain
+KVM and never under this VMM.**
+
+**But the disk is not silent, and that matters.** `/proc/interrupts` carries
+`vfio-intx(0000:02:00.0)` on IRQ 16 with 22,904 interrupts - the device has
+fallen back to **legacy pin interrupts** rather than being cut off. That line
+is shared with `i2c_designware`, `idma64` and three other assigned devices,
+so the count is not all the disk's, and the controller itself reads enabled
+and ready. So this is not "the disk is dead"; it is "the disk is on the slow
+path that the working configuration does not use".
+
+**Why this is the thread worth pulling.** Everything else that has been
+checked came back *correct* - the timer, the injection, the delivery
+eligibility, the TPR threshold, the controller state, the guest's own clock.
+This is the only measured difference between us and a configuration that
+boots the same Windows, and it is a difference in **device interrupt
+delivery**, which is exactly the kind of thing that leaves a kernel alive,
+ticking, and waiting.
+
 ## WINDOWS IS NOT DEADLOCKED. It is running and keeping correct time
 
 **The single most important measurement in this investigation, and it
