@@ -203,6 +203,36 @@ class Capacities(unittest.TestCase):
             "dump_field_use's capacity default disagrees with "
             "vmcs_field_use_capacity in the header")
 
+    def test_tick_account_ring_capacities(self):
+        """`dump_tick_account`'s two ring depths, against the header.
+
+        The tick account merges two rings on the one clock they share -
+        the guest's synthetic-timer arms and the level above's own local
+        APIC timer arms - and they are declared with *different*
+        constants that happen to be equal.  A reader that assumed one
+        constant for both would walk the second ring at the wrong pitch
+        the moment either moved, and the failure is the one this file
+        exists for: it would still print a plausible timeline, in the
+        wrong order, from which somebody would conclude the level above
+        expires the timer early.
+        """
+        script = read(DUMP_STATE)
+
+        for name, variable in (("reference_sample_capacity",
+                                "stimer_capacity"),
+                               ("timer_arm_capacity", "apic_capacity")):
+            declared = cxx_constant(self.header, name)
+            match = re.search(r"^\s*" + variable + r" = (\d+)$", script,
+                              re.M)
+            self.assertIsNotNone(
+                match,
+                "dump_tick_account no longer sets " + variable)
+            self.assertEqual(
+                int(match.group(1)), declared,
+                "dump_tick_account's {} disagrees with {} in the header, "
+                "so one of the two rings it merges is read at the wrong "
+                "pitch".format(variable, name))
+
     def test_phase_names_and_parents_cover_every_slot(self):
         """PHASE_NAMES and PHASE_PARENT, against `phase_count`.
 
@@ -360,10 +390,27 @@ class ExitReasonNames(unittest.TestCase):
                 re.M):
             declared.setdefault(int(value), name)
 
+        # **Scoped to the table**, not to the whole file.  This used to
+        # scan every line of the script for `<n>: "<name>"`, which is a
+        # shape any small integer-keyed dictionary has: a ring-kind
+        # legend added elsewhere in the file matched it, and the test
+        # failed reporting that exit reason 3 had been renamed to
+        # something it had nothing to do with.  The same class of defect
+        # the whole file is about - an instrument aimed at more than the
+        # thing it names cannot tell you it is reading the wrong dict.
+        table = re.search(r"^EXIT_REASON = \{(.*?)^\}", script,
+                          re.S | re.M)
+        self.assertIsNotNone(
+            table,
+            "rig-dump-state.py no longer defines EXIT_REASON as a "
+            "top-level dictionary - the shape this test knows about has "
+            "changed")
+
         scripted = {
             int(value): name
             for value, name in re.findall(
-                r"^\s*(\d+):\s*\"([a-z_0-9 /]+)\"", script, re.M)}
+                r"^\s*(\d+):\s*\"([a-z_0-9 /]+)\"", table.group(1),
+                re.M)}
 
         self.assertTrue(
             scripted,

@@ -1670,6 +1670,281 @@ def dump_reference_tsc(args, elf, instance):
         print("\nreference TSC page: never enabled by the guest")
 
 
+def dump_tick_account(args, elf, instance):
+    """**What the level above believes elapsed time to be, against what
+    it is.**
+
+    The whole investigation turns on one ratio and nothing could state
+    it.  The second-level guest arms Hyper-V synthetic timer 0
+    *periodically* with 17,400 hundred-nanosecond units - 1.74 ms,
+    574.7 Hz - and the clock vector arrives at about 1,080/s, which is
+    0.926 ms.  That was only ever obtained by dividing two *rates*
+    sampled from two different counters over a window, and a ratio
+    between two quantities that were never measured together is exactly
+    the mistake this file has already retired twice ("the ratio near
+    1213 was two different quantities").
+
+    `asked` and `given` below are measured on **one** clock, per arm:
+    the hypervisor timestamps the guest's write of `STIMER0_COUNT` and
+    the clock vector that answers it, and sums both.  `given / asked` is
+    the factor, directly.
+
+    Three things make it able to fail rather than merely print:
+
+    - The two arm counts are separate.  Every arm is counted in `asked`;
+      only an arm that a clock vector answered is counted in `given`.
+      They disagreeing means the vector is not the answer to the arm,
+      which is the one assumption the ratio rests on - and `unanswered`
+      is the same failure seen from the other side.
+    - The timeline below interleaves the guest's arms with the level
+      above's *own* local APIC timer armings, which is the clock it
+      actually schedules the expiry on.  A count against the real time
+      to the next arming gives that timer's rate, and the rate against
+      the count gives the interval the level above **intended**.  Three
+      numbers, and they separate "the level above converted 1.74 ms into
+      0.926 ms" from "it asked for 1.74 ms and the timer fired early".
+    - Nothing here substitutes a constant for a reading without saying
+      so.  The time-stamp counter frequency falls back to the tree's own
+      wall-clock measurement and is labelled when it does.
+
+    **If the APIC half of the timeline is empty, that is a finding and
+    not a broken reader.**  `timer_arm_recent_*` is filled from the write
+    watch on the local APIC *page*, so it sees an xAPIC-mode timer and
+    nothing else.  A level above using x2APIC (`IA32_X2APIC_INIT_COUNT`)
+    or TSC-deadline mode programs an MSR instead, and this VMM traps
+    those two only when `arm_guest_timer_poll` is armed - which happens
+    only where the processor refuses the VMX-preemption timer.  Empty
+    here therefore means "go and arm that", not "it programs no timer".
+    """
+    members = ["stimer_asked_units", "stimer_asked_arms",
+               "stimer_given_cycles", "stimer_given_arms",
+               "stimer_unanswered", "stimer_arm_pending_tsc",
+               "l2_stimer_config", "reference_tsc_frequency"]
+    rings = ["stimer_arm_value", "stimer_arm_tsc", "stimer_arm_kind",
+             "stimer_arm_count", "timer_arm_recent_value",
+             "timer_arm_recent_tsc", "timer_arm_recent_lvt",
+             "timer_arm_recent_divide", "timer_arm_recent_count"]
+    off = gdb_offsets(elf, members + rings)
+
+    # Both rings are 32 deep.  `reference_sample_capacity` and
+    # `timer_arm_capacity` are separate constants in the header that
+    # happen to be equal; tests/python_layout asserts both against it,
+    # so a change there fails a test rather than misreading a ring.
+    stimer_capacity = 32
+    apic_capacity = 32
+
+    reader = Monitor(args.rig, args.port)
+    for member in members:
+        reader.queue(instance + off[member], args.cpus)
+    for member in ("stimer_arm_count", "timer_arm_recent_count"):
+        reader.queue(instance + off[member], args.cpus)
+    for member in ("stimer_arm_value", "stimer_arm_tsc",
+                   "stimer_arm_kind"):
+        reader.queue(instance + off[member], args.cpus * stimer_capacity)
+    for member in ("timer_arm_recent_value", "timer_arm_recent_tsc",
+                   "timer_arm_recent_lvt", "timer_arm_recent_divide"):
+        reader.queue(instance + off[member], args.cpus * apic_capacity)
+    got = reader.run()
+
+    def word(member, index):
+        return got.get(instance + off[member] + 8 * index, 0)
+
+    measured = 1_992_000_000
+
+    printed = False
+    for cpu in range(args.cpus):
+        asked_arms = word("stimer_asked_arms", cpu)
+        given_arms = word("stimer_given_arms", cpu)
+        stimer_n = word("stimer_arm_count", cpu)
+        apic_n = word("timer_arm_recent_count", cpu)
+
+        if not (asked_arms or given_arms or stimer_n or apic_n):
+            continue
+
+        if not printed:
+            print("\nthe tick account: asked against given")
+            printed = True
+
+        tsc_hz = word("reference_tsc_frequency", cpu)
+        source = "CPUID.15H"
+        if not tsc_hz:
+            tsc_hz = measured
+            source = "FALLBACK, measured at the wall; CPUID.15H read zero"
+
+        config = word("l2_stimer_config", cpu)
+        print(f"\n  cpu {cpu}  STIMER0_CONFIG 0x{config:x} "
+              f"({'periodic' if config & 2 else 'one-shot'}, "
+              f"{'enabled' if config & 1 else 'DISABLED'}), "
+              f"time-stamp counter {tsc_hz:,} Hz ({source})")
+
+        if not asked_arms:
+            print("    no periodic arm recorded - the guest has not "
+                  "programmed a period yet, or STIMER0_CONFIG's periodic "
+                  "bit was never seen")
+            continue
+
+        # 100 ns units in, 100 ns units out, so the two sides are the
+        # same quantity before they are divided.
+        asked_units = word("stimer_asked_units", cpu) / asked_arms
+        print(f"    asked  {asked_units:>12,.1f} x100ns per arm "
+              f"({asked_units / 10_000.0:.3f} ms, "
+              f"{10_000_000.0 / max(asked_units, 1):.1f} Hz)  "
+              f"over {asked_arms:,} arms")
+
+        if not given_arms:
+            print("    given  -  NOT ONE ARM WAS ANSWERED by the clock "
+                  "vector.  The ratio cannot be formed, and that is the "
+                  "finding: the vector is not the answer to the arm.")
+        else:
+            cycles = word("stimer_given_cycles", cpu) / given_arms
+            given_units = cycles * 10_000_000.0 / tsc_hz
+            print(f"    given  {given_units:>12,.1f} x100ns per arm "
+                  f"({given_units / 10_000.0:.3f} ms, "
+                  f"{10_000_000.0 / max(given_units, 1):.1f} Hz)  "
+                  f"over {given_arms:,} answered")
+
+            ratio = asked_units / max(given_units, 1e-9)
+            verdict = ("ok" if abs(ratio - 1.0) <= 0.05
+                       else f"EARLY by {ratio:.3f}x")
+            if ratio < 0.95:
+                verdict = f"LATE by {1.0 / ratio:.3f}x"
+            print(f"    ratio  {ratio:>12.3f}x  {verdict}")
+
+        # The assumption the ratio rests on, stated rather than assumed.
+        missing = asked_arms - given_arms
+        unanswered = word("stimer_unanswered", cpu)
+        note = "one vector per arm" if missing <= 1 else "DISAGREE"
+        print(f"    arms asked {asked_arms:,}, answered {given_arms:,}, "
+              f"displaced before an answer {unanswered:,}  ({note})")
+        if word("stimer_arm_pending_tsc", cpu):
+            print("    one arm is outstanding, which is normal - it is "
+                  "the arm the guest is currently waiting on")
+
+        # ------------------------------------------- the timeline
+        #
+        # Two rings merged on the one clock they share.  Kinds 1, 2 and 3
+        # are the guest's count write, its config write and the clock
+        # vector; 'apic' rows are the level above arming its own timer,
+        # which is what it schedules the expiry on.
+        rows = []
+        kinds = {1: "STIMER0_COUNT", 2: "STIMER0_CONFIG",
+                 3: "clock vector injected"}
+        for i in range(min(stimer_n, stimer_capacity)):
+            slot = (stimer_n - 1 - i) % stimer_capacity
+            tsc = word("stimer_arm_tsc", cpu * stimer_capacity + slot)
+            if not tsc:
+                continue
+            kind = word("stimer_arm_kind", cpu * stimer_capacity + slot)
+            value = word("stimer_arm_value", cpu * stimer_capacity + slot)
+            rows.append((tsc, kinds.get(kind, f"kind {kind}"), value, None))
+
+        for i in range(min(apic_n, apic_capacity)):
+            slot = (apic_n - 1 - i) % apic_capacity
+            tsc = word("timer_arm_recent_tsc", cpu * apic_capacity + slot)
+            if not tsc:
+                continue
+            value = word("timer_arm_recent_value",
+                         cpu * apic_capacity + slot)
+            lvt = word("timer_arm_recent_lvt", cpu * apic_capacity + slot)
+            divide = word("timer_arm_recent_divide",
+                          cpu * apic_capacity + slot)
+            rows.append((tsc, "apic initial count", value, (lvt, divide)))
+
+        if not rows:
+            continue
+
+        rows.sort()
+
+        # ------------------- what the level above intended to wait for
+        #
+        # It schedules a synthetic timer's expiry on its own local APIC
+        # timer - measured, not assumed: the watch on the APIC page sees
+        # it write the initial count once per tick, one-shot at vector
+        # 0xef with divide-by-one.  So its arming, converted at that
+        # timer's rate, is the interval it *meant* to wait, and that is
+        # the third number the other two cannot supply.
+        #
+        # **Two rates, deliberately, because they can disagree.** The
+        # nominal is 1.0 GHz - this tree's own earlier measurement on
+        # this rig, recorded in BACKLOG.md where 2,382,592,343 counts
+        # were observed against a 4.747e9-cycle gap, which is where the
+        # "ratio near 1213" was retired.  It is not far-fetched
+        # arithmetic either: KVM converts a count to a wall-clock
+        # deadline in `tmict_to_ns` as `tmict * apic_bus_cycle_ns *
+        # divide_count`, so the rate is a nanosecond-domain constant and
+        # not anything derived from this processor.
+        #
+        # The fitted rate beside it is what these armings actually did:
+        # a count, against the real time until the next arming.  It is
+        # only the timer's rate if each one-shot arming ran to expiry -
+        # so a fit far above the nominal does not mean a fast timer, it
+        # means the level above re-armed early, and it is *that* which
+        # says the verdict below cannot be trusted.  A single-rate
+        # instrument could not tell the two apart.
+        apic = [r for r in rows if r[1] == "apic initial count"]
+        nominal = 1.0e9
+        if len(apic) >= 2:
+            fits = []
+            for a, b in zip(apic, apic[1:]):
+                gap = b[0] - a[0]
+                if gap > 0 and a[2]:
+                    fits.append(a[2] * tsc_hz / gap)
+            if fits:
+                fits.sort()
+                rate = fits[len(fits) // 2]
+                agrees = abs(rate - nominal) <= 0.1 * nominal
+                print(f"\n    the level above's own APIC timer")
+                print(f"      nominal {nominal / 1e6:,.1f} MHz "
+                      f"(measured on this rig, BACKLOG.md)")
+                print(f"      fitted  {rate / 1e6:,.1f} MHz "
+                      f"(median of {len(fits)} armings)  "
+                      f"{'agrees' if agrees else 'DISAGREES - the level '
+                         'above is re-arming before expiry, so the '
+                         'intended interval below is not what it waited'}")
+
+                last = apic[-1][2]
+                if last:
+                    intended = last / nominal * 10_000_000.0
+                    print(f"      its last arming of {last:,} counts is "
+                          f"{intended:,.1f} x100ns "
+                          f"({intended / 10_000.0:.3f} ms) at the "
+                          f"nominal rate - what it INTENDED to wait")
+
+                    # The discriminator, spelled out rather than left to
+                    # the reader, because getting it the wrong way round
+                    # sends the next session to the wrong layer.
+                    to_asked = abs(intended - asked_units)
+                    to_given = (abs(intended - given_units)
+                                if given_arms else None)
+                    if to_given is not None and to_given < to_asked:
+                        print("      -> intended matches GIVEN, not "
+                              "asked: the level above converted the "
+                              "guest's period into a shorter wait. The "
+                              "fault is its notion of elapsed time, and "
+                              "the reference-page fit above says whether "
+                              "its counter is fast too.")
+                    elif to_given is not None:
+                        print("      -> intended matches ASKED: the "
+                              "level above wanted the right interval and "
+                              "the timer fired early underneath it. The "
+                              "fault is below it - this VMM or KVM - not "
+                              "in its clock.")
+
+        first = rows[0][0]
+        print("\n    timeline, oldest first (us from the first row)")
+        for tsc, what, value, extra in rows:
+            when = (tsc - first) * 1e6 / tsc_hz
+            tail = ""
+            if extra is not None:
+                lvt, divide = extra
+                mode = {0: "one-shot", 1: "periodic",
+                        2: "tsc-deadline"}.get((lvt >> 17) & 3, "?")
+                tail = (f"  lvt 0x{lvt:x} ({mode}, vector 0x{lvt & 0xff:x}"
+                        f"{', masked' if lvt & 0x10000 else ''}), "
+                        f"divide 0x{divide:x}")
+            print(f"      {when:10.1f} us  {what:<22} {value:>14,}{tail}")
+
+
 def dump_vtl(args, elf, instance):
     """The trust-level switch loop: whether it advances, and who calls it.
 
@@ -2395,7 +2670,7 @@ def main():
     # looked short. One section failing must not cost the others.
     for section in (dump_entry_rips, dump_priority,
                     dump_synthetic_msrs, dump_reference_tsc,
-                    dump_l1_host_audit,
+                    dump_tick_account, dump_l1_host_audit,
                     dump_guest_state_shadow, dump_regions,
                     dump_vtl, dump_vtl_steps):
         try:

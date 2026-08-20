@@ -2669,11 +2669,27 @@ std::expected<void, zpp::error> hypervisor::build_vmcs02(std::size_t cpu)
             // ran and failed from a vector that was never taken.
             constexpr std::uint64_t synthetic_interrupt_3 = 0xd1;
 
+            // One reading for both records below, which is not merely a
+            // saving: they time the same event, and two `rdtsc`s
+            // straddling the intervening work would put a few hundred
+            // cycles of this VMM between the clock gap and the tick
+            // account and leave the two disagreeing about when the same
+            // injection happened.
+            //
+            // Taken for either vector rather than for `clock_gap_vector`
+            // alone, even though the two constants are the same number
+            // today: the tick account below is keyed on the other one,
+            // and a reading conditional on a constant it does not use is
+            // a zero waiting to happen.
+            auto now = ((clock_gap_vector == vector) ||
+                        (synthetic_interrupt_3 == vector))
+                           ? arch::x86_64::rdtsc()
+                           : std::uint64_t{};
+
             // And how long the guest was given since the last one. See
             // `clock_gap_buckets`: the instruction trace ends on this
             // question and cannot answer it.
             if (clock_gap_vector == vector) {
-                auto now = arch::x86_64::rdtsc();
                 auto previous = this->clock_gap_last[cpu];
 
                 this->clock_gap_last[cpu] = now;
@@ -2697,6 +2713,40 @@ std::expected<void, zpp::error> hypervisor::build_vmcs02(std::size_t cpu)
                     shadow.read(field::guest_rip);
                 this->injection_to_rip[cpu][slot] = 0;
                 this->injection_landing_armed[cpu] = 1;
+
+                // The given half of the tick account, closed against the
+                // arm that is waiting for it. See the members for what
+                // the pair is for; the short version is that this is the
+                // only place both halves of "asked 1.74 ms, given 0.926
+                // ms" are measured on one clock rather than divided out
+                // of two rates.
+                //
+                // Note what is *not* claimed here: nothing in this VMM
+                // decides this vector. `injection` came out of vmcs12's
+                // own entry-interruption field a few lines above, so the
+                // level above staged it and this only times it.
+                auto armed = this->stimer_arm_pending_tsc[cpu];
+
+                if ((0 != armed) && (now > armed)) {
+                    this->stimer_given_cycles[cpu] =
+                        this->stimer_given_cycles[cpu] + (now - armed);
+                    this->stimer_given_arms[cpu] =
+                        this->stimer_given_arms[cpu] + 1;
+                }
+
+                this->stimer_arm_pending_tsc[cpu] = 0;
+
+                // And into the arm ring as a third kind, so the ordered
+                // timeline of "guest armed, level above expired it" is
+                // readable rather than having to be reassembled from two
+                // rings with two different capacities.
+                auto ring = this->stimer_arm_count[cpu] %
+                            reference_sample_capacity;
+                this->stimer_arm_value[cpu][ring] = vector;
+                this->stimer_arm_tsc[cpu][ring] = now;
+                this->stimer_arm_kind[cpu][ring] = 3;
+                this->stimer_arm_count[cpu] =
+                    this->stimer_arm_count[cpu] + 1;
             }
         }
     }
@@ -8730,6 +8780,45 @@ hypervisor::on_l2_exit(std::size_t cpu,
                 if (2 == tag) {
                     this->l2_stimer_config[cpu] =
                         this->stimer_arm_value[cpu][slot];
+                }
+
+                // The asked half of the tick account. See the members:
+                // this is the only resident statement of "a 1.74 ms
+                // periodic timer expires after 0.926 ms", and until now
+                // it existed only as a ratio between two rates sampled
+                // from two counters over a window.
+                //
+                // Periodic counts only. The interface makes a one-shot
+                // count an absolute expiry in reference-counter units,
+                // and adding one of those to a sum of durations is the
+                // unit slip this file keeps re-learning. The periodic
+                // bit is the test rather than the magnitude, so a short
+                // absolute deadline cannot slip in on size alone.
+                constexpr std::uint64_t config_periodic_bit = 1ull << 1;
+
+                if ((1 == tag) && (cpu < max_cpus) &&
+                    (0 != (this->l2_stimer_config[cpu] &
+                           config_periodic_bit))) {
+                    auto period = this->stimer_arm_value[cpu][slot];
+
+                    if (0 != period) {
+                        // An arm displaced before any vector answered
+                        // it, counted rather than dropped: the two arm
+                        // counts disagreeing is what says the vector is
+                        // not the answer to the arm, which is the whole
+                        // assumption the ratio rests on.
+                        if (0 != this->stimer_arm_pending_tsc[cpu]) {
+                            this->stimer_unanswered[cpu] =
+                                this->stimer_unanswered[cpu] + 1;
+                        }
+
+                        this->stimer_asked_units[cpu] =
+                            this->stimer_asked_units[cpu] + period;
+                        this->stimer_asked_arms[cpu] =
+                            this->stimer_asked_arms[cpu] + 1;
+                        this->stimer_arm_pending_tsc[cpu] =
+                            this->stimer_arm_tsc[cpu][slot];
+                    }
                 }
             }
         }

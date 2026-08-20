@@ -4414,12 +4414,72 @@ private:
     std::uint64_t stimer_arm_value[max_cpus][reference_sample_capacity]{};
     std::uint64_t stimer_arm_tsc[max_cpus][reference_sample_capacity]{};
 
-    /** 1 for `STIMER0_COUNT`, 2 for `STIMER0_CONFIG`, 0 for an empty
-     * slot. Both go in one ring so their order survives, and the order is
-     * what says whether a count is a period or an absolute deadline. */
+    /** 1 for `STIMER0_COUNT`, 2 for `STIMER0_CONFIG`, **3 for the clock
+     * vector being injected into vmcs02**, 0 for an empty slot. All three
+     * go in one ring so their order survives, and the order is what says
+     * whether a count is a period or an absolute deadline - and, with the
+     * third kind, how long the level above took to expire it. */
     std::uint64_t stimer_arm_kind[max_cpus][reference_sample_capacity]{};
     std::uint64_t stimer_arm_count[max_cpus]{};
     bool reference_read_pending[max_cpus]{};
+    /**
+     * @}
+     */
+
+    /**
+     * **The tick account: what the level above was asked for against
+     * what it gave.**
+     *
+     * The whole investigation now turns on one ratio and nothing
+     * resident could state it. The second-level guest arms a *periodic*
+     * synthetic timer 0 with 17,400 hundred-nanosecond units - 1.74 ms,
+     * 574.7 Hz - and the level above injects the clock vector at
+     * 1,080/s, which is 0.926 ms. That is the level above deciding a
+     * 1.74 ms timer has expired after 0.926 ms of real time, and it
+     * has only ever been inferred by dividing two *rates* sampled from
+     * two different counters over a window.
+     *
+     * These four state it directly, per arm, from one clock:
+     *
+     * - `stimer_asked_units` and `stimer_asked_arms` sum the periodic
+     *   counts the guest wrote, in the interface's own 100 ns units.
+     * - `stimer_given_cycles` and `stimer_given_arms` sum the time-stamp
+     *   counter actually elapsed from each such write to the clock
+     *   vector that answered it.
+     *
+     * `given / asked`, with the counts to divide by and the time-stamp
+     * counter's frequency to convert with, **is the factor**. One is
+     * agreement; anything else is the level above's clock against the
+     * wall, measured rather than fitted.
+     *
+     * **It is built to fail loudly rather than plausibly.** The two arm
+     * counts are kept separately on purpose: an arm that is never
+     * answered is counted in `stimer_asked_arms` and not in
+     * `stimer_given_arms`, so the pair disagreeing says the vector is
+     * not the answer to the arm - which is the one assumption the ratio
+     * rests on and the one thing a single counter could not report.
+     * `stimer_unanswered` counts arms displaced by a later arm before
+     * any vector arrived, which is the same failure seen from the other
+     * side.
+     *
+     * Only *periods* are accounted. The interface defines a periodic
+     * count as a period in 100 ns units and a one-shot count as an
+     * absolute expiry in reference-counter units, so summing both would
+     * add a wall-clock time to a duration - the unit slip this file has
+     * already suffered three times. The periodic bit in
+     * `l2_stimer_config` is the test, not the magnitude.
+     * @{
+     */
+    std::uint64_t stimer_asked_units[max_cpus]{};
+    std::uint64_t stimer_asked_arms[max_cpus]{};
+    std::uint64_t stimer_given_cycles[max_cpus]{};
+    std::uint64_t stimer_given_arms[max_cpus]{};
+    std::uint64_t stimer_unanswered[max_cpus]{};
+
+    /** The time-stamp counter at the arm that has not yet been answered,
+     * or zero when none is outstanding. Not a diagnostic in itself - it
+     * is the state `stimer_given_cycles` is accumulated from. */
+    std::uint64_t stimer_arm_pending_tsc[max_cpus]{};
     /**
      * @}
      */
