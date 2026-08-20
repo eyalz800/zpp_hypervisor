@@ -996,9 +996,18 @@ def dump_phase_tree(cpu, phase_count, cell, round_trips, handler):
              if (i < len(PHASE_PARENT))
              and (PHASE_PARENT[i] == PHASE_CROSS) and calls[i]]
     if cross:
-        print("       cross-cutting - more than one caller, so these are "
-              "already inside\n       one of the rows above and must not "
-              "be added to it")
+        # Named, because the alternative is that somebody reads a `self`
+        # column as smaller than it is. A cross-cutting phase is inside
+        # one of the rows above - `copy_shadow_to_vmcs12` is inside
+        # `on_guest_vmlaunch` on one call and inside `vmptrld: flush
+        # old` on another - and because it is not anybody's child it is
+        # never subtracted from either. So those two `self` figures are
+        # upper bounds by exactly this much, and adding these rows to
+        # the tree above double counts them.
+        print("       cross-cutting - each of these is already inside one "
+              "of the rows above,\n       and is NOT subtracted from that "
+              "row's self, because it has more than\n       one caller. "
+              "Do not add them to the tree.")
         for index in cross:
             row(index, 1)
 
