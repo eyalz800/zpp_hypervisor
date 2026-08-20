@@ -538,6 +538,54 @@ thing to measure, because every named item has either been optimised, tested
 and rejected, or shown too small - and 1.4x cannot come from what is left
 named.
 
+## The guest is not spinning. It is executing widely, and it is 13x slow
+
+**The second-level profiler contradicts the framing this whole file has used,
+and it says so in its own words.** `ZPP_PROFILE_L2=ON` samples the guest's
+instruction pointer off the VMX-preemption timer - a clock the guest does not
+control, chosen precisely so the samples do not all land in the clock handler.
+
+    1,739 samples, 32 slots filled since the last flush, 10 flushes
+    top slot 8 hits of the 56 since the last flush
+    "many flushes with a low maximum is a guest executing widely;
+     a spin fills the table once and then never flushes again"
+
+    0xfffff804980a768e   8   0.5%
+    0xfffff80497e2890d   7   0.4%
+    0xfffff804985be948   6   0.3%
+    ...a long tail of single hits
+
+**Ten flushes, about 640 distinct-address fills, and nothing above 0.5%.**
+That is the shape of a guest running real varied code, not one stuck in a
+loop.
+
+It directly contradicts the earlier reading of "99.76% of second-level
+entries at one of eight instruction pointers, every one in the clock path" -
+which was taken **before the local APIC fix**, in the window where seven of
+eight processors ran outside this VMM. Another reading from that window that
+does not survive re-measurement.
+
+**So "livelock" may be the wrong word for what is happening now.** What is
+measured is:
+
+- the guest executes widely, over hundreds of distinct addresses;
+- it gets **7.9% of the boot processor**;
+- `leaves-filled` does not move, so it touches no *new* page - but that is
+  not the same as executing no new code, and this file has been treating the
+  two as identical.
+
+**The obvious test has never been run.** At 7.9% of a core the guest is
+about **13x slower than bare metal**. Windows with virtualization-based
+security boots on plain KVM here in about five minutes; thirteen times that
+is **over an hour**. The longest observation in this entire investigation is
+twenty-eight minutes, and most are five. A guest that simply needs an hour
+would look exactly like this at every point anyone has looked.
+
+That does not explain everything - a flat `leaves-filled` over twenty
+minutes still wants explaining, and the earlier configurations really were
+stuck. But it is cheap, it has never been done, and no amount of further
+optimisation is worth anything if the answer is "wait".
+
 ## Shadow VMCS earns its cost 2.3x over, measured rather than argued
 
 The two shadow-VMCS copies are **84,796 cycles a round trip, 14.6% of this
