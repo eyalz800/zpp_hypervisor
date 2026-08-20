@@ -2065,10 +2065,24 @@ bool hypervisor::on_guest_vmlaunch(std::size_t cpu,
             // b` holds with constant `a` and `b` for the life of the
             // boot, where against the host's counter the relation bends
             // as the two levels' share of the machine changes.
-            this->reference_read_tsc[cpu][slot] =
-                arch::x86_64::rdtsc() + this->dilation_offset[cpu];
+            auto when = arch::x86_64::rdtsc() + this->dilation_offset[cpu];
+            this->reference_read_tsc[cpu][slot] = when;
             this->reference_read_count[cpu] =
                 this->reference_read_count[cpu] + 1;
+
+            // The far end of the baseline, kept outside the ring because
+            // the ring is 32 entries and the guest reads the counter
+            // fifteen times a clock tick - so opposite ends of it span
+            // about 5 ms, and each end carries the reflection cost as
+            // error. The member existed for this and nothing had ever
+            // written it; `publish_reference_tsc_page` fell back to the
+            // ring's oldest entry and fitted a slope to five
+            // milliseconds. See `reference_minimum_baseline`.
+            if (0 == this->reference_first_tsc[cpu]) {
+                this->reference_first_tsc[cpu] = when;
+                this->reference_first_value[cpu] =
+                    this->reference_read_value[cpu][slot];
+            }
         }
 
         // The answer to a reflected `HvCallModifyVtlProtectionMask`,

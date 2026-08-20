@@ -8,6 +8,7 @@
 #include "zpp/diag/config.h"
 #include "zpp/diag/log.h"
 #include "zpp/hypervisor/nested_vmx.h"
+#include "zpp/hypervisor/reference_tsc.h"
 #include "zpp/scope_exit.h"
 #include <cstddef>
 #include <cstdint>
@@ -5631,55 +5632,49 @@ void hypervisor::module_name_of(std::size_t cpu,
     }
 }
 
-namespace
+std::uint64_t hypervisor::nominal_tsc_frequency()
 {
-/**
- * `floor((numerator << 64) / denominator)`, for `numerator <
- * denominator` so the result fits.
- *
- * Shift and subtract rather than a 128-bit division, because there is no
- * runtime library here to supply `__udivti3` and a link failure at this
- * depth is a bad way to find that out. Sixty-four iterations, once.
- */
-[[maybe_unused]] constexpr std::uint64_t
-shifted_quotient(std::uint64_t numerator, std::uint64_t denominator)
-{
-    if ((0 == denominator) || (numerator >= denominator)) {
+    std::uint32_t maximum[4]{};
+    arch::x86_64::cpuid(0, 0, maximum);
+
+    if (maximum[0] < 0x15) {
         return 0;
     }
 
-    std::uint64_t quotient{};
-    std::uint64_t remainder = numerator;
+    std::uint32_t leaf_15[4]{};
+    arch::x86_64::cpuid(0x15, 0, leaf_15);
 
-    for (int i{}; i < 64; ++i) {
-        auto carry = remainder >> 63;
-        remainder <<= 1;
-        quotient <<= 1;
+    // The crystal, where the leaf declines to name it, comes from SDM
+    // Table 22-95 and that table is indexed by the *display* family and
+    // model - SDM 21.1.2's rule, not the raw fields.
+    std::uint32_t leaf_1[4]{};
+    arch::x86_64::cpuid(1, 0, leaf_1);
 
-        if ((0 != carry) || (remainder >= denominator)) {
-            remainder -= denominator;
-            quotient |= 1;
-        }
+    auto version = leaf_1[0];
+    auto family = (version >> 8) & 0xf;
+    auto model = (version >> 4) & 0xf;
+
+    if (0xf == family) {
+        family += (version >> 20) & 0xff;
     }
 
-    return quotient;
-}
+    if ((6 == family) || (0xf == family)) {
+        model += ((version >> 16) & 0xf) << 4;
+    }
 
-/** `((tsc * scale) >> 64)`, the reference TSC page's own arithmetic. */
-[[maybe_unused]] constexpr std::uint64_t scaled_tsc(std::uint64_t tsc,
-                                                    std::uint64_t scale)
-{
-    return static_cast<std::uint64_t>(
-        (static_cast<unsigned __int128>(tsc) * scale) >> 64);
+    return reference_tsc::tsc_frequency_from_leaf_15(
+        leaf_15[0],
+        leaf_15[1],
+        leaf_15[2],
+        reference_tsc::nominal_crystal_frequency(family, model));
 }
-} // namespace
 
 void hypervisor::publish_reference_tsc_page(std::size_t cpu)
 {
     if constexpr (!nested_vmx::publish_reference_tsc) {
         return;
     } else {
-        if ((cpu >= max_cpus) || (0 != this->reference_published[cpu])) {
+        if (cpu >= max_cpus) {
             return;
         }
 
@@ -5688,62 +5683,169 @@ void hypervisor::publish_reference_tsc_page(std::size_t cpu)
             return;
         }
 
-        // Three samples: two to fit with, and the newest to check the fit
-        // against. Fitting to two adjacent reads would divide by a tiny
-        // time-stamp delta and amplify every rounding error in it, so the
-        // pair is taken from opposite ends of the ring.
         auto count = this->reference_read_count[cpu];
         if (count < reference_sample_capacity) {
             return;
         }
 
+        // Nothing new to fit from. This is what keeps the work off the
+        // entry path once the guest has stopped reading the counter,
+        // which it does the moment the page becomes valid - and it is
+        // also what replaces the old `reference_published` latch. The
+        // latch meant the first fit governed the guest's clock for the
+        // rest of the boot with nothing able to revise it; this lets a
+        // later, longer-baselined fit replace it, and costs one
+        // comparison per entry when there is no later fit to make.
+        if (count == this->reference_fit_count[cpu]) {
+            return;
+        }
+        this->reference_fit_count[cpu] = count;
+
         auto newest = (count - 1) % reference_sample_capacity;
         auto oldest = count % reference_sample_capacity;
 
-        auto t1 = this->reference_read_tsc[cpu][oldest];
-        auto r1 = this->reference_read_value[cpu][oldest];
         auto t2 = this->reference_read_tsc[cpu][newest];
         auto r2 = this->reference_read_value[cpu][newest];
+
+        // The longest baseline available, which is the *first* answer
+        // ever seen rather than the oldest still in the ring. A pair
+        // taken from opposite ends of a 32-entry ring spans about two
+        // clock ticks, and each end carries the reflection cost - about
+        // 2.5 ms here - as error on its time-stamp axis, so the slope is
+        // fitted from a 5 ms baseline with 2.5 ms of noise on it. That
+        // is how a fit lands far from the truth and still passes a
+        // collinearity check.
+        auto t1 = this->reference_first_tsc[cpu];
+        auto r1 = this->reference_first_value[cpu];
+
+        if ((0 == t1) || (0 == r1)) {
+            t1 = this->reference_read_tsc[cpu][oldest];
+            r1 = this->reference_read_value[cpu][oldest];
+        }
 
         if ((t2 <= t1) || (r2 <= r1)) {
             return;
         }
 
+        auto baseline = t2 - t1;
+        this->reference_baseline_tsc[cpu] = baseline;
+
         // The counter is 10 MHz and the time-stamp counter is gigahertz,
         // so the ratio is well under one and the quotient fits.
-        auto scale = shifted_quotient(r2 - r1, t2 - t1);
+        auto fitted = reference_tsc::shifted_quotient(r2 - r1, baseline);
+        this->reference_fitted_scale[cpu] = fitted;
+
+        // **Computed, not fitted.** Hyper-V reference time is counted in
+        // 100-nanosecond units, so the counter advances at exactly 10 MHz
+        // by specification - Xen quotes the TLFS text above `hv_scale_tsc`
+        // and derives the same `10^7 * 2^64 / tsc_hz` in
+        // `update_reference_tsc`; KVM's `compute_tsc_page_parameters`
+        // divides nanoseconds by 100 for the same reason. The scale has a
+        // closed form and the sampling apparatus was answering a question
+        // that did not need asking.
+        //
+        // Read once, and only here rather than on every entry: this point
+        // is reached a few dozen times in a boot.
+        auto tsc_hz = this->reference_tsc_frequency[cpu];
+        if (0 == tsc_hz) {
+            tsc_hz = nominal_tsc_frequency();
+            this->reference_tsc_frequency[cpu] = tsc_hz;
+        }
+
+        auto computed = reference_tsc::scale_for(tsc_hz);
+        auto scale = (0 != computed) ? computed : fitted;
+
         if (0 == scale) {
             return;
         }
 
-        auto offset = r2 - scaled_tsc(t2, scale);
+        // The diagnostic, and the whole reason the wrong scale went
+        // unnoticed: one second of time-stamp counter through the page's
+        // own arithmetic. It must read about 10,000,000. Recorded for
+        // both candidates so they can disagree - a single-field
+        // instrument cannot tell you it is aimed at the wrong field.
+        if (0 != tsc_hz) {
+            this->reference_implied_hz[cpu] =
+                reference_tsc::implied_frequency(scale, tsc_hz);
+            this->reference_fit_implied_hz[cpu] =
+                reference_tsc::implied_frequency(fitted, tsc_hz);
+        }
 
-        // Checked against a sample from inside the baseline, which the
-        // fit did not use. A pair always reproduces itself, so checking
-        // against either end of it would prove nothing - and that is what
-        // the first version did.
-        constexpr std::uint64_t tolerance = 1000;
+        // **The check that can fail on the thing it protects against**
+        // lives in `reference_fit_implied_hz` above and not here. Where
+        // the frequency is enumerable the fit is no longer what governs
+        // the guest's clock, so it is free to be an independent opinion
+        // about it - and the opinion is read as hertz against ten
+        // million, which is a quantity that disagrees.
+        //
+        // Deliberately not folded into `reference_fit_error`. That field
+        // carries the collinearity difference in hundred-nanosecond
+        // units, and a field that means hertz on one path and
+        // hundred-nanoseconds on the other is the unit slip this reader
+        // has already suffered three times.
+        if (0 == computed) {
+            // No enumerable frequency, so the fit is all there is and it
+            // has to earn its baseline. Under QEMU this is always the
+            // branch taken: `cpu_x86_cpuid` has no case for leaf 0x15 and
+            // its default returns zero, and `kvm_x86_build_cpuid` builds
+            // the guest's table from that function.
+            if (baseline < reference_minimum_baseline) {
+                return;
+            }
 
-        auto middle = (count - (reference_sample_capacity / 2)) %
-                      reference_sample_capacity;
-        auto tm = this->reference_read_tsc[cpu][middle];
-        auto rm = this->reference_read_value[cpu][middle];
+            // Collinearity, against a sample from inside the baseline
+            // that the fit did not use. It cannot fail on a wrong slope -
+            // which is why it is no longer the only check - but it does
+            // fail on a window where the counter was not yet linear in
+            // the time-stamp counter, and that is worth keeping.
+            constexpr std::uint64_t tolerance = 1000;
 
-        if ((0 == tm) || (tm <= t1) || (tm >= t2)) {
+            auto middle = (count - (reference_sample_capacity / 2)) %
+                          reference_sample_capacity;
+            auto tm = this->reference_read_tsc[cpu][middle];
+            auto rm = this->reference_read_value[cpu][middle];
+
+            if ((0 == tm) || (tm <= t1) || (tm >= t2)) {
+                return;
+            }
+
+            auto anchor = r2 - reference_tsc::scaled_tsc(t2, scale);
+            auto predicted = reference_tsc::scaled_tsc(tm, scale) + anchor;
+            auto difference =
+                (predicted > rm) ? (predicted - rm) : (rm - predicted);
+
+            if (difference > tolerance) {
+                this->reference_fit_error[cpu] = difference;
+                return;
+            }
+        }
+
+        auto published = this->reference_published[cpu];
+
+        // Nothing would change, so nothing is written. A rewrite that
+        // carries the same numbers still steps the sequence and still
+        // makes a reader retry.
+        if ((0 != published) && (scale == this->reference_scale[cpu])) {
             return;
         }
 
-        auto predicted = scaled_tsc(tm, scale) + offset;
-        auto difference =
-            (predicted > rm) ? (predicted - rm) : (rm - predicted);
+        // The offset anchors reference time on what the guest has
+        // already been told. On a first publish that is the newest
+        // answer the level above gave; on a revision it is the value the
+        // page itself reads *now*, so replacing the scale does not step
+        // the clock - the same construction Xen uses in
+        // `time_ref_count_thaw`, `trc->off = trc->val - trc_val(d, 0)`.
+        std::uint64_t offset{};
 
-        if (difference > tolerance) {
-            this->reference_fit_error[cpu] = difference;
-            return;
+        if (0 != published) {
+            auto now = arch::x86_64::rdtsc() + this->dilation_offset[cpu];
+            auto current = reference_tsc::scaled_tsc(
+                               now, this->reference_scale[cpu]) +
+                           this->reference_offset[cpu];
+            offset = current - reference_tsc::scaled_tsc(now, scale);
+        } else {
+            offset = r2 - reference_tsc::scaled_tsc(t2, scale);
         }
-
-        this->reference_scale[cpu] = scale;
-        this->reference_offset[cpu] = offset;
 
         // The page is a second-level guest-physical address, so it needs
         // the guest hypervisor's extended tables to reach.
@@ -5751,6 +5853,27 @@ void hypervisor::publish_reference_tsc_page(std::size_t cpu)
         auto physical = l2_physical_to_l1(cpu, enabled & page_bits);
         if (!physical) {
             return;
+        }
+
+        std::uint32_t sequence{};
+        auto write_sequence = [&] {
+            return write_guest_physical(
+                *physical,
+                std::span(reinterpret_cast<const std::byte *>(&sequence),
+                          sizeof(sequence)));
+        };
+
+        // Invalidate before rewriting, which matters only on a revision:
+        // a reader that samples the sequence, reads a torn scale/offset
+        // pair and samples the same sequence again would accept it. Zero
+        // is the interface's own "this page is not a reliable source",
+        // and it sends the guest to the counter MSR for as long as the
+        // rewrite takes. Skipped on a first publish, where the sequence
+        // is already zero because the level above never filled it in.
+        if (0 != published) {
+            if (!write_sequence()) {
+                return;
+            }
         }
 
         // Scale and offset first, sequence last. The interface has the
@@ -5774,21 +5897,35 @@ void hypervisor::publish_reference_tsc_page(std::size_t cpu)
             return;
         }
 
-        std::uint32_t sequence = 1;
-        if (!write_guest_physical(
-                *physical,
-                std::span(reinterpret_cast<const std::byte *>(&sequence),
-                          sizeof(sequence)))) {
+        auto publishes = this->reference_publishes[cpu] + 1;
+
+        // Monotonic across revisions, and never zero - zero is the
+        // interface's invalid marker, which is what Xen's
+        // `seq ? seq : 1` is avoiding.
+        sequence = static_cast<std::uint32_t>(publishes);
+        if (0 == sequence) {
+            sequence = 1;
+        }
+
+        if (!write_sequence()) {
             return;
         }
 
+        this->reference_scale[cpu] = scale;
+        this->reference_offset[cpu] = offset;
+        this->reference_publishes[cpu] = publishes;
         this->reference_published[cpu] = 1;
 
-        log("cpu {} published reference tsc page at {} scale {} offset {}",
+        log("cpu {} published reference tsc page at {} scale {} offset "
+            "{} tsc_hz {} implied_hz {} fit_implied_hz {} baseline {}",
             cpu,
             enabled & page_bits,
             scale,
-            offset);
+            offset,
+            tsc_hz,
+            this->reference_implied_hz[cpu],
+            this->reference_fit_implied_hz[cpu],
+            baseline);
     }
 }
 

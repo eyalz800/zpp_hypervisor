@@ -38,7 +38,7 @@ option(ZPP_EAGER_EPT_NEIGHBOURS
     OFF)
 
 option(ZPP_PUBLISH_REFERENCE_TSC
-    "Fill in the reference TSC page the guest hypervisor leaves invalid. See the root CMakeLists."
+    "Fill in the reference TSC page the guest hypervisor leaves invalid, with a scale computed from CPUID.15H where that enumerates and fitted over a long baseline where it does not. See the root CMakeLists."
     OFF)
 
 option(ZPP_NESTED_SHADOW_VMCS

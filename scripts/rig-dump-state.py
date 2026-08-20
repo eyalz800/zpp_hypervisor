@@ -1359,6 +1359,126 @@ def dump_l1_host_audit(args, elf, instance):
                       f"this one")
 
 
+def dump_reference_tsc(args, elf, instance):
+    """What clock the guest was handed, in hertz.
+
+    **This is the reading that would have caught a wrong scale, and there
+    was no way to take it.**  The reference TSC page carries a fixed
+    point multiplier and the guest computes
+    `((rdtsc * scale) >> 64) + offset`; nothing about a scale of
+    `0x0148f2db8d6da21a` says whether it is right, and three sessions
+    quoted one at each other without anybody being able to say.
+
+    Reference time is counted in 100-nanosecond units, so the counter
+    advances at exactly 10,000,000 ticks a second - by the Hyper-V
+    specification, not by observation.  `implied` below is one second of
+    time-stamp counter pushed through the page's own arithmetic, so it
+    **must read about 10,000,000**.  Anything else and the guest is
+    living in a different second from the one it is being told about,
+    which sets the rate of every timer it programs.
+
+    Two columns, not one, because a single-field instrument cannot tell
+    you it is aimed at the wrong field: `computed` is the scale derived
+    from the counter frequency, `fitted` is the slope through the guest
+    hypervisor's own answers for the counter MSR.  They should agree.
+    Where they do not, `baseline` says whether the fit could possibly
+    have been right - it is the time-stamp counter its two ends span, and
+    each end carries the reflection cost, about 2.5 ms, as error.
+    """
+    members = ["reference_scale", "reference_offset", "reference_published",
+               "reference_fit_error", "reference_tsc_frequency",
+               "reference_fitted_scale", "reference_implied_hz",
+               "reference_fit_implied_hz", "reference_baseline_tsc",
+               "reference_publishes", "reference_read_count",
+               "l2_reference_tsc_written"]
+    off = gdb_offsets(elf, members)
+
+    reader = Monitor(args.rig, args.port)
+    for member in members:
+        reader.queue(instance + off[member], args.cpus)
+    got = reader.run()
+
+    def word(member, cpu):
+        return got.get(instance + off[member] + 8 * cpu, 0)
+
+    # The counter frequency the hypervisor found for itself, where it
+    # found one.  Zero is the expected answer on this rig and is not a
+    # failure to read: QEMU's `cpu_x86_cpuid` has no case for CPUID leaf
+    # 0x15 and its default returns zero, and `kvm_x86_build_cpuid` builds
+    # the guest's table from that function.  The fallback below is the
+    # tree's own wall-clock measurement - 179,446,096,055 counts over a
+    # 90.08 second window - and it is labelled as a fallback wherever it
+    # is used, because a diagnostic that silently substitutes a constant
+    # for a reading is how the last three unit slips happened.
+    measured = 1_992_000_000
+
+    printed = False
+    for cpu in range(args.cpus):
+        enabled = word("l2_reference_tsc_written", cpu)
+        if not enabled and not word("reference_read_count", cpu):
+            continue
+
+        if not printed:
+            print("\nreference TSC page: the guest's clock, in hertz")
+            printed = True
+
+        tsc_hz = word("reference_tsc_frequency", cpu)
+        source = "CPUID.15H"
+        if not tsc_hz:
+            tsc_hz = measured
+            source = "FALLBACK, measured at the wall; CPUID.15H read zero"
+
+        published = word("reference_published", cpu)
+        scale = word("reference_scale", cpu)
+        fitted = word("reference_fitted_scale", cpu)
+        baseline = word("reference_baseline_tsc", cpu)
+
+        # Computed here rather than trusted from the member, so a stale
+        # deployed binary that does not have the member still gets a
+        # reading - and so the two can disagree, which is the only way a
+        # reader catches itself.
+        def implied(value):
+            return (value * tsc_hz) >> 64
+
+        print(f"\n  cpu {cpu}  page 0x{enabled & ~0xfff:x} "
+              f"{'enabled' if enabled & 1 else 'DISABLED'}, "
+              f"published {word('reference_publishes', cpu)} time(s), "
+              f"{word('reference_read_count', cpu):,} counter reads")
+        print(f"    time-stamp counter {tsc_hz:,} Hz  ({source})")
+
+        for what, value in (("published", scale), ("fitted", fitted)):
+            if not value:
+                print(f"    {what:<9} scale -                    "
+                      f"        -")
+                continue
+            hz = implied(value)
+            # 0.1%, which is `reference_tsc::frequency_tolerance`.  The
+            # honest fits recorded in BACKLOG.md came out at 9,998,562
+            # and 10,000,215 Hz; the failure was 15.8 million.
+            verdict = ("ok" if abs(hz - 10_000_000) <= 10_000
+                       else f"WRONG by {hz / 10_000_000.0:.3f}x")
+            print(f"    {what:<9} scale 0x{value:016x}  "
+                  f"implies {hz:>12,} Hz  {verdict}")
+
+        if baseline:
+            print(f"    fit baseline {baseline:,} counts "
+                  f"({1000.0 * baseline / tsc_hz:.1f} ms)")
+        # The removed check's own verdict, in hundred-nanosecond units,
+        # kept beside the frequency it could not see.  A zero here next
+        # to a WRONG above is the whole story: collinear samples always
+        # reproduce themselves, whatever their slope.
+        print(f"    offset 0x{word('reference_offset', cpu):x}, "
+              f"collinearity error {word('reference_fit_error', cpu):,} "
+              f"x100ns")
+
+        if not published:
+            print("    NOT PUBLISHED - the guest is still reading the "
+                  "counter MSR")
+
+    if not printed:
+        print("\nreference TSC page: never enabled by the guest")
+
+
 def dump_vtl(args, elf, instance):
     """The trust-level switch loop: whether it advances, and who calls it.
 
@@ -2078,7 +2198,8 @@ def main():
     # the rig killed every section after it, silently, and the dump just
     # looked short. One section failing must not cost the others.
     for section in (dump_entry_rips, dump_priority,
-                    dump_synthetic_msrs, dump_l1_host_audit,
+                    dump_synthetic_msrs, dump_reference_tsc,
+                    dump_l1_host_audit,
                     dump_guest_state_shadow, dump_regions,
                     dump_vtl, dump_vtl_steps):
         try:

@@ -11692,6 +11692,159 @@ still wrong here. So this may be the same defect one level along rather than
 a new one. It is *not* evidence that the clock repair is insufficient, and
 it should be re-measured once the scale is correct rather than attacked on
 its own.
+## The scale is computed now, and the 1.58x is not the scale's - read the new line
+
+**Two things, and the second one contradicts the entry below it.** The
+repair is done: the scale is computed from the definition rather than
+fitted. But the diagnosis that motivated it does not survive contact with
+what this file already records, and that is worth more than the repair.
+
+### What was verified, and where
+
+`scale = 10^7 * 2^64 / tsc_hz`, and the multiply is a 64x64 taking the
+high half. Three independent confirmations, because "recalled knowledge
+is a good way to form a hypothesis and a bad way to settle one":
+
+- The TLFS text itself, quoted verbatim in Xen's
+  `xen/arch/x86/include/asm/guest/hyperv.h` above `hv_scale_tsc`:
+  "ReferenceTime = ((VirtualTsc * TscScale) >> 64) + TscOffset. The
+  multiplication is a 64 bit multiplication, which results in a 128 bit
+  number which is then shifted 64 times to the right to obtain the high
+  64 bits."
+- Xen's implementation, `xen/arch/x86/hvm/viridian/time.c`
+  `update_reference_tsc`: `p->tsc_scale = ((10000UL << 32) /
+  d->arch.tsc_khz) << 32`, which is the same expression with the
+  division split to stay inside 64 bits. `hyperv-tlfs.h` beside it
+  defines `HV_CLOCK_HZ (NSEC_PER_SEC/100)`.
+- KVM's `arch/x86/kvm/hyperv.c`: `compute_tsc_page_parameters` divides
+  nanoseconds by 100, and `kvm_hv_get_time_ref_counter` reads the page
+  back as `mul_u64_u64_shr(tsc, tsc_ref.tsc_scale, 64) + tsc_offset`.
+
+So the shift is 64, the units are 100 ns, and `scaled_tsc` already
+matched. **The convention was never the bug.**
+
+### The premise does not hold: every scale this tree ever recorded was right
+
+Three published scales appear in this file. Against the 1.9920 GHz the
+counter was measured at, each implies a reference frequency of:
+
+| scale | where | implied |
+|---|---|---|
+| `0x14900c840a0c59d` | the boot that first filled the page | **10,000,215 Hz** |
+| `0x0148f472366408c2` | "the guest asks for 575 Hz" | **9,998,750 Hz** |
+| `0x0148f2db8d6da21a` | "the reference TSC page is right" | **9,998,562 Hz** |
+
+All three inside 0.03% of ten million, and the last was already checked
+against an independent wall clock. **A page carrying any of them is not
+1.58 times fast.** The entry below reads the 906 Hz against 574.7 Hz as
+"the scale we publish makes the clock run 1.577x fast"; no scale ever
+recorded here does that, and no reading of the scale was taken on the
+boot that measured 906 Hz - because until now there was no way to take
+one. That is the finding.
+
+**What is true of the fit, and it is a real defect**: it is not
+reproducible. The samples are pairs of (guest time-stamp counter, the
+level above's answer for `TIME_REF_COUNT`), and the answer is captured
+when the guest hypervisor resumes its guest with it in RAX - so each
+sample carries our reflection cost, **about 2.5 ms**, as error on its
+time-stamp axis. The guest reads the counter about fifteen times a clock
+tick, so 32 reads span roughly **5 ms**. A slope fitted across a 5 ms
+baseline with 2.5 ms of noise at each end can land anywhere, including
+1.58x, and the old check could not tell: it predicted a middle sample,
+and collinear samples always reproduce themselves whatever their slope.
+Modelled in `tests/reference_tsc`: on samples lying exactly on a
+1.58x-fast line, the removed check's difference is **0** against a
+tolerance of 1000.
+
+So both readings are consistent - the fit landed right on the boots
+somebody looked at, and may have landed wrong on the boot that
+livelocked. **Nothing settles that except the new diagnostic**, and it
+is one line.
+
+### Where a trustworthy `tsc_hz` comes from, and where it does not
+
+- **CPUID.15H is the answer, on bare metal.** SDM 22.7.3: nominal TSC
+  frequency = `ECX * EBX / EAX`, with SDM Table 22-95 supplying the
+  crystal where `ECX` is zero. For this part - 06_8EH, in the table's
+  24 MHz row - a ratio of 83 gives **1,992,000,000**, which reproduces
+  the wall-clock measurement of 1.9920 GHz to four significant figures.
+- **CPUID.16H is rejected, and by a measurement rather than an
+  argument.** It reports the processor base frequency: 1800 MHz on this
+  part, against a counter measured at 1992 MHz. **10.7% low**, and it
+  would have looked entirely plausible.
+- **MSR_PLATFORM_INFO (0xCE) is rejected twice over.** Its ratio field
+  gives the base frequency, the same wrong answer; and KVM resets it to
+  `MSR_PLATFORM_INFO_CPUID_FAULT` alone in `kvm_vcpu_reset`
+  (`arch/x86/kvm/x86.c`), so the ratio bits read zero to any guest whose
+  userspace has not written them.
+- **Under QEMU there is no source at all, and that is checkable.**
+  `cpu_x86_cpuid` in `target/i386/cpu.c` has no case for 0x15 or 0x16
+  and its `default:` returns "reserved values: zero";
+  `kvm_x86_build_cpuid` in `target/i386/kvm/kvm.c` builds the guest's
+  CPUID table by calling that function for every leaf. KVM itself would
+  have passed both through - `__do_cpuid_func` in `arch/x86/kvm/cpuid.c`
+  has no case for them either, so `do_host_cpuid`'s values survive - but
+  QEMU decides what KVM is handed. **So on the rig the leaf reads zero
+  and the scale must still be fitted.**
+- Calibrating against another clock was considered and is not available:
+  every clock this VMM could reach - the local APIC timer, the PIT, the
+  ACPI power-management timer - belongs to the guest, and reading one
+  perturbs what is being measured. The guest hypervisor's own counter is
+  the thing being corrected, so it cannot be the reference.
+
+### What changed
+
+- The scale is **computed** wherever `CPUID.15H` enumerates. Only the
+  offset comes from the level above, and only so reference time stays
+  continuous with what the guest has already read.
+- Where it does not enumerate, the scale is still fitted, but over a
+  baseline of at least **2^31 counts** (about 1.08 s, so 0.5% error
+  from the same 2.5 ms noise) instead of the 5 ms that 32 reads span.
+  `reference_first_tsc` and `reference_first_value` existed for exactly
+  this and **had never been written by anything**; the fit fell back to
+  the ring's oldest entry every time.
+- `reference_published` no longer latches. A later fit over a longer
+  baseline replaces an earlier one, the sequence is zeroed across the
+  rewrite so a reader falls back rather than reading a torn pair, and
+  the offset is re-anchored so replacing the scale does not step the
+  clock - the construction Xen uses in `time_ref_count_thaw`.
+- **The diagnostic, which is the part that matters.**
+  `rig-dump-state.py` grows a `reference TSC page` section printing the
+  implied reference frequency in hertz for the published scale *and* for
+  the fitted one, with the baseline beside them. On the synthetic case
+  above it reads:
+
+      published scale 0x0207d04bafec9b0a  implies  15,800,000 Hz  WRONG by 1.580x
+      fit baseline 9,960,000 counts (5.0 ms)
+      offset 0x40000000, fit error 0
+
+  Three lines, and the third is the removed check reporting success
+  beside the failure it could not see.
+
+### What is still open, and it needs one boot
+
+**Read the new section on the next boot before doing anything else.** If
+`implies` reads about 10,000,000 on a guest that is livelocking, the
+scale is exonerated and the 906 Hz has another cause - and the entries
+below, which attribute the livelock to the page's scale, are wrong about
+the mechanism while being right that the page is involved. `reftsc=0`
+did take the injection rate from 906/s to 432/s, and that is measured;
+what it does not establish is *which* property of the page did it.
+
+Candidates, if the frequency reads correct:
+
+- **the offset.** It anchors on the newest sample, and a discontinuity
+  at publish time puts every armed deadline in the past.
+- **the sequence.** It was written as `1` on every publish and the page
+  was never invalidated first, so a guest sampling across the write
+  could accept a torn pair. Fixed here, untested.
+- **who reads it.** `l2_reference_tsc_written` records the *second-level*
+  guest enabling the page, so Windows computes reference time from it
+  while the guest hypervisor decides when a synthetic timer expires
+  against its own clock. Two clocks, and only one of them ours. Nothing
+  in this tree has established that they agree, and a census of the
+  level above's `TIME_REF_COUNT` answers against our page's value at the
+  same instant would settle it.
 
 ## The reference scale is fitted when it is defined, and validated against itself
 

@@ -267,6 +267,23 @@ zpp_add_host_test(small_map
 zpp_add_host_test(mtrr
     SOURCES mtrr/harness.cpp)
 
+# The Hyper-V reference TSC page's arithmetic.
+# zpp/hypervisor/reference_tsc.h depends on <cstdint> and <climits> and on
+# nothing else, so it compiles here exactly as the hypervisor compiles it.
+# Pure and constexpr, so most of the assertions are made at compile time
+# and the compile is itself the test.
+#
+# What it pins: the scale on that page was *fitted* from the guest
+# hypervisor's own answers and validated by predicting a sample from
+# inside its own baseline - a check that fails on non-linearity and never
+# on a wrong slope, which was the entire risk. Reference time is counted
+# in 100-nanosecond units, so the rate is 10 MHz by specification and the
+# scale has a closed form; this harness is that closed form, its round
+# trip back to ten million, and the two units slips that would look like
+# an ordinary scale - a shift wrong by one, and hertz for kilohertz.
+zpp_add_host_test(reference_tsc
+    SOURCES reference_tsc/harness.cpp)
+
 # The host page table, the OS page table walker and the paging-structure
 # helpers underneath both. The two translation units are the real ones,
 # compiled rather than copied, so a change to either is a change to what

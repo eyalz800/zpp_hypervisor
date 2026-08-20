@@ -6690,14 +6690,110 @@ private:
     std::uint64_t l2_reference_tsc_written[max_cpus]{};
 
     /**
-     * The fit of the guest hypervisor's own reference counter against the
-     * time stamp counter, and whether the page has been published from
-     * it. See `nested_vmx::publish_reference_tsc`.
+     * What was published on the reference TSC page, and what the fit of
+     * the guest hypervisor's own counter said about it. See
+     * `nested_vmx::publish_reference_tsc` and `zpp/hypervisor/
+     * reference_tsc.h`.
+     *
+     * `reference_scale` and `reference_offset` are what the page carries.
+     * The scale is *computed* from `reference_tsc_frequency` wherever
+     * that is known, because the reference counter's rate is defined -
+     * 100-nanosecond units, 10 MHz - and only the offset has to come from
+     * the level above so reference time stays continuous with what the
+     * guest has already read.
+     *
+     * `reference_fit_error` is the collinearity check's difference, in
+     * hundred-nanosecond units, and stays that on every path - the
+     * frequency disagreement is read from `reference_fit_implied_hz`
+     * below rather than folded in here, because a field meaning hertz on
+     * one path and hundred-nanoseconds on the other is the unit slip
+     * this reader has already suffered three times.
      */
     std::uint64_t reference_scale[max_cpus]{};
     std::uint64_t reference_offset[max_cpus]{};
     volatile std::uint64_t reference_published[max_cpus]{};
     volatile std::uint64_t reference_fit_error[max_cpus]{};
+
+    /**
+     * The diagnostic that would have caught a wrong scale, and the pair
+     * of readings that lets it disagree with itself.
+     *
+     * `reference_implied_hz` is one second of time-stamp counter pushed
+     * through the published page's own arithmetic. **It must read about
+     * 10,000,000.** Anything else and the guest is living in a different
+     * second from the one it is being told about, which is precisely the
+     * failure the fitted scale could not detect: its own check predicted
+     * a sample from inside its own baseline, so it failed on
+     * non-linearity and never on a wrong slope.
+     *
+     * `reference_fit_implied_hz` is the same reading for the *fitted*
+     * scale, kept beside the published one whether or not the fit was
+     * used. Two fields rather than one on purpose - a single-field
+     * instrument cannot tell you it is aimed at the wrong field, and
+     * this pair says which of "the definition" and "the level above"
+     * disagrees.
+     *
+     * Both are zero when `reference_tsc_frequency` is zero, because
+     * neither can be computed without it - and that is itself the
+     * reading, not a missing one.
+     */
+    std::uint64_t reference_tsc_frequency[max_cpus]{};
+    std::uint64_t reference_fitted_scale[max_cpus]{};
+    std::uint64_t reference_implied_hz[max_cpus]{};
+    std::uint64_t reference_fit_implied_hz[max_cpus]{};
+
+    /**
+     * How much time-stamp counter the fit's two ends span, and how many
+     * times the page has been written.
+     *
+     * The baseline is the number that says whether a fit could possibly
+     * be right. A reflected read is sampled when the guest hypervisor
+     * resumes its guest with the answer in RAX, so each pair carries the
+     * reflection cost as error on its time-stamp axis - about 2.5 ms
+     * here, per `BACKLOG.md`. Across 32 reads at roughly fifteen a clock
+     * tick that is a baseline of about 5 ms with 2.5 ms of noise at each
+     * end, which is how a fit lands 58% fast and still looks collinear.
+     */
+    std::uint64_t reference_baseline_tsc[max_cpus]{};
+    std::uint64_t reference_publishes[max_cpus]{};
+
+    /**
+     * The read count the last fit was made at, so the entry path does no
+     * work when the guest has stopped reading the counter - which it does
+     * the moment the page becomes valid.
+     *
+     * This is what replaced the `reference_published` latch. The latch
+     * meant whatever came out of the first window governed the guest's
+     * clock for the rest of the boot with nothing able to revise it;
+     * against this, a later fit over a longer baseline replaces an
+     * earlier one, and the offset is re-anchored so reference time does
+     * not step when it does.
+     */
+    std::uint64_t reference_fit_count[max_cpus]{};
+
+    /**
+     * The least time-stamp counter a *fitted* scale's two ends may span
+     * before it is published: 2^31 counts, about 1.08 seconds at the
+     * 1.992 GHz this rig's counter was measured at.
+     *
+     * Sized against the error rather than against a wish. Each sample
+     * carries the reflection cost on its time-stamp axis - about 2.5 ms -
+     * so a baseline of B seconds fits a slope to about 2 * 2.5ms / B. At
+     * the 5 ms baseline 32 reads actually span, that is order one; at
+     * 1.08 seconds it is 0.5%, which is inside `frequency_tolerance`.
+     *
+     * The cost is that the guest reads the counter MSR for another
+     * second, about 8,600 reads at fifteen a clock tick. That is worth
+     * paying and it is not what the page was introduced to avoid: before
+     * the page existed the guest read the MSR ~236,000 times and never
+     * stopped.
+     *
+     * **Only the fitted path waits.** Where the frequency is enumerable
+     * the scale is computed and the samples anchor nothing but the
+     * offset, for which one is enough, so that path publishes at once.
+     */
+    static constexpr std::uint64_t reference_minimum_baseline =
+        std::uint64_t{1} << 31;
 
     /** The first answer seen, kept as a long baseline for the fit. A
      * scale fitted across a 32-entry ring spans milliseconds, and a rate
@@ -6707,12 +6803,20 @@ private:
     std::uint64_t reference_first_value[max_cpus]{};
 
     /**
-     * Fits that pair from the answers already recorded in
-     * `reference_read_value` and `reference_read_tsc`, checks the fit
-     * against a later sample, and only then writes the page and makes its
-     * sequence non-zero. Called on entry; does nothing until it can.
+     * Computes the scale from the time-stamp counter frequency where
+     * that is enumerable, fits it from the guest hypervisor's own
+     * answers where it is not, anchors the offset on the newest of those
+     * answers so reference time does not step, and only then writes the
+     * page and makes its sequence non-zero. Called on entry; does
+     * nothing until it can.
      */
     void publish_reference_tsc_page(std::size_t cpu);
+
+    /**
+     * The nominal time-stamp counter frequency in hertz from CPUID leaf
+     * 0x15, or zero where the leaf enumerates nothing. SDM 22.7.3.
+     */
+    static std::uint64_t nominal_tsc_frequency();
 
     std::uint32_t l2_synthetic_msr_reads[max_cpus][256]{};
     std::uint32_t l2_synthetic_msr_writes[max_cpus][256]{};
