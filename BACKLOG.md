@@ -752,6 +752,68 @@ thing to measure, because every named item has either been optimised, tested
 and rejected, or shown too small - and 1.4x cannot come from what is left
 named.
 
+## The clock is honest. The 1.879x was our own cost, measured as a ratio
+
+**Read from the failing configuration, which nobody had ever done:**
+
+    fitted scale 0x0148ff3f4f5255e8  implies  10,000,032 Hz  ok
+    time-stamp counter 1,992,000,000 Hz (measured at the wall)
+
+`dump_reference_tsc`'s **fitted** row measures the level above's *own*
+reference-counter rate against the wall, and it stays live because the guest
+reads the counter MSR from inside its clock handler. Against a
+specification-mandated 10 MHz it reads **10,000,032 Hz - honest to 3 parts
+per million.** The criterion was stated before the reading was taken: ~10 MHz
+means the clock is honest and the fault is in the *scheduling*; ~18.8 MHz
+would have named the cause outright.
+
+**So the guest hypervisor's clock is not fast, and the over-injection theory
+is dead.**
+
+**And the number it rested on was never a measurement.** `1.879` is an
+injection *rate* - a window delta, 1,080/s - divided by a *period* read once
+out of `rax` - 17,400 units, 574.7 Hz. Two quantities never measured against
+each other, which is precisely the shape of the "ratio near 1213" this file
+already retired. Re-measured an hour later it read **1.931**, not 1.879. **A
+constant of nature does not drift by 3% in an hour; a cost does.**
+
+That is what it was. If the level above finds the timer already overdue
+every time it looks - which it will, at 7.9% of a processor and a 390
+microsecond round trip - then it re-arms and fires immediately, and the
+"rate" being measured is **how fast this VMM can go round the loop**, wearing
+a clock's clothes.
+
+**Which puts cost back as the variable**, consistent with the one
+intervention that ever moved the guest: doubling the period, +100% of budget,
+which got application processors from 17 second-level entries to 8,410. And
+inconsistent with nothing - the three failed reductions were 2.8% to 15.5%,
+far below what this needs.
+
+Also settled while looking, so it is not re-opened:
+
+- **The TSC-offset composition is correct and inert.** `build_vmcs02`
+  composes `offset02 = (m12==1.0 ? o01 : signed_scaled(o01,m12)) + o12` term
+  for term with KVM's `kvm_calc_nested_tsc_offset`. On this configuration
+  every term collapses - `o01` is 0 because "use TSC offsetting" is named
+  only under `ZPP_TIME_DILATION`; `m01` is 1.0 and cannot be otherwise, SDM
+  A.3.3 "bits 31:0 ... These bits are always 0"; `m12` is 1.0 necessarily
+  because `supported_secondary_controls` withholds bit 25. So `offset02 ==
+  o12` verbatim and **a second-level RDTSC reads exactly what it would with
+  this VMM absent.** No factor here can be 1.879.
+- **A real latent bug fixed on the way**: `multiplier01` was read *after* the
+  VMPTRLD, so it read vmcs02's composed product and squared the guest
+  hypervisor's multiplier on every entry. Now cached from vmcs01, which is
+  what KVM does. Dead on this part for want of TSC scaling; live on any part
+  that has it. The regression test was checked by reverting the line.
+- **`0xd1` is not ours.** It is read out of vmcs12's entry-interruption field
+  and copied; `selfipi=0`, so nothing here synthesises it.
+- **The ACPI power-management timer and HPET never reach us** - only the
+  sleep-control port appears in either I/O bitmap - so they run on real host
+  time, and a platform timer cannot produce a *constant* factor anyway.
+- **1,992,000,000 / 1.879 = 1.060 GHz matches nothing** on an i7-8565U or in
+  QEMU's defaults. Recorded as checked, because numerology is not evidence
+  and the next reader should not repeat it.
+
 ## Telling the guest hypervisor the TSC frequency: it never asks
 
 **Checked and rejected before building anything.** The reasoning was sound
