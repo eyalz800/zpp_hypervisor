@@ -11653,6 +11653,49 @@ of exactly the shape that has now failed twice in this file.
 The switch stays **off**, and now for a measured reason rather than an
 inherited one.
 
+## The reference scale is fitted when it is defined, and validated against itself
+
+**Why the published scale is wrong, from reading the code and the census
+together.** Two facts that only mean something side by side:
+
+- `reference_sample_capacity` is **32**.
+- The synthetic-MSR read census says the guest reads `0x40000020`
+  `TIME_REF_COUNT` **exactly 32 times in a whole boot**, and 65.3% of all
+  its synthetic reads are that one MSR.
+
+So the sample ring fills **once**, entirely from early boot, `publish` fires
+the moment it is full, and `reference_published[cpu]` stops it ever being
+revisited. The scale that governs the guest's timers for the rest of the
+boot is fitted from one early window and never corrected.
+
+**And the fit's own check cannot detect a wrong slope.** It predicts a
+*middle* sample and compares against a tolerance of 1000. The comment is
+right that checking against either end would prove nothing - a pair always
+reproduces itself - but the middle is still *inside the same baseline*. It
+proves the points are collinear. It cannot prove the line's slope is the
+right one, because every sample it could disagree with was taken in the same
+window under the same distortion. This is the third instance in this file of
+the same shape: **a self-check must be able to fail on the thing it protects
+against**, and this one fails only on non-linearity, which was never the
+risk.
+
+**The scale does not need fitting, because it is defined.** Hyper-V
+reference time is counted in **100-nanosecond units** - the reference
+counter advances at exactly 10 MHz by specification, not by observation. So
+
+    scale = 10^7 * 2^64 / tsc_hz
+
+is computable from the time-stamp counter frequency alone, and the whole
+sampling apparatus is answering a question that has a closed form. The
+measured error is 906/574.7 = **1.577x fast**, which is a constant factor -
+exactly what a wrong slope produces, and exactly what a fit over an
+unrepresentative window would give.
+
+The repair is therefore to compute the scale rather than fit it, and to keep
+the fit only as a *check* on the computed value - which is the direction the
+check can actually fail in. What that needs is a trustworthy `tsc_hz`, and
+where that comes from on this part, under KVM, is the open question.
+
 ## The reference TSC page was the over-injection, and turning it off breaks the livelock
 
 **First forward progress in the whole investigation.** One variable:
