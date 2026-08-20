@@ -785,6 +785,50 @@ is not there" and is really "the wrong question was asked". `x` is the
 virtual read. The same distinction is why a wide `xp` over a device BAR
 lied, further down this file.
 
+## No VMCS shadowing on this silicon - confirmed, and for a different reason
+
+The tax above is unavoidable here, and the reason this file gave for it was
+the wrong bit. Recorded properly so the next reader checks the right one.
+
+**What was claimed:** the i7-8565U "does not report IA32_VMX_MISC[29]".
+**MISC[29] is VMWRITE-to-read-only-fields.** VMCS shadowing is enumerated in
+`IA32_VMX_PROCBASED_CTLS2` **bit 14**. Right conclusion, wrong evidence -
+which matters, because anyone re-checking the cited bit would have found it
+irrelevant and drawn no conclusion at all.
+
+**Checked authoritatively.** The MSR device is absent on the rig's TinyCore
+(`/dev/cpu/0/msr`, and `modprobe msr` does not provide it), so the reading
+comes from the kernel's own enumeration, which lists `shadow_vmcs` when the
+part has it:
+
+    vmx flags: vnmi preemption_timer invvpid ept_x_only ept_ad ept_1gb
+               flexpriority tsc_offset vtpr mtf vapic ept vpid
+               unrestricted_guest ple pml ept_violation_ve
+               ept_mode_based_exec
+
+Eighteen flags, **no `shadow_vmcs`**, and no `posted_intr` or `apicv` either
+- which agrees with `enable_apicv N` beside `enable_shadow_vmcs N`. Kernel
+6.12.11-zpptrace.
+
+**And the tax accounting closes to about 1:1.** Roughly 110 VMCS accesses a
+round trip at ~2,600 round trips a second is 286,000/s; the ten or so
+VMPTRLD/VMPTRST/VMCLEAR per round trip add ~26,000/s; our own 8,155 exits/s
+on top. Against KVM's measured **401,393/s**. So **each VMX instruction this
+VMM executes costs one KVM exit**, and the two counts are the same quantity
+seen from either side.
+
+That makes the remaining lever exact rather than vague: **reducing our VMX
+instruction count reduces KVM's load one for one.** To reach 1.4x, roughly
+30% of 401,393 must go - about **46 of the 110 accesses a round trip**. For
+scale, the reduction that landed earlier removed 23 and moved the round trip
+2.8%.
+
+Where those 110 sit, from the phase tree: `save_l2_state` ~15 fields,
+`load_l1_host_state` 52 writes at ~80% elided, `exit information` 8, the
+vmcs02 build ~17, and the two shadow copies ~20 plus their four pointer
+instructions. Halving that total is the whole remaining budget, and no
+single item is big enough on its own.
+
 ## 49 KVM exits for every one of ours. That is where the 78% goes
 
 **Measured from KVM's own counters on the rig, 30-second delta, while the
