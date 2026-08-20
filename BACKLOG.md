@@ -240,6 +240,248 @@ it.** `rdx` in the trust-level register census held the descriptor
 pointer from the very first capture, in a printed column, for five
 sessions.
 
+## The unattributed half was 46% of a different quantity
+
+**The section below this one is arithmetically wrong twice over, in
+opposite directions, and correcting it changes the target.** It sums a
+column that cannot be summed and divides by a denominator that includes
+the guests.
+
+### 1. Six of the "top-level" rows nest inside two of the others
+
+`copy_vmcs12_to_shadow` is called from `reflect_l2_exit`, at its last
+line. `merge_nested_bitmaps`, `vmptrld->vmcs02` and
+`shadow_ept_pointer_for` are called from `build_vmcs02`.
+`vmptrld->vmcs01` is called from `reflect_l2_exit`. So of the 384,000
+cycles the table below adds up as top-level items,
+
+    24,996 + 18,063 + 5,715 + 5,791 + 2,327 = 56,892
+
+is counted twice. The de-nested top-level total is about **329,000**.
+
+### 2. The denominator was the wall clock, and 21.88% of that is the guests
+
+`handler_cycles` is what the phases live inside, and it is 78.12% of the
+780,707 cycles a round trip takes - **609,900 cycles, 306 microseconds**.
+The other 170,700 are Hyper-V (16.40%) and Windows (5.47%) executing,
+which no phase should ever cover and which no optimisation here can
+recover, because recovering it is the *goal*.
+
+So the honest statement is:
+
+| | cycles/RT | share |
+|---|---|---|
+| wall clock, one round trip | 780,707 | 100% |
+| inside this VMM | 609,900 | 78.12% |
+| named phases, de-nested | ~329,000 | 54% *of the VMM's own time* |
+| **unattributed, inside this VMM** | **~281,000** | **46% of it** |
+| Hyper-V executing | 128,000 | 16.40% |
+| Windows executing | 42,700 | 5.47% |
+
+**46% of our own handler, not "half the round trip".** 141
+microseconds, not 200.
+
+### And the yardstick, in cycles rather than in a ratio
+
+78.12% -> 56% is 22.12 points of the machine. One point is 7,807 cycles
+a round trip. **1.4x means removing 172,700 cycles from every round
+trip** - which is more than half of everything currently named, and 61%
+of the whole unattributed residue.
+
+That number is the thing to hold every proposal against, and it is why
+the ranking below ends where it does.
+
+## The instrument that closes it: the phase table is a tree with a root
+
+The table could not be summed because it had no root - every slot was
+added where somebody suspected a cost, so nothing covered the exit as a
+whole and nothing recorded what nested inside what. Both are fixed.
+
+**Slots 25 to 30 are adjacent intervals over the whole of an exit**,
+stamped from one running mark rather than bracketed:
+
+| slot | interval |
+|---|---|
+| 25 `exit: prologue` | top of `on_vm_exit` to the dispatch |
+| 26 `exit: dispatch` | whatever handled the exit |
+| 27 `resume: events` | the interrupted-event re-queue |
+| 28 `resume: diag and rip` | the pump, the heartbeat, the RIP advance |
+| 29 `resume: record_exit` | the ring, on every single exit |
+| 30 `resume: entry census` | the last block before the entry |
+
+They sum to `handler_cycles` **by construction**: `resume_guest` is
+`[[noreturn]]` with exactly two call sites and both are inside
+`on_vm_exit`, so no exit reaches a guest without crossing every boundary
+once. The reader prints `--- outside the split` against them, and that
+line is the check - if it is not near zero, exits are leaving the
+handler by a path nobody has named.
+
+The rest close the two ends that had nothing at all:
+
+- **31-34** name `reflect_l2_exit`'s residue - the exit ring (four
+  VMREADs), the two MSR areas, the transition INVVPID, the enlightened
+  store. That residue is 24,339 cycles a round trip, not the ~55,000 the
+  section below quotes, because that figure was `reflect` minus three of
+  its five children.
+- **35, 36** cover the entry half, which had *nothing* between
+  `build_vmcs02` returning and the guest running.
+- **37-39** close guest memory: the write side of the mapping window,
+  which was never measured at all, and the whole of each call against
+  the mapping inside it.
+- **40-49** split the two shadow-VMCS copies into their five steps each.
+
+### The instructions nothing was counting
+
+`vmcs_reads_taken` and `vmcs_writes_taken` are incremented in
+`vmcs::read` and `vmcs::write` and nowhere else. **So "110.6 VMCS
+accesses per round trip" - the number every estimate in this file is
+built on - excludes every VMPTRLD, VMCLEAR, VMPTRST, INVEPT and INVVPID
+this VMM executes.** Phase 6 already prices a single VMPTRLD at 5,715
+cycles against a VMREAD's 991, and the two shadow copies issue four
+region instructions each.
+
+Counted out of the source, a round trip issues roughly **seven VMPTRLD,
+two VMPTRST, two VMCLEAR and one or two INVVPID** that appear in no
+access count anywhere. At the VMPTRLD price that is on the order of
+60,000 cycles a round trip, 10% of our own time, in a category this file
+has been treating as free.
+
+### What it costs to run
+
+One RDTSC per boundary, and KVM clears `CPU_BASED_RDTSC_EXITING` for its
+guests in `vmx_exec_control` (`.references/kvm/vmx.c:4490`), so it does
+not exit. Twenty-odd boundaries on the heaviest round trip is under a
+thousand cycles against 609,900 - **0.15%**, and the first mark is taken
+from the read `handler_entry_tsc` already does. Nothing takes a lock.
+
+## The ranked recoverable costs, and the verdict on 1.4x
+
+Everything below is against 609,900 cycles a round trip and the 172,700
+that have to go. **Projections are labelled; nothing here was run on
+hardware.**
+
+| # | what | cyc/RT | % of VMM | points of 78.12 | kind |
+|---|---|---|---|---|---|
+| 1 | `save`+`load`+`exit info` | 126,553 | 20.8% | 16.2 | **structural** |
+| 2 | shadow-VMCS copies | ~78,700 | 12.9% | 10.1 | mixed |
+| 3 | `build_vmcs02` self | 65,489 | 10.7% | 8.4 | **unexplained** |
+| 4 | `reflect_l2_exit` self | 24,339 | 4.0% | 3.1 | incidental |
+| 5 | `merge_nested_bitmaps` | 18,063 | 3.0% | 2.3 | incidental |
+| 6 | mapping window | ~5,500 | 0.9% | 0.7 | closed |
+| | **unattributed** | **~281,000** | **46%** | **36** | unknown |
+
+**1. The reflection's state transfer, 126,553 - structural.**
+`save_l2_state` reads 46 guest-state fields out of vmcs02,
+`load_l1_host_state` writes ~43 into vmcs01, and the exit-information
+block copies eight more. Divided by the 991-cycle marginal price these
+are ~54, ~43 and ~8 accesses, which is what the architecture requires of
+anything that reflects an exit. It goes away only by *not reflecting*.
+
+**2. The shadow-VMCS copies, ~78,700 - mixed, and the one concrete
+removal is here.** Both copies are
+
+    VMPTRST, VMPTRLD(shadow), fields, VMCLEAR, VMPTRLD(back)
+
+and `shadow_writes_skipped` already says the field loop is mostly
+elided, so the cost is the four region instructions. Slots 40-49 price
+each one.
+
+- **Removable: the VMPTRST.** The comment says it is used "rather than a
+  remembered pointer because this is called from both the vmcs01 and the
+  reflection paths". That is a statement about the *callers*, not about
+  the information: `running_l2[cpu]` says which level is current,
+  `own_vmcs_region_physical(cpu)` and `vmcs02_physical[cpu]` give both
+  addresses, and `reflect_l2_exit` has just executed the VMPTRLD that
+  made vmcs01 current thirty lines above. Two VMPTRSTs a round trip.
+  **Projected 11,000-33,000 cycles/RT, 1.4-4.3 points** - the range is
+  wide because the price is either a VMPTRLD's (5,715, measured) or the
+  residual the copies' totals imply (~16,700, arithmetic). Slot 40 and
+  slot 45 settle it in one boot, which is why they exist.
+- **Not removable: the VMCLEAR and the restore.** The VMCLEAR is what
+  makes the region's contents reach memory; KVM does the identical
+  sequence in its own `copy_shadow_to_vmcs12`.
+- **Rejected: merging the two visits into one.** The collection has to
+  happen before anything reads the cached vmcs12 after L1 has run, and
+  the publish has to happen before L1 runs. L1's exit handler is between
+  them by definition. There is no single visit that serves both.
+
+**3. `build_vmcs02` self, 65,489 - named, sized, and still
+unexplained.** The `vmcs02_split` counters already say this block takes
+almost no VMCS accesses, so it is 33 microseconds a round trip of
+apparently pure software - reading ten controls out of a cached
+structure, five `within_capability` checks against MSRs cached at
+launch, the extended-page-table pointer decision and the TPR shadow
+decision. **That is not credible as straight-line code and it is the
+best lead in the table.** Either it is cache misses across the 4 KB
+vmcs12 and the shadow-EPT slot table, or something in there is not the
+software it looks like. Phases 14 and 15 plus the new `self` column
+localise it without another instrument.
+
+**4. `reflect_l2_exit` self, 24,339.** Slots 31-34 split it. One
+proposal is already visible: the second-level exit ring at the top reads
+`guest_activity_state`, `guest_cs_selector` and `guest_physical_address`
+on every reflection, three VMREADs, purely for a diagnostic ring. The
+identical three reads in `record_exit` are already gated behind
+`nested_vmx::census_exits`, which the running build has **off**. Gating
+these the same way is **~3,000 cycles/RT, 0.4 points**, and costs
+nothing but a switch.
+
+**5. `merge_nested_bitmaps`, 18,063.** The "cannot be cached" reasoning
+survives - KVM's own exemption is a protocol requiring an enlightened
+VMCS, not an optimisation - but the *shape* does not. KVM patches a
+persistent bitmap with the handful of MSRs it cares about; this VMM
+copies and ORs four kilobytes. Its own intercept set is
+IA32_APIC_BASE, IA32_FEATURE_CONTROL and 0x480-0x491, so the same result
+is a copy plus twenty-two bit sets. **Removing the whole phase is 2.3
+points**, so it is worth doing and is not a lever.
+
+**6. The mapping window - closed, and the note that kept it open was
+stale by fifty times.** `guest_memory.cpp` said 126 calls an exit at
+1,088 cycles, "a third" of an exit. Phase 11 reads 112,463,598 calls at
+**278** cycles, which over the same dump's 5,673,717 round trips is 19.8
+calls and ~5,500 cycles a round trip - **0.9%**. The cached leaf entry
+closed it. Keeping the pages mapped removes at most that, and less,
+because the copy through the window survives the fix.
+
+### The verdict, plainly
+
+**1.4x is not reachable from anything currently named.** Adding up every
+removal identified above - the VMPTRSTs at their optimistic price, the
+whole bitmap merge, the exit ring's three reads, the whole mapping
+window - comes to **37,000 to 59,000 cycles a round trip, 4.7 to 7.6
+points**, taking 78.12% to about 71-73%. That is a 1.07-1.10x reduction
+against a 1.4x target, and it assumes every one of them lands whole.
+
+The 172,700 cycles the target needs are not in the named inventory. They
+can only be in one of two places:
+
+- **In the 281,000 unattributed cycles**, if those turn out to be one
+  thing rather than forty. This branch's whole point is that after one
+  boot that is a reading rather than an argument, and the six adjacent
+  intervals cannot fail to say where it is. **This is the next
+  measurement and it costs one boot.**
+- **Nowhere, in which case the round trip has to stop happening.** The
+  reflection and the rebuild together are ~330,000 cycles because a
+  second-level exit travels all the way to Hyper-V and back. The exits
+  that dominate are the second-level guest's synthetic-MSR traffic - the
+  reference counter, the timer arm, the end-of-message - and answering
+  those here without reflecting would turn a 610,000-cycle round trip
+  into one handled exit.
+
+  **That is not an optimisation and it is probably not sound.** Those
+  MSRs are Hyper-V's interface to its own guest; answering them means
+  becoming Hyper-V for the parts Windows uses, and CLAUDE.md's rule -
+  answer the whole of an interface or fault - is exactly what makes a
+  partial version of it worse than none. It is recorded because it is
+  the only remaining shape of an answer, not because it is recommended.
+
+**And the honest summary of the honest summary:** the largest single
+item in the whole table is the one nobody has been able to name, at 46%
+of our own time. Every ranked, understood item put together is a tenth
+of what the target needs. Optimising the named list is not a route to
+1.4x, and the next thing to do is read the six intervals rather than
+shave anything.
+
 ## Where the 78% goes, and the two levers tested against it
 
 **The attribution, per round trip on CPU 0**, from the phase reporter over
