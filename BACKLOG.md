@@ -15,6 +15,220 @@ The convention for closing an entry: state what was observed afterwards, not
 that the code changed. "Guest now reads `cr4=0x0668`" closes one of these;
 "masked CR4" does not.
 
+## The 1.879x is not the TSC offset, and the ratio is not yet a measurement
+
+**Read against `762a535`, on the code rather than on hardware.** The
+question posed was "the level above expires a 1.74 ms periodic timer
+after 0.926 ms - find the clock and why it runs 1.879x fast". Four lines
+were checked. The TSC-offset line is closed, one latent bug in it is
+fixed, and the interesting result is about the ratio rather than about
+the clock.
+
+### 1. The TSC offsetting is a faithful pass-through. It cannot be it.
+
+Worked through explicitly, because "the offset is applied
+inconsistently" is exactly the shape of a constant factor and it was the
+primary suspicion.
+
+What a second-level `rdtsc` returns is `((tsc * m01) >> 48 + o01) * m12
+>> 48 + o12`, which `build_vmcs02` composes into vmcs02's two fields as
+
+    offset02     = (m12 == 1.0 ? o01 : signed_scaled(o01, m12)) + o12
+    multiplier02 = (m12 == 1.0 ? m01 : scaled(m01, m12))
+
+That is `kvm_calc_nested_tsc_offset` and `kvm_calc_nested_tsc_multiplier`
+term for term, including the gates: KVM's `vmx_get_l2_tsc_offset` returns
+zero unless vmcs12 sets "use TSC offsetting", and
+`vmx_get_l2_tsc_multiplier` returns the default unless vmcs12 sets *both*
+that and TSC scaling. Both gates are present here.
+
+On the deployed configuration every term collapses:
+
+- `o01` is `dilation_offset[cpu]`, and it is **zero** - `setup_vmcs`
+  names "use TSC offsetting" in vmcs01 only when `ZPP_TIME_DILATION` is
+  on, so `primary01` does not carry bit 3 and the term is discarded
+  before the member is read.
+- `m01` is 1.0: this VMM never asks for TSC scaling in vmcs01, and it
+  cannot be forced on - SDM A.3.3 says of IA32_VMX_PROCBASED_CTLS2 that
+  "bits 31:0 indicate the allowed 0-settings of these controls. These
+  bits are always 0".
+- `m12` is 1.0 **necessarily**: `supported_secondary_controls` does not
+  offer bit 25, and `build_vmcs02`'s `within_capability` check refuses a
+  vmcs12 naming a control the narrowed capability MSRs withheld. A guest
+  hypervisor asking to scale does not get a wrong answer, it gets
+  `nested_controls_unsupported`.
+
+So `offset02 == o12` verbatim and `multiplier02 == 1.0`: a second-level
+`rdtsc` reads **exactly what it would read with this VMM absent**. There
+is no factor here to be 1.879, and no scaling arithmetic is live on this
+machine at all.
+
+`tests/nested_exit`'s new section 16 pins all of it, including the shape
+that would produce a drifting clock rather than a constant one: four
+consecutive entries must leave vmcs02's offset at the same value,
+because composing a value read *back out of vmcs02* would add the guest
+hypervisor's half again on every entry, at whatever rate rebuilds happen
+to occur.
+
+### 2. One latent bug found there, and it was the same mistake twice
+
+`multiplier01` was `vmcs.read(field::tsc_multiplier)` at the composition
+site - **after** `build_vmcs02`'s VMPTRLD, so it read vmcs02's field,
+which is the previous entry's composed product. With TSC scaling set in
+vmcs01 that squares the guest hypervisor's multiplier every entry.
+
+It is the identical mistake the offset path already carries a comment
+about having avoided, and it survived for the same reason that one did:
+the value was harmlessly 1.0 for as long as nothing set the control.
+
+Fixed by caching vmcs01's own multiplier in `host_controls_cache[cpu][8]`
+during the once-per-processor fill, which is the only point in that
+function where vmcs01 is still current - and which is what KVM does,
+`kvm_calc_nested_tsc_multiplier` taking `vcpu->arch.l1_tsc_scaling_ratio`
+and never a VMCS read. The regression test fails without the fix and
+passes with it; that was checked by reverting the line, not by
+inspection.
+
+**Dead on this part, and fixed anyway**, because what makes it dead is a
+capability decision that could be revisited in one line.
+`tests/nested_exit` now asserts that a vmcs12 naming TSC scaling is
+refused, so whoever offers bit 25 is told the scaling arithmetic has just
+become live.
+
+### 3. Nothing here injects the clock vector
+
+Checked, because it would change the whole question.
+`l2_injected_vector` is counted from `injection`, read out of vmcs12's
+own `vm_entry_interruption_information_field` a few lines above. The only
+branch that can substitute a vector of this VMM's choosing is
+`nested_vmx::self_ipi_delivery`, and `selfipi=0` in the build manifest.
+The level above stages `0xd1`; this VMM copies it.
+
+### 4. A platform timer cannot produce a constant factor
+
+The ACPI power-management timer is an I/O port and the only port in
+either bitmap is the ACPI sleep-control one, so a read of it never exits
+to this VMM; HPET is MMIO this VMM's extended tables do not divert. Both
+reach KVM/QEMU, which advance them against real host time.
+
+That is the *argument* as well as the plumbing: both clocks measure real
+time, so a calibration against either is perturbed by sampling noise and
+not by a fixed ratio. A constant factor needs a wrong **constant** - a
+believed frequency - not a stretched measurement. This line cannot
+produce 1.879x.
+
+### 5. 1.879 matches nothing, and saying so is the useful part
+
+`1,992,000,000 / 1.879 = 1,060,138,000`. Nothing on an i7-8565U or in
+QEMU's defaults lands there: the crystal is 24 MHz with a TSC ratio of
+83, the max non-turbo ratio is 18 (1.8 GHz, a factor of 1.107), KVM's
+APIC bus period is a nanosecond-domain constant (a factor of 1.992
+against this TSC), and the ACPI timer is 3.579545 MHz. 24 MHz x 44 =
+1.056 GHz is within half a per cent, and 44 is not a ratio anything on
+this part uses. **No match. Numerology is not evidence.**
+
+### 6. The ratio is two rates from two counters, which this file has retired twice
+
+This is the finding.
+
+`1.879` is `1,080/s` divided by `574.7 Hz`, and neither number was
+measured against the other. The numerator is an injection *rate* sampled
+as a delta over a window; the denominator is a *period* read out of one
+`rax` at an arming site. This file has already retired one conclusion of
+exactly that shape - "the ratio near 1213 was two different quantities" -
+and the lesson recorded there was that a ratio is not evidence until both
+halves have units and were taken together.
+
+Worse, the numerator may not be free at all: if the level above finds the
+timer already overdue every time it looks, the rate it injects at is set
+by how fast a tick can be *processed*, and 1,080/s is then a cost
+measurement wearing a clock's clothes.
+
+And both clocks the level above could be using have already been measured
+honest in this tree, on this rig:
+
+- **Its reference counter.** `reference_fit_implied_hz` fits the slope of
+  Hyper-V's own answers to `HV_X64_MSR_TIME_REF_COUNT` against this VMM's
+  time-stamp counter. The honest fits recorded here are **9,998,562 Hz
+  and 10,000,215 Hz** against a specification-mandated 10 MHz - 0.03%.
+- **Its local APIC timer.** The "1213" retirement measured it
+  self-consistent at about 1.0 GHz at both of the two scales the guest
+  uses it at: "the guest asks for an interval and gets that interval,
+  twice over".
+
+If both still hold on the failing build then **neither clock the level
+above has is fast**, and a 1.879x early expiry cannot come from either -
+which points at the ratio rather than at the clock.
+
+**`dump_reference_tsc` already prints the first of those and nobody has
+quoted it from this configuration.** The fit stays live, too: the
+second-level guest reads the counter MSR from inside its own clock
+handler, so `reference_read_count` keeps climbing and
+`publish_reference_tsc_page` refits whenever it does. One row of an
+existing dump, and it is the cheapest thing left to read.
+
+### The instrument: `dump_tick_account`
+
+Because the ratio needs measuring rather than dividing, both halves are
+now recorded per arm, on one clock, inside the VMM:
+
+- `stimer_asked_units` / `stimer_asked_arms` - the periodic counts the
+  second-level guest wrote, in the interface's own 100 ns units. Periodic
+  only, gated on `l2_stimer_config`'s periodic bit rather than on
+  magnitude, because a one-shot count is an absolute expiry and summing
+  it with durations is the unit slip this file has suffered three times.
+- `stimer_given_cycles` / `stimer_given_arms` - the time-stamp counter
+  elapsed from each such write to the clock vector that answered it.
+
+`given / asked` is the factor, directly. It is built to fail rather than
+to print: the two arm counts are kept apart, so an arm no vector answered
+is counted on one side only, and `stimer_unanswered` counts arms
+displaced before any answer. The pair disagreeing falsifies the one
+assumption the ratio rests on - that the vector is the answer to the arm
+- and no single counter could report that.
+
+`scripts/rig-dump-state.py`'s `dump_tick_account` prints it, and beside
+it merges two rings that share the one clock: the guest's synthetic-timer
+arms (`stimer_arm_*`, which now carries a third kind for the injection)
+and the level above's own local APIC timer arms (`timer_arm_recent_*`,
+which existed and which **no script had ever read**). That supplies the
+third number the other two cannot:
+
+| reading | meaning |
+|---|---|
+| asked | what the second-level guest programmed |
+| **intended** | the level above's own APIC arming, at the nominal rate |
+| given | what actually elapsed |
+
+- intended ~ asked, given short: the timer fired **early underneath** the
+  level above - this VMM or KVM, not its clock.
+- intended ~ given: the level above **converted the period wrongly** -
+  its notion of elapsed time, and the reference fit above then says
+  whether its counter is fast too.
+
+Two APIC rates are printed, not one, and they are allowed to disagree:
+the nominal 1.0 GHz this tree measured, and a fit from the armings
+themselves. A fit far above nominal does not mean a fast timer, it means
+the level above re-armed before expiry - and that is what says the
+verdict cannot be trusted. A single-rate version of this instrument was
+written first and **confirmed the hypothesis under test** on fabricated
+data, by fitting the rate from the very gaps whose earliness was the
+question.
+
+**An empty APIC half of the timeline is a finding too**, not a broken
+reader: the ring is filled from the write watch on the APIC page, so it
+sees xAPIC mode only. A level above using x2APIC or TSC-deadline programs
+an MSR instead, and this VMM traps those two only where the processor
+refuses the VMX-preemption timer.
+
+### What was not determined
+
+Which clock it is. Nothing above identifies it and nothing above could:
+every remaining candidate needs a reading from the failing configuration
+that has never been taken. The two readings that would settle it are one
+boot away and neither needs a new idea - the `fitted` row of
+`dump_reference_tsc`, and the three-way comparison above.
+
 ## THE CLOSE: why Windows does not finish booting, and where that ends
 
 *Read this first. The investigation below reached a conclusion; this is
