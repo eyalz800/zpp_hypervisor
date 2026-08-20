@@ -538,6 +538,41 @@ thing to measure, because every named item has either been optimised, tested
 and rejected, or shown too small - and 1.4x cannot come from what is left
 named.
 
+## An uninterrupted hour: 27 million exits, zero new pages. It is stuck
+
+**The "it may simply need an hour" hypothesis is refuted by direct
+measurement**, and it was mine, raised in the section below. Fastest build -
+profiler off, every fix in - booted clean and left alone, sampled every
+three minutes for an hour and never poked at:
+
+    18:39  builds=15876  leaves=302689  exits=1,674,015
+    18:46  builds=15876  leaves=302689  exits=4,880,684
+    19:06  builds=15876  leaves=302689  exits=14,529,285
+    19:22  builds=15876  leaves=302689  exits=22,596,480
+    19:35  builds=15876  leaves=302689  exits=29,049,932
+
+**Fifty-seven minutes, 27.4 million exits at a steady 8,155 a second, and
+`leaves-filled` and `shadow-builds` identical at every one of eighteen
+samples.** Not one new page of guest memory, not one new shadow leaf.
+
+So the guest is **stuck**, not slow, and the thirteen-times-slower
+arithmetic - true as far as it goes - does not explain it. That closes the
+cheapest remaining explanation, which is worth as much as opening one.
+
+**And it reconciles with the profiler rather than contradicting it.**
+Executing *widely* and making *progress* are different claims, and the
+section below conflated them. 640 distinct-address fills with nothing above
+0.5% rules out a *tight* spin on a handful of instructions; it does not rule
+out cycling a large body of code. Over an hour with no new memory touched,
+that is exactly what it must be: **a big loop, not a small one.**
+
+Both measurements stand. The inference drawn from the first one did not.
+
+A parse note for whoever reads the raw samples: the `l2=` and `vmm=` columns
+in `/tmp/zpp-longrun.txt` read 0.00 and 0.12 throughout because the sampler's
+`tail -1` took CPU 1's row, not CPU 0's. The leaves, builds and exit columns
+are CPU 0 and are correct - they are what the conclusion rests on.
+
 ## The guest is not spinning. It is executing widely, and it is 13x slow
 
 **The second-level profiler contradicts the framing this whole file has used,
