@@ -785,6 +785,47 @@ is not there" and is really "the wrong question was asked". `x` is the
 virtual read. The same distinction is why a wide `xp` over a device BAR
 lied, further down this file.
 
+## 49 KVM exits for every one of ours. That is where the 78% goes
+
+**Measured from KVM's own counters on the rig, 30-second delta, while the
+guest was livelocked:**
+
+    nested_run/s    8,147      KVM's entries into us - tracks our exit count
+    kvm_exits/s   401,393      every VM exit KVM itself takes
+
+**49.3 KVM exits for each exit this VMM handles.** `nested_run` at 8,147/s
+against our own measured ~8,155 exits/s confirms the two are the same
+quantity, so the ratio is sound.
+
+That is the whole of the 78%. Every VMREAD, VMWRITE, VMPTRLD, VMPTRST,
+VMCLEAR, INVEPT and INVVPID this VMM executes is a VM exit **into KVM**,
+because the host has no VMCS shadowing to offer us - already measured, 2,687
+cycles against 2,801 for a shadow-listed field versus a non-listed one,
+identical. At roughly 1,500-3,000 cycles each, 401,393 of them a second is
+0.6-1.2 GHz of a 2 GHz part, which is the 78% almost exactly.
+
+**So the answer to "where does 1.4x come from" is: from removing KVM.** Not
+from anything in this tree. The accounting was closed, every named cost was
+optimised or measured and rejected, and the total available was 1.07-1.10x -
+because the cost is not *in* the named work, it is in what the layer below
+charges for each instruction that work executes.
+
+On bare metal those 401,393 exits a second do not happen. A VMREAD is tens
+of cycles rather than 991; an L2 exit arrives here directly instead of being
+taken by KVM and reflected. The plausible improvement is a **multiple**, not
+a percentage - and 1.4x is the threshold the guest needs.
+
+**What this does not claim.** It is not measured on bare metal, and this
+project has been wrong before by predicting a configuration it had not run -
+the 1.24-1.43 bare-metal projection further down was itself a correction of
+an earlier one that double-counted. What is measured is the tax under KVM:
+49 to 1. Whether removing it is sufficient is a boot, not an argument.
+
+It also explains, without any further theory, why three separate cost
+reductions in this VMM changed nothing measurable. Removing 23 VMCS accesses
+a round trip removed 23 of ours and about 23 of KVM's - against 401,393 a
+second. The lever was never here.
+
 ## There is no timer bug. The guest sets its own rate, one shot at a time
 
 **Measured as a steady-state delta rather than a cumulative total, which is
