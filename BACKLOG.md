@@ -785,6 +785,57 @@ is not there" and is really "the wrong question was asked". `x` is the
 virtual read. The same distinction is why a wide `xp` over a device BAR
 lied, further down this file.
 
+## The loop decoded: a bitmap builder, not a block
+
+**Read out of guest memory, so it is code rather than inference.** The
+second-level profile's hot cluster sits in one function; walking the guest's
+own page tables to it - CR3 `0x1ae002`, PML4 index 496, PDPT 7, PD 211,
+where the page directory entry `0x119c000a1` has **bit 7 set and is a 2 MB
+leaf**, so physical is `0x119c00000 + (va & 0x1fffff)` - and reading the
+bytes gives:
+
+    883: 83 3c 8e 00    cmp   dword [rsi+rcx*4], 0
+    887: 74 02          je    88b              <- sampled
+    889: 08 10          or    [rax], dl
+    88b: d0 ea          shr   dl, 1
+    88d: 75 05          jne   894
+    88f: b2 80          mov   dl, 0x80
+    891: 48 ff c0       inc   rax
+    894: 48 ff c1       inc   rcx              <- sampled
+    897: 49 3b cf       cmp   rcx, r15
+    89a: 7c e7          jl    883
+
+**A bitmap builder.** Walk an array of dwords at `rsi`, set one bit in the
+byte at `rax` for each non-zero entry, rotate the mask in `dl`, advance the
+output byte when it wraps, continue while `rcx < r15`. Both samples in the
+cluster fall inside it.
+
+**Three things follow.**
+
+- **This is ordinary work, not a block.** No lock, no device, no wait. The
+  guest is not deadlocked at this address, it is grinding.
+- **It explains the signature that has misled this investigation for hours.**
+  A loop over an array the guest already owns **touches no new page**, so
+  `leaves-filled` stays flat while real work happens. "No new pages" was
+  read as "no progress" throughout this file; it is not the same statement.
+- **The addresses reproduce.** Across boots with different kernel bases the
+  low twenty bits match exactly - `...768e`, `...0894`, `...57fa`,
+  `...e948`, `...890d` - so this is the same code every time and not an
+  artefact of one sample.
+
+**What is not established.** Whether the loop *completes* - whether `rcx`
+reaches `r15` and the caller moves on, or whether the whole thing is
+re-entered from the top forever. That is the difference between slow and
+stuck and it needs the registers, which the monitor can only read while the
+boot processor is in the guest rather than inside this VMM. `r15` is the
+element count and would say how long one pass should take.
+
+Method note, since it cost a run: the page-directory entry must be tested
+for bit 7 before being followed. Treating a 2 MB leaf as a table pointer
+produced `0xd62b0a8b410972d6` as a "page table entry" - plausible-looking
+garbage, and the same class as every other wrong-reader failure recorded
+here.
+
 ## The guest is in a narrow loop after all - the flush count is cumulative too
 
 **Third instance of the same error, on the instrument that produced the
