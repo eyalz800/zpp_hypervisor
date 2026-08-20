@@ -805,6 +805,35 @@ measured**. Quoting 1.4x gives a false precision that this file then reasons
 against ("every named item totals 1.07-1.10x, therefore hopeless"), and that
 conclusion is only as good as the number it is compared with.
 
+**RETRACTED - the loop is not at the hypercall page.** Measured as rates
+over a 45-second window immediately afterwards: **VMCALL is 51/s, 0.6% of
+exits**, against VMRESUME 2,960/s (36.1%), EPT violation 2,175/s (26.5%),
+WRMSR 2,132/s (26.0%) and interrupt-window 751/s (9.2%). A hypercall at 0.6%
+cannot be the loop.
+
+The claim below came from **five** instruction pointers in the exit ring,
+which is a snapshot of recent exits and not a rate - and a ring that had, at
+that moment, 78 `vmcall` entries against 85 `vmresume`, wildly unlike the
+0.6% the counters give. **A ring is a sample of what happened recently, a
+histogram is what happens. They answer different questions and the ring
+flatters whatever burst it caught.** That is the same error as dividing a
+rate by a period, in a new costume - the fourth time in this file.
+
+It is also, as pointed out immediately, **a hypercall from Windows to
+Hyper-V and not into this VMM at all**. We are the courier: Windows executes
+`VMCALL`, it exits here because this is the outermost VMM, `l1_wants_l2_exit`
+says the level above wants it, and it is reflected. Nothing about it is
+addressed to us, so even had it been hot, "read the caller" was aimed at the
+wrong layer.
+
+What is left standing, and it is where it always was: the hot exits are the
+guest hypervisor resuming its guest, Windows' synthetic-MSR writes, and the
+extended-page-table violations from **our own** local APIC page watch, which
+`l2_ept_dispositions` already showed are the guest hypervisor's own traffic
+in root operation rather than anything nested.
+
+**The original, now withdrawn:**
+
 **And the loop has an address.** The second-level instruction pointers this
 VMM resumes at cluster in a single page, at a handful of small offsets:
 
