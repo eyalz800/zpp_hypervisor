@@ -785,6 +785,55 @@ is not there" and is really "the wrong question was asked". `x` is the
 virtual read. The same distinction is why a wide `xp` over a device BAR
 lied, further down this file.
 
+## The guest is in a narrow loop after all - the flush count is cumulative too
+
+**Third instance of the same error, on the instrument that produced the
+"executing widely" verdict.** The second-level profiler reports a *flush
+count*, and this file read it as a description of current behaviour. It is
+cumulative since boot.
+
+Measured over four minutes on a settled guest:
+
+    t=0     1,747 samples, 46 slots filled since the last flush, 10 flushes
+    t=240s  1,772 samples, 51 slots filled since the last flush, 10 flushes
+
+**Flushes 10 -> 10.** The table has not filled with 64 distinct addresses
+**once** since boot - it has crept from 46 to 51 slots in four minutes. The
+ten flushes all happened during boot, when the guest genuinely was executing
+widely.
+
+The profiler's own line says what that means, and it was quoted in this file
+while the opposite conclusion was drawn from it: *"a spin fills the table
+once and then never flushes again."* **The guest is in a narrow loop.**
+
+That retracts "The guest is not spinning. It is executing widely" below, and
+it removes the contradiction that section had to argue around - a guest
+executing hundreds of distinct addresses while touching no new page for an
+hour. There was no contradiction. It is a small loop, and the wide execution
+was the boot that preceded it.
+
+**The addresses, before the run was lost** (kernel image at
+`0xfffff8078c600000`):
+
+    12 hits  ...8c9a57fa       11 hits  ...8cca768e     11 hits  ...8ca2890d
+     5 hits  ...8d1be948        4 hits  ...8ca60d9f      4 hits  ...8ca60894
+     3 hits  ...8ca714f2        3 hits  ...8c9100e6      2 hits  ...8ca60979
+     2 hits  ...8ca60962        2 hits  ...8ca6088b      2 hits  ...8ca60883
+
+Six of the twelve lie inside `...8ca608xx-09xx`, which is one function. And
+the trio `...768e`, `...890d`, `...e948` has the **same low twelve bits** as
+instruction pointers recorded hours earlier under different kernel bases -
+so this is the same loop across boots, not an artefact of one run.
+
+**The run was then lost, and how matters.** Taking a log-ring dump while
+`ZPP_PROFILE_L2=ON` was deployed left the guest reset-looping: module loads
+went **2 -> 8**, and the addresses in a later read were a different KASLR
+base entirely. Cause not isolated - the profiler arms the VMX-preemption
+timer for second-level entries, and the log dump attaches gdb - but the pair
+is not safe together and the offsets above should be re-measured before
+anything is built on them. Restored to the default build, which boots at 2
+loads.
+
 ## l2-run% is cumulative, not a rate - and the APIC watch is worth 17.7%
 
 **Every `l2-run%` figure quoted in this file before now is a cumulative
