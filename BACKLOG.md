@@ -785,6 +785,67 @@ is not there" and is really "the wrong question was asked". `x` is the
 virtual read. The same distinction is why a wide `xp` over a device BAR
 lied, further down this file.
 
+## WINDOWS IS NOT DEADLOCKED. It is running and keeping correct time
+
+**The single most important measurement in this investigation, and it
+overturns its central conclusion.**
+
+`KUSER_SHARED_DATA` sits at the architectural address
+`0xFFFFF78000000000` in every Windows address space and needs no symbols.
+Walked through the guest's own tables - CR3 `0x1ae002`, PML4 495, PDPT 0, PD
+0, PT 0, page-table entry `0x8a000000002b5021`, physical `0x2b5000` - and
+sampled every ten seconds:
+
+| | `InterruptTime` (+0x08) | `TickCount` (+0x320) |
+|---|---|---|
+| t=0 | 0x3e43e9b40 | 0x1a1da |
+| t=10 | 0x3ea3ac94d | 0x1a45d |
+| t=20 | 0x3f035790d | 0x1a6df |
+| t=30 | 0x3f6319510 | 0x1a962 |
+
+- **`InterruptTime` advances 10.046, 10.069 and 10.057 seconds per ten
+  seconds of wall clock.** In 100 ns units, tracking real time **1:1**.
+- **`TickCount` advances 643, 642, 643 per ten seconds - 64.3 Hz**, which is
+  Windows' standard 15.6 ms tick, to three figures.
+
+**Windows is alive, keeping correct time, and ticking at the correct rate.**
+It is not livelocked, not deadlocked, and not starved of interrupts.
+
+**Why this was missed for so long, and it is a methodological failure rather
+than a measurement one.** Every "no progress" conclusion in this file rests
+on `shadow_ept_leaves_filled`, and that counter's own declaration says what
+it is: *"the pages a guest hypervisor mapped **after** its shadow was
+built"*. It counts **new second-level mappings**, not guest progress. A guest
+executing inside memory it has already mapped advances without ever
+incrementing it - which is exactly what a Windows past its initial paging-in
+does.
+
+So "27 million exits and zero progress in an hour" was never measured. What
+was measured is "27 million exits and no new second-level mappings", which is
+a different and much weaker statement, and it is compatible with a guest
+running normally.
+
+**Two other instruments that supported the deadlock reading are also weaker
+than they looked**:
+
+- The second-level profiler samples at **0.1 a second** - twenty-five
+  samples in four minutes. "A narrow instruction-pointer set" from
+  twenty-five samples is not a characterisation of anything.
+- The injection landing ring holds **sixteen** entries. All sixteen being
+  identical is consistent with a hot path, not proof of an exclusive one.
+
+**And the observation that should have been believed first was the user's**:
+the boot spinner is *animating*. A Windows that redraws its spinner is
+running a timer-driven callback, which is incompatible with "never executes
+a single deferred procedure call". That was reported and not reconciled.
+
+**What this changes.** The question is no longer "why is the guest wedged" -
+it is not wedged. It is "why does a running Windows that keeps perfect time
+not finish booting", and the leading answer is the dull one this file has
+resisted since the wall-clock split: at 5-6% of a processor it is roughly
+twenty times slower than native, and nothing has ever waited long enough at
+the *right* metric to say whether it completes.
+
 ## Storage is healthy, the TPR path is exact, and I nearly reported a dead disk
 
 Three results, and the third is a near-miss worth more than the other two.
