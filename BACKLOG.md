@@ -11653,6 +11653,67 @@ of exactly the shape that has now failed twice in this file.
 The switch stays **off**, and now for a measured reason rather than an
 inherited one.
 
+## The reference TSC page was the over-injection, and turning it off breaks the livelock
+
+**First forward progress in the whole investigation.** One variable:
+`ZPP_PUBLISH_REFERENCE_TSC=OFF`, everything else as deployed, same
+eight-processor guest.
+
+| | `reftsc=1` | `reftsc=0` |
+|---|---|---|
+| clock vector `0xd1` injected | **906/s** | **432/s** |
+| dispatch vector `0x2f` delivered | **0/s**, frozen at 39 | **~1.7/s and rising** |
+| `leaves-filled` | never moved, over 20 minutes | **advancing** |
+| `shadow-builds` | never moved | **advancing** |
+
+Sustained across four samples 90 seconds apart, and accelerating rather than
+tailing off:
+
+    14:06:50  leaves 294,546  0x2f delivered 241  builds 15,859
+    14:08:57  leaves 294,546  0x2f delivered 277  builds 15,859
+    14:11:04  leaves 294,557  0x2f delivered 302  builds 15,859
+    14:13:11  leaves 294,749  0x2f delivered 319  builds 15,864
+
+**The guest is touching new memory and draining its deferred procedure call
+queue.** Both had been flat in every configuration tried before this one.
+
+The chain, end to end, each link measured rather than assumed:
+
+1. We publish a Hyper-V reference TSC page. The level above uses it to
+   decide when a timer has expired.
+2. The scale we publish makes that clock run fast, so a 574.7 Hz periodic
+   timer fires at 906 Hz - **1.58x**.
+3. Each firing injects vector `0xd1` through the VM-entry
+   interruption-information field, which the task priority does not gate,
+   so it lands whatever the guest is doing.
+4. The guest is therefore re-entered into its clock handler before it can
+   return, and its task priority stays at `0xd0`, IRQL 13, CLOCK_LEVEL.
+5. At that priority vector `0x2f` - class 2, the dispatch interrupt - is
+   architecturally undeliverable, so the deferred procedure call queue is
+   never drained and nothing else in Windows ever runs.
+
+Take the page away and the timer fires at 432/s, below the 574.7 Hz the
+guest asked for; the handler returns; IRQL drops; `0x2f` is delivered; work
+proceeds.
+
+**Why this was invisible for so long, and it is worth stating plainly.**
+Every instrument pointed at *cost* - exits per second, cycles per round
+trip, VMCS accesses. Three separate reductions each made the guest cheaper
+and each made it spin faster in the same place, because the injection rate
+is set by *time* and is completely indifferent to what a round trip costs.
+The measurement that broke it open was not a faster instrument, it was a
+*different quantity*: how many interrupts of which vector actually reach the
+guest, against how many it asked for, and at what task priority. That census
+already existed in the tree.
+
+**Do not read this as "the reference TSC page is wrong and should be off".**
+Off, the timer now fires 432/s where the guest asked for 574.7 - it is
+**under** by a quarter, which is its own lie and may well cost something
+later. What is established is that the published scale is wrong in the fast
+direction and that the error is the deadlock. The right fix is a correct
+scale, not an absent page; `reftsc=0` is the experiment that proves the
+mechanism, not the repair.
+
 ## The clock is injected 1.58x too often, and that is the deadlock
 
 **Measured, and it names a mechanism rather than a cost.** The vector census
