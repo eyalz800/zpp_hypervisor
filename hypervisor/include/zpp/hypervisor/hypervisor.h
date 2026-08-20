@@ -9077,9 +9077,20 @@ private:
      * the same for the entry half, which had nothing between
      * `build_vmcs02` and the guest running.
      *
+     * 40 through 49 split the two shadow-VMCS copies into their five
+     * steps each. Both are {VMPTRST, VMPTRLD, fields, VMCLEAR, VMPTRLD}
+     * and four of those five are region instructions that **no counter
+     * in this tree has ever counted**: `vmcs_reads_taken` and
+     * `vmcs_writes_taken` are incremented in `vmcs::read` and
+     * `vmcs::write` and nowhere else, so the "110.6 VMCS accesses a
+     * round trip" every cost estimate here is built on excludes every
+     * VMPTRLD, VMCLEAR, VMPTRST, INVEPT and INVVPID this VMM executes -
+     * and phases 6 and 7 already price a single VMPTRLD at 5,715 cycles
+     * against a VMREAD's 991.
+     *
      * @{
      */
-    static constexpr std::size_t phase_count = 42;
+    static constexpr std::size_t phase_count = 52;
     std::uint64_t phase_cycles[max_cpus][phase_count]{};
     std::uint64_t phase_calls[max_cpus][phase_count]{};
 

@@ -390,14 +390,50 @@ void hypervisor::copy_vmcs12_to_shadow(std::size_t cpu)
             return;
         }
 
+        // Adjacent intervals over the five things this does, because
+        // four of them are region instructions and the fifth is the only
+        // one anybody has ever thought about.
+        //
+        // `shadow_writes_skipped` says the field writes are mostly
+        // elided already, so a call that still costs tens of thousands
+        // of cycles is not costing them on fields - it is costing them
+        // on the VMPTRST, the two VMPTRLDs and the VMCLEAR that bracket
+        // them. Those four are **not** in `vmcs_reads_taken` or
+        // `vmcs_writes_taken`, which count only `vmcs::read` and
+        // `vmcs::write` - so the "110.6 VMCS accesses a round trip" this
+        // project prices its estimates from has never included the most
+        // expensive instructions on the path.
+        //
+        // Which of the four is the answer: KVM's `handle_vmptrst` writes
+        // through a guest *linear* address and its `handle_vmclear`
+        // releases the mapped page and writes the launch state back, so
+        // neither is the cheap pointer move its name suggests. If they
+        // are, the VMPTRST is removable outright - this VMM knows which
+        // VMCS is current from `running_l2` and
+        // `own_vmcs_region_physical`, and the comment above only says it
+        // does not.
+        auto mark = copy_start;
+        auto stamp = [&](std::size_t slot) {
+            if (cpu < max_cpus) {
+                auto now = arch::x86_64::rdtsc();
+                this->phase_cycles[cpu][slot] += now - mark;
+                this->phase_calls[cpu][slot] += 1;
+                mark = now;
+            }
+        };
+
         std::uint64_t previous{};
         if (arch::x86_64::vmx::vmptrst(&previous)) {
             return;
         }
 
+        stamp(40);
+
         if (arch::x86_64::vmx::vmptrld(&this->shadow_vmcs_physical[cpu])) {
             return;
         }
+
+        stamp(41);
 
         auto & cached = this->guest_vmcs12[cpu];
 
@@ -435,8 +471,15 @@ void hypervisor::copy_vmcs12_to_shadow(std::size_t cpu)
         }
         this->shadow_cache_valid[cpu] = true;
 
+        stamp(42);
+
         arch::x86_64::vmx::vmclear(&this->shadow_vmcs_physical[cpu]);
+
+        stamp(43);
+
         arch::x86_64::vmx::vmptrld(&previous);
+
+        stamp(44);
 
         this->vmcs_shadow_stores[cpu] = this->vmcs_shadow_stores[cpu] + 1;
     }
@@ -470,14 +513,31 @@ void hypervisor::copy_shadow_to_vmcs12(std::size_t cpu)
             return;
         }
 
+        // The same five adjacent intervals as the copy out; see it for
+        // why the four region instructions are the interesting part and
+        // the nine field reads are not.
+        auto mark = copy_start;
+        auto stamp = [&](std::size_t slot) {
+            if (cpu < max_cpus) {
+                auto now = arch::x86_64::rdtsc();
+                this->phase_cycles[cpu][slot] += now - mark;
+                this->phase_calls[cpu][slot] += 1;
+                mark = now;
+            }
+        };
+
         std::uint64_t previous{};
         if (arch::x86_64::vmx::vmptrst(&previous)) {
             return;
         }
 
+        stamp(45);
+
         if (arch::x86_64::vmx::vmptrld(&this->shadow_vmcs_physical[cpu])) {
             return;
         }
+
+        stamp(46);
 
         auto & cached = this->guest_vmcs12[cpu];
 
@@ -500,8 +560,15 @@ void hypervisor::copy_shadow_to_vmcs12(std::size_t cpu)
             ++index;
         }
 
+        stamp(47);
+
         arch::x86_64::vmx::vmclear(&this->shadow_vmcs_physical[cpu]);
+
+        stamp(48);
+
         arch::x86_64::vmx::vmptrld(&previous);
+
+        stamp(49);
 
         this->vmcs_shadow_loads[cpu] = this->vmcs_shadow_loads[cpu] + 1;
     }

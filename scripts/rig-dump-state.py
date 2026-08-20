@@ -75,7 +75,13 @@ PHASE_NAMES = ["save_l2_state", "reflect_l2_exit", "build_vmcs02",
                "reflect: evmcs store", "enter_or_park_l2",
                "on_guest_vmlaunch", "guest write: map_window",
                "guest read: whole call", "guest write: whole call",
-               "(spare 40)", "(spare 41)"]
+               "copy out: vmptrst", "copy out: vmptrld shadow",
+               "copy out: field writes", "copy out: vmclear",
+               "copy out: vmptrld back",
+               "copy in: vmptrst", "copy in: vmptrld shadow",
+               "copy in: field reads", "copy in: vmclear",
+               "copy in: vmptrld back",
+               "(spare 50)", "(spare 51)"]
 
 # Which slot each one is nested inside. TOP is a top-level interval of
 # the adjacent split over a whole exit; CROSS is a phase with more than
@@ -133,8 +139,18 @@ PHASE_PARENT = [
     39,           # 37 guest write: map_window
     PHASE_CROSS,  # 38 guest read: whole call
     PHASE_CROSS,  # 39 guest write: whole call
-    PHASE_CROSS,  # 40 spare
-    PHASE_CROSS,  # 41 spare
+    4,            # 40 copy out: vmptrst
+    4,            # 41 copy out: vmptrld shadow
+    4,            # 42 copy out: field writes
+    4,            # 43 copy out: vmclear
+    4,            # 44 copy out: vmptrld back
+    5,            # 45 copy in: vmptrst
+    5,            # 46 copy in: vmptrld shadow
+    5,            # 47 copy in: field reads
+    5,            # 48 copy in: vmclear
+    5,            # 49 copy in: vmptrld back
+    PHASE_CROSS,  # 50 spare
+    PHASE_CROSS,  # 51 spare
 ]
 
 # Whose instruction pointer a record holds - see exit_trace_entry's
