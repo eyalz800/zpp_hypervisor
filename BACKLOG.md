@@ -240,6 +240,54 @@ it.** `rdx` in the trust-level register census held the descriptor
 pointer from the very first capture, in a printed column, for five
 sessions.
 
+## stretch=2 did not answer the rate question, and said something else instead
+
+**The experiment failed at what it was for, and produced one real signal.**
+Run as a diagnostic - doubling the period the guest asks for, so that if the
+count is honoured the injection rate should halve from 1,080/s to about 540
+- and it never produced a stable window to measure in. The guest bugchecked
+and reset (module loads 2 -> 4), and the boot after the reset wedged: CPU 0
+frozen at `0xfffff806681f143e`, exits static at 1,065,108, **zero** timer
+arms and **zero** injections across a 60-second window with no further
+reset. So the rate question is **still open**; nothing here answered it.
+
+That failure mode is the one already recorded for this switch - a guest lied
+to about time checks its clocks against each other and bugchecks - so it is
+confirmation, not news.
+
+**What is new is what the guest did before it died.** Application processors
+were doing real work for the first time in any configuration:
+
+| | every other run | `stretch=2`, before the bugcheck |
+|---|---|---|
+| CPU 1 | 284-442 exits, 17 l2-entries | **27,727 exits, 8,410 entries** |
+| CPU 2 | 284 exits, 17 l2-entries | **23,636 exits, 6,430 entries** |
+
+Two orders of magnitude. Given twice the budget per tick the guest got far
+enough to schedule work onto other processors, which it has never otherwise
+managed.
+
+**That forces a correction to "cost is not the variable".** This file says,
+three times, that making the round trip cheaper changed nothing and
+therefore cost was never what stood in the way. The measured reductions were
+**2.8% to 15.5%**. Doubling the period is **+100%**, and it visibly moved
+the guest. Those are not in contradiction - they say the threshold is
+somewhere above a 15% improvement, not that there is no threshold.
+
+The honest form of the claim is therefore: **cost is a variable, and the
+factor needed is large.** A tick was measured at about 2.46 ms against a
+1.74 ms period, so roughly **1.4x** is the least that could suffice, and
+nothing tried has come within a quarter of it. "Optimisation is pointless"
+was too strong; "optimisation at the scale attempted so far is pointless" is
+what the evidence supports.
+
+What that does *not* license is another round of shaving. 1.4x is not
+reachable by removing VMCS accesses - the whole of that traffic is now
+measured at about 70 microseconds of a 390 microsecond round trip after the
+marginal-cost correction. Something structural would have to change, or the
+tick has to be made to cost less than a tick by not being a full round trip
+at all.
+
 ## The scale was not the cause, and the timer expires 1.879x early
 
 **Correction, established on hardware.** The claim that the published scale
