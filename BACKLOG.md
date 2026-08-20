@@ -538,6 +538,43 @@ thing to measure, because every named item has either been optimised, tested
 and rejected, or shown too small - and 1.4x cannot come from what is left
 named.
 
+## Shadow VMCS earns its cost 2.3x over, measured rather than argued
+
+The two shadow-VMCS copies are **84,796 cycles a round trip, 14.6% of this
+VMM** - the largest concrete item in the closed accounting - and the tree
+said not to propose removing them. The evidence for that was an *inference*:
+the shadowed fields never appear among the VMREAD exits, which proves the
+mechanism works and says nothing about whether it is net positive. One boot
+settles it.
+
+`ZPP_NESTED_SHADOW_VMCS=OFF`, one variable:
+
+| | shadowing on | shadowing off |
+|---|---|---|
+| exits per round trip | 3.05 | **12.88** |
+| handler cycles a round trip | 582,513 | **1,362,110** |
+| `exit: prologue` | 43,388 | 182,630 |
+| `copy_vmcs12_to_shadow` | 26,750 | **110** |
+| `l2-run%` | **5.48** | 5.27 |
+| `l1-run%` | 16.46 | 17.97 |
+| `vmm%` | 78.06 | 76.76 |
+
+The copies do vanish - 26,750 cycles to 110, so the switch did what it says.
+And **9.83 extra exits appear per round trip**, which is the guest
+hypervisor's VMREAD and VMWRITE traffic no longer being serviced by hardware
+against the shadow. The handler more than doubles.
+
+**So shadowing is worth 2.3x on the handler and the design was right.** Note
+what the *headline* number does, though: `vmm%` falls from 78.06 to 76.76,
+which read alone looks like an improvement. It is not - `l1-run%` rose to
+absorb it and `l2-run%`, the only share that matters, went **down**. A
+percentage of wall clock is a ratio between three things and moving one of
+them is not the same as helping the guest. **Read `l2-run%`, not `vmm%`.**
+
+That is the third instrument in this file to flatter a change that hurt, and
+the reason for the rule: state the quantity being maximised before running
+the experiment, not after seeing which number moved.
+
 ## The accounting is closed, and it corrects two errors in my own arithmetic
 
 **`--- outside the split` reads -341 cycles, -0.1%.** The six adjacent
