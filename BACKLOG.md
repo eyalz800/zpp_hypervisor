@@ -785,6 +785,54 @@ is not there" and is really "the wrong question was asked". `x` is the
 virtual read. The same distinction is why a wide `xp` over a device BAR
 lied, further down this file.
 
+## Interrupt delivery is correct end to end. 100% of the "misses" were illegal
+
+**The claim in the section below is refuted, by an instrument built to be
+able to refute it.** `l2_low_priority_no_event` tests the task priority and
+**nothing else**. It does not test `RFLAGS.IF`, and it does not test the
+interruptibility state - and SDM 27.6.1 refuses an external interrupt while
+IF is clear, 27.6.2 while blocking by STI or by MOV SS is in force. On such
+an entry the level above staging nothing is *correct*, not a miss.
+
+Split into `l2_eligible_no_event` and `l2_masked_no_event` - the two extra
+VMREADs paid inside the existing low-priority branch, so about thirty a
+second rather than on every entry - and measured on a settled guest:
+
+    low-priority, no event : 30.5/s
+      of which ELIGIBLE    :  0.0/s
+      of which masked      : 30.5/s
+    eligible share         :  0.0%
+
+**Every one of them had interrupts masked or was in an interrupt shadow.**
+The "roughly 40% of the moments the guest could take its deferred-call
+interrupt go unused" was **0%**.
+
+**Together with the other half, the whole delivery path is now proven
+correct.** `build_vmcs02` wrote and vmcs02 carried, read back at the last
+instruction before entry:
+
+    vector   wrote        carried      dropped
+    0x2f     79,146       79,146       0
+    0xd1     1,917,657    1,917,657    0
+    0x40     79,759       79,759       0
+
+Nothing is dropped, nothing eligible is declined. **The interrupt machinery
+is not the fault**, and four hypotheses die together: the timer, the clock
+rate, injection loss, and missed delivery windows.
+
+What that leaves is unglamorous and is where the evidence has pointed since
+the wall-clock split: the guest is delivered its deferred-call dispatch **46
+times a second**, every time it is legally possible, and that is not enough
+to drain the queue at the CPU share it has. The remaining question is not
+*why is it not delivered* - it is delivered - but **what the guest does with
+each dispatch, and why 46 a second does not clear the backlog.**
+
+Note also what the masked figure says on its own: the guest is at low task
+priority thirty times a second **with interrupts disabled**. That is the
+window between lowering IRQL and executing STI, and it being the *only* place
+the priority is ever seen low is itself a description of a guest that is
+almost never at rest.
+
 ## The guest DOES drop below DISPATCH, 31 times a second, and gets nothing
 
 **Two corrections, one of them mine and one in the tree, and together they

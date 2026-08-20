@@ -5845,6 +5845,33 @@ private:
     std::uint32_t l2_entry_ppr[max_cpus][256]{};
     std::uint64_t l2_low_priority_no_event[max_cpus]{};
 
+    /**
+     * The same crossing, split by whether the event could legally have
+     * been injected at all.
+     *
+     * **`l2_low_priority_no_event` tests the task priority and nothing
+     * else, and that is not sufficient to call an entry a missed
+     * delivery.** SDM 27.6.1: an external interrupt cannot be delivered
+     * while RFLAGS.IF is clear, and 27.6.2 blocks it while the
+     * interruptibility state carries blocking by STI or by MOV SS - an
+     * interrupt shadow. On such an entry the level above is *correct* to
+     * stage nothing, whatever the priority says.
+     *
+     * So the bare counter cannot distinguish "declined" from "not
+     * allowed", and reading it as the former was the error these two
+     * exist to stop repeating. `l2_eligible_no_event` counts only
+     * entries where the priority admitted it **and** interrupts were
+     * enabled **and** no shadow was in force - those are the ones that
+     * are genuinely the level above's choice. `l2_masked_no_event` is
+     * the remainder, and a large one is the honest explanation.
+     *
+     * Both are read inside the existing low-priority branch, so the two
+     * extra VMREADs are paid on about thirty entries a second rather
+     * than on every one.
+     */
+    std::uint64_t l2_eligible_no_event[max_cpus]{};
+    std::uint64_t l2_masked_no_event[max_cpus]{};
+
     /** The priority this entry was sampled at, carried from where the
      * virtual-APIC page is read to where the event it will carry is
      * known. Both are on the same entry, so this never spans one.

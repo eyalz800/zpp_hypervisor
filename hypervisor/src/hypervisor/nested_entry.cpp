@@ -6987,6 +6987,30 @@ void hypervisor::record_l2_entry_event(std::size_t cpu)
 
     if (this->l2_entry_priority[cpu] < dispatch_class) {
         this->l2_low_priority_no_event[cpu] += 1;
+
+        // And whether it could legally have been delivered at all,
+        // which the priority alone does not say. SDM 27.6.1 refuses an
+        // external interrupt while RFLAGS.IF is clear; 27.6.2 refuses
+        // it while the interruptibility state carries blocking by STI
+        // or by MOV SS. On either, the level above staging nothing is
+        // correct rather than a miss - and reading the bare counter as
+        // a miss is exactly the mistake this split exists to stop.
+        constexpr std::uint64_t rflags_if = 1ull << 9;
+        constexpr std::uint64_t blocking_by_sti = 1ull << 0;
+        constexpr std::uint64_t blocking_by_mov_ss = 1ull << 1;
+
+        auto rflags = this->vmcs.read(field::guest_rflags);
+        auto interruptibility =
+            this->vmcs.read(field::guest_interruptibility_state);
+
+        auto shadowed = 0 != (interruptibility &
+                              (blocking_by_sti | blocking_by_mov_ss));
+
+        if ((0 != (rflags & rflags_if)) && !shadowed) {
+            this->l2_eligible_no_event[cpu] += 1;
+        } else {
+            this->l2_masked_no_event[cpu] += 1;
+        }
     }
 }
 
