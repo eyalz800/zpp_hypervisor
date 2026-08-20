@@ -785,6 +785,54 @@ is not there" and is really "the wrong question was asked". `x` is the
 virtual read. The same distinction is why a wide `xp` over a device BAR
 lied, further down this file.
 
+## There is no timer bug. The guest sets its own rate, one shot at a time
+
+**Measured as a steady-state delta rather than a cumulative total, which is
+what every earlier reading of this got wrong:**
+
+    asked arms  25.6/s   units/arm 17400.0 x100ns = 1.740 ms
+    given arms  25.6/s   cyc/arm   7,103,891      = 3.566 ms
+    unanswered   0.0/s
+
+**The periodic arms are 25.6 a second.** Not 1,080. So the ~1,080
+`STIMER0_COUNT` writes a second are overwhelmingly **one-shot** arms - which
+`STIMER0_CONFIG` has been reading as `0x30008`, one-shot, the whole time and
+nobody joined it up - and the ~1,080 `0xd1` vectors a second are answering
+*those*.
+
+**So the guest arms a one-shot timer, is answered, and arms another.** The
+interrupt rate is the guest's own choice, and the level above is serving it
+faithfully. There is no over-injection, no under-injection, and no clock
+error. The 574.7 Hz periodic figure is a small side-channel of 25.6 arms a
+second, and 17,400 x100ns is reproduced **exactly** on every one of them.
+
+**Three successive conclusions in this file were wrong about this**, each
+from a different arithmetic error on the same underlying data, and they are
+worth listing together because the pattern is the lesson:
+
+1. "over-injecting 1.58x" - a rate divided by a period.
+2. "over-injecting 1.879x, and it is the deadlock" - the same division, and
+   it drifted to 1.931x an hour later, which should have ended it.
+3. "LATE by 2.17x, the direction was inverted" - a per-arm *latency*
+   presented as a "Hz" and compared against a *rate*.
+
+Every one of them compared two quantities that were never measured against
+each other, and every one produced a confident mechanism. **The fix each
+time was the same: measure both halves of the ratio in one place, on one
+clock, as a delta over a window.** The instrument that finally did it was
+built for exactly that and still misled, because its report inverted a
+latency into a frequency and printed it beside a real one.
+
+**What this closes.** The timer, the reference TSC page, the injection rate
+and the guest hypervisor's notion of elapsed time are all now measured
+honest. None of them is the reason Windows does not boot. Every remaining
+explanation is cost: the guest gets **7.9% of one processor**, its clock work
+does not fit in what that buys, and seven processors sit idle at
+`l2-run 0.00%` while the eighth does everything.
+
+That is a duller answer than a clock bug and it is where the evidence has
+pointed since the wall-clock split was first read.
+
 ## The timer is LATE by 2.17x, not early. The direction was inverted
 
 **The instrument built to avoid dividing a rate by a period gives the
