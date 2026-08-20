@@ -785,6 +785,55 @@ is not there" and is really "the wrong question was asked". `x` is the
 virtual read. The same distinction is why a wide `xp` over a device BAR
 lied, further down this file.
 
+## One withheld clock interrupt wedges the guest. The protocol allows zero
+
+**The last mechanism-based idea, built, run, and refuted in ninety seconds -
+and refuted for exactly the reason it was predicted to fail.**
+
+`ZPP_LAZY_TICK=<microseconds>` clears `interruption_valid` from a clock
+injection that arrives sooner than N microseconds after the last delivered
+one. It touches only vector `0xd1`, only in `build_vmcs02`, and it lies
+about **delivery** rather than about time - which is what distinguishes it
+from `ZPP_STRETCH_GUEST_TIMER`, `ZPP_TICK_FLOOR` and `ZPP_TIME_DILATION`,
+all of which Windows caught by cross-checking its clocks.
+
+Run at 2,000 microseconds:
+
+    withheld    1
+    delivered   3,816
+
+**One.** The mechanism fired exactly once, and that single withheld
+interrupt froze the boot processor permanently: exits and second-level
+entries unchanged across seventy-five seconds, the processor sitting at
+`0xfffff8052a21f3d2` with interrupts enabled, taking no further exits, while
+the other processors continued. No unhandled exit, no entry failure - it is
+simply waiting for something that will never arrive.
+
+**The prediction was written down before the run and is worth quoting**,
+because it is why this was still worth one boot: KVM's equivalent policy
+drops a periodic expiry at the **source**, before the message is committed,
+and declines to re-arm a timer whose message the guest has not consumed
+(`hyperv.c:812-830`, `:886-889`). This drops at the **sink** - the level
+above has already written its message and set the synthetic interrupt
+source, so it believes the interrupt was injected, never re-stages it, and
+the guest never acknowledges a tick it never took.
+
+**The protocol tolerates zero.** Not "few", not "a bounded rate" - one.
+That is a stronger statement than the experiment set out to make, and it
+closes the whole family: any scheme that withholds, coalesces, delays or
+rate-limits a staged injection from this layer will wedge the guest on its
+first application. There is no tuning of N that helps, because N never got
+to matter.
+
+**What remains after this.** Every mechanism-based intervention has now been
+tried and refuted by measurement: the timer, the clock scale, injection
+loss, missed delivery windows, self-IPI delivery, self-IPI interception,
+forced dispatch, tick floors, period stretching, time dilation, and now
+delivery withholding. What is left is cost, and cost on this rig is
+dominated by the 49:1 tax KVM charges for every VMX instruction - which
+enlightened VMCS would largely remove and which is ruled out on the
+project's own principle that this VMM must need nothing underneath it.
+
 ## KVM has nothing to adopt, and it cannot be what escapes this
 
 **Asked directly, and answered against the sources: there is no mechanism in

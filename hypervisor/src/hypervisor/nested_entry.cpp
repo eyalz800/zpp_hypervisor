@@ -2643,6 +2643,37 @@ std::expected<void, zpp::error> hypervisor::build_vmcs02(std::size_t cpu)
         }
     }
 
+    // Withhold a clock interrupt that crowds the previous one. See
+    // `nested_vmx::lazy_tick_microseconds` for what this is for and why
+    // it is expected to fail; the short version is that the guest is
+    // preempted two instructions short of draining its deferred-call
+    // queue and this is the only remaining way to give it a gap.
+    //
+    // Only the clock vector, and only when a gap has not already
+    // elapsed. Nothing else is touched, so an exception or any other
+    // vector the level above staged goes through untouched.
+    if constexpr (0 != nested_vmx::lazy_tick_microseconds) {
+        constexpr std::uint64_t clock_vector = 0xd1;
+        constexpr std::uint64_t gap = nested_vmx::lazy_tick_microseconds *
+                                      nested_vmx::ticks_per_microsecond;
+
+        if ((cpu < max_cpus) && (0 != (injection & interruption_valid)) &&
+            (clock_vector == (injection & interruption_vector_mask))) {
+            auto now = arch::x86_64::rdtsc();
+            auto last = this->lazy_tick_last_tsc[cpu];
+
+            if ((0 != last) && ((now - last) < gap)) {
+                injection &= ~interruption_valid;
+                this->lazy_tick_withheld[cpu] =
+                    this->lazy_tick_withheld[cpu] + 1;
+            } else {
+                this->lazy_tick_last_tsc[cpu] = now;
+                this->lazy_tick_delivered[cpu] =
+                    this->lazy_tick_delivered[cpu] + 1;
+            }
+        }
+    }
+
     vmcs.write(field::vm_entry_interruption_information_field, injection);
 
     if (0 != (injection & interruption_valid)) {

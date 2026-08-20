@@ -13,6 +13,9 @@ option(ZPP_VIRTUALIZE_APIC
     "Take every external interrupt in the host and inject it into the guest, the way KVM does, instead of letting the guest's own interrupt controller deliver them natively. Off is this VMM's design; on exists to test whether that difference is what stalls the nested guest."
     OFF)
 
+set(ZPP_LAZY_TICK "0" CACHE STRING
+    "Withhold a clock interrupt arriving sooner than this many microseconds after the last delivered one.")
+
 option(ZPP_DISARM_APIC_WATCH
     "Drop the local APIC page watch once no more processors are going to start."
     OFF)
@@ -214,6 +217,7 @@ target_compile_options(zpp_hypervisor PRIVATE
     -DZPP_EAGER_EPT_NEIGHBOURS=$<BOOL:${ZPP_EAGER_EPT_NEIGHBOURS}>
     -DZPP_INTERCEPT_APIC=$<BOOL:${ZPP_INTERCEPT_APIC}>
     -DZPP_DISARM_APIC_WATCH=$<BOOL:${ZPP_DISARM_APIC_WATCH}>
+    -DZPP_LAZY_TICK=${ZPP_LAZY_TICK}
     -DZPP_VIRTUALIZE_APIC=$<BOOL:${ZPP_VIRTUALIZE_APIC}>
     -DZPP_PROFILE_L2=$<BOOL:${ZPP_PROFILE_L2}>
     -DZPP_CENSUS_EXITS=$<BOOL:${ZPP_CENSUS_EXITS}>

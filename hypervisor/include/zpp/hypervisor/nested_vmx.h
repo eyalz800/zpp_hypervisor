@@ -1079,6 +1079,56 @@ inline constexpr bool intercept_apic = (0 != ZPP_INTERCEPT_APIC);
 inline constexpr bool disarm_apic_watch = (0 != ZPP_DISARM_APIC_WATCH);
 
 /**
+ * Withhold a clock interrupt that arrives sooner than this many
+ * microseconds after the last one that was delivered. Zero is off.
+ *
+ * **What it is for.** Measured on the rig, the second-level guest
+ * returns from its clock handler to one instruction, finds the next
+ * clock already pending, and takes it before that instruction retires -
+ * 680,862 times, always the same address, two instructions short of the
+ * `call` that would drain its deferred-procedure-call queue. It has
+ * therefore never run one. Giving it a gap is the only intervention
+ * left that addresses the mechanism rather than its cost.
+ *
+ * **Why this is not the four time lies that already failed.**
+ * `ZPP_STRETCH_GUEST_TIMER`, `ZPP_TICK_FLOOR` and `ZPP_TIME_DILATION`
+ * all alter what the guest is told the *time* is, and Windows checks its
+ * clocks against each other - `HalpWatchdogCheckPreResetNMI`, bugcheck
+ * `0x1CA`. This alters *delivery* instead. The reference counter stays
+ * truthful and a masked interrupt is something real hardware produces
+ * routinely.
+ *
+ * **Why it is expected to fail, recorded before running it.** KVM's
+ * equivalent - the lazy lost-ticks policy at `hyperv.c:812-830` - drops
+ * a periodic expiry at the **source**, before the message is committed,
+ * and declines to re-arm a timer whose message the guest has not
+ * consumed. This drops at the **sink**: the level above has already
+ * written its message and set the synthetic interrupt source, so it will
+ * believe the interrupt was injected and will not re-stage it, and the
+ * guest will never acknowledge a tick it never took. Both earlier
+ * experiments that perturbed this same field ended with the level above
+ * halting. **A failure here is expected and is still worth one boot,
+ * because the alternative is to stop having any mechanism to test.**
+ *
+ * The failure signature is known and takes ninety seconds: second-level
+ * entries frozen with a last exit of `hlt` at the first-level
+ * instruction pointer. Success is `l2_injected_vector[0x2f]` climbing
+ * and `leaves-filled` moving.
+ */
+#ifndef ZPP_LAZY_TICK
+#define ZPP_LAZY_TICK 0
+#endif
+
+inline constexpr std::uint64_t lazy_tick_microseconds = ZPP_LAZY_TICK;
+
+/**
+ * Time-stamp ticks in a microsecond on the part this runs on, measured
+ * at the wall as 1,992,000,000 Hz and agreeing with CPUID.15H's 24 MHz
+ * crystal times 83. Not derived from a leaf that reads zero here.
+ */
+inline constexpr std::uint64_t ticks_per_microsecond = 1992;
+
+/**
  * How long after the last start-up IPI the watch is considered to have
  * done its job, in time-stamp counter ticks.
  *

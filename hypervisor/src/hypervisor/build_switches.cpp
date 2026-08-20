@@ -91,6 +91,20 @@ extern "C" [[gnu::used, gnu::retain]] constinit const char
         // the watch is dropped runs outside this VMM.
         ' ', 'a', 'p', 'i', 'c', 'o', 'f', 'f', '=',
         digit(nested_vmx::disarm_apic_watch),
+        // Microseconds, **four** digits, because the useful values are
+        // milliseconds and two digits would print 2,000 as `00` - which
+        // is indistinguishable from off. A manifest that cannot show the
+        // value is no better than one that cannot show the switch, and
+        // this project has already lost a session to a switch the
+        // manifest could not show.
+        ' ', 'l', 'a', 'z', 'y', '=',
+        digit(static_cast<unsigned>(
+            nested_vmx::lazy_tick_microseconds / 1000)),
+        digit(static_cast<unsigned>(
+            nested_vmx::lazy_tick_microseconds / 100)),
+        digit(static_cast<unsigned>(
+            nested_vmx::lazy_tick_microseconds / 10)),
+        digit(static_cast<unsigned>(nested_vmx::lazy_tick_microseconds)),
         // Two digits for both multipliers, where every switch above
         // needs one. They are free-form `CACHE STRING`s rather than
         // booleans - `BACKLOG.md` records the stretch run at 1, 2 and 8,

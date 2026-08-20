@@ -5869,6 +5869,16 @@ private:
      * extra VMREADs are paid on about thirty entries a second rather
      * than on every one.
      */
+    /**
+     * Clock interrupts withheld and delivered under
+     * `nested_vmx::lazy_tick_microseconds`, and when the last one went
+     * out. The pair is the whole experiment: withheld climbing with
+     * delivered flat means the gap is being enforced.
+     */
+    volatile std::uint64_t lazy_tick_withheld[max_cpus]{};
+    volatile std::uint64_t lazy_tick_delivered[max_cpus]{};
+    std::uint64_t lazy_tick_last_tsc[max_cpus]{};
+
     std::uint64_t l2_eligible_no_event[max_cpus]{};
     std::uint64_t l2_masked_no_event[max_cpus]{};
 
