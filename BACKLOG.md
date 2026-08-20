@@ -785,6 +785,49 @@ is not there" and is really "the wrong question was asked". `x` is the
 virtual read. The same distinction is why a wide `xp` over a device BAR
 lied, further down this file.
 
+## The 1.4x target has lost its derivation, and the loop is at a hypercall page
+
+**Two corrections to the framing, before any more work is aimed at it.**
+
+**The 1.4x is no longer justified.** It came from "a tick costs about 2.46 ms
+against a 1.74 ms period", and the timer investigation that produced that
+number has since collapsed entirely: there is no timer bug, the guest sets
+its own rate with one-shot arms, and the reference clock is honest to three
+parts per million. What actually survives is much narrower and should be
+quoted instead:
+
+- cost reductions of **2.8% to 15.5%** changed nothing measurable;
+- doubling the guest's per-tick budget (**+100%**) visibly moved it -
+  application processors went from 17 second-level entries to 8,410.
+
+So the threshold is somewhere between 15% and 100%, and **it has never been
+measured**. Quoting 1.4x gives a false precision that this file then reasons
+against ("every named item totals 1.07-1.10x, therefore hopeless"), and that
+conclusion is only as good as the number it is compared with.
+
+**And the loop has an address.** The second-level instruction pointers this
+VMM resumes at cluster in a single page, at a handful of small offsets:
+
+    0xfffff807270f0003
+    0xfffff807270f001c
+    0xfffff807270f0035
+
+Well below the second-level kernel image, which this boot's log puts at
+`0xfffff8077fc00000`. One page, three stubs a few bytes apart, and **the same
+low offsets recur across every boot in this session's traces** - `...001c`
+appears in exit rings taken hours and several KASLR bases apart.
+
+That is the shape of the **Hyper-V hypercall page**: the page Windows
+registers through `HV_X64_MSR_HYPERCALL`, containing small `vmcall` stubs.
+So the guest is not looping in kernel code that a profile would name - it is
+looping *through hypercalls*, and every sample of "where the guest is" has
+been landing on the stub rather than on whatever calls it.
+
+Not yet read: the page is not mapped in the boot processor's current address
+space when it is inside this VMM, so dumping it needs a walk of the guest's
+own page tables rather than `x`. The **caller** is what matters and is one
+stack frame above the stub.
+
 ## Asking KVM for enlightenments is the wrong answer, and it also does not work
 
 **Withdrawn on principle before it was withdrawn on evidence, and the
