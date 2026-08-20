@@ -469,6 +469,17 @@ void hypervisor::resume_guest(std::uint64_t cpuid,
 {
     auto & vmcs = this->vmcs;
 
+    // Closes the dispatch. Everything between the mark taken in
+    // `on_vm_exit` and here is whatever handled the exit - the
+    // reflection, the vmcs02 build, the extended page-table fault, or
+    // one of the ordinary cases in the switch - and every older phase
+    // slot nests inside this one. See `phase_mark`.
+    //
+    // This function is `[[noreturn]]` and has exactly two call sites,
+    // both in `on_vm_exit`, which is what makes the boundary sound: no
+    // exit reaches the guest without passing through here once.
+    mark_phase(cpuid, 26);
+
     // The activity state, read at most once and only where something
     // asks for it.
     //
@@ -773,6 +784,11 @@ void hypervisor::resume_guest(std::uint64_t cpuid,
         }
     }
 
+    // The event decision, closed. Everything above is the re-queue: the
+    // interruptibility state, the error code and length writes, and the
+    // entry-interruption write itself.
+    mark_phase(cpuid, 27);
+
     // Move a few records out of the ring on the way back to the
     // guest.
     //
@@ -889,9 +905,19 @@ void hypervisor::resume_guest(std::uint64_t cpuid,
         resume_rip = vmcs.guest_rip();
     }
 
+    // The diagnostic trickle and the RIP advance, closed. The advance is
+    // one VMWRITE and the pump folds away when the channel is off, so a
+    // large number here is the pump and nothing else.
+    mark_phase(cpuid, 28);
+
     // Record what is about to be resumed, now that the handlers have
     // had their say.
     record_exit(cpuid, full_reason, context);
+
+    // `record_exit` alone, because it runs on every single exit and
+    // reads up to five VMCS fields doing it - and it is the one thing on
+    // this path that exists purely to be read from outside.
+    mark_phase(cpuid, 29);
 
     // Counted here, at the last point before control leaves this
     // handler, so a frozen exit count can be read two ways round.
@@ -1026,9 +1052,16 @@ void hypervisor::resume_guest(std::uint64_t cpuid,
     // Close the span opened at the top of `on_vm_exit`. Here rather
     // than anywhere earlier because everything this VMM does for an exit
     // has now been done, and the next instruction is the entry itself.
+    // The last adjacent interval: the entry census above, from the end
+    // of `record_exit` to here. Taken before the span below rather than
+    // beside it so the two share one RDTSC - `mark_phase` leaves the
+    // instant it read in `phase_mark`, and that is the instant the
+    // handler's span closes at.
+    mark_phase(cpuid, 30);
+
     if (auto slot = (cpuid + 1); (0 != slot) && (slot <= max_cpus)) {
         auto cpu = slot - 1;
-        auto now = arch::x86_64::rdtsc();
+        auto now = this->phase_mark[cpu];
         if (0 != this->handler_entry_tsc[cpu]) {
             auto span = now - this->handler_entry_tsc[cpu];
 

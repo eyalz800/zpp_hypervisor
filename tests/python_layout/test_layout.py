@@ -203,6 +203,47 @@ class Capacities(unittest.TestCase):
             "dump_field_use's capacity default disagrees with "
             "vmcs_field_use_capacity in the header")
 
+    def test_phase_names_and_parents_cover_every_slot(self):
+        """PHASE_NAMES and PHASE_PARENT, against `phase_count`.
+
+        `phase_cycles` is indexed by position, so a name list shorter
+        than the array silently stops printing the newest slots - which
+        are exactly the ones somebody added because they suspected a
+        cost. Longer, and it names slots that do not exist and prints
+        them as zero, which reads as "nothing happens there".
+
+        PHASE_PARENT is worse if it drifts, because it is what the tree
+        printer subtracts children with: a slot that falls off the end
+        is treated as cross-cutting, so its cycles stop being subtracted
+        from its parent's `self` column and the parent's residue grows
+        by exactly the amount that was just explained.
+        """
+        declared = cxx_constant(self.header, "phase_count")
+        script = read(DUMP_STATE)
+
+        for name in ("PHASE_NAMES", "PHASE_PARENT"):
+            match = re.search(
+                r"^" + name + r" = \[(.*?)^\]", script,
+                re.S | re.M)
+            self.assertIsNotNone(
+                match, "rig-dump-state.py no longer defines " + name)
+
+        names = re.search(r"^PHASE_NAMES = \[(.*?)\]$", script,
+                          re.S | re.M).group(1)
+        self.assertEqual(
+            len(re.findall(r'"[^"]*"', names)), declared,
+            "PHASE_NAMES has a different number of entries than "
+            "phase_count, so the phase table names the wrong slots")
+
+        parents = re.search(r"^PHASE_PARENT = \[(.*?)^\]", script,
+                            re.S | re.M).group(1)
+        self.assertEqual(
+            len(re.findall(r"^\s*(?:-?\d+|PHASE_\w+),", parents,
+                           re.M)), declared,
+            "PHASE_PARENT has a different number of entries than "
+            "phase_count, so some slot's nesting is unknown and its "
+            "cycles are left out of its parent's residue")
+
     def test_exit_trace_capacity_in_gdb(self):
         """`set $cap = 32` in scripts/zpp.gdb.
 

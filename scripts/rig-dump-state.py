@@ -48,19 +48,94 @@ ACTIVITY = {0: "active", 1: "hlt", 2: "shutdown", 3: "wait-sipi"}
 # The order the hypervisor writes them in - phase_cycles is indexed by
 # position, not by name, so this list is the only thing that says which
 # is which. Keep it beside the indices in the sources that fill them.
+#
+# The indentation used to be in the *name*, which is how the table came
+# to be summed: a reader looking at a flat column of "cycles/call" has
+# nothing telling it that `save_l2_state` is inside `reflect_l2_exit`
+# and that `copy_shadow_to_vmcs12` is called four times a round trip
+# where `build_vmcs02` is called once. The nesting is now data, in
+# PHASE_PARENT below, and the printer derives the indentation from it.
 PHASE_NAMES = ["save_l2_state", "reflect_l2_exit", "build_vmcs02",
                "shadow_ept_pointer_for", "copy_vmcs12_to_shadow",
                "copy_shadow_to_vmcs12", "vmptrld->vmcs02",
                "vmptrld->vmcs01", "merge_nested_bitmaps",
-               "on_l2_ept_fault", "  merge: guest page read",
-               "    merge: of which map_window", "load_l1_host_state",
+               "on_l2_ept_fault", "merge: guest page read",
+               "guest read: map_window", "load_l1_host_state",
                "exit information", "build: before vmptrld",
                "build: after vmptrld",
-               "  vmptrld: read region", "  vmptrld: flush old",
-               "  vmptrld: assign", "  vmptrld: shadow publish",
+               "vmptrld: read region", "vmptrld: flush old",
+               "vmptrld: assign", "vmptrld: shadow publish",
                "vmptrld: whole call",
-               "  materialise: vmptrld in", "  materialise: field loop",
-               "  materialise: vmptrld out", "materialise: whole"]
+               "materialise: vmptrld in", "materialise: field loop",
+               "materialise: vmptrld out", "materialise: whole",
+               "exit: prologue", "exit: dispatch", "resume: events",
+               "resume: diag and rip", "resume: record_exit",
+               "resume: entry census", "reflect: exit ring",
+               "reflect: msr store", "reflect: msr load + invvpid",
+               "reflect: evmcs store", "enter_or_park_l2",
+               "on_guest_vmlaunch", "guest write: map_window",
+               "guest read: whole call", "guest write: whole call",
+               "(spare 40)", "(spare 41)"]
+
+# Which slot each one is nested inside. TOP is a top-level interval of
+# the adjacent split over a whole exit; CROSS is a phase with more than
+# one caller, so it belongs to no single parent and is excluded from the
+# residue arithmetic rather than being charged to whichever caller was
+# guessed at.
+#
+# **This table is what makes the phase table readable, and its absence
+# is what made it misleading.** Slots 0 to 24 were each added where
+# somebody suspected a cost, so several of them nest two and three deep,
+# and a naive sum of their cycles/call column came to about half the
+# round trip - which was then reported as "the other half is
+# unattributed". Some of that half was double counting.
+PHASE_TOP = -1
+PHASE_CROSS = -2
+
+PHASE_PARENT = [
+    1,            # 0  save_l2_state
+    26,           # 1  reflect_l2_exit
+    36,           # 2  build_vmcs02
+    PHASE_CROSS,  # 3  shadow_ept_pointer_for - build, ept fault, vmfunc
+    1,            # 4  copy_vmcs12_to_shadow
+    PHASE_CROSS,  # 5  copy_shadow_to_vmcs12 - vmlaunch and the flush
+    2,            # 6  vmptrld->vmcs02
+    1,            # 7  vmptrld->vmcs01
+    14,           # 8  merge_nested_bitmaps
+    26,           # 9  on_l2_ept_fault
+    8,            # 10 merge: guest page read
+    38,           # 11 guest read: map_window
+    1,            # 12 load_l1_host_state
+    1,            # 13 exit information
+    2,            # 14 build: before vmptrld
+    2,            # 15 build: after vmptrld
+    20,           # 16 vmptrld: read region
+    20,           # 17 vmptrld: flush old
+    20,           # 18 vmptrld: assign
+    20,           # 19 vmptrld: shadow publish
+    26,           # 20 vmptrld: whole call
+    24,           # 21 materialise: vmptrld in
+    24,           # 22 materialise: field loop
+    24,           # 23 materialise: vmptrld out
+    17,           # 24 materialise: whole
+    PHASE_TOP,    # 25 exit: prologue
+    PHASE_TOP,    # 26 exit: dispatch
+    PHASE_TOP,    # 27 resume: events
+    PHASE_TOP,    # 28 resume: diag and rip
+    PHASE_TOP,    # 29 resume: record_exit
+    PHASE_TOP,    # 30 resume: entry census
+    1,            # 31 reflect: exit ring
+    1,            # 32 reflect: msr store
+    1,            # 33 reflect: msr load + invvpid
+    1,            # 34 reflect: evmcs store
+    36,           # 35 enter_or_park_l2
+    26,           # 36 on_guest_vmlaunch
+    39,           # 37 guest write: map_window
+    PHASE_CROSS,  # 38 guest read: whole call
+    PHASE_CROSS,  # 39 guest write: whole call
+    PHASE_CROSS,  # 40 spare
+    PHASE_CROSS,  # 41 spare
+]
 
 # Whose instruction pointer a record holds - see exit_trace_entry's
 # rip_owner. An address attributed to the wrong guest reads as a
@@ -819,6 +894,97 @@ def dump_synthetic_msrs(args, elf, instance):
                   f"for it at entry")
             print(f"  armed {armed:,} of {total:,} entries "
                   f"({100.0 * armed / max(total, 1):.1f}%)")
+
+
+def dump_phase_tree(cpu, phase_count, cell, round_trips, handler):
+    """The phase table as the tree it is, with a column that sums.
+
+    Three things this prints that the flat table could not, and each of
+    them is a wrong conclusion this file has already recorded:
+
+    - **cycles per round trip**, so siblings are additive. The old table
+      printed cycles per *call*, and the denominators differ by more
+      than an order of magnitude across the rows - so the sum of that
+      column is not a quantity.
+    - **the nesting**, from PHASE_PARENT, so a container and its
+      children are never added to each other.
+    - **the residue**, twice: `handler_cycles` minus the top-level
+      intervals, which says whether the split covers the handler at all,
+      and each container minus its own children, which is where the cost
+      is when everything named inside a large phase is small.
+
+    Slots 25 to 30 are adjacent intervals over the whole of an exit and
+    sum to `handler_cycles` by construction. Everything older nests
+    inside one of them, so a top-level residue much above the round-off
+    means an exit is leaving the handler somewhere this does not know
+    about - a halt, or a path that never reaches `resume_guest`.
+    """
+    calls = [cell("phase_calls", i) for i in range(phase_count)]
+    cycles = [cell("phase_cycles", i) for i in range(phase_count)]
+
+    if not any(calls):
+        return
+
+    # A phase's own cycles, less everything charged to a child of it.
+    # Cross-cutting slots are not anybody's child, so they never subtract
+    # from a container - which is deliberate: charging
+    # `copy_shadow_to_vmcs12` to whichever caller happened to be guessed
+    # at is exactly the error this column exists to avoid.
+    children = [[] for _ in range(phase_count)]
+    for index in range(phase_count):
+        parent = PHASE_PARENT[index] if index < len(PHASE_PARENT) \
+            else PHASE_CROSS
+        if 0 <= parent < phase_count:
+            children[parent].append(index)
+
+    rt = round_trips or 1
+    total = handler or 1
+
+    print(f"\ncpu {cpu} phase tree "
+          f"({round_trips:,} round trips, "
+          f"{handler // max(round_trips, 1):,} handler cycles a round "
+          f"trip)")
+    print("     phase                                     calls  calls/RT"
+          "     cyc/call      cyc/RT   self/RT   %vmm")
+
+    def row(index, depth):
+        if not calls[index]:
+            return
+        name = (("  " * depth) + PHASE_NAMES[index])[:36]
+        own = cycles[index] - sum(cycles[c] for c in children[index])
+        print(f"  {index:3d}  {name:<36} {calls[index]:>12,} "
+              f"{calls[index] / rt:>8.2f} "
+              f"{cycles[index] // calls[index]:>12,} "
+              f"{cycles[index] / rt:>11,.0f} "
+              f"{own / rt:>9,.0f} "
+              f"{100.0 * cycles[index] / total:>6.1f}")
+        for child in children[index]:
+            row(child, depth + 1)
+
+    top = [i for i in range(phase_count)
+           if (i < len(PHASE_PARENT)) and (PHASE_PARENT[i] == PHASE_TOP)]
+
+    for index in top:
+        row(index, 0)
+
+    covered = sum(cycles[i] for i in top)
+    for label, value in (
+            ("--- the six adjacent intervals", covered),
+            ("--- handler_cycles", handler),
+            ("--- outside the split", handler - covered)):
+        print(f"       {label:<36} {'':>12} {'':>8} {'':>12} "
+              f"{value / rt:>11,.0f} {'':>9} "
+              f"{100.0 * value / total:>6.1f}")
+
+    cross = [i for i in range(phase_count)
+             if (i < len(PHASE_PARENT))
+             and (PHASE_PARENT[i] == PHASE_CROSS) and calls[i]]
+    if cross:
+        print("       cross-cutting - more than one caller, so these are "
+              "already inside\n       one of the rows above and must not "
+              "be added to it")
+        for index in cross:
+            row(index, 1)
 
 
 def dump_regions(args, elf, instance):
@@ -2175,22 +2341,27 @@ def main():
         print(f"{cpu:3d}  {read('vmcs_shadow_loads', cpu):-12d}  "
               f"{read('vmcs_shadow_stores', cpu):-13d}")
 
-    # Where the nested round trip's time actually goes. Cycles a call is
-    # the number to compare against the price of one VMCS access, since
-    # on this rig every one of them traps to the layer below - a phase
-    # is, to a first approximation, a count of accesses in disguise.
-    print("\ncpu  phase                    calls        cycles  "
-          "cycles/call")
+    # Where the nested round trip's time actually goes.
+    #
+    # **Read the `cyc/RT` column, not `cyc/call`, and never sum
+    # `cyc/call`.** They have different denominators: `build_vmcs02`
+    # runs once a round trip, `copy_shadow_to_vmcs12` about four times,
+    # and `guest read: map_window` about twenty. A column of cycles a
+    # call is a column of prices for different quantities, and summing
+    # it is how this project came to believe half the round trip was
+    # unattributed when part of that half was one cost counted twice.
+    #
+    # `cyc/RT` is cycles divided by second-level entries, so it is
+    # additive across siblings, and `self` is a phase minus its own
+    # children - which is where a cost hides when a container is large
+    # and everything named inside it is small.
     for cpu in range(args.cpus):
-        for index, name in enumerate(PHASE_NAMES[:phase_count]):
-            calls = words.get(instance + off["phase_calls"]
-                              + (cpu * phase_count + index) * 8, 0)
-            cycles = words.get(instance + off["phase_cycles"]
-                               + (cpu * phase_count + index) * 8, 0)
-            if not calls:
-                continue
-            print(f"{cpu:3d}  {name:<20} {calls:10d}  {cycles:12d}  "
-                  f"{cycles // calls:11d}")
+        dump_phase_tree(cpu, phase_count,
+                        lambda member, index:
+                        words.get(instance + off[member]
+                                  + (cpu * phase_count + index) * 8, 0),
+                        read("l2_entries", cpu) or 0,
+                        read("handler_cycles", cpu) or 0)
 
     # Each section separately, because `gdb_offsets` exits the process
     # when a member is missing and the reader routinely runs ahead of

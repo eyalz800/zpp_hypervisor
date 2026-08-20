@@ -9046,9 +9046,80 @@ private:
     // computed rather than assumed. See `on_guest_vmptrld`.
     // 21 through 24 bracket `materialise_l2_guest_state`, which is 81%
     // of VMPTRLD and had never been measured.
-    static constexpr std::size_t phase_count = 28;
+    /**
+     * **The table is a tree, and until slot 25 it had no root.**
+     *
+     * Every slot from 0 to 24 was added where somebody suspected a cost,
+     * so they overlap, they nest, and their `cycles/call` column cannot
+     * be summed - the denominators differ. Summing it anyway is how this
+     * file came to say "roughly half the round trip is unattributed": the
+     * named items came to about 384,000 of 780,707, and the arithmetic
+     * that produced that added a cost charged twice to one charged four
+     * times a round trip.
+     *
+     * 25 through 30 fix that by being **adjacent intervals over the whole
+     * of an exit**, in the one control flow every exit takes:
+     * `on_vm_exit` runs, something handles the exit, `resume_guest` ends
+     * it, and `resume_guest` is `[[noreturn]]` with exactly two call
+     * sites, both inside `on_vm_exit`. So the six of them sum to
+     * `handler_cycles` by construction, not by agreement, and every older
+     * slot nests inside one of them. `phase_mark` is the running mark
+     * they are stamped from - one RDTSC per boundary rather than two per
+     * bracket.
+     *
+     * The nesting is data, in `PHASE_PARENT` in `scripts/rig-dump-state.
+     * py`, beside the names. A reader that does not know which slots nest
+     * prints a table that adds up to more than the machine has.
+     *
+     * 31 through 34 bracket what `reflect_l2_exit` does that its three
+     * children never named - the exit ring at the top, the two MSR areas,
+     * the transition flush and the enlightened store - and 35 and 36 do
+     * the same for the entry half, which had nothing between
+     * `build_vmcs02` and the guest running.
+     *
+     * @{
+     */
+    static constexpr std::size_t phase_count = 42;
     std::uint64_t phase_cycles[max_cpus][phase_count]{};
     std::uint64_t phase_calls[max_cpus][phase_count]{};
+
+    /**
+     * Where the last adjacent-interval boundary was taken.
+     *
+     * Set at the top of `on_vm_exit` from the same RDTSC
+     * `handler_entry_tsc` uses, so opening the split costs nothing, and
+     * moved by `mark_phase` at each boundary. Zero means no exit is in
+     * progress on this processor - `tests/resume_guest` drives
+     * `resume_guest` directly - and a zero mark charges nothing rather
+     * than charging the whole time since boot to whichever slot ran
+     * first.
+     */
+    std::uint64_t phase_mark[max_cpus]{};
+
+    /**
+     * Closes the interval since this processor's last mark into a slot,
+     * and opens the next one at the same instant.
+     *
+     * One RDTSC. It does not exit: KVM clears `CPU_BASED_RDTSC_EXITING`
+     * for its guests in `vmx_exec_control`
+     * (`.references/kvm/vmx.c:4490`), so this VMM's own RDTSC is a
+     * handful of cycles against the ~390,000 an exit costs here.
+     */
+    void mark_phase(std::size_t cpu, std::size_t slot)
+    {
+        if ((cpu >= max_cpus) || (slot >= phase_count)) {
+            return;
+        }
+
+        auto now = arch::x86_64::rdtsc();
+
+        if (0 != this->phase_mark[cpu]) {
+            this->phase_cycles[cpu][slot] += now - this->phase_mark[cpu];
+            this->phase_calls[cpu][slot] += 1;
+        }
+
+        this->phase_mark[cpu] = now;
+    }
     /** @} */
 
     std::uint64_t vmcs_shadow_loads[max_cpus]{};

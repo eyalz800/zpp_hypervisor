@@ -3859,6 +3859,19 @@ void hypervisor::load_l1_host_state(std::size_t cpu)
 
 hypervisor::l2_entry_outcome hypervisor::enter_or_park_l2(std::size_t cpu)
 {
+    // Phase timing; see `phase_cycles`. Everything between
+    // `build_vmcs02` returning and the second-level guest running is
+    // here and in `record_l2_entry_event` below it, and neither had ever
+    // been timed - "after the build" was simply not in the table.
+    auto enter_start = arch::x86_64::rdtsc();
+    auto enter_stop = zpp::scope_exit([&] {
+        if (cpu < max_cpus) {
+            this->phase_cycles[cpu][35] +=
+                arch::x86_64::rdtsc() - enter_start;
+            this->phase_calls[cpu][35] += 1;
+        }
+    });
+
     namespace activity = arch::x86_64::vmx::activity_state;
 
     auto & vmcs = this->vmcs;
@@ -4048,6 +4061,24 @@ void hypervisor::reflect_l2_exit(std::size_t cpu,
     auto & vmcs = this->vmcs;
     auto & shadow = this->guest_vmcs12[cpu];
 
+    // The four brackets below are this function's residue, named.
+    //
+    // Its three children - `save_l2_state`, `load_l1_host_state` and the
+    // exit-information block - came to 126,553 of 181,679 cycles a call,
+    // and the ~55,000 left over was the largest unnamed term in the
+    // handler. It is not one thing: the ring below reads four VMCS
+    // fields, the two MSR areas read two shadow fields each and walk
+    // guest memory when they are non-empty, and the transition flush is
+    // an INVVPID that exits to the layer below. All four were invisible.
+    auto residue = [&](std::size_t slot, std::uint64_t since) {
+        if (cpu < max_cpus) {
+            this->phase_cycles[cpu][slot] += arch::x86_64::rdtsc() - since;
+            this->phase_calls[cpu][slot] += 1;
+        }
+    };
+
+    auto ring_start = arch::x86_64::rdtsc();
+
     // Recorded here, first, and for the same reason the guest state is
     // read here: this is the last moment the VMCS that ran the
     // second-level guest is current, so the instruction pointer below is
@@ -4162,6 +4193,8 @@ void hypervisor::reflect_l2_exit(std::size_t cpu,
         this->l2_exit_detail_value[cpu] = 0;
     }
 
+    residue(31, ring_start);
+
     // The interrupted event becomes the guest hypervisor's, not ours.
     //
     // Below, this reflection copies the interrupted-event field into its
@@ -4271,6 +4304,8 @@ void hypervisor::reflect_l2_exit(std::size_t cpu,
     // list - 29.8 step 4 performs it - so only this half moves.
     auto aborted = false;
 
+    auto store_start = arch::x86_64::rdtsc();
+
     if (!reason.entry_failure()) {
         if (auto stored = store_nested_msrs(
                 shadow.read(field::vm_exit_msr_store_address),
@@ -4283,6 +4318,8 @@ void hypervisor::reflect_l2_exit(std::size_t cpu,
                 stored.error().code());
         }
     }
+
+    residue(32, store_start);
 
     // Back onto the VMCS that runs the guest hypervisor.
     //
@@ -4327,6 +4364,8 @@ void hypervisor::reflect_l2_exit(std::size_t cpu,
 
     // SDM 30.6: and the VM-exit MSR-load area after host state, which is
     // why this is here rather than beside the store above.
+    auto load_start = arch::x86_64::rdtsc();
+
     if (auto loaded =
             load_nested_msrs(cpu,
                              shadow.read(field::vm_exit_msr_load_address),
@@ -4339,6 +4378,12 @@ void hypervisor::reflect_l2_exit(std::size_t cpu,
     }
 
     nested_transition_flush(cpu);
+
+    // The MSR-load area and the INVVPID together. Kept as one slot
+    // because they are one region of straight-line code and splitting
+    // them would cost another RDTSC to separate a load area that is
+    // almost always empty from a flush that always runs.
+    residue(33, load_start);
 
     this->l2_exits_reflected[cpu] = this->l2_exits_reflected[cpu] + 1;
 
@@ -4380,7 +4425,9 @@ void hypervisor::reflect_l2_exit(std::size_t cpu,
     // VM entry reads its exit information out of that structure rather
     // than with VMREAD, so it has to hold what was just written. Inert
     // unless the enlightenment is armed. See `store_enlightened_vmcs`.
+    auto evmcs_start = arch::x86_64::rdtsc();
     store_enlightened_vmcs(cpu);
+    residue(34, evmcs_start);
 }
 
 namespace

@@ -204,6 +204,13 @@ void hypervisor::on_vm_exit(std::uint64_t cpuid,
             this->handler_first_tsc[cpuid] = now;
         }
 
+        // And the first boundary of the adjacent-interval split, from
+        // this same read rather than one of its own. See `phase_mark`:
+        // slots 25 through 30 are the only part of the phase table that
+        // sums to anything, and they sum to `handler_cycles` because
+        // they start where it starts.
+        this->phase_mark[cpuid] = now;
+
         // The access counters at the span's open, for
         // `handler_reason_reads`. Two loads, and they have to be taken
         // here rather than anywhere later or they would describe a
@@ -422,6 +429,13 @@ void hypervisor::on_vm_exit(std::uint64_t cpuid,
                 vmcs.vm_exit_instruction_length();
         }
     }
+
+    // Everything above is what every exit pays before anything knows
+    // what the exit was: the GS check, the controller poll, the extended
+    // page-table catch-up, the exit reason, the guest RIP and the
+    // interrupted-event block. Six VMCS reads on the worst path and no
+    // decision taken. Closed here, where the dispatch begins.
+    mark_phase(cpuid, 25);
 
     if constexpr (nested_vmx::enabled) {
         if (auto slot = (cpuid + 1); (0 != slot) && (slot <= max_cpus) &&

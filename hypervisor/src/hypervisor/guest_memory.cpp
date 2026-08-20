@@ -84,6 +84,25 @@ void hypervisor::note_guest_memory_caller(std::uint64_t caller)
 std::expected<void, zpp::error> hypervisor::read_guest_physical(
     std::uint64_t guest_physical, std::span<std::byte> into)
 {
+    // Phase 38 is the whole call, against phase 11's mapping alone.
+    //
+    // The pair is what says whether keeping the window mapped is worth
+    // anything: the difference between them is the lock, the loop and
+    // the `memcpy`, and none of that goes away with a kept mapping. The
+    // note above this function sized the window from its own cost with
+    // no denominator beside it, and this file has now twice recorded an
+    // optimisation sized off a container rather than the part of it that
+    // would actually go.
+    auto whole_start = arch::x86_64::rdtsc();
+    auto whole_cpu = this_processor();
+    scope_exit whole_stop{[&] {
+        if (whole_cpu < max_cpus) {
+            this->phase_cycles[whole_cpu][38] +=
+                arch::x86_64::rdtsc() - whole_start;
+            this->phase_calls[whole_cpu][38] += 1;
+        }
+    }};
+
     note_guest_memory_caller(reinterpret_cast<std::uint64_t>(
         __builtin_return_address(0)));
 
@@ -110,10 +129,23 @@ std::expected<void, zpp::error> hypervisor::read_guest_physical(
         // cache traffic and would survive a kept mapping; only this
         // would go away, so the two are timed apart before anything is
         // built on either.
+        //
+        // **Charged to this processor, not to row 0.** It used to be
+        // `phase_cycles[0][11]` unconditionally, which is right about
+        // the totals on a guest where one processor does everything and
+        // silently wrong on any other - and it made this the one row in
+        // a per-processor table that was not per processor. See
+        // `this_processor`: one load through GS, and
+        // `gs_processor_index_disagreements` reads 0 on the running
+        // guest, so the index is checked rather than trusted.
+        auto here = this_processor();
         auto map_start = arch::x86_64::rdtsc();
         auto window = map_window_at(transfer_window_first_page, at, 1);
-        this->phase_cycles[0][11] += arch::x86_64::rdtsc() - map_start;
-        this->phase_calls[0][11] += 1;
+        if (here < max_cpus) {
+            this->phase_cycles[here][11] +=
+                arch::x86_64::rdtsc() - map_start;
+            this->phase_calls[here][11] += 1;
+        }
 
         if (nullptr == window) {
             return std::unexpected(
@@ -130,6 +162,18 @@ std::expected<void, zpp::error> hypervisor::read_guest_physical(
 std::expected<void, zpp::error> hypervisor::write_guest_physical(
     std::uint64_t guest_physical, std::span<const std::byte> from)
 {
+    // Phase 39, the write side of 38. See it for why the whole call and
+    // the mapping inside it are timed apart.
+    auto whole_start = arch::x86_64::rdtsc();
+    auto whole_cpu = this_processor();
+    scope_exit whole_stop{[&] {
+        if (whole_cpu < max_cpus) {
+            this->phase_cycles[whole_cpu][39] +=
+                arch::x86_64::rdtsc() - whole_start;
+            this->phase_calls[whole_cpu][39] += 1;
+        }
+    }};
+
     note_guest_memory_caller(reinterpret_cast<std::uint64_t>(
         __builtin_return_address(0)));
 
@@ -147,7 +191,21 @@ std::expected<void, zpp::error> hypervisor::write_guest_physical(
         this->mapping_window_lock.lock();
         scope_exit release{[&] { this->mapping_window_lock.unlock(); }};
 
+        // Phase 37 is the write side of what phase 11 measures on the
+        // read side, and it was missing. `flush_guest_vmcs12` pushes
+        // twelve kilobytes into the guest hypervisor's own region on
+        // every VMPTRLD - three pages, three repoints - and none of that
+        // appeared anywhere in the table. A window cost measured only
+        // over reads understates the case for keeping the mapping.
+        auto here = this_processor();
+        auto map_start = arch::x86_64::rdtsc();
         auto window = map_window_at(transfer_window_first_page, at, 1);
+        if (here < max_cpus) {
+            this->phase_cycles[here][37] +=
+                arch::x86_64::rdtsc() - map_start;
+            this->phase_calls[here][37] += 1;
+        }
+
         if (nullptr == window) {
             return std::unexpected(
                 zpp::error{error::guest_memory_unreachable});

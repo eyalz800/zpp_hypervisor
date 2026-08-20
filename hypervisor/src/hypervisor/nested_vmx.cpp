@@ -1791,6 +1791,21 @@ bool hypervisor::on_guest_vmlaunch(std::size_t cpu,
                                    basic_reason reason,
                                    arch::x86_64::context & context)
 {
+    // Phase timing; see `phase_cycles`. This is the whole of the entry
+    // half of a round trip - the exit the guest hypervisor's own
+    // VMRESUME takes - and until slot 36 the only parts of it in the
+    // table were `build_vmcs02` and the shadow collection. What it
+    // covers besides those is the enlightenment probe, the launch-state
+    // checks, `capture_context`, and `enter_or_park_l2`.
+    auto entry_start = arch::x86_64::rdtsc();
+    auto entry_stop = zpp::scope_exit([&] {
+        if (cpu < max_cpus) {
+            this->phase_cycles[cpu][36] +=
+                arch::x86_64::rdtsc() - entry_start;
+            this->phase_calls[cpu][36] += 1;
+        }
+    });
+
     // The enlightenment first, because it decides whether there *is* a
     // current VMCS by the architecture's reckoning. A guest hypervisor
     // using an enlightened VM entry never executes VMPTRLD - it names
