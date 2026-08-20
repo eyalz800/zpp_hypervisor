@@ -240,6 +240,49 @@ it.** `rdx` in the trust-level register census held the descriptor
 pointer from the very first capture, in a printed column, for five
 sessions.
 
+## Windows gets 5.47% of the machine. This VMM takes 78.12%
+
+**The number that reframes everything above, and it was already in the state
+dump.** Share of wall clock on a settled eight-processor guest:
+
+    cpu  l2-run%  l1-run%  vmm%
+      0    5.47    16.40  78.12
+      1    0.00    99.88   0.12     <- application processors, parked in
+      2    0.00    99.89   0.11        the guest hypervisor's idle loop
+
+**Windows executes for 5.47% of the boot processor.** Hyper-V gets 16.40%.
+This VMM takes **78.12%**, and the two guests together get 21.9%.
+
+That single line explains, without any further theory, every result in the
+three sections above:
+
+- **Why +100% of period worked and -15% of cost did not.** Doubling the
+  period doubles the guest's budget per tick. Cutting our cost by 15% moves
+  78.12% to about 66%, which raises the guest stack from 21.9% to 34% - a
+  real improvement, and nowhere near the doubling the handler needed.
+- **Why three cost reductions each made the guest spin faster in the same
+  place.** They gave it more round trips per second inside the same 5.47%,
+  not more time to finish anything.
+- **What "1.4x" actually means.** To give the guest stack twice its present
+  share, our 78.12% has to fall to about 56% - a **1.4x reduction in this
+  VMM's own consumption**, which is exactly the figure the tick arithmetic
+  implied by a different route. Two independent estimates agreeing is worth
+  more than either.
+
+**And it puts a ceiling on the shaving.** All VMCS traffic is about 70
+microseconds of a 390 microsecond round trip after the marginal-cost
+correction - roughly 18%. Removing **every single VMCS access** would take
+78.12% to about 64%, and the guest stack from 21.9% to 36%: short of the
+doubling, and unreachable anyway. **The remaining 82% of the round trip has
+never been attributed**, and that, not the accesses, is where a 1.4x could
+come from if it exists at all.
+
+The application processor rows are worth reading too: `l1-run` 99.88% with
+`l2-run` **0.00**. They are not idle in the sense of halted-and-cheap - they
+are spinning in the guest hypervisor's idle loop, burning their cores
+without ever entering the second level. Whatever they are waiting for,
+they are waiting hot.
+
 ## stretch=2 did not answer the rate question, and said something else instead
 
 **The experiment failed at what it was for, and produced one real signal.**
