@@ -240,6 +240,62 @@ it.** `rdx` in the trust-level register census held the descriptor
 pointer from the very first capture, in a printed column, for five
 sessions.
 
+## Where the 78% goes, and the two levers tested against it
+
+**The attribution, per round trip on CPU 0**, from the phase reporter over
+5,673,717 round trips:
+
+| phase | cycles/call |
+|---|---|
+| `reflect_l2_exit` | **181,679** |
+| `build_vmcs02` | **91,594** |
+| `copy_shadow_to_vmcs12` | 53,752 |
+| `save_l2_state` | 53,117 *(inside reflect)* |
+| `load_l1_host_state` | 42,299 *(inside reflect)* |
+| `exit information` | 31,137 *(inside reflect)* |
+| `copy_vmcs12_to_shadow` | 24,996 |
+| `merge_nested_bitmaps` | 18,063 |
+| `vmptrld->vmcs02` / `->vmcs01` | 5,715 / 5,791 |
+| `shadow_ept_pointer_for` | 2,327 |
+
+Top-level entries sum to about **384,000 cycles**, roughly half the 780,707
+a round trip measures - so **half of it is still unattributed even now**,
+and that remains the honest state of the accounting.
+
+`reflect_l2_exit` contains save, load and exit-information, which come to
+126,553 of its 181,679 - leaving ~55,000 inside it that nothing names. The
+two shadow-VMCS copies together are **78,748 cycles a round trip, 39
+microseconds**, which is the largest single item nobody had costed.
+
+### Enlightened VMCS: still boot-loops, and this time the result is real
+
+`nested_vmx.h` argues at length that this is "the only candidate large
+enough to matter" - the guest hypervisor's own VMX instructions measured at
+54% of a round trip - and it is implemented, with `nested_evmcs.cpp` driven
+by `tests/nested_exit`. Its recorded failure was 1,760 boot loops.
+
+**That failure was suspected void**, on the same grounds that voided the
+self-IPI result: it predates the local APIC fix, and this file says nothing
+measured in that window means anything. Re-run in the valid configuration:
+
+    16:35:14 module loads: 18      (70 seconds after boot)
+
+**It boot-loops identically.** So this one is *not* an artifact of the
+invalid window - it reproduces, and the void-by-association reasoning that
+correctly rehabilitated the self-IPI experiment does not rescue this one.
+Reverted inside two minutes; the good build is back and boots with 2 loads.
+
+Worth stating because the two cases look alike and are not: a measurement
+taken in a broken configuration is *unreliable*, not *wrong*. It has to be
+re-run to find out which, and here it came back the same.
+
+**What this leaves.** The largest named costs are the reflection and the
+vmcs02 build, and the only mechanism in the tree aimed squarely at them does
+not work. The unattributed half of the round trip is now the most valuable
+thing to measure, because every named item has either been optimised, tested
+and rejected, or shown too small - and 1.4x cannot come from what is left
+named.
+
 ## Windows gets 5.47% of the machine. This VMM takes 78.12%
 
 **The number that reframes everything above, and it was already in the state
