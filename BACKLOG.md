@@ -36229,3 +36229,39 @@ every hypothesis tried so far, all of which looked for a mechanism that was
 why a guest with a fifth of the machine, correct clocks, working interrupt
 delivery, working thresholds and both trust levels executing real code makes
 forward progress fifteen times a second.
+
+## Steady state, measured over three samples: 9 Hz, 879 exits a round trip, no decay
+
+Nearly recorded as "the rate is decaying", which it is not. The cumulative
+average falls - 87/s at 275 s, 64/s at 385 s - because it includes the VSM
+setup phase, when trust-level activity is genuinely high and
+`HvCallModifyVtlProtectionMask` is running. **Three samples show the
+instantaneous rate is flat:**
+
+    window        duration   VTL/s   exits/s   exits per round trip
+    1 -> 2         110.0 s    9.00     7,930          881
+    2 -> 3         179.7 s    9.09     7,984          879
+
+Two windows agreeing to 1% on both quantities. **A cumulative average and an
+instantaneous rate are different measurements, and the gap between them is
+phase history rather than a trend** - the third sample is what distinguishes
+them and it cost nothing.
+
+### What the steady state is
+
+    9 trust-level round trips a second
+    879 exits between one HvCallVtlCall and the next
+    ~236 of those are EPT violations, which at apic=1 are APIC-page writes
+    ~64 clock ticks of guest time per round trip, at 574.7 Hz
+
+So the ordinary kernel spends **sixty-four clock periods** between one
+return from the secure kernel and its next call into it, and the loop that
+does this is - disassembled, not inferred - tight: read the state byte,
+dispatch to the default arm, test a trace mask, call. Nothing in it waits.
+
+**That is the whole remaining question, stated in one number.** Not why a
+mechanism is broken - fifteen have been examined and each is correct - but
+why a loop with nothing in it that waits advances nine times a second while
+the guest holds a fifth of the machine, its clocks are right to one part in
+ten million, its interrupts are delivered whenever its own priority permits,
+and both trust levels execute real code.
