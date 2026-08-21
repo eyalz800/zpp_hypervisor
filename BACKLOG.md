@@ -38246,3 +38246,32 @@ processor count.
 **So the stopping point is a property of the work, not of the machine.**
 Something completes or is exhausted after a fixed amount of VSM setup, and
 that amount does not depend on how many processors are available to do it.
+
+## The working-exit ring confirms there is no other work
+
+`l2_working_trace` exists to answer "what was the guest *doing*" - it drops
+the reference-clock polls, the synthetic EOI/ICR/timer writes and the
+external interrupts that fill the ordinary ring, and keeps 4,096 of the
+rest. **It had never been dumped in this investigation.**
+
+Its last forty entries, at the hang:
+
+    tpr-below   rip=…b2caeb0c
+    vmcall 0x11 rip=…415e0019   HvCallVtlCall
+    vmcall 0x12 rip=…415e0032   HvCallVtlReturn
+    ... the same three, without variation, for forty entries
+
+**Nothing else.** The filtered ring, whose whole purpose is to show work
+rather than waiting, contains only the trust-level cycle. So there is no
+second activity hidden under the clock traffic - the guest is not quietly
+making progress somewhere the ordinary ring could not show.
+
+That closes the last place unobserved work could have been hiding, and it
+is consistent with every other measurement: `installed` frozen, protection
+calls frozen, code-0 requests frozen, no ring 3 in three million samples.
+
+**The `tpr-below` before every `VtlCall` is worth one more look by whoever
+continues.** It is the guest's own priority dropping far enough for the
+processor to report it, immediately before it re-enters VTL1 - three exits,
+in that order, for ever. Whether that ordering is the loop's cause or its
+signature has not been established.
