@@ -37095,3 +37095,55 @@ not blocked on anything this VMM injects, faults, or refuses.
 continue - the routine is in the image already on disk, so this costs
 nothing and is the same move that named `ShvlVinaHandler`'s flag. Then read
 whatever that test reads, at the address the frame gives.
+
+## `SkmiProtectPageRange`'s loop, disassembled: it advances on the OUTPUT AREA, not RAX
+
+From the image on disk, `0xe800`..`0xe9f0`:
+
+    14000e8c7  cmpl %r15d,%r14d ; cmovbel     batch = min(batch, remaining)
+    14000e8f3  movl $0xc,%ecx
+    14000e900  cmpl %ecx,%r14d ; ja           >12 pages takes the slow path
+    14000e91f  callq <extended fast hypercall>
+    14000e93b  movl %eax,%ebx
+    14000e93d  testl %eax,%eax ; js  ->0xe959 a negative status leaves the loop
+    14000e941  movl 0x40(%rsp),%ecx           <- REPS COMPLETED, from the
+                                                 hypercall's OUTPUT AREA
+    14000e94b  addq %rcx,%r13                 advance the page frame base
+    14000e94e  addl %ecx,%ebp                 running total
+    14000e950  subl %ecx,%r15d                remaining -= completed
+    14000e953  jne  0x14000e8c7               loop while remaining != 0
+    ...
+    14000e99b  cmpq %rdi,%rax ; je            done == expected? return
+    14000e9a0  movl $0x1a,%ecx  $0x56534d  $0x90a
+    14000e9bb  callq KeBugCheckEx             0x1A MEMORY_MANAGEMENT, 'VSM'
+
+**Two facts with consequences.**
+
+**1. The completed count is read from `0x40(%rsp)`, the output area - not from
+RAX.** Every census in this file reads the reps-completed field out of RAX
+bits 43:32, and reported 71,137 completed against 71,093 asked. **That
+measures a field the guest never looks at on this path.** An extended fast
+hypercall returns its output through the output area (and XMM registers for
+the fast form), so the number that drives the loop and the number this VMM
+has been checking are different numbers. The census is not wrong, it is
+aimed at the wrong word - the eighth instrument in this investigation to be
+so.
+
+**2. The loop terminates only on `remaining == 0` exactly** - `subl` then
+`jne`. **A completed count of zero decrements nothing and loops for ever**,
+and a count that overshoots skips past zero and also loops for ever. There
+is no bound, no retry limit and no timeout in it.
+
+`SkiUpdateXStateForVtlTransition` appears in every VTL1 instruction trace
+taken, which is the routine that marshals extended state across a
+trust-level transition - and XMM registers are where a fast hypercall's
+output rides. **Whether the output area and the XMM state survive the round
+trip through this VMM is now the question**, and it is one nothing here has
+ever checked: the reflection path was verified for general-purpose
+registers and for the MSR areas, never for this.
+
+**The bugcheck path is the tell that will confirm or kill it.** If the loop
+ever exits with `done != expected` the guest calls `KeBugCheckEx(0x1A, ...,
+'VSM', 0x90A)`. It has not - so the loop has not exited unhappily; it either
+completed or is still inside. Reading `r15d`/`0x40(%rsp)` at the last call
+distinguishes those, and both are in the stack window already captured.
