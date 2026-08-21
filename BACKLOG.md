@@ -785,6 +785,57 @@ is not there" and is really "the wrong question was asked". `x` is the
 virtual read. The same distinction is why a wide `xp` over a device BAR
 lied, further down this file.
 
+## The retry is byte-identical every iteration. That is the strongest handle yet
+
+The VTL round trip captured at both ends, 24,922 of them on the
+single-processor guest, with `changed` counting how often each register
+differed between switches:
+
+    HvCallVtlReturn      changed   latest
+      rax                      0   0x1
+      rcx                      0   0x12
+      rdx  r8  r9  r10 r11 r14 0   0x0
+      rip                      0   0xfffff801756f0032
+      cr3                      0   0x8800002      (VTL1's address space)
+      rflags                   0   0x46
+      eptp                     0   0x101b1d01e
+
+    HvCallVtlCall        changed   latest
+      rax                      0   0x0
+      rcx                      0   0x11
+      rip                      0   0xfffff805601f0019
+      eptp                     0   0x101b1c01e
+      rbp / rdi                2   0xffffd2835949c080   (the Phase1 thread)
+
+**Only stack and scratch registers vary** - `rbx`, `rsp`, `rdi`, `r12`,
+`r13`. Every architectural register that decides anything is **identical on
+every one of 24,922 round trips**, in both directions.
+
+**So this is not a race, a timing artifact or a lost signal.** It is a
+deterministic loop: VTL0 asks the same question with the same registers, VTL1
+answers the same way, VTL0 asks again, eight times a second, for ever. The
+two `rip`s are the hypercall page in each trust level's own address space -
+`0x19` and `0x32` into it - which is where every `VtlCall` and `VtlReturn` is
+issued from by construction, so their constancy is expected and is not itself
+the finding.
+
+**Why that is the strongest handle in this file.** Everything previously
+chased was statistical - rates, histograms, shares of wall clock - and needed
+long runs and careful denominators to say anything. This does not. **One
+iteration contains the whole fault**, it repeats identically eight times a
+second, and it is reproducible on a single-processor guest with no
+concurrency anywhere in the picture.
+
+**What that makes possible, which was not possible before:** the monitor trap
+flag, or a breakpoint on the `VtlCall` site, would step through exactly one
+round trip and show what the secure kernel is asked and what it says. This
+tree already documents MTF as the way to force an exit after one retired
+instruction. Against a deterministic loop it costs one iteration to learn
+everything the loop knows.
+
+**And what to stop doing.** No further rate measurement will add anything -
+the loop's rate is 8 Hz, its content is constant, and both are now known.
+
 ## It is a retry loop, not a stall: VTL round trips continue at 8 Hz for ever
 
 Measured on the single-processor guest over 60 seconds, which is the
