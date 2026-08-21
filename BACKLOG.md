@@ -785,6 +785,49 @@ is not there" and is really "the wrong question was asked". `x` is the
 virtual read. The same distinction is why a wide `xp` over a device BAR
 lied, further down this file.
 
+## Confirmed by reading guest memory: the state byte is 4, and nothing writes it
+
+The caveat on the previous section is resolved by measurement rather than
+inference. `rdx` at the `HvCallVtlCall` is `0xffff818a15403f70`, and walking
+VTL0's page tables by hand - `cr3 0x1ae002`, four levels, every entry present
+- reaches it:
+
+    L4 idx 259 -> L3 idx 40 -> L2 idx 170 -> L1 idx 3 -> phys 0x11b8baf70
+
+    block: 00 04 00 00 01 00 00 00  00 00 00 00 00 00 00 00
+           ^^ ^^                    ^^^^^^^^^^^
+           |  byte 1 = 0x04         offset 8 = 0 (NTSTATUS, success)
+           byte 0 = 0x00
+
+The first qword is exactly `0x100000400`, which is what `rbx` carries into
+VTL1 - so `rbx = *(rdx)` as the code implied, and **the dispatch byte is 4,
+read out of guest memory.**
+
+**The layout matches the routine's own accesses**, which is the check that
+makes the identification safe rather than plausible: `VslpEnterIumSecureMode`
+reads `[rbx+1]` (the state), `[rbx+4]` (a dword it copies to `[rbp+796]`),
+and `[rbx+8]` (where it writes `STATUS_INVALID_SYSTEM_SERVICE` on one path) -
+and offset 8 currently holds **0**, success, because no failure path has been
+taken.
+
+**And the value never changes.** The capture's `first` and `latest` columns
+for `rbx` both read `0x100000400` - not merely stable across recent samples,
+but identical from the first sample the instrument ever took. Byte 0 reading
+zero is consistent with the fall-through path having run, since it does
+`movb $0, (%rbx)`; byte 1 was set to 4 before the loop began and nothing has
+written it since.
+
+**So the blocker, fully specified:** the guest enters an IUM state machine
+whose dispatch handles states 0, 1, 2, 3, 5 and 6; the state is **4**; every
+pass falls through the whole chain, clears two fields, calls into VTL1,
+returns unchanged, and repeats at 8 Hz for ever. `Phase1Initialization`
+never returns, so `smss.exe` never starts, so ring 3 is never reached.
+
+**What is still unknown, and it is now one question:** who sets that byte to
+4, and whether 4 is a state this VMM's behaviour caused the guest to enter.
+The value predates the loop, so the answer is upstream of everything measured
+here.
+
 ## The state machine has no case for 4
 
 Every comparison in `VslpEnterIumSecureMode`'s dispatch, traced by following
