@@ -37828,3 +37828,42 @@ single rare scheduling decision, roughly twenty candidate mechanisms are
 eliminated by measurement, two instruments are proven unbuildable on this
 path, and eleven measurement errors are recorded with the rule each one
 earned. Windows does not boot, and nothing here is a fix.
+
+## THE FAILURE IS DETERMINISTIC: the same four physical pages, every boot
+
+Checked across six independent boots, from dumps already on disk. The last
+secure memory-manager requests before the freeze:
+
+    boot 1   0x11aac9 0x11aaca 0x11aacb 0x11aacc
+    boot 2   0x11aac9 0x11aaca 0x11aacb 0x11aacc
+    boot 3   0x11aacb 0x11aacc            0x11aac9 0x11aaca
+    boot 4   0x11aacc                     0x11aac9 0x11aaca 0x11aacb
+    boot 5   0x11aac9 0x11aaca 0x11aacb 0x11aacc
+    boot 6   0x11aac9 0x11aaca 0x11aacb 0x11aacc
+
+**The same four page frame numbers every time** - only their position in the
+ring differs, which is where the ring happened to wrap.
+
+And the kernel **virtual** addresses interleaved with them differ on every
+boot - `0xffffd502…`, `0xffffdf0c…`, `0xffffde0a…`, `0xffffd18e…`,
+`0xffff808d…` - which is KASLR doing exactly what it should. **So the guest
+is at a different place in its own address space each time and dies on the
+same physical memory.**
+
+**That changes the whole character of the fault.** It is not a race that
+loses once in 18,585 - a race would not pick the same four frames on six
+boots. It is something about **physical pages `0x11aac9000`..`0x11aacc000`**,
+around 4.72 GB, and physical addresses are this VMM's business in a way the
+secure kernel's scheduler is not.
+
+Two neighbours already recorded sit in the same region: the VP assist page
+at `0x117a20000` and the IUM secure-call block at `0x11bb1af70`. So this is
+guest RAM the guest hypervisor uses, not a hole or a device window - but
+whether **this VMM's extended page tables give those four pages the same
+permissions as their neighbours has never been checked**, and it is one
+lookup.
+
+**This is the first lead in the investigation that is deterministic,
+specific, and on this side of the boundary.** Everything before it was
+either a rate, a probability, or inside secure-kernel memory. Four physical
+pages can be dumped, walked, and compared against the shadow.
