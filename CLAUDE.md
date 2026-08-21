@@ -665,13 +665,29 @@ constant-folded on. `KeMinimumIncrement` is 5,000 and
 `KeMaximumIncrement` is 156,250, so 17,400 is neither a clamp nor a
 rounding of either.
 
-A tick costs this VMM about 2.46 ms, so the clock handler cannot finish
-inside its own period and the guest never leaves it - 99.76% of
-second-level entries at one of eight instruction pointers, every one in
-the clock path, with zero new memory touched over 191 seconds.
+**The "the guest never leaves the clock handler" reading of that is
+withdrawn - measured 2026-08-21, and it was wrong.** It said a tick costs
+this VMM about 2.46 ms so the handler cannot finish inside its own period.
+The gap histogram says otherwise:
 
-**Four attempts to help the guest cope have now failed**, and the
-fourth is the one that closes the class:
+    time-stamp counter between clock interrupts (241,551 gaps, 1.992 GHz)
+      2^21 ( 1.05 - 2.11 ms)   232,690   96.3%    <- the 1.74 ms period, met
+      2^22 ( 2.11 - 4.21 ms)     4,139    1.7%
+
+    virtual task priority at second-level entry (1,085,015 entries)
+      0x00    27,169   2.5%      0x10     2,777   0.3%   <- PASSIVE_LEVEL
+
+96.3% of intervals land in the bucket holding the guest's own 1.74 ms
+period, and it enters at task priority `0x00` twenty-seven thousand times.
+**The guest meets its clock and reaches PASSIVE_LEVEL constantly.** What is
+still true is the *shape* of the hot set - eight instruction pointers, all
+in the clock path, zero new memory - but that is a guest **waiting**, not
+one saturated. Those look identical in a profile and are opposite problems.
+
+**Four attempts to help the guest cope have now failed**, and the reason
+they all failed is most likely this: every one of them was aimed at a
+saturation that is not happening. That is a better account than the four
+separate ones recorded beside them.
 
 | intervention | outcome |
 |---|---|
