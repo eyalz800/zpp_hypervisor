@@ -785,6 +785,52 @@ is not there" and is really "the wrong question was asked". `x` is the
 virtual read. The same distinction is why a wide `xp` over a device BAR
 lied, further down this file.
 
+## Correction to today's arithmetic: VMCS traffic is ~18% of an exit, not ~51%
+
+**Every access-derived figure written today used the launch-time price
+(2,845 cycles a VMREAD) where this file already records the marginal price
+as 991**, measured by controlled removal of 23 known accesses. The price list
+overstates by roughly three times because the accesses pipeline against each
+other and against KVM's own work, and the note beside `map_window_at` says so
+in words. **I re-derived on top of a number this file had already
+corrected.**
+
+Recomputed:
+
+    36 accesses x   991 = 35,676 cycles of 199,170  =  18%   <- correct
+    36 accesses x 2,845 = 102,420 cycles            =  51%   <- what I wrote
+
+**This makes the conclusion stronger, not weaker.** If VMCS traffic is 18% of
+an exit, then a *perfect* access cache - zero reads, zero writes - leaves 82%
+of the per-exit cost untouched. The exit cost is dominated by KVM's
+nested-exit machinery, not by what we do inside it, which is exactly what the
+14,017-cycle prologue said: 14,000 cycles to reach our first instruction is
+not our code being slow.
+
+**So the only lever with 2x in it is the exit *count*.** And there the
+theoretical floor is visible: 11.7 exits a tick now, against 6 that are
+structural - three synthetic MSR writes the guest makes every tick (EOI,
+`STIMER0_COUNT`, ICR), each requiring a `wrmsr` exit to reflect to Hyper-V
+and a `vmresume` exit when it re-enters. **11.7 -> 6 is precisely the 2x
+needed.**
+
+The other 5.7 are the APIC page watch (~1.5), interrupt windows (~1.2),
+vmresumes beyond the three (~2), and assorted (~1).
+
+**And the measured attempt to collect them did not deliver.** Removing the
+APIC watch and the profiler's timer cut exits by 4.6% and improved the tick
+by 1.5%, because the freed time was consumed by the guest doing more work
+per tick - `l2-entries` went *up*, 4,731/s to 5,611/s. That is not a
+measurement error; it is the system finding new work when given room, and it
+means **exit-count reductions do not convert to tick-time reductions at
+anything like 1:1 here.**
+
+**Which is the honest state of the question**: 2x exists on paper in the exit
+count, no combination tried has converted more than a few percent of it, and
+the one mechanism that would remove the per-exit floor - a hardware shadow
+VMCS for L1 - is absent from this processor. Recorded with the correct price
+this time.
+
 ## Settled by hardware: this rig cannot host this test, and no switch changes it
 
 Three independent confirmations, because the conclusion is expensive enough
