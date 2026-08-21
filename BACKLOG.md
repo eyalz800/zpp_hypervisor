@@ -785,6 +785,51 @@ is not there" and is really "the wrong question was asked". `x` is the
 virtual read. The same distinction is why a wide `xp` over a device BAR
 lied, further down this file.
 
+## The application processors did send IPIs, then halted. It is a lost wake-up at bring-up
+
+**Correcting a claim from two sections down**: "Hyper-V never writes the
+interrupt command register" was said of **cpu 0**, and of the *log*. The
+application processors' own exit rings say otherwise about them. cpu 1's last
+recorded exits:
+
+    24  ept-violation  rip ...7efe  gpa 0xfee00000  [times=4]
+    25  ept-violation  rip ...7a81  gpa 0xfee00000   <- ICR high
+    26  ept-violation  rip ...7a8e  gpa 0xfee00000   <- ICR low, the send
+    29  ept-violation  rip ...7b19  gpa 0xfee00000
+    30  ept-violation  rip ...7b26  gpa 0xfee00000
+
+`...7a81` and `...7a8e` are the ICR-high and ICR-low writes decoded earlier
+from hvix64's own bytes. **So the application processors did send IPIs**, and
+their rings hold only their last 32 exits of 442 total, so these are from
+**bring-up** - not from now.
+
+Together with cpu 7's `ICR2 = 0x7f000000`, a destination mask naming every
+processor but itself, the picture is: **each processor broadcast an IPI to
+all the others and then halted.** Which is a rendezvous, and it matches the
+`pause; jmp $-2` wait loop found on cpu 0 in the first boot of this session -
+one processor waiting for the others to answer.
+
+**So this is a lost wake-up, and it happened during bring-up rather than
+now.** The shape is the classic one: A signals B before B has halted, B finds
+nothing to do and halts, A halts, and both wait for a signal already spent.
+The first-level guest's idle loop is `hlt; mov al,[flag]; test al,al; je` -
+it tests the flag *after* the halt, so a signal that arrives before the halt
+is only safe if something else re-checks, and here nothing did.
+
+**What that means for where to look.** The failure is not in the steady state
+this file has spent two days measuring - it is in the window during
+processor bring-up when the IPIs were sent. Every measurement of tick cost,
+VTL round trips and exit rates describes a machine that had already lost the
+race. **The evidence for the race is in the log ring's first 400 lines**,
+which is where the bring-up sequence lives and which has been read past
+repeatedly in favour of the counters below it.
+
+**Still unproven**: that the signal was actually delivered and consumed
+rather than never delivered. Both produce two halted processors, they want
+different fixes, and the exit rings cannot separate them because external
+interrupts do not exit here. Distinguishing them needs the target's
+interrupt state captured *at* the halt, not after it.
+
 ## Reading "zero exits" correctly, and why the parked processors really are dead
 
 **`ZPP_VIRTUALIZE_APIC=0` means external-interrupt exiting is off**, so a
