@@ -36669,3 +36669,40 @@ means here, and watching what clears it settles the fix.
 hypervisor consider pending for VTL0, and why does VTL0 never take it? At
 class 2 - 67.6% of trust-level calls - vector `0x2f` is masked and cannot
 be taken, which would hold the bit set indefinitely.
+
+## The VINA bit is set at only 19% of yields, so VINA is not the livelock
+
+The flag `ShvlVinaHandler` tests, walked from inside the VMM at the
+`HvCallVtlReturn` where VTL1 is the running guest and vmcs02 carries its GS
+base:
+
+    gs 0xfffff8056ca7ff80 -> block 0xfffff8056cee4008
+    dword at +4 = 0x00000001   bit 0 = 1   at the sampled instant
+    seen SET 5,045 times, CLEAR 20,982 times
+
+**Set at 19% of trust-level returns, clear at 81%.** So the secure kernel
+yields with that bit clear four times out of five, and VINA cannot be what
+holds this loop - at most it accounts for a fifth of the yields.
+
+**The instant sample read `1`, which is the minority case.** Counting both
+outcomes is the only reason that did not become a sixth single-sample error;
+a reader that printed the current value alone would have confirmed the
+hypothesis it was built to test. That is the entire argument for the
+`..._set_count` / `..._clear_count` pair, and it earned its keep on the
+first run.
+
+**What survives**: `movb $0x4, 0x21(%rsp)` in `ShvlVinaHandler` is real and
+state 4 *is* the VINA message on the paths that reach it. What is withdrawn
+is that this is the mechanism of the hang - it is a fifth of it.
+
+**Noted for whoever picks this up**: 5,045 is within 1% of the independently
+measured `tpr-below` exit count (5,042 and 5,102 on two other runs). Both
+are "the normal level's priority changed in a way that matters", counted at
+opposite ends of the system, and that they agree is either a strong
+cross-check on both or a coincidence worth one measurement to settle.
+
+**And the open question is now the 81%**: what does the secure kernel yield
+for when VINA is clear? It selects a thread, does not run it, and returns
+`STATUS_SUCCESS` - and on four fifths of those it was not reporting a
+pending interrupt at all. `ZPP_STEP_VTL` traces the VTL1 path and the branch
+taken there is what names it.

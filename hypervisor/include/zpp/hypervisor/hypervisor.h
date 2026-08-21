@@ -10067,6 +10067,36 @@ private:
 
     /** Set at an `HvCallVtlCall`, consumed by the entry that follows. */
     std::uint64_t vtl1_entry_armed[max_cpus]{};
+
+    /**
+     * The VINA-pending flag the secure kernel actually tests, read at the
+     * `HvCallVtlReturn` that carries its decision.
+     *
+     * `ShvlVinaHandler` is, in the guest's own instructions:
+     *
+     *     movq  %gs:0x0, %rax
+     *     movq  0x10(%rax), %rcx
+     *     testb $0x1, 0x4(%rcx)     <- this bit
+     *     je    return              <- clear: nothing to report
+     *     ...
+     *     movb  $0x4, 0x21(%rsp)    <- set: build the VINA message
+     *     callq SkCallNormalMode    <- and yield carrying it
+     *
+     * So one bit decides whether the secure kernel runs the thread it just
+     * selected or hands control back. At the VtlReturn exit VTL1 is the
+     * running guest, so vmcs02 holds its GS base and the chain can be
+     * walked from here.
+     *
+     * The whole dword is kept rather than the bit, and the two pointers
+     * with it, because a zero read and a failed read are different
+     * findings - and `..._read` says which.
+     */
+    std::uint64_t vina_gs_base[max_cpus]{};
+    std::uint64_t vina_block[max_cpus]{};
+    std::uint64_t vina_flags[max_cpus]{};
+    std::uint64_t vina_read[max_cpus]{};
+    std::uint64_t vina_set_count[max_cpus]{};
+    std::uint64_t vina_clear_count[max_cpus]{};
     /** @} */
     /** @} */
     /** @} */

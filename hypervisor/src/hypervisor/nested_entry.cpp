@@ -8563,6 +8563,53 @@ hypervisor::on_l2_exit(std::size_t cpu,
                 capture_vtl_switch(cpu, 1, context);
                 mark_vtl_half(cpu, 1);
                 arm_vtl_step(cpu, 1);
+
+                // The one bit the secure kernel tested to decide this.
+                // See `vina_flags`: VTL1 is the running guest here, so
+                // vmcs02 carries its GS base and the chain
+                // `[[gs:0] + 0x10] + 4` can be walked.
+                if (cpu < max_cpus) {
+                    this->vina_read[cpu] = 0;
+
+                    auto gs = this->vmcs.read(
+                        arch::x86_64::vmx::vmcs::field::guest_gs_base);
+
+                    this->vina_gs_base[cpu] = gs;
+
+                    auto load = [&](std::uint64_t at,
+                                    std::uint64_t & out) {
+                        auto physical = translate_guest_linear(cpu, at);
+                        if (!physical) {
+                            return false;
+                        }
+                        return static_cast<bool>(read_guest_memory(
+                            cpu,
+                            *physical,
+                            std::as_writable_bytes(
+                                std::span(&out, 1))));
+                    };
+
+                    std::uint64_t self{};
+                    std::uint64_t block{};
+
+                    if (load(gs, self) && (0 != self) &&
+                        load(self + 0x10, block) && (0 != block)) {
+                        this->vina_block[cpu] = block;
+
+                        std::uint64_t flags{};
+                        if (load(block, flags)) {
+                            this->vina_flags[cpu] = flags;
+                            this->vina_read[cpu] = 1;
+
+                            // Bit 0 of the byte at offset 4.
+                            if (0 != ((flags >> 32) & 1)) {
+                                this->vina_set_count[cpu] += 1;
+                            } else {
+                                this->vina_clear_count[cpu] += 1;
+                            }
+                        }
+                    }
+                }
             }
 
             // `HvCallModifyVtlProtectionMask`, decoded rather than

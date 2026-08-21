@@ -2253,6 +2253,8 @@ def main():
                "vtl_call_rdx", "vtl_call_block", "vtl_call_block_read",
                "vtl_call_block_physical", "vtl_call_vtpr",
                "vtl_call_gap_buckets", "vtl1_entry_vector",
+               "vina_gs_base", "vina_block", "vina_flags", "vina_read",
+               "vina_set_count", "vina_clear_count",
                "vmcs_shadow_loads", "vmcs_shadow_stores",
                "vmcs_field_read_encoding", "vmcs_field_read_count",
                "vmcs_field_write_encoding", "vmcs_field_write_count",
@@ -2365,6 +2367,8 @@ def main():
                "vtl_call_rdx", "vtl_call_block", "vtl_call_block_read",
                "vtl_call_block_physical", "vtl_call_vtpr",
                "vtl_call_gap_buckets", "vtl1_entry_vector",
+               "vina_gs_base", "vina_block", "vina_flags", "vina_read",
+               "vina_set_count", "vina_clear_count",
                "vmcs_shadow_loads",
                "vmcs_shadow_stores",
                "guest_state_writes_skipped", "guest_state_writes_done",
@@ -2441,6 +2445,9 @@ def main():
     monitor.queue(instance + off["vtl_call_vtpr"], scalar_cpus * 16)
     monitor.queue(instance + off["vtl_call_gap_buckets"], scalar_cpus * 40)
     monitor.queue(instance + off["vtl1_entry_vector"], scalar_cpus * 257)
+    for _n in ("vina_gs_base", "vina_block", "vina_flags", "vina_read",
+               "vina_set_count", "vina_clear_count"):
+        monitor.queue(instance + off[_n], scalar_cpus)
 
     # Ten dispositions per processor - `none` through `pointer_failed`.
     monitor.queue(instance + off["l2_ept_dispositions"], scalar_cpus * 10)
@@ -3063,6 +3070,20 @@ def main():
                       f"{100.0 * ev[256] / etotal:5.1f}%"
                       "  <- nothing injected; whatever ends its turn "
                       "is not an injected interrupt")
+        # The bit ShvlVinaHandler tests. See hypervisor.h `vina_flags`.
+        if read('vina_read', 0):
+            fl = read('vina_flags', 0) or 0
+            print(f"  VINA flag chain: gs 0x{read('vina_gs_base', 0):x}"
+                  f" -> block 0x{read('vina_block', 0):x}")
+            print(f"    dword at +4 = 0x{(fl >> 32) & 0xffffffff:08x}"
+                  f"   bit 0 = {(fl >> 32) & 1}"
+                  + ("  <- SET: the secure kernel yields"
+                     if (fl >> 32) & 1 else "  <- clear"))
+            print(f"    seen set {read('vina_set_count', 0):,} times, "
+                  f"clear {read('vina_clear_count', 0):,} times")
+        else:
+            print("  VINA flag chain: NOT READ  <- walk failed, the "
+                  "values above are meaningless")
         print(f"  STATUS        = 0x{status:08x}"
               + ("  <- an NTSTATUS error" if signed < 0 else
                  "  (success or not an error)"))
