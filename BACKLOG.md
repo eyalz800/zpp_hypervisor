@@ -38100,3 +38100,46 @@ four `rwx` and the composition is exact.
 **The determinism remains, and remains unexplained.** Six boots, same four
 frames, while every virtual address moves. Something selects those pages,
 and it is not anything visible from here.
+
+## Secure-kernel state IS readable. The "needs private symbols" claim was wrong
+
+Pushed to reverse-engineer rather than ask for symbols, and the objection
+does not survive contact.
+
+`SkiSelectThread` opens with:
+
+    14008ed0e  lock incl 0x1401288d0     an atomic global
+    14008ed15  movq %gs:0x0, %rdi        the per-processor block
+    14008ed21  movl 0x1401288d0, %eax    read back
+    14008ed27  movq 0x8(%rdi), %rcx      [pcr+8], the current thread
+    14008ed2f  testl %eax, %eax
+    14008ed31  jns  normal_path          non-negative -> normal
+                                          negative    -> restricted
+
+**One global, at image offset `0x1288d0`, whose sign selects the path.** No
+type information is needed to find that - the instruction encodes the
+offset, and securekernel's base is already recorded per boot.
+
+Reading it needed a page-table walk into VTL1's address space, done from the
+QEMU monitor:
+
+    securekernel base 0xfffff80660b31000
+    global VA         0xfffff80660c598d0
+    walk cr3 0x8800002 -> physical 0x19e28d0
+    value 0x00000000 on ten samples - non-negative
+
+So the branch is the normal one and this particular global is not the
+switch. **The result is an elimination; the method is the finding.**
+
+**The claim in the handoff that this route "blocks entirely" without private
+symbols is withdrawn.** What the public PDB does not give is field *names*.
+It gives every function's address, and the instructions give every offset
+those functions touch - `0x8(%rdi)`, `0xa8(%rcx)`, `0x1288d0` - and a
+four-level page-table walk from a known CR3 turns any of them into a value.
+**Structures can be recovered by reading them, one offset at a time, against
+behaviour that changes.**
+
+That is slower than having symbols and it is not blocked. The next targets
+in `SkiSelectThread` are `[pcr+8]` - the current thread - and `0xa8(%rcx)`,
+the field compared against a caller argument at `14008edb0`, both reachable
+by exactly the walk above.

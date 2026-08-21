@@ -2239,6 +2239,7 @@ def main():
                "l2_run_cycles", "l1_run_cycles", "handler_cycles",
                "handler_first_tsc", "handler_last_tsc",
                "shadow_ept_evictions", "shadow_ept_resets",
+               "shadow_ept_reclaims",
                "shadow_ept_leaves_filled",
                # How each second-level fault was answered. Without this
                # the only visible fact is that faults arrive, and a fault
@@ -3139,12 +3140,13 @@ def main():
                   f"{len(set(starts))} distinct, "
                   f"min {min(starts)} max {max(starts)}")
 
-    print("\ncpu  shadow-builds  cache-hits  evictions  resets  leaves-filled")
+    print("\ncpu  shadow-builds  cache-hits  evictions  resets  reclaims  leaves-filled")
     for cpu in range(args.cpus):
         print(f"{cpu:3d}  {read('shadow_ept_builds', cpu):-13d}  "
               f"{read('shadow_ept_cache_hits', cpu):-10d}  "
               f"{read('shadow_ept_evictions', cpu):-9d}  "
               f"{read('shadow_ept_resets', cpu):-6d}  "
+              f"{(read('shadow_ept_reclaims', cpu) or 0):-8d}  "
               f"{read('shadow_ept_leaves_filled', cpu):-13d}")
 
     # **How each fault was answered.** `leaves-filled` above counts only
