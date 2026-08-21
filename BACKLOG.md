@@ -785,6 +785,56 @@ is not there" and is really "the wrong question was asked". `x` is the
 virtual read. The same distinction is why a wide `xp` over a device BAR
 lied, further down this file.
 
+## Where the 75 microseconds is: trivial slots costing thousands of cycles each
+
+The decomposition the section above called for, from the phase tree that was
+already there. Per *exit* (499,432 cycles a round trip over 2.93 exits =
+170,454 cycles, 85.6 us):
+
+**Slots that issue no VMCS access at all and still cost thousands of cycles:**
+
+    exit: prologue          12,799 cyc/call    register save
+    reflect: exit ring      11,531 cyc/call    writing one ring entry
+    resume: entry census     6,104 cyc/call    **and census=0 in this build**
+    resume: record_exit      4,886 cyc/call
+    resume: events           3,890 cyc/call
+    resume: diag and rip     3,712 cyc/call
+
+**A register save costing 12,799 cycles, and a ring-entry write costing
+11,531, are not doing 12,000 cycles of work.** Neither touches the VMCS.
+`resume: entry census` charging 6,104 cycles in a build where the census is
+switched *off* is the sharpest of them - that slot should be nearly free and
+is not.
+
+**And two large self-times remain unattributed:**
+
+    exit: dispatch        self 64,434 cyc/RT
+    on_guest_vmlaunch     self 60,586 cyc/RT
+
+Together 125,020 of 499,432 - a quarter of the handler - inside phases whose
+named children are already subtracted.
+
+**What this is probably not, and what it probably is.** It is not VMCS
+traffic: these slots issue none, and the traffic is separately accounted at
+17.9 us. It is not KVM's transition: that is the prologue's *entry*, measured
+at 7.0 us against a 15.4 us budget. **The shape - trivial code costing
+thousands of cycles, uniformly across unrelated slots - is what a cold cache
+and TLB look like.** Every VM exit here crosses two levels of hypervisor,
+and by the time this VMM's handler runs, its own data structures have been
+evicted.
+
+**Stated as a hypothesis, not a finding**, because it has not been measured:
+nothing here has counted a cache miss. The measurement that would settle it
+is a performance counter, and this VMM does not currently program one.
+
+**Why it matters more than anything else in this file**: if the 75 us is
+cache and TLB, it is *ours* - a working set touched per exit that can be
+shrunk, laid out, or prefetched - and the 8x that decides whether Windows
+boots is on the table. If it is something else, the phase tree will say so
+once the two unattributed self-times are broken down. **Either way this is
+the first target in two days that is inside this VMM's own code and has not
+already been tried.**
+
 ## REOPENED: KVM's floor fits the budget. 75 of every 100 microseconds is unaccounted
 
 **The "not reachable under KVM" conclusion in the sections below is
