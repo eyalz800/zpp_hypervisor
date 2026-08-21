@@ -785,6 +785,60 @@ is not there" and is really "the wrong question was asked". `x` is the
 virtual read. The same distinction is why a wide `xp` over a device BAR
 lied, further down this file.
 
+## Suspect the phase tree itself: emptying a slot did not make it cheaper
+
+**A negative result that matters more than the change that produced it.**
+The `resume: entry census` block was gated behind `census_exits`, where it
+always belonged - it was issuing a VMREAD and four ring writes on every
+second-level entry behind no diagnostic switch. Measured, on the same
+single-processor configuration as the baseline:
+
+    ordinary-kernel half   13,691.5 -> 11,844.5 us   (-13.5%)
+    exits within it            112.4 ->     109.8
+    resume: entry census    6,104   ->   6,089 cyc/call   **unchanged**
+
+**The slot did not move.** The gated block provably runs inside that span -
+it is between `record_exit`, which closes slot 29, and the `mark_phase(30)`
+that closes slot 30 - so removing its work should have shown there. It did
+not, which means **those ~6,089 cycles are not the slot's contents**.
+
+*(The 13.5% on the half is not claimed as the change's doing: three
+measurements of that half across this session read 13,691, 12,114 and 11,844
+under three different builds, and the spread is wide enough that a single
+comparison cannot separate the change from run-to-run variation.)*
+
+**Which puts the instrument itself under suspicion.** `mark_phase`'s own
+comment says:
+
+> "One RDTSC. It does not exit ... a handful of cycles against the ~390,000
+> an exit costs here."
+
+**That is an assumption and it has never been measured.** If a nearly-empty
+span costs 6,089 cycles, then either the span is not empty - possible, and
+worth checking before anything else - or a phase boundary costs far more than
+a handful of cycles. **The phase tree has forty-odd slots.** At 6,000 cycles a
+boundary that is 240,000 of the 499,432 cycles a round trip: the profiler
+would be half of what it is profiling.
+
+**Every per-exit number in this file comes from that tree**, including the
+199,170 cycles an exit, the 100 us, the 75 us unaccounted, and the 8x the
+whole investigation now rests on. If the tree measures largely itself, those
+figures describe an instrumented build and not a deployable one - and the
+`sampl1`, `census` and `profile` switches would be the smaller half of the
+problem.
+
+**The measurement that settles it, and it is cheap**: time `mark_phase`
+directly - a loop of N calls around a single RDTSC pair, run once at start-up
+and logged. That gives the per-boundary cost as a number rather than an
+assumption, and multiplying by the slot count says immediately whether the
+phase tree is a rounding error or the largest single consumer in the handler.
+
+**Until that is known, treat the per-exit decomposition in the sections above
+as provisional.** The blocker itself is not in doubt - `Phase1Initialization`
+retrying a VTL round trip whose VTL0 half will not fit inside a tick is
+measured by counters that predate the phase tree - but *why* that half is
+expensive may be partly the act of measuring it.
+
 ## A worked example of the 75 us: a diagnostic VMREAD on every entry, behind no switch
 
 Reading the code behind the `resume: entry census` slot - 6,104 cycles a call

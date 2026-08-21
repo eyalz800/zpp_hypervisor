@@ -996,6 +996,27 @@ void hypervisor::resume_guest(std::uint64_t cpuid,
             // it: every other counter in this investigation observes
             // where an event was *put*, and none of them observes
             // whether it was still there.
+            //
+            // **Now behind `census_exits`, where it always belonged.**
+            // Measured at **6,104 cycles a call** in the phase tree's
+            // `resume: entry census` slot - 3.6% of a 170,454-cycle exit
+            // - and it was gated on `nested_vmx::enabled` alone, so a
+            // build with every diagnostic switched off still paid a
+            // VMREAD, four ring writes and a modulo on *every*
+            // second-level entry.
+            //
+            // The question it was added to answer is answered: entries
+            // carry what they were given, and `l2_entry_vector` and
+            // `l2_entries_carrying_nothing` recorded it. Keeping the
+            // machinery and paying for it on every entry for ever is a
+            // different decision from having made the measurement, and
+            // only the first one was ever taken deliberately.
+            //
+            // The general rule this is the worked example of: **a
+            // diagnostic on the hot path belongs behind a switch from
+            // the day it is written**, because the day it stops being
+            // read is never marked.
+            if constexpr (nested_vmx::census_exits) {
             constexpr std::uint64_t injection_valid = 1ull << 31;
             constexpr std::uint64_t vector_mask = 0xff;
 
@@ -1045,6 +1066,7 @@ void hypervisor::resume_guest(std::uint64_t cpuid,
             } else {
                 this->l2_entries_carrying_nothing[cpu] =
                     this->l2_entries_carrying_nothing[cpu] + 1;
+            }
             }
         }
     }
