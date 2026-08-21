@@ -785,6 +785,64 @@ is not there" and is really "the wrong question was asked". `x` is the
 virtual read. The same distinction is why a wide `xp` over a device BAR
 lied, further down this file.
 
+## THE COMPLETE CHAIN, and the number that closes it: a secure call takes 72 ticks
+
+`ZPP_STEP_VTL` already exists and a previous session already used it. Its
+comment carries the finding this session spent two days reaching by other
+means:
+
+> "the loop is a clock interrupt whose handler makes a secure call that
+> outlasts the next tick"
+
+**What this session adds is the arithmetic**, from measurements that session
+did not have - the single-processor boot, the hypercall census, and the
+guest's own timer constants read out of its memory:
+
+    VTL round trip, measured (8.0/s on a 1-vCPU guest)      125 ms
+    guest tick, read from KeQuantumEndTimerIncrement       1.74 ms
+    ticks arriving during one secure call                       72
+
+**So the whole failure, end to end:**
+
+1. `Phase1Initialization` calls `VslFinishStartSecureProcessor` to finish
+   bringing up the secure kernel.
+2. That makes a secure call - `HvlSwitchToVsmVtl1`, an `HvCallVtlCall`.
+3. Under this VMM under KVM the round trip costs **125 milliseconds**.
+4. The guest's clock tick is **1.74 ms**, its own constant, not negotiable.
+5. **Seventy-two ticks arrive during one secure call.** The clock handler
+   preempts it, cannot finish inside its own period, and the call is never
+   completed.
+6. VTL0 retries. Eight times a second. Byte-identical every time.
+7. Nothing above it ever runs: no `smss.exe`, no user mode, no login screen.
+
+**Every observation in this file is a symptom of step 5.** The IRQL pinned at
+`0xd0`, the 12.4 million requests for `0x2f` that can never be taken, the
+DPC queue that never drains, zero new pages, ring 3 never reached, the
+application processors idle waiting for work that is never dispatched, and
+the `SkeCrashDumpNmi` park when a watchdog eventually fires.
+
+**And the required speed-up is 72x, not the 2x this file estimated
+elsewhere.** That estimate compared a *tick's* cost against a tick. The
+binding constraint is a **secure call** against a tick, and a secure call is
+two orders of magnitude more expensive than a tick.
+
+**72x is not reachable by any lever in this tree.** The measured candidates
+together moved the machine 1.5%. The per-exit floor is KVM's nested-exit
+handling. The one mechanism that would collapse it - a hardware shadow VMCS
+for L1 - is absent from this processor, confirmed three ways.
+
+**So the honest conclusion, stated once and plainly**: this VMM's logic is
+not what stops Windows booting with VBS here. Everything checkable checks
+out - INIT-SIPI-SIPI, IPI delivery, logical routing, VTL transitions, the
+protection composition, the reference clock to four decimals, injection,
+eligibility, the shadow EPT. **What stops it is that one secure call costs
+seventy-two of the guest's own clock ticks on a machine running four levels
+deep without VMCS shadowing.**
+
+The one measurement that would confirm it from the other side remains the
+same: this build on bare metal, where a VTL round trip is microseconds and
+72x arrives for free.
+
 ## The retry is byte-identical every iteration. That is the strongest handle yet
 
 The VTL round trip captured at both ends, 24,922 of them on the
