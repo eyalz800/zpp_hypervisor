@@ -35842,3 +35842,90 @@ or is exhausted at that count rather than drifting. What is at ~39,270 - a
 structure filled, a list walked to its end, a region finished - is the next
 question, and it is answerable from the recorded arguments of the last calls
 rather than from another boot.
+
+## Where this stands: what is eliminated, and the one fact that names the fault
+
+Written as a starting position rather than a narrative, because this
+investigation has now produced more retractions than findings and the
+retractions are the expensive part to rediscover.
+
+### The fault, in one measurement
+
+Against the chainload control - same machine, same Windows, same VBS, this
+VMM the only variable:
+
+    control (reaches user mode)        under this VMM (stuck)
+      164 distinct RIPs                  8 distinct entry RIPs
+      top 8 cover 48.4%                  top 4 cover 96%
+      ring 3 in 40 of 576 samples        ring 3 never
+      two hottest are securekernel       securekernel absent from the hot set
+
+**In a healthy boot VTL1 does most of the work. Here it does none.** It is
+entered correctly, does nothing, and returns - fifteen times a second.
+Everything else measured follows from that.
+
+### Established about the trust-level call
+
+- entered with `vtl_entry_reason = 1` (VtlCall), 14 samples of 14 - **not**
+  a VINA preemption
+- **zero exits** between `HvCallVtlCall` and `HvCallVtlReturn`, from the
+  exit counter, so it is not working and not faulting
+- answers `STATUS_SUCCESS` at `[rbx+8]` - **not** refusing or erroring
+- request byte 4, which is the default arm of `VslpEnterIumSecureMode`'s
+  dispatch: "nothing to ask for"
+- the VTL0 loop around it is **tight** - no wait, semaphore or timer
+- VTL0 and VTL1 have **different** CR3s (`0x1ae002` / `0x8800002`) and
+  **different** shadow EPT roots, so the context switch is real
+- `HvCallModifyVtlProtectionMask` stops at 39,264 / 39,264 / 39,280 across
+  three builds - deterministic to within sixteen calls
+
+### Eliminated by measurement, each one variable
+
+| candidate | result |
+|---|---|
+| the rig cannot do nested VBS | control reaches user mode in 118 s |
+| exit cost / guest starvation | duty 0.797; Windows has ~20 s of CPU |
+| the local APIC page watch | -37% exits, VTL rate 18.5 -> 15.4/s |
+| VINA preempting VTL1 | entry reason is VtlCall, 14/14 |
+| securekernel refusing | status is 0 |
+| shared EPT between trust levels | two distinct roots |
+| deferred guest-state writes | identical, duty 0.801 -> 0.843 |
+| VMCS shadowing | identical, L1 9.4% -> 15.3% |
+| MSR load/store areas | emulated in software; allow-list matches KVM's |
+| the whole VMX capability surface | all six groups unnarrowed, no change |
+| L2 EPT faults | zero in steady state |
+
+### Retracted, and why each is worth remembering
+
+- **"no case for state 4"** - truncated disassembly, 960 bytes of a `0x49c`
+  routine, stopping four instructions short of the default arm.
+- **"the guest never leaves the clock handler"** - the profile shape is real
+  but a *waiting* guest and a *saturated* one look identical in one, and
+  the duty cycle tells them apart.
+- **"the clock-gap histogram proves spare capacity"** - it does not.
+  Arrival interval is not idle time.
+- **"the DPC is deliverable and undelivered"** - the counter never tests
+  whether anything is outstanding.
+- **"the idle application processors are a second failure"** -
+  `KeStartAllProcessors` runs inside the thread that is blocked.
+
+**The pattern across all five is one mistake**: an instrument was read as
+answering a question it was not aimed at. The cure that actually worked each
+time was to measure the quantity directly - `handler_cycles / elapsed`,
+`vtl_entry_reason`, `[rbx+8]` - rather than to infer it from a rate.
+
+### What has not been tried
+
+The remaining candidates for "entered correctly, nothing to do":
+
+- a VTL1 timer that never fires. `SkeSetTimer` sits beside
+  `SkpReturnFromNormalMode` in the image, and securekernel's work may be
+  driven by one.
+- a VTL1 interrupt never delivered, which would be Hyper-V's SynIC state -
+  the one thing in this system nothing here reads.
+- securekernel resuming on a stale saved context. Weakened by CR3 and the
+  EPT root both being right, but not excluded.
+
+The cheapest discriminator among them is the first: a timer either fires or
+it does not, and `SkeSetTimer`'s callers are readable in the image already
+on disk.
