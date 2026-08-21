@@ -1850,10 +1850,34 @@ static void test_advertised_versus_implemented()
     // be the worst of both, a guest hypervisor setting the control and
     // getting nothing. It is taken from *its* controls, so a guest
     // hypervisor that does not ask still gets the old behaviour exactly.
-    check(0 != (secondary_offered & (1ull << 22)),
-          "secondary control bit 22 (mode-based execute control) is not "
-          "offered - a secure kernel then has nowhere to express code "
-          "integrity, which is the shape of the stall on the rig");
+    // **Inverted 2026-08-22.** The reasoning above is wrong in two
+    // places and is kept only so the reversal is legible.
+    //
+    // "The composition already handles it" is true and beside the point:
+    // `compose_ept` carries `execute_user`, but the lambda in
+    // `nested_entry.cpp` that decides what a fault *means* tests
+    // `permissions.execute()` - bit 2 - and never `execute_user()`, bit
+    // 10. With the control on, a user-mode fetch is governed by bit 10,
+    // so a user-executable page is reflected to the guest hypervisor for
+    // an access its own tables allow, and a supervisor-only page is
+    // quietly satisfied. Both resume onto the identical fault for ever.
+    //
+    // "the same guest reaches ring 3 under KVM alone, which advertises
+    // the bit" is **false**: KVM's allow-list in
+    // `nested_vmx_setup_ctls_msrs` omits
+    // `SECONDARY_EXEC_MODE_BASED_EPT_EXEC`, its only nested mention is a
+    // consistency check, and its nested walker is three-bit. The
+    // baseline never had the bit, so the comparison did not test what it
+    // claimed.
+    //
+    // Offering a capability whose fault handling cannot read it is worse
+    // than withholding it - that is the "worst of both" the paragraph
+    // above warns about, arrived at from the other direction.
+    check(0 == (secondary_offered & (1ull << 22)),
+          "secondary control bit 22 (mode-based execute control) is "
+          "offered while the fault disposition still tests only "
+          "supervisor execute - a guest hypervisor that sets it then "
+          "faults for ever on pages its own tables permit");
 
     // --- The EPT and VPID capabilities --------------------------------
     //

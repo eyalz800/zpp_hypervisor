@@ -1477,7 +1477,7 @@ constexpr std::uint64_t supported_secondary_controls =
     // through `shadow_ept_pointer_for` before anything reaches the
     // hardware.
     (1ull << 13) | (1ull << 16) | // RDSEED exiting.
-    (1ull << 20) |                // Enable XSAVES/XRSTORS.
+    (1ull << 20);                 // Enable XSAVES/XRSTORS.
 
     // Mode-based execute control, SDM Table 25-7 bit 22.
     //
@@ -1495,15 +1495,45 @@ constexpr std::uint64_t supported_secondary_controls =
     // in the tables this VMM shadows. A guest hypervisor that cannot
     // split execute cannot put that policy anywhere.
     //
-    // The composition already handles it: `nested_ept.h` takes
-    // `mode_based_execute_control` and reads `execute_user()`, and Table
-    // 30-7's rule that bit 6 exists only with the control set is written
-    // there. Only the advertisement was missing.
+    // **WITHDRAWN 2026-08-22, and the justification above is wrong in
+    // two places.**
     //
-    // Baseline for the comparison, measured 2026-08-15: the same guest
-    // reaches ring 3 in about five minutes under KVM alone, which does
-    // advertise this bit.
-    (1ull << 22);
+    // "The composition already handles it" is true and irrelevant:
+    // `compose_ept` carries `execute_user` correctly, but **nothing that
+    // decides what a fault MEANS ever reads it.** The disposition in
+    // `nested_entry.cpp` is made by one lambda that tests
+    // `permissions.execute()` - bit 2, supervisor execute - and never
+    // `execute_user()`, bit 10. With this control on, a user-mode fetch
+    // is governed by bit 10, so both directions are wrong: a user-mode
+    // fetch of a user-executable page is reflected to the guest
+    // hypervisor for an access its own tables permit, and a user-mode
+    // fetch of a supervisor-only page is quietly satisfied. Either way
+    // the guest resumes onto the identical fault for ever.
+    //
+    // "KVM alone... does advertise this bit" is **false**. KVM masks
+    // `secondary_ctls_high` to an allow-list that omits
+    // `SECONDARY_EXEC_MODE_BASED_EPT_EXEC`
+    // (`.references/kvm/nested.c`, `nested_vmx_setup_ctls_msrs`); its only
+    // mention of the control in the nested path is a consistency check at
+    // `nested.c:890`. Its nested walker is three-bit
+    // (`paging_tmpl.h:179-186`). So the baseline this was measured
+    // against never had the bit, and the comparison did not test what it
+    // said it tested.
+    //
+    // **And the instruments that should have caught it are blind by
+    // construction.** `shadow_ept_leaves_that_did_not_help` re-uses the
+    // same `permits()` lambda, so it reads zero while this happens; and
+    // both leaf-permission histograms in `nested_ept.cpp` mask
+    // `permissions.bits() & 7` while `bits()` places `execute_user` at
+    // **bit 10**, so the "eptp12 alone against composed" table cannot see
+    // this bit at all. A whole session's worth of "the composition is
+    // exact" readings were taken through that mask.
+    //
+    // Re-advertising needs three things first: `permits()` and the
+    // reflected qualification taught about bit 10 and the faulting
+    // privilege level, the qualification's bit 6 stopped being hard-coded
+    // false at both call sites, and the histograms widened past `& 7`.
+    // 0;
 
 // Deliberately absent: **use TSC scaling**, SDM Table 25-7 bit 25.
 //

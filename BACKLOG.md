@@ -38334,3 +38334,59 @@ screen. The rig's display is a passed-through GPU, so `screendump` returns
 "There is no console to take a screendump from" and nothing in this tree can
 see it. **When a run is compared, ask what the screen is doing** - it is the
 only progress indicator that does not depend on choosing the right counter.
+
+## Mode-based execute control withdrawn: a real defect, and NOT this hang
+
+A background review against KVM found it; I verified every claim in the
+code before acting, and the verification also invalidated two of my own
+earlier conclusions.
+
+**The defect.** `supported_secondary_controls` advertised bit 22
+(mode-based execute control), which splits execute into supervisor and
+user - the control HVCI uses. `compose_ept` carries `execute_user`
+correctly. **But nothing that decides what a fault MEANS reads it**: the
+disposition in `nested_entry.cpp` is one lambda testing
+`permissions.execute()` (bit 2) and never `execute_user()` (bit 10). With
+the control on, a user-mode fetch is governed by bit 10, so a
+user-executable page is reflected to the guest hypervisor for an access
+its own tables permit, and a supervisor-only page is quietly satisfied.
+Either way the guest resumes onto the identical fault.
+
+**Two of this file's instruments were blind to it by construction**, and I
+used both to close leads earlier in this investigation:
+
+- `shadow_ept_leaves_that_did_not_help` re-uses that same `permits()`
+  lambda, so it reads zero while this happens - and I cited its zero as
+  proof;
+- both leaf-permission histograms mask `permissions.bits() & 7` while
+  `bits()` puts `execute_user` at **bit 10**, so the "eptp12 alone against
+  composed" table cannot see this bit. **My "guest equals composed
+  exactly, all four combinations" conclusion was taken through that mask**
+  and did not establish what I said it did.
+
+**And the justification for adding the bit was factually wrong.** Both the
+header comment and the test claimed "the same guest reaches ring 3 under
+KVM alone, which advertises this bit". KVM does **not**:
+`nested_vmx_setup_ctls_msrs` masks `secondary_ctls_high` to an allow-list
+omitting `SECONDARY_EXEC_MODE_BASED_EPT_EXEC`, its only nested mention is a
+consistency check at `nested.c:890`, and its nested walker is three-bit
+(`paging_tmpl.h:179-186`). The baseline never had the bit, so the
+comparison did not test what it claimed.
+
+**Result on the rig, one variable, measured with three dumps rather than
+one:**
+
+    protect 39,279   code0 21,000   installed 355,266     all frozen
+    vtlcalls 29,182 -> 31,558 -> 34,233                    only this climbs
+    cpl 0=1,420,269, no ring 3
+
+**No change.** Same freeze point, same signature. The defect is real and
+the withdrawal is kept - advertising a capability whose fault handling
+cannot read it is wrong regardless - but **it is not this hang.**
+
+Re-advertising needs three things first, recorded beside the constant:
+`permits()` and the reflected qualification taught about bit 10 and the
+faulting privilege level; the qualification's bit 6 stopped being
+hard-coded `false` at both call sites; and the histograms widened past
+`& 7`. The test in `tests/nested_vmx` is inverted to assert the bit is
+**not** offered, with the same reasoning recorded there.
