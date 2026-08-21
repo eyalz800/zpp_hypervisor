@@ -785,6 +785,46 @@ is not there" and is really "the wrong question was asked". `x` is the
 virtual read. The same distinction is why a wide `xp` over a device BAR
 lied, further down this file.
 
+## Where `ZPP_SAMPLE_L1` leaves the picture, and one observation not yet explained
+
+The sampler settled the halted-or-spinning question. Two further readings
+from the same boot, recorded because one of them is unexplained and small
+enough to chase.
+
+**cpu 1 did more second-level work than it ever has.** Every AP in every
+previous boot in this session sat at exactly **17** second-level entries and
+**0** shadow leaves. With the sampler on, cpu 1 reached **79 entries and 11
+leaves** - and the others still 17/0.
+
+That is not nothing: the preemption timer takes a processor out of the HLT
+state, and something about the resume let that one continue past the halt
+rather than back into it. **It did not continue**, though - 79 is where it
+stopped and it has not moved in 90 seconds - so this is a one-off during
+bring-up rather than a mechanism that keeps a processor alive. Whether the
+resume path clears the activity state, and whether doing so deliberately
+would let an AP run, is **untested and is the most concrete lead this file
+currently has.**
+
+**And cpu 0 is now wedged in a way not seen before.** Its exits are still
+growing - 833 a second - but its `l2-entries` are **frozen** at 1,091,499:
+
+    cpu 0 exits       3,350,459 -> 3,383,793   (833/s, running)
+    cpu 0 l2-entries  1,091,499 -> 1,091,499   (frozen)
+    second-level profile: top slot 1,177,940 of 1,186,226  (99.3%, a spin)
+    thread: ntoskrnl+0x6fb520 = Phase1Initialization, state 2, irql 0
+
+**So the first-level guest is running and has stopped resuming its own
+guest.** Hyper-V is executing, taking exits, and never re-entering the second
+level. That is a different wedge from any of the states catalogued above -
+state A is the second-level guest parked in `SkeCrashDumpNmi`, state B is the
+second-level guest looping in the clock path, and this is the *first*-level
+guest declining to run a second level at all.
+
+**Not claimed**: that the sampler caused it. It charges every processor an
+exit a millisecond and that is a real perturbation, so a boot with it on is
+not comparable with one without. The honest statement is that this state was
+observed with the sampler on and has not been looked for without it.
+
 ## Settled with an uncontaminated clock: the APs ARE halted. 100% schedstat does not mean busy
 
 **Two sections back this file said the application processors are not halted
