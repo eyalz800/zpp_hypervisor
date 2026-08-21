@@ -35929,3 +35929,59 @@ The remaining candidates for "entered correctly, nothing to do":
 The cheapest discriminator among them is the first: a timer either fires or
 it does not, and `SkeSetTimer`'s callers are readable in the image already
 on disk.
+
+## The guest is 3.13x late on every timer, and it is still not slowness
+
+Two results that belong together, because the first is the best argument for
+"it is merely slow" and the second kills it.
+
+### The tick account: asked against given
+
+The reader has been printing this and it had not been read:
+
+    reference TSC page: published scale implies 10,000,001 Hz  ok
+                        fitted scale     implies 10,000,001 Hz  ok
+                        collinearity error 0 x100ns
+
+    STIMER0: asked   17,427.4 x100ns per arm (1.743 ms, 573.8 Hz)  over 5,063 arms
+             given   54,554.5 x100ns per arm (5.455 ms, 183.3 Hz)  over 5,063 answered
+             ratio      0.319x   LATE by 3.130x
+
+**The reference clock this VMM publishes is correct** - 10,000,001 Hz
+against a specified 10,000,000, collinearity error zero. So the earlier
+worry that the "3.59x larger fitted scale" recorded elsewhere in this file
+governed the guest's clock is void: the scale is *computed* from the closed
+form and the fit is kept only as an independent opinion, and here they agree
+to one part in ten million.
+
+**What is wrong is delivery.** Windows arms a 1.743 ms synthetic timer and
+the vector arrives 5.455 ms later, every time, over five thousand arms. Its
+clock therefore runs at a third of the rate it believes.
+
+That is consistent with the 0.797 duty cycle rather than a separate fault:
+if the guest and the level above it share a fifth of the machine, work that
+should take 1.743 ms of guest time takes several milliseconds of wall time.
+No lie about time is being told - the arithmetic is right and the delivery
+is late.
+
+### And it is still not slowness. Nineteen minutes, ten times the control
+
+**Every measurement in this file until now sampled at about 280 seconds**,
+and a guest running 3x slow against a control that boots in 118 seconds is
+a live alternative that inference alone should not have settled. Run to
+1,157 seconds:
+
+    at ~4 min      at ~19.3 min
+    39,264         39,266        HvCallModifyVtlProtectionMask   frozen
+    ~23,000        52,245        HvCallVtlCall                   climbing
+    ~320,000       312,598       pages installed                 frozen
+    0              0             ring 3, out of 3,011,724 CPL samples
+
+**Nineteen minutes, ten times the control's entire boot, and the protection
+count has not moved since minute four.** Three million privilege samples
+without one in user mode.
+
+So the guest is stuck, not slow, and that is now a measurement rather than
+an inference from untouched pages. **The lesson is the cheap one: when a
+mechanism that would explain the symptom is present - here a 3.13x clock -
+the test is to wait, and waiting had never been tried.**
