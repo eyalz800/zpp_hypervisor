@@ -2254,7 +2254,9 @@ def main():
                "vtl_call_block_physical", "vtl_call_vtpr",
                "vtl_call_gap_buckets", "vtl1_entry_vector",
                "vina_gs_base", "vina_block", "vina_flags", "vina_read",
-               "vina_set_count", "vina_clear_count",
+               "vina_set_count", "vina_clear_count", "vina_block_physical",
+               "vina_at_call_set", "vina_at_call_clear",
+               "vina_at_call_unread",
                "vmcs_shadow_loads", "vmcs_shadow_stores",
                "vmcs_field_read_encoding", "vmcs_field_read_count",
                "vmcs_field_write_encoding", "vmcs_field_write_count",
@@ -2368,7 +2370,9 @@ def main():
                "vtl_call_block_physical", "vtl_call_vtpr",
                "vtl_call_gap_buckets", "vtl1_entry_vector",
                "vina_gs_base", "vina_block", "vina_flags", "vina_read",
-               "vina_set_count", "vina_clear_count",
+               "vina_set_count", "vina_clear_count", "vina_block_physical",
+               "vina_at_call_set", "vina_at_call_clear",
+               "vina_at_call_unread",
                "vmcs_shadow_loads",
                "vmcs_shadow_stores",
                "guest_state_writes_skipped", "guest_state_writes_done",
@@ -2446,7 +2450,9 @@ def main():
     monitor.queue(instance + off["vtl_call_gap_buckets"], scalar_cpus * 40)
     monitor.queue(instance + off["vtl1_entry_vector"], scalar_cpus * 257)
     for _n in ("vina_gs_base", "vina_block", "vina_flags", "vina_read",
-               "vina_set_count", "vina_clear_count"):
+               "vina_set_count", "vina_clear_count",
+               "vina_block_physical", "vina_at_call_set",
+               "vina_at_call_clear", "vina_at_call_unread"):
         monitor.queue(instance + off[_n], scalar_cpus)
 
     # Ten dispositions per processor - `none` through `pointer_failed`.
@@ -3079,8 +3085,21 @@ def main():
                   f"   bit 0 = {(fl >> 32) & 1}"
                   + ("  <- SET: the secure kernel yields"
                      if (fl >> 32) & 1 else "  <- clear"))
-            print(f"    seen set {read('vina_set_count', 0):,} times, "
-                  f"clear {read('vina_clear_count', 0):,} times")
+            print(f"    block physical = "
+                  f"0x{read('vina_block_physical', 0):x}")
+            print(f"    at the RETURN (after KiVinaInterrupt cleared "
+                  f"it - the aftermath, not the decision):")
+            print(f"      set {read('vina_set_count', 0):,}  "
+                  f"clear {read('vina_clear_count', 0):,}")
+        cs = read('vina_at_call_set', 0) or 0
+        cc = read('vina_at_call_clear', 0) or 0
+        cu = read('vina_at_call_unread', 0) or 0
+        if cs or cc or cu:
+            tot = cs + cc
+            print(f"    at the CALL, before VTL1 runs - THE DECISION:")
+            print(f"      set {cs:,}  clear {cc:,}  unread {cu:,}"
+                  + (f"   -> SET on {100.0 * cs / tot:.1f}% of entries"
+                     if tot else ""))
         else:
             print("  VINA flag chain: NOT READ  <- walk failed, the "
                   "values above are meaningless")

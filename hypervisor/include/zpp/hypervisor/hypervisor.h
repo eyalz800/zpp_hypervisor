@@ -10097,6 +10097,25 @@ private:
     std::uint64_t vina_read[max_cpus]{};
     std::uint64_t vina_set_count[max_cpus]{};
     std::uint64_t vina_clear_count[max_cpus]{};
+
+    /**
+     * The same flag, read **before** VTL1 runs rather than after.
+     *
+     * `vina_set_count` above is sampled at the `HvCallVtlReturn`, which is
+     * after `KiVinaInterrupt` has handled and cleared the bit, so it
+     * measures the aftermath of the decision and reported the opposite of
+     * what two instruction traces show. **A counter one step downstream of
+     * what it counts reports the opposite of the truth, confidently.**
+     *
+     * Read at the `HvCallVtlCall` instead. VTL0 is the running guest
+     * there, so its GS is the wrong address space - hence the physical
+     * address, captured once at a return and stable for the boot, which
+     * is reachable from either level.
+     */
+    std::uint64_t vina_block_physical[max_cpus]{};
+    std::uint64_t vina_at_call_set[max_cpus]{};
+    std::uint64_t vina_at_call_clear[max_cpus]{};
+    std::uint64_t vina_at_call_unread[max_cpus]{};
     /** @} */
     /** @} */
     /** @} */

@@ -36746,3 +36746,50 @@ wrong address space; the way round is to record the block's **physical**
 address once at a VtlReturn, then read that physical address at each
 VtlCall. The pointer chain is stable within a boot, so this is a small
 change to code that already exists.
+
+## The VINA flag located exactly, and it is set on a minority of yields
+
+**The flag `ShvlVinaHandler` tests is in the VP assist page.** The VMM's own
+walk of `[[gs:0] + 0x10] + 4` resolves to physical `0x117a20008`, and the VP
+assist page for that boot is `0x117a20000` - so the chain lands on **VP
+assist + 8**, and the tested byte is at **VP assist + 0xC**.
+
+That is the field this investigation read hours ago and dismissed. When the
+assist page was first polled, `+0x008` read `0x0000000100000001`: the low
+half is `vtl_entry_reason` = 1 (VtlCall), and the high half - written off
+then as "`vtl_reserved`, and 1 there is odd" - **is the VINA flag.**
+
+It is reachable from the QEMU monitor, needing nothing from the VMM:
+
+    16 monitor samples of the dword at VP assist + 0xC
+      bit 0 clear   15
+      bit 0 set      1
+
+And the VMM's own counter, sampled at the `HvCallVtlReturn`:
+
+    set 6,648   clear 20,981     (~24% set)
+
+**Two independent sampling points, both saying the flag is set on a
+minority of yields.** So VINA cannot be why the secure kernel abandons its
+thread four times out of five, and the previous entry - which restored VINA
+as *the* mechanism on the strength of two instruction traces - overstated
+it. **Two traces both landing on a branch taken ~24% of the time is a 6%
+coincidence, which is not evidence.** Withdrawn.
+
+**What is now solid, and it is worth more than the retracted claims:**
+
+- the flag's exact location, in a page readable without any instrumentation
+- that it is *set sometimes* - so the VINA path is real and reachable
+- that `movb $0x4, 0x21(%rsp)` in `ShvlVinaHandler` is where `byte[1] = 4`
+  comes from, so state 4 is the VINA message on the paths that reach it
+- that on the majority of yields the flag is **clear**, so the secure kernel
+  selects a thread and abandons it **for some other reason entirely**
+
+**That last point is the open question, and it has not moved all session.**
+Every mechanism proposed for it - a fault, a refusal, a missing capability,
+a stale context, an aliased page, a masked interrupt, VINA - has been
+measured and eliminated. The remaining approach that has not been tried is
+to trace VTL1 across *many* entries and histogram the branch actually taken,
+rather than reading one or two traces and generalising. `ZPP_STEP_VTL` arms
+one transition; aggregating it over hundreds is the change that would answer
+this, and it is the thing to build next.
