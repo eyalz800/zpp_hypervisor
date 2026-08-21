@@ -36265,3 +36265,51 @@ why a loop with nothing in it that waits advances nine times a second while
 the guest holds a fifth of the machine, its clocks are right to one part in
 ten million, its interrupts are delivered whenever its own priority permits,
 and both trust levels execute real code.
+
+## What the ordinary kernel does with its sixty-four ticks: all of it is the clock ISR
+
+Symbolised from the `ZPP_STEP_VTL` trace's **VTL0** half - 1,434
+instructions after the trust-level return, which had only ever been
+analysed for its VTL1 half.
+
+    246  KiEndThreadCycleAccumulation      92  KeClockInterruptNotify
+    213  KiUpdateTime                      91  KiCallInterruptServiceRoutine
+    140  KeQueryPerformanceCounter         56  KiComputeNewInterruptTime
+    140  KiCheckForTimerExpiration         48  KiIsrLinkage
+    103  RtlGetInterruptTimePrecise        40  KiUpdateRunTime
+
+In order, from the instant VTL1 hands back:
+
+    KiIsrThunkShadow -> KxIsrLinkageShadow -> KiIsrLinkage
+      -> KiInterruptDispatchNoLockNoEtw -> KiInterruptSubDispatchNoLockNoEtw
+      -> KiCallInterruptServiceRoutine -> HalpHvTimerAcknowledgeInterrupt
+      -> KeClockInterruptNotify -> KiUpdateTime -> KeQueryPerformanceCounter
+      -> KiComputeNewInterruptTime -> KiCheckForTimerExpiration
+      -> KiEndThreadCycleAccumulation
+
+**Every instruction of it is the clock interrupt.** Not one frame belongs to
+`VslpEnterIumSecureMode`, to the page transfer, or to anything else phase 1
+is trying to do. The ordinary kernel returns from the secure kernel
+*straight into* a clock interrupt, services it completely, and repeats -
+sixty-four times before it gets far enough to make the next trust-level
+call.
+
+**And the arithmetic closes.** 574.7 Hz over the 280-second window is
+~160,000 clock interrupts; Windows' measured share of the machine is 20
+seconds; that is **125 microseconds of guest execution per clock
+interrupt**, and 125 us x 160,000 is the whole 20 seconds. **The clock
+interrupt accounts for one hundred per cent of Windows' processor time**,
+with nothing left over, which is exactly why the phase-1 loop advances nine
+times a second and why no amount of waiting helps.
+
+So the profile that has been visible since the first session - eight
+instruction pointers, every one in the clock path - was never a symptom to
+look past. It was the whole thing.
+
+**What is still not explained**, and it is now a single quantity: a clock
+interrupt service routine costs about 1,400 guest instructions here and 125
+microseconds of guest time, which is on the order of a hundred cycles per
+instruction. Native is under one. The APIC-watch experiment says per-exit
+cost is not what sets the trust-level rate, and this says the clock ISR
+consumes everything the guest has. Both are measured, and reconciling them
+is the next piece of work.
