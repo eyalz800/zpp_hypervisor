@@ -785,6 +785,54 @@ is not there" and is really "the wrong question was asked". `x` is the
 virtual read. The same distinction is why a wide `xp` over a device BAR
 lied, further down this file.
 
+## The hang, complete and measured end to end
+
+Polled directly at guest-physical `0x11b8baf70`, twelve samples over two
+minutes, during which the loop ran roughly **960** VTL round trips:
+
+    12 of 12   0x0000000100000400
+
+**The block does not change. At all.** Not the state byte, not the status
+word, not the dword at offset 4.
+
+**So the whole hang, with nothing inferred:**
+
+1. `Phase1Initialization` - the only thread the guest runs, state 2, IRQL 0 -
+   calls `VslpEnterIumSecureMode`.
+2. That routine dispatches on a state byte at `[rbx+1]`. It has cases for
+   **0, 1, 2, 3, 5 and 6**, verified across the whole routine bounded by the
+   next public symbol.
+3. **The state is 4.** Read out of guest memory by walking VTL0's page
+   tables, and the block's layout matches the routine's own accesses.
+4. Every pass falls through the entire dispatch chain, clears two fields,
+   calls into VTL1 through `HvlSwitchToVsmVtl1`, which carries the block's
+   first qword in `rbx`.
+5. VTL1 - `SkpPrepareForReturnToNormalMode` into `SkpReturnFromNormalMode` -
+   scrubs its registers and returns **the same qword**, measured inside VTL1
+   at `cr3 0x8800002`.
+6. Back in VTL0 the state is still 4. Go to 2. Eight times a second, for
+   ever.
+7. `Phase1Initialization` therefore never returns, `smss.exe` never starts,
+   and **ring 3 is never reached** - which is the whole visible failure.
+
+**What is ruled out by this, and it is nearly everything looked at in two
+days**: the nested-VMX carriage (clean by two independent readings), event
+injection, shadow-EPT composition, XMM/FPU marshalling, APIC routing,
+INIT-SIPI-SIPI, the reference clock, exit cost, cache footprint, the phase
+tree, and lost IPIs. **Every one of those would corrupt or lose the block,
+and the block is byte-identical on both sides of every switch and unchanged
+in memory across a thousand of them.**
+
+**What is not answered**: why the state is 4, and whether anything this VMM
+does put it there. The value predates the loop and nothing writes it
+afterwards, so the answer lies in the VSM setup phase - the same phase in
+which `HvCallModifyVtlProtectionMask` ran ~39,26x times and stopped.
+
+**And an honest limit.** Going further by static analysis needs securekernel
+internals that public PDB symbols do not carry, or a dynamic trace of a
+decision made inside VTL1. The blocker is specified to the byte; naming its
+*cause* is a different and larger problem than locating it was.
+
 ## Verified over the whole routine: still no case for 4
 
 The previous section's window covered 0x3c0 bytes of a routine that runs to
