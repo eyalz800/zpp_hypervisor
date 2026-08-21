@@ -8781,6 +8781,22 @@ hypervisor::on_l2_exit(std::size_t cpu,
                                 std::as_writable_bytes(
                                     std::span(this->vtl_call_block[cpu])))) {
                             this->vtl_call_block_read[cpu] = 1;
+
+                            // Census the request byte and whether the
+                            // block moves at all. See
+                            // `vtl_call_request`: a sample is not a
+                            // census, and this is the difference
+                            // between "always 4" and "only looked when
+                            // it was 4".
+                            auto word = this->vtl_call_block[cpu][0];
+
+                            this->vtl_call_request[cpu]
+                                                  [(word >> 8) & 0xff] += 1;
+
+                            if (word != this->vtl_block_previous[cpu]) {
+                                this->vtl_block_changes[cpu] += 1;
+                                this->vtl_block_previous[cpu] = word;
+                            }
                         }
                     }
                 }

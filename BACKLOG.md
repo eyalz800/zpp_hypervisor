@@ -36881,3 +36881,48 @@ stop being opaque. `0` is memory work, `2` is tracing, `4` is "you have an
 interrupt pending", `5` is teardown. A loop that only ever carries `4` is
 not a loop servicing requests - it is a loop carrying one notification over
 and over, and the request that matters has never appeared in it.
+
+## Code 0 IS being issued, 75% of the time. The protocol is alive
+
+**Census, not sample:**
+
+    every request byte ever seen (28,034 calls)
+      code 0   20,991   74.9%   secure memory manager
+      code 4    7,043   25.1%   VINA notification
+    the block's first quadword changed 14,222 times
+
+**The secure kernel issues `SkmiMapViewOfImage`-class requests twenty-one
+thousand times**, and the block is not stale - it moves on half of all
+calls. Both trust levels are running a live request/response protocol.
+
+**So "the loop carries only 4" is withdrawn**, along with everything built
+on it: the stale-notification hypothesis, "the request that matters has
+never appeared", and the reading that state 4's default arm is where this
+dies. All of it came from **one sample per state dump**, taken perhaps
+twenty times across the investigation, every one of which landed in the 25%
+case. Twenty samples of a 25% event all agreeing is a 0.003% coincidence -
+it is not one. The dumps were taken at moments the guest had settled into,
+so they were not independent draws, which is exactly what makes repeated
+sampling of the same instrument feel like confirmation.
+
+**This is the seventh time in this investigation that a single-sample
+reading has produced a confident and wrong conclusion**, and the fix has
+been the same every time: count every occurrence instead of looking at one.
+The census cost one array and one increment. *Sample to find a hypothesis;
+census to believe it.*
+
+### What it leaves
+
+The protocol is alive and the status is `0` - success. Twenty-one thousand
+successful secure memory-manager requests, and yet:
+
+- `HvCallModifyVtlProtectionMask` frozen at ~39,266
+- pages installed frozen
+- no ring 3 in three million samples
+
+**Successful requests that produce no forward progress** is a different
+failure from a request never sent, and it is the one now to chase. The block
+carries parameters beyond the request byte, and whether those twenty-one
+thousand calls are twenty-one thousand *distinct* operations or the same one
+repeated is the question - and it is answerable the same way this entry was:
+census the parameter words rather than sampling them.

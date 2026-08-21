@@ -10134,6 +10134,28 @@ private:
      * be left on to gather a distribution.
      */
     std::uint64_t vtl1_duration[max_cpus][2][24]{};
+
+    /**
+     * Every value the request byte has ever held, counted.
+     *
+     * The block is sampled once per state dump and has read `4` on every
+     * sample of every boot - but a sample is not a census, and "the byte
+     * is always 4" and "I have only ever looked when it was 4" are
+     * different claims that one reading cannot separate.
+     *
+     * The codes are known from the image: `0` is the secure memory
+     * manager (`SkmiMapViewOfImage` and the image-page lock pair), `2` is
+     * tracing, `4` is the VINA notification, `5` is teardown. **A secure
+     * image transfer must issue `0`.** If this histogram shows only `4`
+     * across tens of thousands of calls then the request the normal
+     * kernel is waiting on is never sent, and what it re-reads each
+     * iteration is a stale notification.
+     */
+    std::uint64_t vtl_call_request[max_cpus][256]{};
+
+    /** How often the whole first quadword changed between calls. */
+    std::uint64_t vtl_block_changes[max_cpus]{};
+    std::uint64_t vtl_block_previous[max_cpus]{};
     /** @} */
     /** @} */
     /** @} */

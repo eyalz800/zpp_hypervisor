@@ -2256,7 +2256,8 @@ def main():
                "vina_gs_base", "vina_block", "vina_flags", "vina_read",
                "vina_set_count", "vina_clear_count", "vina_block_physical",
                "vina_at_call_set", "vina_at_call_clear",
-               "vina_at_call_unread", "vtl1_duration",
+               "vina_at_call_unread", "vtl1_duration", "vtl_call_request",
+               "vtl_block_changes",
                "vmcs_shadow_loads", "vmcs_shadow_stores",
                "vmcs_field_read_encoding", "vmcs_field_read_count",
                "vmcs_field_write_encoding", "vmcs_field_write_count",
@@ -2372,7 +2373,8 @@ def main():
                "vina_gs_base", "vina_block", "vina_flags", "vina_read",
                "vina_set_count", "vina_clear_count", "vina_block_physical",
                "vina_at_call_set", "vina_at_call_clear",
-               "vina_at_call_unread", "vtl1_duration",
+               "vina_at_call_unread", "vtl1_duration", "vtl_call_request",
+               "vtl_block_changes",
                "vmcs_shadow_loads",
                "vmcs_shadow_stores",
                "guest_state_writes_skipped", "guest_state_writes_done",
@@ -2450,6 +2452,8 @@ def main():
     monitor.queue(instance + off["vtl_call_gap_buckets"], scalar_cpus * 40)
     monitor.queue(instance + off["vtl1_entry_vector"], scalar_cpus * 257)
     monitor.queue(instance + off["vtl1_duration"], scalar_cpus * 2 * 24)
+    monitor.queue(instance + off["vtl_call_request"], scalar_cpus * 256)
+    monitor.queue(instance + off["vtl_block_changes"], scalar_cpus)
     for _n in ("vina_gs_base", "vina_block", "vina_flags", "vina_read",
                "vina_set_count", "vina_clear_count",
                "vina_block_physical", "vina_at_call_set",
@@ -3023,6 +3027,21 @@ def main():
         for i, q in enumerate(blk):
             print(f"  +0x{i * 8:02x}  0x{q:016x}")
         print(f"  request byte  = {state} (0x{state:02x})")
+        MEANING = {0: "secure memory manager (SkmiMapViewOfImage etc)",
+                   2: "WPP tracing", 4: "VINA notification",
+                   5: "process/thread teardown"}
+        req = [read('vtl_call_request', 0 * 256 + i) or 0
+               for i in range(256)]
+        rtot = sum(req)
+        if rtot:
+            print(f"  every request byte ever seen ({rtot:,} calls):")
+            for i, c in enumerate(req):
+                if c:
+                    print(f"    code {i:3d}  {c:9,d}  "
+                          f"{100.0 * c / rtot:5.1f}%   "
+                          f"{MEANING.get(i, '')}")
+            print(f"  the block's first quadword changed "
+                  f"{read('vtl_block_changes', 0):,} times")
         signed = status - (1 << 32) if status & 0x80000000 else status
         # The priority each trust-level call is made at. Class 13
         # masks both the clock vector 0xd1 and the deferred-call vector
