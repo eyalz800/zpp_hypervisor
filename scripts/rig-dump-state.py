@@ -2280,7 +2280,16 @@ def main():
                # Which thread the guest is running. Sampled for sessions
                # and printed by nothing, and it is the only progress
                # metric here that a livelock cannot fake.
-               "guest_thread_samples", "guest_thread_sample_count"]
+               "guest_thread_samples", "guest_thread_sample_count",
+               # Which hypercalls each level makes. Recorded for sessions
+               # and printed by nothing, and the second-level one names
+               # what Windows is asking Hyper-V to do.
+               "hypercall_codes", "hypercall_code_counts",
+               "l2_hypercall_codes", "l2_hypercall_code_counts",
+               # What the guest hypervisor asked vmcs02 for against what
+               # it was given. A bit it asked for and did not get changes
+               # how its guest's APIC behaves.
+               "control_secondary_requested", "control_secondary_granted"]
     off = gdb_offsets(args.elf, members)
     instance = base + gdb_symbol(
         args.elf, "zpp::hypervisor::hypervisor::instance()::instance")
@@ -2424,6 +2433,13 @@ def main():
             monitor.queue(instance + off[name], stack_capacity)
     # guest_thread_sample is eight 64-bit fields; 32 of them per processor.
     thread_fields, thread_capacity = 8, 32
+    for name in ("control_secondary_requested", "control_secondary_granted"):
+        if name in off:
+            monitor.queue(instance + off[name], args.cpus)
+    for name in ("hypercall_codes", "hypercall_code_counts",
+                 "l2_hypercall_codes", "l2_hypercall_code_counts"):
+        if name in off:
+            monitor.queue(instance + off[name], 16)
     if "guest_thread_samples" in off:
         monitor.queue(instance + off["guest_thread_samples"],
                       args.cpus * thread_capacity * thread_fields)
@@ -2460,6 +2476,82 @@ def main():
     # the level above expired it early", and those need different fixes.
     # The `kind` column is what separates them - 1 is the guest writing a
     # count, 3 is the clock vector actually going in.
+    # Secondary controls: what the guest hypervisor asked vmcs02 for
+    # against what it was granted.
+    #
+    # **A bit asked for and not granted changes how the second-level
+    # guest's APIC behaves**, and the three APIC-virtualization controls
+    # are exactly the ones that decide where its INIT and start-up IPIs
+    # go. If those are missing, a processor the guest tries to start
+    # never hears about it.
+    SECONDARY = {
+        0: "virtualize_apic_accesses", 1: "enable_ept",
+        3: "enable_rdtscp", 5: "enable_vpid", 7: "unrestricted_guest",
+        8: "apic_register_virtualization", 9: "virtual_interrupt_delivery",
+        12: "enable_invpcid", 14: "vmcs_shadowing",
+        18: "conceal_vmx_from_pt", 20: "enable_xsaves",
+        22: "mode_based_execute_control",
+    }
+    if "control_secondary_requested" in off:
+        for cpu in range(args.cpus):
+            asked = read("control_secondary_requested", cpu) or 0
+            got = read("control_secondary_granted", cpu) or 0
+            if not asked and not got:
+                continue
+            missing = asked & ~got
+            print(f"\ncpu {cpu} vmcs02 secondary controls: "
+                  f"asked 0x{asked:x}, granted 0x{got:x}"
+                  f"{'  <- ALL GRANTED' if not missing else ''}")
+            if missing:
+                for bit in range(64):
+                    if missing & (1 << bit):
+                        print(f"    NOT GRANTED bit {bit}  "
+                              f"{SECONDARY.get(bit, '')}")
+            for bit in (0, 8, 9):
+                state = "yes" if got & (1 << bit) else "no"
+                print(f"    {SECONDARY[bit]:<30} {state}")
+
+    # Which hypercalls each level is making, by code.
+    #
+    # `HvCallStartVirtualProcessor` and friends are how Windows asks the
+    # hypervisor above it to bring up a virtual processor, and nothing in
+    # this reader has ever shown them. A code that repeats without the
+    # guest moving on is a request that is not completing.
+    HV_CALLS = {
+        0x0008: "HvCallSendSyntheticClusterIpi",
+        0x000c: "HvCallModifyVtlProtectionMask",
+        0x000d: "HvCallEnablePartitionVtl",
+        0x000f: "HvCallEnableVpVtl",
+        0x0011: "HvCallVtlCall",
+        0x0012: "HvCallVtlReturn",
+        0x0013: "HvCallFlushVirtualAddressSpaceEx",
+        0x0014: "HvCallFlushVirtualAddressListEx",
+        0x0015: "HvCallSendSyntheticClusterIpiEx",
+        0x005b: "HvCallGetVpRegisters",
+        0x005c: "HvCallSetVpRegisters",
+        0x0099: "HvCallStartVirtualProcessor",
+        0x009a: "HvCallGetVpIndexFromApicId",
+    }
+    for label, codes, counts in (
+            ("first level (Hyper-V)", "hypercall_codes",
+             "hypercall_code_counts"),
+            ("SECOND level (Windows)", "l2_hypercall_codes",
+             "l2_hypercall_code_counts")):
+        if codes not in off:
+            continue
+        rows = []
+        for i in range(16):
+            c = words.get(instance + off[codes] + 8 * i, 0)
+            n = words.get(instance + off[counts] + 8 * i, 0)
+            if n:
+                rows.append((n, c))
+        if not rows:
+            continue
+        print(f"\ncpu 0 hypercalls from the {label}")
+        for n, c in sorted(rows, reverse=True):
+            print(f"    0x{c:04x}  {n:>12,}  "
+                  f"{HV_CALLS.get(c, '')}")
+
     # The kernel image bounds, used by both the thread and stack sections
     # below to turn an address into an offset that survives KASLR.
     kbase = read("guest_kernel_base") or 0

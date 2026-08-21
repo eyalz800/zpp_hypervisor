@@ -785,6 +785,60 @@ is not there" and is really "the wrong question was asked". `x` is the
 virtual read. The same distinction is why a wide `xp` over a device BAR
 lied, further down this file.
 
+## Narrowing the lost wake-up: four candidates eliminated, one left
+
+Following the start-up IPI from `Phase1Initialization` outward. Each of these
+was a plausible cause and each is now excluded by measurement, so the search
+space is small.
+
+**1. Windows never issues the start hypercall.** The second-level hypercall
+census - recorded for sessions, printed by nothing until now:
+
+    0x0012  129,888  HvCallVtlReturn
+    0x0011  129,888  HvCallVtlCall
+    0x000c   39,261  HvCallModifyVtlProtectionMask
+    0x0003      365     0x0051  98     0x0050  20     ...
+
+**No `HvCallStartVirtualProcessor` (0x0099) and no `HvCallEnableVpVtl`
+(0x000f), ever.** So the guest is stuck *before* the call that starts a
+processor, not waiting on one that was made. And the VTL round trips work -
+129,888 of them - so VTL1 itself is alive on the boot processor.
+
+**2. Memory starvation.** The launcher gives the guest **11,830 MB**
+(`MemTotal - 4000`). Not starved, so the memory-manager frames on the stack -
+`MiProbeLockFrame`, `MiUnlinkFreeOrZeroedPage`, `MiGetPerfectColorHeadPage` -
+are page *locking* for transfer to VTL1 rather than a failing allocator.
+
+**3. A missing APIC-virtualization control.** vmcs02's secondary controls,
+asked against granted:
+
+    cpu 0  asked 0x1010ae  granted 0x1050ae   <- everything asked for, granted
+      virtualize_apic_accesses        no
+      apic_register_virtualization    no
+      virtual_interrupt_delivery      no
+
+**Hyper-V does not ask for any of the three.** It emulates its guest's APIC
+in software, which is its own choice and works on real hardware, so nothing
+is being withheld. (cpus 1-7 ask for `0x0` - Hyper-V never built a vmcs12
+there at all, which is the same fact as their 17 second-level entries.)
+
+**4. A TSC-deadline timer we broke.** `LVTT` on the halted processors reads
+**one-shot**, not TSC-deadline, with `initial_count = 0`. So they are not
+waiting on a deadline we mishandled; they are disarmed.
+
+**What is left, and it is now a single link.** The halted application
+processors have **no wake source of any kind** - APIC timer disarmed, IRR and
+ISR empty, no preemption timer in vmcs01 for them - so only an IPI can wake
+them, and the only processor that could send one is cpu 0. **cpu 0's Hyper-V
+never writes the interrupt command register**: two independent instruments
+agree, the APIC page is being intercepted at ~1,400 EPT violations a second
+and `interrupt_command.cpp` logs no ICR-low write after bring-up.
+
+So: **Hyper-V, on the one running processor, never sends the IPI that would
+wake another one.** Either it is not trying, or its attempt takes a path this
+VMM does not observe. That is the next thing to establish and it is one
+question rather than a search.
+
 ## CONFIRMED, and the retraction of it was wrong: `VslStartSecureProcessor` waits on a VP that never starts
 
 **The chain is real.** It was retracted earlier in this session on a bad
