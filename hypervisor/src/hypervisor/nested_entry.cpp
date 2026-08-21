@@ -8851,6 +8851,48 @@ hypervisor::on_l2_exit(std::size_t cpu,
                 // that stops.
                 this->vtl_protect_last_r15[cpu] = context.r15;
 
+                // The secure kernel's current thread and the in-use bit
+                // both its scheduler and its call path test. See
+                // `vtl_protect_thread_flags`.
+                if (cpu < max_cpus) {
+                    this->vtl_protect_thread_read[cpu] = 0;
+
+                    auto gs = this->vmcs.read(
+                        arch::x86_64::vmx::vmcs::field::guest_gs_base);
+
+                    auto load = [&](std::uint64_t at, std::uint64_t & out) {
+                        auto physical = translate_guest_linear(cpu, at);
+                        if (!physical) {
+                            return false;
+                        }
+                        return static_cast<bool>(read_guest_memory(
+                            cpu,
+                            *physical,
+                            std::as_writable_bytes(std::span(&out, 1))));
+                    };
+
+                    std::uint64_t thread{};
+
+                    if (load(gs + 8, thread) && (0 != thread)) {
+                        this->vtl_protect_thread[cpu] = thread;
+
+                        std::uint64_t flags{};
+                        if (load(thread + 0xa8, flags)) {
+                            // 0xa8 holds two dwords; 0xac is the high one.
+                            auto word = (flags >> 32) & 0xffffffff;
+
+                            this->vtl_protect_thread_flags[cpu] = word;
+                            this->vtl_protect_thread_read[cpu] = 1;
+
+                            if (0 != (word & (1u << 4))) {
+                                this->vtl_protect_thread_locked[cpu] += 1;
+                            } else {
+                                this->vtl_protect_thread_clear[cpu] += 1;
+                            }
+                        }
+                    }
+                }
+
                 // The last page of the walk. See `vtl_step_pin_request`:
                 // this is the transition the trace has to catch, and the
                 // periodic arming would overwrite it within a period.

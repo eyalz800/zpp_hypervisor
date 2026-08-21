@@ -10293,6 +10293,35 @@ private:
      */
     std::uint64_t vtl_protect_host_perms[max_cpus][8]{};
     std::uint64_t vtl_protect_host_status[max_cpus][8]{};
+
+    /**
+     * The secure kernel's current thread at the protection call, and the
+     * flag word both `SkiSelectThread` and `SkCallNormalMode` test.
+     *
+     * Reverse-engineered rather than looked up. Both routines do the same
+     * atomic test-and-set on **bit 4 of `[thread+0xac]`**:
+     *
+     *     SkiSelectThread   lock btsl $0x4, 0xac(%rax)
+     *                       jae  proceed
+     *                       movl $0xc000000d, %edx   STATUS_INVALID_PARAMETER
+     *
+     *     SkCallNormalMode  lock btsl $0x4, (%rsi)   rsi = thread + 0xac
+     *                       jae  proceed
+     *                       movl $0xc0000184, %ebx   STATUS_INVALID_DEVICE_STATE
+     *
+     * **It is an in-use lock, and a thread whose bit is left set can never
+     * be selected again** - which is exactly the shape of a thread parked
+     * four instructions from the end of its loop and never resumed.
+     *
+     * `[gs:0]` is a self-pointer, so the current thread is `[gs_base+8]`,
+     * and it is non-zero only while VTL1 is executing - which a protection
+     * call is. Sampling from outside reads it as zero and says nothing.
+     */
+    std::uint64_t vtl_protect_thread[max_cpus]{};
+    std::uint64_t vtl_protect_thread_flags[max_cpus]{};
+    std::uint64_t vtl_protect_thread_read[max_cpus]{};
+    std::uint64_t vtl_protect_thread_locked[max_cpus]{};
+    std::uint64_t vtl_protect_thread_clear[max_cpus]{};
     std::uint64_t vina_at_call_set[max_cpus]{};
     std::uint64_t vina_at_call_clear[max_cpus]{};
     std::uint64_t vina_at_call_unread[max_cpus]{};

@@ -2280,7 +2280,9 @@ def main():
                "vtl_protect_pfn_probed", "vtl_protect_pfn_abnormal",
                "vtl_protect_pfn_perm_seen", "vtl_protect_readonly_pfn",
                "vtl_protect_readonly_count", "vtl_protect_host_perms",
-               "vtl_protect_host_status",
+               "vtl_protect_host_status", "vtl_protect_thread",
+               "vtl_protect_thread_flags", "vtl_protect_thread_read",
+               "vtl_protect_thread_locked", "vtl_protect_thread_clear",
                "vmcs_shadow_loads", "vmcs_shadow_stores",
                "vmcs_field_read_encoding", "vmcs_field_read_count",
                "vmcs_field_write_encoding", "vmcs_field_write_count",
@@ -2419,7 +2421,9 @@ def main():
                "vtl_protect_pfn_probed", "vtl_protect_pfn_abnormal",
                "vtl_protect_pfn_perm_seen", "vtl_protect_readonly_pfn",
                "vtl_protect_readonly_count", "vtl_protect_host_perms",
-               "vtl_protect_host_status",
+               "vtl_protect_host_status", "vtl_protect_thread",
+               "vtl_protect_thread_flags", "vtl_protect_thread_read",
+               "vtl_protect_thread_locked", "vtl_protect_thread_clear",
                "vmcs_shadow_loads",
                "vmcs_shadow_stores",
                "guest_state_writes_skipped", "guest_state_writes_done",
@@ -2509,6 +2513,10 @@ def main():
     monitor.queue(instance + off["vtl_protect_readonly_count"], scalar_cpus)
     for _n in ("vtl_protect_host_perms", "vtl_protect_host_status"):
         monitor.queue(instance + off[_n], scalar_cpus * 8)
+    for _n in ("vtl_protect_thread", "vtl_protect_thread_flags",
+               "vtl_protect_thread_read", "vtl_protect_thread_locked",
+               "vtl_protect_thread_clear"):
+        monitor.queue(instance + off[_n], scalar_cpus)
     for _n in ():
         monitor.queue(instance + off[_n], scalar_cpus)
     for _n in ():
@@ -3098,6 +3106,15 @@ def main():
               f"0x{read('vtl_protect_answer_last_cr3', cpu):x}, "
               f"call was from cr3 "
               f"0x{read('vtl_protect_last_cr3', cpu):x}")
+        if read('vtl_protect_thread_read', cpu):
+            fl = read('vtl_protect_thread_flags', cpu) or 0
+            lk = read('vtl_protect_thread_locked', cpu) or 0
+            cl = read('vtl_protect_thread_clear', cpu) or 0
+            print(f"      secure-kernel thread 0x{read('vtl_protect_thread', cpu):x}"
+                  f"  [+0xac] = 0x{fl:08x}  bit4 = {(fl >> 4) & 1}")
+            print(f"        over all calls: bit4 SET {lk:,}, clear {cl:,}"
+                  + ("   <- the in-use lock is held at the call"
+                     if lk > cl else ""))
         print(f"      r15 at the last call (loop remaining) = "
               f"{read('vtl_protect_last_r15', cpu):,}"
               + ("   <- zero: the walk finished"

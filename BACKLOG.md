@@ -38143,3 +38143,44 @@ That is slower than having symbols and it is not blocked. The next targets
 in `SkiSelectThread` are `[pcr+8]` - the current thread - and `0xa8(%rcx)`,
 the field compared against a caller argument at `14008edb0`, both reachable
 by exactly the walk above.
+
+## The thread in-use bit is set in both phases. Eliminated by its own control
+
+Reverse-engineered from the instructions, with no type information:
+`SkiSelectThread` and `SkCallNormalMode` both do an atomic test-and-set of
+**bit 4 of `[thread+0xac]`**, and both fail if it was already set -
+`0xC000000D` (STATUS_INVALID_PARAMETER) and `0xC0000184`
+(STATUS_INVALID_DEVICE_STATE) respectively. A thread whose bit is left set
+can never be selected, which is precisely the shape of a thread parked four
+instructions from the end of its loop.
+
+Read at the protection call, from inside the VMM, since `[gs:0]` is a
+self-pointer and the current thread is `[gs_base+8]` - non-zero only while
+VTL1 executes, which is why sampling from outside reads zero:
+
+    thread 0xfffff806…2f80   [+0xac] = 0x00000050   bit4 = 1
+    over all calls: bit4 SET 39,279, clear 0
+
+And while the guest is wedged, read from the monitor by walking VTL1's page
+tables: **still set, twelve samples of twelve.**
+
+**Then the control, run before the claim rather than after it.** The same
+bit sampled thirty times *while the walk is still running* - protection
+count 26,866 against a freeze at ~39,270:
+
+    0x00000050  bit4=1  x30
+
+**Identical.** The bit is set in the working phase and in the hung one, so
+it does not toggle and it cannot be what distinguishes them. Hypothesis
+eliminated.
+
+The `btsl` path traced is in `SkiSelectThread`'s *no-current-thread* arm,
+which first calls a helper to obtain a thread and then locks **that** one -
+a different thread each time - so a persistently set bit on this thread is
+consistent with it being an attached/active marker rather than a
+per-selection lock.
+
+**What this run establishes beyond the elimination**: secure-kernel thread
+structures are readable at will, at the right moment, from both sides - the
+VMM at the call and the monitor at rest. The offsets came from the
+instructions. **Nothing here needed a symbol.**
