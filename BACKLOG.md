@@ -35808,3 +35808,37 @@ told apart: a VTL1 timer that never fires (securekernel arms one -
 `SkeSetTimer` sits next to `SkpReturnFromNormalMode` in the image); a VTL1
 interrupt that is never delivered; or a saved VTL1 register context that
 comes back wrong, which would leave it resuming somewhere harmless.
+
+## Two more eliminated: deferred guest-state writes and VMCS shadowing
+
+Both were picked because they are the two halves of an interaction this tree
+has already been bitten by - a field that is both deferrable and shadowed,
+which `nested_entry.cpp` now carries a `static_assert` against. A trust
+level switch loads a *different* vmcs12, so any write this VMM skips as
+"unchanged", or any read Hyper-V satisfies from a shadow, is a candidate for
+VTL1 resuming on VTL0's state. That would look exactly like the measured
+symptom: enter, do nothing, return.
+
+**Neither is it.** One variable each, same 280-second window:
+
+    switch                       VTL calls   ModifyVtlProtection   distinct rips   duty
+    default                        ~23-26k          39,264              8          0.801
+    ZPP_DEFER_GUEST_STATE=OFF       23,285          39,264              8          0.843
+    ZPP_NESTED_SHADOW_VMCS=OFF      22,986          39,280              6          0.793
+
+Identical in every respect that matters - the same frozen protection count,
+the same handful of clock-path instruction pointers, the same trust-level
+rate, no ring 3. `defer=0` costs more (duty 0.801 -> 0.843) for nothing;
+`shadowvmcs=0` moves work from this VMM into the guest hypervisor (L1 9.4%
+-> 15.3%) for nothing. Both restored.
+
+**The one new fact from the sweep is in the middle column.**
+`HvCallModifyVtlProtectionMask` stops at **39,264, 39,264, 39,280** across
+three different builds. That is not a race and not a timing artifact - the
+guest performs an essentially fixed amount of VSM setup, to within sixteen
+calls, and then stops. **A deterministic stopping point is a much better
+thing to chase than a rate**, because it means something specific completes
+or is exhausted at that count rather than drifting. What is at ~39,270 - a
+structure filled, a list walked to its end, a region finished - is the next
+question, and it is answerable from the recorded arguments of the last calls
+rather than from another boot.
