@@ -37336,3 +37336,53 @@ The routine is in the image on disk, its ready-list and the thread's state
 live in secure-kernel memory, and the same reading that named
 `ShvlVinaHandler`'s one-bit flag from a `gs`-relative chain would name what
 `SkiSelectThread` tests. **That is the next move, and it needs no boot.**
+
+## Correction: the thread IS selected, then deselected. And the VINA contradiction
+
+The previous entry concluded "the thread holding the loop is never selected
+again". **The trace it was drawn from says otherwise**, and both routines are
+in it:
+
+     91  SkiSelectThread      <- it is selected
+     45  SkiDeselectThread    <- and then put back
+     51  KiVinaInterrupt      <- with the VINA path between them
+
+The order confirms it: `SkiSelectThread` -> `SkiUpdateXStateForVtlTransition`
+-> `ShvlVinaHandler` -> `KiVinaInterrupt` -> `SkiDeselectThread` ->
+`SkCallNormalMode`. **The secure kernel picks the thread, takes the VINA
+branch before running it, and puts it back.** That is not a scheduling
+failure - the scheduler is working - it is a pre-emption before the first
+instruction of the selected thread.
+
+So `SkiSelectThread` is the wrong routine to disassemble; nothing in it is
+misbehaving.
+
+### The contradiction that has to be resolved
+
+**Three instruction traces, from three separate boots, all take the VINA
+branch** - each shows `__memset_spec_ermsb` inside `ShvlVinaHandler`, which
+only the taken branch reaches.
+
+**And two independent samplings of the flag say it is mostly clear:**
+
+    16 QEMU monitor samples of VP assist + 0xC   clear 15, set 1
+    VMM counter at the HvCallVtlReturn           clear 20,981, set 6,713
+
+Both cannot describe the same thing. The known defect in the second is that
+it samples **after** `KiVinaInterrupt` has cleared the flag; the monitor
+samples land wherever they land, which for a 9 Hz loop is almost always
+between transitions rather than at one. **So both are sampling the wrong
+moment, in different ways, and neither refutes the traces.**
+
+The reading that fits everything is that **VINA is set on most or all
+trust-level entries** and cleared during handling - which is exactly what a
+notification that VTL0 has an interrupt pending would do, given VTL0's clock
+path consumes all of its time and therefore essentially always has one
+pending.
+
+**What would settle it** is reading the flag at the `HvCallVtlCall`, before
+VTL1 runs. That was attempted and the read failed on every one of 27,699
+calls - `read_guest_memory` returned false for the physical address captured
+at the return, which is a fixable instrument bug and not a finding. **Fixing
+that read is the single measurement that decides whether VINA is the
+mechanism**, and it is the thing to do next.
