@@ -9092,6 +9092,46 @@ hypervisor::on_l2_exit(std::size_t cpu,
 
                                     this->vtl_code0_last_pfn[cpu] = pfn;
                                     this->vtl_code0_pfn_calls[cpu] += 1;
+
+                                    // What our own shadow says about it.
+                                    // See `vtl_protect_pfn_status`.
+                                    auto probe = shadow_ept_lookup(
+                                        cpu, pfn << 12);
+
+                                    this->vtl_protect_pfn_status[cpu] =
+                                        static_cast<std::uint64_t>(
+                                            probe.status);
+                                    this->vtl_protect_pfn_perms[cpu] =
+                                        probe.permissions.bits();
+                                    this->vtl_protect_pfn_probed[cpu] += 1;
+
+                                    if (arch::x86_64::vmx::ept_walk_status::
+                                            mapped != probe.status) {
+                                        this->vtl_protect_pfn_abnormal[cpu]
+                                            += 1;
+                                    } else {
+                                        auto bits =
+                                            probe.permissions.bits() & 0x7;
+
+                                        this->vtl_protect_pfn_perm_seen
+                                            [cpu][bits] += 1;
+
+                                        // Which frames they are. See
+                                        // `vtl_protect_readonly_pfn`.
+                                        if (1 == bits) {
+                                            auto & n = this->
+                                                vtl_protect_readonly_count
+                                                    [cpu];
+
+                                            if (n < 8) {
+                                                this->
+                                                    vtl_protect_readonly_pfn
+                                                        [cpu][n] = pfn;
+                                            }
+
+                                            n = n + 1;
+                                        }
+                                    }
                                 }
 
                                 seen = seen + 1;

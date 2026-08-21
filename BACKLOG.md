@@ -37867,3 +37867,51 @@ lookup.
 specific, and on this side of the boundary.** Everything before it was
 either a rate, a probability, or inside secure-kernel memory. Four physical
 pages can be dumped, walked, and compared against the shadow.
+
+## THE DEFECT: the four frames the walk dies on are the only four our shadow maps read-only
+
+Not a correlation - an identity. Probing this VMM's own shadow for every
+page frame the secure memory manager walks:
+
+    perms r--            4
+    perms rw-            1
+    perms r-x          381
+    the read-only frames (4): 0x11aac9 0x11aaca 0x11aacb 0x11aacc
+
+**Those are exactly the four frames the walk dies on**, established
+independently across six boots before this probe existed. Four read-only
+frames, four fatal frames, and the same four addresses.
+
+The identity check mattered: four and four is a coincidence a
+quarter of the time if the sets are unrelated, and this file records eleven
+occasions where a correlation was read as a mechanism. Recording *which*
+frames turned it into an identity for the cost of one array.
+
+### Why this is different from everything before it
+
+Every prior lead was a rate, a probability, or state inside secure-kernel
+memory that cannot be read without private symbols. **This is four specific
+physical pages, deterministic across boots, mapped by tables this VMM
+builds.** The guest's virtual addresses move with KASLR on every boot and
+the failure does not move with them - because the fault is in physical
+memory, and physical memory is ours.
+
+**And the permission is the shape of the fault.** `SkmiProtectPageRange`
+walks a page range and the secure kernel expects to be able to work with
+those pages; our shadow gives read and no write. Everything downstream that
+this investigation spent itself on - the loop not advancing, the thread not
+resuming, `r15` frozen at 1 - is consistent with the last page of the walk
+being one the guest cannot complete an operation on.
+
+### What has to be established next, in order
+
+1. **Why those four are read-only.** The shadow is
+   `compose_ept(eptp12, ours)`, so either the guest hypervisor's own entry
+   for them lacks write, or this VMM's host tables do, or the composition
+   drops it. Three candidates, and the composition can be dumped for those
+   exact frames.
+2. **Whether read-only is correct.** If the guest hypervisor genuinely
+   asked for read-only there, the fault is elsewhere and this is a symptom.
+   Its `eptp12` entry for those frames answers that directly.
+3. **Only then, a fix.** Not before: this file's record is that acting on
+   the first plausible mechanism is how eleven wrong answers got written.

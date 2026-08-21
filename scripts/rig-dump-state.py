@@ -2275,6 +2275,10 @@ def main():
                "vtl_protect_step_count", "vtl_protect_step_other",
                "vtl_protect_next_reason", "vtl_protect_next_last",
                "vtl_protect_next_code", "vtl_protect_next_code_last",
+               "vtl_protect_pfn_status", "vtl_protect_pfn_perms",
+               "vtl_protect_pfn_probed", "vtl_protect_pfn_abnormal",
+               "vtl_protect_pfn_perm_seen", "vtl_protect_readonly_pfn",
+               "vtl_protect_readonly_count",
                "vmcs_shadow_loads", "vmcs_shadow_stores",
                "vmcs_field_read_encoding", "vmcs_field_read_count",
                "vmcs_field_write_encoding", "vmcs_field_write_count",
@@ -2409,6 +2413,10 @@ def main():
                "vtl_protect_step_count", "vtl_protect_step_other",
                "vtl_protect_next_reason", "vtl_protect_next_last",
                "vtl_protect_next_code", "vtl_protect_next_code_last",
+               "vtl_protect_pfn_status", "vtl_protect_pfn_perms",
+               "vtl_protect_pfn_probed", "vtl_protect_pfn_abnormal",
+               "vtl_protect_pfn_perm_seen", "vtl_protect_readonly_pfn",
+               "vtl_protect_readonly_count",
                "vmcs_shadow_loads",
                "vmcs_shadow_stores",
                "guest_state_writes_skipped", "guest_state_writes_done",
@@ -2488,6 +2496,14 @@ def main():
     monitor.queue(instance + off["vtl_protect_next_last"], scalar_cpus)
     monitor.queue(instance + off["vtl_protect_next_code"], scalar_cpus * 32)
     monitor.queue(instance + off["vtl_protect_next_code_last"], scalar_cpus)
+    for _n in ("vtl_protect_pfn_status", "vtl_protect_pfn_perms",
+               "vtl_protect_pfn_probed", "vtl_protect_pfn_abnormal"):
+        monitor.queue(instance + off[_n], scalar_cpus)
+    monitor.queue(instance + off["vtl_protect_pfn_perm_seen"],
+                  scalar_cpus * 8)
+    monitor.queue(instance + off["vtl_protect_readonly_pfn"],
+                  scalar_cpus * 8)
+    monitor.queue(instance + off["vtl_protect_readonly_count"], scalar_cpus)
     for _n in ():
         monitor.queue(instance + off[_n], scalar_cpus)
     for _n in ():
@@ -3017,6 +3033,27 @@ def main():
         oth = read('vtl_protect_answer_rip_other', cpu) or 0
         if oth:
             print(f"        (beyond eight distinct) {oth:,}")
+        pr = read('vtl_protect_pfn_probed', cpu) or 0
+        ab = read('vtl_protect_pfn_abnormal', cpu) or 0
+        if pr:
+            print(f"      shadow lookup of the walked frames: {pr:,} probed, "
+                  f"{ab:,} not normally mapped"
+                  + ("   <- ALL NORMAL, not an EPT difference" if not ab
+                     else "   <- a difference on our side"))
+            NAMES = {0: "---", 1: "r--", 2: "-w-", 3: "rw-", 4: "--x",
+                     5: "r-x", 6: "-wx", 7: "rwx"}
+            for k in range(8):
+                c = read('vtl_protect_pfn_perm_seen', (cpu * 8) + k) or 0
+                if c:
+                    print(f"          perms {NAMES[k]}  {c:9,d}")
+            rc = read('vtl_protect_readonly_count', cpu) or 0
+            if rc:
+                pfns = [read('vtl_protect_readonly_pfn', (cpu * 8) + k) or 0
+                        for k in range(min(rc, 8))]
+                print(f"          the read-only frames ({rc}): "
+                      + " ".join(f"0x{p:x}" for p in pfns))
+            print(f"        last frame status {read('vtl_protect_pfn_status', cpu)} "
+                  f"perms 0x{read('vtl_protect_pfn_perms', cpu):x}")
         print("      the first exit after a protection answer, by reason:")
         for k in range(72):
             c = read('vtl_protect_next_reason', (cpu * 72) + k) or 0

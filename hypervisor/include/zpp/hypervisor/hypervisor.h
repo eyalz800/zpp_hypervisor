@@ -10230,6 +10230,53 @@ private:
      */
     std::uint64_t vtl_protect_next_code[max_cpus][32]{};
     std::uint64_t vtl_protect_next_code_last[max_cpus]{};
+
+    /**
+     * What this VMM's own shadow says about the pages the walk touches.
+     *
+     * The walk dies on the **same four page frames on every boot** -
+     * `0x11aac9`..`0x11aacc` - while the guest's virtual addresses move
+     * with KASLR, so the fault is tied to physical memory rather than to
+     * anything in the guest's layout. Physical memory is this side of the
+     * boundary.
+     *
+     * So look each requested frame up in the shadow as it goes past, and
+     * keep the last one plus a count of how many resolved to something
+     * other than a normal mapped page. **If the failing frames are mapped
+     * exactly like the twenty thousand that work, this is not it and the
+     * lead dies cheaply; if they are not, it is the first difference on
+     * this side of the boundary the investigation has found.**
+     */
+    std::uint64_t vtl_protect_pfn_status[max_cpus]{};
+    std::uint64_t vtl_protect_pfn_perms[max_cpus]{};
+    std::uint64_t vtl_protect_pfn_probed[max_cpus]{};
+    std::uint64_t vtl_protect_pfn_abnormal[max_cpus]{};
+
+    /**
+     * The permission bits the shadow gives each walked frame, as a
+     * histogram over the eight read/write/execute combinations, split by
+     * whether the walk resolved the frame at all.
+     *
+     * The last frame before the freeze reads `mapped` with permissions
+     * `0x1` - **read, no write**. Whether that is the difference or simply
+     * what every frame in this walk looks like cannot be told from one
+     * value, which is the mistake this file has recorded eleven times. The
+     * histogram says which.
+     */
+    std::uint64_t vtl_protect_pfn_perm_seen[max_cpus][8]{};
+
+    /**
+     * The page frames the shadow maps **read-only**, kept whole.
+     *
+     * Four frames come back `r--` against 381 `r-x` and one `rw-`, and the
+     * walk dies on exactly four frames - `0x11aac9`..`0x11aacc`, the same
+     * four on six boots. **Four and four is a correlation, not an
+     * identity**, and this file records eleven occasions where that
+     * distinction mattered. So record which frames they are and let them
+     * be compared directly.
+     */
+    std::uint64_t vtl_protect_readonly_pfn[max_cpus][8]{};
+    std::uint64_t vtl_protect_readonly_count[max_cpus]{};
     std::uint64_t vina_at_call_set[max_cpus]{};
     std::uint64_t vina_at_call_clear[max_cpus]{};
     std::uint64_t vina_at_call_unread[max_cpus]{};
