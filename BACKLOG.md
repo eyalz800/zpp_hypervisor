@@ -785,6 +785,53 @@ is not there" and is really "the wrong question was asked". `x` is the
 virtual read. The same distinction is why a wide `xp` over a device BAR
 lied, further down this file.
 
+## Both levers together move the tick by 1.5%. The exits they remove are not the tick's
+
+**Measured, and it is the result that matters most this session, because it
+kills the model the three sections below are built on.** Baseline against
+both levers pulled at once, judged on arm-to-fire rather than on l2-run%:
+
+| build | arm->fire | ratio |
+|---|---|---|
+| `profile=1 apicoff=0` | 3,536.0 us | 2.03x |
+| `profile=0 apicoff=1` | 3,484.4 us | **2.00x** |
+
+**1.5%.** The two levers were measured separately at 10.7% and 17.7% and the
+model said they would compound. They do not.
+
+**And the levers did work** - that was checked before believing the null
+result, which is the only reason it is trustworthy:
+
+    ept-violation  29.7% -> 12.6%   (the APIC page watch, gone)
+    preempt-timer  11.8% -> absent  (the profiler's timer, gone)
+
+Yet total exits fell only 4.6%, 11,832/s to 11,289/s, because the work
+redistributed rather than disappeared: `vmresume` rose 34.2% -> 42.3% and
+l2-entries went *up*, 4,731/s to 5,611/s. **Removing a reason for exiting
+does not remove the exit if the guest simply gets further and exits for
+something else.**
+
+**What the tick is actually made of.** `vmresume` and `wrmsr` are now 71.6%
+of exits, and those two are the tick itself. The guest writes three synthetic
+MSRs per tick - EOI, `STIMER0_COUNT`, ICR - and each one costs a `wrmsr`
+exit to reflect to Hyper-V *plus* a `vmresume` exit when Hyper-V re-enters.
+Six of the 13.2 exits a tick are that, and they are **not removable by us**:
+these are Hyper-V's MSRs, the merged bitmap traps them correctly, and
+answering them here would mean reimplementing Hyper-V's SynIC.
+
+**So the target is a 2x cut in per-tick cost**, 3,484 us to under 1,740, and
+the two cheapest levers in the tree buy 1.5% of it. That is a real number and
+a hard one, but it is 2x rather than the 8.6x claimed earlier, and it is
+aimed at a quantity - the tick - that is now measurable in one line of the
+reader.
+
+**Method note, and it is the transferable part.** Both levers had been
+measured before against *l2-run%* and *exits/s*, and both looked good by
+those. Against the quantity that decides whether the guest boots they are
+worth nothing. **A proxy metric that improves while the real one does not is
+worse than no metric**, because it justifies the next change in the same
+direction. The tick interval is the metric; l2-run% is not.
+
 ## The synthetic timer fires 2.03x late, and the reader can now see it
 
 `rig-dump-state.py` reads `stimer_given_cycles`/`stimer_given_arms` and the
