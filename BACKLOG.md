@@ -785,6 +785,54 @@ is not there" and is really "the wrong question was asked". `x` is the
 virtual read. The same distinction is why a wide `xp` over a device BAR
 lied, further down this file.
 
+## The 75 us is cache, and the diagnostics are the working set
+
+The two measurements needed to say this are now both in hand, and the phase
+tree already held the comparison:
+
+    phase boundary, measured warm (tight loop)          21 cycles
+    exit: prologue, the FIRST slot after an exit     12,799 cycles   609x
+    later `resume:` slots, trivial bookkeeping    3,712-6,089        221x
+
+**The same class of work costs 21 cycles warm and thousands cold.** The
+prologue is a register save - it is the first thing to touch memory after the
+exit and it pays 12,799 cycles for it. The `resume:` slots run after the
+handler has been going for a while, are still doing almost nothing, and still
+cost 3,712-6,089 each: **18,577 cycles, 9.3 microseconds an exit, in
+bookkeeping alone.**
+
+**That is the 75 us, and it is cache and TLB, not instructions.** Every exit
+here crosses two hypervisor levels; by the time this VMM's handler runs, its
+own lines are gone. The instruction counts were never the problem - which is
+why counting VMCS accesses, and then removing a whole diagnostic's
+instructions, both moved so little.
+
+**And it identifies what to shrink, which is not what I expected.** The
+diagnostics are cheap in instructions - 21 cycles a boundary - and expensive
+in *footprint*: `exit_trace` rings, `profile_rip`/`profile_hits`,
+`guest_thread_samples`, `l2_resume_*`, `hypercall_codes`,
+`shadow_leaf_permissions`, `vtl_*`, `stimer_arm_*`, the phase arrays. Each
+lives in a different part of a multi-megabyte singleton and **each is touched
+on every exit**, so each costs a cold line whatever its instruction count.
+
+**That explains a result that otherwise did not add up**: gating one
+diagnostic's VMREAD and four ring writes moved the ordinary-kernel half
+13.5%, far more than its ~3.6% instruction share. It did not remove 3.6% of
+the work - it removed a cache line from the per-exit footprint.
+
+**So the direction is footprint, not instructions**, and it is testable
+cheaply: build with every diagnostic switch off - `profile`, `census`,
+`sampl1`, and the ungated ones now gated - and measure the ordinary-kernel
+half. If the 8x is cache, that build should move it far more than the sum of
+the individual instruction costs predicts. **If it does not, the cache
+reading is wrong and this section is the next thing to retract.**
+
+**What would make it structural rather than a tuning exercise**: the
+per-exit working set is dominated by *diagnostics that a deployed build does
+not need at all*. A release configuration that touches only the VMCS cache
+and the shadow-EPT root has a footprint a fraction of this one - and that is
+a different build, not a faster one.
+
 ## Measured: a phase boundary is 21 cycles. The tree is not the cost, and the decomposition stands
 
 The suspicion in the section below is **retired by measurement**, which is
