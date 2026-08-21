@@ -785,6 +785,62 @@ is not there" and is really "the wrong question was asked". `x` is the
 virtual read. The same distinction is why a wide `xp` over a device BAR
 lied, further down this file.
 
+## Cutting the VMCS tax cannot close this gap. The arithmetic says so before the work does
+
+The section below argues the tax is the hang and the access count is the
+lever. **The first measurement of that lever says the lever is too short**,
+and it is worth having the arithmetic on record before anyone spends a week
+on a VMCS write cache.
+
+**Measured, one variable, the profiler's own preemption timer off.** It is
+11.8% of all exits - 673,903 of 5,700,902 - and 21.5 VMCS accesses apiece, so
+it is the cheapest large cut available and needs no new code:
+
+| | `profile=1` | `profile=0` |
+|---|---|---|
+| ordinary-kernel VTL half | 16,837.4 us, 133.4 exits | **15,038.4 us, 124.3 exits** |
+| secure-kernel VTL half | 1,178.2 us, 7.9 exits | 1,171.9 us, 7.6 exits |
+| exits/s | ~15,700 | ~13,000 |
+| l2-entries/s | ~5,733 | ~4,731 |
+
+10.7% off the cycles and 6.8% off the exits. Real, and nowhere near enough.
+
+**Why no amount of this closes it.** The target is one ordinary-kernel half
+inside one 1.74 ms tick. It currently takes 15.0 ms, so the gap is about
+8.6x. Decompose the 199,170 cycles an exit: ~36 VMCS accesses at 2,845
+cycles is ~102,000 of it, leaving ~97,000 cycles that are not VMCS accesses
+at all. So **an access cache that achieved perfection** - zero VMREADs, zero
+VMWRITEs, which is not achievable - would leave
+
+    124.3 exits x 97,000 cycles = 12.1M cycles = 6.1 ms
+
+still three and a half tick periods, still pinned at CLOCK_LEVEL, still
+deadlocked. The tax is real and it is worth cutting, but **it is not
+sufficient, and the sufficiency question is settled by arithmetic that costs
+nothing to check.**
+
+**Which makes exits-per-half the load-bearing number, not cycles-per-exit.**
+124.3 exits for one half of one round trip is the thing that has to fall,
+and the exit histogram says where they come from:
+
+    ept-violation   1,656,181   29.0%
+    vmresume        1,947,184   34.2%
+    wrmsr           1,336,205   23.4%
+
+**The EPT violations are the suspicious entry.** 1,656,181 violations against
+309,967 leaves filled - so about 1.35 million of them, 81%, resolved without
+installing anything new. `replayed-leaves` reads 1,010,306. A fault that
+installs no mapping is a fault that will be taken again, and at ~199,170
+cycles each those 1.35M faults are roughly 270 billion cycles, which is
+minutes of the boot processor. That is the next thing to measure, and it is a
+different question from the tax entirely.
+
+**Recorded as a correction to the section below**, which ends by naming
+`build_vmcs02` and `save_l2_state` as the targets. They are the largest
+*accesses*, and this says accesses are not what is in the way. Read the two
+sections together or the second one points at a week of work that provably
+cannot succeed on its own.
+
 ## The chain closes: the VMCS tax *is* the hang, by way of the clock
 
 Three things measured this session were filed as separate findings, and they
