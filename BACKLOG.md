@@ -785,6 +785,72 @@ is not there" and is really "the wrong question was asked". `x` is the
 virtual read. The same distinction is why a wide `xp` over a device BAR
 lied, further down this file.
 
+## The nesting tax is our own VMCS accesses, ~109 a round trip, and it is the blocker
+
+With the control settled - plain Windows reaches ring 3, the nested guest
+never does - the question is what the nested configuration spends the
+machine on. Sampled from the monitor, 40 readings of RIP on the boot
+processor with `profile=1`:
+
+    23/40  base+0x11263  vmread    (57.5%)
+     2/40  base+0x32ba3  vmptrld
+     2/40  base+0x11343  vmwrite
+     1/40  base+0x10595  invvpid
+     6/40  hvix64 / ntoskrnl, six *distinct* addresses
+     6/40  elsewhere in this VMM
+
+**`vmread` alone is 57.5% of the machine.** And the six guest-code samples
+were six different addresses, so the guest is making forward progress - this
+is a throughput collapse, not a spin. `l2-run%` reads 6.69 against `vmm%`
+77.38.
+
+**The accesses are ours, not the guest hypervisor's.** That was the
+surprise, and it inverts the obvious fix. Hyper-V exits for `vmread` 3,659
+times and `vmwrite` 637 times in a run of 5,700,902 exits - 0.1% and 0.0%.
+Turning VMCS shadowing off to save the copies would therefore save nothing
+and cost everything: the header on `ZPP_NESTED_SHADOW_VMCS` already records
+that experiment, at ~890 second-level entries a second against 5,733 now.
+
+Counted instead from the phase tree, dividing each phase by the per-access
+price the hypervisor's own log prints (`vmcs price per 1000`: **2,845
+cycles a VMREAD, 1,997 a VMWRITE**):
+
+| phase | cyc/RT | accesses/RT |
+|---|---|---|
+| `build: after vmptrld` | 65,883 | ~33 writes |
+| `load_l1_host_state` | 42,827 | ~22 writes |
+| `save_l2_state` | 53,127 | ~19 reads |
+| `copy in: field reads` | 37,496 | ~12 reads |
+| `exit information` | 31,143 | ~11 reads |
+| `copy out: field writes` | 8,462 | ~4 writes |
+| vmptrst/vmptrld/vmclear churn | ~37,554 | 8 pointer ops |
+
+**~109 VMCS accesses a round trip.** At the measured round-trip rate that
+predicts ~404,000 L0 exits a second, and KVM's own counter reads
+**404,833**. The arithmetic and the independent instrument agree to 0.2%,
+which is what makes this a count rather than an estimate.
+
+    kvm exits/s      404,833
+    kvm nested_run/s   8,130      -> 49.8 L0 exits per re-entry
+
+**Why every one of them traps.** `enable_shadow_vmcs` is **N** on this rig
+and the host CPU's `vmx flags` carries no `shadow_vmcs` at all, so there is
+no hardware VMCS shadowing for *us*. Every VMREAD and VMWRITE this VMM
+issues against vmcs02 is a VM exit to KVM. That is the whole tax, and it is
+not reducible by tuning what we do per access - only by doing fewer.
+
+**So the lever is the count, and the two largest entries are the promising
+ones**: `build_vmcs02` writes ~33 fields on every entry and
+`load_l1_host_state` writes ~22 on every exit, and most of those fields hold
+the same value they held last time. `hot-state skipped/done` reads
+6,462,076/1,489,249, so partial caching already exists and already pays -
+the untried step is dirty-tracking the rest.
+
+**What this does not settle**: whether cutting the count far enough lets the
+guest reach ring 3, or whether something else blocks after it. The guest is
+progressing, so the prediction is that it does; that prediction is worth
+recording before the work, so it can be wrong on the record.
+
 ## THE CONTROL, RUN PROPERLY: plain Windows reaches user mode. It IS a VBS problem
 
 **The section below is void, and the way it was void is the lesson.** It
