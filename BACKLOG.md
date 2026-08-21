@@ -785,6 +785,45 @@ is not there" and is really "the wrong question was asked". `x` is the
 virtual read. The same distinction is why a wide `xp` over a device BAR
 lied, further down this file.
 
+## Three real defects fixed. None of them was the blocker
+
+Deployed together and measured: **no change.**
+
+    HvCallModifyVtlProtectionMask   39,264   (against 39,259 / 39,261 / 39,262 before)
+    ring 3                          0 of 20 samples
+    thread                          Phase1Initialization, state 2, irql 0
+
+The three, all found by a subagent reading our nested path against KVM's, all
+of the same class - state that is wrong with no fault and no counter moving:
+
+1. **`guest_state_deferrable` and `shadow_read_write_fields` had to be
+   disjoint by hand, in different translation units.** Now one shared
+   definition and a `static_assert`. The live hazard is `guest_cr3`:
+   deferrable here, shadowed by KVM, and adding it would make a guest
+   hypervisor read a stale second-level CR3 with no exit - which presents
+   exactly as a guest re-entering a context it already had. **Verified by
+   making it fire**, then restoring.
+2. **Two shadow-EPT discard paths released slots without
+   `invalidate_ept_locally()`** where every sibling calls it. Latent on an
+   implicit contract, which is the shape that already produced one silent
+   bug here.
+3. **`hot_state_saved[3]` recorded the masked interruptibility while vmcs02
+   held the unmasked value**, so `build_vmcs02` would compare masked against
+   masked, skip the write, and enter the second-level guest with an
+   interrupt shadow it should not have. Reachable only from an exit in HLT
+   or wait-for-SIPI.
+
+**Worth having, and worth being clear that fixing them changed nothing.** A
+defect being real is not evidence it is *the* one, and three real defects in
+the same subsystem as the symptom is exactly the situation where that
+mistake is easiest to make.
+
+**What it does buy**: the nested-VMX carriage is now clean by two independent
+readings - a subagent's comparison against KVM's implementation, and KVM's
+own tracepoints showing both VMCSes and both EPTPs entered correctly from
+outside. **So the remaining fault is not in how the VMCS is carried**, and
+the sections above that looked there are closed.
+
 ## Neither VSM start routine loops. The retry is above them, in `Phase1InitializationDiscard`
 
 Disassembled from the running guest, using ntoskrnl's real symbols and its
