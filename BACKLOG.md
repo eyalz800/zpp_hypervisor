@@ -785,6 +785,45 @@ is not there" and is really "the wrong question was asked". `x` is the
 virtual read. The same distinction is why a wide `xp` over a device BAR
 lied, further down this file.
 
+## A worked example of the 75 us: a diagnostic VMREAD on every entry, behind no switch
+
+Reading the code behind the `resume: entry census` slot - 6,104 cycles a call
+in a build where `census=0` - the block is gated on
+`nested_vmx::enabled && running_l2` and **on no diagnostic switch at all**.
+It calls `entry_event_now()`, and its own comment says what that costs:
+
+> "A vmread on the entry path is not free, and it is worth it: every other
+> counter in this investigation observes where an event was *put*, and none
+> of them observes whether it was still there."
+
+**It was worth it, and the question it was added to answer has since been
+answered.** What remains is a VMREAD plus four ring writes and a modulo, on
+**every second-level entry**, for a counter nobody is currently reading.
+
+**This is the shape to hunt.** Not one big mistake - a diagnostic that
+earned its place, answered its question, and was never put behind a switch.
+At 6,104 cycles it is 3.6% of a 170,454-cycle exit on its own. **Ten of these
+is a third of the budget**, and this file's history says there are more: the
+tree has accumulated `l2_resume_*`, `reference_count_*`,
+`l2_entries_carrying_nothing`, `l2_entry_vector`, the exit ring, the phase
+tree itself, and the thread and stack samplers, most of them added to settle
+a question that is now settled.
+
+**The discipline this suggests, and it is the same one the manifest already
+enforces for behaviour**: a diagnostic on the hot path belongs behind a
+switch *from the day it is written*, not from the day someone notices it is
+expensive. `ZPP_CENSUS_EXITS` exists and this block is not under it -
+which is precisely the kind of gap `zpp_build_switches` was created to make
+visible, and cannot, because the manifest reports switches and this is not
+one.
+
+**Not yet done**: putting it behind a switch and measuring. The expected
+saving is 3.6%, which is worth having and is not the 8x. **The 8x, if it
+exists, is the sum of many of these plus the two unattributed self-times** -
+`exit: dispatch` at 64,434 cycles a round trip and `on_guest_vmlaunch` at
+60,586, which between them are a quarter of the handler and have no named
+children accounting for them.
+
 ## Where the 75 microseconds is: trivial slots costing thousands of cycles each
 
 The decomposition the section above called for, from the phase tree that was
