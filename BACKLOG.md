@@ -38005,3 +38005,74 @@ settled this had been printing on every dump for the whole investigation.
 Two entries were written - one titled "THE DEFECT" - on a subset of 386
 frames, when the population was 1.6 million and already on screen. *Look at
 what the reader already prints before building a new probe.*
+
+# HANDOFF: the nested-VSM hang, as it stands
+
+State on leaving: every switch at its default (`nested=1 evmcs=0
+shadowvmcs=1 tpr=1 reftsc=1 selfipi=0 defer=1 stepvtl=0 apic=1 apicoff=0`),
+24/24 host tests passing, the rig idle with the default build deployed.
+Windows does not boot.
+
+## The failure, in the fewest facts that fully specify it
+
+`Phase1Initialization` never returns. It is inside
+`VslpLockPagesForTransfer` -> `VslpEnterIumSecureMode`, which loops calling
+VTL1 at **9 Hz** for ever. In VTL1, `SkmiProtectPageRange` is walking pages
+and issuing `HvCallModifyVtlProtectionMask`; it stops after ~39,270 calls
+with its thread parked **four instructions from the end of the loop**,
+`r15 = 1`, frame byte-for-byte unchanged minutes later. No ring 3 in three
+million samples, no new pages in nineteen minutes.
+
+**The one deterministic fact, and the only unexplained one:** the walk dies
+on the **same four page frames on six independent boots** - `0x11aac9`..
+`0x11aacc` - while the guest's virtual addresses move with KASLR every
+boot. Physical determinism against virtual randomness.
+
+## What is proven correct, so do not re-check it
+
+The transport, exhaustively: `vtl_entry_reason`, the entry's injected event
+(none, 27,698 of 27,698), the VINA flag at entry (clear, 28,445 of 28,446),
+the hypercall status (zero, all 39,275), the completed reps (full), the
+answer's destination trust level (the caller, all 39,275), the resume
+instruction (identical, all 39,275), XMM save/restore, the MSR load/store
+areas, the EPT composition (**guest equals composed exactly, all four
+permission combinations**), the shadow EPT cache (99% hit, no evictions),
+and the whole VMX capability surface.
+
+Also settled: the guest is **not** starved (duty 0.797, ~20 s of processor),
+**not** slow (nineteen minutes changes nothing), and both trust levels
+execute real code throughout.
+
+## What cannot be built here
+
+Two instruments, both fatal to the guest: `ZPP_WATCH_VTL_BLOCK` (freezes at
+22,308 exits) and a monitor-trap step after a protection answer (wedges at 2
+protection calls). **Anything that traps while the guest hypervisor is
+mid-transition stops it.** Only passive counters work on that path.
+
+## What would actually be needed
+
+- **Private symbols for `securekernel.exe`.** The public PDB has
+  `Has Types: true` and dumps **zero** type records, so `SkiSelectThread`'s
+  branches cannot be decoded. This blocks the scheduler route entirely.
+- **An explanation for the four frames** that is not permissions - those are
+  ordinary (45,531 leaves are `r--`). What is at `0x11aac9000` in the
+  *guest's* memory map, and is it a boundary of something.
+- **A reference capture.** The chainload control boots to user mode in 118 s
+  and cannot be instrumented. Anything that makes it observable - a second
+  VMM below it, or KVM tracepoints on its VSM hypercalls - turns "what does
+  a working one do here" from unanswerable into a diff.
+
+## The methodological record
+
+**Twelve instruments in this investigation measured the wrong thing** - the
+right quantity at the wrong moment, a sample read as a census, a cumulative
+total read as a rate, a file-scoped grep read as an existence proof, a
+subset of 386 read as a population of 1.6 million. Every one was caught by a
+second, independent instrument disagreeing, and by nothing else.
+
+The rules that earned their place, each beside the entry that paid for it:
+census rather than sample; two dumps rather than one; measure the quantity
+rather than a rate implying it; ask the binary, not one file; write the
+refutation check into the same commit as the hypothesis; and **read what the
+reader already prints before building a new probe.**
