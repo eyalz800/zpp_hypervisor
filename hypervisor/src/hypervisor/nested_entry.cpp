@@ -6893,6 +6893,60 @@ bool hypervisor::may_defer_guest_state(std::size_t cpu) const
     return guest_state_deferral_licensed(cpu);
 }
 
+namespace
+{
+/** True where a deferrable guest-state field is also shadowed - the one
+ *  combination that cannot be made safe. See the assert below. */
+constexpr bool deferrable_field_is_shadowed()
+{
+    for (auto deferrable : guest_state_fields) {
+        if ((field::guest_cs_access_rights == deferrable) ||
+            (field::guest_ss_access_rights == deferrable)) {
+            // The two the exclusion below already names. Excluded by
+            // `guest_state_deferrable`, so their presence in both lists
+            // is deliberate and handled.
+            continue;
+        }
+
+        for (auto shadowed : nested_vmx::shadow_read_write_fields) {
+            if (static_cast<std::uint64_t>(deferrable) ==
+                static_cast<std::uint64_t>(shadowed)) {
+                return true;
+            }
+        }
+    }
+
+    return false;
+}
+} // namespace
+
+// **A deferred field that is also shadowed is handed over stale, and
+// nothing notices.** Deferral writes vmcs02 lazily and repairs on a read;
+// shadowing lets the guest hypervisor read the field out of the hardware
+// shadow region with no exit at all - so there is no read to repair on.
+// The value is simply wrong, invisibly, with no fault and no counter
+// moving.
+//
+// The two lists were in different translation units with only a comment
+// tying them, and `guest_state_deferrable` below excludes exactly the two
+// entries they share - by hand. This makes that a checked property.
+//
+// **The live hazard it guards is `field::guest_cr3`**: it is in
+// `guest_state_fields`, it is deferrable, and KVM shadows `GUEST_CR3`
+// (`.references/kvm/vmcs_shadow_fields.h`). Adding it to
+// `shadow_read_write_fields` is the obvious optimisation and the one
+// another VMM sanctions, and it would make a guest hypervisor read a
+// stale second-level CR3 - which looks exactly like a guest re-entering
+// a context it already had. This assert is what turns that from a
+// debugging session into a compile error.
+static_assert(!deferrable_field_is_shadowed(),
+              "a guest-state field is both deferrable and shadowed: the "
+              "guest hypervisor would read it out of the shadow region "
+              "with no exit, so the deferred write is never materialised "
+              "and a stale value is handed over silently. Either exclude "
+              "it in guest_state_deferrable, as guest_cs/ss_access_rights "
+              "are, or do not shadow it.");
+
 bool hypervisor::guest_state_deferrable(std::size_t index)
 {
     // The two on `shadow_read_write_fields`, which the guest hypervisor

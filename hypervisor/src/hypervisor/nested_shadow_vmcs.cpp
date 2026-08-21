@@ -98,23 +98,7 @@ constexpr field shadow_read_only_fields[] = {
  * reason: injecting an event is a write, and it happens on the path this
  * is trying to make free.
  */
-constexpr field shadow_read_write_fields[] = {
-    // Measured, and it was not on KVM's list. With everything else here
-    // shadowed, Hyper-V's remaining VMREAD traffic was 45,866 reads of
-    // which 45,866 were DR7 and six were anything else - one per exit it
-    // handles, from its own exit path. KVM's vmcs_shadow_fields.h does
-    // not shadow it, which is the whole argument for measuring the guest
-    // in front of you rather than copying another VMM's list.
-    field::guest_dr7,
-    field::guest_rip,
-    field::guest_rflags,
-    field::guest_interruptibility_state,
-    field::vm_entry_interruption_information_field,
-    field::primary_processor_based_vm_execution_controls,
-    field::tpr_threshold,
-    field::guest_cs_access_rights,
-    field::guest_ss_access_rights,
-};
+using nested_vmx::shadow_read_write_fields;
 
 /**
  * Clears a field's bit in a bitmap, meaning "answer this one from the

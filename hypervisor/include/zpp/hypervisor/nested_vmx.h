@@ -1,4 +1,5 @@
 #pragma once
+#include "zpp/arch/x86_64/vmx/vmcs_fields.h"
 #include "zpp/arch/x86_64/vmx/vmx.h"
 #include <cstdint>
 
@@ -1624,5 +1625,52 @@ constexpr std::uint64_t supported_entry_controls =
                    // back out again, next to IA32_PAT and IA32_EFER,
                    // which are the two controls this sits beside and
                    // which already worked that way.
+
+/**
+ * The fields the guest hypervisor may read and write against the hardware
+ * shadow region **without exiting**.
+ *
+ * Lives here, rather than beside its use in `nested_shadow_vmcs.cpp`,
+ * because a second list has to be kept disjoint from it and the two were
+ * in different translation units with nothing tying them together.
+ * `guest_state_deferrable` excludes exactly the entries this list and
+ * `guest_state_fields` share - by hand, and correctly today. Sharing the
+ * definition lets that be a `static_assert` instead of a comment.
+ *
+ * **Why the two must not overlap.** A deferred guest-state field is
+ * written to vmcs02 lazily and materialised when somebody reads it. A
+ * shadowed field is read by the guest hypervisor straight out of the
+ * shadow region with no exit - so there is no read to materialise on, and
+ * a deferred value would be handed over stale, invisibly, with no fault
+ * and no counter moving.
+ *
+ * `field::guest_cr3` is the live hazard: it is in `guest_state_fields`,
+ * it is deferrable, and **KVM shadows `GUEST_CR3`**
+ * (`.references/kvm/vmcs_shadow_fields.h:65`). Adding it here - the
+ * obvious optimisation, and the one KVM sanctions - would make a guest
+ * hypervisor read a stale second-level CR3. The assert is what stops
+ * that being found the hard way.
+ */
+inline constexpr arch::x86_64::vmx::vmcs_fields::vmcs_field
+    shadow_read_write_fields[] = {
+        // Measured, and it was not on KVM's list. With everything else
+        // here shadowed, Hyper-V's remaining VMREAD traffic was 45,866
+        // reads of which 45,866 were DR7 and six were anything else -
+        // one per exit it handles, from its own exit path. KVM's
+        // vmcs_shadow_fields.h does not shadow it, which is the whole
+        // argument for measuring the guest in front of you rather than
+        // copying another VMM's list.
+        arch::x86_64::vmx::vmcs_fields::vmcs_field::guest_dr7,
+        arch::x86_64::vmx::vmcs_fields::vmcs_field::guest_rip,
+        arch::x86_64::vmx::vmcs_fields::vmcs_field::guest_rflags,
+        arch::x86_64::vmx::vmcs_fields::vmcs_field::guest_interruptibility_state,
+        arch::x86_64::vmx::vmcs_fields::vmcs_field::
+            vm_entry_interruption_information_field,
+        arch::x86_64::vmx::vmcs_fields::vmcs_field::
+            primary_processor_based_vm_execution_controls,
+        arch::x86_64::vmx::vmcs_fields::vmcs_field::tpr_threshold,
+        arch::x86_64::vmx::vmcs_fields::vmcs_field::guest_cs_access_rights,
+        arch::x86_64::vmx::vmcs_fields::vmcs_field::guest_ss_access_rights,
+};
 
 } // namespace zpp::hypervisor::nested_vmx
