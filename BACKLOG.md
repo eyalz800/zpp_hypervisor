@@ -785,6 +785,50 @@ is not there" and is really "the wrong question was asked". `x` is the
 virtual read. The same distinction is why a wide `xp` over a device BAR
 lied, further down this file.
 
+## The state machine has no case for 4
+
+Every comparison in `VslpEnterIumSecureMode`'s dispatch, traced by following
+each branch to its target:
+
+    +0x1b1  cmpb $1, %cl ; je        -> state 1 handled
+    +0x1b5  cmpb $6, %cl ; je        -> state 6 handled
+    +0x1d1  cmpb $3, %cl ; jne       -> state 3 handled
+    +0x2a8  testb %cl, %cl ; je      -> state 0 handled
+    +0x2b0  cmpb $2, %cl ; jne       -> state 2 handled
+    +0x378  cmpb $5, %cl ; jne -399  -> state 5 handled
+
+    fall-through lands at +0x1f2:
+        xor  %r8d, %r8d
+        movb $0, (%rbx)        <- clear byte 0
+        movw %r8w, 2(%rbx)     <- clear bytes 2-3
+        movl $1, %edx
+        jmp  -282              <- round again
+
+**Handled: 0, 1, 2, 3, 5, 6. Not handled: 4.** The observed dispatch byte is
+**4**, so every pass falls through the whole chain, clears two fields, and
+loops - which is exactly the byte-identical 8 Hz round trip measured from the
+other end.
+
+**Also in the fall-through region, two status values it can write:**
+`0xC000001C` = `STATUS_INVALID_SYSTEM_SERVICE` on the state-3 path when a
+bounds check fails, and `0xC0000030` on the state-2 path. Neither is reached
+in this state.
+
+**The caveat, stated because the conclusion rests on it.** The dispatch byte
+is `[rbx+1]` where `rbx` is `VslpEnterIumSecureMode`'s fifth argument - the
+context block. The **4** comes from the capture's `rbx` at the hypercall,
+which `HvlSwitchToVsmVtl1` loads as `movq (%rdx), %rbx`, i.e. the block's
+first qword, whose byte 1 is `0x04`. **That identification assumes `rdx`
+there is the same block**, which is consistent with the code but not proven.
+If it is a different block, the value 4 is wrong and only the *shape* of this
+finding survives - a dispatch with no case for whatever the state actually
+is.
+
+**How to settle it in one read**: the deep capture already records `rdx` at
+the `HvCallVtlCall` site. Translating that address through the second level's
+paging and reading its first two bytes gives the block and the dispatch byte
+directly, with no inference. That is the next thing to do, and it is small.
+
 ## Securekernel's return path is normal, and it contains a processor barrier
 
 Disassembled from the code window the deep VTL capture already dumps - no
