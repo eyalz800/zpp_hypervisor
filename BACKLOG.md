@@ -785,6 +785,78 @@ is not there" and is really "the wrong question was asked". `x` is the
 virtual read. The same distinction is why a wide `xp` over a device BAR
 lied, further down this file.
 
+## THE BLOCKER, NAMED: `VslStartSecureProcessor` waits on an AP that never starts
+
+**The second-level guest's stack, resolved against real Microsoft symbols.**
+Not inferred, not deduced from an address - the function names come from
+`ntkrnlmp.pdb` fetched from the symbol server for this exact build.
+
+    VslStartSecureProcessor+0x211      [PAGE]   <- start VTL1 on another processor
+      HvlHalStartVirtualProcessor+0x12
+        HalpHvStartVirtualProcessor+0x133
+          HalpApicRequestInterrupt+0x96
+            HalpInterruptSendIpi+0xa9           <- the IPI that starts it
+
+    VslpLockPagesForTransfer+0x16d
+      VslpLockMdlForTransfer+0x44
+        VslpEnterIumSecureMode+0x3a8
+          MiProbeAndLockComplete / MiProbeLockFrame
+            HvlSwitchToVsmVtl1+0xab
+
+And what it executes while it waits - the whole hot set, every one of them a
+timer or interrupt-return path:
+
+    KiIsrThunkShadow+0x688          [KVASCODE]
+    HvlEndSystemInterrupt+0x1e
+    HalpHvTimerArm+0x7a
+    HalpHvTimerAcknowledgeInterrupt+0x46
+    HvlWriteApicCommandRegister+0x1d
+    KiDpcInterruptBypass+0x12
+    KeQueryPerformanceCounter+0x163
+
+**Windows is trying to start the secure kernel on an application processor,
+and that processor never comes.** It is not slow, not storming, not short of
+time: it is blocked on a virtual processor that never starts, and it will
+wait for ever.
+
+**Every unexplained observation in this file collapses into that one fact:**
+
+- Application processors sit at **17 second-level entries** and never move.
+  That is the thing being waited for.
+- The ordinary kernel is pinned at task priority `0xd0` - `HalpInterruptSendIpi`
+  raises IRQL for the send and the wait, which is why 12.4 million requests
+  for `0x2f` are all made at IRQL 13 and none can be taken.
+- **Zero new pages**: a spin waiting on another processor touches nothing.
+- The `securekernel+0xb043e` park - `pause; jmp $` - is the *other end* of
+  the same failure: the secure kernel on the processor being started gives up
+  and parks.
+- `stretch=2` was the only thing that ever moved this, giving APs 27,727
+  exits instead of 284. It changed the timing of this start-up, not the
+  budget of a tick.
+
+**How the symbols were obtained**, since it takes the guesswork out of every
+future stack and nothing in this tree did it before:
+
+    ntoskrnl physical base = published hot physical - (hot virtual - kernel base)
+    PE debug directory -> RSDS -> GUID c8a7f11b-37fe-2822-7b6b11412e3a0519, age 1
+    https://msdl.microsoft.com/download/symbols/ntkrnlmp.pdb/<GUID><AGE>/ntkrnlmp.pdb
+
+`llvm-pdbutil dump --publics` gives `segment:offset` with **both in decimal**,
+and the segment indexes the PE section table read from the guest's own image -
+so an RVA is `section[seg-1].VirtualAddress + offset`. Reading either as hex
+puts every symbol somewhere plausible and wrong, which this file already
+warned about and which is easy to do accidentally.
+
+**So the work is now specific**: make an application processor start a
+virtual processor. The chain to follow is the guest's
+`HalpInterruptSendIpi` - a synthetic ICR write to MSR `0x40000071`, of which
+this VMM has counted **12.4 million** - through Hyper-V, to a physical IPI
+that has to wake a processor halted in Hyper-V's idle loop. Measured
+earlier and still unexplained: the targets' IRR and ISR are **empty**, their
+APIC timers unarmed, and no interrupt-command line appears in the log after
+bring-up. Something in that chain drops the wake-up, and it is now the only
+thing that matters.
+
 ## Two stuck states, not one - and the stack scan was hiding half of it
 
 **The stack sampler filtered every frame to the kernel image**, so a trace
