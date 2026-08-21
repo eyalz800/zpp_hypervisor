@@ -10277,6 +10277,22 @@ private:
      */
     std::uint64_t vtl_protect_readonly_pfn[max_cpus][8]{};
     std::uint64_t vtl_protect_readonly_count[max_cpus]{};
+
+    /**
+     * What **this VMM's own** tables say about those same frames.
+     *
+     * The shadow is `compose_ept(eptp12, ours)`, so a read-only result has
+     * three possible sources: the guest hypervisor's entry, ours, or the
+     * composition dropping the bit. `host_ept_lookup` answers the middle
+     * one directly, and it is the one this VMM is responsible for.
+     *
+     * **If our own tables map these frames read-only, the defect is here**
+     * and the composition is faithfully carrying it. If ours grant write
+     * and the shadow does not, the fault is the composition or the level
+     * above.
+     */
+    std::uint64_t vtl_protect_host_perms[max_cpus][8]{};
+    std::uint64_t vtl_protect_host_status[max_cpus][8]{};
     std::uint64_t vina_at_call_set[max_cpus]{};
     std::uint64_t vina_at_call_clear[max_cpus]{};
     std::uint64_t vina_at_call_unread[max_cpus]{};

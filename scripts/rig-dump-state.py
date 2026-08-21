@@ -2278,7 +2278,8 @@ def main():
                "vtl_protect_pfn_status", "vtl_protect_pfn_perms",
                "vtl_protect_pfn_probed", "vtl_protect_pfn_abnormal",
                "vtl_protect_pfn_perm_seen", "vtl_protect_readonly_pfn",
-               "vtl_protect_readonly_count",
+               "vtl_protect_readonly_count", "vtl_protect_host_perms",
+               "vtl_protect_host_status",
                "vmcs_shadow_loads", "vmcs_shadow_stores",
                "vmcs_field_read_encoding", "vmcs_field_read_count",
                "vmcs_field_write_encoding", "vmcs_field_write_count",
@@ -2416,7 +2417,8 @@ def main():
                "vtl_protect_pfn_status", "vtl_protect_pfn_perms",
                "vtl_protect_pfn_probed", "vtl_protect_pfn_abnormal",
                "vtl_protect_pfn_perm_seen", "vtl_protect_readonly_pfn",
-               "vtl_protect_readonly_count",
+               "vtl_protect_readonly_count", "vtl_protect_host_perms",
+               "vtl_protect_host_status",
                "vmcs_shadow_loads",
                "vmcs_shadow_stores",
                "guest_state_writes_skipped", "guest_state_writes_done",
@@ -2504,6 +2506,8 @@ def main():
     monitor.queue(instance + off["vtl_protect_readonly_pfn"],
                   scalar_cpus * 8)
     monitor.queue(instance + off["vtl_protect_readonly_count"], scalar_cpus)
+    for _n in ("vtl_protect_host_perms", "vtl_protect_host_status"):
+        monitor.queue(instance + off[_n], scalar_cpus * 8)
     for _n in ():
         monitor.queue(instance + off[_n], scalar_cpus)
     for _n in ():
@@ -3050,8 +3054,16 @@ def main():
             if rc:
                 pfns = [read('vtl_protect_readonly_pfn', (cpu * 8) + k) or 0
                         for k in range(min(rc, 8))]
-                print(f"          the read-only frames ({rc}): "
-                      + " ".join(f"0x{p:x}" for p in pfns))
+                print(f"          the read-only frames ({rc}):")
+                for k, pf in enumerate(pfns):
+                    hp = read('vtl_protect_host_perms', (cpu * 8) + k) or 0
+                    hs = read('vtl_protect_host_status', (cpu * 8) + k) or 0
+                    print(f"            0x{pf:x}  shadow r--   "
+                          f"our own tables: status {hs} perms "
+                          f"{NAMES.get(hp & 7, '?')}"
+                          + ("   <- OURS drops write too"
+                             if (hp & 2) == 0 else
+                             "   <- ours GRANT write; the shadow does not"))
             print(f"        last frame status {read('vtl_protect_pfn_status', cpu)} "
                   f"perms 0x{read('vtl_protect_pfn_perms', cpu):x}")
         print("      the first exit after a protection answer, by reason:")

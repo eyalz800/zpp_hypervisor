@@ -9127,6 +9127,21 @@ hypervisor::on_l2_exit(std::size_t cpu,
                                                 this->
                                                     vtl_protect_readonly_pfn
                                                         [cpu][n] = pfn;
+
+                                                // And what our own
+                                                // tables say. See
+                                                // `vtl_protect_host_perms`.
+                                                auto ours = host_ept_lookup(
+                                                    pfn << 12);
+
+                                                this->vtl_protect_host_perms
+                                                    [cpu][n] =
+                                                    ours.permissions.bits();
+                                                this->vtl_protect_host_status
+                                                    [cpu][n] =
+                                                    static_cast<
+                                                        std::uint64_t>(
+                                                        ours.status);
                                             }
 
                                             n = n + 1;

@@ -37915,3 +37915,51 @@ being one the guest cannot complete an operation on.
    Its `eptp12` entry for those frames answers that directly.
 3. **Only then, a fix.** Not before: this file's record is that acting on
    the first plausible mechanism is how eleven wrong answers got written.
+
+## Our tables grant rwx; the shadow drops it. Which makes read-only probably an EFFECT
+
+Probing this VMM's own tables for the same four frames, beside the shadow:
+
+    0x11aac9  shadow r--   our own tables: mapped, rwx
+    0x11aaca  shadow r--   our own tables: mapped, rwx
+    0x11aacb  shadow r--   our own tables: mapped, rwx
+    0x11aacc  shadow r--   our own tables: mapped, rwx
+
+**Our tables grant everything on all four.** The shadow is
+`compose_ept(eptp12, ours)`, so the missing write comes from the level
+above - the guest hypervisor's own entry - and the composition is carrying
+it faithfully. **There is no defect in our composition here.**
+
+**And that forces the reading flagged one entry ago, before this was
+measured**: *"whether read-only is correct. If the guest hypervisor
+genuinely asked for read-only there, the fault is elsewhere and this is a
+symptom."* Making pages read-only is exactly what
+`HvCallModifyVtlProtectionMask` does. So the most parsimonious explanation
+for "the four frames the walk dies on are read-only" is that **the walk
+protected them** - they are the last four it got to, and read-only is the
+effect of the very call being counted.
+
+**"THE DEFECT" in the previous entry's title is therefore withdrawn.** The
+identity between the four read-only frames and the four fatal frames is
+real and was correctly established; the causal direction was assumed, and
+the more likely direction is the opposite one.
+
+### What is not explained away, and is worth one more look
+
+The 386 mapped frames the walk touched split:
+
+    r-x   381
+    rw-     1
+    r--     4
+
+**If read-only were simply the effect of protection, the 381 should look
+like the 4.** They do not: the 381 keep **execute** and the four do not.
+Whatever the four are, they are the only frames in the walk that came back
+without execute permission, and that distinction is not explained by "they
+were protected" - all 386 were.
+
+So the open question is narrow and concrete: **why do four frames out of
+386 lose execute where the rest keep it**, and is that difference upstream
+of the freeze or another consequence of it. That is answerable from the
+guest hypervisor's own `eptp12` entry for those frames, which is one walk
+and has not been done.
