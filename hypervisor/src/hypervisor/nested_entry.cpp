@@ -5097,7 +5097,31 @@ void hypervisor::sample_guest_stack(std::size_t cpu)
         // Inside the kernel image, which is what a return address into it
         // looks like. Nothing else about it is checked - see the
         // declaration for why this is a candidate list and not a stack.
-        if ((value >= base) && (value < (base + size))) {
+        //
+        // **Or inside the image the guest is currently executing**, which
+        // is not always the kernel and was the whole reason this
+        // instrument answered the wrong question. The second-level guest
+        // parks in `securekernel.exe`, whose base is *below* the kernel's,
+        // so every frame belonging to the trust level that actually failed
+        // was discarded by the test above and the trace came back two
+        // frames deep and entirely in `ntoskrnl` - the callers, not the
+        // callee. A stack that omits the failing module is worse than no
+        // stack, because it reads as evidence about the module it does
+        // show.
+        //
+        // Bounded to a window around the sampled instruction pointer
+        // rather than opened to every canonical address: 48 slots fill
+        // with stack garbage in a few words otherwise, and a candidate
+        // list that is mostly noise is the same failure in the other
+        // direction. 64 MB comfortably spans a Windows system image and
+        // excludes the pool and the stacks either side of it.
+        constexpr std::uint64_t image_window = 64ull << 20;
+        auto here = this->profile_code_virtual;
+        auto near_here =
+            (0 != here) && (value >= (here - image_window)) &&
+            (value < (here + image_window));
+
+        if (((value >= base) && (value < (base + size))) || near_here) {
             this->guest_stack_trace[this->guest_stack_count] = value;
             this->guest_stack_count = this->guest_stack_count + 1;
         }

@@ -785,6 +785,51 @@ is not there" and is really "the wrong question was asked". `x` is the
 virtual read. The same distinction is why a wide `xp` over a device BAR
 lied, further down this file.
 
+## Two stuck states, not one - and the stack scan was hiding half of it
+
+**The stack sampler filtered every frame to the kernel image**, so a trace
+taken while the guest was parked in `securekernel.exe` came back two frames
+deep and entirely in `ntoskrnl` - the callers, and not one frame of the
+module that had actually failed. **A stack that omits the failing module is
+worse than no stack**, because it reads as evidence about the module it does
+show, and that is how "called from ntoskrnl+0x6a6fd0" got recorded as if it
+were the whole story.
+
+Widened to also accept the image the guest is *currently executing*, bounded
+to 64 MB either side of the sampled instruction pointer - loose enough to
+span a Windows system image, tight enough that 48 slots do not fill with
+stack garbage. The trace now returns 48 frames instead of 2.
+
+**And the guest has two stuck states, which is why single readings kept
+disagreeing.** Across boots of the same binary:
+
+| | state A | state B |
+|---|---|---|
+| where | `securekernel+0xb043e` | inside `ntoskrnl` |
+| profile | 96.8-99.7% on one address | 50 slots, 10 flushes, top 1.0% |
+| shape | `pause; jmp $`, parked | a large loop over resident code |
+
+State B, measured over six minutes on the boot after the widening:
+
+    leaves-filled  318,528 -> 318,528   (zero new memory, six minutes)
+    rip cycles     ntoskrnl+0x1100e6, +0x1a57e9, +0x4a768e,
+                   +0x1a57fa, +0x22890d, +0x4b3692
+    ring 3         0 of 20 samples
+
+Those offsets are the ones whose bytes were read earlier: `ret`,
+`pop rdx; pop rax; pop rcx; ret`, and function epilogues. **The guest is
+cycling through function returns** over a working set it already has.
+
+**Both states are stuck and neither is slow.** Zero new pages over six
+minutes with the machine executing is the same verdict as the infinite loop,
+reached by a different route: state A parks explicitly, state B loops. What
+is not yet known is whether B precedes A - a retry loop that eventually gives
+up and calls the fatal path - or whether they are independent. **The profile
+distinguishes them in one line** (flush count against top slot), so any
+future reading should say which state it was taken in before quoting a
+number from it. Several numbers in this file do not, and that is why they
+disagree.
+
 ## The park is in securekernel.exe, at image+0xb043e. Named, not inferred
 
 The infinite loop the section below establishes is in the **VBS secure
