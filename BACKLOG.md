@@ -36455,3 +36455,62 @@ the watch intercepts, the synthetic MSR writes (`EOI`, `ICR`,
 `STIMER0_COUNT`) that must reach Hyper-V, and one `vmresume` per exit taken.
 **Measure per-tick, not per-second**, or the next intervention will be
 judged the way that one nearly was.
+
+## The complete account, with every measurement reconciled
+
+Correcting the previous entry's arithmetic, which used a cumulative average
+where the steady state was wanted, and completing it.
+
+    steady-state exits per trust-level round trip      879
+    clock interrupts per round trip (50 ms / 1.74 ms)  ~29
+    -> exits per clock interrupt                       ~30
+    x measured cost per exit                           ~120 us
+    -> wall time per clock interrupt                   ~3.6 ms
+
+    tick period the guest asks for                      1.743 ms
+    tick period actually delivered (measured, 5,063 arms)  5.455 ms
+    ratio                                               3.13x
+
+**A clock interrupt costs about twice the period the guest asks for.** It
+cannot be serviced inside its own interval, so the interval stretches: the
+5.455 ms delivered against 1.743 ms asked - recorded earlier in this file as
+"LATE by 3.130x" and treated as a separate fault - **is this overrun seen
+from the other end.**
+
+That reconciles every measurement taken in this investigation:
+
+| measurement | follows from |
+|---|---|
+| duty 0.797, Windows holds 20 s | 30 exits a tick at 120 us |
+| eight hot RIPs, all clock path | the ISR is all there is time for |
+| STIMER 3.13x late | the ISR overruns its period by ~2x |
+| gap distribution bimodal | most ticks yield nothing, one gets through |
+| 9 Hz trust-level rate | what is left after the clock |
+| `ModifyVtlProtectionMask` frozen | the work that issues it never runs |
+| no ring 3 in 3,011,724 samples | phase 1 never completes |
+| fifteen mechanisms all correct | none of them is broken |
+
+**Nothing is left unexplained.** The reference clock is right to one part in
+ten million, the extended page tables are right, the interrupt delivery is
+right, the trust-level transitions are right, both trust levels execute real
+code, and the guest is not starved of wall time. The single defect is that
+**a clock interrupt costs thirty exits**.
+
+### The target, and how to judge an attempt at it
+
+Thirty exits a tick, at apic=1, in rough proportion:
+
+    ~10  ept-violation   APIC-page writes the watch intercepts
+    ~9   vmresume        one per exit taken - falls out with the others
+    ~6   wrmsr           synthetic EOI, ICR, STIMER0_COUNT - must reach Hyper-V
+    ~2   int-window
+    ~3   everything else
+
+`vmresume` is not independent: it is the guest hypervisor re-entering after
+each exit, so it scales with whatever else is removed. The two real
+populations are the APIC-page writes and the synthetic MSR writes.
+
+**Judge any attempt per tick, never per second.** Disarming the APIC watch
+cut exits per second by 14% and *raised* exits per round trip from 879 to
+1,120 - it is a pessimisation, and measured per second it looked like an
+improvement. That is the trap this section exists to mark.
