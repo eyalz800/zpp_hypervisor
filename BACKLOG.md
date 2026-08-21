@@ -785,6 +785,46 @@ is not there" and is really "the wrong question was asked". `x` is the
 virtual read. The same distinction is why a wide `xp` over a device BAR
 lied, further down this file.
 
+## VMFUNC is not it, and the APIC candidate needs tempering
+
+**VMFUNC: zero calls, zero refusals.** The counters are now printed - an
+eighth instrument that was recorded and read by nothing - and the
+second-level guest never executes the instruction. Consistent with the note
+on the capability merge: Hyper-V "does not offer VMFUNC to its guest", so
+VTL switching here does not use extended-page-table pointer switching at all.
+
+Worth having checked, because the path *looks* like a candidate: we advertise
+`IA32_VMX_VMFUNC = 1` and then force the VM-function controls to zero in
+vmcs02. That reads like advertising a capability and withholding it - the
+exact mistake this tree warns about - and it is not. **Zeroing the controls
+is what makes every VMFUNC exit** (SDM 26.5.5), so the instruction is
+*honoured by interception*: `on_l2_exit` validates the function and index,
+reads the entry from the guest hypervisor's own list, and translates it into
+a shadow. Letting the bit through would run a guest against unshadowed
+tables. The counters confirm the path is simply never taken.
+
+**And the APIC candidate is weaker than the previous section makes it
+sound.** Virtualized APIC accesses, APIC-register virtualization and
+virtual-interrupt delivery are **optimisations**, not prerequisites: Hyper-V
+and VBS run on processors that predate them, falling back to trapping every
+APIC access - which is what the 28.8% of exits at `gpa 0xfee00000` from
+hvix64's own ICR and EOI helpers *is*. A capability whose absence a real
+machine tolerates cannot by itself explain a state machine that will not
+advance.
+
+**So it stays on the list but demoted**: it remains the only thing found that
+is ours, specific and untested, and the shape still fits VSM needing an
+interrupt controller for its second trust level - but "Hyper-V requires it"
+is now known to be false in general, and would have to be true *specifically
+of VSM* for the hypothesis to hold. That is a narrower claim and nothing here
+supports it yet.
+
+**What the elimination list now looks like**, everything measured rather than
+argued: nested-VMX carriage, event injection, EPT composition, XMM/FPU
+marshalling, APIC routing, INIT-SIPI-SIPI, the reference clock, exit cost,
+cache footprint, the phase tree, lost IPIs, the hypervisor-present bit, and
+VMFUNC. **Thirteen candidates, all dead.**
+
 ## The leading candidate at last: we withhold APIC virtualization from Hyper-V
 
 The VMX capabilities this VMM answers are now printed - a seventh instrument

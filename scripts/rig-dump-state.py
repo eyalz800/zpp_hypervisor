@@ -2293,6 +2293,9 @@ def main():
                # The IUM block memory breakpoint. See
                # nested_vmx::watch_vtl_block.
                "capability_answers", "nested_capability_reads",
+               # VMFUNC, which is how a guest hypervisor switches extended
+               # page tables. A refusal injects #UD into its guest.
+               "l2_vmfunc_calls", "l2_vmfunc_refused",
                "vtl_block_page", "vtl_block_writes",
                "vtl_block_writer_rip", "vtl_block_write_address",
                "vtl_block_write_value"]
@@ -2442,6 +2445,9 @@ def main():
     for name in ("control_secondary_requested", "control_secondary_granted"):
         if name in off:
             monitor.queue(instance + off[name], args.cpus)
+    for name in ("l2_vmfunc_calls", "l2_vmfunc_refused"):
+        if name in off:
+            monitor.queue(instance + off[name], args.cpus)
     if "capability_answers" in off:
         monitor.queue(instance + off["capability_answers"], 48 * 2)
         monitor.queue(instance + off["nested_capability_reads"], 1)
@@ -2523,6 +2529,22 @@ def main():
             for bit in (0, 8, 9):
                 state = "yes" if got & (1 << bit) else "no"
                 print(f"    {SECONDARY[bit]:<30} {state}")
+
+    # VMFUNC: extended-page-table pointer switching, which is how a
+    # guest hypervisor moves its guest between page-table sets.
+    #
+    # **A refusal is not silent - it injects #UD** - so refused > 0 means
+    # the guest hypervisor asked for a switch and got an invalid-opcode
+    # fault instead. Printed because a counter that only matters when
+    # non-zero is exactly the kind that goes unread until it is too late.
+    if "l2_vmfunc_calls" in off:
+        calls = sum((read("l2_vmfunc_calls", c) or 0)
+                    for c in range(args.cpus))
+        refused = sum((read("l2_vmfunc_refused", c) or 0)
+                      for c in range(args.cpus))
+        if calls or refused:
+            note = "  <- REFUSED, #UD injected" if refused else ""
+            print(f"\ncpu* VMFUNC: {calls:,} calls, {refused:,} refused{note}")
 
     # What this VMM told the guest hypervisor about VMX, which is a set
     # of values we genuinely originate - unlike the hypercall answers,
