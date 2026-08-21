@@ -785,6 +785,67 @@ is not there" and is really "the wrong question was asked". `x` is the
 virtual read. The same distinction is why a wide `xp` over a device BAR
 lied, further down this file.
 
+## THE CONTROL, RUN PROPERLY: plain Windows reaches user mode. It IS a VBS problem
+
+**The section below is void, and the way it was void is the lesson.** It
+reported that the failure reproduces with nested VMX off. **Nested VMX was
+never off.** `check-bootable.sh` **refused** to deploy a `nested=0` build -
+it exists precisely to stop that - and printed the refusal along with the
+override to use if the question is deliberate. The command grepped for
+`^OK:`, got nothing, and the `ok:` line from `rig-boot.sh` was mistaken for
+success. The old `nested=1` loader stayed on the ESP and the guest rebooted
+with it.
+
+**The tooling was right and the reading of it was wrong**, which is this
+file's oldest recurring failure - *verify the binary that actually ran*. The
+check that settles it is one command and was not used: read
+`zpp_build_switches` out of the **running module** through the monitor. Done
+after the fact, it read `nested=1`.
+
+**Re-run deliberately**, with `ZPP_ALLOW_NO_NESTED=1`, and verified from the
+running module rather than the deploy script:
+
+    running module manifest: nested=0
+    l2-entries: 0          <- no second level exists, as it should not
+    module loads: 2
+    reader proven: host_page_table[0] = 0x6a36d023
+
+Then the privilege level, sampled forty times from the monitor:
+
+    38 x CPL=0
+     2 x CPL=3
+
+**Windows reaches user mode.** With nested VMX off, this VMM boots Windows
+into ring 3.
+
+| | nested=1 | nested=0 |
+|---|---|---|
+| ring 3 reached | **never**, across 10,576,438 ring-0 exits | **yes** |
+| `TickCount` | 64.0 Hz | 64.3 Hz |
+
+**So the failure is specific to nested virtualization and virtualization-based
+security after all.** This VMM runs a plain Windows to user mode; it is the
+guest hypervisor's guest that never gets there.
+
+**Which restores, rather than retires, the nested findings.** The trust-level
+round trip, vector `0x2f` held pending at task priority `0xd0` across
+2,105,997 requests, the secure-kernel half costing 1,254.4 microseconds, the
+30-millisecond ordinary-kernel half - all of those describe the configuration
+that fails, and the configuration that works does not have them. The
+retraction written into the section below applied to a control that never
+ran and should be read as withdrawn.
+
+**Two process notes worth more than the result:**
+
+- **A guard that refuses is not a failure to route around.** The refusal
+  named the exact override for a deliberate experiment. Reaching for it
+  knowingly took one command; missing the refusal cost an entire wrong
+  conclusion and a section of this file.
+- **`grep` for a success line cannot distinguish "did not succeed" from
+  "did not print".** Both give empty output. The deploy's own report has to
+  be read, or the running manifest checked - which is the same rule this
+  file states for CMake caches, stale objects and manifests.
+
 ## THE CONTROL: it fails identically with nested VMX OFF. Not a VBS problem
 
 **The control this file has named as decisive and never run.** One variable,
