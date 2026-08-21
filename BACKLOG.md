@@ -785,6 +785,53 @@ is not there" and is really "the wrong question was asked". `x` is the
 virtual read. The same distinction is why a wide `xp` over a device BAR
 lied, further down this file.
 
+## The loop, decoded: a state machine on a byte that never changes
+
+`VslpEnterIumSecureMode` disassembled from its entry (rva 0x38dd60) with
+offsets computed from instruction encodings, so the alignment is right this
+time. Two backward branches enclose the VTL call, and the loop head is:
+
+    +0x1a0  movzbl 1(%rbx), %eax     <- read a STATE BYTE from [rbx+1]
+    +0x1a4  testb  %al, %al
+    +0x1a6  jns    +0x1a9
+    +0x1a8  int3                     <- if bit 7 set: breakpoint
+    +0x1a9  andb   $127, 1(%rbx)     <- clear bit 7
+    +0x1ad  movzbl 1(%rbx), %eax
+    +0x1b1  cmpb   $1, %al ; je      <- dispatch on the state
+    +0x1b5  cmpb   $6, %al ; je
+    ...
+    +0x3a2  callq  ...               <- the work, including the VTL call
+    +0x3a7  movl   8(%rbx), %r15d
+    +0x3ad  jmp    +0x1a0            <- re-read the state, go again
+
+**It is a state machine over a byte at `[rbx+1]`, and the byte never reaches
+a terminal value.** `rbx` comes from `r9`, the routine's fifth argument -
+the IUM context block - and the same block is what
+`HvlSwitchToVsmVtl1` marshals into and out of VTL1.
+
+**One hypothesis this raised and killed.** `HvlSwitchToVsmVtl1` passes VSM
+state in **`rbx` and `xmm10`-`xmm15`**:
+
+    in:  movq (%rdx), %rbx ; movdqu 8(%rdx), %xmm10 ... 88(%rdx), %xmm15
+    out: movq %rbx, (%rdx) ; movdqu %xmm10, 8(%rdx) ...
+
+A VMM that clobbered those between L2's exit and its re-entry would destroy
+whatever VTL1 returned, and the guest would loop for ever on an unchanged
+state byte - which is exactly the symptom. **Checked: it does not.**
+`capture_context_into_stack` saves `xmm0`-`xmm15`, `fxsave` and `stmxcsr`,
+and `restore_context` puts all of them back with `fxrstor` and `ldmxcsr`.
+Recorded as a **non-finding**, because "the hypervisor eats the guest's SSE
+state" is a good guess that would have cost a day to re-derive.
+
+**What is now known and what is not.** Known: the guest loops in one routine,
+at one call site, at one stack depth, dispatching on one byte; VTL1 answers
+each pass through `SkpReturnFromNormalMode`; the nested-VMX carriage is clean
+by two independent readings; and the guest's SSE state survives our exits.
+**Not known: who is supposed to write that byte, and with what.** If VTL1
+writes it, the question is why the write is not visible to VTL0 - which is a
+memory-visibility question about a page shared across trust levels, and a
+different shape of bug from anything looked at so far.
+
 ## The loop is in `VslpEnterIumSecureMode`, and the call site never moves
 
 Found by following the *actual* stack rather than the candidate list. The
