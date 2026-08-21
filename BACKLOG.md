@@ -785,6 +785,83 @@ is not there" and is really "the wrong question was asked". `x` is the
 virtual read. The same distinction is why a wide `xp` over a device BAR
 lied, further down this file.
 
+## The nested guest wedges completely: six processors halted, nobody wakes them
+
+**This corrects the section below, which said the guest was "making forward
+progress - a throughput collapse, not a spin".** That was read off 40 RIP
+samples taken through the monitor, of which only six landed in guest code,
+and six distinct addresses out of six looked like breadth. The VMM's own
+second-level profile had 677,542 samples and says the opposite:
+
+    cpu 0 second-level profile: 677,542 samples
+      0xfffff803372b143e   675,509   99.7%
+
+The dump even prints the rule for reading it - "many flushes with a low
+maximum is a guest executing widely; a spin fills the table once and then
+never flushes again". **Six samples cannot outvote 677,542**, and the
+instrument that had the samples was already in the dump. The lesson is the
+one this file keeps relearning in new clothes: a census over a handful of
+points cannot tell you it is under-powered, because breadth and
+under-sampling look identical from inside.
+
+**The guest is not slow. It is stopped.** Exit counters over a 45-second
+window, on a guest that had been running for twenty minutes:
+
+    cpu   exits    l2-entries
+      0       0             0
+      1     150             0
+      2-7     0             0
+
+Zero exits on seven of eight processors. A spin inside the first-level guest
+needs no exits at all, which is why the earlier rate measurements - 15,712
+exits/s - were of the phase *before* this one.
+
+**Where each processor is**, sampled from the monitor and decoded by walking
+the guest page tables by hand:
+
+- **cpu 0** sits at `0xfffff8301b01f3d0` in hvix64, which disassembles to
+  `pause; pause; jmp -282`, the tail of a loop that reads `%gs:8` for its own
+  processor index, fills a per-processor bitmap in locals with `or $-1`,
+  clears its own bit with `btr`, and rescans until the entries change. It is
+  **waiting for the other processors to answer**.
+- **cpus 2-7** all sit at `0xfffff8301b03a070`, which is one byte past a
+  `hlt` at `0xfffff8301b03a06f`, followed by
+  `mov al,[flag]; test al,al; je` back to that `hlt`. Hyper-V's idle loop.
+  `HLT=0` in `info registers` and the RIP never moves, which is what a
+  processor halted in **non-root** operation looks like from outside - KVM's
+  vCPU thread is inside `KVM_RUN`, so KVM does not see a halt.
+- **cpu 1** is the only one alive, in this VMM at 3.3 exits a second.
+
+**The decisive asymmetry: no interrupt of any kind reaches cpus 2-7.** Not an
+IPI, and *not a timer either* - cpu 1 has taken 676,198 preemption-timer
+exits, 99.1% of its total, while cpus 2-7 have taken about 4,000 exits each
+in the whole run and none at all now. A processor that is merely idle still
+gets its timer.
+
+**The last thing each parked processor did was write its local APIC.** Their
+exit rings all end the same way, on EPT violations at `gpa 0xfee00000`, at
+three RIPs that decode to exactly:
+
+    mov [rax+0x310], r8d     ; ICR high
+    mov [rax+0x300], edx     ; ICR low
+    mov dword [rax+0xb0], 0  ; EOI
+
+Recorded one instruction past each, because the ring is sampled after
+handling and the resume path has already advanced RIP - worth knowing before
+concluding a fault is at the wrong address.
+
+So the shape is: every processor sends its IPIs and goes idle, cpu 0 then
+waits for them to answer, and nothing ever wakes them. **This is a lost
+wake-up, and it is the blocker** - it is not a performance problem, and the
+tax measured in the section below is a separate matter that does not stop the
+boot on its own.
+
+**Not yet established**: whether the wake-up is lost on the sending side
+(our emulation of the ICR write not reaching a processor halted in non-root)
+or on the receiving side (nothing arming those processors' timers at all).
+The timer asymmetry points at the latter and is the cheaper of the two to
+test, because it needs no IPI to be in flight to reproduce.
+
 ## The nesting tax is our own VMCS accesses, ~109 a round trip, and it is the blocker
 
 With the control settled - plain Windows reaches ring 3, the nested guest
