@@ -785,6 +785,68 @@ is not there" and is really "the wrong question was asked". `x` is the
 virtual read. The same distinction is why a wide `xp` over a device BAR
 lied, further down this file.
 
+## Retraction: it is not an interrupt storm, and the timer is healthy
+
+**The section below is wrong and this is the measurement that kills it.** It
+concluded, from an IDT stub table at the hot instruction pointer, that the
+guest is in an interrupt storm on vector 0xd1. The stub bytes were real. The
+conclusion drawn from them was not.
+
+**Injections exactly match arms.** Measured as deltas over 60 seconds:
+
+    0xd1 injected        891.8 /s
+    STIMER0_COUNT armed  892.5 /s
+
+0.08% apart. **One delivery per arming** - we are not injecting more than the
+level above staged, which is what "storm" would require.
+
+**And the timer is on time.** The ring carries the deadline and a TSC for
+every event, so the interval needs no averaging:
+
+    COUNT written  value 0x54313f9b3  tsc 0x41f49e2ebc7
+    clock vector   value 0xd1         tsc 0x41f4a0b54df
+    COUNT written  value 0x543143a55  tsc 0x41f4a15372d
+
+    deadline delta   16,546 units x 100 ns  = 1.65 ms   (asked)
+    tsc delta        3,296,614 cycles       = 1.65 ms   (given)
+    arm -> injection 2,842,904 cycles       = 1.43 ms
+    injection -> next arm                   = 0.21 ms
+
+The guest asks for ~1.65 ms, gets ~1.65 ms, and its handler finishes in
+**209 microseconds** - 13% of the period. **87% of the guest's time is
+free.** Nothing about that is a storm, and nothing about it is a clock this
+VMM is getting wrong.
+
+**Two of my own numbers are withdrawn with it:**
+
+- **The 3,536 us arm-to-fire is void.** `stimer_given_arms` pairs only 35 of
+  892 arms a second - 4% - because `stimer_arm_pending_tsc` is overwritten by
+  the next arm before the injection lands. It was an average over an
+  unrepresentative sample, and the ring above is the honest form. *Prefer the
+  ring to the average whenever both exist.*
+- **The 1.56x "arms too fast" is void** for the same reason, and the ring's
+  1.65 ms says the period is right.
+
+**What survives, and it is the part that matters.** The guest is still stuck:
+13,029 exits a second, **zero** new pages over 60 seconds, ring 0 in every
+sample, and 1,204,761 requests for vector 0x2f of which 45,297 - 3.8% - are
+ever carried. The task priority is 0xd0 whenever it is sampled.
+
+**So the guest is at IRQL 13 for a reason that is not the clock**, because
+the clock only occupies 13% of it. Something else raised the priority and is
+waiting, and the DPC interrupt it keeps asking for cannot be taken until that
+something returns. Hyper-V issues **no IPIs at all** after bring-up - the log
+ring holds 380 of 4,000 lines and its last interrupt-command entries are the
+start-up sequence - so whatever the wait is, it is not being signalled to
+another processor.
+
+**A caution for whoever reads the exit ring next.** Its `rip` does not always
+belong to its `reason`: entries reading `reason 0x18` (VMRESUME, an L1
+instruction) carry second-level kernel addresses whose bytes decode to `ret`
+and function epilogues. The reason appears to come from one VMCS and the RIP
+from whichever is current. **Do not pair them without checking**, which is
+how the storm reading happened.
+
 ## What it is stuck ON: an interrupt storm on vector 0xd1, read from the guest's own bytes
 
 **It is stuck, not slow, and the distinction is now settled by reading the
