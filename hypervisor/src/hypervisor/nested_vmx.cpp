@@ -2134,6 +2134,30 @@ bool hypervisor::on_guest_vmlaunch(std::size_t cpu,
 
                 this->vtl_protect_answer_last_cr3[cpu] = entering;
 
+                // Where it resumes, counted rather than sampled. See
+                // `vtl_protect_answer_rip`.
+                auto resume_at = this->vmcs.guest_rip();
+                bool placed{};
+
+                for (std::size_t k{}; k < 8; ++k) {
+                    if (0 == this->vtl_protect_answer_rip_count[cpu][k]) {
+                        this->vtl_protect_answer_rip[cpu][k] = resume_at;
+                        this->vtl_protect_answer_rip_count[cpu][k] = 1;
+                        placed = true;
+                        break;
+                    }
+
+                    if (resume_at == this->vtl_protect_answer_rip[cpu][k]) {
+                        this->vtl_protect_answer_rip_count[cpu][k] += 1;
+                        placed = true;
+                        break;
+                    }
+                }
+
+                if (!placed) {
+                    this->vtl_protect_answer_rip_other[cpu] += 1;
+                }
+
                 if (entering == this->vtl_protect_last_cr3[cpu]) {
                     this->vtl_protect_answer_to_caller[cpu] += 1;
                 } else {

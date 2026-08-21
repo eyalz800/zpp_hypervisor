@@ -2269,7 +2269,9 @@ def main():
                "vtl_protect_early_before", "vtl_protect_early_after",
                "vtl_protect_last_r15", "vtl_protect_answer_to_caller",
                "vtl_protect_answer_to_other",
-               "vtl_protect_answer_last_cr3",
+               "vtl_protect_answer_last_cr3", "vtl_protect_answer_rip",
+               "vtl_protect_answer_rip_count",
+               "vtl_protect_answer_rip_other",
                "vmcs_shadow_loads", "vmcs_shadow_stores",
                "vmcs_field_read_encoding", "vmcs_field_read_count",
                "vmcs_field_write_encoding", "vmcs_field_write_count",
@@ -2398,7 +2400,9 @@ def main():
                "vtl_protect_early_before", "vtl_protect_early_after",
                "vtl_protect_last_r15", "vtl_protect_answer_to_caller",
                "vtl_protect_answer_to_other",
-               "vtl_protect_answer_last_cr3",
+               "vtl_protect_answer_last_cr3", "vtl_protect_answer_rip",
+               "vtl_protect_answer_rip_count",
+               "vtl_protect_answer_rip_other",
                "vmcs_shadow_loads",
                "vmcs_shadow_stores",
                "guest_state_writes_skipped", "guest_state_writes_done",
@@ -2467,7 +2471,12 @@ def main():
     monitor.queue(instance + off["vtl_protect_last_r15"], scalar_cpus)
     for _n in ("vtl_protect_answer_to_caller",
                "vtl_protect_answer_to_other",
-               "vtl_protect_answer_last_cr3"):
+               "vtl_protect_answer_last_cr3",
+               "vtl_protect_answer_rip_other"):
+        monitor.queue(instance + off[_n], scalar_cpus)
+    for _n in ("vtl_protect_answer_rip", "vtl_protect_answer_rip_count"):
+        monitor.queue(instance + off[_n], scalar_cpus * 8)
+    for _n in ():
         monitor.queue(instance + off[_n], scalar_cpus)
     for _n in ():
         monitor.queue(instance + off[_n], scalar_cpus)
@@ -2987,6 +2996,15 @@ def main():
               f"{tc:,} times, to the OTHER level {to:,} times"
               + ("   <- answers land in the wrong trust level"
                  if to > tc else ""))
+        print("      where the answer resumes the guest, over all calls:")
+        for k in range(8):
+            c = read('vtl_protect_answer_rip_count', (cpu * 8) + k) or 0
+            if c:
+                print(f"        0x{read('vtl_protect_answer_rip', (cpu * 8) + k):x}"
+                      f"  {c:9,d}")
+        oth = read('vtl_protect_answer_rip_other', cpu) or 0
+        if oth:
+            print(f"        (beyond eight distinct) {oth:,}")
         print(f"      last answer entered cr3 "
               f"0x{read('vtl_protect_answer_last_cr3', cpu):x}, "
               f"call was from cr3 "

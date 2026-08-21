@@ -37610,3 +37610,40 @@ point. If it is rare, the fatal case is identified. If it is the common
 case, then this entry shape is normal too and the fault is elsewhere again.
 That is a counter, not a trace, and this file's own rule says to reach for
 the aggregate first.
+
+## The answer resumes at the same instruction on all 39,275 calls
+
+The counter the previous entry asked for, aggregated rather than sampled:
+
+    where the answer resumes the guest, over all calls:
+      0xfffff80215d20003     39,275
+
+**One distinct resume point, no variation.** So the entry that carries a
+protection answer looks identical on the fatal call and on all 39,274
+harmless ones, and **the resume point does not distinguish them.**
+
+That does not refute the pinned trace, and the trace's own reading holds up
+under checking: its first instruction was securekernel base + `0xEABC0`,
+which is `KiVinaInterruptShadow+0` **exactly** - an exact symbol match, not
+a nearest-below guess. So that entry did vector into the VINA handler on the
+instruction after the resume.
+
+**What the two together say** is that the resume is always to the same
+place, and what happens on the *next* instruction is where the paths
+diverge - and that is not visible in any counter here. Distinguishing it
+needs the monitor trap flag armed on **every** protection answer rather than
+one, which is 39,275 single-step exits: affordable as a count of "did the
+next instruction leave the hypercall page", not as 39,275 traces.
+
+**Status, plainly.** The mechanism is identified to a specific entry, a
+specific handler and a specific stranded frame, and it is *not* identified
+to what makes one occurrence of a common pattern fatal. Every counter that
+could have separated them has come back uniform - the status, the reps, the
+destination trust level, the resume point - and the one observation that
+differs is a single trace of an event that happens 39,275 times.
+
+**This investigation has now eliminated every mechanism it could name.** The
+remaining work is not another hypothesis; it is the one narrow measurement
+above, and it should be built as a counter over all calls rather than as a
+trace of one - which is the lesson this file has recorded ten times and is
+the only reliable thing it has produced.

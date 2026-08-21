@@ -10150,6 +10150,26 @@ private:
     std::uint64_t vtl_protect_answer_to_caller[max_cpus]{};
     std::uint64_t vtl_protect_answer_to_other[max_cpus]{};
     std::uint64_t vtl_protect_answer_last_cr3[max_cpus]{};
+
+    /**
+     * The instruction pointer the answer-carrying entry resumes at,
+     * aggregated over every protection call.
+     *
+     * The single pinned trace of that entry started inside
+     * `KiVinaInterruptShadow`, where every other trace starts at
+     * `SkpReturnFromNormalMode`. **Whether that is the fatal case or simply
+     * what these entries normally look like cannot be told from one
+     * observation**, and reading a single sighting of a common event as the
+     * explanation of a rare one is the mistake this investigation has made
+     * ten times.
+     *
+     * So: count. Eight distinct resume points with their counts, and a
+     * total, which distinguishes "the answer usually resumes the caller and
+     * once did not" from "the answer never resumes the caller".
+     */
+    std::uint64_t vtl_protect_answer_rip[max_cpus][8]{};
+    std::uint64_t vtl_protect_answer_rip_count[max_cpus][8]{};
+    std::uint64_t vtl_protect_answer_rip_other[max_cpus]{};
     std::uint64_t vina_at_call_set[max_cpus]{};
     std::uint64_t vina_at_call_clear[max_cpus]{};
     std::uint64_t vina_at_call_unread[max_cpus]{};
