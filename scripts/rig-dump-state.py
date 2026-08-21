@@ -2268,7 +2268,15 @@ def main():
                "stimer_arm_kind",
                # Where the second-level guest's hot instruction lives, so
                # the bytes can be read. See `profile_code_physical`.
-               "profile_code_physical", "profile_code_virtual"]
+               "profile_code_physical", "profile_code_virtual",
+               # The call stacks. Sampled for sessions and printed by
+               # nothing, which is why "what is the guest waiting on" has
+               # been answered from exit histograms every time.
+               "guest_stack_trace", "guest_stack_count",
+               "guest_stack_pointer", "guest_stack_rip",
+               "guest_kernel_base", "guest_kernel_size",
+               "guest_interrupted_trace", "guest_interrupted_count",
+               "guest_interrupted_rsp", "guest_interrupted_rip"]
     off = gdb_offsets(args.elf, members)
     instance = base + gdb_symbol(
         args.elf, "zpp::hypervisor::hypervisor::instance()::instance")
@@ -2399,9 +2407,17 @@ def main():
             monitor.queue(instance + off[name], args.cpus * stimer_ring)
     # Two scalars, not per-processor arrays - the profiler is boot
     # processor only, which is why these are queued with a count of one.
-    for name in ("profile_code_physical", "profile_code_virtual"):
+    for name in ("profile_code_physical", "profile_code_virtual",
+                 "guest_stack_count", "guest_stack_pointer",
+                 "guest_stack_rip", "guest_kernel_base", "guest_kernel_size",
+                 "guest_interrupted_count", "guest_interrupted_rsp",
+                 "guest_interrupted_rip"):
         if name in off:
             monitor.queue(instance + off[name], 1)
+    stack_capacity = 48
+    for name in ("guest_stack_trace", "guest_interrupted_trace"):
+        if name in off:
+            monitor.queue(instance + off[name], stack_capacity)
 
     words = monitor.run()
 
@@ -2434,6 +2450,44 @@ def main():
     # the level above expired it early", and those need different fixes.
     # The `kind` column is what separates them - 1 is the guest writing a
     # count, 3 is the clock vector actually going in.
+    # The call stacks, which say what the guest is *doing* rather than
+    # where it is.
+    #
+    # These have been sampled for several sessions and printed by nothing,
+    # so every attempt at "what is the second-level guest waiting on" has
+    # been answered from exit histograms and instruction pointers instead -
+    # and those say where it is, never what called it there.
+    #
+    # Offsets from the kernel base rather than raw addresses, because the
+    # base moves every boot (KASLR) and an offset is comparable across
+    # runs and against a PDB. Values outside the image are printed raw:
+    # they are stack data that survived the scan's filter, not frames.
+    kbase = read("guest_kernel_base") or 0
+    ksize = read("guest_kernel_size") or 0
+    for label, tr, cnt, rsp, rip in (
+            ("where it is now", "guest_stack_trace", "guest_stack_count",
+             "guest_stack_pointer", "guest_stack_rip"),
+            ("what it interrupted", "guest_interrupted_trace",
+             "guest_interrupted_count", "guest_interrupted_rsp",
+             "guest_interrupted_rip")):
+        if tr not in off:
+            continue
+        n = read(cnt) or 0
+        if not n:
+            continue
+        print(f"\ncpu 0 second-level call stack - {label} "
+              f"({n} frames, rsp 0x{read(rsp) or 0:x}, "
+              f"rip 0x{read(rip) or 0:x})")
+        if kbase:
+            print(f"    kernel base 0x{kbase:x} size 0x{ksize:x} "
+                  f"- offsets below are into it")
+        for i in range(min(n, stack_capacity)):
+            frame = words.get(instance + off[tr] + 8 * i, 0)
+            if kbase and kbase <= frame < kbase + ksize:
+                print(f"    ntoskrnl+0x{frame - kbase:x}")
+            else:
+                print(f"    0x{frame:x}")
+
     # The instruction the second level is sitting on, read as bytes.
     #
     # `xp` is a physical read and the hypervisor has already resolved this

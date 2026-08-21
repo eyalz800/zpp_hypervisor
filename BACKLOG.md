@@ -785,6 +785,84 @@ is not there" and is really "the wrong question was asked". `x` is the
 virtual read. The same distinction is why a wide `xp` over a device BAR
 lied, further down this file.
 
+## SETTLED: the guest parks itself in `pause; jmp $` forever. It is a block, not a price
+
+**The question this file has carried for sessions - "a machine too slow to
+finish a tick inside a tick, a price, or a handler that would not finish
+however long it were given, a block" - is answered.** It is a block. The
+second-level guest executes an **unconditional infinite loop**, and no amount
+of making anything faster ends it.
+
+Read from the guest's own memory, cleanly aligned:
+
+    0x196a434  0f 10 41 40   movups xmm0, [rcx+0x40]
+    0x196a438  0f 11 40 40   movups [rax+0x40], xmm0
+    0x196a43c  f3 90         pause
+    0x196a43e  eb fc         jmp -4          -> 0x196a43c
+    0x196a440  32 c0         xor al, al           <- unreachable
+    0x196a442  48 8b 8c 24 00 05 00 00  mov rcx, [rsp+0x500]
+    0x196a44a  48 33 cc      xor rcx, rsp         <- stack cookie epilogue
+
+`eb fc` jumps back four bytes from the *next* instruction, which lands on the
+`pause`. **Two instructions, no condition, no exit.** The function's real
+epilogue - returning `al = 0` - is dead code beneath it.
+
+**This is what every boot has been showing all along.** The profile's two
+hottest addresses were always a pair two bytes apart:
+
+    boot 1  0xfffff803372b143e  675,509   and  ...143c  178
+    boot 2  0xfffff8027fe3143e   55,459   and  ...143c   55
+    boot 3  0xfffff8065155143e            and  ...143c
+
+Those are the `jmp` and the `pause`. The 96.8% and 99.7% "spins" were this
+loop, and the reason it was never named is that its address is in **no
+image** - it sits below the kernel base, so a scan for a PE header finds
+nothing, and it cannot be read from the monitor because that only has the
+first-level guest's CR3.
+
+**How it was finally read**, and the method is the reusable part:
+`record_profile_context` already translates a linear address through the
+*second* level's paging, so it now publishes the hot instruction pointer's
+physical address as `profile_code_physical`; `xp` reads the bytes from there.
+Nothing decodes in the hypervisor. **The address that mattered was the one
+address nothing could read, for three sessions.**
+
+**The call stack, which was also sampled for sessions and printed by
+nothing**, puts the callers in the kernel:
+
+    rip 0xfffff8065155143e, rsp 0xffffce8062c7c7f0
+      ntoskrnl+0x6a6fd0
+      ntoskrnl+0xbbf200
+
+So kernel code called into a routine in another image, and that routine
+parked. The `movups` run before the loop is a 16-byte-at-a-time block copy,
+so the park is on some path *after* a copy - the shape of a routine that
+copies a structure and then cannot proceed.
+
+**What this retires**, and it is most of the last two days of this file:
+
+- Every measurement of tick cost, VTL round-trip cost, exits per tick, VMCS
+  accesses per exit and cycles per exit is **describing the cost of running
+  an infinite loop**. They were all correct and all beside the point.
+- "The gap is 8.6x", "the gap is 1.18x", "the tick is 2.03x late", "the guest
+  arms 1.56x too fast" - all void, all downstream of treating a parked
+  processor as a slow one.
+- The levers that moved nothing - profiler off, APIC watch off, 1.5% - were
+  not too small. **They were aimed at a machine that had already stopped.**
+
+**The one thing that ever moved it is now explicable.** `stretch=2` gave
+application processors real work for the first time - 27,727 exits against
+284 - because doubling the period changed *when* the guest reached the path
+that parks, not because it bought time. That is a logical change of course,
+not a speed change, and it is consistent with a block.
+
+**Next, and it is a small question now**: which image, and which function.
+The image base is not the kernel's, so the candidates are the secure kernel
+or a boot driver - and a `pause; jmp $` reached from a copy routine, in a
+VBS-only failure, points at the secure kernel refusing something. Finding the
+image needs a downward scan for `MZ` **through the second level's paging**,
+which is one more use of the translation that just read these bytes.
+
 ## Retraction: it is not an interrupt storm, and the timer is healthy
 
 **The section below is wrong and this is the measurement that kills it.** It
