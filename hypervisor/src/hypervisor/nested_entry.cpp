@@ -7340,6 +7340,29 @@ void hypervisor::arm_vtl_step(std::size_t cpu, std::size_t kind)
         return;
     }
 
+    // The one-shot pin. See `vtl_step_pin_request`: once the trace has
+    // been taken at the transition that matters, every later arming is
+    // refused so the ring still holds it when the guest is dumped.
+    if ((0 != this->vtl_step_pin_taken[cpu]) && (0 == kind)) {
+        return;
+    }
+
+    // Only the VtlCall side. `arm_vtl_step` is also called for the
+    // free-running kind on **every** second-level entry, so an
+    // unrestricted pin is taken by that before any trust-level
+    // transition happens - and then refuses the one it was for.
+    if ((0 != this->vtl_step_pin_request[cpu]) && (0 == kind)) {
+        this->vtl_step_pin_request[cpu] = 0;
+        this->vtl_step_pin_taken[cpu] = 1;
+
+        this->vtl_step_count[kind] = 0;
+        this->vtl_step_other[kind] = 0;
+        this->vtl_step_other_reason[kind] = 0;
+        this->vtl_step_at[kind] = this->vtl_switches[cpu][kind];
+        this->vtl_step_active[cpu] = static_cast<std::uint8_t>(kind + 1);
+        return;
+    }
+
     // The free-running kind counts second-level entries and the two
     // trust-level kinds count switches, so which counter drives the
     // period is the one thing that differs between them.
@@ -8746,6 +8769,21 @@ hypervisor::on_l2_exit(std::size_t cpu,
                 // last one of these is the last act of the work item
                 // that stops.
                 this->vtl_protect_last_r15[cpu] = context.r15;
+
+                // The last page of the walk. See `vtl_step_pin_request`:
+                // this is the transition the trace has to catch, and the
+                // periodic arming would overwrite it within a period.
+                // Not `r15 == 1` alone: **every** walk's final page has
+                // one remaining, so that fired at switch 2 and pinned the
+                // trace thousands of calls before the freeze. The freeze
+                // itself is reproducible across boots to within ten calls
+                // - 39,264 / 39,266 / 39,272 / 39,274 - so the count is
+                // the selective condition and `r15` merely confirms it is
+                // a walk's last page.
+                if ((this->vtl_protect_count[cpu] >= 39250) &&
+                    (1 == context.r15)) {
+                    this->vtl_step_pin_request[cpu] = 1;
+                }
                 this->vtl_protect_last_rip[cpu] = this->vmcs.guest_rip();
                 this->vtl_protect_last_cr3[cpu] =
                     this->vmcs.read(

@@ -37293,3 +37293,46 @@ Whether "never resumes" means the resume point is wrong or the resume never
 happens is the next thing to separate, and both are visible in the VTL1
 instruction trace once it is armed on a *late* transition rather than an
 arbitrary one.
+
+## The trace at the freeze: VTL1 never resumes the page walk
+
+`ZPP_STEP_VTL` re-arms every period and overwrites, so its ring always held
+a steady-state transition. A **one-shot pin** was added, armed at the
+protection call that precedes the freeze - selected by call count, because
+`r15 == 1` alone fires on every walk's final page and pinned the trace at
+switch 2 - and it caught the transition at **switch 25,630**, with the
+protection count at 39,276 against a freeze at ~39,272.
+
+**The trace is identical to the steady-state ones.** Same routines, same
+instruction counts, same order:
+
+     91  SkiSelectThread          49  SkiUpdateXStateForVtlTransition
+     77  SkpReturnFromNormalModeRaxSet
+     52  SkiLockThreadEntry       45  SkiDeselectThread
+     51  KiVinaInterrupt          37  SkCallNormalMode
+     44  SkpSyncUserSharedData    23  ShvlVinaHandler
+
+**`SkmiProtectPageRange` does not appear.** Nor does anything else from the
+memory manager. On the very next trust-level entry after its last hypercall,
+the secure kernel resumes into its **scheduler**, walks the VINA path, and
+yields.
+
+**So the loop is not stuck inside itself and is not waiting on a hypercall
+answer.** The thread that holds it is simply never selected again.
+`SkiSelectThread` runs 91 instructions on every entry and picks something
+other than the thread parked four instructions from the end of
+`SkmiProtectPageRange`.
+
+That is consistent with every earlier measurement and explains the ones that
+looked contradictory: the protection count is frozen because the thread that
+issues those calls does not run; `r15 == 1` is preserved because nothing has
+touched that frame since; the hypercall answers were all delivered because
+they were, to a thread that then never continued; and both trust levels stay
+busy because the scheduler and the VINA path are real work.
+
+**The question this leaves is a scheduling one, inside VTL1**: why does
+`SkiSelectThread` not resume the thread parked in `SkmiProtectPageRange`?
+The routine is in the image on disk, its ready-list and the thread's state
+live in secure-kernel memory, and the same reading that named
+`ShvlVinaHandler`'s one-bit flag from a `gs`-relative chain would name what
+`SkiSelectThread` tests. **That is the next move, and it needs no boot.**

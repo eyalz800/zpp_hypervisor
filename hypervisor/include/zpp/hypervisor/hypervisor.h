@@ -10304,6 +10304,23 @@ private:
      * the walk finished and a non-zero says it did not.
      */
     std::uint64_t vtl_protect_last_r15[max_cpus]{};
+
+    /**
+     * A one-shot pin for the instruction trace, at the moment that
+     * matters.
+     *
+     * `arm_vtl_step` re-arms every period and **overwrites**, so its ring
+     * always holds a steady-state transition - which has been traced twice
+     * and shows the VINA path. The transition worth seeing is the one
+     * where `SkmiProtectPageRange` has `r15 == 1`, its last page, after
+     * which the guest never returns to the loop.
+     *
+     * `request` is set when that call is seen; `taken` makes the arming
+     * happen once and refuses every later one, so the ring still holds
+     * that transition when the guest is dumped minutes later.
+     */
+    std::uint64_t vtl_step_pin_request[max_cpus]{};
+    std::uint64_t vtl_step_pin_taken[max_cpus]{};
     std::uint64_t vtl_protect_last_rsp[max_cpus]{};
     /** @} */
     /** @} */
