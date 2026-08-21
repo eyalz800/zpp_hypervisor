@@ -36514,3 +36514,57 @@ populations are the APIC-page writes and the synthetic MSR writes.
 cut exits per second by 14% and *raised* exits per round trip from 879 to
 1,120 - it is a pessimisation, and measured per second it looked like an
 improvement. That is the trap this section exists to mark.
+
+## Correction: the cost account cannot explain a frozen counter, and the argument against VINA was backwards
+
+**Two errors, and they compound: the second was made while chasing the
+first.**
+
+### Zero progress is not slow progress
+
+The preceding entries build a quantitative case that a clock interrupt costs
+thirty exits and ~3.6 ms against a 1.743 ms period, and conclude that the
+hang is that cliff. **It cannot be.** A guest running at four per cent of
+speed makes four per cent progress. Over the nineteen-minute run that is
+about forty-five seconds of effective work, against a control that boots in
+118 seconds - a third of a boot, plainly visible. What was measured:
+
+    HvCallModifyVtlProtectionMask   39,266, unchanged over 15 minutes
+    pages installed                 frozen
+    ring 3                          0 of 3,011,724 CPL samples
+
+**Frozen, not slow.** No cost explains a counter that does not move. The
+thirty-exits figure is real and worth fixing, but it sets how fast a futile
+loop spins - it does not make the loop futile. The account is demoted from
+"the hang" to "the spin rate of the hang".
+
+### And the argument that dismissed VINA was invalid
+
+This file dismissed VINA a second time on the priority histogram: 32% of
+trust-level calls are made at task-priority class 0 or 1, where nothing is
+masked, therefore VINA cannot be asserted on those.
+
+**That is backwards.** VINA - Virtual Interrupt Notification Assist - is
+asserted when a *lower* VTL has an interrupt **pending**. A low task
+priority makes a pending interrupt more deliverable, not less; masking was
+never the condition. So the 32% argues nothing, and the histogram it was
+built on says nothing either way about VINA.
+
+Both dismissals of VINA are therefore withdrawn - the first read
+`vtl_entry_reason`, which describes the entry and not what arrives
+afterwards; the second inverted the condition.
+
+**What is not withdrawn is the only direct evidence anyone has gathered
+about what VTL1 does**, from the `ZPP_STEP_VTL` trace:
+
+    SkiSelectThread        91 instructions   <- picks a thread
+    ShvlVinaHandler        23
+    KiVinaInterrupt        51
+    KiVinaInterruptShadow
+    SkiDeselectThread      45                <- puts it back unrun
+    SkCallNormalMode       37                <- and returns
+
+**The secure kernel selects a thread and abandons it before running it.**
+That is a functional hang and it is what the next work should address:
+whether VINA is asserted at the moment VTL1 is entered, measured on the
+transition itself rather than inferred from a priority.
