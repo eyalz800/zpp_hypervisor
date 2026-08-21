@@ -2265,6 +2265,7 @@ def main():
                "vtl_protect_reps_done", "vtl_protect_last_rip",
                "vtl_protect_last_cr3", "vtl_protect_last_caller",
                "vtl_protect_last_rsp", "vtl_protect_last_stack",
+               "vtl_protect_after_stack", "vtl_protect_after_read",
                "vmcs_shadow_loads", "vmcs_shadow_stores",
                "vmcs_field_read_encoding", "vmcs_field_read_count",
                "vmcs_field_write_encoding", "vmcs_field_write_count",
@@ -2389,6 +2390,7 @@ def main():
                "vtl_protect_reps_done", "vtl_protect_last_rip",
                "vtl_protect_last_cr3", "vtl_protect_last_caller",
                "vtl_protect_last_rsp", "vtl_protect_last_stack",
+               "vtl_protect_after_stack", "vtl_protect_after_read",
                "vmcs_shadow_loads",
                "vmcs_shadow_stores",
                "guest_state_writes_skipped", "guest_state_writes_done",
@@ -2448,7 +2450,10 @@ def main():
                "vtl_protect_last_rsp"):
         monitor.queue(instance + off[_n], scalar_cpus)
     monitor.queue(instance + off["vtl_protect_last_stack"],
-                  scalar_cpus * 16)
+                  scalar_cpus * 32)
+    monitor.queue(instance + off["vtl_protect_after_stack"],
+                  scalar_cpus * 32)
+    monitor.queue(instance + off["vtl_protect_after_read"], scalar_cpus)
     for _n in ():
         monitor.queue(instance + off[_n], scalar_cpus)
     monitor.queue(instance + off["vtl_call_rcx"], scalar_cpus)
@@ -2949,10 +2954,18 @@ def main():
               f"cr3 0x{read('vtl_protect_last_cr3', cpu):x}")
         print(f"      rsp 0x{read('vtl_protect_last_rsp', cpu):x}")
         print("      stack window:")
-        for w in range(16):
-            v = read('vtl_protect_last_stack', (cpu * 16) + w) or 0
+        for w in range(32):
+            v = read('vtl_protect_last_stack', (cpu * 32) + w) or 0
             if v:
                 print(f"        +0x{w * 8:02x}  0x{v:016x}")
+        nr = read('vtl_protect_after_read', cpu) or 0
+        print(f"      AFTER the answer landed ({nr} words readable) - "
+              f"differences from the window above:")
+        for w in range(32):
+            b4 = read('vtl_protect_last_stack', (cpu * 32) + w) or 0
+            af = read('vtl_protect_after_stack', (cpu * 32) + w) or 0
+            if b4 != af:
+                print(f"        +0x{w * 8:02x}  0x{b4:016x} -> 0x{af:016x}")
         print(f"cpu {cpu} HvCallModifyVtlProtectionMask: {total:,} calls")
         cap = 32
         order = ([(total - cap + i) % cap for i in range(cap)]

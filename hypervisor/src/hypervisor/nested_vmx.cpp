@@ -2117,6 +2117,16 @@ bool hypervisor::on_guest_vmlaunch(std::size_t cpu,
                 this->vtl_protect_rax[cpu][slot] = context.rax;
             }
 
+            // And the guest's own stack, now that the answer has
+            // landed - but performed in `nested_entry.cpp`, which is
+            // where `translate_guest_linear` and `read_guest_memory`
+            // live. The host test harness links this translation unit
+            // and not that one, so referencing them here breaks the
+            // build of the tests rather than of the hypervisor.
+            if (cpu < max_cpus) {
+                this->vtl_protect_after_pending[cpu] = 1;
+            }
+
             // And the census. See `vtl_protect_status_seen`: the ring
             // above holds sixteen of thirty-nine thousand calls, so a
             // single failure - the exact shape that would stop the walk -

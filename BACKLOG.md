@@ -37189,3 +37189,57 @@ hypervisor writes the result to a guest page rather than to registers -
 guest memory, and whether a write Hyper-V makes to it is coherent with what
 the guest then reads is a question about extended page tables rather than
 about registers.
+
+## The output area is never written. 32 words readable, zero differences
+
+`SkmiProtectPageRange` passes a pointer to `0x40(%rsp)` in its own frame as
+the hypercall's output area, and advances its loop by the completed-rep
+count it reads back from there:
+
+    14000e8f8  leaq 0x40(%rsp),%rax     the output area
+    14000e91a  movq %rax,0x20(%rsp)     passed to the hypercall
+    14000e91f  callq <extended fast hypercall>
+    14000e941  movl 0x40(%rsp),%ecx     read back
+    14000e950  subl %ecx,%r15d          remaining -= completed
+    14000e953  jne  ...                 loop while remaining != 0
+
+The guest's stack captured at the VMCALL and again once the answer had
+landed, same 32 addresses both times:
+
+    AFTER the answer landed (32 words readable) - differences: none
+
+**Byte for byte identical, and the output word at `+0x98` is zero in
+both.** The read is proven rather than assumed - all 32 words were
+readable, so this is not a failed page walk reporting silence.
+
+**So nothing writes the completed-rep count into the guest's output area.**
+The value the loop advances on is zero, and `subl` by zero followed by `jne`
+is the non-terminating condition the disassembly already showed.
+
+**And this is a different quantity from everything checked so far.** The
+census of 39,272 calls read the completed-rep field out of **RAX bits
+43:32** and found every call reporting full completion. That field is
+correct and the guest never reads it on this path. The number it does read
+is in its own stack, and that number is never written.
+
+### The tension that has to be resolved before this is called the bug
+
+**A loop that never advances would keep issuing hypercalls**, and the
+protection count is *frozen* - so the guest is not spinning inside this
+loop. Either it exited (and the walk finished, making the zero irrelevant
+because `remaining` was already zero), or it is blocked before re-issuing.
+
+Two readings, and they are cheap to separate:
+
+- capture `r15d` - the remaining count - at the last call. It is a register,
+  so it is in the context the exit handler already has, and it says whether
+  the loop had anything left to do.
+- read the output area at the *first* protection call as well as the last.
+  If it is written on the early calls and not the late ones, that is a
+  transition to explain; if it is never written, the loop advanced 39,272
+  times on a value that was always zero, which cannot be - and would mean
+  `0x40(%rsp)` is not the output area and this whole reading is wrong.
+
+**The second check is the one that can refute this**, and it should be run
+before any fix is attempted. This file has recorded eight instruments aimed
+at the wrong word; this reading is one boot away from being the ninth.

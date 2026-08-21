@@ -8555,6 +8555,37 @@ hypervisor::on_l2_exit(std::size_t cpu,
                 }
             }
 
+            // The guest's stack once a protection answer has landed.
+            // See `vtl_protect_after_stack`.
+            if ((cpu < max_cpus) &&
+                (0 != this->vtl_protect_after_pending[cpu])) {
+                this->vtl_protect_after_pending[cpu] = 0;
+                this->vtl_protect_after_read[cpu] = 0;
+
+                auto base = this->vtl_protect_last_rsp[cpu];
+
+                for (std::size_t w{}; w < 32; ++w) {
+                    this->vtl_protect_after_stack[cpu][w] = 0;
+
+                    auto at = translate_guest_linear(
+                        cpu, base + (w * sizeof(std::uint64_t)));
+                    if (!at) {
+                        break;
+                    }
+
+                    std::uint64_t value{};
+                    if (!read_guest_memory(
+                            cpu,
+                            *at,
+                            std::as_writable_bytes(std::span(&value, 1)))) {
+                        break;
+                    }
+
+                    this->vtl_protect_after_stack[cpu][w] = value;
+                    this->vtl_protect_after_read[cpu] = w + 1;
+                }
+            }
+
             if (vtl_call_code == code) {
                 capture_vtl_switch(cpu, 0, context);
                 mark_vtl_half(cpu, 0);
@@ -8696,7 +8727,7 @@ hypervisor::on_l2_exit(std::size_t cpu,
                 this->vtl_protect_last_rsp[cpu] = protect_rsp;
                 this->vtl_protect_last_caller[cpu] = 0;
 
-                for (std::size_t w{}; w < 16; ++w) {
+                for (std::size_t w{}; w < 32; ++w) {
                     this->vtl_protect_last_stack[cpu][w] = 0;
 
                     auto at = translate_guest_linear(

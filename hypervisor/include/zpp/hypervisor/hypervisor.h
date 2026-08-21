@@ -10256,7 +10256,26 @@ private:
      * caller shares and which names nothing. The frame that matters is
      * further up, so take a window and let the symbols pick it out.
      */
-    std::uint64_t vtl_protect_last_stack[max_cpus][16]{};
+    std::uint64_t vtl_protect_last_stack[max_cpus][32]{};
+
+    /**
+     * The same stack window, re-read **after** the answer is delivered.
+     *
+     * The window above is captured at the VMCALL, before the hypervisor
+     * has written anything, so its output area necessarily reads zero -
+     * which proves nothing. `SkmiProtectPageRange` advances its loop by
+     * the completed-rep count it reads out of `0x40(%rsp)` in its own
+     * frame, and that frame begins where its return address sits in the
+     * window. **Reading the same addresses once the answer has landed is
+     * the only way to see the number the guest actually acts on**, and it
+     * is a different number from the RAX field every census here has
+     * checked.
+     */
+    std::uint64_t vtl_protect_after_stack[max_cpus][32]{};
+    std::uint64_t vtl_protect_after_read[max_cpus]{};
+
+    /** Set when the answer lands, consumed by the next second-level exit. */
+    std::uint64_t vtl_protect_after_pending[max_cpus]{};
     std::uint64_t vtl_protect_last_rsp[max_cpus]{};
     /** @} */
     /** @} */
