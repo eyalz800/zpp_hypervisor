@@ -785,6 +785,59 @@ is not there" and is really "the wrong question was asked". `x` is the
 virtual read. The same distinction is why a wide `xp` over a device BAR
 lied, further down this file.
 
+## Settled by hardware: this rig cannot host this test, and no switch changes it
+
+Three independent confirmations, because the conclusion is expensive enough
+to deserve them:
+
+1. **The host is bare metal.** `/proc/cpuinfo` carries no `hypervisor` flag
+   and DMI reads `ASUSTeK ZenBook UX433FA`, so its `vmx flags` are the real
+   processor's - and the list has **no `shadow_vmcs`**:
+
+       vnmi preemption_timer invvpid ept_x_only ept_ad ept_1gb flexpriority
+       tsc_offset vtpr mtf vapic ept vpid unrestricted_guest ple pml
+       ept_violation_ve ept_mode_based_exec
+
+2. **`enable_shadow_vmcs` is read-only** - mode `-r--r--r--`, and writing it
+   returns `Permission denied` - because KVM sets it at module load and
+   forces it to 0 when `cpu_has_vmx_shadow_vmcs()` is false. It cannot be
+   turned on from userspace, and reloading the module with the parameter set
+   would be overridden by the same test.
+
+3. **Our own log's "vmcs shadowing available" is not evidence**, and the
+   comment in `nested_shadow_vmcs.cpp` already said so: KVM advertises
+   `SECONDARY_EXEC_SHADOW_VMCS` in the capability MSR *unconditionally* and
+   strips the control in `prepare_vmcs02` before hardware sees it. The
+   capability MSR is a promise KVM does not keep here.
+
+**Why this is the whole question and not a detail.** `enable_shadow_vmcs` is
+what gives **L1 - us - a hardware shadow VMCS**, so that this VMM's own
+VMREAD and VMWRITE against vmcs02 execute as instructions instead of exiting
+to KVM. Without it every one of the ~36 VMCS accesses an exit is a full L0
+round trip at ~2,845 cycles, which is measured, and 404,833 L0 exits a second
+by KVM's own counter, which is measured independently and agrees to 0.2%.
+
+**So the 1.24 ms of per-tick VMM time is not a property of this code.** It is
+what running four levels deep on a processor without VMCS shadowing costs.
+The guest needs 0.17 ms and Hyper-V 0.24 ms of a 1.65 ms tick; the remainder
+is a hardware tax that no lever in this tree has moved by more than a few
+percent, and the tree has now tried: the profiler's timer, the APIC page
+watch, eager EPT neighbours, shadow VMCS off, deferred guest state, timer
+stretch, tick floors, self-IPI delivery and time dilation.
+
+**What would settle the other half of the question**, and it is one boot:
+the same `nested=1` build on this machine **without KVM underneath**. There
+the VMX instructions are instructions, the per-exit floor collapses, and
+either the guest boots - proving this VMM correct and the rig inadequate - or
+it does not, which would point somewhere this file has not looked. That is
+the single highest-information experiment available and it is blocked only by
+the standing instruction to stay on KVM.
+
+**Recorded so nobody re-derives it.** The arithmetic, the hardware check and
+the exhausted lever list are all here. **Further tuning under KVM is not a
+path to the login screen**, and the next session should either take the
+bare-metal measurement or pick a different objective.
+
 ## The tick constants, read live from the running guest. No lever there
 
 With symbols, the four increments are readable out of guest memory rather
