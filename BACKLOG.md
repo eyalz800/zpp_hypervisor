@@ -785,6 +785,40 @@ is not there" and is really "the wrong question was asked". `x` is the
 virtual read. The same distinction is why a wide `xp` over a device BAR
 lied, further down this file.
 
+## Verified over the whole routine: still no case for 4
+
+The previous section's window covered 0x3c0 bytes of a routine that runs to
+**+0x49c** - the next public symbol, `HalpPCIAcquireConfigSpaceLock`, sits at
+0x38e1fc. **220 bytes were unread, and a missing dispatch case is exactly the
+kind of claim a truncated read manufactures.** Re-read in full and re-traced:
+
+    +0x1b1  cmpb $1      +0x2a8  testb %cl, %cl   (0)
+    +0x1b5  cmpb $6      +0x2b0  cmpb $2
+    +0x1d1  cmpb $3      +0x30e  cmpb $3
+                         +0x378  cmpb $5
+
+**Every comparison against the state register in the entire function.
+0, 1, 2, 3, 5, 6. Still no 4.** The conclusion survives the check that could
+have overturned it.
+
+**Three things in the tail worth keeping:**
+
+- **+0x40e** `cmpb %sil, 1(%rbx)` / `jge` / `int3` / `andb $127, 1(%rbx)` -
+  a *second* read of the state byte, with the same `int3` guard on bit 7 as
+  the loop head. The high bit of that byte is a debug-break flag, checked
+  in two places.
+- **+0x435-+0x443** `movq %cr8, %r13` / `movl $15, %eax` / `movq %rax, %cr8`
+  - a path that raises IRQL to **15**, HIGH_LEVEL, saving the old value.
+- **+0x3fc and +0x46d** repeat the `movq %rbx, %rdx ; xorl %ecx, %ecx ; call`
+  shape of the VTL call at +0x3a2, so **three** call sites hand the same
+  block to the switch.
+
+**Method note.** The window size was chosen before the function's extent was
+known, and the extent was one symbol lookup away the whole time. Bounding a
+disassembly by the *next symbol* rather than by a round number costs one
+query and removes a class of false conclusion - this one happened to survive,
+which is luck rather than method.
+
 ## Confirmed by reading guest memory: the state byte is 4, and nothing writes it
 
 The caveat on the previous section is resolved by measurement rather than
