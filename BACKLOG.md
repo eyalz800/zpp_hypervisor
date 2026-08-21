@@ -785,6 +785,43 @@ is not there" and is really "the wrong question was asked". `x` is the
 virtual read. The same distinction is why a wide `xp` over a device BAR
 lied, further down this file.
 
+## Securekernel's return path is normal, and it contains a processor barrier
+
+Disassembled from the code window the deep VTL capture already dumps - no
+physical address needed, because the capture reads it through VTL1's own
+paging. The window spans rva 0xd8fa4 to 0xd93a4, ending exactly at
+`SkpReturnFromNormalMode`. Its tail:
+
+    +0xd9319  xsetbv                     <- restore XCR0
+    +0xd931c..+0xd9339  xor rdx/r8-r11, xorps xmm0-xmm5
+    +0xd933c  movq %rdx, %cr2
+    +0xd9344  movb %gs:192, %al ; testb $2
+    +0xd9350  movb %gs:2736, %al ; testb $64
+    +0xd9371  lock decq 474239(%rip)     <- drop this processor's count
+    +0xd9379  cmpq $0, 474231(%rip)
+    +0xd9381  pause
+    +0xd9383  jne -12                    <- spin until the other reaches 0
+    +0xd939a  callq *%rax                <- the hypercall page, VtlReturn
+
+**Two things worth having.** The register scrub before returning to VTL0 is
+VSM doing its job - VTL1 does not leak register state downward, and it
+explains why so many registers read zero in the `HvCallVtlReturn` capture.
+And **there is a processor barrier on the return path**: `lock decq` on one
+counter, then spin on another until it reaches zero.
+
+**The barrier is not the hang.** It completes on every pass - the VtlReturn
+does happen, eight times a second - so whatever it waits for is satisfied.
+Recorded because a `pause` spin in the path of a hang is exactly the thing
+that looks like the answer and is not, and it would cost a session to
+re-derive that.
+
+**So the refusal to advance is earlier**, in securekernel's *entry* path
+rather than its return. That is a much larger disassembly job than anything
+attempted here so far, and it is where a session that continues this should
+start - with the caveat that the answer may not be a defect of ours at all:
+we are the transport for a protocol negotiated entirely between Windows and
+Hyper-V, and two independent readings now say the transport is clean.
+
 ## THE FAULT, stated exactly: the IUM state word is unchanged across the VTL round trip
 
 Measured on both sides of the switch, stable across three samples a dozen
