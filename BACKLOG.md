@@ -36835,3 +36835,49 @@ characterise VTL1 read one trace and generalised, and three of them were
 withdrawn. A cheap counter aggregated over every occurrence settled in one
 boot what those could not, and it did so without perturbing the guest. Reach
 for the aggregate first.
+
+## The request-code protocol, mapped from the image
+
+Every caller of `SkCallNormalMode` in `securekernel.exe` - 78 of them - with
+the request byte each writes before the call. Nine were identified directly
+by an immediate store into offset 1 of the block; the rest set it less
+directly and are not resolved by this pass.
+
+    code 0   SkmiMapViewOfImage+0x2b6
+             SkmiUnlockImageVadPages+0x59
+             SkmiLockNtInvertedFunctionTable+0x25
+             SkmiUnlockNtInvertedFunctionTable+0x43
+             SkpsSendDebugAttachNotifications+0x149
+    code 2   SkpHandleWppEvent+0x2a4
+    code 4   ShvlVinaHandler+0x52                  <- VINA
+    code 5   NtTerminateProcess+0x104
+             SkiTerminateThread+0x97
+
+**Code 0 is the secure memory manager**, and `SkmiMapViewOfImage` plus the
+image-page lock/unlock pair are exactly the class of request a secure image
+transfer has to make. It pairs with the normal kernel's own dispatch, where
+state 0 reaches a handler and state 3 dispatches a system call - both of
+which do real work - while **state 4 falls to the default arm that does
+nothing.**
+
+**And code 0 has never once been observed.** Every sample of the block, on
+every boot, reads `byte[1] = 4`. The normal kernel is in
+`VslpLockPagesForTransfer` waiting for the transfer to proceed, and the
+message that would advance it is one the secure kernel is apparently never
+sending.
+
+Read against the duration split - 23% of yields on the VINA path, 77% on a
+shorter path that does not build a message at all - the likely shape is that
+**on the 77% the block is not written and the normal kernel re-reads a stale
+`4` left by an earlier VINA.** That would explain a constant block across
+every sample on every boot, and it is testable: watch the block's page for
+writes and see whether anything ever stores to `byte[1]`.
+`ZPP_WATCH_VTL_BLOCK` exists for this and is recorded as having frozen the
+guest at 22,308 exits, so it needs the narrower form - a write watch on the
+one address rather than the page.
+
+**What this adds that the previous entries did not**: the state numbers
+stop being opaque. `0` is memory work, `2` is tracing, `4` is "you have an
+interrupt pending", `5` is teardown. A loop that only ever carries `4` is
+not a loop servicing requests - it is a loop carrying one notification over
+and over, and the request that matters has never appeared in it.
