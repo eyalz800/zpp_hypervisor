@@ -785,6 +785,72 @@ is not there" and is really "the wrong question was asked". `x` is the
 virtual read. The same distinction is why a wide `xp` over a device BAR
 lied, further down this file.
 
+## CONFIRMED, and the retraction of it was wrong: `VslStartSecureProcessor` waits on a VP that never starts
+
+**The chain is real.** It was retracted earlier in this session on a bad
+check, and the bad check is worth more than the result.
+
+**The evidence now.** `Phase1Initialization` is the only thread the guest
+runs. Its *interrupted* stack - the thread's own, not the timer ISR's - was
+sampled eight times over 96 seconds and **every one of 30 frames persists in
+every sample**, which is what a frozen stack looks like. Split by section,
+the 23 code frames are:
+
+    VslStartSecureProcessor+0x211      [PAGE]
+      HvlHalStartVirtualProcessor+0x12
+        HalpHvStartVirtualProcessor+0x133
+          HalpApicRequestInterrupt+0x96
+            HalpInterruptSendIpi+0xa9
+
+    VslpEnterIumSecureMode+0x3a8
+      VslpLockMdlForTransfer+0x44
+        VslpLockPagesForTransfer+0x16d
+          MiProbeAndLockComplete+0x21 / MiProbeLockFrame+0x41f
+    HvlSwitchToVsmVtl1+0xab
+
+plus `KiQuantumEnd`, `KiInterruptDispatchNoLockNoEtw` and the scheduler
+entries the tick leaves behind, and in *data* -
+`VslpIumThreadSemaphore`, which is the object this path waits on.
+
+**Why the retraction was wrong, and this is the transferable part.** The
+reader prints two stacks: "where it is now" and "what it interrupted". The
+first is the **timer interrupt's** stack, and it legitimately changes every
+sample because the ISR is running. I intersected *that* one, found almost
+nothing in common, and concluded the frames were residue. **The thread's own
+stack is the other one, and it is identical every time.** Same instrument,
+wrong half, opposite conclusion.
+
+So the rule adopted after that mistake - "do not quote a frame unless it
+survives repeated sampling" - was right, and applying it to the wrong array
+produced a false negative rather than protecting against a false positive.
+**Say which stack a frame came from.**
+
+**What this means.** Windows is in `Phase1Initialization`, trying to start a
+secure - VTL1 - virtual processor. It sends the start-up IPI through
+`HalpInterruptSendIpi` and then waits, and the processor never arrives. That
+is consistent with everything measured for two days and previously
+unexplained:
+
+- application processors sit at **17 second-level entries** and never move;
+- the guest is pinned at task priority `0xd0` because this path raises IRQL
+  for the send and the wait;
+- **zero new pages**, because a thread spinning on another processor touches
+  nothing;
+- ring 3 never appears, because `Phase1Initialization` never reaches
+  `smss.exe`;
+- and the `securekernel+0xb043e` `SkeCrashDumpNmi` park in the *other* stuck
+  state is the far end of the same failure.
+
+**This is not a performance wall.** It is a virtual processor that does not
+start. The per-tick arithmetic in the sections below describes the cost of
+spinning while it fails to start, and would matter only after it starts.
+
+**Next**: follow the start-up IPI. The guest's `HalpInterruptSendIpi` reaches
+Hyper-V, which must run the new VP on another physical processor - and those
+processors are halted in Hyper-V's idle loop with **empty IRR and ISR and no
+armed APIC timer**, measured. Somewhere between the guest's send and a
+physical processor waking, the wake-up is lost.
+
 ## THE ANSWER: the guest is stuck in `Phase1Initialization`, one thread, never scheduling
 
 **The only progress metric here that a livelock cannot fake**, and it was
