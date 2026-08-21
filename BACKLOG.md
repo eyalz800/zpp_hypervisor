@@ -785,6 +785,37 @@ is not there" and is really "the wrong question was asked". `x` is the
 virtual read. The same distinction is why a wide `xp` over a device BAR
 lied, further down this file.
 
+## The VP assist read error is probably the capture's own, not the mechanism's
+
+Chased before it hardened into a lead. The failing read:
+
+    vp assist level 0: msr 0x117a1f001 ... read 512 bytes err 0x0        (VtlCall side)
+    vp assist level 0: msr 0x117a1f001 ... read   0 bytes err 0x100000010 (VtlReturn side)
+
+Three things say this is the instrument and not the fault:
+
+- **It is always `level 0`.** `l2_vp_assist[max_cpus][2]` has room for two
+  trust levels and only level 0 is ever captured, so the capture reads
+  VTL0's page regardless of which level it is standing in.
+- **The failing side is where CR3 is VTL1's** (`0x8800002` against
+  `0x1ae002` on the call side). Reading a VTL0 guest-physical address
+  through VTL1's extended page tables **failing is what VTL protection is
+  for** - a success there would be more alarming than the error.
+- **The page itself checks out**: `0x117a1f000` on every processor, and the
+  reader's two independent paths - through the guest hypervisor's own EPT
+  and through this VMM's identity map - agree.
+
+So: not a defect, and worth writing down as a *non*-finding so the next
+session does not spend a day on it. **The first read error in the
+investigation turned out to be the investigation's own.**
+
+**What it did leave**: `HV_X64_MSR_VP_ASSIST_PAGE` (0x40000073) is written
+**once** in an entire boot, by the synthetic-MSR census. If VTL1 needed an
+assist page of its own it would have to write one, and no second write
+appears. Whether the secure kernel simply does not use one, or whether its
+write is not reaching that census, is unestablished and is a smaller,
+sharper question than the one it replaces.
+
 ## The cache reading is retracted, and the evidence was functional all along
 
 **My own test refuted it, exactly as the previous section said it must.**
