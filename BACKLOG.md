@@ -785,6 +785,69 @@ is not there" and is really "the wrong question was asked". `x` is the
 virtual read. The same distinction is why a wide `xp` over a device BAR
 lied, further down this file.
 
+## What it is stuck ON: an interrupt storm on vector 0xd1, read from the guest's own bytes
+
+**It is stuck, not slow, and the distinction is now settled by reading the
+instructions rather than by arguing from rates.** Over 60 seconds on a live
+guest:
+
+    exits          11,157,703 -> 11,939,451   (13,029/s - busy)
+    leaves-filled     312,705 ->    312,705   (zero new memory)
+    ring 3                              0 of 25 samples
+
+A booting kernel touches new pages constantly. Thirteen thousand exits a
+second against **zero** new pages is a closed loop over a resident working
+set, and no amount of making that loop faster ends it.
+
+**The bytes say what the loop is.** `profile_code_physical` now publishes the
+second level's hot instruction pointer translated through *its* paging, which
+is the part nothing outside this VMM could do, and `xp` reads it:
+
+    0x11a3be948   6a d1  e9 b1 01 00 00     push 0xd1 ; jmp ...
+                  cc 6a d2  e9 a9 ...       push 0xd2 ; jmp ...
+    0x119ea768e   5a 58 59 c3               pop rdx ; pop rax ; pop rcx ; ret
+    0x119ba57fa   48 8b 5c 24 30 33 c0      mov rbx,[rsp+0x30] ; xor eax,eax
+    0x119c2890d   c3                        ret
+
+The first is an **interrupt dispatch stub table** - consecutive entries
+pushing 0xd1, then 0xd2, each jumping to a common dispatcher, which is how
+Windows builds `KiIsrThunk`. The rest are the tail of a handler returning.
+
+**And 0xd1 is our own clock vector.** The synthetic-timer instrument prints
+`clock vector injected value 0xd1` on every delivery. So the guest is taking
+vector 0xd1, running its handler, returning, and taking vector 0xd1 again,
+without ever getting far enough to do anything else.
+
+**That is an interrupt storm, and it explains every symptom at once** - which
+is what makes it worth more than the rate measurements that preceded it:
+
+- ring 0 across 150 samples in three boots: the handler never returns to
+  anything else.
+- 12,457,624 requests for vector 0x2f, **every one** at task priority 0xd0:
+  the DPC interrupt is requested from inside the storm and 0xd0 refuses
+  priority 2 correctly, so the DPC queue never drains.
+- zero new memory: the loop's working set is the handler and the stub.
+- application processors idle at 17 second-level entries: Windows starts its
+  other processors after the phase this never leaves.
+
+**So the question is no longer how fast a tick is.** It is why a second 0xd1
+is always already pending when the first one's handler returns. Three
+candidates, and the instruments to separate them exist:
+
+1. The guest re-arms and the deadline is already in the past, so it fires
+   immediately. `stimer_arm_value` carries the deadline and the reference
+   counter is computable from the published scale - the arithmetic checks out
+   to 1.92e11 on both sides, so this is *not* obviously it.
+2. The level above delivers more 0xd1 than were armed. `COUNT written` and
+   `clock vector injected` alternate 1:1 in the ring, which argues against.
+3. The handler does not complete the work that would stop the next one -
+   which is what an undrained DPC queue at IRQL 13 looks like, and is
+   circular with the storm rather than upstream of it.
+
+**Recorded before choosing between them**, because the previous three
+sections each picked a cause from a rate and were each wrong in a different
+direction.
+
 ## Both levers together move the tick by 1.5%. The exits they remove are not the tick's
 
 **Measured, and it is the result that matters most this session, because it
