@@ -2276,7 +2276,11 @@ def main():
                "guest_stack_pointer", "guest_stack_rip",
                "guest_kernel_base", "guest_kernel_size",
                "guest_interrupted_trace", "guest_interrupted_count",
-               "guest_interrupted_rsp", "guest_interrupted_rip"]
+               "guest_interrupted_rsp", "guest_interrupted_rip",
+               # Which thread the guest is running. Sampled for sessions
+               # and printed by nothing, and it is the only progress
+               # metric here that a livelock cannot fake.
+               "guest_thread_samples", "guest_thread_sample_count"]
     off = gdb_offsets(args.elf, members)
     instance = base + gdb_symbol(
         args.elf, "zpp::hypervisor::hypervisor::instance()::instance")
@@ -2418,6 +2422,12 @@ def main():
     for name in ("guest_stack_trace", "guest_interrupted_trace"):
         if name in off:
             monitor.queue(instance + off[name], stack_capacity)
+    # guest_thread_sample is eight 64-bit fields; 32 of them per processor.
+    thread_fields, thread_capacity = 8, 32
+    if "guest_thread_samples" in off:
+        monitor.queue(instance + off["guest_thread_samples"],
+                      args.cpus * thread_capacity * thread_fields)
+        monitor.queue(instance + off["guest_thread_sample_count"], args.cpus)
 
     words = monitor.run()
 
@@ -2450,6 +2460,51 @@ def main():
     # the level above expired it early", and those need different fixes.
     # The `kind` column is what separates them - 1 is the guest writing a
     # count, 3 is the clock vector actually going in.
+    # The kernel image bounds, used by both the thread and stack sections
+    # below to turn an address into an offset that survives KASLR.
+    kbase = read("guest_kernel_base") or 0
+    ksize = read("guest_kernel_size") or 0
+
+    # Which thread the guest is running, and whether it is the idle one.
+    #
+    # **This is the only progress metric here that a livelock cannot
+    # fake.** `leaves-filled` counts new *mappings*, so a guest working
+    # hard over a resident set reads as frozen; exits/s and l2-entries/s
+    # rise when the guest is given room and say nothing about whether the
+    # work is getting anywhere. A changing thread pointer is scheduling,
+    # and scheduling is progress. One unchanging thread over minutes is
+    # not.
+    #
+    # `thread == idle_thread` is the case worth calling out separately: a
+    # guest that is idle is not stuck, it is waiting, and those want
+    # opposite work.
+    if "guest_thread_samples" in off:
+        stride = thread_fields * 8
+        for cpu in range(args.cpus):
+            n = read("guest_thread_sample_count", cpu) or 0
+            if not n:
+                continue
+            print(f"\ncpu {cpu} second-level threads "
+                  f"({n} samples, newest last)")
+            seen = []
+            for slot in range(max(0, n - 6), n):
+                i = slot % thread_capacity
+                a = (instance + off["guest_thread_samples"] +
+                     (cpu * thread_capacity + i) * stride)
+                f = [words.get(a + 8 * k, 0) for k in range(thread_fields)]
+                gs, prcb, thread, idle, start, state, why, irql = f
+                tag = " IDLE" if thread and thread == idle else ""
+                seen.append(thread)
+                where = (f"ntoskrnl+0x{start - kbase:x}"
+                         if kbase and kbase <= start < kbase + ksize
+                         else f"0x{start:x}")
+                print(f"    thread 0x{thread:x}{tag}  start {where}  "
+                      f"state {state}  wait {why}/irql {irql}")
+            distinct = len(set(x for x in seen if x))
+            print(f"    -> {distinct} distinct thread(s) in the last "
+                  f"{len(seen)} samples"
+                  f"{'  <- ONE THREAD, not scheduling' if distinct == 1 else ''}")
+
     # The call stacks, which say what the guest is *doing* rather than
     # where it is.
     #
@@ -2462,8 +2517,6 @@ def main():
     # base moves every boot (KASLR) and an offset is comparable across
     # runs and against a PDB. Values outside the image are printed raw:
     # they are stack data that survived the scan's filter, not frames.
-    kbase = read("guest_kernel_base") or 0
-    ksize = read("guest_kernel_size") or 0
     for label, tr, cnt, rsp, rip in (
             ("where it is now", "guest_stack_trace", "guest_stack_count",
              "guest_stack_pointer", "guest_stack_rip"),

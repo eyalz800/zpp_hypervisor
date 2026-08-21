@@ -785,6 +785,58 @@ is not there" and is really "the wrong question was asked". `x` is the
 virtual read. The same distinction is why a wide `xp` over a device BAR
 lied, further down this file.
 
+## THE ANSWER: the guest is stuck in `Phase1Initialization`, one thread, never scheduling
+
+**The only progress metric here that a livelock cannot fake**, and it was
+being sampled for sessions with nothing printing it:
+
+    cpu 0 second-level threads (2,605 samples, newest last)
+        thread 0xffffd20ef04de080  start ntoskrnl+0x6fb520  state 2  wait 0/irql 0
+        ... identical in every sample ...
+        -> 1 distinct thread   <- ONE THREAD, not scheduling
+
+    ntoskrnl+0x6fb520 = Phase1Initialization+0x0
+
+**Windows is stuck inside `Phase1Initialization`.** That thread is what
+brings the operating system up after early kernel init - I/O subsystem,
+processor start-up, VBS and the secure kernel, and finally `smss.exe`, which
+is what eventually leads to a login screen. It never finishes, so user mode
+is never entered, which is exactly why **ring 3 has never appeared in any
+sample in any boot**.
+
+**And it is running, not waiting**: `state 2`, `wait 0`, `irql 0`. A thread
+blocked on a lock or an event would show a wait reason. This one is
+executing, forever, and never yields the processor to anything else.
+
+**Why this settles "stuck" against "slow" where nothing else did:**
+
+- `leaves-filled` counts new *mappings*, so a guest working hard over a
+  resident set reads as frozen. It is not a progress metric and this file
+  says so.
+- `exits/s` and `l2-entries/s` *rose* when levers freed time - 4,731 to
+  5,611 - which reads like progress and is not.
+- **A thread pointer that never changes across 2,605 samples is not
+  ambiguous.** A guest that is merely slow still schedules; the scheduler
+  runs on every tick and there are 892 of those a second.
+
+**What it makes of the rest of this file.** The clock path this VMM has been
+measuring for two days - `HalpHvTimerArm`, `HvlEndSystemInterrupt`,
+`KiDpcInterruptBypass` - is the *tick interrupting a thread that is going
+nowhere*, not the thing that stops it. And the retracted
+`VslStartSecureProcessor` frames become plausible again for a different
+reason than they were first claimed: starting secure processors is precisely
+what `Phase1Initialization` does. **That is now a hypothesis with a named
+thread behind it rather than residue read as a call chain** - and the way to
+settle it is to catch a frame that survives repeated sampling, which is the
+rule this file adopted after that mistake.
+
+**So the question is finally the right size**: what does
+`Phase1Initialization` do, in order, and which step does not return. It runs
+at IRQL 0 and is not waiting, so it is spinning in code rather than blocked
+on an object - and everything needed to find it is now in place: kernel
+symbols, a translatable instruction pointer, a stack scan that reaches past
+the kernel image, and a thread sampler that says when the answer changes.
+
 ## Correction to today's arithmetic: VMCS traffic is ~18% of an exit, not ~51%
 
 **Every access-derived figure written today used the launch-time price
