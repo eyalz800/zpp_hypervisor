@@ -785,6 +785,62 @@ is not there" and is really "the wrong question was asked". `x` is the
 virtual read. The same distinction is why a wide `xp` over a device BAR
 lied, further down this file.
 
+## Every lever is worth 10-20% and the gap is 860%. The exit itself is the problem
+
+The EPT violations named in the section below are answered, and the answer
+generalises past them. **They are all one address.** The exit ring shows
+`phys=0xfee00000` on every single one, at the RIPs that decode to Hyper-V's
+ICR-high, ICR-low and EOI helpers:
+
+    ept-violation   1,483,127   29.7%   <- all of them the local APIC page
+
+So 30% of all exits are the local-APIC page watch, and they install no shadow
+leaf because there is nothing to install - the page is watched on purpose.
+The 81%-install-nothing figure in the section below is explained and is not a
+shadow-EPT bug.
+
+**And disarming that watch was already measured this session: +17.7% l2-run
+and no unblock.** Which completes a pattern worth stating on its own, because
+it is the session's actual result:
+
+| lever | measured effect |
+|---|---|
+| profiler's preemption timer off (11.8% of exits) | 10.7% off the VTL half |
+| APIC page watch disarmed (29.7% of exits) | +17.7% l2-run, no unblock |
+| a *perfect* VMCS access cache (36 accesses/exit) | 6.1 ms, arithmetic only |
+| **needed** | **8.6x** |
+
+**Each lever removes a slice of exits; none of them touches what an exit
+costs.** That is the number in the way: **199,170 cycles - about 100
+microseconds - for one VM exit.** On bare metal a VM exit is one to two
+microseconds. We are fifty to a hundred times slower than that, and removing
+30% of a hundred-microsecond exit still leaves a hundred-microsecond exit.
+
+**Where the 100 microseconds comes from is not exotic.** Every privileged
+instruction this VMM executes - VMREAD, VMWRITE, VMPTRLD, VMCLEAR, INVEPT,
+INVVPID - is a trap to KVM, because `enable_shadow_vmcs` is `N` and the host
+CPU's `vmx flags` carries no `shadow_vmcs`. ~36 VMCS accesses at 2,845 cycles
+is ~102,000 of it and the rest is the same tax under other instruction names,
+plus the guest-memory reads that walk tables to reach a mapping window.
+
+**So the honest statement of where this stands**: the nested-Hyper-V boot is
+blocked by the cost of a VM exit on this rig, and that cost is a property of
+running four levels deep under a KVM whose processor cannot shadow a VMCS.
+It is not obviously a defect in this VMM's logic - the APIC configuration is
+correct, INIT-SIPI-SIPI works, injection is honest, the reference TSC is
+within 2 ppm, and the guest is doing exactly what a Windows kernel does when
+its clock handler cannot finish inside its own tick.
+
+**What would settle it, and what it costs.** The same build on bare metal,
+where those instructions are instructions rather than traps, predicts an exit
+one to two orders of magnitude cheaper and therefore a VTL half inside the
+tick. That is a single measurement and it is the one measurement that
+distinguishes "this VMM is too slow" from "this rig cannot host this test".
+It needs a trip to the machine, which is why it has not been made - see the
+standing instruction to use KVM only. **Recorded so the option is visible
+rather than forgotten**, and so that further tuning under KVM is a choice
+made with the arithmetic in hand.
+
 ## Cutting the VMCS tax cannot close this gap. The arithmetic says so before the work does
 
 The section below argues the tax is the hang and the access count is the
