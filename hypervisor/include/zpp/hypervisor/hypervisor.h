@@ -10129,6 +10129,27 @@ private:
      * which does not consult a guest table at all.
      */
     std::uint64_t vina_block_l1_physical[max_cpus]{};
+
+    /**
+     * Which trust level the protection hypercall's answer is delivered to.
+     *
+     * `HvCallModifyVtlProtectionMask` is issued **by VTL1** - the recorded
+     * call site has `cr3 0x8800002` and a securekernel stack. So its answer
+     * belongs to VTL1, and the entry that carries it should be an entry
+     * into VTL1.
+     *
+     * **If it is delivered to VTL0 instead, the secure kernel's thread was
+     * suspended in the middle of a hypercall** and needs a later resume to
+     * finish the four instructions after it - which is exactly the state
+     * the last call is stuck in, with `r15 = 1`.
+     *
+     * Counted by address space rather than named, because the two CR3
+     * values differ per boot: whichever value the call site carried is
+     * VTL1's, and anything else is not.
+     */
+    std::uint64_t vtl_protect_answer_to_caller[max_cpus]{};
+    std::uint64_t vtl_protect_answer_to_other[max_cpus]{};
+    std::uint64_t vtl_protect_answer_last_cr3[max_cpus]{};
     std::uint64_t vina_at_call_set[max_cpus]{};
     std::uint64_t vina_at_call_clear[max_cpus]{};
     std::uint64_t vina_at_call_unread[max_cpus]{};

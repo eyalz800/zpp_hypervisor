@@ -2125,6 +2125,20 @@ bool hypervisor::on_guest_vmlaunch(std::size_t cpu,
             // build of the tests rather than of the hypervisor.
             if (cpu < max_cpus) {
                 this->vtl_protect_after_pending[cpu] = 1;
+
+                // And which trust level is being entered with it. See
+                // `vtl_protect_answer_to_caller`: the call was made by
+                // VTL1, so its answer belongs to VTL1.
+                auto entering = this->vmcs.read(
+                    arch::x86_64::vmx::vmcs::field::guest_cr3);
+
+                this->vtl_protect_answer_last_cr3[cpu] = entering;
+
+                if (entering == this->vtl_protect_last_cr3[cpu]) {
+                    this->vtl_protect_answer_to_caller[cpu] += 1;
+                } else {
+                    this->vtl_protect_answer_to_other[cpu] += 1;
+                }
             }
 
             // And the census. See `vtl_protect_status_seen`: the ring

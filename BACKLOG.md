@@ -37430,3 +37430,47 @@ not to run the one thread that has work.** Nothing measured explains that
 choice, and the instruments that appeared to - the entry reason, the request
 byte, the output area, the VINA flag - have each been eliminated by
 measuring the same quantity at the moment it is actually consulted.
+
+## The answer is delivered to the right trust level, all 39,275 times
+
+`HvCallModifyVtlProtectionMask` is issued **by VTL1** - the call site
+carries `cr3 0x8800002` and a securekernel stack - so a plausible failure
+was the answer being delivered to VTL0 instead, leaving the secure kernel's
+thread suspended mid-hypercall. Counted by comparing the CR3 of the entry
+that carries the answer against the CR3 of the call:
+
+    delivered to the CALLING level   39,275
+    delivered to the OTHER level          0
+    last answer entered cr3 0x8800002, call was from cr3 0x8800002
+
+**Every answer lands in the level that asked for it, including the last
+one.** The secure kernel receives the result for its final page, is resumed
+in its own address space, and still does not execute the four instructions
+that would finish the walk.
+
+### The eliminations, as they now stand
+
+Every step of the last protection call has been checked at the moment it
+happens, and each is correct:
+
+| step | measured |
+|---|---|
+| the call is made | 39,275 times, from VTL1, `r15 = 1` |
+| the status returned | zero, on every call |
+| the reps completed | full, on every call |
+| the answer's destination | the calling level, 39,275 of 39,275 |
+| the guest's stack after it | unchanged - as it is on working calls too |
+| the next VTL1 entry | VINA clear, nothing injected, `VtlCall` |
+| what VTL1 then runs | its scheduler, then yields |
+
+**Nothing in the transaction is wrong.** The hypercall works, the answer
+arrives, it arrives in the right place, and the thread that was four
+instructions from finishing is not the one that runs next.
+
+**What has not been instrumented** is the entry that *carries* the answer -
+as opposed to the trust-level call that follows it. The pinned instruction
+trace was armed on the next `HvCallVtlCall`, which is a different event: the
+answer is delivered on a plain resume into VTL1, and what the secure kernel
+executes on **that** entry has never been traced. It is the one remaining
+gap on this path, and the pin already exists - it needs arming on the
+answer-carrying entry instead.
