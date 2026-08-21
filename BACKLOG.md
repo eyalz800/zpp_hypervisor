@@ -785,6 +785,56 @@ is not there" and is really "the wrong question was asked". `x` is the
 virtual read. The same distinction is why a wide `xp` over a device BAR
 lied, further down this file.
 
+## The tick constants, read live from the running guest. No lever there
+
+With symbols, the four increments are readable out of guest memory rather
+than disassembled out of an image, so this settles by measurement what was
+previously settled by reading code:
+
+    KeMaximumIncrement         = 156,250   (15.625 ms)
+    KeMinimumIncrement         =   5,000   ( 0.500 ms)
+    KeTimeIncrement            =  20,000   ( 2.000 ms)
+    KeQuantumEndTimerIncrement =  17,400   ( 1.740 ms)
+
+**17,400 is neither a clamp nor a rounding of the bounds**, which this file
+asserted from a disassembly and can now assert from the running machine. The
+measured arm-to-arm interval of ~16,546 units matches it. So the period is
+the guest's own constant and **there is no honest lever on it** - which is
+what the four failed interventions (stretch, tick floor, self-IPI, dilation)
+were each trying to be, and why each had to lie to get there.
+
+`KeTimeIncrement` = 20,000 is new and not previously recorded here. It is not
+what the synthetic timer is armed for - the quantum-end increment is - but it
+says the system clock is running at 2 ms rather than the 15.625 ms default,
+so anything that later reasons about "the tick" should say which of the two
+it means.
+
+**Where that leaves the arithmetic**, using the wall-clock split against the
+measured 1.65 ms period:
+
+    our VMM         75.3%  = 1.24 ms of the tick
+    Hyper-V (L1)    14.5%  = 0.24 ms
+    the guest (L2)  10.1%  = 0.17 ms
+
+**The guest and the hypervisor above us together need a quarter of the
+period.** We consume the rest. If our time were zero the tick would cost
+0.41 ms and everything would fit; to leave real slack our 1.24 ms has to
+become about 0.6 ms.
+
+**So the target is exactly one number: a 2x cut in this VMM's own per-tick
+time.** Not the guest's, not Hyper-V's, and not the period. Every other
+framing tried in this file - the VTL half, exits per second, l2-run%,
+cycles per exit taken alone - is a proxy that has already been shown to move
+without this moving.
+
+**And the honest position on reaching it under KVM**: the two cheapest levers
+together bought 1.5%, the per-exit floor is set by KVM's nested-exit
+handling (measured: 14,017 cycles just to reach our prologue), and about half
+of a 199,170-cycle exit is trapped VMCS accesses that exist because
+`enable_shadow_vmcs` is `N` and the processor has no `shadow_vmcs`. **There
+is no credible path to 2x under KVM identified yet.** Recorded plainly so the
+next session starts from that rather than rediscovering it.
+
 ## The park is `SkeCrashDumpNmi`. State A is a crash *aftermath*, state B is the live fault
 
 **Named from `securekernel.pdb`**, fetched from the symbol server for this
