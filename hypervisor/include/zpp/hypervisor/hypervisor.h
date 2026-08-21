@@ -9984,6 +9984,22 @@ private:
      * mistaken for a zero status. The reader-proof rule, as a field.
      */
     std::uint64_t vtl_call_block_read[max_cpus]{};
+
+    /**
+     * The guest-physical address RDX translated to.
+     *
+     * The two trust levels talk to each other through this one block and
+     * they run on **different** extended page tables - two distinct shadow
+     * roots, measured. If those two compositions ever mapped this
+     * guest-physical address to different host pages, each level would
+     * read and write its own private copy: no fault, no error, and neither
+     * ever seeing the other's writes. That is indistinguishable from the
+     * measured symptom, and nothing here has ever compared the two.
+     *
+     * Published so the address can be read independently from the QEMU
+     * monitor and compared with what this VMM sees at the same instant.
+     */
+    std::uint64_t vtl_call_block_physical[max_cpus]{};
     /** @} */
     /** @} */
     /** @} */

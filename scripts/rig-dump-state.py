@@ -2251,6 +2251,7 @@ def main():
                "shadow_ept_leaves_that_did_not_help",
                "shadow_ept_recall_root", "shadow_ept_current_slot",
                "vtl_call_rdx", "vtl_call_block", "vtl_call_block_read",
+               "vtl_call_block_physical",
                "vmcs_shadow_loads", "vmcs_shadow_stores",
                "vmcs_field_read_encoding", "vmcs_field_read_count",
                "vmcs_field_write_encoding", "vmcs_field_write_count",
@@ -2361,6 +2362,7 @@ def main():
                "shadow_ept_leaves_that_did_not_help",
                "shadow_ept_recall_root", "shadow_ept_current_slot",
                "vtl_call_rdx", "vtl_call_block", "vtl_call_block_read",
+               "vtl_call_block_physical",
                "vmcs_shadow_loads",
                "vmcs_shadow_stores",
                "guest_state_writes_skipped", "guest_state_writes_done",
@@ -2433,6 +2435,7 @@ def main():
     monitor.queue(instance + off["vtl_call_rdx"], scalar_cpus)
     monitor.queue(instance + off["vtl_call_block"], scalar_cpus * 4)
     monitor.queue(instance + off["vtl_call_block_read"], scalar_cpus)
+    monitor.queue(instance + off["vtl_call_block_physical"], scalar_cpus)
 
     # Ten dispositions per processor - `none` through `pointer_failed`.
     monitor.queue(instance + off["l2_ept_dispositions"], scalar_cpus * 10)
@@ -2992,7 +2995,12 @@ def main():
         state = (blk[0] >> 8) & 0xff
         status = blk[1] & 0xffffffff
         print(f"\ncpu 0 IUM secure-call block at "
-              f"0x{read('vtl_call_rdx', 0):x}")
+              f"0x{read('vtl_call_rdx', 0):x}"
+              f"  ->  guest-physical "
+              f"0x{read('vtl_call_block_physical', 0):x}")
+        print(f"  read the same physical from the monitor and compare: "
+              f"a disagreement means the two trust levels' extended page "
+              f"tables alias it to different host pages")
         for i, q in enumerate(blk):
             print(f"  +0x{i * 8:02x}  0x{q:016x}")
         print(f"  request byte  = {state} (0x{state:02x})")

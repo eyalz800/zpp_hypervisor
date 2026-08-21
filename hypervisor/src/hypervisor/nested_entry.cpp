@@ -8626,6 +8626,8 @@ hypervisor::on_l2_exit(std::size_t cpu,
                         translate_guest_linear(cpu, context.rdx);
 
                     if (physical) {
+                        this->vtl_call_block_physical[cpu] = *physical;
+
                         if (read_guest_memory(
                                 cpu,
                                 *physical,

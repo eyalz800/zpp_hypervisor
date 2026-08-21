@@ -35985,3 +35985,50 @@ So the guest is stuck, not slow, and that is now a measurement rather than
 an inference from untouched pages. **The lesson is the cheap one: when a
 mechanism that would explain the symptom is present - here a 3.13x clock -
 the test is to wait, and waiting had never been tried.**
+
+## Not EPT aliasing between the trust levels, and the log is clean
+
+### The block is one page, not two
+
+The two trust levels talk through a single block and run on **different**
+extended page tables - two distinct shadow roots, measured. If those two
+compositions mapped its guest-physical address to different host pages,
+each level would read and write a private copy: no fault, no error, success
+status, and neither ever seeing the other's writes. That is
+indistinguishable from the measured symptom and nothing had compared them.
+
+`vtl_call_block_physical` publishes the address so it can be read
+independently:
+
+    VMM capture, guest-physical 0x11bb9ff70   +0x00 0x0000000100000400
+    QEMU monitor, same address, 10 samples    +0x00 0x0000000100000400
+
+**They agree, on every sample.** No aliasing. And the block does not change
+at all across ten samples a second apart, which fits the disassembly: VTL0's
+default arm writes zero to bytes already zero, VTL1 writes 4 to a byte
+already 4. Both sides keep re-affirming a fixed state.
+
+### The log ring, read for the first time this investigation
+
+`--log 4096`. 393 lines, and **the only thing in it that looks like a fault
+is not one**:
+
+    start_up.cpp(668): guest start-up ipi for cpu 0x1..0x7,
+                       activity 0x0 is not wait-for-sipi, dropped
+
+Seven of them, one per application processor, and then one more per
+processor later. These are the **second** start-up IPI of each
+INIT-SIPI-SIPI sequence, ignored because the target is already active -
+which is what a processor does (SDM: a start-up IPI to a processor not in
+wait-for-SIPI has no effect). Seven processors, seven pairs, no asymmetry.
+
+Everything else is module segments, MTRRs, the extended page tables being
+built, processors coming up on the trampoline, APIC writes, `guest vmxon`,
+and `entering the second level`. **No failure, refusal, error or retry
+anywhere in it.**
+
+That is worth recording precisely because it is negative: the channel that
+exists to say *what happened, in order* - the one CLAUDE.md recommends over
+the state records for exactly this - has nothing to report. This VMM does
+not think anything went wrong, and by every measurement taken so far it is
+right.
