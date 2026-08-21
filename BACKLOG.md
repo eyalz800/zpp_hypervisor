@@ -35763,3 +35763,48 @@ is only damning against a reference, and this tree has one: the chainload
 control, where the same Windows with the same VBS reaches user mode in 118
 seconds on the same machine. Measuring the clock path there is the
 comparison that decides whether this is the fault or a consequence of it.
+
+## The reference measurement: securekernel is the busiest code in a working boot, and never runs here
+
+**Same machine, same Windows, same VBS, one variable - this VMM present or
+absent.** RIPs sampled from the QEMU monitor every 350 ms for 240 s across
+the boot window, which is the phase that matters.
+
+    chainload control (reaches user mode)     under this VMM (stuck)
+      576 samples, 164 distinct RIPs            8 distinct entry RIPs
+      top 8 cover 48.4%                         top 4 cover 96%
+      ring 3 in 40 of 576 samples               ring 3 never
+      hottest: 0xfffff86ffbfa843d 14.8%         hottest: all ntoskrnl
+               0xfffff86ffbfa6b5e 13.0%           clock path
+               (securekernel)
+
+**The two hottest addresses in a working boot are in securekernel**, and the
+`0xfffff86ffb…` range dominates the top eight. Under this VMM securekernel
+appears **nowhere** in the hot set - every one of the eight is ntoskrnl's
+clock path.
+
+So the difference is not subtle and it is not about cost: **in a healthy
+boot VTL1 does most of the work, and here it does none.** It is entered
+with `vtl_entry_reason = VtlCall`, takes zero exits, answers
+`STATUS_SUCCESS` with no request, and hands back - fifteen times a second,
+while a working boot has it executing continuously.
+
+That also disposes of the last reading that survived: Windows' clock path
+consuming all of Windows' time is a *consequence*. In the control the clock
+runs at the same 574.7 Hz and does not dominate, because there is real work
+interleaved with it. Here there is nothing else to run, so the clock is all
+there is to see.
+
+**The goal restated in terms of a measurement**, which is worth more than
+the narrative: *make securekernel execute*. Everything else measured -
+untouched pages, the tight loop at 15 Hz, the frozen protection calls, the
+absent ring 3 - follows from VTL1 doing nothing, and would be expected to
+clear when it does.
+
+**What is not yet known** is why a secure kernel that is entered correctly,
+with its own extended page tables, with success status and no fault, has
+nothing to do. The next candidates, in order of how cheaply they can be
+told apart: a VTL1 timer that never fires (securekernel arms one -
+`SkeSetTimer` sits next to `SkpReturnFromNormalMode` in the image); a VTL1
+interrupt that is never delivered; or a saved VTL1 register context that
+comes back wrong, which would leave it resuming somewhere harmless.
