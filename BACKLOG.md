@@ -785,6 +785,62 @@ is not there" and is really "the wrong question was asked". `x` is the
 virtual read. The same distinction is why a wide `xp` over a device BAR
 lied, further down this file.
 
+## THE BLOCKER, with the processor confound removed: VTL1 write-protection on the boot processor
+
+**One vCPU. Same hang.** Booted with `ZPP_CPUS=1`, where Windows cannot
+possibly be waiting for another processor:
+
+    thread  ntoskrnl+0x6fb520 = Phase1Initialization, state 2, irql 0
+    ring 3  0 of 30 samples
+    l2-entries 1,298,246 and climbing - the guest is running, not wedged
+
+**That kills the entire application-processor line** - `VslStartSecureProcessor`,
+the lost start-up IPI, the halted APs, the rendezvous. All of it was real and
+none of it was the cause: remove every other processor and the hang is
+identical. Those frames were the boot processor's own VBS work, not a wait on
+anybody else.
+
+**And the stack, with the confound gone, is legible.** Twenty frames,
+persistent across five samples ten seconds apart:
+
+    KiSystemStartup -> KxStartSystemThread -> PspSystemThreadStartup
+      Phase1Initialization+0x23
+        Phase1InitializationDiscard+0x95a
+          VslpEnterIumSecureMode+0x3a8
+            VslpLockMdlForTransfer+0x44
+              VslpLockPagesForTransfer+0x16d
+                MiProbeAndLockComplete+0x21
+          VslFinishStartSecureProcessor+0xc4
+          HvlSwitchToVsmVtl1+0xab
+          MakeGdtReadOnly+0x8b
+          KeWriteProtectProcessorState+0xc6
+
+**`MakeGdtReadOnly` and `KeWriteProtectProcessorState` are the operation.**
+Windows is handing pages to VTL1 and asking the hypervisor to make them
+read-only to VTL0 - its GDT, and the per-processor state around it. That is
+`HvCallModifyVtlProtectionMask`, and this VMM's own census says it ran
+**39,261 times and then stopped**, static across every reading since.
+
+So the shape is: **the guest asks for VTL protection, the calls stop, and the
+thread never returns from the routine that asked.** Every other observation in
+this file - the clock-path loop, the IRQL held at `0xd0`, the DPC that never
+drains, the second-level guest never reaching ring 3 - is downstream of one
+thread that never returns.
+
+**What this makes newly testable**, and it is close to the code rather than to
+a measurement: this VMM *answers* `HvCallModifyVtlProtectionMask` and it
+*composes* VTL permissions into the shadow EPT, and the composition was
+verified bucket-for-bucket. What has not been checked is the **completion
+protocol** of a rep hypercall that is answered 39,261 times and then not
+again - whether the guest is waiting for a status this VMM returns
+differently from Hyper-V, or for a page state it believes it asked for and
+did not get.
+
+**Method note.** The single-processor boot cost one reboot and eliminated four
+sessions' worth of hypotheses in seven minutes. **When a hang involves N
+processors, try it with one** - the confound is not subtle and removing it is
+cheap.
+
 ## Where `ZPP_SAMPLE_L1` leaves the picture, and one observation not yet explained
 
 The sampler settled the halted-or-spinning question. Two further readings
