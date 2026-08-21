@@ -35598,3 +35598,30 @@ the running boot, which the log prints, and then the same `llvm-pdbutil`
 route already used for `SkeCrashDumpNmi`. If the seven are parked in
 securekernel, the other stuck state's `pause; jmp $` park is the same park
 and the two failures are one.
+
+### Correction, before that becomes the next wrong lead: the idle processors are downstream
+
+The entry above calls the frozen application processors "the first asymmetry
+found that is not on the boot processor" and points at
+`HvCallStartVirtualProcessor` never being issued. **The ordering makes that
+a consequence rather than a cause**, and it is worth writing down before a
+session is spent on it.
+
+Windows starts its application processors from `KeStartAllProcessors`, which
+runs *inside* `Phase1Initialization` - the very thread this hang holds. The
+measured stack has that thread blocked in `VslpLockPagesForTransfer`, in VSM
+setup, which happens first. So:
+
+- application processors idle with 17 entries each is **exactly** what a
+  guest looks like when phase 1 never reaches the call that starts them,
+- `HvCallStartVirtualProcessor` never being issued says the same thing once,
+  not twice,
+- and `HvCallEnableVpVtl` issued once is the boot processor's own, which is
+  all that should exist yet.
+
+The securekernel base for that boot is `0xfffff8008c4c1000` and the
+second-level kernel is at `0xfffff800f5800000`; the park address
+`0xfffff806477a7697` is in **neither**, so it is a third image and naming it
+is still open - but it is no longer on the critical path. **The blocker is
+on the boot processor, in the page transfer, and everything else measured so
+far is downstream of it.**
