@@ -1772,7 +1772,22 @@ std::expected<void, zpp::error> hypervisor::build_vmcs02(std::size_t cpu)
     // records `nested.mtf_pending` and `vmx_check_nested_events`
     // delivers it as a monitor-trap-flag VM exit, so it survives round
     // trips through L1 and is even part of migration state.
-    if (this->stepping_watch[cpu] || (0 != this->vtl_step_active[cpu])) {
+    // The protection-answer step is a **one shot**: the request is
+    // consumed here, when the bit is actually set, rather than in the
+    // exit handler. The first version cleared it only on the branch that
+    // records, so any exit taken by the watch stepper or a trace left it
+    // armed - and the trap flag then stayed on for every instruction.
+    // Measured: the guest reached two protection calls instead of 39,275.
+    auto protect_step = (cpu < max_cpus) &&
+                        (0 != this->vtl_protect_step_armed[cpu]);
+
+    if (protect_step) {
+        this->vtl_protect_step_armed[cpu] = 0;
+        this->vtl_protect_step_pending[cpu] = 1;
+    }
+
+    if (this->stepping_watch[cpu] || (0 != this->vtl_step_active[cpu]) ||
+        protect_step) {
         primary |= primary_monitor_trap_flag;
     }
 
@@ -8405,6 +8420,39 @@ hypervisor::on_l2_exit(std::size_t cpu,
     // stepper's and its handler closes a page this trace never opened.
     // The two never overlap - `stepping_watch` is tested first - and if
     // they ever did, the watch is the one that must not be lost.
+    // One step after a protection answer, recording only where it
+    // landed. See `vtl_protect_step_rip`.
+    if ((basic_reason::monitor_trap_flag == reason.basic()) &&
+        !this->stepping_watch[cpu] && (0 == this->vtl_step_active[cpu]) &&
+        (cpu < max_cpus) && (0 != this->vtl_protect_step_pending[cpu])) {
+        this->vtl_protect_step_pending[cpu] = 0;
+
+        auto landed = this->vmcs.guest_rip();
+        bool placed{};
+
+        for (std::size_t k{}; k < 8; ++k) {
+            if (0 == this->vtl_protect_step_count[cpu][k]) {
+                this->vtl_protect_step_rip[cpu][k] = landed;
+                this->vtl_protect_step_count[cpu][k] = 1;
+                placed = true;
+                break;
+            }
+
+            if (landed == this->vtl_protect_step_rip[cpu][k]) {
+                this->vtl_protect_step_count[cpu][k] += 1;
+                placed = true;
+                break;
+            }
+        }
+
+        if (!placed) {
+            this->vtl_protect_step_other[cpu] += 1;
+        }
+
+        advance_rip = false;
+        return l2_exit_outcome::handled;
+    }
+
     if ((basic_reason::monitor_trap_flag == reason.basic()) &&
         !this->stepping_watch[cpu] && (0 != this->vtl_step_active[cpu])) {
         record_vtl_step(cpu);

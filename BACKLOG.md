@@ -37647,3 +37647,39 @@ remaining work is not another hypothesis; it is the one narrow measurement
 above, and it should be built as a counter over all calls rather than as a
 trace of one - which is the lesson this file has recorded ten times and is
 the only reliable thing it has produced.
+
+## The monitor trap flag cannot be armed on the protection-answer path
+
+The measurement the previous entry called for - one step after **every**
+protection answer, recording only where it lands, as a count rather than
+39,275 traces - was built and does not work.
+
+    with the step armed:   2 protection calls, r15 = 12
+    inert again:      39,276 protection calls, r15 = 1
+
+**Two calls instead of thirty-nine thousand.** The guest wedges immediately.
+
+The first version leaked - the arming flag was cleared only on the branch
+that records, so any exit taken by the watch stepper or a trace left the
+trap flag set for every instruction. That was a real bug and fixing it,
+with a strict one-shot discipline consuming the request where the bit is
+actually set, **changed nothing**: still two calls.
+
+So it is not the leak. **The answer to a VTL1-issued hypercall arrives
+during the guest hypervisor's own resume, and setting the monitor trap flag
+on that path is not something it survives.** The counters are left compiled
+in and inert, with the arming removed and the reason recorded beside it.
+
+**This is the second instrument in this investigation that cannot be
+built** - the first being `ZPP_WATCH_VTL_BLOCK`, which froze the guest at
+22,308 exits and needed a narrower form that was never written. Both are on
+the same path, and both fail the same way: the thing worth watching is
+inside the window where the guest hypervisor is mid-transition, and
+anything that traps there stops it.
+
+**That is worth knowing as a constraint rather than a defeat.** It says the
+divergence on the instruction after the resume is not observable by trapping
+- it needs something passive. What is passive and unused: the exit reason of
+whatever *does* come next. A protection answer is followed by some exit
+eventually, and counting those by reason, split by whether the call was the
+last one, needs no trap flag at all.

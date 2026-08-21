@@ -10170,6 +10170,29 @@ private:
     std::uint64_t vtl_protect_answer_rip[max_cpus][8]{};
     std::uint64_t vtl_protect_answer_rip_count[max_cpus][8]{};
     std::uint64_t vtl_protect_answer_rip_other[max_cpus]{};
+
+    /**
+     * Where the **next** instruction after a protection answer goes,
+     * counted over every call.
+     *
+     * All 39,275 answers resume at the same instruction, so the resume
+     * point cannot separate the fatal call from the rest. The single
+     * pinned trace shows the instruction after it landing in
+     * `KiVinaInterruptShadow` rather than continuing through the hypercall
+     * wrapper - **and one observation of an event that happens 39,275
+     * times explains nothing**, which is the mistake this file has
+     * recorded ten times.
+     *
+     * So one step, on every answer, recording only where it lands. Eight
+     * distinct destinations with counts is a count rather than 39,275
+     * traces, and it is exactly the aggregate this file's own rule says to
+     * reach for first.
+     */
+    std::uint64_t vtl_protect_step_armed[max_cpus]{};
+    std::uint64_t vtl_protect_step_pending[max_cpus]{};
+    std::uint64_t vtl_protect_step_rip[max_cpus][8]{};
+    std::uint64_t vtl_protect_step_count[max_cpus][8]{};
+    std::uint64_t vtl_protect_step_other[max_cpus]{};
     std::uint64_t vina_at_call_set[max_cpus]{};
     std::uint64_t vina_at_call_clear[max_cpus]{};
     std::uint64_t vina_at_call_unread[max_cpus]{};

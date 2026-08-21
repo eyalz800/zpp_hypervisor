@@ -2158,6 +2158,15 @@ bool hypervisor::on_guest_vmlaunch(std::size_t cpu,
                     this->vtl_protect_answer_rip_other[cpu] += 1;
                 }
 
+                // **Deliberately not armed.** Stepping one instruction
+                // after a protection answer wedges the guest at two
+                // protection calls instead of 39,275, with and without a
+                // one-shot arming discipline - so the monitor trap flag
+                // cannot be set on this path at all, and the counters
+                // below stay inert. See BACKLOG.md: the answer arrives
+                // during the guest hypervisor's own resume, and trapping
+                // there is not something it survives.
+
                 if (entering == this->vtl_protect_last_cr3[cpu]) {
                     this->vtl_protect_answer_to_caller[cpu] += 1;
                 } else {

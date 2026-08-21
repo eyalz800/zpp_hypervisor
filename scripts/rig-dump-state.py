@@ -2271,7 +2271,8 @@ def main():
                "vtl_protect_answer_to_other",
                "vtl_protect_answer_last_cr3", "vtl_protect_answer_rip",
                "vtl_protect_answer_rip_count",
-               "vtl_protect_answer_rip_other",
+               "vtl_protect_answer_rip_other", "vtl_protect_step_rip",
+               "vtl_protect_step_count", "vtl_protect_step_other",
                "vmcs_shadow_loads", "vmcs_shadow_stores",
                "vmcs_field_read_encoding", "vmcs_field_read_count",
                "vmcs_field_write_encoding", "vmcs_field_write_count",
@@ -2402,7 +2403,8 @@ def main():
                "vtl_protect_answer_to_other",
                "vtl_protect_answer_last_cr3", "vtl_protect_answer_rip",
                "vtl_protect_answer_rip_count",
-               "vtl_protect_answer_rip_other",
+               "vtl_protect_answer_rip_other", "vtl_protect_step_rip",
+               "vtl_protect_step_count", "vtl_protect_step_other",
                "vmcs_shadow_loads",
                "vmcs_shadow_stores",
                "guest_state_writes_skipped", "guest_state_writes_done",
@@ -2474,8 +2476,10 @@ def main():
                "vtl_protect_answer_last_cr3",
                "vtl_protect_answer_rip_other"):
         monitor.queue(instance + off[_n], scalar_cpus)
-    for _n in ("vtl_protect_answer_rip", "vtl_protect_answer_rip_count"):
+    for _n in ("vtl_protect_answer_rip", "vtl_protect_answer_rip_count",
+               "vtl_protect_step_rip", "vtl_protect_step_count"):
         monitor.queue(instance + off[_n], scalar_cpus * 8)
+    monitor.queue(instance + off["vtl_protect_step_other"], scalar_cpus)
     for _n in ():
         monitor.queue(instance + off[_n], scalar_cpus)
     for _n in ():
@@ -3005,6 +3009,15 @@ def main():
         oth = read('vtl_protect_answer_rip_other', cpu) or 0
         if oth:
             print(f"        (beyond eight distinct) {oth:,}")
+        print("      and where the NEXT instruction lands:")
+        for k in range(8):
+            c = read('vtl_protect_step_count', (cpu * 8) + k) or 0
+            if c:
+                print(f"        0x{read('vtl_protect_step_rip', (cpu * 8) + k):x}"
+                      f"  {c:9,d}")
+        so = read('vtl_protect_step_other', cpu) or 0
+        if so:
+            print(f"        (beyond eight distinct) {so:,}")
         print(f"      last answer entered cr3 "
               f"0x{read('vtl_protect_answer_last_cr3', cpu):x}, "
               f"call was from cr3 "
