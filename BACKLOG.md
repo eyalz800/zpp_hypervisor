@@ -785,6 +785,59 @@ is not there" and is really "the wrong question was asked". `x` is the
 virtual read. The same distinction is why a wide `xp` over a device BAR
 lied, further down this file.
 
+## The combined ceiling under KVM, computed before building anything
+
+Asked to stay on KVM, so the question becomes: what is the *best case*
+reachable here, with every lever pulled at once? Worth computing first,
+because two of the four levers are multi-session features and the arithmetic
+costs nothing.
+
+**The 29.7% of exits on the APIC page are not a switch away.**
+`ZPP_VIRTUALIZE_APIC` sounds like the answer and is not it - in this tree
+that name means *external-interrupt exiting*, SDM Table 27-5 bit 0. Intel's
+actual APIC virtualization is three secondary controls -
+`virtualize_apic_accesses` (bit 0), `apic_register_virtualization` (bit 8),
+`virtual_interrupt_delivery` (bit 9) - and **none of the three appears in
+`vm_execution_controls::secondary` at all.** This VMM does not implement
+them, deliberately: the design has the guest owning the *physical* APIC, and
+the comment on external-interrupt exiting says so. Virtualizing the page
+means writing a virtual local APIC that then drives the real one, which is
+what KVM's `lapic.c` is.
+
+**Best case with everything pulled**, and every figure here is generous to
+the optimistic side:
+
+| removed | share of exits |
+|---|---|
+| APIC page EPT violations (needs a virtual local APIC) | 29.7% |
+| `wrmsr` handled without reflecting to Hyper-V | 23.4% |
+| `int-window` (Hyper-V's own, so probably not removable) | 8.2% |
+| remaining | **38.7%** |
+
+That is 2.6x on exit count. Compound it with a *perfect* VMCS access cache -
+zero reads, zero writes, which is not achievable - and the residual ~97,000
+non-access cycles an exit put the ceiling near 5x.
+
+**The gap is 8.6x.** So the honest arithmetic is that the login screen is not
+reachable on this rig even with every lever pulled and two features built,
+and each of those features is worth having for its own sake rather than for
+this. The blocking quantity is 199,170 cycles an exit, and nothing on the
+exit-*count* side reaches it.
+
+**This is not a conclusion about the VMM.** Everything checked this session
+checks out: the APIC configuration, INIT-SIPI-SIPI, injection, eligibility,
+the reference TSC within 2 ppm, the shadow EPT. The guest is behaving exactly
+as a Windows kernel behaves when its clock handler cannot finish inside its
+own tick, and the tick is not negotiable.
+
+**Where that leaves the work.** The levers are still worth pulling and the
+features still worth building - on bare metal, where an exit is one to two
+microseconds, the same guest has eight to ten times the headroom it needs and
+these changes decide margin rather than possibility. What should *not* happen
+is another session spent tuning under KVM in the expectation that it reaches
+a login screen. That expectation is now arithmetic, not opinion, and it is
+recorded here so it does not have to be rediscovered.
+
 ## Every lever is worth 10-20% and the gap is 860%. The exit itself is the problem
 
 The EPT violations named in the section below are answered, and the answer
