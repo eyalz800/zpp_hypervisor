@@ -38390,3 +38390,75 @@ faulting privilege level; the qualification's bit 6 stopped being
 hard-coded `false` at both call sites; and the histograms widened past
 `& 7`. The test in `tests/nested_vmx` is inverted to assert the bit is
 **not** offered, with the same reasoning recorded there.
+## The screen is readable after all: the GOP framebuffer, handed over and sampled
+
+The entry above ends "nothing in this tree can see it". That was true and it
+is no longer. The pixels were never unreachable - the adapter's framebuffer
+bar is mapped into the **guest's** physical address space, and `xp` reads
+guest physical memory. What was missing was only the address and the layout,
+and those come out of `EFI_GRAPHICS_OUTPUT_PROTOCOL`, which is a boot
+services protocol: it stops existing long before the resident side has
+anything to ask it, and the resident side has no protocol database anyway.
+
+So the loader asks while it still can, and hands the answer over:
+
+- `zpp_framebuffer_info` in `loader/include/zpp/loader.h` - base, size,
+  width, height, **pixels per scan line**, pixel format, and the bit masks.
+  By value inside `zpp_launch_parameters`, not behind a pointer, because the
+  resident side copies the launch block whole and then stops being able to
+  follow any pointer out of it.
+- `collect_framebuffer()` in `uefi_loader/src/main.cpp`, called beside
+  `collect_processor_roster()` and on a chainload-only build too, so a
+  control run has the same instrument.
+- Ten flat members on the singleton, which nothing in the VMM reads. They
+  are there to be read from outside.
+- `scripts/rig-dump-state.py` prints them, and prints the `rig-screen.py`
+  command line that goes with them.
+- `scripts/rig-screen.py` samples the framebuffer and answers the two
+  questions: **is it changing** between samples - the animation test, which
+  is the "is the spinner spinning" observation the entry above needed a
+  human for - and what is on it, as an ASCII preview or a PNG.
+
+Three things chosen deliberately, so they are not re-litigated:
+
+- **The stride is carried, not derived from the width.** Firmware routinely
+  pads a scan line, and an image walked at the visible width shears
+  diagonally - which reads as a corrupt framebuffer rather than as a reader
+  bug.
+- **Wide reads are measured before they are used.** This tree's rule is that
+  `xp` is trustworthy on RAM and not across a passed-through bar - the NVMe
+  measurement in CLAUDE.md. A framebuffer bar is prefetchable memory rather
+  than a register file, so wide reads may well be fine, but "may well be" is
+  not a measurement and one word at a time is far too slow for a screen.
+  `rig-screen.py` reads narrow, wide, narrow, wide at a handful of addresses
+  and classifies: narrow agreeing with itself while wide disagrees is a
+  broken wide read; all four disagreeing is a screen animating under the
+  probe, which is inconclusive rather than damning. `--narrow` forces the
+  slow path.
+- **A failed read is not a black pixel.** A cell that never came back is a
+  hole, counted separately, magenta in the image. Rejected: defaulting it to
+  zero, which is how a reader pointed at a wrong address reports a blank
+  screen with total confidence.
+
+**What this cannot see, and it is a real limit.** This is the *firmware's*
+framebuffer. The boot graphics - vendor logo, spinner, and a bugcheck screen
+raised before the display driver loads - are drawn into it, which is exactly
+the window that matters here, since a guest that hangs in
+`Phase1Initialization` never gets further. Once the operating system's own
+display driver takes over it may program the adapter differently and this
+stops describing what is on screen. Following it that far means reading the
+guest's own display state, which needs the driver's private structures; not
+worth it until something needs it.
+
+**Not verified on hardware.** Every part of it is verified offline - the
+loader builds and the graphics code cannot fail a boot (it returns void,
+checks the `LocateProtocol` status and both `Mode` pointers, allocates
+nothing and installs nothing), the address arithmetic and the wide/narrow
+classifier are exercised against a synthetic framebuffer including odd
+strides and an unaligned base, and the member names are pinned by
+`tests/python_layout`. What no test here can answer is whether the rig's
+firmware offers a GOP at all, whether its `FrameBufferBase` is a guest
+physical address `xp` resolves, and whether wide reads survive that
+particular bar. The first shows as `none - the loader found no graphics
+output protocol` in the state dump, the second as a frame of one repeated
+value with the note that says so, and the third as the calibration verdict.

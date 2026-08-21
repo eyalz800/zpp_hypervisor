@@ -438,5 +438,48 @@ class ExitReasonNames(unittest.TestCase):
             "from vmx_exit_reason.h:\n" + "\n".join(disagreements))
 
 
+class FramebufferMembers(unittest.TestCase):
+    """The framebuffer members, against the two readers that name them.
+
+    These are read by name through gdb rather than at a copied offset, so
+    they cannot drift the way the histogram stride did.  They can still
+    drift the *other* way: a member renamed in the header leaves the
+    scripts asking for a name gdb cannot resolve, and `rig-dump-state.py`
+    resolves them with `optional=True` - which was the right choice, since
+    a deployed binary may predate them, and which means a rename makes the
+    whole section **silently disappear** instead of failing.
+
+    Silence from an instrument is exactly what this file exists to stop
+    being mistaken for a measurement, so the two lists are compared here.
+    """
+
+    MEMBERS = ["framebuffer_base", "framebuffer_size", "framebuffer_width",
+               "framebuffer_height", "framebuffer_stride",
+               "framebuffer_format", "framebuffer_red_mask",
+               "framebuffer_green_mask", "framebuffer_blue_mask",
+               "framebuffer_reserved_mask"]
+
+    def test_header_declares_every_member(self):
+        source = read(HEADER)
+        missing = [name for name in self.MEMBERS
+                   if not re.search(
+                       r"std::uint(?:32|64)_t\s+" + re.escape(name)
+                       + r"\s*\{\}\s*;", source)]
+        self.assertEqual(
+            [], missing,
+            "hypervisor.h no longer declares: " + ", ".join(missing))
+
+    def test_both_readers_ask_for_the_same_names(self):
+        for path in (DUMP_STATE,
+                     os.path.join(ROOT, "scripts", "rig-screen.py")):
+            source = read(path)
+            missing = [name for name in self.MEMBERS
+                       if '"{}"'.format(name) not in source]
+            self.assertEqual(
+                [], missing,
+                "{} no longer asks for: {}".format(
+                    os.path.basename(path), ", ".join(missing)))
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -84,6 +84,10 @@ zpp_load_elf(const struct zpp_loader_parameters * parameters)
     handover.processor_apic_ids = parameters->processor_apic_ids;
     handover.number_of_processor_apic_ids =
         parameters->number_of_processor_apic_ids;
+    // By value, so it survives this loader's frames and its image being
+    // reclaimed. A platform that found no graphics output leaves it all
+    // zero, which is what the resident side reads as "no framebuffer".
+    handover.framebuffer = parameters->framebuffer;
 
     for (std::size_t i{}; i < cpus; ++i) {
         // Rebuilt per processor because it captures i, which is the one

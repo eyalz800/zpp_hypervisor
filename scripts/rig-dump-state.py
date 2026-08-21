@@ -2178,6 +2178,101 @@ def dump_vtl_steps(args, elf, instance):
             show(previous, repeats)
 
 
+# EFI_GRAPHICS_PIXEL_FORMAT, by number.  Format 3 has no linear
+# framebuffer at all - the firmware offers only Blt() - so its base is
+# not an address anything can read, and saying so is the whole reason
+# the number is carried rather than normalised away by the loader.
+PIXEL_FORMAT = {0: "RGBX (red first)", 1: "BGRX (blue first)",
+                2: "bit mask", 3: "blt only - NO linear framebuffer"}
+
+
+def dump_framebuffer(args, elf, instance):
+    """Where the firmware's linear framebuffer is, as the loader found it.
+
+    Nothing in the VMM reads these members; they exist to be read from
+    out here.  On a rig whose display adapter is passed through the
+    emulator has no console and answers `screendump` with "There is no
+    console to take a screendump from", so this is what makes the boot
+    spinner and a pre-driver bugcheck screen observable at all - see
+    `scripts/rig-screen.py`, which takes these six numbers.
+
+    Optional offsets, because a *deployed* binary may predate the
+    members: a dump of an older one has to lose this section rather than
+    the whole dump.
+    """
+    members = ["framebuffer_base", "framebuffer_size", "framebuffer_width",
+               "framebuffer_height", "framebuffer_stride",
+               "framebuffer_format", "framebuffer_red_mask",
+               "framebuffer_green_mask", "framebuffer_blue_mask",
+               "framebuffer_reserved_mask"]
+    off = gdb_offsets(elf, members, optional=True)
+    if "framebuffer_base" not in off:
+        return
+
+    # The monitor reads 8-byte words and six of these members are 32 bits,
+    # so two of them share a word.  Reading each at its own **aligned**
+    # address and picking the half by `offset & 4` is what keeps that from
+    # being a layout assumption: it holds however the compiler chooses to
+    # pack them, and it fails loudly (a missing offset) rather than
+    # quietly if a member is ever removed.
+    reader = Monitor(args.rig, args.port)
+    for name in members:
+        reader.queue(instance + (off[name] & ~7), 1)
+    words = reader.run()
+
+    def value(name, bits):
+        word = words.get(instance + (off[name] & ~7))
+        if word is None:
+            return None
+        if 64 == bits:
+            return word
+        return (word >> (32 if (off[name] & 4) else 0)) & 0xffffffff
+
+    base = value("framebuffer_base", 64)
+    if base is None:
+        print("\nframebuffer: NOT READ")
+        return
+
+    size = value("framebuffer_size", 64)
+    width = value("framebuffer_width", 32)
+    height = value("framebuffer_height", 32)
+    stride = value("framebuffer_stride", 32)
+    fmt = value("framebuffer_format", 32)
+
+    print("\nframebuffer (the firmware's, from the graphics output "
+          "protocol)")
+    if not base:
+        # Not an error and not a bug.  The loader records zeros when the
+        # firmware offers no graphics output, and it must never fail a
+        # boot over one.
+        print("  none - the loader found no graphics output protocol")
+        return
+
+    print(f"  base   0x{base:x}  size 0x{size:x} ({size // 1024:,} KiB)")
+    print(f"  {width} x {height}, stride {stride} pixels, "
+          f"format {fmt} ({PIXEL_FORMAT.get(fmt, '?')})")
+    if 2 == fmt:
+        print(f"  masks  red 0x{value('framebuffer_red_mask', 32):08x} "
+              f"green 0x{value('framebuffer_green_mask', 32):08x} "
+              f"blue 0x{value('framebuffer_blue_mask', 32):08x} "
+              f"reserved "
+              f"0x{value('framebuffer_reserved_mask', 32):08x}")
+
+    # The arithmetic worth stating rather than leaving to be redone: a
+    # stride that is not the width is the field a reader gets wrong, and
+    # an image walked at the visible width shears diagonally.
+    if stride and width and stride != width:
+        print(f"  NOTE stride {stride} != width {width} - walk rows at "
+              f"the stride")
+    if size and stride and height and size < stride * height * 4:
+        print(f"  NOTE size 0x{size:x} is smaller than "
+              f"stride*height*4 = 0x{stride * height * 4:x}")
+
+    print(f"  read it with: scripts/rig-screen.py --base 0x{base:x} "
+          f"--width {width} --height {height} --stride {stride} "
+          f"--format {fmt}")
+
+
 def main():
     ap = argparse.ArgumentParser()
     # The archived copy first, because it is the binary the guest is
@@ -3557,6 +3652,12 @@ def main():
                   f"every number above it is fiction")
     except Exception as failure:
         print(f"base unproven: {failure}")
+
+    # Straight after the two proofs, because it is the section most
+    # likely to be the only one wanted: it is what a separate reader
+    # needs before it can look at the screen at all, and it costs one
+    # monitor connection.
+    dump_framebuffer(args, args.elf, instance)
 
     # Which hypervisor-range CPUID leaves the guest actually asks for.
     # The question the exit trace cannot answer: it records that a cpuid

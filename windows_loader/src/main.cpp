@@ -111,6 +111,13 @@ extern "C" NTAPI NTSTATUS driver_entry(PDRIVER_OBJECT driver_object,
         // arrives and there is nothing left for a roster to answer.
         .processor_apic_ids = nullptr,
         .number_of_processor_apic_ids = 0,
+        // Nor this. There is no graphics output protocol under a running
+        // operating system - it is a boot services protocol and boot
+        // services are long gone - and by this point the display driver
+        // owns the adapter and may have reprogrammed it, so the
+        // firmware's framebuffer would no longer describe the screen even
+        // if it could be found.
+        .framebuffer = {},
         .adjust_launch_calling_convention = invoke_entry,
     };
 

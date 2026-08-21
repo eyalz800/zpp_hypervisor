@@ -30,6 +30,102 @@ extern "C" {
 #define ZPP_START_UP_MEMORY_SIZE (4 * 4096)
 
 /**
+ * Where the firmware's own graphics output is, and how it is laid out.
+ *
+ * Only the loader can answer this. The framebuffer's address comes out of
+ * EFI_GRAPHICS_OUTPUT_PROTOCOL, which is a boot services protocol - it
+ * stops existing at ExitBootServices, long before the resident side has
+ * anything to ask it, and the resident side has no protocol database to
+ * ask anyway.
+ *
+ * Why it is worth handing over at all: on a rig whose display adapter is
+ * passed through, the emulator has no console of its own and answers
+ * `screendump` with "There is no console to take a screendump from". The
+ * pixels are still there - they are in the *guest's* physical address
+ * space, inside the adapter's framebuffer bar, which the monitor's `xp`
+ * reads. What is missing is only the address and the layout, and this is
+ * that. See scripts/rig-screen.py, which is the reader.
+ *
+ * This describes the **firmware's** linear framebuffer, which is what the
+ * boot graphics - the vendor logo, the spinner, and a bugcheck screen
+ * raised before the display driver loads - are drawn into. Once the
+ * operating system's own display driver takes over it may program the
+ * adapter differently and this stops describing what is on screen. That
+ * is a real limit and it is the *right* one for the window that matters:
+ * a guest that hangs in Phase1Initialization never gets that far.
+ *
+ * By value inside `zpp_launch_parameters` rather than behind a pointer,
+ * deliberately. The resident side copies the launch block whole and then
+ * stops being able to follow any pointer out of it - it switches to the
+ * host page table, which maps this module and very little else - so a
+ * pointer here would need its own second copy, exactly like
+ * `diagnostic_channel` does. Ten scalars are cheaper than that.
+ *
+ * All zero means the loader found no graphics output protocol, which is
+ * not an error: it must never stop a boot.
+ */
+struct zpp_framebuffer_info
+{
+    /**
+     * Physical address of the first pixel, and how many bytes the
+     * firmware says the whole framebuffer occupies.
+     *
+     * A physical address in the address space the loader is running in,
+     * which under UEFI is identity mapped - so it is directly what `xp`
+     * wants. Zero means there is no framebuffer.
+     * @{
+     */
+    uint64_t base;
+    uint64_t size;
+    /**
+     * @}
+     */
+
+    /**
+     * The visible extent, in pixels.
+     * @{
+     */
+    uint32_t horizontal_resolution;
+    uint32_t vertical_resolution;
+    /**
+     * @}
+     */
+
+    /**
+     * How many pixels one scan line occupies, which is **not** the same
+     * as the horizontal resolution and is the field a reader gets wrong.
+     * Firmware routinely pads a scan line out to a convenient alignment,
+     * so an image walked at the visible width shears diagonally.
+     */
+    uint32_t pixels_per_scan_line;
+
+    /**
+     * The pixel format, as EFI_GRAPHICS_PIXEL_FORMAT numbers them:
+     * 0 red-green-blue-reserved, 1 blue-green-red-reserved, 2 bit mask,
+     * 3 blt only. Every one of the first three is four bytes per pixel.
+     *
+     * Format 3 has **no** linear framebuffer at all - the firmware only
+     * offers the Blt() service - and `base` is meaningless there. A
+     * reader must check this rather than assume, which is why the number
+     * is carried rather than normalised away.
+     */
+    uint32_t pixel_format;
+
+    /**
+     * The channel masks, meaningful only when `pixel_format` is 2. Zero
+     * otherwise, since the other formats define their byte order.
+     * @{
+     */
+    uint32_t red_mask;
+    uint32_t green_mask;
+    uint32_t blue_mask;
+    uint32_t reserved_mask;
+    /**
+     * @}
+     */
+};
+
+/**
  * The platform services zpp_load_elf needs from its caller.
  *
  * Grouped into a struct rather than passed positionally so that call sites
@@ -163,6 +259,12 @@ struct zpp_launch_parameters
     /**
      * @}
      */
+
+    /**
+     * The firmware's linear framebuffer, or all zero where the loader
+     * found none. See `zpp_framebuffer_info`.
+     */
+    struct zpp_framebuffer_info framebuffer;
 };
 
 struct zpp_loader_parameters
@@ -237,6 +339,15 @@ struct zpp_loader_parameters
     /**
      * @}
      */
+
+    /**
+     * The firmware's linear framebuffer, as this loader's platform
+     * describes it, or all zero. Only the UEFI loader can fill this in -
+     * a loader running under an operating system has no graphics output
+     * protocol to ask, and by then the display driver owns the adapter
+     * anyway.
+     */
+    struct zpp_framebuffer_info framebuffer;
 
     /**
      * Adjusts the calling convention before entering the hypervisor. May

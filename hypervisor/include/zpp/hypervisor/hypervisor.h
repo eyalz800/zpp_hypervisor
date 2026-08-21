@@ -10793,6 +10793,53 @@ private:
     std::uint64_t sleep_facs_physical{};
 
     /**
+     * Where the firmware's linear framebuffer is and how it is laid out,
+     * as the loader's graphics output protocol described it. All zero
+     * where it found none.
+     *
+     * **Nothing in this VMM reads these.** They are here to be read from
+     * *outside*, by `scripts/rig-screen.py`, and that is the whole point:
+     * on a rig whose display adapter is passed through, the emulator has
+     * no console and answers `screendump` with "There is no console to
+     * take a screendump from", so the only way to see a boot spinner or a
+     * bugcheck screen is to read the pixels out of guest physical memory
+     * with the monitor's `xp`. The pixels were always reachable; the
+     * address and the layout were not, because they come out of a boot
+     * services protocol that stopped existing before this module ran.
+     *
+     * Flat scalars rather than the `zpp_framebuffer_info` structure, so
+     * this header does not have to include `zpp/loader.h` - it does not
+     * today, and the sleep control fields above set the precedent for
+     * copying a hand-over field by field into members.
+     *
+     * Recorded once, on the boot processor's launch, inside the same
+     * guard as everything else out of the launch block: a processor this
+     * VMM starts itself has no launch block, and writing an unguarded
+     * zero over what the boot processor found is exactly how the sleep
+     * control port was lost once.
+     *
+     * `framebuffer_format` is an EFI_GRAPHICS_PIXEL_FORMAT: 0
+     * red-green-blue-reserved, 1 blue-green-red-reserved, 2 bit mask, 3
+     * blt only. Format 3 means there is no linear framebuffer and the
+     * base is not an address - the reader has to check it, so it is
+     * carried rather than normalised away.
+     * @{
+     */
+    std::uint64_t framebuffer_base{};
+    std::uint64_t framebuffer_size{};
+    std::uint32_t framebuffer_width{};
+    std::uint32_t framebuffer_height{};
+    std::uint32_t framebuffer_stride{};
+    std::uint32_t framebuffer_format{};
+    std::uint32_t framebuffer_red_mask{};
+    std::uint32_t framebuffer_green_mask{};
+    std::uint32_t framebuffer_blue_mask{};
+    std::uint32_t framebuffer_reserved_mask{};
+    /**
+     * @}
+     */
+
+    /**
      * The waking vector the guest left in that table, read on the way into
      * a sleep state.
      *

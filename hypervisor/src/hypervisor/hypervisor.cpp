@@ -6263,6 +6263,34 @@ hypervisor::main(arch::x86_64::context & caller_context)
         this->sleep_control_width = launch.sleep_control_width;
         this->sleep_facs_physical = launch.sleep_facs_physical;
 
+        // The firmware's framebuffer, recorded and never read from
+        // here - see the members' comment. Inside this guard with the
+        // rest, because a processor this VMM started carries no launch
+        // block and would otherwise zero what the boot processor found.
+        this->framebuffer_base = launch.framebuffer.base;
+        this->framebuffer_size = launch.framebuffer.size;
+        this->framebuffer_width = launch.framebuffer.horizontal_resolution;
+        this->framebuffer_height = launch.framebuffer.vertical_resolution;
+        this->framebuffer_stride = launch.framebuffer.pixels_per_scan_line;
+        this->framebuffer_format = launch.framebuffer.pixel_format;
+        this->framebuffer_red_mask = launch.framebuffer.red_mask;
+        this->framebuffer_green_mask = launch.framebuffer.green_mask;
+        this->framebuffer_blue_mask = launch.framebuffer.blue_mask;
+        this->framebuffer_reserved_mask = launch.framebuffer.reserved_mask;
+
+        // In the log too, not only in the members. The members need a
+        // reader that knows the singleton's offsets; the log is text and
+        // comes out of a wedged guest through the same path everything
+        // else does. Both, because the two are read in different
+        // situations and neither subsumes the other.
+        log("framebuffer at {} size {}, {}x{} stride {} format {}",
+            this->framebuffer_base,
+            this->framebuffer_size,
+            this->framebuffer_width,
+            this->framebuffer_height,
+            this->framebuffer_stride,
+            this->framebuffer_format);
+
         // Where this module was put. Inside the guard with the rest,
         // because a processor this VMM started has no launch block and
         // would otherwise write a null over the answer the boot

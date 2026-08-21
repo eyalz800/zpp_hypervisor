@@ -145,6 +145,12 @@ static int zpp_init(void)
          * start-up IPI, so there is nothing for a roster to answer. */
         .processor_apic_ids = NULL,
         .number_of_processor_apic_ids = 0,
+        /* Nor this. The graphics output protocol is a boot services
+         * protocol and boot services are long gone under a running
+         * kernel, which owns the adapter itself by now - so the
+         * firmware's framebuffer would no longer describe the screen
+         * even if it could still be asked for. */
+        .framebuffer = {0},
         /* System V already, so no adaptation is needed. */
         .adjust_launch_calling_convention = NULL,
     };

@@ -8,6 +8,7 @@ extern "C" {
 #include <Protocol/BlockIo.h>
 #include <Protocol/DevicePathToText.h>
 #include <Protocol/DevicePathUtilities.h>
+#include <Protocol/GraphicsOutput.h>
 #include <Protocol/LoadedImage.h>
 #include <Protocol/MpService.h>
 #include <Protocol/SimpleFileSystem.h>
@@ -97,6 +98,12 @@ static EFI_GUID g_efi_device_path_to_text_protocol_guid = {
     0xa76e,
     0x4f46,
     {0xad, 0x29, 0x12, 0xf4, 0x53, 0x1b, 0x3d, 0x08}};
+
+static EFI_GUID g_efi_graphics_output_protocol_guid = {
+    0x9042a9de,
+    0x23dc,
+    0x4a38,
+    {0x96, 0xfb, 0x7a, 0xde, 0xd0, 0x80, 0x51, 0x6a}};
 /**
  * @}
  */
@@ -579,6 +586,105 @@ static void collect_processor_roster()
         g_processor_apic_ids[g_number_of_processor_apic_ids++] =
             static_cast<std::uint32_t>(information.ProcessorId);
     }
+}
+
+/**
+ * Where the firmware draws, for the hypervisor to record and something
+ * outside the machine to read. See `zpp_framebuffer_info` for why.
+ *
+ * Static for the same reason the roster above is: the hypervisor goes
+ * resident and this loader's frames do not. Copied by value into the
+ * launch block, so it only has to survive the call.
+ */
+static zpp_framebuffer_info g_framebuffer{};
+
+/**
+ * Asks the graphics output protocol for it.
+ *
+ * **Nothing here may fail a boot.** Every step returns quietly, leaving
+ * the structure all zero, which is what the resident side reads as "no
+ * framebuffer". A display is not something this loader needs, and a
+ * machine that boots without one being readable is strictly better than
+ * one that does not boot.
+ *
+ * `LocateProtocol` rather than a handle walk, and that is a real choice:
+ * a machine can carry several graphics output handles - one per adapter,
+ * plus the firmware's own console splitter - and picking among them
+ * needs a rule this loader has no way to check. `LocateProtocol` returns
+ * the first, which is the same one the firmware's console is on, and the
+ * console is where the boot graphics go. If a rig ever turns out to have
+ * more than one, the fix is to prefer the handle that also carries
+ * EFI_CONSOLE_OUT_DEVICE_GUID; it is not needed until it is.
+ *
+ * Not called before `connect_all_controllers`, and it does not have to
+ * be: unlike the passed-through disk, whose block IO handle only exists
+ * once something drives it, the firmware has already driven whatever it
+ * is drawing its own boot messages on.
+ */
+static void collect_framebuffer()
+{
+    g_framebuffer = zpp_framebuffer_info{};
+
+    EFI_GRAPHICS_OUTPUT_PROTOCOL * graphics{};
+    if (EFI_ERROR(g_boot_services->LocateProtocol(
+            &g_efi_graphics_output_protocol_guid,
+            nullptr,
+            reinterpret_cast<void **>(&graphics)))) {
+        trace::line("ZPP_TRACE no graphics output protocol");
+        return;
+    }
+
+    // Both are pointers the firmware owns and either may be null on a
+    // protocol that exists but has no mode set. Checked rather than
+    // assumed - this runs on every boot and a null dereference here is a
+    // machine that does not start.
+    if (!graphics->Mode || !graphics->Mode->Info) {
+        trace::line("ZPP_TRACE graphics output with no mode");
+        return;
+    }
+
+    auto * mode = graphics->Mode;
+    auto * info = mode->Info;
+
+    g_framebuffer.base = mode->FrameBufferBase;
+    g_framebuffer.size = mode->FrameBufferSize;
+    g_framebuffer.horizontal_resolution = info->HorizontalResolution;
+    g_framebuffer.vertical_resolution = info->VerticalResolution;
+    // Recorded even when it equals the width. A reader that assumes it
+    // does gets a diagonally sheared image the day it does not, and the
+    // shear is subtle enough to be read as a corrupt framebuffer.
+    g_framebuffer.pixels_per_scan_line = info->PixelsPerScanLine;
+    g_framebuffer.pixel_format =
+        static_cast<std::uint32_t>(info->PixelFormat);
+
+    // Only meaningful for PixelBitMask, and the specification says so -
+    // UEFI 2.10, EFI_GRAPHICS_OUTPUT_MODE_INFORMATION: "This bit-mask is
+    // only valid if PixelFormat is set to PixelBitMask". Copied only
+    // there, so a reader can use a non-zero mask as evidence of the
+    // format rather than having to cross-check.
+    if (PixelBitMask == info->PixelFormat) {
+        g_framebuffer.red_mask = info->PixelInformation.RedMask;
+        g_framebuffer.green_mask = info->PixelInformation.GreenMask;
+        g_framebuffer.blue_mask = info->PixelInformation.BlueMask;
+        g_framebuffer.reserved_mask = info->PixelInformation.ReservedMask;
+    }
+
+    // PixelBltOnly means there is no linear framebuffer at all, so the
+    // base is not an address anything can read. Left in the hand-over
+    // exactly as the firmware reported it, with the format beside it,
+    // rather than being zeroed here: a reader that finds base non-zero
+    // and format 3 learns *why* it cannot read the screen, which is more
+    // than it learns from an all-zero record.
+    trace::hex_line("ZPP_TRACE framebuffer base ", g_framebuffer.base);
+    trace::hex_line("ZPP_TRACE framebuffer size ", g_framebuffer.size);
+    trace::hex_line("ZPP_TRACE framebuffer width ",
+                    g_framebuffer.horizontal_resolution);
+    trace::hex_line("ZPP_TRACE framebuffer height ",
+                    g_framebuffer.vertical_resolution);
+    trace::hex_line("ZPP_TRACE framebuffer stride ",
+                    g_framebuffer.pixels_per_scan_line);
+    trace::hex_line("ZPP_TRACE framebuffer format ",
+                    g_framebuffer.pixel_format);
 }
 
 static void trace_launch_context()
@@ -1613,6 +1719,13 @@ extern "C" EFI_STATUS EFIAPI uefi_main(EFI_HANDLE image_handle,
     // hypervisor needs this whether or not anything is being traced.
     collect_processor_roster();
 
+    // While boot services still exist. The graphics output protocol is a
+    // boot services protocol, so this is the last part of the boot at
+    // which the question can be asked at all - and it is asked
+    // unconditionally, on a chainload-only build too, because a control
+    // run wants the screen readable for exactly the same reason.
+    collect_framebuffer();
+
     // Take a tail of the EFI system partition out of its file system, so
     // there are blocks the guest's file system cannot reach and cannot
     // hand to anybody else. Idempotent: a boot that finds the
@@ -1763,6 +1876,9 @@ extern "C" EFI_STATUS EFIAPI uefi_main(EFI_HANDLE image_handle,
                 : std::uint64_t{},
         .processor_apic_ids = g_processor_apic_ids,
         .number_of_processor_apic_ids = g_number_of_processor_apic_ids,
+        // All zero when there is no graphics output, which the resident
+        // side reads as "no framebuffer" rather than as an error.
+        .framebuffer = g_framebuffer,
         .adjust_launch_calling_convention = invoke_entry,
     };
 
