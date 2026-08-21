@@ -84,6 +84,10 @@ option(ZPP_PROFILE_L2
     "Sample a second-level guest's instruction pointer on the VMX-preemption timer. A profiler: it costs an exit per interval and is the only instrument that can see a guest spinning on memory."
     OFF)
 
+option(ZPP_SAMPLE_L1
+    "Sample the FIRST-level guest's instruction pointer on the VMX-preemption timer, armed at VMCS setup rather than from the exit path. The application processors burn a whole host core each and take no exits, so every exit-driven instrument here is blind to them, and reading their state through the monitor is not passive - QEMU must signal them out of guest mode to do it. Costs one exit per period per processor, for ever."
+    OFF)
+
 option(ZPP_CENSUS_EXITS
     "Fill the exit ring's qualification, activity state and CS selector, and the CPL census beside them. Three VMCS reads on every exit, which is 7.8 per round trip at the measured 2.61 exits per round trip, and every one of them is an exit to KVM on a host without VMCS shadowing. OFF: the ring still records the reason, the instruction pointer and the guest-physical address, and the terminal records keep their full detail. See nested_vmx.h."
     OFF)
@@ -221,6 +225,7 @@ target_compile_options(zpp_hypervisor PRIVATE
     -DZPP_VIRTUALIZE_APIC=$<BOOL:${ZPP_VIRTUALIZE_APIC}>
     -DZPP_PROFILE_L2=$<BOOL:${ZPP_PROFILE_L2}>
     -DZPP_CENSUS_EXITS=$<BOOL:${ZPP_CENSUS_EXITS}>
+    -DZPP_SAMPLE_L1=$<BOOL:${ZPP_SAMPLE_L1}>
     # **Three switches added in one session never reached the compiler
     # because they were declared in the top-level CMakeLists, forwarded
     # to this sub-build's cache, and then not added to this list.** The

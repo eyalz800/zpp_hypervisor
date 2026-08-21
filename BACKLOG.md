@@ -785,6 +785,53 @@ is not there" and is really "the wrong question was asked". `x` is the
 virtual read. The same distinction is why a wide `xp` over a device BAR
 lied, further down this file.
 
+## Settled with an uncontaminated clock: the APs ARE halted. 100% schedstat does not mean busy
+
+**Two sections back this file said the application processors are not halted
+but spinning at 100%. That was wrong, and this is the measurement that
+settles it** - taken with a clock this VMM owns, so nothing had to be
+perturbed to read it.
+
+`ZPP_SAMPLE_L1` arms the VMX-preemption timer in **vmcs01 at VMCS setup**,
+which is the missing piece: `arm_controller_poll` arms the same timer but
+only from the exit path, and a first-level guest that never exits never
+reaches it. With it on, cpu 1's exits become 99.0% preemption timer -
+416,690 of them - and its ring reads:
+
+    reason 0x34 (VMX preemption timer)  rip 0xfffff85a8a5a6b5e  [times=350582]
+
+**350,582 consecutive samples at one unchanging instruction pointer**, and
+that pointer is the `jmp` immediately after the `hlt`, which is where the
+processor stands when a VM exit is taken from the HLT state. **A processor
+executing anything would show varied pointers.** It shows none.
+
+So the application processors are halted, the timer keeps firing, and this
+VMM keeps resuming them straight back into the halt.
+
+**Why the 100% reading was misleading, and this is the part to remember.**
+HLT is not intercepted here, so a processor that halts does so *inside the
+guest*: it never exits to KVM, KVM's `halt_exits` stays 0, the vCPU thread
+never returns from `KVM_RUN`, and **the Linux scheduler therefore counts the
+thread as continuously running.** `schedstat` measures "did this thread yield
+to the scheduler", not "did this core execute instructions". For a guest-mode
+halt the two are opposite.
+
+That also un-breaks the earlier contradiction: `irq_injections` at 0/s and
+`halt_exits` at 0 were both correct and both consistent with halted
+processors, and only the schedstat figure argued otherwise.
+
+**Corrected, then, and back to where the evidence actually pointed:** seven
+processors sit in the first-level guest's idle halt with no wake source -
+APIC timer disarmed, IRR and ISR empty - and `Phase1Initialization` on the
+eighth waits for a virtual processor that needs one of them.
+
+**Method, twice burned and now written down**: for "is this processor doing
+anything", the only trustworthy instrument is one whose sampling *is* the
+observation - a timer this VMM arms, whose exit records the guest's own
+pointer. Host scheduler accounting answers a different question than it
+appears to, and monitor reads force the exit they report on. **Both were
+tried here first and both misled.**
+
 ## Qualifying "interrupt storm": they are spinning at 100%, and where is not yet established
 
 **The 100% is solid. The word "storm" was one inference too far**, and the

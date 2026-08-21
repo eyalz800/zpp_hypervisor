@@ -4,6 +4,14 @@ namespace zpp::hypervisor
 {
 namespace
 {
+// Mirrors the constant in hypervisor.cpp, which is where the control is
+// actually programmed. Spelled from the macro here because the constexpr
+// bool it feeds is local to that translation unit.
+#ifndef ZPP_SAMPLE_L1
+#define ZPP_SAMPLE_L1 0
+#endif
+constexpr bool sample_l1_enabled = (0 != ZPP_SAMPLE_L1);
+
 constexpr char digit(bool value)
 {
     return value ? '1' : '0';
@@ -119,6 +127,12 @@ extern "C" [[gnu::used, gnu::retain]] constinit const char
         ' ', 's', 't', 'r', 'e', 't', 'c', 'h', '=',
         digit(static_cast<unsigned>(ZPP_STRETCH_GUEST_TIMER) / 10),
         digit(static_cast<unsigned>(ZPP_STRETCH_GUEST_TIMER)),
+        // The first-level sampler. On, every processor pays an exit a
+        // millisecond for ever, so a run that has it on is not comparable
+        // with one that does not - which is exactly what a manifest field
+        // is for.
+        ' ', 's', 'a', 'm', 'p', 'l', '1', '=',
+        digit(sample_l1_enabled),
         ' ', 'v', 't', 'l', 'c', 'a', 'p', '=',
         digit(nested_vmx::capture_vtl_deeply),
         ' ', 'd', 'i', 'l', 'a', 't', 'e', '=',

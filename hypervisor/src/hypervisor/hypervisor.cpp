@@ -5628,12 +5628,56 @@ void hypervisor::setup_vmcs(std::size_t cpu,
 #endif
     constexpr bool virtualize_apic = (0 != ZPP_VIRTUALIZE_APIC);
 
+    // Sampling the *first*-level guest, which is otherwise unobservable
+    // once it stops exiting.
+    //
+    // **The application processors burn 100% of a host core each and take
+    // no exits at all**, measured from the host's own scheduler accounting
+    // (`/proc/<pid>/task/*/schedstat`) with `signal_exits` proving nothing
+    // kicked them. Every instrument in this tree is driven by an exit, so
+    // a first-level guest that spins without exiting is invisible to all
+    // of them - and reading its instruction pointer through the monitor is
+    // not passive, because QEMU must signal the processor out of guest
+    // mode to do it, which perturbs exactly the state being asked about.
+    //
+    // `arm_controller_poll` already arms this timer and cannot help here:
+    // it runs from the exit path, and these processors do not reach one.
+    // Arming it at VMCS setup is what breaks that chicken-and-egg.
+    //
+    // Nothing else is needed - the exit ring already records the guest RIP
+    // of every exit, so a periodic exit *is* the sample.
+    //
+    // Off by default: it charges every processor an exit per period for
+    // ever, and this VMM's whole difficulty is exits.
+#ifndef ZPP_SAMPLE_L1
+#define ZPP_SAMPLE_L1 0
+#endif
+    constexpr bool sample_l1 = (0 != ZPP_SAMPLE_L1);
+
     vmcs.pin_based_vm_execution_controls(arch::x86_64::vmx::adjust_msr(
         this->cached_vmx_msr(vmx_msr::true_pin_based_controls),
         arch::x86_64::vmx::vm_execution_controls::pin::nmi_exiting |
+            (sample_l1 ? arch::x86_64::vmx::vm_execution_controls::pin::
+                             activate_preemption_timer
+                       : 0) |
             (virtualize_apic ? arch::x86_64::vmx::vm_execution_controls::
                                    pin::external_interrupt_exiting
                              : 0)));
+
+    if constexpr (sample_l1) {
+        // The timer counts the time-stamp counter shifted right by
+        // IA32_VMX_MISC[4:0], so the same interval is a different number
+        // on every machine. A millisecond is far longer than anything
+        // being chased and still gives a thousand samples a second.
+        //
+        // Written unconditionally on every entry is not needed here: the
+        // exit controls leave "save VMX-preemption timer value" clear, so
+        // this one write keeps producing exits at the same interval -
+        // SDM 26.6.4, and `build_vmcs02` relies on the same property.
+        auto divisor = this->cached_vmx_msr(vmx_msr::misc) & 0x1f;
+        auto ticks = (1000ull * 1800) >> divisor;
+        vmcs.vmx_preemption_timer_value(ticks ? ticks : 1);
+    }
 
     // Trapping MONITOR and MWAIT, which is **off**, and the reason is a
     // measurement rather than a preference.
