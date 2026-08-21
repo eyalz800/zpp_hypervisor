@@ -35726,3 +35726,40 @@ the worked example: **a chain of rates multiplied by estimates can reach a
 confident, precise and false conclusion, and the only cure is to measure the
 quantity itself.** `handler_cycles / (last_tsc - first_tsc)` is two fields
 that were already being read and never divided.
+
+## Whose time it is: Windows gets 7.1%, the guest hypervisor gets 12.8%
+
+The duty cycle says how much of the machine is not this VMM. It does not say
+whether what is left reaches Windows, and those are opposite diagnoses. Split
+with `l1_run_cycles` and `l2_run_cycles`, both of which the reader was
+already fetching and never printed:
+
+    handler (this VMM)       80.1%
+    guest hypervisor (L1)    12.8%    35.8 s
+    Windows          (L2)     7.1%    19.9 s
+    Windows' share of non-VMM time: 35.7%
+
+**Windows has had about twenty seconds of processor across 280 seconds**,
+and the guest hypervisor has had nearly twice that. Twenty seconds is not
+nothing - it is the order of a whole boot - so the guest is not being denied
+time. It is spending it.
+
+Where: every one of the eight hot second-level instruction pointers is in
+the clock path, so essentially all of Windows' twenty seconds goes there.
+Against roughly 160,000 ticks in that window that is **~125 microseconds of
+guest execution per clock tick**, and `KiDpcInterruptBypass` is one of the
+eight. A clock interrupt service routine costs microseconds, not 125 of
+them.
+
+**So the shape of the fault is now: Windows' clock path consumes all of
+Windows' time, and the trust-level loop advances only in the slivers left
+over - fifteen times a second.** That is consistent with everything measured
+and contradicts nothing: the guest is not starved of wall time (duty 0.797),
+the secure kernel answers success, the loop around it is tight, and no new
+memory is touched.
+
+**What it is not yet** is established as abnormal. 125 microseconds a tick
+is only damning against a reference, and this tree has one: the chainload
+control, where the same Windows with the same VBS reaches user mode in 118
+seconds on the same machine. Measuring the clock path there is the
+comparison that decides whether this is the fault or a consequence of it.

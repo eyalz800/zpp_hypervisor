@@ -2962,6 +2962,25 @@ def main():
                      if duty > 0.85 else
                      "   <- NOT starved: the guest has time it is not using"))
 
+        # And **whose** the remaining time is. The duty cycle above says
+        # how much is not this VMM's; it does not say whether what is left
+        # reaches Windows at all. `l1_run_cycles` is the guest hypervisor
+        # executing and `l2_run_cycles` is its guest - and "Windows has a
+        # fifth of the machine" and "Hyper-V has a fifth of the machine
+        # and Windows has almost none" are opposite diagnoses that the
+        # duty cycle alone cannot tell apart.
+        l1 = read('l1_run_cycles', cpu) or 0
+        l2 = read('l2_run_cycles', cpu) or 0
+        if span > 0 and (l1 or l2):
+            print(f"  of which:")
+            print(f"    guest hypervisor (L1)  {l1:>18,}"
+                  f"   {100.0 * l1 / span:5.1f}% of wall")
+            print(f"    Windows          (L2)  {l2:>18,}"
+                  f"   {100.0 * l2 / span:5.1f}% of wall")
+            if (l1 + l2) > 0:
+                print(f"    Windows' share of non-VMM time: "
+                      f"{100.0 * l2 / (l1 + l2):.1f}%")
+
     # **The secure kernel's own answer.** Byte 1 of the block is the
     # request it is making and the 32-bit word at offset 8 is the status
     # it returned - the slot VslpEnterIumSecureMode itself writes
