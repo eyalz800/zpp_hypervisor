@@ -785,6 +785,63 @@ is not there" and is really "the wrong question was asked". `x` is the
 virtual read. The same distinction is why a wide `xp` over a device BAR
 lied, further down this file.
 
+## Retraction: `VslStartSecureProcessor` was stack residue. The profile is the instrument, the scan is not
+
+**The section below overstates its evidence and its headline is withdrawn.**
+It read a chain - `VslStartSecureProcessor` -> `HvlHalStartVirtualProcessor`
+-> `HalpHvStartVirtualProcessor` -> `HalpApicRequestInterrupt` ->
+`HalpInterruptSendIpi` - off one sample of `guest_stack_trace` and called it
+the blocker. **Sampled five times twenty seconds apart, exactly one frame
+survives all five**, and it is `ntoskrnl+0xe10f80` = `HalpKInterruptHeap+0xa20`,
+which is in `.data` and is a pointer, not a return address:
+
+    sample 1  13 distinct frames     sample 4  30
+    sample 2  30                     sample 5  26
+    sample 3  13
+    present in all five: 1 frame, and it is data
+
+`sample_guest_stack`'s own declaration says it is "a candidate list and not a
+stack" - it scans 2,048 words and keeps whatever falls in an image range, so
+a dead frame from any earlier call looks exactly like a live one. **The
+warning was in the code and the conclusion was drawn anyway.** A plausible
+call chain assembled from residue is the most convincing wrong answer this
+instrument can produce, because the functions really do call each other.
+
+**What is actually supported, from the profile**, which samples 1,771+ times
+on a clock this VMM owns and is not a candidate list:
+
+    KiIsrThunkShadow+0x688              [KVASCODE]
+    HvlEndSystemInterrupt+0x1e
+    HalpHvTimerArm+0x7a
+    HalpHvTimerAcknowledgeInterrupt+0x46
+    HvlWriteApicCommandRegister+0x1d
+    KiDpcInterruptBypass+0x12
+    KeQueryPerformanceCounter+0x163
+
+**Every one is the clock path.** Arm the timer, acknowledge the timer, end
+the interrupt, write the APIC command register, bypass to the DPC interrupt,
+read the performance counter, and the KVA-shadow thunk that gets in and out
+of it. That is a guest doing nothing but servicing its own tick and asking
+for a DPC - which is what `0x2f` requested 12.4 million times at task
+priority `0xd0` already said, now with the function names to match.
+
+**And the synthetic ICR writes are self-IPIs, not start-up IPIs.** The code
+comment on `synthetic_interrupt_command` records it: every one of 297,465
+sampled writes carried `0x4002f` - vector `0x2f`, fixed, shorthand 00,
+physical destination APIC id 0 - and *the second-level guest has one virtual
+processor*. So those 12.4 million writes are the guest asking itself for a
+DPC, and they are not evidence of any attempt to start another processor.
+
+**What survives from the section below, unchanged**: the securekernel park at
+`+0xb043e` is real - it was read out of guest memory as bytes, not inferred -
+and the symbolisation method is real and reusable. Only the call chain and
+the conclusion drawn from it are withdrawn.
+
+**Rule going forward, since this is the third wrong answer in two days from
+the same class of mistake**: quote the profile, quote counters, quote bytes.
+**Do not quote `guest_stack_trace` unless a frame survives repeated
+sampling** - and say how many samples it survived when you do.
+
 ## THE BLOCKER, NAMED: `VslStartSecureProcessor` waits on an AP that never starts
 
 **The second-level guest's stack, resolved against real Microsoft symbols.**
