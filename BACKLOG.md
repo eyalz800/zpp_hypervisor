@@ -785,6 +785,72 @@ is not there" and is really "the wrong question was asked". `x` is the
 virtual read. The same distinction is why a wide `xp` over a device BAR
 lied, further down this file.
 
+## THE APPLICATION PROCESSORS ARE NOT HALTED. They are at 100% CPU in an interrupt storm
+
+**This overturns the reading that has driven the last several sections**, and
+the mistake was mine: every "the APs are dead / halted / have no wake source"
+claim rested on exit counters that are structurally blind to what those
+processors are doing.
+
+**Measured on the host, per thread, over 15 seconds:**
+
+    tid 17964  15001.2 ms of 15000  (100.0%)   tid 17968  14981.7 ms  ( 99.9%)
+    tid 17965  15003.8 ms           (100.0%)   tid 17969  15000.4 ms  (100.0%)
+    tid 17966  14986.9 ms           ( 99.9%)   tid 17970  14998.0 ms  (100.0%)
+    tid 17967  14949.6 ms           ( 99.7%)   tid 17971  14935.8 ms  ( 99.6%)
+
+**All eight vCPU threads are pinned at 100%.** A halted processor consumes
+**zero**. They were never idle.
+
+**And the code they sit in is not the idle loop this file assumed.** The
+frozen address was decoded in an *earlier boot* and then assumed identical in
+later ones; decoded properly, in this boot, through the first-level guest's
+own page tables:
+
+    0x50  fa                          cli
+    0x51  65 83 3c 25 40 03 00 00 00  cmp dword gs:[0x340], 0
+    0x5a  7f 04                       jg  +4         -> skip the halt
+    0x5c  fb                          sti
+    0x5d  f4                          hlt
+    0x5e  eb 01                       jmp +1         <- THE SAMPLED RIP
+    0x60  fb                          sti
+    0x61  c3                          ret
+
+The sampled instruction pointer is the instruction **immediately after the
+`hlt`** - which is where a processor stands when it has just been *woken*,
+not where one stands while halted. Sampling it in 25 of 25 attempts, at 100%
+CPU, means the halt is returning immediately every time: **execute `hlt`,
+wake at once, return, the caller loops, halt again.**
+
+**That is an interrupt storm on seven processors**, and it has been invisible
+for the entire investigation because `ZPP_VIRTUALIZE_APIC=0` leaves
+external-interrupt exiting off, so not one of those interrupts produces an
+exit. The section above warned that a trap-driven counter cannot distinguish
+"nothing happened" from "something happened that does not trap" - and then
+this file went on reading those zeros as absence anyway.
+
+**What this retires:**
+
+- "The APs have no wake source." They are being woken constantly.
+- "The wake-up was lost at bring-up." Nothing was lost; wake-ups are
+  arriving now, at enormous rate.
+- Every framing built on the APs being asleep, including the rendezvous
+  race and the lost-signal analysis two sections down.
+
+**What it leaves, and it is a better question than the one it replaces:**
+*what is interrupting seven processors continuously?* KVM's own
+`irq_injections` reads **0/s**, so the source is not KVM injecting into this
+VMM's vCPUs - it is something inside the guest's own view of its interrupt
+controller. And whatever it is, it keeps seven of eight processors from ever
+running a virtual processor, which is exactly what `Phase1Initialization` is
+waiting for.
+
+**Method note, and it is the one worth carrying**: the host's scheduler
+accounting - `/proc/<pid>/task/*/schedstat` - answered in one command what
+every guest-side instrument here got wrong, because it does not depend on the
+guest trapping to be observed. **When in-guest counters say a processor is
+doing nothing, ask the host how much CPU it is burning.**
+
 ## The IPIs were delivered. Routing is correct. It is a rendezvous race, and the instruments here cannot see it
 
 **Delivered, not lost in flight.** KVM's own per-VM counters:
