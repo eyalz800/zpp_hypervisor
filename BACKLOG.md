@@ -37565,3 +37565,48 @@ bookkeeping tied to seeing that write - which is what the option text warns
 secure kernel. **Any fix has to leave Hyper-V's view of the interrupt
 intact**, which rules out the whole class of "deliver it ourselves"
 interventions, not just this one.
+
+## Caveat on the "FOUND" entry: the detach is not unique to the freeze
+
+The entry above concludes that VINA preempts the hypercall return and
+`SkiDetachThread` strands the walk's thread. **One part of that does not
+survive comparison with the traces already in this file.**
+
+`SkiDetachThread` runs 7 instructions in the trace pinned at the freeze -
+and it runs **7 instructions in the steady-state traces taken earlier too**,
+from different boots. So detaching a thread is part of the ordinary VINA
+path, not something that happens only when the walk dies. A routine that
+appears in both the failing case and thousands of working ones is not by
+itself the failure.
+
+**What does survive, and it is the part that matters:**
+
+- the trace on the entry carrying the hypercall answer **starts inside
+  `KiVinaInterruptShadow`**, where every other trace starts at
+  `SkpReturnFromNormalMode`. That difference is real and is not a sampling
+  artifact - it is a structurally different entry, and it is the only trace
+  of that event ever taken.
+- `SkmiProtectPageRange` does not appear on it, so the four instructions
+  after the hypercall are not executed on that entry.
+- `r15` stays at 1 and the frame is unchanged minutes later, which is
+  consistent with them never being executed at all.
+
+**What is not established** is that this is *why*. The same VINA path, with
+the same detach, runs thousands of times during the walk without stopping
+it. So either something about the last occurrence differs in a way the trace
+does not show, or the thread is normally re-attached by something that did
+not happen this time.
+
+**The honest position**: the mechanism is *identified* to the level of a
+specific entry and a specific handler, and *not* to the level of what
+distinguishes the fatal occurrence from the thousands of harmless ones.
+Calling it FOUND was premature by one step, which is the same step this
+investigation has skipped ten times - reading a single observation of a
+common event as the explanation of a rare one.
+
+**The measurement that would close it**: count how often the answer-carrying
+entry starts in `KiVinaInterruptShadow` rather than at a normal resume
+point. If it is rare, the fatal case is identified. If it is the common
+case, then this entry shape is normal too and the fault is elsewhere again.
+That is a counter, not a trace, and this file's own rule says to reach for
+the aggregate first.
