@@ -10000,6 +10000,24 @@ private:
      * monitor and compared with what this VMM sees at the same instant.
      */
     std::uint64_t vtl_call_block_physical[max_cpus]{};
+
+    /**
+     * The virtual task priority in force at each `HvCallVtlCall`, as a
+     * histogram over its sixteen priority classes.
+     *
+     * **VINA is asserted while the normal level has an interrupt pending
+     * that it cannot yet take**, and the trace shows the secure kernel
+     * selecting a thread, taking VINA, deselecting it and returning on
+     * every entry. So the premise worth testing is that VTL0 calls into
+     * VTL1 from a context whose priority blocks what is pending: at task
+     * priority 0xd0 both the clock vector `0xd1` and the deferred-call
+     * vector `0x2f` are masked, and either would hold VINA asserted.
+     *
+     * The existing `l2_entry_vtpr` histogram is every second-level entry,
+     * which is dominated by the clock path and cannot answer this. This
+     * one is only the moments a trust-level call is made.
+     */
+    std::uint64_t vtl_call_vtpr[max_cpus][16]{};
     /** @} */
     /** @} */
     /** @} */

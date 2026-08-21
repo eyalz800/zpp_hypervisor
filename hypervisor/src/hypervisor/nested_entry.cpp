@@ -8618,6 +8618,16 @@ hypervisor::on_l2_exit(std::size_t cpu,
                 this->vtl_call_rdx[cpu] = context.rdx;
                 this->vtl_call_block_read[cpu] = 0;
 
+                // The priority this call is made at. See
+                // `vtl_call_vtpr`: at class 13 both the clock vector and
+                // the deferred-call vector are masked, and either being
+                // pending holds VINA asserted - which is what the
+                // instruction trace shows preempting the secure kernel
+                // after it selects a thread.
+                this->vtl_call_vtpr[cpu][(this->l2_entry_priority[cpu] >>
+                                          4) &
+                                         0xf] += 1;
+
                 constexpr std::uint64_t kernel_address_floor =
                     0xffff800000000000;
 

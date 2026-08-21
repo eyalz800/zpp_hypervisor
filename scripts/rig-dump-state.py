@@ -2251,7 +2251,7 @@ def main():
                "shadow_ept_leaves_that_did_not_help",
                "shadow_ept_recall_root", "shadow_ept_current_slot",
                "vtl_call_rdx", "vtl_call_block", "vtl_call_block_read",
-               "vtl_call_block_physical",
+               "vtl_call_block_physical", "vtl_call_vtpr",
                "vmcs_shadow_loads", "vmcs_shadow_stores",
                "vmcs_field_read_encoding", "vmcs_field_read_count",
                "vmcs_field_write_encoding", "vmcs_field_write_count",
@@ -2362,7 +2362,7 @@ def main():
                "shadow_ept_leaves_that_did_not_help",
                "shadow_ept_recall_root", "shadow_ept_current_slot",
                "vtl_call_rdx", "vtl_call_block", "vtl_call_block_read",
-               "vtl_call_block_physical",
+               "vtl_call_block_physical", "vtl_call_vtpr",
                "vmcs_shadow_loads",
                "vmcs_shadow_stores",
                "guest_state_writes_skipped", "guest_state_writes_done",
@@ -2436,6 +2436,7 @@ def main():
     monitor.queue(instance + off["vtl_call_block"], scalar_cpus * 4)
     monitor.queue(instance + off["vtl_call_block_read"], scalar_cpus)
     monitor.queue(instance + off["vtl_call_block_physical"], scalar_cpus)
+    monitor.queue(instance + off["vtl_call_vtpr"], scalar_cpus * 16)
 
     # Ten dispositions per processor - `none` through `pointer_failed`.
     monitor.queue(instance + off["l2_ept_dispositions"], scalar_cpus * 10)
@@ -3005,6 +3006,22 @@ def main():
             print(f"  +0x{i * 8:02x}  0x{q:016x}")
         print(f"  request byte  = {state} (0x{state:02x})")
         signed = status - (1 << 32) if status & 0x80000000 else status
+        # The priority each trust-level call is made at. Class 13
+        # masks both the clock vector 0xd1 and the deferred-call vector
+        # 0x2f, so a call made there with either pending holds VINA
+        # asserted - and VINA is what the instruction trace shows
+        # preempting the secure kernel after it selects a thread.
+        vt = [read('vtl_call_vtpr', 0 * 16 + i) or 0 for i in range(16)]
+        vtotal = sum(vt)
+        if vtotal:
+            print("  task priority at the trust-level call:")
+            for i, c in enumerate(vt):
+                if c:
+                    note = ("  <- masks the clock AND the deferred call"
+                            if i == 13 else
+                            ("  <- admits both" if i < 2 else ""))
+                    print(f"    class {i:2d} (0x{i << 4:02x})  {c:9,d}  "
+                          f"{100.0 * c / vtotal:5.1f}%{note}")
         print(f"  STATUS        = 0x{status:08x}"
               + ("  <- an NTSTATUS error" if signed < 0 else
                  "  (success or not an error)"))

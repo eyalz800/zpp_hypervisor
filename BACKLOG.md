@@ -36150,3 +36150,42 @@ permanently: vector `0x2f`, requested **233,575** times and carried
 **The question this reduces to**: why is VTL0's pending interrupt never
 delivered and retired? Deliver it and VINA clears; clear VINA and VTL1 keeps
 its thread. That is now one question rather than a search.
+
+## The priority at the trust-level call: the mechanism holds for two thirds of them, not all
+
+`vtl_call_vtpr` - the task priority in force at each `HvCallVtlCall`, which
+`l2_entry_vtpr` cannot answer because that one is every second-level entry
+and is dominated by the clock path.
+
+    class  0 (0x00)    5,786   21.6%   admits the clock and the deferred call
+    class  1 (0x10)    2,748   10.3%   admits both
+    class  2 (0x20)   18,123   67.6%   masks 0x2f, admits 0xd1
+    class 12 (0xc0)        1    0.0%
+    class 13 (0xd0)       66    0.2%   masks both
+    class 15 (0xf0)       73    0.3%   masks both
+
+**Two thirds of trust-level calls are made at class 2**, which masks exactly
+the deferred-call vector `0x2f` - requested 233,575 times, carried 3,730.
+A pending, masked `0x2f` at that priority holds VINA asserted, and that is
+the mechanism the instruction trace showed.
+
+**But a third of them are made at class 0 or 1, where nothing is masked at
+all.** VINA therefore cannot be asserted on every entry, and the previous
+entry's claim that it is came from **one** 2048-step trace. One sample.
+
+That is the same error this file documents five times and warns about in
+its own rules - and it was made in the iteration immediately after writing
+the warning. The trace is real and what it shows is real; "every entry" was
+not measured and is withdrawn. What is measured is that the *opportunity*
+for VINA to preempt exists on 67.6% of calls and provably does not on 32%.
+
+**So the mechanism is a strong candidate rather than the answer**, and the
+discriminating measurement is now specific: trace VTL1 on calls made at
+class 0 and class 1, where VINA cannot be holding it, and see whether it
+still selects a thread and puts it back. If it does, VINA is not the whole
+story. If it runs the thread there, then the fault is on the other two
+thirds and the question really is why `0x2f` is not retired.
+
+`ZPP_STEP_VTL` can answer it - it already records the priority alongside -
+but it must sample many transitions rather than one, which is the change
+this entry pays for.
