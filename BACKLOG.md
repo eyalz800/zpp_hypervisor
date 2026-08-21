@@ -785,6 +785,39 @@ is not there" and is really "the wrong question was asked". `x` is the
 virtual read. The same distinction is why a wide `xp` over a device BAR
 lied, further down this file.
 
+## We do not answer the VTL hypercalls. Hyper-V does, and we only carry them
+
+Worth stating plainly because several theories in this file quietly assumed
+otherwise. The `vtl_protect_rax` capture reads `context.rax` at the
+second-level entry, and its own comment says what that is:
+
+> "the guest hypervisor has loaded its guest's registers and RAX holds what
+> it is about to be told. Bits 15:0 are the status, bits 43:32 the reps
+> completed."
+
+**So `HvCallModifyVtlProtectionMask`, `HvCallVtlCall` and `HvCallVtlReturn`
+are answered by Hyper-V.** This VMM reflects the `vmcall` and *observes* the
+reply on the way back. There is no answer of ours to get wrong - no status
+code, no reps-completed field, no bit position.
+
+**Which closes a whole class of hypothesis**: "we answer a rep hypercall with
+the completed count in the wrong bits", "we return success where Hyper-V
+would return a retry", "our status encoding is off". None of them can be
+true, because none of those values originate here.
+
+**And it sharpens what remains.** The VSM protocol runs entirely between
+Windows and Hyper-V; this VMM is the transport for it. Two independent
+readings say the transport is clean - a comparison against KVM's nested
+implementation, and KVM's own tracepoints showing both VMCSes and both EPTPs
+carried correctly - and the state block is byte-identical on both sides of
+every switch and unchanged across a thousand of them.
+
+**So if this is our fault at all, it is not in what we say to either party.
+It is in something we give Hyper-V that changes what Hyper-V decides** - a
+capability it enumerates, a page it can or cannot reach, a control it is or
+is not granted. That is a much smaller surface than the protocol itself, and
+it is the surface the next session should enumerate.
+
 ## The hang, complete and measured end to end
 
 Polled directly at guest-physical `0x11b8baf70`, twelve samples over two
