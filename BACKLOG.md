@@ -37147,3 +37147,45 @@ ever exits with `done != expected` the guest calls `KeBugCheckEx(0x1A, ...,
 'VSM', 0x90A)`. It has not - so the loop has not exited unhappily; it either
 completed or is still inside. Reading `r15d`/`0x40(%rsp)` at the last call
 distinguishes those, and both are in the stack window already captured.
+
+## XMM is saved and restored correctly. A near-miss worth recording
+
+Chasing the output area of `SkmiProtectPageRange`'s hypercall - which for an
+extended fast call rides in XMM - produced this sequence:
+
+    grep 'movdqa [rax'  in asm.cpp   ->  16 saves
+    grep 'movdqa xmm,'  in asm.cpp   ->   0 restores
+    grep -c '%xmm' on the built ELF  ->  76 instructions
+    grep -rn 'mno-sse' in cmake/     ->  nothing
+
+Four readings, each correct, and together they say the handler uses XMM and
+never puts the guest's back. **That is a serious bug and it is not
+happening.** Disassembling by *function* rather than grepping by file:
+
+    16  zpp_x86_64_capture_context_into_stack
+    16  zpp::arch::x86_64::restore_context      <- the restore
+    16  zpp::arch::x86_64::capture_context
+     8  hypervisor::record_profile_context
+     4  on_ept_violation / on_unhandled_exit / arm_controller_poll / ...
+
+`restore_context` carries all sixteen restores, and `resume.cpp:1191` calls
+it on the resume path. The ordering is exit -> `capture_context` -> handler,
+which is free to use XMM -> `restore_context` -> `vmresume`. **Correct.**
+
+**The near-miss is the point.** The grep was scoped to the file the saves
+happened to be in, and the restores are in another translation unit
+entirely. A file-scoped grep answers "is it in this file", and it was read
+as "does it exist" - which is the same error as reading a sample as a
+census, in a different dress. **Asking the binary which functions contain
+the instruction took one command and settled it**; four converging greps did
+not, and would have produced a confident bug report against working code.
+
+So the output-area hypothesis is not supported by anything yet: XMM survives
+the round trip, the general-purpose registers were verified long ago, and
+the MSR areas are emulated in software with a KVM-matching allow-list. What
+remains unchecked on that path is the **non-fast** output form, where the
+hypervisor writes the result to a guest page rather than to registers -
+`0x40(%rsp)` is a stack address, so `SkmiProtectPageRange`'s output area is
+guest memory, and whether a write Hyper-V makes to it is coherent with what
+the guest then reads is a question about extended page tables rather than
+about registers.
