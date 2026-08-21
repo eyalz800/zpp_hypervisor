@@ -36189,3 +36189,43 @@ thirds and the question really is why `0x2f` is not retired.
 `ZPP_STEP_VTL` can answer it - it already records the priority alongside -
 but it must sample many transitions rather than one, which is the change
 this entry pays for.
+
+## The deferred-call delivery path works. Everything just happens at fifteen hertz
+
+Chasing "why is `0x2f` never retired" to its mechanism, and it is not broken.
+
+Windows asks for `0x2f` at task priority `0xd0` on **114,467 of 114,468**
+requests - always masked. So Hyper-V has to be *told* when the priority
+drops, and the architectural mechanism is the TPR threshold. Measured:
+
+    l2_tpr_would_fire (owed by SDM 27.6.7)   4,851
+    tpr-below exits actually taken           5,042
+    0x2f carried into the guest              3,730
+
+**They agree.** Hyper-V arms thresholds, the exits happen, and about 74% of
+the notifications result in the deferred call being delivered. The quarter
+of a million requests coalesce onto roughly five thousand priority drops,
+which is what a pending-bit interrupt does. Nothing here is dropped or lost.
+
+So the "0x2f is never delivered" reading is withdrawn too. It is delivered
+whenever the guest's own priority permits, which is ~5,000 times, and the
+233,575:3,730 ratio that made it look broken is an artifact of comparing a
+request count against a delivery count for a coalescing interrupt.
+
+**What the numbers actually show, put together:**
+
+    tpr-below exits          5,042 over 280 s   =  18/s
+    trust-level round trips  ~4,200 over 280 s  =  15/s
+    0x2f deliveries          3,730 over 280 s   =  13/s
+
+Every independent path through this guest runs at the same fifteen to
+eighteen hertz. That is not one broken mechanism, it is a common rate limit
+that all of them sit behind - and it is the same rate the phase-1 loop
+advances at.
+
+**That is the shape of the remaining problem**, and it is different from
+every hypothesis tried so far, all of which looked for a mechanism that was
+*wrong*. Each mechanism examined is right. What has not been explained is
+why a guest with a fifth of the machine, correct clocks, working interrupt
+delivery, working thresholds and both trust levels executing real code makes
+forward progress fifteen times a second.
