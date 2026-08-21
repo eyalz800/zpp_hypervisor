@@ -8684,6 +8684,42 @@ hypervisor::on_l2_exit(std::size_t cpu,
 
                 // What this call asked for, so the answer can be
                 // compared against it. See `vtl_protect_reps_short`.
+                // Where it came from. See `vtl_protect_last_rip`: the
+                // last one of these is the last act of the work item
+                // that stops.
+                this->vtl_protect_last_rip[cpu] = this->vmcs.guest_rip();
+                this->vtl_protect_last_cr3[cpu] =
+                    this->vmcs.read(
+                        arch::x86_64::vmx::vmcs::field::guest_cr3);
+
+                auto protect_rsp = this->vmcs.guest_rsp();
+                this->vtl_protect_last_rsp[cpu] = protect_rsp;
+                this->vtl_protect_last_caller[cpu] = 0;
+
+                for (std::size_t w{}; w < 16; ++w) {
+                    this->vtl_protect_last_stack[cpu][w] = 0;
+
+                    auto at = translate_guest_linear(
+                        cpu, protect_rsp + (w * sizeof(std::uint64_t)));
+                    if (!at) {
+                        break;
+                    }
+
+                    std::uint64_t back{};
+                    if (!read_guest_memory(
+                            cpu,
+                            *at,
+                            std::as_writable_bytes(std::span(&back, 1)))) {
+                        break;
+                    }
+
+                    this->vtl_protect_last_stack[cpu][w] = back;
+
+                    if (0 == w) {
+                        this->vtl_protect_last_caller[cpu] = back;
+                    }
+                }
+
                 this->vtl_protect_reps_pending[cpu] =
                     (0 != (context.rcx & (1ull << 16)))
                         ? 1

@@ -37057,3 +37057,41 @@ fails in `ModifyVtlProtectionMask`" - nothing does - but *what the guest was
 doing between protection calls that it stopped being able to do*. The three
 frozen counters are all effects of the same secure-kernel work item, and it
 is that work item, not any of its outputs, that ends.
+
+## The work item that dies is `SkmiProtectPageRange`, walking `SkmiNonPagedPtes`
+
+The last `HvCallModifyVtlProtectionMask` is the final act of whatever stops,
+so its stack names it. Captured at the call - a window rather than one
+return address, because the first attempt landed in
+`HvcallpExtendedFastHypercall`, the wrapper every caller shares, which names
+nothing:
+
+    cr3 0x8800002                          <- VTL1, the secure kernel
+    +0x00  HvcallpExtendedFastHypercall+0x51
+    +0x10  ShvlpInitiateFastHypercall+0x36
+    +0x50  SkmiProtectPageRange+0x124      <- the work item
+    +0x08  SkmiNonPagedPtes+0x0            <- what it is walking
+    +0x58  0x11aaca                        <- a page frame number
+
+**`SkmiProtectPageRange` walking `SkmiNonPagedPtes`**, one page at a time,
+and the page frame number in its frame - `0x11aaca` - is from exactly the
+range the page walk covers before freezing (`0x11aac9`..`0x11aacc`).
+
+That ties together every frozen counter with one named routine:
+
+- the code-0 secure memory-manager requests are its work
+- the page walk's consecutive PFNs are its iteration
+- the protection calls are its output
+- all three stop together because it is one loop
+
+**So the question is now as specific as it can be made from outside the
+guest**: `SkmiProtectPageRange` is protecting the secure kernel's non-paged
+page-table region, gets to around PFN `0x11aacc`, and does not come back.
+Every hypercall it made succeeded; nothing it asked for failed; and it is
+not blocked on anything this VMM injects, faults, or refuses.
+
+**What is worth doing next, in order of cost**: disassemble
+`SkmiProtectPageRange` around `+0x124` and find what its loop tests to
+continue - the routine is in the image already on disk, so this costs
+nothing and is the same move that named `ShvlVinaHandler`'s flag. Then read
+whatever that test reads, at the address the frame gives.

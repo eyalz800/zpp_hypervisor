@@ -2262,7 +2262,9 @@ def main():
                "vtl_code0_consecutive", "vtl_code0_pfn_calls",
                "vtl_protect_failures", "vtl_protect_last_failure",
                "vtl_protect_reps_short", "vtl_protect_reps_asked",
-               "vtl_protect_reps_done",
+               "vtl_protect_reps_done", "vtl_protect_last_rip",
+               "vtl_protect_last_cr3", "vtl_protect_last_caller",
+               "vtl_protect_last_rsp", "vtl_protect_last_stack",
                "vmcs_shadow_loads", "vmcs_shadow_stores",
                "vmcs_field_read_encoding", "vmcs_field_read_count",
                "vmcs_field_write_encoding", "vmcs_field_write_count",
@@ -2384,7 +2386,9 @@ def main():
                "vtl_code0_consecutive", "vtl_code0_pfn_calls",
                "vtl_protect_failures", "vtl_protect_last_failure",
                "vtl_protect_reps_short", "vtl_protect_reps_asked",
-               "vtl_protect_reps_done",
+               "vtl_protect_reps_done", "vtl_protect_last_rip",
+               "vtl_protect_last_cr3", "vtl_protect_last_caller",
+               "vtl_protect_last_rsp", "vtl_protect_last_stack",
                "vmcs_shadow_loads",
                "vmcs_shadow_stores",
                "guest_state_writes_skipped", "guest_state_writes_done",
@@ -2439,7 +2443,13 @@ def main():
     monitor.queue(instance + off["vtl_protect_count"], scalar_cpus)
     for _n in ("vtl_protect_failures", "vtl_protect_last_failure",
                "vtl_protect_reps_short", "vtl_protect_reps_asked",
-               "vtl_protect_reps_done"):
+               "vtl_protect_reps_done", "vtl_protect_last_rip",
+               "vtl_protect_last_cr3", "vtl_protect_last_caller",
+               "vtl_protect_last_rsp"):
+        monitor.queue(instance + off[_n], scalar_cpus)
+    monitor.queue(instance + off["vtl_protect_last_stack"],
+                  scalar_cpus * 16)
+    for _n in ():
         monitor.queue(instance + off[_n], scalar_cpus)
     monitor.queue(instance + off["vtl_call_rcx"], scalar_cpus)
     monitor.queue(instance + off["guest_leaf_permissions"], scalar_cpus * 8)
@@ -2933,6 +2943,16 @@ def main():
         print(f"    answers short of the reps asked: {sh:,}")
         print(f"    reps asked {ra:,}  reps done {rd:,}"
               + ("   <- SHORTFALL" if rd < ra else "   <- all completed"))
+        print(f"    the LAST call - the final act of the work item "
+              f"that stops:")
+        print(f"      rip 0x{read('vtl_protect_last_rip', cpu):x}  "
+              f"cr3 0x{read('vtl_protect_last_cr3', cpu):x}")
+        print(f"      rsp 0x{read('vtl_protect_last_rsp', cpu):x}")
+        print("      stack window:")
+        for w in range(16):
+            v = read('vtl_protect_last_stack', (cpu * 16) + w) or 0
+            if v:
+                print(f"        +0x{w * 8:02x}  0x{v:016x}")
         print(f"cpu {cpu} HvCallModifyVtlProtectionMask: {total:,} calls")
         cap = 32
         order = ([(total - cap + i) % cap for i in range(cap)]

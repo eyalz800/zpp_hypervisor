@@ -10230,6 +10230,34 @@ private:
 
     /** The rep count of the call whose answer is outstanding. */
     std::uint64_t vtl_protect_reps_pending[max_cpus]{};
+
+    /**
+     * Where the last `HvCallModifyVtlProtectionMask` was issued from.
+     *
+     * The protection calls, the secure memory-manager requests and the
+     * page walk all stop in the same interval, so **the last protection
+     * call is the last act of whatever work item died.** Its instruction
+     * pointer names that work item, and CR3 says which trust level made
+     * it - securekernel runs on its own address space, so the two are
+     * distinguishable without any symbol.
+     *
+     * Kept as "latest" rather than a ring on purpose: nothing follows it,
+     * so the latest *is* the last.
+     */
+    std::uint64_t vtl_protect_last_rip[max_cpus]{};
+    std::uint64_t vtl_protect_last_cr3[max_cpus]{};
+    std::uint64_t vtl_protect_last_caller[max_cpus]{};
+
+    /**
+     * A window of the stack at that last call.
+     *
+     * One return address was not enough: it landed in
+     * `HvcallpExtendedFastHypercall`, the hypercall wrapper, which every
+     * caller shares and which names nothing. The frame that matters is
+     * further up, so take a window and let the symbols pick it out.
+     */
+    std::uint64_t vtl_protect_last_stack[max_cpus][16]{};
+    std::uint64_t vtl_protect_last_rsp[max_cpus]{};
     /** @} */
     /** @} */
     /** @} */
