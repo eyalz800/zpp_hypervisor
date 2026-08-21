@@ -2240,6 +2240,15 @@ def main():
                "handler_first_tsc", "handler_last_tsc",
                "shadow_ept_evictions", "shadow_ept_resets",
                "shadow_ept_leaves_filled",
+               # How each second-level fault was answered. Without this
+               # the only visible fact is that faults arrive, and a fault
+               # that installs nothing looks exactly like one that
+               # installs something - which is the case that livelocks.
+               # `leaves_filled` frozen while the fault count climbs says
+               # some branch other than `installed` is taking them, and
+               # only this array says which.
+               "l2_ept_dispositions",
+               "shadow_ept_leaves_that_did_not_help",
                "vmcs_shadow_loads", "vmcs_shadow_stores",
                "vmcs_field_read_encoding", "vmcs_field_read_count",
                "vmcs_field_write_encoding", "vmcs_field_write_count",
@@ -2345,7 +2354,10 @@ def main():
                "l2_run_cycles", "l1_run_cycles", "handler_cycles",
                "handler_first_tsc", "handler_last_tsc",
                "shadow_ept_evictions", "shadow_ept_resets",
-               "shadow_ept_leaves_filled", "vmcs_shadow_loads",
+               "shadow_ept_leaves_filled",
+               "l2_ept_dispositions",
+               "shadow_ept_leaves_that_did_not_help",
+               "vmcs_shadow_loads",
                "vmcs_shadow_stores",
                "guest_state_writes_skipped", "guest_state_writes_done",
                "control_writes_skipped", "control_writes_done",
@@ -2401,6 +2413,11 @@ def main():
     monitor.queue(instance + off["guest_leaf_permissions"], scalar_cpus * 8)
     monitor.queue(instance + off["shadow_leaf_permissions"],
                   scalar_cpus * 8)
+
+    # Ten dispositions per processor - `none` through `pointer_failed`.
+    monitor.queue(instance + off["l2_ept_dispositions"], scalar_cpus * 10)
+    monitor.queue(instance + off["shadow_ept_leaves_that_did_not_help"],
+                  scalar_cpus)
 
     monitor.queue(instance + off["cpuid_trace_count"], 1)
     monitor.queue(instance + off["cpuid_hypervisor_leaves_asked"], 1)
@@ -2870,6 +2887,72 @@ def main():
               f"{read('shadow_ept_evictions', cpu):-9d}  "
               f"{read('shadow_ept_resets', cpu):-6d}  "
               f"{read('shadow_ept_leaves_filled', cpu):-13d}")
+
+    # **How each fault was answered.** `leaves-filled` above counts only
+    # the `installed` branch, so it going nowhere while the fault count
+    # climbs means some other branch is taking every fault - and a fault
+    # answered without installing anything resumes the guest onto the
+    # identical fault. That is a livelock, and it is invisible in every
+    # other counter here: exits climb, cache hits climb, nothing errors.
+    #
+    # Read the *rate*, never the total. Reflections are legitimate and a
+    # booting guest makes plenty; what is not legitimate is a steady
+    # state where the same disposition keeps rising and `installed` does
+    # not move at all.
+    DISPOSITIONS = ("none", "without-ept", "reflected-walk",
+                    "reflected-misconfig", "reflected-permission",
+                    "watched", "unwatched", "installed",
+                    "install-failed", "pointer-failed")
+    print("\ncpu 0 how each second-level fault was answered")
+    total = sum(read('l2_ept_dispositions', 0 * 10 + i) or 0
+                for i in range(len(DISPOSITIONS)))
+    for i, name in enumerate(DISPOSITIONS):
+        count = read('l2_ept_dispositions', 0 * 10 + i) or 0
+        if not count:
+            continue
+        share = 100.0 * count / total if total else 0.0
+        print(f"  {name:<22s} {count:12,d}  {share:5.1f}%")
+    # **Which page.** `guest_physical` is recorded for every EPT violation
+    # unconditionally - it is not behind ZPP_CENSUS_EXITS, unlike the
+    # qualification - so the address is in the ring on every build and
+    # nothing here has ever read it.
+    #
+    # The reason this matters: a fault whose disposition is not
+    # `installed` resumes the guest onto the same access. One address
+    # repeating across the whole ring is that livelock; a spread of
+    # addresses is a guest touching memory, which is normal.
+    pages = {}
+    reasons = {}
+    for slot in range(ring):
+        a = instance + off["exit_trace"] + (0 * ring + slot) * entry_size
+        reason = words.get(a)
+        if reason is None:
+            continue
+        basic = reason & 0xffff
+        reasons[basic] = reasons.get(basic, 0) + 1
+        if basic not in (48, 49):
+            continue
+        physical = words.get(a + 8 * 5)
+        if physical is None:
+            continue
+        page = physical & ~0xfff
+        pages[page] = pages.get(page, 0) + 1
+    if pages:
+        ordered = sorted(pages.items(), key=lambda kv: -kv[1])
+        seen = sum(pages.values())
+        print(f"\ncpu 0 ept-violation pages in the exit ring "
+              f"({seen} of {ring} slots, {len(pages)} distinct)")
+        for page, count in ordered[:12]:
+            print(f"  0x{page:012x}  {count:6d}  "
+                  f"{100.0 * count / seen:5.1f}%")
+        if len(pages) == 1:
+            print("  ONE PAGE across the whole ring <- a livelock, not "
+                  "a guest touching memory")
+
+    unhelpful = read('shadow_ept_leaves_that_did_not_help', 0) or 0
+    print(f"  {'leaves that did not help':<22s} {unhelpful:12,d}"
+          f"  <- must be zero" if unhelpful else
+          f"  leaves that did not help: 0")
 
     # Why a rebuild happened, which the total above cannot say. A stale
     # generation is this VMM's own tables moving under a root it had

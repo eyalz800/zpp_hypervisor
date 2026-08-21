@@ -35292,3 +35292,61 @@ with no securekernel address among them; and the other stuck state parks in
 `SkeCrashDumpNmi+0x1aa` (`pause; jmp $-2`), which proves VTL1 *can* run far
 enough to crash. A VTL1 that is entered and immediately returns with no
 request would produce exactly the loop measured here.
+
+## The APIC page watch cost 31% of all exits, removing it changed nothing, and that is the useful half
+
+**Measured, two boots, one variable (`ZPP_DISARM_APIC_WATCH`).**
+
+`watch_local_apic` takes write permission away from the local APIC page so
+a start-up IPI can be caught and redirected to this VMM's trampoline. The
+page is `0xfee00000`, and *every* write Hyper-V makes to it - every EOI,
+every task-priority update - therefore leaves as an EPT violation.
+
+    exit reason        watch armed      watch disarmed
+    ept-violation      4,560/s          0/s        (frozen at 609,837)
+    total exits        17,073/s         10,795/s   (-37%)
+    vmresume           6,234/s          5,366/s
+    wrmsr              4,629/s          4,013/s
+    int-window         1,548/s          1,306/s
+
+**And the guest did not go faster.** VTL round trips went **18.5/s ->
+15.4/s** - if anything slightly down, certainly not up. One thread, still
+`Phase1Initialization`, still `state 2`, still `irql 0`.
+
+**So a third of this VMM's exits were self-inflicted and none of them were
+the blocker.** Both halves are worth keeping: the cost was real and is now
+removable, and the "the guest is drowning in exits" reading of this hang is
+now refuted by direct measurement rather than by argument.
+
+`ZPP_DISARM_APIC_WATCH` is left **off**. Its own comment calls it a
+correctness field - a processor that starts after the watch is dropped runs
+outside this VMM - and a correctness risk taken for a measured zero
+functional gain is a bad trade. Turn it on for exit-cost work, not for this.
+
+### How it was found, since no counter in this tree said it
+
+Three readings, none of which is conclusive alone:
+
+1. `leaves-filled` was **320,988 in two dumps ninety seconds apart** while
+   the EPT violation count grew by 410,443. A fault that installs nothing
+   resumes the guest onto the identical fault.
+2. The disposition array totalled **321,118** against **1,204,436** EPT
+   violations, so ~883,000 faults never reached the second-level path at
+   all. The exit table's own `321118/1204436` column had been printing that
+   split for sessions and nothing read it. Those are **L1** faults -
+   Hyper-V faulting on *our* tables, not its guest's.
+3. `guest_physical` is recorded for every EPT violation **unconditionally**,
+   not behind `ZPP_CENSUS_EXITS` like the qualification is - and
+   `rig-dump-state.py` had never decoded it. Decoded: **one distinct page
+   across the whole ring, `0xfee00000`.**
+
+Both readers are now in `rig-dump-state.py` - the disposition histogram and
+the EPT-violation page histogram - because each of them turns a "faults are
+arriving" number into a named branch and a named page.
+
+**The general lesson, and it is the third time this tree has paid it:** the
+counter that would have named this had been printing since it was written.
+`321118/1204436` is not a ratio anybody reads as "883,000 faults are from
+the other level". **A number nobody can interpret at a glance is not
+instrumentation.** Both new sections print a verdict line - `ONE PAGE across
+the whole ring <- a livelock` - for exactly this reason.
