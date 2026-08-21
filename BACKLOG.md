@@ -785,6 +785,49 @@ is not there" and is really "the wrong question was asked". `x` is the
 virtual read. The same distinction is why a wide `xp` over a device BAR
 lied, further down this file.
 
+## THE CONTROL: it fails identically with nested VMX OFF. Not a VBS problem
+
+**The control this file has named as decisive and never run.** One variable,
+`ZPP_NESTED_VMX=OFF`, so the guest hypervisor finds no VMX, stands down, and
+Windows boots **without** virtualization-based security.
+
+| | nested=1 | **nested=0** |
+|---|---|---|
+| ring 0 exits seen | 10,576,438 | 1,118,079 |
+| **ring 3 exits seen** | **none** | **none** |
+| `TickCount` | 64.0 Hz | **64.3 Hz** |
+| module loads | 2 | 2 |
+
+**Windows never executes a single user-mode instruction in either
+configuration**, and in both it is alive and keeping correct time.
+
+**So the failure is not about the second level, the virtual trust levels, the
+secure kernel, the synthetic timers, or nested VMX at all.** Every one of
+those is absent from the right-hand column and the outcome is the same.
+
+That retires, as *causes*, essentially the whole investigation recorded
+above: the trust-level round trip, vector `0x2f` and its task priority, the
+`sti` preemption, the synthetic clock, the reference TSC page, the shadow
+VMCS, the injection path, and the MSI-X divergence. They are real
+observations of a nested guest, and they are downstream of something that
+breaks a guest with no nesting at all.
+
+**And it makes the problem far cheaper to work on.** The bug reproduces with
+Hyper-V removed from the picture, so the reproduction no longer needs a guest
+hypervisor, a secure kernel, or a trust-level protocol - which removes almost
+every instrument that has misled this file, because most of them only exist
+to describe nesting.
+
+**What it does not say.** It does not say the nested findings are wrong; the
+`0x2f` block and the trust-level costs were measured and stand as
+descriptions. It says they cannot be the reason Windows fails to reach user
+mode, because it fails to reach user mode without them.
+
+**Next question, and it is a much smaller one:** what does a Windows kernel
+need in order to leave ring 0 for the first time, and which of those does
+this VMM get wrong for a *plain* guest? The rig is left on the `nested=0`
+build for that reason - it is the simpler reproduction.
+
 ## RETRACTED: the admin-queue reading does not discriminate, and MSI-X is a symptom
 
 **The section below is wrong in its central claim and is kept for the
