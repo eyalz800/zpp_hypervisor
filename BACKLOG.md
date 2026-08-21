@@ -785,6 +785,83 @@ is not there" and is really "the wrong question was asked". `x` is the
 virtual read. The same distinction is why a wide `xp` over a device BAR
 lied, further down this file.
 
+## The chain closes: the VMCS tax *is* the hang, by way of the clock
+
+Three things measured this session were filed as separate findings, and they
+are one mechanism. Written out because each was individually true and
+individually useless, and the argument only bites when they are put in order.
+
+From the state dump on the wedged guest:
+
+    vectors the guest asked for (412,824)
+      0x2f      412824  100.0%
+    task priority when it asked (412,824)
+      0xd0      412823  100.0%
+
+    what one trust-level round trip costs
+      HvCallVtlCall   -> HvCallVtlReturn (secure kernel)
+        40,276 halves,  1,178.2 us,   7.9 exits
+      HvCallVtlReturn -> HvCallVtlCall  (ordinary kernel)
+        40,276 halves, 16,837.4 us, 133.4 exits
+
+**Vector `0x2f` is `KiDpcInterrupt`, priority class 2. Task priority `0xd0`
+is class 13.** 2 is below 13, so *every one of those 412,824 requests is
+architecturally undeliverable at the moment it is made* - SDM 12.8.3.1, and
+the dump agrees: 3.9% of `0x2f` ever gets delivered, in the windows where the
+priority happens to have dropped. The guest is sitting at IRQL 13,
+CLOCK_LEVEL, asking for a DPC interrupt it has itself masked.
+
+**Why it never leaves CLOCK_LEVEL is the second number.** The ordinary-kernel
+half of a trust-level round trip costs **16.8 milliseconds** and 133.4 exits.
+Windows' tick is 574.7 Hz - 1.74 ms - and that rate is not negotiable, which
+this file already establishes at length and four failed interventions. So one
+half of one VTL round trip spans about ten tick periods. The clock handler
+cannot finish inside its own period, the next tick is already owed when it
+returns, and the guest never gets back down to an IRQL where its own DPC
+interrupt can be taken.
+
+**And the third number says what those 133.4 exits are made of.** At 199,170
+cycles an exit and ~109 VMCS accesses an exit at 2,845 cycles a VMREAD, the
+exits are almost entirely the trapped VMCS accesses recorded two sections
+below - 404,833 L0 exits a second against KVM's own counter, because
+`enable_shadow_vmcs` is `N` and the host CPU's `vmx flags` has no
+`shadow_vmcs`.
+
+So the chain is:
+
+    no hardware VMCS shadowing under KVM
+      -> ~109 trapped VMCS accesses per exit
+        -> 133 exits x 199,170 cycles = 16.8 ms per VTL half
+          -> ten tick periods spent inside one round trip
+            -> guest pinned at IRQL 13 (CLOCK_LEVEL)
+              -> its own vector 0x2f blocked, 412,824 times
+                -> DPCs never drain, boot never advances
+                  -> Hyper-V's rendezvous waits on VPs that never answer
+                    -> six processors halted, cpu 0 spinning, nothing moves
+
+**This retires the framing that the tax and the hang are separate problems.**
+The section two below said the tax "does not stop the boot on its own" and
+filed the wedge as an independent lost wake-up. It is not independent - the
+lost wake-up is the last link, not the first. The processors are not missing
+an interrupt because delivery is broken; the APIC configuration is correct
+(flat DFR `0x0f`, cpu 0 LDR `0x01`, cpu 7 LDR `0x80`, IRR and ISR empty on
+both), and INIT-SIPI-SIPI works - the log shows all seven APs started, and
+the one dropped SIPI is dropped correctly because the target is already
+active. They are idle because the one processor doing work never reaches the
+point of giving them any.
+
+**So the work is the count of VMCS accesses per exit, and it is now a
+correctness item rather than a tuning one.** The ranked targets are in the
+section two below; `build_vmcs02`'s ~33 writes an entry and
+`save_l2_state`'s ~19 reads an exit are the two largest, and
+`load_l1_host_state` already shows the technique works - an audit-backed
+elision took it from 52 writes to ~22, measured at 80.7% elided after warm-up.
+
+**What would falsify this**: cutting the accesses substantially and finding
+the VTL half does not shorten proportionally, or that it shortens and the
+guest still pins at IRQL 13. Both are worth knowing and neither is assumed
+here.
+
 ## The nested guest wedges completely: six processors halted, nobody wakes them
 
 **This corrects the section below, which said the guest was "making forward
