@@ -35350,3 +35350,55 @@ counter that would have named this had been printing since it was written.
 the other level". **A number nobody can interpret at a glance is not
 instrumentation.** Both new sections print a verdict line - `ONE PAGE across
 the whole ring <- a livelock` - for exactly this reason.
+
+## The live fault, with a counter already growing: the DPC interrupt is deliverable and is not delivered
+
+**`l2_low_priority_no_event` grows at 16.3/s on a settled guest** - 17,007
+-> 17,539 -> 18,549 across three dumps - and its own printed warning says
+non-zero growth is a live fault rather than residue. It counts entries into
+the second-level guest made at a task priority that *would* have admitted a
+deferred call, with the vector the guest asked for still outstanding, and
+nothing staged.
+
+The surrounding census says what that vector is and how one-sided this is:
+
+    vectors the guest asked for      233,575   all of them 0x2f
+    task priority when it asked      0xd0      233,574 of 233,575
+    vectors vmcs02 actually carried  249,964   0xd1 96.7%, 0x40 1.8%, 0x2f 1.5%
+
+So Windows requests the deferred-procedure-call interrupt a quarter of a
+million times, always from task priority 13 which blocks it, and what
+actually reaches it is the clock. **`0x2f` is carried 3,730 times against
+233,575 requests.** Requests coalesce, so that ratio alone proves nothing -
+but `l2_low_priority_no_event` is not a ratio. It is a count of moments when
+the guest *was* interruptible, the DPC *was* outstanding, and nothing was
+injected.
+
+**Why this is the shape of a hang and the exit storm was not.** A DPC queue
+that never drains stalls exactly the kind of work `Phase1Initialization`
+waits on, and it does so while the machine looks entirely healthy - the
+clock keeps ticking, the boot spinner keeps animating, no counter errors.
+That matches what is on the physical screen: an animating spinner, forever.
+
+**What is checked and is not the cause:**
+
+- The interrupt-window control on vmcs02 is taken **from the guest
+  hypervisor alone** - `primary01 & ~(window bits) | primary12` - which is
+  what KVM's `prepare_vmcs02_early` does, and inheriting ours would produce
+  window exits nobody asked for.
+- The interrupt-window exit **is** reflected when the guest hypervisor armed
+  it (`case basic_reason::interrupt_window: return primary_set(...)`).
+- Hyper-V is actively trying: **1,306 interrupt-window exits per second**,
+  armed on vmcs02 by Hyper-V, not by us. It is asking to be told when the
+  guest becomes interruptible.
+- Our own deferral is empty: `deferred 0`, `pending 0x0`, `requeued 85`.
+  Nothing is being held here.
+
+So Hyper-V wants to inject, asks to be told when it can, is told - and the
+guest still enters at an admitting priority carrying nothing, sixteen times
+a second. **That gap is the next thing to instrument**: what Hyper-V is
+given at the moment it declines to stage the event, and specifically whether
+its synthetic interrupt controller sees the self-IPI. Windows drives this
+entirely through synthetic MSRs - `ICR` 233,893 writes, `EOI` 237,920,
+`EOM` 24,228 - so the pending bit lives in Hyper-V's SynIC state, not in a
+local APIC this VMM can read.
