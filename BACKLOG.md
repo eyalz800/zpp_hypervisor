@@ -35485,3 +35485,59 @@ requested again.
 rule says not to quote a frame that has not survived repeated sampling. What
 would settle it is whether the VINA vector is asserted on entry to VTL1, and
 that lives in Hyper-V's SynIC state rather than anywhere this VMM reads.
+
+## The hang is a three-exit cycle, and VTL1 declines instantly rather than working or waiting
+
+**Read out of the second-level exit ring** (`rig-dump-state.py --l2 0`),
+which nothing had dumped for this hang. The last forty entries are the same
+three exits repeating without variation:
+
+    tpr-below   rip=KiInterruptDispatchNoLockNoEtw+0x7c  detail=0x8d164
+    vmcall 0x11 HvCallVtlCall                            detail=0x8d166
+    vmcall 0x12 HvCallVtlReturn                          detail=0x8d168
+    ... 98 further exits, none of them second-level ...
+    tpr-below   rip=KiInterruptDispatchNoLockNoEtw+0x7c  detail=0x8d1ca
+
+`detail` is a monotonic exit counter, so the two `vmcall`s are **adjacent**:
+between entering VTL1 and VTL1 handing control back there is not one exit.
+The 98-count gap after the return is the ordinary kernel's own work, and it
+matches the measured 104.7 exits for that half.
+
+**So securekernel is neither working nor waiting - it declines instantly.**
+That rules out the two readings this file has carried in turn: it is not
+doing 2.1 ms of work per visit (the round-trip average that suggested it is
+counts wall time across the whole cycle, not the VTL1 half), and it is not
+blocked on a fault, since the disposition histogram shows **zero** L2 EPT
+violations in steady state.
+
+**And the call chain on the VTL0 side is a real stack, not a scan.** Taken
+from the `HvCallVtlCall` site's own frame, so it is not the candidate list
+this file already retracted once:
+
+    HvlSwitchToVsmVtl1+0xab
+      VslpEnterIumSecureMode+0x3a8      <- return address of the loop's call
+        VslpLockMdlForTransfer+0x44
+          VslpLockPagesForTransfer+0x16d
+            MiProbeAndLockComplete+0x21
+
+`Phase1Initialization` is **transferring pages to VTL1**, not idling in a
+service loop. That fits `HvCallModifyVtlProtectionMask` - the call VTL1 uses
+to protect what it has been given - being frozen at exactly 39,266 with
+every one of its recorded calls having returned `status=0x0000`. The
+transfer stalled mid-flight, after 39,266 successful protection changes.
+
+**The best remaining hypothesis, still not established.** VINA - Hyper-V's
+Virtual Interrupt Notification Assist - tells VTL1 that VTL0 has an
+interrupt pending so that VTL1 yields. `KiVinaInterrupt+0x2b2` is on
+securekernel's own stack at the return site. An instant, exit-free decline
+is exactly what a VINA already asserted on entry produces, and VTL0 has a
+permanent candidate for it: vector `0x2f`, requested 233,575 times and
+carried 3,730. If the undelivered DPC keeps VINA asserted, VTL1 can never
+do work, the page transfer never completes, phase 1 never finishes, and the
+DPC is requested again.
+
+**What would settle it** is whether VINA is asserted at the moment of entry
+to VTL1. That state is Hyper-V's SynIC, which this VMM does not read - so
+settling it needs either the SynIC pages decoded out of guest memory, or the
+`tpr-below -> VtlCall -> VtlReturn` triple instrumented with what vmcs02
+carried and what the assist page held on each of the three.
