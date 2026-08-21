@@ -8610,6 +8610,31 @@ hypervisor::on_l2_exit(std::size_t cpu,
             // frame pointer was read as a page number.
             if ((vtl_call_code == code) && (cpu < max_cpus)) {
                 this->vtl_call_rcx[cpu] = context.rcx;
+
+                // And the block RDX points at. See `vtl_call_block`:
+                // the status at offset 8 is the secure kernel's own
+                // answer, and it is the only thing measured so far that
+                // can say why a call taking zero exits declines.
+                this->vtl_call_rdx[cpu] = context.rdx;
+                this->vtl_call_block_read[cpu] = 0;
+
+                constexpr std::uint64_t kernel_address_floor =
+                    0xffff800000000000;
+
+                if (context.rdx >= kernel_address_floor) {
+                    auto physical =
+                        translate_guest_linear(cpu, context.rdx);
+
+                    if (physical) {
+                        if (read_guest_memory(
+                                cpu,
+                                *physical,
+                                std::as_writable_bytes(
+                                    std::span(this->vtl_call_block[cpu])))) {
+                            this->vtl_call_block_read[cpu] = 1;
+                        }
+                    }
+                }
             }
         }
 

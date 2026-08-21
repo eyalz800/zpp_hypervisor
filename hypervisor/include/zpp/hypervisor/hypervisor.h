@@ -9947,6 +9947,43 @@ private:
      * for one.
      */
     std::uint64_t vtl_call_rcx[max_cpus]{};
+
+    /**
+     * The IUM secure-call block, read at the moment of an `HvCallVtlCall`.
+     *
+     * `VslpEnterIumSecureMode` keeps its request in a structure whose
+     * address it passes in RDX, and the loop around the trust-level switch
+     * is, in the guest's own instructions:
+     *
+     *     movq  %rbx, %rdx          ; the block
+     *     callq HvlSwitchToVsmVtl1
+     *     movl  0x8(%rbx), %r15d    ; <- the STATUS the secure kernel left
+     *     jmp   ...                 ; round again
+     *
+     * **Byte 1 is the request the secure kernel is making and the word at
+     * offset 8 is the status it answered with**, and this VMM has read the
+     * first of those and never the second. The status is the only thing
+     * measured so far that can say *why* a trust-level call that takes
+     * zero exits declines: `VslpEnterIumSecureMode` writes `0xC000001C`
+     * and `0xC0000030` into that same slot on its own error paths, so an
+     * NTSTATUS there names the refusal directly.
+     *
+     * Captured at the call rather than the return because the loop is
+     * steady: the block seen entering iteration N holds what the secure
+     * kernel left at the end of iteration N-1, which is the answer wanted.
+     *
+     * Four quadwords, so the state byte and the status arrive together -
+     * a status without the request it answers is another single-field
+     * instrument, and this file records what those cost.
+     */
+    std::uint64_t vtl_call_rdx[max_cpus]{};
+    std::uint64_t vtl_call_block[max_cpus][4]{};
+
+    /**
+     * Whether the read above succeeded, so an all-zero block cannot be
+     * mistaken for a zero status. The reader-proof rule, as a field.
+     */
+    std::uint64_t vtl_call_block_read[max_cpus]{};
     /** @} */
     /** @} */
     /** @} */

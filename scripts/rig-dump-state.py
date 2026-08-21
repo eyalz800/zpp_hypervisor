@@ -2249,6 +2249,8 @@ def main():
                # only this array says which.
                "l2_ept_dispositions",
                "shadow_ept_leaves_that_did_not_help",
+               "shadow_ept_recall_root", "shadow_ept_current_slot",
+               "vtl_call_rdx", "vtl_call_block", "vtl_call_block_read",
                "vmcs_shadow_loads", "vmcs_shadow_stores",
                "vmcs_field_read_encoding", "vmcs_field_read_count",
                "vmcs_field_write_encoding", "vmcs_field_write_count",
@@ -2357,6 +2359,8 @@ def main():
                "shadow_ept_leaves_filled",
                "l2_ept_dispositions",
                "shadow_ept_leaves_that_did_not_help",
+               "shadow_ept_recall_root", "shadow_ept_current_slot",
+               "vtl_call_rdx", "vtl_call_block", "vtl_call_block_read",
                "vmcs_shadow_loads",
                "vmcs_shadow_stores",
                "guest_state_writes_skipped", "guest_state_writes_done",
@@ -2413,6 +2417,22 @@ def main():
     monitor.queue(instance + off["guest_leaf_permissions"], scalar_cpus * 8)
     monitor.queue(instance + off["shadow_leaf_permissions"],
                   scalar_cpus * 8)
+
+    # The guest hypervisor's EPT roots this processor holds shadows for.
+    # Four slots. **VSM gives each trust level its own extended page
+    # tables** - that is the mechanism HvCallModifyVtlProtectionMask acts
+    # through, and it is how VTL0 is denied the pages VTL1 owns. So a
+    # single distinct root across every slot would mean the two levels are
+    # sharing a view they must not share, and securekernel refusing to
+    # proceed would be correct rather than mysterious.
+    monitor.queue(instance + off["shadow_ept_recall_root"],
+                  scalar_cpus * 4)
+    monitor.queue(instance + off["shadow_ept_current_slot"], scalar_cpus)
+
+    # The IUM secure-call block. See hypervisor.h `vtl_call_block`.
+    monitor.queue(instance + off["vtl_call_rdx"], scalar_cpus)
+    monitor.queue(instance + off["vtl_call_block"], scalar_cpus * 4)
+    monitor.queue(instance + off["vtl_call_block_read"], scalar_cpus)
 
     # Ten dispositions per processor - `none` through `pointer_failed`.
     monitor.queue(instance + off["l2_ept_dispositions"], scalar_cpus * 10)
@@ -2899,6 +2919,44 @@ def main():
     # booting guest makes plenty; what is not legitimate is a steady
     # state where the same disposition keeps rising and `installed` does
     # not move at all.
+    # The roots themselves. See the queue above for why one distinct value
+    # would be a finding rather than a detail.
+    roots = [read('shadow_ept_recall_root', 0 * 4 + i) or 0
+             for i in range(4)]
+    distinct = sorted({r for r in roots if r})
+    print(f"\ncpu 0 shadow EPT roots held (slot "
+          f"{read('shadow_ept_current_slot', 0)} current)")
+    for i, r in enumerate(roots):
+        print(f"  slot {i}  0x{r:012x}" + ("  <- current" if
+              i == read('shadow_ept_current_slot', 0) else ""))
+    print(f"  {len(distinct)} distinct non-zero root(s)")
+    if len(distinct) == 1:
+        print("  ONE ROOT <- both trust levels would be sharing an "
+              "extended page table, which VSM requires them not to")
+
+    # **The secure kernel's own answer.** Byte 1 of the block is the
+    # request it is making and the 32-bit word at offset 8 is the status
+    # it returned - the slot VslpEnterIumSecureMode itself writes
+    # 0xC000001C and 0xC0000030 into on its error paths. A trust-level
+    # call that takes zero exits and declines has a reason, and this is
+    # the field that carries it.
+    if read('vtl_call_block_read', 0):
+        blk = [read('vtl_call_block', 0 * 4 + i) or 0 for i in range(4)]
+        state = (blk[0] >> 8) & 0xff
+        status = blk[1] & 0xffffffff
+        print(f"\ncpu 0 IUM secure-call block at "
+              f"0x{read('vtl_call_rdx', 0):x}")
+        for i, q in enumerate(blk):
+            print(f"  +0x{i * 8:02x}  0x{q:016x}")
+        print(f"  request byte  = {state} (0x{state:02x})")
+        signed = status - (1 << 32) if status & 0x80000000 else status
+        print(f"  STATUS        = 0x{status:08x}"
+              + ("  <- an NTSTATUS error" if signed < 0 else
+                 "  (success or not an error)"))
+    else:
+        print("\ncpu 0 IUM secure-call block: NOT READ"
+              "  <- rdx unmapped or not yet captured, field is meaningless")
+
     DISPOSITIONS = ("none", "without-ept", "reflected-walk",
                     "reflected-misconfig", "reflected-permission",
                     "watched", "unwatched", "installed",

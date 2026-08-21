@@ -35625,3 +35625,73 @@ second-level kernel is at `0xfffff800f5800000`; the park address
 is still open - but it is no longer on the critical path. **The blocker is
 on the boot processor, in the page transfer, and everything else measured so
 far is downstream of it.**
+
+## The secure kernel returns SUCCESS. It is not refusing, and the loop around it is tight
+
+**Captured with new instrumentation** (`vtl_call_block`): the IUM
+secure-call block RDX points at, read at the moment of every
+`HvCallVtlCall`, with a read-succeeded flag beside it so an all-zero block
+cannot be mistaken for a zero status.
+
+    cpu 0 IUM secure-call block at 0xfffffd0051803f70
+      +0x00  0x0000000100000400
+      +0x08  0x0000000000000000
+      request byte  = 4
+      STATUS        = 0x00000000  (success)
+
+**`[rbx+8]` is the status word** - the slot `VslpEnterIumSecureMode` itself
+writes `0xC000001C` and `0xC0000030` into on its own error paths, and the
+one the guest reads back with `movl 0x8(%rbx), %r15d` immediately after the
+trust-level switch. This VMM had read byte 1 of that block for sessions and
+never byte 8.
+
+**It is zero.** The secure kernel is not failing, not refusing and not
+reporting a missing capability. It answers *success, nothing to ask for*,
+every time. Every "securekernel is declining / erroring / blocked" reading
+in this file is therefore withdrawn - including this session's own.
+
+### And the loop is tight, which moves the question outside it
+
+The back edge, disassembled from the guest's own image:
+
+    0038de5d  movl PerfGlobalGroupMask+0x14, %eax
+    0038de63  testb $8, %al
+    0038de65  je 0038e0f9          <- ETW off, so this is the path taken
+    0038e0f9  ... movq %rbx, %rdx
+    0038e103  callq HvlSwitchToVsmVtl1
+    0038e108  movl 0x8(%rbx), %r15d
+    0038e10e  jmp 0038df01
+
+**No wait, no semaphore, no timer, no sleep.** Read the state, dispatch to
+the default arm, test a trace mask, call VTL1, round again. So the measured
+14.4 ms and ~98 exits between one `HvCallVtlReturn` and the next
+`HvCallVtlCall` are **not** the guest's own code taking that long - they are
+time taken from it.
+
+### Where that leaves the cost argument, stated honestly
+
+That arithmetic points back at cost: ~8 clock ticks elapse per loop
+iteration, and the clock path is about 12 exits a tick at roughly 147 us an
+exit, which is ~1.76 ms against a 1.74 ms period - essentially the whole
+budget.
+
+**But the measurement still refuses it.** Disarming the APIC page watch
+removed 4,560 EPT violations a second and cut total exits 37%, and the VTL
+round-trip rate went **18.5/s -> 15.4/s**, slightly *down*. If per-exit cost
+were the limiter, removing a third of the exits on the clock path - EOI
+writes are exactly that path - had to help. It did not.
+
+**And one piece of my own reasoning against the cost story was weak and is
+withdrawn**: the clock-gap histogram showing 96.3% of intervals at
+1.05-2.11 ms was read as "the guest has spare capacity". It does not say
+that. It says ticks *arrive* on time, which is fixed by the timer and is
+true whether the guest has 99% of its cycles left or 1%. Arrival interval is
+not idle time. The APIC-watch experiment is the real evidence here, and it
+is an experiment rather than an inference.
+
+So the position is: the cost arithmetic says starvation, one controlled
+experiment says otherwise, and they cannot both be right. **The next thing
+worth doing is the direct measurement neither of them is** - handler cycles
+against elapsed cycles, giving the fraction of wall time this VMM occupies -
+because every account of this so far has been a rate multiplied by an
+estimate.
