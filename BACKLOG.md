@@ -785,6 +785,50 @@ is not there" and is really "the wrong question was asked". `x` is the
 virtual read. The same distinction is why a wide `xp` over a device BAR
 lied, further down this file.
 
+## The admin queue is two entries deep: Windows' storage driver never started
+
+**Positive confirmation of what `DisINTx-` only implied.** The section on the
+device being "exactly as the firmware left it" inferred that from interrupt
+configuration. The controller's own registers say it outright:
+
+    AQA (0x24) = 0x00010001    admin submission and completion queues, 2 entries each
+    ASQ (0x28) = 0x7dd18000
+    ACQ (0x30) = 0x7dd19000
+
+**A two-entry admin queue is a firmware queue.** EDK2's `NvmExpressDxe`
+allocates the minimum it needs to identify the namespace and read blocks;
+Windows' `stornvme` sizes its admin queue far larger and reallocates the
+queues in its own memory when it claims the device. Both base addresses sit
+just below 2 GB, where firmware allocates, not where a running Windows would.
+
+**So the controller has never been reset and re-initialised by the guest's
+storage driver.** It is still running the queues UEFI built to load the boot
+manager and the kernel. That is a positive reading rather than an absence,
+and it agrees with the three independent signs already recorded: `DisINTx`
+clear, MSI-X `Enable-`, and the vector table at reset.
+
+**Which closes the boundary question from the section above.** Everything up
+to the spinner was read through firmware block I/O. Windows' own storage
+stack never took over the device - so nothing after that point can be loaded,
+which is exactly why `shadow_ept_leaves_filled` never moves while the kernel
+ticks perfectly and redraws its spinner.
+
+**The question is now specific and answerable**: why does Windows' storage
+driver never claim a device whose memory decoding, bus mastering and BAR
+assignment are all identical to the configuration where it does? The
+candidates are no longer about timers or interrupts arriving - they are about
+whether the driver is reached at all:
+
+- the driver never loads, because loading it needs disk;
+- it loads and fails to start, because the device is not enumerated to it;
+- or the device is assigned to a virtual trust level and the hand-over does
+  not complete, which is the one thing here that exists only in the
+  VBS configuration and not in the plain-KVM control.
+
+**The third is the only candidate that explains why plain KVM differs**, and
+it is the first hypothesis in a long time that is specific to the
+configuration under test rather than to timing.
+
 ## Eighteen minutes: the clock is perfect, DPCs run, and nothing loads
 
 **The consolidated picture, and it contradicts most of what this file said
