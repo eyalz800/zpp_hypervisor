@@ -2252,7 +2252,7 @@ def main():
                "shadow_ept_recall_root", "shadow_ept_current_slot",
                "vtl_call_rdx", "vtl_call_block", "vtl_call_block_read",
                "vtl_call_block_physical", "vtl_call_vtpr",
-               "vtl_call_gap_buckets",
+               "vtl_call_gap_buckets", "vtl1_entry_vector",
                "vmcs_shadow_loads", "vmcs_shadow_stores",
                "vmcs_field_read_encoding", "vmcs_field_read_count",
                "vmcs_field_write_encoding", "vmcs_field_write_count",
@@ -2364,7 +2364,7 @@ def main():
                "shadow_ept_recall_root", "shadow_ept_current_slot",
                "vtl_call_rdx", "vtl_call_block", "vtl_call_block_read",
                "vtl_call_block_physical", "vtl_call_vtpr",
-               "vtl_call_gap_buckets",
+               "vtl_call_gap_buckets", "vtl1_entry_vector",
                "vmcs_shadow_loads",
                "vmcs_shadow_stores",
                "guest_state_writes_skipped", "guest_state_writes_done",
@@ -2440,6 +2440,7 @@ def main():
     monitor.queue(instance + off["vtl_call_block_physical"], scalar_cpus)
     monitor.queue(instance + off["vtl_call_vtpr"], scalar_cpus * 16)
     monitor.queue(instance + off["vtl_call_gap_buckets"], scalar_cpus * 40)
+    monitor.queue(instance + off["vtl1_entry_vector"], scalar_cpus * 257)
 
     # Ten dispositions per processor - `none` through `pointer_failed`.
     monitor.queue(instance + off["l2_ept_dispositions"], scalar_cpus * 10)
@@ -3043,6 +3044,25 @@ def main():
                 print(f"    2^{i:<2d} {lo * 1e6:12,.1f} us  {c:9,d}  "
                       f"{100.0 * c / gtotal:5.1f}%  "
                       f"(cumulative {100.0 * run / gtotal:5.1f}%)")
+        # What the entry that runs VTL1 carries. VINA reaches the
+        # secure kernel as an injected interrupt, and injections go
+        # through vmcs02, so this is direct evidence rather than
+        # inference from a priority.
+        ev = [read('vtl1_entry_vector', 0 * 257 + i) or 0
+              for i in range(257)]
+        etotal = sum(ev)
+        if etotal:
+            print(f"  what the entry running VTL1 carried "
+                  f"({etotal:,} entries):")
+            for i, c in enumerate(ev[:256]):
+                if c:
+                    print(f"    vector 0x{i:02x}   {c:9,d}  "
+                          f"{100.0 * c / etotal:5.1f}%")
+            if ev[256]:
+                print(f"    no event      {ev[256]:9,d}  "
+                      f"{100.0 * ev[256] / etotal:5.1f}%"
+                      "  <- nothing injected; whatever ends its turn "
+                      "is not an injected interrupt")
         print(f"  STATUS        = 0x{status:08x}"
               + ("  <- an NTSTATUS error" if signed < 0 else
                  "  (success or not an error)"))

@@ -7197,6 +7197,19 @@ void hypervisor::record_l2_entry_event(std::size_t cpu)
     auto given =
         this->vmcs.read(field::vm_entry_interruption_information_field);
 
+    // Whether the entry about to run VTL1 carries an interrupt, and
+    // which. See `vtl1_entry_vector`: this is the only direct evidence
+    // available about what ends the secure kernel's turn.
+    if (0 != this->vtl1_entry_armed[cpu]) {
+        this->vtl1_entry_armed[cpu] = 0;
+
+        if (0 != (given & valid)) {
+            this->vtl1_entry_vector[cpu][given & vector_mask] += 1;
+        } else {
+            this->vtl1_entry_vector[cpu][256] += 1;
+        }
+    }
+
     if (0 != (given & valid)) {
         this->l2_given_vector[cpu][given & vector_mask] += 1;
         return;
@@ -8653,6 +8666,11 @@ hypervisor::on_l2_exit(std::size_t cpu,
                 }
 
                 this->vtl_call_last_tsc[cpu] = call_now;
+
+                // The entry that follows this call is the one that runs
+                // VTL1 - it takes no exits, so there is exactly one.
+                // See `vtl1_entry_vector`.
+                this->vtl1_entry_armed[cpu] = 1;
 
                 constexpr std::uint64_t kernel_address_floor =
                     0xffff800000000000;

@@ -10043,6 +10043,30 @@ private:
 
     /** When the last `HvCallVtlCall` was seen, for the histogram above. */
     std::uint64_t vtl_call_last_tsc[max_cpus]{};
+
+    /**
+     * What vector, if any, was injected on the entry that runs VTL1.
+     *
+     * **VINA is delivered to the secure kernel as an interrupt**, and an
+     * interrupt injected into a second-level guest goes through vmcs02's
+     * VM-entry interruption-information field - which this VMM writes. So
+     * if VINA is what preempts VTL1, it is visible here, and if VTL1 is
+     * entered carrying nothing then whatever ends its turn is not an
+     * injected interrupt at all.
+     *
+     * VTL1 takes **zero** exits between `HvCallVtlCall` and
+     * `HvCallVtlReturn`, so it is entered exactly once per call: the next
+     * entry after a VtlCall is the one that runs it, and `vtl1_entry_armed`
+     * is what carries that across.
+     *
+     * Slot 256 counts entries that carried no event at all, so "nothing
+     * was injected" is a reading rather than an absence - the distinction
+     * this investigation has got wrong more than once.
+     */
+    std::uint64_t vtl1_entry_vector[max_cpus][257]{};
+
+    /** Set at an `HvCallVtlCall`, consumed by the entry that follows. */
+    std::uint64_t vtl1_entry_armed[max_cpus]{};
     /** @} */
     /** @} */
     /** @} */

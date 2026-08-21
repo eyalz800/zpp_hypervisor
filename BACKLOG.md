@@ -36568,3 +36568,48 @@ about what VTL1 does**, from the `ZPP_STEP_VTL` trace:
 That is a functional hang and it is what the next work should address:
 whether VINA is asserted at the moment VTL1 is entered, measured on the
 transition itself rather than inferred from a priority.
+
+## Nothing is injected into VTL1. The secure kernel yields voluntarily
+
+**Direct measurement, and it needs no inference from a priority.** VINA
+would reach the secure kernel as an interrupt, and an interrupt injected
+into a second-level guest goes through vmcs02's VM-entry
+interruption-information field, which this VMM writes. VTL1 takes zero
+exits between `HvCallVtlCall` and `HvCallVtlReturn`, so it is entered
+exactly once per call and that entry can be identified exactly.
+
+    what the entry running VTL1 carried (26,547 entries)
+      no event    26,547   100.0%
+
+**Twenty-six thousand entries, not one carrying an injected event.** The
+slot counting "nothing" is a counted reading rather than an absent one,
+which is the distinction this investigation has got wrong before.
+
+So the `ShvlVinaHandler` -> `KiVinaInterrupt` -> `KiVinaInterruptShadow`
+sequence in the instruction trace is a **call chain, not an interrupt
+delivery**. The secure kernel is not being preempted. It **polls** for the
+notification and yields of its own accord:
+
+    SkiSelectThread      picks a thread
+    ShvlVinaHandler      asks whether the normal level has work pending
+    KiVinaInterrupt      handles the answer
+    SkiDeselectThread    puts the thread back, unrun
+    SkCallNormalMode     and returns
+
+**That is a voluntary yield on every one of ~26,000 entries**, and it makes
+the question concrete and small: *what does the secure kernel read that
+tells it the normal level has something pending, and why does it always say
+yes?* The answer is a field in memory - the VP assist page or the synthetic
+interrupt controller's state - not anything this VMM injects.
+
+**This also supplies the bridge the cost account was missing.** The normal
+level does have something pending, permanently: its clock, at 574.7 Hz,
+whose service routine overruns its own period. If the secure kernel yields
+whenever the normal level has a pending interrupt, and the normal level
+always has one, then VTL1 never runs a thread - and that is a hang produced
+by a cost, which is why neither account alone ever fit.
+
+**Not established**, and the two ways to settle it are cheap: find the field
+`ShvlVinaHandler` reads and watch it, or make the normal level's clock stop
+being permanently pending and see whether the secure kernel then keeps its
+thread.
