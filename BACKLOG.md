@@ -785,6 +785,64 @@ is not there" and is really "the wrong question was asked". `x` is the
 virtual read. The same distinction is why a wide `xp` over a device BAR
 lied, further down this file.
 
+## Correction: the gap is 1.18x, not 8.6x. The handler fits; the *arming rate* does not
+
+**The "8.6x" in the sections below is wrong, and it is wrong in the way that
+matters most - it compared two quantities that are not the same period.**
+Recorded prominently rather than quietly edited, because it was used to argue
+the goal is unreachable on this rig, and that argument does not survive the
+correction.
+
+The mistake: the ordinary-kernel **VTL round-trip half** costs 15-31 ms, and
+that was set against Windows' 1.74 ms tick. But a VTL round trip is not a
+tick. There are 566,425 round trips against **12.8 million** synthetic-timer
+arms - **one round trip per twenty-two ticks**. The period the clock handler
+has to fit inside is the tick, and the tick's cost has to be measured on its
+own.
+
+Measured, this boot, both terms as deltas:
+
+    cpu 0 exits            11,832 /s
+    STIMER0_COUNT arms        893.9 /s
+    -> exits per tick          13.2
+    -> cycles per tick    2,636,290   (at 199,170 cycles an exit)
+    -> milliseconds per tick     1.32
+
+    Windows' budget (17,400 x 100 ns)  1.74 ms   <- the handler FITS
+    observed period (1 / 893.9 Hz)     1.12 ms   <- what it actually gets
+
+**So the clock handler does fit inside the period Windows asks for, with 24%
+to spare.** What defeats it is that the guest re-arms at 893.9 Hz rather than
+574.7 Hz - 1.56x too fast - which turns 1.32-inside-1.74 into
+1.32-against-1.12. **The real gap is 1.18x**, and every lever already
+measured is larger than that: the profiler's timer alone was 10.7%, the APIC
+page watch 17.7%.
+
+**Which relocates the question entirely.** It is no longer "make the VMM
+eight times faster", which is not achievable here. It is **"why does the
+guest arm its synthetic timer 1.56x more often than its own constant says"**
+- a correctness question with a bounded answer, and the kind this tree is
+good at.
+
+Two things already eliminated as the cause:
+
+- **Our reference clock is exact.** Scale `0x148ff4d8b372ebb` implies
+  1.9920 GHz against an actual 1.9920 GHz. We are not delivering time fast.
+- **It is not a mis-scaled tick constant.** `KeQuantumEndTimerIncrement` is
+  17,400 and `KeMinimumIncrement`/`KeMaximumIncrement` are 5,000/156,250, so
+  574.7 Hz is neither a clamp nor a rounding.
+
+**The next instrument, and it is small**: census the *value* written to
+`0x400000b1` against the current reference time, so the requested interval is
+visible rather than inferred. If the intervals are 17,400 units apart, then
+893.9 Hz means more than one logical timer is multiplexed onto STIMER0 and
+the 1.56x is legitimate. If some are far shorter, the guest is asking for a
+faster tick and the reason it is asking is the blocker.
+
+**Nothing below this line that cites 8.6x should be trusted on that number.**
+The measurements in those sections stand; the ratio they were compared
+against does not.
+
 ## The tick loop, counted: three synthetic MSRs per tick and an exact reference clock
 
 Measured on a boot that is **not** in the spin state, which matters - the
