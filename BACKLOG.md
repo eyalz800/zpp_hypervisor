@@ -36032,3 +36032,53 @@ exists to say *what happened, in order* - the one CLAUDE.md recommends over
 the state records for exactly this - has nothing to report. This VMM does
 not think anything went wrong, and by every measurement taken so far it is
 right.
+
+## Retraction: VTL1 is not idle. It executes 614 instructions an entry and returns deliberately
+
+**"Securekernel is entered, does nothing, and returns" is withdrawn.** It
+rested on VTL1 taking zero exits between `HvCallVtlCall` and
+`HvCallVtlReturn`, and **zero exits means it needs no exits, not that it
+does no work.** That inference was wrong for six sessions' worth of
+conclusions built on it.
+
+`ZPP_STEP_VTL` arms the monitor trap flag across a trust-level transition
+and traces retired instructions. It is documented here as perturbing and is
+off by default, and it is the only instrument that can see inside a region
+that takes no exits. Turned on for one boot:
+
+    instruction trace after HvCallVtlCall: 2048 steps
+      614   steps with cr3 0x8800002   <- VTL1
+      1434  steps with cr3 0x1ae002    <- VTL0, after the return
+      1822 distinct instruction pointers across the trace, max repeat 8
+
+**614 instructions of varied work per entry, and no loop in it.** For
+comparison, a tight spin would show a handful of addresses repeating
+hundreds of times.
+
+What it does, from the trace: resumes at `SkpReturnFromNormalMode`, restores
+the register and XMM state, reads DR6 and CR2, **executes `STI`** - so the
+"VTL1 runs with interrupts masked and can never take its timer" hypothesis
+is refuted too, it enables them - runs several hundred instructions across
+more than one image, then:
+
+    0xfffff80643ada36f  cmpq $0, [rip+0x73c89]    test a global
+    0xfffff80643ada377  je ...                    taken
+    0xfffff80643ada39b  mov rax,[rip+0x65cce]; call rax
+    0xfffff8063b130028  mov rax, rcx
+    0xfffff8063b13002b  mov rcx, 0x12             HvCallVtlReturn
+    0xfffff8063b130032  vmcall                    -> cr3 flips to VTL0
+
+It reaches a deliberate, ordinary return through its own epilogue. Nothing
+faults, nothing retries, and it is not stuck inside itself.
+
+**So both trust levels are executing real code and neither is making
+progress.** That is a livelock between two working peers, not a dead one -
+a materially different thing to chase, and the reason this retraction
+matters more than the others.
+
+**The rule this breaks, worth stating because it looked so safe:** exit
+count is a measure of how much a region *interacts with the level below*,
+never of how much it executes. Every other region in this system happens to
+exit constantly, which is why the inference passed unexamined for so long.
+The instrument that could have said so was built, documented and switched
+off in this very tree.
