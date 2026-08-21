@@ -785,6 +785,77 @@ is not there" and is really "the wrong question was asked". `x` is the
 virtual read. The same distinction is why a wide `xp` over a device BAR
 lied, further down this file.
 
+## The park is `SkeCrashDumpNmi`. State A is a crash *aftermath*, state B is the live fault
+
+**Named from `securekernel.pdb`**, fetched from the symbol server for this
+exact binary (GUID `624a32cc-5c6f-b9ab-012f6a639a4f7823`, age 1) and resolved
+against the section headers the PDB itself carries - so no running image is
+needed:
+
+    securekernel+0xb043c   SkeCrashDumpNmi+0x1a8    <- pause
+    securekernel+0xb043e   SkeCrashDumpNmi+0x1aa    <- jmp $-2
+
+**The infinite loop is inside the secure kernel's crash-dump NMI handler.**
+That reinterprets it completely. The `movups` run before it is the handler
+saving processor context for a dump, and the park is what every processor
+*except* the one writing the dump is supposed to do. A processor sitting
+there forever is not a hang in the ordinary sense - **it is a machine that
+has already crashed**, waiting in the state a crash dump leaves it in.
+
+**And the current boot has not crashed**, which is what separates the two
+states rather than contradicting them. Read from guest memory with ntoskrnl
+symbols:
+
+    KiBugCheckData   (+0xf229c0)  0 0 0 0 0
+    KiBugCheckActive (+0xf229e8)  0
+
+All zero. So:
+
+| | state A | state B |
+|---|---|---|
+| what | `SkeCrashDumpNmi` park | live clock-path livelock |
+| bugcheck | one has happened | **none** - `KiBugCheckData` is zero |
+| meaning | the aftermath | **the fault itself** |
+
+**So state B is the thing to fix and state A is its consequence** - the guest
+livelocks, a watchdog eventually fires, an NMI collects a crash dump, and
+every processor parks in `SkeCrashDumpNmi`. `BACKLOG.md` already records
+bugcheck `0x1CA` from `HalpWatchdogCheckPreResetNMI` on this rig, which is
+the same shape: a watchdog that did not get an answer in time.
+
+**What state B is, with names**, from the profile - the instrument that
+samples on a clock this VMM owns and survives repeated sampling:
+
+    KiIsrThunkShadow+0x688     HalpHvTimerArm+0x7a
+    HvlEndSystemInterrupt+0x1e HalpHvTimerAcknowledgeInterrupt+0x46
+    KiDpcInterruptBypass+0x12  HvlWriteApicCommandRegister+0x1d
+    KeQueryPerformanceCounter+0x163
+
+Every one is on the tick path, and they are spread across *all* of it -
+acknowledge, arm, end-of-interrupt, request the DPC, and the KVA-shadow thunk
+in and out. **The guest is not stuck at a point in the tick; it is going
+round the whole tick, and only the tick.** Which is this file's oldest
+finding - "the clock handler cannot finish inside its own period" - now with
+function names instead of raw addresses, and confirmed on a boot that has
+provably not crashed.
+
+**Reconciling "stuck" against "slow", because both readings were defensible
+and they are the same fact.** A handler that cannot complete within its own
+period makes *no forward progress at all* - zero new pages, never ring 3 -
+so it presents exactly as stuck. Cost is the mechanism; a livelock is the
+symptom. Arguing which word applies wasted a day; the measurable question is
+the one already stated - get a tick to cost less than a tick.
+
+**Symbolisation, now available for both images and worth keeping:**
+
+    ntkrnlmp.pdb     GUID c8a7f11b-37fe-2822-7b6b11412e3a0519 age 1
+    securekernel.pdb GUID 624a32cc-5c6f-b9ab-012f6a639a4f7823 age 1
+    https://msdl.microsoft.com/download/symbols/<pdb>/<GUID><AGE>/<pdb>
+
+For ntoskrnl the section table is read from the guest's own image; for
+securekernel `llvm-pdbutil dump --section-headers` supplies it. Both give
+`segment:offset` with **both fields decimal**.
+
 ## Retraction: `VslStartSecureProcessor` was stack residue. The profile is the instrument, the scan is not
 
 **The section below overstates its evidence and its headline is withdrawn.**
