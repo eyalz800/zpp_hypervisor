@@ -6263,12 +6263,85 @@ void hypervisor::capture_poll_site(std::size_t cpu)
     this->l2_poll_captured = 1;
 }
 
+void hypervisor::on_vtl_block_write(void * context,
+                                    std::uint64_t page,
+                                    const guest_write * write)
+{
+    auto & self = *static_cast<hypervisor *>(context);
+
+    static_cast<void>(page);
+
+    self.vtl_block_writes = self.vtl_block_writes + 1;
+
+    // What was written and by whom, which is the entire question. A
+    // count alone cannot distinguish the second-level guest touching its
+    // own stack from the state actually being set - the address and the
+    // value can, and the instruction pointer says who.
+    //
+    // The RIP comes from the VMCS rather than from `guest_write`, which
+    // carries only address, value and width. Whichever VMCS is current
+    // is the one that faulted, so this is the faulting guest's own
+    // instruction pointer either way.
+    if (nullptr != write) {
+        self.vtl_block_write_address = write->address;
+        self.vtl_block_write_value = write->value;
+    }
+
+    self.vtl_block_writer_rip = self.vmcs.guest_rip();
+}
+
 void hypervisor::capture_vtl_switch(std::size_t cpu,
                                     std::size_t kind,
                                     arch::x86_64::context & context)
 {
     if ((cpu >= max_cpus) || (kind >= vtl_kinds)) {
         return;
+    }
+
+    // Arm the IUM block watch, once, on the page `rdx` lands in.
+    //
+    // `rdx` at an `HvCallVtlCall` is the register block
+    // `HvlSwitchToVsmVtl1` marshals - `movq (%rdx), %rbx` going in and
+    // `movq %rbx, (%rdx)` coming out - so it is the object whose first
+    // qword carries the state the second-level guest dispatches on and
+    // never sees change. See `nested_vmx::watch_vtl_block` for why a
+    // watch and not another read.
+    //
+    // Kind 0 only - the `HvCallVtlCall` side - because that is where
+    // `rdx` holds the block; on the return side it holds something else.
+    if constexpr (nested_vmx::watch_vtl_block) {
+        // **Not the first `HvCallVtlCall` - the first one is somebody
+        // else's.** Armed on the first switch it saw, this watched
+        // `rdx = 0x1a7280`, an identity-mapped low address holding
+        // `0x8c0`, from an early-boot use of the same hypercall. The
+        // block the loop spins on is a kernel *stack* address and its
+        // first qword is `0x100000400`, so the two are not confusable
+        // once the test is right.
+        //
+        // A canonical kernel address is the discriminator, and it is the
+        // cheapest one that cannot be fooled by boot ordering: early VSM
+        // work runs on identity-mapped memory, the IUM block does not.
+        constexpr std::uint64_t kernel_floor = 0xffff800000000000;
+
+        if ((0 == kind) && (0 == this->vtl_block_page) &&
+            this->running_l2[cpu] && (context.rdx >= kernel_floor)) {
+            if (auto physical = translate_guest_linear(cpu, context.rdx)) {
+                if (auto reachable = l2_physical_to_l1(
+                        this->vmcs.vpid() - 1, *physical)) {
+                    auto page = *reachable & ~std::uint64_t{0xfff};
+
+                    if (watch_guest_page_writes(
+                            page,
+                            &hypervisor::on_vtl_block_write,
+                            this)) {
+                        this->vtl_block_page = page;
+                        log("watching the IUM block page {} (block at {})",
+                            page,
+                            context.rdx);
+                    }
+                }
+            }
+        }
     }
 
     auto & vmcs = this->vmcs;

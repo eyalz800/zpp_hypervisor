@@ -785,6 +785,50 @@ is not there" and is really "the wrong question was asked". `x` is the
 virtual read. The same distinction is why a wide `xp` over a device BAR
 lied, further down this file.
 
+## The IUM block watch: a memory breakpoint the guest does not survive
+
+**The idea is right and this target is wrong**, and both halves are worth
+recording because the idea will come up again.
+
+`ZPP_WATCH_VTL_BLOCK` arms an EPT write-watch on the page holding the IUM
+context block, discovered at runtime from `rdx` at an `HvCallVtlCall`. It
+exists because **a write that is attempted and lost, and a write that never
+happens, leave identical bytes in memory** - polling cannot separate them and
+they want opposite fixes. A watch can.
+
+**Two failures, in order.**
+
+**First it armed on the wrong block.** Armed on the *first* `HvCallVtlCall`
+it saw, it watched `rdx = 0x1a7280` - an identity-mapped low address holding
+`0x8c0` - from an early-boot use of the same hypercall, nothing to do with
+the loop. Caught by checking the watched page against the block address
+rather than trusting `0 writes`: `0x1a7000` is under two megabytes and the
+loop's block is a kernel stack address. Fixed by requiring a canonical
+kernel address, `rdx >= 0xffff800000000000`, since early VSM work runs on
+identity-mapped memory and the IUM block does not.
+
+**Then it stopped the guest.** With the arming corrected the watch took the
+right page - `0x850e000`, from `rdx = 0xfffff80414cacea0` - and the guest
+froze at **22,308 exits**, against millions in every other boot, far earlier
+than the state under study. `0 writes seen` was therefore not an observation:
+the instrument killed what it was measuring.
+
+**Why, and it is obvious in hindsight.** The block lives on a **live kernel
+stack**. Clearing write permission on that page faults on every ordinary
+stack push, not merely on the state byte - a whole page of unrelated traffic
+routed through an emulation path built for a device register. The APIC page
+tolerates this because nothing else lives on it.
+
+**So the technique is sound and needs a narrower target.** What would work:
+a watch on a page that holds *only* the object, or hardware debug registers
+programmed for the exact address rather than the page - `DR0`-`DR3` with a
+4-byte write breakpoint, which is what a debugger would use and which does
+not disturb the rest of the page. That is a different mechanism from
+anything this tree has, and it is the honest next step for this question.
+
+**Left off.** The switch defaults off and the rig is restored to a
+configuration the guest survives.
+
 ## We do not answer the VTL hypercalls. Hyper-V does, and we only carry them
 
 Worth stating plainly because several theories in this file quietly assumed

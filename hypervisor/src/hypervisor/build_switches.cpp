@@ -133,6 +133,11 @@ extern "C" [[gnu::used, gnu::retain]] constinit const char
         // is for.
         ' ', 's', 'a', 'm', 'p', 'l', '1', '=',
         digit(sample_l1_enabled),
+        // The IUM block watch. On, a live kernel stack page loses
+        // write permission and every write to it is an exit, so a run
+        // with this on is not comparable with one without.
+        ' ', 'b', 'l', 'k', 'w', '=',
+        digit(nested_vmx::watch_vtl_block),
         ' ', 'v', 't', 'l', 'c', 'a', 'p', '=',
         digit(nested_vmx::capture_vtl_deeply),
         ' ', 'd', 'i', 'l', 'a', 't', 'e', '=',

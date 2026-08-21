@@ -1673,4 +1673,36 @@ inline constexpr arch::x86_64::vmx::vmcs_fields::vmcs_field
         arch::x86_64::vmx::vmcs_fields::vmcs_field::guest_ss_access_rights,
 };
 
+/**
+ * Watch the IUM context block for writes, and log who makes them.
+ *
+ * **The value being unchanged and the value being un-writable look
+ * identical from outside.** The second-level guest loops on a state byte
+ * that never moves, and polling it - twelve reads over two minutes, all
+ * `0x0000000100000400` - cannot distinguish "nothing writes it" from "a
+ * write is attempted and lost". Those want opposite fixes, and only a
+ * memory breakpoint separates them.
+ *
+ * The block's address is not known until the guest is deep in boot and
+ * changes every run with KASLR, so it cannot be baked in. It is
+ * discovered instead: `capture_vtl_switch` already holds `rdx` at the
+ * `HvCallVtlCall`, which is the block, and translates second-level
+ * addresses for its code window - so the watch is armed from there, once,
+ * on the page that address lands in.
+ *
+ * Watching in *this* VMM's extended page tables reaches a second-level
+ * write because the shadow composes our permissions with the guest
+ * hypervisor's - measured bucket-for-bucket in `install_shadow_leaf` -
+ * so clearing write here removes it from the composition too.
+ *
+ * Off by default: it costs an EPT violation on every write to a live
+ * kernel stack page, which is not a page a deployed build should be
+ * faulting on.
+ */
+#ifndef ZPP_WATCH_VTL_BLOCK
+#define ZPP_WATCH_VTL_BLOCK 0
+#endif
+
+inline constexpr bool watch_vtl_block = (0 != ZPP_WATCH_VTL_BLOCK);
+
 } // namespace zpp::hypervisor::nested_vmx

@@ -2289,7 +2289,12 @@ def main():
                # What the guest hypervisor asked vmcs02 for against what
                # it was given. A bit it asked for and did not get changes
                # how its guest's APIC behaves.
-               "control_secondary_requested", "control_secondary_granted"]
+               "control_secondary_requested", "control_secondary_granted",
+               # The IUM block memory breakpoint. See
+               # nested_vmx::watch_vtl_block.
+               "vtl_block_page", "vtl_block_writes",
+               "vtl_block_writer_rip", "vtl_block_write_address",
+               "vtl_block_write_value"]
     off = gdb_offsets(args.elf, members)
     instance = base + gdb_symbol(
         args.elf, "zpp::hypervisor::hypervisor::instance()::instance")
@@ -2436,6 +2441,10 @@ def main():
     for name in ("control_secondary_requested", "control_secondary_granted"):
         if name in off:
             monitor.queue(instance + off[name], args.cpus)
+    for name in ("vtl_block_page", "vtl_block_writes", "vtl_block_writer_rip",
+                 "vtl_block_write_address", "vtl_block_write_value"):
+        if name in off:
+            monitor.queue(instance + off[name], 1)
     for name in ("hypercall_codes", "hypercall_code_counts",
                  "l2_hypercall_codes", "l2_hypercall_code_counts"):
         if name in off:
@@ -2510,6 +2519,27 @@ def main():
             for bit in (0, 8, 9):
                 state = "yes" if got & (1 << bit) else "no"
                 print(f"    {SECONDARY[bit]:<30} {state}")
+
+    # The IUM context block memory breakpoint.
+    #
+    # **A write that is attempted and lost, and a write that never
+    # happens, leave the same bytes in memory.** The second-level guest
+    # loops on a state byte that polling shows unchanged; only a watch
+    # says which of those is true. `writes 0` with the page armed means
+    # nothing writes it - the state is stale by omission, not by loss.
+    if "vtl_block_page" in off:
+        page = read("vtl_block_page") or 0
+        if page:
+            n = read("vtl_block_writes") or 0
+            print(f"\ncpu 0 IUM block watch: page 0x{page:x}, "
+                  f"{n:,} writes seen")
+            if n:
+                print(f"    last write: address 0x{read('vtl_block_write_address') or 0:x}"
+                      f"  value 0x{read('vtl_block_write_value') or 0:x}"
+                      f"  from rip 0x{read('vtl_block_writer_rip') or 0:x}")
+            else:
+                print("    NOTHING writes this page - the state is stale by "
+                      "omission, not by a lost write")
 
     # Which hypercalls each level is making, by code.
     #

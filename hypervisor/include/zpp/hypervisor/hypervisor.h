@@ -4872,6 +4872,12 @@ private:
                                    std::uint64_t page,
                                    const guest_write * write);
 
+    /** Records who writes the IUM context block's page. See
+     *  `nested_vmx::watch_vtl_block`. */
+    static void on_vtl_block_write(void * context,
+                                   std::uint64_t page,
+                                   const guest_write * write);
+
     /**
      * Whether a `load_l1_host_state` slot has been audited often enough,
      * and never once found changed, for its write to be skipped. See
@@ -5139,6 +5145,23 @@ private:
      */
     std::uint64_t profile_code_physical{};
     std::uint64_t profile_code_virtual{};
+
+    /**
+     * The IUM context block watch. See `nested_vmx::watch_vtl_block`.
+     *
+     * `vtl_block_page` is the guest-physical page the block landed in,
+     * armed once and never re-armed - a second arm would be a second
+     * watch on the same page. `vtl_block_writes` counts writes seen and
+     * `vtl_block_writer_rip` holds the most recent writer, which is the
+     * whole point: **a write that is attempted and lost and a write that
+     * never happens leave the same value in memory**, and only this
+     * tells them apart.
+     */
+    std::uint64_t vtl_block_page{};
+    std::uint64_t vtl_block_writes{};
+    std::uint64_t vtl_block_writer_rip{};
+    std::uint64_t vtl_block_write_address{};
+    std::uint64_t vtl_block_write_value{};
 
     /**
      * Which instruction the pointer above was taken at.
