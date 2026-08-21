@@ -10193,6 +10193,43 @@ private:
     std::uint64_t vtl_protect_step_rip[max_cpus][8]{};
     std::uint64_t vtl_protect_step_count[max_cpus][8]{};
     std::uint64_t vtl_protect_step_other[max_cpus]{};
+
+    /**
+     * The exit reason of the first exit taken after a protection answer.
+     *
+     * **Passive.** The monitor trap flag cannot be armed on this path -
+     * measured, twice, with and without a one-shot discipline - so the
+     * instruction after the resume is not directly observable. What *is*
+     * observable is the next exit the guest takes, which costs nothing:
+     * the flag consumed at that exit already exists.
+     *
+     * A protection answer that resumes into the hypercall wrapper and
+     * carries on through the loop will be followed by the *next* protection
+     * hypercall - reason `vmcall`. One that vectors into an interrupt
+     * handler instead will be followed by something else. So the histogram
+     * separates "the loop continued" from "the loop was diverted" without
+     * trapping anything, and the last call's entry is the one that differs.
+     */
+    std::uint64_t vtl_protect_next_reason[max_cpus][72]{};
+    std::uint64_t vtl_protect_next_last[max_cpus]{};
+
+    /**
+     * And the hypercall **code** of that next exit, which is what actually
+     * separates the cases.
+     *
+     * Every protection answer is followed by a `vmcall` - all 39,276 - so
+     * the exit reason alone distinguishes nothing: the loop issues its
+     * protection calls back to back, and the next exit is normally the
+     * next `HvCallModifyVtlProtectionMask`. **The code says which
+     * hypercall it is**, and the last one is expected to differ: if the
+     * walk continued it is `0x0c` again, and if the secure kernel yielded
+     * instead it is `0x12`, `HvCallVtlReturn`.
+     *
+     * Sixteen slots for the low nibble-pair of the code, which covers
+     * every call this guest makes, plus the last one kept whole.
+     */
+    std::uint64_t vtl_protect_next_code[max_cpus][32]{};
+    std::uint64_t vtl_protect_next_code_last[max_cpus]{};
     std::uint64_t vina_at_call_set[max_cpus]{};
     std::uint64_t vina_at_call_clear[max_cpus]{};
     std::uint64_t vina_at_call_unread[max_cpus]{};

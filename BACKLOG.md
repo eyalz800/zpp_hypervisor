@@ -37683,3 +37683,48 @@ divergence on the instruction after the resume is not observable by trapping
 whatever *does* come next. A protection answer is followed by some exit
 eventually, and counting those by reason, split by whether the call was the
 last one, needs no trap flag at all.
+
+## Yielding after a protection answer is normal: 18,585 times. Not resuming happens once
+
+The passive measurement, built after the monitor trap flag proved unusable
+on this path. Every protection answer is followed by a `vmcall` - all
+39,277, so the exit *reason* separates nothing - but the hypercall **code**
+separates everything:
+
+    the first exit after a protection answer
+      code 0x0c  ModifyVtlProtectionMask   20,632    the walk continued
+      code 0x12  VtlReturn                 18,585    the secure kernel yielded
+      code 0x03                                55
+      code 0x02                                 1
+      the LAST answer was followed by code 0x12, VtlReturn
+
+**The secure kernel yields after a protection answer 18,585 times** - 47% of
+them - and comes back and carries on 18,584 times. The last one is the same
+event with the same code, and it does not come back.
+
+**So the yield is not the fault.** Every reading in this file that treated
+"VINA fires on the hypercall return and the secure kernel hands control
+back" as the failure is describing something that happens eighteen thousand
+times without consequence. What fails is the **resume** afterwards, and it
+fails exactly once.
+
+That is the shape this investigation has been unable to reach for twenty
+iterations: **a rare event inside a common pattern, measured rather than
+inferred from one trace.** It also retires the last of the traces as
+evidence - they were all sampling the 47%.
+
+### What this makes the question
+
+Between the 18,584 successful cases and the one failure, everything measured
+is identical: the same hypercall, the same status, the same completed reps,
+the same resume instruction, the same destination trust level, the same next
+hypercall code. The difference is only in what happens *after* VTL0 services
+the yield and calls back in - and 18,584 times the secure kernel resumes the
+walk, once it does not.
+
+`SkiSelectThread` runs on every one of those entries. **So the question is
+what it tests that answers differently on the last occasion**, and that is a
+scheduling decision inside secure-kernel memory: a thread state, a ready
+list, or a lock. Those live in `SkmiNonPagedPtes`-adjacent structures the
+guest owns, they are reachable by the same `gs`-relative walk that found the
+VINA flag, and **none of them has been read.**

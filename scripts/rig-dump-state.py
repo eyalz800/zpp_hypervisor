@@ -2273,6 +2273,8 @@ def main():
                "vtl_protect_answer_rip_count",
                "vtl_protect_answer_rip_other", "vtl_protect_step_rip",
                "vtl_protect_step_count", "vtl_protect_step_other",
+               "vtl_protect_next_reason", "vtl_protect_next_last",
+               "vtl_protect_next_code", "vtl_protect_next_code_last",
                "vmcs_shadow_loads", "vmcs_shadow_stores",
                "vmcs_field_read_encoding", "vmcs_field_read_count",
                "vmcs_field_write_encoding", "vmcs_field_write_count",
@@ -2405,6 +2407,8 @@ def main():
                "vtl_protect_answer_rip_count",
                "vtl_protect_answer_rip_other", "vtl_protect_step_rip",
                "vtl_protect_step_count", "vtl_protect_step_other",
+               "vtl_protect_next_reason", "vtl_protect_next_last",
+               "vtl_protect_next_code", "vtl_protect_next_code_last",
                "vmcs_shadow_loads",
                "vmcs_shadow_stores",
                "guest_state_writes_skipped", "guest_state_writes_done",
@@ -2480,6 +2484,10 @@ def main():
                "vtl_protect_step_rip", "vtl_protect_step_count"):
         monitor.queue(instance + off[_n], scalar_cpus * 8)
     monitor.queue(instance + off["vtl_protect_step_other"], scalar_cpus)
+    monitor.queue(instance + off["vtl_protect_next_reason"], scalar_cpus * 72)
+    monitor.queue(instance + off["vtl_protect_next_last"], scalar_cpus)
+    monitor.queue(instance + off["vtl_protect_next_code"], scalar_cpus * 32)
+    monitor.queue(instance + off["vtl_protect_next_code_last"], scalar_cpus)
     for _n in ():
         monitor.queue(instance + off[_n], scalar_cpus)
     for _n in ():
@@ -3009,6 +3017,24 @@ def main():
         oth = read('vtl_protect_answer_rip_other', cpu) or 0
         if oth:
             print(f"        (beyond eight distinct) {oth:,}")
+        print("      the first exit after a protection answer, by reason:")
+        for k in range(72):
+            c = read('vtl_protect_next_reason', (cpu * 72) + k) or 0
+            if c:
+                print(f"        {EXIT_REASON.get(k, hex(k)):<16s} {c:9,d}")
+        HV = {0x0c: "ModifyVtlProtectionMask", 0x11: "VtlCall",
+              0x12: "VtlReturn", 0x0d: "EnablePartitionVtl",
+              0x0f: "EnableVpVtl"}
+        for k in range(32):
+            c = read('vtl_protect_next_code', (cpu * 32) + k) or 0
+            if c:
+                print(f"          code 0x{k:02x} {HV.get(k, ''):<24s} "
+                      f"{c:9,d}")
+        lc = read('vtl_protect_next_code_last', cpu) or 0
+        print(f"          the LAST answer was followed by code 0x{lc:02x} "
+              f"{HV.get(lc, '')}")
+        print(f"        last one was: "
+              f"{EXIT_REASON.get(read('vtl_protect_next_last', cpu), '?')}")
         print("      and where the NEXT instruction lands:")
         for k in range(8):
             c = read('vtl_protect_step_count', (cpu * 8) + k) or 0

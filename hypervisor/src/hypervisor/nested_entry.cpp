@@ -8658,6 +8658,29 @@ hypervisor::on_l2_exit(std::size_t cpu,
             if ((cpu < max_cpus) &&
                 (0 != this->vtl_protect_after_pending[cpu])) {
                 this->vtl_protect_after_pending[cpu] = 0;
+
+                // What the guest did next, by exit reason. See
+                // `vtl_protect_next_reason`.
+                auto next = static_cast<std::size_t>(reason.basic());
+
+                if (next < 72) {
+                    this->vtl_protect_next_reason[cpu][next] += 1;
+                }
+
+                this->vtl_protect_next_last[cpu] = next;
+
+                // And which hypercall, which is the part that separates
+                // "the walk continued" from "the secure kernel yielded".
+                // See `vtl_protect_next_code`.
+                if (basic_reason::vmcall == reason.basic()) {
+                    auto code = context.rcx & 0xffff;
+
+                    this->vtl_protect_next_code_last[cpu] = code;
+
+                    if (code < 32) {
+                        this->vtl_protect_next_code[cpu][code] += 1;
+                    }
+                }
                 this->vtl_protect_after_read[cpu] = 0;
 
                 auto base = this->vtl_protect_last_rsp[cpu];
