@@ -785,6 +785,71 @@ is not there" and is really "the wrong question was asked". `x` is the
 virtual read. The same distinction is why a wide `xp` over a device BAR
 lied, further down this file.
 
+## The cache reading is retracted, and the evidence was functional all along
+
+**My own test refuted it, exactly as the previous section said it must.**
+Built with every diagnostic off - `profile=0 census=0 sampl1=0` and the
+entry-path diagnostic gated - the ordinary-kernel half went
+
+    13,691.5 us  ->  11,758.4 us     -14%
+
+The prediction was that if the 8x were cache footprint, this build "should
+move it far more than the sum of individual instruction costs predicts". It
+moved 14%, which is roughly the sum of the individual costs. **The cache
+hypothesis is dead and the budget framing with it.**
+
+**And the evidence was functional the whole time.** Three signs, all present
+for days, all read as cost:
+
+- **`HvCallModifyVtlProtectionMask` stops at a reproducible count**:
+  **39,259 / 39,261 / 39,262** across three independent boots with different
+  KASLR bases. A machine that is merely slow does not stop at the same number
+  three times; it gets further when it gets more time.
+- **The retry is byte-identical.** Every architectural register the same
+  across 25,000+ round trips. A slow guest still advances - different
+  registers each time. Identical registers mean *no state is changing*.
+- **Ring 3 never, zero new pages never.** Not rarely. Never.
+
+**"The VTL0 half must fit inside a tick" was an inference, never an
+observation.** It was assumed, an 8x was computed from it, and four sections
+of this file were built on top. The tick is real and the half is real; that
+one *causes* the other was never shown.
+
+**What the deep capture says, which is functional and specific.** With
+`ZPP_VTL_CAPTURE=ON`:
+
+    --- HvCallVtlReturn 0x12 call site ---
+      caller 0xfffff80085cb1000 'securekernel.exe' at +0xd93a4
+        = SkpReturnFromNormalMode+0x0
+        (preceded by SkpPrepareForReturnToNormalMode+0xb0)
+
+**The secure kernel is doing its job.** It is entered, it prepares to return,
+it returns - the ordinary VTL1 -> VTL0 path, not a crash, not a park, not a
+spin. So the loop is not VTL1 failing to answer. **VTL0 asks, gets a proper
+answer, and asks again.**
+
+**And one thing in that capture is an error rather than an observation:**
+
+    vp assist level 0: msr 0x117a1f001 ... read 512 bytes err 0x0        (call side)
+    vp assist level 0: msr 0x117a1f001 ... read   0 bytes err 0x100000010 (return side)
+
+The VP assist page reads cleanly entering VTL1 and **fails to read on the way
+back**. That page is how a VTL switch's result is communicated. Whether the
+failure is the capture's own limitation - reading a VTL0 address while VTL1's
+CR3 is current - or the mechanism itself, is not yet established, **but it is
+the first read error anywhere in this investigation and it sits exactly where
+the result would be.**
+
+**Method correction, which is the durable part.** The user's observation is
+correct and worth recording against my own work: *every time this
+investigation reached for an explanation it reached for cost, and every
+finding that turned out to be real was functional* - the fake control, the
+`ZPP_INTERCEPT_APIC` stale cache, the swallowed EPT fault, the shadow-VMCS
+misreading, the halted-versus-spinning reversal. **Cost is the explanation
+that always fits and therefore never discriminates.** A reproducible stopping
+count, identical registers and a hard never are functional signatures, and
+each was in hand long before it was read that way.
+
 ## The 75 us is cache, and the diagnostics are the working set
 
 The two measurements needed to say this are now both in hand, and the phase
