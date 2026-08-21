@@ -785,6 +785,44 @@ is not there" and is really "the wrong question was asked". `x` is the
 virtual read. The same distinction is why a wide `xp` over a device BAR
 lied, further down this file.
 
+## Neither VSM start routine loops. The retry is above them, in `Phase1InitializationDiscard`
+
+Disassembled from the running guest, using ntoskrnl's real symbols and its
+own memory. **`VslFinishStartSecureProcessor` (rva 0x58a12c) contains no
+backward branch at all:**
+
+    prologue, stack cookie
+    two setup calls
+    mov r8d,[rbx+36] ; test ; je
+    call ...                    <- returns an NTSTATUS
+    mov ebx,eax ; test eax,eax ; js +61      <- the failure path
+    mov edx,3 ; mov cl,2 ; call ...          <- the VTL call
+    mov ebx,eax ; call ... ; cookie check ; ret
+
+**`VslStartSecureProcessor` (rva 0x70ef88) likewise**: call, `mov edi,eax`,
+`test`, `js +49`, then `mov edx,2 ; mov cl,dl` and a call, then cleanup and
+return. Straight-line, one status test, no loop.
+
+**So neither of the two routines the stack named is the retry.** They are
+called, they run once, they return a status. The loop that drives 8
+`HvCallVtlCall`s a second is **above** them - `Phase1InitializationDiscard+0x95a`
+is the next frame up and is the remaining candidate.
+
+**Worth noting about that frame**: it lives in section `INIT`
+(rva 0xbe0000-0xc83000), which Windows *discards* once boot completes. A
+guest looping forever inside `INIT` code is a guest that never reached the
+point where that section is freed - consistent with everything else, and a
+reminder that this is early boot, before the kernel has finished
+initialising itself.
+
+**Method note, because it cost two reads to notice**: the stack is a
+*candidate list* - `sample_guest_stack` scans words and keeps those landing
+in an image - so a frame appearing in it means that address is on the stack,
+not that execution is inside it. `VslFinishStartSecureProcessor+0xc4` is a
+**return address** left by a completed call, not a program counter.
+Disassembling the routine is what distinguishes "the loop is here" from "this
+was called once and returned", and only the second is true of both of these.
+
 ## Two agents, and KVM's own tracepoints: the nested mechanics are clean
 
 **A KVM-comparison agent read our nested-VMX path against `.references/kvm/`
