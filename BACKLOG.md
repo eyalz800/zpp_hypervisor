@@ -785,6 +785,51 @@ is not there" and is really "the wrong question was asked". `x` is the
 virtual read. The same distinction is why a wide `xp` over a device BAR
 lied, further down this file.
 
+## THE FAULT, stated exactly: the IUM state word is unchanged across the VTL round trip
+
+Measured on both sides of the switch, stable across three samples a dozen
+seconds apart:
+
+    VtlCall   (VTL0 -> VTL1)   rbx 0x100000400
+    VtlReturn (VTL1 -> VTL0)   rbx 0x100000400      <- identical
+
+`HvlSwitchToVsmVtl1` carries the IUM context block's first qword **in
+`rbx`** - `movq (%rdx), %rbx` going in, `movq %rbx, (%rdx)` coming out - so
+that word *is* the state passed between trust levels. Its bytes:
+
+    00 04 00 00 01 00 00 00
+       ^^
+       [rbx+1] = 0x04, the byte `VslpEnterIumSecureMode` dispatches on
+
+and the loop's dispatch compares it against **1** and **6**. Four matches
+neither, so the state machine falls through, makes the VTL call, and comes
+back to re-read the same 4.
+
+**And this is not a value we are losing.** The `HvCallVtlReturn` capture is
+taken *inside VTL1* - `cr3 0x8800002`, securekernel's address space - at the
+instant `SkpReturnFromNormalMode` issues the hypercall. `rbx` already reads
+`0x100000400` there. **The secure kernel receives state 4 and returns state
+4.** Nothing between the two levels drops a modification, because no
+modification is made.
+
+**So the fault is now located precisely**: VTL1 is asked to advance an IUM
+initialisation state and declines, every time, identically. Everything
+downstream - the 8 Hz loop, the byte-identical registers, the protection-mask
+count frozen at ~39,26x, `Phase1Initialization` never returning, ring 3 never
+reached - follows from that one refusal.
+
+**What this rules out, and it is most of the investigation**: it is not the
+nested-VMX carriage (clean by two independent readings), not event injection,
+not the shadow EPT composition, not XMM/FPU marshalling, not APIC routing,
+not the reference clock, not exit cost. **All of those would have shown as a
+corrupted or lost state word, and the word is intact on both sides.**
+
+**What it points at**: whatever the secure kernel *checks* before advancing
+from state 4. That is a question about what VTL1 can see or do - a page it
+must be able to read, a capability it must be able to enumerate, a hypercall
+it must be able to make - and it is answerable, because the loop is
+deterministic and both ends are already instrumented.
+
 ## The loop, decoded: a state machine on a byte that never changes
 
 `VslpEnterIumSecureMode` disassembled from its entry (rva 0x38dd60) with
