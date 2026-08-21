@@ -785,6 +785,59 @@ is not there" and is really "the wrong question was asked". `x` is the
 virtual read. The same distinction is why a wide `xp` over a device BAR
 lied, further down this file.
 
+## The park is in securekernel.exe, at image+0xb043e. Named, not inferred
+
+The infinite loop the section below establishes is in the **VBS secure
+kernel**. Read from its own PE debug directory, so this is its name and not a
+deduction from an address:
+
+    PE image at physical 0x18ba000 (176 pages below the park)
+    PE32+ debug dir rva 0xf9000
+    GUID 624a32cc-5c6f-b9ab-012f6a639a4f7823
+    PDB  securekernel.pdb
+
+So the park sits at **securekernel + 0xb043e**, called from
+`ntoskrnl+0x6a6fd0` and `ntoskrnl+0xbbf200`.
+
+**This closes the control.** Plain Windows reaches ring 3 under this VMM;
+the nested guest never does. The difference is not nesting *cost* and never
+was - it is that VBS loads a secure kernel, and this VMM makes that secure
+kernel park itself. Everything above VTL1 then stops, which is why the
+ordinary kernel sits at IRQL 13 asking for a DPC forever: it is waiting on a
+trust level that is never coming back.
+
+**How it was named**, since the method is reusable and took three sessions to
+assemble:
+
+1. `record_profile_context` publishes the hot instruction pointer translated
+   through the *second* level's paging (`profile_code_physical`). Nothing
+   else in the tree can resolve that address.
+2. A downward scan of *physical* memory for `MZ` + `PE\0\0` finds the image
+   base - valid here because a boot-loaded image is physically contiguous,
+   and the scan reports when it is not rather than guessing.
+3. The CodeView record names it. **Use `AddressOfRawData`, the RVA, not
+   `PointerToRawData`** - the latter is a file offset and reads garbage from
+   a loaded image, which is exactly what it did on the first attempt.
+
+**What the code around the park says about the failure.** A run of `movups`
+copying sixteen bytes at a time, then `pause; jmp $`, and beneath it - dead -
+a normal MSVC epilogue that loads the stack cookie and returns `al = 0`. So
+this is a routine that copies a structure, decides it cannot proceed, and
+parks instead of returning false. **A secure kernel cannot blue-screen; it
+spins.** That is what an unrecoverable check failure looks like from VTL1.
+
+**So the question is now narrow and answerable**: which check. The candidates
+are what this VMM presents to VTL1 that a real hypervisor would present
+differently, and the census already shows the traffic -
+`HvCallModifyVtlProtectionMask` ran 39,262 times and then **stopped**, with
+its last non-`SELF` call carrying `partition=0x18b4000`, twenty-four
+kilobytes below the securekernel image base found above. That proximity may
+be coincidence and is recorded as an observation, not a claim.
+
+**And a warning against the obvious next move.** Do not reach for more
+optimisation, more levers, or more timer experiments. Every one of those in
+the sections below was measuring the cost of running this loop.
+
 ## SETTLED: the guest parks itself in `pause; jmp $` forever. It is a block, not a price
 
 **The question this file has carried for sessions - "a machine too slow to
