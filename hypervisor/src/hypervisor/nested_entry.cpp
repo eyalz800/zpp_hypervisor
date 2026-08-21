@@ -8797,6 +8797,40 @@ hypervisor::on_l2_exit(std::size_t cpu,
                                 this->vtl_block_changes[cpu] += 1;
                                 this->vtl_block_previous[cpu] = word;
                             }
+
+                            // And, for the memory-manager requests, what
+                            // they actually ask for. See
+                            // `vtl_code0_param_changes`.
+                            if (0 == ((word >> 8) & 0xff)) {
+                                auto & seen = this->vtl_code0_count[cpu];
+                                auto slot = seen % 8;
+
+                                this->vtl_code0_ring[cpu][slot][0] = word;
+                                this->vtl_code0_ring[cpu][slot][1] =
+                                    this->vtl_call_block[cpu][1];
+                                this->vtl_code0_ring[cpu][slot][2] =
+                                    this->vtl_call_block[cpu][2];
+
+                                auto differs =
+                                    (word !=
+                                     this->vtl_code0_previous[cpu][0]) ||
+                                    (this->vtl_call_block[cpu][1] !=
+                                     this->vtl_code0_previous[cpu][1]) ||
+                                    (this->vtl_call_block[cpu][2] !=
+                                     this->vtl_code0_previous[cpu][2]);
+
+                                if (differs && (0 != seen)) {
+                                    this->vtl_code0_param_changes[cpu] += 1;
+                                }
+
+                                this->vtl_code0_previous[cpu][0] = word;
+                                this->vtl_code0_previous[cpu][1] =
+                                    this->vtl_call_block[cpu][1];
+                                this->vtl_code0_previous[cpu][2] =
+                                    this->vtl_call_block[cpu][2];
+
+                                seen = seen + 1;
+                            }
                         }
                     }
                 }

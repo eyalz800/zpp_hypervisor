@@ -2257,7 +2257,8 @@ def main():
                "vina_set_count", "vina_clear_count", "vina_block_physical",
                "vina_at_call_set", "vina_at_call_clear",
                "vina_at_call_unread", "vtl1_duration", "vtl_call_request",
-               "vtl_block_changes",
+               "vtl_block_changes", "vtl_code0_param_changes", "vtl_code0_ring",
+               "vtl_code0_count",
                "vmcs_shadow_loads", "vmcs_shadow_stores",
                "vmcs_field_read_encoding", "vmcs_field_read_count",
                "vmcs_field_write_encoding", "vmcs_field_write_count",
@@ -2374,7 +2375,8 @@ def main():
                "vina_set_count", "vina_clear_count", "vina_block_physical",
                "vina_at_call_set", "vina_at_call_clear",
                "vina_at_call_unread", "vtl1_duration", "vtl_call_request",
-               "vtl_block_changes",
+               "vtl_block_changes", "vtl_code0_param_changes", "vtl_code0_ring",
+               "vtl_code0_count",
                "vmcs_shadow_loads",
                "vmcs_shadow_stores",
                "guest_state_writes_skipped", "guest_state_writes_done",
@@ -2454,6 +2456,9 @@ def main():
     monitor.queue(instance + off["vtl1_duration"], scalar_cpus * 2 * 24)
     monitor.queue(instance + off["vtl_call_request"], scalar_cpus * 256)
     monitor.queue(instance + off["vtl_block_changes"], scalar_cpus)
+    monitor.queue(instance + off["vtl_code0_param_changes"], scalar_cpus)
+    monitor.queue(instance + off["vtl_code0_count"], scalar_cpus)
+    monitor.queue(instance + off["vtl_code0_ring"], scalar_cpus * 8 * 3)
     for _n in ("vina_gs_base", "vina_block", "vina_flags", "vina_read",
                "vina_set_count", "vina_clear_count",
                "vina_block_physical", "vina_at_call_set",
@@ -3042,6 +3047,21 @@ def main():
                           f"{MEANING.get(i, '')}")
             print(f"  the block's first quadword changed "
                   f"{read('vtl_block_changes', 0):,} times")
+            c0 = read('vtl_code0_count', 0) or 0
+            ch = read('vtl_code0_param_changes', 0) or 0
+            if c0:
+                print(f"  code-0 requests: {c0:,}, parameters differed "
+                      f"from the previous one {ch:,} times "
+                      f"({100.0 * ch / c0:.1f}%)"
+                      + ("   <- one request repeated" if ch * 20 < c0 else
+                         "   <- distinct requests"))
+                print("  the last code-0 blocks seen:")
+                for sl in range(8):
+                    w = [read('vtl_code0_ring', (sl * 3) + k) or 0
+                         for k in range(3)]
+                    if any(w):
+                        print(f"    +0x00 0x{w[0]:016x}  "
+                              f"+0x08 0x{w[1]:016x}  +0x10 0x{w[2]:016x}")
         signed = status - (1 << 32) if status & 0x80000000 else status
         # The priority each trust-level call is made at. Class 13
         # masks both the clock vector 0xd1 and the deferred-call vector

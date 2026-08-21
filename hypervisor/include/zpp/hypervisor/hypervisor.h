@@ -10156,6 +10156,25 @@ private:
     /** How often the whole first quadword changed between calls. */
     std::uint64_t vtl_block_changes[max_cpus]{};
     std::uint64_t vtl_block_previous[max_cpus]{};
+
+    /**
+     * The parameters of the secure memory-manager requests, censused.
+     *
+     * Twenty-one thousand `code 0` calls all return success and nothing
+     * moves - no new pages, no protection changes, no ring 3. **Twenty-one
+     * thousand distinct operations that each succeed and achieve nothing is
+     * a different fault from one operation repeated twenty-one thousand
+     * times**, and the request byte alone cannot tell them apart.
+     *
+     * A ring of the recent ones, plus a count of how often the parameters
+     * differ from the previous `code 0` call. If that count is near zero
+     * the guest is repeating a single request; if it tracks the call count
+     * the guest is working through a list and the fault is downstream.
+     */
+    std::uint64_t vtl_code0_param_changes[max_cpus]{};
+    std::uint64_t vtl_code0_previous[max_cpus][3]{};
+    std::uint64_t vtl_code0_ring[max_cpus][8][3]{};
+    std::uint64_t vtl_code0_count[max_cpus]{};
     /** @} */
     /** @} */
     /** @} */

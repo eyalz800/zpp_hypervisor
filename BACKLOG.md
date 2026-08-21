@@ -36926,3 +36926,50 @@ carries parameters beyond the request byte, and whether those twenty-one
 thousand calls are twenty-one thousand *distinct* operations or the same one
 repeated is the question - and it is answerable the same way this entry was:
 census the parameter words rather than sampling them.
+
+## The code-0 stream is frozen too. Steady state is a pure VINA loop
+
+**Two dumps, 150 seconds apart:**
+
+    code-0 requests   20,990   ->   20,990      unchanged
+    the last code-0 blocks seen: byte-for-byte identical
+
+**The secure memory-manager requests have stopped.** All 20,990 of them
+happened during the VSM setup phase and none since. In steady state **every
+trust-level call carries code 4** - the VINA notification - and nothing
+else.
+
+So the previous entry's census was **cumulative**, and its headline - "code 0
+is 75% of calls, the protocol is alive" - describes the boot, not the hang.
+The single samples that kept reading `byte[1] = 4` were *correct about the
+steady state* all along. Both instruments were right and they answered
+different questions; what was wrong was reading a lifetime total as a
+description of the present.
+
+**That is the same cumulative-versus-instantaneous trap this file already
+records for the trust-level rate** (87/s cumulative against 9/s
+instantaneous), and it was caught the same way: a second dump. One dump
+cannot distinguish "this is happening" from "this happened". **Take two.**
+
+### What the frozen stream shows before it stops
+
+The parameters are a page walk, one page per call:
+
+    +0x00 0x0000000001010002  +0x08 0x11aac9  +0x10 1
+    +0x00 0x0000000001010002  +0x08 0x11aaca  +0x10 1
+    +0x00 0x0000000001010002  +0x08 0x11aacb  +0x10 1
+    +0x00 0x0000000001010002  +0x08 0x11aacc  +0x10 1
+    +0x00 0x0000000000fe0002  +0x08 0xffffd5025447ff90  +0x10 0x13ee7f
+
+Consecutive page frame numbers, count 1 each, with an occasional different
+subcode carrying a kernel virtual address. **The secure kernel was working
+through pages and got as far as PFN `0x11aacc`.**
+
+**And it stops at the same moment `HvCallModifyVtlProtectionMask` stops** -
+20,990 and 39,266, both frozen, both reproducible across boots to within a
+few calls. Two independent counters halting together is one event, not two.
+
+**So the question is now the sharpest it has been in this investigation:
+what happens at PFN `0x11aacc` that ends the page walk?** Not why the loop
+spins - it spins because VINA is all that is left to send - but what stopped
+the work that was genuinely progressing up to that point.
