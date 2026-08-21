@@ -36082,3 +36082,71 @@ never of how much it executes. Every other region in this system happens to
 exit constantly, which is why the inference passed unexamined for so long.
 The instrument that could have said so was built, documented and switched
 off in this very tree.
+
+## THE MECHANISM: VINA preempts VTL1 after it selects a thread, every entry
+
+**And it retracts this file's own refutation of VINA**, which was made
+against the wrong form of the hypothesis.
+
+Symbolising the 614 VTL1 instructions from the `ZPP_STEP_VTL` trace against
+`securekernel.pdb`, anchored on the first traced address being
+`SkpReturnFromNormalMode`:
+
+     91  SkiSelectThread                  <- picks a thread to run
+     77  SkpReturnFromNormalModeRaxSet
+     52  SkiLockThreadEntry
+     51  KiVinaInterrupt                  <- VINA
+     50  SkpSyncUserSharedData
+     49  SkiUpdateXStateForVtlTransition
+     45  SkiDeselectThread                <- and puts it straight back
+     37  SkCallNormalMode
+     33  __memset_spec_ermsb
+     32  SkpPrepareForNormalCall
+     27  SkpPrepareForReturnToNormalMode
+     23  ShvlVinaHandler                  <- VINA
+     14  SkpReturnFromNormalModeRcxSet
+      7  SkiDetachThread
+
+In order: resume, `SkiSelectThread`, `SkiLockThreadEntry`,
+`SkiUpdateXStateForVtlTransition`, then **`ShvlVinaHandler` ->
+`KiVinaInterrupt` -> `KiVinaInterruptShadow`**, then `SkiDeselectThread`,
+`SkCallNormalMode`, and out.
+
+**The secure kernel selects a thread to run, is interrupted by VINA before
+it runs it, deselects it, and returns.** Seventy-four of its 614
+instructions an entry are VINA handling, and `SkiSelectThread` /
+`SkiDeselectThread` bracket it - it is picking work up and putting it back
+down, fifteen times a second, for ever.
+
+### Why the earlier refutation was wrong
+
+This file records "VINA is refuted by direct measurement" on the strength of
+`vtl_entry_reason` reading `1` (HvVtlEntryVtlCall) and never `2`
+(HvVtlEntryInterrupt), fourteen samples of fourteen. **That measurement is
+correct and the conclusion drawn from it is not.** `vtl_entry_reason` says
+why VTL1 was *entered*. VINA does not cause the entry - VTL0's call does,
+which is why the field reads VtlCall. **VINA arrives afterwards, as an
+interrupt to a VTL1 that is already running**, and the entry reason has
+nothing to say about it.
+
+So the field was read correctly, answered the question asked of it, and the
+question was the wrong one. That is the fifth time in this investigation and
+the most expensive, because it closed the line that turns out to be right.
+
+### What this predicts, and it matches everything already measured
+
+VINA is asserted while VTL0 has an interrupt pending. VTL0 has one
+permanently: vector `0x2f`, requested **233,575** times and carried
+**3,730**. So:
+
+- VTL1 can never keep a thread selected -> no secure work completes
+- `HvCallModifyVtlProtectionMask` freezes, because the work that would issue
+  it never runs -> matches the deterministic stop at ~39,270
+- the page transfer never completes -> `Phase1Initialization` never returns
+- no new pages, no ring 3, for nineteen minutes
+- and both levels stay busy, which is why every "is it stuck or slow"
+  instrument read "busy"
+
+**The question this reduces to**: why is VTL0's pending interrupt never
+delivered and retired? Deliver it and VINA clears; clear VINA and VTL1 keeps
+its thread. That is now one question rather than a search.
