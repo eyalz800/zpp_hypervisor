@@ -37728,3 +37728,59 @@ scheduling decision inside secure-kernel memory: a thread state, a ready
 list, or a lock. Those live in `SkmiNonPagedPtes`-adjacent structures the
 guest owns, they are reachable by the same `gs`-relative walk that found the
 VINA flag, and **none of them has been read.**
+
+## `SkiSelectThread` is not readable statically, and the honest state of this investigation
+
+`SkiSelectThread` spans `0x8ece0`..`0x8efc0` and is a dense decision tree -
+a dozen conditional branches over structure fields, two calls into
+`SkiLockThreadEntry` and a locking helper, and comparisons against offsets
+like `0xa8(%rcx)` whose meaning needs the secure kernel's own type layouts.
+**Which branch answers differently on one occasion out of 18,585 is not
+reachable from the disassembly alone**, and guessing at it would be the
+eleventh instance of the mistake this file exists to record.
+
+### What this investigation established
+
+The fault is isolated to a single rare event inside a common pattern:
+
+- `SkmiProtectPageRange` walks pages, issuing
+  `HvCallModifyVtlProtectionMask` per batch
+- 47% of those answers are followed by the secure kernel **yielding** -
+  18,585 of them - and it resumes and carries on **18,584 times**
+- on the last one it does not resume; its thread stays parked four
+  instructions from the end of the loop with `r15 = 1`, and the frame is
+  byte-for-byte unchanged minutes later
+- everything measurable about that call is identical to the 18,584 that
+  worked: status, completed reps, resume instruction, destination trust
+  level, next hypercall code
+
+### What was eliminated, each by measurement
+
+The rig itself; exit cost and guest starvation (duty 0.797, ~20 s of guest
+processor); the APIC page watch; VINA as the entry condition (clear on
+28,445 of 28,446); securekernel refusing (status always zero); shared EPT
+between trust levels; deferred guest-state writes; VMCS shadowing; the MSR
+load/store areas; the whole VMX capability surface; L2 EPT faults; XMM
+save/restore; the hypercall output area; answer mis-delivery (39,275 of
+39,275 to the calling level); and self-IPI delivery, which wedges the guest
+harder.
+
+### What could not be built
+
+Two instruments, both on the same path: `ZPP_WATCH_VTL_BLOCK` froze the
+guest at 22,308 exits, and a monitor-trap step after a protection answer
+wedges it at 2 protection calls. **The window worth watching is the one
+where the guest hypervisor is mid-transition, and anything that traps there
+stops it.** Only passive counters work there, which is how the 18,584/18,585
+split was finally obtained.
+
+### The methodological record, which is the durable part
+
+Eleven instruments in this investigation measured the right quantity at the
+wrong moment, the wrong quantity, or a sample read as a census. Each was
+caught the same way and only that way: **by a second, independent
+instrument disagreeing.** The rules that came out of it are written beside
+the entries that earned them - census rather than sample; two dumps rather
+than one; measure the quantity rather than a rate that implies it; read the
+binary rather than grep one file; and write the refutation check into the
+same commit as the hypothesis.
