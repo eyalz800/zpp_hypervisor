@@ -785,6 +785,46 @@ is not there" and is really "the wrong question was asked". `x` is the
 virtual read. The same distinction is why a wide `xp` over a device BAR
 lied, further down this file.
 
+## Measured: a phase boundary is 21 cycles. The tree is not the cost, and the decomposition stands
+
+The suspicion in the section below is **retired by measurement**, which is
+what it asked for. A thousand `mark_phase` calls inside one RDTSC pair, on
+the boot processor before any guest runs:
+
+    phase boundary costs 0x15 cycles, over 0x3e8 calls
+
+**21 cycles.** `mark_phase`'s own comment - "a handful of cycles against the
+~390,000 an exit costs here" - was right, and had simply never been checked.
+Forty boundaries an exit is **840 cycles of 499,432, or 0.17%**. The profiler
+is a rounding error, not half of what it profiles.
+
+**So every per-exit figure in this file stands**: the 199,170 cycles an exit,
+the 85-100 us, the 17.9 us of VMCS traffic, the 7.0 us prologue, and the
+**75 us that remains unaccounted**. That last number was the reason the
+suspicion mattered, and it survives.
+
+**And it sharpens the `resume: entry census` result.** Gating that slot's
+diagnostic left it at 6,089 cycles a call, and the slot carries one boundary
+- 21 cycles. So the remaining 6,068 are **real work or real stalls inside the
+span**, not measurement. Something between `record_exit` and the entry is
+costing six thousand cycles and it is not the code that was just removed from
+it.
+
+**One caveat, stated because it bounds the claim**: 21 cycles was measured in
+a tight loop at start-up, with the code and `phase_cycles` hot in cache. The
+same boundary taken once per phase during a real exit, on a cache the guest
+and two hypervisors have been through, could cost more. **What is ruled out
+is the instruction cost; what is not ruled out is that touching
+`phase_cycles` forty times an exit pulls forty lines through a cold cache.**
+That is the same cache hypothesis the unaccounted 75 us already points at,
+and it now has a second way in - the difference between 21 cycles warm and
+whatever a boundary costs cold would measure it directly.
+
+**Method note**: the suspicion was worth raising and worth killing in one
+measurement. The cost of not checking would have been discarding a
+decomposition that turned out to be sound, and building the next session on
+the assumption that all of it was instrument artefact.
+
 ## Suspect the phase tree itself: emptying a slot did not make it cheaper
 
 **A negative result that matters more than the change that produced it.**

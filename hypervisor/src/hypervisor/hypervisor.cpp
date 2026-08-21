@@ -719,6 +719,38 @@ void hypervisor::initialize_mtrrs()
     // and because the type this VMM hands the guest is the only one it
     // gets. Reading it back off a failed boot is how a wrong default type
     // or a missed fixed range would be identified.
+    // What a phase boundary costs, measured rather than assumed.
+    //
+    // **`mark_phase`'s comment calls it "a handful of cycles against the
+    // ~390,000 an exit costs here", and that was never measured.** It
+    // matters because every per-exit figure in `BACKLOG.md` comes from
+    // the phase tree, and the tree takes forty-odd boundaries an exit -
+    // so if a boundary is thousands of cycles rather than tens, the
+    // profiler is a large fraction of what it profiles and the
+    // decomposition built on it describes an instrumented build.
+    //
+    // The suspicion is concrete: gating the diagnostic inside the
+    // `resume: entry census` span left that span at 6,089 cycles a call
+    // against 6,104, so its cost is not its contents.
+    //
+    // Measured here, once, on the boot processor before any guest runs:
+    // a thousand calls inside one RDTSC pair. Slot 0 absorbs the
+    // thousand marks and is the only distortion - against the 1.68
+    // million calls a real boot puts through it, that is noise.
+    {
+        constexpr std::uint64_t rounds = 1000;
+        auto before = arch::x86_64::rdtsc();
+        for (std::uint64_t i{}; i < rounds; ++i) {
+            mark_phase(0, 0);
+        }
+        auto after = arch::x86_64::rdtsc();
+
+        log("phase boundary costs {} cycles, over {} calls - compare the "
+            "phase tree's per-slot figures, which carry one of these each",
+            (after - before) / rounds,
+            rounds);
+    }
+
     log("mtrr cap {}, def type {}, enabled {}, fixed in use {}, "
         "default {}, variable {}",
         mtrrs.capabilities.value(),
