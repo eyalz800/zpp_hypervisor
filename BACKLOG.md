@@ -36793,3 +36793,45 @@ to trace VTL1 across *many* entries and histogram the branch actually taken,
 rather than reading one or two traces and generalising. `ZPP_STEP_VTL` arms
 one transition; aggregating it over hundreds is the change that would answer
 this, and it is the thing to build next.
+
+## Aggregation works: two distinct VTL1 paths, and VINA is only the shorter-tailed 23%
+
+Built after three retractions caused by reading one or two instruction
+traces and generalising. This histograms **every** trust-level entry - the
+duration of the VTL1 half, split by the VINA flag at its return - and costs
+one `rdtsc` and one shift. Non-perturbing on purpose: `ZPP_STEP_VTL` answers
+a richer question and is documented as moving the guest between regimes, so
+it cannot be left on to gather a distribution.
+
+    bucket        us      VINA clear     VINA set
+    2^19       263.2              37            0
+    2^20       526.4          14,716            0
+    2^21     1,052.8           6,201        5,642
+    2^22     2,105.6              28           77
+    2^23     4,211.1               5          378
+    total                     20,987        6,097
+
+**Two populations, cleanly separated.** The VINA-set path is **never**
+shorter than 1.05 ms - zero samples in the two fastest buckets, out of six
+thousand. The VINA-clear path is mostly 526 us to 1 ms and has almost no
+tail. They are different code paths, and the separation is sharp enough that
+no single trace could have established it.
+
+Subtracting this VMM's own cost for the two hypercalls that bracket the half
+- about 120 us an exit, so ~240 us - the secure kernel itself runs for
+roughly **280 us on the common path and ~760 us on the VINA path**, so the
+VINA path does about 2.7x the work. That is consistent with it being the one
+that builds the 0x68-byte message, memsets it and writes `byte[1] = 4`.
+
+**So VINA is real, is the longer path, and accounts for 23% of yields.** The
+other **77% - 20,987 entries - is a shorter path that also selects a thread
+and abandons it**, and that path remains unidentified. It is now a
+well-posed target rather than a guess: it is the branch taken when the
+VINA flag is clear, it runs about 280 us, and it is four times more common
+than the one two instruction traces happened to catch.
+
+**The method is the transferable part.** Every previous attempt to
+characterise VTL1 read one trace and generalised, and three of them were
+withdrawn. A cheap counter aggregated over every occurrence settled in one
+boot what those could not, and it did so without perturbing the guest. Reach
+for the aggregate first.

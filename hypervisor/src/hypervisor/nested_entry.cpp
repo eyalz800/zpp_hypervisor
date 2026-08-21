@@ -8606,10 +8606,30 @@ hypervisor::on_l2_exit(std::size_t cpu,
                             this->vina_read[cpu] = 1;
 
                             // Bit 0 of the byte at offset 4.
-                            if (0 != ((flags >> 32) & 1)) {
+                            auto vina = ((flags >> 32) & 1);
+
+                            if (0 != vina) {
                                 this->vina_set_count[cpu] += 1;
                             } else {
                                 this->vina_clear_count[cpu] += 1;
+                            }
+
+                            // And how long VTL1 ran, bucketed against
+                            // that. See `vtl1_duration`.
+                            if (0 != this->vtl_call_last_tsc[cpu]) {
+                                auto ran = arch::x86_64::rdtsc() -
+                                           this->vtl_call_last_tsc[cpu];
+
+                                std::size_t bucket{};
+                                while ((ran >> bucket) > 1) {
+                                    bucket = bucket + 1;
+                                }
+
+                                if (bucket >= 24) {
+                                    bucket = 23;
+                                }
+
+                                this->vtl1_duration[cpu][vina][bucket] += 1;
                             }
                         }
                     }

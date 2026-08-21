@@ -10116,6 +10116,24 @@ private:
     std::uint64_t vina_at_call_set[max_cpus]{};
     std::uint64_t vina_at_call_clear[max_cpus]{};
     std::uint64_t vina_at_call_unread[max_cpus]{};
+
+    /**
+     * How long VTL1 runs, as a power-of-two histogram, **split by whether
+     * the VINA flag was set when it returned**.
+     *
+     * The question this answers: the secure kernel selects a thread and
+     * abandons it, and the VINA flag is set on only a minority of those.
+     * So either the two cases do different work - which shows up as
+     * different durations - or they do the same thing and VINA is
+     * incidental. Reading one or two instruction traces and generalising
+     * has produced three retractions here; this aggregates every entry
+     * and costs one `rdtsc` and one shift.
+     *
+     * Non-perturbing on purpose. `ZPP_STEP_VTL` answers a richer question
+     * and is documented as moving the guest between regimes, so it cannot
+     * be left on to gather a distribution.
+     */
+    std::uint64_t vtl1_duration[max_cpus][2][24]{};
     /** @} */
     /** @} */
     /** @} */

@@ -2256,7 +2256,7 @@ def main():
                "vina_gs_base", "vina_block", "vina_flags", "vina_read",
                "vina_set_count", "vina_clear_count", "vina_block_physical",
                "vina_at_call_set", "vina_at_call_clear",
-               "vina_at_call_unread",
+               "vina_at_call_unread", "vtl1_duration",
                "vmcs_shadow_loads", "vmcs_shadow_stores",
                "vmcs_field_read_encoding", "vmcs_field_read_count",
                "vmcs_field_write_encoding", "vmcs_field_write_count",
@@ -2372,7 +2372,7 @@ def main():
                "vina_gs_base", "vina_block", "vina_flags", "vina_read",
                "vina_set_count", "vina_clear_count", "vina_block_physical",
                "vina_at_call_set", "vina_at_call_clear",
-               "vina_at_call_unread",
+               "vina_at_call_unread", "vtl1_duration",
                "vmcs_shadow_loads",
                "vmcs_shadow_stores",
                "guest_state_writes_skipped", "guest_state_writes_done",
@@ -2449,6 +2449,7 @@ def main():
     monitor.queue(instance + off["vtl_call_vtpr"], scalar_cpus * 16)
     monitor.queue(instance + off["vtl_call_gap_buckets"], scalar_cpus * 40)
     monitor.queue(instance + off["vtl1_entry_vector"], scalar_cpus * 257)
+    monitor.queue(instance + off["vtl1_duration"], scalar_cpus * 2 * 24)
     for _n in ("vina_gs_base", "vina_block", "vina_flags", "vina_read",
                "vina_set_count", "vina_clear_count",
                "vina_block_physical", "vina_at_call_set",
@@ -3103,6 +3104,18 @@ def main():
         else:
             print("  VINA flag chain: NOT READ  <- walk failed, the "
                   "values above are meaningless")
+        # How long VTL1 ran, split by the VINA flag. Aggregated over
+        # every entry rather than read off one or two traces.
+        dur = [[read('vtl1_duration', (v * 24) + i) or 0
+                for i in range(24)] for v in range(2)]
+        if sum(dur[0]) or sum(dur[1]):
+            print("  how long VTL1 ran (us), by VINA flag at its return:")
+            print("      bucket        us     VINA clear     VINA set")
+            for i in range(24):
+                if not (dur[0][i] or dur[1][i]):
+                    continue
+                print(f"      2^{i:<2d} {(1 << i) / 1.992e3:9,.1f}  "
+                      f"{dur[0][i]:12,d} {dur[1][i]:12,d}")
         print(f"  STATUS        = 0x{status:08x}"
               + ("  <- an NTSTATUS error" if signed < 0 else
                  "  (success or not an error)"))
