@@ -5120,6 +5120,27 @@ private:
     std::uint64_t profile_pointer_virtual{};
 
     /**
+     * Where the instruction the second-level guest is executing lives,
+     * as an address the reader can reach with `xp`.
+     *
+     * **The spin's address is in no image.** When the guest stops making
+     * progress, 96.8% of profile samples land on one instruction pointer
+     * roughly 0x6a000000 below the kernel base - the guest's own
+     * hypercall page, which is an allocation rather than part of a loaded
+     * module, so scanning down for a PE header finds nothing. And it
+     * cannot be read from the monitor either: walking page tables by hand
+     * from there only has the *first*-level guest's CR3, and this address
+     * lives in the second level's address space.
+     *
+     * So the translation is done here, where the second level's paging is
+     * reachable, and only the result is published. The reader does the
+     * reading. That keeps the decode out of the hypervisor and leaves the
+     * cost at one page-table walk on a path that already does one.
+     */
+    std::uint64_t profile_code_physical{};
+    std::uint64_t profile_code_virtual{};
+
+    /**
      * Which instruction the pointer above was taken at.
      *
      * Without it the translation is uninterpretable: it is `rcx` at

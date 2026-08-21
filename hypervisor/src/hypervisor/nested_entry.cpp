@@ -4956,6 +4956,31 @@ void hypervisor::record_profile_context(
         .r8 = context.r8,
     };
 
+    // And where the *code* the guest is executing lives, in a form the
+    // reader can reach.
+    //
+    // This exists because the one address that matters is the one nothing
+    // could read. When the second-level guest spins, 96.8% of samples land
+    // on a single instruction pointer that is in **no image**: it sits
+    // about 0x6a000000 below the kernel base, and walking the guest's page
+    // tables from the monitor cannot reach it because the monitor only has
+    // the first-level guest's CR3. Two sessions have now identified the
+    // spin, failed to name it, and reasoned about it from its address
+    // alone.
+    //
+    // Nothing is read here. The linear address is translated to a physical
+    // one the *reader* can already reach with `xp`, which keeps the
+    // expensive part - a page-table walk per sample - and adds nothing to
+    // the exit path, and keeps the byte-level decode where a decoder
+    // exists rather than writing one here.
+    if (auto physical = translate_guest_linear(cpu, rip)) {
+        if (auto reachable =
+                l2_physical_to_l1(this->vmcs.vpid() - 1, *physical)) {
+            this->profile_code_virtual = rip;
+            this->profile_code_physical = *reachable;
+        }
+    }
+
     // And what the polled pointer maps to.
     //
     // **Every sample, not every thirty-second.** Rate-limiting this was

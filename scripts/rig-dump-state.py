@@ -2265,7 +2265,10 @@ def main():
                # own period, and nothing else in this reader shows it.
                "stimer_given_cycles", "stimer_given_arms",
                "stimer_arm_count", "stimer_arm_value", "stimer_arm_tsc",
-               "stimer_arm_kind"]
+               "stimer_arm_kind",
+               # Where the second-level guest's hot instruction lives, so
+               # the bytes can be read. See `profile_code_physical`.
+               "profile_code_physical", "profile_code_virtual"]
     off = gdb_offsets(args.elf, members)
     instance = base + gdb_symbol(
         args.elf, "zpp::hypervisor::hypervisor::instance()::instance")
@@ -2394,6 +2397,11 @@ def main():
     for name in ("stimer_arm_value", "stimer_arm_tsc", "stimer_arm_kind"):
         if name in off:
             monitor.queue(instance + off[name], args.cpus * stimer_ring)
+    # Two scalars, not per-processor arrays - the profiler is boot
+    # processor only, which is why these are queued with a count of one.
+    for name in ("profile_code_physical", "profile_code_virtual"):
+        if name in off:
+            monitor.queue(instance + off[name], 1)
 
     words = monitor.run()
 
@@ -2426,6 +2434,24 @@ def main():
     # the level above expired it early", and those need different fixes.
     # The `kind` column is what separates them - 1 is the guest writing a
     # count, 3 is the clock vector actually going in.
+    # The instruction the second level is sitting on, read as bytes.
+    #
+    # `xp` is a physical read and the hypervisor has already resolved this
+    # address through the *second* level's page tables, which is the part
+    # nothing outside could do. Sixteen bytes is enough to tell a `vmcall`
+    # from a `pause` loop from a `hlt`, which is the whole question.
+    code_phys = read("profile_code_physical") or 0
+    code_virt = read("profile_code_virtual") or 0
+    if code_phys:
+        raw = monitor.read_bytes(code_phys, 16) if hasattr(
+            monitor, "read_bytes") else None
+        print(f"\ncpu 0 second-level hot instruction: "
+              f"virtual 0x{code_virt:x} -> physical 0x{code_phys:x}")
+        if raw:
+            print(f"    bytes {raw.hex()}")
+        else:
+            print(f"    read it with:  xp /16xb 0x{code_phys:x}")
+
     if "stimer_given_arms" in off:
         print("\ncpu  stimer arm->fire, measured against the guest's own "
               "1.74 ms constant")
@@ -2622,6 +2648,29 @@ def main():
                       "activity state and CS selector are NOT filled, and "
                       "the cpl columns below are empty by construction - "
                       "build with -DZPP_CENSUS_EXITS=ON to ask")
+        # A read that failed and a base that is wrong produce different
+        # bytes, and saying so is the whole value of this check.
+        #
+        # **It cried wolf, and that is why this distinction exists.** The
+        # payload came back all `0xff`, the guard blamed the base, and the
+        # base was provably right: the module base matched the two
+        # `allocate_rwx` lines on serial, `reader proven` passed, and
+        # reading `base + 0x2020` by hand from the monitor returned
+        # `zpp switches: nested=1 ...` exactly as it should. All-`0xff` is
+        # what the monitor returns when a read does not land - most often
+        # because something else already holds the one connection it
+        # allows - and it is not evidence about the base at all.
+        #
+        # A guard that fires falsely is worse than no guard, because the
+        # next time it fires truthfully nobody will believe it. That is
+        # exactly the failure this file's own notes warn about with stale
+        # caches and proxy metrics.
+        elif not raw.strip(b"\xff") or not raw.strip(b"\x00"):
+            print(f"manifest unread at 0x{manifest_va:x}: all "
+                  f"0x{raw[0]:02x} bytes. **This is a failed read, not a "
+                  f"wrong base** - check nothing else is holding the "
+                  f"monitor connection. Compare `reader proven` above: if "
+                  f"that passed, the base is fine.")
         else:
             print(f"BASE SUSPECT: {raw!r} at 0x{manifest_va:x} is not the "
                   f"manifest - the module base is probably wrong, and "
