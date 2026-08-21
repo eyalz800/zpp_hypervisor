@@ -38302,3 +38302,35 @@ That was the last structural regularity in the ring. Everything visible in
 the steady state - the three-exit cycle, its ordering, its rate, and the
 work that precedes it - is now either measured correct or eliminated as a
 cause.
+
+## Correction: with the TPR shadow OFF the boot spinner does not animate
+
+The entry above concludes the TPR shadow is eliminated because the freeze
+point does not move - 39,277 protection calls against 39,264-39,279. **That
+compared counters and nothing else, and it is wrong.**
+
+Observed on the physical screen, which is the one channel this VMM cannot
+read: with `ZPP_NESTED_TPR_SHADOW=OFF` **the boot spinner does not spin.**
+With it on, the spinner animates for ever. So the guest reaches a different
+state with the shadow off, and reaches it without the protection counters
+saying anything different.
+
+**Two counters agreeing is not two guests behaving the same.** The
+protection count and the code-0 count both measure work the *secure kernel*
+does during setup, and that work completed identically in both runs - it
+says nothing about what the normal kernel does afterwards. An animating
+spinner means the boot graphics path is still being serviced on a timer; a
+static one means it is not. That is a real difference, in the opposite
+direction from "no effect", and it was invisible to every instrument here.
+
+So: **`ZPP_NESTED_TPR_SHADOW=OFF` makes the guest worse**, not neutral, and
+the elimination is withdrawn. It stays ON, now on three grounds - cost, the
+1.59 million `cr-access` exits it avoids, and this.
+
+**The general point is the one worth keeping.** This investigation has
+twelve recorded instances of an instrument measuring the wrong thing, and
+this is the first where the *missing* instrument was a human looking at a
+screen. The rig's display is a passed-through GPU, so `screendump` returns
+"There is no console to take a screendump from" and nothing in this tree can
+see it. **When a run is compared, ask what the screen is doing** - it is the
+only progress indicator that does not depend on choosing the right counter.
