@@ -36313,3 +36313,41 @@ instruction. Native is under one. The APIC-watch experiment says per-exit
 cost is not what sets the trust-level rate, and this says the clock ISR
 consumes everything the guest has. Both are measured, and reconciling them
 is the next piece of work.
+
+## Fewer exits make it slower. Exit count is not the limiter, measured properly this time
+
+The APIC-watch experiment was originally run as **one window against one
+window**, and this file drew a conclusion from it. Redone with two
+steady-state windows per configuration, which is what makes each one
+self-checking:
+
+    configuration              VTL/s        exits/s     exits per round trip
+    apic=1    watch armed      9.00, 9.09   7,950       881, 879
+    apicoff=1 watch disarmed   5.92, 6.30   6,843       1155, 1088
+
+**Removing fourteen per cent of the exits made the guest thirty-two per cent
+slower**, and each configuration agrees with itself across independent
+windows, so this is not run-to-run noise. The effect is in the opposite
+direction from the intuition it was testing.
+
+**So exit count does not set the rate of progress.** That conclusion was
+already in this file, reached from a single pair of runs which - on the
+evidence here - could not have supported it. It is now supported.
+
+Two things follow that are worth more than the number:
+
+- **`ZPP_DISARM_APIC_WATCH` is a pessimisation, not an optimisation.** It
+  was left off on correctness grounds; it should stay off on performance
+  grounds too, and the earlier entry recording "-37% exits for no gain"
+  understates it - it is a loss.
+- **Whatever paces this guest is not the thing every measurement here has
+  been counting.** Exits per round trip *rose* from ~880 to ~1,120 when the
+  watch was removed, so the guest did more work per iteration and completed
+  fewer of them. That is the signature of a *latency* being paid somewhere,
+  not a throughput being consumed - and latency is the one class of
+  quantity this investigation has never measured directly.
+
+**The next measurement is therefore the distribution of wall-clock gaps
+between consecutive `HvCallVtlCall`s**, not another rate. A rate divides
+away exactly the structure that matters: whether the loop is paced by many
+small delays or a few large ones, and 9 Hz is equally consistent with both.
