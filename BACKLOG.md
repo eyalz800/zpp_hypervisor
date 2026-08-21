@@ -38076,3 +38076,27 @@ census rather than sample; two dumps rather than one; measure the quantity
 rather than a rate implying it; ask the binary, not one file; write the
 refutation check into the same commit as the hypothesis; and **read what the
 reader already prints before building a new probe.**
+
+## Not a memory-map boundary either
+
+The four deterministic frames were checked against the guest's actual RAM
+layout, on the theory that a walk running off the end of a region would fail
+at the same physical address every boot regardless of KASLR.
+
+    host MemTotal        15,830 MB
+    guest gets            11,830 MB   (`boot-zpp.sh`: MemTotal - 4000)
+
+With QEMU's split - roughly 3 GB below the 4 GiB PCI hole and the remainder
+above it - high RAM runs from `0x100000000` to about `0x322300000`.
+**`0x11aacc000` is 0.42 GiB into that region and nowhere near either end**,
+and the walk's own span tops out at `0x13fe20` which is also well inside.
+So the frames are ordinary guest RAM, not the edge of anything.
+
+That closes the last construction available from this side: the four frames
+are not distinguished by permissions, not by their contents, not by the
+memory map, and not by anything this VMM does to them - our tables map all
+four `rwx` and the composition is exact.
+
+**The determinism remains, and remains unexplained.** Six boots, same four
+frames, while every virtual address moves. Something selects those pages,
+and it is not anything visible from here.
