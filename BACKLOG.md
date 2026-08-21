@@ -37474,3 +37474,58 @@ answer is delivered on a plain resume into VTL1, and what the secure kernel
 executes on **that** entry has never been traced. It is the one remaining
 gap on this path, and the pin already exists - it needs arming on the
 answer-carrying entry instead.
+
+## FOUND: VINA preempts the hypercall return, and the thread is DETACHED
+
+The last unexamined step on this path: the entry that **carries the
+hypercall answer**, as opposed to the trust-level call that follows it. The
+pin was moved to arm there - `build_vmcs02` sets the monitor trap flag from
+`vtl_step_active`, and the answer capture runs during the guest
+hypervisor's `vmresume`, before vmcs02 is built - and caught switch 25,562
+with the protection count at 39,276 against a freeze at ~39,272.
+
+**The trace is qualitatively unlike every earlier one.** All of those
+*started* at `SkpReturnFromNormalMode`, a fresh trust-level entry. This one
+starts mid-handler:
+
+    KiVinaInterruptShadow -> KiVinaInterrupt -> ShvlVinaHandler
+      -> __memset_spec_ermsb -> ShvlVinaHandler -> SkCallNormalMode
+      -> SkpPrepareForNormalCall -> SkiDeselectThread
+      -> SkiUpdateXStateForVtlTransition -> SkiDeselectThread
+      -> SkpPrepareForNormalCall -> SkiDetachThread
+      -> SkpPrepareForNormalCall -> SkpPrepareForReturnToNormalMode
+
+**The secure kernel resumes from its hypercall directly into the VINA
+interrupt handler.** It never returns to `SkmiProtectPageRange`. The four
+instructions after the call - `movl 0x40(%rsp),%ecx; addq; addl; subl; jne`
+- are never executed, which is why `r15` stays at `1` for ever and why the
+frame is byte-for-byte unchanged when read minutes later.
+
+**And `SkiDetachThread` runs.** The thread is not merely deselected and left
+runnable - it is *detached*, which is why no later `SkiSelectThread` ever
+picks it up again.
+
+### Why the earlier VINA measurement did not see this
+
+`vina_at_call_set` reported the flag clear on 28,445 of 28,446 entries, and
+that measurement is correct - **it samples `HvCallVtlCall` entries.** The
+answer to a VTL1-issued hypercall does not arrive on a `VtlCall`; it arrives
+on a **plain resume**, which that counter never looks at. Two different
+events, and every VINA instrument in this file has been aimed at the wrong
+one - the tenth time an instrument here has measured the right quantity at
+the wrong moment.
+
+The three earlier instruction traces took the VINA branch because VINA
+genuinely does fire often; what they could not show is that it fires *on the
+hypercall return*, because they were armed on trust-level calls.
+
+### What this makes the fault
+
+VINA is asserted while the normal level has an interrupt pending, and the
+normal level's clock path consumes all of its time, so one is essentially
+always pending. On the last page of the walk that notification lands on the
+hypercall's return path, the secure kernel handles it, detaches the thread
+holding the walk, and yields - and nothing ever re-attaches it.
+
+**This is where a fix would go**, and it is the first time in this
+investigation that sentence can be written about a specific instruction.

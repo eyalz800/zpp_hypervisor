@@ -2139,6 +2139,29 @@ bool hypervisor::on_guest_vmlaunch(std::size_t cpu,
                 } else {
                     this->vtl_protect_answer_to_other[cpu] += 1;
                 }
+
+                // And trace what the secure kernel executes on **this**
+                // entry - the one carrying the answer. The pinned trace
+                // was armed on the following `HvCallVtlCall`, which is a
+                // different event; this is a plain resume into VTL1 and
+                // what runs on it has never been seen.
+                //
+                // `build_vmcs02` arms the monitor trap flag from
+                // `vtl_step_active`, and it runs after this, so setting
+                // the flag here traces this entry.
+                if constexpr (nested_vmx::step_vtl) {
+                    if ((this->vtl_protect_count[cpu] >= 39250) &&
+                        (0 == this->vtl_step_pin_taken[cpu]) &&
+                        (0 == this->vtl_step_active[cpu])) {
+                        this->vtl_step_pin_taken[cpu] = 1;
+
+                        this->vtl_step_count[0] = 0;
+                        this->vtl_step_other[0] = 0;
+                        this->vtl_step_other_reason[0] = 0;
+                        this->vtl_step_at[0] = this->vtl_switches[cpu][0];
+                        this->vtl_step_active[cpu] = 1;
+                    }
+                }
             }
 
             // And the census. See `vtl_protect_status_seen`: the ring

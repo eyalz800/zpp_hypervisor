@@ -8790,10 +8790,10 @@ hypervisor::on_l2_exit(std::size_t cpu,
                 // - 39,264 / 39,266 / 39,272 / 39,274 - so the count is
                 // the selective condition and `r15` merely confirms it is
                 // a walk's last page.
-                if ((this->vtl_protect_count[cpu] >= 39250) &&
-                    (1 == context.r15)) {
-                    this->vtl_step_pin_request[cpu] = 1;
-                }
+                // The pin is now taken at the entry that carries the
+                // answer - see nested_vmx.cpp - rather than at the
+                // trust-level call that follows it, so this request is
+                // no longer raised here.
                 this->vtl_protect_last_rip[cpu] = this->vmcs.guest_rip();
                 this->vtl_protect_last_cr3[cpu] =
                     this->vmcs.read(
