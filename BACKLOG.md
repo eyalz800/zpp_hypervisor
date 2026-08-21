@@ -35402,3 +35402,86 @@ its synthetic interrupt controller sees the self-IPI. Windows drives this
 entirely through synthetic MSRs - `ICR` 233,893 writes, `EOI` 237,920,
 `EOM` 24,228 - so the pending bit lives in Hyper-V's SynIC state, not in a
 local APIC this VMM can read.
+
+## Correction: `l2_low_priority_no_event` is not a missed delivery, and the guest is not drowning in its own clock
+
+**Two corrections, one of them to the entry immediately above this and one
+to a story this tree has carried since the tick was first measured.**
+
+### The counter does not mean what it prints
+
+`l2_low_priority_no_event`'s printed warning says "non-zero growth is a live
+fault, not residue", and the previous entry took that at face value and
+called the DPC "deliverable and undelivered". The condition is:
+
+```cpp
+if (0 != (given & valid)) { ...; return; }      // an event was staged
+if (this->l2_entry_priority[cpu] < dispatch_class) {   // TPR < 0x20
+    this->l2_low_priority_no_event[cpu] += 1;
+```
+
+**It never tests whether anything is outstanding.** It counts every entry
+made at a low task priority with nothing injected - which is the correct and
+expected state whenever there is nothing to deliver. A guest at IRQL 0 with
+an empty queue increments it forever. `l2_eligible_no_event` and
+`l2_masked_no_event` refine it by RFLAGS.IF and by STI/MOV-SS shadowing, and
+neither tests pendency either.
+
+So 18,549, and its 16.3/s growth, is **not** evidence of a lost interrupt.
+Withdrawn. This is the single-field-instrument mistake this file already
+documents three times: *a counter cannot tell you it is aimed at the wrong
+question.* The instrument that would settle it has to read what Hyper-V's
+synthetic interrupt controller holds as pending, and nothing here does.
+
+### The guest meets its clock period, and reaches PASSIVE_LEVEL constantly
+
+From the same table, and this is the important half:
+
+    time-stamp counter between clock interrupts (241,551 gaps, 1.992 GHz)
+      2^21 ( 1.05 - 2.11 ms)   232,690   96.3%
+      2^22 ( 2.11 - 4.21 ms)     4,139    1.7%
+
+    virtual task priority at second-level entry (1,085,015 entries)
+      0xd0   495,396  45.7%      0x00   27,169   2.5%
+      0x20   288,299  26.6%      0x40   25,858   2.4%
+      0xf0   245,511  22.6%      0x10    2,777   0.3%
+
+**96.3% of clock intervals land in the 1.05-2.11 ms bucket** - the guest's
+own 1.74 ms `KeQuantumEndTimerIncrement` period, met. And the guest enters
+at task priority `0x00` twenty-seven thousand times and `0x10` another two
+thousand: it reaches PASSIVE_LEVEL constantly.
+
+**So "a tick costs this VMM 2.46 ms, the clock handler cannot finish inside
+its own period, and the guest never leaves it" is wrong.** It leaves it, on
+time, hundreds of times a second. The four failed interventions recorded
+against that story - `ZPP_STRETCH_GUEST_TIMER`, `ZPP_DELIVER_SELF_IPI`,
+`ZPP_TICK_FLOOR`, `ZPP_TIME_DILATION` - failed because they were aimed at a
+saturation that is not happening, which is a better explanation for all four
+than the four separate ones recorded at the time.
+
+**The guest is not overloaded. It is waiting.** That is a different problem
+and it is the right one: it is consistent with zero new pages touched, with
+one thread, with a boot spinner that animates for ever, and with removing a
+third of all exits changing nothing.
+
+### What it appears to be waiting on, stated as a hypothesis and not a finding
+
+The `HvCallVtlReturn` call site's own stack carries two securekernel
+addresses and one of them is the mechanism:
+
+    +0x000  SkpReturnFromNormalMode
+    +0x1d0  KiVinaInterrupt+0x2b2
+
+VINA is Hyper-V's Virtual Interrupt Notification Assist: it tells VTL1 that
+VTL0 has an interrupt pending so VTL1 hands control back. If VTL0 has an
+interrupt permanently outstanding - and Windows requests vector `0x2f`
+233,575 times against 3,730 deliveries - then VINA fires on every VTL1
+entry, securekernel is preempted before it does its work, and it returns
+"no request" every time. That is exactly the 16 Hz loop measured, and it
+closes: no VTL1 progress means no phase-1 progress means the DPC is
+requested again.
+
+**Not established.** One stack frame is not a mechanism, and this file's own
+rule says not to quote a frame that has not survived repeated sampling. What
+would settle it is whether the VINA vector is asserted on entry to VTL1, and
+that lives in Hyper-V's SynIC state rather than anywhere this VMM reads.
