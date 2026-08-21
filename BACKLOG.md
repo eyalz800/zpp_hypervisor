@@ -36613,3 +36613,59 @@ by a cost, which is why neither account alone ever fit.
 `ShvlVinaHandler` reads and watch it, or make the normal level's clock stop
 being permanently pending and see whether the secure kernel then keeps its
 thread.
+
+## FOUND: state 4 is the VINA message, and the flag that produces it is one bit
+
+Disassembled from `securekernel.exe`, which has been on disk the whole time.
+`ShvlVinaHandler` at `+0x942cc`:
+
+    movq  %gs:0x0, %rax
+    movq  0x10(%rax), %rcx
+    testb $0x1, 0x4(%rcx)        <- the VINA-pending flag, one bit
+    je    return                  <- clear: nothing to do, fall straight out
+    movq  0x5bf41(%rip), %rax     <- a global; must be zero to proceed
+    testq %rax, %rax
+    jne   return
+    leaq  0x20(%rsp), %rcx        <- a 0x68-byte block on the stack
+    callq memmove                 <- zeroed
+    movb  $0x4, 0x21(%rsp)        <- byte[1] = 4   ***
+    callq SkCallNormalMode        <- yield to VTL0 carrying it
+
+**`movb $0x4, 0x21(%rsp)` is the origin of the `byte[1] = 4` this
+investigation has been reading out of guest memory since the beginning.**
+
+So **state 4 is the VINA message**: *"the normal level has an interrupt
+pending - take it."* It is not "no request", which is what this file called
+it for most of this investigation, and it is not "nothing to do".
+
+### That makes the livelock exact
+
+1. VTL1 tests one bit. It is set.
+2. VTL1 builds the block, writes `4`, and yields through `SkCallNormalMode`.
+3. VTL0's dispatcher reaches `4`, which falls to the **default arm** -
+   `movb $0, (%rbx)`, clear the request word, re-enter VTL1. **It does not
+   take an interrupt.**
+4. VTL1 tests the same bit, still set, and says `4` again.
+
+**Neither side is wrong on its own terms.** The secure kernel correctly
+reports a pending interrupt; the normal kernel correctly treats `4` as
+requiring no service. What is missing is the step between them - VTL0
+actually *taking* the interrupt - and until it does, the bit stays set and
+the pair spins.
+
+That is why every mechanism measured correct, why the secure kernel returns
+`STATUS_SUCCESS`, why nothing faults, why the log is clean, and why no
+amount of waiting helps. **It is a livelock between two correct peers, and
+the whole of it is one bit that never clears.**
+
+### The next measurement is now exact rather than exploratory
+
+The flag is at `[[gs:0x0] + 0x10] + 4`, bit 0, in VTL1's address space -
+`gs` in VTL1 is securekernel's own processor block, and both the pointer
+chain and the bit position are known. Reading it settles what "pending"
+means here, and watching what clears it settles the fix.
+
+**And the question that decides everything**: which interrupt does the
+hypervisor consider pending for VTL0, and why does VTL0 never take it? At
+class 2 - 67.6% of trust-level calls - vector `0x2f` is masked and cannot
+be taken, which would hold the bit set indefinitely.
