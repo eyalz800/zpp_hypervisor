@@ -785,6 +785,66 @@ is not there" and is really "the wrong question was asked". `x` is the
 virtual read. The same distinction is why a wide `xp` over a device BAR
 lied, further down this file.
 
+## Two agents, and KVM's own tracepoints: the nested mechanics are clean
+
+**A KVM-comparison agent read our nested-VMX path against `.references/kvm/`
+and found no defect explaining the symptom.** Its verdict is worth recording
+in full because it closes several theories:
+
+- **Stale entry-interruption re-delivery is structurally impossible here.**
+  `build_vmcs02` has exactly one caller, `on_guest_vmlaunch`, so an L2 exit
+  L0 handles itself re-enters vmcs02 *without* rebuilding. KVM buys that with
+  the `nested_run_pending` flag (`nested.c:2491-2504`); we get it from the
+  call graph. The valid-bit clear at `nested_entry.cpp:4412-4417` matches
+  `prepare_vmcs12` (`nested.c:4617`) including the failed-entry exemption.
+- **Deferred guest state** matches `need_sync_vmcs02_to_vmcs12_rare`
+  (`nested.c:4487-4494`), materialise-on-VMREAD included.
+- **VPID**: we share vpid01 where KVM allocates vpid02, but INVVPID
+  single-context on *both* transitions - over-invalidating and sound.
+
+**Three latent items it did find, none of them the cause, all worth fixing:**
+
+1. **A landmine one edit away.** `guest_state_deferrable` excludes exactly the
+   two fields that appear in `shadow_read_write_fields`, by hand, with
+   nothing tying the two lists. `guest_cr3` is deferrable *and* is what KVM
+   shadows (`vmcs_shadow_fields.h:65`). Adding it to the shadow list - the
+   obvious optimisation, the one KVM sanctions - would let L1 read a stale L2
+   CR3 out of the hardware shadow with no exit and no materialisation point.
+   **A `static_assert` that no `shadow_read_write_fields` entry is deferrable
+   would close it.**
+2. `hot_state_saved[3]` records the *masked* interruptibility while vmcs02
+   holds the unmasked value, breaking the invariant the elision rests on.
+   Reachable only from HLT or wait-for-SIPI.
+3. `discard_shadow_ept_for` and `discard_shadow_ept` release slots without
+   `invalidate_ept_locally()` where every sibling does. Latent, and this tree
+   already has one bug of exactly that shape.
+
+**And KVM's own nested tracepoints, read from the host.** A dedicated ftrace
+instance - `instances/zpp` - avoids the formatter crash recorded against the
+old FIFO capture, and `kvm_nested_vmenter` shows the two-VMCS structure
+directly:
+
+    vmcs 0x6b07a000   13,137 entries   event_inj always 0      <- our vmcs01, Hyper-V
+    vmcs 0x6b09a000    8,067 entries                           <- our vmcs02, Windows
+       1,671 (20.7%)  event_inj 0x800000d1   valid, vector 0xd1
+       6,370 (79.0%)  event_inj 0x000000d1   **valid bit clear**
+           7          event_inj 0x8000002f   valid, vector 0x2f
+
+**The valid-bit-clear entries are a non-finding**, checked rather than
+assumed: SDM 27.6.1 consults the field only when bit 31 is set, so a stale
+vector beneath a clear valid bit injects nothing and is ignored. Recorded so
+it is not chased.
+
+**What the host-side view adds that ours could not**: the alternation is
+visible from outside, two VMCSes and two EPTPs, one per trust level, and it
+confirms both are being entered normally. `nested_rip` on the vmcs01 entries
+lands in hvix64's APIC helpers; on the vmcs02 entries in ntoskrnl's clock
+path. **Nothing in the carriage of the VMCS is wrong.**
+
+**So both agents and the trace point the same way**, and it is where the
+capture already pointed: VTL1 answers correctly, VTL0 asks again, and the
+question is what VTL0 is testing - not how its VMCS is carried.
+
 ## The VP assist read error is probably the capture's own, not the mechanism's
 
 Chased before it hardened into a lead. The failing read:
