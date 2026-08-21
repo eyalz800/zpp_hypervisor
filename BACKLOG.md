@@ -785,6 +785,51 @@ is not there" and is really "the wrong question was asked". `x` is the
 virtual read. The same distinction is why a wide `xp` over a device BAR
 lied, further down this file.
 
+## The loop is in `VslpEnterIumSecureMode`, and the call site never moves
+
+Found by following the *actual* stack rather than the candidate list. The
+deep VTL capture dumps stack words at a known RSP, so these are real frames:
+
+    HvCallVtlCall  rsp 0xffff818a15403c98  cr3 0x1ae002
+      +0x000  ntoskrnl+0x6a774b = HvlSwitchToVsmVtl1+0xab   <- return address
+      +0x030  ntoskrnl+0x237009 = MiProbeAndLockComplete+0x21
+      +0x140  ntoskrnl+0x38e108 = VslpEnterIumSecureMode+0x3a8
+      +0x148  ntoskrnl+0xf8df40 = VslpIumThreadSemaphore    <- a semaphore
+
+    HvCallVtlReturn rsp 0xffff898060f25ec8  cr3 0x8800002
+      caller securekernel.exe+0xd93a4 = SkpReturnFromNormalMode
+
+**Sampled four times over a minute, every field identical - including both
+stack pointers.** Same call site, same stack depth, same caller on both
+sides. That is one call site repeating, not a guest wandering.
+
+**`HvlSwitchToVsmVtl1` is not the loop**: disassembled, it is a
+register-marshalling wrapper - save the non-volatiles and xmm6-15, load
+VTL1's register block from `[rdx]`, `mov r8, cr8` for the current IRQL, call
+the hypercall page, store the results back. `+0xab` is the `callq` itself,
+which is why every capture shows that offset.
+
+**`VslpEnterIumSecureMode` is.** Disassembled around `+0x3a8` it is dense
+with backward branches - `jmp -354`, `je -676`, `jmp -684`, `jne -399`,
+`jmp -412`, `jmp -281`, `jmp -530`, `je -446`, `jmp -458` - where every
+other routine on this stack was straight-line with a single status test.
+**It is a state machine, and it is the only thing on the path that loops.**
+
+*(The window was read starting mid-instruction, so its first lines decode as
+nonsense. Branch density is unaffected by alignment; the individual targets
+are not to be trusted without a re-read from a known boundary.)*
+
+**What that names**: the guest is inside "enter Isolated User Mode secure
+mode", going round a state machine, calling into VTL1 each time,
+`SkpReturnFromNormalMode` answering each time, and never leaving. The
+semaphore on the stack beside it - `VslpIumThreadSemaphore` - is what the
+routine's own name suggests it waits on.
+
+**Next, and it is now a single routine rather than a search**: disassemble
+`VslpEnterIumSecureMode` from its entry at rva 0x38dd60 with correct
+alignment, find which backward branch closes around the VTL call, and read
+the condition it tests. That condition is the blocker.
+
 ## Three real defects fixed. None of them was the blocker
 
 Deployed together and measured: **no change.**
