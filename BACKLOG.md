@@ -785,6 +785,40 @@ is not there" and is really "the wrong question was asked". `x` is the
 virtual read. The same distinction is why a wide `xp` over a device BAR
 lied, further down this file.
 
+## Reading "zero exits" correctly, and why the parked processors really are dead
+
+**`ZPP_VIRTUALIZE_APIC=0` means external-interrupt exiting is off**, so a
+physical interrupt arriving at a processor halted in the first-level guest
+wakes it and is delivered straight into that guest's own IDT **with no exit
+to this VMM at all**. So "cpus 2-7 took zero exits" does *not* by itself
+prove they are dead - it proves only that nothing exit-worthy happened, and a
+wake-handle-rehalt cycle would be invisible.
+
+Worth stating because the argument elsewhere in this file leans on that
+counter, and the counter alone cannot carry it.
+
+**They are dead anyway, and here is the argument that does carry.** Two
+independent facts:
+
+- **Their exit totals are static at 284**, not merely low. Hyper-V doing any
+  real work eventually touches a VMCS field, takes an EPT violation or makes
+  a hypercall, all of which exit. Waking to run a scheduler and re-halting
+  would move that number; it has not moved in an hour.
+- **Their second-level entry count is static at 17.** Whatever else they
+  might be doing, they are not running a virtual processor, which is the
+  thing being waited for.
+
+And the instruction pointer agrees: 25 of 25 samples on cpu 2 and cpu 7 alike
+sit at one address, one byte past the `hlt` in the first-level guest's idle
+loop.
+
+**The general form, which is the part worth keeping**: a counter that only
+increments on a *trap* cannot distinguish "nothing happened" from "something
+happened that does not trap". Check which controls are off before reading a
+zero as absence - this VMM deliberately lets external interrupts through
+without exiting, and that makes a whole class of guest activity invisible to
+every exit-derived instrument here.
+
 ## Narrowing the lost wake-up: four candidates eliminated, one left
 
 Following the start-up IPI from `Phase1Initialization` outward. Each of these
