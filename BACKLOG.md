@@ -785,6 +785,63 @@ is not there" and is really "the wrong question was asked". `x` is the
 virtual read. The same distinction is why a wide `xp` over a device BAR
 lied, further down this file.
 
+## The leading candidate at last: we withhold APIC virtualization from Hyper-V
+
+The VMX capabilities this VMM answers are now printed - a seventh instrument
+that was being recorded and read by nothing. What we tell the guest
+hypervisor, `PROCBASED_CTLS2 = 0x001138ee00000000`:
+
+    offered      EPT(1) desc-table(2) RDTSCP(3) VPID(5) WBINVD(6)
+                 unrestricted(7) PAUSE-loop(10) RDRAND(11) INVPCID(12)
+                 VMFUNC(13) RDSEED(16) XSAVES(20)
+    NOT offered  virtualize-APIC-accesses(0)   APIC-register-virt(8)
+                 virtual-interrupt-delivery(9) x2APIC-virt(4)
+                 VMCS-shadowing(14)            mode-based-execute(22)
+
+**The absence is deliberate and documented**, on
+`supported_secondary_controls`:
+
+> "Absent on purpose: everything to do with the local APIC - virtualized
+> APIC accesses, x2APIC virtualization, APIC-register virtualization,
+> virtual-interrupt delivery - because each needs pages and state of its
+> own that nothing here maintains."
+
+**This corrects a reading recorded earlier in this session as reassuring.**
+That entry observed "Hyper-V does not ask for any of the three" APIC
+controls and treated it as the guest hypervisor's own choice, evidence that
+nothing was being withheld. **It cannot ask for what is not offered.** The
+capability MSR is the allowed-1 mask; a control absent there cannot be set in
+vmcs12 at all. The requested-versus-granted comparison was therefore
+tautological - it compared what Hyper-V asked for against a menu this VMM
+wrote.
+
+**Why this is the leading candidate.** It is the first thing found in two days
+that is simultaneously (a) **ours** - a value we originate, not one we carry -
+(b) **specific**, a named set of controls, and (c) **untested**. Everything
+else that could have explained the stall has been eliminated by measurement:
+the nested carriage, event injection, EPT composition, XMM marshalling, APIC
+routing, the reference clock, exit cost, the hypervisor-present bit.
+
+And the shape fits. Virtual-interrupt delivery and APIC-register
+virtualization are how a hypervisor gives a guest an APIC without trapping
+every access - **and VSM's second trust level needs an interrupt controller
+of its own.** A Hyper-V that cannot obtain one from the layer below has to
+emulate it, and a VBS initialisation that gets partway and then will not
+advance is what "the capability I need is not available" would look like from
+outside.
+
+**What it would take to test.** Offering the controls honestly means
+implementing them - the virtual-APIC page, the EOI-exit bitmap, the guest
+interrupt status - which is the work the comment declines. There is no cheap
+version: advertising them without honouring them would make Hyper-V program
+an APIC that does not exist, which is worse than the current state and is the
+mistake `CLAUDE.md` warns about in "answer the whole of whatever it is, or
+fault".
+
+**So it is a hypothesis with a real cost attached**, and it is the one worth
+paying for next - unlike the levers above it, which were cheap and are
+exhausted.
+
 ## The hypervisor-present bit is separable from the block, and changes nothing
 
 `ZPP_ANNOUNCE_HYPERVISOR_BIT` sets CPUID leaf 1 ECX bit 31 - "you are

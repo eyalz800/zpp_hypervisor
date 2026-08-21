@@ -2292,6 +2292,7 @@ def main():
                "control_secondary_requested", "control_secondary_granted",
                # The IUM block memory breakpoint. See
                # nested_vmx::watch_vtl_block.
+               "capability_answers", "nested_capability_reads",
                "vtl_block_page", "vtl_block_writes",
                "vtl_block_writer_rip", "vtl_block_write_address",
                "vtl_block_write_value"]
@@ -2441,6 +2442,9 @@ def main():
     for name in ("control_secondary_requested", "control_secondary_granted"):
         if name in off:
             monitor.queue(instance + off[name], args.cpus)
+    if "capability_answers" in off:
+        monitor.queue(instance + off["capability_answers"], 48 * 2)
+        monitor.queue(instance + off["nested_capability_reads"], 1)
     for name in ("vtl_block_page", "vtl_block_writes", "vtl_block_writer_rip",
                  "vtl_block_write_address", "vtl_block_write_value"):
         if name in off:
@@ -2519,6 +2523,41 @@ def main():
             for bit in (0, 8, 9):
                 state = "yes" if got & (1 << bit) else "no"
                 print(f"    {SECONDARY[bit]:<30} {state}")
+
+    # What this VMM told the guest hypervisor about VMX, which is a set
+    # of values we genuinely originate - unlike the hypercall answers,
+    # which Hyper-V produces and we only carry.
+    #
+    # A capability narrowed away here is a thing the guest hypervisor
+    # will not attempt. That is the point of narrowing - do not promise
+    # what the shadow builder cannot honour - but it also means this list
+    # is the complete set of ways this VMM can make Hyper-V behave
+    # differently from how it would on the metal.
+    VMX_MSRS = {
+        0x480: "IA32_VMX_BASIC",          0x481: "PINBASED_CTLS",
+        0x482: "PROCBASED_CTLS",          0x483: "EXIT_CTLS",
+        0x484: "ENTRY_CTLS",              0x485: "MISC",
+        0x486: "CR0_FIXED0",              0x487: "CR0_FIXED1",
+        0x488: "CR4_FIXED0",              0x489: "CR4_FIXED1",
+        0x48a: "VMCS_ENUM",               0x48b: "PROCBASED_CTLS2",
+        0x48c: "EPT_VPID_CAP",            0x48d: "TRUE_PINBASED_CTLS",
+        0x48e: "TRUE_PROCBASED_CTLS",     0x48f: "TRUE_EXIT_CTLS",
+        0x490: "TRUE_ENTRY_CTLS",         0x491: "VMFUNC",
+    }
+    if "capability_answers" in off:
+        n = read("nested_capability_reads") or 0
+        if n:
+            print(f"\ncpu 0 VMX capabilities answered to the guest "
+                  f"hypervisor ({n} reads)")
+            seen = {}
+            for i in range(min(n, 48)):
+                a = instance + off["capability_answers"] + i * 16
+                msr = words.get(a, 0)
+                val = words.get(a + 8, 0)
+                seen[msr] = val
+            for msr in sorted(seen):
+                print(f"    0x{msr:03x}  {VMX_MSRS.get(msr,''):<22} "
+                      f"0x{seen[msr]:016x}")
 
     # The IUM context block memory breakpoint.
     #
