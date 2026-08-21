@@ -37963,3 +37963,45 @@ So the open question is narrow and concrete: **why do four frames out of
 of the freeze or another consequence of it. That is answerable from the
 guest hypervisor's own `eptp12` entry for those frames, which is one walk
 and has not been done.
+
+## The composition is exact, and read-only is ordinary. The physical-page lead is dead
+
+The walk of the guest hypervisor's own `eptp12` entry did not need writing -
+**the histogram was already being printed** and had not been read:
+
+    ept leaf permissions (guest = eptp12 alone, composed = installed)
+      001 (r--)  guest     45,531   composed     45,531
+      011 (rw-)  guest  1,407,556   composed  1,407,556
+      101 (r-x)  guest    171,756   composed    171,756
+      111 (rwx)  guest      5,390   composed      5,390
+
+**Guest equals composed, exactly, in all four combinations.** The
+composition drops nothing. `nested_ept.cpp` states the two shapes this
+distinguishes, in a comment written long before this session:
+
+- guest side uniformly 7 -> the protection is not in the extended page
+  tables and the loop is elsewhere;
+- guest side varying while the composed side stays 7 -> the composition
+  drops what the level above removed, "and that is this VMM's bug".
+
+**Neither holds.** The guest side varies and the composed side tracks it
+exactly, so `HvCallModifyVtlProtectionMask` *is* expressed through the
+extended page tables and this VMM carries it correctly.
+
+**And it disposes of the four frames.** 45,531 leaves are `r--`. Read-only
+is one of the ordinary permissions here, not a marker - so four frames out
+of the 386 the walk touched being `r--` says nothing, and the "only four
+lose execute" distinction is an artifact of looking at 386 frames instead of
+1.6 million.
+
+**So the physical-page lead is closed.** What survives from it is the one
+fact that made it worth chasing and is unaffected: **the walk dies on the
+same four page frames on six independent boots, while the guest's virtual
+addresses move with KASLR.** That determinism is real and remains
+unexplained; the explanation is simply not in the permissions.
+
+**And the lesson is the same one, for the twelfth time**: the histogram that
+settled this had been printing on every dump for the whole investigation.
+Two entries were written - one titled "THE DEFECT" - on a subset of 386
+frames, when the population was 1.6 million and already on screen. *Look at
+what the reader already prints before building a new probe.*
