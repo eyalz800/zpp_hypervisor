@@ -785,6 +785,62 @@ is not there" and is really "the wrong question was asked". `x` is the
 virtual read. The same distinction is why a wide `xp` over a device BAR
 lied, further down this file.
 
+## The tick loop, counted: three synthetic MSRs per tick and an exact reference clock
+
+Measured on a boot that is **not** in the spin state, which matters - the
+same rig reaches two different steady states and they read differently.
+
+**This boot the second level executes widely.** The profile reads 2,557
+samples, 51 slots filled, 12 flushes, top slot 54 hits at 2.1%, against the
+dump's own rule that "many flushes with a low maximum is a guest executing
+widely". The earlier boot in this same session read 99.7% at one address.
+Both are real; **a single reading does not characterise this guest**, and the
+profile's flush count is what distinguishes them.
+
+**What it is executing.** The sampled addresses match the earlier boot's
+minority samples once KASLR is removed - `...b3692`, `...be948`, `...a57fa`,
+`...2890d` are common to both at different bases. These are the eight
+clock-path addresses this file already records.
+
+**And it touches no new memory**: `leaves-filled` was 305,919 before a
+40-second window and 305,919 after. Combined with 60 of 60 CPL samples in
+ring 0, the characterisation is a **broad livelock over an already-resident
+working set** - not a tight spin, and not progress either.
+
+**The per-tick cost, counted rather than inferred**:
+
+    cpu 0 synthetic MSRs written (39,128,096)
+      0x40000070  12,791,909  32.7%  EOI
+      0x400000b1  12,790,651  32.7%  STIMER0_COUNT
+      0x40000071  12,229,936  31.3%  ICR
+
+Three near-equal counts is a repeating triple: every tick the guest writes an
+EOI, re-arms the synthetic timer, and sends an IPI. Each is an L2 MSR write
+that must be reflected to Hyper-V, because these are Hyper-V's MSRs and the
+merged bitmap correctly traps them - about 200,000 cycles apiece, so roughly
+600 microseconds a tick in reflections alone.
+
+**The re-arm rate, measured as a delta and not divided out of a cumulative
+counter**: 12,827,115 -> 12,880,751 over 60 seconds is **893.9 Hz**, against
+the 574.7 Hz that `KeQuantumEndTimerIncrement` = 17,400 implies. 1.56x.
+
+*(Dividing the cumulative count by a guessed uptime gave "10.6x" and it was
+wrong. The delta is the only honest form - which is the rule this file
+already states for KVM's counters and applies just as well here.)*
+
+**The 1.56x is not a clock error of ours, and that is checked rather than
+assumed.** The published reference-TSC page carries scale
+`0x148ff4d8b372ebb`, and
+
+    implied_hz = 1e7 * 2^64 / scale = 1.9920 GHz
+
+against an actual TSC of 1.9920 GHz - exact to four decimals. So the
+reference clock this VMM hands the guest is right, and the extra timer
+arming is the guest's own behaviour rather than something being delivered
+early. **A candidate root cause is eliminated for the cost of one
+calculation**, and it is the candidate that four previous interventions in
+this tree were all aimed at.
+
 ## The combined ceiling under KVM, computed before building anything
 
 Asked to stay on KVM, so the question becomes: what is the *best case*
