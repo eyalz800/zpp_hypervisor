@@ -785,6 +785,63 @@ is not there" and is really "the wrong question was asked". `x` is the
 virtual read. The same distinction is why a wide `xp` over a device BAR
 lied, further down this file.
 
+## RETRACTED: the admin-queue reading does not discriminate, and MSI-X is a symptom
+
+**The section below is wrong in its central claim and is kept for the
+reading, not the conclusion.** Two corrections, both from evidence already in
+this file that I did not consult before writing it:
+
+- **The two-entry admin queue does not discriminate.** That argument was made
+  before, and **the plain-KVM control showed exactly the same registers**,
+  which retired it. `Mem+ BusMaster+` and the identical BAR do not
+  discriminate either, for the same reason: both firmware and Windows set
+  them. So "the controller is as firmware left it" does not follow from AQA.
+- **MSI-X is a symptom, and this file had already concluded that twice**
+  before the entry below reopened it as a lead. The chain recorded there runs
+  the other way: no deferred calls -> the storage stack never starts ->
+  `stornvme` never touches the controller -> no MSI-X. Reopening it as a
+  cause was going backwards up a chain this file had already walked down.
+
+**And it is not ours.** Configuration space reaches the device by I/O ports
+`0xCF8`/`0xCFC` or by extended configuration space, and this VMM traps
+neither: the I/O bitmaps are zero except the two ACPI sleep-control ports,
+and the extended-configuration aperture is identity-mapped and never
+write-protected. Nor could we hide it if we tried - KVM forces
+`CPU_BASED_UNCOND_IO_EXITING` for a second-level guest and clears
+`USE_IO_BITMAPS`, and takes every extended-page-table violation at the
+lowest level. **The writes are not being swallowed; they are never made.**
+
+`intremap=off` is not the mechanism either: every launcher pins it, and the
+control gets `Enable+` under the same flag.
+
+## What a trust-level round trip actually costs, both halves
+
+**New, and it reframes the guest's tempo.** From the same dump:
+
+    HvCallVtlCall   -> HvCallVtlReturn  (secure kernel)   107,866 halves, 1,254.4 us,   8.6 exits
+    HvCallVtlReturn -> HvCallVtlCall    (ordinary kernel) 107,865 halves, 30,080.6 us, 243.7 exits
+
+**The ordinary kernel runs for 30 milliseconds at a stretch, taking 243.7
+exits**, before calling into the secure kernel, which runs 1.25 ms and
+returns. The halves balance to one, so the calls **do** retire.
+
+Two things follow that contradict earlier sections here:
+
+- **Windows is not stuck one instruction short of anything.** It executes 30
+  ms slices, which at ~1,257 microseconds a clock interval is about
+  twenty-four ticks per slice. The "preempted at the `sti`" reading described
+  a real hot path but cannot be the whole behaviour of a guest that runs 30
+  ms at a time.
+- **The secure-kernel half costs 1,254.4 microseconds, and the clock interval
+  measured independently is ~1,257 microseconds.** Those are the same number
+  to a quarter of a percent. That is either a coincidence or the connection
+  between the timer and the trust-level machinery, and it has not been
+  explained.
+
+Still true and still unexplained: the guest asks for vector `0x2f` -
+**2,105,997 requests, 100%** - always at task priority `0xd0`, and maps no
+new memory.
+
 ## The admin queue is two entries deep: Windows' storage driver never started
 
 **Positive confirmation of what `DisINTx-` only implied.** The section on the
