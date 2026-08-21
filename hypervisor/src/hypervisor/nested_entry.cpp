@@ -3503,6 +3503,13 @@ void hypervisor::save_l2_state(std::size_t cpu)
     // `enter_or_park_l2` exists to avoid saying.
     constexpr std::uint64_t blocking_by_sti_or_mov_ss = 0x3;
 
+    // What vmcs02 holds, kept before the mask below changes the copy
+    // bound for vmcs12. See the `hot_state_saved` recording further
+    // down: its declared invariant is "what vmcs02's guest-state fields
+    // actually hold", and only the vmcs12 copy is masked here - vmcs02
+    // keeps the blocking bits.
+    auto interruptibility02 = interruptibility12;
+
     if (arch::x86_64::vmx::activity_state::active != activity12) {
         interruptibility12 &= ~blocking_by_sti_or_mov_ss;
     }
@@ -3525,7 +3532,22 @@ void hypervisor::save_l2_state(std::size_t cpu)
         this->hot_state_saved[cpu][0] = shadow.read(field::guest_rip);
         this->hot_state_saved[cpu][1] = shadow.read(field::guest_rsp);
         this->hot_state_saved[cpu][2] = shadow.read(field::guest_rflags);
-        this->hot_state_saved[cpu][3] = interruptibility12;
+        // **The one field here that is not what was written to
+        // vmcs12.** The mask above clears blocking-by-STI/MOV-SS from
+        // the vmcs12 copy and leaves vmcs02 holding them, so recording
+        // the masked value would break this array's invariant in the
+        // one way that matters: `build_vmcs02` compares vmcs12's masked
+        // value against the record, finds them equal, and **skips the
+        // write** - leaving vmcs02 with an interrupt shadow while
+        // `put_hot(4, ...)` forces its activity state to active. The
+        // second-level guest is then entered blocked for one
+        // instruction for no reason.
+        //
+        // Recording what vmcs02 holds makes the comparison differ, so
+        // the masked value is written and vmcs02 and vmcs12 agree.
+        // Reachable only from an exit in HLT or wait-for-SIPI, which is
+        // why it has not been seen - not because it cannot happen.
+        this->hot_state_saved[cpu][3] = interruptibility02;
         this->hot_state_saved[cpu][4] = activity12;
         this->hot_state_vmcs[cpu] = this->guest_current_vmcs[cpu];
         this->hot_state_valid[cpu] = true;

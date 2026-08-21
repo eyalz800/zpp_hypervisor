@@ -1111,10 +1111,33 @@ void hypervisor::refresh_shadow_ept_for(std::size_t cpu,
 void hypervisor::discard_shadow_ept_for(std::size_t cpu,
                                         std::uint64_t root)
 {
+    auto released = false;
+
     for (std::size_t slot{}; slot < shadow_ept_slots; ++slot) {
         if (root == this->shadow_ept_source[cpu][slot]) {
             release_shadow_slot(cpu, slot);
+            released = true;
         }
+    }
+
+    // Every sibling invalidates and this did not.
+    //
+    // `refresh_shadow_ept_for`, `discard_stale_shadow_ept` and
+    // `shadow_ept_pointer_for` all call this after touching a slot;
+    // these two discard paths were the exceptions. **It was latent
+    // rather than live** - the route from a discard back into a
+    // second-level guest always passes through `shadow_ept_pointer_for`,
+    // which fails the source match, because `release_shadow_slot` zeroed
+    // it, and invalidates on the rebuild.
+    //
+    // Latent on an implicit contract is the shape this tree has already
+    // been bitten by: `invalidate_ept_locally` once passed INVEPT's type
+    // *by address* and silently failed every invalidation it ever made
+    // (`hypervisor.cpp`). A released slot whose entries a processor may
+    // still have cached is exactly the state INVEPT exists for, so it is
+    // invalidated here rather than left to a caller that happens to.
+    if (released) {
+        invalidate_ept_locally();
     }
 }
 
@@ -1178,6 +1201,10 @@ void hypervisor::discard_shadow_ept(std::size_t cpu)
     for (std::size_t slot{}; slot < shadow_ept_slots; ++slot) {
         release_shadow_slot(cpu, slot);
     }
+
+    // As above: unconditional here because every slot is released, so
+    // there is always something a processor may have cached.
+    invalidate_ept_locally();
 }
 
 } // namespace zpp::hypervisor
