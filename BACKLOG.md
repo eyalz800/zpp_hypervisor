@@ -38275,3 +38275,30 @@ continues.** It is the guest's own priority dropping far enough for the
 processor to report it, immediately before it re-enters VTL1 - three exits,
 in that order, for ever. Whether that ordering is the loop's cause or its
 signature has not been established.
+
+## The TPR shadow is not the cause either: same freeze with it off
+
+`tpr-below` precedes **every** `HvCallVtlCall` in the working-exit ring, in
+that exact order, for ever - the only structural regularity left
+unexplained. It is produced by the TPR shadow this VMM offers, so turning
+that off removes those exits entirely and tests whether the ordering is
+cause or signature.
+
+    ZPP_NESTED_TPR_SHADOW=OFF
+      HvCallModifyVtlProtectionMask   39,277 calls   (against 39,264-39,279)
+      code-0 requests                 20,997         (against ~20,990)
+      exit mix    cr-access 52.8%  ept-violation 19.1%  vmresume 12.5%
+
+**The freeze point does not move.** The exit profile changes completely -
+`cr-access` becomes 1.59 million exits, 52.8% of the total, because every
+CR8 access now leaves the guest instead of being absorbed by the virtual-APIC
+page - and the guest still stops after the same amount of work.
+
+**So the `tpr-below` ordering is a signature, not a cause**, and the TPR
+shadow is eliminated. Restored to ON, where it belongs on cost grounds
+alone.
+
+That was the last structural regularity in the ring. Everything visible in
+the steady state - the three-exit cycle, its ordering, its rate, and the
+work that precedes it - is now either measured correct or eliminated as a
+cause.
