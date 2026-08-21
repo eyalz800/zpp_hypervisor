@@ -785,6 +785,55 @@ is not there" and is really "the wrong question was asked". `x` is the
 virtual read. The same distinction is why a wide `xp` over a device BAR
 lied, further down this file.
 
+## The IPIs were delivered. Routing is correct. It is a rendezvous race, and the instruments here cannot see it
+
+**Delivered, not lost in flight.** KVM's own per-VM counters:
+
+    irq_injections   3,188,985 cumulative   ->  0/s now
+    nmi_injections           0
+    halt_exits               0
+    halt_wakeup             70   (all early)
+
+Three million interrupts were injected during bring-up and **none since**.
+So the rendezvous IPIs reached their targets and were consumed; the failure
+is not a signal that never arrived.
+
+*(`halt_exits` = 0 is worth its own note: HLT is not intercepted here, so the
+processors halt in non-root and **KVM never sees it**. Every halt in this
+system is invisible to KVM's counters, which is why `halt_exits` being zero
+is not evidence that nobody halted.)*
+
+**And routing is correct.** All eight processors, read from their APICs:
+
+    cpu 0  DFR 0x0f  LDR 0x01      cpu 4  DFR 0x0f  LDR 0x10
+    cpu 1  DFR 0x0f  LDR 0x02      cpu 5  DFR 0x0f  LDR 0x20
+    cpu 2  DFR 0x0f  LDR 0x04      cpu 6  DFR 0x0f  LDR 0x40
+    cpu 3  DFR 0x0f  LDR 0x08      cpu 7  DFR 0x0f  LDR 0x80
+
+Flat model, one distinct bit each, exactly what the `0x7f`, `0xfd` and `0x7e`
+destination masks in the bring-up log need. Nothing is misaddressed.
+
+**So the shortlist is empty.** Everything checkable checks out: INIT-SIPI-SIPI
+works, IPIs are delivered, logical routing is right, VTL round trips run,
+every vmcs02 control asked for is granted, the reference clock is exact to
+four decimals, the guest has 11.8 GB, and the shadow EPT composes
+permissions bucket-for-bucket. **And all eight processors still end up
+halted after a rendezvous.**
+
+**What that leaves is a timing race, and this VMM cannot currently observe
+it.** The window is between a target being signalled and that target
+halting, and the first-level guest's idle loop tests its flag *after* the
+`hlt`. To tell "woke, found nothing, re-halted" from "halted just before the
+signal" needs the target's interrupt state captured **at the moment of the
+halt** - and HLT does not exit, so there is no such moment to hook.
+
+**The one instrument that would settle it**: HLT exiting in vmcs01, recording
+IRR, ISR and pending-event state at each halt. It is not free - it turns
+every idle halt into an exit and this VMM would then have to emulate the halt
+- so it is a diagnostic build, not a deployable one. It is also the only
+proposal in this file that would see the failure directly rather than
+inferring it from what is left behind afterwards.
+
 ## The application processors did send IPIs, then halted. It is a lost wake-up at bring-up
 
 **Correcting a claim from two sections down**: "Hyper-V never writes the
