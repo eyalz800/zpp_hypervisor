@@ -37529,3 +37529,39 @@ holding the walk, and yields - and nothing ever re-attaches it.
 
 **This is where a fix would go**, and it is the first time in this
 investigation that sentence can be written about a specific instruction.
+
+## `ZPP_DELIVER_SELF_IPI` makes it strictly worse: the guest wedges completely
+
+The first intervention attempted against the mechanism, chosen because the
+switch was built for exactly it - its own option text records "the
+notification asserted on 1.0032 of every `HvCallVtlCall` - which is what
+stops VTL1 retiring its secure call".
+
+**It does not help. It wedges the guest harder.** Three samples a hundred
+seconds apart:
+
+    protect 17,908   code0 7,031   vtlcalls 7,901   cpl 0=35,486
+    protect 17,908   code0 7,031   vtlcalls 7,901   cpl 0=35,486
+    protect 17,908   code0 7,031   vtlcalls 7,901   cpl 0=35,486
+
+Every counter frozen, **including `vtlcalls`** - which in the baseline is the
+one thing that always keeps climbing, at 9 Hz, for ever. And it stops far
+earlier: 17,908 protection calls against ~39,272, and 7,031 code-0 requests
+against 20,992.
+
+The second-level entry table also overflows - 35,453 entries beyond a
+capacity that normally holds all eight - with instruction pointers like
+`0x0000000001cba7e7`, far below any kernel address. The guest is somewhere
+it does not belong, not looping in phase 1.
+
+**So withholding the self-directed vector and delivering it here is not a
+fix**, and the outcome matches what `BACKLOG.md` already recorded for this
+switch: "one delivery, then a spin". Restored to OFF.
+
+**What it does establish**, and it is worth the boot: the pending vector is
+not an accounting artifact this VMM can simply drain. The level above keeps
+bookkeeping tied to seeing that write - which is what the option text warns
+- and taking it away breaks the guest hypervisor rather than freeing the
+secure kernel. **Any fix has to leave Hyper-V's view of the interrupt
+intact**, which rules out the whole class of "deliver it ourselves"
+interventions, not just this one.
