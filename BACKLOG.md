@@ -35541,3 +35541,60 @@ to VTL1. That state is Hyper-V's SynIC, which this VMM does not read - so
 settling it needs either the SynIC pages decoded out of guest memory, or the
 `tpr-below -> VtlCall -> VtlReturn` triple instrumented with what vmcs02
 carried and what the assist page held on each of the three.
+
+## VINA is refuted by direct measurement, and the application processors are frozen
+
+### VINA: dead. `vtl_entry_reason` is `VtlCall`, 14 samples out of 14
+
+The previous entry's leading hypothesis - that securekernel declines
+instantly because Hyper-V's Virtual Interrupt Notification Assist is already
+asserted on entry - is **wrong**, and it took no rebuild to settle.
+
+The VP assist page carries `vtl_entry_reason` at offset `0x08` (`1` =
+HvVtlEntryVtlCall, `2` = HvVtlEntryInterrupt). CLAUDE.md's rule that a
+second-level physical address is an `xp` address directly makes it a monitor
+read:
+
+    0x117a20000  +0x008  0x0000000100000001   vtl_entry_reason = 1
+                 +0x018  0x0000000000000011   vtl_ret_x64rcx   = 0x11
+
+Polled fourteen times: **entry reason 1 on every sample, never 2.** VTL1 is
+entered by a genuine VTL call every time and declines anyway. So the decline
+is securekernel's own decision, not a preemption.
+
+**The reader was proved before the reading was believed**, which is what
+saved this from being a third wrong answer: the address the state dump names
+for this boot, `0x117a1f000`, reads as **64 qwords of zero**. That is
+indistinguishable from "the field is 0" until the neighbouring pages are
+read - `0x117a1e000` has ten non-zero qwords and `0x117a20000` has the
+assist-page shape. The zero page is real and is not the live one.
+
+### The application processors take no exits at all
+
+    cpu  exits   l2-entries    over 60 s
+      0  1.78 M     535,504    climbing
+      1    4,454         17    4,454 -> 4,454, unchanged
+      2-7  same          17    unchanged
+
+**Seven processors, seventeen second-level entries each, and then nothing -
+zero exits over a full minute.** They are not spinning; 91% of what they did
+take was CPUID, and none of it is growing. They are idle or halted with the
+guest hypervisor having no work for them.
+
+And all seven stopped at the *same* second-level instruction pointer,
+`0xfffff806477a7697`, which is **not in ntoskrnl** - the second-level kernel
+is at `0xfffff800f5800000` size `0x1450000`, and that address is nowhere
+near it. So the seven are parked in some other image, together, at one
+address.
+
+**This is the first asymmetry found that is not on the boot processor**, and
+it fits two things already recorded and never connected: `HvCallEnableVpVtl`
+issued exactly **once**, and `HvCallStartVirtualProcessor` (0x99) **never**.
+A guest whose secure kernel is up on one processor and nowhere else is a
+guest that cannot finish enabling VSM.
+
+**Next**: name that image and that address. It needs securekernel's base for
+the running boot, which the log prints, and then the same `llvm-pdbutil`
+route already used for `SkeCrashDumpNmi`. If the seven are parked in
+securekernel, the other stuck state's `pause; jmp $` park is the same park
+and the two failures are one.
