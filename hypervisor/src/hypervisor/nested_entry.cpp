@@ -8558,6 +8558,33 @@ hypervisor::on_l2_exit(std::size_t cpu,
             // The guest's stack once a protection answer has landed.
             // See `vtl_protect_after_stack`.
             if ((cpu < max_cpus) &&
+                (0 != this->vtl_protect_early_pending[cpu])) {
+                this->vtl_protect_early_pending[cpu] = 0;
+
+                auto early = this->vtl_protect_early_rsp[cpu];
+
+                for (std::size_t w{}; w < 32; ++w) {
+                    this->vtl_protect_early_after[cpu][w] = 0;
+
+                    auto at = translate_guest_linear(
+                        cpu, early + (w * sizeof(std::uint64_t)));
+                    if (!at) {
+                        break;
+                    }
+
+                    std::uint64_t value{};
+                    if (!read_guest_memory(
+                            cpu,
+                            *at,
+                            std::as_writable_bytes(std::span(&value, 1)))) {
+                        break;
+                    }
+
+                    this->vtl_protect_early_after[cpu][w] = value;
+                }
+            }
+
+            if ((cpu < max_cpus) &&
                 (0 != this->vtl_protect_after_pending[cpu])) {
                 this->vtl_protect_after_pending[cpu] = 0;
                 this->vtl_protect_after_read[cpu] = 0;
@@ -8718,6 +8745,7 @@ hypervisor::on_l2_exit(std::size_t cpu,
                 // Where it came from. See `vtl_protect_last_rip`: the
                 // last one of these is the last act of the work item
                 // that stops.
+                this->vtl_protect_last_r15[cpu] = context.r15;
                 this->vtl_protect_last_rip[cpu] = this->vmcs.guest_rip();
                 this->vtl_protect_last_cr3[cpu] =
                     this->vmcs.read(
@@ -8748,6 +8776,17 @@ hypervisor::on_l2_exit(std::size_t cpu,
 
                     if (0 == w) {
                         this->vtl_protect_last_caller[cpu] = back;
+                    }
+                }
+
+                // The refutation check. See `vtl_protect_early_before`.
+                if (100 == this->vtl_protect_count[cpu]) {
+                    this->vtl_protect_early_rsp[cpu] = protect_rsp;
+                    this->vtl_protect_early_pending[cpu] = 1;
+
+                    for (std::size_t w{}; w < 32; ++w) {
+                        this->vtl_protect_early_before[cpu][w] =
+                            this->vtl_protect_last_stack[cpu][w];
                     }
                 }
 

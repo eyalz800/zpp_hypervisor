@@ -10276,6 +10276,34 @@ private:
 
     /** Set when the answer lands, consumed by the next second-level exit. */
     std::uint64_t vtl_protect_after_pending[max_cpus]{};
+
+    /**
+     * The same before/after pair, taken at an **early** call.
+     *
+     * This is the check that can refute the whole output-area reading. The
+     * loop advanced 39,272 times, so on the calls that worked the
+     * completed-rep count must have arrived somewhere. **If the early
+     * window shows the output area being written and the late one does
+     * not, that is a real transition to explain. If it is never written on
+     * any call, then `0x40(%rsp)` is not the output area and the reading is
+     * wrong** - which is the more likely outcome given that eight
+     * instruments in this investigation have been aimed at the wrong word.
+     *
+     * Taken at call 100: late enough to be past any first-call special
+     * case, early enough to be thousands of calls before the freeze.
+     */
+    std::uint64_t vtl_protect_early_before[max_cpus][32]{};
+    std::uint64_t vtl_protect_early_after[max_cpus][32]{};
+    std::uint64_t vtl_protect_early_rsp[max_cpus]{};
+    std::uint64_t vtl_protect_early_pending[max_cpus]{};
+
+    /**
+     * `r15` at the last protection call - the loop's remaining count.
+     *
+     * `subl %ecx,%r15d; jne` is the loop's only exit, so a zero here says
+     * the walk finished and a non-zero says it did not.
+     */
+    std::uint64_t vtl_protect_last_r15[max_cpus]{};
     std::uint64_t vtl_protect_last_rsp[max_cpus]{};
     /** @} */
     /** @} */

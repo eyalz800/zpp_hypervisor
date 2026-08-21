@@ -37243,3 +37243,53 @@ Two readings, and they are cheap to separate:
 **The second check is the one that can refute this**, and it should be run
 before any fix is attempted. This file has recorded eight instruments aimed
 at the wrong word; this reading is one boot away from being the ninth.
+
+## Refuted: the output area reading. Established: the loop had ONE page left
+
+The check that could refute the previous entry was run before any fix was
+attempted, and it refuted it.
+
+    r15 at the last call (loop remaining) = 1
+    EARLY call (#100) - what the answer wrote (1 word changed):
+      +0xc8  0x0000000000001900 -> 0x0000000000001901
+
+**At an early call - one of the 39,272 that worked - the answer writes
+essentially nothing to the guest's stack either.** One word changes, at
+`+0xc8`, by exactly one: a counter advancing, not a completed-rep count
+arriving at `+0x98`. So the late call's "nothing was written" is not a
+failure, it is normal, and **`0x40(%rsp)` is not where the completed count
+lands**. The whole output-area mechanism is withdrawn.
+
+That is the **ninth** instrument in this investigation aimed at the wrong
+word, and the first one caught *before* a fix was proposed rather than
+after. The check cost one boot and was written into the same commit as the
+hypothesis, which is the only reason it happened.
+
+### What is established, and it is the sharpest fact yet
+
+**`r15` - the loop's remaining count - is `1` at the last protection
+call.** The walk had exactly one page left. It issued the hypercall for that
+final page, the answer was delivered and counted, and **the guest never
+returned to the loop.**
+
+That kills two readings at once:
+
+- **not "the loop spins for ever"** - it had one iteration left, and a
+  spinning loop would keep issuing calls, which the frozen count denies;
+- **not "the walk finished"** - `r15` would be zero and
+  `subl %ecx,%r15d; jne` would have fallen through to the normal return.
+
+**The guest stopped between the last hypercall's answer and the instruction
+that consumes it.** `SkmiProtectPageRange` is four instructions from
+finishing - `movl 0x40(%rsp),%ecx; addq; addl; subl; jne` - and does not
+execute them.
+
+**So the question is now: what happens to the secure kernel between a
+hypercall answer and the next instruction of the caller?** The trace already
+shows the answer path passes through `SkiUpdateXStateForVtlTransition` and
+`SkCallNormalMode` - a trust-level transition - so the secure kernel yields
+somewhere in there and, on this last occasion, never resumes the loop.
+Whether "never resumes" means the resume point is wrong or the resume never
+happens is the next thing to separate, and both are visible in the VTL1
+instruction trace once it is armed on a *late* transition rather than an
+arbitrary one.

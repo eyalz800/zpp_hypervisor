@@ -2266,6 +2266,8 @@ def main():
                "vtl_protect_last_cr3", "vtl_protect_last_caller",
                "vtl_protect_last_rsp", "vtl_protect_last_stack",
                "vtl_protect_after_stack", "vtl_protect_after_read",
+               "vtl_protect_early_before", "vtl_protect_early_after",
+               "vtl_protect_last_r15",
                "vmcs_shadow_loads", "vmcs_shadow_stores",
                "vmcs_field_read_encoding", "vmcs_field_read_count",
                "vmcs_field_write_encoding", "vmcs_field_write_count",
@@ -2391,6 +2393,8 @@ def main():
                "vtl_protect_last_cr3", "vtl_protect_last_caller",
                "vtl_protect_last_rsp", "vtl_protect_last_stack",
                "vtl_protect_after_stack", "vtl_protect_after_read",
+               "vtl_protect_early_before", "vtl_protect_early_after",
+               "vtl_protect_last_r15",
                "vmcs_shadow_loads",
                "vmcs_shadow_stores",
                "guest_state_writes_skipped", "guest_state_writes_done",
@@ -2454,6 +2458,9 @@ def main():
     monitor.queue(instance + off["vtl_protect_after_stack"],
                   scalar_cpus * 32)
     monitor.queue(instance + off["vtl_protect_after_read"], scalar_cpus)
+    monitor.queue(instance + off["vtl_protect_early_before"], scalar_cpus * 32)
+    monitor.queue(instance + off["vtl_protect_early_after"], scalar_cpus * 32)
+    monitor.queue(instance + off["vtl_protect_last_r15"], scalar_cpus)
     for _n in ():
         monitor.queue(instance + off[_n], scalar_cpus)
     monitor.queue(instance + off["vtl_call_rcx"], scalar_cpus)
@@ -2966,6 +2973,23 @@ def main():
             af = read('vtl_protect_after_stack', (cpu * 32) + w) or 0
             if b4 != af:
                 print(f"        +0x{w * 8:02x}  0x{b4:016x} -> 0x{af:016x}")
+        print(f"      r15 at the last call (loop remaining) = "
+              f"{read('vtl_protect_last_r15', cpu):,}"
+              + ("   <- zero: the walk finished"
+                 if not read('vtl_protect_last_r15', cpu) else
+                 "   <- non-zero: it had work left"))
+        diffs = [(w,
+                  read('vtl_protect_early_before', (cpu * 32) + w) or 0,
+                  read('vtl_protect_early_after', (cpu * 32) + w) or 0)
+                 for w in range(32)]
+        diffs = [d for d in diffs if d[1] != d[2]]
+        print(f"      EARLY call (#100) - what the answer wrote "
+              f"({len(diffs)} words changed):")
+        for w, b4, af in diffs:
+            print(f"        +0x{w * 8:02x}  0x{b4:016x} -> 0x{af:016x}")
+        if not diffs:
+            print("        nothing changed there either <- 0x40(%rsp) is "
+                  "probably NOT the output area, and the reading is wrong")
         print(f"cpu {cpu} HvCallModifyVtlProtectionMask: {total:,} calls")
         cap = 32
         order = ([(total - cap + i) % cap for i in range(cap)]
