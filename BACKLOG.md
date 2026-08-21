@@ -38217,3 +38217,32 @@ chunking a larger region - which is consistent with ~39,270 protection
 calls being many separate `SkmiProtectPageRange` invocations rather than
 one walk, and with `r15 = 1` being the last page of *a* batch rather than
 of everything.
+
+## The freeze count is independent of processor count: not a per-CPU resource, not an MP race
+
+The fixed stopping point looks like a resource, and a resource can be
+probed by changing what it scales with. `rig-boot.sh` takes `ZPP_CPUS`, so
+the cheapest axis is processors.
+
+    8 CPUs   39,264 / 39,266 / 39,272 / 39,274 / 39,276 / 39,278 calls
+    2 CPUs   39,279 calls,  code-0 21,000  (against ~20,990 at eight)
+
+**Identical.** A quarter of the processors and the guest performs the same
+amount of VSM setup, to within the same handful of calls, and stops in the
+same place with `r15 = 1`.
+
+**Two eliminations from one boot:**
+
+- **not a per-processor resource** - anything sized per CPU would have moved
+  by a factor of four, and nothing moved;
+- **not a multiprocessor race** - the failure reproduces exactly with two
+  processors, and a race between eight would not land on the same count.
+
+That last one matters because "a race that loses once in 18,585" was the
+reading this file carried for several entries. **It is not a race.** The
+guest performs a fixed quantity of work and stops, reproducibly, on any
+processor count.
+
+**So the stopping point is a property of the work, not of the machine.**
+Something completes or is exhausted after a fixed amount of VSM setup, and
+that amount does not depend on how many processors are available to do it.
