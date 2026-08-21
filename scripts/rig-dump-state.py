@@ -2470,8 +2470,12 @@ def main():
         # The ring, newest last, so an interval can be differenced by hand
         # rather than trusted from the average above. Kind 1 and kind 3
         # alternating is one arm and one delivery per tick.
-        base = off.get("stimer_arm_value")
-        if base is not None:
+        # NOT named `base`. That is the module base, it is live for the
+        # rest of this function, and shadowing it here pointed the
+        # manifest check at 0x14daf40 + 0x2020 and made it report
+        # BASE SUSPECT on a base that was provably correct.
+        ring_base = off.get("stimer_arm_value")
+        if ring_base is not None:
             count = read("stimer_arm_count", 0) or 0
             print(f"\ncpu 0 last synthetic timer events "
                   f"({count:,} total, newest last)")
