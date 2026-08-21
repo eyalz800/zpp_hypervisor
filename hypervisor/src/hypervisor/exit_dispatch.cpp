@@ -872,7 +872,8 @@ void hypervisor::on_vm_exit(std::uint64_t cpuid,
             // the nested path instead. The reference this is being
             // compared against announces itself unconditionally.
             if constexpr (nested_vmx::pass_through_hypervisor_interface ||
-                          nested_vmx::announce_hypervisor) {
+                          nested_vmx::announce_hypervisor ||
+                          nested_vmx::announce_hypervisor_bit) {
                 cpuid_result[2] |= (1u << 31);
             } else {
                 cpuid_result[2] &= ~(1u << 31);

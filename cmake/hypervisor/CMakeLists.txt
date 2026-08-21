@@ -92,6 +92,10 @@ option(ZPP_WATCH_VTL_BLOCK
     "Watch the IUM context block for writes and record who makes them. The second-level guest loops on a state byte that never changes, and polling cannot distinguish nothing-writes-it from a-write-is-lost - those want opposite fixes. Costs an EPT violation per write to a live kernel stack page."
     OFF)
 
+option(ZPP_ANNOUNCE_HYPERVISOR_BIT
+    "Set CPUID leaf 1 ECX bit 31 - you are virtualized - without advertising a hypervisor interface block. The bit and the block are different claims: the block makes Windows' hypervisor stand down, the bit decides which VBS path it takes. See nested_vmx.h."
+    OFF)
+
 option(ZPP_CENSUS_EXITS
     "Fill the exit ring's qualification, activity state and CS selector, and the CPL census beside them. Three VMCS reads on every exit, which is 7.8 per round trip at the measured 2.61 exits per round trip, and every one of them is an exit to KVM on a host without VMCS shadowing. OFF: the ring still records the reason, the instruction pointer and the guest-physical address, and the terminal records keep their full detail. See nested_vmx.h."
     OFF)
@@ -231,6 +235,7 @@ target_compile_options(zpp_hypervisor PRIVATE
     -DZPP_CENSUS_EXITS=$<BOOL:${ZPP_CENSUS_EXITS}>
     -DZPP_SAMPLE_L1=$<BOOL:${ZPP_SAMPLE_L1}>
     -DZPP_WATCH_VTL_BLOCK=$<BOOL:${ZPP_WATCH_VTL_BLOCK}>
+    -DZPP_ANNOUNCE_HYPERVISOR_BIT=$<BOOL:${ZPP_ANNOUNCE_HYPERVISOR_BIT}>
     # **Three switches added in one session never reached the compiler
     # because they were declared in the top-level CMakeLists, forwarded
     # to this sub-build's cache, and then not added to this list.** The

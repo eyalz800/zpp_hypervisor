@@ -136,6 +136,9 @@ extern "C" [[gnu::used, gnu::retain]] constinit const char
         // The IUM block watch. On, a live kernel stack page loses
         // write permission and every write to it is an exit, so a run
         // with this on is not comparable with one without.
+        // Whether the guest is told it is virtualized at all.
+        ' ', 'h', 'v', 'b', 'i', 't', '=',
+        digit(nested_vmx::announce_hypervisor_bit),
         ' ', 'b', 'l', 'k', 'w', '=',
         digit(nested_vmx::watch_vtl_block),
         ' ', 'v', 't', 'l', 'c', 'a', 'p', '=',

@@ -785,6 +785,44 @@ is not there" and is really "the wrong question was asked". `x` is the
 virtual read. The same distinction is why a wide `xp` over a device BAR
 lied, further down this file.
 
+## The hypervisor-present bit is separable from the block, and changes nothing
+
+`ZPP_ANNOUNCE_HYPERVISOR_BIT` sets CPUID leaf 1 ECX bit 31 - "you are
+virtualized" - **without** advertising an interface block at `0x40000000`.
+The two had been coupled through `announce_hypervisor = evmcs_offered`, and
+the note on that coupling says they "cannot be separated". **They can: they
+are different claims.** The bit says a hypervisor is present; the block says
+which one and what it offers.
+
+**Result, measured:**
+
+    hvbit=1   HvCallModifyVtlProtectionMask   39,264 calls   (unchanged)
+              VTL block rbx  0x100000400                     (state 4, unchanged)
+              ring 3         0 of 20 samples                 (unchanged)
+              vmon present, no vmoff        -> the guest did NOT stand down
+
+**Two things settled.**
+
+**The separation works.** With the full block (`ZPP_EVMCS=ON`) Windows'
+hypervisor probes it and quits - `vmon`, ninety-nine `vmwrite`s, one
+`vmlaunch`, `vmclear`, `vmoff`. With the bit alone it does not: it runs
+normally, a million second-level entries in seven minutes. **So the
+stand-down is caused by the block, not by the knowledge of being
+virtualized**, which the coupling had made impossible to tell apart.
+
+**And it is not the blocker.** The `cpuid` handler's comment reasons that a
+guest believing itself on bare metal "applies bare metal requirements to
+virtualization-based security, Secure Boot among them, and this rig reports
+Secure Boot unsupported". That is a good argument and it is **wrong here**:
+told it is virtualized, the guest reaches exactly the same state 4, the same
+39,264 protection calls, and the same 8 Hz loop. **Hyper-V's VBS decision is
+not driven by that bit.**
+
+**Kept rather than reverted**, off by default, because the separation it
+demonstrates is worth having: any future question of the form "does the guest
+behave differently when it knows it is virtualized" is now one switch, and
+does not require accepting the stand-down that comes with the block.
+
 ## State 4 is reproducible, and the "different state" was the broken instrument's guest
 
 Booted clean - `blkw=0`, watch off, 8 processors - and the block reads the

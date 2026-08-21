@@ -235,6 +235,44 @@ inline constexpr bool evmcs_offered =
  * That is a question about what the whole block claims. `BACKLOG.md` has
  * the census.
  */
+/**
+ * Set CPUID leaf 1 ECX bit 31 - "you are virtualized" - **without**
+ * advertising a hypervisor interface block at `0x40000000`.
+ *
+ * **These are two different claims and the coupling above conflates
+ * them.** The bit says only that a hypervisor is present. The block says
+ * *which* hypervisor and what it offers, and it is the block that makes
+ * Windows' own hypervisor stand down: with `ZPP_EVMCS=ON` it probes the
+ * block, executes `vmon`, `vmptrld`, ninety-nine real `vmwrite`s, one
+ * `vmlaunch`, then `vmclear` and `vmoff`. It declines to run under an
+ * announced peer.
+ *
+ * The bit alone has never been tried, and it is the half that decides a
+ * different question: **which virtualization-based-security path the
+ * guest takes.** The `cpuid` handler's own comment states the stake -
+ * "a guest that believes it is on bare metal applies bare metal
+ * requirements to virtualization-based security, Secure Boot among them,
+ * and this rig reports Secure Boot unsupported. A guest that knows it is
+ * virtualized takes the nested path instead."
+ *
+ * Currently the bit is **clear**, because `announce_hypervisor` follows
+ * `evmcs_offered` and eVMCS is off - so Hyper-V believes it is on bare
+ * metal and applies bare-metal VBS requirements on a machine that cannot
+ * meet them. That is a candidate explanation for a VBS state machine
+ * that initialises and then will not advance.
+ *
+ * Off by default because it is a claim about the machine and an untested
+ * one. On, expect either the guest to take a different VBS path - which
+ * is the point - or to stand down as it does for the full block, which
+ * would show as `vmoff` and settle the question the other way.
+ */
+#ifndef ZPP_ANNOUNCE_HYPERVISOR_BIT
+#define ZPP_ANNOUNCE_HYPERVISOR_BIT 0
+#endif
+
+inline constexpr bool announce_hypervisor_bit =
+    (0 != ZPP_ANNOUNCE_HYPERVISOR_BIT);
+
 inline constexpr bool announce_hypervisor = evmcs_offered;
 
 inline constexpr bool enabled =
