@@ -10018,6 +10018,31 @@ private:
      * one is only the moments a trust-level call is made.
      */
     std::uint64_t vtl_call_vtpr[max_cpus][16]{};
+
+    /**
+     * Wall-clock gaps between consecutive `HvCallVtlCall`s, as a
+     * power-of-two histogram over time-stamp counter ticks.
+     *
+     * **Every quantity this investigation has produced is a rate**, and a
+     * rate divides away the one thing that distinguishes the two
+     * explanations left: nine round trips a second is equally consistent
+     * with a loop delayed a little on every iteration and with one
+     * delayed enormously on a few. Those want opposite fixes.
+     *
+     * The signature that made this worth measuring: removing 14% of the
+     * exits raised the exits *per round trip* from ~880 to ~1,120 while
+     * lowering the completed round trips - work per iteration up,
+     * iterations down. That is a latency being paid, not a throughput
+     * being consumed, and no counter here measures one.
+     *
+     * Bucket `n` holds gaps of `2^n` to `2^(n+1)-1` cycles, so at
+     * 1.992 GHz bucket 21 is about a millisecond and bucket 31 about a
+     * second.
+     */
+    std::uint64_t vtl_call_gap_buckets[max_cpus][40]{};
+
+    /** When the last `HvCallVtlCall` was seen, for the histogram above. */
+    std::uint64_t vtl_call_last_tsc[max_cpus]{};
     /** @} */
     /** @} */
     /** @} */

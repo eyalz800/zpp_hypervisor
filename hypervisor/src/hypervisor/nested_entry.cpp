@@ -8628,6 +8628,32 @@ hypervisor::on_l2_exit(std::size_t cpu,
                                           4) &
                                          0xf] += 1;
 
+                // And how long since the last one. See
+                // `vtl_call_gap_buckets`: a rate cannot tell a loop
+                // delayed a little every iteration from one delayed
+                // enormously on a few, and those want opposite fixes.
+                auto call_now = arch::x86_64::rdtsc();
+
+                if (0 != this->vtl_call_last_tsc[cpu]) {
+                    auto gap = call_now - this->vtl_call_last_tsc[cpu];
+
+                    // Index by the position of the highest set bit, so
+                    // bucket n holds 2^n up to 2^(n+1)-1.
+                    std::size_t bucket{};
+                    while ((gap >> bucket) > 1) {
+                        bucket = bucket + 1;
+                    }
+
+                    if (bucket >= std::size(this->vtl_call_gap_buckets[0])) {
+                        bucket =
+                            std::size(this->vtl_call_gap_buckets[0]) - 1;
+                    }
+
+                    this->vtl_call_gap_buckets[cpu][bucket] += 1;
+                }
+
+                this->vtl_call_last_tsc[cpu] = call_now;
+
                 constexpr std::uint64_t kernel_address_floor =
                     0xffff800000000000;
 

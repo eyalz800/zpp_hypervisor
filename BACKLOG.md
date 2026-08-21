@@ -36351,3 +36351,53 @@ Two things follow that are worth more than the number:
 between consecutive `HvCallVtlCall`s**, not another rate. A rate divides
 away exactly the structure that matters: whether the loop is paced by many
 small delays or a few large ones, and 9 Hz is equally consistent with both.
+
+## The gap distribution is BIMODAL, and 14% of the iterations own 61% of the time
+
+The first latency measurement in this investigation, and it shows what every
+rate divided away.
+
+    bucket    gap        count     share   cumulative
+    2^20     0.53 ms     1,085     4.0%      4.0%
+    2^21     1.05 ms     6,878    25.5%     29.5%
+    2^22     2.11 ms    11,080    41.1%     70.6%    <- fast mode
+    2^23     4.21 ms     2,537     9.4%     80.0%
+    2^24     8.42 ms        21     0.1%     80.1%    <- almost nothing here
+    2^25    16.84 ms     1,174     4.4%     84.4%
+    2^26    33.69 ms     3,677    13.6%     98.1%    <- slow mode
+    2^27    67.38 ms       454     1.7%     99.8%
+
+**Two modes with a hole between them.** Bucket 24 - 8 ms, exactly between
+them - holds 21 samples out of 26,972. A loop that was uniformly slow, or
+slowed by a cost paid on every iteration, produces one broad mode. This is
+two populations.
+
+Weighted by time rather than count, which is the way round that matters:
+
+    bucket 22   11,080 x ~3 ms    =  33 s
+    bucket 26    3,677 x ~50 ms   = 184 s   <- 61% of a ~300 s run
+    bucket 27      454 x ~100 ms  =  45 s
+
+**Fourteen per cent of the iterations consume sixty-one per cent of the
+wall time.** The loop is not slow. It is fast, and then it stalls for 34 to
+67 milliseconds, several thousand times.
+
+That also explains the shape of the earlier confusion. The *fast* mode at
+2-4 ms is what the VSM setup phase runs at, which is why the cumulative
+rate looked high early and settled later; the *slow* mode is the steady
+state. And ~50 ms is about thirty clock periods at 574.7 Hz, which is where
+"sixty-four ticks between calls" came from - that figure was an average
+across both modes and describes neither.
+
+**So the question is now specific and small: what takes 34 to 67
+milliseconds, several thousand times, between one `HvCallVtlReturn` and the
+next `HvCallVtlCall`?** Not "why is the guest slow" - it is not slow - but
+what single event costs fifty milliseconds. That is a long time: it is
+thirty clock ticks, or about four hundred thousand exits' worth of handler
+at the measured per-exit cost, and nothing measured so far takes anything
+like it.
+
+The instrument that answers it is the one already built: `ZPP_STEP_VTL`
+traces the VTL0 half, and it needs to be armed on a *long* gap rather than
+the next one - the 2048 steps taken so far landed in the fast mode, which is
+why they showed nothing but a clock interrupt.

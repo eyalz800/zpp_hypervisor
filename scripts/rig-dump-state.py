@@ -2252,6 +2252,7 @@ def main():
                "shadow_ept_recall_root", "shadow_ept_current_slot",
                "vtl_call_rdx", "vtl_call_block", "vtl_call_block_read",
                "vtl_call_block_physical", "vtl_call_vtpr",
+               "vtl_call_gap_buckets",
                "vmcs_shadow_loads", "vmcs_shadow_stores",
                "vmcs_field_read_encoding", "vmcs_field_read_count",
                "vmcs_field_write_encoding", "vmcs_field_write_count",
@@ -2363,6 +2364,7 @@ def main():
                "shadow_ept_recall_root", "shadow_ept_current_slot",
                "vtl_call_rdx", "vtl_call_block", "vtl_call_block_read",
                "vtl_call_block_physical", "vtl_call_vtpr",
+               "vtl_call_gap_buckets",
                "vmcs_shadow_loads",
                "vmcs_shadow_stores",
                "guest_state_writes_skipped", "guest_state_writes_done",
@@ -2437,6 +2439,7 @@ def main():
     monitor.queue(instance + off["vtl_call_block_read"], scalar_cpus)
     monitor.queue(instance + off["vtl_call_block_physical"], scalar_cpus)
     monitor.queue(instance + off["vtl_call_vtpr"], scalar_cpus * 16)
+    monitor.queue(instance + off["vtl_call_gap_buckets"], scalar_cpus * 40)
 
     # Ten dispositions per processor - `none` through `pointer_failed`.
     monitor.queue(instance + off["l2_ept_dispositions"], scalar_cpus * 10)
@@ -3022,6 +3025,24 @@ def main():
                             ("  <- admits both" if i < 2 else ""))
                     print(f"    class {i:2d} (0x{i << 4:02x})  {c:9,d}  "
                           f"{100.0 * c / vtotal:5.1f}%{note}")
+        # The latency distribution. A rate cannot separate "delayed a
+        # little every iteration" from "delayed enormously on a few",
+        # and those want opposite fixes.
+        gaps = [read('vtl_call_gap_buckets', 0 * 40 + i) or 0
+                for i in range(40)]
+        gtotal = sum(gaps)
+        if gtotal:
+            print("  gaps between consecutive trust-level calls "
+                  f"({gtotal:,} of them):")
+            run = 0
+            for i, c in enumerate(gaps):
+                if not c:
+                    continue
+                run += c
+                lo = (1 << i) / 1.992e9
+                print(f"    2^{i:<2d} {lo * 1e6:12,.1f} us  {c:9,d}  "
+                      f"{100.0 * c / gtotal:5.1f}%  "
+                      f"(cumulative {100.0 * run / gtotal:5.1f}%)")
         print(f"  STATUS        = 0x{status:08x}"
               + ("  <- an NTSTATUS error" if signed < 0 else
                  "  (success or not an error)"))
