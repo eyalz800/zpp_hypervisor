@@ -785,6 +785,39 @@ is not there" and is really "the wrong question was asked". `x` is the
 virtual read. The same distinction is why a wide `xp` over a device BAR
 lied, further down this file.
 
+## State 4 is reproducible, and the "different state" was the broken instrument's guest
+
+Booted clean - `blkw=0`, watch off, 8 processors - and the block reads the
+same as every other healthy boot:
+
+    rbx    first 0x100000400   latest 0x100000400     <- state 4
+    HvCallModifyVtlProtectionMask   39,264 calls
+    ring 3                          0 of 15 samples
+
+**Both the `first` and `latest` columns are `0x100000400`**, so the state was
+4 from the first switch the instrument ever saw and has never been anything
+else in this boot.
+
+**Correcting an observation from the previous section.** The `rbx = 0x1000002`
+seen with the block watch armed - state byte 0, which *is* handled - was read
+from the boot the watch **froze at 22,308 exits**. That guest never reached
+the state under study; it was stopped long before. It is not evidence of a
+second failure mode, and reading it as one would have sent the next session
+looking for a timing-dependent divergence that does not exist.
+
+**The rule this is an instance of, which this file has now paid for twice in
+one session**: a measurement taken from a guest that a diagnostic has
+perturbed describes the diagnostic, not the guest. The `schedstat` 100%
+reading was the first; this is the second. **Check that the guest is still
+healthy before quoting anything measured while an invasive switch was on** -
+`exits` against a known-good boot is the cheapest possible test and takes one
+line.
+
+**So the picture is stable and reproducible across boots**: protection-mask
+calls stop at ~39,26x, the IUM state settles at 4, the dispatch has no case
+for 4, the loop runs at 8 Hz with a byte-identical block, and ring 3 is never
+reached.
+
 ## The IUM block watch: a memory breakpoint the guest does not survive
 
 **The idea is right and this target is wrong**, and both halves are worth
