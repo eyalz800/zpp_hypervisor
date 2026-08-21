@@ -37018,3 +37018,42 @@ of the same to do. Both counters are already recorded per boot, so two dumps
 during the setup phase - before it freezes - would show whether the rate
 decays to zero or is cut off, and that is a different measurement from
 anything taken so far.
+
+## `ModifyVtlProtectionMask` never fails. Censused over all 39,272 calls
+
+Asked directly whether something fails inside it. It does not:
+
+    non-zero statuses                    0        never failed
+    answers short of the reps asked      0
+    reps asked 71,093   reps done 71,137          all completed
+
+Over **every** call, not the sixteen-entry ring - which matters, because the
+ring holds 16 of 39,272 and this file has been misled seven times by reading
+a sample as a census. The 44-rep excess is an accounting artifact: a handful
+of early calls had no recorded ask value to subtract.
+
+**Every protection change the guest requested succeeded, including the bulk
+`reps=256` forms.** So the fault is not in the hypercall, its status, its
+rep accounting, or this VMM's handling of it.
+
+### And the three counters are severed together, not decayed
+
+Sampled through the setup phase rather than after it:
+
+    t       code-0    pfn calls   protect    vtl calls
+    ~100 s  10,882      3,408     24,551      11,649
+    ~200 s  20,132      6,979     38,765      21,441
+    ~300 s  20,992      7,209     39,272      23,079    <- all three stop
+    ~430 s  20,992      7,209     39,272      23,974
+    ~900 s  20,992      7,209     39,272      26,020
+
+**All three freeze in the same interval while the trust-level call count
+goes on climbing.** A walk that ran out of work would taper; these are cut
+off mid-stride, and one event stops all three at once. The loop that
+survives is carrying VINA notifications and nothing else.
+
+**So the question moves upstream of the hypercall entirely**: not "what
+fails in `ModifyVtlProtectionMask`" - nothing does - but *what the guest was
+doing between protection calls that it stopped being able to do*. The three
+frozen counters are all effects of the same secure-kernel work item, and it
+is that work item, not any of its outputs, that ends.

@@ -10203,6 +10203,33 @@ private:
      * on a walk the ring plainly shows stepping by one.
      */
     std::uint64_t vtl_code0_last_pfn[max_cpus]{};
+
+    /**
+     * Every status `HvCallModifyVtlProtectionMask` has ever returned, and
+     * every short rep count, counted over all calls.
+     *
+     * **The ring holds sixteen of thirty-nine thousand calls.** A single
+     * failure anywhere in the run - which is exactly the shape that would
+     * stop the walk - is invisible in it unless it happens to be among the
+     * last sixteen, and this file has now been misled seven times by
+     * reading a sample as if it were a census.
+     *
+     * `reps_short` counts answers whose completed-rep count is less than
+     * the requested one, which is how a rep hypercall reports partial
+     * progress: the status can be success while fewer pages were done
+     * than asked for, and the guest is then expected to resume from the
+     * rep-start index. A guest that never resumes, or a VMM that loses
+     * the partial answer, stops exactly here.
+     */
+    std::uint64_t vtl_protect_status_seen[max_cpus][16]{};
+    std::uint64_t vtl_protect_failures[max_cpus]{};
+    std::uint64_t vtl_protect_last_failure[max_cpus]{};
+    std::uint64_t vtl_protect_reps_short[max_cpus]{};
+    std::uint64_t vtl_protect_reps_asked[max_cpus]{};
+    std::uint64_t vtl_protect_reps_done[max_cpus]{};
+
+    /** The rep count of the call whose answer is outstanding. */
+    std::uint64_t vtl_protect_reps_pending[max_cpus]{};
     /** @} */
     /** @} */
     /** @} */

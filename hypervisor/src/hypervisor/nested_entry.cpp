@@ -8682,6 +8682,13 @@ hypervisor::on_l2_exit(std::size_t cpu,
                 this->vtl_protect_answer_slot[cpu] = slot;
                 this->vtl_protect_answer_pending[cpu] = true;
 
+                // What this call asked for, so the answer can be
+                // compared against it. See `vtl_protect_reps_short`.
+                this->vtl_protect_reps_pending[cpu] =
+                    (0 != (context.rcx & (1ull << 16)))
+                        ? 1
+                        : ((context.rcx >> 32) & 0xfff);
+
                 count = count + 1;
             }
 

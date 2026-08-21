@@ -2116,6 +2116,31 @@ bool hypervisor::on_guest_vmlaunch(std::size_t cpu,
             if (slot < vtl_protect_capacity) {
                 this->vtl_protect_rax[cpu][slot] = context.rax;
             }
+
+            // And the census. See `vtl_protect_status_seen`: the ring
+            // above holds sixteen of thirty-nine thousand calls, so a
+            // single failure - the exact shape that would stop the walk -
+            // is invisible in it.
+            if (cpu < max_cpus) {
+                auto status = context.rax & 0xffff;
+                auto done = (context.rax >> 32) & 0xfff;
+
+                this->vtl_protect_status_seen[cpu][status & 0xf] += 1;
+
+                if (0 != status) {
+                    this->vtl_protect_failures[cpu] += 1;
+                    this->vtl_protect_last_failure[cpu] = context.rax;
+                }
+
+                auto asked = this->vtl_protect_reps_pending[cpu];
+
+                this->vtl_protect_reps_asked[cpu] += asked;
+                this->vtl_protect_reps_done[cpu] += done;
+
+                if ((0 != asked) && (done < asked)) {
+                    this->vtl_protect_reps_short[cpu] += 1;
+                }
+            }
         }
 
         publish_reference_tsc_page(cpu);

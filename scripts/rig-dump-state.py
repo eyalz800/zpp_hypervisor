@@ -2260,6 +2260,9 @@ def main():
                "vtl_block_changes", "vtl_code0_param_changes", "vtl_code0_ring",
                "vtl_code0_count", "vtl_code0_min_pfn", "vtl_code0_max_pfn",
                "vtl_code0_consecutive", "vtl_code0_pfn_calls",
+               "vtl_protect_failures", "vtl_protect_last_failure",
+               "vtl_protect_reps_short", "vtl_protect_reps_asked",
+               "vtl_protect_reps_done",
                "vmcs_shadow_loads", "vmcs_shadow_stores",
                "vmcs_field_read_encoding", "vmcs_field_read_count",
                "vmcs_field_write_encoding", "vmcs_field_write_count",
@@ -2379,6 +2382,9 @@ def main():
                "vtl_block_changes", "vtl_code0_param_changes", "vtl_code0_ring",
                "vtl_code0_count", "vtl_code0_min_pfn", "vtl_code0_max_pfn",
                "vtl_code0_consecutive", "vtl_code0_pfn_calls",
+               "vtl_protect_failures", "vtl_protect_last_failure",
+               "vtl_protect_reps_short", "vtl_protect_reps_asked",
+               "vtl_protect_reps_done",
                "vmcs_shadow_loads",
                "vmcs_shadow_stores",
                "guest_state_writes_skipped", "guest_state_writes_done",
@@ -2431,6 +2437,10 @@ def main():
     for name in ("vtl_protect_rcx", "vtl_protect_rdx", "vtl_protect_rax"):
         monitor.queue(instance + off[name], scalar_cpus * 32)
     monitor.queue(instance + off["vtl_protect_count"], scalar_cpus)
+    for _n in ("vtl_protect_failures", "vtl_protect_last_failure",
+               "vtl_protect_reps_short", "vtl_protect_reps_asked",
+               "vtl_protect_reps_done"):
+        monitor.queue(instance + off[_n], scalar_cpus)
     monitor.queue(instance + off["vtl_call_rcx"], scalar_cpus)
     monitor.queue(instance + off["guest_leaf_permissions"], scalar_cpus * 8)
     monitor.queue(instance + off["shadow_leaf_permissions"],
@@ -2911,6 +2921,18 @@ def main():
               f"code=0x{c_code:x} fast={c_fast} reps={c_reps} "
               f"start={c_start}  <- {verdict}")
 
+        f = read("vtl_protect_failures", cpu) or 0
+        sh = read("vtl_protect_reps_short", cpu) or 0
+        ra = read("vtl_protect_reps_asked", cpu) or 0
+        rd = read("vtl_protect_reps_done", cpu) or 0
+        print(f"cpu {cpu} ModifyVtlProtectionMask census over ALL calls "
+              f"(the ring below is only the last few):")
+        print(f"    non-zero statuses {f:,}"
+              + (f"   last rax 0x{read('vtl_protect_last_failure', cpu):x}"
+                 if f else "   <- never failed"))
+        print(f"    answers short of the reps asked: {sh:,}")
+        print(f"    reps asked {ra:,}  reps done {rd:,}"
+              + ("   <- SHORTFALL" if rd < ra else "   <- all completed"))
         print(f"cpu {cpu} HvCallModifyVtlProtectionMask: {total:,} calls")
         cap = 32
         order = ([(total - cap + i) % cap for i in range(cap)]
