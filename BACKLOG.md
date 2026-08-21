@@ -35231,3 +35231,64 @@ A non-zero disagreement count means everything indexed by it is
 misattributed. The old justification for `gs_data` was that counters
 indexed by it "landed entirely on processor zero, which is where the work
 was" - which is equally consistent with GS always reading zero.
+
+## Retraction: state 4 is not an unhandled state. It is the "no request" arm, and VTL0 is behaving correctly
+
+**The headline this tree has carried for several sessions - "the IUM state
+machine has no case for state 4, so every pass falls through" - is
+withdrawn.** It was drawn from a *truncated* read of
+`VslpEnterIumSecureMode`: 960 bytes of a `0x49c`-byte routine, which stops
+four instructions before the arm that answers the question. The conclusion
+survived the truncation in the sense that the loop is real; the *description*
+of why it loops did not.
+
+Re-derived from `syms/ntoskrnl.exe`, which was on disk the whole time, so
+this needed no boot and no guest:
+
+    0038df01  movzbl 0x1(%rbx), %eax     <- the state byte, bit 7 = debug flag
+    0038df12  cmpb $1  je 0038df8f
+    0038df16  cmpb $6  je 0038df77
+    0038df2e  movzbl 0x1(%rbx), %ecx
+    0038df32  cmpb $3  jne 0038e009      <- 3 = dispatch a system call
+    0038e009  testb %cl,%cl  je 0038e0e2 <- 0
+    0038e011  cmpb $2  jne 0038e0d9      <- 2 = guarded syscall path
+    0038e0d9  cmpb $5  jne 0038df53      <- 5 joins 0; EVERYTHING ELSE -> 0038df53
+    0038df53  xorl %r8d,%r8d ... movb $0,(%rbx) ... jmp 0038de5d
+    0038e103  callq <the VTL1 switch>
+    0038e10e  jmp 0038df01               <- the loop closes here
+
+So the dispatch is complete: `0 1 2 3 5 6` are requests, and **`4` (with
+`7`+) is the default arm - clear the request word and re-enter VTL1.** That
+is not a missing case. That is "VTL1 had nothing to ask for, put it back".
+
+**Consequences, and they invert the search.**
+
+- **VTL0 is doing the right thing.** `Phase1Initialization` sitting in this
+  loop is not a symptom of ntoskrnl being confused by a value it does not
+  understand. It is a service loop faithfully servicing a peer that keeps
+  saying "nothing".
+- **The stuck side is VTL1**, and every measurement aimed at ntoskrnl's
+  state was therefore aimed at the half that is working. The observed block
+  `00 04 00 00 01 00 00 00`, identical across 12 polls over two minutes, is
+  not evidence of a wedged state machine - it is what an idle request slot
+  looks like.
+- **"Who writes the state byte to 4" was the wrong question**, and it was
+  the open question this tree was carrying. Nothing needs to write it to 4
+  for a reason; 4 is what "no request" is spelled as.
+
+**What makes this worth more than the fact:** the truncation was *known* at
+the time - it is recorded as "read 0x3c0 of a 0x49c routine ... bound by the
+next symbol, not a round number" - and the conclusion was allowed to stand
+anyway because it was checked for plausibility rather than for completeness.
+A dispatch chain read to `n-1` arms cannot tell you the `n`th arm is absent;
+it can only tell you it was not among the ones read. **When the shape of a
+claim is "there is no case for X", the read has to reach the default.**
+
+**The question that replaces it:** does VTL1 execute at all under this VMM?
+Two readings already in this file point the same way and were never put
+together - the profile's 99.76% of second-level entries sit at eight
+instruction pointers and *every one of them is in ntoskrnl's clock path*,
+with no securekernel address among them; and the other stuck state parks in
+`SkeCrashDumpNmi+0x1aa` (`pause; jmp $-2`), which proves VTL1 *can* run far
+enough to crash. A VTL1 that is entered and immediately returns with no
+request would produce exactly the loop measured here.
