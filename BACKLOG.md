@@ -38184,3 +38184,36 @@ per-selection lock.
 structures are readable at will, at the right moment, from both sides - the
 VMM at the call and the monitor at rest. The offsets came from the
 instructions. **Nothing here needed a symbol.**
+
+## The VTL0 side, verified by arithmetic: it holds no loop of its own
+
+Disassembled `VslpLockPagesForTransfer` and confirmed the call chain by
+address rather than by trusting a nearest-symbol match - the public symmap
+resolves this region under a neighbouring export, so the names alone would
+have been wrong:
+
+    14025dd24  callq 0x14025debc      -> returns to +0x16d, the stack frame
+    14025dd29  movl  %eax, %r15d         seen at the freeze
+    14025dd2c  testl %eax, %eax
+    14025dd2e  js    error
+    14025dd39  orl   $0x8, 0x40(%rax)
+    14025dd3d  xorl  %eax, %eax          return success
+    14025dd4e  retq
+
+`0x25debc` is `VslpLockMdlForTransfer` - its `+0x44` is `0x25df00`, which
+was symbolised independently from the earlier stack - so the chain
+`VslpLockPagesForTransfer -> VslpLockMdlForTransfer ->
+VslpEnterIumSecureMode` is verified by two independent address facts rather
+than by one name lookup.
+
+**And VTL0's side holds no loop.** It calls, tests the status, sets a flag
+and returns. Every iteration in this hang belongs to
+`VslpEnterIumSecureMode`, which is already disassembled, and to the secure
+kernel. There is nothing further to find on the normal-kernel side.
+
+One constant worth recording for whoever continues: `cmpq $0x1fa000, %r8`
+at `14025dd68` caps a transfer at just under 2 MB, so the caller is
+chunking a larger region - which is consistent with ~39,270 protection
+calls being many separate `SkmiProtectPageRange` invocations rather than
+one walk, and with `r15 = 1` being the last page of *a* batch rather than
+of everything.
