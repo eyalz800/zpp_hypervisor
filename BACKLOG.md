@@ -785,7 +785,54 @@ is not there" and is really "the wrong question was asked". `x` is the
 virtual read. The same distinction is why a wide `xp` over a device BAR
 lied, further down this file.
 
-## THE APPLICATION PROCESSORS ARE NOT HALTED. They are at 100% CPU in an interrupt storm
+## Qualifying "interrupt storm": they are spinning at 100%, and where is not yet established
+
+**The 100% is solid. The word "storm" was one inference too far**, and the
+inference depended on a reading the act of taking it perturbs.
+
+**What is confirmed, and it is passive.** Over a 20-second window with **no**
+monitor reads at all:
+
+    signal_exits   7017 -> 7017   (delta 0 - nothing kicked the vCPUs)
+    all eight threads              99.8% - 100.0%
+
+`signal_exits` is QEMU kicking a vCPU with a signal to force it out of guest
+mode, which is what `info registers` needs. Zero of them means the processors
+**never left guest mode** during that window, and the CPU burn is measured by
+the host scheduler, which needs no cooperation from the guest. So: **eight
+processors executing guest code continuously, not exiting, not halted.**
+
+**What is *not* established is where.** The claim above reasoned from the
+sampled instruction pointer sitting immediately after a `hlt`. But reading
+that pointer requires QEMU to kick the vCPU, and **a kick is itself an
+interrupt that would wake a halted processor and leave it exactly there.**
+The reading and the hypothesis it supports are not independent.
+
+Two readings remain consistent with 100% CPU and neither is settled:
+
+- the `hlt` returns immediately every time because something is pending -
+  the storm reading; or
+- the `jg` skips the `hlt` entirely because `gs:[0x340]` is non-zero, and
+  the caller loops - a plain spin that never halts at all.
+
+**They want different fixes**, which is why the distinction is worth the
+care: one is an interrupt that should not be arriving, the other is a flag
+that should have been cleared.
+
+**What would settle it**: uncontaminated instruction pointers, which means
+making the processors exit *on their own* rather than being kicked - the VMX
+preemption timer armed in **vmcs01** at setup, so every processor exits
+periodically and records its own RIP from inside. `arm_controller_poll`
+already arms that timer but only from an exit path, and these processors do
+not exit, so it never reaches them. That is the chicken-and-egg to break.
+
+**The observer-effect lesson generalises past this bug**: `info registers` on
+a vCPU that is not exiting is not a passive read. It forces the exit it then
+reports on. Prefer host-side accounting - `schedstat`, `signal_exits` - for
+any question of the form "is this processor doing anything", and treat
+guest-state reads as an intervention.
+
+## THE APPLICATION PROCESSORS ARE NOT HALTED. They are at 100% CPU (see the qualification above)
 
 **This overturns the reading that has driven the last several sections**, and
 the mistake was mine: every "the APs are dead / halted / have no wake source"
