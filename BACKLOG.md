@@ -38462,3 +38462,40 @@ physical address `xp` resolves, and whether wide reads survive that
 particular bar. The first shows as `none - the loader found no graphics
 output protocol` in the state dump, the second as a frame of one repeated
 value with the note that says so, and the third as the calibration verdict.
+
+## The screen is readable, and it shows a spinner over our own trace
+
+The GOP hand-over works on the rig. The firmware's framebuffer is
+**0x7000000000, 1920x1080, stride 1920, BGRX**, and `scripts/rig-screen.py`
+reads it through the monitor. Captured at full resolution and looked at:
+
+- the framebuffer still holds **this loader's own trace**, ending at
+  `ZPP_TRACE chainloading \EFI\Microsoft\Boot\bootmgfw.efi`;
+- the **Windows boot spinner** is drawn at about x=965, y=838, on top of
+  that text - it overwrites the word `flags` on the `cpu 4 apic 0x0004`
+  line;
+- the animation test reports one cell of 2,400 changing per frame, which
+  is that arc turning.
+
+**Three things this settles that no counter could:**
+
+1. **There is no bugcheck and no error text.** Windows is not reporting a
+   failure - `KiBugCheckData` never needs reading, because the screen is
+   plainly a spinner and not a stop screen.
+2. **Windows never cleared the framebuffer and never drew its logo.** A
+   normal boot blanks the screen and centres a logo above the spinner.
+   Here only the spinner is drawn, over our leftover text - so its boot
+   graphics came up partially.
+3. **The spinner really is animating**, which confirms by direct
+   observation what was previously only inferred from the clock path.
+
+**This closes a gap CLAUDE.md records as impossible**: "the display is a
+passed-through GPU, so QEMU answers `screendump` with 'There is no console
+to take a screendump from'... Read `KiBugCheckData` instead". That was true
+of `screendump` and not of the framebuffer, which is ordinary memory at an
+address the firmware will tell you if you ask it. **The loader was always
+the right place to ask, and nobody had.**
+
+Use it: `scripts/rig-dump-state.py` prints the exact command line, and
+`--passes N` turns it into an animation detector that needs no eye on the
+monitor.
