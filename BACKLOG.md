@@ -36706,3 +36706,43 @@ for when VINA is clear? It selects a thread, does not run it, and returns
 `STATUS_SUCCESS` - and on four fifths of those it was not reporting a
 pending interrupt at all. `ZPP_STEP_VTL` traces the VTL1 path and the branch
 taken there is what names it.
+
+## The VINA counter was sampled after the flag is cleared. Two traces say the branch IS taken
+
+**The previous entry's "set at only 19% of yields, so VINA is not the
+livelock" is withdrawn, and the reason is a timing error in the
+instrument.**
+
+A second `ZPP_STEP_VTL` trace, from an independent boot, walks the same path
+as the first:
+
+    SkpReturnFromNormalMode -> SkiSelectThread
+      -> SkiUpdateXStateForVtlTransition -> SkiSelectThread
+      -> KiVinaInterruptShadow -> KiVinaInterrupt -> ShvlVinaHandler
+      -> __memset_spec_ermsb -> ShvlVinaHandler -> SkCallNormalMode
+      -> SkpPrepareForNormalCall -> SkiDeselectThread -> return
+
+`__memset_spec_ermsb` inside `ShvlVinaHandler` is the `memmove` that zeroes
+the 0x68-byte block **on the taken branch** - the one that then writes
+`byte[1] = 4` and calls `SkCallNormalMode`. So **both traces took the VINA
+branch**, on two different boots.
+
+Meanwhile the counter added to measure exactly this reported the flag clear
+6,940 times against 356 set **in the same run as the second trace**. Both
+cannot be right, and the counter is what is wrong: **it reads the flag at
+the `HvCallVtlReturn`, which is after `KiVinaInterrupt` has handled and
+cleared it.** It measures the aftermath of the decision, not the decision.
+
+**A counter placed one step downstream of the thing it is counting reports
+the opposite of the truth**, and it reports it with a large, confident
+sample - 7,296 observations. Nothing about the number looked wrong. The only
+thing that caught it was an independent instrument disagreeing, which is the
+sixth time in this investigation that a second instrument was the whole
+difference.
+
+**To measure it correctly** the flag has to be read *before* VTL1 runs -
+at the `HvCallVtlCall`. VTL0 is the running guest there, so its GS is the
+wrong address space; the way round is to record the block's **physical**
+address once at a VtlReturn, then read that physical address at each
+VtlCall. The pointer chain is stable within a boot, so this is a small
+change to code that already exists.
