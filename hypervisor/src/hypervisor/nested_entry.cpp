@@ -8829,6 +8829,40 @@ hypervisor::on_l2_exit(std::size_t cpu,
                                 this->vtl_code0_previous[cpu][2] =
                                     this->vtl_call_block[cpu][2];
 
+                                // The span it covered, over the one
+                                // subcode that carries a page frame
+                                // number. See `vtl_code0_min_pfn`: the
+                                // block's second quadword is a PFN only
+                                // for this subcode and a kernel virtual
+                                // address for others, and mixing them
+                                // gives a span of billions.
+                                constexpr std::uint64_t pfn_subcode =
+                                    0x01010002;
+
+                                if (pfn_subcode == (word & 0xffffffff)) {
+                                    auto pfn = this->vtl_call_block[cpu][1];
+
+                                    if ((0 == this->vtl_code0_pfn_calls[cpu]) ||
+                                        (pfn < this->vtl_code0_min_pfn[cpu])) {
+                                        this->vtl_code0_min_pfn[cpu] = pfn;
+                                    }
+
+                                    if (pfn > this->vtl_code0_max_pfn[cpu]) {
+                                        this->vtl_code0_max_pfn[cpu] = pfn;
+                                    }
+
+                                    // Against its own previous value,
+                                    // captured before it is overwritten.
+                                    if ((0 != this->vtl_code0_pfn_calls[cpu]) &&
+                                        (pfn ==
+                                         (this->vtl_code0_last_pfn[cpu] + 1))) {
+                                        this->vtl_code0_consecutive[cpu] += 1;
+                                    }
+
+                                    this->vtl_code0_last_pfn[cpu] = pfn;
+                                    this->vtl_code0_pfn_calls[cpu] += 1;
+                                }
+
                                 seen = seen + 1;
                             }
                         }

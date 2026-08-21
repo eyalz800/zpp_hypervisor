@@ -36973,3 +36973,48 @@ few calls. Two independent counters halting together is one event, not two.
 what happens at PFN `0x11aacc` that ends the page walk?** Not why the loop
 spins - it spins because VINA is all that is left to send - but what stopped
 the work that was genuinely progressing up to that point.
+
+## The page walk, measured properly - and an instrument bug worth recording
+
+**First attempt reported a span of 13 billion pages and zero consecutive
+steps**, on a walk whose ring plainly shows page frame numbers stepping by
+one. Both halves were my own bugs:
+
+- the "consecutive" test compared against `vtl_code0_previous`, which is
+  updated **before** the comparison, so it could never differ by one;
+- the block's second quadword is a page frame number only for subcode
+  `0x01010002` and a *kernel virtual address* for others - the ring shows
+  `0xffffd5025447ff90` among them - and mixing the two gives a span of
+  billions.
+
+**A counter compared against a value already overwritten reads zero, and
+zero looks like a finding.** Fixed with a dedicated last-PFN variable and a
+subcode filter.
+
+Corrected:
+
+    page-walk span 0x11a483..0x13fe20 = 154,014 pages (601.6 MB)
+                   7,209 page requests, 6,297 consecutive (87%)
+
+**The walk is genuinely sequential** - 87% of steps advance by exactly one -
+but in roughly nine hundred separate runs averaging eight pages each,
+scattered over a 601 MB range and touching 7,209 pages of it. So the reader's
+"SHORT OF THE SPAN" verdict is **not meaningful for this shape**: it assumes
+one contiguous region and this is many small ones. That line should be
+removed or rewritten rather than believed - a verdict printed by an
+instrument is only as good as the shape it assumes, and this one assumed
+wrong.
+
+**What is solid**: the secure kernel walked ~7,209 pages in ~900 runs,
+across 601 MB, issuing memory-manager requests that all returned success -
+and then stopped, at the same moment `HvCallModifyVtlProtectionMask` stopped
+at ~39,266. Whether that constitutes finishing its work cannot be decided
+from the span alone, because the region set is scattered rather than
+contiguous.
+
+**What would decide it**: the walk's *rate* over time. A walk that finished
+stops cleanly at a boundary; a walk that is blocked stops mid-run with more
+of the same to do. Both counters are already recorded per boot, so two dumps
+during the setup phase - before it freezes - would show whether the rate
+decays to zero or is cut off, and that is a different measurement from
+anything taken so far.

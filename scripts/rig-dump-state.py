@@ -2258,7 +2258,8 @@ def main():
                "vina_at_call_set", "vina_at_call_clear",
                "vina_at_call_unread", "vtl1_duration", "vtl_call_request",
                "vtl_block_changes", "vtl_code0_param_changes", "vtl_code0_ring",
-               "vtl_code0_count",
+               "vtl_code0_count", "vtl_code0_min_pfn", "vtl_code0_max_pfn",
+               "vtl_code0_consecutive", "vtl_code0_pfn_calls",
                "vmcs_shadow_loads", "vmcs_shadow_stores",
                "vmcs_field_read_encoding", "vmcs_field_read_count",
                "vmcs_field_write_encoding", "vmcs_field_write_count",
@@ -2376,7 +2377,8 @@ def main():
                "vina_at_call_set", "vina_at_call_clear",
                "vina_at_call_unread", "vtl1_duration", "vtl_call_request",
                "vtl_block_changes", "vtl_code0_param_changes", "vtl_code0_ring",
-               "vtl_code0_count",
+               "vtl_code0_count", "vtl_code0_min_pfn", "vtl_code0_max_pfn",
+               "vtl_code0_consecutive", "vtl_code0_pfn_calls",
                "vmcs_shadow_loads",
                "vmcs_shadow_stores",
                "guest_state_writes_skipped", "guest_state_writes_done",
@@ -2458,6 +2460,9 @@ def main():
     monitor.queue(instance + off["vtl_block_changes"], scalar_cpus)
     monitor.queue(instance + off["vtl_code0_param_changes"], scalar_cpus)
     monitor.queue(instance + off["vtl_code0_count"], scalar_cpus)
+    for _n in ("vtl_code0_min_pfn", "vtl_code0_max_pfn",
+               "vtl_code0_consecutive", "vtl_code0_pfn_calls"):
+        monitor.queue(instance + off[_n], scalar_cpus)
     monitor.queue(instance + off["vtl_code0_ring"], scalar_cpus * 8 * 3)
     for _n in ("vina_gs_base", "vina_block", "vina_flags", "vina_read",
                "vina_set_count", "vina_clear_count",
@@ -3055,6 +3060,19 @@ def main():
                       f"({100.0 * ch / c0:.1f}%)"
                       + ("   <- one request repeated" if ch * 20 < c0 else
                          "   <- distinct requests"))
+                lo = read('vtl_code0_min_pfn', 0) or 0
+                hi = read('vtl_code0_max_pfn', 0) or 0
+                nc = read('vtl_code0_pfn_calls', 0) or 0
+                cons = read('vtl_code0_consecutive', 0) or 0
+                if nc:
+                    span = hi - lo + 1
+                    print(f"  page-walk span: 0x{lo:x}..0x{hi:x} "
+                          f"= {span:,} pages ({span * 4096 / 1048576:.1f} MB)"
+                          f", {nc:,} page requests, {cons:,} consecutive")
+                    print("    " + ("COVERED THE SPAN - the walk finished a "
+                                    "region, so the fault is in what should "
+                                    "happen next" if nc >= span * 0.9 else
+                                    "SHORT OF THE SPAN - it stopped inside"))
                 print("  the last code-0 blocks seen:")
                 for sl in range(8):
                     w = [read('vtl_code0_ring', (sl * 3) + k) or 0

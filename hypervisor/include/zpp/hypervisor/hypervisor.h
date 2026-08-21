@@ -10175,6 +10175,34 @@ private:
     std::uint64_t vtl_code0_previous[max_cpus][3]{};
     std::uint64_t vtl_code0_ring[max_cpus][8][3]{};
     std::uint64_t vtl_code0_count[max_cpus]{};
+
+    /**
+     * The span of page frame numbers the secure memory-manager walk
+     * covered, and how many of its steps were consecutive.
+     *
+     * **"Aborted at a page" and "finished a region" are opposite faults**
+     * and the last eight requests cannot tell them apart: a walk that
+     * stops because a page failed and a walk that stops because it reached
+     * the end of what it was given look identical in a ring.
+     *
+     * If (max - min + 1) equals the request count and the steps are
+     * consecutive, the walk covered a contiguous region completely and the
+     * fault is in whatever should have happened *next*. If the count falls
+     * short of the span, it stopped somewhere inside.
+     */
+    std::uint64_t vtl_code0_min_pfn[max_cpus]{};
+    std::uint64_t vtl_code0_max_pfn[max_cpus]{};
+    std::uint64_t vtl_code0_consecutive[max_cpus]{};
+    std::uint64_t vtl_code0_pfn_calls[max_cpus]{};
+
+    /**
+     * The previous page frame number, kept separately from
+     * `vtl_code0_previous` because that one is updated before the
+     * comparison and so can never differ by one - the first version of
+     * this counter read zero consecutive steps for exactly that reason,
+     * on a walk the ring plainly shows stepping by one.
+     */
+    std::uint64_t vtl_code0_last_pfn[max_cpus]{};
     /** @} */
     /** @} */
     /** @} */
