@@ -785,6 +785,46 @@ is not there" and is really "the wrong question was asked". `x` is the
 virtual read. The same distinction is why a wide `xp` over a device BAR
 lied, further down this file.
 
+## The whole capability surface is eliminated in one boot
+
+Every narrowing group turned off at once - pin-based, primary, secondary,
+exits, entries and EPT/VPID - so the guest hypervisor sees the processor's
+real capabilities in every VMX MSR this VMM answers. One boot rather than
+six, because a null result eliminates all six and a positive one can be
+bisected afterwards.
+
+    withheld before, offered now:
+      EPT_VPID_CAP     0x...6134040 -> 0x...6334041   execute-only EPT, +2 bits
+      TRUE_PINBASED    0x3f         -> 0x7f           VMX preemption timer
+      TRUE_ENTRY_CTLS  0x0001d3ff   -> 0x0001f3ff
+      PROCBASED_CTLS2  0x001138ee   -> 0x001378ff
+
+    Hyper-V's request:   0x1010af   - unchanged from the APIC-only run
+    the hang:            39,264 calls, rbx 0x100000400, ring 3 in 0 of 15
+
+**Hyper-V takes none of it.** Given execute-only extended page tables, the
+VMX preemption timer and the rest, it asks for exactly what it asked for
+before - only the one APIC bit it had already taken. And the stall is
+byte-for-byte unchanged.
+
+**This closes a line this file opened several sections ago.** The reasoning
+then was: we do not answer the VTL hypercalls, Hyper-V does; the transport is
+clean by two independent readings; *"so if this is our fault at all, it is
+not in what we say to either party - it is in something we give Hyper-V that
+changes what Hyper-V decides."* **That surface is the capability MSRs, and it
+is now tested whole and eliminated.**
+
+**So the position is: it is not what we carry, not what we answer, and not
+what we offer.** Those were the three things a transport can get wrong, and
+all three are measured clean.
+
+**Reverted to `unnarrow_nothing`**, because narrowing exists so this VMM does
+not promise what its shadow builder cannot honour, and the promise being
+harmless in one seven-minute boot is not evidence it is harmless.
+
+**Fifteen candidates dead by measurement**, and the surface they were drawn
+from is exhausted.
+
 ## The APIC candidate is dead by experiment: offered it, Hyper-V took it, nothing changed
 
 `report_hardware_capabilities_unnarrowed = unnarrow_secondary` reports the
