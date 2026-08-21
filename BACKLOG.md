@@ -36401,3 +36401,57 @@ The instrument that answers it is the one already built: `ZPP_STEP_VTL`
 traces the VTL0 half, and it needs to be armed on a *long* gap rather than
 the next one - the 2048 steps taken so far landed in the fast mode, which is
 why they showed nothing but a clock interrupt.
+
+## The synthesis: the clock ISR costs 96% of its own period, and that is the hang
+
+The guest **never halts** - zero `hlt` exits in 2,268,472 - so the 34-67 ms
+stalls are spent executing, not waiting. That is what closes this:
+
+    slow-mode gap        ~50 ms
+    tick period          1.74 ms  (574.7 Hz, KeQuantumEndTimerIncrement)
+    -> ~29 clock interrupts serviced per trust-level iteration
+
+    exits per clock ISR  ~14        (879 exits per round trip / ~64 ticks)
+    cost per exit        ~120 us    (measured)
+    -> ISR costs ~1.68 ms against a 1.74 ms period = ~96%
+
+**The clock interrupt service routine costs ninety-six per cent of the
+interval between clock interrupts.** The guest comes out of one tick just as
+the next arrives. Roughly four per cent of each period is left for
+everything else, and the phase-1 loop lives in that four per cent - which is
+why it advances nine times a second, why the gap distribution is bimodal
+(most ticks yield nothing, an occasional one gets through), and why nineteen
+minutes changed nothing.
+
+Every previously puzzling measurement follows:
+
+- duty 0.797 and Windows holding 20 s of processor - true, and all of it
+  goes to the clock path
+- the eight hot instruction pointers, all clock - not a symptom to look
+  past, it is the whole thing
+- both trust levels executing real code - they are; neither is broken
+- fifteen mechanisms each measuring correct - they are all correct
+- `ModifyVtlProtectionMask` frozen - the work that would issue it gets 4%
+  of a processor
+
+### The uncomfortable part, stated plainly
+
+**This is a performance cliff presenting as a hang**, and the standing
+instruction for this work is to prioritise hangs over performance. Those are
+the same thing here: at 96% the guest makes no progress, and at, say, 60% it
+would boot. There is no functional defect left to find - the search for one
+consumed this entire investigation and eliminated fifteen candidates, every
+one of which turned out to be working correctly.
+
+**And it explains the result that looked impossible**: disarming the APIC
+watch removed 14% of exits *per second* but raised exits *per round trip*
+from ~880 to ~1,120. Per-tick exit count is what matters, not exits per
+second, and that intervention made the per-tick count worse. The two
+quantities move independently and only one of them is the cliff.
+
+So the work that remains is exit reduction on the clock path specifically -
+the ~14 exits a tick, of which the largest groups are the APIC-page writes
+the watch intercepts, the synthetic MSR writes (`EOI`, `ICR`,
+`STIMER0_COUNT`) that must reach Hyper-V, and one `vmresume` per exit taken.
+**Measure per-tick, not per-second**, or the next intervention will be
+judged the way that one nearly was.
