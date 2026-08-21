@@ -785,6 +785,52 @@ is not there" and is really "the wrong question was asked". `x` is the
 virtual read. The same distinction is why a wide `xp` over a device BAR
 lied, further down this file.
 
+## It is a retry loop, not a stall: VTL round trips continue at 8 Hz for ever
+
+Measured on the single-processor guest over 60 seconds, which is the
+configuration with no processor confound:
+
+    0x000c  HvCallModifyVtlProtectionMask   39,259 -> 39,259    0.0/s
+    0x0011  HvCallVtlCall                   27,668 -> 28,146    8.0/s
+    0x0012  HvCallVtlReturn                 27,668 -> 28,146    8.0/s
+    0x000f  HvCallEnableVpVtl                    1
+    0x000d  HvCallEnablePartitionVtl             1
+
+**The guest has not stopped asking. It is asking eight times a second and
+getting nowhere.** `HvCallVtlCall` and `HvCallVtlReturn` stay exactly equal
+and both advance, so every entry into VTL1 returns - nothing is lost or
+hung inside the secure kernel. What has stopped is
+`HvCallModifyVtlProtectionMask`, the *work*; the round trips carrying it
+continue.
+
+**So the shape is a retry loop**, and that is a different fault from the
+stall this file has assumed for two days. `VslFinishStartSecureProcessor` on
+the stack is precisely a routine that would enter VTL1, check whether the
+secure processor has finished starting, and go round again when it has not.
+Eight times a second, about 125 milliseconds a round trip.
+
+**Which makes the question sharp**: what does VTL1 report back that VTL0
+keeps rejecting? The transition machinery works - 28,146 completed round
+trips prove it. The protection composition works - verified bucket for
+bucket. `HvCallEnableVpVtl` and `HvCallEnablePartitionVtl` each succeeded
+once. Something *inside* that round trip returns a result the guest treats as
+"not yet".
+
+**And it is now cheap to watch.** A retry loop at 8 Hz with a fixed stack is
+the easiest possible target: every iteration is identical, there are eight a
+second, and both ends of each one are already instrumented -
+`capture_vtl_switch` records the registers at each `HvCallVtlCall` and
+`HvCallVtlReturn`. **The answer is in what changes, or fails to change,
+between two consecutive round trips**, and nothing in this tree has yet
+looked at that pair.
+
+**Correcting the framing one more time**: "the calls stopped and the thread
+never returned" was true of the protection-mask hypercall and false of the
+guest. The guest is alive, looping, and making a well-formed request eight
+times a second. A counter that is static because the *work* stopped looks
+identical to one static because the *guest* stopped, and this file read it
+the second way.
+
 ## THE BLOCKER, with the processor confound removed: VTL1 write-protection on the boot processor
 
 **One vCPU. Same hang.** Booted with `ZPP_CPUS=1`, where Windows cannot
