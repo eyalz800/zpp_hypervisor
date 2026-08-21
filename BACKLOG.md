@@ -37784,3 +37784,47 @@ the entries that earned them - census rather than sample; two dumps rather
 than one; measure the quantity rather than a rate that implies it; read the
 binary rather than grep one file; and write the refutation check into the
 same commit as the hypothesis.
+
+## The secure kernel's type layouts are not obtainable, confirmed
+
+Before concluding that `SkiSelectThread` cannot be read, the assumption
+behind it was checked rather than asserted. `securekernel.pdb` reports:
+
+    Has Types: true
+    Is stripped: true
+
+and dumping the type stream gives **"Showing 0 records"**. The public symbol
+server ships publics and no types, so the structure layouts the routine
+branches on - `0xa8(%rcx)`, the thread-entry fields, the ready-list shape -
+are not available from anything on disk.
+
+**So the static route is closed, and it is closed by a fact rather than by
+running out of ideas.** Reading which of a dozen branches answers
+differently on one occasion out of 18,585 would need either private symbols
+or the structures reconstructed by observation - and observation on this
+path is what the two unbuildable instruments already showed is not possible,
+because anything that traps while the guest hypervisor is mid-transition
+stops the guest.
+
+### What would actually be needed from here
+
+Three routes, none of them a continuation of what this session did:
+
+- **Private symbols or a reconstructed layout** for the secure kernel's
+  thread structures, which would make `SkiSelectThread`'s branches readable
+  and turn "one occasion differs" into "this field differs".
+- **A passive record of the scheduler's inputs** - the same `gs`-relative
+  walk that found the VINA flag, applied to the thread entry the loop's
+  thread lives in, sampled at every yield rather than traced. That is
+  buildable within the constraint that only passive counters survive here,
+  but it needs to know which offsets to read, which is the first item again.
+- **Reproducing the failure under an emulator** where single-stepping does
+  not perturb, which is what Bochs exists for in this tree - the guest is
+  far too slow there to reach phase 1, so this would need the state carried
+  in rather than booted to.
+
+**The honest summary of this session**: the hang is characterised to a
+single rare scheduling decision, roughly twenty candidate mechanisms are
+eliminated by measurement, two instruments are proven unbuildable on this
+path, and eleven measurement errors are recorded with the rule each one
+earned. Windows does not boot, and nothing here is a fix.
