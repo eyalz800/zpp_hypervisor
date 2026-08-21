@@ -2259,7 +2259,13 @@ def main():
                # read with their own queue below rather than with the
                # per-processor run.
                "gs_processor_index_disagreements",
-               "gs_processor_index_checked"]
+               "gs_processor_index_checked",
+               # The synthetic timer's arm-to-fire interval. This decides
+               # whether the guest's clock handler can finish inside its
+               # own period, and nothing else in this reader shows it.
+               "stimer_given_cycles", "stimer_given_arms",
+               "stimer_arm_count", "stimer_arm_value", "stimer_arm_tsc",
+               "stimer_arm_kind"]
     off = gdb_offsets(args.elf, members)
     instance = base + gdb_symbol(
         args.elf, "zpp::hypervisor::hypervisor::instance()::instance")
@@ -2377,6 +2383,18 @@ def main():
     for cpu in range(args.cpus):
         monitor.queue(instance + off["exit_trace"] + cpu * ring * entry_size,
                       ring * entry_size // 8)
+    # The synthetic timer, which is what decides whether the guest's clock
+    # handler can finish inside its own period. Queued here rather than in
+    # a section of its own because every read has to precede monitor.run().
+    stimer_ring = 32
+    for name in ("stimer_given_cycles", "stimer_given_arms",
+                 "stimer_arm_count"):
+        if name in off:
+            monitor.queue(instance + off[name], args.cpus)
+    for name in ("stimer_arm_value", "stimer_arm_tsc", "stimer_arm_kind"):
+        if name in off:
+            monitor.queue(instance + off[name], args.cpus * stimer_ring)
+
     words = monitor.run()
 
     def read(name, index=0):
@@ -2392,6 +2410,55 @@ def main():
               f"{read('events_deferred', cpu):-8d}  "
               f"0x{read('pending_event', cpu):-6x}  "
               f"{ACTIVITY.get(read('l2_activity_state', cpu), '?')}")
+
+    # What the guest asked its synthetic timer for, and what it was given.
+    #
+    # The pair is the point. `stimer_given_cycles / stimer_given_arms` is
+    # the measured arm-to-fire interval; the guest's own constant
+    # `KeQuantumEndTimerIncrement` is 17,400 units of 100 ns, so 1.74 ms is
+    # what it believes it asked for. **A handler that costs more than the
+    # interval it is given can never return**, and the guest then never
+    # lowers IRQL far enough to take the DPC interrupt it keeps requesting -
+    # which is exactly the 0x2f-at-task-priority-0xd0 census below.
+    #
+    # Read both, never one: the interval alone cannot distinguish "the
+    # guest asked for a short period" from "the guest asked for 1.74 ms and
+    # the level above expired it early", and those need different fixes.
+    # The `kind` column is what separates them - 1 is the guest writing a
+    # count, 3 is the clock vector actually going in.
+    if "stimer_given_arms" in off:
+        print("\ncpu  stimer arm->fire, measured against the guest's own "
+              "1.74 ms constant")
+        for cpu in range(args.cpus):
+            arms = read("stimer_given_arms", cpu) or 0
+            cycles = read("stimer_given_cycles", cpu) or 0
+            if not arms:
+                continue
+            per = cycles / arms
+            micro = per / 1992.0
+            print(f"{cpu:3d}  {arms:,} arms, {per:,.0f} cycles "
+                  f"({micro:,.1f} us at 1.992 GHz), "
+                  f"{1e6 / micro if micro else 0:,.1f} Hz "
+                  f"-> {micro / 1740.0:.2f}x the 1.74 ms it asked for")
+
+        # The ring, newest last, so an interval can be differenced by hand
+        # rather than trusted from the average above. Kind 1 and kind 3
+        # alternating is one arm and one delivery per tick.
+        base = off.get("stimer_arm_value")
+        if base is not None:
+            count = read("stimer_arm_count", 0) or 0
+            print(f"\ncpu 0 last synthetic timer events "
+                  f"({count:,} total, newest last)")
+            for slot in range(max(0, count - 8), count):
+                i = slot % stimer_ring
+                value = words.get(instance + off["stimer_arm_value"] +
+                                  8 * i)
+                tsc = words.get(instance + off["stimer_arm_tsc"] + 8 * i)
+                kind = words.get(instance + off["stimer_arm_kind"] + 8 * i)
+                name = {1: "COUNT written", 2: "CONFIG written",
+                        3: "clock vector injected"}.get(kind, f"kind {kind}")
+                print(f"    {name:<24} value 0x{value or 0:x} "
+                      f"tsc 0x{tsc or 0:x}")
 
     # A census over every exit, not a sample. One entry at ring 3 proves
     # the guest reached user mode; hundreds of `info registers` samples

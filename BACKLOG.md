@@ -785,6 +785,56 @@ is not there" and is really "the wrong question was asked". `x` is the
 virtual read. The same distinction is why a wide `xp` over a device BAR
 lied, further down this file.
 
+## The synthetic timer fires 2.03x late, and the reader can now see it
+
+`rig-dump-state.py` reads `stimer_given_cycles`/`stimer_given_arms` and the
+`stimer_arm_*` ring now. **The members had existed for sessions and nothing
+printed them**, so the one quantity that decides whether the guest's clock
+handler can keep up was invisible to the reader that works on a wedged guest.
+No rebuild and no reboot were needed - the data was already in memory.
+
+    cpu 0  568,994 arms, 7,043,733 cycles (3,536.0 us at 1.992 GHz),
+           282.8 Hz -> 2.03x the 1.74 ms it asked for
+
+    cpu 0 last synthetic timer events (27,480,200 total, newest last)
+        clock vector injected  value 0xd1  tsc 0x230af68056c4
+        COUNT written          value 0x2cffddeb26  tsc 0x230af68a954b
+        clock vector injected  value 0xd1  tsc 0x230af6bb7894
+        COUNT written          value 0x2cffde390d  tsc 0x230af6c73562
+
+**It fires late, not early.** That is the opposite of what the section above
+guessed at, and it matters because the two have opposite fixes. The guest
+asks for 1.74 ms and waits 3,536 microseconds, so it ticks at **282.8 Hz
+against the 574.7 Hz its own constant implies** - half speed, not 1.56x fast.
+
+*(The 893.9 Hz measured earlier from `STIMER0_COUNT` write rate is a
+different quantity and both are right: 13,028,001 COUNT writes against
+568,994 measured arm-to-fire pairs means most writes are not a fresh arming.
+Counting writes is not counting ticks, and this is the third time in this
+session that a rate has been read off the wrong denominator.)*
+
+**The ring settles what the average cannot.** `COUNT written` and
+`clock vector injected` alternate exactly 1:1, so every arm gets one
+delivery - nothing is being dropped or doubled. The TSC deltas between
+consecutive `COUNT written` entries are 3,973,143, 3,663,529 and 3,213,816
+cycles, or 1,994 / 1,839 / 1,613 microseconds. So the guest re-arms roughly
+every 1.8 ms while asking for 1.74 ms, and the 3.54 ms average arm-to-fire is
+that period plus the lateness.
+
+**Which says where the 1.8 ms of lateness has to come from.** Per-tick exit
+cost was measured at 1.32 ms - 13.2 exits at 199,170 cycles - so our own
+overhead is most of it but not all of it. **Removing every exit entirely
+would leave about 0.48 ms of lateness**, giving 2.22 ms a tick and 450 Hz,
+still short of 574.7 Hz. So the exits are necessary to fix and not obviously
+sufficient, and the residual 0.48 ms needs its own explanation before any
+target is credible.
+
+**What to measure next, and it is bounded**: where the arm-to-fire interval
+actually goes. The ring carries the TSC of each arm and each injection, so
+the gap is already differenceable per event rather than as an average over
+568,994 - and an average over a bimodal distribution is exactly the shape
+that has misled this file before. Bucket it before believing 3,536.
+
 ## Correction: the gap is 1.18x, not 8.6x. The handler fits; the *arming rate* does not
 
 **The "8.6x" in the sections below is wrong, and it is wrong in the way that
