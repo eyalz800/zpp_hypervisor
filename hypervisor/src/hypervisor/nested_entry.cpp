@@ -8679,6 +8679,16 @@ hypervisor::on_l2_exit(std::size_t cpu,
 
                         if (auto bp = translate_guest_linear(cpu, block)) {
                             this->vina_block_physical[cpu] = *bp;
+
+                            // And once more, all the way to an
+                            // L1-physical address. See
+                            // `vina_block_l1_physical`: at the call this
+                            // page is not in VTL0's extended page tables
+                            // and cannot be, so the guest-table step has
+                            // to be done here and not there.
+                            if (auto l1 = l2_physical_to_l1(cpu, *bp)) {
+                                this->vina_block_l1_physical[cpu] = *l1;
+                            }
                         }
 
                         std::uint64_t flags{};
@@ -8897,12 +8907,11 @@ hypervisor::on_l2_exit(std::size_t cpu,
                 // The VINA flag as it stands **before** VTL1 runs. See
                 // `vina_block_physical`: read through the physical
                 // address because VTL0's GS is the wrong address space.
-                if (0 != this->vina_block_physical[cpu]) {
+                if (0 != this->vina_block_l1_physical[cpu]) {
                     std::uint64_t flags{};
 
-                    if (read_guest_memory(
-                            cpu,
-                            this->vina_block_physical[cpu],
+                    if (read_guest_physical(
+                            this->vina_block_l1_physical[cpu],
                             std::as_writable_bytes(std::span(&flags, 1)))) {
                         if (0 != ((flags >> 32) & 1)) {
                             this->vina_at_call_set[cpu] += 1;

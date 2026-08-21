@@ -37386,3 +37386,47 @@ calls - `read_guest_memory` returned false for the physical address captured
 at the return, which is a fixable instrument bug and not a finding. **Fixing
 that read is the single measurement that decides whether VINA is the
 mechanism**, and it is the thing to do next.
+
+## VINA is CLEAR when VTL1 is entered. 28,445 of 28,446. The line is closed
+
+The deciding measurement, finally taken at the right moment. Reading the
+flag at the `HvCallVtlCall` needed the page's **L1**-physical address,
+resolved once at a return where the translation is legal, because
+`read_guest_memory` walks the current trust level's tables and VTL1's pages
+are absent from VTL0's by design:
+
+    at the CALL, before VTL1 runs:   set 0   clear 28,445   unread 1
+    at the RETURN, after handling:   set 7,457   clear 20,989
+
+**The flag is clear on entry every single time.** It is not pre-asserted, it
+is *raised while VTL1 runs* - which is what a notification meaning "an
+interrupt has arrived for the level below you" is supposed to do, and it is
+set at the return on 26% of entries because on those an interrupt did
+arrive.
+
+**So VINA cannot be why the secure kernel abandons its thread**: it is not
+set when the secure kernel starts. Every reading in this file that made VINA
+the mechanism is withdrawn, and this time on a measurement taken before the
+decision rather than after it.
+
+It also explains the three instruction traces that all took the VINA branch.
+They are the 26%, not the rule - three draws from a 26% population is 1.8%,
+unlikely rather than impossible, and **the traces were taken at moments the
+periodic arming chose, which are not independent draws**. The same
+correlation that made twenty single samples of the request byte all read `4`.
+
+### Where that leaves it
+
+    entered with vtl_entry_reason = VtlCall      14/14
+    entered with VINA clear                      28,445/28,446
+    zero exits taken inside VTL1
+    returns STATUS_SUCCESS
+    selects a thread, deselects it, yields
+    the thread parked in SkmiProtectPageRange, four instructions
+      from finishing, with r15 = 1
+
+**The secure kernel is entered cleanly, with nothing pending, and chooses
+not to run the one thread that has work.** Nothing measured explains that
+choice, and the instruments that appeared to - the entry reason, the request
+byte, the output area, the VINA flag - have each been eliminated by
+measuring the same quantity at the moment it is actually consulted.

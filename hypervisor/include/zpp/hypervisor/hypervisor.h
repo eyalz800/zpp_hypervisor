@@ -10113,6 +10113,22 @@ private:
      * is reachable from either level.
      */
     std::uint64_t vina_block_physical[max_cpus]{};
+
+    /**
+     * The same page as an **L1**-physical address.
+     *
+     * Reading the flag at the `HvCallVtlCall` failed on all 27,699 calls,
+     * and that is VSM working rather than a bug: `read_guest_memory` goes
+     * through `l2_physical_to_l1`, which walks the *current* trust level's
+     * extended page tables - and at the call that is VTL0's, where VTL1's
+     * pages are deliberately absent. The whole point of the mechanism is
+     * that VTL0 cannot see them.
+     *
+     * So the translation is done once at the return, where it is legal,
+     * and the result read directly with `read_guest_physical` at the call,
+     * which does not consult a guest table at all.
+     */
+    std::uint64_t vina_block_l1_physical[max_cpus]{};
     std::uint64_t vina_at_call_set[max_cpus]{};
     std::uint64_t vina_at_call_clear[max_cpus]{};
     std::uint64_t vina_at_call_unread[max_cpus]{};
