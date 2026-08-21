@@ -2934,6 +2934,34 @@ def main():
         print("  ONE ROOT <- both trust levels would be sharing an "
               "extended page table, which VSM requires them not to")
 
+    # **What fraction of wall time this VMM occupies.** Every account of
+    # the cost of this hang so far has been a rate multiplied by an
+    # estimated per-exit cost; this is the quantity those were estimating,
+    # measured directly. handler_cycles is time inside the exit handler,
+    # and the two time stamps bracket the window it accumulated over, so
+    # the ratio is the duty cycle - and it needs no assumption about how
+    # much an exit costs or how many there were.
+    #
+    # A guest starved by exit handling shows a duty near 1. A guest that
+    # is stuck for some other reason shows a small one, and then the cost
+    # arithmetic is a red herring however convincing it looks.
+    for cpu in range(min(args.cpus, 1)):
+        cycles = read('handler_cycles', cpu) or 0
+        first = read('handler_first_tsc', cpu) or 0
+        last = read('handler_last_tsc', cpu) or 0
+        span = last - first
+        if span > 0:
+            duty = cycles / span
+            print(f"\ncpu {cpu} share of wall time spent in the exit "
+                  f"handler")
+            print(f"  handler cycles  {cycles:>20,}")
+            print(f"  elapsed cycles  {span:>20,}"
+                  f"   ({span / 1.992e9:,.1f} s at 1.992 GHz)")
+            print(f"  duty            {duty:>20.3f}"
+                  + ("   <- starved: the handler owns the processor"
+                     if duty > 0.85 else
+                     "   <- NOT starved: the guest has time it is not using"))
+
     # **The secure kernel's own answer.** Byte 1 of the block is the
     # request it is making and the 32-bit word at offset 8 is the status
     # it returned - the slot VslpEnterIumSecureMode itself writes

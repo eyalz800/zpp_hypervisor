@@ -35695,3 +35695,34 @@ worth doing is the direct measurement neither of them is** - handler cycles
 against elapsed cycles, giving the fraction of wall time this VMM occupies -
 because every account of this so far has been a rate multiplied by an
 estimate.
+
+### Settled by direct measurement: duty 0.797. The guest is not starved
+
+The quantity every cost argument in this file has been estimating, measured
+instead of inferred - handler cycles against the elapsed cycles they
+accumulated over, which needs no assumption about per-exit cost or exit
+count:
+
+    handler cycles  714,510,966,754
+    elapsed cycles  896,559,548,121   (450.1 s at 1.992 GHz)
+    duty                      0.797
+
+**80% of wall time is this VMM, and that leaves the second-level guest
+about 91 seconds of processor over the run.** A Windows boot needs a small
+fraction of that, and the working control reached user mode in 118 seconds
+of wall time on the same machine. So the guest has had ample time and has
+made no progress with it.
+
+**Cost is not the blocker.** That is now three independent results agreeing:
+removing 37% of all exits changed the VTL rate not at all (slightly down),
+the duty cycle leaves a fifth of the machine unused, and zero new pages are
+touched. The 80% overhead is worth fixing on its own account and is not
+what this hang is.
+
+Note the arithmetic that pointed the other way - 8 clock ticks per loop
+iteration, ~12 exits a tick, ~1.76 ms against a 1.74 ms period - is
+*wrong somewhere*, and it looked airtight. It is left here deliberately as
+the worked example: **a chain of rates multiplied by estimates can reach a
+confident, precise and false conclusion, and the only cure is to measure the
+quantity itself.** `handler_cycles / (last_tsc - first_tsc)` is two fields
+that were already being read and never divided.
