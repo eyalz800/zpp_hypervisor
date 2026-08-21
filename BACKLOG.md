@@ -785,6 +785,47 @@ is not there" and is really "the wrong question was asked". `x` is the
 virtual read. The same distinction is why a wide `xp` over a device BAR
 lied, further down this file.
 
+## The APIC candidate is dead by experiment: offered it, Hyper-V took it, nothing changed
+
+`report_hardware_capabilities_unnarrowed = unnarrow_secondary` reports the
+processor's real secondary controls to the guest hypervisor instead of the
+narrowed set. Measured either side:
+
+    offered   PROCBASED_CTLS2  0x001138ee -> 0x001378ff
+    asked     vmcs02 secondary 0x1010ae   -> 0x1010af      <- bit 0 added
+              virtualize_apic_accesses    no -> **yes**
+              apic_register_virtualization   no
+              virtual_interrupt_delivery     no
+
+    hang      HvCallModifyVtlProtectionMask  39,264   (unchanged)
+              VTL block rbx  0x100000400               (unchanged, state 4)
+              ring 3         0 of 15 samples           (unchanged)
+
+**Two facts, and the pair is what settles it.**
+
+**Hyper-V wants the capability.** Offered virtualized APIC accesses, it asks
+for it on the very next VMCS it builds - `0x1010ae` becomes `0x1010af`. So
+the earlier reading that "it does not ask for any of the three" was purely an
+artefact of the menu, exactly as suspected, and this is the direct proof.
+
+**And it changes nothing.** Same protection-mask count, same state 4, same
+byte-identical block, same ring 0. **The stall is not a capability this VMM
+withholds** - which the previous section could only argue from the fact that
+real hardware predates the feature, and which is now an experiment instead.
+
+*(Note it did not ask for `apic_register_virtualization` or
+`virtual_interrupt_delivery` even when offered - so those two are Hyper-V's
+own choice, not the menu's, and offering them is not a second experiment
+waiting to be run.)*
+
+**Reverted to `unnarrow_nothing`.** Advertising a control this VMM does not
+maintain state for is the mistake `CLAUDE.md` names - answer the whole of
+whatever it is, or fault - and it is only safe as a bounded diagnostic. It is
+notable that the guest survived it, which says the APIC-access page path is
+more forgiving than expected, but that is not a reason to ship it.
+
+**Fourteen candidates now dead by measurement.**
+
 ## VMFUNC is not it, and the APIC candidate needs tempering
 
 **VMFUNC: zero calls, zero refusals.** The counters are now printed - an
