@@ -785,6 +785,59 @@ is not there" and is really "the wrong question was asked". `x` is the
 virtual read. The same distinction is why a wide `xp` over a device BAR
 lied, further down this file.
 
+## REOPENED: KVM's floor fits the budget. 75 of every 100 microseconds is unaccounted
+
+**The "not reachable under KVM" conclusion in the sections below is
+withdrawn.** It assumed the per-exit cost is dominated by KVM's nested-exit
+machinery. Decomposed against the budget, it is not.
+
+**The levers tested against the right metric at last.** On a single-processor
+guest, baseline against `profile=0 apicoff=1`:
+
+    ordinary-kernel half   13,691.5 us -> 12,114.4 us   -11.5%
+    exits within it            112.4   ->     113.1     unchanged
+
+11.5% of the cycles and **none** of the exits - the levers make exits
+cheaper, never fewer. Against a needed 8x that settles them, and settles it
+on the quantity that decides the boot rather than on a proxy.
+
+**But the decomposition is the finding:**
+
+    budget: 113 exits inside one 1.74 ms tick        15.4 us an exit
+    current                                         100.0 us an exit
+      ~36 VMCS accesses at the *marginal* 991 cycles  17.9 us
+      exit prologue, measured                          7.0 us
+      -----------------------------------------------------
+      accounted                                       24.9 us
+      **unaccounted**                                 75.0 us
+
+**KVM's floor is 7.0 microseconds and the budget is 15.4.** The floor fits,
+with room for the VMCS traffic beside it. **So the 8x is not a hardware wall
+- three quarters of every exit is time this VMM spends on something that is
+neither a trapped VMCS access nor KVM's transition.**
+
+**That is a lead, and a large one.** It is also consistent with a figure this
+file already recorded and did not follow: the `build_vmcs02` split reports
+"53.5% of the phase is slots that touch the VMCS, **46.5% is software that
+touches nothing**". Forty-six per cent of the largest phase doing no VMCS
+work at all is the same observation from the other side.
+
+**What to do with it, and it needs no rig time to start**: the phase tree
+already decomposes the exit into named slots with cycles and access counts
+per call. Nothing has yet subtracted the accounted cost from each slot and
+asked what the remainder is doing. **A slot that takes tens of microseconds
+while issuing no VMCS access is either doing real work that can be moved off
+the exit path, or waiting on something - and either is actionable in a way
+that "KVM is slow" was not.**
+
+**Why the wrong conclusion was reached.** The 199,170-cycle exit was measured
+early and attributed to KVM because the *first* decomposition used the
+launch-time VMCS price of 2,845 cycles, which made VMCS traffic look like
+51% of the exit and left little to explain. With the marginal price of 991 -
+already recorded in this file - the same traffic is 18%, and the unexplained
+remainder is four times larger than the part anyone looked at. **One wrong
+constant hid the largest term in the budget.**
+
 ## Correction: the gap is ~8x, measured directly. 72x was wrong, and so was 1.18x
 
 **Three figures for the same quantity have now appeared in this file, and
