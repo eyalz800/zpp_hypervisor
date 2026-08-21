@@ -785,6 +785,52 @@ is not there" and is really "the wrong question was asked". `x` is the
 virtual read. The same distinction is why a wide `xp` over a device BAR
 lied, further down this file.
 
+## Correction: the gap is ~8x, measured directly. 72x was wrong, and so was 1.18x
+
+**Three figures for the same quantity have now appeared in this file, and
+only one of them came from a direct measurement.** Recorded together because
+the pattern is the lesson.
+
+| claim | how it was got | verdict |
+|---|---|---|
+| 8.6x | ordinary-kernel half against the tick | **right** |
+| 1.18x | tick cost against the tick | wrong quantity |
+| 72x | round trip derived from an 8/s *rate* | wrong |
+| **7.9x** | **the half, measured directly** | **right** |
+
+The direct reading, on the single-processor guest:
+
+    HvCallVtlCall  -> HvCallVtlReturn (secure kernel)
+      28,114 halves,  1,169.8 us,   7.4 exits
+    HvCallVtlReturn -> HvCallVtlCall  (ordinary kernel)
+      28,113 halves, 13,691.5 us, 112.4 exits
+
+**The secure-kernel half is 1.17 ms and fits inside a 1.74 ms tick.** It is
+the **ordinary-kernel** half, 13.69 ms, that does not - 7.9 ticks. So the
+phrase "a secure call that outlasts the next tick" is right about the round
+trip and misleading about which end: VTL1 is fast, and the work VTL0 does
+between secure calls is what cannot finish.
+
+**Where 72x came from, and why it was wrong.** Round trips occur at 8.0/s, so
+1/8 = 125 ms was taken as the cost of one. But the halves sum to 14.86 ms -
+the guest spends the remaining 110 ms elsewhere, not inside the round trip.
+**A rate measures how often something happens, never how long it takes**, and
+those differ by exactly the idle time between occurrences.
+
+**That is the third time in this session a ratio from a rate has been wrong
+where a direct measurement was right** - after the 3,536 us arm-to-fire from
+a 4%-paired average, and the 1.56x arming from dividing MSR writes by a
+guessed uptime. The rule this file already states for KVM's counters -
+**read deltas, and prefer the instrument that measures the thing itself** -
+applies to every ratio here, and I broke it three times.
+
+**So the target stands where it began: ~8x on the ordinary-kernel half.**
+Which is the figure the first section of this session's work reached, before
+two corrections moved it wrongly in both directions. **The original number
+was right and the reasoning that produced it was not** - it compared the
+correct pair for the wrong reason, and survived only because the pair was
+correct.
+
 ## THE COMPLETE CHAIN, and the number that closes it: a secure call takes 72 ticks
 
 `ZPP_STEP_VTL` already exists and a previous session already used it. Its
