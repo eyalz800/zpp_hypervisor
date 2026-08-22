@@ -38755,3 +38755,40 @@ So the scheduler's own inputs are healthy too. With the thread structure
 identical between working and frozen, the object table intact, the SynIC
 channel live and both assist pages clean, **every piece of secure-kernel
 state this investigation can reach is in order.**
+
+## Two premises tested, both verified, and one class of explanation dies
+
+Neither had been checked; both were assumed throughout this file.
+
+**The blocked thread really is `Phase1Initialization`.** The thread sampler
+reports its start address as `ntoskrnl+0x6fb520`, which was never
+symbolised. It resolves to **`Phase1Initialization+0x0`** - an exact match,
+not a nearest-symbol guess.
+
+**And it really is the only thread.** Not "one distinct thread in the last
+six samples", which is what the reader prints and what this file has been
+quoting: **one distinct thread across all 103 samples in the ring.**
+
+    thread 0xffffbd033d4dd080  start Phase1Initialization  state 2  wait 0  irql 0
+
+### What state 2 rules out
+
+`state 2` in a Windows `KTHREAD` is **Running**, not Waiting. Wait reason is
+0 and IRQL is 0.
+
+**So `Phase1Initialization` is not blocked on anything.** It is actively
+executing the `VslpEnterIumSecureMode` loop, at passive level, and Windows
+never schedules another thread while it does.
+
+That kills a whole class of explanation this investigation has been carrying
+implicitly - and which several entries above are phrased in terms of:
+**there is no missing wakeup, no lost event, no unsignalled object, no
+dropped notification.** Nothing is waiting to be woken. A thread in
+`Waiting` with a wait reason would have been the shape of every "the
+handshake lost a message" reading; the thread is in `Running`, and has been
+the whole time.
+
+What remains is exactly what the disassembly says: a live loop that calls
+into VTL1, is told `4`, does nothing with it, and calls again - by choice,
+not by blocking. The question is not what failed to arrive. **It is what
+would make the secure kernel answer with something other than `4`.**
