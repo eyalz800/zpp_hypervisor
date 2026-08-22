@@ -1,5 +1,36 @@
 # Known defects
 
+## What the halt was hiding: the boot goes much further without it
+
+**2026-08-22, measured after the instruction-length fix.** The old wall was
+not a wall. With cpu 0 no longer halted:
+
+| | at the halt | +3 min | +9 min | +15 min |
+|---|---|---|---|---|
+| exits | 874,877 | 1,573,332 | 3,277,024 | 6,764,868 |
+| l2-entries | 180,098 | 461,789 | 1,293,465 | 3,036,721 |
+| `HvCallVtlReturn` | 24,925 | 24,234 | 24,553 | 25,167 |
+| synthetic timer events | - | 171,317 | 537,691 | 1,302,395 |
+
+**`HvCallModifyVtlProtectionMask` reads 39,303 in every one of them.** That
+number was never a freeze point - it is where the secure kernel *finishes*
+growing its protected page pool. The boot used to stop there only because
+the ninth refused write happened to land at the same moment; the page-pool
+phase had already completed on its own.
+
+Where it is now: one thread whose start routine is `Phase1Initialization`,
+in `KeClockInterruptNotify` -> `KiSetNextClockTickDueTime` -> `KiUpdateTime`
+-> `KiSetClockTickRate` -> `HalpTimerClockArm`. Application processors have
+still never run guest code - cpu 1 through 7 hold 17 second-level entries
+each, unchanged since boot - so `KeStartAllProcessors` has not happened.
+
+Trust-level switches continue at roughly 100 a minute against 1.3 million
+timer events, so the machine is advancing rather than wedged, but the
+ratio is the next thing to explain. **This is a new position, not the old
+one**: the previous freeze had every counter dead, and these are all
+moving.
+
+
 ## The freeze was ours: one decode disagreement halted the boot processor
 
 **2026-08-22.** Not a guest livelock, not VSM, not the notification. The
