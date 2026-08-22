@@ -38690,3 +38690,36 @@ through, is wrong.** Windows performs a fixed quantity of VSM setup - the
 same to within a handful of calls on every configuration tried, including
 two processors instead of eight - and then its secure kernel stops finding
 the one thread runnable.
+
+## The parked thread's structure is identical working and frozen
+
+Sampled the secure kernel's current thread directly - the same one, by
+pointer - once while the page walk was still running (protection count
+33,009) and again at the freeze (39,281), by walking VTL1's page tables
+from the monitor. No rebuild: the capability from the `ShvlVinaHandler`
+work reads any secure-kernel address at will.
+
+    thread 0xfffff80629292f80
+    48 qwords compared
+    0 of 48 changed - byte for byte identical
+
+**The thread does not change state.** Every reading in this file that
+describes it as "becoming not runnable", "detached", or "abandoned" is
+describing something the structure does not record: it looks exactly the
+same while its own work is proceeding as it does when everything has
+stopped.
+
+That is worth more than another elimination, because it redirects the
+search. The scheduler is not seeing a changed thread; whatever decides
+against it is **outside the thread** - the ready list, a lock, a
+per-processor scheduling field, or a condition the thread is waiting on
+that lives elsewhere. `SkiSelectThread`'s branches read `[pcr+8]`,
+`0xa8(%rcx)` and two locking helpers, and only the first two have been
+read.
+
+**Caveat, stated because this file has been bitten by exactly this**: 48
+qwords is 384 bytes and a secure-kernel thread is certainly larger. A field
+past that window would not have shown. What is established is that nothing
+in the first 384 bytes moves - which covers the flag word at `0xa8` that
+both `SkiSelectThread` and `SkCallNormalMode` test, and that is the field
+the scheduler actually looks at.
