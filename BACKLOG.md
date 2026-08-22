@@ -1,5 +1,63 @@
 # Known defects
 
+## securekernel is symbolisable after all, and here is the loop condition
+
+**2026-08-22, and it overturns three earlier negatives in this file.** The
+local `securekernel.exe` and `.pdb` are **the right build**; the failures
+were mine.
+
+The validation cost nothing, because the caller's actual bytes were
+already captured from guest memory. Searching for that byte string finds
+it **exactly once** in `securekernel.exe`, at **RVA `0xd93a4`** - and not
+at all in `ntoskrnl.exe` or `CI.dll`.
+
+**Why every previous attempt missed it.** The runtime address ends
+`0xa3a4`; the RVA ends `0x93a4`. The difference is `0x1000`, so the image
+base is **page-aligned and not 64 KB-aligned**. Both content scans probed
+only 64 KB boundaries, and the symbol filter searched the sixteen RVAs
+ending `0xa3a4` rather than `0x93a4`. Three failures, one wrong
+assumption.
+
+**So the base is computable from any captured call:**
+`base = vtl1_caller_at - 0xd93a4`, and with `securekernel.pdb` the whole
+image becomes readable. That unblocks everything about VTL1's state that
+was previously written off as needing symbols this project does not have.
+
+### What the resume point does
+
+`0xd93a4` is `SkpReturnFromNormalMode + 0x0` - not a call return at all,
+but the address the secure kernel resumes at when VTL0 calls back in.
+Disassembled with symbols:
+
+```
+movq  %gs:0x10, %rax      ; the secure-call block
+movl  (%rax), %ecx        ; its first dword
+decl  %ecx
+je    full_return         ; == 1 -> return to the secure kernel's caller
+movq  %cr2, %rax          ; else save cr2/dr6
+movq  %dr6, %rcx
+sti
+btrl  $0x3, %gs:0xc0      ; test-and-clear a pending-work bit
+jae   +5
+callq ...                 ; service it if set
+cli
+movq  %rcx, %dr6
+movq  %rax, %cr2
+jmp   0x...934c           ; and loop back into SkCallNormalMode
+```
+
+**The secure kernel returns to its caller only when that first dword is
+`1`.** The block this VMM has been reading all session holds
+`0x0000000100000400` - request byte 4 in byte 1 - so the `dec` never
+yields zero and it loops. Its first quadword changes 12,351 times, so VTL0
+*is* writing to it; it is never left holding `1`.
+
+**That is the loop condition stated from the instructions rather than
+inferred**, and it moves the question to a single field: what VTL0 must
+write into the secure-call block's first dword to end the call, and why it
+writes everything except that.
+
+
 ## The VTL1 per-processor block, and why the scan anchor was wrong
 
 **2026-08-22.** Following the pointer `ShvlVinaHandler` dereferences:
