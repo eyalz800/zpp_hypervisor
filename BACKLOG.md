@@ -1,5 +1,32 @@
 # Known defects
 
+## "reps done exceeds reps asked" is an instrument artifact
+
+**2026-08-22.** The protection census reports `reps asked 71,151 reps done
+71,195` - **44 more completed than requested** - and a rep-based hypercall
+reporting more than it was given is malformed, so this looked like a
+defect in something this VMM answers. It is not, and it is recorded so it
+is not chased again.
+
+```cpp
+auto done  = (context.rax >> 32) & 0xfff;      // read from the guest's rax
+auto asked = this->vtl_protect_reps_pending[cpu];
+```
+
+Two reasons it means nothing. **`rax` is the guest hypervisor's answer**,
+not ours - `HvCallModifyVtlProtectionMask` is issued by the guest and
+reflected upward, and this code only *observes* the reply on the way back,
+so nothing here composes that field. And **`asked` comes from our own
+decode**, which records one rep for the fast-hypercall form that does not
+use the rep field at all; the census itself shows `fast=1 reps=1` on
+almost every call and `fast=0 reps=256` on the rare slow one.
+
+44 in 71,151 is 0.06%, consistent with a handful of calls whose decoded
+rep count and returned rep count are simply not the same quantity.
+`answers short of the reps asked` reads **0**, which is the direction that
+would actually matter, and every status is zero.
+
+
 ## The freeze is single-processor: identical at 1, 2 and 8 CPUs
 
 **2026-08-22.** Two and eight were already recorded as identical. One had
