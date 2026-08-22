@@ -1,5 +1,30 @@
 # Known defects
 
+## Guest INVVPID and INVEPT are handled correctly
+
+**2026-08-22, checked because it is the one correctness path never
+examined in this investigation.** Stale translations surviving a
+protection change is exactly the shape that would stop a page walk, and
+the second level runs on **this VMM's** VPID rather than one of its own -
+so a guest invalidation naming its own numbering has to be translated,
+and getting that wrong would be silent.
+
+`on_guest_invvpid` validates the operand the way SDM 33.3 requires - all
+four types accepted, a zero VPID refused for every type but all-context, a
+non-canonical address refused for the individual-address type - and then
+answers every type identically with `nested_transition_flush`, a
+single-context INVVPID on the VPID `build_vmcs02` actually wrote. SDM
+31.4.3.1 makes that cover every PCID and, for combined mappings, every
+extended page-table root, so it is deliberate over-invalidation and is
+documented as such.
+
+`on_guest_invept` releases the shadow slot, and the counts agree: 15,954
+guest INVEPTs against 15,956 rebuilds, within 0.02%.
+
+Neither is the fault. Recorded so the last untested correctness path in
+the nested paging code is not re-opened.
+
+
 ## Without nesting the same VMM runs Windows healthily - the failure is VSM-only
 
 **2026-08-22.** Never measured in this session, and it scopes everything
