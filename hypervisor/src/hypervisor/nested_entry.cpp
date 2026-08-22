@@ -7527,6 +7527,49 @@ void hypervisor::record_l2_entry_event(std::size_t cpu)
         }
     }
 
+    // Withhold the notification interrupt itself, not just its flag.
+    //
+    // **Clearing the flag was the wrong half.** `ZPP_SUPPRESS_VINA`
+    // cleared the bit the secure kernel tests and the guest still
+    // stalled, because the *interrupt* was still delivered: the
+    // single-step trace shows `KiVinaInterruptShadow` into
+    // `KiVinaInterrupt` dispatched through VTL1's own descriptor table,
+    // and counting injections over **every** entry that runs VTL1 -
+    // rather than only the armed one, which is what reported "no event
+    // 100%" - finds vector `0x40` on 3,920 of 68,786 of them.
+    //
+    // So this drops that vector on entries that run VTL1, which is what
+    // faster hardware would produce by finishing `ShvlpProtectPages`
+    // before the notification arrived. It is advisory by design - it
+    // tells VTL1 that VTL0 would like the processor back - so declining
+    // to deliver it costs VTL0 latency and nothing else.
+    if constexpr (nested_vmx::suppress_vina) {
+        constexpr std::uint64_t notification_vector = 0x40;
+
+        if ((cpu < max_cpus) && (1 == this->vtl_half_mark_kind[cpu]) &&
+            (0 != (given & valid)) &&
+            (notification_vector == (given & vector_mask))) {
+            this->vmcs.write(
+                field::vm_entry_interruption_information_field,
+                given & ~valid);
+
+            this->vina_suppressed[cpu] += 1;
+            given = given & ~valid;
+        }
+    }
+
+    // Every entry that runs VTL1, not just the armed one. See
+    // `vtl1_any_entry_vector`.
+    if ((cpu < max_cpus) && (1 == this->vtl_half_mark_kind[cpu])) {
+        this->vtl1_any_entry_count[cpu] += 1;
+
+        if (0 != (given & valid)) {
+            this->vtl1_any_entry_vector[cpu][given & vector_mask] += 1;
+        } else {
+            this->vtl1_any_entry_vector[cpu][256] += 1;
+        }
+    }
+
     if (0 != this->vtl1_entry_armed[cpu]) {
         this->vtl1_entry_armed[cpu] = 0;
 

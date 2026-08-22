@@ -10787,6 +10787,30 @@ private:
     std::uint64_t vtl_call_block_word[max_cpus][8][4]{};
     std::uint64_t vtl_call_block_other[max_cpus]{};
     std::uint64_t vtl_call_block_last[max_cpus]{};
+
+    /**
+     * Vectors injected on **every** entry that runs VTL1, not only the
+     * first after the call.
+     *
+     * `vtl1_entry_vector` marks just the armed entry and reports "no
+     * event" on 100% of them - yet the single-step trace shows VTL1
+     * dispatching `KiVinaInterruptShadow` into `KiVinaInterrupt` through
+     * its own descriptor table, which is a real interrupt. Both readings
+     * are direct, so the instrument is the thing at fault: VTL1's half
+     * takes about 7.7 exits, so there are several entries per half and
+     * only the first was ever examined.
+     *
+     * The same oversight made `ZPP_SUPPRESS_VINA` fire 293 times in
+     * 22,000 before it was pointed at every entry instead. Counted here
+     * against `vtl_half_mark_kind`, which holds `1` for exactly the
+     * window VTL1 is the running level.
+     * @{
+     */
+    std::uint64_t vtl1_any_entry_vector[max_cpus][257]{};
+    std::uint64_t vtl1_any_entry_count[max_cpus]{};
+    /**
+     * @}
+     */
     /**
      * @}
      */
