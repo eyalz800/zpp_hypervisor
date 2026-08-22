@@ -406,6 +406,15 @@ void hypervisor::copy_vmcs12_to_shadow(std::size_t cpu)
             }
         };
 
+        // The VMCS pointer is borrowed from here to the `vmptrld`
+        // back at the end, and only the shadow region is touched in
+        // between - so the fields cached for the VMCS that is current
+        // now are still good when it becomes current again. Holding the
+        // cache still across the borrow, and handing the row back on the
+        // way out, is what stops these two functions wiping it six times
+        // a round trip. See `vmcs_cache_suspended`.
+        arch::x86_64::vmx::vmcs_cache_borrow borrow;
+
         std::uint64_t previous{};
         if (arch::x86_64::vmx::vmptrst(&previous)) {
             return;
@@ -509,6 +518,15 @@ void hypervisor::copy_shadow_to_vmcs12(std::size_t cpu)
                 mark = now;
             }
         };
+
+        // The VMCS pointer is borrowed from here to the `vmptrld`
+        // back at the end, and only the shadow region is touched in
+        // between - so the fields cached for the VMCS that is current
+        // now are still good when it becomes current again. Holding the
+        // cache still across the borrow, and handing the row back on the
+        // way out, is what stops these two functions wiping it six times
+        // a round trip. See `vmcs_cache_suspended`.
+        arch::x86_64::vmx::vmcs_cache_borrow borrow;
 
         std::uint64_t previous{};
         if (arch::x86_64::vmx::vmptrst(&previous)) {

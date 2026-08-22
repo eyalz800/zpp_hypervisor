@@ -7383,6 +7383,14 @@ void hypervisor::record_l2_entry_event(std::size_t cpu)
         } else {
             this->vtl1_entry_vector[cpu][256] += 1;
         }
+
+        // And **where** it resumes, which is the thing that says whether
+        // it is progressing or starting over. See `vtl1_resume_rip`.
+        auto & slot = this->vtl1_resume_count[cpu];
+
+        this->vtl1_resume_rip[cpu][slot % vtl1_resume_capacity] =
+            this->vmcs.read(field::guest_rip);
+        slot = slot + 1;
     }
 
     if (0 != (given & valid)) {
@@ -8887,6 +8895,65 @@ hypervisor::on_l2_exit(std::size_t cpu,
             }
 
             if (vtl_call_code == code) {
+                // What VTL0 could have done with an interrupt at the
+                // instant it handed over. See `vtl_call_if_clear`.
+                if (cpu < max_cpus) {
+                    constexpr std::uint64_t interrupt_enable = 1ull << 9;
+                    constexpr std::uint64_t blocking =
+                        (1ull << 0) | (1ull << 1);
+
+                    auto rflags = this->vmcs.read(
+                        arch::x86_64::vmx::vmcs::field::guest_rflags);
+                    auto state = this->vmcs.read(
+                        arch::x86_64::vmx::vmcs::field::
+                            guest_interruptibility_state);
+
+                    this->vtl_call_rflags[cpu] = rflags;
+                    this->vtl_call_interruptibility[cpu] = state;
+                    this->vtl_call_activity[cpu] = this->vmcs.read(
+                        arch::x86_64::vmx::vmcs::field::
+                            guest_activity_state);
+
+                    if (0 == (rflags & interrupt_enable)) {
+                        this->vtl_call_if_clear[cpu] += 1;
+                    } else {
+                        this->vtl_call_if_set[cpu] += 1;
+                    }
+
+                    if (0 != (state & blocking)) {
+                        this->vtl_call_blocked[cpu] += 1;
+                    }
+
+                    // And where the call came from. See `vtl0_call_rip`.
+                    auto & where = this->vtl0_call_count[cpu];
+                    auto at = where % vtl1_resume_capacity;
+
+                    this->vtl0_call_rip[cpu][at] = this->vmcs.read(
+                        arch::x86_64::vmx::vmcs::field::guest_rip);
+
+                    // The caller behind the hypercall stub: one qword at
+                    // the stack pointer, which is where the stub's `ret`
+                    // will go. See `vtl0_call_return`.
+                    auto rsp = this->vmcs.read(
+                        arch::x86_64::vmx::vmcs::field::guest_rsp);
+
+                    this->vtl0_call_rsp[cpu] = rsp;
+
+                    std::uint64_t caller{};
+                    if (auto physical = translate_guest_linear(cpu, rsp)) {
+                        if (read_guest_memory(
+                                cpu,
+                                *physical,
+                                std::as_writable_bytes(
+                                    std::span(&caller, 1)))) {
+                            this->vtl0_call_return[cpu][at] = caller;
+                            this->vtl0_call_return_read[cpu] += 1;
+                        }
+                    }
+
+                    where = where + 1;
+                }
+
                 capture_vtl_switch(cpu, 0, context);
                 mark_vtl_half(cpu, 0);
                 arm_vtl_step(cpu, 0);
@@ -8894,6 +8961,20 @@ hypervisor::on_l2_exit(std::size_t cpu,
                 capture_vtl_switch(cpu, 1, context);
                 mark_vtl_half(cpu, 1);
                 arm_vtl_step(cpu, 1);
+
+                // Where it yielded from, beside the flag it yielded on.
+                // See `vtl1_resume_rip`: the pair says whether the
+                // secure kernel is walking through its work or looping
+                // over the same instruction.
+                if (cpu < max_cpus) {
+                    auto & where = this->vtl1_yield_count[cpu];
+
+                    this->vtl1_yield_rip[cpu]
+                                        [where % vtl1_resume_capacity] =
+                        this->vmcs.read(
+                            arch::x86_64::vmx::vmcs::field::guest_rip);
+                    where = where + 1;
+                }
 
                 // The one bit the secure kernel tested to decide this.
                 // See `vina_flags`: VTL1 is the running guest here, so

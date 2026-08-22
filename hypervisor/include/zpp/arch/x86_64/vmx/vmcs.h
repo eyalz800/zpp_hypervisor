@@ -239,6 +239,35 @@ struct vmcs_cache_row
 
 inline constinit vmcs_cache_row vmcs_cache[vmcs_cache_processors]{};
 inline constinit std::uint64_t vmcs_cache_epoch{1};
+
+/**
+ * Non-zero while a caller is borrowing the current VMCS pointer and will
+ * hand it back - the shadow-VMCS copies, which `vmptrld` away, touch only
+ * the shadow, and `vmptrld` back.
+ *
+ * **This is what the hit rate turns on.** Measured: the epoch was bumped
+ * 9,584,003 times over 2,076,513 exits, 4.6 window-ends an exit, and only
+ * one of those is the exit itself. The rest are the two shadow copies,
+ * each of which loads a pointer, clears it and loads the old one back -
+ * three bumps apiece, twice a round trip, every one of them wiping fields
+ * belonging to a VMCS that never stopped being the one we care about.
+ *
+ * While it is set, `read` and `write` neither consult nor fill the cache,
+ * so nothing belonging to the borrowed VMCS can enter a row. The borrower
+ * then calls `vmcs_cache_revalidate` once its own `vmptrld` back has
+ * happened, which marks the row current again **without clearing it** -
+ * sound precisely because the row still describes the VMCS that is
+ * current again, and nothing in between could have changed it.
+ *
+ * Global rather than per-processor, and safe that way round: another
+ * processor seeing it set merely stops caching for a moment. The one
+ * thing that would *not* be safe is restoring the epoch to a saved value,
+ * because a second processor may have bumped it meanwhile and lowering it
+ * would revive that processor's stale rows. Hence re-validating a row
+ * forward to the current epoch rather than winding the epoch back.
+ */
+inline constinit std::uint64_t vmcs_cache_suspended{};
+inline constinit std::uint64_t vmcs_cache_revalidations{};
 inline constinit std::uint64_t vmcs_cache_hits{};
 inline constinit std::uint64_t vmcs_cache_misses{};
 inline constinit std::uint64_t vmcs_cache_unarmed{};
@@ -278,6 +307,56 @@ inline std::size_t vmcs_cache_row_index()
     return (index < vmcs_cache_processors) ? index
                                            : vmcs_cache_processors;
 }
+
+/**
+ * Marks this processor's row current again without discarding it.
+ *
+ * Only correct when the VMCS current now is the one the row already
+ * describes, and nothing has changed a field of it in between - which is
+ * exactly the shadow-copy case `vmcs_cache_suspended` exists for.
+ */
+inline void vmcs_cache_revalidate()
+{
+    if constexpr (vmcs_cache_enabled) {
+        auto row = vmcs_cache_row_index();
+
+        if (row < vmcs_cache_processors) {
+            vmcs_cache[row].epoch = vmcs_cache_epoch;
+            vmcs_cache_revalidations = vmcs_cache_revalidations + 1;
+        }
+    }
+}
+
+/**
+ * Holds the cache still across a borrow of the VMCS pointer, and hands
+ * the row back on the way out. See `vmcs_cache_suspended`.
+ */
+class vmcs_cache_borrow
+{
+public:
+    vmcs_cache_borrow()
+    {
+        if constexpr (vmcs_cache_enabled) {
+            vmcs_cache_suspended = vmcs_cache_suspended + 1;
+        }
+    }
+
+    ~vmcs_cache_borrow()
+    {
+        if constexpr (vmcs_cache_enabled) {
+            vmcs_cache_suspended = vmcs_cache_suspended - 1;
+
+            // After the borrower's own `vmptrld` back, so the pointer is
+            // the one the row describes again.
+            if (0 == vmcs_cache_suspended) {
+                vmcs_cache_revalidate();
+            }
+        }
+    }
+
+    vmcs_cache_borrow(const vmcs_cache_borrow &) = delete;
+    vmcs_cache_borrow & operator=(const vmcs_cache_borrow &) = delete;
+};
 
 /**
  * `vmptrld` and `vmclear`, wrapped so the cache cannot be left describing
@@ -421,7 +500,9 @@ public:
         // Honouring the width would mean re-deriving it at every write;
         // dropping the entry costs one miss and cannot be wrong.
         if constexpr (vmcs_cache_enabled) {
-            auto row = vmcs_cache_row_index();
+            auto row = (0 == vmcs_cache_suspended)
+                           ? vmcs_cache_row_index()
+                           : vmcs_cache_processors;
 
             if ((row < vmcs_cache_processors) &&
                 (vmcs_cache[row].epoch == vmcs_cache_epoch)) {
@@ -449,7 +530,9 @@ public:
             reinterpret_cast<std::uint64_t>(__builtin_return_address(0)));
 
         if constexpr (vmcs_cache_enabled) {
-            auto row = vmcs_cache_row_index();
+            auto row = (0 == vmcs_cache_suspended)
+                           ? vmcs_cache_row_index()
+                           : vmcs_cache_processors;
 
             if (row < vmcs_cache_processors) {
                 auto slot = static_cast<std::size_t>(

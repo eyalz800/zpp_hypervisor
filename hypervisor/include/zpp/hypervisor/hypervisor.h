@@ -10490,6 +10490,116 @@ private:
     std::uint64_t vina_at_call_unread[max_cpus]{};
 
     /**
+     * Where the secure kernel resumes, one entry per `HvCallVtlCall`.
+     *
+     * **This is the instrument that separates "restarting" from
+     * "progressing", and nothing in this tree could tell them apart.**
+     * The measured shape of the freeze is that VTL1 completes about
+     * 21,005 times and then never again - the same ceiling on every build
+     * measured, including one 1.64x faster than another, so the thing
+     * that stops it is counted in work rather than in microseconds. After
+     * that point the guest keeps calling in at tens of hertz and every
+     * call comes back having done nothing.
+     *
+     * Two accounts fit that equally well and want opposite fixes. Either
+     * the secure kernel resumes where it left off and is making progress
+     * too slowly to finish, or it restarts the same operation every time
+     * and can never finish however long it is given. A ring of the
+     * resume address answers it directly: a spread of addresses is the
+     * first, one or two repeated addresses is the second.
+     *
+     * Cheap enough to leave on. The value is read from vmcs02 on an entry
+     * that already reads the interruption-information field beside it,
+     * and only on entries that run VTL1 - tens a second, not per exit.
+     * @{
+     */
+    static constexpr std::size_t vtl1_resume_capacity = 64;
+
+    std::uint64_t vtl1_resume_rip[max_cpus][vtl1_resume_capacity]{};
+    std::uint64_t vtl1_resume_count[max_cpus]{};
+
+    /** The same for where it *yields*, taken at the `HvCallVtlReturn`. */
+    std::uint64_t vtl1_yield_rip[max_cpus][vtl1_resume_capacity]{};
+    std::uint64_t vtl1_yield_count[max_cpus]{};
+
+    /**
+     * What state VTL0 is in at the `HvCallVtlCall`, which is the moment
+     * that decides whether it can ever take the interrupt it is holding.
+     *
+     * The secure kernel is spinning in `ShvlVinaHandler` - measured, both
+     * resume and yield addresses are a single value three bytes apart,
+     * the `vmcall` and the instruction after it. That handler loops until
+     * VINA is clear, and VINA is Hyper-V saying VTL0 has an interrupt
+     * pending. So VTL1 is waiting on VTL0, not the other way round, and
+     * the question is why a thread sampled at IRQL 0 never takes it.
+     *
+     * The three candidates are all here: `RFLAGS.IF` clear, blocking by
+     * STI or MOV SS in the interruptibility state, and a virtual task
+     * priority high enough to mask the vector. Counted rather than
+     * argued, because "it is at PASSIVE_LEVEL so it must be able to take
+     * one" is exactly the kind of reasoning this tree has been wrong
+     * about before.
+     * @{
+     */
+    std::uint64_t vtl_call_if_clear[max_cpus]{};
+    std::uint64_t vtl_call_if_set[max_cpus]{};
+    std::uint64_t vtl_call_blocked[max_cpus]{};
+    std::uint64_t vtl_call_rflags[max_cpus]{};
+    std::uint64_t vtl_call_interruptibility[max_cpus]{};
+    std::uint64_t vtl_call_activity[max_cpus]{};
+
+    /**
+     * Where in VTL0 the `HvCallVtlCall` is issued from, one entry per
+     * call.
+     *
+     * The pair to `vtl1_resume_rip`, and needed for the same reason: that
+     * ring showed the secure kernel spinning on a single instruction, so
+     * the interesting half of the loop is now the other one. If VTL0 also
+     * calls from a single address it is a two-sided spin and the address
+     * names the function to disassemble; if VTL0 calls from many places
+     * it is doing real work and only the secure kernel's side is stuck.
+     *
+     * Symbolised against `ntoskrnl` the same way `Phase1Initialization`
+     * was found - the kernel base is in this VMM's own log and moves
+     * every boot with KASLR.
+     * @{
+     */
+    std::uint64_t vtl0_call_rip[max_cpus][vtl1_resume_capacity]{};
+    std::uint64_t vtl0_call_count[max_cpus]{};
+
+    /**
+     * The return address on VTL0's stack at the `HvCallVtlCall`, which is
+     * the thing `vtl0_call_rip` could not give.
+     *
+     * Both sides of the loop turned out to sit in Hyper-V's hypercall
+     * page - VTL0 calls from offset 0x019 and the secure kernel resumes
+     * at 0x035, twenty-eight bytes apart in one page - because that page
+     * holds the `vmcall` stubs both trust levels call through. So the
+     * instruction pointer names the stub and not the caller, and the
+     * caller is one qword down the stack, where the stub's `ret` will
+     * take it.
+     *
+     * Symbolised against `ntoskrnl`, whose base this VMM already logs and
+     * which moves every boot with KASLR.
+     * @{
+     */
+    std::uint64_t vtl0_call_return[max_cpus][vtl1_resume_capacity]{};
+    std::uint64_t vtl0_call_rsp[max_cpus]{};
+    std::uint64_t vtl0_call_return_read[max_cpus]{};
+    /**
+     * @}
+     */
+    /**
+     * @}
+     */
+    /**
+     * @}
+     */
+    /**
+     * @}
+     */
+
+    /**
      * How long VTL1 runs, as a power-of-two histogram, **split by whether
      * the VINA flag was set when it returned**.
      *
