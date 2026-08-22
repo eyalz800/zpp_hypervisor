@@ -1,5 +1,111 @@
 # Known defects
 
+## The freeze is a livelock: VTL1's window outgrew the guest's clock period
+
+**Measured 2026-08-22, on the rig, two dumps ninety seconds apart at the
+freeze.** This is the first account of the hang built entirely out of
+counters that were *seen to move or not move*, rather than out of a single
+cumulative reading - and every earlier "freeze point" claim in this file
+that was taken from one dump should be read against it.
+
+### What the two dumps say
+
+`how long VTL1 ran (us), by VINA flag at its return`, the same run, ninety
+seconds apart:
+
+```
+                   VINA clear        VINA set
+  2^20    526 us     5,546 (frozen)        0
+  2^21  1,053 us    10,735 (frozen)   10,031 -> 13,106   (+3,075)
+  2^22  2,106 us     1,939 (frozen)    3,100 ->  3,101
+  2^23  4,211 us     2,778 (frozen)    1,234
+```
+
+**Every VINA-clear bucket is frozen; all growth is in one VINA-set
+bucket.** The same shape appears in the raw pair: VINA-clear-at-return
+stopped dead at 20,998 while VINA-set went 2,877 -> 6,633 -> 10,066 across
+three samples, i.e. 17.7% -> 24.0% -> 32.4% of returns.
+
+So after the freeze **VTL1 never once completes a call without being
+interrupted.** It runs 1.05-2.1 ms; the guest's clock period is 1.74 ms
+(`KeQuantumEndTimerIncrement` = 17,400, settled by disassembly and
+recorded above). A tick therefore always lands inside VTL1's window. VTL1
+observes VTL0 has an interrupt pending, takes the `ShvlVinaHandler` path,
+returns `4` having done none of the work it was called for, and
+`VslpLockPagesForTransfer` calls it again. Nothing is broken; the loop
+simply cannot make progress.
+
+**This is a threshold, not a slope.** VTL1's window must be shorter than
+1.74 ms. That is why the failure is deterministic at ~39,280 protection
+calls and identical with 2 or 8 CPUs, and it is why it looks like a hang
+rather than like slowness.
+
+### What this retires
+
+The reframing kills a large class of hypotheses outright, and several of
+them have entries of their own above:
+
+- **"An interrupt is queued and never delivered."** False, and measured:
+  `l2_given_vector` records **360,637** injections - 0xd1 (clock) 330,192,
+  0x40 17,647, 0x2f (deferred procedure call) 12,798 - against 349,724
+  interrupt-window exits. Every window opened ends in an injection.
+  Delivery works.
+- **"VINA being set is the defect."** It is the *correct* answer to the
+  question securekernel asks. With a 574.7 Hz clock and a 1 ms window,
+  VINA set on 100% of returns is arithmetic, not a bug.
+- **"A stuck IRR bit."** VTL0's virtual-APIC page reads IRR and ISR both
+  **completely empty**, with the reader proven against
+  `host_page_table[0]`.
+- **"A stale virtual task priority."** A single read said `VTPR = 0xd0`,
+  IRQL 13, against a thread sampled at IRQL 0 - a clean story, and wrong.
+  The entry histogram over 1,459,083 entries reads 0xd0 44.2%, 0x20 25.2%,
+  0xf0 23.4%, 0x00 4.3%: it moves, and it reaches zero 63,077 times. **The
+  one-shot read would have confirmed the hypothesis under test.** Same
+  lesson as the RDX census and the wide `xp` over a VFIO BAR, for the
+  third time.
+- **"The TPR-below-threshold exit is owed and never generated."** The
+  criterion is stated in `nested_entry.cpp:3431` and it is met: 12,679
+  owed against 12,851 reason-43 exits taken. CLAUDE.md's "fires 33 times
+  in 3.6 million" describes an older configuration and should not be
+  carried forward.
+- **"Hyper-V's injections are lost in the hardware shadow VMCS."** Read
+  both sides: `vm_entry_interruption_information_field` *is* in
+  `shadow_read_write_fields` (`nested_vmx.h:1761`), and
+  `copy_shadow_to_vmcs12` runs before `build_vmcs02` reads it, in the same
+  place KVM does it in `nested_vmx_run` (`nested_vmx.cpp:1837`).
+- **The application processors are not a cause.** All seven are parked in
+  L1 with **zero exits over ninety seconds** and 17 second-level entries
+  each, taken long ago. That is a consequence: `KeStartAllProcessors` is
+  called *from* `Phase1Initialization`, and we are stuck before it.
+
+### Where the window goes, and the one lever
+
+53% of all exits are the level above us doing local-APIC work, and all of
+it lands inside VTL1's window:
+
+- `ept-violation` 1,384,476, **30.6%**, and the exit ring shows **one
+  page**, `0xfee00000`, from L1 rip `0xfffff82b96c57efe`.
+- `wrmsr` 1,012,787, **22.4%**, of Hyper-V's synthetic APIC MSRs -
+  `0x40000070` (EOI), `0x40000071` (ICR), `0x40000084` (EOM) - from L1 rip
+  `0xfffff82b96da843d`.
+
+The EPT violations are **self-inflicted**: they are the local-APIC page
+watch, which exists to catch a start-up IPI. `ZPP_DISARM_APIC_WATCH` was
+added for exactly this and has been off because a processor started after
+the watch is dropped would run unvirtualized. In this configuration no
+processor is going to start - Windows never reaches
+`KeStartAllProcessors` - so the objection does not apply *while the guest
+is stuck here*, and it is the one lever aimed at 30.6% of the window.
+
+**This also explains why performance was deprioritised and should not have
+been, in this one respect.** Per-exit cost is not a tuning question here;
+it is the difference between a VTL1 window that fits inside 1.74 ms and
+one that does not. The four earlier interventions all tried to move the
+*clock* (`ZPP_STRETCH_GUEST_TIMER`, `ZPP_DELIVER_SELF_IPI`,
+`ZPP_TICK_FLOOR`, `ZPP_TIME_DILATION`) and all four failed. The other side
+of the same inequality had not been tried.
+
+
 Everything here was found by reading the tree or by measuring a running
 system, and each entry says which. That distinction is the point of the
 document: a defect that has been *seen* justifies a fix on its own, and a
