@@ -1,5 +1,51 @@
 # Known defects
 
+## Where the processor actually is: starved, not blocked
+
+**2026-08-22.** Asked directly of the running machine rather than inferred,
+on the single-processor configuration that gets furthest.
+
+Twelve samples of `info registers` on the one vCPU, classified by range:
+
+```
+9/12  this VMM      vm_exit_entry, memcpy, invvpid, the enlightened field path
+3/12  Hyper-V       0xfffff825b2...
+0/12  Windows       nothing in ntoskrnl at 0xfffff80179600000
+```
+
+which agrees with the dump: **this VMM ~40%, the guest hypervisor ~50%,
+Windows ~9%.** The processor is running - RIP moves between samples, CPL
+is 0 - so nothing is wedged. **Windows is starved, not blocked.** There is
+no lock to break and no interrupt to deliver; it simply gets under a tenth
+of one 1.8 GHz core with three layers above it.
+
+**And the largest single cost is now one this VMM inflicted on itself.**
+The guest hypervisor's own VMREADs: **9,896,360 exits, 29.3% of handler
+time**, because giving up VMCS shadowing is the price of the enlightened
+VMCS and the two cannot be combined.
+
+Measured both ways on one processor, same binary, the only difference
+being whether the layer below was asked for the enlightenment:
+
+| | shadowing, no eVMCS | eVMCS, no shadowing |
+|---|---|---|
+| duty | 0.769 | 0.406 |
+| guest hypervisor's share | 16.1% | 50.5% |
+| **Windows' share** | 7.0% | **9.0%** |
+
+So the enlightened VMCS is the better of the two, and only just.
+
+**A faster VMM is not automatically a faster guest.** Turning the
+trust-level trace off took cycles an exit from 22,484 to 16,224 and duty
+from 0.406 to 0.363 - and Windows' share **fell** to 7.6%, because the
+time freed went to the guest hypervisor's VMREADs rather than to Windows.
+Optimising this VMM without asking who receives the saving is how the last
+several rounds were spent.
+
+It also removed the hypercall census, which lives behind the same flag -
+the same trap the manifest exists for.
+
+
 ## One processor unsticks it, and eight do not
 
 **2026-08-22.** After the instruction-length halt was fixed and the
