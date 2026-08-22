@@ -1,5 +1,50 @@
 # Known defects
 
+## The VMCS field cache, measured end to end - and one idea that did not pay
+
+**2026-08-22.** Every VMCS access is an exit to KVM at about 4,600 cycles,
+and at ~41 accesses an exit that was essentially the whole 196,000-cycle
+cost of an exit. Three changes, each measured on the rig over a ~310 s
+window on a settled guest:
+
+| | read hit rate | cycles/exit | Windows' share of wall |
+|---|---|---|---|
+| one row per processor (original) | 26.1% | 196,539 | 6.8% |
+| one row per **VMCS**, 4 per processor | 45.2% | 201,942 | 7.9% |
+| + write-through, width-aware | 48.5% | 191,085 | 8.1% |
+| + skip a write the VMCS already holds | 50.3% | 196,720 | 8.0% |
+
+**The elision does not pay and has been reverted.** It fired on 245,129 of
+25,874,946 writes - **0.9%** - so a vmcs02 rebuild really does write new
+values nearly every time, and the branch bought a rounding error. The
+counter it added is what said so, which is the only reason it was worth
+building; the comment demanded the ratio be checked before believing it
+helped, and the ratio said no.
+
+Keep the first two. Hardware accesses an exit fell from about 41 to 35.6
+and Windows' share of wall rose 6.8% -> 8.0%, an 18% improvement that is
+real and nowhere near enough.
+
+**What this settles: the cache is not the answer.** Doubling the hit rate
+moved cycles/exit by less than 3%, because the remaining ~25 reads and ~17
+writes an exit are all genuine first touches. The access count cannot be
+cut much further by caching, and the per-access price cannot be cut at all
+on this machine:
+
+- `enable_shadow_vmcs=N`, and **forcing it is not possible**: reloading
+  `kvm_intel` with `enable_shadow_vmcs=1` still reads `N`, because KVM
+  clears the flag when the processor does not enumerate the capability.
+- `/proc/cpuinfo` `vmx flags` on this i7-8565U lists `ept vpid tpr_shadow
+  flexpriority pml ept_violation_ve ept_mode_based_exec` and **no
+  `shadow_vmcs`**, no `apicv`, no `posted_intr`.
+- Our own vmcs02 secondary controls read `0x1010ae`, whose bit 14 is
+  clear, so this VMM is not using it either.
+
+General claims that Whiskey Lake supports VMCS shadowing may be right
+about the die; on this board, silicon or firmware, it is not enumerated,
+and no QEMU option can conjure a capability the processor does not report.
+
+
 ## What the halt was hiding: the boot goes much further without it
 
 **2026-08-22, measured after the instruction-length fix.** The old wall was
