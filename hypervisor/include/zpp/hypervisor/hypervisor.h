@@ -10560,6 +10560,38 @@ private:
     std::uint64_t vtl1_resume_rip[max_cpus][vtl1_resume_capacity]{};
     std::uint64_t vtl1_resume_count[max_cpus]{};
 
+    /** How many times the notification flag was cleared on a VTL1 entry.
+     *  See `nested_vmx::suppress_vina`. */
+    std::uint64_t vina_suppressed[max_cpus]{};
+    /** Why the suppression did or did not fire, so 293 clears out of
+     *  22,000 entries can be attributed. See `nested_vmx::suppress_vina`. */
+    std::uint64_t vina_suppress_attempts[max_cpus]{};
+    std::uint64_t vina_suppress_no_address[max_cpus]{};
+    std::uint64_t vina_suppress_read_failed[max_cpus]{};
+    std::uint64_t vina_suppress_already_clear[max_cpus]{};
+    std::uint64_t vina_suppress_write_failed[max_cpus]{};
+
+    /**
+     * VTL0's stack at the `HvCallVtlCall`, so the call chain that leads
+     * into VTL1 can be read rather than guessed at.
+     *
+     * `vtl0_call_return` gave the immediate caller behind the hypercall
+     * stub - `HvlSwitchToVsmVtl1+0xab` - and that is a shim: it says
+     * nothing about *which* piece of work is entering the secure kernel,
+     * or what that work is waiting for. The frames above it do. Every
+     * qword here that lands inside `ntoskrnl` is a return address, and
+     * symbolising them against the kernel base this VMM already logs
+     * gives the chain.
+     *
+     * Captured once per call and overwritten, because the question is
+     * what the *steady* chain is, and it has been byte-identical in every
+     * other register sampled at this point.
+     */
+    static constexpr std::size_t vtl0_stack_words = 48;
+
+    std::uint64_t vtl0_call_stack[max_cpus][vtl0_stack_words]{};
+    std::uint64_t vtl0_call_stack_read[max_cpus]{};
+
     /** The same for where it *yields*, taken at the `HvCallVtlReturn`. */
     std::uint64_t vtl1_yield_rip[max_cpus][vtl1_resume_capacity]{};
     std::uint64_t vtl1_yield_count[max_cpus]{};

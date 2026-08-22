@@ -222,6 +222,7 @@ target_compile_options(zpp_hypervisor PRIVATE
     # so a release build has to be able to ask for it.
     -DZPP_VMCS_CACHE=$<BOOL:${ZPP_VMCS_CACHE}>
     -DZPP_NESTED_VID=$<BOOL:${ZPP_NESTED_VID}>
+    -DZPP_SUPPRESS_VINA=$<BOOL:${ZPP_SUPPRESS_VINA}>
     # Nested VMX. Same shape as the diagnostic switch - an always defined 0/1
     # macro turned into a constexpr bool by nested_vmx.h - and defined for both
     # configurations rather than debug only, because unlike diagnostics this is

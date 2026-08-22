@@ -1520,6 +1520,46 @@ constexpr std::uint64_t supported_primary_controls =
 #define ZPP_NESTED_VID 0
 #endif
 
+/**
+ * Clear the virtual interrupt notification flag on the entry that runs
+ * VTL1, so the secure kernel does its work instead of yielding.
+ *
+ * **This is a lie, and it is the narrowest one that addresses the
+ * measured deadlock.** The secure kernel spins in `ShvlVinaHandler`,
+ * which loops until VINA is clear. VINA is set because vector `0x2f` is
+ * pending for VTL0 and deliverable - measured, 95.6% of returns whose
+ * call was made at priority class 0, against 6.2% at class 2 where the
+ * guest's own priority blocks that vector. The level above is right to
+ * set it. The guest is right to call in. Nothing is broken.
+ *
+ * What is wrong is only the *rate*: for VINA to be clear, VTL0 must
+ * re-enter VTL1 inside the 1.74 ms before the clock re-requests `0x2f`,
+ * and its half of the round trip is 11,357 us across 95.6 exits - about
+ * seven ticks wide - because every synthetic MSR write in the clock path
+ * costs two exits and every exit costs 58 exits into KVM underneath us.
+ * On a host with VMCS shadowing that half would fit and this flag would
+ * be unnecessary.
+ *
+ * So the flag makes the outcome that faster hardware would produce: the
+ * secure kernel runs its 1,456 us and finishes instead of yielding
+ * having done nothing. The cost is that VTL0's deferred procedure call
+ * waits that long, which Windows tolerates by design - deferred calls
+ * have no deadline.
+ *
+ * **What would make it wrong.** VINA is VTL0's signal that it wants the
+ * processor back; suppressing it indefinitely would starve VTL0. This
+ * clears it only on the entry that runs VTL1, so the level above is free
+ * to set it again the moment VTL1 returns, and every other use of the
+ * flag is untouched. If the secure kernel has a second reason to consult
+ * it that this has not seen, this will find it - which is why it is a
+ * switch and not a change.
+ */
+#ifndef ZPP_SUPPRESS_VINA
+#define ZPP_SUPPRESS_VINA 0
+#endif
+
+inline constexpr bool suppress_vina = (0 != ZPP_SUPPRESS_VINA);
+
 inline constexpr bool virtual_interrupt_delivery_offered =
     (0 != ZPP_NESTED_VID);
 

@@ -103,6 +103,17 @@ option(ZPP_NESTED_VID
     "Offer APIC-register virtualization and virtual-interrupt delivery"
     OFF)
 
+# Clear the virtual interrupt notification flag on the entry that runs
+# VTL1, so the secure kernel does its work instead of yielding. See
+# nested_vmx.h, which carries the measurement and the argument.
+#
+# OFF, and it is a lie to the guest rather than a fix to a defect: nothing
+# in this VMM is misbehaving, the rate is simply wrong. It exists because
+# the rate cannot be fixed on this host.
+option(ZPP_SUPPRESS_VINA
+    "Clear the interrupt notification flag when entering VTL1"
+    OFF)
+
 # Nested VMX: whether the guest is told VT-x exists.
 #
 # Off, and the default is the decision rather than a convenience. With it off
@@ -311,6 +322,7 @@ ExternalProject_Add(hypervisor
         -DZPP_FRAMEBUFFER=${ZPP_FRAMEBUFFER}
         -DZPP_VMCS_CACHE=$<BOOL:${ZPP_VMCS_CACHE}>
         -DZPP_NESTED_VID=$<BOOL:${ZPP_NESTED_VID}>
+        -DZPP_SUPPRESS_VINA=$<BOOL:${ZPP_SUPPRESS_VINA}>
         -DZPP_NESTED_VMX=${ZPP_NESTED_VMX}
         -DZPP_REQUEUE_INTERRUPTED_EVENTS=${ZPP_REQUEUE_INTERRUPTED_EVENTS}
         -DZPP_NESTED_TPR_SHADOW=${ZPP_NESTED_TPR_SHADOW}
@@ -446,6 +458,7 @@ ExternalProject_Add(uefi_loader
         -DZPP_FRAMEBUFFER=${ZPP_FRAMEBUFFER}
         -DZPP_VMCS_CACHE=$<BOOL:${ZPP_VMCS_CACHE}>
         -DZPP_NESTED_VID=$<BOOL:${ZPP_NESTED_VID}>
+        -DZPP_SUPPRESS_VINA=$<BOOL:${ZPP_SUPPRESS_VINA}>
     INSTALL_COMMAND ""
     BUILD_ALWAYS ON
     DEPENDS hypervisor

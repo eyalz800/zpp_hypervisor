@@ -177,6 +177,11 @@ extern "C" [[gnu::used, gnu::retain]] constinit const char
         // differ in it are not comparable at all.
         ' ', 'v', 'i', 'd', '=',
         digit(nested_vmx::virtual_interrupt_delivery_offered),
+        // Clears the notification flag on a VTL1 entry, so the secure
+        // kernel works instead of yielding. A deliberate lie to the
+        // guest, so a run with it on describes a different machine.
+        ' ', 'n', 'o', 'v', 'i', 'n', 'a', '=',
+        digit(nested_vmx::suppress_vina),
         '\0'};
 
 } // namespace zpp::hypervisor

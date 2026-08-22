@@ -1,5 +1,64 @@
 # Known defects
 
+## VINA is not the blocker, and the secure kernel was making progress all along
+
+**Measured 2026-08-22.** `ZPP_SUPPRESS_VINA` clears the notification flag
+on **every** entry that runs VTL1 - not only the first after the call,
+which is why an earlier version fired 293 times in 22,000 and taught
+nothing. The flag is clear on 98.4% of first entries because VTL1's half
+takes 7.7 exits, and the level above sets it on one of *those*, so the
+window that matters is the whole half.
+
+With it firing properly: **VINA set at the return is 0**, down from 6,333.
+Both long-standing ceilings move - protection calls 39,307 against 39,290,
+VINA-clear 21,029 against 21,007 - and three application processors show
+~350 second-level entries where every previous build had 17.
+
+**And it still freezes, in the same place.** Protection calls and
+VINA-clear are both unchanged over 100 s while exits climb. So the secure
+kernel yielding on VINA **is not what stops this boot**, and the account
+built on it - VINA, task priority, the 1.74 ms re-request window - is
+wrong about the mechanism even where its measurements were right.
+
+### What the same dump says instead
+
+```
+every request byte ever seen (21,028 calls):
+  code 0   21,028  100.0%   secure memory manager
+code-0 requests: parameters differed from the previous one 21,015 (99.9%)
+page-walk span: 0x11a483..0x13f420 = 151,454 pages (591.6 MB),
+                7,217 page requests, 6,305 consecutive
+  SHORT OF THE SPAN - it stopped inside
+```
+
+**The secure kernel is not repeating one request.** 99.9% of its requests
+differ from the one before. It is the secure memory manager walking a
+591.6 MB span a page at a time, and it **stopped inside** - 7,217 requests
+into 151,454 pages, about 5%.
+
+The last blocks name frames `0x11aad0` through `0x11aad4`. **Four frames
+immediately below them - `0x11aac9`, `0x11aaca`, `0x11aacb`, `0x11aacc` -
+were measured earlier as read-only in the composed extended page tables
+while this VMM's own tables grant write**, recorded at the time as "ours
+GRANT write; the shadow does not" and never followed up. The walk stops
+essentially where those frames are.
+
+That is two independent measurements, taken days apart in the
+investigation, pointing at the same handful of physical frames. It is the
+best lead in this file and it is nothing to do with interrupts.
+
+### What to do with it
+
+The composed permission is `read-only` because the guest hypervisor's own
+extended page tables say so - which is what `HvCallModifyVtlProtectionMask`
+installs. So the question is what VTL0 does next with a frame it has just
+had protected, and why the walk cannot pass it. Note that
+`reflected_permission` reads **0**: no second-level fault has ever been
+attributed to the guest hypervisor's permissions, and EPT violations are
+frozen at the freeze - so whatever stops the walk is not currently taking
+a fault at all.
+
+
 ## The productive calls were the ones made with 0x2f blocked
 
 **Measured 2026-08-22.** Two correlations, taken together, invert how this

@@ -7442,6 +7442,91 @@ void hypervisor::record_l2_entry_event(std::size_t cpu)
     // Whether the entry about to run VTL1 carries an interrupt, and
     // which. See `vtl1_entry_vector`: this is the only direct evidence
     // available about what ends the secure kernel's turn.
+    // Clear the notification the secure kernel is about to read, on
+    // **every** entry that runs VTL1 rather than only the first after the
+    // call. See `nested_vmx::suppress_vina`.
+    //
+    // Measured: the flag is clear on 98.4% of first entries, and the
+    // secure kernel reads it set moments later - because VTL1's half
+    // takes 7.7 exits, and on one of them the level above runs, sees
+    // `0x2f` pending for VTL0 and sets it before re-entering. Clearing
+    // only on the armed entry therefore missed almost every case that
+    // mattered. `vtl_half_mark_kind` holds `1` while VTL1 is the running
+    // level, which is exactly the window this has to cover.
+    if constexpr (nested_vmx::suppress_vina) {
+        if ((cpu < max_cpus) && (1 == this->vtl_half_mark_kind[cpu])) {
+            this->vina_suppress_attempts[cpu] += 1;
+
+            // Walked fresh rather than taken from
+            // `vina_block_l1_physical`, and that is the whole difference.
+            // The cached address read **clear on 21,921 of 22,317
+            // entries** while the secure kernel read the same flag set
+            // moments later - so the cache names the wrong bytes. The
+            // return path walks `[[gs:0] + 0x10] + 4` every time and its
+            // reads agree with the guest's behaviour, so the walk is what
+            // is trustworthy. vmcs02 already carries VTL1's GS base here,
+            // because it is the state we are about to enter with.
+            std::uint64_t at{};
+
+            {
+                auto gs = this->vmcs.read(
+                    arch::x86_64::vmx::vmcs::field::guest_gs_base);
+
+                auto load = [&](std::uint64_t from,
+                                std::uint64_t & into) {
+                    auto physical = translate_guest_linear(cpu, from);
+                    return physical &&
+                           read_guest_memory(
+                               cpu,
+                               *physical,
+                               std::as_writable_bytes(
+                                   std::span(&into, 1)));
+                };
+
+                std::uint64_t self{};
+                std::uint64_t block{};
+
+                if (load(gs, self) && (0 != self) &&
+                    load(self + 0x10, block) && (0 != block)) {
+                    // All the way to a first-level physical address, as
+                    // the return path does: the page is not in VTL0's
+                    // extended page tables, so the guest-table step has
+                    // to happen here.
+                    if (auto physical =
+                            translate_guest_linear(cpu, block)) {
+                        if (auto l1 = l2_physical_to_l1(cpu, *physical)) {
+                            at = *l1;
+                        }
+                    }
+                }
+            }
+
+            if (0 == at) {
+                this->vina_suppress_no_address[cpu] += 1;
+            } else {
+                std::uint8_t flags{};
+
+                if (!read_guest_physical(
+                        at + 4,
+                        std::as_writable_bytes(std::span(&flags, 1)))) {
+                    this->vina_suppress_read_failed[cpu] += 1;
+                } else if (0 == (flags & 1)) {
+                    this->vina_suppress_already_clear[cpu] += 1;
+                } else {
+                    flags = static_cast<std::uint8_t>(flags & ~1u);
+
+                    if (write_guest_physical(
+                            at + 4,
+                            std::as_bytes(std::span(&flags, 1)))) {
+                        this->vina_suppressed[cpu] += 1;
+                    } else {
+                        this->vina_suppress_write_failed[cpu] += 1;
+                    }
+                }
+            }
+        }
+    }
+
     if (0 != this->vtl1_entry_armed[cpu]) {
         this->vtl1_entry_armed[cpu] = 0;
 
@@ -9017,6 +9102,29 @@ hypervisor::on_l2_exit(std::size_t cpu,
                             this->vtl0_call_return_read[cpu] += 1;
                         }
                     }
+
+                    // And the frames above it. See `vtl0_call_stack`:
+                    // the immediate caller is a shim, and what the work
+                    // is waiting for is further up. Walked a word at a
+                    // time so a page boundary costs one entry rather
+                    // than the whole window.
+                    for (std::size_t k{}; k < vtl0_stack_words; ++k) {
+                        std::uint64_t word{};
+                        auto address = rsp + (8 * k);
+
+                        if (auto to = translate_guest_linear(cpu, address);
+                            to && read_guest_memory(
+                                      cpu,
+                                      *to,
+                                      std::as_writable_bytes(
+                                          std::span(&word, 1)))) {
+                            this->vtl0_call_stack[cpu][k] = word;
+                        } else {
+                            this->vtl0_call_stack[cpu][k] = 0;
+                        }
+                    }
+
+                    this->vtl0_call_stack_read[cpu] += 1;
 
                     where = where + 1;
                 }
