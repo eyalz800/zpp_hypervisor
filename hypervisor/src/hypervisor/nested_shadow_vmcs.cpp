@@ -233,8 +233,77 @@ void hypervisor::note_shadowing_ineffective(std::size_t cpu,
  * - a separate boot-processor-only initialisation step - is one more
  * ordering constraint for no gain.
  */
+/**
+ * Records what this VMM is running *on*, once, on the boot processor.
+ *
+ * **Diagnostic only, and deliberately so.** Nothing in this tree may
+ * behave differently for being nested - the goal is to need nothing
+ * underneath at all - so this decides nothing and only says what is
+ * there. It exists because the question "is the layer below offering the
+ * enlightened VMCS" was answered three times by reasoning and twice
+ * wrongly, and one log line settles it.
+ *
+ * The leaves are the architectural hypervisor range: `0x40000000` carries
+ * the maximum leaf and the vendor signature, `0x40000001` the interface
+ * signature - `Hv#1` when a Hyper-V compatible interface is present - and
+ * `0x40000004` the recommendation bits, of which bit 14 is
+ * "enlightened VMCS". That bit is the precondition for ever replacing our
+ * VMREAD and VMWRITE with writes to a shared page, which on this machine
+ * is the only remaining way to make an exit cheap: every VMCS access is
+ * an exit to the layer below at about 4,600 cycles, KVM will not use a
+ * shadow VMCS on our behalf, and there are some thirty-six accesses an
+ * exit.
+ *
+ * Read with `zpplog`, or from the members, which is why they are kept.
+ */
+void hypervisor::detect_underlying_hypervisor()
+{
+    std::uint32_t leaf[4]{};
+
+    arch::x86_64::cpuid(0x40000000, 0, leaf);
+
+    this->underlying_max_leaf = leaf[0];
+    this->underlying_signature[0] = leaf[1];
+    this->underlying_signature[1] = leaf[2];
+    this->underlying_signature[2] = leaf[3];
+
+    // Nothing below, or nothing that says so. Both are the same to us.
+    if (leaf[0] < 0x40000001) {
+        log("nothing underneath announces itself at cpuid 0x40000000");
+        return;
+    }
+
+    log("underneath: cpuid 0x40000000 max {} signature {} {} {}",
+        leaf[0],
+        leaf[1],
+        leaf[2],
+        leaf[3]);
+
+    arch::x86_64::cpuid(0x40000001, 0, leaf);
+    this->underlying_interface = leaf[0];
+    log("underneath: interface signature {}", leaf[0]);
+
+    if (this->underlying_max_leaf < 0x40000004) {
+        return;
+    }
+
+    arch::x86_64::cpuid(0x40000004, 0, leaf);
+    this->underlying_recommendations = leaf[0];
+
+    constexpr std::uint32_t enlightened_vmcs_recommended = 1u << 14;
+
+    this->underlying_offers_evmcs =
+        (0 != (leaf[0] & enlightened_vmcs_recommended));
+
+    log("underneath: recommendations {}, enlightened vmcs offered = {}",
+        leaf[0],
+        static_cast<std::uint64_t>(this->underlying_offers_evmcs));
+}
+
 void hypervisor::initialize_vmcs_shadowing()
 {
+    detect_underlying_hypervisor();
+
     if constexpr (!nested_vmx::enabled ||
                   !nested_vmx::shadow_vmcs_enabled) {
         // Left false, so set_vmcs_shadowing and both copies are no-ops

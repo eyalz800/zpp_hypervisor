@@ -8506,6 +8506,26 @@ private:
      * arming happens outside a VM exit but *matching* happens inside
      * one, and nothing on that path may allocate.
      */
+    /**
+     * What announced itself below this VMM, from the hypervisor CPUID
+     * range. Diagnostic: nothing in this tree behaves differently for
+     * being nested, and these decide nothing.
+     *
+     * `underlying_offers_evmcs` is the one that matters for future work -
+     * bit 14 of the recommendations at leaf `0x40000004`, "enlightened
+     * VMCS". It is the precondition for ever replacing this VMM's VMREAD
+     * and VMWRITE with writes to a shared page, which on a processor
+     * whose L0 will not use a shadow VMCS on our behalf is the only way
+     * left to make an exit cheap.
+     * @{
+     */
+    std::uint32_t underlying_max_leaf{};
+    std::uint32_t underlying_signature[3]{};
+    std::uint32_t underlying_interface{};
+    std::uint32_t underlying_recommendations{};
+    bool underlying_offers_evmcs{};
+    /** @} */
+
     page_watch watches[watch_capacity]{};
 
     /**
@@ -9474,6 +9494,12 @@ private:
      */
     std::uint64_t shadowing_ineffective[max_cpus]{};
     /** @} */
+
+    /**
+     * Records what this VMM is running on. Diagnostic only - nothing here
+     * behaves differently for being nested. See the definition.
+     */
+    void detect_underlying_hypervisor();
 
     void initialize_vmcs_shadowing();
     void set_vmcs_shadowing(std::size_t cpu, bool enabled);
