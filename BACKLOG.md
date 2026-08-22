@@ -46,8 +46,34 @@ hypervisor's to intercept. Another elimination.
 
 So the code at the return address is ordinary virtual-processor plumbing
 with nothing wrong in it, and it does not name the work item that stalled.
-Finding that still needs either `skci.pdb` or a walk further up VTL1's
-stack than the single frame currently captured.
+
+### And there is no deeper frame to walk
+
+The obvious next move was to walk further up that stack. There is nothing
+there. Of 48 captured words - 384 bytes - **six are non-zero and exactly
+one is a code address**:
+
+```
++0x000  0xfffff8067697a3a4   the return address
++0x008  0x0000000000000001
++0x010  0x0000000100000400   the secure-call block value: request 4, VINA set
++0x018  0x0000000000000001
++0x0d8  0x0000000000000200
++0x130  0x0000000000020001
+```
+
+**The secure kernel is not suspended inside its memory manager.** It is
+near the top of a shallow stack, which is what entering, testing VINA and
+leaving looks like - and matches the resume and yield instruction pointers
+being a single pair three bytes apart. So the stalled work item is not on
+this stack to be found, and the stack-walk route is closed rather than
+merely unfinished.
+
+What that leaves is the secure kernel's *saved thread state* rather than
+its live stack: the thread object `SkiSelectThread` picks, and whatever it
+is blocked on. Reaching that needs the VTL1 address-space reader described
+above, and symbols or structure offsets for `securekernel`'s scheduler -
+neither of which exists here yet.
 
 
 ## Reading the secure kernel's own state needs a reader that does not exist yet
