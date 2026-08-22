@@ -1,5 +1,56 @@
 # Known defects
 
+## We read 30.7 VMCS fields an exit; KVM reads eight. That is the fix.
+
+**Measured 2026-08-22 from this VMM's own field census**, which had been
+compiled in all along and never read:
+
+```
+our reads: 60,562,642 total, 98 distinct, over 1,975,342 exits = 30.7 an exit
+  0x681e guest_rip                              9,053,888  14.9%   <- 4.6 an exit
+  0x4012 vm_entry_controls                      5,172,008   8.5%   <- 2.6 an exit
+  0x6802 guest_cr3                              4,081,087   6.7%
+  0x0802 guest_cs_selector                      3,346,761   5.5%
+  0x4016 vm_entry_interruption_information       3,304,647   5.5%
+  0x4408 idt_vectoring_information_field         2,616,123   4.3%
+```
+
+At 3,529 cycles an access and 58 KVM exits for every exit we take, this
+is the whole of the remaining gap. **The top entries are repeats within a
+single exit** - `guest_rip` is read four and a half times per exit, and
+between a VM exit and the next entry it cannot change unless we write it.
+
+`vmcs.h`'s own comment already framed the target and it is worth quoting,
+because it means the design is settled and only the work remains: KVM's
+hot exit path reads about eight fields - `sync_vmcs02_to_vmcs12` takes
+RFLAGS, two access-rights bytes and the interruptibility state, gets RIP
+and RSP from its own register cache and computes the activity state - and
+defers everything else behind `need_sync_vmcs02_to_vmcs12_rare` until L1
+actually reads one. **30.7 against 8 is 3.8x, and the guest's timer needs
+2.16x.**
+
+`ZPP_DEFER_GUEST_STATE` is on and defers **0.9** of the 30.7. It is the
+right idea applied to almost nothing.
+
+### Why the quick version was not taken
+
+A per-CPU cache valid from VM exit to the next VM entry is sound - those
+fields cannot change in that window unless we write them - and would take
+the repeats out on its own. It was not written because
+`arch::x86_64::vmx::vmcs vmcs{}` is **one object in the singleton shared
+by every processor** (`hypervisor.h:8338`), so the cache has to be
+per-processor, and the index comes from `this_processor()`, which lives
+in the hypervisor layer and reads a GS offset defined there. Duplicating
+that layout constant into the architecture layer to make a cache work is
+how a silent wrong answer gets built: a stale VMCS read does not fault,
+it answers.
+
+If it is written, the invalidation must be exhaustive - there are 12
+`vmptrld` sites and 7 `vmclear` sites - and the way to make missing one
+impossible is to bump the epoch **inside** the `vmptrld`/`vmclear`
+wrappers rather than at the call sites, plus once per VM entry.
+
+
 ## The nesting tax is 58x, measured, and it is most of the blocker
 
 **Measured 2026-08-22 from KVM's own counters on the rig**, as a delta
