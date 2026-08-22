@@ -9176,6 +9176,52 @@ hypervisor::on_l2_exit(std::size_t cpu,
                     this->vtl1_yield_cr3[cpu] = this->vmcs.read(
                         arch::x86_64::vmx::vmcs::field::guest_cr3);
 
+                    // The secure kernel's load base, once. See
+                    // `vtl1_sk_base`.
+                    if ((0 == this->vtl1_sk_base[cpu]) &&
+                        (0 == this->vtl1_sk_scanned[cpu])) {
+                        this->vtl1_sk_scanned[cpu] = 1;
+
+                        // `movabs rdx, 0x400000000000` then `test`, the
+                        // first non-padding bytes of `.text`.
+                        constexpr std::uint8_t want[] = {
+                            0x48, 0xba, 0x00, 0x00, 0x00, 0x00,
+                            0x00, 0x40, 0x00, 0x00, 0x48, 0x85};
+
+                        auto gs = this->vmcs.read(
+                            arch::x86_64::vmx::vmcs::field::guest_gs_base);
+                        auto from = (gs & ~0xffffull) - 0x2000000ull;
+
+                        for (std::size_t k{}; k < 1024; ++k) {
+                            auto candidate = from + (0x10000ull * k);
+                            auto at = candidate + 0x1008;
+                            bool same = true;
+
+                            for (std::size_t b{}; b < sizeof(want); ++b) {
+                                std::uint8_t byte{};
+
+                                auto to =
+                                    translate_guest_linear(cpu, at + b);
+
+                                if (!to ||
+                                    !read_guest_memory(
+                                        cpu,
+                                        *to,
+                                        std::as_writable_bytes(
+                                            std::span(&byte, 1))) ||
+                                    (byte != want[b])) {
+                                    same = false;
+                                    break;
+                                }
+                            }
+
+                            if (same) {
+                                this->vtl1_sk_base[cpu] = candidate;
+                                break;
+                            }
+                        }
+                    }
+
                     // The caller's own code, once, from the address it
                     // returns to. See `vtl1_caller_code`.
                     if ((0 == this->vtl1_caller_at[cpu]) &&

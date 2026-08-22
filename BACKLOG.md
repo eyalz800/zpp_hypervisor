@@ -1,5 +1,40 @@
 # Known defects
 
+## Locating securekernel by content, and what the addresses say instead
+
+**2026-08-22.** `securekernel.pdb` is present locally - only `skci.pdb` is
+missing - so with a load base in hand its scheduler and thread structures
+would be readable, which is where the stalled work item has to be. The PE
+header is not mapped, so the image was searched for by **content**:
+`.text` begins at RVA 0x1000 with eight `int3` and then
+`movabs rdx, 0x400000000000`, distinctive enough to match.
+
+Bounded by locality rather than searched blindly - 32 MB either side of
+VTL1's GS base at 64 KB steps, a thousand probes, once. **It found
+nothing.**
+
+The addresses are the interesting part:
+
+```
+VTL1 gs base    0xfffff80125eeff80
+caller at       0xfffff80125eaa3a4     ~285 KB below gs
+```
+
+Had the image base been `0xfffff80125ea0000` the caller would sit at RVA
+`0xa3a4`, which is exactly the constant low sixteen bits seen in every
+boot - and that candidate **was** covered by the scan. So the secure
+kernel's `.text` is not there, and the module holding the caller is a
+small one sitting close to the per-processor block. That agrees with the
+independent result above, where none of `securekernel`'s sixteen candidate
+offsets is preceded by a `call`.
+
+**So two methods now agree that the VTL1 caller is not `securekernel`**,
+and locating `securekernel` itself still needs either a wider search or a
+pointer to it from a structure this VMM can already reach - the
+per-processor block at `gs:0x0`, whose first qword `ShvlVinaHandler`
+dereferences, being the obvious candidate and not yet followed.
+
+
 ## The VTL1 caller, read without symbols
 
 **2026-08-22.** Symbols for the module are not available, and are not

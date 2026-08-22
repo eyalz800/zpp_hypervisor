@@ -10722,6 +10722,30 @@ private:
     std::uint8_t vtl1_caller_code[max_cpus][128]{};
     std::uint64_t vtl1_caller_at[max_cpus]{};
 
+    /**
+     * `securekernel`'s load base, found by matching the first bytes of
+     * its `.text` rather than by looking for a PE header.
+     *
+     * The header is not mapped in VTL1 - a 32 MB scan for one found
+     * nothing - so the image is located by content instead. `.text`
+     * begins at RVA 0x1000 with `movabs rdx, 0x400000000000` followed by
+     * a `test`, which is distinctive enough to match on.
+     *
+     * Bounded by locality rather than searched blindly: in one boot VTL1's
+     * GS base was `0xfffff8037d3aff80` and the caller `0xfffff8037dd1a3a4`,
+     * about ten megabytes apart, so the image is near the per-processor
+     * block. Scanning 32 MB either side of the GS base at 64 KB steps is
+     * a thousand probes, done **once**.
+     *
+     * Worth having because `securekernel.pdb` **is** present locally -
+     * only `skci.pdb` is missing - so with the base in hand its
+     * scheduler and thread structures become readable, which is where the
+     * stalled work item has to be. The base is the only thing standing
+     * between the symbols and the state.
+     */
+    std::uint64_t vtl1_sk_base[max_cpus]{};
+    std::uint64_t vtl1_sk_scanned[max_cpus]{};
+
     /** The same for where it *yields*, taken at the `HvCallVtlReturn`. */
     std::uint64_t vtl1_yield_rip[max_cpus][vtl1_resume_capacity]{};
     std::uint64_t vtl1_yield_count[max_cpus]{};
