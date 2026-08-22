@@ -1,5 +1,55 @@
 # Known defects
 
+## The four-frame lead is dead: the ring was being read unordered
+
+**2026-08-22, and this retracts a lead returned to repeatedly.**
+`vtl_code0_ring` is a **circular buffer of eight**, and both the dump
+script and every reading taken from it print slots 0..7 in raw order. The
+newest entry is at `(count - 1) % 8`. Read as a sequence - which is what
+was done - the entries appear in an order that has nothing to do with
+time.
+
+Read properly, with `vtl_code0_count` at 21,023 so the newest slot is 6,
+the last eight code-0 requests oldest to newest are:
+
+```
+0x0000000100000000  +8 0                    +10 0
+0x0000000100000000  +8 0                    +10 0x136801
+0x0000000001010002  +8 0x11aac9             +10 1
+0x0000000001010002  +8 0x11aaca             +10 1
+0x0000000000fe0002  +8 0xffffd201794867b0   +10 0x133c86
+0x0000000001010002  +8 0x11aacb             +10 1
+0x0000000001010002  +8 0x11aacc             +10 1
+0x0000000000020002  +8 0xffffd201794fdfb0   +10 0x133cfd   <- last
+```
+
+**The read-only frames `0x11aac9`-`0x11aacc` are in the middle of that
+window, not at the end.** The walk passed straight through them and made
+three more requests afterwards. So the convergence between "the frames the
+walk halts on" and "the frames that are read-only" was an artefact of
+reading an unordered buffer, and **the entire four-frame lead is
+withdrawn** - including the entry above that called it the strongest in
+this file.
+
+That also retires the suspicion attached to their permissions, which had
+already been shown correct on both extended page-table roots. Two separate
+lines of work rested on the same misreading.
+
+### What the true last request is
+
+`0x00020002`, naming kernel virtual address `0xffffd201794fdfb0` and frame
+`0x133cfd`. The first quadword's high half varies across requests -
+`0x0101`, `0x00fe`, `0x0002`, `0x0100` - in a way that looks like a count
+rather than a code, since the low half is `0x0002` on all of the
+page-shaped ones. Two requests immediately before the window carry
+`0x0000000100000000` with a zero frame, a shape not seen elsewhere.
+
+**This is the transition data every previous instrument sampled the wrong
+side of**, and it is the place to start: what `0x00020002` asks for, why
+`0x133cfd` is the frame it stops on, and what the two zero-framed requests
+before it mean.
+
+
 ## Both trust levels traced with symbols, and both are working
 
 **2026-08-22.** The same single-step instrument captures a VTL0 trace
