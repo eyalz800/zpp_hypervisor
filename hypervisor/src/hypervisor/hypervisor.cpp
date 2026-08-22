@@ -5482,6 +5482,101 @@ void hypervisor::setup_vmcs(std::size_t cpu,
         }
     }
 
+    // The enlightened VMCS, when the layer below offers one and this
+    // build asks for it. Set up before vmcs02 because the two are
+    // alternatives: with this active the second-level VMCS is a page
+    // shared with the layer below rather than a VMCS, and the region
+    // prepared below simply goes unused.
+    //
+    // The protocol is the one KVM performs from the other side in
+    // `vmx.c`'s `hv_reset_evmcs`, which clears exactly these three
+    // things: the assist page is published through
+    // HV_X64_MSR_VP_ASSIST_PAGE, `current_nested_vmcs` names the
+    // enlightened page, and `enlighten_vmentry` says to use it. The
+    // revision must be 1, which the layer below checks first.
+    if constexpr (nested_vmx::enabled && nested_vmx::evmcs_to_kvm) {
+        // **Before the test, not after it.** The detection used to
+        // run only from `initialize_vmcs_shadowing`, which is later in
+        // this function, so on the boot processor this block tested a
+        // flag nothing had set yet and reported "not offered" - while
+        // the very next log line said it was offered. Every other
+        // processor then read the flag the boot processor had left
+        // behind and enabled correctly, which is the shape that makes
+        // this kind of ordering bug look like a per-processor fault.
+        //
+        // Idempotent, so calling it from both places costs one CPUID
+        // and keeps each caller honest about its own precondition.
+        detect_underlying_hypervisor();
+
+        if (this->underlying_offers_evmcs && (cpu < max_cpus)) {
+            constexpr std::size_t vp_assist_msr = 0x40000073;
+            constexpr std::uint64_t vp_assist_enable = 1;
+
+            auto * assist = this->vp_assist[cpu];
+            auto * page = this->evmcs[cpu];
+            auto * own = this->evmcs_own[cpu];
+
+            for (std::size_t i{}; i < page_size; ++i) {
+                assist[i] = 0;
+                page[i] = 0;
+                own[i] = 0;
+            }
+
+            this->vp_assist_physical[cpu] =
+                this->host_page_table.virtual_to_physical(assist);
+            this->evmcs_physical[cpu] =
+                this->host_page_table.virtual_to_physical(page);
+            this->evmcs_own_physical[cpu] =
+                this->host_page_table.virtual_to_physical(own);
+
+            // Revision first, at offset zero, since the layer below
+            // rejects the page outright without it. Both pages: this
+            // VMM's own VMCS is enlightened too, because the layer
+            // below refuses an ordinary VMPTRLD once any enlightened
+            // VMCS has been used. See `evmcs_own`.
+            *reinterpret_cast<std::uint32_t *>(page) =
+                arch::x86_64::vmx::evmcs_revision;
+            *reinterpret_cast<std::uint32_t *>(own) =
+                arch::x86_64::vmx::evmcs_revision;
+
+            arch::x86_64::wrmsr(vp_assist_msr,
+                                this->vp_assist_physical[cpu] |
+                                    vp_assist_enable);
+
+            // Set once and never cleared. **Both** of this VMM's
+            // VMCSs are enlightened - they have to be, since the
+            // layer below refuses an ordinary VMPTRLD once any
+            // enlightened VMCS has been used - so the flag is not
+            // what distinguishes the two entries. `point_at_vmcs`
+            // does that, by naming the page.
+            constexpr std::size_t enlighten_vmentry_offset = 40;
+
+            *reinterpret_cast<volatile std::uint8_t *>(
+                assist + enlighten_vmentry_offset) = 1;
+
+            this->evmcs_active[cpu] = true;
+
+            // **Before this function writes a single vmcs01 field.**
+            // Everything below aims at "the current VMCS", and with
+            // this on that has to be the enlightened page standing in
+            // for it - otherwise setup fills the real region, the
+            // enlightened one keeps nothing but its revision, and the
+            // first entry runs the guest hypervisor from an empty
+            // description. Measured: zero exits and zero second-level
+            // entries, a hypervisor that never launched.
+            point_at_vmcs(cpu, false);
+
+            log("cpu {} enlightened vmcs active, assist {} page {}",
+                cpu,
+                this->vp_assist_physical[cpu],
+                this->evmcs_physical[cpu]);
+        } else {
+            log("cpu {} enlightened vmcs asked for and not offered",
+                cpu);
+        }
+    }
+
+
     // Zero the VMX abort indicator, as the SDM recommends for any VMCS
     // this VMM uses. A VMX abort is a failure during a VM *exit*: it puts
     // the processor into a shutdown state that only RESET leaves, and it
@@ -5566,100 +5661,6 @@ void hypervisor::setup_vmcs(std::size_t cpu,
         // It leaves this VMM's own VMCS current: SDM 27.1 has VMCLEAR make
         // the *named* VMCS inactive and not current, and this names the
         // other one.
-        // The enlightened VMCS, when the layer below offers one and this
-        // build asks for it. Set up before vmcs02 because the two are
-        // alternatives: with this active the second-level VMCS is a page
-        // shared with the layer below rather than a VMCS, and the region
-        // prepared below simply goes unused.
-        //
-        // The protocol is the one KVM performs from the other side in
-        // `vmx.c`'s `hv_reset_evmcs`, which clears exactly these three
-        // things: the assist page is published through
-        // HV_X64_MSR_VP_ASSIST_PAGE, `current_nested_vmcs` names the
-        // enlightened page, and `enlighten_vmentry` says to use it. The
-        // revision must be 1, which the layer below checks first.
-        if constexpr (nested_vmx::enabled && nested_vmx::evmcs_to_kvm) {
-            // **Before the test, not after it.** The detection used to
-            // run only from `initialize_vmcs_shadowing`, which is later in
-            // this function, so on the boot processor this block tested a
-            // flag nothing had set yet and reported "not offered" - while
-            // the very next log line said it was offered. Every other
-            // processor then read the flag the boot processor had left
-            // behind and enabled correctly, which is the shape that makes
-            // this kind of ordering bug look like a per-processor fault.
-            //
-            // Idempotent, so calling it from both places costs one CPUID
-            // and keeps each caller honest about its own precondition.
-            detect_underlying_hypervisor();
-
-            if (this->underlying_offers_evmcs && (cpu < max_cpus)) {
-                constexpr std::size_t vp_assist_msr = 0x40000073;
-                constexpr std::uint64_t vp_assist_enable = 1;
-
-                auto * assist = this->vp_assist[cpu];
-                auto * page = this->evmcs[cpu];
-                auto * own = this->evmcs_own[cpu];
-
-                for (std::size_t i{}; i < page_size; ++i) {
-                    assist[i] = 0;
-                    page[i] = 0;
-                    own[i] = 0;
-                }
-
-                this->vp_assist_physical[cpu] =
-                    this->host_page_table.virtual_to_physical(assist);
-                this->evmcs_physical[cpu] =
-                    this->host_page_table.virtual_to_physical(page);
-                this->evmcs_own_physical[cpu] =
-                    this->host_page_table.virtual_to_physical(own);
-
-                // Revision first, at offset zero, since the layer below
-                // rejects the page outright without it. Both pages: this
-                // VMM's own VMCS is enlightened too, because the layer
-                // below refuses an ordinary VMPTRLD once any enlightened
-                // VMCS has been used. See `evmcs_own`.
-                *reinterpret_cast<std::uint32_t *>(page) =
-                    arch::x86_64::vmx::evmcs_revision;
-                *reinterpret_cast<std::uint32_t *>(own) =
-                    arch::x86_64::vmx::evmcs_revision;
-
-                arch::x86_64::wrmsr(vp_assist_msr,
-                                    this->vp_assist_physical[cpu] |
-                                        vp_assist_enable);
-
-                // Set once and never cleared. **Both** of this VMM's
-                // VMCSs are enlightened - they have to be, since the
-                // layer below refuses an ordinary VMPTRLD once any
-                // enlightened VMCS has been used - so the flag is not
-                // what distinguishes the two entries. `point_at_vmcs`
-                // does that, by naming the page.
-                constexpr std::size_t enlighten_vmentry_offset = 40;
-
-                *reinterpret_cast<volatile std::uint8_t *>(
-                    assist + enlighten_vmentry_offset) = 1;
-
-                this->evmcs_active[cpu] = true;
-
-                // **Before this function writes a single vmcs01 field.**
-                // Everything below aims at "the current VMCS", and with
-                // this on that has to be the enlightened page standing in
-                // for it - otherwise setup fills the real region, the
-                // enlightened one keeps nothing but its revision, and the
-                // first entry runs the guest hypervisor from an empty
-                // description. Measured: zero exits and zero second-level
-                // entries, a hypervisor that never launched.
-                point_at_vmcs(cpu, false);
-
-                log("cpu {} enlightened vmcs active, assist {} page {}",
-                    cpu,
-                    this->vp_assist_physical[cpu],
-                    this->evmcs_physical[cpu]);
-            } else {
-                log("cpu {} enlightened vmcs asked for and not offered",
-                    cpu);
-            }
-        }
-
         if constexpr (nested_vmx::enabled) {
             auto & region = this->vmcs02[cpu];
 
