@@ -1,5 +1,30 @@
 # Known defects
 
+## The freeze is single-processor: identical at 1, 2 and 8 CPUs
+
+**2026-08-22.** Two and eight were already recorded as identical. One had
+never been tried, and one virtual processor is the simplest virtual secure
+mode can be - no cross-processor trust-level interaction exists at all.
+
+```
+cpus  protection calls   VINA-clear   code-0 requests
+   1            39,299       21,017            21,021
+   8            39,29x       21,00x            21,01x
+```
+
+**Identical.** So nothing about the failure involves a second processor:
+not a start-up race, not a cross-processor invalidation, not a shared
+structure, not the application processors that never start - which are a
+consequence and now demonstrably not a cause.
+
+That is worth having because it narrows the failure to a single virtual
+processor executing a deterministic sequence, which is the smallest the
+problem can be made from outside. Everything measured in this file holds
+in that configuration, and any future reproduction should use it: one
+processor is cheaper to trace, cheaper to single-step, and removes a whole
+class of explanation before the first measurement is taken.
+
+
 ## Guest memory is not the cause
 
 **2026-08-22.** The two rig launchers reserve different amounts for the
