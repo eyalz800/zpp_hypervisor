@@ -9149,6 +9149,32 @@ hypervisor::on_l2_exit(std::size_t cpu,
                         this->vmcs.read(
                             arch::x86_64::vmx::vmcs::field::guest_rip);
                     where = where + 1;
+
+                    // And the secure kernel's stack, which is the only
+                    // reachable window on its private state. See
+                    // `vtl1_yield_stack`.
+                    auto sp = this->vmcs.read(
+                        arch::x86_64::vmx::vmcs::field::guest_rsp);
+
+                    for (std::size_t k{}; k < vtl0_stack_words; ++k) {
+                        std::uint64_t word{};
+                        auto address = sp + (8 * k);
+
+                        if (auto to = translate_guest_linear(cpu, address);
+                            to && read_guest_memory(
+                                      cpu,
+                                      *to,
+                                      std::as_writable_bytes(
+                                          std::span(&word, 1)))) {
+                            this->vtl1_yield_stack[cpu][k] = word;
+                        } else {
+                            this->vtl1_yield_stack[cpu][k] = 0;
+                        }
+                    }
+
+                    this->vtl1_yield_stack_read[cpu] += 1;
+                    this->vtl1_yield_cr3[cpu] = this->vmcs.read(
+                        arch::x86_64::vmx::vmcs::field::guest_cr3);
                 }
 
                 // The one bit the secure kernel tested to decide this.

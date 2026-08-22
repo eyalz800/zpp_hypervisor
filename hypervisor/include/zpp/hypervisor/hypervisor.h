@@ -10637,6 +10637,30 @@ private:
     std::uint64_t vtl0_call_stack[max_cpus][vtl0_stack_words]{};
     std::uint64_t vtl0_call_stack_read[max_cpus]{};
 
+    /**
+     * The **secure kernel's** stack at the `HvCallVtlReturn`, which is
+     * the one place its private state is reachable from here.
+     *
+     * Everything measured so far has been VTL0's side or the interface
+     * between them, and all of it is behaving correctly: both extended
+     * page-table roots are right, every protection call succeeds, the
+     * deferred call is delivered, nothing faults. What is left unexplained
+     * is entirely inside VTL1 - its memory manager makes about 21,000
+     * distinct requests and then stops - and its instruction pointer at
+     * the yield is in the hypercall page, so it names nothing.
+     *
+     * The frames above it do. Symbolised against `securekernel.pdb` the
+     * same way `ntoskrnl` was, these say which function of the secure
+     * memory manager was running when it gave up the processor.
+     */
+    std::uint64_t vtl1_yield_stack[max_cpus][vtl0_stack_words]{};
+    std::uint64_t vtl1_yield_stack_read[max_cpus]{};
+
+    /** The secure kernel's CR3 at the yield, so its address space can be
+     *  walked from outside and its image base found - the return address
+     *  on its stack names a module this VMM never logs. */
+    std::uint64_t vtl1_yield_cr3[max_cpus]{};
+
     /** The same for where it *yields*, taken at the `HvCallVtlReturn`. */
     std::uint64_t vtl1_yield_rip[max_cpus][vtl1_resume_capacity]{};
     std::uint64_t vtl1_yield_count[max_cpus]{};

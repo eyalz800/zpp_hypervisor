@@ -1,5 +1,45 @@
 # Known defects
 
+## Reading the secure kernel's own state needs a reader that does not exist yet
+
+**2026-08-22.** Every measurement in this investigation has been of VTL0's
+side or of the interface between the levels, and all of it is now known to
+be correct: both extended page-table roots are right, every protection
+call succeeds, the deferred call is delivered, nothing faults, and the
+guest is stopped rather than slow. What is unexplained is entirely inside
+VTL1 - its memory manager makes about 21,000 **distinct** requests and then
+stops.
+
+Its instruction pointer at the yield names nothing, because it is in
+Hyper-V's hypercall page. `vtl1_yield_stack` captures the stack instead
+and finds exactly one kernel-range word, the return address into whatever
+called the stub - `0xfffff80419aca3a4` in one boot, with VTL1's CR3 at
+`0x8800002`.
+
+**Symbolising it needs the image base, and this VMM logs only
+`ntoskrnl`'s.** The implied offset is out of range for `securekernel`'s
+`.text`, which `securekernel.pdb` gives as RVA `0x1000` size `0xE8C68`, so
+the address is in some other module and the base has to be found by
+scanning VTL1's address space for a PE header.
+
+**That scan was attempted and its result is not trustworthy.** It walks
+VTL1's page tables by reading guest-physical addresses through the QEMU
+monitor, which assumes the identity mapping that holds for VTL0 - and VTL1
+runs on **root 1**, a different extended page-table root, measured
+directly above as granting `rwx` where VTL0's grants `r--`. So the walk
+may be reading the wrong pages entirely, and it reported "no PE header in
+4 MB below" which means nothing. Recorded as a failed attempt rather than
+a negative result.
+
+**What a real reader needs**: translate VTL1-linear to VTL1-physical
+through CR3, then VTL1-physical to host-physical through *root 1* rather
+than by assuming identity - the same two-step `l2_physical_to_l1` performs
+inside the VMM, done from outside. That is buildable and is the next piece
+of work; nothing further about the secure kernel's state should be
+believed until it exists and has a proof line of its own, the way
+`rig-dump-state.py` proves itself with `host_page_table[0] = ...023`.
+
+
 ## The walk stops on four named frames, and they are the read-only ones
 
 **Measured 2026-08-22, and this is the first time two independent
