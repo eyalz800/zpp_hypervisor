@@ -120,6 +120,62 @@ inline void vmcs_record_use(std::uint64_t encoding,
 }
 
 /**
+ * Which *code* makes the reads, as opposed to which fields they name.
+ *
+ * The field table above says `guest_rip` is read 4.6 times an exit and
+ * `vm_entry_controls` 2.6, and cannot say by whom - so it cannot say
+ * whether those are one caller in a loop or six callers each asking
+ * once, and those want opposite fixes. The phase tree has the same blind
+ * spot from the other side: on a vmcall it attributes 62 of the 112
+ * accesses to named phases and leaves **50.5 reads in "residue"**, which
+ * is the largest single item in this VMM's cost and is currently
+ * anonymous.
+ *
+ * This is the instrument that closed exactly this question once already.
+ * `note_guest_memory_caller` named `l2_physical_to_l1` as 83.8% of every
+ * guest-memory read in one reading, after two sessions of guessing - so
+ * the same shape is used here rather than a third round of reasoning
+ * about which phase "ought" to be expensive.
+ *
+ * Return addresses rather than field encodings, resolved offline against
+ * the ELF with `info symbol`; the module base moves per run, so what is
+ * stored is the raw address and the reader subtracts.
+ *
+ * Deliberately shared and non-atomic, for the reason `vmcs_reads_taken`
+ * gives directly above: a table occasionally short by a racing increment
+ * answers "who reads the VMCS" exactly as well as an exact one, and a
+ * `lock` prefix here would be a real cost added to the hot path in order
+ * to measure the hot path. Linear probe over a small table, and a miss
+ * is counted rather than folded into a sitting tenant - an entry that
+ * silently absorbed another caller's hits would be worse than an absent
+ * one, since it would read as a confident wrong answer.
+ */
+inline constexpr std::size_t vmcs_caller_slots = 48;
+
+inline constinit std::uint64_t vmcs_read_caller[vmcs_caller_slots]{};
+inline constinit std::uint64_t vmcs_read_caller_hits[vmcs_caller_slots]{};
+inline constinit std::uint64_t vmcs_read_caller_overflow{};
+
+inline void vmcs_note_read_caller(std::uint64_t caller)
+{
+    for (std::size_t slot{}; slot < vmcs_caller_slots; ++slot) {
+        if (0 == vmcs_read_caller[slot]) {
+            vmcs_read_caller[slot] = caller;
+            vmcs_read_caller_hits[slot] = 1;
+            return;
+        }
+
+        if (vmcs_read_caller[slot] == caller) {
+            vmcs_read_caller_hits[slot] =
+                vmcs_read_caller_hits[slot] + 1;
+            return;
+        }
+    }
+
+    vmcs_read_caller_overflow = vmcs_read_caller_overflow + 1;
+}
+
+/**
  * The VMCS error type.
  */
 enum class vmcs_error : int
@@ -238,6 +294,8 @@ public:
                         vmcs_read_field,
                         vmcs_read_hits,
                         vmcs_read_overflow);
+        vmcs_note_read_caller(
+            reinterpret_cast<std::uint64_t>(__builtin_return_address(0)));
 
         std::uint64_t value{};
         if (0 != vmread(field, &value)) {
