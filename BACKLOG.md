@@ -63,6 +63,28 @@ means, what `hi` counts, and why frame `0x1232fc` is where the last one
 sits. All three are now answerable from the ring rather than by
 speculation, which none of them was before.
 
+### The field layout, settled by static analysis
+
+Searching `securekernel.exe` for those words as 32-bit immediates finds
+**none** of them - `0x00d30002` and `0x00fe0002` appear zero times, and
+`0x00020002`'s hits are coincidental byte patterns in unrelated tables. So
+they are **computed at runtime rather than written as constants**, which
+settles the layout the earlier `hi`/`lo` split only guessed at:
+
+- **byte 0 is the operation**, and it is `0x02` on every page-shaped
+  request in the window;
+- **bytes 2-3 are a count** - 211, 208, 257, 254 and finally **2** - which
+  is why no immediate matches: they are batch sizes, not codes.
+
+So the steady phase is **one operation submitted in batches**, and the
+walk stops on a batch of **two**, immediately after two requests carrying
+a different operation (`0x00`, with a zero argument and byte 4 set).
+
+That is as far as static analysis reaches without securekernel source.
+What it rules out is the reading that the final request is a *different
+kind* of work: it is the same operation as the preceding twenty-odd
+thousand, in a smaller batch.
+
 
 ## The four-frame lead is dead: the ring was being read unordered
 
