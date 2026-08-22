@@ -10986,6 +10986,24 @@ private:
     std::uint64_t vtl_code0_count[max_cpus]{};
 
     /**
+     * A wider window on the secure memory manager's requests, kept so the
+     * **transition** can be read rather than only its last moments.
+     *
+     * `vtl_code0_ring` holds eight, which is enough to see that the walk
+     * stopped and not enough to see what changed as it did. Every
+     * instrument in this investigation samples the frozen steady state;
+     * this one is meant to span the point where progress ends, which is
+     * the one thing none of them covers.
+     *
+     * Thirty-two entries of three quadwords, the same shape as the ring
+     * beside it, and read the same way - **newest at
+     * `(count - 1) % 32`**. That ordering is not decoration: reading the
+     * narrow ring as though slot 0 were oldest is exactly what produced
+     * the four-frame lead and kept it alive across several sessions.
+     */
+    std::uint64_t vtl_code0_wide[max_cpus][32][3]{};
+
+    /**
      * The span of page frame numbers the secure memory-manager walk
      * covered, and how many of its steps were consecutive.
      *

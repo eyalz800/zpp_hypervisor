@@ -9829,6 +9829,18 @@ hypervisor::on_l2_exit(std::size_t cpu,
                                 this->vtl_code0_ring[cpu][slot][2] =
                                     this->vtl_call_block[cpu][2];
 
+                                // And the same into the wider window, so
+                                // the transition has context either side
+                                // of it rather than only its last few
+                                // moments. See `vtl_code0_wide`.
+                                auto wide = seen % 32;
+
+                                this->vtl_code0_wide[cpu][wide][0] = word;
+                                this->vtl_code0_wide[cpu][wide][1] =
+                                    this->vtl_call_block[cpu][1];
+                                this->vtl_code0_wide[cpu][wide][2] =
+                                    this->vtl_call_block[cpu][2];
+
                                 auto differs =
                                     (word !=
                                      this->vtl_code0_previous[cpu][0]) ||

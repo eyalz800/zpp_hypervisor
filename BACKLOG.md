@@ -1,5 +1,44 @@
 # Known defects
 
+## The transition, finally captured: the request stream changes shape
+
+**2026-08-22.** Every instrument in this investigation samples the frozen
+steady state. `vtl_code0_wide` is thirty-two entries instead of eight, so
+it spans the point where progress ends. Last 32 code-0 requests, oldest to
+newest:
+
+```
+ 0-22  hi=0x000000d3  lo=0x0002  arg 0                    frame kernel VAs
+   23  hi=0x000000d0  lo=0x0002  arg 0x30a000010          frame 0x2b6000
+ 24-25 hi=0x00010000  lo=0x0000  arg 0                    frame 0 / 0x125e01
+ 26-30 hi=0x0101/0xfe lo=0x0002  arg 0x11aac9..0x11aacc   frame 1
+   31  hi=0x00000002  lo=0x0002  arg 0xffffe38daa4fcf80   frame 0x1232fc
+```
+
+**The walk does not trail off - it changes character.** Twenty-three
+uniform requests, all `hi=0xd3` with a null argument and a kernel virtual
+address, then one `hi=0xd0` carrying a real argument, then **two requests
+with `lo=0x0000`** - a shape that appears nowhere in the steady state -
+then a mixed burst, ending on `hi=0x02`.
+
+The `hi` field is not a code, since `lo` is `0x0002` on all the
+page-shaped requests and only `hi` varies. Values seen: `0xd3` throughout
+the steady phase, then `0xd0`, `0x0101`, `0x00fe`, `0x0002`. It reads as a
+count or a length, and the final request carries the smallest.
+
+**This is the first measurement in this file taken on the right side of
+the transition.** What it says is that the secure memory manager finishes
+one kind of work, begins another - the `lo=0x0000` pair - and stops in the
+middle of it. Everything downstream that has been measured to death,
+including the VINA loop and the deferred-call traffic, follows from that
+stop.
+
+The questions it sharpens, in order: what a request with `lo=0x0000`
+means, what `hi` counts, and why frame `0x1232fc` is where the last one
+sits. All three are now answerable from the ring rather than by
+speculation, which none of them was before.
+
+
 ## The four-frame lead is dead: the ring was being read unordered
 
 **2026-08-22, and this retracts a lead returned to repeatedly.**
