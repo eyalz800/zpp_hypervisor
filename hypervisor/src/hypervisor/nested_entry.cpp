@@ -1794,6 +1794,40 @@ std::expected<void, zpp::error> hypervisor::build_vmcs02(std::size_t cpu)
         this->vtl_protect_step_pending[cpu] = 1;
     }
 
+    // Arm the trust-level trace here, on the **vmcs12 that is about to
+    // run**, rather than at the hypercall.
+    //
+    // `arm_vtl_step` fires on `HvCallVtlCall`, and at that moment the
+    // guest hypervisor has not yet made VTL1's vmcs12 current - so every
+    // trace taken that way recorded VTL0 finishing its own side. It was
+    // symbolised against `securekernel` for a whole session and resolved
+    // into plausible secure-kernel names that were nearest-symbol noise;
+    // byte-matching the same instructions found them in `ntoskrnl`, 1,688
+    // of 2,048 steps.
+    //
+    // The vmcs12 pointer is the thing that actually identifies the trust
+    // level, and it is known to move on every switch - 24,925 of 24,925,
+    // measured. VTL1's is the one current when it issues its
+    // `HvCallVtlReturn`, which `vtl_return_vmcs12` records, so an entry
+    // whose current vmcs12 equals it is the secure kernel and nothing
+    // else.
+    if constexpr (nested_vmx::step_vtl) {
+        if ((cpu < max_cpus) && (0 == this->vtl_step_active[cpu]) &&
+            (0 != this->vtl_return_vmcs12[cpu]) &&
+            (this->guest_current_vmcs[cpu] ==
+             this->vtl_return_vmcs12[cpu]) &&
+            (this->vtl_protect_count[cpu] >= 39250) &&
+            (0 == this->vtl_step_pin_taken[cpu])) {
+            this->vtl_step_pin_taken[cpu] = 1;
+
+            this->vtl_step_count[0] = 0;
+            this->vtl_step_other[0] = 0;
+            this->vtl_step_other_reason[0] = 0;
+            this->vtl_step_at[0] = this->vtl_switches[cpu][0];
+            this->vtl_step_active[cpu] = 1;
+        }
+    }
+
     if (this->stepping_watch[cpu] || (0 != this->vtl_step_active[cpu]) ||
         protect_step) {
         primary |= primary_monitor_trap_flag;

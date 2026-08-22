@@ -1,5 +1,53 @@
 # Known defects
 
+## VTL1 observed for the first time, and it is preempted before it works
+
+**2026-08-22.** Arming the step trace on **VTL1's vmcs12** instead of on
+the hypercall - the fix the previous entry derived - captures the secure
+kernel at last. The base is confirmed by **byte identity**, not by
+plausibility: the first traced instruction's bytes occur **exactly once**
+in `securekernel.exe`, which is the check that would have caught the false
+trace a day earlier.
+
+364 of 2,048 steps are securekernel; the remainder are VTL0 after the
+return, which is expected since the ring keeps running past the switch.
+
+```
+SkpReturnFromNormalMode              3     resumes here
+SkpReturnFromNormalModeFrameSaved    2
+SkpReturnFromNormalModeFrameSet      1
+SkpReturnFromNormalModeRcxSet       14
+SkpReturnFromNormalModeRaxSet       28
+SkiSelectThread                     77     picks a thread
+SkiUpdateXStateForVtlTransition     28
+KiVinaInterruptShadow                4     VINA arrives
+KiVinaInterrupt                     29
+ShvlVinaHandler                     18
+__memset_spec_ermsb                 33
+SkCallNormalMode                    37     calls straight back down
+SkpPrepareForNormalCall             27
+SkiDeselectThread                   40
+SkpPrepareForReturnToNormalMode     23
+```
+
+**`ShvlpProtectPages` does not appear.** The retracted trace claimed it
+did, and a great deal was built on that; the real one shows the secure
+kernel doing **no protection work at all** in this window.
+
+**What it does show, observed rather than inferred**: securekernel
+resumes, restores its frame and registers, **selects a thread**, updates
+extended state for the transition - and is then preempted by the VINA
+interrupt *before running any of that thread's work*, deselects it, and
+calls straight back down. Every iteration, in that order.
+
+So the sequence "picks a thread, is preempted, puts it back" is real and
+is now a measurement. What remains unexplained is why the notification
+lands in that same narrow window every time, between selection and any
+useful work - and that is a far more specific question than anything this
+file has held before, because it is anchored to two named functions
+whose distance apart is 105 traced instructions.
+
+
 ## The trust-level switch works; the trace instrument aims at the wrong side
 
 **2026-08-22.** The retraction above raised a real possibility: if the
