@@ -1,5 +1,50 @@
 # Known defects
 
+## Vector 0x40 is the notification, and it is load-bearing
+
+**2026-08-22.** The single-step trace shows VTL1 dispatching
+`KiVinaInterruptShadow` into `KiVinaInterrupt` through its own descriptor
+table, while `vtl1_entry_vector` reported **no event on 100%** of the
+entries that run VTL1. Both readings were direct, and **the instrument was
+the thing at fault**: it marks only the entry armed by `HvCallVtlCall`,
+and VTL1's half takes about 7.7 exits, so there are several entries per
+half and only the first was ever examined.
+
+Counted over **every** entry that runs VTL1, gated on
+`vtl_half_mark_kind == 1`:
+
+```
+entries that ran VTL1: 68,786
+  no event      64,889   94.3%
+  vector 0x40    3,920    5.7%
+```
+
+**So `0x40` is the notification interrupt**, and the chain is complete end
+to end: VTL0 holds `0x2f` pending, the level above injects `0x40` into
+VTL1, `KiVinaInterruptShadow` dispatches it into `KiVinaInterrupt`,
+`ShvlVinaHandler` yields, and `ShvlpProtectPages` is left unfinished.
+
+This is the **third** per-entry instrument in this file to be wrong by
+looking only at the armed entry - it is also why `ZPP_SUPPRESS_VINA` fired
+293 times in 22,000 before being pointed at every entry. **Anything aimed
+at VTL1 must be gated on `vtl_half_mark_kind`, never on
+`vtl1_entry_armed`.**
+
+### The notification is not an interruption to be avoided
+
+With the chain understood, the switch was aimed at the interrupt rather
+than the flag: drop vector `0x40` on entries that run VTL1, which is what
+faster hardware would produce by finishing `ShvlpProtectPages` before the
+notification arrived.
+
+**It is far worse.** 13,890 protection calls against 39,292, and the guest
+stops after 73,603 exits instead of running on.
+
+The secure kernel *needs* the notification: if VTL1 never yields, VTL0
+never runs. That closes the whole suppression family - flag and interrupt
+both - by experiment rather than by argument, and the switch is left off.
+
+
 ## The VTL1 loop, symbolised instruction by instruction
 
 **2026-08-22.** `ZPP_STEP_VTL` has existed all along and had never been
