@@ -1655,7 +1655,7 @@ std::expected<void, zpp::error> hypervisor::build_vmcs02(std::size_t cpu)
 
     auto switch_start = arch::x86_64::rdtsc();
     auto switch_failed =
-        arch::x86_64::vmx::vmptrld(&this->vmcs02_physical[cpu]);
+        arch::x86_64::vmx::vmptrld(&this->vmcs02_physical[cpu], cpu);
 
     if (cpu < max_cpus) {
         this->phase_cycles[cpu][6] += arch::x86_64::rdtsc() - switch_start;
@@ -4430,7 +4430,7 @@ hypervisor::l2_entry_outcome hypervisor::enter_or_park_l2(std::size_t cpu)
     // here for ever - is the same darkness the hardware state produces,
     // only in root mode.
     auto region = own_vmcs_region_physical(cpu);
-    if ((0 == region) || arch::x86_64::vmx::vmptrld(&region)) {
+    if ((0 == region) || arch::x86_64::vmx::vmptrld(&region, cpu)) {
         // Same reasoning as reflect_l2_exit: without its own VMCS there is
         // no guest hypervisor left to go back to.
         __builtin_trap();
@@ -4756,7 +4756,7 @@ void hypervisor::reflect_l2_exit(std::size_t cpu,
     auto region = own_vmcs_region_physical(cpu);
     auto switch_start = arch::x86_64::rdtsc();
     auto switch_failed =
-        (0 == region) || arch::x86_64::vmx::vmptrld(&region);
+        (0 == region) || arch::x86_64::vmx::vmptrld(&region, cpu);
 
     if (cpu < max_cpus) {
         this->phase_cycles[cpu][7] += arch::x86_64::rdtsc() - switch_start;
@@ -7418,7 +7418,7 @@ void hypervisor::materialise_l2_guest_state(std::size_t cpu)
     auto region = this->vmcs02_physical[cpu];
 
     auto in_start = arch::x86_64::rdtsc();
-    if ((0 == region) || arch::x86_64::vmx::vmptrld(&region)) {
+    if ((0 == region) || arch::x86_64::vmx::vmptrld(&region, cpu)) {
         return;
     }
     mark(21, in_start);
@@ -7443,7 +7443,7 @@ void hypervisor::materialise_l2_guest_state(std::size_t cpu)
 
     auto out_start = arch::x86_64::rdtsc();
     auto own = own_vmcs_region_physical(cpu);
-    if ((0 == own) || arch::x86_64::vmx::vmptrld(&own)) {
+    if ((0 == own) || arch::x86_64::vmx::vmptrld(&own, cpu)) {
         // Without its own VMCS there is nothing to return to. Same
         // reasoning as `enter_or_park_l2`'s switch failure.
         __builtin_trap();

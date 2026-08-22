@@ -229,15 +229,48 @@ inline constexpr std::uint64_t vmcs_cache_token_offset = 8;
 inline constexpr std::uint64_t vmcs_cache_token_magic = 0x5a70705643414300;
 inline constexpr std::uint64_t vmcs_cache_token_index_mask = 0xff;
 
+/**
+ * How many VMCSs a processor can cache at once.
+ *
+ * **Four because three are live.** A nested round trip moves between
+ * vmcs01, vmcs02 and the shadow VMCS, and with a single row per processor
+ * every one of those moves threw the row away - measured at 69,419,564
+ * epoch bumps over 13,305,860 exits, 5.3 per exit, for a 26.1% hit rate
+ * over 429,893,345 reads. A row per VMCS makes the move itself free: what
+ * vmcs01 held is still true while vmcs02 is current, because the
+ * processor only writes the VMCS that is current.
+ *
+ * The fourth is headroom, so that adding one more VMCS to the round trip
+ * does not silently restore the thrashing this exists to remove.
+ */
+inline constexpr std::size_t vmcs_cache_sets = 4;
+
 struct vmcs_cache_row
 {
     /** The field encoding plus one, so that zero means empty. */
     std::uint64_t tag[vmcs_cache_entries];
     std::uint64_t value[vmcs_cache_entries];
     std::uint64_t epoch;
+
+    /**
+     * The VMCS this row describes, as the physical address `vmptrld` was
+     * given, or zero for a row that describes nothing.
+     *
+     * This is what makes a row survive a pointer change. It is only ever
+     * set by the processor-aware `vmptrld`, and dropped whenever the
+     * global epoch moves - so a row can never be matched against a VMCS
+     * loaded by a path that did not go through it.
+     */
+    std::uint64_t vmcs;
 };
 
-inline constinit vmcs_cache_row vmcs_cache[vmcs_cache_processors]{};
+inline constinit vmcs_cache_row
+    vmcs_cache[vmcs_cache_processors][vmcs_cache_sets]{};
+
+/** Which of this processor's rows the current VMCS is. */
+inline constinit std::uint64_t
+    vmcs_cache_active[vmcs_cache_processors]{};
+
 inline constinit std::uint64_t vmcs_cache_epoch{1};
 
 /**
@@ -321,7 +354,8 @@ inline void vmcs_cache_revalidate()
         auto row = vmcs_cache_row_index();
 
         if (row < vmcs_cache_processors) {
-            vmcs_cache[row].epoch = vmcs_cache_epoch;
+            vmcs_cache[row][vmcs_cache_active[row]].epoch =
+                vmcs_cache_epoch;
             vmcs_cache_revalidations = vmcs_cache_revalidations + 1;
         }
     }
@@ -374,6 +408,87 @@ inline int vmptrld(void * region)
 {
     vmcs_cache_forget();
     return vmptrld_raw(region);
+}
+
+/**
+ * Points this processor's cache at the row describing `region`, without
+ * discarding anything.
+ *
+ * **Takes the processor index rather than reading it from GS**, because
+ * `vmptrld` runs on the launch path before `setup_vmcs` has armed the GS
+ * base, and reading GS there is how the field cache killed a boot with
+ * loader code `0x60e00` the first time it was added. Every caller on the
+ * nested path already holds `cpu`; the ones that do not use the plain
+ * wrapper above and pay a full flush, which is correct and rare.
+ */
+inline void vmcs_cache_select(std::uint64_t region, std::size_t cpu)
+{
+    if constexpr (vmcs_cache_enabled) {
+        if (cpu >= vmcs_cache_processors) {
+            vmcs_cache_forget();
+            return;
+        }
+
+        auto * rows = vmcs_cache[cpu];
+
+        for (std::size_t i{}; i < vmcs_cache_sets; ++i) {
+            if ((rows[i].vmcs == region) &&
+                (rows[i].epoch == vmcs_cache_epoch)) {
+                vmcs_cache_active[cpu] = i;
+                return;
+            }
+        }
+
+        // Round robin rather than least-recently-used: with one row per
+        // VMCS in the round trip there is nothing to choose between, and
+        // a policy that cannot thrash is worth more than one that picks
+        // well.
+        auto victim = static_cast<std::size_t>(
+            (vmcs_cache_active[cpu] + 1) % vmcs_cache_sets);
+
+        for (auto & each : rows[victim].tag) {
+            each = 0;
+        }
+
+        rows[victim].vmcs = region;
+        rows[victim].epoch = vmcs_cache_epoch;
+        vmcs_cache_active[cpu] = victim;
+    }
+}
+
+/**
+ * `vmptrld` that keeps the rows for the VMCSs it is not loading.
+ */
+inline int vmptrld(void * region, std::size_t cpu)
+{
+    vmcs_cache_select(*static_cast<const std::uint64_t *>(region), cpu);
+    return vmptrld_raw(region);
+}
+
+/**
+ * Discards only the VMCS that just ran, rather than every row.
+ *
+ * A VM exit updates the guest-state and read-only fields of the VMCS that
+ * was current and of no other, so the rows describing the VMCSs that were
+ * merely resident stay true. That distinction is the whole reason the
+ * per-exit flush is no longer global.
+ */
+inline void vmcs_cache_forget_current(std::size_t cpu)
+{
+    if constexpr (vmcs_cache_enabled) {
+        if (cpu >= vmcs_cache_processors) {
+            vmcs_cache_forget();
+            return;
+        }
+
+        auto & row = vmcs_cache[cpu][vmcs_cache_active[cpu]];
+
+        if (row.epoch == vmcs_cache_epoch) {
+            for (auto & each : row.tag) {
+                each = 0;
+            }
+        }
+    }
 }
 
 inline int vmclear(void * region)
@@ -504,13 +619,17 @@ public:
                            ? vmcs_cache_row_index()
                            : vmcs_cache_processors;
 
-            if ((row < vmcs_cache_processors) &&
-                (vmcs_cache[row].epoch == vmcs_cache_epoch)) {
-                auto slot = static_cast<std::size_t>(
-                    (static_cast<std::uint64_t>(field) >> 1) %
-                    vmcs_cache_entries);
+            if (row < vmcs_cache_processors) {
+                auto & current =
+                    vmcs_cache[row][vmcs_cache_active[row]];
 
-                vmcs_cache[row].tag[slot] = 0;
+                if (current.epoch == vmcs_cache_epoch) {
+                    auto slot = static_cast<std::size_t>(
+                        (static_cast<std::uint64_t>(field) >> 1) %
+                        vmcs_cache_entries);
+
+                    current.tag[slot] = 0;
+                }
             }
         }
     }
@@ -540,16 +659,30 @@ public:
                     vmcs_cache_entries);
                 auto tag = static_cast<std::uint64_t>(field) + 1;
 
+                auto & current =
+                    vmcs_cache[row][vmcs_cache_active[row]];
+
                 // The epoch is checked before the tag, because a row left
                 // over from an earlier window may hold a matching tag.
-                if (vmcs_cache[row].epoch != vmcs_cache_epoch) {
-                    for (auto & each : vmcs_cache[row].tag) {
-                        each = 0;
+                //
+                // **Every** row of this processor is reset, not just the
+                // current one, and that is required rather than tidy: a
+                // global epoch move means some path loaded a VMCS without
+                // going through `vmcs_cache_select`, so an identity left
+                // in another row would match a later `vmptrld` of the
+                // same address and answer with a different VMCS's values.
+                // Dropping the identities is what stops that.
+                if (current.epoch != vmcs_cache_epoch) {
+                    for (auto & each : vmcs_cache[row]) {
+                        for (auto & one : each.tag) {
+                            one = 0;
+                        }
+                        each.vmcs = 0;
+                        each.epoch = vmcs_cache_epoch;
                     }
-                    vmcs_cache[row].epoch = vmcs_cache_epoch;
-                } else if (vmcs_cache[row].tag[slot] == tag) {
+                } else if (current.tag[slot] == tag) {
                     vmcs_cache_hits = vmcs_cache_hits + 1;
-                    return vmcs_cache[row].value[slot];
+                    return current.value[slot];
                 }
 
                 vmcs_cache_misses = vmcs_cache_misses + 1;
@@ -559,8 +692,8 @@ public:
                     __builtin_trap();
                 }
 
-                vmcs_cache[row].tag[slot] = tag;
-                vmcs_cache[row].value[slot] = fresh;
+                current.tag[slot] = tag;
+                current.value[slot] = fresh;
                 return fresh;
             }
         }

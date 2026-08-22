@@ -422,7 +422,7 @@ void hypervisor::copy_vmcs12_to_shadow(std::size_t cpu)
 
         stamp(40);
 
-        if (arch::x86_64::vmx::vmptrld(&this->shadow_vmcs_physical[cpu])) {
+        if (arch::x86_64::vmx::vmptrld(&this->shadow_vmcs_physical[cpu], cpu)) {
             return;
         }
 
@@ -470,7 +470,7 @@ void hypervisor::copy_vmcs12_to_shadow(std::size_t cpu)
 
         stamp(43);
 
-        arch::x86_64::vmx::vmptrld(&previous);
+        arch::x86_64::vmx::vmptrld(&previous, cpu);
 
         stamp(44);
 
@@ -535,7 +535,7 @@ void hypervisor::copy_shadow_to_vmcs12(std::size_t cpu)
 
         stamp(45);
 
-        if (arch::x86_64::vmx::vmptrld(&this->shadow_vmcs_physical[cpu])) {
+        if (arch::x86_64::vmx::vmptrld(&this->shadow_vmcs_physical[cpu], cpu)) {
             return;
         }
 
@@ -568,7 +568,7 @@ void hypervisor::copy_shadow_to_vmcs12(std::size_t cpu)
 
         stamp(48);
 
-        arch::x86_64::vmx::vmptrld(&previous);
+        arch::x86_64::vmx::vmptrld(&previous, cpu);
 
         stamp(49);
 

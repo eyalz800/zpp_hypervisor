@@ -79,7 +79,11 @@ void hypervisor::on_vm_exit(std::uint64_t cpuid,
     // from inside their own wrappers in `vmcs.h`, where the bare
     // instructions are named `_raw` so they cannot be reached by
     // accident.
-    arch::x86_64::vmx::vmcs_cache_forget();
+    // Only the VMCS that just ran, not every row this processor holds.
+    // A VM exit updates the guest-state and read-only fields of the
+    // current VMCS alone, so vmcs01's row stays true across an exit from
+    // vmcs02 and vice versa - which is the whole point of a row per VMCS.
+    arch::x86_64::vmx::vmcs_cache_forget_current(cpuid);
 
     // `cpuid + 1` throughout, where this used to say `vmcs.vpid()`.
     //

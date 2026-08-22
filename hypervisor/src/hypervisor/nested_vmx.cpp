@@ -2270,7 +2270,7 @@ void hypervisor::on_nested_entry_failure(arch::x86_64::context * recovery)
     // few instructions ago, so a refusal means the state this code
     // believes it is in is not the state the processor is in.
     auto region = own_vmcs_region_physical(slot - 1);
-    if ((0 == region) || arch::x86_64::vmx::vmptrld(&region)) {
+    if ((0 == region) || arch::x86_64::vmx::vmptrld(&region, slot - 1)) {
         __builtin_trap();
     }
 
