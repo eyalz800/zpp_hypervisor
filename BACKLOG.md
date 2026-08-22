@@ -1,5 +1,55 @@
 # Known defects
 
+## The loop, symbolised: the guest requests a DPC every tick and never runs it
+
+**Measured 2026-08-22.** `--l2 0` dumps a ring this investigation had never
+read - `l2_working_trace`, which filters out idle MSR traffic and
+interrupt-window exits so that what is left is what the guest is genuinely
+*doing*. At the freeze it contains three entries, repeated exactly:
+
+```
+vmcall     rip=0x...2e150019  phys=0x11      HvCallVtlCall
+vmcall     rip=0x...2e150032  phys=0x12      HvCallVtlReturn
+tpr-below  rip=0xfffff806a00aeb0c
+```
+
+**That is the whole of the guest's work.** Everything else in the full
+ring is clock machinery the working ring is built to exclude.
+
+Symbolised against `ntkrnlmp.pdb` at the kernel base this VMM logs -
+remembering that `llvm-pdbutil dump --publics` gives the offset in
+**decimal** and the segment is 1-based into the PE section table, both of
+which put every symbol somewhere plausible and wrong if read as hex:
+
+| exit | symbol |
+|---|---|
+| tpr-below | `KiInterruptDispatchNoLockNoEtw + 0x7c` |
+| `wrmsr 0x400000b1` | `HalpHvTimerArm + 0x78` |
+| `wrmsr 0x40000070` | `HvlEndSystemInterrupt + 0x1c` |
+| `wrmsr 0x40000071` | `HvlWriteApicCommandRegister + 0x1b` |
+| int-window | `KiDpcInterruptBypass + 0x12` |
+| VTL0's `HvCallVtlCall` caller | `HvlSwitchToVsmVtl1 + 0xab` |
+
+So each cycle the guest **dispatches an interrupt**, re-arms the Hyper-V
+timer, ends the system interrupt, writes the APIC command register to
+request vector `0x2f`, reaches `KiDpcInterruptBypass` - Windows' path for
+running deferred procedure calls *without* taking a real interrupt - and
+calls into VTL1, which yields on VINA. **The deferred procedure call is
+requested every tick and never dispatched.**
+
+This also disposes of "the guest is stuck at high IRQL": the tpr-below
+exit is *inside the interrupt dispatcher*, so the priority is being
+lowered and the processor is exiting on it, every cycle.
+
+### What this rules in
+
+The failure is on the deferred-procedure-call delivery path, between
+`HvlWriteApicCommandRegister` requesting `0x2f` and
+`KiDpcInterruptBypass` failing to run it - not in the VSM protection work,
+not in the timer, and not in the secure kernel, which is only ever
+responding to VINA.
+
+
 ## Both sides of the trust-level loop are single instructions
 
 **Measured 2026-08-22 with instruments built for the question**, after a
