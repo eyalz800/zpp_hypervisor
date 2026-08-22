@@ -30,18 +30,49 @@ Two bugs found and fixed on the way, both worth keeping:
   dropping a *zero* write to an absent field - it is disabling a feature
   the format never had - while still trapping a non-zero one.
 
-Where it stops now: `l2-entries` reaches **1** and the machine stops in
-early firmware, around `rip 0x7ed5xxxx`, with cpu 0 inside `vmptrld_raw`.
-No `unhandled_exit` and no `vm_entry_failure` are recorded, so it is a
-`__builtin_trap` or a fault that leaves nothing behind - the two remaining
-traps are `evmcs_load` on an absent field and something about the
-interleaving of the two VMCSs.
+### Why it stops after exactly one second-level entry
 
-The first thing to check next, because it is cheap and was never checked:
-enabling the assist page also switches on **PV EOI** in KVM
-(`kvm_lapic_set_pv_eoi`, `hyperv.c`), which claims the first four bytes of
-that same page. This VMM intercepts the local APIC itself, and the two
-have not been reconciled.
+**Settled by reading, not by another boot.** KVM's `handle_vmptrld`,
+`nested.c:5758`:
+
+```c
+	/* Forbid normal VMPTRLD if Enlightened version was used */
+	if (nested_vmx_is_evmptr12_valid(vmx))
+		return 1;
+```
+
+**Once an enlightened VMCS has been used, every ordinary `VMPTRLD` is
+refused and faults.** This VMM alternates: it runs the guest hypervisor on
+its own VMCS and that hypervisor's guest on the second-level one, so the
+first thing it does after an L2 exit is `vmptrld` back to vmcs01. That
+`vmptrld` is now forbidden.
+
+Every observation fits and none of it needed guessing: `l2-entries` is
+exactly **1**, cpu 0's RIP resolves inside **`vmptrld_raw`**, and neither
+`unhandled_exit` nor `vm_entry_failure` is set because the fault happens
+in an instruction wrapper rather than on an exit path.
+
+**So this is not a bug to patch, it is a design constraint: the
+enlightened VMCS is all-or-nothing for a processor.** A VMM that uses it
+for one VMCS cannot use a real one for another.
+
+What the next attempt has to do, therefore:
+
+- Give **both** VMCSs enlightened pages, and switch between them by
+  writing `current_nested_vmcs` in the assist page rather than by
+  `vmptrld`. KVM re-maps when the pointer changes - `nested.c:2101`
+  releases and remaps on `evmcs_gpa != hv_evmcs_vmptr` - so alternating
+  two pages is supported, and alternating a page with a *VMCS* is not.
+- Which means `vmcs_cache_select` and every `vmptrld(region, cpu)` on the
+  nested path has to become "point at this enlightened page", and the only
+  real `vmptrld` left is the one at launch, before any enlightened entry
+  has happened.
+
+One further interaction to reconcile at the same time, found while
+reading and never tested: enabling the assist page also switches on **PV
+EOI** in KVM (`kvm_lapic_set_pv_eoi`, `hyperv.c:1573`), which claims the
+first four bytes of that same page. This VMM intercepts the local APIC
+itself.
 
 
 ## The enlightened VMCS is available to us, and invisible to the guest
