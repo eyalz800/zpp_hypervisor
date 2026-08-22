@@ -1,5 +1,58 @@
 # Known defects
 
+## Mixed mode: where it actually stops, with the number that says so
+
+**2026-08-23.** Four attempts. The instrument work paid for itself twice
+and the remaining question is now one line wide.
+
+Settled, and not worth re-deriving:
+
+- **The release is correct.** `evmcs_release_clean = 2`,
+  `clobbered = 0` - a VMCLEAR of the enlightened page while the assist
+  page still names it releases the pointer and does not stamp the page.
+- **The failure is `VMfailValid`, not `VMfailInvalid`.**
+  `last_entry_failure_flags = 0x8000000000000042`: valid bit set, CF
+  clear, **ZF set**. An earlier reading said carry, from per-processor
+  fields that had never been written - `record_entry_failure` skips them
+  when it cannot pick a slot, and their initial zeros read as "flags 0,
+  error 0", which is VMsucceed.
+- **The enlightened page is intact**: `revision_id` 1,
+  `virtual_processor_id` 1.
+
+**Where it stops, in one number: `hv_clean_fields` reads `0xffff` at the
+failure.** KVM sets every group clean after an entry; `evmcs_store` resets
+it to zero on every field write. So `0xffff` means **no field was written
+into the page for the second entry** - the entry ran against a description
+nothing had updated, which is exactly "invalid control field" territory
+and matches `VMfailValid`.
+
+So the question is narrow: **why `evmcs_store` does not run on the second
+`build_vmcs02`.** One candidate was found and fixed on the way and was not
+it - `vmcs_cache_select` reclaimed a row for a real VMCS without clearing
+its `evmcs`, so a row could route a real VMCS's accesses into the
+enlightened page. That fix is kept; it is a real bug regardless.
+
+A second candidate was proposed and **checked before being written up as a
+lead, and it is wrong**: that `build_vmcs02` might write controls before
+switching VMCS. Both are in `build_vmcs02` (which begins at line 1158) and
+the switch at 1671 precedes `write_vmcs02_control` at 2180, so the order
+is already right. Recording the disproof rather than the guess, because
+this file has twice sent someone after a lead that had never been checked.
+
+What is left to check, and none of it needs a boot:
+
+- whether `vmcs_cache_current_enlightened` can return zero during
+  `build_vmcs02` for some other reason - it reads the *active* row, and
+  `vmcs_cache_forget_current` runs on every exit;
+- whether anything between the switch and the writes bumps the global
+  epoch, since a row whose epoch has moved is reset - and the reset clears
+  `evmcs` identities as well, which would silently un-route every write
+  that follows;
+
+that second one is the shape of the bug already found once in this file:
+the binding being invalidated by something that only invalidates values.
+
+
 ## The entry-failure recorder is blind under the enlightened VMCS
 
 **2026-08-23.** Mixed mode was attempted a third time, with the VMCLEAR
