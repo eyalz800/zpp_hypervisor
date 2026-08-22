@@ -2335,6 +2335,8 @@ def main():
                "handler_first_tsc", "handler_last_tsc",
                "shadow_ept_evictions", "shadow_ept_resets",
                "shadow_ept_reclaims", "guest_nmis_reinjected",
+               "pending_event_lost", "pending_event_lost_first",
+               "pending_event_lost_last", "pending_event_lost_reason",
                "l2_simp_msr", "l2_siefp_msr",
                "shadow_ept_leaves_filled",
                # How each second-level fault was answered. Without this
@@ -2633,6 +2635,10 @@ def main():
                   scalar_cpus * 4)
     monitor.queue(instance + off["shadow_ept_current_slot"], scalar_cpus)
     monitor.queue(instance + off["guest_nmis_reinjected"], 1)
+    for _m in ("pending_event_lost", "pending_event_lost_first",
+               "pending_event_lost_last", "pending_event_lost_reason"):
+        if _m in off:
+            monitor.queue(instance + off[_m], scalar_cpus)
     monitor.queue(instance + off["l2_simp_msr"], scalar_cpus)
     monitor.queue(instance + off["l2_siefp_msr"], scalar_cpus)
 
@@ -3277,6 +3283,30 @@ def main():
                   "base means a message the guest has not consumed")
     print(f"\nNMIs re-injected into a guest rather than reflected: "
           f"{words.get(instance + off['guest_nmis_reinjected'], 0):,}")
+
+    # A held event destroyed by reflect_l2_exit. Non-zero means the
+    # fifth thing that can happen to an interrupted event is happening,
+    # and an interrupt the second-level guest was owed is simply gone.
+    # See `pending_event_lost` in hypervisor.h for why the path exists.
+    if "pending_event_lost" in off:
+        print("\ncpu  events destroyed by reflect_l2_exit  "
+              "first          last           at reason")
+        for cpu in range(args.cpus):
+            n = read("pending_event_lost", cpu)
+            if 0 == n:
+                continue
+            first = read("pending_event_lost_first", cpu)
+            last = read("pending_event_lost_last", cpu)
+            why = read("pending_event_lost_reason", cpu)
+            print(f"{cpu:3d}  {n:-36,d}  0x{first:08x}     "
+                  f"0x{last:08x}     {name_reason(why & 0xffff)}"
+                  f" (0x{why:x})")
+            print(f"     first vector 0x{first & 0xff:02x}, "
+                  f"last vector 0x{last & 0xff:02x}")
+        if all(0 == read("pending_event_lost", c)
+               for c in range(args.cpus)):
+            print("\nno held event was destroyed by reflect_l2_exit "
+                  "(pending_event_lost = 0 on every cpu)")
     print("\ncpu  shadow-builds  cache-hits  evictions  resets  reclaims  leaves-filled")
     for cpu in range(args.cpus):
         print(f"{cpu:3d}  {read('shadow_ept_builds', cpu):-13d}  "

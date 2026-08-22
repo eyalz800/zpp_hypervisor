@@ -4423,7 +4423,29 @@ void hypervisor::reflect_l2_exit(std::size_t cpu,
     // it started did not finish - so it is the one that decides what
     // happens next. Re-injecting it here as well would deliver the same
     // event twice, once by each level.
+    //
+    // **And that is only true when the exit being reflected is the exit
+    // that interrupted the delivery.** When the interrupting exit was
+    // handled here instead - an EPT violation, which `l0_wants_l2_exit`
+    // claims unconditionally - and the re-queue was then refused by the
+    // entry state, the event is still held when some later and unrelated
+    // exit reflects. The copy below then gives vmcs12 the *hardware*
+    // IDT-vectoring field, which for that exit reads zero, and the held
+    // event is destroyed. See `pending_event_lost`, which is here to
+    // establish whether that happens before anything is changed about it.
     if (cpu < max_cpus) {
+        if (0 != this->pending_event[cpu]) {
+            auto lost = this->pending_event[cpu];
+
+            this->pending_event_lost[cpu] += 1;
+            this->pending_event_lost_last[cpu] = lost;
+            this->pending_event_lost_reason[cpu] = reason.value();
+
+            if (1 == this->pending_event_lost[cpu]) {
+                this->pending_event_lost_first[cpu] = lost;
+            }
+        }
+
         this->pending_event[cpu] = 0;
     }
 

@@ -2,6 +2,65 @@
 
 ## The freeze is a livelock: VTL1's window outgrew the guest's clock period
 
+> **RETRACTED the same day, by the experiment this entry proposed.**
+> Disarming the local-APIC page watch (`ZPP_DISARM_APIC_WATCH=ON`) removed
+> 30.6% of exits and made the VMM reach the freeze roughly three times
+> faster - and it froze at **the same work count**: 39,282 protection
+> calls against 39,281, and 20,996 VINA-clear returns against 20,998.
+> Three separate builds have now stopped within two calls of each other.
+>
+> **A timing threshold moves when the VMM gets faster. This does not.** So
+> the freeze is determined by *work*, not by the ratio of VTL1's window to
+> the clock period, and the inequality argued below is not what stops the
+> boot. What survives is everything in "What this retires" - those are
+> measurements, and they stand - plus one sharpened fact: VTL1 completes
+> exactly ~20,996 times and then never again, at any speed.
+>
+> Also retired with it: the claim that per-exit cost was the lever. It was
+> reduced by a third and bought nothing.
+
+
+## What the third reproduction says, and what is left
+
+**Measured 2026-08-22.** Three builds, three freezes, all at 39,28x
+protection calls and ~20,99x VINA-clear returns. Two facts follow from the
+reproduction itself, before any hypothesis:
+
+- **`HvCallModifyVtlProtectionMask` frozen means the guest stopped
+  asking.** 39,282 is where a phase *ends*, not where this VMM fails. The
+  failure is in the phase after it.
+- **VTL1 completes ~20,996 times and then never again**, and the count is
+  the same whether the VMM is fast or slow. Whatever ends it is counted in
+  operations, not in microseconds.
+
+The two VINA instruments now agree and explain each other, which is worth
+recording because they looked contradictory: `vina_at_call` reads **clear
+on 100% of entries** and `vina_set_count` reads **set on 100% of returns**.
+A live `xp` of the same block reads clear almost always - because VTL calls
+run at about 9 Hz and VTL1 occupies only 1-4 ms of each ~110 ms, so a
+random sample nearly always lands in VTL0. All three are consistent.
+
+**And 100% is the interesting number.** VTL1 runs ~1 ms against a 1.74 ms
+clock period, so a tick landing inside its window by chance would give
+roughly 57%, not 100%. VINA is not being set by an unlucky tick. Something
+leaves VTL0 permanently interrupt-pending, cleared on the way back into
+VTL0 and re-asserted the moment VTL1 runs.
+
+Where that is *not* coming from, all checked:
+
+- the virtual-APIC page: IRR and ISR both empty, reader proven;
+- a lost injection: 360,637 delivered against 349,724 windows opened;
+- a held event destroyed by `reflect_l2_exit`: the counter was added
+  before the fix, and reads **zero on every processor**. KVM's
+  `vmcs12_save_pending_event` ordering hazard is real and is not firing
+  here;
+- the synthetic interrupt controller's message page: slot 3 carries
+  `HvMessageTypeTimerExpired` in 7 of 8 samples but sample 3 caught it
+  cleared, so it is being consumed. **This is the third time that slot has
+  offered a complete and wrong explanation** - it is occupied most of the
+  time because the guest is slow, not because it is stuck.
+
+
 **Measured 2026-08-22, on the rig, two dumps ninety seconds apart at the
 freeze.** This is the first account of the hang built entirely out of
 counters that were *seen to move or not move*, rather than out of a single

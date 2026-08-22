@@ -6622,6 +6622,44 @@ private:
      */
 
     /**
+     * A held event destroyed by `reflect_l2_exit` rather than delivered
+     * or handed on - the **fifth** thing that can happen to one, and the
+     * only one that was not counted.
+     *
+     * `reflect_l2_exit` clears `pending_event` on the reasoning that the
+     * reflection hands the interrupted event to the guest hypervisor in
+     * the IDT-vectoring field instead. That is true when the exit being
+     * reflected *is* the exit that interrupted delivery. It is false when
+     * the interrupting exit was handled here - an EPT violation, which
+     * `l0_wants_l2_exit` claims unconditionally - and the re-queue was
+     * then refused by the entry state: the event is held, some later and
+     * unrelated exit reflects, and vmcs12 is given the **hardware**
+     * IDT-vectoring field, which for that exit reads zero. The event is
+     * gone with nothing recording it.
+     *
+     * KVM does not have this hole and says why. `nested_vmx_vmexit`
+     * serialises its *software* event queue into vmcs12 through
+     * `vmcs12_save_pending_event` - reading `arch.interrupt.injected`,
+     * never `vmcs_read32(IDT_VECTORING_INFO_FIELD)` - and only then
+     * clears the queue, with the comment "this must NOT be hoisted above
+     * prepare_vmcs12()".
+     *
+     * Counted before being fixed, deliberately. The path existing is not
+     * evidence that it fires, and this project has spent whole sessions
+     * on mechanisms that were real and silent. `first` and `last` carry
+     * the event itself so a single loss can be identified by vector, and
+     * `reason` says which exit was being reflected when it happened.
+     * @{
+     */
+    std::uint64_t pending_event_lost[max_cpus]{};
+    std::uint64_t pending_event_lost_first[max_cpus]{};
+    std::uint64_t pending_event_lost_last[max_cpus]{};
+    std::uint64_t pending_event_lost_reason[max_cpus]{};
+    /**
+     * @}
+     */
+
+    /**
      * Which second-level guest a held event was being delivered to,
      * named by the guest hypervisor's current VMCS.
      *
