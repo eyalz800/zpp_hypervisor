@@ -39,9 +39,28 @@ below the maximum. So each call is submitting **everything that is left**.
 
 **The last call had two pages remaining.** Securekernel is not stopping
 part-way through a long walk; it is stopping on the **final batch of a
-work item**, with the work all but complete. Whatever fails, fails at the
-end of a protection request rather than in the middle of one, which is a
-much narrower place to look than "somewhere in 21,000 requests".
+work item**, with the work all but complete.
+
+> **Over-interpreted, and withdrawn the same hour.** The observed values
+> step **211 -> 208** and **257 -> 254** - a decrement of **3**, twice. If
+> the field were pages-remaining and each call submitted
+> `min(remaining, max)` with a maximum of 12 or 510, one call would take
+> it to zero. It does not, so the field is **not** the `(%rdx)` count this
+> disassembly reads, or the calls observed are not the calls that
+> decrement it.
+>
+> What survives is the disassembly itself - the validation, the buffer
+> threshold at 12, the maximum of 12 or 510, `batch = min(remaining,
+> max)`. What does **not** survive is the identification of the value in
+> the request ring with that count, and therefore the conclusion that the
+> walk stopped on its final batch.
+>
+> This is the same failure as the four-frame lead and the loop-condition
+> dword: a plausible mapping between a field read from memory and a field
+> read from code, asserted without a check that distinguishes them. The
+> consistent `-3` step is the check, and it fails. **Anything further here
+> needs the request block's layout established from the code that writes
+> it, not from the code that consumes something of the same shape.**
 
 
 ## Guest INVVPID and INVEPT are handled correctly
