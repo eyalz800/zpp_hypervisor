@@ -1,5 +1,51 @@
 # Known defects
 
+## Both trust levels traced with symbols, and both are working
+
+**2026-08-22.** The same single-step instrument captures a VTL0 trace
+beside the VTL1 one, and `ntkrnlmp.pdb` is known-good, so it resolves
+directly. 4,096 steps:
+
+```
+HvlSwitchToVsmVtl1                 29
+VslpEnterIumSecureMode             23
+PsDispatchIumService               42
+MmMapProtectedKernelPage            8
+MiGetPteAddress                     6
+MiMakeValidPte                     41
+KiIsrLinkage                      192
+KiInterruptDispatchNoLockNoEtw    181
+KiInterruptSubDispatchNoLockNoEtw  80
+KiStartInterruptCycleAccumulation  84
+KiEndThreadCycleAccumulation      645
+KiCallInterruptServiceRoutine     420
+HalpTimerClockInterruptStub        45
+HalpTimerGetInternalData           16
+HalpHvTimerAcknowledgeInterrupt    61
+```
+
+**VTL0 genuinely services the request.** `PsDispatchIumService` into
+`MmMapProtectedKernelPage`, `MiGetPteAddress` and `MiMakeValidPte` - the
+secure memory manager asks for a page, the ordinary kernel maps it and
+validates the entry. That is the other half of the `code 0` requests whose
+parameters differ 99.9% of the time, and it confirms from the instructions
+that real work is being done on both sides.
+
+**So the two-sided picture is complete and nothing in it is
+malfunctioning**: VTL1 asks and yields on a notification it needs, VTL0
+services the request and takes its clock interrupt. About 1,724 of the
+4,096 VTL0 steps - **42%** - are clock-interrupt handling, with
+`KiEndThreadCycleAccumulation` alone at 645.
+
+That is worth stating plainly because it removes a whole class of
+hypothesis. There is no stuck loop on either side, no request that is
+never answered, no handler that never runs. Both trust levels execute the
+sequence they are supposed to execute, and the boot still does not
+progress - so whatever stops it is not visible in a 4,096-step window of
+either level, and the next instrument has to be one that spans the moment
+progress *stops* rather than one that samples the steady state.
+
+
 ## Vector 0x40 is the notification, and it is load-bearing
 
 **2026-08-22.** The single-step trace shows VTL1 dispatching
