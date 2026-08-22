@@ -38723,3 +38723,35 @@ past that window would not have shown. What is established is that nothing
 in the first 384 bytes moves - which covers the flag word at `0xa8` that
 both `SkiSelectThread` and `SkCallNormalMode` test, and that is the field
 the scheduler actually looks at.
+
+## The secure kernel's object table is healthy: 8 of 512 used
+
+`SkiSelectThread` does not walk a ready list - it looks an object up **by
+index** in a reference-counted handle table, and fails with
+`STATUS_INVALID_PARAMETER` if the index is out of range or the entry is
+invalid. Disassembled from the helper at `+0x8eaa0`:
+
+    cmpl 0x140128b0c, %ecx     index against a count, fail if >=
+    movq 0x140128b00, %r14     table base
+    movq (%r14,%rbp,8), %rdi   entry
+    testq %rdi,%rdi ; jns fail entry must have bit 63 set to be valid
+    shrb $3 / andb $1 / cmpb   a type bit must match the caller's
+    lock cmpxchgq              refcount in the low three bits
+
+Both globals read from the running guest at the freeze:
+
+    table base  sk+0x128b00 -> 0xffff8a803d91e000
+    entry count sk+0x128b0c -> 512
+
+    [ 1] 0xfffff80644a399a0  valid    (a static object in the image)
+    [ 2-8] 0xffffbb80022...  valid    (seven heap objects)
+    [ 9+]  0x0a, 0x0b, 0x0c, ...      a free list, each linking to the next
+
+**Eight entries of 512 in use, and the remainder is an intact free list.**
+The table is nowhere near exhausted, the count is not tight, and no entry is
+corrupt. Thread lookup cannot be failing for want of a slot.
+
+So the scheduler's own inputs are healthy too. With the thread structure
+identical between working and frozen, the object table intact, the SynIC
+channel live and both assist pages clean, **every piece of secure-kernel
+state this investigation can reach is in order.**
