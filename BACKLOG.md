@@ -1,5 +1,40 @@
 # Known defects
 
+## The trust-level switch works; the trace instrument aims at the wrong side
+
+**2026-08-22.** The retraction above raised a real possibility: if the
+guest is still executing `ntoskrnl` after `HvCallVtlCall`, perhaps the
+switch never reaches this VMM - the guest hypervisor changes trust level
+by making a **different vmcs12** current, and missing that would re-enter
+VTL0 for ever.
+
+Measured directly, and it is not so:
+
+```
+vmcs12 current at the VtlCall     0x117a17000
+vmcs12 current at the VtlReturn   0x117a1a000
+switches where it moved           24,925
+switches where it did not         0
+```
+
+**Two distinct vmcs12s, and the change is picked up on every single
+switch.** So the trust-level machinery works, and `set_guest_current_vmcs`
+is tracking it correctly.
+
+**The fault is in the instrument.** `arm_vtl_step` fires on the
+*hypercall*, and at that moment the guest hypervisor has not yet swapped
+the vmcs12 - so the steps recorded are VTL0 finishing its side, which is
+exactly why they resolve into `ntoskrnl` interrupt-dispatch code. The
+label "expected VTL1" is an assumption the instrument never checked.
+
+**And the fix follows from the measurement**: arm on the **vmcs12
+identity** rather than on the hypercall. VTL1's vmcs12 is the one current
+at the `HvCallVtlReturn` - `0x117a1a000` here - so stepping entries whose
+`guest_current_vmcs` equals it captures the secure kernel and nothing
+else. That is the change that would finally make VTL1 observable, which
+this investigation has assumed it was for a long time and never was.
+
+
 ## RETRACTION: the "VTL1 instruction trace" is ntoskrnl, not securekernel
 
 **2026-08-22, found by debugging rather than by reasoning**, and it

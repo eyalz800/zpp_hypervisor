@@ -9090,6 +9090,16 @@ hypervisor::on_l2_exit(std::size_t cpu,
             }
 
             if (vtl_call_code == code) {
+                // Which vmcs12 is current as the call is made. See
+                // `vtl_call_vmcs12`: the guest hypervisor switches trust
+                // level by making a different one current, so this and
+                // its partner at the return say whether the switch ever
+                // reaches this VMM.
+                if (cpu < max_cpus) {
+                    this->vtl_call_vmcs12[cpu] =
+                        this->guest_current_vmcs[cpu];
+                }
+
                 // What VTL0 could have done with an interrupt at the
                 // instant it handed over. See `vtl_call_if_clear`.
                 if (cpu < max_cpus) {
@@ -9203,6 +9213,22 @@ hypervisor::on_l2_exit(std::size_t cpu,
                 capture_vtl_switch(cpu, 1, context);
                 mark_vtl_half(cpu, 1);
                 arm_vtl_step(cpu, 1);
+
+                // And which vmcs12 is current at the return. If this
+                // equals the one recorded at the call, the pointer never
+                // moved and both halves ran the same trust level. See
+                // `vtl_call_vmcs12`.
+                if (cpu < max_cpus) {
+                    this->vtl_return_vmcs12[cpu] =
+                        this->guest_current_vmcs[cpu];
+
+                    if (this->vtl_call_vmcs12[cpu] ==
+                        this->guest_current_vmcs[cpu]) {
+                        this->vtl_switch_same_vmcs[cpu] += 1;
+                    } else {
+                        this->vtl_switch_moved_vmcs[cpu] += 1;
+                    }
+                }
 
                 // Where it yielded from, beside the flag it yielded on.
                 // See `vtl1_resume_rip`: the pair says whether the

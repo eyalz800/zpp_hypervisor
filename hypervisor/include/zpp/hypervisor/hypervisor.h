@@ -10723,6 +10723,29 @@ private:
     std::uint64_t vtl1_caller_at[max_cpus]{};
 
     /**
+     * Which vmcs12 is current at each trust-level switch.
+     *
+     * **This is the test the whole investigation has been missing.** The
+     * guest hypervisor changes trust level by making a *different* vmcs12
+     * current, so if VTL0's pointer is still current on the entry that
+     * follows `HvCallVtlCall`, the switch never reached this VMM and the
+     * processor re-enters VTL0 - which is exactly what the instruction
+     * trace shows, resolving to `ntoskrnl` where securekernel was
+     * expected.
+     *
+     * Recorded at the call and at the return, so the pair says whether
+     * the pointer moves at all and whether it moves back.
+     * @{
+     */
+    std::uint64_t vtl_call_vmcs12[max_cpus]{};
+    std::uint64_t vtl_return_vmcs12[max_cpus]{};
+    std::uint64_t vtl_switch_same_vmcs[max_cpus]{};
+    std::uint64_t vtl_switch_moved_vmcs[max_cpus]{};
+    /**
+     * @}
+     */
+
+    /**
      * `securekernel`'s load base, found by matching the first bytes of
      * its `.text` rather than by looking for a PE header.
      *
