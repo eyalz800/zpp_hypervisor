@@ -608,12 +608,21 @@ public:
             __builtin_trap();
         }
 
-        // Dropped, **not** written through, and that is correctness
-        // rather than taste: a 32-bit field stores only the low half of
-        // what is handed to `vmwrite`, so caching the value as written
-        // would answer a later read with bits the processor discarded.
-        // Honouring the width would mean re-deriving it at every write;
-        // dropping the entry costs one miss and cannot be wrong.
+        // **Written through, honouring the field's width.** This used
+        // to drop the entry instead, on the grounds that a 32-bit field
+        // stores only the low half of what is handed to `vmwrite`, so
+        // caching the value as written would answer a later read with
+        // bits the processor discarded - true, and the conclusion drawn
+        // from it was wrong. Re-deriving the width is two shifts, not a
+        // lookup: SDM 27.11.2 and Table 27-22
+        // (`.references/sdm.txt:200509`) put the width in bits 14:13 of
+        // the encoding and the access type in bit 0.
+        //
+        // Dropping cost far more than the miss it was described as. A
+        // write is the *most* likely thing to be followed by a read of
+        // the same field, and there are 17 writes to 26 reads on an exit,
+        // so every write was arming a guaranteed miss on a path where a
+        // miss is an exit to the layer below at about 4,900 cycles.
         if constexpr (vmcs_cache_enabled) {
             auto row = (0 == vmcs_cache_suspended)
                            ? vmcs_cache_row_index()
@@ -624,11 +633,28 @@ public:
                     vmcs_cache[row][vmcs_cache_active[row]];
 
                 if (current.epoch == vmcs_cache_epoch) {
+                    auto encoding = static_cast<std::uint64_t>(field);
                     auto slot = static_cast<std::size_t>(
-                        (static_cast<std::uint64_t>(field) >> 1) %
-                        vmcs_cache_entries);
+                        (encoding >> 1) % vmcs_cache_entries);
 
-                    current.tag[slot] = 0;
+                    // Width 0 is 16-bit and width 2 is 32-bit; widths 1
+                    // and 3 are 64-bit and natural, which this
+                    // processor stores whole. A "high" access - bit 0 -
+                    // names the upper half of a 64-bit field and is
+                    // itself 32 bits wide.
+                    constexpr std::uint64_t access_type_high = 1;
+                    auto width = (encoding >> 13) & 3;
+
+                    auto stored =
+                        (0 != (encoding & access_type_high))
+                            ? (value & 0xffffffffull)
+                            : ((0 == width)   ? (value & 0xffffull)
+                               : (2 == width) ? (value & 0xffffffffull)
+                                              : value);
+
+                    current.tag[slot] =
+                        static_cast<std::uint64_t>(field) + 1;
+                    current.value[slot] = stored;
                 }
             }
         }
