@@ -10183,6 +10183,30 @@ private:
     std::uint64_t vtl_call_vtpr[max_cpus][16]{};
 
     /**
+     * VINA at the trust-level *return*, split by the task priority the
+     * matching *call* was made at.
+     *
+     * **This is the test that separates two accounts of the freeze that
+     * every other instrument reads identically.** The clock vector is
+     * class 13 and the deferred-call vector `0x2f` is class 2, and
+     * delivery needs a class strictly greater than the priority. So at a
+     * call made at class 0 or 1 both are deliverable, and at class 2 only
+     * the clock is - `0x2f` is pending but blocked by the guest's own
+     * priority.
+     *
+     * If VINA-set tracks class 2, the interrupt holding it asserted is
+     * one the level above **cannot itself deliver**, which real Hyper-V
+     * has no reason to do and would point at the priority it is being
+     * shown rather than at timing. If VINA-set is spread evenly across
+     * the classes, it is the clock, and the freeze is the threshold
+     * already recorded: the guest cannot call in faster than it ticks.
+     *
+     * Indexed `[vina][class]`, so the pair for one class is directly
+     * comparable and neither needs a denominator from elsewhere.
+     */
+    std::uint64_t vtl_return_vina_by_call_class[max_cpus][2][16]{};
+
+    /**
      * Wall-clock gaps between consecutive `HvCallVtlCall`s, as a
      * power-of-two histogram over time-stamp counter ticks.
      *

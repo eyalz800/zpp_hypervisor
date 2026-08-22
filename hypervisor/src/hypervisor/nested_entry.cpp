@@ -9119,6 +9119,14 @@ hypervisor::on_l2_exit(std::size_t cpu,
                                 }
 
                                 this->vtl1_duration[cpu][vina][bucket] += 1;
+
+                            // And against the priority the matching call
+                            // was made at. See
+                            // `vtl_return_vina_by_call_class`.
+                            this->vtl_return_vina_by_call_class
+                                [cpu][vina]
+                                [(this->l2_entry_priority[cpu] >> 4) &
+                                 0xf] += 1;
                             }
                         }
                     }

@@ -2,6 +2,35 @@
 
 ## Why the guest cannot beat its own clock, in one arithmetic
 
+> **RETRACTED the same day, by a correlation this entry never made.**
+> The argument below assumes the interrupt holding VINA asserted is the
+> **clock**, which is class 13 and deliverable at every priority observed
+> at the call - so it concluded the gap between calls must be driven under
+> the 1.74 ms clock period. Splitting VINA-at-return by the priority the
+> matching call was made at says otherwise:
+>
+> ```
+> call class   VINA clear   VINA set   % set   deliverable there
+> class 0             243      5,300   95.6%   clock + 0x2f
+> class 2          15,532      1,027    6.2%   clock only (0x2f blocked)
+> class 4           5,221          6    0.1%   clock only
+> ```
+>
+> **A clock-driven VINA would be flat across those classes. It is not.**
+> It is 95.6% where `0x2f` is deliverable and effectively zero where
+> `0x2f` is blocked by the guest's own priority - so the interrupt holding
+> VINA asserted is `0x2f`, and the level above is asserting it *correctly*,
+> only when it can actually be delivered.
+>
+> So the timing threshold is not the blocker and the 5.4x it demanded is
+> not the target. What is left is sharper: the frozen VINA-clear ceiling of
+> 21,007 is exactly the class-2 and class-4 calls, and the guest has since
+> switched to calling in at **class 0 with a deliverable `0x2f` pending**
+> and never taking it. Why a guest at priority class 0 does not take a
+> class-2 interrupt is the question, and `RFLAGS.IF` at the call - already
+> measured clear on 10.4% of calls - is the first thing to correlate.
+
+
 **Measured 2026-08-22**, and this is the blocker stated as a threshold
 rather than a story. Every number is a delta over ~80 s at the freeze.
 
