@@ -5543,36 +5543,28 @@ void hypervisor::setup_vmcs(std::size_t cpu,
                                 this->vp_assist_physical[cpu] |
                                     vp_assist_enable);
 
-            // **Not armed here.** In mixed mode only the second-level
-            // VMCS is enlightened, so the flag belongs with the entry
-            // that uses it: `point_at_vmcs` sets it when it names the
-            // enlightened page and clears it when it goes back to the
-            // real one.
-            //
-            // Arming it at setup is a leftover from when both VMCSs
-            // were enlightened, and it cost a launch. With the flag set
-            // and `current_nested_vmcs` still zero, the layer below
-            // takes guest-physical page zero as the description of the
-            // very first entry, and the launch fails leaving no VMCS
-            // current at all - which is also why the instruction error
-            // read back as a leftover register rather than a code.
+            // Set once and never cleared. **Both** of this VMM's
+            // VMCSs are enlightened - they have to be, since the
+            // layer below refuses an ordinary VMPTRLD once any
+            // enlightened VMCS has been used - so the flag is not
+            // what distinguishes the two entries. `point_at_vmcs`
+            // does that, by naming the page.
+            constexpr std::size_t enlighten_vmentry_offset = 40;
+
+            *reinterpret_cast<volatile std::uint8_t *>(
+                assist + enlighten_vmentry_offset) = 1;
 
             this->evmcs_active[cpu] = true;
 
-            // **Nothing is selected here, and that is deliberate.** Only
-            // the second-level VMCS is enlightened; vmcs01 is a real VMCS
-            // and is already current, so every field this function writes
-            // below belongs in it and gets there by doing nothing.
-            //
-            // An earlier shape called `point_at_vmcs(cpu, false)` here,
-            // from when both VMCSs were enlightened. In mixed mode that
-            // releases an enlightened pointer which does not exist yet
-            // and re-loads a region this function has not filled in,
-            // which leaves **no VMCS current at all** - the launch fails,
-            // and even the failure reads back wrong, because the VMREAD
-            // that fetches the instruction error needs a current VMCS
-            // too. It reported `0x67192000`, a leftover register value,
-            // which is what a failed VMREAD leaves behind.
+            // **Before this function writes a single vmcs01 field.**
+            // Everything below aims at "the current VMCS", and with
+            // this on that has to be the enlightened page standing in
+            // for it - otherwise setup fills the real region, the
+            // enlightened one keeps nothing but its revision, and the
+            // first entry runs the guest hypervisor from an empty
+            // description. Measured: zero exits and zero second-level
+            // entries, a hypervisor that never launched.
+            point_at_vmcs(cpu, false);
 
             log("cpu {} enlightened vmcs active, assist {} page {}",
                 cpu,

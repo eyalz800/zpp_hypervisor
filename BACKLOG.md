@@ -1,5 +1,50 @@
 # Known defects
 
+## The entry-failure recorder is blind under the enlightened VMCS
+
+**2026-08-23.** Mixed mode was attempted a third time, with the VMCLEAR
+release restored and an instrument to settle the open question. The
+instrument worked and the answer is clean:
+
+```
+evmcs_release_clean     = 1
+evmcs_release_clobbered = 0
+```
+
+**The VMCLEAR release does not corrupt the page.** The revision survives,
+so releasing while the assist page still names the page is correct, and
+the "real VMCLEAR stamps a launch state into it" worry does not happen in
+this order. That question is closed.
+
+What is not closed is why the *next* entry fails, and the reason is that
+the thing which should say so cannot:
+
+```
+entry_failures_seen = 1
+entry_failure_flags = 0x0     neither carry nor zero
+entry_failure_error = 0
+```
+
+Flags of zero mean VMsucceed, which cannot be true on a path only reached
+when the entry failed. **`record_entry_failure` reads
+`vmcs.vm_instruction_error()`, and with an enlightened VMCS current that
+read comes out of our own page** - which the layer below writes on an
+enlightened *exit* and not on a failed *entry*. So it reports zero, and
+`vmcs.vpid()` beside it is read the same way.
+
+**Third instrument this session to answer a question it was not aimed
+at**, after the circular VMREAD count and `cycles/acc` read as a
+per-access price. The shape is always the same: a number that is real, and
+is about something else.
+
+What the next attempt needs before anything else: read the instruction
+error out of the **real** VMCS on that path - point at vmcs01 first, or
+read it with a bare `vmread` that does not go through the field cache -
+so the failure can be named instead of guessed. Everything else about
+mixed mode is now settled: the design is sound, the release is clean, and
+only the re-arm is unexplained.
+
+
 ## 78% of all exits are the guest hypervisor's own VMCS accesses
 
 **2026-08-23.** One processor, enlightened VMCS on, 430 s:
