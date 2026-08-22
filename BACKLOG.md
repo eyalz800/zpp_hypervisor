@@ -1,5 +1,52 @@
 # Known defects
 
+## 78% of all exits are the guest hypervisor's own VMCS accesses
+
+**2026-08-23.** One processor, enlightened VMCS on, 430 s:
+
+```
+vmread          25,394,517   49.9%
+vmwrite         14,369,268   28.2%
+vmresume         3,941,803    7.7%
+ept-violation    3,132,507    6.2%
+wrmsr            2,868,654    5.6%
+   total exits  50,866,133
+```
+
+**Forty million of fifty-one million exits are the guest hypervisor
+reading or writing a VMCS**, and they exist only because using the
+enlightened VMCS meant giving up VMCS shadowing for it.
+
+Everything else is healthy on this configuration and worth recording so it
+is not re-investigated: vector `0x2f` is delivered 13,176 times, **1.4%**
+against 0.3% before; device vectors `0x50` and `0x51` arrive; `ext-int` is
+non-zero. Deferred work runs and I/O completes. **This is throughput and
+nothing else.**
+
+### Mixed mode is worth it, and the arithmetic that said otherwise was wrong
+
+The two savings looked mutually exclusive - the enlightened layout has no
+VMREAD/VMWRITE bitmap fields, so an enlightened vmcs01 cannot shadow for
+the guest hypervisor. But only *vmcs01* needs the bitmaps. vmcs02 can be
+enlightened while vmcs01 stays a real VMCS, and the thing that forbids
+mixing - KVM refusing an ordinary `VMPTRLD` while an enlightened pointer
+is live - is escapable: a **VMCLEAR of the enlightened page** releases it
+(`nested.c:267`), after which `VMPTRLD` is permitted.
+
+That costs one extra VMCLEAR exit per switch back to vmcs01. **This was
+dismissed earlier by putting 15.7M against it, which was the wrong
+number** - that is the count of *all* second-level exits over a longer
+window. The relevant figure from this run is `l2-exits`, **1,830,539**.
+
+So the trade is **1.8 million extra exits to remove 40 million**, and it
+keeps both savings: the guest hypervisor's accesses shadowed and free,
+this VMM's accesses loads and stores.
+
+It also respects the constraint that matters - the guest hypervisor is
+told nothing and goes on believing it is on bare metal, because the
+enlightenment stays a contract with the layer below.
+
+
 ## Where the processor actually is: starved, not blocked
 
 **2026-08-22.** Asked directly of the running machine rather than inferred,
