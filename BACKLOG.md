@@ -62,12 +62,24 @@ and the VMCLEAR shape has its own failure above.
 Reverted to the enlightened build that works - vmcs02 enlightened,
 shadowing given up - which is the one that gets past the plateau.
 
-**What the next attempt should establish first, cheaply:** whether a
-VMCLEAR-released enlightened pointer can be re-armed at all by writing the
-assist page again, or whether the layer below requires the pointer to
-*change* to re-map it (`nested.c:2101` remaps on `evmcs_gpa !=
-hv_evmcs_vmptr`). If it is the latter, two enlightened pages alternating
-would do it, and that is a small change rather than another design.
+**That question is now answered, from the source rather than another
+boot.** `nested_release_evmcs` sets `hv_evmcs_vmptr = EVMPTR_INVALID`
+(`nested.c:239`), and the re-map test is `evmcs_gpa != hv_evmcs_vmptr`
+(`nested.c:2101`), so re-arming *the same page* after a release does
+re-map. Two alternating pages are unnecessary.
+
+**So the design is sound and the release was performed wrongly.** The
+VMCLEAR shape is the right one; what failed is the detail of when the
+assist page is written relative to it. The specific thing to check next,
+and it needs no boot to reason about: `nested_evmcs_handle_vmclear`
+returns early unless `evmptr_is_valid(nested_get_evmptr(vcpu))`, so the
+assist page must still name the page **at the moment of the VMCLEAR** -
+and after the release it must be re-armed before the next entry, which
+`point_at_vmcs(cpu, true)` does. The attempt that failed cleared
+`enlighten_vmentry` immediately after the VMCLEAR in the same block;
+whether `nested_get_evmptr` consults that flag or only
+`current_nested_vmcs` decides whether that clear was harmless or was the
+bug.
 
 It also respects the constraint that matters - the guest hypervisor is
 told nothing and goes on believing it is on bare metal, because the
