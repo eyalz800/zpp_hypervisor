@@ -7653,6 +7653,35 @@ void hypervisor::record_l2_entry_event(std::size_t cpu)
     if (this->l2_entry_priority[cpu] < dispatch_class) {
         this->l2_low_priority_no_event[cpu] += 1;
 
+        // **Split by whether the level above has anything pending at
+        // all, because the bare count cannot tell the two apart and they
+        // want opposite fixes.**
+        //
+        // A hypervisor with an interrupt it cannot yet deliver asks for
+        // an interrupt window, so that it is told the moment the guest
+        // can take one. So on an entry carrying nothing at a priority
+        // that would have admitted the dispatch vector:
+        //
+        //   - window asked  -> it *has* something pending and is waiting
+        //     for a chance this VMM apparently did not give it, which
+        //     would be a delivery fault here;
+        //   - window not asked -> it has nothing pending, so the guest's
+        //     request never reached it, which is a different bug in a
+        //     different place.
+        //
+        // Measured need: the guest asks for vector 0x2f 145,200 times and
+        // receives it 479, and `KiDeferredReadySingleThread` is waiting
+        // on exactly that. Six readings this session were single numbers
+        // that answered the wrong question; this one is two numbers that
+        // disagree with each other, which is the only shape that cannot.
+        if (0 != (this->guest_vmcs12[cpu].read(
+                      field::primary_processor_based_vm_execution_controls) &
+                  primary_interrupt_window)) {
+            this->l2_no_event_window_asked[cpu] += 1;
+        } else {
+            this->l2_no_event_window_idle[cpu] += 1;
+        }
+
         // And whether it could legally have been delivered at all,
         // which the priority alone does not say. SDM 27.6.1 refuses an
         // external interrupt while RFLAGS.IF is clear; 27.6.2 refuses

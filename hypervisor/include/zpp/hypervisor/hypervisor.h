@@ -5933,6 +5933,22 @@ private:
     std::uint64_t l2_low_priority_no_event[max_cpus]{};
 
     /**
+     * `l2_low_priority_no_event` split by whether the level above had
+     * anything pending, which the bare count cannot say.
+     *
+     * A hypervisor holding an interrupt it cannot deliver asks for an
+     * interrupt window. So `asked` counts entries where it had something
+     * and this VMM carried nothing anyway - a delivery fault here - and
+     * `idle` counts entries where it had nothing, meaning the guest's
+     * request never reached it. Opposite fixes, and the single counter
+     * beside them has been read as evidence for both.
+     * @{
+     */
+    std::uint64_t l2_no_event_window_asked[max_cpus]{};
+    std::uint64_t l2_no_event_window_idle[max_cpus]{};
+    /** @} */
+
+    /**
      * The same crossing, split by whether the event could legally have
      * been injected at all.
      *
