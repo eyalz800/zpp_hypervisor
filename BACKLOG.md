@@ -96,12 +96,29 @@ below neither runs the guest nor fails the launch back to us; it does not
 return at all.
 
 That is a different failure from the previous one and rules out the
-`VMPTRLD` refusal, which is what this change was for. The candidates,
-untested: the enlightened page is missing a field VM entry requires and
-KVM is looping on a failed entry; `enlighten_vmentry` being set for this
-VMM's *own* entry is not something KVM expects from a guest that is not
-Hyper-V; or the assist page's `nested_control` needs to be written before
-the first enlightened entry.
+`VMPTRLD` refusal, which is what this change was for.
+
+**And the hang is not the whole story - it is the launch path having no
+way to report a failure.** The first launch works by pointing
+`guest_context.rip` at `arch::x86_64::vmx::vmlaunch` and calling
+`restore_context`, so this VMM *jumps* to the instruction carrying the
+guest's register state. On success the guest runs. On failure execution
+simply falls past `vmlaunch` with a guest stack and nothing to catch it,
+which is why any launch failure here looks like a silent stop at that RIP
+rather than an error code.
+
+**So the first thing the next attempt needs is not a fix, it is a
+diagnostic**: read `vm_instruction_error` after a failed launch and get it
+out, the way `zpp_load_elf` gets the loader's code out. Every candidate
+below is guesswork until that number exists, and this session has already
+paid twice for reasoning where a measurement was available.
+
+The candidates, untested and unordered: the enlightened page is missing a
+field VM entry requires, because `setup_vmcs` reads some controls before
+writing them and an empty page reads as zero; `enlighten_vmentry` set for
+this VMM's own entry is not what the layer below expects; or
+`nested_control` in the assist page must be written before the first
+enlightened entry.
 
 What the next attempt has to do, therefore:
 
