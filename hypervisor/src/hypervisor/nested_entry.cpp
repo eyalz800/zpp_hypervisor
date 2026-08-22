@@ -2722,24 +2722,107 @@ std::expected<void, zpp::error> hypervisor::build_vmcs02(std::size_t cpu)
     // Only the clock vector, and only when a gap has not already
     // elapsed. Nothing else is touched, so an exception or any other
     // vector the level above staged goes through untouched.
+    //
+    // **Withheld means deferred, not dropped.** It used to clear the
+    // valid bit and stop there, which destroys an interrupt the level
+    // above staged and was never told about. Measured, and it is not
+    // subtle: at 10 ms the guest got *further* than any other build in
+    // this tree - it passed the 20,996 ceiling and started its
+    // application processors, so `KeStartAllProcessors` ran - and then
+    // stopped dead, zero exits across a whole minute on all eight
+    // processors. A guest waiting on the tick that was discarded waits
+    // for ever. This tree has already been here once: the
+    // interrupted-event re-queue exists because destroying a staged
+    // event "stopped Hyper-V's synthetic timer dead".
+    //
+    // So the withheld injection is kept whole - vector, type and valid
+    // bit exactly as the level above wrote them - and put back on the
+    // first later entry that has the gap behind it and nothing else
+    // staged. Nothing is invented: the only interrupt delivered is one
+    // the level above asked for.
     if constexpr (0 != nested_vmx::lazy_tick_microseconds) {
         constexpr std::uint64_t clock_vector = 0xd1;
         constexpr std::uint64_t gap = nested_vmx::lazy_tick_microseconds *
                                       nested_vmx::ticks_per_microsecond;
 
-        if ((cpu < max_cpus) && (0 != (injection & interruption_valid)) &&
-            (clock_vector == (injection & interruption_vector_mask))) {
+        if (cpu < max_cpus) {
             auto now = arch::x86_64::rdtsc();
             auto last = this->lazy_tick_last_tsc[cpu];
+            auto elapsed = (0 == last) || ((now - last) >= gap);
 
-            if ((0 != last) && ((now - last) < gap)) {
-                injection &= ~interruption_valid;
-                this->lazy_tick_withheld[cpu] =
-                    this->lazy_tick_withheld[cpu] + 1;
-            } else {
-                this->lazy_tick_last_tsc[cpu] = now;
-                this->lazy_tick_delivered[cpu] =
-                    this->lazy_tick_delivered[cpu] + 1;
+            if ((0 != (injection & interruption_valid)) &&
+                (clock_vector ==
+                 (injection & interruption_vector_mask))) {
+                if (!elapsed) {
+                    // Held, not lost. A tick already owed is not
+                    // replaced - one interrupt is owed, however many
+                    // arrive while it is, which is what a level-
+                    // triggered periodic timer means.
+                    if (0 == this->lazy_tick_owed[cpu]) {
+                        this->lazy_tick_owed[cpu] = injection;
+                    }
+
+                    injection &= ~interruption_valid;
+                    this->lazy_tick_withheld[cpu] =
+                        this->lazy_tick_withheld[cpu] + 1;
+                } else {
+                    this->lazy_tick_last_tsc[cpu] = now;
+                    this->lazy_tick_owed[cpu] = 0;
+                    this->lazy_tick_delivered[cpu] =
+                        this->lazy_tick_delivered[cpu] + 1;
+                }
+            } else if (elapsed && (0 != this->lazy_tick_owed[cpu]) &&
+                       (0 == (injection & interruption_valid))) {
+                // The gap has passed and the level above has staged
+                // nothing of its own, so the tick it is owed goes in
+                // now - **if the guest can take one.**
+                //
+                // The entry will not refuse it. SDM 27.2.1.3 does not
+                // list RFLAGS.IF among the checks on an injected
+                // external interrupt, so putting one in while the guest
+                // has interrupts disabled delivers it into a critical
+                // section that disabled them precisely to keep it out,
+                // and nothing faults. The self-IPI path a few lines
+                // above makes exactly this test for exactly this
+                // reason, and KVM's equivalent is `vmx_interrupt_allowed`
+                // rather than anything the processor does.
+                //
+                // Measured: without this the guest stopped at 20,319
+                // protection calls, earlier than any build that had no
+                // lazy tick at all, with the application processors
+                // never reaching the second level.
+                //
+                // Read out of vmcs12, which is free - `build_vmcs02`
+                // already has both values in hand and they are what this
+                // entry is about to load.
+                constexpr std::uint64_t rflags_interrupt_enable = 1ull
+                                                                  << 9;
+                constexpr std::uint64_t blocking_by_sti = 1ull << 0;
+                constexpr std::uint64_t blocking_by_mov_ss = 1ull << 1;
+
+                auto blocking =
+                    shadow.read(field::guest_interruptibility_state);
+
+                auto interruptible =
+                    (0 != (shadow.read(field::guest_rflags) &
+                           rflags_interrupt_enable)) &&
+                    (0 == (blocking &
+                           (blocking_by_sti | blocking_by_mov_ss)));
+
+                if (interruptible) {
+                    injection = this->lazy_tick_owed[cpu];
+
+                    this->lazy_tick_owed[cpu] = 0;
+                    this->lazy_tick_last_tsc[cpu] = now;
+                    this->lazy_tick_redelivered[cpu] =
+                        this->lazy_tick_redelivered[cpu] + 1;
+                } else {
+                    // Still owed. Counted, because an owed tick that
+                    // never finds an interruptible entry is the same
+                    // failure as dropping it, just slower.
+                    this->lazy_tick_not_yet[cpu] =
+                        this->lazy_tick_not_yet[cpu] + 1;
+                }
             }
         }
     }

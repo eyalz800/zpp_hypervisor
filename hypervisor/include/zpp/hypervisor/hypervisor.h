@@ -5948,6 +5948,33 @@ private:
      */
     volatile std::uint64_t lazy_tick_withheld[max_cpus]{};
     volatile std::uint64_t lazy_tick_delivered[max_cpus]{};
+
+    /**
+     * The withheld injection itself, kept whole so it can be put back.
+     *
+     * Withholding used to clear the valid bit and stop, which destroys
+     * an interrupt the level above staged without telling it. That is
+     * measurably fatal: at a 10 ms gap the guest got further than any
+     * other build here - past the 20,996 ceiling, far enough to run
+     * `KeStartAllProcessors` - and then stopped dead, zero exits across
+     * a minute on all eight processors, because something was waiting
+     * on the tick that had been thrown away.
+     *
+     * Zero means nothing is owed. One tick is owed however many arrive
+     * while it is: a periodic timer the guest has not serviced does not
+     * become two pieces of work.
+     *
+     * `lazy_tick_redelivered` counts the ones put back, and is the pair
+     * to read `lazy_tick_withheld` against - withheld climbing without
+     * it is the old dropping behaviour returning.
+     * @{
+     */
+    volatile std::uint64_t lazy_tick_owed[max_cpus]{};
+    volatile std::uint64_t lazy_tick_redelivered[max_cpus]{};
+    volatile std::uint64_t lazy_tick_not_yet[max_cpus]{};
+    /**
+     * @}
+     */
     std::uint64_t lazy_tick_last_tsc[max_cpus]{};
 
     std::uint64_t l2_eligible_no_event[max_cpus]{};

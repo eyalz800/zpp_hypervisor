@@ -99,13 +99,22 @@ extern "C" [[gnu::used, gnu::retain]] constinit const char
         // the watch is dropped runs outside this VMM.
         ' ', 'a', 'p', 'i', 'c', 'o', 'f', 'f', '=',
         digit(nested_vmx::disarm_apic_watch),
-        // Microseconds, **four** digits, because the useful values are
-        // milliseconds and two digits would print 2,000 as `00` - which
-        // is indistinguishable from off. A manifest that cannot show the
+        // Microseconds, **five** digits. A manifest that cannot show the
         // value is no better than one that cannot show the switch, and
         // this project has already lost a session to a switch the
         // manifest could not show.
+        //
+        // It was four, and four was not enough. The leading digit was
+        // `value / 1000 % 10`, so 10,000 printed `0000` - character for
+        // character what *off* prints. A build configured with
+        // -DZPP_LAZY_TICK=10000 was compiled, deployed to the rig and
+        // read back as disabled; the switch was almost dismissed as
+        // having no effect on that evidence. Ten milliseconds is not an
+        // exotic value here either: the measured tick-handling cycle is
+        // about 4 ms, so every useful setting is over 9,999.
         ' ', 'l', 'a', 'z', 'y', '=',
+        digit(static_cast<unsigned>(
+            nested_vmx::lazy_tick_microseconds / 10000)),
         digit(static_cast<unsigned>(
             nested_vmx::lazy_tick_microseconds / 1000)),
         digit(static_cast<unsigned>(
