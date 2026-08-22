@@ -88,6 +88,10 @@ option(ZPP_SAMPLE_L1
     "Sample the FIRST-level guest's instruction pointer on the VMX-preemption timer, armed at VMCS setup rather than from the exit path. The application processors burn a whole host core each and take no exits, so every exit-driven instrument here is blind to them, and reading their state through the monitor is not passive - QEMU must signal them out of guest mode to do it. Costs one exit per period per processor, for ever."
     OFF)
 
+option(ZPP_EVMCS_TO_KVM
+    "Use Hyper-V's enlightened VMCS toward the layer *below* this VMM, replacing VMREAD and VMWRITE on the second-level VMCS with loads and stores to a page shared with it. Off by default and detected at run time: it is a contract with whatever is underneath, and this VMM is not specific to any. It is never advertised upward - the guest hypervisor keeps being told it is on bare metal - and it cannot be combined with offering VMCS shadowing to the guest, which the enlightened layout has no room for."
+    OFF)
+
 option(ZPP_TRACE_VTL
     "Record Hyper-V virtual trust level switches - the VTL call and return hypercalls, the registers either side of them, and the guest stack above the caller. Purely observational: it reads guest state and writes only this VMM's own members, and folds to nothing when off. Off by default because it is specific to one guest hypervisor's interface, and this VMM is not specific to any guest. Costs several VMCS reads and a guest page walk per trust-level switch."
     OFF)
@@ -249,6 +253,7 @@ target_compile_options(zpp_hypervisor PRIVATE
     -DZPP_PROFILE_L2=$<BOOL:${ZPP_PROFILE_L2}>
     -DZPP_CENSUS_EXITS=$<BOOL:${ZPP_CENSUS_EXITS}>
     -DZPP_SAMPLE_L1=$<BOOL:${ZPP_SAMPLE_L1}>
+    -DZPP_EVMCS_TO_KVM=$<BOOL:${ZPP_EVMCS_TO_KVM}>
     -DZPP_TRACE_VTL=$<BOOL:${ZPP_TRACE_VTL}>
     -DZPP_WATCH_VTL_BLOCK=$<BOOL:${ZPP_WATCH_VTL_BLOCK}>
     -DZPP_ANNOUNCE_HYPERVISOR_BIT=$<BOOL:${ZPP_ANNOUNCE_HYPERVISOR_BIT}>

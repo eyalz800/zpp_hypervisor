@@ -1911,6 +1911,34 @@ inline constexpr arch::x86_64::vmx::vmcs_fields::vmcs_field
  * It is not free, which is the other reason it is a flag: several VMCS
  * reads and a guest page walk on every trust-level switch.
  */
+#ifndef ZPP_EVMCS_TO_KVM
+#define ZPP_EVMCS_TO_KVM 0
+#endif
+
+/**
+ * Use Hyper-V's enlightened VMCS toward the layer *below* this VMM.
+ *
+ * Every VMREAD and VMWRITE executed here is an exit to that layer when it
+ * will not give us a shadow VMCS - measured at about 4,600 cycles against
+ * some thirty-six accesses an exit, which is essentially the whole cost of
+ * an exit, and that cost is what pins the guest at its highest interrupt
+ * priority. The enlightened VMCS replaces those instructions with loads
+ * and stores to a page shared with the layer below, so the cost is not
+ * reduced, it stops being paid.
+ *
+ * **Off by default, detected at run time, and never advertised upward.**
+ * This is a contract with whatever is underneath, and this VMM is not
+ * specific to anything underneath - so it is used only where the layer
+ * below says it offers it, and the guest hypervisor above is told nothing:
+ * the whole hypervisor CPUID range is answered here rather than forwarded,
+ * so it goes on believing it is on bare metal.
+ *
+ * **It cannot be combined with offering VMCS shadowing to the guest.** The
+ * enlightened layout has no home for the VMREAD and VMWRITE bitmap
+ * pointers; KVM refuses the same combination.
+ */
+inline constexpr bool evmcs_to_kvm = (0 != ZPP_EVMCS_TO_KVM);
+
 inline constexpr bool trace_vtl = (0 != ZPP_TRACE_VTL);
 
 inline constexpr bool watch_vtl_block = (0 != ZPP_WATCH_VTL_BLOCK);

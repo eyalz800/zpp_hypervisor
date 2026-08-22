@@ -234,6 +234,10 @@ option(ZPP_SAMPLE_L1
     "Sample the first-level guest's instruction pointer on the VMX-preemption timer, armed at VMCS setup. See cmake/hypervisor/CMakeLists.txt."
     OFF)
 
+option(ZPP_EVMCS_TO_KVM
+    "Use Hyper-V's enlightened VMCS toward the layer below. See cmake/hypervisor/CMakeLists.txt."
+    OFF)
+
 option(ZPP_TRACE_VTL
     "Record Hyper-V virtual trust level switches. See cmake/hypervisor/CMakeLists.txt."
     OFF)
@@ -348,6 +352,7 @@ ExternalProject_Add(hypervisor
         -DZPP_PROFILE_L2=${ZPP_PROFILE_L2}
         -DZPP_CENSUS_EXITS=${ZPP_CENSUS_EXITS}
         -DZPP_SAMPLE_L1=${ZPP_SAMPLE_L1}
+        -DZPP_EVMCS_TO_KVM=${ZPP_EVMCS_TO_KVM}
         -DZPP_TRACE_VTL=${ZPP_TRACE_VTL}
         -DZPP_WATCH_VTL_BLOCK=${ZPP_WATCH_VTL_BLOCK}
         -DZPP_ANNOUNCE_HYPERVISOR_BIT=${ZPP_ANNOUNCE_HYPERVISOR_BIT}
@@ -449,6 +454,7 @@ ExternalProject_Add(uefi_loader
         -DZPP_PROFILE_L2=${ZPP_PROFILE_L2}
         -DZPP_CENSUS_EXITS=${ZPP_CENSUS_EXITS}
         -DZPP_SAMPLE_L1=${ZPP_SAMPLE_L1}
+        -DZPP_EVMCS_TO_KVM=${ZPP_EVMCS_TO_KVM}
         -DZPP_TRACE_VTL=${ZPP_TRACE_VTL}
         -DZPP_WATCH_VTL_BLOCK=${ZPP_WATCH_VTL_BLOCK}
         -DZPP_ANNOUNCE_HYPERVISOR_BIT=${ZPP_ANNOUNCE_HYPERVISOR_BIT}

@@ -8519,6 +8519,29 @@ private:
      * left to make an exit cheap.
      * @{
      */
+    /**
+     * The pages this VMM shares with the layer below when the enlightened
+     * VMCS is in use: the virtual-processor assist page, which carries
+     * `enlighten_vmentry` and `current_nested_vmcs`, and the enlightened
+     * VMCS itself, which stands in for vmcs02.
+     *
+     * Allocated unconditionally so this object's layout does not depend on
+     * a build switch - two pages a processor, and `max_cpus` is 32, so a
+     * quarter of a megabyte that costs nothing when unused. Conditional
+     * members would move every offset after them with the switch, and a
+     * reader pointed at the wrong build then reads plausible rubbish,
+     * which this tree has already lost a session to.
+     * @{
+     */
+    alignas(page_size) std::uint8_t vp_assist[max_cpus][page_size]{};
+    alignas(page_size) std::uint8_t evmcs[max_cpus][page_size]{};
+    std::uint64_t vp_assist_physical[max_cpus]{};
+    std::uint64_t evmcs_physical[max_cpus]{};
+
+    /** Set once the layer below has accepted the assist page. */
+    bool evmcs_active[max_cpus]{};
+    /** @} */
+
     std::uint32_t underlying_max_leaf{};
     std::uint32_t underlying_signature[3]{};
     std::uint32_t underlying_interface{};

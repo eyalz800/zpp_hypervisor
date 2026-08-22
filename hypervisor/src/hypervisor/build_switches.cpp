@@ -153,6 +153,12 @@ extern "C" [[gnu::used, gnu::retain]] constinit const char
         // the guest sees - but it is the difference between a dump full
         // of switch records and one where every VTL field reads zero,
         // which looks exactly like a guest that never used them.
+        // Whether this VMM talks to the layer below through a shared
+        // page instead of VMREAD and VMWRITE. A correctness field, not a
+        // tuning one: on, the second-level VMCS is not a VMCS at all, and
+        // two runs that differ in it are not comparable.
+        ' ', 'e', 'v', 'm', 'k', '=',
+        digit(nested_vmx::evmcs_to_kvm),
         ' ', 'v', 't', 'l', 't', 'r', 'c', '=',
         digit(nested_vmx::trace_vtl),
         ' ', 'b', 'l', 'k', 'w', '=',

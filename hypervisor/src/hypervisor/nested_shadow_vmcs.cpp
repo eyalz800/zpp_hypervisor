@@ -331,6 +331,27 @@ void hypervisor::initialize_vmcs_shadowing()
               32) &
              shadowing);
 
+        // **The two are alternatives, not additions.** The enlightened
+        // VMCS has no field for the VMREAD and VMWRITE bitmap pointers,
+        // so a second-level VMCS that lives in the enlightened page
+        // cannot also carry shadowing for the guest hypervisor. KVM
+        // refuses the same combination - `nested.c` treats a valid
+        // enlightened pointer and `enable_shadow_vmcs` as one condition
+        // throughout, never both at once.
+        //
+        // Shadowing is the one given up, because it saves the *guest
+        // hypervisor* some exits and the enlightened VMCS saves this VMM
+        // its own, which are far more numerous: measured, the guest
+        // hypervisor takes about four thousand VMREAD exits across a
+        // whole boot, against tens of millions of VMCS accesses here.
+        if constexpr (nested_vmx::evmcs_to_kvm) {
+            if (this->underlying_offers_evmcs) {
+                this->vmcs_shadowing_enabled = false;
+                log("vmcs shadowing given up: the enlightened vmcs has "
+                    "no room for the vmread and vmwrite bitmaps");
+            }
+        }
+
         // All ones is "exit for everything", which is what this VMM did
         // before there were bitmaps at all - so a field left out of the
         // lists below behaves exactly as it used to.

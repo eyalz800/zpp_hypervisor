@@ -9,6 +9,7 @@
 #include "zpp/arch/x86_64/vm_exit_entry.h"
 #include "zpp/arch/x86_64/vmx/asm.h"
 #include "zpp/arch/x86_64/vmx/ept_pointer.h"
+#include "zpp/arch/x86_64/vmx/evmcs.h"
 #include "zpp/arch/x86_64/vmx/vmcs.h"
 #include "zpp/arch/x86_64/vmx/vmx_exit_reason.h"
 #include "zpp/crt.h"
@@ -5565,6 +5566,57 @@ void hypervisor::setup_vmcs(std::size_t cpu,
         // It leaves this VMM's own VMCS current: SDM 27.1 has VMCLEAR make
         // the *named* VMCS inactive and not current, and this names the
         // other one.
+        // The enlightened VMCS, when the layer below offers one and this
+        // build asks for it. Set up before vmcs02 because the two are
+        // alternatives: with this active the second-level VMCS is a page
+        // shared with the layer below rather than a VMCS, and the region
+        // prepared below simply goes unused.
+        //
+        // The protocol is the one KVM performs from the other side in
+        // `vmx.c`'s `hv_reset_evmcs`, which clears exactly these three
+        // things: the assist page is published through
+        // HV_X64_MSR_VP_ASSIST_PAGE, `current_nested_vmcs` names the
+        // enlightened page, and `enlighten_vmentry` says to use it. The
+        // revision must be 1, which the layer below checks first.
+        if constexpr (nested_vmx::enabled && nested_vmx::evmcs_to_kvm) {
+            if (this->underlying_offers_evmcs && (cpu < max_cpus)) {
+                constexpr std::size_t vp_assist_msr = 0x40000073;
+                constexpr std::uint64_t vp_assist_enable = 1;
+
+                auto * assist = this->vp_assist[cpu];
+                auto * page = this->evmcs[cpu];
+
+                for (std::size_t i{}; i < page_size; ++i) {
+                    assist[i] = 0;
+                    page[i] = 0;
+                }
+
+                this->vp_assist_physical[cpu] =
+                    this->host_page_table.virtual_to_physical(assist);
+                this->evmcs_physical[cpu] =
+                    this->host_page_table.virtual_to_physical(page);
+
+                // Revision first, at offset zero, since the layer below
+                // rejects the page outright without it.
+                *reinterpret_cast<std::uint32_t *>(page) =
+                    arch::x86_64::vmx::evmcs_revision;
+
+                arch::x86_64::wrmsr(vp_assist_msr,
+                                    this->vp_assist_physical[cpu] |
+                                        vp_assist_enable);
+
+                this->evmcs_active[cpu] = true;
+
+                log("cpu {} enlightened vmcs active, assist {} page {}",
+                    cpu,
+                    this->vp_assist_physical[cpu],
+                    this->evmcs_physical[cpu]);
+            } else {
+                log("cpu {} enlightened vmcs asked for and not offered",
+                    cpu);
+            }
+        }
+
         if constexpr (nested_vmx::enabled) {
             auto & region = this->vmcs02[cpu];
 
