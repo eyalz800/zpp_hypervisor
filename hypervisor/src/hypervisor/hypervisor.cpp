@@ -5444,6 +5444,43 @@ void hypervisor::setup_vmcs(std::size_t cpu,
 
     auto & vmcs = this->vmcs;
 
+    // **Before the first VMCS access on this processor, and that ordering
+    // is the whole of why this sits at the top of the function.**
+    //
+    // With the field cache on, every `vmcs.read` and `vmcs.write` looks
+    // up this processor's row through GS. Until this runs, GS still holds
+    // whatever the loader left - `host_gs_processor_index`'s own comment
+    // is the warning, that GS is only this VMM's in root mode - so a
+    // VMCS access made before it either reads a wrong row or faults. A
+    // first attempt armed the row in the middle of this function, after
+    // roughly two hundred VMCS writes had already run, and the launch
+    // died with loader code 0x60e00 and zero exits on every processor.
+    //
+    // The token is what makes an unarmed row say so rather than answer:
+    // a bare index taken from a foreign GS base would be garbage that is
+    // in range often enough to matter. Written after the index so a row
+    // is never armed while naming the wrong processor.
+    if constexpr (arch::x86_64::vmx::vmcs_cache_enabled) {
+        if (cpu < max_cpus) {
+            auto * row = this->gs_data[cpu];
+
+            *reinterpret_cast<std::uint64_t *>(
+                row + host_gs_processor_index) = cpu;
+            *reinterpret_cast<std::uint64_t *>(
+                row + arch::x86_64::vmx::vmcs_cache_token_offset) =
+                arch::x86_64::vmx::vmcs_cache_token_magic |
+                (static_cast<std::uint64_t>(cpu) &
+                 arch::x86_64::vmx::vmcs_cache_token_index_mask);
+
+            // The live GS base, not only the VMCS field that would
+            // restore it on the next VM exit. Without this the row is
+            // unreachable until an exit has happened, which is after
+            // every access this function makes.
+            arch::x86_64::wrmsr(arch::x86_64::msr::ia32_gs_base,
+                                reinterpret_cast<std::uint64_t>(row));
+        }
+    }
+
     // Zero the VMX abort indicator, as the SDM recommends for any VMCS
     // this VMM uses. A VMX abort is a failure during a VM *exit*: it puts
     // the processor into a shutdown state that only RESET leaves, and it
@@ -5915,6 +5952,7 @@ void hypervisor::setup_vmcs(std::size_t cpu,
         auto * row = this->gs_data[cpu];
         *reinterpret_cast<std::uint64_t *>(row +
                                            host_gs_processor_index) = cpu;
+
         vmcs.host_gs_base(reinterpret_cast<std::uint64_t>(row));
     } else {
         vmcs.host_gs_base(

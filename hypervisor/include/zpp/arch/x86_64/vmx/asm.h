@@ -51,15 +51,24 @@ inline int __attribute__((naked)) vmxoff()
     )!!");
 }
 
-inline int __attribute__((naked)) vmptrld(void *)
+/**
+ * The bare instruction. **Call `vmptrld` from `vmcs.h` instead**, which
+ * ends the VMCS field cache's window first - a value read through a cache
+ * filled under a different current VMCS does not fault, it answers.
+ *
+ * Named `_raw` so a translation unit that includes only this header and
+ * reaches for `vmptrld` fails to compile rather than silently skipping
+ * that. The rename exists for exactly that reason.
+ */
+inline int __attribute__((naked)) vmptrld_raw(void *)
 {
     asm(R"!!(
         .intel_syntax noprefix
         vmptrld [rdi]
-        jc vmptrld_fail
+        jc vmptrld_raw_fail
         mov eax, 0
         ret
-    vmptrld_fail:
+    vmptrld_raw_fail:
         mov eax, 1
         ret
     )!!");
@@ -79,15 +88,24 @@ inline int __attribute__((naked)) vmptrst(void *)
     )!!");
 }
 
-inline int __attribute__((naked)) vmclear(void *)
+/**
+ * The bare instruction. **Call `vmclear` from `vmcs.h` instead**, which
+ * ends the VMCS field cache's window first - a value read through a cache
+ * filled under a different current VMCS does not fault, it answers.
+ *
+ * Named `_raw` so a translation unit that includes only this header and
+ * reaches for `vmclear` fails to compile rather than silently skipping
+ * that. The rename exists for exactly that reason.
+ */
+inline int __attribute__((naked)) vmclear_raw(void *)
 {
     asm(R"!!(
         .intel_syntax noprefix
         vmclear [rdi]
-        jc vmclear_fail
+        jc vmclear_raw_fail
         mov eax, 0
         ret
-    vmclear_fail:
+    vmclear_raw_fail:
         mov eax, 1
         ret
     )!!");

@@ -1,4 +1,5 @@
 #pragma once
+#include "zpp/arch/x86_64/asm.h"
 #include "zpp/arch/x86_64/vmx/asm.h"
 #include "zpp/arch/x86_64/vmx/vmcs_fields.h"
 #include "zpp/error.h"
@@ -176,6 +177,137 @@ inline void vmcs_note_read_caller(std::uint64_t caller)
 }
 
 /**
+ * A per-processor cache of VMCS fields, valid from one VM exit to the
+ * next VM entry. **Off unless `ZPP_VMCS_CACHE` is set.**
+ *
+ * **Why it is sound.** The processor writes VMCS fields only on VM entry
+ * and VM exit. Between our handler starting and the entry that ends it,
+ * no field changes unless *we* write it, so a value read once is good for
+ * the rest of that window. Three things end the window - a VM exit, a
+ * `vmptrld` and a `vmclear` - and all three bump the epoch below.
+ *
+ * **Why it is worth having.** Measured: 60,562,642 reads over 1,975,342
+ * exits, 30.7 a call, at ~3,529 cycles each, because nested under KVM
+ * every access to a field it does not shadow is a VM exit into KVM - 58
+ * KVM exits for every exit this VMM takes. The caller census says 37.8%
+ * of them are repeats of four fields, `guest_rip` alone 4.6 times an exit.
+ *
+ * **The epoch is global and that is deliberate.** Invalidating every
+ * processor's row when any processor loads a VMCS is *over*-invalidation,
+ * and over-invalidation is always safe - it costs a miss, never a wrong
+ * answer. It buys something worth more than the precision: the wrappers
+ * need no idea which processor they are on, so **nothing on the launch
+ * path has to touch GS**.
+ *
+ * That distinction is the whole design, and it was learned the expensive
+ * way. A first version read the processor index through GS on every
+ * access, including from the `vmptrld` inside `enter_root_mode`. GS is
+ * only this VMM's *in root mode with our page tables loaded* - the
+ * comment on `hypervisor::host_gs_processor_index` says so in terms - and
+ * on the launch path it still holds whatever the loader left, so the read
+ * faulted and the launch died with loader code **0x60e00**, zero exits on
+ * every processor. Nothing on that path may read GS.
+ *
+ * So GS is read only from `read`/`write`, and `setup_vmcs` points the
+ * real GS base at this processor's row before it issues its first VMCS
+ * access. Ordering there is load bearing.
+ * @{
+ */
+#ifndef ZPP_VMCS_CACHE
+#define ZPP_VMCS_CACHE 0
+#endif
+
+inline constexpr bool vmcs_cache_enabled = (0 != ZPP_VMCS_CACHE);
+
+inline constexpr std::size_t vmcs_cache_processors = 32;
+inline constexpr std::size_t vmcs_cache_entries = 128;
+
+/** Byte offset in the per-processor GS row holding the arming token. */
+inline constexpr std::uint64_t vmcs_cache_token_offset = 8;
+
+/** High 56 bits of the token; the low 8 are the processor index. */
+inline constexpr std::uint64_t vmcs_cache_token_magic = 0x5a70705643414300;
+inline constexpr std::uint64_t vmcs_cache_token_index_mask = 0xff;
+
+struct vmcs_cache_row
+{
+    /** The field encoding plus one, so that zero means empty. */
+    std::uint64_t tag[vmcs_cache_entries];
+    std::uint64_t value[vmcs_cache_entries];
+    std::uint64_t epoch;
+};
+
+inline constinit vmcs_cache_row vmcs_cache[vmcs_cache_processors]{};
+inline constinit std::uint64_t vmcs_cache_epoch{1};
+inline constinit std::uint64_t vmcs_cache_hits{};
+inline constinit std::uint64_t vmcs_cache_misses{};
+inline constinit std::uint64_t vmcs_cache_unarmed{};
+
+/**
+ * Ends the window every cached value describes. No GS, no processor
+ * index, no memory beyond one counter - which is what makes it safe to
+ * call from the launch path and from inside the instruction wrappers.
+ */
+inline void vmcs_cache_forget()
+{
+    if constexpr (vmcs_cache_enabled) {
+        vmcs_cache_epoch = vmcs_cache_epoch + 1;
+    }
+}
+
+/**
+ * Which row this processor owns, or `vmcs_cache_processors` when the
+ * cache is not armed on it.
+ *
+ * A token rather than a bare index because a bare index taken from a GS
+ * base that is not ours would be garbage that is *in range* often enough
+ * to matter, and would serve one processor's fields from another's row:
+ * no fault, just a wrong answer later.
+ */
+inline std::size_t vmcs_cache_row_index()
+{
+    auto token = gs_qword(vmcs_cache_token_offset);
+
+    if (vmcs_cache_token_magic != (token & ~vmcs_cache_token_index_mask)) {
+        vmcs_cache_unarmed = vmcs_cache_unarmed + 1;
+        return vmcs_cache_processors;
+    }
+
+    auto index = static_cast<std::size_t>(token &
+                                          vmcs_cache_token_index_mask);
+    return (index < vmcs_cache_processors) ? index
+                                           : vmcs_cache_processors;
+}
+
+/**
+ * `vmptrld` and `vmclear`, wrapped so the cache cannot be left describing
+ * a VMCS that is no longer current.
+ *
+ * Here rather than at the call sites deliberately: there are twelve
+ * `vmptrld` sites and seven `vmclear` sites, and a design where one can
+ * be missed is one that will miss one. The bare instructions are named
+ * `_raw`, so a translation unit that reaches for them by the old name
+ * fails to compile instead of silently skipping this. `vmptrst` needs no
+ * wrapper - it reports the current VMCS without changing it.
+ * @{
+ */
+inline int vmptrld(void * region)
+{
+    vmcs_cache_forget();
+    return vmptrld_raw(region);
+}
+
+inline int vmclear(void * region)
+{
+    vmcs_cache_forget();
+    return vmclear_raw(region);
+}
+/**
+ * @}
+ * @}
+ */
+
+/**
  * The VMCS error type.
  */
 enum class vmcs_error : int
@@ -281,6 +413,25 @@ public:
         if (0 != vmwrite(field, value)) {
             __builtin_trap();
         }
+
+        // Dropped, **not** written through, and that is correctness
+        // rather than taste: a 32-bit field stores only the low half of
+        // what is handed to `vmwrite`, so caching the value as written
+        // would answer a later read with bits the processor discarded.
+        // Honouring the width would mean re-deriving it at every write;
+        // dropping the entry costs one miss and cannot be wrong.
+        if constexpr (vmcs_cache_enabled) {
+            auto row = vmcs_cache_row_index();
+
+            if ((row < vmcs_cache_processors) &&
+                (vmcs_cache[row].epoch == vmcs_cache_epoch)) {
+                auto slot = static_cast<std::size_t>(
+                    (static_cast<std::uint64_t>(field) >> 1) %
+                    vmcs_cache_entries);
+
+                vmcs_cache[row].tag[slot] = 0;
+            }
+        }
     }
 
     /**
@@ -296,6 +447,40 @@ public:
                         vmcs_read_overflow);
         vmcs_note_read_caller(
             reinterpret_cast<std::uint64_t>(__builtin_return_address(0)));
+
+        if constexpr (vmcs_cache_enabled) {
+            auto row = vmcs_cache_row_index();
+
+            if (row < vmcs_cache_processors) {
+                auto slot = static_cast<std::size_t>(
+                    (static_cast<std::uint64_t>(field) >> 1) %
+                    vmcs_cache_entries);
+                auto tag = static_cast<std::uint64_t>(field) + 1;
+
+                // The epoch is checked before the tag, because a row left
+                // over from an earlier window may hold a matching tag.
+                if (vmcs_cache[row].epoch != vmcs_cache_epoch) {
+                    for (auto & each : vmcs_cache[row].tag) {
+                        each = 0;
+                    }
+                    vmcs_cache[row].epoch = vmcs_cache_epoch;
+                } else if (vmcs_cache[row].tag[slot] == tag) {
+                    vmcs_cache_hits = vmcs_cache_hits + 1;
+                    return vmcs_cache[row].value[slot];
+                }
+
+                vmcs_cache_misses = vmcs_cache_misses + 1;
+
+                std::uint64_t fresh{};
+                if (0 != vmread(field, &fresh)) {
+                    __builtin_trap();
+                }
+
+                vmcs_cache[row].tag[slot] = tag;
+                vmcs_cache[row].value[slot] = fresh;
+                return fresh;
+            }
+        }
 
         std::uint64_t value{};
         if (0 != vmread(field, &value)) {

@@ -217,6 +217,10 @@ target_compile_options(zpp_hypervisor PRIVATE
     # no graphics output protocol already produces.
     $<$<CONFIG:Debug>:-DZPP_FRAMEBUFFER=$<BOOL:${ZPP_FRAMEBUFFER}>>
     $<$<CONFIG:Release>:-DZPP_FRAMEBUFFER=0>
+    # The VMCS field cache. Defined for both configurations rather than
+    # debug only: unlike a diagnostic this changes what the hot path does,
+    # so a release build has to be able to ask for it.
+    -DZPP_VMCS_CACHE=$<BOOL:${ZPP_VMCS_CACHE}>
     # Nested VMX. Same shape as the diagnostic switch - an always defined 0/1
     # macro turned into a constexpr bool by nested_vmx.h - and defined for both
     # configurations rather than debug only, because unlike diagnostics this is

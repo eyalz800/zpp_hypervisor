@@ -64,7 +64,9 @@ inline int vmxoff()
 {
     return 0;
 }
-inline int vmptrld(void * pointer)
+// Named `_raw` to match the real header, where `vmcs.h` wraps these to
+// end the VMCS field cache's window first.
+inline int vmptrld_raw(void * pointer)
 {
     // The real code passes the address *of* the physical address, which
     // is what the instruction takes - SDM 33.3, VMPTRLD, "the operand
@@ -96,7 +98,9 @@ inline int vmptrst(void *)
 {
     return 0;
 }
-inline int vmclear(void *)
+// Named `_raw` to match the real header, where `vmcs.h` wraps these to
+// end the VMCS field cache's window first.
+inline int vmclear_raw(void *)
 {
     return 0;
 }

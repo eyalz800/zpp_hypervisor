@@ -52,13 +52,17 @@ inline int vmxoff()
     return 0;
 }
 
-inline int vmclear(void * region)
+// Named `_raw` to match the real header, where `vmcs.h` wraps these to
+// end the VMCS field cache's window first.
+inline int vmclear_raw(void * region)
 {
     g_vmclear_region = *static_cast<std::uint64_t *>(region);
     return 0;
 }
 
-inline int vmptrld(void * region)
+// Named `_raw` to match the real header, where `vmcs.h` wraps these to
+// end the VMCS field cache's window first.
+inline int vmptrld_raw(void * region)
 {
     g_vmptrld_region = *static_cast<std::uint64_t *>(region);
     return 0;

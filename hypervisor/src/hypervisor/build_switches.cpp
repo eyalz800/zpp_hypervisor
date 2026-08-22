@@ -1,3 +1,4 @@
+#include "zpp/arch/x86_64/vmx/vmcs.h"
 #include "zpp/hypervisor/nested_vmx.h"
 
 namespace zpp::hypervisor
@@ -163,6 +164,13 @@ extern "C" [[gnu::used, gnu::retain]] constinit const char
         // "not built" from the other two.
         ' ', 'f', 'b', '=',
         digit(nested_vmx::framebuffer_recorded),
+        // The VMCS field cache. A correctness field rather than a tuning
+        // one: on, a read may be answered from memory instead of from
+        // the processor, and the launch path points the live GS base at
+        // this processor's row. Two runs that differ in it are not
+        // comparable and one of them boots differently.
+        ' ', 'v', 'c', 'a', 'c', 'h', 'e', '=',
+        digit(arch::x86_64::vmx::vmcs_cache_enabled),
         '\0'};
 
 } // namespace zpp::hypervisor

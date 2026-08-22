@@ -68,6 +68,28 @@ option(ZPP_FRAMEBUFFER
     "Locate the firmware framebuffer and hand it over (debug builds only)"
     ON)
 
+# A per-processor cache of VMCS fields, valid from one VM exit to the next
+# VM entry. See vmcs.h, which carries the whole argument.
+#
+# OFF, and off is the decision rather than a convenience. It is worth a
+# great deal - 30.7 VMCS reads an exit at ~3,529 cycles each, of which the
+# caller census says 37.8% are repeats of four fields - but it turns a
+# read that always talked to the processor into one that may talk to
+# memory instead, and a cache that answers with a stale field does not
+# fault, it answers. That is the worst failure shape in this tree.
+#
+# It also changes the launch path: with it on, `setup_vmcs` points the
+# live GS base at this processor's row, because until the first VM exit GS
+# still holds whatever the loader left. A first attempt read GS without
+# doing that and the launch died with loader code 0x60e00 and zero exits
+# on every processor.
+#
+# So it is asked for, measured against a run without it, and the pair
+# `vmcs_cache_hits` / `vmcs_cache_misses` says whether it did anything.
+option(ZPP_VMCS_CACHE
+    "Cache VMCS fields per processor between a VM exit and the next entry"
+    OFF)
+
 # Nested VMX: whether the guest is told VT-x exists.
 #
 # Off, and the default is the decision rather than a convenience. With it off
@@ -274,6 +296,7 @@ ExternalProject_Add(hypervisor
         -DZPP_DIAG=${ZPP_DIAG}
         -DZPP_DIAG_RESERVE_WINDOW=${ZPP_DIAG_RESERVE_WINDOW}
         -DZPP_FRAMEBUFFER=${ZPP_FRAMEBUFFER}
+        -DZPP_VMCS_CACHE=$<BOOL:${ZPP_VMCS_CACHE}>
         -DZPP_NESTED_VMX=${ZPP_NESTED_VMX}
         -DZPP_REQUEUE_INTERRUPTED_EVENTS=${ZPP_REQUEUE_INTERRUPTED_EVENTS}
         -DZPP_NESTED_TPR_SHADOW=${ZPP_NESTED_TPR_SHADOW}
@@ -407,6 +430,7 @@ ExternalProject_Add(uefi_loader
         -DZPP_DIAG=${ZPP_DIAG}
         -DZPP_DIAG_RESERVE_WINDOW=${ZPP_DIAG_RESERVE_WINDOW}
         -DZPP_FRAMEBUFFER=${ZPP_FRAMEBUFFER}
+        -DZPP_VMCS_CACHE=$<BOOL:${ZPP_VMCS_CACHE}>
     INSTALL_COMMAND ""
     BUILD_ALWAYS ON
     DEPENDS hypervisor

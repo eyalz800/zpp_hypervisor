@@ -69,6 +69,18 @@ void hypervisor::on_vm_exit(std::uint64_t cpuid,
     using basic_reason = arch::x86_64::vmx::exit_reason::basic_reason;
     auto & vmcs = this->vmcs;
 
+    // Everything the field cache holds describes the window that just
+    // ended: the processor writes VMCS fields on VM entry and VM exit, so
+    // the guest having run is exactly the event that makes a cached value
+    // wrong. This is the one place every exit passes through, which is
+    // why it is here rather than beside the entry.
+    //
+    // The other two ways a window ends - `vmptrld` and `vmclear` - do it
+    // from inside their own wrappers in `vmcs.h`, where the bare
+    // instructions are named `_raw` so they cannot be reached by
+    // accident.
+    arch::x86_64::vmx::vmcs_cache_forget();
+
     // `cpuid + 1` throughout, where this used to say `vmcs.vpid()`.
     //
     // They are the same number: `setup_vmcs` writes `vpid(cpu + 1)` and
