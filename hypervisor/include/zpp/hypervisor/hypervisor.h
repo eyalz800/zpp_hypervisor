@@ -10586,6 +10586,32 @@ private:
     std::uint64_t vtl0_call_return[max_cpus][vtl1_resume_capacity]{};
     std::uint64_t vtl0_call_rsp[max_cpus]{};
     std::uint64_t vtl0_call_return_read[max_cpus]{};
+
+    /**
+     * What the interrupt-window control looked like at an
+     * interrupt-window exit.
+     *
+     * **36 of these exits happen for every one vector injected** -
+     * measured as a delta, +104,451 against +2,916 over ninety seconds -
+     * and they are about 86% of the 12.6 ms VTL0 half. That half exceeding
+     * the guest's 1.74 ms clock period is what guarantees an interrupt is
+     * pending at every `HvCallVtlCall`, which is what keeps VINA asserted
+     * and the secure kernel yielding.
+     *
+     * Two accounts fit. Either the guest hypervisor genuinely arms, looks,
+     * declines and re-arms dozens of times - its own business - or it
+     * clears the control and we re-enter with it still set in vmcs02, in
+     * which case the processor exits again immediately and the storm is
+     * ours. `asked` counts exits where vmcs12 still has the control set;
+     * `stale` counts exits where it does not, which can only be us.
+     * @{
+     */
+    std::uint64_t int_window_asked[max_cpus]{};
+    std::uint64_t int_window_stale[max_cpus]{};
+    std::uint64_t int_window_vtpr[max_cpus][16]{};
+    /**
+     * @}
+     */
     /**
      * @}
      */

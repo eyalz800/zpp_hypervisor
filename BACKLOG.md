@@ -1,5 +1,55 @@
 # Known defects
 
+## The guest is pinned at DISPATCH_LEVEL, and that closes the loop
+
+**Measured 2026-08-22** with an instrument built to test whether the
+interrupt-window storm was ours. It is not, and the same instrument
+answered a better question by accident.
+
+```
+interrupt-window exits the guest hypervisor still wanted:  156,307
+interrupt-window exits it had already cleared (ours):            0
+virtual task priority class at those exits:
+  class 2 (0x20)   146,853   94%
+  class 0 (0x00)     9,449    6%
+```
+
+**`stale` is exactly zero**, so vmcs02 never keeps an interrupt-window
+control that vmcs12 has dropped, and the 36-exits-per-injection ratio is
+the guest hypervisor's own behaviour rather than a storm we manufacture.
+That hypothesis is closed.
+
+**What the priority column says is the important part.** The guest is at
+class 2 - DISPATCH_LEVEL - on 94% of these exits. Vector `0x2f` is *also*
+class 2, and an interrupt is delivered only when its class is **strictly
+greater** than the task priority's. So `0x2f` is not merely undelivered,
+it is **undeliverable** for as long as the guest stays at IRQL 2.
+
+Put together with everything already measured, the loop closes on itself:
+
+1. the guest is inside the deferred-procedure-call dispatcher, at IRQL 2;
+2. one of those calls is the VSM work, which calls into VTL1;
+3. VTL0 has `0x2f` pending - the clock path requests it every tick - and
+   at IRQL 2 it can never be taken;
+4. the guest hypervisor sees an interrupt pending for VTL0 and asserts
+   VINA;
+5. `ShvlVinaHandler` sees VINA and yields having done nothing;
+6. the call returns, the dispatcher retries, and nothing has changed.
+
+Each link is measured rather than argued: the priority here, the single
+resume and yield addresses in `vtl1_resume_rip`, `HvlSwitchToVsmVtl1+0xab`
+as the caller, VINA clear at every call and set at every return, and the
+delivery counters showing `0x2f` arriving once per cycle and the guest
+still not advancing.
+
+**The question this leaves is precise.** Real Hyper-V does not deadlock
+here, so either it does not assert VINA for an interrupt blocked by VTL0's
+own task priority, or VTL0 is expected to reach a lower IRQL that it never
+reaches here. Both are answerable by reading what the guest hypervisor is
+told about VTL0's priority - which is the virtual-APIC page vmcs02 names -
+and that is the next thing to check rather than guess at.
+
+
 ## The loop, symbolised: the guest requests a DPC every tick and never runs it
 
 **Measured 2026-08-22.** `--l2 0` dumps a ring this investigation had never

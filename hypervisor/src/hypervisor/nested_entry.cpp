@@ -3166,8 +3166,36 @@ bool hypervisor::l1_wants_l2_exit(std::size_t cpu,
         // into the second-level one.
         return 0 != (pin12 & pin_external_interrupt);
 
-    case basic_reason::interrupt_window:
-        return primary_set(primary_interrupt_window);
+    case basic_reason::interrupt_window: {
+        // Whether the guest hypervisor still wants this, and the guest's
+        // priority when it happened. See `int_window_asked`: a `stale`
+        // count that climbs means vmcs02 kept a control vmcs12 had
+        // cleared, and the exit storm is ours rather than its.
+        auto wanted = primary_set(primary_interrupt_window);
+
+        if (cpu < max_cpus) {
+            if (wanted) {
+                this->int_window_asked[cpu] += 1;
+            } else {
+                this->int_window_stale[cpu] += 1;
+            }
+
+            if (auto page = this->nested_virtual_apic_address[cpu];
+                0 != page) {
+                constexpr std::uint64_t virtual_task_priority = 0x80;
+                std::uint8_t vtpr{};
+
+                if (read_guest_physical(
+                        page + virtual_task_priority,
+                        std::span(reinterpret_cast<std::byte *>(&vtpr),
+                                  sizeof(vtpr)))) {
+                    this->int_window_vtpr[cpu][vtpr >> 4] += 1;
+                }
+            }
+        }
+
+        return wanted;
+    }
     case basic_reason::nmi_window:
         return primary_set(primary_nmi_window);
     case basic_reason::hlt:
