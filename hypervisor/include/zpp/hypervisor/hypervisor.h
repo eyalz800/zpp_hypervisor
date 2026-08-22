@@ -10661,6 +10661,29 @@ private:
      *  on its stack names a module this VMM never logs. */
     std::uint64_t vtl1_yield_cr3[max_cpus]{};
 
+    /**
+     * The image base of whatever called the hypercall stub in VTL1, found
+     * from **inside** by scanning back for a PE header.
+     *
+     * The return address on the secure kernel's stack names a module this
+     * VMM never logs, and the implied offset is out of range for
+     * `securekernel`'s `.text`, so the base has to be discovered. An
+     * attempt from outside through the QEMU monitor was wrong by
+     * construction: it walked VTL1's page tables assuming the identity
+     * mapping that holds for VTL0, and VTL1 runs on a different
+     * extended-page-table root - measured granting `rwx` where VTL0's
+     * grants `r--`.
+     *
+     * Done here instead, where `translate_guest_linear` and
+     * `read_guest_memory` already perform both steps correctly and are
+     * the same pair every other capture on this path relies on.
+     *
+     * Scanned **once** - the moment it is non-zero the work stops - so a
+     * search over megabytes costs one yield rather than every one.
+     */
+    std::uint64_t vtl1_yield_image[max_cpus]{};
+    std::uint64_t vtl1_yield_image_tried[max_cpus]{};
+
     /** The same for where it *yields*, taken at the `HvCallVtlReturn`. */
     std::uint64_t vtl1_yield_rip[max_cpus][vtl1_resume_capacity]{};
     std::uint64_t vtl1_yield_count[max_cpus]{};

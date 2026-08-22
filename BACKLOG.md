@@ -31,6 +31,36 @@ may be reading the wrong pages entirely, and it reported "no PE header in
 4 MB below" which means nothing. Recorded as a failed attempt rather than
 a negative result.
 
+### The identification attempt, and why it is not finished
+
+The base scan was then done from **inside**, where
+`translate_guest_linear` and `read_guest_memory` do both translation steps
+correctly - the same pair every other capture on this path uses. It
+scanned 32 MB below the address at 64 KB steps for a PE header and found
+none, which is a real answer rather than a broken one: secure images are
+often mapped without their header page.
+
+A second route looked promising and also failed, usefully. The word is
+**identical in its low sixteen bits across every boot** - `...3c1ca3a4`,
+`...19aca3a4`, `...7dd1a3a4` - so if it lies in a 64 KB-aligned image its
+offset within that image ends `0xa3a4`, which leaves sixteen candidates in
+a 1.5 MB module. Filtering them by the one property a return address must
+have - **the instruction before it is a `call`** - eliminates *all
+sixteen* in `securekernel`. So either the module is something else, or the
+word is not a return address.
+
+**The second is more likely, and it invalidates the hunt.** The captured
+word is whatever sits at RSP *inside Hyper-V's hypercall stub*, and the
+resume and yield instruction pointers are `+0x35` and `+0x32` into that
+stub - mid-routine. A stub that pushes anything before `vmcall` puts a
+saved register there, not a return address. Nothing was verified about the
+stub before reading its stack that way.
+
+**What would settle it**: disassemble the hypercall stub itself. Its
+address is known every boot from `vtl1_yield_rip`, and the in-VMM reader
+can fetch its bytes. Until the stub's prologue is known, no offset from
+that stack word means anything.
+
 **What a real reader needs**: translate VTL1-linear to VTL1-physical
 through CR3, then VTL1-physical to host-physical through *root 1* rather
 than by assuming identity - the same two-step `l2_physical_to_l1` performs

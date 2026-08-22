@@ -9175,6 +9175,45 @@ hypervisor::on_l2_exit(std::size_t cpu,
                     this->vtl1_yield_stack_read[cpu] += 1;
                     this->vtl1_yield_cr3[cpu] = this->vmcs.read(
                         arch::x86_64::vmx::vmcs::field::guest_cr3);
+
+                    // And which image the caller belongs to, once. See
+                    // `vtl1_yield_image`.
+                    if ((0 == this->vtl1_yield_image[cpu]) &&
+                        (0 != this->vtl1_yield_stack[cpu][0])) {
+                        this->vtl1_yield_image_tried[cpu] += 1;
+
+                        constexpr std::uint64_t mz = 0x5a4d;
+                        constexpr std::uint64_t step = 0x10000;
+                        constexpr std::size_t reach = 512;
+
+                        auto from = this->vtl1_yield_stack[cpu][0] &
+                                    ~(step - 1);
+
+                        for (std::size_t k{}; k < reach; ++k) {
+                            auto candidate = from - (step * k);
+                            std::uint16_t signature{};
+
+                            auto to =
+                                translate_guest_linear(cpu, candidate);
+
+                            if (!to) {
+                                continue;
+                            }
+
+                            if (!read_guest_memory(
+                                    cpu,
+                                    *to,
+                                    std::as_writable_bytes(
+                                        std::span(&signature, 1)))) {
+                                continue;
+                            }
+
+                            if (mz == signature) {
+                                this->vtl1_yield_image[cpu] = candidate;
+                                break;
+                            }
+                        }
+                    }
                 }
 
                 // The one bit the secure kernel tested to decide this.
