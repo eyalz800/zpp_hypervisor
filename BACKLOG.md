@@ -1,5 +1,47 @@
 # Known defects
 
+## The dispatch interrupt is not a delivery fault here - it never reaches the level above
+
+**2026-08-23.** The two-counter instrument answers it, and the answer is
+the opposite of what this file had been assuming.
+
+On a single processor, over 1.6M second-level entries:
+
+```
+carried nothing at a priority that would have admitted the vector : 16,933
+  the guest hypervisor HAD something pending (window asked)       :  2,093   12.4%
+  the guest hypervisor had NOTHING pending                        : 14,840   87.6%
+```
+
+**Seven times out of eight the level above is not holding anything.** So
+the shortfall is not this VMM failing to carry an interrupt the guest
+hypervisor wanted delivered - that accounts for 12% at most. The guest
+asks for vector `0x2f` 145,200 times, receives it 479, and in most of the
+moments it could have been given one, **there was nothing to give.**
+
+That moves the question upstream, off the injection path this file has
+been circling:
+
+- the guest requests the dispatch interrupt by writing the synthetic
+  interrupt-command register, which is an L2 `wrmsr` this VMM intercepts
+  and reflects;
+- **so either the reflection is not arriving as a request**, or the guest
+  hypervisor is satisfying it by a route that never appears as an injected
+  vector.
+
+Both are checkable and neither has been checked. The first by counting the
+reflected writes against the requests this VMM already censuses; the
+second by looking at what the guest hypervisor does to the guest's
+synthetic interrupt state instead of injecting.
+
+**Why the counter had to be split to see this.**
+`l2_low_priority_no_event` alone had been read as evidence of a delivery
+fault, twice, and it is consistent with either story. Two counters that
+disagree are the only shape that could settle it - which is the lesson six
+single-number misreadings in this session were teaching, applied once
+deliberately and paying for itself immediately.
+
+
 ## What the stalled thread is waiting for: the dispatch IPI
 
 **2026-08-23.** The single-processor run stalls with `KiExecuteDpc`
