@@ -1,5 +1,67 @@
 # Known defects
 
+## The cost is VMCS accesses, and they cost 3,529 cycles each
+
+**Measured 2026-08-22, after the translation cache landed.** The tick
+account moved for the first time - the guest's timer is now answered every
+3.768 ms against 4.740 ms before, so late by 2.160x rather than 2.684x,
+against the 1.766 ms it asks for. What is left is one term.
+
+```
+vmcall (93,691 exits, 641,559 cyc, 112.5 accesses an exit)
+  save_l2_state       54,822 cyc   13.0rd   0.0wr
+  reflect_l2_exit    198,867 cyc   31.1rd   9.9wr
+  exit information    31,841 cyc    8.0rd   0.0wr
+  residue            356,029 cyc   50.5rd   0.0wr
+wrmsr  (391,562 exits, 223,163 cyc,  46.4 accesses an exit)
+```
+
+`build_vmcs02`'s own split prices it: **19.7 VMCS accesses a call at 3,529
+cycles each**, against a launch-time price list of ~3,100 a read and
+~2,200 a write. At 112 accesses a vmcall that is ~395,000 cycles, about
+59% of the 673,367-cycle round trip. **Nothing else in the handler is
+within an order of magnitude of this.**
+
+### Why 3,529 cycles, and the hypothesis worth testing next
+
+A VMREAD is a few tens of cycles on hardware. It costs thousands here
+because we are L1 under KVM and every access to a field KVM does not
+shadow is itself a VM exit into KVM.
+
+KVM *does* shadow a list of fields for its guest, which is what makes
+those accesses nearly free - but the shadow is tied to the VMCS it set up
+for the pointer we had current. **We switch VMCS pointers constantly:**
+`copy_shadow_to_vmcs12` and `copy_vmcs12_to_shadow` each do
+vmptrst -> vmptrld(shadow) -> access -> vmclear -> vmptrld(back), four
+pointer operations a call, about two calls a round trip. That is eight
+pointer switches a round trip, each ~4,000 cycles in its own right
+(`copy in: vmptrld shadow` 6,823 cyc/RT, `copy in: vmptrld back` 4,464,
+and the same again on the way out).
+
+So the hypothesis to test is that **the pointer churn is what keeps KVM's
+shadow cold**, and that the ~20,000 cycles a round trip the dance costs
+directly is the smaller half of its price. If so the lever is not making
+each access cheaper but making far fewer of them, and aligning the fields
+we do touch with `.references/kvm/vmcs_shadow_fields.h`.
+
+### What was checked and is not the answer
+
+- **The two zero-access slots in `build_vmcs02`** - "ept pointer and TPR
+  shadow decided" 21,413 cyc and "bitmaps merged" 20,323 cyc, 34.9% of the
+  phase between them and not a single VMCS access - look like free wins
+  and are not. The bitmap merge cannot be cached on the addresses, and
+  `merge_nested_bitmaps` already argues why at length: the *contents* live
+  in guest memory the guest hypervisor edits directly with no VMWRITE and
+  no exit, so a cache keyed on the address would go on trapping what it
+  stopped asking for and, worse, stop trapping what it started asking for.
+  KVM's `force_msr_bitmap_recalc` exemption is a *protocol* requiring an
+  enlightened VMCS clean field, which is not available at `evmcs=0`.
+- **`shadow_ept_pointer_for`'s 12,216 cycles a call** is bimodal and the
+  function says so: 3.8% of calls rebuild, tracking the guest's own
+  `invept` almost exactly (4,162 exits against 4,104 rebuilds), and one
+  rebuild is ~746,000 cycles. The hit path is already ~100 cycles.
+
+
 ## The tick account names the blocker: asked 1.766 ms, given 4.740 ms
 
 **Measured 2026-08-22 on the rig.** This is the number the whole
