@@ -1,5 +1,88 @@
 # Known defects
 
+## The freeze was ours: one decode disagreement halted the boot processor
+
+**2026-08-22.** Not a guest livelock, not VSM, not the notification. The
+whole investigation above was chasing the other seven processors spinning
+after cpu 0 had already stopped.
+
+Found by asking where the processors actually were, which had never been
+asked of the *live* machine:
+
+```
+cpu0  RIP=0x000000006715cb51   module base 0x6712a000 -> +0x32b51
+                               = zpp::arch::x86_64::halt()
+cpu1  RIP=0xfffff8079c75b1e1   ntoskrnl
+cpu2..7 RIP=0xfffff86fbcfa6b5e all identical
+```
+
+Every RIP identical across two samples minutes apart, and `exits handled`
+frozen at 874,877 across three dumps. `unhandled_exit` then named it:
+
+```
+occurred 1   reason 0x30 (EPT violation)   qualification 0x2b
+rip 0xfffff86fbce57ad7   gpa 0xfee00000 (from the exit ring)
+vm_entry_failure: all zero
+```
+
+The cause is four lines in `watched_page.cpp`, on the path that refuses an
+emulated write:
+
+```cpp
+auto reported = this->vmcs.vm_exit_instruction_length();
+if ((0 != reported) && (reported != store->length)) {
+    ...
+    return false;                 // <- caller stops the processor
+}
+```
+
+`false` from `on_ept_violation` means "nothing watched this page" to both
+callers, so they take it as a bug here and halt. It was being returned for
+something else entirely: a disagreement between the processor's
+instruction length and this decoder's.
+
+The counters had recorded it all along, and nothing had read them:
+
+```
+emulated_length_disagreement = 1        happened exactly once
+emulated_length_reported     = 10       the processor's length
+emulated_length_decoded      = 2        this decoder's
+emulated_writes              = 69,109   emulated fine
+filtered_writes              = 9        refused ever; the 9th halted the boot
+```
+
+**One instruction in 69,109.** A 10-byte store to the local APIC page that
+this decoder read as 2 bytes, on the ninth write it ever refused.
+
+Fixed by trusting the processor, which SDM 25.9.4
+(`.references/sdm.txt:200400`) says is authoritative - the field "receives
+the length in bytes of the instruction whose execution led to the VM
+exit". Nothing on the refusal path needs the decode to be right: the write
+is not performed, so the only open question is how far to step RIP. The
+counters stay, and now log, but they record instead of deciding.
+
+Three things worth keeping:
+
+- **A single-processor halt is indistinguishable from a guest livelock
+  from the inside.** Seven processors spinning, high host load, no
+  progress. Every instrument in this tree reported on the *guest*, and the
+  guest was fine. `info registers -a` from the monitor, twice, answers it
+  in one command and was never run.
+- **A counter nobody reads is not an instrument.**
+  `emulated_length_disagreement` was incremented at exactly the moment of
+  death and no dump printed it.
+- **Do not overload a boolean that already means something.** The two
+  callers even log "which nothing here watches", which would have been a
+  false diagnostic had this gone down the nested path.
+
+Still open, same shape, not yet fired: the *allowed* write path has the
+identical check and `return false`. Halting is more defensible there since
+the store has already reached the device, but the overload is the same.
+Better would be to compare lengths *before* applying the store and fall
+back to letting the guest execute its own instruction under the existing
+monitor-trap machinery.
+
+
 ## The freeze is the secure kernel growing its page pool, and both halves are now byte-proven
 
 **2026-08-22.** With both module bases derived from the trace's own

@@ -493,6 +493,35 @@ bool hypervisor::on_ept_violation(std::size_t cpu,
                     this->emulated_writes = this->emulated_writes + 1;
                     this->filtered_writes = this->filtered_writes + 1;
 
+                    // **The processor's length wins, and a disagreement
+                    // is not fatal.** SDM 25.9.4
+                    // (.references/sdm.txt:200400): the VM-exit
+                    // instruction length field "receives the length in
+                    // bytes of the instruction whose execution led to
+                    // the VM exit", so it is authoritative and our
+                    // decoder is the thing that can be wrong.
+                    //
+                    // This used to `return false` on a disagreement, and
+                    // that killed a boot. `false` means something quite
+                    // different to both callers - "the protection was put
+                    // there by something that is not going to handle the
+                    // fault" - so they stop the processor. Measured on
+                    // the rig: after 69,109 emulated writes and 9 refused
+                    // ones, a single 10-byte instruction that this
+                    // decoder read as 2 bytes halted cpu 0 inside
+                    // `on_unhandled_exit` with reason 0x30,
+                    // qualification 0x2b, on the local APIC page. The
+                    // other seven processors kept spinning, so it looked
+                    // exactly like a guest livelock and was investigated
+                    // as one for a long time.
+                    //
+                    // Nothing about the refusal needs the decode to be
+                    // right: the write is *not* performed, so the only
+                    // question left is how far to step RIP, and the
+                    // processor has already answered it. The counters
+                    // stay - a disagreement still means this decoder has
+                    // a gap worth closing - but they record rather than
+                    // decide.
                     auto reported =
                         this->vmcs.vm_exit_instruction_length();
                     if ((0 != reported) && (reported != store->length)) {
@@ -500,8 +529,16 @@ bool hypervisor::on_ept_violation(std::size_t cpu,
                             this->emulated_length_disagreement + 1;
                         this->emulated_length_reported = reported;
                         this->emulated_length_decoded = store->length;
-                        return false;
+                        log("emulated write length disagreement: the "
+                            "processor reports {} bytes, this decoder "
+                            "read {}, at rip {} - trusting the processor",
+                            reported,
+                            store->length,
+                            context.rip);
                     }
+
+                    auto length =
+                        (0 != reported) ? reported : store->length;
 
                     // Advanced from `context.rip` rather than from a
                     // read back, and **`context.rip` is advanced with
@@ -511,7 +548,7 @@ bool hypervisor::on_ept_violation(std::size_t cpu,
                     // the field, so leaving `context.rip` behind here
                     // would make the two disagree by the length of one
                     // instruction and the disagreement would be silent.
-                    context.rip = context.rip + store->length;
+                    context.rip = context.rip + length;
                     this->vmcs.guest_rip(context.rip);
                     return true;
                 }
