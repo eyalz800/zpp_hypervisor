@@ -38565,3 +38565,55 @@ is a function of **work done**, not of an address. That retires
 
 None of these is measured to fire in this configuration. All are worth
 fixing on their own terms.
+
+## Two real fixes, verified on the rig, and the hang is unmoved
+
+### The secondary-control leak is closed, and this time the measurement agrees
+
+`build_vmcs02` composed `secondary01 | secondary12`, so anything this VMM
+sets in vmcs01 reached the second-level guest whether the guest hypervisor
+asked for it or not. `secondary01` is snapshotted **once per processor**
+into `host_controls_cache`, and `set_vmcs_shadowing(cpu, true)` runs at the
+guest hypervisor's first VMPTRLD - before the first `build_vmcs02` - so
+**VMCS shadowing was live in vmcs02 for the life of every boot.** vmcs02's
+VMREAD/VMWRITE bitmap fields are never written, so they name host-physical
+page zero: whether an L2 VMREAD exits or silently VMfails was decided by
+whatever the firmware left there.
+
+Four bits are now removed from this VMM's copy before the union - VMCS
+shadowing, RDTSCP, INVPCID, XSAVES - which is KVM's list in
+`prepare_vmcs02_early` restricted to the bits we actually set. Measured on
+the rig:
+
+    before   secondary controls: asked 0x1010ae, granted 0x1050ae
+    after    secondary controls: asked 0x1010ae, granted 0x1010ae
+
+**Asked equals granted.** An earlier entry claimed that gap was closed by
+removing bit 18; the difference was `0x4000`, bit 14, and bit 18 was set in
+neither value. It is closed now.
+
+### The TPR-shadow state is per-vmcs12 again
+
+The branch taken when a vmcs12 does **not** ask for the TPR shadow cleared
+the control bit and left `nested_virtual_apic_address` and
+`nested_tpr_threshold` holding the *other* trust level's values. With two
+levels alternating on one processor - VTL0 asking, VTL1 not -
+`on_nested_cr8_access` would have read and written one level's virtual-APIC
+page while the other ran, and **every VTPR instrument in this file would
+have been reporting the wrong level's priority.** Both are now zeroed, which
+`on_nested_cr8_access` already refuses loudly rather than acting on. Xen
+re-derives both per virtual VMCS and writes zero when the control is clear;
+KVM re-derives them every entry.
+
+### And the hang is unmoved
+
+    HvCallModifyVtlProtectionMask   39,280
+    code-0 requests                 21,001
+    screen                          loader trace + spinner, still animating
+
+Same freeze, same signature, same picture. **Both fixes are correct on their
+own terms and neither is this hang.** That is now the eighth and ninth real
+defect found and fixed without moving the boot - which is itself worth
+stating: the nested surface had genuine faults in it, they were found by
+comparison against two independent implementations, and none of them is what
+stops Windows.

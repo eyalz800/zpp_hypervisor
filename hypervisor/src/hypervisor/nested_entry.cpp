@@ -116,6 +116,12 @@ constexpr std::uint64_t secondary_unrestricted_guest = 1ull << 7;
 constexpr std::uint64_t secondary_pause_loop_exiting = 1ull << 10;
 constexpr std::uint64_t secondary_rdrand_exiting = 1ull << 11;
 constexpr std::uint64_t secondary_enable_invpcid = 1ull << 12;
+
+// SDM Table 25-7 bit 3 and bit 14. Named here because `build_vmcs02`
+// must be able to *remove* them from this VMM's own copy before the
+// union - see `secondary_not_inherited`.
+constexpr std::uint64_t secondary_enable_rdtscp = 1ull << 3;
+constexpr std::uint64_t secondary_vmcs_shadowing = 1ull << 14;
 constexpr std::uint64_t secondary_rdseed_exiting = 1ull << 16;
 constexpr std::uint64_t secondary_enable_xsaves = 1ull << 20;
 constexpr std::uint64_t secondary_tsc_scaling = 1ull << 25;
@@ -1955,6 +1961,26 @@ std::expected<void, zpp::error> hypervisor::build_vmcs02(std::size_t cpu)
         // it answers MOV to CR4 and nothing else.
         this->tpr_shadow_absent[cpu] = this->tpr_shadow_absent[cpu] + 1;
         primary &= ~primary_tpr_shadow;
+
+        // **And forget the other trust level's page and threshold.**
+        // These two are per-processor while everything they describe is
+        // per-vmcs12, and this is the one branch that leaves them
+        // describing a vmcs12 that is no longer current. With two trust
+        // levels alternating on one processor - VTL0 asking for the TPR
+        // shadow and VTL1 not - `on_nested_cr8_access` would then read
+        // and write one level's virtual-APIC page while the other is
+        // running, and every VTPR instrument in this tree
+        // (`l2_entry_vtpr`, `vtl_call_vtpr`, `l2_tpr_would_fire`) would
+        // be reporting the wrong level's priority.
+        //
+        // Zero rather than stale: `on_nested_cr8_access` already refuses
+        // a zero address, so a lost update is loud instead of silent.
+        // Xen re-derives both per virtual VMCS and writes zero when the
+        // control is clear (`vvmx.c`, `nvmx_update_tpr_threshold` and
+        // `nvmx_update_virtual_apic_address`); KVM re-derives them on
+        // every entry.
+        this->nested_virtual_apic_address[cpu] = 0;
+        this->nested_tpr_threshold[cpu] = 0;
     }
 
     // The bitmaps, whose controls follow the merge rather than either
@@ -2035,8 +2061,37 @@ std::expected<void, zpp::error> hypervisor::build_vmcs02(std::size_t cpu)
     //
     // Extended page tables and VPIDs are always on, because the pointer
     // written below is always a real one and the VPID always non-zero.
+    // **Controls that must not be carried in from this VMM's own copy.**
+    //
+    // The union below exists so vmcs02 keeps the things this VMM needs
+    // regardless of what the guest hypervisor asked for. But four of them
+    // are statements about *its* guest rather than about this VMM, and
+    // carrying them in gives the second-level guest a capability the
+    // level above never granted - where the architecture promises `#UD`.
+    //
+    // Measured, and the reason this list exists: the asked-versus-given
+    // difference `0x1010ae` against `0x1050ae` is `0x4000`, **bit 14,
+    // VMCS shadowing** - not bit 18 as an earlier entry in `BACKLOG.md`
+    // concluded. `set_vmcs_shadowing(cpu, true)` sets it in vmcs01 at the
+    // guest hypervisor's first VMPTRLD, `host_controls_cache` snapshots
+    // vmcs01's secondary controls **once** per processor, and nothing
+    // cleared it afterwards - so it was live in vmcs02 for the life of
+    // every boot. vmcs02's VMREAD/VMWRITE bitmap fields are never
+    // written, so they name host-physical page zero, and whether an L2
+    // VMREAD exits or silently VMfails would be decided by whatever the
+    // firmware left there.
+    //
+    // KVM clears the same class explicitly in `prepare_vmcs02_early`
+    // (`nested.c`, "VMCS shadowing for L2 is emulated for now"), and Xen
+    // clears shadowing in `nvmx_update_secondary_exec_control`. This is
+    // their list, restricted to the bits this VMM actually sets in
+    // vmcs01.
+    constexpr std::uint64_t secondary_not_inherited =
+        secondary_vmcs_shadowing | secondary_enable_rdtscp |
+        secondary_enable_invpcid | secondary_enable_xsaves;
+
     auto secondary =
-        (secondary01 | secondary12) &
+        ((secondary01 & ~secondary_not_inherited) | secondary12) &
         ~(secondary_mode_based_execute | secondary_unrestricted_guest);
 
     secondary |= secondary12 &
