@@ -10746,6 +10746,29 @@ private:
     std::uint64_t vtl1_sk_base[max_cpus]{};
     std::uint64_t vtl1_sk_scanned[max_cpus]{};
 
+    /**
+     * The pointer at `gs:0x0` in VTL1, and a window of what it points at.
+     *
+     * `ShvlVinaHandler` opens with `movq %gs:0x0,%rax` and then
+     * `movq 0x10(%rax),%rcx`, so this qword is a pointer into the secure
+     * kernel's own structures - which makes it a way to reach the image
+     * without searching for it. Two independent methods have now agreed
+     * that the module holding the hypercall caller is **not**
+     * `securekernel`, and a 32 MB content scan around the GS base did not
+     * find `.text` either, so a pointer is what is left.
+     *
+     * A window is captured rather than one field because the layout is
+     * unknown: anything in it that looks like a code address is a
+     * candidate for locating the image, and `securekernel.pdb` is present
+     * to name it once the base is known.
+     * @{
+     */
+    std::uint64_t vtl1_gs_zero[max_cpus]{};
+    std::uint64_t vtl1_gs_block[max_cpus][32]{};
+    /**
+     * @}
+     */
+
     /** The same for where it *yields*, taken at the `HvCallVtlReturn`. */
     std::uint64_t vtl1_yield_rip[max_cpus][vtl1_resume_capacity]{};
     std::uint64_t vtl1_yield_count[max_cpus]{};

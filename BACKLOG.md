@@ -1,5 +1,38 @@
 # Known defects
 
+## The VTL1 per-processor block, and why the scan anchor was wrong
+
+**2026-08-22.** Following the pointer `ShvlVinaHandler` dereferences:
+
+```
+[gs:0x00]  0xfffff8022f74ff80   <- the GS base itself: a self-pointer
+   +0x010  0xfffff802303a1008   <- the VINA block
+   +0x018  0xfffff8023020a000
+   +0x020  0xfffff8022f750f80
+   +0x028  0xfffff8022f752f80
+   +0x088  0xfffff8022c376000   page-aligned
+   +0x090  0xfffff802279bd000   page-aligned
+```
+
+Two things follow. `[gs:0]` is a **self-pointer**, so the handler's
+`mov rax, gs:0` then `mov rcx, [rax+0x10]` is just reading `gs:0x10`, and
+`+0x10` is confirmed as the VINA block - the chain this VMM has been
+walking is right.
+
+And this is a **processor control region in allocated memory, not part of
+an image**. That retires the assumption behind the content scan above: the
+GS base was taken as an anchor on the reasoning that the caller sat 285 KB
+from it, so the image must be nearby. If the block is allocated, that
+distance is an allocator coincidence and the scan searched the wrong
+neighbourhood - which is a better explanation of its empty result than
+"the signature is absent".
+
+The two page-aligned pointers at `+0x088` and `+0x090` sit 50 MB and
+130 MB below the block, well outside the range scanned, and are the next
+anchors worth trying. Neither is 64 KB-aligned, so neither is itself an
+image base, but a pointer *into* one narrows the search enormously.
+
+
 ## Locating securekernel by content, and what the addresses say instead
 
 **2026-08-22.** `securekernel.pdb` is present locally - only `skci.pdb` is

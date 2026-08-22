@@ -9176,6 +9176,38 @@ hypervisor::on_l2_exit(std::size_t cpu,
                     this->vtl1_yield_cr3[cpu] = this->vmcs.read(
                         arch::x86_64::vmx::vmcs::field::guest_cr3);
 
+                    // The pointer the VINA handler dereferences, and a
+                    // window of what it names. See `vtl1_gs_zero`.
+                    if (0 == this->vtl1_gs_zero[cpu]) {
+                        auto gs = this->vmcs.read(
+                            arch::x86_64::vmx::vmcs::field::guest_gs_base);
+                        std::uint64_t self{};
+
+                        if (auto to = translate_guest_linear(cpu, gs);
+                            to && read_guest_memory(
+                                      cpu,
+                                      *to,
+                                      std::as_writable_bytes(
+                                          std::span(&self, 1)))) {
+                            this->vtl1_gs_zero[cpu] = self;
+
+                            for (std::size_t k{}; (0 != self) && (k < 32);
+                                 ++k) {
+                                std::uint64_t word{};
+
+                                if (auto at = translate_guest_linear(
+                                        cpu, self + (8 * k));
+                                    at && read_guest_memory(
+                                              cpu,
+                                              *at,
+                                              std::as_writable_bytes(
+                                                  std::span(&word, 1)))) {
+                                    this->vtl1_gs_block[cpu][k] = word;
+                                }
+                            }
+                        }
+                    }
+
                     // The secure kernel's load base, once. See
                     // `vtl1_sk_base`.
                     if ((0 == this->vtl1_sk_base[cpu]) &&
