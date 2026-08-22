@@ -1,5 +1,84 @@
 # Known defects
 
+## Both sides of the trust-level loop are single instructions
+
+**Measured 2026-08-22 with instruments built for the question**, after a
+session of inferring this from counters that could not answer it.
+
+- **The secure kernel spins on its own `HvCallVtlReturn`.** `vtl1_resume_rip`
+  and `vtl1_yield_rip` each hold **one address across 64 samples**, three
+  bytes apart - the `vmcall` and the instruction after it. That is
+  `ShvlVinaHandler`, which loops until VINA is clear. **So VTL1 is waiting
+  on VTL0, not the other way round**, which is the opposite of how this
+  was read for most of the session.
+- **VTL0 calls from one address too**, `ntoskrnl+0x6A774B` =
+  `HvlSwitchToVsmVtl1+0xab`. Both instruction pointers first appeared to
+  be in the same page 0x1c apart, which is Hyper-V's **hypercall page** -
+  the stubs both trust levels call through - so the caller had to be read
+  one qword down the stack, where the stub's `ret` goes.
+- **VTL0 can take an interrupt and is not given one.** `RFLAGS.IF` set on
+  89.6% of calls, blocking by STI or MOV SS **exactly zero**, activity
+  state active.
+- **VINA is clear at every call and set at every return.** So Hyper-V
+  re-asserts it on each switch into VTL1, because VTL0 has something
+  pending at that instant.
+
+### The priority reading, and what it does and does not say
+
+Two instruments that already existed and had never been read:
+
+```
+vectors the guest asked for (297,636)
+  0x2f      297,636   100.0%
+task priority when it asked (297,636)
+  0xd0      297,635   100.0%
+```
+
+Every request is for vector `0x2f`, class 2, made while the virtual task
+priority is `0xd0`, class 13 - blocked at the instant it is made. **That
+on its own is normal**: asking for a deferred procedure call from a
+high-IRQL path is what Windows does.
+
+And the guest does come down. Delta over ninety seconds *at the freeze*:
+priority `0x00` at second-level entry **+14,112**, `0x20` **+131,002**. So
+there are thousands of moments a second when `0x2f` could be delivered,
+and `l2_given_vector` says it arrives 5,552 times against 297,636 asked.
+**3.6% may well be correct** - `KeInsertQueueDpc` re-requests an
+already-pending interrupt - so this is recorded as measured rather than as
+a defect.
+
+### Two things checked and struck off, both of which looked conclusive
+
+- **`ZPP_DELIVER_SELF_IPI` is not it, and is worse.** With the guest now
+  known to reach passive priority, the switch was retried on the argument
+  that the earlier "one delivery then a spin" was measured when the
+  priority was believed never to drop. It froze at **19,975** protection
+  calls - half the usual point - and stopped dead. Off.
+- **We do not `#GP` Hyper-V's synthetic APIC MSRs.** The exit ring labels
+  those `wrmsr` exits `[l1-rip]`, which reads as "the guest hypervisor is
+  using an interface we fault", and that is the shape of this project's
+  recurring mistake - so it was very nearly acted on. The counter behind
+  the census lives in `on_l2_exit`: they are the **second-level** guest's
+  writes, reflected up to Hyper-V, which implements them. The label
+  misled; the counter's location settled it.
+
+For the record of what KVM does, since the question came up: it maps the
+three synthetic APIC registers straight onto the real local APIC -
+`HV_X64_MSR_EOI` to `APIC_EOI`, `HV_X64_MSR_ICR` to `APIC_ICR`,
+`HV_X64_MSR_TPR` to `APIC_TASKPRI` (`hyperv.c:1580-1585`), gated on
+`HV_MSR_APIC_ACCESS_AVAILABLE` in CPUID (`hyperv.c:1292`). We advertise
+only privilege bits 5 and 6, and do not need to implement these, because
+the writes are not ours to answer.
+
+### What is left
+
+Hyper-V asserts VINA on every switch into VTL1, so VTL0 holds a pending
+interrupt across the whole loop. It is almost certainly `0x2f`. The open
+question is why VTL0 never retires it, given that it reaches passive
+priority thousands of times a second and is fully interruptible when it
+calls in.
+
+
 ## We read 30.7 VMCS fields an exit; KVM reads eight. That is the fix.
 
 **Measured 2026-08-22 from this VMM's own field census**, which had been
