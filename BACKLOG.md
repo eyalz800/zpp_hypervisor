@@ -1,5 +1,83 @@
 # Known defects
 
+## The tick account names the blocker: asked 1.766 ms, given 4.740 ms
+
+**Measured 2026-08-22 on the rig.** This is the number the whole
+investigation was looking for, and it was already being printed.
+
+```
+asked  17,661.0 x100ns per arm (1.766 ms, 566.2 Hz)  over 532 arms
+given  47,398.4 x100ns per arm (4.740 ms, 211.0 Hz)  over 532 answered
+ratio     0.373x  LATE by 2.684x
+```
+
+The guest arms its synthetic timer for 1.766 ms and is answered every
+4.740 ms, on every one of 532 arms. The deadline is **structurally
+unreachable**: the timer has always already expired by the time the guest
+finishes servicing the previous expiry, so it never reaches anything else.
+The exit ring shows it directly - a verbatim eight-exit cycle, `EOM`,
+`STIMER0_COUNT`, `EOI`, `ICR` with `0x4002f`, an interrupt-window exit, a
+`vmresume` after each, every one from the same first-level instruction
+pointer.
+
+### The reference TSC page is not the cause
+
+Struck off by reading it: published and fitted scales agree exactly -
+`0x0148fe4ee03e21b3`, 9,999,921 Hz, **zero** collinearity error over a
+1,084 ms baseline. The note above that the fitted scale came out 3.59x
+large does not describe this build and should not be carried forward.
+
+### Lying about time fails at the minimum ratio, not just at large ones
+
+`ZPP_TIME_DILATION=3` is the *smallest* value the arithmetic admits: it
+turns the guest's 1.766 ms deadline into 5.30 ms of real time against the
+4.740 ms actually delivered, which is the first value that makes the
+deadline reachable at all. It reached the same freeze at 39,284 calls and
+then **rebooted** - counters going backwards between two dumps. Same
+outcome as the 8x attempt, so the watchdog is not merely intolerant of a
+large lie, and this line is closed.
+
+### The cost is ours, not KVM's, and it is now itemised
+
+`duty 0.803` - **80.3% of wall clock is inside our own exit handler**,
+against 12.6% for the guest hypervisor and 7.2% for Windows. Per round
+trip, 673,367 cycles (338 us):
+
+| phase | cyc/RT | share |
+|---|---|---|
+| exit: dispatch (self) | 140,673 | 20.9% |
+| build_vmcs02 | 113,409 | 16.8% |
+| copy_shadow_to_vmcs12 | 58,585 | 8.7% |
+| guest read: whole call (**75.9 calls/RT**) | 59,198 | 8.8% |
+| save_l2_state | 53,813 | 8.0% |
+| load_l1_host_state | 44,021 | 6.5% |
+| record_exit | 41,688 | 6.2% |
+| diagnostics, total | ~80,000 | ~12% |
+
+Eight exits a cycle at that price is 2.7 ms before either guest runs,
+which is how 1.766 ms becomes 4.740 ms.
+
+**Four of the eight cannot be removed by advertising less.** We claim only
+privilege bits 5 and 6 at `0x40000003` - `exit_dispatch.cpp:1049` says in
+terms that the synthetic interrupt controller, synthetic timers and
+reference counter are all absent - so Hyper-V is not our client for them;
+they are its own implementation for its guest, and MSRs outside
+`0`-`0x1fff` and `0xc0000000`-`0xc0001fff` exit **unconditionally**
+whatever the bitmap says.
+
+**One inconsistency to resolve:** that same comment calls the reference
+counter absent, while `reftsc=1` publishes a reference TSC page that the
+dump shows enabled with 268 counter reads. Both cannot be true.
+
+### So the target is exact
+
+The eight-exit cycle has to fit inside 1.766 ms. That is **2.7x** from
+here, and the candidates in descending order of size over ease are: the
+~12% of pure diagnostics (switches already exist), the 75.9 guest reads a
+round trip, `build_vmcs02` rebuilding what KVM would rewrite only when
+dirty, and `copy_shadow_to_vmcs12` doing the same on the way back.
+
+
 ## The freeze is a livelock: VTL1's window outgrew the guest's clock period
 
 > **RETRACTED the same day, by the experiment this entry proposed.**
