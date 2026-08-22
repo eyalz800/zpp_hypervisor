@@ -9644,6 +9644,66 @@ hypervisor::on_l2_exit(std::size_t cpu,
                                                     static_cast<
                                                         std::uint64_t>(
                                                         ours.status);
+
+                                                // And what the guest
+                                                // hypervisor's own
+                                                // tables say, which is
+                                                // the only reading that
+                                                // separates "it
+                                                // protected them" from
+                                                // "our composition is
+                                                // wrong". See
+                                                // `vtl_protect_guest_perms`.
+                                                {
+                                                    auto eptp12 =
+                                                        this->guest_vmcs12
+                                                            [cpu]
+                                                                .read(
+                                                                    field::
+                                                                        ept_pointer);
+
+                                                    auto walk = arch::
+                                                        x86_64::vmx::walk_ept(
+                                                            eptp12 &
+                                                                (((1ull
+                                                                   << 52) -
+                                                                  1) &
+                                                                 ~0xfffull),
+                                                            pfn << 12,
+                                                            physical_address_bits(),
+                                                            execute_only_translations_offered,
+                                                            [&](std::uint64_t
+                                                                    at)
+                                                                -> std::optional<
+                                                                    arch::x86_64::
+                                                                        vmx::epte> {
+                                                                std::uint64_t
+                                                                    value{};
+                                                                if (!read_guest_physical(
+                                                                        at,
+                                                                        std::as_writable_bytes(
+                                                                            std::span(
+                                                                                &value,
+                                                                                1)))) {
+                                                                    return std::
+                                                                        nullopt;
+                                                                }
+                                                                return arch::
+                                                                    x86_64::vmx::
+                                                                        epte(
+                                                                            value);
+                                                            });
+
+                                                    this->vtl_protect_guest_perms
+                                                        [cpu][n] =
+                                                        walk.permissions
+                                                            .bits();
+                                                    this->vtl_protect_guest_status
+                                                        [cpu][n] =
+                                                        static_cast<
+                                                            std::uint64_t>(
+                                                            walk.status);
+                                                }
                                             }
 
                                             n = n + 1;

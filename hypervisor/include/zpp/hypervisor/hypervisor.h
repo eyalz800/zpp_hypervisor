@@ -10497,6 +10497,29 @@ private:
      * above.
      */
     std::uint64_t vtl_protect_host_perms[max_cpus][8]{};
+
+    /**
+     * What the **guest hypervisor's own** extended page tables say about
+     * the same frame, beside what our composed shadow says.
+     *
+     * The freeze is localised to four frames - `0x11aac9` through
+     * `0x11aacc` - which the secure memory manager's walk names in its
+     * last requests and which our shadow holds read-only while our own
+     * tables grant write. That is *expected* if the guest hypervisor
+     * protected them, since the shadow is the intersection; it is **our
+     * defect** if the guest hypervisor grants write and the intersection
+     * still comes out read-only.
+     *
+     * Nothing in this tree could tell those apart, because both existing
+     * probes look at our side: `shadow_ept_lookup` at the composition and
+     * `host_ept_lookup` at our own tables. This walks eptp12 itself.
+     * @{
+     */
+    std::uint64_t vtl_protect_guest_perms[max_cpus][8]{};
+    std::uint64_t vtl_protect_guest_status[max_cpus][8]{};
+    /**
+     * @}
+     */
     std::uint64_t vtl_protect_host_status[max_cpus][8]{};
 
     /**

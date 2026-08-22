@@ -69,6 +69,30 @@ on them, and no fault is taken - so either VTL0 never touches them after
 they are protected, or it touches them in a way that succeeds and the walk
 stops for another reason entirely.
 
+### And the read-only is the guest hypervisor's, not ours
+
+The obvious way for this to be **our** defect was for the guest
+hypervisor's own tables to grant write while our composed shadow denied
+it. Nothing in this tree could tell that apart, because both existing
+probes look at our side - `shadow_ept_lookup` at the composition and
+`host_ept_lookup` at our own tables. So eptp12 was walked directly:
+
+```
+frame         ours   EPT12   EPT12 status
+0x11aac9       rwx     r--   0 (mapped)
+0x11aaca       rwx     r--   0
+0x11aacb       rwx     r--   0
+0x11aacc       rwx     r--   0
+```
+
+**The guest hypervisor holds them read-only itself**, which is precisely
+what `HvCallModifyVtlProtectionMask` installs, and our composition is the
+correct intersection. So the frames are protected as intended and their
+permissions are **not a defect on this side**. The convergence of the two
+instruments on these four frames is real, but it is the *ordering* - the
+walk halts right after protecting them - and not a permission this VMM got
+wrong.
+
 
 ## VINA is not the blocker, and the secure kernel was making progress all along
 
