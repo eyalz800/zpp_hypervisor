@@ -1,5 +1,38 @@
 # Known defects
 
+## Without nesting the same VMM runs Windows healthily - the failure is VSM-only
+
+**2026-08-22.** Never measured in this session, and it scopes everything
+above. Built with `ZPP_NESTED_VMX=OFF` - which `check-bootable.sh` refuses
+to deploy without `ZPP_ALLOW_NO_NESTED=1`, correctly - and booted:
+
+```
+duty                  0.200        (against 0.76-0.80 with nesting on)
+exits                 221,827 -> 232,959 and climbing
+exit mix              ept-violation 93.7%, cpuid 6.1%, rdmsr 0.2%
+second-level entries  0            (nothing nested, as expected)
+framebuffer           entirely black
+```
+
+**Black is what a *booted* guest looks like here.** The display is a
+passed-through GPU, so once Windows' own driver takes it the firmware
+framebuffer stops reflecting the screen - which is why `screendump`
+answers "there is no console" and why the control run reads black from
+145 s onward. With nesting **on**, the same reader shows this VMM's own
+loader trace instead, because Windows never gets far enough to claim the
+adapter.
+
+The login screen itself was **not** observed - it cannot be, through a
+passed-through adapter - so this is not a claim that the boot completed.
+What it does establish is that the identical VMM, loader, extended page
+tables, hand-over and rig carry Windows to the point of owning its display
+with a fifth of the exit overhead, and that **everything measured in this
+file is specific to the nested virtual-secure-mode path** rather than to
+this VMM at large.
+
+The nested build was restored immediately afterwards.
+
+
 ## "reps done exceeds reps asked" is an instrument artifact
 
 **2026-08-22.** The protection census reports `reps asked 71,151 reps done
