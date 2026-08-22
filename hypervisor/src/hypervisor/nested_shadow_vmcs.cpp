@@ -318,20 +318,70 @@ bool hypervisor::point_at_vmcs(std::size_t cpu, bool second_level)
     if constexpr (nested_vmx::evmcs_to_kvm) {
         if ((cpu < max_cpus) && this->evmcs_active[cpu]) {
             constexpr std::size_t current_nested_vmcs_offset = 48;
+            constexpr std::size_t enlighten_vmentry_offset = 40;
 
-            auto * page =
-                second_level ? this->evmcs[cpu] : this->evmcs_own[cpu];
-            auto physical = second_level ? this->evmcs_physical[cpu]
-                                         : this->evmcs_own_physical[cpu];
+            auto * assist = this->vp_assist[cpu];
 
-            *reinterpret_cast<volatile std::uint64_t *>(
-                this->vp_assist[cpu] + current_nested_vmcs_offset) =
-                physical;
+            if (second_level) {
+                *reinterpret_cast<volatile std::uint64_t *>(
+                    assist + current_nested_vmcs_offset) =
+                    this->evmcs_physical[cpu];
 
-            arch::x86_64::vmx::vmcs_cache_select_enlightened(
-                reinterpret_cast<std::uint64_t>(page), cpu);
+                *reinterpret_cast<volatile std::uint8_t *>(
+                    assist + enlighten_vmentry_offset) = 1;
 
-            return false;
+                arch::x86_64::vmx::vmcs_cache_select_enlightened(
+                    reinterpret_cast<std::uint64_t>(this->evmcs[cpu]),
+                    cpu);
+
+                return false;
+            }
+
+            // **Mixed mode: only the second-level VMCS is enlightened.**
+            // vmcs01 stays a real VMCS, because it is the one that
+            // carries the VMREAD and VMWRITE bitmap pointers, and those
+            // are what keep the guest hypervisor's own VMCS accesses from
+            // exiting. Measured, they are 40,000,000 of 51,000,000 exits
+            // when it cannot shadow - 78% of everything this VMM handles.
+            //
+            // The layer below refuses an ordinary VMPTRLD while an
+            // enlightened pointer is live, so the pointer is released
+            // first. A VMCLEAR of the enlightened page does that
+            // (`nested.c`, `nested_evmcs_handle_vmclear`), and costs one
+            // exit per switch back - `l2-exits` a run, about 1.8 million,
+            // against the 40 million it removes.
+            // **VMCLEAR first, while the assist page still names the
+            // page, then clear the flag.** The layer below recognises a
+            // VMCLEAR as "release the enlightened pointer" only while
+            // `nested_get_evmptr` still answers with this page; if it
+            // does not, it performs a *real* VMCLEAR and writes a launch
+            // state into the middle of the page.
+            //
+            // **Which of the two fields that answer depends on is the
+            // open question, and it is measured rather than argued.**
+            // `evmcs_release_clean` counts releases where the page's
+            // revision survived, `evmcs_release_clobbered` counts those
+            // where it did not - a clobbered revision is exactly the real
+            // VMCLEAR above, and is the difference between "the flag may
+            // be cleared first" and "it may not".
+            arch::x86_64::vmx::vmclear(&this->evmcs_physical[cpu]);
+
+            if (arch::x86_64::vmx::evmcs_revision ==
+                *reinterpret_cast<const volatile std::uint32_t *>(
+                    this->evmcs[cpu])) {
+                this->evmcs_release_clean[cpu] += 1;
+            } else {
+                this->evmcs_release_clobbered[cpu] += 1;
+
+                // Put it back, so the next entry is not run against a
+                // page the layer below has stamped.
+                *reinterpret_cast<volatile std::uint32_t *>(
+                    this->evmcs[cpu]) =
+                    arch::x86_64::vmx::evmcs_revision;
+            }
+
+            *reinterpret_cast<volatile std::uint8_t *>(
+                assist + enlighten_vmentry_offset) = 0;
         }
     }
 
@@ -397,13 +447,11 @@ void hypervisor::initialize_vmcs_shadowing()
         // its own, which are far more numerous: measured, the guest
         // hypervisor takes about four thousand VMREAD exits across a
         // whole boot, against tens of millions of VMCS accesses here.
-        if constexpr (nested_vmx::evmcs_to_kvm) {
-            if (this->underlying_offers_evmcs) {
-                this->vmcs_shadowing_enabled = false;
-                log("vmcs shadowing given up: the enlightened vmcs has "
-                    "no room for the vmread and vmwrite bitmaps");
-            }
-        }
+        // **Kept, and that is the whole point of mixed mode.** Only the
+        // second-level VMCS is enlightened; vmcs01 stays a real VMCS and
+        // carries the bitmaps, so the guest hypervisor's own VMREADs and
+        // VMWRITEs still do not exit. Giving this up cost 40,000,000
+        // exits a run, 78% of everything handled.
 
         // All ones is "exit for everything", which is what this VMM did
         // before there were bitmaps at all - so a field left out of the

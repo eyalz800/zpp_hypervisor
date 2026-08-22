@@ -8558,6 +8558,20 @@ private:
     std::uint64_t vp_assist_physical[max_cpus]{};
     std::uint64_t evmcs_physical[max_cpus]{};
 
+    /**
+     * Whether releasing the enlightened pointer left the page intact.
+     *
+     * The layer below treats a VMCLEAR of that page as a release only
+     * while its assist page still names it, and otherwise performs a real
+     * VMCLEAR that stamps a launch state into the middle of it. Which
+     * assist-page field it consults is the thing these two counters
+     * settle: a non-zero `clobbered` means the release was made too late.
+     * @{
+     */
+    std::uint64_t evmcs_release_clean[max_cpus]{};
+    std::uint64_t evmcs_release_clobbered[max_cpus]{};
+    /** @} */
+
     /** Set once the layer below has accepted the assist page. */
     bool evmcs_active[max_cpus]{};
     /** @} */
