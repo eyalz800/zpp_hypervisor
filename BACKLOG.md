@@ -1,5 +1,51 @@
 # Known defects
 
+## The VTL1 loop, symbolised instruction by instruction
+
+**2026-08-22.** `ZPP_STEP_VTL` has existed all along and had never been
+useful, because its output is bare addresses. With the secure kernel's
+base now computable - `vtl1_caller_at - 0xd93a4` - every one of them
+resolves. This is the whole of what VTL1 executes per iteration:
+
+```
+ShvlpProtectPages                 10 steps
+ShvlpInitiateFastHypercall        13
+HvcallpExtendedFastHypercall       3
+KiVinaInterruptShadow              4
+KiVinaInterrupt                   29
+ShvlVinaHandler                   18
+__memset_spec_ermsb               33
+SkCallNormalMode                  37
+SkpPrepareForNormalCall           32
+SkiDeselectThread                 45
+SkiUpdateXStateForVtlTransition   14
+SkiDetachThread                    7
+SkpPrepareForReturnToNormalMode   23
+```
+
+**The secure kernel is inside `ShvlpProtectPages` when it is interrupted.**
+It issues the protection hypercall through
+`ShvlpInitiateFastHypercall` and `HvcallpExtendedFastHypercall`, and then
+VINA arrives, is dispatched through `KiVinaInterruptShadow` into
+`KiVinaInterrupt`, reaches `ShvlVinaHandler`, and the whole yield sequence
+follows - deselect the thread, save extended state, detach, prepare to
+return. That is the loop, named function by function rather than inferred
+from counters.
+
+**And one thing in it does not fit anything measured here.**
+`KiVinaInterruptShadow` into `KiVinaInterrupt` is an **interrupt dispatch
+through VTL1's own descriptor table**, so VTL1 is taking a real interrupt
+- while `vtl1_entry_vector` reports **no event injected on 100% of the
+entries that run VTL1**, across tens of thousands of them.
+
+Both readings are direct. So the interrupt VTL1 dispatches is not one this
+VMM puts there on the entry, which leaves it being raised inside VTL1 -
+by its own local interrupt controller, or by something the level above
+arranges without an injection this VMM performs. **That gap is the first
+thing in a long time that is neither explained nor eliminated**, and it is
+now approachable, because every address in the trace has a name.
+
+
 ## securekernel is symbolisable after all, and here is the loop condition
 
 **2026-08-22, and it overturns three earlier negatives in this file.** The
