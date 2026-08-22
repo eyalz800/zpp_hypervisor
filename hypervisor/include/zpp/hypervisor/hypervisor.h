@@ -8415,6 +8415,77 @@ private:
      * @{
      */
     std::atomic<std::uint64_t> ept_generation{};
+
+    /**
+     * The second-level-physical to first-level-physical cache.
+     *
+     * **This is 84% of every guest-memory read this VMM makes.** Measured
+     * on the rig: 46,410,058 of 55,389,056 reads came from inside
+     * `l2_physical_to_l1`, named by the return-address census in
+     * `note_guest_memory_caller`. The reason is compounding, and it is
+     * visible in `hypervisor.cpp`'s four-level *linear* walk - that walk
+     * calls `l2_physical_to_l1` once per level, and each of those calls
+     * is itself a four-level walk of the guest hypervisor's extended page
+     * tables. One nested translation is therefore about twenty guest
+     * reads, and nothing was remembered between them.
+     *
+     * Direct-mapped and per processor, so a hit costs a compare and no
+     * lock. The tag is the second-level physical page; a zero tag means
+     * empty, which is safe because page zero is never translated here.
+     *
+     * Correctness rests on knowing when it may be stale, and there are
+     * exactly two ways: the guest hypervisor edits its tables and tells
+     * us with INVEPT, or it points at different tables entirely. The
+     * first is handled in `on_guest_invept` and the second by keying the
+     * whole cache on the EPTP it was built under - a mismatch empties it
+     * rather than being merged, since a stale hit here would send a read
+     * to the wrong page silently, which is the worst failure shape this
+     * tree has.
+     *
+     * `l2_translate_cache_hits` against `l2_translate_walks` is the pair
+     * to read: hits not climbing means the cache is keyed wrong, and
+     * walks not falling means it is being emptied faster than it fills.
+     * @{
+     */
+    static constexpr std::size_t l2_translate_cache_entries = 512;
+
+    std::uint64_t l2_translate_cache_tag[max_cpus]
+                                        [l2_translate_cache_entries]{};
+    std::uint64_t l2_translate_cache_value[max_cpus]
+                                          [l2_translate_cache_entries]{};
+    std::uint64_t l2_translate_cache_eptp[max_cpus]{};
+    std::uint64_t l2_translate_cache_hits[max_cpus]{};
+    std::uint64_t l2_translate_cache_flushes[max_cpus]{};
+
+    /**
+     * Empties one processor's translation cache.
+     *
+     * Called when the guest hypervisor says its tables changed - INVEPT -
+     * and when it points at different tables. Both have to empty it: a
+     * stale entry does not fault, it answers, and the caller then reads
+     * the wrong page.
+     *
+     * Defined here rather than in `nested_ept.cpp` because `tests/`
+     * links the translation units it exercises one at a time, and
+     * `nested_vmx` links `on_guest_invept` without `nested_ept.cpp`. A
+     * loop over 512 words does not justify a second translation unit.
+     */
+    void forget_l2_translations(std::size_t cpu)
+    {
+        if (cpu >= max_cpus) {
+            return;
+        }
+
+        for (auto & tag : this->l2_translate_cache_tag[cpu]) {
+            tag = 0;
+        }
+
+        this->l2_translate_cache_flushes[cpu] =
+            this->l2_translate_cache_flushes[cpu] + 1;
+    }
+    /**
+     * @}
+     */
     std::uint64_t ept_generation_seen[max_cpus]{};
     /**
      * @}

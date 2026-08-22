@@ -1559,6 +1559,16 @@ bool hypervisor::on_guest_invept(std::size_t cpu,
         return true;
     }
 
+    // This is the announcement the translation cache waits for: the
+    // guest hypervisor edited its extended page tables, so anything
+    // remembered from walking them may now name the wrong page. Emptied
+    // for both types rather than only for all-context - a single-context
+    // invalidation names an EPTP, and matching it against the cache's
+    // would save a flush the guest asks for a few thousand times a boot
+    // while adding a way to keep a stale entry. See
+    // `l2_translate_cache_tag`: a stale hit does not fault, it answers.
+    forget_l2_translations(cpu);
+
     // The descriptor is read even for the all-context type, because the
     // memory operand is still decoded and a bad address is still a fault.
     auto linear = vmx_operand_linear_address(context);

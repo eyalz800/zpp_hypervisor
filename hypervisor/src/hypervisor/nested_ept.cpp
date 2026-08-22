@@ -194,8 +194,32 @@ std::expected<std::uint64_t, zpp::error> hypervisor::l2_physical_to_l1(
 
     auto eptp12 = shadow.read(arch::x86_64::vmx::vmcs::field::ept_pointer);
 
+    // The cache, before the walk. See `l2_translate_cache_tag` for why
+    // this is worth having at all: this function is 84% of every guest
+    // memory read this VMM makes, because the four-level linear walk
+    // above it calls this once per level and each call walks four more.
+    //
+    // Keyed on the extended-page-table pointer the entries were built
+    // under. A different pointer means different tables, so the whole
+    // cache is emptied rather than merged - a stale hit would send a
+    // read to the wrong page with nothing faulting.
+    auto page = guest_physical & ~0xfffull;
+    auto slot = (page >> 12) % l2_translate_cache_entries;
+
+    if (this->l2_translate_cache_eptp[cpu] != eptp12) {
+        forget_l2_translations(cpu);
+        this->l2_translate_cache_eptp[cpu] = eptp12;
+    } else if (this->l2_translate_cache_tag[cpu][slot] == page) {
+        this->l2_translate_cache_hits[cpu] =
+            this->l2_translate_cache_hits[cpu] + 1;
+
+        return this->l2_translate_cache_value[cpu][slot] +
+               (guest_physical & 0xfffull);
+    }
+
     // Counted here rather than at entry: the two returns above answer
-    // without reading anything. See `l2_translate_walks`.
+    // without reading anything, and a cache hit does not walk. See
+    // `l2_translate_walks`.
     this->l2_translate_walks[cpu] = this->l2_translate_walks[cpu] + 1;
 
     auto walk = arch::x86_64::vmx::walk_ept(
@@ -227,8 +251,21 @@ std::expected<std::uint64_t, zpp::error> hypervisor::l2_physical_to_l1(
             zpp::error{error::guest_address_not_mapped});
     }
 
+    // Only a mapped result is remembered. A refusal is not cached at
+    // all, deliberately: the guest hypervisor filling in a mapping it
+    // had not made yet is the ordinary case, and a cached refusal would
+    // have to be invalidated by something that does not announce itself.
+    //
+    // The page is stored, not the address, so a hit can serve any offset
+    // within it - which is what makes one entry cover the whole of a
+    // page-table page being walked entry by entry.
+    this->l2_translate_cache_tag[cpu][slot] = page;
+    this->l2_translate_cache_value[cpu][slot] =
+        walk.physical_address & ~0xfffull;
+
     return walk.physical_address;
 }
+
 
 std::expected<void, zpp::error>
 hypervisor::read_guest_memory(std::size_t cpu,
