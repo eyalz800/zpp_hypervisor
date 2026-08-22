@@ -1,5 +1,30 @@
 # Known defects
 
+## Guest memory is not the cause
+
+**2026-08-22.** The two rig launchers reserve different amounts for the
+host, which `CLAUDE.md` records and which had never been tested:
+
+```
+boot.sh      (control)   mem = MemTotal - 2500 MB   -> 13,330 MB
+boot-zpp.sh  (ours)      mem = MemTotal - 4000 MB   -> 11,830 MB
+```
+
+**Our guest runs with 1.5 GB less than the control**, and a halt that is
+deterministic at a fixed amount of work is exactly the shape of committing
+memory until it runs out - the secure memory manager's walk covers 591 MB
+of pages, each needing structures in VTL1.
+
+Tested by raising `boot-zpp.sh` to the control's figure for one boot and
+putting it back afterwards. **No change**: 39,303 protection calls and
+21,013 VINA-clear returns, against 39,29x and 21,00x on every other run.
+
+So the difference between the two launchers is not what separates a guest
+that boots from one that does not, and memory pressure inside the guest is
+not what stops the walk. The launcher is restored; nothing on the rig is
+left modified.
+
+
 ## The transition, finally captured: the request stream changes shape
 
 **2026-08-22.** Every instrument in this investigation samples the frozen
