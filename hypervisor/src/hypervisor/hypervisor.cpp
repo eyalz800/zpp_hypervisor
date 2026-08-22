@@ -5543,16 +5543,19 @@ void hypervisor::setup_vmcs(std::size_t cpu,
                                 this->vp_assist_physical[cpu] |
                                     vp_assist_enable);
 
-            // Set once and never cleared. **Both** of this VMM's
-            // VMCSs are enlightened - they have to be, since the
-            // layer below refuses an ordinary VMPTRLD once any
-            // enlightened VMCS has been used - so the flag is not
-            // what distinguishes the two entries. `point_at_vmcs`
-            // does that, by naming the page.
-            constexpr std::size_t enlighten_vmentry_offset = 40;
-
-            *reinterpret_cast<volatile std::uint8_t *>(
-                assist + enlighten_vmentry_offset) = 1;
+            // **Not armed here.** In mixed mode only the second-level
+            // VMCS is enlightened, so the flag belongs with the entry
+            // that uses it: `point_at_vmcs` sets it when it names the
+            // enlightened page and clears it when it goes back to the
+            // real one.
+            //
+            // Arming it at setup is a leftover from when both VMCSs
+            // were enlightened, and it cost a launch. With the flag set
+            // and `current_nested_vmcs` still zero, the layer below
+            // takes guest-physical page zero as the description of the
+            // very first entry, and the launch fails leaving no VMCS
+            // current at all - which is also why the instruction error
+            // read back as a leftover register rather than a code.
 
             this->evmcs_active[cpu] = true;
 

@@ -350,28 +350,21 @@ bool hypervisor::point_at_vmcs(std::size_t cpu, bool second_level)
             // (`nested.c`, `nested_evmcs_handle_vmclear`), and costs one
             // exit per switch back - `l2-exits` a run, about 1.8 million,
             // against the 40 million it removes.
-            // **Order matters, and getting it wrong corrupts the page.**
-            // The layer below only treats a VMCLEAR as "release the
-            // enlightened pointer" while that pointer is still valid; its
-            // own comment says it cannot otherwise distinguish the area
-            // from an ordinary VMCS, so it would do a real VMCLEAR and
-            // write a launch state into the middle of our enlightened
-            // page. So the release happens first and the assist page is
-            // cleared after it.
+            // **Clearing the flag is the whole release.** The layer
+            // below decides whether an enlightened pointer is live by
+            // reading the assist page, so with `enlighten_vmentry` clear
+            // it finds none and an ordinary `VMPTRLD` is permitted again.
+            // No VMCLEAR is needed, and issuing one here was wrong twice
+            // over: it costs an exit, and on a page the layer below no
+            // longer recognises as enlightened it performs a *real*
+            // VMCLEAR and writes a launch state into the middle of it.
             //
-            // And only when a pointer is actually live. At setup there is
-            // nothing to release, and a VMCLEAR then would be exactly the
-            // corrupting case above.
-            auto * live = reinterpret_cast<volatile std::uint64_t *>(
-                assist + current_nested_vmcs_offset);
-
-            if (0 != *live) {
-                arch::x86_64::vmx::vmclear(&this->evmcs_physical[cpu]);
-
-                *reinterpret_cast<volatile std::uint8_t *>(
-                    assist + enlighten_vmentry_offset) = 0;
-                *live = 0;
-            }
+            // Measured: with the VMCLEAR in place the first second-level
+            // entry failed with carry set - VMfailInvalid, no current
+            // VMCS - because the pointer had been torn down rather than
+            // parked.
+            *reinterpret_cast<volatile std::uint8_t *>(
+                assist + enlighten_vmentry_offset) = 0;
         }
     }
 
