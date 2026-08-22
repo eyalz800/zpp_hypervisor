@@ -1030,6 +1030,22 @@ private:
      */
     volatile std::uint64_t entry_failure_flags[max_cpus]{};
     volatile std::uint64_t entry_failure_error[max_cpus]{};
+    /**
+     * The flags of the most recent failed VM entry, whatever they were.
+     *
+     * The per-processor `entry_failure_flags` beside it is written only
+     * when a VMCS is current, so a failure with carry set leaves it at
+     * zero - and zero reads as VMsucceed, which cannot be true on a path
+     * only reached when the entry failed. This one is always written and
+     * carries `entry_failure_flags_valid`, so "nothing was recorded" and
+     * "zero was recorded" can be told apart. The absence of a recording
+     * was read as a recording of absence once already, and it cost a run.
+     */
+    volatile std::uint64_t last_entry_failure_flags{};
+
+    /** Marks `last_entry_failure_flags` as written rather than initial. */
+    static constexpr std::uint64_t entry_failure_flags_valid = 1ull << 63;
+
     volatile std::uint64_t entry_failures_seen{};
 
     /**

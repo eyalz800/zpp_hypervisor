@@ -5349,6 +5349,15 @@ void hypervisor::record_entry_failure(std::uint64_t flags)
 {
     this->entry_failures_seen = this->entry_failures_seen + 1;
 
+    // **Unconditionally, and before anything that can decline to record.**
+    // The per-processor slots below are only written when a VMCS is
+    // current, so a failure with carry set writes nothing at all - and the
+    // untouched zeros then read exactly like "flags 0, error 0", which is
+    // VMsucceed and cannot be true on a path only reached when the entry
+    // failed. That cost a boot and a wrong reading: the absence of a
+    // recording was mistaken for a recording of absence.
+    this->last_entry_failure_flags = flags | entry_failure_flags_valid;
+
     // vpid is readable only if a VMCS is current, which carry says it is
     // not - so fall back to a slot of zero rather than reading garbage.
     constexpr std::uint64_t carry = 1;
