@@ -32,6 +32,30 @@ The two page-aligned pointers at `+0x088` and `+0x090` sit 50 MB and
 anchors worth trying. Neither is 64 KB-aligned, so neither is itself an
 image base, but a pointer *into* one narrows the search enormously.
 
+### Re-anchored, re-scanned, and still nothing - which points at the files
+
+The scan was re-anchored on those two pointers and widened to the 176 MB
+they bracket, 2,816 probes. **Also nothing.**
+
+Three failures now share one candidate explanation that has never been
+checked: **the local `securekernel.exe` and `securekernel.pdb` may not be
+the build running on the rig.** That would explain all of them at once -
+the sixteen candidate offsets none of which is preceded by a `call`, and
+two content scans over different regions finding no `.text` signature.
+
+`ntkrnlmp.pdb` is known to match, and known *by measurement*:
+`ntoskrnl+0x6fb520` resolved exactly to `Phase1Initialization+0x0`, and
+every ntoskrnl symbol taken since has been consistent with the guest's
+behaviour. **No equivalent check was ever done for the secure kernel
+files**, which came from a different source.
+
+So before any more searching: validate them. The cheap test is the one
+already used for `ntoskrnl` - take an address this VMM has captured
+independently and see whether the symbol it resolves to makes sense.
+Failing that, the version resources or the debug directory GUID read out
+of guest memory would settle it outright. **Searching harder with
+possibly-wrong bytes is the least valuable thing left.**
+
 
 ## Locating securekernel by content, and what the addresses say instead
 

@@ -9220,11 +9220,39 @@ hypervisor::on_l2_exit(std::size_t cpu,
                             0x48, 0xba, 0x00, 0x00, 0x00, 0x00,
                             0x00, 0x40, 0x00, 0x00, 0x48, 0x85};
 
-                        auto gs = this->vmcs.read(
-                            arch::x86_64::vmx::vmcs::field::guest_gs_base);
-                        auto from = (gs & ~0xffffull) - 0x2000000ull;
+                        // Anchored on the pointers the processor
+                        // control region holds rather than on the GS
+                        // base. The block is **allocated memory**, so its
+                        // distance from the image is an allocator
+                        // coincidence and the earlier scan around it was
+                        // searching the wrong neighbourhood - which
+                        // explains its empty result better than the
+                        // signature being absent.
+                        //
+                        // `+0x088` and `+0x090` are page-aligned pointers
+                        // 50 MB and 130 MB below the block. Scanning from
+                        // below the lower of them to above the block
+                        // covers the region they bracket: 176 MB at
+                        // 64 KB steps, 2,816 probes, once.
+                        auto low = this->vtl1_gs_block[cpu][17];
+                        auto high = this->vtl1_gs_block[cpu][0];
 
-                        for (std::size_t k{}; k < 1024; ++k) {
+                        if ((0 == low) || (0 == high)) {
+                            low = this->vmcs.read(
+                                arch::x86_64::vmx::vmcs::field::
+                                    guest_gs_base);
+                            high = low;
+                        }
+
+                        auto from = (low & ~0xffffull) - 0x1000000ull;
+                        auto span =
+                            ((high - from) >> 16) + 0x200;
+
+                        if (span > 4096) {
+                            span = 4096;
+                        }
+
+                        for (std::size_t k{}; k < span; ++k) {
                             auto candidate = from + (0x10000ull * k);
                             auto at = candidate + 0x1008;
                             bool same = true;
