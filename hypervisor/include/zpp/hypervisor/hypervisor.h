@@ -10684,6 +10684,25 @@ private:
     std::uint64_t vtl1_yield_image[max_cpus]{};
     std::uint64_t vtl1_yield_image_tried[max_cpus]{};
 
+    /**
+     * The bytes of Hyper-V's hypercall stub, so its prologue can be read
+     * instead of assumed.
+     *
+     * `vtl1_yield_stack[0]` was treated as a return address and it may
+     * not be one: the yield and resume instruction pointers are `+0x32`
+     * and `+0x35` into this stub, which is mid-routine, so anything the
+     * stub pushed before its `vmcall` sits at RSP instead. Sixteen
+     * candidate offsets in `securekernel` were eliminated by requiring a
+     * `call` before them, which is consistent with the word not being a
+     * return address at all.
+     *
+     * Captured once, from the page the yield instruction pointer names,
+     * and disassembled offline. Until the prologue is known, no offset
+     * taken from that stack word means anything.
+     */
+    std::uint8_t vtl1_stub_bytes[max_cpus][64]{};
+    std::uint64_t vtl1_stub_at[max_cpus]{};
+
     /** The same for where it *yields*, taken at the `HvCallVtlReturn`. */
     std::uint64_t vtl1_yield_rip[max_cpus][vtl1_resume_capacity]{};
     std::uint64_t vtl1_yield_count[max_cpus]{};

@@ -49,17 +49,33 @@ have - **the instruction before it is a `call`** - eliminates *all
 sixteen* in `securekernel`. So either the module is something else, or the
 word is not a return address.
 
-**The second is more likely, and it invalidates the hunt.** The captured
-word is whatever sits at RSP *inside Hyper-V's hypercall stub*, and the
-resume and yield instruction pointers are `+0x35` and `+0x32` into that
-stub - mid-routine. A stub that pushes anything before `vmcall` puts a
-saved register there, not a return address. Nothing was verified about the
-stub before reading its stack that way.
+That doubt was raised, tested, and **disproved**. The stub's own bytes,
+fetched by the in-VMM reader from the page `vtl1_yield_rip` names:
 
-**What would settle it**: disassemble the hypercall stub itself. Its
-address is known every boot from `vtl1_yield_rip`, and the in-VMM reader
-can fetch its bytes. Until the stub's prologue is known, no offset from
-that stack word means anything.
+```
++0x2b: 48 c7 c1 12 00 00 00   mov rcx, 0x12    ; HvCallVtlReturn
++0x32: 0f 01 c1               vmcall            <- the yield rip
++0x35: c3                     ret               <- the resume rip
+```
+
+It is a table of three-instruction thunks - `mov rcx, code; vmcall; ret` -
+and the `0x11` thunk sits at `+0x19`, exactly where VTL0 calls from.
+**Nothing is pushed**, so `[rsp]` at the `vmcall` *is* a return address and
+the original reading was right.
+
+So the caller is simply **not `securekernel`**. Filtering the sixteen
+candidate offsets by "the instruction before it is a `call`" - and
+disassembling from each containing symbol so the stream is aligned, since
+starting mid-instruction desynchronises x86 and was the first version's
+mistake - leaves **none**. Six are aligned and not calls;
+`SkmmProtectVirtualMemory + 0x34c` and `SkmmLoadEnclaveData + 0x37c` were
+the tempting names and both are ruled out.
+
+**What is left is an identification blocked by symbols, not by method.**
+The caller is a 64 KB-aligned VTL1 module at offset `...a3a4` that is not
+`securekernel` - `skci.dll` being the obvious candidate, whose symbols are
+not present locally. `securekernel.pdb`, `ntkrnlmp.pdb`, `ci.pdb` and
+`hvix64.pdb` are; `skci.pdb` is not.
 
 **What a real reader needs**: translate VTL1-linear to VTL1-physical
 through CR3, then VTL1-physical to host-physical through *root 1* rather

@@ -9176,6 +9176,30 @@ hypervisor::on_l2_exit(std::size_t cpu,
                     this->vtl1_yield_cr3[cpu] = this->vmcs.read(
                         arch::x86_64::vmx::vmcs::field::guest_cr3);
 
+                    // The stub's own bytes, once. See
+                    // `vtl1_stub_bytes`.
+                    if (0 == this->vtl1_stub_at[cpu]) {
+                        auto rip = this->vmcs.read(
+                            arch::x86_64::vmx::vmcs::field::guest_rip);
+                        auto from = rip & ~0x3full;
+
+                        for (std::size_t k{}; k < 64; ++k) {
+                            std::uint8_t byte{};
+
+                            if (auto to = translate_guest_linear(cpu,
+                                                                 from + k);
+                                to && read_guest_memory(
+                                          cpu,
+                                          *to,
+                                          std::as_writable_bytes(
+                                              std::span(&byte, 1)))) {
+                                this->vtl1_stub_bytes[cpu][k] = byte;
+                            }
+                        }
+
+                        this->vtl1_stub_at[cpu] = from;
+                    }
+
                     // And which image the caller belongs to, once. See
                     // `vtl1_yield_image`.
                     if ((0 == this->vtl1_yield_image[cpu]) &&
