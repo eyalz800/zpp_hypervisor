@@ -8535,6 +8535,26 @@ private:
      */
     alignas(page_size) std::uint8_t vp_assist[max_cpus][page_size]{};
     alignas(page_size) std::uint8_t evmcs[max_cpus][page_size]{};
+
+    /**
+     * The enlightened page standing in for this VMM's *own* VMCS.
+     *
+     * **Both or neither, and that is the layer below's rule rather than a
+     * choice here.** KVM's `handle_vmptrld` refuses an ordinary `VMPTRLD`
+     * outright once an enlightened VMCS has been used - `nested.c`,
+     * "Forbid normal VMPTRLD if Enlightened version was used". This VMM
+     * runs two VMCSs, its own to run the guest hypervisor and the
+     * second-level one, and alternates between them on every exit; with
+     * only the second-level one enlightened, the first `vmptrld` back
+     * faults. Measured: exactly one second-level entry, then a stop with
+     * the instruction pointer inside `vmptrld_raw`.
+     *
+     * So both live in enlightened pages and the switch between them is a
+     * store to `current_nested_vmcs` in the assist page. The layer below
+     * supports that - it releases and remaps whenever the pointer changes.
+     */
+    alignas(page_size) std::uint8_t evmcs_own[max_cpus][page_size]{};
+    std::uint64_t evmcs_own_physical[max_cpus]{};
     std::uint64_t vp_assist_physical[max_cpus]{};
     std::uint64_t evmcs_physical[max_cpus]{};
 
@@ -9523,6 +9543,15 @@ private:
      * behaves differently for being nested. See the definition.
      */
     void detect_underlying_hypervisor();
+
+    /**
+     * Points this processor at one of its two VMCSs.
+     *
+     * The one place that knows whether that means a `vmptrld` or a store
+     * to the assist page, so no call site has to. Returns true on failure,
+     * matching `vmptrld`'s sense, so the switch is a drop-in.
+     */
+    bool point_at_vmcs(std::size_t cpu, bool second_level);
 
     void initialize_vmcs_shadowing();
     void set_vmcs_shadowing(std::size_t cpu, bool enabled);

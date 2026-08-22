@@ -300,6 +300,59 @@ void hypervisor::detect_underlying_hypervisor()
         static_cast<std::uint64_t>(this->underlying_offers_evmcs));
 }
 
+/**
+ * Points this processor at one of its two VMCSs.
+ *
+ * With the enlightened VMCS in use there is no `vmptrld` to do: the layer
+ * below is told which page describes the next entry through
+ * `current_nested_vmcs` in the assist page, and this VMM's field accesses
+ * are aimed by pointing its cache row at the same page.
+ *
+ * **Both VMCSs are enlightened or neither is.** KVM refuses an ordinary
+ * `VMPTRLD` once an enlightened VMCS has been used, so a VMM that runs two
+ * VMCSs and alternates between them cannot enlighten only one - see
+ * `evmcs_own`.
+ */
+bool hypervisor::point_at_vmcs(std::size_t cpu, bool second_level)
+{
+    if constexpr (nested_vmx::evmcs_to_kvm) {
+        if ((cpu < max_cpus) && this->evmcs_active[cpu]) {
+            constexpr std::size_t current_nested_vmcs_offset = 48;
+
+            auto * page =
+                second_level ? this->evmcs[cpu] : this->evmcs_own[cpu];
+            auto physical = second_level ? this->evmcs_physical[cpu]
+                                         : this->evmcs_own_physical[cpu];
+
+            *reinterpret_cast<volatile std::uint64_t *>(
+                this->vp_assist[cpu] + current_nested_vmcs_offset) =
+                physical;
+
+            arch::x86_64::vmx::vmcs_cache_select_enlightened(
+                reinterpret_cast<std::uint64_t>(page), cpu);
+
+            return false;
+        }
+    }
+
+    auto region = second_level ? this->vmcs02_physical[cpu]
+                               : own_vmcs_region_physical(cpu);
+
+    // **A zero region is a failure only where it always was.** The
+    // second-level path never tested it - `build_vmcs02` handed the field
+    // to `vmptrld` whatever it held - and adding the test here changed
+    // behaviour rather than preserving it: `tests/nested_exit` builds a
+    // vmcs02 with the physical address left zero, so the new check made
+    // the function return before writing a single control, and fifteen
+    // assertions about the exit and entry controls failed at once. The
+    // harness was right and the helper was wrong.
+    if (!second_level && (0 == region)) {
+        return true;
+    }
+
+    return 0 != arch::x86_64::vmx::vmptrld(&region, cpu);
+}
+
 void hypervisor::initialize_vmcs_shadowing()
 {
     detect_underlying_hypervisor();

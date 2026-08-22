@@ -1668,32 +1668,7 @@ std::expected<void, zpp::error> hypervisor::build_vmcs02(std::size_t cpu)
     // page on every launch and resume. Their offsets are fixed by
     // `struct hv_vp_assist_page`: the control word is eight bytes at 32,
     // the flag one byte at 40, the pointer eight bytes at 48.
-    bool switch_failed = false;
-
-    if constexpr (nested_vmx::evmcs_to_kvm) {
-        if ((cpu < max_cpus) && this->evmcs_active[cpu]) {
-            constexpr std::size_t enlighten_vmentry_offset = 40;
-            constexpr std::size_t current_nested_vmcs_offset = 48;
-
-            auto * assist = this->vp_assist[cpu];
-
-            *reinterpret_cast<volatile std::uint64_t *>(
-                assist + current_nested_vmcs_offset) =
-                this->evmcs_physical[cpu];
-
-            *reinterpret_cast<volatile std::uint8_t *>(
-                assist + enlighten_vmentry_offset) = 1;
-
-            arch::x86_64::vmx::vmcs_cache_select_enlightened(
-                reinterpret_cast<std::uint64_t>(this->evmcs[cpu]), cpu);
-        } else {
-            switch_failed = arch::x86_64::vmx::vmptrld(
-                &this->vmcs02_physical[cpu], cpu);
-        }
-    } else {
-        switch_failed =
-            arch::x86_64::vmx::vmptrld(&this->vmcs02_physical[cpu], cpu);
-    }
+    auto switch_failed = point_at_vmcs(cpu, true);
 
     if (cpu < max_cpus) {
         this->phase_cycles[cpu][6] += arch::x86_64::rdtsc() - switch_start;
@@ -4467,8 +4442,7 @@ hypervisor::l2_entry_outcome hypervisor::enter_or_park_l2(std::size_t cpu)
     // processor is parked rather than lost. The alternative - waiting
     // here for ever - is the same darkness the hardware state produces,
     // only in root mode.
-    auto region = own_vmcs_region_physical(cpu);
-    if ((0 == region) || arch::x86_64::vmx::vmptrld(&region, cpu)) {
+    if (point_at_vmcs(cpu, false)) {
         // Same reasoning as reflect_l2_exit: without its own VMCS there is
         // no guest hypervisor left to go back to.
         __builtin_trap();
@@ -4791,10 +4765,8 @@ void hypervisor::reflect_l2_exit(std::size_t cpu,
     // Phase timing; see `phase_cycles`. The pair with the one in
     // build_vmcs02: together they are every VMCS switch a round trip
     // makes, so phases 6 and 7 price the whole of it.
-    auto region = own_vmcs_region_physical(cpu);
     auto switch_start = arch::x86_64::rdtsc();
-    auto switch_failed =
-        (0 == region) || arch::x86_64::vmx::vmptrld(&region, cpu);
+    auto switch_failed = point_at_vmcs(cpu, false);
 
     if (cpu < max_cpus) {
         this->phase_cycles[cpu][7] += arch::x86_64::rdtsc() - switch_start;
@@ -7453,10 +7425,8 @@ void hypervisor::materialise_l2_guest_state(std::size_t cpu)
         this->phase_calls[cpu][slot] += 1;
     };
 
-    auto region = this->vmcs02_physical[cpu];
-
     auto in_start = arch::x86_64::rdtsc();
-    if ((0 == region) || arch::x86_64::vmx::vmptrld(&region, cpu)) {
+    if ((0 == this->vmcs02_physical[cpu]) || point_at_vmcs(cpu, true)) {
         return;
     }
     mark(21, in_start);
@@ -7480,8 +7450,7 @@ void hypervisor::materialise_l2_guest_state(std::size_t cpu)
     mark(22, loop_start);
 
     auto out_start = arch::x86_64::rdtsc();
-    auto own = own_vmcs_region_physical(cpu);
-    if ((0 == own) || arch::x86_64::vmx::vmptrld(&own, cpu)) {
+    if (point_at_vmcs(cpu, false)) {
         // Without its own VMCS there is nothing to return to. Same
         // reasoning as `enter_or_park_l2`'s switch failure.
         __builtin_trap();

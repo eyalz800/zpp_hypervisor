@@ -5598,25 +5598,45 @@ void hypervisor::setup_vmcs(std::size_t cpu,
 
                 auto * assist = this->vp_assist[cpu];
                 auto * page = this->evmcs[cpu];
+                auto * own = this->evmcs_own[cpu];
 
                 for (std::size_t i{}; i < page_size; ++i) {
                     assist[i] = 0;
                     page[i] = 0;
+                    own[i] = 0;
                 }
 
                 this->vp_assist_physical[cpu] =
                     this->host_page_table.virtual_to_physical(assist);
                 this->evmcs_physical[cpu] =
                     this->host_page_table.virtual_to_physical(page);
+                this->evmcs_own_physical[cpu] =
+                    this->host_page_table.virtual_to_physical(own);
 
                 // Revision first, at offset zero, since the layer below
-                // rejects the page outright without it.
+                // rejects the page outright without it. Both pages: this
+                // VMM's own VMCS is enlightened too, because the layer
+                // below refuses an ordinary VMPTRLD once any enlightened
+                // VMCS has been used. See `evmcs_own`.
                 *reinterpret_cast<std::uint32_t *>(page) =
+                    arch::x86_64::vmx::evmcs_revision;
+                *reinterpret_cast<std::uint32_t *>(own) =
                     arch::x86_64::vmx::evmcs_revision;
 
                 arch::x86_64::wrmsr(vp_assist_msr,
                                     this->vp_assist_physical[cpu] |
                                         vp_assist_enable);
+
+                // Set once and never cleared. **Both** of this VMM's
+                // VMCSs are enlightened - they have to be, since the
+                // layer below refuses an ordinary VMPTRLD once any
+                // enlightened VMCS has been used - so the flag is not
+                // what distinguishes the two entries. `point_at_vmcs`
+                // does that, by naming the page.
+                constexpr std::size_t enlighten_vmentry_offset = 40;
+
+                *reinterpret_cast<volatile std::uint8_t *>(
+                    assist + enlighten_vmentry_offset) = 1;
 
                 this->evmcs_active[cpu] = true;
 

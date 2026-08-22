@@ -52,9 +52,26 @@ exactly **1**, cpu 0's RIP resolves inside **`vmptrld_raw`**, and neither
 `unhandled_exit` nor `vm_entry_failure` is set because the fault happens
 in an instruction wrapper rather than on an exit path.
 
-**So this is not a bug to patch, it is a design constraint: the
-enlightened VMCS is all-or-nothing for a processor.** A VMM that uses it
-for one VMCS cannot use a real one for another.
+**"All-or-nothing" is too strong, and the reason matters.** KVM's own
+comment beside `nested_evmcs_handle_vmclear` gives it: *"When Enlightened
+VMEntry is enabled on the calling CPU we treat memory area pointed by
+vmptr as Enlightened VMCS (as there's no good way to distinguish it from
+VMCS12)"*. It is not a policy, it is an ambiguity - with enlightened entry
+on, KVM cannot tell one kind of page from the other.
+
+And it is escapable: `nested_release_evmcs` fires on a **VMCLEAR of the
+enlightened page** (`nested.c:267`), after which an ordinary `VMPTRLD` is
+permitted again. So a VMM *can* alternate - it just has to release the
+enlightened pointer first, which costs an extra exit on every switch
+between its two VMCSs, and that is most of what the enlightened VMCS was
+bought to save.
+
+Catching the fault instead does not help: KVM queues an exception into the
+guest, and handling it does not make the `VMPTRLD` happen.
+
+**So the design is to issue no `VMPTRLD` at all**: both VMCSs live in
+enlightened pages and switching between them is a store to
+`current_nested_vmcs`.
 
 What the next attempt has to do, therefore:
 
