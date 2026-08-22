@@ -37,6 +37,22 @@ The other shapes seen - `0x00020002`, `0x00fe0002`, `0x01000000` - carry a
 kernel virtual address at +8 and a frame at +0x10, so this one is the
 request that names a frame *directly*.
 
+### It is stopped, not slow
+
+Every "frozen" claim in this file rested on 100-second windows, which
+cannot see a long-period retry. Watched for **twelve minutes** instead:
+
+```
+t+04min  39,292 calls   VINA set 18,115  clear 21,010
+t+08min  39,292 calls   VINA set 24,517  clear 21,010
+t+12min  39,292 calls   VINA set 30,949  clear 21,010
+```
+
+Protection calls and VINA-clear do not move at all while VINA-set climbs
+at 27/s. So the guest is executing and making no progress, and "it is
+merely very slow on a VMM 58 times taxed per exit" is closed as an
+explanation.
+
 ### What is and is not known about those frames
 
 - Composed permission is read-only; ours is `rwx`; so the guest
