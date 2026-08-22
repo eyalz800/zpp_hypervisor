@@ -484,7 +484,20 @@ inline void vmcs_cache_select(std::uint64_t region, std::size_t cpu)
             each = 0;
         }
 
+        // **And drop any enlightened identity the row was carrying.**
+        // A row describes one VMCS or one enlightened page, never both;
+        // `vmcs_cache_current_enlightened` answers from `evmcs` alone, so
+        // a row reclaimed for a real VMCS while `evmcs` still named a page
+        // sends every access to that page instead of to the VMCS.
+        //
+        // Measured, and it is why mixed mode got exactly one second-level
+        // entry: after the switch back to vmcs01 reclaimed the row, the
+        // next `build_vmcs02` wrote its fields through VMWRITE rather than
+        // into the enlightened page, so the page kept KVM's
+        // `hv_clean_fields` of 0xffff - every group marked clean - and the
+        // entry ran against a description nothing had updated.
         rows[victim].vmcs = region;
+        rows[victim].evmcs = 0;
         rows[victim].epoch = vmcs_cache_epoch;
         vmcs_cache_active[cpu] = victim;
     }

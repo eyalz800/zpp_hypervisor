@@ -8574,6 +8574,16 @@ private:
     std::uint64_t vp_assist_physical[max_cpus]{};
     std::uint64_t evmcs_physical[max_cpus]{};
 
+    /**
+     * Whether releasing the enlightened pointer left the page intact.
+     * A non-zero `clobbered` means the layer below no longer recognised
+     * the page as enlightened and performed a real VMCLEAR on it.
+     * @{
+     */
+    std::uint64_t evmcs_release_clean[max_cpus]{};
+    std::uint64_t evmcs_release_clobbered[max_cpus]{};
+    /** @} */
+
     /** Set once the layer below has accepted the assist page. */
     bool evmcs_active[max_cpus]{};
     /** @} */
