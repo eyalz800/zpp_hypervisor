@@ -5365,8 +5365,27 @@ void hypervisor::record_entry_failure(std::uint64_t flags)
 
     if ((0 != slot) && (slot <= max_cpus)) {
         this->entry_failure_flags[slot - 1] = flags;
-        this->entry_failure_error[slot - 1] =
-            this->vmcs.vm_instruction_error();
+
+        // **A real VMREAD instruction, not the accessor.** With an
+        // enlightened VMCS current the accessor is a load out of our own
+        // page, and the error is not there: KVM's `nested_vmx_failValid`
+        // writes it into its own cached vmcs12 and only marks the
+        // enlightened page for a *deferred* sync, which never happens
+        // because this path stops the processor.
+        //
+        // The instruction exits to KVM, which answers it from that cached
+        // copy - so it is the one way to get the number from here.
+        // Verified in `nested.c:177` before being relied on, after five
+        // readings this session that were real numbers about other
+        // questions.
+        std::uint64_t error{};
+        if (0 == arch::x86_64::vmx::vmread(
+                     static_cast<std::uint64_t>(
+                         arch::x86_64::vmx::vmcs::field::
+                             vm_instruction_error),
+                     &error)) {
+            this->entry_failure_error[slot - 1] = error;
+        }
     }
 }
 
