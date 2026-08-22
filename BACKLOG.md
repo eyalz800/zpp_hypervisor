@@ -19,12 +19,33 @@ Settled, and not worth re-deriving:
 - **The enlightened page is intact**: `revision_id` 1,
   `virtual_processor_id` 1.
 
-**Where it stops, in one number: `hv_clean_fields` reads `0xffff` at the
-failure.** KVM sets every group clean after an entry; `evmcs_store` resets
-it to zero on every field write. So `0xffff` means **no field was written
-into the page for the second entry** - the entry ran against a description
-nothing had updated, which is exactly "invalid control field" territory
-and matches `VMfailValid`.
+**`hv_clean_fields` reading `0xffff` at the failure is NOT evidence of
+anything, and reading it as evidence cost two more attempts.** The layer
+below sets every group clean once it has consumed the page, so `0xffff`
+after an entry is simply the normal state. It was read as "no field was
+written into the page", a theory was built on it - that
+`write_vmcs02_control`'s own cache skips unchanged controls and therefore
+never dirties the mask - and a fix was written and measured. The mask
+still read `0xffff` afterwards, because the layer below had set it again.
+
+The fix is harmless and arguably right, but **it was aimed at a fact that
+was never established.** Fifth instrument this session read as answering a
+question it was not asked, after the circular VMREAD count, `cycles/acc`
+as a per-access price, the share comparison across boot phases, and the
+never-written failure fields. That rate is itself the finding: at five,
+the discipline to stop and say so is worth more than another attempt.
+
+What is actually known about the failure: it is **`VMfailValid`** -
+`last_entry_failure_flags` `0x8000000000000042`, ZF set - and the error
+code that would name it is not readable from here, because the layer below
+writes it into its own vmcs12 and only syncs that to the enlightened page
+on an *exit*, which a failed entry is not.
+
+**So the next attempt needs the error before it needs a theory.** The one
+way to get it that does not depend on the enlightened path: after a failed
+entry, point at vmcs01 and read `vm_instruction_error` from the real VMCS,
+or read it through a bare `vmread` that bypasses the field cache
+entirely.
 
 So the question is narrow: **why `evmcs_store` does not run on the second
 `build_vmcs02`.** One candidate was found and fixed on the way and was not
