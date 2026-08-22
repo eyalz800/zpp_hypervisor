@@ -29,10 +29,26 @@ been circling:
   hypervisor is satisfying it by a route that never appears as an injected
   vector.
 
-Both are checkable and neither has been checked. The first by counting the
-reflected writes against the requests this VMM already censuses; the
-second by looking at what the guest hypervisor does to the guest's
-synthetic interrupt state instead of injecting.
+**The first is now checked, and this VMM does reflect them.**
+`l2_self_ipi_reflected` reads 0 against 446,434 recorded requests, which
+looks damning and is not: both it and `l2_self_ipi_swallowed` sit inside
+`if constexpr (nested_vmx::intercept_self_ipi)`, and the manifest says
+`swallow=0`. **Zero means the feature is compiled out, not that nothing
+was reflected.** That would have been the seventh single-number
+misreading of the session and was caught only by reading what gates the
+counter - which is now the standing rule: before believing a counter,
+read what increments it.
+
+So the requests reach the guest hypervisor. What it does with them is the
+remaining question, and the TPR-threshold census already taken answers
+half of it: it sets the threshold to **0 in 7,810,736 of 7,815,163
+cases**, and arms it at `0x2` only **4,408** times - which matches the
+~3,721 deliveries almost exactly.
+
+So the guest hypervisor takes the request, and then *usually does not arm
+the mechanism that would tell it when the vector could be delivered*. The
+next question is why: what distinguishes the 4,408 it arms from the
+140,000 it does not.
 
 **Why the counter had to be split to see this.**
 `l2_low_priority_no_event` alone had been read as evidence of a delivery
