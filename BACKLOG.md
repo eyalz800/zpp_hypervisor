@@ -42,6 +42,33 @@ So the trade is **1.8 million extra exits to remove 40 million**, and it
 keeps both savings: the guest hypervisor's accesses shadowed and free,
 this VMM's accesses loads and stores.
 
+### Attempted, and it does not work yet - reverted
+
+Two shapes were tried and each got exactly **one** second-level entry
+before stopping:
+
+- **Release with a VMCLEAR of the enlightened page.** The next entry
+  failed with carry set - VMfailInvalid, no current VMCS - so the release
+  tore the pointer down in a way the re-arm did not recover from.
+- **Release by clearing `enlighten_vmentry` alone.** The `VMPTRLD` back to
+  vmcs01 is then refused and the processor parks in `vmptrld_raw`.
+
+The second is the informative one. **KVM's refusal is keyed on its own
+cached `hv_evmcs_vmptr`, not on what the assist page currently says**, so
+clearing the flag does not release anything; only something that calls
+`nested_release_evmcs` does. That leaves the VMCLEAR as the only release,
+and the VMCLEAR shape has its own failure above.
+
+Reverted to the enlightened build that works - vmcs02 enlightened,
+shadowing given up - which is the one that gets past the plateau.
+
+**What the next attempt should establish first, cheaply:** whether a
+VMCLEAR-released enlightened pointer can be re-armed at all by writing the
+assist page again, or whether the layer below requires the pointer to
+*change* to re-map it (`nested.c:2101` remaps on `evmcs_gpa !=
+hv_evmcs_vmptr`). If it is the latter, two enlightened pages alternating
+would do it, and that is a small change rather than another design.
+
 It also respects the constraint that matters - the guest hypervisor is
 told nothing and goes on believing it is on bare metal, because the
 enlightenment stays a contract with the layer below.
