@@ -2335,6 +2335,7 @@ def main():
                "handler_first_tsc", "handler_last_tsc",
                "shadow_ept_evictions", "shadow_ept_resets",
                "shadow_ept_reclaims", "guest_nmis_reinjected",
+               "l2_simp_msr", "l2_siefp_msr",
                "shadow_ept_leaves_filled",
                # How each second-level fault was answered. Without this
                # the only visible fact is that faults arrive, and a fault
@@ -2632,6 +2633,8 @@ def main():
                   scalar_cpus * 4)
     monitor.queue(instance + off["shadow_ept_current_slot"], scalar_cpus)
     monitor.queue(instance + off["guest_nmis_reinjected"], 1)
+    monitor.queue(instance + off["l2_simp_msr"], scalar_cpus)
+    monitor.queue(instance + off["l2_siefp_msr"], scalar_cpus)
 
     # The IUM secure-call block. See hypervisor.h `vtl_call_block`.
     monitor.queue(instance + off["vtl_call_rdx"], scalar_cpus)
@@ -3259,6 +3262,19 @@ def main():
     # one to the level above. Both KVM (`vmx_check_nested_events`) and the
     # architecture say it should be reflected when vmcs12 asked. This
     # counter says whether it ever fires.
+    for _c in range(min(args.cpus, 1)):
+        _simp = read('l2_simp_msr', _c) or 0
+        _sief = read('l2_siefp_msr', _c) or 0
+        if _simp or _sief:
+            print(f"\nsynthetic interrupt controller pages, as the guest "
+                  f"named them:")
+            print(f"  SIMP  0x{_simp:016x}  enabled {_simp & 1}  "
+                  f"gpa 0x{_simp & ~0xfff:x}")
+            print(f"  SIEFP 0x{_sief:016x}  enabled {_sief & 1}  "
+                  f"gpa 0x{_sief & ~0xfff:x}")
+            print("  read the message slots with xp at the SIMP gpa: "
+                  "sixteen 256-byte slots, a non-zero type word at slot "
+                  "base means a message the guest has not consumed")
     print(f"\nNMIs re-injected into a guest rather than reflected: "
           f"{words.get(instance + off['guest_nmis_reinjected'], 0):,}")
     print("\ncpu  shadow-builds  cache-hits  evictions  resets  reclaims  leaves-filled")

@@ -4528,6 +4528,33 @@ private:
      */
     std::uint64_t synthetic_msr_reads[max_cpus][synthetic_msr_capacity]{};
     std::uint64_t synthetic_msr_writes[max_cpus][synthetic_msr_capacity]{};
+    /**
+     * The synthetic interrupt controller's message page, as the guest
+     * named it, and the event flag page beside it.
+     *
+     * **This is the one channel between the two trust levels that has
+     * never been read.** Everything about the VMX transport has been
+     * measured correct, both reference implementations were combed and
+     * found nothing, and what is left is the handshake the guest itself
+     * runs: VTL0 waits in `VslpEnterIumSecureMode` for VTL1, VTL1 selects
+     * the thread that would answer and puts it back. A two-sided
+     * handshake that has lost exactly one message looks precisely like
+     * that.
+     *
+     * `HV_X64_MSR_SIMP` (0x40000083) carries a guest-physical address in
+     * bits 63:12 and an enable in bit 0. The page holds sixteen 256-byte
+     * message slots, one per synthetic interrupt source; a slot whose
+     * header type is non-zero holds a message the guest has not consumed,
+     * and the controller will not deliver another into a slot that is
+     * still occupied. **A slot left occupied is a wedge, and it is
+     * visible from outside.**
+     *
+     * `HV_X64_MSR_SIEFP` (0x40000082) is the event-flag page, the other
+     * half of the same interface.
+     */
+    std::uint64_t l2_simp_msr[max_cpus]{};
+    std::uint64_t l2_siefp_msr[max_cpus]{};
+
     std::uint64_t synthetic_msr_last_write_tsc[max_cpus]
                                               [synthetic_msr_capacity]{};
 

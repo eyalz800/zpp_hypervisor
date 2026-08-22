@@ -38617,3 +38617,45 @@ defect found and fixed without moving the boot - which is itself worth
 stating: the nested surface had genuine faults in it, they were found by
 comparison against two independent implementations, and none of them is what
 stops Windows.
+
+## The SynIC message channel works: slot 3 toggles, it does not wedge
+
+Both wide reviews ended by pointing at the same remaining thread - the
+guest-observable handshake between the trust levels, the VP assist page and
+the synthetic interrupt controller's messages - as the one place neither had
+looked. It is now looked at.
+
+`HV_X64_MSR_SIMP` (0x40000083) is captured as the guest writes it:
+
+    SIMP  0x0000000117a32001   enabled 1   gpa 0x117a32000
+    SIEFP 0x0000000000000000   enabled 0
+
+The message page holds sixteen 256-byte slots, one per synthetic interrupt
+source. A slot whose type word is non-zero holds a message the guest has not
+consumed, **and the controller will not deliver another into an occupied
+slot** - so a slot left occupied is a wedge, and one that never clears would
+explain a timer that never fires again, which is exactly what
+`SkeSetTimer`'s work would depend on.
+
+**Slot 3 read occupied, with type `0x80000010` - `HvMessageTypeTimerExpired`,
+payload size 0x18.** On one sample that is a wedge and the whole hang
+explained.
+
+**Sampled fourteen times, it toggles:**
+
+    0x80000010  occupied   samples 0-3, 6-7, 9-10, 13
+    0x00000000  consumed   samples 4-5, 11-12
+    0x0000011800000000     one sample caught mid-write
+
+**Messages are posted and consumed continuously.** The channel is alive, the
+guest is answering it, and nothing is stuck in it. Not a wedge.
+
+**This is the discipline paying for itself.** A single read of that slot
+would have produced a confident, complete and wrong explanation - occupied
+timer message, controller blocked, secure kernel's timer never fires, thread
+never runnable - and it fits every symptom. Fourteen reads cost twenty
+seconds and refuted it. *Sample to find a hypothesis; census to believe it*
+was written in this file eleven errors ago, and it is the reason this one
+did not become the twelfth.
+
+So the SynIC message path joins the transport: measured, working, not this.

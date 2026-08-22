@@ -8600,6 +8600,25 @@ hypervisor::on_l2_exit(std::size_t cpu,
             } else if (basic_reason::wrmsr == reason.basic()) {
                 this->l2_synthetic_msr_writes[cpu][slot] += 1;
 
+                // The synthetic interrupt controller's two pages, as the
+                // guest names them. See `l2_simp_msr`: a message slot the
+                // guest never consumes stops the controller delivering
+                // into it, which is what a lost handshake looks like from
+                // outside, and nothing here has ever read that page.
+                constexpr std::uint64_t siefp_slot = 0x82;
+                constexpr std::uint64_t simp_slot = 0x83;
+
+                if ((simp_slot == slot) || (siefp_slot == slot)) {
+                    auto written = (context.rax & 0xffffffff) |
+                                   (context.rdx << 32);
+
+                    if (simp_slot == slot) {
+                        this->l2_simp_msr[cpu] = written;
+                    } else {
+                        this->l2_siefp_msr[cpu] = written;
+                    }
+                }
+
                 // Where the trust levels talk to each other. See
                 // `l2_vp_assist`: the loop's decision to call again is
                 // made from neither registers nor stack, both of which
