@@ -1,5 +1,55 @@
 # Known defects
 
+## RETRACTION: the "VTL1 instruction trace" is ntoskrnl, not securekernel
+
+**2026-08-22, found by debugging rather than by reasoning**, and it
+withdraws the largest claim made in this file.
+
+The trace headed *"instruction trace after HvCallVtlCall (expected VTL1)"*
+was symbolised against `securekernel.pdb` and produced a clean-looking
+loop: `ShvlpProtectPages`, `ShvlpInitiateFastHypercall`,
+`KiVinaInterruptShadow`, `KiVinaInterrupt`, `ShvlVinaHandler`,
+`SkCallNormalMode`, `SkiDeselectThread`, `SkpPrepareForReturnToNormalMode`.
+**All of it was false.**
+
+The check that found it was byte matching, not reasoning. Taking a
+21-byte run from the trace's tail -
+`4c8b7424304084ff0f95c04883c448415f5f5d5bc3` - and searching the binaries:
+
+```
+securekernel.exe   0 hits
+CI.dll             0 hits
+ntoskrnl.exe       1 hit at .text rva 0x310228  -> implied base 0xfffff80282000000
+```
+
+That base is **exactly** what the state dump prints as `kernel base`, and
+re-symbolising the whole trace against `ntkrnlmp.pdb` at it resolves
+**1,688 of 2,048 steps** into coherent names - `KiIsrLinkage`,
+`KiInterruptDispatchNoLockNoEtw`, `KiEndThreadCycleAccumulation`,
+`KiCallInterruptServiceRoutine`, `HalpTimerClockInterruptStub`.
+
+**So both captured traces are VTL0.** The secure kernel's execution has
+**never been observed** in this investigation, and every statement about
+what VTL1 does instruction by instruction is withdrawn:
+
+- "the secure kernel is inside `ShvlpProtectPages` when it is interrupted"
+- "VTL1 dispatches `KiVinaInterrupt` through its own descriptor table"
+- the whole "VTL1 loop, symbolised" entry
+- the reasoning built on `ShvlpProtectPages`' disassembly, which describes
+  a real function that there is no evidence VTL1 was executing
+
+**What survives.** The identification of `securekernel` itself does not
+depend on the trace: it came from a 23-byte match of the *captured caller
+bytes*, unique in `securekernel.exe` at RVA `0xd93a4` and absent from
+`ntoskrnl.exe` and `CI.dll`. That stands on its own evidence.
+
+**The lesson, which is the same one three times over.** Nearest-symbol
+lookup against a wrong module returns plausible names for every address,
+and plausibility is not a check. The discriminating test is byte
+identity - does this exact run of bytes exist in that binary - and it
+costs nothing. **Symbolise nothing without it.**
+
+
 ## `ShvlpProtectPages` disassembled: it stops on the **final** batch
 
 **2026-08-22.** Securekernel's operation semantics were listed as needing
