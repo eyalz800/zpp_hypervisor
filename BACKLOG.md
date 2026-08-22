@@ -1,5 +1,66 @@
 # Known defects
 
+## The freeze is the secure kernel growing its page pool, and both halves are now byte-proven
+
+**2026-08-22.** With both module bases derived from the trace's own
+instruction bytes rather than assumed, all three traces symbolize and the
+byte check passes: securekernel 351 of 356 steps, ntoskrnl 1,542 of 1,606
+and 1,895 of 1,967. The five and sixty-odd mismatches are 16-byte windows
+straddling a section end.
+
+**VTL1**, entered by `HvCallVtlCall`:
+
+```
+HvcallpExtendedFastHypercall     3
+ShvlpInitiateFastHypercall      13
+ShvlpProtectPages               72
+SkmiProtectSecureKernelPages    20
+KiVinaInterruptShadow            4
+KiVinaInterrupt                 29
+ShvlVinaHandler                 18
+__memset_spec_ermsb             33
+SkCallNormalMode                37
+SkpPrepareForNormalCall         32
+SkiDeselectThread               45
+SkiDetachThread                  7
+SkpPrepareForReturnToNormalMode 23
+```
+
+**VTL0**, entered by `HvCallVtlReturn`:
+
+```
+HvlSwitchToVsmVtl1               29
+VslpEnterIumSecureMode           29
+VslSetPlaceholderPages           10
+MiUpdateSlabPagePlaceholderState  8
+MiGetPageFromSlabAllocator       17
+MiUnlockPageInline               13
+MiGetSlabPage                    27
+MiAllocateDriverPage             11
+   ... then KiIsrLinkage into the clock ISR and HvlEndSystemInterrupt
+```
+
+They compose into one mechanism, and it names the counter that freezes.
+**The 39,303 `HvCallModifyVtlProtectionMask` calls are the secure kernel
+growing its own protected page pool.** VTL0 takes pages from the slab
+allocator and donates them through `VslSetPlaceholderPages`; VTL1 protects
+each batch through `SkmiProtectSecureKernelPages` -> `ShvlpProtectPages`,
+which *is* the hypercall being counted. Then the notification arrives and
+the secure kernel calls back down.
+
+Two corrections this forces:
+
+- **`ShvlpProtectPages` is real after all.** The retraction of it was right
+  about the evidence - that trace was symbolized against a base that had
+  never been checked - and wrong about the conclusion. It is present at a
+  base carrying 246 unanimous votes. Retracting a claim does not make its
+  negation true; it returns the question to open.
+- **"Preempted before doing any work" was wrong.** The secure kernel does
+  a great deal of work before the notification arrives - a fast hypercall,
+  a page-protection pass and a memset. The earlier reading came from the
+  same unverified base.
+
+
 ## VTL1 observed for the first time, and it is preempted before it works
 
 **2026-08-22.** Arming the step trace on **VTL1's vmcs12** instead of on
