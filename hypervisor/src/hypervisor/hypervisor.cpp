@@ -5579,6 +5579,19 @@ void hypervisor::setup_vmcs(std::size_t cpu,
         // enlightened page, and `enlighten_vmentry` says to use it. The
         // revision must be 1, which the layer below checks first.
         if constexpr (nested_vmx::enabled && nested_vmx::evmcs_to_kvm) {
+            // **Before the test, not after it.** The detection used to
+            // run only from `initialize_vmcs_shadowing`, which is later in
+            // this function, so on the boot processor this block tested a
+            // flag nothing had set yet and reported "not offered" - while
+            // the very next log line said it was offered. Every other
+            // processor then read the flag the boot processor had left
+            // behind and enabled correctly, which is the shape that makes
+            // this kind of ordering bug look like a per-processor fault.
+            //
+            // Idempotent, so calling it from both places costs one CPUID
+            // and keeps each caller honest about its own precondition.
+            detect_underlying_hypervisor();
+
             if (this->underlying_offers_evmcs && (cpu < max_cpus)) {
                 constexpr std::size_t vp_assist_msr = 0x40000073;
                 constexpr std::uint64_t vp_assist_enable = 1;
