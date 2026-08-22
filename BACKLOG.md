@@ -1,5 +1,60 @@
 # Known defects
 
+## The enlightened VMCS is available to us, and invisible to the guest
+
+**2026-08-22.** The precondition for the only remaining step change is
+proven on the rig rather than argued.
+
+Booted with `ZPP_CPU_EXTRA=",hv-vapic,hv-evmcs"` - the launcher already
+takes that hook, so no script was edited and nothing persists. QEMU 11.0.3
+accepts the properties, and refuses `hv-evmcs` alone with "requires
+Hyper-V virtual APIC (hv-vapic)", which is the whole of the dependency.
+
+What this VMM then sees below itself:
+
+```
+underneath: cpuid 0x40000000 max 0x4000000a signature "Micr" "osof" "t Hv"
+underneath: interface signature 0x31237648 = "Hv#1"
+underneath: recommendations 0x4008, enlightened vmcs offered = 1
+```
+
+Bit 14 of leaf `0x40000004` is set: **KVM offers the enlightened VMCS to
+us.**
+
+**And the guest cannot see it.** The same run reports `cpuid leaves
+recorded (8415 entries, 0 in the hypervisor range)` - the second-level
+guest never asks anything in `0x40000000`-`0x4fffffff`, and this VMM
+answers that whole range itself rather than forwarding it, with
+`announce_hypervisor_bit` off. The guest hypervisor goes on believing it
+is on bare metal, which is the requirement this must not violate. The boot
+is otherwise unchanged: 39,322 protection calls, same shape as without the
+flags.
+
+Why it is worth building, in one line each:
+
+- Every VMCS access is an exit to KVM at about 4,600 cycles.
+- KVM will not use a shadow VMCS on our behalf and cannot be made to.
+- An exit carries about 36 accesses, so they are essentially its whole
+  195,000-cycle cost.
+- That cost is what pins the guest at CLOCK level 77% of the time, which
+  is why vector `0x2f` is delivered on 0.6% of the times it is asked for,
+  and why `Phase1Initialization` never drains its deferred work.
+
+With eVMCS those accesses become writes to a shared page.
+
+**Scope, so it is not started blind.** The ABI is `struct
+hv_enlightened_vmcs` (packed, ~150 fields) and `struct hv_vp_assist_page`
+carrying `enlighten_vmentry` and `current_nested_vmcs`, with
+`HV_X64_MSR_VP_ASSIST_PAGE` at `0x40000073`. The work is: a per-processor
+assist page and eVMCS page; a field-encoding to page-offset map; routing
+vmcs02 accesses to the page when the flag is on and vmcs02 is the current
+row - which the per-VMCS cache rows already make a natural place; and the
+`hv_clean_fields` bitmap so L0 knows what changed.
+
+It must stay a contract between this VMM and KVM alone: detected at run
+time, behind a flag, off by default, never advertised upward.
+
+
 ## Shadow VMCS: the processor has it, KVM will not use it for us
 
 **2026-08-22.** Worth writing down carefully because it was got wrong once
