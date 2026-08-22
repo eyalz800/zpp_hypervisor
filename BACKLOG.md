@@ -47,6 +47,20 @@ That is two independent measurements, taken days apart in the
 investigation, pointing at the same handful of physical frames. It is the
 best lead in this file and it is nothing to do with interrupts.
 
+### And suppression moves the stall rather than removing it
+
+Run with `ZPP_SUPPRESS_VINA=ON` to the end: the guest stops calling into
+VTL1 entirely after 21,029 calls - twenty-two more than baseline - and its
+only remaining work is a `tpr-below` exit at a **single instruction**,
+`ntoskrnl+0x6b3318` = **`KiDpcInterrupt+0x3b8`**. Ninety-five thousand
+working exits, nothing else in the ring.
+
+So the deferred-procedure-call interrupt is delivered, its handler runs,
+and the handler is where the guest then spins. The switch is a diagnostic,
+not a fix, and is left off. What it bought is the negative result above,
+which is worth the work: **the secure kernel yielding on VINA is not what
+stops this boot.**
+
 ### What to do with it
 
 The composed permission is `read-only` because the guest hypervisor's own
