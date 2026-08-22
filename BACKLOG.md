@@ -1,5 +1,59 @@
 # Known defects
 
+## Shadow VMCS: the processor has it, KVM will not use it for us
+
+**2026-08-22.** Worth writing down carefully because it was got wrong once
+in the middle of it, in the direction that sounds more authoritative.
+
+What was claimed first, from `/proc/cpuinfo`: that this i7-8565U does not
+enumerate VMCS shadowing, since its `vmx flags` line lists `ept vpid
+tpr_shadow flexpriority pml ept_violation_ve ept_mode_based_exec` and no
+`shadow_vmcs`. **That conclusion was wrong.** Read back from this VMM's
+own cache of the capability MSRs, as a KVM guest:
+
+```
+0x48b PROCBASED_CTLS2 = 0x001378ff00000000   bit 14 SHADOW_VMCS : YES
+0x485 MISC            = 0x0000000020000165   bit 29 VMWRITE RO  : YES
+```
+
+and `vmcs_shadowing_enabled` reads 1 in the running hypervisor, which is
+computed from exactly that bit - so this VMM *is* using hardware VMCS
+shadowing toward the guest hypervisor, and could not be if the control did
+not exist. An absent name in a `cpuinfo` flag list is not the same fact as
+a clear bit, and it was treated as one.
+
+What is true, and is the part that matters:
+
+- **`enable_shadow_vmcs` is `N`, and forcing it does nothing.** Reloading
+  the module with `modprobe kvm_intel enable_shadow_vmcs=1` still reads
+  `N`. There is no `modprobe.d` entry and nothing on the kernel command
+  line, so it is KVM's own decision: `nested.c:7238` clears the parameter
+  when `cpu_has_vmx_shadow_vmcs()` is false, and that helper tests the
+  *physical* `vmcs_config` rather than the values KVM synthesises for a
+  guest.
+- So KVM will not use a shadow VMCS to accelerate **our** VMREAD and
+  VMWRITE, which is the only thing that would make them cheap. They stay
+  at about 4,600 cycles each, and at ~36 accesses an exit that is the
+  whole cost of an exit.
+
+The two are not the same question and reading either as the other is the
+trap here: *we* have shadow VMCS to offer our guest; *KVM* will not offer
+it to us.
+
+**What remains, and it is the only step change left**: the enlightened
+VMCS. KVM implements Hyper-V's eVMCS for a nested guest, which replaces
+VMREAD and VMWRITE with plain writes to a shared page - removing the tax
+rather than trimming it. It requires `hv-evmcs` on the QEMU command line
+and the eVMCS field layout and clean-fields bitmap here.
+
+It must be built so the guest cannot see it: detected at run time, behind
+a flag, off by default, and used only toward KVM. That is already the
+shape of this tree - the whole `0x40000000`-`0x4fffffff` CPUID range is
+answered here rather than forwarded, and `hvbit` is off - so the guest
+hypervisor goes on believing it is on bare metal, which is the requirement
+it must not violate.
+
+
 ## The VMCS field cache, measured end to end - and one idea that did not pay
 
 **2026-08-22.** Every VMCS access is an exit to KVM at about 4,600 cycles,
