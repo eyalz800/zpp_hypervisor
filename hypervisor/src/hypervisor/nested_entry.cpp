@@ -9076,6 +9076,30 @@ hypervisor::on_l2_exit(std::size_t cpu,
                         this->vtl_call_blocked[cpu] += 1;
                     }
 
+                    // What VTL0 is leaving in the field the secure
+                    // kernel's loop turns on. See
+                    // `vtl_call_block_word`.
+                    if (0 != this->vina_block_l1_physical[cpu]) {
+                        std::uint32_t word{};
+
+                        if (read_guest_physical(
+                                this->vina_block_l1_physical[cpu],
+                                std::as_writable_bytes(
+                                    std::span(&word, 1)))) {
+                            this->vtl_call_block_last[cpu] = word;
+
+                            auto request = (word >> 8) & 0xff;
+                            auto done = word & 0xff;
+
+                            if ((request < 8) && (done < 4)) {
+                                this->vtl_call_block_word[cpu][request]
+                                                         [done] += 1;
+                            } else {
+                                this->vtl_call_block_other[cpu] += 1;
+                            }
+                        }
+                    }
+
                     // And where the call came from. See `vtl0_call_rip`.
                     auto & where = this->vtl0_call_count[cpu];
                     auto at = where % vtl1_resume_capacity;

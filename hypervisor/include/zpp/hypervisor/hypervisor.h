@@ -10764,6 +10764,32 @@ private:
      * @{
      */
     std::uint64_t vtl1_gs_zero[max_cpus]{};
+
+    /**
+     * What the secure-call block's first dword holds at each
+     * `HvCallVtlCall`, which is the exact field the loop turns on.
+     *
+     * `SkpReturnFromNormalMode` reads that dword, decrements it, and
+     * returns to the secure kernel's caller only if the result is zero -
+     * so **the call completes if and only if VTL0 leaves `1` there**. It
+     * is observed holding `0x400`: request byte 4, the VINA notification,
+     * sitting in byte 1 with byte 0 clear.
+     *
+     * The block's first quadword is known to change 12,351 times, so VTL0
+     * writes to it constantly and simply never leaves the one value that
+     * ends the call. This census says what it leaves instead, per call,
+     * which is the last thing between the measurements and the cause.
+     *
+     * Indexed by the low byte pair, so request code and completion flag
+     * are separable: `[byte1][byte0]`.
+     * @{
+     */
+    std::uint64_t vtl_call_block_word[max_cpus][8][4]{};
+    std::uint64_t vtl_call_block_other[max_cpus]{};
+    std::uint64_t vtl_call_block_last[max_cpus]{};
+    /**
+     * @}
+     */
     std::uint64_t vtl1_gs_block[max_cpus][32]{};
     /**
      * @}

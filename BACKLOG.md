@@ -47,15 +47,28 @@ jmp   0x...934c           ; and loop back into SkCallNormalMode
 ```
 
 **The secure kernel returns to its caller only when that first dword is
-`1`.** The block this VMM has been reading all session holds
-`0x0000000100000400` - request byte 4 in byte 1 - so the `dec` never
-yields zero and it loops. Its first quadword changes 12,351 times, so VTL0
-*is* writing to it; it is never left holding `1`.
+`1`.**
 
-**That is the loop condition stated from the instructions rather than
-inferred**, and it moves the question to a single field: what VTL0 must
-write into the secure-call block's first dword to end the call, and why it
-writes everything except that.
+> **RETRACTED immediately, by censusing the field itself.** The dword at
+> `gs:0x10` is **`1` on every call** - code 0, byte 0 = 1, 24,953 of
+> 24,953, nothing else and nothing outside the table. So the `dec` *does*
+> yield zero, `SkpReturnFromNormalMode` **takes the full-return path every
+> time**, and the `jmp` back into `SkCallNormalMode` is the branch that is
+> never taken. The secure kernel is behaving normally here.
+>
+> The error was conflating two different structures. `vina_block`, which
+> `gs:0x10` names and whose first dword is `1`, is not the **IUM
+> secure-call block** at a separate address whose first quadword reads
+> `0x0000000100000400`. The `0x400` that the loop-condition story rested
+> on came from the second while the instruction reads the first. Two
+> blocks, two addresses, one careless identification - the same class of
+> mistake as reading the wrong virtual-APIC page earlier in this file.
+
+**What survives, and it is the valuable half**: the image base is
+computable as `vtl1_caller_at - 0xd93a4`, `securekernel.pdb` is the right
+build, and `SkpReturnFromNormalMode` is now disassembled with symbols. All
+of VTL1 is readable. What that reading has *not* yet found is anything
+misbehaving.
 
 
 ## The VTL1 per-processor block, and why the scan anchor was wrong
