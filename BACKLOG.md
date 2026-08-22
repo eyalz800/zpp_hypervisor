@@ -1,5 +1,61 @@
 # Known defects
 
+## Virtual-interrupt delivery cannot be offered on this rig, and that is hardware
+
+**Measured 2026-08-22**, after implementing the feature the deadlock
+evidence pointed at. The implementation is sound and the experiment it
+was built for **cannot run here**, which is worth recording so it is not
+attempted again.
+
+`ZPP_NESTED_VID` offers secondary bits 8 and 9, carries the guest
+interrupt status into vmcs02 and back, and passes the four EOI-exit
+bitmaps through. `tests/nested_exit` caught a regression in it inside a
+minute - gating `virtualized_eoi` and `apic_write` on the control answered
+`false` with the knob off, dropping an exit only the level above can
+handle - and the suite is 24/24 with the switch in both positions.
+
+**It changes nothing on the rig, because the offer never reaches the
+guest.** The capability MSR is narrowed against the *hardware* one:
+
+```
+PROCBASED_CTLS2 answered   0x001138ee00000000    bits 8, 9 clear
+vmcs12_secondary_asked     0x001010ae            bits 8, 9 clear
+```
+
+With the switch on, the guest hypervisor still never asks, because it was
+never told. The run that froze at 39,291 with `vid=1` therefore **tested
+nothing**.
+
+The cause is the host, and it is not a setting:
+
+```
+/sys/module/kvm_intel/parameters/enable_apicv        N
+/sys/module/kvm_intel/parameters/enable_shadow_vmcs  N
+```
+
+`kvm_intel` was unloaded and reloaded with `enable_apicv=1
+enable_shadow_vmcs=1` - cleanly, with no VM running and a fallback to
+defaults - and **both still read `N`**. KVM ands the module parameter with
+its own hardware check, so it refused. There is no `modprobe.d` entry and
+nothing on the kernel command line to blame. The processor is an i7-8565U,
+which `nested_vmx.h` already records as lacking `tsc_scaling` and
+`shadow_vmcs` in its VMX flags.
+
+**So on this rig:**
+
+- **virtual-interrupt delivery is unavailable**, and the best-evidenced
+  fix for the DISPATCH_LEVEL deadlock cannot be tested at all;
+- **the 58x nesting tax is irreducible**, because `enable_shadow_vmcs=N`
+  means KVM shadows no fields for us and every VMCS access we make is a VM
+  exit into it. That is separate from *our* shadowing of the guest
+  hypervisor's VMCS, which is on and working - `copy_shadow_to_vmcs12`
+  costs 58,585 cycles a round trip, so it is plainly not returning early.
+
+Neither is a defect in this tree. Both are limits of the machine, and both
+should be checked on any other host before the corresponding work is
+planned again.
+
+
 ## Touching the self-IPI path freezes at 19,975, whichever way you touch it
 
 **Measured 2026-08-22, third and fourth data points on a signature this
