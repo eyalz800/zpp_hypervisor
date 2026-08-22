@@ -73,6 +73,36 @@ guest, and handling it does not make the `VMPTRLD` happen.
 enlightened pages and switching between them is a store to
 `current_nested_vmcs`.
 
+### Both enlightened: implemented, and it hangs in VMLAUNCH
+
+Built behind `ZPP_EVMCS_TO_KVM`, off by default. Two further bugs were
+found and fixed getting there, both worth keeping:
+
+- **Nothing pointed at the enlightened page before `setup_vmcs` wrote
+  vmcs01's fields**, so setup filled the *real* region and the enlightened
+  one kept nothing but its revision. Zero exits and zero second-level
+  entries - a hypervisor that never launched.
+- **The VMREAD and VMWRITE bitmap pointers were written under a build
+  switch** while the thing that turns shadowing off for an enlightened
+  build is a *runtime* flag. Those fields have no enlightened home and the
+  addresses are non-zero, so they would have trapped. Gated on the runtime
+  flag, which is the one that knows.
+
+Where it stops now, and this is the next thing to chase: **cpu 0 hangs
+inside `vmlaunch` itself** - `RIP` resolves to
+`zpp::arch::x86_64::vmx::vmlaunch`, `exits` is 0 with the reader proven,
+`build_vmcs02` shows one call, and cpu 1 sits in firmware. So the layer
+below neither runs the guest nor fails the launch back to us; it does not
+return at all.
+
+That is a different failure from the previous one and rules out the
+`VMPTRLD` refusal, which is what this change was for. The candidates,
+untested: the enlightened page is missing a field VM entry requires and
+KVM is looping on a failed entry; `enlighten_vmentry` being set for this
+VMM's *own* entry is not something KVM expects from a guest that is not
+Hyper-V; or the assist page's `nested_control` needs to be written before
+the first enlightened entry.
+
 What the next attempt has to do, therefore:
 
 - Give **both** VMCSs enlightened pages, and switch between them by
