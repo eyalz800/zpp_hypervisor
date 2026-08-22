@@ -1,5 +1,55 @@
 # Known defects
 
+## The VTL1 caller, read without symbols
+
+**2026-08-22.** Symbols for the module are not available, and are not
+needed: the return address is by construction an instruction boundary, so
+disassembling forward from it is sound. `vtl1_caller_code` captures 128
+bytes there and it decodes cleanly:
+
+```
+movq  %rax, (%rsp)
+movq  %rbp, 0x8(%rsp)
+movq  %rdx, 0x10(%rsp)
+movq  %gs:0x10, %rax          ; the per-processor block
+movq  %rsp, %rbp
+movq  %rcx, 0x10(%rax)
+movq  (%rsp), %rcx
+movq  %rcx, 0x8(%rax)
+andb  $-0x7, %gs:0xc0
+testb $0x1, %gs:0xab0
+je    +0x7f
+movzwl %gs:0xab2, %eax
+cmpw  %ax, %gs:0xab8
+je    +0x60
+movw  %ax, %gs:0xab8
+movl  $0x48, %ecx  ; xorl %edx,%edx ; wrmsr     <- IA32_SPEC_CTRL
+movzbl %gs:0xab0, %edx
+testl $0x4, %edx
+je    +0x7f
+movl  $0x1, %eax ; xorl %edx,%edx ; movl $0x49, %ecx ; wrmsr   <- IBPB
+```
+
+**This is the hypercall *return* path in VTL1**, not the memory manager:
+it saves `rcx` and the return address into the per-processor block at
+`gs:0x10`, clears two flag bits at `gs:0xc0`, and then conditionally
+restores speculation control - `IA32_SPEC_CTRL` when a flag at `gs:0xab0`
+is set and the cached value at `gs:0xab8` differs, then `IA32_PRED_CMD`
+(IBPB) when another bit is set.
+
+**And those two MSRs are not mishandled here.** They are architectural and
+inside `0`-`0x1fff`, so the bitmap governs them, and this VMM's own
+intercepts are only `IA32_APIC_BASE`, `IA32_FEATURE_CONTROL` and the VMX
+capability block `0x480`-`0x491`. Neither `0x48` nor `0x49` appears
+anywhere in the MSR handling, so the writes are either native or the guest
+hypervisor's to intercept. Another elimination.
+
+So the code at the return address is ordinary virtual-processor plumbing
+with nothing wrong in it, and it does not name the work item that stalled.
+Finding that still needs either `skci.pdb` or a walk further up VTL1's
+stack than the single frame currently captured.
+
+
 ## Reading the secure kernel's own state needs a reader that does not exist yet
 
 **2026-08-22.** Every measurement in this investigation has been of VTL0's

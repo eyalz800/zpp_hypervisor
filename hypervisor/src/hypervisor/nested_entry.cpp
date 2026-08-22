@@ -9176,6 +9176,29 @@ hypervisor::on_l2_exit(std::size_t cpu,
                     this->vtl1_yield_cr3[cpu] = this->vmcs.read(
                         arch::x86_64::vmx::vmcs::field::guest_cr3);
 
+                    // The caller's own code, once, from the address it
+                    // returns to. See `vtl1_caller_code`.
+                    if ((0 == this->vtl1_caller_at[cpu]) &&
+                        (0 != this->vtl1_yield_stack[cpu][0])) {
+                        auto from = this->vtl1_yield_stack[cpu][0];
+
+                        for (std::size_t k{}; k < 128; ++k) {
+                            std::uint8_t byte{};
+
+                            if (auto to = translate_guest_linear(cpu,
+                                                                 from + k);
+                                to && read_guest_memory(
+                                          cpu,
+                                          *to,
+                                          std::as_writable_bytes(
+                                              std::span(&byte, 1)))) {
+                                this->vtl1_caller_code[cpu][k] = byte;
+                            }
+                        }
+
+                        this->vtl1_caller_at[cpu] = from;
+                    }
+
                     // The stub's own bytes, once. See
                     // `vtl1_stub_bytes`.
                     if (0 == this->vtl1_stub_at[cpu]) {

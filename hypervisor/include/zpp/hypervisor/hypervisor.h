@@ -10703,6 +10703,25 @@ private:
     std::uint8_t vtl1_stub_bytes[max_cpus][64]{};
     std::uint64_t vtl1_stub_at[max_cpus]{};
 
+    /**
+     * The VTL1 caller's own code, at the address its `call` returns to.
+     *
+     * Symbols for that module are not available locally - it is a
+     * 64 KB-aligned VTL1 image at offset `...a3a4` that is provably not
+     * `securekernel` - but symbols are not needed to read what it does.
+     * The return address is by construction an instruction boundary, so
+     * disassembling **forward** from it is sound, and that is the half
+     * that matters: it shows what the caller checks when the secure call
+     * comes back and where it branches.
+     *
+     * This is the same technique that settled VTL0's side, where
+     * `VslpEnterIumSecureMode` turned out to read a status at `[rbx+8]`
+     * and jump backwards - the loop, read straight out of the
+     * instructions rather than inferred.
+     */
+    std::uint8_t vtl1_caller_code[max_cpus][128]{};
+    std::uint64_t vtl1_caller_at[max_cpus]{};
+
     /** The same for where it *yields*, taken at the `HvCallVtlReturn`. */
     std::uint64_t vtl1_yield_rip[max_cpus][vtl1_resume_capacity]{};
     std::uint64_t vtl1_yield_count[max_cpus]{};
