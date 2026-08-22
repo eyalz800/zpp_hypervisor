@@ -16,6 +16,21 @@ tpr-below  rip=0xfffff806a00aeb0c
 **That is the whole of the guest's work.** Everything else in the full
 ring is clock machinery the working ring is built to exclude.
 
+> **Correction, same day, by delta rather than by inspection.** The
+> heading's "never dispatched" is **wrong** and the counters say so. Over
+> ninety seconds at the freeze: `tpr-below` **+2,932**, vector `0x2f`
+> injected **+2,916**, `HvCallVtlCall` **+2,967** - one-to-one within 2%.
+> **The deferred procedure call is delivered, once per cycle, about
+> thirty-two times a second.** The guest receives it and still makes no
+> progress, so the fault is not in delivery.
+>
+> What the same delta does show as anomalous is `int-window` at
+> **+104,451**, about **36 interrupt-window exits per cycle** against one
+> injection. Hyper-V arms the window, takes the exit, and re-arms, dozens
+> of times before each single delivery. On hardware it would arm once.
+> That ratio is the open lead, and it is a measurement rather than a
+> story.
+
 Symbolised against `ntkrnlmp.pdb` at the kernel base this VMM logs -
 remembering that `llvm-pdbutil dump --publics` gives the offset in
 **decimal** and the segment is 1-based into the PE section table, both of
