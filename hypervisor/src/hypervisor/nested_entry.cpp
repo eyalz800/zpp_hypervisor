@@ -1654,8 +1654,46 @@ std::expected<void, zpp::error> hypervisor::build_vmcs02(std::size_t cpu)
     stamp(3);   // bitmaps merged, this VMM's own controls in hand
 
     auto switch_start = arch::x86_64::rdtsc();
-    auto switch_failed =
-        arch::x86_64::vmx::vmptrld(&this->vmcs02_physical[cpu], cpu);
+
+    // **With the enlightened VMCS there is nothing to load.** The
+    // second-level VMCS is a page shared with the layer below, so making
+    // it current is pointing this processor's cache row at it; the layer
+    // below is told which page to use through the assist page, and every
+    // field access after this becomes a store instead of a VMWRITE.
+    //
+    // `enlighten_vmentry` and `current_nested_vmcs` are set here rather
+    // than once at setup because the layer below reads them at the entry
+    // itself, and this VMM runs its own VMCS in between - see KVM's
+    // `nested_vmx_handle_enlightened_vmptrld`, which reads the assist
+    // page on every launch and resume. Their offsets are fixed by
+    // `struct hv_vp_assist_page`: the control word is eight bytes at 32,
+    // the flag one byte at 40, the pointer eight bytes at 48.
+    bool switch_failed = false;
+
+    if constexpr (nested_vmx::evmcs_to_kvm) {
+        if ((cpu < max_cpus) && this->evmcs_active[cpu]) {
+            constexpr std::size_t enlighten_vmentry_offset = 40;
+            constexpr std::size_t current_nested_vmcs_offset = 48;
+
+            auto * assist = this->vp_assist[cpu];
+
+            *reinterpret_cast<volatile std::uint64_t *>(
+                assist + current_nested_vmcs_offset) =
+                this->evmcs_physical[cpu];
+
+            *reinterpret_cast<volatile std::uint8_t *>(
+                assist + enlighten_vmentry_offset) = 1;
+
+            arch::x86_64::vmx::vmcs_cache_select_enlightened(
+                reinterpret_cast<std::uint64_t>(this->evmcs[cpu]), cpu);
+        } else {
+            switch_failed = arch::x86_64::vmx::vmptrld(
+                &this->vmcs02_physical[cpu], cpu);
+        }
+    } else {
+        switch_failed =
+            arch::x86_64::vmx::vmptrld(&this->vmcs02_physical[cpu], cpu);
+    }
 
     if (cpu < max_cpus) {
         this->phase_cycles[cpu][6] += arch::x86_64::rdtsc() - switch_start;

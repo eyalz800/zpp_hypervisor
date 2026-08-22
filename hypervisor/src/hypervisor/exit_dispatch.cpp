@@ -79,6 +79,26 @@ void hypervisor::on_vm_exit(std::uint64_t cpuid,
     // from inside their own wrappers in `vmcs.h`, where the bare
     // instructions are named `_raw` so they cannot be reached by
     // accident.
+    // **The enlightened entry is armed per entry, and disarmed here.**
+    // This VMM runs two VMCSs - its own, to run the guest hypervisor, and
+    // the second-level one - and both are nested entries as far as the
+    // layer below is concerned. `enlighten_vmentry` left set would make
+    // it take the *enlightened* page as the description of whichever of
+    // the two ran next, so it is set immediately before the second-level
+    // entry and cleared at the one place every exit passes through.
+    //
+    // Unconditional because it is cheap and because a conditional here
+    // would have to know which VMCS just ran, which is the thing that is
+    // easy to get wrong.
+    if constexpr (nested_vmx::evmcs_to_kvm) {
+        if ((cpuid < max_cpus) && this->evmcs_active[cpuid]) {
+            constexpr std::size_t enlighten_vmentry_offset = 40;
+
+            *reinterpret_cast<volatile std::uint8_t *>(
+                this->vp_assist[cpuid] + enlighten_vmentry_offset) = 0;
+        }
+    }
+
     // Only the VMCS that just ran, not every row this processor holds.
     // A VM exit updates the guest-state and read-only fields of the
     // current VMCS alone, so vmcs01's row stays true across an exit from

@@ -1,6 +1,7 @@
 #pragma once
 #include "zpp/arch/x86_64/asm.h"
 #include "zpp/arch/x86_64/vmx/asm.h"
+#include "zpp/arch/x86_64/vmx/evmcs.h"
 #include "zpp/arch/x86_64/vmx/vmcs_fields.h"
 #include "zpp/error.h"
 #include <cstdint>
@@ -253,6 +254,14 @@ struct vmcs_cache_row
     std::uint64_t epoch;
 
     /**
+     * When non-zero, this row does not describe a VMCS at all: it is the
+     * address of an *enlightened* VMCS, a page shared with the layer
+     * below, and every access to it is a load or a store rather than a
+     * VMREAD or a VMWRITE. See `nested_vmx::evmcs_to_kvm`.
+     */
+    std::uint64_t evmcs;
+
+    /**
      * The VMCS this row describes, as the physical address `vmptrld` was
      * given, or zero for a row that describes nothing.
      *
@@ -457,6 +466,127 @@ inline void vmcs_cache_select(std::uint64_t region, std::size_t cpu)
 }
 
 /**
+ * Makes an *enlightened* VMCS current for this processor.
+ *
+ * The counterpart of `vmcs_cache_select` for a second-level VMCS that
+ * lives in a page shared with the layer below. No `vmptrld` follows,
+ * because there is nothing to load: the layer below is told which page to
+ * use through the assist page, and every access here becomes a load or a
+ * store. See `nested_vmx::evmcs_to_kvm`.
+ *
+ * Takes `cpu` for the same reason `vmptrld` does - GS is not armed
+ * everywhere this can be reached from.
+ */
+inline void vmcs_cache_select_enlightened(std::uint64_t page,
+                                          std::size_t cpu)
+{
+    if constexpr (vmcs_cache_enabled) {
+        if (cpu >= vmcs_cache_processors) {
+            return;
+        }
+
+        auto * rows = vmcs_cache[cpu];
+
+        for (std::size_t i{}; i < vmcs_cache_sets; ++i) {
+            if ((rows[i].evmcs == page) &&
+                (rows[i].epoch == vmcs_cache_epoch)) {
+                vmcs_cache_active[cpu] = i;
+                return;
+            }
+        }
+
+        auto victim = static_cast<std::size_t>(
+            (vmcs_cache_active[cpu] + 1) % vmcs_cache_sets);
+
+        for (auto & each : rows[victim].tag) {
+            each = 0;
+        }
+
+        rows[victim].vmcs = 0;
+        rows[victim].evmcs = page;
+        rows[victim].epoch = vmcs_cache_epoch;
+        vmcs_cache_active[cpu] = victim;
+    }
+}
+
+/**
+ * The enlightened VMCS this processor is currently pointed at, or zero.
+ */
+inline std::uint64_t vmcs_cache_current_enlightened()
+{
+    if constexpr (vmcs_cache_enabled) {
+        auto row = vmcs_cache_row_index();
+
+        if (row < vmcs_cache_processors) {
+            auto & current = vmcs_cache[row][vmcs_cache_active[row]];
+
+            if (current.epoch == vmcs_cache_epoch) {
+                return current.evmcs;
+            }
+        }
+    }
+
+    return 0;
+}
+
+/**
+ * Reads a field out of an enlightened VMCS.
+ *
+ * Traps on a field the enlightened layout has no home for, rather than
+ * falling back to a VMREAD. The fallback would read whatever VMCS happens
+ * to be current - this VMM's own - and answer with a plausible value from
+ * the wrong one, which is the failure this whole tree keeps having to
+ * unpick. There is no correct answer, so there is no answer.
+ */
+inline std::uint64_t evmcs_load(std::uint64_t page, std::uint64_t encoding)
+{
+    auto slot = evmcs_offset_of(encoding);
+
+    if (0 == slot.size) {
+        __builtin_trap();
+    }
+
+    auto * at = reinterpret_cast<const volatile std::uint8_t *>(
+        page + slot.offset);
+
+    std::uint64_t value{};
+
+    for (std::uint16_t i{}; i < slot.size; ++i) {
+        value |= static_cast<std::uint64_t>(at[i]) << (8 * i);
+    }
+
+    return value;
+}
+
+/**
+ * Writes a field into an enlightened VMCS, and marks the page dirty.
+ */
+inline void evmcs_store(std::uint64_t page,
+                        std::uint64_t encoding,
+                        std::uint64_t value)
+{
+    auto slot = evmcs_offset_of(encoding);
+
+    if (0 == slot.size) {
+        __builtin_trap();
+    }
+
+    auto * at =
+        reinterpret_cast<volatile std::uint8_t *>(page + slot.offset);
+
+    for (std::uint16_t i{}; i < slot.size; ++i) {
+        at[i] = static_cast<std::uint8_t>(value >> (8 * i));
+    }
+
+    // Every field dirty, every time. See `evmcs_all_dirty` for why the
+    // clean-fields bitmap is not used yet: a wrong bit there means the
+    // layer below keeps a stale field and runs the guest with it, which
+    // is silent, and this is the correctness-first version.
+    *reinterpret_cast<volatile std::uint32_t *>(
+        page + evmcs_clean_fields_offset) = evmcs_all_dirty;
+}
+
+/**
  * `vmptrld` that keeps the rows for the VMCSs it is not loading.
  */
 inline int vmptrld(void * region, std::size_t cpu)
@@ -604,6 +734,17 @@ public:
                         vmcs_write_hits,
                         vmcs_write_overflow);
 
+        // **An enlightened VMCS is memory, so this is a store**, and it
+        // must happen instead of the `vmwrite` rather than beside it: the
+        // instruction would write whichever VMCS is current, which is not
+        // this one. See `nested_vmx::evmcs_to_kvm`.
+        if constexpr (vmcs_cache_enabled) {
+            if (auto page = vmcs_cache_current_enlightened(); 0 != page) {
+                evmcs_store(page, static_cast<std::uint64_t>(field), value);
+                return;
+            }
+        }
+
         if (0 != vmwrite(field, value)) {
             __builtin_trap();
         }
@@ -673,6 +814,16 @@ public:
                         vmcs_read_overflow);
         vmcs_note_read_caller(
             reinterpret_cast<std::uint64_t>(__builtin_return_address(0)));
+
+        // **An enlightened VMCS is memory, so this is a load.** Ahead of
+        // the cache, which exists to avoid an access that is not being
+        // made here. See `nested_vmx::evmcs_to_kvm`.
+        if constexpr (vmcs_cache_enabled) {
+            if (auto page = vmcs_cache_current_enlightened(); 0 != page) {
+                return evmcs_load(page,
+                                  static_cast<std::uint64_t>(field));
+            }
+        }
 
         if constexpr (vmcs_cache_enabled) {
             auto row = (0 == vmcs_cache_suspended)
