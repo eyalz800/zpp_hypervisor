@@ -1,5 +1,45 @@
 # Known defects
 
+## One processor unsticks it, and eight do not
+
+**2026-08-22.** After the instruction-length halt was fixed and the
+enlightened VMCS was working, the guest still sat at the same plateau:
+`HvCallModifyVtlProtectionMask` frozen at 39,303, then 39,322, on every
+run, with every other hypercall count frozen beside it.
+
+Booted with `ZPP_CPUS=1` and it moves:
+
+| | 8 cpus | 1 cpu, +5 min | +12 min | +20 min |
+|---|---|---|---|---|
+| `HvCallModifyVtlProtectionMask` | 39,322 (frozen) | 39,879 | 40,377 | **41,203** |
+| `HvCallVtlReturn` | ~24,000 (frozen) | 24,190 | 24,996 | **26,545** |
+| `0x0051` | 96 | 151 | 155 | 165 |
+| `0x0050` | 20 | 23 | 27 | 31 |
+| distinct second-level threads seen | 1 | **2** | | |
+
+New hypercall codes appear that never appeared on eight processors -
+`0x007b`, `0x006c` - and the thread doing the work is no longer the
+`Phase1Initialization` thread but one started at `ntoskrnl+0x324e10`.
+
+**So the blocker is the processor count, not the cost of an exit.** That
+is worth stating plainly because this file spent a long stretch arguing
+the opposite, and the enlightened VMCS - which made an exit 8.8 times
+cheaper - did not move this counter by one.
+
+Consistent with it, and previously read as "Windows has not got there
+yet": `HvCallStartVirtualProcessor` (`0x0099`) appears **nowhere** in any
+census, and `HvCallEnableVpVtl` is called exactly **once**. Only the boot
+processor ever had a second trust level enabled. On eight processors the
+guest never asked for another one and never started one, and the seven
+others sat at seventeen second-level entries each from boot to death.
+
+**`BACKLOG.md` previously recorded "CPU count 1/2/8 identical" as an
+eliminated cause. That measurement was taken before the halt fix**, when
+every configuration died at the same unrelated `#UD`, so it could not have
+distinguished them. An elimination is only as good as the run underneath
+it.
+
+
 ## The enlightened VMCS works: exits are 8.8x cheaper, and the guest still does not boot
 
 **2026-08-22.** Measured on the rig over a 250 s window, against the same
