@@ -38499,3 +38499,69 @@ the right place to ask, and nobody had.**
 Use it: `scripts/rig-dump-state.py` prints the exact command line, and
 `--passes N` turns it into an animation detector that needs no eye on the
 monitor.
+
+# Two wide reviews against KVM and Xen: five findings eliminated for free
+
+Both reviews were widened past nested VMX to cover interrupts, APIC, MSRs,
+CPUID, hypercalls, timers, CR shadowing and the exit-reflection decision.
+**Neither found something that explains the hang**, and both say so plainly.
+What follows is what their free checks settled, read from a live guest with
+no boot spent.
+
+## Eliminated by measurement, no boot
+
+| finding | check | result |
+|---|---|---|
+| shadow-EPT global generation churn discarding both VTLs' shadows every entry | `generation-discards` as a delta | **0**, and `rebuild-new-root` frozen at 18,960 |
+| the recall set fossilised at 64 and replaying forever | `shadow-builds`, `reclaims`, `resets`, `evictions` | all **frozen or zero** in steady state |
+| EPT **misconfiguration** handled as a violation with a qualification the architecture does not save | `exit_reason_counts[49]` | **zero** - reason 49 never occurs |
+| `ept_permissions::present()` counting bit 10 unconditionally | depends on the above | unreachable |
+| an NMI Hyper-V asked to intercept (`pin 0x1e`, bit 3 set) re-injected into its guest instead of reflected | `guest_nmis_reinjected` | **0** - never fires |
+
+The shadow EPT is **entirely quiescent** in the steady state: builds frozen,
+no evictions, no reclaims, no resets, no generation discards, leaves-filled
+frozen. Only cache *hits* climb. That closes the whole
+shadow-EPT-churn family, which was the strongest of the two reviews' leads.
+
+The NMI case is a genuine correctness divergence - both KVM
+(`vmx_check_nested_events`) and the architecture say reflect it when vmcs12
+asked, and nothing in this tree reflects one - so it is worth fixing. It is
+just not this.
+
+## Two corrections to this file's own record, both from the reviews
+
+**The "asked versus given" gap was bit 14, not bit 18.** An earlier entry
+removed `1ull << 18` (conceal-VMX-from-PT) on the strength of
+`requested 0x1010ae -> granted 0x1050ae`. But `0x1010ae ^ 0x1050ae` is
+`0x4000` - **bit 14, VMCS shadowing**. Bit 18 is `0x40000` and is set in
+neither value. The fix removed a bit that was never there, and the
+conclusion "the asked-versus-given gap is now zero" is false. `secondary01`
+is latched once per processor and carries VMCS shadowing into vmcs02 for the
+life of the boot; KVM clears it explicitly (`nested.c:2427`).
+
+**The four deterministic page frames are not an independent fact.** KASLR
+randomises the *virtual* mapping of the kernel image; it does not randomise
+the secure kernel's physical allocator, which runs the same sequence from
+the same boot. Given the *count* is already deterministic, the frame reached
+is a consequence of it. "Physical determinism against virtual randomness"
+was two views of one observation, and the right reading is that the failure
+is a function of **work done**, not of an address. That retires
+"what is at 0x11aac9000" as a line of enquiry.
+
+## What survives, unrefuted
+
+- **secondary controls composed as `secondary01 | secondary12`** where KVM
+  takes a named list from vmcs12 only, leaking VMCS shadowing (measured),
+  RDTSCP, INVPCID and XSAVES into L2.
+- **the MSR bitmap is unioned** rather than patched; both references force
+  the whole x2APIC block (0x800-0x8FF) intercepted and we do not.
+- **`nested_virtual_apic_address` / `nested_tpr_threshold` are per-CPU, not
+  per-vmcs12**, and are not cleared when a vmcs12 does not ask for the TPR
+  shadow - which would corrupt every VTPR instrument in this file.
+- **XSETBV executes on real hardware with unvalidated operands** - a
+  guest-triggerable host `#GP`, which stops the processor.
+- `own_msr_intercepted` and `own_io_port_intercepted` exist and **have no
+  callers anywhere in the tree**.
+
+None of these is measured to fire in this configuration. All are worth
+fixing on their own terms.

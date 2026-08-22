@@ -2334,7 +2334,7 @@ def main():
                "l2_run_cycles", "l1_run_cycles", "handler_cycles",
                "handler_first_tsc", "handler_last_tsc",
                "shadow_ept_evictions", "shadow_ept_resets",
-               "shadow_ept_reclaims",
+               "shadow_ept_reclaims", "guest_nmis_reinjected",
                "shadow_ept_leaves_filled",
                # How each second-level fault was answered. Without this
                # the only visible fact is that faults arrive, and a fault
@@ -2631,6 +2631,7 @@ def main():
     monitor.queue(instance + off["shadow_ept_recall_root"],
                   scalar_cpus * 4)
     monitor.queue(instance + off["shadow_ept_current_slot"], scalar_cpus)
+    monitor.queue(instance + off["guest_nmis_reinjected"], 1)
 
     # The IUM secure-call block. See hypervisor.h `vtl_call_block`.
     monitor.queue(instance + off["vtl_call_rdx"], scalar_cpus)
@@ -3252,6 +3253,14 @@ def main():
                   f"{len(set(starts))} distinct, "
                   f"min {min(starts)} max {max(starts)}")
 
+    # **Hyper-V asked to see NMIs from its guest** - its captured pin
+    # controls are 0x1e, and bit 3 is NMI exiting - but `l0_wants_l2_exit`
+    # claims every NMI unconditionally and nothing in the tree reflects
+    # one to the level above. Both KVM (`vmx_check_nested_events`) and the
+    # architecture say it should be reflected when vmcs12 asked. This
+    # counter says whether it ever fires.
+    print(f"\nNMIs re-injected into a guest rather than reflected: "
+          f"{words.get(instance + off['guest_nmis_reinjected'], 0):,}")
     print("\ncpu  shadow-builds  cache-hits  evictions  resets  reclaims  leaves-filled")
     for cpu in range(args.cpus):
         print(f"{cpu:3d}  {read('shadow_ept_builds', cpu):-13d}  "
