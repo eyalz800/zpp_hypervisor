@@ -165,6 +165,8 @@ constexpr std::uint64_t signed_scaled_product(std::uint64_t left,
 }
 /** @} */
 constexpr std::uint64_t secondary_mode_based_execute = 1ull << 22;
+constexpr std::uint64_t secondary_virtual_interrupt_delivery =
+    1ull << 9;
 constexpr std::uint64_t secondary_enable_vmfunc = 1ull << 13;
 /**
  * @}
@@ -2139,6 +2141,33 @@ std::expected<void, zpp::error> hypervisor::build_vmcs02(std::size_t cpu)
         field::secondary_processor_based_vm_execution_controls,
         secondary02);
 
+    // The state virtual-interrupt delivery runs on, carried through from
+    // vmcs12 whole. See `nested_vmx::virtual_interrupt_delivery_offered`.
+    //
+    // The guest interrupt status is the requesting and servicing vectors
+    // the processor maintains itself, so it has to arrive as the guest
+    // hypervisor left it and leave as the processor leaves it - the
+    // matching save is in `reflect_l2_exit`. The four EOI-exit bitmaps
+    // say which vectors' end-of-interrupt the level above wants to see,
+    // and are its statement about its own guest, so they pass through
+    // unaltered. KVM does the same, `nested.c:2437-2439` for the status
+    // and the bitmaps beside it.
+    //
+    // Written only when the control is actually on, so a build without
+    // the offer touches neither field and costs nothing.
+    if (0 != (secondary02 & secondary_virtual_interrupt_delivery)) {
+        write_vmcs02_control(cpu,
+                             field::guest_interrupt_status,
+                             shadow.read(field::guest_interrupt_status));
+
+        for (auto entry : {field::eio_exit_bitmap_0,
+                           field::eio_exit_bitmap_1,
+                           field::eio_exit_bitmap_2,
+                           field::eio_exit_bitmap_3}) {
+            write_vmcs02_control(cpu, entry, shadow.read(entry));
+        }
+    }
+
     // What the guest hypervisor asked for against what it got. See
     // `control_pin_requested` - the machine boots under KVM and not here,
     // so a control it set and did not get back is exactly the shape of
@@ -3198,6 +3227,16 @@ bool hypervisor::l1_wants_l2_exit(std::size_t cpu,
     }
     case basic_reason::nmi_window:
         return primary_set(primary_nmi_window);
+
+    // `virtualized_eoi` and `apic_write` are deliberately **not** listed
+    // here. They can only occur because the guest hypervisor asked for
+    // virtual-interrupt delivery, so they are unconditionally its own,
+    // and this function's `default:` already answers `true`. Gating them
+    // on the control instead was written, and `tests/nested_exit` caught
+    // it the same minute: with the knob off it answered `false`, which
+    // would have dropped an exit only the level above can handle. The
+    // test asserts `true` for both in either position, which is the
+    // stronger and simpler rule.
     case basic_reason::hlt:
         return primary_set(primary_hlt_exiting);
     case basic_reason::invlpg:

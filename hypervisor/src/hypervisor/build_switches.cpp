@@ -171,6 +171,12 @@ extern "C" [[gnu::used, gnu::retain]] constinit const char
         // comparable and one of them boots differently.
         ' ', 'v', 'c', 'a', 'c', 'h', 'e', '=',
         digit(arch::x86_64::vmx::vmcs_cache_enabled),
+        // Virtual-interrupt delivery. A correctness field: on, the
+        // processor decides when a pending vector may be delivered
+        // instead of the level above polling for it, so two runs that
+        // differ in it are not comparable at all.
+        ' ', 'v', 'i', 'd', '=',
+        digit(nested_vmx::virtual_interrupt_delivery_offered),
         '\0'};
 
 } // namespace zpp::hypervisor

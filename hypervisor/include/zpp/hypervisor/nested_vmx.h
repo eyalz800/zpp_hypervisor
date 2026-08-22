@@ -1476,6 +1476,53 @@ constexpr std::uint64_t supported_primary_controls =
  * across the whole second-level guest. `build_vmcs02` therefore also
  * clears the control it inherits from this VMM's own VMCS.
  */
+/**
+ * Offer virtual-interrupt delivery to the guest hypervisor.
+ *
+ * **Off, and it is the best-evidenced remaining candidate for the boot
+ * this tree cannot finish.** The measured deadlock is: the guest sits at
+ * DISPATCH_LEVEL inside its deferred-procedure-call dispatcher; one of
+ * those calls enters VTL1; vector `0x2f` is pending and *undeliverable*,
+ * because delivery needs a priority class strictly greater than the task
+ * priority's and both are class 2; the guest hypervisor sees an interrupt
+ * pending for VTL0 and asserts VINA; `ShvlVinaHandler` yields having done
+ * nothing; the dispatcher retries unchanged.
+ *
+ * With virtual-interrupt delivery the processor evaluates the request
+ * against the task priority itself and delivers the instant it falls
+ * below class 2 - no exit, and no involvement from the level above. The
+ * fifth link, a hypervisor asserting VINA for an interrupt it cannot
+ * itself deliver, does not arise.
+ *
+ * **Nothing is being refused today**, which is why this is a feature and
+ * not a fix to an existing hole: `vmcs12_secondary_asked` reads with bits
+ * 0, 4, 8 and 9 clear and `vmcs12_pin_asked` is `0x3f`. The guest
+ * hypervisor read the capability MSRs, found these absent, and adapted to
+ * the polling path - which is the interrupt-window storm measured at 36
+ * exits for every one vector injected.
+ *
+ * Bits 8 and 9 together, as KVM offers them
+ * (`.references/kvm/nested.c:7051-7066`). SDM 25.6.2 requires only that
+ * "use TPR shadow" be 1 for either, and that is already honoured for
+ * every vmcs12 - `tpr_shadow_refused` and `tpr_shadow_absent` both read
+ * zero. Bit 0, virtualize-APIC-accesses, is deliberately **not** offered:
+ * it needs an APIC-access address this VMM never writes, and offering a
+ * control whose backing field is absent is the exact failure this project
+ * keeps making.
+ *
+ * What has to work for it to be sound, all of it in `build_vmcs02` and
+ * `reflect_l2_exit`: the guest interrupt status carried into vmcs02 and
+ * back out to vmcs12, the four EOI-exit bitmaps passed through, and the
+ * two exits it makes possible - `virtualized_eoi` and `apic_write` -
+ * reflected rather than reaching `default:` and stopping the processor.
+ */
+#ifndef ZPP_NESTED_VID
+#define ZPP_NESTED_VID 0
+#endif
+
+inline constexpr bool virtual_interrupt_delivery_offered =
+    (0 != ZPP_NESTED_VID);
+
 constexpr std::uint64_t supported_secondary_controls =
     (1ull << 1) |  // Enable EPT.
     (1ull << 2) |  // Descriptor-table exiting.
@@ -1503,6 +1550,12 @@ constexpr std::uint64_t supported_secondary_controls =
     // through `shadow_ept_pointer_for` before anything reaches the
     // hardware.
     (1ull << 13) | (1ull << 16) | // RDSEED exiting.
+
+    // APIC-register virtualization and virtual-interrupt delivery, SDM
+    // Table 25-7 bits 8 and 9. See `virtual_interrupt_delivery_offered`
+    // for why, and for why bit 0 is not offered beside them.
+    (virtual_interrupt_delivery_offered ? ((1ull << 8) | (1ull << 9))
+                                        : 0ull) |
     (1ull << 20);                 // Enable XSAVES/XRSTORS.
 
     // Mode-based execute control, SDM Table 25-7 bit 22.

@@ -90,6 +90,19 @@ option(ZPP_VMCS_CACHE
     "Cache VMCS fields per processor between a VM exit and the next entry"
     OFF)
 
+# Virtual-interrupt delivery, offered to the guest hypervisor. See
+# nested_vmx.h, which carries the measurement this exists for.
+#
+# OFF. It is the best-evidenced candidate for the deadlock that stops the
+# nested boot - the guest pinned at DISPATCH_LEVEL with vector 0x2f
+# undeliverable by the strictly-greater rule, and the level above
+# asserting VINA for an interrupt it cannot itself deliver - but it hands
+# the processor a job the level above is doing today, and a run with it on
+# is not comparable with one without.
+option(ZPP_NESTED_VID
+    "Offer APIC-register virtualization and virtual-interrupt delivery"
+    OFF)
+
 # Nested VMX: whether the guest is told VT-x exists.
 #
 # Off, and the default is the decision rather than a convenience. With it off
@@ -297,6 +310,7 @@ ExternalProject_Add(hypervisor
         -DZPP_DIAG_RESERVE_WINDOW=${ZPP_DIAG_RESERVE_WINDOW}
         -DZPP_FRAMEBUFFER=${ZPP_FRAMEBUFFER}
         -DZPP_VMCS_CACHE=$<BOOL:${ZPP_VMCS_CACHE}>
+        -DZPP_NESTED_VID=$<BOOL:${ZPP_NESTED_VID}>
         -DZPP_NESTED_VMX=${ZPP_NESTED_VMX}
         -DZPP_REQUEUE_INTERRUPTED_EVENTS=${ZPP_REQUEUE_INTERRUPTED_EVENTS}
         -DZPP_NESTED_TPR_SHADOW=${ZPP_NESTED_TPR_SHADOW}
@@ -431,6 +445,7 @@ ExternalProject_Add(uefi_loader
         -DZPP_DIAG_RESERVE_WINDOW=${ZPP_DIAG_RESERVE_WINDOW}
         -DZPP_FRAMEBUFFER=${ZPP_FRAMEBUFFER}
         -DZPP_VMCS_CACHE=$<BOOL:${ZPP_VMCS_CACHE}>
+        -DZPP_NESTED_VID=$<BOOL:${ZPP_NESTED_VID}>
     INSTALL_COMMAND ""
     BUILD_ALWAYS ON
     DEPENDS hypervisor
