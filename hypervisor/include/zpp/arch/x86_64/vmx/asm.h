@@ -19,6 +19,38 @@ inline int __attribute__((naked)) vmxon(void *)
     )!!");
 }
 
+/**
+ * Why a failed launch was silent, and now is not.
+ *
+ * The park below is correct and has to stay - there is no caller to
+ * return to - but for a long time it carried no information, so every
+ * launch failure looked identical from outside: a processor stopped at a
+ * named symbol, with no exits, and nothing to say why. That is precisely
+ * the shape that gets read as "hung inside vmlaunch" when what happened
+ * is "VM entry failed its checks".
+ *
+ * The VMCS is still current on the failing path, so the reason is one
+ * VMREAD away - SDM 31.4 puts it in `vm_instruction_error`, field
+ * `0x4400`. It is written here, before the halt, where a state dump can
+ * find it.
+ *
+ * The registers clobbered are the guest's, and that is acceptable: this
+ * path never resumes a guest, and an error code that names the failed
+ * check is worth more than register state nothing will use.
+ * @{
+ */
+// `used` and `retain` for the same reason `zpp_build_switches` carries
+// them: the only reference is from inside the assembly below, which is
+// not an odr-use, so without these the definitions are never emitted and
+// the link fails on the symbol the asm names.
+extern "C" {
+[[gnu::used, gnu::retain]] inline constinit std::uint64_t
+    zpp_launch_instruction_error{};
+[[gnu::used, gnu::retain]] inline constinit std::uint64_t
+    zpp_launch_failed{};
+}
+/** @} */
+
 inline void __attribute__((naked)) vmlaunch()
 {
     asm(R"!!(
@@ -31,6 +63,14 @@ inline void __attribute__((naked)) vmlaunch()
         // the guest stack and a ret would jump wherever that happens to
         // point. Park instead, so a debugger finds the CPU stopped at a
         // named symbol rather than somewhere unrecoverable.
+        //
+        // Say why first. The VMCS is still current, so the instruction
+        // error is one VMREAD away, and without it every failure here
+        // looks the same from outside.
+        mov rax, 0x4400
+        vmread rcx, rax
+        mov qword ptr [rip + zpp_launch_instruction_error], rcx
+        mov qword ptr [rip + zpp_launch_failed], 1
     1:  cli
         hlt
         jmp 1b
