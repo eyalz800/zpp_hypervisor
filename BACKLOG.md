@@ -1,5 +1,49 @@
 # Known defects
 
+## The enlightened VMCS, as far as it got
+
+**2026-08-22.** Built, flagged off by default, and **not working yet**.
+Recorded at the point it was left so the next attempt starts from the
+evidence.
+
+What is done and verified:
+
+- KVM offers it. `ZPP_CPU_EXTRA=",hv-vapic,hv-evmcs"` - QEMU refuses
+  `hv-evmcs` alone, saying it requires `hv-vapic` - and this VMM then
+  reads signature "Microsoft Hv", interface `Hv#1`, recommendations
+  `0x4008`, bit 14 set.
+- The guest cannot see it: `8,415 cpuid leaves recorded, 0 in the
+  hypervisor range`.
+- The assist page is accepted on all eight processors.
+- The field map is generated, 134 of 156 encodings, asserted three ways.
+
+Two bugs found and fixed on the way, both worth keeping:
+
+- **The detection ran after the test that needed it.** cpu 0 logged
+  "asked for and not offered" one line before "offered = 1"; cpus 1-7 read
+  the flag cpu 0 had left behind and enabled correctly. **cpu 0 differing
+  from the rest is a clue about ordering, not about cpu 0.**
+- **`write_vmcs02_control(cpu, field::vm_function_controls, 0)` is
+  unconditional**, and that field has no enlightened home, so the store
+  trapped on the very first second-level entry. `l2-entries` read **zero**,
+  which is indistinguishable from a guest that never started. Fixed by
+  dropping a *zero* write to an absent field - it is disabling a feature
+  the format never had - while still trapping a non-zero one.
+
+Where it stops now: `l2-entries` reaches **1** and the machine stops in
+early firmware, around `rip 0x7ed5xxxx`, with cpu 0 inside `vmptrld_raw`.
+No `unhandled_exit` and no `vm_entry_failure` are recorded, so it is a
+`__builtin_trap` or a fault that leaves nothing behind - the two remaining
+traps are `evmcs_load` on an absent field and something about the
+interleaving of the two VMCSs.
+
+The first thing to check next, because it is cheap and was never checked:
+enabling the assist page also switches on **PV EOI** in KVM
+(`kvm_lapic_set_pv_eoi`, `hyperv.c`), which claims the first four bytes of
+that same page. This VMM intercepts the local APIC itself, and the two
+have not been reconciled.
+
+
 ## The enlightened VMCS is available to us, and invisible to the guest
 
 **2026-08-22.** The precondition for the only remaining step change is
