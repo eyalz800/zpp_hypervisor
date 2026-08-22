@@ -518,11 +518,21 @@ inline std::uint64_t vmcs_cache_current_enlightened()
         auto row = vmcs_cache_row_index();
 
         if (row < vmcs_cache_processors) {
-            auto & current = vmcs_cache[row][vmcs_cache_active[row]];
-
-            if (current.epoch == vmcs_cache_epoch) {
-                return current.evmcs;
-            }
+            // **Deliberately not gated on the epoch.** The epoch says
+            // cached *values* are stale; it does not say which page is
+            // current, and those are different facts. A `vmclear` bumps
+            // it without changing the current VMCS at all.
+            //
+            // Gating on it cost a whole debugging cycle. `setup_vmcs`
+            // clears vmcs02 partway through, the epoch moved, and every
+            // control written after that point silently stopped going to
+            // the enlightened page and went to the real VMCS through
+            // VMWRITE instead. The page then carried a correct
+            // `revision_id`, `host_rip` and `vmcs_link_pointer` - written
+            // before the clear - and **zero** in every control field
+            // written after it, which is exactly "VM entry with invalid
+            // control fields", instruction error 7.
+            return vmcs_cache[row][vmcs_cache_active[row]].evmcs;
         }
     }
 
