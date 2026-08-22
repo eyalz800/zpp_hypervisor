@@ -33,6 +33,16 @@ inline constinit std::uint64_t vmcs_reads_taken{};
 inline constinit std::uint64_t vmcs_writes_taken{};
 
 /**
+ * Writes that were skipped because the VMCS already held the value.
+ *
+ * Kept beside the count above so the two can be read as a ratio: the
+ * saving is only real if this is a large fraction of `vmcs_writes_taken`,
+ * and a ratio near zero would mean the rebuild genuinely writes new
+ * values every time and the elision is pure overhead.
+ */
+inline constinit std::uint64_t vmcs_writes_elided{};
+
+/**
  * Which fields those accesses name, as a table rather than a ring.
  *
  * The count above says 54 reads an exit and the guest-state deferral
@@ -603,6 +613,48 @@ public:
                         vmcs_write_field,
                         vmcs_write_hits,
                         vmcs_write_overflow);
+
+        // **Elided when the VMCS already holds this value.** The cache
+        // is written through below, so a hit here means this processor
+        // put that exact value in that exact field and nothing has
+        // invalidated it since - a VM entry or exit discards the row that
+        // ran, and a pointer change selects another row. So the `vmwrite`
+        // is not merely redundant, it is provably a no-op.
+        //
+        // This is the largest single saving available on this machine and
+        // it is not a KVM-specific trick: every VMCS access is an exit to
+        // the layer below at about 4,500 cycles, because this processor
+        // does not enumerate VMCS shadowing, and a vmcs02 rebuild writes
+        // 17 fields of which most carry the same host-state and control
+        // values as the entry before. Reads were already cached; writes
+        // were not, and had become the bigger half.
+        //
+        // The elision is checked *before* the width mask below rather
+        // than after, so a value that differs only in bits the field
+        // cannot hold still takes the write - conservative, and it cannot
+        // turn a real change into a skipped one.
+        if constexpr (vmcs_cache_enabled) {
+            auto row = (0 == vmcs_cache_suspended)
+                           ? vmcs_cache_row_index()
+                           : vmcs_cache_processors;
+
+            if (row < vmcs_cache_processors) {
+                auto & current =
+                    vmcs_cache[row][vmcs_cache_active[row]];
+
+                if (current.epoch == vmcs_cache_epoch) {
+                    auto encoding = static_cast<std::uint64_t>(field);
+                    auto slot = static_cast<std::size_t>(
+                        (encoding >> 1) % vmcs_cache_entries);
+
+                    if ((current.tag[slot] == (encoding + 1)) &&
+                        (current.value[slot] == value)) {
+                        vmcs_writes_elided = vmcs_writes_elided + 1;
+                        return;
+                    }
+                }
+            }
+        }
 
         if (0 != vmwrite(field, value)) {
             __builtin_trap();
