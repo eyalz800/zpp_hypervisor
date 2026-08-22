@@ -1,5 +1,61 @@
 # Known defects
 
+## The nesting tax is 58x, measured, and it is most of the blocker
+
+**Measured 2026-08-22 from KVM's own counters on the rig**, as a delta
+over a 30-second window on a settled guest, per the rule that these are
+never read cumulatively:
+
+```
+kvm exits    416,725/s
+nested_run     7,088/s      <- our own exit count
+ratio              58        KVM exits for every exit we take
+```
+
+`nested_run` is KVM re-entering its guest, which is one re-entry per exit
+*we* take. So **every exit this VMM handles costs fifty-eight exits into
+KVM underneath it.** Those are our VMCS accesses: the round trip makes
+about 112 of them on a vmcall, and each one to a field KVM does not shadow
+is a VM exit into KVM at ~3,529 cycles.
+
+### What that implies for the goal
+
+On real hardware a VMREAD is tens of cycles, not thousands. The term that
+is **59% of the 673,367-cycle round trip** would shrink by roughly seventy
+times, which is about 2.4x on the round trip as a whole - and the guest's
+timer needs 2.16x. **So the arithmetic that stops this boot is
+substantially an artifact of the rig, and on bare metal the 1.766 ms
+budget would very likely be met.**
+
+That is not an excuse to stop: it is a statement about which lever
+remains. Inside the rig the only thing that helps is **making fewer VMCS
+accesses**, since each one's price is fixed by KVM. Halving them is worth
+about the factor needed.
+
+Where the 112 go on a vmcall, and the largest is unattributed:
+
+| phase | reads | writes |
+|---|---|---|
+| residue (**not attributed to any named phase**) | 50.5 | 0.0 |
+| reflect_l2_exit | 31.1 | 9.9 |
+| save_l2_state | 13.0 | 0.0 |
+| exit information | 8.0 | 0.0 |
+
+**The 50.5 unattributed reads are the biggest single target in the tree
+and nothing currently says what they are.** Instrumenting them is the next
+step, and it is worth more than any further guessing: every micro-
+optimisation attempted against the named phases so far has been worth 1-3%
+against a need of 116%.
+
+### Do not re-propose these
+
+- **The `vmclear` in `copy_shadow_to_vmcs12` is not waste.** It matches
+  KVM's own `copy_shadow_to_vmcs12` exactly - `vmcs_load(shadow)`, read,
+  `vmcs_clear(shadow)`, `vmcs_load(back)` - and is architecturally
+  required before the region is used as a shadow again. Only the
+  `vmptrst` either side is removable, worth about 1.2%.
+
+
 ## The cost is VMCS accesses, and they cost 3,529 cycles each
 
 **Measured 2026-08-22, after the translation cache landed.** The tick
