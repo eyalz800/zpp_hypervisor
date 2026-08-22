@@ -1,5 +1,79 @@
 # Known defects
 
+## Why the guest cannot beat its own clock, in one arithmetic
+
+**Measured 2026-08-22**, and this is the blocker stated as a threshold
+rather than a story. Every number is a delta over ~80 s at the freeze.
+
+**The condition for progress.** The secure kernel yields whenever VINA is
+set, and Hyper-V sets VINA when VTL0 has a *deliverable* interrupt pending
+at the switch. The task priority at the trust-level call is class 0 or 1
+on 35.5% of calls and class 2 on 64%, and the clock vector is class 13 -
+**deliverable at every one of them**. So the only way VINA is ever clear
+is for VTL0 to reach its next `HvCallVtlCall` without a clock tick having
+arrived since the last one.
+
+**The clock period is 1.74 ms. The gap between consecutive calls is not.**
+
+```
+gaps between consecutive trust-level calls (28,184)
+  2^20    526 us   1,254   4.4%
+  2^21  1,053 us   5,995  21.3%     <- 25.7% cumulative, under the period
+  2^22  2,106 us   9,408  33.4%
+  2^23  4,211 us   5,197  18.4%
+```
+
+Only a quarter of gaps fit inside the clock period. The rest guarantee a
+pending tick, which guarantees VINA, which guarantees the yield. **Hyper-V
+is not wrong and the secure kernel is not wrong; the guest simply cannot
+call in faster than it ticks.**
+
+**Where the gap goes.** The VTL0 half is 9,336 us over 80.3 exits, and the
+live exit mix is:
+
+| reason | per second | share |
+|---|---|---|
+| `vmresume` | 7,366 | 49.1% |
+| `wrmsr` | 5,311 | 35.4% |
+| `int-window` | 1,842 | 12.3% |
+| `vmcall` | 112 | 0.7% |
+
+The trust-level cycle runs at 56 Hz, so that is **about 268 exits per
+cycle**. The `wrmsr` traffic is the guest's clock path - roughly nine
+synthetic MSR writes per tick at 574 Hz - and **each one costs two exits**,
+the write itself reflected to Hyper-V and Hyper-V's `vmresume` afterwards.
+Those MSRs lie outside both bitmap ranges, so they exit unconditionally
+whatever the bitmap says, and only Hyper-V can answer them. Every
+`vmresume` then rebuilds vmcs02 at ~119,532 cycles.
+
+**The cheap levers are already spent.** vmcs02 write elision is at
+**81.8%** (7,145,497 skipped of 8,737,295); the VMCS field cache is in and
+took the timer from 2.684x late to 1.660x; the translation cache cut guest
+reads from 75.9 to 24.1 a round trip. The VTL0 half came down from 12,636
+us to 9,336 us across those. **It needs to reach 1,740 us - another 5.4x -
+and no remaining micro-optimisation is worth more than tens of per cent.**
+
+### What that means
+
+The gap is a consequence of per-exit cost, and per-exit cost here is
+dominated by the rig: `enable_shadow_vmcs=N`, so every VMCS access this
+VMM makes is a VM exit into KVM, measured at **58 KVM exits for every exit
+we take**. That is not reducible in software.
+
+So this particular boot is blocked by a threshold that this machine cannot
+meet, and the three ways past it are all outside the current tree:
+
+- a host whose CPU has VMCS shadowing, which would cut the dominant term
+  by roughly seventy times and put 1,740 us within reach;
+- a host with APICv, which would let virtual-interrupt delivery be offered
+  and remove the VINA link entirely (`ZPP_NESTED_VID` is implemented and
+  waiting);
+- bare metal, where neither tax exists.
+
+Everything measured here should be re-checked on such a host before more
+optimisation is attempted, because the thresholds move.
+
+
 ## Virtual-interrupt delivery cannot be offered on this rig, and that is hardware
 
 **Measured 2026-08-22**, after implementing the feature the deadlock
