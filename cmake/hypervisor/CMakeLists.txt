@@ -88,6 +88,10 @@ option(ZPP_SAMPLE_L1
     "Sample the FIRST-level guest's instruction pointer on the VMX-preemption timer, armed at VMCS setup rather than from the exit path. The application processors burn a whole host core each and take no exits, so every exit-driven instrument here is blind to them, and reading their state through the monitor is not passive - QEMU must signal them out of guest mode to do it. Costs one exit per period per processor, for ever."
     OFF)
 
+option(ZPP_TRACE_VTL
+    "Record Hyper-V virtual trust level switches - the VTL call and return hypercalls, the registers either side of them, and the guest stack above the caller. Purely observational: it reads guest state and writes only this VMM's own members, and folds to nothing when off. Off by default because it is specific to one guest hypervisor's interface, and this VMM is not specific to any guest. Costs several VMCS reads and a guest page walk per trust-level switch."
+    OFF)
+
 option(ZPP_WATCH_VTL_BLOCK
     "Watch the IUM context block for writes and record who makes them. The second-level guest loops on a state byte that never changes, and polling cannot distinguish nothing-writes-it from a-write-is-lost - those want opposite fixes. Costs an EPT violation per write to a live kernel stack page."
     OFF)
@@ -245,6 +249,7 @@ target_compile_options(zpp_hypervisor PRIVATE
     -DZPP_PROFILE_L2=$<BOOL:${ZPP_PROFILE_L2}>
     -DZPP_CENSUS_EXITS=$<BOOL:${ZPP_CENSUS_EXITS}>
     -DZPP_SAMPLE_L1=$<BOOL:${ZPP_SAMPLE_L1}>
+    -DZPP_TRACE_VTL=$<BOOL:${ZPP_TRACE_VTL}>
     -DZPP_WATCH_VTL_BLOCK=$<BOOL:${ZPP_WATCH_VTL_BLOCK}>
     -DZPP_ANNOUNCE_HYPERVISOR_BIT=$<BOOL:${ZPP_ANNOUNCE_HYPERVISOR_BIT}>
     # **Three switches added in one session never reached the compiler

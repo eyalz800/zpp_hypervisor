@@ -6570,6 +6570,10 @@ void hypervisor::capture_vtl_switch(std::size_t cpu,
                                     std::size_t kind,
                                     arch::x86_64::context & context)
 {
+    if constexpr (!nested_vmx::trace_vtl) {
+        return;
+    }
+
     if ((cpu >= max_cpus) || (kind >= vtl_kinds)) {
         return;
     }
@@ -9024,7 +9028,11 @@ hypervisor::on_l2_exit(std::size_t cpu,
         constexpr std::uint64_t vtl_call_code = 0x11;
         constexpr std::uint64_t vtl_return_code = 0x12;
 
-        if (basic_reason::vmcall == reason.basic()) {
+        // Folded away entirely when the trace is off - `trace_vtl` is a
+        // `constexpr bool`, so the whole block below costs nothing and
+        // links out. Everything in it observes; see `nested_vmx::trace_vtl`.
+        if (nested_vmx::trace_vtl &&
+            (basic_reason::vmcall == reason.basic())) {
             auto code = context.rcx & hypercall_code_mask;
 
             // Censused before the decode, so a code with no case here is

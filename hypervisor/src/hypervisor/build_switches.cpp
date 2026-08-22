@@ -149,6 +149,12 @@ extern "C" [[gnu::used, gnu::retain]] constinit const char
         // Whether the guest is told it is virtualized at all.
         ' ', 'h', 'v', 'b', 'i', 't', '=',
         digit(nested_vmx::announce_hypervisor_bit),
+        // The trust-level trace. Observational, so it cannot change what
+        // the guest sees - but it is the difference between a dump full
+        // of switch records and one where every VTL field reads zero,
+        // which looks exactly like a guest that never used them.
+        ' ', 'v', 't', 'l', 't', 'r', 'c', '=',
+        digit(nested_vmx::trace_vtl),
         ' ', 'b', 'l', 'k', 'w', '=',
         digit(nested_vmx::watch_vtl_block),
         ' ', 'v', 't', 'l', 'c', 'a', 'p', '=',

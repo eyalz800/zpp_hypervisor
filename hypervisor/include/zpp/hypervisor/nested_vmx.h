@@ -1890,6 +1890,29 @@ inline constexpr arch::x86_64::vmx::vmcs_fields::vmcs_field
 #define ZPP_WATCH_VTL_BLOCK 0
 #endif
 
+#ifndef ZPP_TRACE_VTL
+#define ZPP_TRACE_VTL 0
+#endif
+
+/**
+ * Record Hyper-V's virtual trust level switches - the `HvCallVtlCall` and
+ * `HvCallVtlReturn` hypercalls, the register state either side of each,
+ * and the guest stack above the caller.
+ *
+ * **Off by default, and observational only.** This VMM is not specific to
+ * any guest hypervisor, and virtual trust levels are one guest
+ * hypervisor's interface; nothing here may be on the path of a guest that
+ * has never heard of them. Everything behind this flag reads guest state
+ * and writes only this VMM's own members - it decides nothing, injects
+ * nothing and answers no hypercall, so a build with it off and a build
+ * with it on present the *same* machine to the guest and differ only in
+ * what this VMM knows about it.
+ *
+ * It is not free, which is the other reason it is a flag: several VMCS
+ * reads and a guest page walk on every trust-level switch.
+ */
+inline constexpr bool trace_vtl = (0 != ZPP_TRACE_VTL);
+
 inline constexpr bool watch_vtl_block = (0 != ZPP_WATCH_VTL_BLOCK);
 
 } // namespace zpp::hypervisor::nested_vmx
