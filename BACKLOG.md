@@ -35,12 +35,30 @@ being whether the layer below was asked for the enlightenment:
 
 So the enlightened VMCS is the better of the two, and only just.
 
-**A faster VMM is not automatically a faster guest.** Turning the
-trust-level trace off took cycles an exit from 22,484 to 16,224 and duty
-from 0.406 to 0.363 - and Windows' share **fell** to 7.6%, because the
-time freed went to the guest hypervisor's VMREADs rather than to Windows.
-Optimising this VMM without asking who receives the saving is how the last
-several rounds were spent.
+**A faster VMM is not automatically a faster guest** - but the evidence
+for that here is weaker than it was written up as, and the weakness is
+worth more than the claim.
+
+Three configurations were compared by Windows' share of wall: 9.0% with
+everything on, 7.6% with the trust-level trace off, 7.4% with the
+per-access census off as well. **Those samples were taken 250 s, 430 s and
+430 s into three different boots**, and a boot has phases, so they are not
+a controlled comparison and cannot support "the freed time went to the
+guest hypervisor". `BACKLOG.md` already carries "measure steady state, not
+cumulative" and this is the same mistake wearing different clothes.
+
+What *is* solid, because it is one number from one run: the guest
+hypervisor issues **10,130,230 VMREAD and 5,649,765 VMWRITE exits** in 430
+seconds, together 39% of handler time. That is the cost of giving up VMCS
+shadowing, it scales with everything else, and no amount of making this
+VMM faster removes it.
+
+**And one hypothesis died on the way.** The per-access census was thought
+to be the dominant cost, from reading `1,606 cycles/acc` as a per-access
+price. It is not a price - it is exit cycles divided by accesses, which
+attributes the whole round trip to them. Switching the census off moved it
+to 1,558. The same shape as the circular VMREAD measurement above: a
+number read as answering a question it was not asked.
 
 It also removed the hypercall census, which lives behind the same flag -
 the same trap the manifest exists for.
