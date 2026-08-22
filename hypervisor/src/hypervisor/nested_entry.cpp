@@ -9321,6 +9321,23 @@ hypervisor::on_l2_exit(std::size_t cpu,
                                           4) &
                                          0xf] += 1;
 
+                // And whether interrupts were even enabled at that
+                // priority. See `vtl_call_if_by_class`.
+                {
+                    constexpr std::uint64_t interrupt_enable = 1ull << 9;
+
+                    auto on = (0 != (this->vmcs.read(
+                                         arch::x86_64::vmx::vmcs::field::
+                                             guest_rflags) &
+                                     interrupt_enable))
+                                  ? 1u
+                                  : 0u;
+
+                    this->vtl_call_if_by_class
+                        [cpu][on]
+                        [(this->l2_entry_priority[cpu] >> 4) & 0xf] += 1;
+                }
+
                 // And how long since the last one. See
                 // `vtl_call_gap_buckets`: a rate cannot tell a loop
                 // delayed a little every iteration from one delayed

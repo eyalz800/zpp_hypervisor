@@ -1,5 +1,57 @@
 # Known defects
 
+## The productive calls were the ones made with 0x2f blocked
+
+**Measured 2026-08-22.** Two correlations, taken together, invert how this
+freeze should be read.
+
+```
+VINA at return, by the priority its call was made at
+  class 0      clear    243   set 5,300   95.6% set   (0x2f deliverable)
+  class 2      clear 15,532   set 1,027    6.2% set   (0x2f blocked)
+  class 4      clear  5,221   set     6    0.1% set   (0x2f blocked)
+
+RFLAGS.IF at the call, by the same priority
+  class 0      clear     15   set 5,385    0.3% masked
+  class 1      clear  2,773   set     0  100.0% masked
+  class 2      clear      0   set 18,271   0.0% masked
+```
+
+**VINA tracks `0x2f` and nothing else.** It is asserted almost exclusively
+where `0x2f` is deliverable and effectively never where the guest's own
+task priority blocks it, so the level above is behaving correctly - it
+asserts when it has an interrupt it *can* deliver. Interrupt masking is
+not the explanation either: at class 0 the guest has `RFLAGS.IF` set on
+99.7% of calls.
+
+**So the calls that worked were the ones made with `0x2f` blocked.** The
+frozen VINA-clear ceiling of 21,007 is exactly the class-2 and class-4
+calls: at DISPATCH_LEVEL the deferred-call vector cannot be delivered,
+VINA stays clear, and the secure kernel gets to do its work. The guest has
+since moved that work to priority class 0, where `0x2f` is always
+deliverable - and therefore VINA is always asserted and the secure kernel
+always yields.
+
+That reframes the remaining question completely. It is **not** "why is an
+interrupt never delivered" - it is delivered, `l2_given_vector` counts
+`0x2f` arriving 5,768 times, about once per class-0 cycle. It is: **the
+clock requests `0x2f` every 1.74 ms and the trust-level cycle runs at
+56 Hz**, so a fresh request always lands between one call and the next,
+and at PASSIVE_LEVEL every one of them asserts VINA.
+
+Two consequences worth stating plainly:
+
+- The earlier timing threshold was right that a 1.74 ms period is the
+  thing to beat, and wrong about which interrupt sets it. The retraction
+  above stands as to the clock; the *rate* argument survives, restated
+  against the deferred-call vector.
+- The class-2 calls are proof that the secure kernel's side works. Nothing
+  is broken in VTL1, in the protection work, or in delivery. What changed
+  at 21,007 is the **priority the guest calls in at**, and why it changed
+  is the next thing to find - it is a guest-side transition, visible as
+  the class histogram shifting from 2 to 0.
+
+
 ## Why the guest cannot beat its own clock, in one arithmetic
 
 > **RETRACTED the same day, by a correlation this entry never made.**

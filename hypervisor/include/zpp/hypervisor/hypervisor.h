@@ -10207,6 +10207,24 @@ private:
     std::uint64_t vtl_return_vina_by_call_class[max_cpus][2][16]{};
 
     /**
+     * `RFLAGS.IF` at the trust-level call, split by the task priority the
+     * call was made at.
+     *
+     * The correlation above narrowed the freeze to one question: the
+     * guest calls into VTL1 at priority class 0 with `0x2f` - class 2,
+     * therefore deliverable - pending, and never takes it. A guest at
+     * class 0 declining a class-2 interrupt has few explanations, and
+     * interrupts being masked outright is the first. `RFLAGS.IF` is
+     * already known clear on 10.4% of calls overall; if those are
+     * *exactly* the class-0 calls, the interrupt is pending, deliverable
+     * by priority, and blocked by the flag - and VINA stays asserted
+     * because nothing can retire it.
+     *
+     * Indexed `[if_set][class]`.
+     */
+    std::uint64_t vtl_call_if_by_class[max_cpus][2][16]{};
+
+    /**
      * Wall-clock gaps between consecutive `HvCallVtlCall`s, as a
      * power-of-two histogram over time-stamp counter ticks.
      *
