@@ -1,5 +1,62 @@
 # Known defects
 
+## The enlightened VMCS works: exits are 8.8x cheaper, and the guest still does not boot
+
+**2026-08-22.** Measured on the rig over a 250 s window, against the same
+build with the switch off:
+
+| | off | on |
+|---|---|---|
+| cycles an exit | 196,720 | **22,484** |
+| duty | 0.769 | **0.406** |
+| exits a second | ~8,000 | ~35,500 |
+| Windows' share of wall | 8.1% | **9.0%** |
+
+**An 8.8x reduction in the cost of an exit, and it buys the guest almost
+nothing.** That gap is the finding, and the reason is a trade this file
+argued for on a measurement that was circular.
+
+**The circular measurement, which is the lesson.** Giving up VMCS
+shadowing was justified here with "the guest hypervisor takes about four
+thousand VMREAD exits across a whole boot, against tens of millions of
+VMCS accesses here". That four thousand was counted **while shadowing was
+enabled** - which is precisely what stops those VMREADs becoming exits. It
+was a measurement of the feature working, read as a measurement of how
+little the feature was needed.
+
+With shadowing off, the guest hypervisor's VMREADs exit: **4,717,882 of
+them in 250 seconds**, 23.6% of handler time, and the guest hypervisor's
+own share of wall goes to 50.5%. So the enlightened VMCS made this VMM's
+accesses nearly free and made its guest's accesses expensive, and the two
+very nearly cancel.
+
+**They cannot both be had.** The enlightened layout has no field for the
+VMREAD and VMWRITE bitmap pointers, and KVM refuses the same combination.
+
+What is left of the win is real but small: duty 0.769 to 0.406 means the
+machine is no longer saturated, and the guest's share moves 8.1% to 9.0%.
+The guest's *behaviour* does not change at all - task priority is still
+0xd0 for 44.6% of second-level entries, vector `0x2f` is still delivered
+on 0.33% of the times it is asked for, and every hypercall count is at the
+same plateau. **The guest is not short of cycles in a way that more cycles
+fix.**
+
+Four bugs were fixed getting here, and each one is a general shape:
+
+- the detection ran after the test that consumed it;
+- an unconditional zero write to a field the format lacks;
+- setup wrote vmcs01's fields before anything pointed at the page they
+  belonged in - found because the page held a correct `revision_id`,
+  `host_rip` and `vmcs_link_pointer` and **zero** in every control;
+- and the binding to that page was gated on the *value* epoch, so a
+  `VMCLEAR` partway through setup silently sent every later control write
+  to the real VMCS.
+
+The last two were only findable because a failed VM entry now reports
+`vm_instruction_error` instead of parking silently. **That diagnostic was
+worth more than any of the fixes.**
+
+
 ## The enlightened VMCS, as far as it got
 
 **2026-08-22.** Built, flagged off by default, and **not working yet**.
