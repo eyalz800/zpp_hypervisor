@@ -9704,6 +9704,69 @@ hypervisor::on_l2_exit(std::size_t cpu,
                                                             std::uint64_t>(
                                                             walk.status);
                                                 }
+
+                                                // And in every root this
+                                                // processor has
+                                                // shadowed, so both
+                                                // trust levels are
+                                                // covered rather than
+                                                // whichever happens to
+                                                // be current. See
+                                                // `vtl_protect_root_perms`.
+                                                for (std::size_t r{};
+                                                     (r < 4) &&
+                                                     (r < shadow_ept_slots);
+                                                     ++r) {
+                                                    auto root =
+                                                        this->shadow_ept_source
+                                                            [cpu][r];
+
+                                                    this->vtl_protect_root_source
+                                                        [cpu][r] = root;
+
+                                                    if (0 == root) {
+                                                        continue;
+                                                    }
+
+                                                    auto each = arch::x86_64::
+                                                        vmx::walk_ept(
+                                                            root,
+                                                            pfn << 12,
+                                                            physical_address_bits(),
+                                                            execute_only_translations_offered,
+                                                            [&](std::uint64_t
+                                                                    at)
+                                                                -> std::optional<
+                                                                    arch::x86_64::
+                                                                        vmx::epte> {
+                                                                std::uint64_t
+                                                                    value{};
+                                                                if (!read_guest_physical(
+                                                                        at,
+                                                                        std::as_writable_bytes(
+                                                                            std::span(
+                                                                                &value,
+                                                                                1)))) {
+                                                                    return std::
+                                                                        nullopt;
+                                                                }
+                                                                return arch::
+                                                                    x86_64::vmx::
+                                                                        epte(
+                                                                            value);
+                                                            });
+
+                                                    this->vtl_protect_root_perms
+                                                        [cpu][r][n] =
+                                                        (arch::x86_64::vmx::
+                                                             ept_walk_status::
+                                                                 mapped ==
+                                                         each.status)
+                                                            ? (each.permissions
+                                                                   .bits() |
+                                                               0x100)
+                                                            : 0;
+                                                }
                                             }
 
                                             n = n + 1;

@@ -10517,6 +10517,28 @@ private:
      */
     std::uint64_t vtl_protect_guest_perms[max_cpus][8]{};
     std::uint64_t vtl_protect_guest_status[max_cpus][8]{};
+
+    /**
+     * The same four frames, looked up in **every** extended-page-table
+     * root this processor has shadowed - which means both trust levels.
+     *
+     * The probe beside this reads whichever vmcs12 happens to be current,
+     * and that is not good enough for the question it was built for. In
+     * virtual secure mode a frame protected read-only for VTL0 **must**
+     * stay writable for VTL1, or the secure kernel cannot touch the pages
+     * it has just secured. If both roots deny write, the walk halting
+     * immediately after protecting them is explained, and it is a
+     * different failure from anything considered so far.
+     *
+     * Indexed `[root slot][frame]`, with the root recorded beside it so a
+     * slot can be matched to the trust level that used it.
+     * @{
+     */
+    std::uint64_t vtl_protect_root_perms[max_cpus][4][8]{};
+    std::uint64_t vtl_protect_root_source[max_cpus][4]{};
+    /**
+     * @}
+     */
     /**
      * @}
      */

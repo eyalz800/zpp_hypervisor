@@ -87,7 +87,24 @@ frame         ours   EPT12   EPT12 status
 
 **The guest hypervisor holds them read-only itself**, which is precisely
 what `HvCallModifyVtlProtectionMask` installs, and our composition is the
-correct intersection. So the frames are protected as intended and their
+correct intersection.
+
+And looking them up in **every** root this processor has shadowed - rather
+than whichever vmcs12 happened to be current, which the probe above cannot
+control - shows both trust levels behaving exactly as virtual secure mode
+requires:
+
+```
+frames:                    0x11aac9  0x11aaca  0x11aacb  0x11aacc
+root 0  eptp 0x101b18000:       r--       r--       r--       r--
+root 1  eptp 0x101b1b000:       rwx       rwx       rwx       rwx
+```
+
+**The secure kernel can write the pages it has just secured and the
+ordinary kernel cannot**, which is the entire point of the mechanism. So
+this is correct on both sides and composed correctly here, and the
+four-frame convergence is settled as an **ordering** coincidence: the walk
+halts immediately after protecting them, and not because of them. So the frames are protected as intended and their
 permissions are **not a defect on this side**. The convergence of the two
 instruments on these four frames is real, but it is the *ordering* - the
 walk halts right after protecting them - and not a permission this VMM got
