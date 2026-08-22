@@ -1,5 +1,49 @@
 # Known defects
 
+## `ShvlpProtectPages` disassembled: it stops on the **final** batch
+
+**2026-08-22.** Securekernel's operation semantics were listed as needing
+source. They do not - the function is in the trace and the symbols are
+present, so it can simply be read.
+
+```
+movl  $0xffffffff, %eax
+cmpq  %rax, (%rdx)          ; the count must fit in 32 bits
+jbe   ok
+andq  $0x0, (%rdx)
+movl  $0xc000000d, %eax     ; STATUS_INVALID_PARAMETER
+ok:
+movl  (%rdx), %edi          ; edi = pages remaining
+cmpl  $0xc, %edi
+jbe   small                 ; 12 or fewer fit the stack buffer
+call  <allocate a larger one>
+small:
+andl  $0x1f2, %ebx
+addl  $0xc, %ebx            ; ebx = 510 with a buffer, else 12
+cmpl  %edi, %ebx
+movl  %edi, %eax
+cmovbel %ebx, %eax          ; batch = min(remaining, max)
+```
+
+Two things follow, and the second is the useful one.
+
+**The `0xC000000D` path is a trivial guard.** It fires only if the count
+exceeds `0xFFFFFFFF`, and the observed counts are 2 to 257. That status is
+the one `CLAUDE.md` records Windows displaying, so it was worth reading -
+but it is not reached here.
+
+**And the request field decoded earlier as "a batch count" is *pages
+remaining*.** The values seen - 211, 208, 257, 254 and finally **2** - are
+`min(remaining, max)` where the maximum is 12 or 510, and all of them are
+below the maximum. So each call is submitting **everything that is left**.
+
+**The last call had two pages remaining.** Securekernel is not stopping
+part-way through a long walk; it is stopping on the **final batch of a
+work item**, with the work all but complete. Whatever fails, fails at the
+end of a protection request rather than in the middle of one, which is a
+much narrower place to look than "somewhere in 21,000 requests".
+
+
 ## Guest INVVPID and INVEPT are handled correctly
 
 **2026-08-22, checked because it is the one correctness path never
