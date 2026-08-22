@@ -103,6 +103,31 @@ inline constinit std::uint64_t vmcs_write_overflow{};
  * it. Anything that lands on a claimed slot with a different encoding is
  * counted as overflow rather than added to the sitting tenant.
  */
+#ifndef ZPP_VMCS_CENSUS
+#define ZPP_VMCS_CENSUS 1
+#endif
+
+/**
+ * Whether to census every VMCS access by field and by caller.
+ *
+ * **This used to be free relative to what it measured, and is not any
+ * more.** Each access cost about 4,600 cycles when it was an exit to the
+ * layer below, so a table update and a short probe beside it did not
+ * matter. With the enlightened VMCS an access is a load or a store, and
+ * the bookkeeping became the expensive part: measured at **1,606 cycles
+ * an access** against roughly ten for the access itself, which at some
+ * thirty-two accesses is essentially the whole cost of an exit.
+ *
+ * `vmcs_note_read_caller` is the worst of it - a linear probe over
+ * forty-eight slots on every read.
+ *
+ * Kept on by default because these tables answered "who reads the VMCS",
+ * which nothing else can, and this tree has lost more time to missing
+ * instruments than to slow ones. Turn it off for a run whose purpose is
+ * throughput, and expect the caller and field tables to read zero.
+ */
+inline constexpr bool vmcs_census_enabled = (0 != ZPP_VMCS_CENSUS);
+
 inline void vmcs_record_use(std::uint64_t encoding,
                             std::uint64_t (&fields)[vmcs_use_slots],
                             std::uint64_t (&hits)[vmcs_use_slots],
@@ -760,10 +785,12 @@ public:
     void write(field field, std::uint64_t value) const
     {
         vmcs_writes_taken = vmcs_writes_taken + 1;
-        vmcs_record_use(static_cast<std::uint64_t>(field),
-                        vmcs_write_field,
-                        vmcs_write_hits,
-                        vmcs_write_overflow);
+        if constexpr (vmcs_census_enabled) {
+            vmcs_record_use(static_cast<std::uint64_t>(field),
+                            vmcs_write_field,
+                            vmcs_write_hits,
+                            vmcs_write_overflow);
+        }
 
         // **An enlightened VMCS is memory, so this is a store**, and it
         // must happen instead of the `vmwrite` rather than beside it: the
@@ -839,12 +866,14 @@ public:
     std::uint64_t read(field field) const
     {
         vmcs_reads_taken = vmcs_reads_taken + 1;
-        vmcs_record_use(static_cast<std::uint64_t>(field),
-                        vmcs_read_field,
-                        vmcs_read_hits,
-                        vmcs_read_overflow);
-        vmcs_note_read_caller(
-            reinterpret_cast<std::uint64_t>(__builtin_return_address(0)));
+        if constexpr (vmcs_census_enabled) {
+            vmcs_record_use(static_cast<std::uint64_t>(field),
+                            vmcs_read_field,
+                            vmcs_read_hits,
+                            vmcs_read_overflow);
+            vmcs_note_read_caller(reinterpret_cast<std::uint64_t>(
+                __builtin_return_address(0)));
+        }
 
         // **An enlightened VMCS is memory, so this is a load.** Ahead of
         // the cache, which exists to avoid an access that is not being

@@ -157,6 +157,10 @@ extern "C" [[gnu::used, gnu::retain]] constinit const char
         // page instead of VMREAD and VMWRITE. A correctness field, not a
         // tuning one: on, the second-level VMCS is not a VMCS at all, and
         // two runs that differ in it are not comparable.
+        // Off leaves the VMCS field and caller tables reading zero,
+        // which is indistinguishable from a VMM that made no accesses.
+        ' ', 'c', 'e', 'n', 's', 'v', '=',
+        digit(arch::x86_64::vmx::vmcs_census_enabled),
         ' ', 'e', 'v', 'm', 'k', '=',
         digit(nested_vmx::evmcs_to_kvm),
         ' ', 'v', 't', 'l', 't', 'r', 'c', '=',
