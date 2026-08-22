@@ -1,5 +1,54 @@
 # Known defects
 
+## What the stalled thread is waiting for: the dispatch IPI
+
+**2026-08-23.** The single-processor run stalls with `KiExecuteDpc`
+running, and its stack says what it is doing:
+
+```
+KiExecuteDpc
+ -> KiCheckPreferredHeteroProcessor
+ -> KiDeferredReadySingleThread
+ -> KiComputeThreadQos
+ -> KiPopulateTrivialProcessorSelectionResult
+ -> KiAddThreadToReadyQueue
+ -> KiUpdateSoftParkElectionStatisticsOnInsertion
+ -> HalpInterruptSendIpi
+ -> HalpApicRequestInterrupt
+```
+
+**Windows is making a thread runnable and sending an interrupt to
+dispatch it.** That is the same vector this tree has been measuring all
+along - `0x2f`, asked for 145,200 times and carried 479, and in the best
+configuration 13,176 of 145,200 - and the dump's own alarm has been saying
+so: *entries carrying nothing while the priority would have admitted a
+deferred call: 18,561*, which it labels a live fault.
+
+**So "Windows is starved" is at best half of it.** It is *also* waiting on
+an interrupt it asked for and did not get, and a thread that is never
+dispatched does not consume the cycles it is supposedly short of. The two
+readings are not alternatives and the starvation reading was allowed to
+close the question.
+
+That reframes the remaining work as a *blocker* rather than throughput,
+which is what the objective asked for from the start:
+
+- the guest requests the dispatch interrupt through the synthetic
+  interrupt-command register, which this VMM reflects to the guest
+  hypervisor;
+- the guest hypervisor decides whether to inject it, and injects on 0.3%
+  to 1.4% of requests;
+- `l2_low_priority_no_event` grows continuously, so there are entries
+  where the priority *would* have admitted it and nothing was carried.
+
+**The next question is one thing, and it has not been asked yet**: on
+those 18,561 entries, is a `0x2f` actually pending in the guest
+hypervisor's own interrupt state, or is it not asking for one? Those want
+opposite fixes - one is a delivery fault here, the other is the guest
+hypervisor declining - and no instrument in this tree currently
+distinguishes them.
+
+
 ## Mixed mode: where it actually stops, with the number that says so
 
 **2026-08-23.** Four attempts. The instrument work paid for itself twice
