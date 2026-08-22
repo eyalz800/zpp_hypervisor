@@ -5640,6 +5640,16 @@ void hypervisor::setup_vmcs(std::size_t cpu,
 
                 this->evmcs_active[cpu] = true;
 
+                // **Before this function writes a single vmcs01 field.**
+                // Everything below aims at "the current VMCS", and with
+                // this on that has to be the enlightened page standing in
+                // for it - otherwise setup fills the real region, the
+                // enlightened one keeps nothing but its revision, and the
+                // first entry runs the guest hypervisor from an empty
+                // description. Measured: zero exits and zero second-level
+                // entries, a hypervisor that never launched.
+                point_at_vmcs(cpu, false);
+
                 log("cpu {} enlightened vmcs active, assist {} page {}",
                     cpu,
                     this->vp_assist_physical[cpu],
@@ -5721,7 +5731,11 @@ void hypervisor::setup_vmcs(std::size_t cpu,
         // leaving them unwritten is what makes "off" mean the VMCS is
         // programmed exactly as it was before shadowing existed, which is
         // the property a bare-metal bisection depends on.
-        if constexpr (nested_vmx::shadow_vmcs_enabled) {
+        // The runtime flag, not the build one: it is cleared when the
+        // enlightened VMCS is in use, and these two fields have no
+        // enlightened home - writing a non-zero address to a field the
+        // layer below cannot represent traps, by design.
+        if (this->vmcs_shadowing_enabled) {
             vmcs.vmread_bitmap_address(
                 this->vmcs_shadow_read_bitmap_physical);
             vmcs.vmwrite_bitmap_address(
