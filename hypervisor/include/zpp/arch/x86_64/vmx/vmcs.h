@@ -568,7 +568,28 @@ inline void evmcs_store(std::uint64_t page,
     auto slot = evmcs_offset_of(encoding);
 
     if (0 == slot.size) {
-        __builtin_trap();
+        // **Writing zero to a field this format does not have is
+        // disabling a feature it never had, so it is dropped.** The
+        // fields with no enlightened home are all optional capabilities -
+        // VMFUNC and its EPTP list, posted interrupts, the
+        // page-modification log, sub-page permissions - and this VMM
+        // writes zero to them on the second-level path to turn them off.
+        // There is nothing to turn off here.
+        //
+        // Measured, and it is why the first attempt at this never reached
+        // a single second-level entry: `write_vmcs02_control(cpu,
+        // field::vm_function_controls, 0)` is unconditional, so the very
+        // first entry trapped, and `l2-entries` read zero - which looks
+        // exactly like a guest that never started.
+        //
+        // A *non-zero* write still traps, and must: that is a request to
+        // switch on something this format cannot express, and carrying on
+        // would run the guest with the feature silently absent.
+        if (0 != value) {
+            __builtin_trap();
+        }
+
+        return;
     }
 
     auto * at =
