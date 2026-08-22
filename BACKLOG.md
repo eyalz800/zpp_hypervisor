@@ -1,5 +1,59 @@
 # Known defects
 
+## The walk stops on four named frames, and they are the read-only ones
+
+**Measured 2026-08-22, and this is the first time two independent
+instruments have named the same physical frames.**
+
+The secure memory manager's last code-0 requests before the walk halts:
+
+```
+the last code-0 blocks seen:
+  +0x00 0x01010002  +0x08 0x11aac9  +0x10 0x1
+  +0x00 0x01010002  +0x08 0x11aaca  +0x10 0x1
+  +0x00 0x01010002  +0x08 0x11aacb  +0x10 0x1
+  +0x00 0x01010002  +0x08 0x11aacc  +0x10 0x1
+```
+
+And the protection-call instrument, from a different run and a different
+part of this investigation:
+
+```
+the read-only frames (4):
+  0x11aac9  shadow r--   our own tables: status 0 perms rwx
+  0x11aaca  shadow r--   our own tables: status 0 perms rwx
+  0x11aacb  shadow r--   our own tables: status 0 perms rwx
+  0x11aacc  shadow r--   our own tables: status 0 perms rwx
+```
+
+**The same four frames.** The walk stops on them, and everything after is
+the VINA loop - request code 4 is 15,309 of 36,324 calls, 42%, and every
+one of them comes *after* the walk halts. So the VINA spin is a
+**consequence** of the walk stopping, not its cause, which is consistent
+with suppressing VINA moving the stall elsewhere rather than removing it.
+
+Subcode `0x01010002` carries a page frame number at +8 and `1` at +0x10.
+The other shapes seen - `0x00020002`, `0x00fe0002`, `0x01000000` - carry a
+kernel virtual address at +8 and a frame at +0x10, so this one is the
+request that names a frame *directly*.
+
+### What is and is not known about those frames
+
+- Composed permission is read-only; ours is `rwx`; so the guest
+  hypervisor's own extended page tables hold them read-only, which is what
+  `HvCallModifyVtlProtectionMask` installs. **That much is expected.**
+- Every protection call succeeded: `non-zero statuses 0`, `answers short
+  of the reps asked: 0`, `reps asked 71,112 reps done 71,156`.
+- `reflected_permission` reads **0** and EPT violations are frozen at the
+  freeze, so **nothing is faulting on them**. Whatever stops the walk is
+  not a permission fault this VMM ever sees.
+
+That last point is the sharp one. The frames are read-only, the walk stops
+on them, and no fault is taken - so either VTL0 never touches them after
+they are protected, or it touches them in a way that succeeds and the walk
+stops for another reason entirely.
+
+
 ## VINA is not the blocker, and the secure kernel was making progress all along
 
 **Measured 2026-08-22.** `ZPP_SUPPRESS_VINA` clears the notification flag
