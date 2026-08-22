@@ -6267,29 +6267,42 @@ hypervisor::main(arch::x86_64::context & caller_context)
         // here - see the members' comment. Inside this guard with the
         // rest, because a processor this VMM started carries no launch
         // block and would otherwise zero what the boot processor found.
-        this->framebuffer_base = launch.framebuffer.base;
-        this->framebuffer_size = launch.framebuffer.size;
-        this->framebuffer_width = launch.framebuffer.horizontal_resolution;
-        this->framebuffer_height = launch.framebuffer.vertical_resolution;
-        this->framebuffer_stride = launch.framebuffer.pixels_per_scan_line;
-        this->framebuffer_format = launch.framebuffer.pixel_format;
-        this->framebuffer_red_mask = launch.framebuffer.red_mask;
-        this->framebuffer_green_mask = launch.framebuffer.green_mask;
-        this->framebuffer_blue_mask = launch.framebuffer.blue_mask;
-        this->framebuffer_reserved_mask = launch.framebuffer.reserved_mask;
+        //
+        // Behind the same switch as the loader-side query, so the two
+        // cannot disagree about whether the capability is present. With
+        // it off the loader hands over zeros anyway, and copying zeros
+        // would be harmless - the branch is here so the *manifest* field
+        // describes one thing rather than two halves that can be built
+        // apart.
+        if constexpr (nested_vmx::framebuffer_recorded) {
+            this->framebuffer_base = launch.framebuffer.base;
+            this->framebuffer_size = launch.framebuffer.size;
+            this->framebuffer_width =
+                launch.framebuffer.horizontal_resolution;
+            this->framebuffer_height =
+                launch.framebuffer.vertical_resolution;
+            this->framebuffer_stride =
+                launch.framebuffer.pixels_per_scan_line;
+            this->framebuffer_format = launch.framebuffer.pixel_format;
+            this->framebuffer_red_mask = launch.framebuffer.red_mask;
+            this->framebuffer_green_mask = launch.framebuffer.green_mask;
+            this->framebuffer_blue_mask = launch.framebuffer.blue_mask;
+            this->framebuffer_reserved_mask =
+                launch.framebuffer.reserved_mask;
 
-        // In the log too, not only in the members. The members need a
-        // reader that knows the singleton's offsets; the log is text and
-        // comes out of a wedged guest through the same path everything
-        // else does. Both, because the two are read in different
-        // situations and neither subsumes the other.
-        log("framebuffer at {} size {}, {}x{} stride {} format {}",
-            this->framebuffer_base,
-            this->framebuffer_size,
-            this->framebuffer_width,
-            this->framebuffer_height,
-            this->framebuffer_stride,
-            this->framebuffer_format);
+            // In the log too, not only in the members. The members need
+            // a reader that knows the singleton's offsets; the log is
+            // text and comes out of a wedged guest through the same path
+            // everything else does. Both, because the two are read in
+            // different situations and neither subsumes the other.
+            log("framebuffer at {} size {}, {}x{} stride {} format {}",
+                this->framebuffer_base,
+                this->framebuffer_size,
+                this->framebuffer_width,
+                this->framebuffer_height,
+                this->framebuffer_stride,
+                this->framebuffer_format);
+        }
 
         // Where this module was put. Inside the guard with the rest,
         // because a processor this VMM started has no launch block and

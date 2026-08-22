@@ -212,6 +212,11 @@ target_compile_options(zpp_hypervisor PRIVATE
     $<$<CONFIG:Release>:-DZPP_DIAG=0>
     $<$<CONFIG:Debug>:-DZPP_DIAG_RESERVE_WINDOW=$<BOOL:${ZPP_DIAG_RESERVE_WINDOW}>>
     $<$<CONFIG:Release>:-DZPP_DIAG_RESERVE_WINDOW=0>
+    # The framebuffer the loader handed over. Recorded only; nothing here
+    # draws. Off, the fields stay zero, which is what a machine reporting
+    # no graphics output protocol already produces.
+    $<$<CONFIG:Debug>:-DZPP_FRAMEBUFFER=$<BOOL:${ZPP_FRAMEBUFFER}>>
+    $<$<CONFIG:Release>:-DZPP_FRAMEBUFFER=0>
     # Nested VMX. Same shape as the diagnostic switch - an always defined 0/1
     # macro turned into a constexpr bool by nested_vmx.h - and defined for both
     # configurations rather than debug only, because unlike diagnostics this is

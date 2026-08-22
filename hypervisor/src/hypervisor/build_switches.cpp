@@ -146,6 +146,14 @@ extern "C" [[gnu::used, gnu::retain]] constinit const char
         ' ', 'd', 'i', 'l', 'a', 't', 'e', '=',
         digit(static_cast<unsigned>(nested_vmx::time_dilation / 10)),
         digit(static_cast<unsigned>(nested_vmx::time_dilation)),
+        // The framebuffer record. Off, every framebuffer field in the
+        // singleton reads zero - which is indistinguishable from a
+        // machine whose firmware reported no graphics output protocol,
+        // and from a loader that found one and failed to hand it over.
+        // Three causes, one reading, so the manifest is what separates
+        // "not built" from the other two.
+        ' ', 'f', 'b', '=',
+        digit(nested_vmx::framebuffer_recorded),
         '\0'};
 
 } // namespace zpp::hypervisor

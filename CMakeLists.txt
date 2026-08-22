@@ -45,6 +45,29 @@ option(ZPP_DIAG
     "Compile the diagnostic log, its ring and its sinks (debug builds only)"
     ON)
 
+# The firmware's linear framebuffer: the UEFI loader asks the graphics output
+# protocol where the screen is and hands the answer over, and the hypervisor
+# records it. Nothing draws - it is recorded so something *outside* the
+# machine can read the screen, which on the passthrough rig is the only way
+# to see one at all: the display is a passed-through GPU, so QEMU answers
+# `screendump` with "There is no console to take a screendump from" and the
+# monitor's `xp` over the reported base is the whole capability.
+#
+# On in debug and hardcoded 0 in release, following ZPP_DIAG rather than the
+# nested switches: it changes nothing the guest observes, it is a diagnostic
+# aid, and a release binary has no reason to query a protocol it will not use.
+#
+# Off leaves the hand-over structure all zero, which is what the resident side
+# already reads on a machine that reports no graphics output protocol - so off
+# is an existing state rather than a new one. The structure itself stays in
+# loader/include/zpp/loader.h unconditionally: it is embedded by value in the
+# loader/hypervisor ABI blocks, and an ABI whose shape follows a build switch
+# is one where a loader and a hypervisor built with different switches
+# disagree silently about every field after it.
+option(ZPP_FRAMEBUFFER
+    "Locate the firmware framebuffer and hand it over (debug builds only)"
+    ON)
+
 # Nested VMX: whether the guest is told VT-x exists.
 #
 # Off, and the default is the decision rather than a convenience. With it off
@@ -250,6 +273,7 @@ ExternalProject_Add(hypervisor
         -DZPP_HYPERVISOR_WAIT_FOR_DEBUGGER=${ZPP_HYPERVISOR_WAIT_FOR_DEBUGGER}
         -DZPP_DIAG=${ZPP_DIAG}
         -DZPP_DIAG_RESERVE_WINDOW=${ZPP_DIAG_RESERVE_WINDOW}
+        -DZPP_FRAMEBUFFER=${ZPP_FRAMEBUFFER}
         -DZPP_NESTED_VMX=${ZPP_NESTED_VMX}
         -DZPP_REQUEUE_INTERRUPTED_EVENTS=${ZPP_REQUEUE_INTERRUPTED_EVENTS}
         -DZPP_NESTED_TPR_SHADOW=${ZPP_NESTED_TPR_SHADOW}
@@ -382,6 +406,7 @@ ExternalProject_Add(uefi_loader
         -DZPP_SEARCH_ALL_DEVICES=${ZPP_SEARCH_ALL_DEVICES}
         -DZPP_DIAG=${ZPP_DIAG}
         -DZPP_DIAG_RESERVE_WINDOW=${ZPP_DIAG_RESERVE_WINDOW}
+        -DZPP_FRAMEBUFFER=${ZPP_FRAMEBUFFER}
     INSTALL_COMMAND ""
     BUILD_ALWAYS ON
     DEPENDS hypervisor

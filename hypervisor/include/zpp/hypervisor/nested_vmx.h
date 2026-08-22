@@ -970,6 +970,32 @@ inline constexpr std::uint64_t time_dilation = ZPP_TIME_DILATION;
 inline constexpr bool dilate_time = (1 < time_dilation);
 
 /**
+ * Whether the firmware's linear framebuffer is located by the loader and
+ * recorded here.
+ *
+ * Nothing in this VMM ever draws. The record exists so that something
+ * *outside* the machine can read the screen, which on the passthrough rig
+ * is the only way to see one: the display is a passed-through GPU, so
+ * QEMU answers `screendump` with "There is no console to take a
+ * screendump from", and the monitor's `xp` over the base recorded here is
+ * the whole capability. `scripts/rig-screen.py` is the reader.
+ *
+ * Off, every field stays zero - which is exactly what a machine reporting
+ * no graphics output protocol produces, so off is a state the reader
+ * already handles rather than a new one.
+ *
+ * Living in this header rather than beside the graphics code is a
+ * deliberate compromise: the header is where every `constexpr bool` the
+ * build manifest is assembled from lives, and a switch the manifest
+ * cannot show is a switch this project has already lost a session to.
+ */
+#ifndef ZPP_FRAMEBUFFER
+#define ZPP_FRAMEBUFFER 1
+#endif
+
+inline constexpr bool framebuffer_recorded = (0 != ZPP_FRAMEBUFFER);
+
+/**
  * Defer the bulk guest-state copy out of vmcs02 into vmcs12.
  *
  * **Off, after three boots and about 280 unclean resets of the rig's
