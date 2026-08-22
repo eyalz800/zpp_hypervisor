@@ -1,5 +1,60 @@
 # Known defects
 
+## Touching the self-IPI path freezes at 19,975, whichever way you touch it
+
+**Measured 2026-08-22, third and fourth data points on a signature this
+tree already recorded once.** Baseline reaches 39,29x protection calls;
+both switches that touch the self-IPI path stop at **19,975**, exactly,
+and then take no further exits at all:
+
+| build | protection calls | state |
+|---|---|---|
+| baseline | 39,290 | livelocked, exits climbing |
+| `ZPP_DELIVER_SELF_IPI=ON` | **19,975** | stopped dead |
+| `ZPP_INTERCEPT_SELF_IPI=ON` | **19,975** | stopped dead |
+
+The two do *opposite* things - one injects a vector the guest hypervisor
+did not stage, the other withholds a request it did make - and they fail
+identically, at the same count. **That is a reproducible signature, not
+noise**, and it says the fault is not in which direction the self-IPI path
+is perturbed but in perturbing it at all.
+
+`intercept_self_ipi` was worth the boot on evidence, not on hope: it is
+built to withhold a self-directed vector *when the requesting processor's
+own task priority refuses it*, and the priority census had just shown
+exactly that case - vector `0x2f` at class 2 against a task priority of
+class 2 on 94% of interrupt-window exits, which refuses by the
+strictly-greater rule. It would have withheld nearly all of them. It did
+not help.
+
+### And the guest hypervisor is not being denied anything
+
+Read rather than assumed, since "we withhold a capability it needs" was
+the standing hypothesis:
+
+```
+vmcs12_secondary_asked   bits 0, 4, 8, 9 all clear
+vmcs12_pin_asked         0x3f - no preemption timer, no posted interrupts
+tpr_shadow_refused       0
+tpr_shadow_absent        0
+```
+
+**Hyper-V never asks for virtualize-APIC-accesses, x2APIC mode, APIC
+register virtualization, virtual interrupt delivery, posted interrupts or
+the preemption timer**, and the TPR shadow is honoured for every vmcs12
+without exception. So nothing is being stripped or refused; it read the
+capability MSRs, found those absent, and adapted to the polling path -
+which is the interrupt-window storm measured above.
+
+That makes advertising virtual interrupt delivery the remaining structural
+candidate: with it, hardware would deliver `0x2f` the instant the task
+priority fell below class 2, with no exit and no involvement from the
+level above - and the deadlock's fifth link, the guest hypervisor
+asserting VINA for an interrupt it cannot itself deliver, would not
+arise. It is a large feature - guest interrupt status, the EOI-exit
+bitmap, APIC-write exits - and it is now the best-evidenced one.
+
+
 ## The guest is pinned at DISPATCH_LEVEL, and that closes the loop
 
 **Measured 2026-08-22** with an instrument built to test whether the
