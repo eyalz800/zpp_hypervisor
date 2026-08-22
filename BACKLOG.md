@@ -38659,3 +38659,34 @@ was written in this file eleven errors ago, and it is the reason this one
 did not become the twelfth.
 
 So the SynIC message path joins the transport: measured, working, not this.
+
+## The VP assist pages carry nothing either
+
+The other half of the handshake, decoded field by field against the
+published layout (`apic_assist`, `vtl_entry_reason`, `vtl_ret_x64rax/rcx`,
+`nested_control`, `enlighten_vmentry`, `current_nested_vmcs`,
+`synthetic_time_unhalted_timer_expired`, `virtualization_fault_information`,
+`intercept_message`):
+
+    page 0x117a1f000  (VTL0's, as Windows wrote the MSR)   0 of 32 qwords non-zero
+    page 0x117a20000                                        2 of 32
+        +0x008  0x0000000000000001   vtl_entry_reason = VtlCall
+        +0x018  0x0000000000000011   vtl_ret_rcx = 0x11
+    page 0x117a21000                                        0 of 32
+
+**No virtualization-fault information, no intercept message, no
+unhalted-timer flag, nothing in the fault-report area at all.** The guest
+hypervisor is not recording a reason anywhere in the structure whose purpose
+is to record one, and VTL0's own assist page is completely empty.
+
+With the message channel measured live in the entry above, that closes the
+whole guest-observable handshake: **both halves are readable, both are
+working, and neither carries a complaint.**
+
+So the position after two wide reviews, nine defects found and fixed, and
+the handshake read directly: **nothing in this VMM, and nothing the two
+levels exchange through the interfaces they are supposed to exchange
+through, is wrong.** Windows performs a fixed quantity of VSM setup - the
+same to within a handful of calls on every configuration tried, including
+two processors instead of eight - and then its secure kernel stops finding
+the one thread runnable.
