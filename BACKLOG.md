@@ -1,5 +1,50 @@
 # Known defects
 
+## VTL1 never runs on the second processor
+
+**2026-08-24.** Turning `ZPP_TRACE_VTL` on for one two-processor boot -
+the census that has been dark on every run that mattered - gives the
+cleanest split yet:
+
+```
+cpu 0   last hypercall 0x0050 GetVpRegisters   count 83,286   vtl1 entries 62,068
+cpu 1   last hypercall 0x0012 VtlReturn        count     21   vtl1 entries      0
+```
+
+**VP1 makes twenty-one hypercalls and stops, and this VMM never once
+observes VTL1 running on it.** VP0 enters VTL1 sixty-two thousand times
+over the same window. VP1's last hypercall is `HvCallVtlReturn` - the
+call that leaves VTL1 for VTL0 - and after it VP1 spins at a single
+second-level instruction that belongs to no loaded module.
+
+Both processors report `l2_activity_state` 0, active, so neither is
+parked or waiting for a start-up IPI. This is not an application
+processor that failed to start; it is one that started, ran, made a
+handful of trust-level calls, and stopped.
+
+**Two readings, and they are not yet separated.** Either VTL1 genuinely
+never runs on VP1 - in which case its secure-kernel startup never
+completes and the spin is it waiting - or **our detection of VTL1 does
+not work on VP1**, and `vtl1_any_entry_count` reads zero for a processor
+where it is in fact running. The second is entirely possible: a
+`VtlReturn` from VP1 implies VTL1 *had* run there, which contradicts a
+literal reading of the zero.
+
+`vtl_half_mark_kind[cpu]` is what feeds that counter, and whether it is
+maintained per processor or only for whichever processor armed it is the
+thing to check first - and it is checkable by reading, without a boot.
+**That is the shape of two bugs already found this session**: a counter
+whose label promised more than its site delivered, and per-processor
+state that was not.
+
+Worth stating plainly: this is the first measurement that distinguishes
+the two processors by *what they are doing* rather than by how far they
+got, and it is one switch away from being available on every run. The
+switch was off because it costs several VMCS reads and a guest page walk
+per trust-level switch - a real cost, and the wrong trade for the run
+that needed diagnosing.
+
+
 ## The second processor spins in VTL1, and the level above is timing it out
 
 **2026-08-24, and this is the sharpest the multi-processor failure has
