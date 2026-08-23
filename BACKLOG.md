@@ -76,10 +76,25 @@ family as the reboot loop recorded above - and the same trap: a counter
 compared against its own previous value, with nothing checking that the
 thing underneath was still the same thing.
 
-**Recording the disproof rather than the guess**, for the fifth time in
-this sequence. Four fixes were aimed at an event that does not happen and
-two candidates have now been checked and discarded before being acted on -
-which is the only part of this that improved.
+**Three ordering candidates have now been checked and all three are
+correct**, which is worth stating so the next attempt does not spend time
+there:
+
+```
+4665  save_l2_state          reads the enlightened page   <- before the switch
+4673+ exit info -> vmcs12    reads the enlightened page   <- before the switch
+4769  point_at_vmcs(false)   switch to vmcs01
+4799  load_l1_host_state     writes vmcs01                <- after the switch
+```
+
+Everything is read from the VMCS that ran and written to the one about to
+run. So the reset is not an ordering fault in `reflect_l2_exit`, and the
+cause is still open.
+
+**Recording the disproofs rather than the guesses**, which is the only
+part of this sequence that improved: four fixes were aimed at an event
+that does not happen, and three candidates since have been checked and
+discarded before being acted on.
 
 
 ## Mixed mode fails on *this VMM's own* VM entry, not the second-level one
