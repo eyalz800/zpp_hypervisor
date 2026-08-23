@@ -1,5 +1,56 @@
 # Known defects
 
+## The empty root is not the deferral, and it may not be a root at all
+
+**2026-08-23, two facts and a caveat on the entry above.**
+
+**It is not `ZPP_DEFER_GUEST_STATE`.** Built with the deferral off, the
+two-processor run bugchecks exactly as before - `paused (shutdown)`, same
+place - and the suspect value simply moved processors:
+
+```
+defer=1   l2_exit_cr3[0] = 0x8800002 (suspect)   [1] = 0x1ae002 (good)
+defer=0   l2_exit_cr3[0] = 0x1ae002 (good)       [1] = 0x8800002 (suspect)
+```
+
+Same value, same PCID, other processor. So the deferral is exonerated,
+and whatever this is follows a *virtual processor* rather than a physical
+one.
+
+**And the caveat, which matters more.** The entry above calls
+`0x8800000` "a second-level page-table root that is an empty page". That
+is one reading of two facts - our recorder holds it, and reading it at
+that host-physical address gives zeros - and there is at least one other:
+
+- **It may be the guest hypervisor's own root, not the second level's.**
+  `save_l2_state` reads `guest_cr3` from whatever VMCS is current; if
+  vmcs01 were current on that path the value would be the level above's,
+  and a crash record naming the hypervisor's own CR3 is *normal* for a
+  crash record rather than evidence of corruption.
+- **A second-level root is an L2-physical address**, which reaches host
+  memory through the level above's extended page tables and then ours.
+  Reading it directly assumes identity. That identity is measured for
+  *some* pages, not established for all, and `0x1ae000` reading as a
+  valid PML4 while `0x8800000` reads as zeros is equally consistent with
+  "one of them is not identity-mapped".
+
+`0x8800000` is exactly 136 MB, which is a suspiciously round number for
+something a guest allocated and a very ordinary one for something placed
+by a loader.
+
+**What would settle it**, and none of it needs another boot: whether
+`save_l2_state` can run with vmcs01 current on any path; what the level
+above's own CR3 is, read from vmcs01 deliberately rather than
+incidentally; and whether the identity assumption holds for the frame in
+question, checked through the shadow EPT rather than assumed from the
+frames where it has been checked.
+
+**Written down before acting on it** because the previous entry acted on
+the first reading, and this session has already retracted three
+conclusions that came from a real number answering a question nobody
+asked.
+
+
 ## The two-processor crash: a second-level page-table root that is an empty page
 
 **2026-08-23, and this is the sharpest thing found all session.** The
