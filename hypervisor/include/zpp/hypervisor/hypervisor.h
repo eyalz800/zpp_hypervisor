@@ -9914,6 +9914,29 @@ private:
     std::uint64_t hypercall_code_counts[hypercall_code_slots]{};
 
     /**
+     * Which MSRs the `wrmsr` exits are, censused by index.
+     *
+     * Taken because `wrmsr` reached **34.8% of all exits** - 1,872,595
+     * of 5,386,026 on a settled single-processor run - with nothing in
+     * this tree recording which MSR that was. An exit reason is not an
+     * instrument: "the guest writes MSRs a lot" is compatible with a
+     * timer being rearmed once a tick, with a spin on the interrupt
+     * command register, and with an end-of-interrupt storm, and those
+     * are three different problems.
+     *
+     * `msr_write_last_value` is the second field, and it is here so the
+     * two can disagree. A count alone cannot separate a deadline being
+     * advanced every tick from the same deadline being rewritten
+     * unchanged - the index is identical either way and only the value
+     * moves. Recording one costs a store on a path that is already
+     * taking a VM exit.
+     */
+    static constexpr std::size_t msr_write_slots = 24;
+    std::uint64_t msr_write_codes[msr_write_slots]{};
+    std::uint64_t msr_write_counts[msr_write_slots]{};
+    std::uint64_t msr_write_last_value[msr_write_slots]{};
+
+    /**
      * The same census for the **second-level** guest's hypercalls, which
      * nothing has ever taken.
      *

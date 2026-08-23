@@ -2329,6 +2329,8 @@ def main():
                "cpuid_trace", "cpuid_trace_count", "host_page_table",
                "cpuid_hypervisor_leaves_asked",
                "hypercall_codes", "hypercall_code_counts",
+               "msr_write_codes", "msr_write_counts",
+               "msr_write_last_value",
                "evmcs_reads", "evmcs_writes", "evmcs_recommended",
                "hot_state_writes_skipped", "hot_state_writes_done",
                "l2_run_cycles", "l1_run_cycles", "handler_cycles",
@@ -2426,6 +2428,8 @@ def main():
                # and printed by nothing, and the second-level one names
                # what Windows is asking Hyper-V to do.
                "hypercall_codes", "hypercall_code_counts",
+               "msr_write_codes", "msr_write_counts",
+               "msr_write_last_value",
                "l2_hypercall_codes", "l2_hypercall_code_counts",
                # What the guest hypervisor asked vmcs02 for against what
                # it was given. A bit it asked for and did not get changes
@@ -2675,6 +2679,11 @@ def main():
     monitor.queue(instance + off["host_page_table"], 1)
 
     hypercall_slots = 16
+    for _name in ("msr_write_codes", "msr_write_counts",
+                  "msr_write_last_value"):
+        if _name in off:
+            monitor.queue(instance + off[_name], 24)
+
     monitor.queue(instance + off["hypercall_codes"], hypercall_slots)
     monitor.queue(instance + off["hypercall_code_counts"], hypercall_slots)
 
@@ -2876,6 +2885,28 @@ def main():
     # hypervisor above it to bring up a virtual processor, and nothing in
     # this reader has ever shown them. A code that repeats without the
     # guest moving on is a request that is not completing.
+    MSR_NAMES = {
+        0x0000001b: "IA32_APIC_BASE",
+        0x0000006e0: "IA32_TSC_DEADLINE",
+        0x00000830: "X2APIC_ICR",
+        0x0000080b: "X2APIC_EOI",
+        0x00000838: "X2APIC_INIT_COUNT",
+        0x00000808: "X2APIC_TPR",
+        0x00000832: "X2APIC_LVT_TIMER",
+        0x0000083f: "X2APIC_SELF_IPI",
+        0x40000070: "HV_SIEFP",
+        0x40000071: "HV_SIMP",
+        0x40000073: "HV_VP_ASSIST_PAGE",
+        0x40000080: "HV_SCONTROL",
+        0x4000008d: "HV_EOM",
+        0x400000b0: "HV_STIMER0_CONFIG",
+        0x400000b1: "HV_STIMER0_COUNT",
+        0x400000b2: "HV_STIMER1_CONFIG",
+        0x400000b3: "HV_STIMER1_COUNT",
+        0xc0000080: "IA32_EFER",
+        0xc0000101: "GS_BASE",
+        0xc0000102: "KERNEL_GS_BASE",
+    }
     HV_CALLS = {
         0x0008: "HvCallSendSyntheticClusterIpi",
         0x000c: "HvCallModifyVtlProtectionMask",
@@ -2910,6 +2941,25 @@ def main():
         for n, c in sorted(rows, reverse=True):
             print(f"    0x{c:04x}  {n:>12,}  "
                   f"{HV_CALLS.get(c, '')}")
+
+    # Which MSRs the wrmsr exits actually are. An exit reason is not an
+    # instrument - see `msr_write_codes`. The value is printed beside the
+    # count so a deadline being advanced can be told from one rewritten
+    # unchanged, which the count alone cannot do.
+    if "msr_write_codes" in off:
+        rows = []
+        for i in range(24):
+            c = words.get(instance + off["msr_write_codes"] + 8 * i, 0)
+            n = words.get(instance + off["msr_write_counts"] + 8 * i, 0)
+            v = words.get(instance + off["msr_write_last_value"] + 8 * i, 0)
+            if n:
+                rows.append((n, c, v))
+        if rows:
+            total = sum(r[0] for r in rows)
+            print(f"\ncpu 0 wrmsr exits by MSR ({total:,} censused)")
+            for n, c, v in sorted(rows, reverse=True):
+                print(f"    0x{c:08x}  {n:>12,}  {100.0*n/total:5.1f}%  "
+                      f"last 0x{v:016x}  {MSR_NAMES.get(c, '')}")
 
     # The kernel image bounds, used by both the thread and stack sections
     # below to turn an address into an offset that survives KASLR.

@@ -1285,6 +1285,28 @@ void hypervisor::on_vm_exit(std::uint64_t cpuid,
         break;
     }
     case basic_reason::wrmsr:
+        // Censused before anything decides what to do with it, so an
+        // MSR with no case below is counted rather than invisible.
+        // See `msr_write_codes` for why this exists at all.
+        {
+            auto censused = static_cast<std::uint64_t>(
+                static_cast<std::uint32_t>(context.rcx));
+
+            for (std::size_t slot{}; slot < msr_write_slots; ++slot) {
+                if (0 == this->msr_write_counts[slot]) {
+                    this->msr_write_codes[slot] = censused;
+                }
+
+                if (this->msr_write_codes[slot] == censused) {
+                    this->msr_write_counts[slot] += 1;
+                    this->msr_write_last_value[slot] =
+                        (context.rax & 0xffffffff) |
+                        ((context.rdx & 0xffffffff) << 32);
+                    break;
+                }
+            }
+        }
+
         // The MSRs nested VMX owns, which are only armed in the bitmap
         // when it is compiled in. Taken before the interrupt command
         // register below because the two sets do not overlap and the
