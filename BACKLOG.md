@@ -1,5 +1,43 @@
 # Known defects
 
+## Mixed mode fails on *this VMM's own* VM entry, not the second-level one
+
+**2026-08-23.** Four attempts were aimed at the wrong VM entry. The
+instrument that ended it recorded which stub the resume path selected:
+it reads **1, launch**, while `vm_instruction_error` reads **5, VMRESUME
+with non-launched VMCS**. One entry cannot be both; two entries can.
+
+**There are two failure reporters and they had been treated as one.** The
+nested stubs (`nested_vmlaunch`, `nested_vmresume`) report through
+`zpp_vmx_nested_entry_failure`, which logs "second level entry refused by
+the processor". `record_entry_failure` - where every 5 was read - is
+reached only from the plain `vmresume` stub, which is the entry that runs
+the **guest hypervisor on vmcs01**.
+
+Confirmed directly: cpu 0 parks in `zpp::arch::x86_64::vmx::vmresume`, the
+log carries no refusal line, and `vm_entry_failure.occurred` is 0. **The
+second-level entry succeeds. The entry after it, back into vmcs01, is what
+fails.**
+
+Why it should fail: the layer below sets its current-VMCS pointer to
+invalid whenever the enlightened pointer changes
+(`nested_vmx_handle_enlightened_vmptrld`), so the launch state it held for
+vmcs01 does not survive a second-level entry, and a VMRESUME on vmcs01 is
+then a resume of something it considers unlaunched.
+
+A fix on that reading - mark vmcs01 as needing a launch when an
+enlightened entry happens, honour it once in the resume path - **did not
+take**: the processor still parks in `vmresume`, so the flag is either not
+set on the path actually taken or is cleared before it is read. That is
+the next thing to check, and it is one counter away rather than one guess.
+
+**The general lesson, and it is the fifth of its kind here:** two
+mechanisms with the same name were assumed to be one, and four fixes were
+aimed at the wrong one. The instrument that separated them - record which
+of two things happened, rather than that something happened - is the same
+shape as the two counters that settled the dispatch interrupt.
+
+
 ## Mixed mode: the error is named and the next check is one line
 
 **2026-08-23.** The failure is `vm_instruction_error` **5**, "VMRESUME
