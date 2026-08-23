@@ -59,10 +59,22 @@ then switches with `point_at_vmcs(cpu, false)` at 4769. So every field is
 read from the enlightened page *before* the VMCS changes, which is the
 correct order and leaves nothing for the guest hypervisor to misread.
 
-So the shape is explained and the cause is not. What is known: the
-second-level entry succeeds, the exit is reflected with its information
-read from the right place, and the guest hypervisor then spends 91.8% of
-its exits on CPUID and never launches its guest again.
+**And the CPUID loop is not the guest hypervisor at all - the guest
+reset.** The leaf census settles it: `0x00000000` 148 times,
+`0x00000001` 347, and **nothing in the hypervisor range**. That is
+firmware enumerating a processor, not a hypervisor running. Our own
+counters carried on across it - 6,239 exits, no restart of this VMM -
+which is precisely what a *guest* reset looks like from underneath, since
+this VMM is resident below the firmware and survives one.
+
+So mixed mode does not hang. **It resets the guest immediately after the
+first second-level round trip**, and everything read as "the guest
+hypervisor stopped asking" was firmware that had replaced it.
+
+That is the fourth reframing of this failure and it puts it in the same
+family as the reboot loop recorded above - and the same trap: a counter
+compared against its own previous value, with nothing checking that the
+thing underneath was still the same thing.
 
 **Recording the disproof rather than the guess**, for the fifth time in
 this sequence. Four fixes were aimed at an event that does not happen and
