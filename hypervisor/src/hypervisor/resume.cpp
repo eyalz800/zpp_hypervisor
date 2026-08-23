@@ -991,9 +991,20 @@ void hypervisor::resume_guest(std::uint64_t cpuid,
     // which is this entry. Three fixes were aimed at the wrong VM entry
     // because two reporters were assumed to be one.
     if constexpr (nested_vmx::evmcs_to_kvm) {
-        if (cpuid < max_cpus && this->evmcs_entered_since_own[cpuid]) {
-            relaunch = true;
-            this->evmcs_entered_since_own[cpuid] = false;
+        if (cpuid < max_cpus) {
+            // **Two counters that can disagree.** `set` is incremented
+            // where the mark is made, `seen` where it is consumed. If
+            // they diverge the mark is being lost between them; if `seen`
+            // stays zero while `set` climbs, this path is not the one
+            // taken. Either answer is a fact; the single "it did not
+            // work" that preceded them was not.
+            if (this->evmcs_entered_since_own[cpuid]) {
+                relaunch = true;
+                this->evmcs_entered_since_own[cpuid] = false;
+                this->evmcs_mark_seen[cpuid] += 1;
+            } else {
+                this->evmcs_mark_absent[cpuid] += 1;
+            }
         }
     }
 

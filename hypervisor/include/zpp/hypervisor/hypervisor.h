@@ -8614,6 +8614,16 @@ private:
      */
     bool evmcs_entered_since_own[max_cpus]{};
 
+    /**
+     * `evmcs_entered_since_own` counted at both ends, because "the fix
+     * did not work" is not a fact and these are.
+     * @{
+     */
+    std::uint64_t evmcs_mark_set[max_cpus]{};
+    std::uint64_t evmcs_mark_seen[max_cpus]{};
+    std::uint64_t evmcs_mark_absent[max_cpus]{};
+    /** @} */
+
     /** Set once the layer below has accepted the assist page. */
     bool evmcs_active[max_cpus]{};
     /** @} */
