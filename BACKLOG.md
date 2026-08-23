@@ -1,5 +1,43 @@
 # Known defects
 
+## Mixed mode: the error is named and the next check is one line
+
+**2026-08-23.** The failure is `vm_instruction_error` **5**, "VMRESUME
+with non-launched VMCS", read only after `record_entry_failure` was fixed
+to pick its slot from GS instead of from `vmcs.vpid()` - a field an
+enlightened VMCS cannot answer, so it had been recording nothing and the
+untouched zeros read as VMsucceed. **The bug was legible the whole time
+behind a broken instrument**, and two attempts were spent diagnosing from
+those zeros.
+
+Why 5: releasing the enlightened pointer calls `nested_release_evmcs` in
+the layer below, which drops it, so the page it has already run is
+forgotten and the next entry against it must be a `VMLAUNCH`.
+
+Two fixes were tried and neither reached the instruction:
+
+- **Clearing `vmcs02_launched` at the release** is undone by
+  `on_l2_exit`, which sets it again at the top of handling the very next
+  exit - after the release, before the next entry.
+- **Forcing the launch path in `resume.cpp`** changed nothing, and the
+  reason is almost certainly that the forcing sits *inside*
+  `if ((0 != slot) && (slot <= max_cpus) && this->running_l2[slot - 1])`.
+  With `running_l2` false at that moment the whole block is skipped and
+  `entry` keeps its outer value, `relaunch ? vmlaunch : vmresume` - a
+  **VMRESUME**, which is exactly the error observed.
+
+**So the next check is one line: whether `running_l2` is set at the point
+`resume.cpp` chooses the entry instruction.** If it is not, the choice for
+a second-level entry is being made by the outer expression that knows
+nothing about vmcs02, and that is a defect independent of the enlightened
+VMCS - it would pick VMRESUME for a freshly cleared vmcs02 in any
+configuration.
+
+Everything else about mixed mode is settled: the release is clean
+(`evmcs_release_clean` 2, `clobbered` 0), the page is intact, and the
+design keeps both savings.
+
+
 ## The lazy tick makes this VMM four times cheaper and the guest four times worse
 
 **2026-08-23.** `ZPP_LAZY_TICK` had never been tried in the configuration
