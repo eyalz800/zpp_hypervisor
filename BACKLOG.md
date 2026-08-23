@@ -16,17 +16,27 @@
 forward progress at all. On one processor the same counters climb:
 protection to 44,077, `0x0003` to 1,266, `0x0051` to 607.
 
-**A frozen count is not "no longer called". It means the last call never
-returned.** The guest is blocked *inside* a hypercall, and the secure
-kernel is re-entered continuously while it waits, which is what the VTL
-churn is.
+**"A frozen count means the last call never returned" was the obvious
+reading and it is wrong.** Recording the last hypercall with its
+parameters and timestamp settles it:
 
-The mechanism fits the counts: `0x0003` is `HvCallFlushVirtualAddressList`,
-and on a multi-processor partition a flush has to reach the **other
-virtual processors**. Those are parked - **exactly 17 second-level entries
-each, identical across all seven, and no exits at all for nine minutes** -
-because the operating system has not started them. With one processor
-there is no other VP to wait for, which is precisely why it proceeds.
+```
+last code = 0x12   HvCallVtlReturn
+count     = 95,817
+```
+
+**The guest is not blocked inside a hypercall.** It is making them
+constantly, and the most recent is the trust-level return. So `0x000c`,
+`0x0003` and `0x0051` are frozen because those calls **are no longer being
+made**, not because one never came back - and the flush-waiting-on-a-parked-
+processor mechanism that followed from the other reading is dead with it.
+
+What is actually happening on eight processors: the guest spins
+`HvCallVtlCall` / `HvCallVtlReturn` and issues **nothing else at all**. A
+livelock in the trust-level loop, not a block. The parked application
+processors - 17 second-level entries each, no exits for nine minutes - are
+a consequence of the operating system never reaching the point of starting
+them, not a cause.
 
 Two things checked and eliminated on the way:
 
