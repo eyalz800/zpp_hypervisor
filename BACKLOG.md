@@ -1,5 +1,39 @@
 # Known defects
 
+## Withholding the interrupt window until the priority drops: tried, harmful
+
+**2026-08-23.** The measured poll - 3,055,183 interrupt-window requests
+with `int_window_stale` zero, against a guest at a blocking priority 75%
+of the time - suggested arming the window on the *priority drop* instead
+of on every interruptible moment. Built behind `ZPP_WINDOW_ON_TPR`.
+
+**It fires and it is harmful.** With `window_deferred_count` at 621,645:
+
+```
+HvCallVtlReturn   591,615
+HvCallVtlCall      21,648      <- twenty-seven times fewer
+vmptrld         1,248,971  42.5%
+vmcall            671,533  22.8%
+```
+
+**The trust-level pair should be equal** - every call is answered by one
+return - and instead the secure kernel returns twenty-seven times for
+every entry, with a `vmptrld` storm behind it. Withholding the window
+changes when the level above may deliver, and that breaks the trust-level
+flow rather than smoothing it.
+
+Rejected and switched off.
+
+**One thing it did establish, by accident.** The first version of the
+change *never fired* - the rearm was set on every call rather than only
+when the priority was low, so the withholding branch was unreachable -
+and the run alongside it showed *higher* trust-level churn. Without
+`window_deferred_count` reading **0**, that run would have been recorded
+as "the deferral makes things worse", which is the right conclusion
+reached from a measurement of nothing. **A flag that silently does nothing
+looks exactly like a flag that does not help.**
+
+
 ## After the APIC fix: three million interrupt-window polls, and no HLT
 
 **2026-08-23.** With the APIC watch livelock gone the exit profile is
