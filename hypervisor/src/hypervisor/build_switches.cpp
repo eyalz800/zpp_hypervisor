@@ -165,6 +165,8 @@ extern "C" [[gnu::used, gnu::retain]] constinit const char
         digit(nested_vmx::evmcs_to_kvm),
         ' ', 'e', 'v', 'm', 'i', 'x', '=',
         digit(nested_vmx::evmcs_mixed),
+        ' ', 's', 't', 'a', 'l', 'l', '=',
+        digit(nested_vmx::stall_breaker),
         ' ', 'v', 't', 'l', 't', 'r', 'c', '=',
         digit(nested_vmx::trace_vtl),
         ' ', 'b', 'l', 'k', 'w', '=',

@@ -7679,6 +7679,44 @@ void hypervisor::record_l2_entry_event(std::size_t cpu)
         }
     }
 
+    // Refuse a repeat delivery at an instruction the guest has already
+    // been interrupted at, so it retires at least one. See
+    // `nested_vmx::stall_breaker` for the two histograms that motivate
+    // this and for why withholding defers rather than drops.
+    if constexpr (nested_vmx::stall_breaker) {
+        if ((cpu < max_cpus) && (0 != (given & valid))) {
+            auto rip = this->vmcs.guest_rip();
+            auto vector = given & vector_mask;
+
+            if ((rip == this->stall_last_rip[cpu]) &&
+                (vector == this->stall_last_vector[cpu])) {
+                if (this->stall_withheld_run[cpu] <
+                    nested_vmx::stall_breaker_limit) {
+                    this->vmcs.write(
+                        field::vm_entry_interruption_information_field,
+                        given & ~valid);
+
+                    this->stall_withheld_run[cpu] += 1;
+                    this->stall_withheld_total[cpu] += 1;
+                    given = given & ~valid;
+                } else {
+                    // The cap. A guest genuinely spinning on one
+                    // instruction must not be starved for ever, and a
+                    // run that is all `forced` says the premise was
+                    // wrong rather than the guard being ineffective.
+                    this->stall_forced_total[cpu] += 1;
+                    this->stall_withheld_run[cpu] = 0;
+                }
+            } else {
+                // Progress: remember where this one landed, so the next
+                // delivery at the same place is the one refused.
+                this->stall_last_rip[cpu] = rip;
+                this->stall_last_vector[cpu] = vector;
+                this->stall_withheld_run[cpu] = 0;
+            }
+        }
+    }
+
     // Every entry that runs VTL1, not just the armed one. See
     // `vtl1_any_entry_vector`.
     if ((cpu < max_cpus) && (1 == this->vtl_half_mark_kind[cpu])) {

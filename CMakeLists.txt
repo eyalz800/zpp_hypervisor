@@ -250,6 +250,10 @@ option(ZPP_EVMCS_MIXED
     "Enlighten only the second-level VMCS and keep offering VMCS shadowing. See cmake/hypervisor/CMakeLists.txt."
     OFF)
 
+option(ZPP_STALL_BREAKER
+    "Refuse to deliver the same vector twice at the same guest instruction. See cmake/hypervisor/CMakeLists.txt."
+    OFF)
+
 option(ZPP_TRACE_VTL
     "Record Hyper-V virtual trust level switches. See cmake/hypervisor/CMakeLists.txt."
     OFF)
@@ -368,6 +372,7 @@ ExternalProject_Add(hypervisor
         -DZPP_VMCS_CENSUS=${ZPP_VMCS_CENSUS}
         -DZPP_EVMCS_TO_KVM=${ZPP_EVMCS_TO_KVM}
         -DZPP_EVMCS_MIXED=${ZPP_EVMCS_MIXED}
+        -DZPP_STALL_BREAKER=${ZPP_STALL_BREAKER}
         -DZPP_TRACE_VTL=${ZPP_TRACE_VTL}
         -DZPP_WATCH_VTL_BLOCK=${ZPP_WATCH_VTL_BLOCK}
         -DZPP_ANNOUNCE_HYPERVISOR_BIT=${ZPP_ANNOUNCE_HYPERVISOR_BIT}
@@ -473,6 +478,7 @@ ExternalProject_Add(uefi_loader
         -DZPP_VMCS_CENSUS=${ZPP_VMCS_CENSUS}
         -DZPP_EVMCS_TO_KVM=${ZPP_EVMCS_TO_KVM}
         -DZPP_EVMCS_MIXED=${ZPP_EVMCS_MIXED}
+        -DZPP_STALL_BREAKER=${ZPP_STALL_BREAKER}
         -DZPP_TRACE_VTL=${ZPP_TRACE_VTL}
         -DZPP_WATCH_VTL_BLOCK=${ZPP_WATCH_VTL_BLOCK}
         -DZPP_ANNOUNCE_HYPERVISOR_BIT=${ZPP_ANNOUNCE_HYPERVISOR_BIT}

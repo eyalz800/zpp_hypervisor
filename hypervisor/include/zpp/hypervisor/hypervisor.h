@@ -5156,6 +5156,21 @@ private:
     std::uint64_t quiet_samples{};
     std::uint64_t quiet_overflow{};
 
+    /**
+     * The stall breaker's state and its two counters. See
+     * `nested_vmx::stall_breaker`.
+     *
+     * `withheld` and `forced` are separate because they mean opposite
+     * things: withheld is the guard working, forced is the cap catching
+     * a guest that really is spinning on one instruction, and a run that
+     * is all `forced` has learned that the premise is wrong.
+     */
+    std::uint64_t stall_last_rip[max_cpus]{};
+    std::uint64_t stall_last_vector[max_cpus]{};
+    std::uint64_t stall_withheld_run[max_cpus]{};
+    std::uint64_t stall_withheld_total[max_cpus]{};
+    std::uint64_t stall_forced_total[max_cpus]{};
+
     static constexpr std::size_t profile_capacity = 64;
 
     std::uint64_t profile_rip[profile_capacity]{};

@@ -2434,6 +2434,7 @@ def main():
                "guest_kernel_base", "guest_kernel_size", "l2_exit_cr3",
                "interrupted_rip", "interrupted_hits",
                "interrupted_samples", "interrupted_overflow",
+               "stall_withheld_total", "stall_forced_total",
                "quiet_rip", "quiet_hits",
                "quiet_samples", "quiet_overflow",
                "guest_interrupted_trace", "guest_interrupted_count",

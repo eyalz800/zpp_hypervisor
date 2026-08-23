@@ -1973,6 +1973,62 @@ inline constexpr bool evmcs_to_kvm = (0 != ZPP_EVMCS_TO_KVM);
  * un-flushed on every enlightened entry, so the state loss outlives any
  * fix aimed at the launch state alone.
  */
+#ifndef ZPP_STALL_BREAKER
+#define ZPP_STALL_BREAKER 0
+#endif
+
+/**
+ * Refuse to deliver the same vector twice at the same guest instruction.
+ *
+ * **The measurement this exists for.** Two histograms of the guest's
+ * instruction pointer - one sampled where the entry stages an event, one
+ * where it stages nothing - disagree completely. The control is flat
+ * across 192 addresses with no peak above 3.3%; **84% of injections land
+ * on two instructions**, and the first of them is the instruction
+ * immediately after a `sti`:
+ *
+ * ```
+ *         movl  $2, %ecx
+ *         movq  %rcx, %cr8      ; lower to DISPATCH_LEVEL
+ *         sti
+ * +0x12:  movq  -87(%rbp), %rcx   <- 45.6% of all injections
+ * ```
+ *
+ * The guest enables interrupts, takes one, runs the handler, returns to
+ * the same instruction and takes another - for ever, never retiring it.
+ * The second address is the first instruction of the `HvCallVtlReturn`
+ * stub, which is the same shape at the other point the guest becomes
+ * deliverable-to.
+ *
+ * **Why withholding loses nothing here.** The source is level-asserted:
+ * the timer message sits unconsumed in the guest's own message page -
+ * read directly, slot 3 holds `0x80000010`, `HvMessageTimerExpired` -
+ * so the level above re-asserts as soon as it is allowed to. Declining
+ * one delivery defers it, it does not drop it. `suppress_vina` already
+ * establishes the mechanism: clear the valid bit in vmcs02 before entry.
+ *
+ * **The rule is forward progress, not a rate.** Deliver when the guest's
+ * instruction pointer has moved since the last delivery of that vector,
+ * withhold while it has not. That guarantees at least one retired
+ * instruction between two deliveries of the same vector and cannot slow
+ * a guest that is making progress, because a guest making progress never
+ * meets the condition.
+ *
+ * **Not a lie about time**, which is what separates it from the four
+ * interventions in `BACKLOG.md` that failed. Those changed the period,
+ * floored it, multiplied it or dilated every clock together, and Windows
+ * cross-checks its clocks. This changes nothing the guest can observe
+ * about time; it changes only whether an interrupt is delivered at an
+ * instruction boundary the guest has already been interrupted at.
+ *
+ * Capped, because a guest legitimately spinning on one instruction - a
+ * string operation, a lock - must not be starved of interrupts for ever.
+ */
+inline constexpr bool stall_breaker = (0 != ZPP_STALL_BREAKER);
+
+/** Consecutive withholds at one instruction before one is forced. */
+inline constexpr std::uint64_t stall_breaker_limit = 256;
+
 inline constexpr bool evmcs_mixed =
     evmcs_to_kvm && (0 != ZPP_EVMCS_MIXED);
 
