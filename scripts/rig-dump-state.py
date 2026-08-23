@@ -2952,7 +2952,7 @@ def main():
     # instrument - see `msr_write_codes`. The value is printed beside the
     # count so a deadline being advanced can be told from one rewritten
     # unchanged, which the count alone cannot do.
-    for label, pfx in (("handled here", "msr_write"),
+    for label, pfx in (("every exit, at the trace record", "msr_write"),
                        ("SECOND level, at the reflect decision",
                         "l2_msr_write")):
         if pfx + "_codes" not in off:

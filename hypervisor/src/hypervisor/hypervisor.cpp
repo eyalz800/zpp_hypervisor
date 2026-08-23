@@ -5203,6 +5203,33 @@ void hypervisor::record_exit(std::size_t cpu,
             this->exit_reason_counts[cpu][basic] + 1;
     }
 
+    // Which MSR the write was, censused **here** and not in a handler.
+    //
+    // Two earlier attempts missed it entirely. One in the dispatcher's
+    // `wrmsr` case read zero, because a second-level write is answered
+    // or reflected from `on_l2_exit` and never reaches the switch. One
+    // at the reflect decision read 6,678 against 1,649,935 `wrmsr`
+    // exits, because `on_l2_exit` answers most of them itself and
+    // returns before asking. Both were plausible places and both
+    // measured a fraction of the truth.
+    //
+    // This site cannot be bypassed: it is the same statement that
+    // produces the exit-reason total the census is being compared
+    // against, so the two cannot disagree about which exits exist.
+    if (wrmsr == basic) {
+        for (std::size_t slot{}; slot < msr_write_slots; ++slot) {
+            if (0 == this->msr_write_counts[slot]) {
+                this->msr_write_codes[slot] = recorded.detail;
+            }
+
+            if (this->msr_write_codes[slot] == recorded.detail) {
+                this->msr_write_counts[slot] += 1;
+                this->msr_write_last_value[slot] = recorded.detail_value;
+                break;
+            }
+        }
+    }
+
     ++count;
 
     // A repeat grows the entry already there rather than taking a slot,
