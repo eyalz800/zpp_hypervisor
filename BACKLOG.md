@@ -1,5 +1,91 @@
 # Known defects
 
+## Mixed mode is impossible under KVM, and the refusal is architectural
+
+**2026-08-23, settled from the source rather than a seventh boot.** Six
+attempts, the sixth of which finally *ran* - 4.8 M exits over 245 s,
+past the one-second-level-entry wall every earlier attempt hit. Two real
+defects were fixed getting there and both are keepers:
+
+- **KVM discards its cached vmcs01 un-flushed on every enlightened
+  entry.** `nested_vmx_handle_enlightened_vmptrld` assigns
+  `current_vmptr = INVALID_GPA` directly (`nested.c:2102`) and never
+  calls `nested_release_vmcs12`, the only thing that writes the cached
+  copy back (`nested.c:5417`). The lost launch state is the visible half;
+  **every VMWRITE to vmcs01 since its last flush is lost too**, which no
+  amount of relaunching repairs. A VMCLEAR of vmcs01 before the
+  enlightened entry reaches that flush through `handle_vmclear`.
+- **The second-level entry was eating the relaunch mark.** `resume_guest`
+  consumes it near the top and the `running_l2` branch below overwrites
+  the instruction with a nested stub, so the mark was spent by the entry
+  that ignores it and the entry that needed it never saw one. The
+  counters said so and read like a contradiction: `evmcs_mark_set` 1 and
+  `evmcs_mark_seen` 1 - made and consumed - beside `vm_instruction_error`
+  **5**, "VMRESUME with non-launched VMCS". Both were true.
+
+**And with it running, shadowing was off.** The log says `vmcs shadowing
+not offered`, `copy_vmcs12_to_shadow` costs 104 cycles because it returns
+early, and `vmread` plus `vmwrite` are 75.5% of exits. The reason is not
+in this tree:
+
+```c
+/* vmx.c:2101 */
+if (!msr_info->host_initiated && guest_cpuid_has_evmcs(vcpu))
+    nested_evmcs_filter_control_msr(vcpu, msr_info->index, &msr_info->data);
+```
+
+`EVMCS1_SUPPORTED_2NDEXEC` (`vmx/hyperv_evmcs.h:72`) does not contain
+`SECONDARY_EXEC_SHADOW_VMCS`, so KVM removes shadowing from
+`IA32_VMX_PROCBASED_CTLS2` for **any** guest whose CPUID advertises
+eVMCS - not for a guest that uses one.
+
+The obvious escape is to set the control anyway, since the filter edits a
+copy and `nested_check_vm_execution_controls` validates against the
+unfiltered `vmx->nested.msrs.secondary_ctls_high` (`nested.c:2854`).
+**It does not work, and this is the line that closes it:**
+
+```c
+/* nested.c:2996, in nested_vmx_check_controls */
+if (guest_cpuid_has_evmcs(vcpu))
+    return nested_evmcs_check_controls(vmcs12);
+```
+
+That runs for **every** vmcs12, enlightened or not, and checks the
+*filtered* set. A vmcs01 carrying `SHADOW_VMCS` fails it with "VM entry
+with invalid control field(s)".
+
+**So the two are mutually exclusive after all, and the original comment
+was right for the wrong reason.** It said the enlightened layout has no
+room for the VMREAD and VMWRITE bitmap pointers. True, and irrelevant -
+only vmcs01 carries those and vmcs01 can stay a real region. What
+actually forbids it is that asking for the enlightenment at all, in
+CPUID, is what removes shadowing.
+
+Nothing in this tree can route around it: the CPUID bit is what enables
+eVMCS, and the filter keys on the CPUID bit. It would take a KVM change.
+**Do not attempt mixed mode again without first checking whether
+`nested_evmcs_check_controls` is still called unconditionally.** Both
+fixes above are kept, and `ZPP_EVMCS_MIXED` stays off, because they are
+correct regardless and the next person will otherwise rediscover them.
+
+### What is left, then
+
+Two configurations, neither of which gives the guest more than 7.6%:
+
+| | shadowing | enlightened |
+|---|---|---|
+| our duty | 0.771 | 0.371 |
+| guest hypervisor | 15.4% | 55.4% |
+| Windows | 7.6% | 7.6% |
+
+The enlightened one is nevertheless the better machine to be on - vector
+`0x2f` delivery triples, device vectors `0x50` and `0x51` arrive, and the
+55.4% is not Hyper-V computing, it is 15.7 million extra VM entries each
+mediated by KVM. That is the number to attack next, and it is attacked by
+making our own exit path cheaper or by making fewer of its accesses exit,
+not by shadowing.
+
+
 ## The enlightened VMCS needs a QEMU flag, and its absence is silent
 
 **2026-08-23.** `evmk=1` read back correctly from the binary's own
