@@ -1,5 +1,51 @@
 # Known defects
 
+## The APIC watch could never disarm on a single-processor guest
+
+**2026-08-23.** A real defect, found by following the state dump's own
+label rather than by theory.
+
+At the single-processor stall: `ept-violation` was **27.6% of all exits**,
+5,085,407 of them, and the exit ring showed **one page, 0xfee00000, 9 of 9
+slots**, under the dump's own line *"ONE PAGE across the whole ring - a
+livelock, not a guest touching memory"*. The guest was looping
+end-of-interrupt inside `KiDpcInterrupt`, and end-of-interrupt is a write
+to that page.
+
+The cause is the disarm condition:
+
+```cpp
+if (!all_processors_started && (0 != ipi_start_up_seen) && ...)
+```
+
+**It requires a start-up IPI to have been seen, and a guest with no
+application processors to start never sends one.** So on one processor the
+watch stayed armed for the entire boot and every access to the page was
+emulated. Confirmed in the running hypervisor: `watched_apic_page`
+0xfee00000, `ipi_start_up_seen` **0**, `all_processors_started` 0,
+`emulated_writes` **5,082,333**.
+
+**The condition that decides when bring-up is over cannot be one that only
+bring-up can satisfy.** The quiet period is now measured from the last
+start-up IPI when there has been one and from the first write this filter
+sees when there has not.
+
+Measured after the fix, same configuration:
+
+| | before | after |
+|---|---|---|
+| `ept-violation` share of exits | 27.6% | **9.2%** |
+| EPT violations | 5,085,407 | 392,367 |
+| emulated writes | 5,082,333 | **91,533** |
+| `HvCallVtlReturn` per nine minutes | +10 | **+1,025** |
+
+**A hundredfold improvement in trust-level throughput, and the boot still
+does not complete** - protection calls remain pinned at 39,317 with
+`Phase1Initialization` looping. So this was a real blocker and not the
+last one, which is worth stating plainly: the exit profile is now healthy
+and the guest is still stuck.
+
+
 ## The dispatch interrupt *is* delivered - the guest livelocks in the scheduler
 
 **2026-08-23.** The single-processor run, at its stall, with the stalled
