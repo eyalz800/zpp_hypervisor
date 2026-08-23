@@ -1,5 +1,52 @@
 # Known defects
 
+## The multi-processor bug: the guest blocks inside a hypercall, it does not slow down
+
+**2026-08-23.** Eight processors, seventeen minutes, baseline build:
+
+```
+0x000c ModifyVtlProtectionMask  39,317   frozen
+0x0003 flush address list          366   frozen
+0x0051                              96   frozen
+0x0012 HvCallVtlReturn          32,258   +5,895 in nine minutes
+```
+
+**Every hypercall count is frozen while the trust-level switch churns at
+655 a minute** - eight times the rate of a single-processor run, with no
+forward progress at all. On one processor the same counters climb:
+protection to 44,077, `0x0003` to 1,266, `0x0051` to 607.
+
+**A frozen count is not "no longer called". It means the last call never
+returned.** The guest is blocked *inside* a hypercall, and the secure
+kernel is re-entered continuously while it waits, which is what the VTL
+churn is.
+
+The mechanism fits the counts: `0x0003` is `HvCallFlushVirtualAddressList`,
+and on a multi-processor partition a flush has to reach the **other
+virtual processors**. Those are parked - **exactly 17 second-level entries
+each, identical across all seven, and no exits at all for nine minutes** -
+because the operating system has not started them. With one processor
+there is no other VP to wait for, which is precisely why it proceeds.
+
+Two things checked and eliminated on the way:
+
+- **`disarm_apic_watch` is not the cause.** `watched_apic_page` reads 0,
+  so the watch had been dropped, and `CLAUDE.md` warns that a processor
+  starting afterwards runs unvirtualized. Rebuilt with it off: the APs
+  still stop at 17 entries and cpu 0 still freezes at 39,317.
+- **The APs are not being starved or mishandled.** cpu 1 takes 4,701 exits
+  in total and the number does not change across nine minutes, so they are
+  parked rather than spinning, and their last exits are ordinary Hyper-V
+  VMWRITEs and APIC-page faults.
+
+**So the question is narrow: which hypercall is the guest blocked in, and
+what is it waiting for from the parked processors.** The census gives the
+code; what it does not give is the moment of blocking. Recording the
+in-flight hypercall - code and parameters, cleared on return - would name
+it outright, and is the same two-sided shape that has settled every one of
+these.
+
+
 ## Mixed mode: the launch fix works, and only one enlightened entry ever happens
 
 **2026-08-23.** Counting the mark at both ends ended four rounds of
