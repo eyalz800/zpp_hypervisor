@@ -56,6 +56,25 @@ across two processors and eight, which is the signature of a sequence that
 completes rather than a race - so it is something the seventeenth entry
 does, or something that never arrives after it.
 
+**And it is not this VMM's handling of that processor.** Built with
+`ZPP_INTERCEPT_APIC=OFF`, which hands application processors to the guest
+unvirtualized: the second processor then takes **zero** exits and zero
+second-level entries - this VMM never runs on it at all - and cpu 0
+**still freezes at 39,316**.
+
+So the stall happens whether or not this VMM manages the second processor,
+which rules out the local-APIC watch, the adoption path, and everything
+else this VMM does to an application processor. Combined with the
+identical VTL1 trace, what is left is the guest's own behaviour with two
+virtual processors under this nesting.
+
+**Eliminated so far, each by measurement rather than by argument:**
+oversubscription (two vCPUs on four cores fails), contention (the
+uninterrupted path is identical), the secure kernel (same trace),
+`disarm_apic_watch` (rebuilt off, no change), blocked-in-a-hypercall (the
+last call is a return, 95,817 made), and now this VMM's AP handling
+entirely.
+
 
 ## Eight processors against one: the difference is in the interrupted path
 
