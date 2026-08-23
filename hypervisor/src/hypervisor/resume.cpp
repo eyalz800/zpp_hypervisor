@@ -1004,6 +1004,21 @@ void hypervisor::resume_guest(std::uint64_t cpuid,
                 }
             }
 
+            // **Which stub was chosen, recorded beside the failure.**
+            // Three fixes have been aimed at `vm_instruction_error` 5,
+            // "VMRESUME with non-launched VMCS", from reading this
+            // function, and all three missed - a VMRESUME executes though
+            // this is the only site that selects the instruction. That is
+            // a mechanism inferred rather than measured, which is the
+            // shape everything expensive in this session had.
+            //
+            // So the next run says which it is: 1 is launch, 2 is resume.
+            // If it reads 1 while the error stays 5, the choice is right
+            // and something else executes the entry; if it reads 2, the
+            // condition above is not doing what it appears to.
+            this->entry_stub_chosen[slot - 1] =
+                (entry == arch::x86_64::vmx::nested_vmlaunch) ? 1 : 2;
+
             // What the entry actually carries, read here because here
             // is the last instant it can still change. See
             // `l2_entry_vector`: the guest hypervisor is injecting and

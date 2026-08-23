@@ -8600,6 +8600,14 @@ private:
     std::uint64_t evmcs_release_clobbered[max_cpus]{};
     /** @} */
 
+    /**
+     * Which VM-entry instruction the resume path selected: 1 launch,
+     * 2 resume, 0 never reached. Recorded because three fixes aimed at
+     * "VMRESUME with non-launched VMCS" were derived from reading that
+     * code and all three missed.
+     */
+    std::uint64_t entry_stub_chosen[max_cpus]{};
+
     /** Set once the layer below has accepted the assist page. */
     bool evmcs_active[max_cpus]{};
     /** @} */
