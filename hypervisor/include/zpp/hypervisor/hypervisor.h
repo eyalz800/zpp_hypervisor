@@ -6180,6 +6180,44 @@ private:
      */
     bool window_armed_on_drop[max_cpus]{};
     std::uint64_t window_deferred_count[max_cpus]{};
+
+    /**
+     * A TPR threshold this VMM armed for itself, which the level above
+     * did not ask for.
+     *
+     * **This is what the first attempt at `window_on_tpr` was missing,
+     * and why it deadlocked.** That version withheld the interrupt
+     * window while the task priority blocked the vector and waited to
+     * notice the drop at the *next exit* - but a guest that lowers its
+     * priority and then runs takes no exit, so the drop was never seen
+     * and the window was withheld for ever. It measured
+     * `window_deferred_count` climbing and the trust levels going 27:1
+     * asymmetric, which is what a level above starved of its window
+     * looks like.
+     *
+     * The processor will report the drop if asked: the TPR threshold
+     * exists exactly for this (SDM 27.6.8), and the level above leaves
+     * it at zero. So this VMM arms it at the dispatch class while the
+     * window is withheld, takes the `tpr-below-threshold` exit itself,
+     * and grants the window on the entry that follows.
+     *
+     * It has to be recorded, because `l1_wants_l2_exit` reasons that the
+     * exit "is always the guest hypervisor's, never shared" on the
+     * grounds that this VMM never sets the threshold for itself. That
+     * stops being true here, and the flag is what keeps the reflection
+     * decision honest.
+     */
+    bool window_threshold_armed[max_cpus]{};
+
+    /**
+     * Priority drops the processor reported because this VMM asked.
+     *
+     * The counter that says whether the mechanism works at all. Against
+     * `window_deferred_count` it reads as a pair: deferrals without
+     * grants is the first attempt's deadlock returning, and grants
+     * roughly tracking deferrals is the loop closing.
+     */
+    std::uint64_t window_granted_on_drop[max_cpus]{};
     /** @} */
 
     std::uint64_t l2_no_event_window_asked[max_cpus]{};

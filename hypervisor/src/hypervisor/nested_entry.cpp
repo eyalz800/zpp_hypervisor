@@ -1799,6 +1799,20 @@ std::expected<void, zpp::error> hypervisor::build_vmcs02(std::size_t cpu)
             } else if (this->l2_entry_priority[cpu] >= dispatch_class) {
                 primary &= ~primary_interrupt_window;
                 this->window_deferred_count[cpu] += 1;
+
+                // **And ask the processor to report the drop.** Without
+                // this the withholding never ends: the priority is only
+                // sampled at an exit, and a guest that lowers it and
+                // then runs takes none. See `window_threshold_armed`.
+                //
+                // Only where the level above set the TPR shadow, since
+                // SDM 27.6.8 makes the threshold exist only with that
+                // control, and only where it left the threshold at zero
+                // so nothing of its own is being overwritten.
+                if ((0 != (primary & primary_tpr_shadow)) &&
+                    (0 == this->nested_tpr_threshold[cpu])) {
+                    this->window_threshold_armed[cpu] = true;
+                }
             }
         }
     }
@@ -1917,7 +1931,19 @@ std::expected<void, zpp::error> hypervisor::build_vmcs02(std::size_t cpu)
         // validation above is what stands in for KVM's kvm_vcpu_map.
         write_vmcs02_control(
             cpu, field::virtual_apic_address, virtual_apic12);
-        write_vmcs02_control(cpu, field::tpr_threshold, tpr_threshold12);
+        // The threshold this VMM armed for itself takes precedence
+        // while it is armed; see `window_threshold_armed`. `2` is the
+        // dispatch class, so the processor reports the moment the guest
+        // drops below it.
+        auto threshold02 = tpr_threshold12;
+
+        if constexpr (nested_vmx::window_on_tpr) {
+            if ((cpu < max_cpus) && this->window_threshold_armed[cpu]) {
+                threshold02 = 2;
+            }
+        }
+
+        write_vmcs02_control(cpu, field::tpr_threshold, threshold02);
 
         // A histogram of what the guest hypervisor arms, because the
         // whole interrupt question turns on it and nothing recorded it.
@@ -3171,6 +3197,17 @@ bool hypervisor::l0_wants_l2_exit(std::size_t cpu,
         // This VMM's clock. The capability MSRs do not offer the timer, so
         // a guest hypervisor cannot have armed it.
         return true;
+
+    case basic_reason::tpr_below_threshold:
+        // Only the one this VMM armed for itself to learn that the task
+        // priority came down. See `window_threshold_armed`; without this
+        // the exit would be reflected to a level above that never set a
+        // threshold and cannot account for it.
+        if constexpr (nested_vmx::window_on_tpr) {
+            return (cpu < max_cpus) && this->window_threshold_armed[cpu];
+        } else {
+            return false;
+        }
 
     case basic_reason::monitor_trap_flag:
         // Only while this VMM is stepping a watched write. A guest
@@ -9113,6 +9150,25 @@ hypervisor::on_l2_exit(std::size_t cpu,
             }
 
             this->vtl_step_other[kind] = this->vtl_step_other[kind] + 1;
+        }
+    }
+
+    // The priority drop this VMM asked the processor to report, which
+    // is answered here rather than deferred: the generic dispatcher has
+    // no case for it, and an exit that reaches `default:` stops the
+    // processor. See `window_threshold_armed`.
+    //
+    // No RIP advance - a TPR-below-threshold exit happens at an
+    // instruction boundary and retires nothing.
+    if constexpr (nested_vmx::window_on_tpr) {
+        if ((cpu < max_cpus) && this->window_threshold_armed[cpu] &&
+            (basic_reason::tpr_below_threshold == reason.basic())) {
+            this->window_threshold_armed[cpu] = false;
+            this->window_armed_on_drop[cpu] = true;
+            this->window_granted_on_drop[cpu] += 1;
+            this->l2_exits_handled[cpu] = this->l2_exits_handled[cpu] + 1;
+
+            return l2_exit_outcome::handled;
         }
     }
 

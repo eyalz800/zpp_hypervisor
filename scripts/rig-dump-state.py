@@ -2437,6 +2437,7 @@ def main():
                "interrupted_rip", "interrupted_hits",
                "interrupted_samples", "interrupted_overflow",
                "stall_withheld_total", "stall_forced_total",
+               "window_deferred_count", "window_granted_on_drop",
                "stall_restaged_total", "stall_restage_blocked",
                "quiet_rip", "quiet_hits",
                "quiet_samples", "quiet_overflow",
