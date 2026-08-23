@@ -1,5 +1,51 @@
 # Known defects
 
+## CORRECTION: the `GetVpRegisters` poll is the BOOT processor's, not VP1's
+
+**2026-08-24.** The entry above says VP1 "polls `HvCallGetVpRegisters` in
+a tight loop". **Wrong processor.** With the trace on and the arguments
+read per processor:
+
+```
+cpu 0   code 0x50 GetVpRegisters   count 85,393
+        rdx = 0xffffffffffffffff   HV_PARTITION_ID_SELF
+        r8  = 0x00000010fffffffe   VpIndex = HV_VP_INDEX_SELF, InputVtl = 0x10
+
+cpu 1   code 0x12 VtlReturn        count 21
+```
+
+**The boot processor polls its own VP registers 85,393 times**, for VTL0
+(`InputVtl` 0x10 is the *use target VTL* flag with target 0) - which is
+the secure kernel inspecting the normal world, from VTL1, as a poll. VP1
+has made **21 hypercalls in total**.
+
+The earlier reading came from a ring snapshot on VP1 that did contain
+`0x0050` calls, generalised into "VP1 spins on it". A ring holds what was
+last in it; the per-processor counter holds what happened. **Same mistake
+as the `0x0050`-loop-is-dominant claim, made again three entries later**,
+and caught the same way - by a counter that can disagree with the ring.
+
+### What VP1 is actually doing, which is not spinning either
+
+Its ring shows EPT violations at *varied* addresses, a `vmresume` to the
+hypercall page, and a `VtlReturn` - that is a processor executing code
+and making progress, not one stuck. It simply gets almost none: **1,689
+exits against the boot processor's 1,407,201**, and 28 second-level
+entries against 99,897.
+
+And across boots VP1's second-level entries are **28, 653, 7,500 and
+12,294** - two and a half orders of magnitude of variation on the same
+build and the same guest. **That variance is the finding**: whatever
+brings VP1 up is racing with something, and no single-boot reading of it
+means anything. Every conclusion in this file about "the second processor
+stops after N entries" is a sample from that distribution and should be
+read as such.
+
+So the multi-processor question is not "why does VP1 spin" - it does not.
+It is **why does VP1 get so little work**, and why does adding it make the
+boot reach fewer modules (77) than one processor alone (105).
+
+
 ## `0x0050` is `HvCallGetVpRegisters`, and our name table was wrong
 
 **2026-08-24, settled from Linux's `include/asm-generic/hyperv-tlfs.h`
