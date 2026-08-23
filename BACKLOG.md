@@ -1,5 +1,61 @@
 # Known defects
 
+## The two-processor crash: a second-level page-table root that is an empty page
+
+**2026-08-23, and this is the sharpest thing found all session.** The
+hypervisor's crash record carries a page-table root at `+0x90`:
+
+```
++0x090  0000000008800000 ...
+```
+
+and that is exactly `l2_exit_cr3[0]`, the root this VMM last recorded for
+the second level on processor 0. Read it:
+
+```
+suspect  0x8800000  PML4[0x1ff] = 0x0        entire page zero
+good     0x1ae000   PML4[0x1ff] = 0x2bc063   real kernel mappings
+                    PML4[0x1f0] = 0x1e0063
+```
+
+**Processor 0's second-level root is an all-zero page.** A walk through it
+reports every kernel address unmapped, which is why the first attempt to
+symbolise the two-processor run failed and printed "unreadable". That is
+not a slow guest or a livelock; it is a processor running with no address
+space, and it is instantly fatal.
+
+Processor 1's root, `0x1ae000`, is perfectly good at the same moment.
+
+**Two independent sources agree on the value** - our own recorder and the
+guest hypervisor's crash record - which is what makes it worth acting on.
+Neither alone would be: the recorder could be reading a stale cache row,
+and the record's field meaning is inferred from position.
+
+### What it is not, checked before being written down
+
+- **Not the VMCS field cache.** The epoch is global and every exit,
+  `vmptrld` and `vmclear` bumps it, so a stale row is over-invalidated
+  rather than wrongly reused. `CLAUDE.md` states the design and the
+  reason.
+- **Not our own memory.** `0x8800000` is 136 MB, in guest RAM; this VMM
+  loads near 1.7 GB.
+- **Not a secure-kernel address space.** VTL1 has its own root, but an
+  all-zero PML4 is not a valid address space for anything.
+
+### Where to look next
+
+The shape - a *fresh, zeroed* page as a page-table root on the boot
+processor while the other processor is healthy - is what an
+application-processor start-up value looks like before its tables are
+filled in. So: whether a start-up or transient CR3 belonging to one
+processor can reach the other's vmcs02, and whether `build_vmcs02` can
+write a `guest_cr3` it read from a vmcs12 that was current for a
+different processor.
+
+This is the first specific, falsifiable account of the multi-processor
+failure. Everything before it described symptoms.
+
+
 ## The hypervisor's own crash record, read out of the dead guest
 
 **2026-08-23.** `HYPERVISOR_ERROR (0x20001)` means the *hypervisor*
