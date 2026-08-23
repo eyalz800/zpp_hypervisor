@@ -5129,7 +5129,64 @@ private:
      * Taken where the event is staged, with vmcs02 current, so the RIP
      * is the guest's own and not the level above's.
      */
-    static constexpr std::size_t interrupted_capacity = 192;
+    /**
+     * **Hashed and self-evicting, because a linear table lies here.**
+     *
+     * The first version claimed a slot for each new address in arrival
+     * order and counted the rest as overflow. On a real run that lost
+     * **1,300,610 of 1,399,906 samples - 93%** - and the 7% that fitted
+     * were whatever the guest happened to touch first. It printed as a
+     * flat distribution over 192 addresses, and "the control is flat"
+     * was read as evidence that the guest executes widely. It was
+     * evidence that the table filled early.
+     *
+     * A saturated histogram does not look broken. It looks like a
+     * finding, and the overflow counter beside it is the only reason
+     * this was caught rather than published.
+     *
+     * So: direct-mapped by a mixed hash, and a colliding sample decays
+     * the resident entry instead of being dropped. A cold entry loses
+     * its slot after a few collisions; a hot one keeps it however late
+     * it first appears. That is the property the linear table lacked.
+     */
+    static constexpr std::size_t interrupted_capacity = 2048;
+
+    /**
+     * One sample into a hashed hot-address table. See
+     * `interrupted_capacity` for why this is not a linear scan.
+     *
+     * A collision decays the resident entry rather than dropping the
+     * sample, so a hot address keeps its slot however late it appears
+     * and a cold one loses it. `overflow` counts only the decays, which
+     * is a *rate of contention* and not a count of lost hot addresses -
+     * the distinction the linear version got wrong.
+     */
+    void note_hot_rip(std::uint64_t (&rips)[interrupted_capacity],
+                      std::uint64_t (&hits)[interrupted_capacity],
+                      std::uint64_t & overflow,
+                      std::uint64_t rip)
+    {
+        constexpr std::uint64_t mix = 0x9e3779b97f4a7c15ull;
+        auto slot = static_cast<std::size_t>(
+            ((rip * mix) >> 45) & (interrupted_capacity - 1));
+
+        if (rips[slot] == rip) {
+            hits[slot] = hits[slot] + 1;
+            return;
+        }
+
+        if (0 == hits[slot]) {
+            rips[slot] = rip;
+            hits[slot] = 1;
+            return;
+        }
+
+        // Occupied by someone else: decay it. A cold entry falls to zero
+        // in a few collisions and the slot is taken by whoever is
+        // actually hot; a hot entry is never displaced by a stray.
+        hits[slot] = hits[slot] - 1;
+        overflow = overflow + 1;
+    }
 
     std::uint64_t interrupted_rip[interrupted_capacity]{};
     std::uint64_t interrupted_hits[interrupted_capacity]{};

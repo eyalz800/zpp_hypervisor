@@ -7796,28 +7796,11 @@ void hypervisor::record_l2_entry_event(std::size_t cpu)
         // is an unbiased sample of it - the only one in the tree, since
         // every other instrument samples at an exit and a guest spinning
         // on memory takes none.
-        auto where = this->vmcs.guest_rip();
-        auto placed = false;
-
         this->interrupted_samples += 1;
-
-        for (std::size_t i{}; i < interrupted_capacity; ++i) {
-            if (0 == this->interrupted_hits[i]) {
-                this->interrupted_rip[i] = where;
-            }
-
-            if (this->interrupted_rip[i] == where) {
-                this->interrupted_hits[i] += 1;
-                placed = true;
-                break;
-            }
-        }
-
-        // Never dropped in silence - a saturated table reads exactly
-        // like a narrow hot set, which is the conclusion being drawn.
-        if (!placed) {
-            this->interrupted_overflow += 1;
-        }
+        note_hot_rip(this->interrupted_rip,
+                     this->interrupted_hits,
+                     this->interrupted_overflow,
+                     this->vmcs.guest_rip());
 
         return;
     }
@@ -7826,26 +7809,11 @@ void hypervisor::record_l2_entry_event(std::size_t cpu)
     // for `interrupted_rip`, which injection cannot shape. See
     // `quiet_rip`.
     {
-        auto where = this->vmcs.guest_rip();
-        auto placed = false;
-
         this->quiet_samples += 1;
-
-        for (std::size_t i{}; i < interrupted_capacity; ++i) {
-            if (0 == this->quiet_hits[i]) {
-                this->quiet_rip[i] = where;
-            }
-
-            if (this->quiet_rip[i] == where) {
-                this->quiet_hits[i] += 1;
-                placed = true;
-                break;
-            }
-        }
-
-        if (!placed) {
-            this->quiet_overflow += 1;
-        }
+        note_hot_rip(this->quiet_rip,
+                     this->quiet_hits,
+                     this->quiet_overflow,
+                     this->vmcs.guest_rip());
     }
 
     // No event, so this entry is a moment the guest hypervisor chose

@@ -3023,7 +3023,7 @@ def main():
     if "interrupted_rip" in off:
         kbase0 = read("guest_kernel_base") or 0
         ksize0 = read("guest_kernel_size") or 0
-        CAP = 192
+        CAP = 2048
         for _p in ("interrupted", "quiet"):
             if _p + "_rip" not in off:
                 continue
@@ -3057,7 +3057,8 @@ def main():
                 print(f"  0x{r:016x}  {h:>10}  "
                       f"{100.0 * h / (tot or 1):5.1f}%{rel}")
             if lost:
-                print(f"  NO SLOT: {lost:,} uncounted - table saturated")
+                print(f"  contention: {lost:,} colliding samples decayed a "
+                      f"resident entry (a rate, not lost hot addresses)")
 
     # The kernel image bounds, used by both the thread and stack sections
     # below to turn an address into an offset that survives KASLR.
