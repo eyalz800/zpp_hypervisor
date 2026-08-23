@@ -1,5 +1,40 @@
 # Known defects
 
+## Mixed mode: the launch fix works, and only one enlightened entry ever happens
+
+**2026-08-23.** Counting the mark at both ends ended four rounds of
+guessing in one run:
+
+```
+evmcs_mark_set    = 1        the mark is made after an enlightened entry
+evmcs_mark_seen   = 1        and consumed by the resume path
+evmcs_mark_absent = 6,238    that path ran this often with no mark
+entry_stub_chosen = 1        launch
+```
+
+**So the fix is correct and the mechanism works.** vmcs01 is launched
+rather than resumed after an enlightened entry, exactly once, because
+there is exactly one enlightened entry to follow.
+
+That reframes the failure for the second time. It is not that the second
+entry is refused - **there is no second entry.** One second-level entry
+happens, the return to vmcs01 succeeds, and then the guest hypervisor runs
+6,238 more times without ever asking to run its guest again.
+
+**What that rules out**, and none of it was cheap to learn: the release is
+clean, the page is intact, the launch state is handled, the entry
+instruction is chosen correctly, and the second-level entry itself
+succeeds. The four fixes aimed at "the second entry fails" were aimed at
+an event that does not occur.
+
+**What to ask next:** why the guest hypervisor stops launching its guest
+after one round trip. Its `VMLAUNCH`/`VMRESUME` is an exit this VMM
+handles - `on_guest_vmlaunch` - so counting arrivals there against
+`l2-entries` says whether it stopped asking or whether this VMM stopped
+carrying the request through. Two counters again, and the same shape that
+has now settled three of these.
+
+
 ## Mixed mode fails on *this VMM's own* VM entry, not the second-level one
 
 **2026-08-23.** Four attempts were aimed at the wrong VM entry. The
