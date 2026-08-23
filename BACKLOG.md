@@ -1,5 +1,53 @@
 # Known defects
 
+## RETRACTED: "the control is flat" - the table had lost 93% of its samples
+
+**2026-08-23.** The entry above concluded, from two RIP histograms, that
+the guest executes widely while injections concentrate on two
+instructions. **The control half of that is withdrawn.** The table was a
+linear scan claiming slots in arrival order, and it dropped **1,300,610
+of 1,399,906 samples**. What printed as a flat distribution over 192
+addresses was the 7% that arrived first.
+
+Rebuilt as a hashed table with decay on collision, the control is not
+flat at all:
+
+```
+where the guest was, entries staging nothing (1,536,424 samples)
+  ntoskrnl+0x6a768e   463,057   30.1%   the EOI wrmsr
+  ntoskrnl+0x3a57fa   462,613   30.1%   the synthetic-timer arm
+  ntoskrnl+0x42890d   446,055   29.0%   the self-IPI wrmsr
+  hypercall+0x03       43,294    2.8%
+```
+
+**89% of the guest's own execution is three instructions, and all three
+are the synthetic MSR quartet.** The guest is running its clock interrupt
+handler back to back and doing nothing else. That is the reading
+`CLAUDE.md` once held, withdrew on the strength of a gap histogram, and
+which is now measured directly.
+
+What survives from the retracted entry, and is now on firmer ground: at
+`ntoskrnl+0x6b3692`, the instruction after the `sti`, injections are
+**48.7%** against **0.2%** of quiet entries - a seventy-fold
+concentration. An interrupt is waiting essentially every time the guest
+opens its interrupt window. That is a consequence of the handler running
+back to back, not an independent fault.
+
+**The arithmetic that ties it together.** About 950 clock interrupts a
+second, each handler costing four second-level exits, each of those
+reflected to a level above that makes about ten VMCS accesses - and
+every one of those is an exit into KVM, because this hardware cannot
+shadow for us. 950 x 4 x 11 is roughly the 46,600 exits a second
+measured. **The guest's clock handler, amplified by the nesting, is the
+entire machine.**
+
+**Third saturated instrument this session** - the MSR census at
+twenty-four slots, the L2 profiler that could not tick, and now this -
+and all three printed something that looked like a finding. The overflow
+counter is the only reason any of them was caught. Put one on every
+table.
+
+
 ## Withholding an injection the level above staged is fatal, twice over
 
 **2026-08-23.** `ZPP_STALL_BREAKER` was built on the instruction-level
