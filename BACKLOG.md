@@ -1,5 +1,77 @@
 # Known defects
 
+## The livelock, in instructions: every injection lands on the `sti`
+
+**2026-08-23.** The guest is not stuck anywhere. Two histograms of the
+guest's RIP, sampled where the entry stages an event and where it stages
+nothing, disagree completely - and the disagreement is the finding:
+
+```
+when an interrupt landed (403,450 samples)     on a quiet entry (1,337,273)
+  ntoskrnl+0x6b3692   184,118   45.6%           hypercall+0x03  43,541  3.3%
+  hypercall+0x1c      153,831   38.1%           hypercall+0x35  29,905  2.2%
+  ntoskrnl+0x6b32f0    18,875    4.7%           hypercall+0x1c  27,082  2.0%
+  hypercall+0x03       10,413    2.6%           ...everything else <0.05%
+```
+
+**The control is flat.** The guest's own execution is spread across 192
+addresses with no peak. **84% of injections land on two instructions.**
+
+And the top one, disassembled out of the guest's own image:
+
+```
+        subq  $40, %rsp
+        movl  $2, %ecx
+        movq  %rcx, %cr8      ; lower IRQL to DISPATCH_LEVEL
+        sti                   ; enable interrupts
++0x12:  movq  -87(%rbp), %rcx   <-- 45.6% of every injection lands here
+        leaq  -128(%rbp), %rdx
+        callq ...
+        cli
+```
+
+**The instant the guest enables interrupts, it takes another one.** It
+never retires the instruction after the `sti`. The second hot address,
+`hypercall+0x1c`, is the first instruction of the `HvCallVtlReturn` stub
+- the same shape, at the other point where the guest becomes
+deliverable-to.
+
+**This retires two earlier readings in this file at once.** It is not a
+guest blocked on a wait, and it is not a guest short of cycles: it is a
+guest that cannot make forward progress between interrupts.
+
+### Why the earlier instruments could not see it
+
+Every ring in this tree samples at an *exit*, and this guest's ordinary
+code takes none - so all of them landed in the interrupt handler, which
+is the one place the guest is not stuck. "Eight distinct entry RIPs, all
+in the clock path" is that artefact, and it was read as a finding at
+least twice. `interrupted_rip` samples on the interrupt itself, which is
+asynchronous to the guest's code; `quiet_rip` is the control that proves
+the first is measuring injection and not the guest.
+
+### The rate that drives it
+
+```
+vectors injected into the second level   416,555   of which 0xd1: 403,713
+external interrupts reflected upward       7,107   of which 0xef:   6,930
+```
+
+**Hyper-V injects 58 clock interrupts into Windows for every hardware
+timer interrupt it takes itself.** And the tick account says the same
+from the other end: Windows asks for 36.389 ms and is answered in
+2.237 ms - **16.266x early** - with the instrument's own verdict that
+"the level above wanted the right interval and the timer fired early
+underneath it. The fault is below it - this VMM or KVM."
+
+That is the thing to fix, and it is the first time it has had a mechanism
+attached rather than a rate. **Note what it is not: it is not a lie this
+VMM is telling about time.** All four failed interventions above changed
+what the guest was *told* - the period, a floor, a multiplier, a
+dilation. This is a delivery that happens earlier than the deadline it
+was given, which is a different fault and needs a different fix.
+
+
 ## The L2 profiler cannot run on this rig: KVM does not offer the preemption timer
 
 **2026-08-23.** `ZPP_PROFILE_L2` is the one instrument in this tree that
