@@ -1,5 +1,70 @@
 # Known defects
 
+## The reference TSC page we publish is what makes the guest's timer fire early
+
+**2026-08-24. The clock fault is ours, it is measured, and it is not a
+lie anybody meant to tell.** Building with
+`ZPP_PUBLISH_REFERENCE_TSC=OFF` changes the synthetic timer from wildly
+early to accurate:
+
+```
+                    reftsc=1                    reftsc=0
+  asked      2081.650 ms (0.5 Hz)         1.744 ms (573.5 Hz)
+  given         2.187 ms (457.2 Hz)       1.587 ms (630.2 Hz)
+  ratio        951.733x EARLY             1.099x
+  arms/answers 3 displaced                one vector per arm
+```
+
+**`asked 1.744 ms` is exactly `KeQuantumEndTimerIncrement`**, 17,400
+hundred-nanosecond units - the constant `CLAUDE.md` records as the
+guest's own and not negotiable. With the page published, the same guest
+asks for **2081 ms**. So the page does not merely change what the guest
+*gets*; it changes what the guest *asks for*, which means the guest's
+own arithmetic is being fed a bad rate.
+
+The size of the error is about **1,193x** on the period asked and 952x on
+the interval delivered - the same order, and both close to 1000. The
+published scale is self-consistent: it implies 10,000,010 Hz against a
+fitted 9,999,980 Hz with a collinearity error of zero. So the page agrees
+with itself and with our own reading of it. What it does not agree with
+is what the guest computes from it.
+
+**This is the mechanism behind the whole clock story in this file.** The
+"guest never leaves the clock handler" reading, the 82% of guest
+execution spent in three synthetic-MSR instructions, the interrupt
+waiting at every `sti`, the four failed interventions that tried to
+change what the guest was *told* about time - all of them are downstream
+of a reference clock that is wrong by three orders of magnitude.
+
+### Switching it off is not the fix
+
+With the page gone the guest falls back to the reference-count MSR, and
+that is an exit every time: **990,931 `rdmsr` exits, 6.6% of all exits**.
+Windows then dies of **`DPC_WATCHDOG_VIOLATION (0x133)`** - read off the
+framebuffer - which is a *timing* bugcheck: with a clock accurate enough
+to measure itself, the guest notices its own deferred work is taking too
+long.
+
+That is a later and better failure than the one before it, and it brackets
+the bug: the page must be **published and correct**, not absent.
+
+### What to check next, in order
+
+- Whether the guest's *perceived* reference rate is off by ~1000x -
+  compare a reference-counter delta read through the page against the
+  same delta in wall time, from inside the guest rather than from our
+  own fit. Our fit only proves the page agrees with itself.
+- The sequence field. A reference TSC page whose sequence is zero means
+  "invalid, use the MSR", and the transition between the two is where a
+  publisher gets it wrong.
+- Whether the level above derives its *own* page for its guest from
+  ours, in which case the error is squared rather than passed through.
+- `CLAUDE.md` already records that `ZPP_PUBLISH_REFERENCE_TSC` once read
+  ON in both caches with a stale object file, so two sessions measured a
+  configuration nobody had built. **Check `reftsc=` in the manifest on
+  every run that touches this.**
+
+
 ## The EPT-acknowledgement fix turns the two-processor crash into a stalled VP
 
 **2026-08-23.** With `wait_for_ept_acknowledgement` no longer stamping
