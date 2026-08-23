@@ -1,5 +1,57 @@
 # Known defects
 
+## The second processor spins in VTL1, and the level above is timing it out
+
+**2026-08-24, and this is the sharpest the multi-processor failure has
+been.** With the EPT-acknowledgement hazard fixed the two-processor run
+no longer crashes, and what is left is legible. VP1's exit ring is one
+loop, repeating:
+
+```
+rdmsr  detail=0x40000020  value=0x2c75f000   [l1-rip]   <- HV_X64_MSR_TIME_REF_COUNT
+vmread x4, vmwrite, invvpid, vmread, vmwrite
+vmresume  rip=0xfffff80330283965  [l2-rip]              <- L2 pinned at ONE instruction
+```
+
+Three facts, each measured:
+
+- **The second-level guest on VP1 is stuck at a single instruction.** The
+  resumed RIP is identical every iteration.
+- **That address is in no loaded module.** Walked all 78 entries of
+  `PsLoadedModuleList`; it matches none, so it is the secure kernel
+  (VTL1) or the level above's own image - not ntoskrnl and not a driver.
+- **The level above reads the reference-count MSR once per iteration.**
+  `0x40000020` is outside both MSR-bitmap ranges, so every one of those
+  reads exits unconditionally - no bitmap can stop it, which is the point
+  `CLAUDE.md` already makes about that range.
+
+**A spin in VTL1 with the level above checking a clock on every pass is a
+timed wait that is not being satisfied.** VP1 runs 653 second-level
+entries and then does this for ever, while VP0 runs on - which is why two
+processors reach only 77 modules where one reaches 105. A wedged
+processor is worse than an absent one, because the guest waits on it.
+
+**What this rules out.** Not a crash - `host_exception` is clear, no
+entry failure, the machine stays `running`. Not our start-up path failing
+outright, since VP1 launched and ran hundreds of second-level entries
+first. Not the EPT hazard, which is fixed and whose counter reads zero.
+
+**Where to look next**, in order:
+- Which VTL1 routine that address is - it needs the secure kernel's image,
+  which is not in the module list and would have to be found in guest
+  memory the way `scripts/guest-symbolize-live.py` finds ntoskrnl.
+- Whether `HvCallEnableVpVtl` (`0x000f`) and
+  `HvCallStartVirtualProcessor` (`0x0099`) are seen for VP1 at all. The
+  hypercall census is gated behind `ZPP_TRACE_VTL` and was off for every
+  run that mattered - **the same gap that left the hypercall recorder
+  dark on the run that needed it.** Turn it on for one two-processor
+  boot.
+- Whether the reference counter VP1's level above reads advances at the
+  rate it expects, since that is the clock it is timing the wait against
+  and this file has already found our published reference page worth a
+  factor of three on the delivered tick.
+
+
 ## Window-on-TPR, second attempt: the mechanism works, the resume path faults
 
 **2026-08-24.** The first attempt deadlocked because it sampled the task
