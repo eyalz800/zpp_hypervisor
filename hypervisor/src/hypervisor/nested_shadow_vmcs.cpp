@@ -613,6 +613,29 @@ void hypervisor::copy_vmcs12_to_shadow(std::size_t cpu)
 
         stamp(43);
 
+        // **Restore the enlightened selection, not just a VMCS
+        // pointer.** With the enlightened VMCS in use there is no real
+        // current VMCS for the second-level one - it was never
+        // `vmptrld`ed - so `vmptrst` above answered with this VMM's own,
+        // and loading that back leaves the cache row bound to vmcs01.
+        // Every second-level field access after this copy would then go
+        // to the wrong VMCS.
+        //
+        // That is why mixed mode reset the guest immediately after its
+        // first round trip while the enlightened build with shadowing off
+        // runs fine: only mixed mode performs these copies with an
+        // enlightened VMCS current.
+        if constexpr (nested_vmx::evmcs_to_kvm) {
+            if ((cpu < max_cpus) && this->evmcs_active[cpu] &&
+                (0 != *reinterpret_cast<volatile std::uint64_t *>(
+                          this->vp_assist[cpu] + 48))) {
+                arch::x86_64::vmx::vmcs_cache_select_enlightened(
+                    reinterpret_cast<std::uint64_t>(this->evmcs[cpu]),
+                    cpu);
+                return;
+            }
+        }
+
         arch::x86_64::vmx::vmptrld(&previous, cpu);
 
         stamp(44);
@@ -710,6 +733,29 @@ void hypervisor::copy_shadow_to_vmcs12(std::size_t cpu)
         arch::x86_64::vmx::vmclear(&this->shadow_vmcs_physical[cpu]);
 
         stamp(48);
+
+        // **Restore the enlightened selection, not just a VMCS
+        // pointer.** With the enlightened VMCS in use there is no real
+        // current VMCS for the second-level one - it was never
+        // `vmptrld`ed - so `vmptrst` above answered with this VMM's own,
+        // and loading that back leaves the cache row bound to vmcs01.
+        // Every second-level field access after this copy would then go
+        // to the wrong VMCS.
+        //
+        // That is why mixed mode reset the guest immediately after its
+        // first round trip while the enlightened build with shadowing off
+        // runs fine: only mixed mode performs these copies with an
+        // enlightened VMCS current.
+        if constexpr (nested_vmx::evmcs_to_kvm) {
+            if ((cpu < max_cpus) && this->evmcs_active[cpu] &&
+                (0 != *reinterpret_cast<volatile std::uint64_t *>(
+                          this->vp_assist[cpu] + 48))) {
+                arch::x86_64::vmx::vmcs_cache_select_enlightened(
+                    reinterpret_cast<std::uint64_t>(this->evmcs[cpu]),
+                    cpu);
+                return;
+            }
+        }
 
         arch::x86_64::vmx::vmptrld(&previous, cpu);
 
