@@ -1,5 +1,70 @@
 # Known defects
 
+## KVM cannot shadow for us, the hardware forbids it, and our shadowing was always emulated
+
+**2026-08-23.** `enable_shadow_vmcs` reads **N** on the rig, the parameter
+file is read-only, and nothing on the kernel command line or in
+`modprobe.d` sets it. KVM cleared it itself:
+
+```c
+/* nested.c:7238 */
+if (!cpu_has_vmx_shadow_vmcs())
+        enable_shadow_vmcs = 0;
+
+/* capabilities.h:223 - "check if the cpu supports writing r/o exit
+   information fields" */
+if (!(vmcs_config.misc & VMX_MISC_VMWRITE_SHADOW_RO_FIELDS))
+        return false;
+```
+
+The i7-8565U does not offer VMWRITE to read-only fields, so **KVM will
+never use a real shadow VMCS for its guest, and its guest is us.** Every
+VMCS access this VMM makes is an exit into KVM, and no module parameter,
+command line or configuration can change that. It is the hardware.
+
+**And the shadowing we offer the guest hypervisor is emulated by KVM, in
+software, on the same hardware** - which is stated outright at
+`nested.c:7068`:
+
+```c
+/*
+ * We can emulate "VMCS shadowing," even if the hardware
+ * doesn't support it.
+ */
+msrs->secondary_ctls_high |= SECONDARY_EXEC_SHADOW_VMCS;
+```
+
+That reframes the measurement that has driven the last two days. With
+shadowing on, the guest hypervisor takes 4,336 VMREAD exits **to us** -
+but its other fifteen million still exit, to *KVM*, which answers them
+from the shadow page without waking us. Shadowing never removed those
+exits from the machine. It removed us from them.
+
+Which is why the two configurations cost the same in total:
+
+| | shadowing | enlightened |
+|---|---|---|
+| this VMM's duty | 0.771 | 0.281 |
+| guest hypervisor | 15.4% | 63.3% |
+| **total overhead** | **92.5%** | **91.9%** |
+| Windows | 7.6% | 8.6% |
+
+**The bill is one KVM exit per VMCS access, by whoever makes it**, and
+the two configurations only move which side of the ledger it lands on.
+The enlightened one is still the better machine - it removes *our*
+accesses from the bill entirely, and the guest schedules on it - but the
+1% difference in total is the honest measure of what is left to win by
+choosing between them.
+
+So the remaining lever is not a choice between these two. It is to make
+the **guest hypervisor** stop issuing VMCS instructions, and the only
+mechanism for that is offering *it* an enlightened VMCS. That is
+`ZPP_EVMCS`, and it announces a hypervisor to a guest this project has
+deliberately kept believing it is on bare metal. **That is a decision
+about the contract, not about performance, and it is not one to take
+silently.**
+
+
 ## Mixed mode is impossible under KVM, and the refusal is architectural
 
 **2026-08-23, settled from the source rather than a seventh boot.** Six
