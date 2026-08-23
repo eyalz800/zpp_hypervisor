@@ -7685,16 +7685,18 @@ void hypervisor::record_l2_entry_event(std::size_t cpu)
     // delivered on.
     constexpr std::uint64_t dispatch_class = 0x20;
 
-    // The priority has come down, so the window that was withheld while
-    // it was up is due now. See `nested_vmx::window_on_tpr`.
-    if constexpr (nested_vmx::window_on_tpr) {
-        if (cpu < max_cpus) {
-            this->window_armed_on_drop[cpu] = true;
-        }
-    }
-
     if (this->l2_entry_priority[cpu] < dispatch_class) {
         this->l2_low_priority_no_event[cpu] += 1;
+
+        // The priority has come down, so the window withheld while it was
+        // up is due on the next entry. **Inside this test, not before
+        // it**: set unconditionally it is always true, the withholding
+        // branch is unreachable, and `window_deferred_count` reads 0 on a
+        // run that was supposed to be exercising it - which is what the
+        // first version measured.
+        if constexpr (nested_vmx::window_on_tpr) {
+            this->window_armed_on_drop[cpu] = true;
+        }
 
         // Split by whether the level above has anything pending at all.
         // The bare count cannot tell a delivery fault here from the guest
