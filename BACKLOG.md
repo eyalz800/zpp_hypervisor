@@ -1,5 +1,77 @@
 # Known defects
 
+## The stall is one instruction, and the tax that causes it is conserved
+
+**2026-08-24.** The Phase 1 stall is now located to a single instruction,
+with a control that cannot be argued with. Two RIP histograms over the
+same window, one sampled where the entry stages an event and one where it
+stages nothing:
+
+```
+  quiet entries        0 samples in 0x30d2b0..0x30d50c
+  interrupted entries  133,870 samples - every one at ntoskrnl+0x30d475
+```
+
+`0x30d475` is **`mov cr8, rbp`** - the instruction that lowers IRQL,
+inside the function `ExSetTimerResolution` calls. The thread lowers its
+priority, an interrupt is *always* waiting, it takes it, runs the
+handler, returns to the same instruction and lowers again. `quiet = 0`
+there is the strong half: there is never a moment when that thread
+resumes at that instruction without one pending.
+
+**And the interrupt rate is correct behaviour, not a fault.** VBoxSup
+asks for 1 ms timer resolution, which is what VirtualBox does; Windows
+honours it; the delivered clock is 1,027 Hz. Nothing is lying about time
+here. The guest simply cannot finish a tick's work inside a tick.
+
+### The tax is conserved across every configuration
+
+| | shadowing (`evmk=0`) | enlightened (`evmk=1`) |
+|---|---|---|
+| this VMM's duty | 0.771 | **0.269** |
+| guest hypervisor | 15.4% | **65.4%** |
+| **Windows** | **7.6%** | **7.7%** |
+
+Our own per-exit cost has come down twice this session - 17,041 to 13,710
+cycles with the enlightened field lookup, then to **10,227** - and
+Windows' share did not move. It is 7.6% in both configurations and after
+every improvement, because what the enlightenment removes from our
+handler it adds to the guest hypervisor's exits, and every one of those
+is a round trip through KVM at about **25,000 cycles** that neither side
+can avoid.
+
+**Three ways out, all closed, each verified rather than assumed:**
+
+- KVM cannot shadow for us - the processor lacks VMWRITE to read-only
+  fields, so `cpu_has_vmx_shadow_vmcs()` fails and `enable_shadow_vmcs`
+  is forced off at load.
+- The enlightenment cannot be mixed with shadowing - KVM filters
+  `SECONDARY_EXEC_SHADOW_VMCS` out of the capability MSR for any guest
+  whose CPUID advertises eVMCS, and validates every vmcs12 against the
+  filtered set.
+- The enlightenment cannot be offered upward - announcing a hypervisor
+  makes Hyper-V stand down and not nest at all, measured.
+
+### What this means for the goal
+
+Windows gets 7.7% of the machine and needs enough to complete a 1 ms tick.
+Per tick it has about 80 microseconds of execution and needs roughly
+300 - four second-level exits, each amplified about elevenfold by the
+guest hypervisor's own VMCS traffic, at ~25,000 cycles of KVM round trip
+apiece. **The deficit is structural on this rig and it is arithmetic, not
+a defect.**
+
+The tax is an artifact of running under KVM. On bare metal our VMCS
+accesses are register operations rather than exits, and the guest
+hypervisor's are absorbed by real shadowing hardware - the same
+measurements would not apply. `CLAUDE.md` already records that per-exit
+cost here is mostly KVM's and not ours; this quantifies it and shows it
+is the binding constraint on reaching a login screen.
+
+**So the next experiment is a bare-metal boot, and that needs the user** -
+it is the one thing in this project that cannot be done from here.
+
+
 ## The reference TSC page we publish is what makes the guest's timer fire early
 
 **2026-08-24. The clock fault is ours, it is measured, and it is not a
