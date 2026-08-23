@@ -1,5 +1,34 @@
 # Known defects
 
+## Eight processors against one: the difference is in the interrupted path
+
+**2026-08-23.** Same build, same instruments, the two configurations side
+by side - how long VTL1 ran, split by whether the notification flag was
+set when it returned:
+
+```
+                   1 cpu (progresses)      8 cpus (livelocks)
+  ~1 ms bucket   clear 14,762  set 3,680   clear 14,892  set   368
+  ~2 ms bucket   clear  6,247  set 1,414   clear  6,131  set 6,453
+```
+
+**The VINA-clear path is identical between them** - 14,762 against 14,892,
+6,247 against 6,131. **The VINA-set path inverts**: on one processor most
+interrupted runs finish inside a millisecond, on eight almost none do and
+they take two.
+
+So whatever eight processors changes is specific to *the secure kernel
+being interrupted and yielding*, not to its work in general. That is a far
+narrower target than "the guest is slower", and it is the first thing in
+this investigation that separates the working configuration from the
+failing one by mechanism rather than by outcome.
+
+Also settled here, and both were mine: the guest is **not** blocked in a
+hypercall - the last one recorded is `HvCallVtlReturn` with 95,817 made -
+and the parked application processors are a consequence of the operating
+system never starting them rather than a cause.
+
+
 ## The multi-processor bug: the guest blocks inside a hypercall, it does not slow down
 
 **2026-08-23.** Eight processors, seventeen minutes, baseline build:
