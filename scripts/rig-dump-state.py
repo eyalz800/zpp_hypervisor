@@ -786,11 +786,22 @@ def dump_priority(args, elf, instance):
         # task priority, which is a lower bound on the processor
         # priority - so every entry counted is one the interrupt
         # certainly could have been delivered on.
-        print(f"\n  entries carrying nothing while the priority would "
-              f"have admitted a deferred call: "
+        # **This is NOT evidence of a fault, and it used to say it was.**
+        # Read the site before believing the label: `on_l2_entry_event`
+        # increments this whenever an entry carries no event and the task
+        # priority is below the dispatch class. It does **not** check that
+        # a deferred call was outstanding. So a guest with nothing pending
+        # at a low priority - an ordinary, healthy moment - counts here,
+        # and the growth rate this used to call "a live fault" is
+        # indistinguishable from a machine with nothing to do.
+        #
+        # Left in because the quantity is still worth watching; the claim
+        # attached to it was not.
+        print(f"\n  entries carrying no event while the task priority was "
+              f"below the dispatch class: "
               f"{word('l2_low_priority_no_event', cpu):,} "
-              f"(cumulative - READ AS A DELTA. Non-zero growth is a live "
-              f"fault, not residue: measured 30.9/s on a settled guest)")
+              f"(cumulative - read as a delta. NOT a fault by itself: the "
+              f"site does not check that anything was pending)")
 
         for member, what in (
                 ("interrupt_request_vector",
