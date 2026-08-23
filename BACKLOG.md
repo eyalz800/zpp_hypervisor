@@ -1,5 +1,40 @@
 # Known defects
 
+## It is the *second* processor, not the count
+
+**2026-08-23.** Two virtual processors fail exactly as eight do:
+`HvCallModifyVtlProtectionMask` frozen at **39,318**, the second processor
+parked at **17 second-level entries**, the trust-level pair churning and
+nothing else moving. One processor progresses to 40,000-44,000.
+
+**Two vCPUs on a four-core host is not oversubscribed**, so contention and
+scheduling are out - which was the standing explanation after the timing
+comparison, and it is wrong. Whatever breaks, breaks on the arrival of the
+second virtual processor.
+
+And it is not the secure kernel doing anything different. The VTL1
+instruction trace on eight processors is **the same trace as on one**,
+function for function and nearly instruction for instruction:
+
+```
+SkpReturnFromNormalMode 3, ...RcxSet 14, ...RaxSet 28, SkiSelectThread 77,
+SkiUpdateXStateForVtlTransition 28, KiVinaInterruptShadow 4,
+KiVinaInterrupt 29, ShvlVinaHandler 18, __memset_spec_ermsb 33,
+SkCallNormalMode 37, SkpPrepareForNormalCall 27, SkiDeselectThread 40,
+SkpPrepareForReturnToNormalMode 23
+```
+
+So the same code runs, and on more than one processor it takes twice as
+long on the interrupted path and the guest never leaves the loop.
+
+**That is a far smaller search space than "the multi-processor bug".** The
+question is what the second virtual processor changes for a guest that
+otherwise executes identical instructions - and the candidates are things
+that only exist above one VP: cross-processor flushes, spin locks that
+send interrupts, and whatever the operating system does before it starts
+its application processors.
+
+
 ## Eight processors against one: the difference is in the interrupted path
 
 **2026-08-23.** Same build, same instruments, the two configurations side
