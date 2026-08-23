@@ -5129,12 +5129,32 @@ private:
      * Taken where the event is staged, with vmcs02 current, so the RIP
      * is the guest's own and not the level above's.
      */
-    static constexpr std::size_t interrupted_capacity = 64;
+    static constexpr std::size_t interrupted_capacity = 192;
 
     std::uint64_t interrupted_rip[interrupted_capacity]{};
     std::uint64_t interrupted_hits[interrupted_capacity]{};
     std::uint64_t interrupted_samples{};
     std::uint64_t interrupted_overflow{};
+
+    /**
+     * The same histogram for entries carrying **no** event, which is the
+     * control the first one needs.
+     *
+     * A hot address in `interrupted_rip` alone is ambiguous: it says the
+     * guest was there when an interrupt landed, and that is equally
+     * consistent with "the guest spends its time there" and with "this
+     * VMM keeps injecting at that instruction without the guest ever
+     * retiring it". Those are opposite problems - one is a guest stuck,
+     * the other is an injection that never lands.
+     *
+     * Sampled on entries that stage nothing, this table cannot be
+     * shaped by injection at all. If the same address dominates both,
+     * the guest is genuinely sitting there.
+     */
+    std::uint64_t quiet_rip[interrupted_capacity]{};
+    std::uint64_t quiet_hits[interrupted_capacity]{};
+    std::uint64_t quiet_samples{};
+    std::uint64_t quiet_overflow{};
 
     static constexpr std::size_t profile_capacity = 64;
 

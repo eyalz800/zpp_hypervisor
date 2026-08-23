@@ -7743,6 +7743,32 @@ void hypervisor::record_l2_entry_event(std::size_t cpu)
         return;
     }
 
+    // Where the guest is on an entry that stages nothing - the control
+    // for `interrupted_rip`, which injection cannot shape. See
+    // `quiet_rip`.
+    {
+        auto where = this->vmcs.guest_rip();
+        auto placed = false;
+
+        this->quiet_samples += 1;
+
+        for (std::size_t i{}; i < interrupted_capacity; ++i) {
+            if (0 == this->quiet_hits[i]) {
+                this->quiet_rip[i] = where;
+            }
+
+            if (this->quiet_rip[i] == where) {
+                this->quiet_hits[i] += 1;
+                placed = true;
+                break;
+            }
+        }
+
+        if (!placed) {
+            this->quiet_overflow += 1;
+        }
+    }
+
     // No event, so this entry is a moment the guest hypervisor chose
     // not to deliver one. Whether it *could* have is what the priority
     // decides. See `l2_low_priority_no_event`.

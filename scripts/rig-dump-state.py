@@ -2434,6 +2434,8 @@ def main():
                "guest_kernel_base", "guest_kernel_size", "l2_exit_cr3",
                "interrupted_rip", "interrupted_hits",
                "interrupted_samples", "interrupted_overflow",
+               "quiet_rip", "quiet_hits",
+               "quiet_samples", "quiet_overflow",
                "guest_interrupted_trace", "guest_interrupted_count",
                "guest_interrupted_rsp", "guest_interrupted_rip",
                # Which thread the guest is running. Sampled for sessions
@@ -2736,6 +2738,8 @@ def main():
                  "guest_stack_rip", "guest_kernel_base", "guest_kernel_size", "l2_exit_cr3",
                "interrupted_rip", "interrupted_hits",
                "interrupted_samples", "interrupted_overflow",
+               "quiet_rip", "quiet_hits",
+               "quiet_samples", "quiet_overflow",
                  "guest_interrupted_count", "guest_interrupted_rsp",
                  "guest_interrupted_rip"):
         if name in off:
@@ -3017,32 +3021,41 @@ def main():
     if "interrupted_rip" in off:
         kbase0 = read("guest_kernel_base") or 0
         ksize0 = read("guest_kernel_size") or 0
-        for _n in ("interrupted_rip", "interrupted_hits"):
-            monitor.queue(instance + off[_n], 64)
-        for _n in ("interrupted_samples", "interrupted_overflow"):
-            monitor.queue(instance + off[_n], 1)
-        more = monitor.run()
-        words.update(more)
-        rows = []
-        for i in range(64):
-            r = words.get(instance + off["interrupted_rip"] + 8 * i, 0)
-            h = words.get(instance + off["interrupted_hits"] + 8 * i, 0)
-            if h:
-                rows.append((h, r))
-        tot = words.get(instance + off["interrupted_samples"], 0)
-        lost = words.get(instance + off["interrupted_overflow"], 0)
-        if rows:
-            print(f"\ncpu 0 where the guest was when an interrupt landed "
+        CAP = 192
+        for _p in ("interrupted", "quiet"):
+            if _p + "_rip" not in off:
+                continue
+            for _n in (_p + "_rip", _p + "_hits"):
+                monitor.queue(instance + off[_n], CAP)
+            for _n in (_p + "_samples", _p + "_overflow"):
+                monitor.queue(instance + off[_n], 1)
+        words.update(monitor.run())
+        for _p, _what in (("interrupted",
+                           "when an interrupt landed on it"),
+                          ("quiet",
+                           "on an entry staging nothing (the control)")):
+            if _p + "_rip" not in off:
+                continue
+            rows = []
+            for i in range(CAP):
+                r = words.get(instance + off[_p + "_rip"] + 8 * i, 0)
+                h = words.get(instance + off[_p + "_hits"] + 8 * i, 0)
+                if h:
+                    rows.append((h, r))
+            tot = words.get(instance + off[_p + "_samples"], 0)
+            lost = words.get(instance + off[_p + "_overflow"], 0)
+            if not rows:
+                continue
+            print(f"\ncpu 0 where the guest was {_what} "
                   f"({tot:,} samples, {len(rows)} distinct)")
-            for h, r in sorted(rows, reverse=True)[:20]:
+            for h, r in sorted(rows, reverse=True)[:14]:
                 rel = ""
                 if kbase0 and kbase0 <= r < kbase0 + (ksize0 or 0):
                     rel = f"  ntoskrnl+0x{r - kbase0:x}"
                 print(f"  0x{r:016x}  {h:>10}  "
                       f"{100.0 * h / (tot or 1):5.1f}%{rel}")
             if lost:
-                print(f"  NO SLOT: {lost:,} samples uncounted - the table "
-                      f"saturated, so this hot set is not the whole story")
+                print(f"  NO SLOT: {lost:,} uncounted - table saturated")
 
     # The kernel image bounds, used by both the thread and stack sections
     # below to turn an address into an offset that survives KASLR.
