@@ -1,5 +1,45 @@
 # Known defects
 
+## The dispatch request reaches the level above and vanishes
+
+**2026-08-23.** Three things established in one pass, and the last one
+with its limits stated rather than argued past.
+
+**Windows has not crashed.** Sampling the one vCPU eight times put four
+samples in this VMM, two in the guest hypervisor and one in ntoskrnl - and
+that one is `HvlEndSystemInterrupt+0x1e`, ordinary interrupt handling, not
+anything in the bugcheck path. The stall is a guest that is alive and
+waiting.
+
+**This VMM does reflect the request.** The synthetic interrupt-command
+write at `0x40000071` lies outside both MSR-bitmap ranges, so it exits
+unconditionally; the only `return l2_exit_outcome::handled` on that path
+is inside `if constexpr (nested_vmx::intercept_self_ipi)`, and the
+manifest reads `swallow=0`. So the write falls through and is reflected.
+
+**And it does not turn up as pending.** Read straight out of the guest's
+virtual-APIC page at `0x117a15000`:
+
+```
+TPR @0x080 = 0xf0        HIGH_LEVEL
+IRR @0x200 = 0x00000000  vectors 0-31
+IRR @0x210 = 0x00000000  vectors 32-63   <- 0x2f would be bit 15 here
+ISR @0x110 = 0x00000000
+```
+
+**What that does and does not show.** It rules out one delivery route: the
+vector is not sitting in the virtual-APIC IRR waiting for a hardware
+delivery that cannot happen without virtual-interrupt delivery, which was
+the leading hypothesis. It does **not** show that the guest hypervisor
+discards the request - it may deliver synthetic interrupts through its own
+synthetic interrupt controller rather than the virtual APIC, and with two
+trust levels there are two vmcs12s and possibly two virtual-APIC pages, so
+this may be the wrong page.
+
+Both are checkable and neither is checked. Stating the limit rather than
+concluding past it is the whole lesson of the eight misreadings above.
+
+
 ## The guest reboots, and the "plateaus" were fresh boots
 
 **2026-08-23.** Watched an uninterrupted single-processor run climb well
