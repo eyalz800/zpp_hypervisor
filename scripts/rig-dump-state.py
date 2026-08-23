@@ -2432,6 +2432,7 @@ def main():
                "guest_stack_trace", "guest_stack_count",
                "guest_stack_pointer", "guest_stack_rip",
                "guest_kernel_base", "guest_kernel_size", "l2_exit_cr3",
+               "synthetic_msr_writes", "synthetic_msr_last_value",
                "interrupted_rip", "interrupted_hits",
                "interrupted_samples", "interrupted_overflow",
                "stall_withheld_total", "stall_forced_total",
@@ -3059,6 +3060,39 @@ def main():
             if lost:
                 print(f"  contention: {lost:,} colliding samples decayed a "
                       f"resident entry (a rate, not lost hot addresses)")
+
+    # The interface's own crash report. HV_X64_MSR_CRASH_P0..P4 are
+    # 0x40000100-0x40000104 and the control is 0x40000105; the guest
+    # writes them when it reports a fatal error, and Windows shows
+    # HYPERVISOR_ERROR (0x20001) on the screen at the same moment. This
+    # is the only place those parameters survive.
+    if "synthetic_msr_last_value" in off and "synthetic_msr_writes" in off:
+        CAPS = 320
+        for _c in range(args.cpus):
+            for i in range(0x100, 0x106):
+                monitor.queue(instance + off["synthetic_msr_writes"]
+                              + (_c * CAPS + i) * 8, 1)
+                monitor.queue(instance + off["synthetic_msr_last_value"]
+                              + (_c * CAPS + i) * 8, 1)
+        words.update(monitor.run())
+        for _c in range(args.cpus):
+            rows = []
+            for i in range(0x100, 0x106):
+                n = words.get(instance + off["synthetic_msr_writes"]
+                              + (_c * CAPS + i) * 8, 0)
+                v = words.get(instance + off["synthetic_msr_last_value"]
+                              + (_c * CAPS + i) * 8, 0)
+                if n:
+                    rows.append((i, n, v))
+            if rows:
+                print(f"\ncpu {_c} HYPERVISOR CRASH REGISTERS - the "
+                      f"interface reported a fatal error")
+                for i, n, v in rows:
+                    nm = {0x100: "CRASH_P0", 0x101: "CRASH_P1",
+                          0x102: "CRASH_P2", 0x103: "CRASH_P3",
+                          0x104: "CRASH_P4", 0x105: "CRASH_CTL"}[i]
+                    print(f"    0x{0x40000000 + i:08x} {nm:<9} "
+                          f"writes {n:>6}  last 0x{v:016x}")
 
     # The kernel image bounds, used by both the thread and stack sections
     # below to turn an address into an offset that survives KASLR.

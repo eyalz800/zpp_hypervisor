@@ -4508,7 +4508,22 @@ private:
      * `0x40000090`-`0x4000009f` for the interrupt sources,
      * `0x400000b0`-`0x400000b1` for the timers - is well inside it.
      */
-    static constexpr std::size_t synthetic_msr_capacity = 256;
+    /**
+     * **320, not 256, because the crash registers are at `0x100`.**
+     *
+     * `HV_X64_MSR_CRASH_P0` through `P4` are `0x40000100`-`0x40000104`
+     * and the control register is `0x40000105` - offsets 256 to 261,
+     * one past the end of a 256-entry table. So the one thing written
+     * when the interface reports a fatal error was the one thing this
+     * census could not see, and a two-processor run that ends in
+     * `HYPERVISOR_ERROR (0x20001)` on the screen left nothing behind to
+     * say why.
+     *
+     * The bound was chosen when the interesting registers were the
+     * timer and interrupt ones, which all live below `0x100`. It cost a
+     * boot to notice.
+     */
+    static constexpr std::size_t synthetic_msr_capacity = 320;
 
     /**
      * Every second-level access to a synthetic MSR, counted per index and

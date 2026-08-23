@@ -1,5 +1,77 @@
 # Known defects
 
+## The multi-processor failure is `HYPERVISOR_ERROR (0x20001)`, and it is on the screen
+
+**2026-08-23.** With `ZPP_CPUS=2` the guest does not crawl, it **dies**.
+Read out of the passed-through framebuffer with `pmemsave` - the only way
+to see this machine's screen - it says:
+
+```
+Your device ran into a problem and needs to restart.
+Stop code: HYPERVISOR_ERROR (0x20001)
+```
+
+and QEMU is `paused (shutdown)`. Reproduced on two independent boots.
+
+**Both processors were running the second level** when it happened: cpu 0
+with 131,983 second-level entries, cpu 1 with 4,336. So this is not a
+processor that failed to start - it is one that started and then the
+interface reported a fatal error. Note cpu 1 takes 52 `hlt` exits and cpu
+0 takes none, which is the first time in this whole investigation that
+any processor has been seen to idle.
+
+**Nothing on our side faulted.** `unhandled_exit`, `vm_entry_failure` and
+`host_exception` are all clear, and there is no VM-entry failure in the
+log. The last thing the log holds is the local-APIC teardown - every LVT
+masked, `SVR` written `0xdf` with the enable bit clear - repeated, which
+is Windows shutting the processors down.
+
+**Where Windows raises it**, found by scanning its own image for
+`mov ecx, 0x20001` and resolving the enclosing function from the
+exception directory: three sites, all in the `Hvl` hypervisor-library
+region, and all the same shape -
+
+```
+xor  ecx, ecx
+call <hvl routine>
+test eax, eax
+jns  over
+movsxd rdx, eax          ; the NTSTATUS becomes bugcheck parameter 1
+mov  ecx, 0x20001
+call KeBugCheckEx
+```
+
+So **the bugcheck carries the failing status as its first parameter**, and
+the failing call is an `Hvl` routine returning a negative NTSTATUS.
+
+**What the processors were doing.** The exit ring's tail on cpu 0 is a
+tight repeating loop, and every iteration carries the same first-level
+hypercall:
+
+```
+vmcall  detail=0xbb7000000010050  [l1-rip]     rcx = 0x00010050
+vmread, vmread, vmptrld, vmread, vmptrld, vmread, vmread,
+vmwrite, invvpid, vmread, vmwrite, vmresume  -> repeat
+```
+
+`rcx` decodes as call code **`0x0050`** with the fast bit set, repeated,
+while cpu 1 is doing ordinary `VtlCall`/`VtlReturn` (`0x11`/`0x12`). One
+processor looping on a single hypercall while the other does trust-level
+work is the shape to chase next.
+
+**Two instrument bounds cost readings here and are now fixed or noted:**
+
+- `synthetic_msr_capacity` was **256**, and the crash registers
+  `HV_X64_MSR_CRASH_P0..P4` are `0x40000100`-`0x40000104` - offsets 256
+  to 260, one past the end. The one thing written when the interface
+  reports a fatal error was the one thing the census could not see.
+  Raised to 320.
+- `last_hypercall_code` and the first-level hypercall census are gated
+  behind `ZPP_TRACE_VTL`, which any throughput build has off - so the
+  run worth diagnosing is the run with the hypercall recorder disabled.
+  The exit ring's `detail` field is what saved this one.
+
+
 ## Offering the enlightened VMCS upward makes Hyper-V stand down
 
 **2026-08-23, one boot, and it closes the option for a better reason than
