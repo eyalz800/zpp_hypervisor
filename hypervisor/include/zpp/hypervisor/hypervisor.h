@@ -8608,6 +8608,12 @@ private:
      */
     std::uint64_t entry_stub_chosen[max_cpus]{};
 
+    /**
+     * Set when an enlightened entry has happened since this VMM last
+     * entered its own VMCS, so that entry launches instead of resuming.
+     */
+    bool evmcs_entered_since_own[max_cpus]{};
+
     /** Set once the layer below has accepted the assist page. */
     bool evmcs_active[max_cpus]{};
     /** @} */

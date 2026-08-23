@@ -976,6 +976,27 @@ void hypervisor::resume_guest(std::uint64_t cpuid,
     // Otherwise it is the ordinary pair, and VMLAUNCH only where this
     // processor has been out of VMX operation and back since its last
     // entry - see relaunch above.
+    // **After an enlightened entry, this VMM's own VMCS must be launched
+    // rather than resumed.** The layer below sets its current VMCS
+    // pointer to invalid whenever the enlightened pointer changes
+    // (`nested_vmx_handle_enlightened_vmptrld`), so the launch state it
+    // held for vmcs01 does not survive a second-level entry, and a
+    // VMRESUME then fails with `vm_instruction_error` 5, "VMRESUME with
+    // non-launched VMCS".
+    //
+    // **That error was read as the second-level entry's for four
+    // attempts.** It is not: the nested stubs report through
+    // `zpp_vmx_nested_entry_failure`, and `record_entry_failure` - where
+    // the 5 was read - is only called from the plain `vmresume` stub,
+    // which is this entry. Three fixes were aimed at the wrong VM entry
+    // because two reporters were assumed to be one.
+    if constexpr (nested_vmx::evmcs_to_kvm) {
+        if (cpuid < max_cpus && this->evmcs_entered_since_own[cpuid]) {
+            relaunch = true;
+            this->evmcs_entered_since_own[cpuid] = false;
+        }
+    }
+
     auto entry = relaunch ? arch::x86_64::vmx::vmlaunch
                           : arch::x86_64::vmx::vmresume;
 
