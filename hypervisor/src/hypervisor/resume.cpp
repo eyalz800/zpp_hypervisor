@@ -936,17 +936,9 @@ void hypervisor::resume_guest(std::uint64_t cpuid,
         // held by enter_or_park_l2 and recorded in `l2_activity_state`,
         // which is the record start_up_processor asks alongside this one.
         //
-        // RIP is not gated: nothing consumes it, it exists to be read
-        // from a debugger, and it costs nothing because the frame above
-        // already holds it.
-        //
-        // **CS is gated, because it does not.** It is the one VMCS read
-        // on this path taken purely for a debugger, and it is taken on
-        // every resume - about 95 million of them on a boot-length run.
-        // Under the enlightened VMCS that is roughly 277 cycles each and
-        // under a real one it is a VM exit into the layer below. Nothing
-        // reads it except a human, and a human can read it from the
-        // singleton on a build that keeps it.
+        // RIP and CS are not gated, deliberately: nothing consumes them,
+        // they exist to be read from a debugger, and the address a
+        // second-level guest is at is the more useful of the two answers.
         auto in_l2 = false;
         if constexpr (nested_vmx::enabled) {
             in_l2 = this->running_l2[slot - 1];
@@ -957,10 +949,7 @@ void hypervisor::resume_guest(std::uint64_t cpuid,
         }
 
         this->resume_guest_rip[slot - 1] = resume_rip;
-
-        if constexpr (nested_vmx::census_exits) {
-            this->resume_guest_cs[slot - 1] = vmcs.guest_cs_selector();
-        }
+        this->resume_guest_cs[slot - 1] = vmcs.guest_cs_selector();
     }
 
     // Whether this processor has been out of VMX operation and back
