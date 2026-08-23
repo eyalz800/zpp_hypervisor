@@ -1,5 +1,43 @@
 # Known defects
 
+## VP1's spin is a repeated fast hypercall `0x0050`, and nobody knows what that is
+
+**2026-08-24.** VP1's loop, read off the exit ring:
+
+```
+vmcall    rip=...bcba751f  detail=0x7a47000000010050  [l1-rip]
+vmresume  rip=0xfffff8047a470003                      [l2-rip]
+vmcall    rip=...bcba751f  detail=0x7a47000000010050  [l1-rip]
+```
+
+The resumed second-level address is the **hypercall page + 0x03** - the
+`ret` after the generic `vmcall` stub - so the second level is making a
+hypercall and returning, over and over. `detail` is
+`(rax << 32) | rcx`, so `rcx = 0x00010050`: **a fast hypercall with call
+code `0x0050`**, the same one VP0's ring showed earlier. Hyper-V reads
+`HV_X64_MSR_TIME_REF_COUNT` once per pass, which is what a poll with a
+timeout looks like from outside.
+
+**And `0x0050` is not identified.** This file and several messages have
+called it `HvCallGetVpRegisters` from memory. **That is unverified and
+probably wrong**: the reader's own table in `rig-dump-state.py` maps
+`0x005b` to `HvCallGetVpRegisters` and `0x005c` to `HvCallSetVpRegisters`
+and does not list `0x0050` at all. The second-level census shows `0x0050`
+and `0x0051` arriving with no names beside them for the same reason.
+
+So the sharpest fact about the second processor rests on a call code
+nobody in this tree has looked up. **Look it up before building on it** -
+the TLFS assigns these, and getting it wrong here would send the next
+person after the wrong subsystem, which is the same failure this file
+records under the RDX census and the `0x8800002` root.
+
+**What is solid**, and does not depend on the name: VP1 makes a handful
+of hypercalls, ends on a `VtlReturn` that drops it to VTL0, and then
+spins on one fast hypercall for ever while VP0 runs on. It is a poll that
+never succeeds, not a processor that failed to start - `l2_activity_state`
+is active and it ran 7,500 second-level entries first.
+
+
 ## VTL1 never runs on the second processor
 
 **2026-08-24.** Turning `ZPP_TRACE_VTL` on for one two-processor boot -
