@@ -1,5 +1,57 @@
 # Known defects
 
+## The hypervisor's own crash record, read out of the dead guest
+
+**2026-08-23.** `HYPERVISOR_ERROR (0x20001)` means the *hypervisor*
+failed, and the screen shows the stop code without its parameters. The
+parameters are the whole of the information, and they are readable.
+
+`KiBugCheckData`, found by scanning the kernel's `.data` for a five-qword
+run whose first word is the stop code - no PDB needed:
+
+```
+[0] 0x0000000000020001   HYPERVISOR_ERROR
+[1] 0x0000000000000011   P1
+[2] 0x00000000003310bd   P2
+[3] 0x0000000000001003   P3
+[4] 0xffffe70000005d60   P4
+```
+
+And the record Windows re-reported them from. The routine that raises
+this bugcheck was found by scanning the image for `mov ecx, 0x20001` and
+resolving the enclosing function from the exception directory; it loads a
+global, checks a flag at `+4`, and passes four fields of the pointed-to
+structure as the parameters. Following that global:
+
+```
++0x000  0000000100000001 0000000000020001
++0x010  0000000000000011 00000000003310bd
++0x020  0000000000001003 ffffe70000005d60
++0x030  ffffe70000005c50 0000000000100a00
++0x090  0000000008800000 fffff806127685e0
+```
+
+The parameters agree with `KiBugCheckData` exactly, which is what
+identifies the structure.
+
+**`+0x90` is `0x8800000`, and that is `l2_exit_cr3[0]`** - the page-table
+root this VMM last recorded for the second level on processor 0, and the
+one a walk with it reports every kernel address unmapped. The record
+carries the faulting root, so the crash and that unusable CR3 are the
+same event.
+
+**What it says:** the guest hypervisor took a fatal error of its own,
+code `0x11`, with `0x3310bd` beside it - which has the shape of an offset
+into its own image - while processor 0 was looping on first-level
+hypercall `0x0050` and processor 1 was doing trust-level calls. Nothing
+in this VMM faulted: `unhandled_exit`, `vm_entry_failure` and
+`host_exception` are all clear.
+
+`scripts/guest-bugcheck.py` keeps the method. **It is worth keeping even
+though the codes are undocumented**, because the alternative was a
+photograph of a screen with the parameters withheld.
+
+
 ## The multi-processor failure is `HYPERVISOR_ERROR (0x20001)`, and it is on the screen
 
 **2026-08-23.** With `ZPP_CPUS=2` the guest does not crawl, it **dies**.
