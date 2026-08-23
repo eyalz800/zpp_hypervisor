@@ -1,5 +1,79 @@
 # Known defects
 
+## The hang is a starvation, and the starvation is VMCS accesses to KVM
+
+**2026-08-23, one 455-second single-processor run, all figures from it.**
+Four instrument placements were needed to see the first line of this, and
+the sequence is recorded above because each wrong one looked like an
+answer.
+
+**What the guest is doing.** Windows writes four synthetic MSRs in a tight
+repeating quartet, 1,223,122 writes and 31.7% of every exit this VMM
+takes:
+
+```
+0x40000070  EOI    364,084  29.8%   last 0x0
+0x400000b1  STIMER0_COUNT  364,048  29.8%   last 0x10bdd3192
+0x40000071  ICR    362,153  29.6%   last 0x4002f     <- self-IPI, vector 0x2f
+0x40000084  EOM    124,999  10.2%   last 0x0
+```
+
+Request the dispatch interrupt, end the interrupt, rearm the timer.
+Round and round.
+
+**What it gets.** Of 362,153 requests for vector 0x2f, **2,477 are
+delivered** - 0.7%. The clock vector 0xd1 is injected 382,968 times, 98.4%
+of all injections. The guest's task priority at second-level entry is
+`0xd0` half the time and `0xf0` a further 22.1%; it reaches `0x00` on 1.1%
+of entries. At `0xd0` a vector in priority class 2 cannot be delivered, so
+the dispatch interrupt it asks for every tick is masked by the clock
+interrupt it is still inside.
+
+**Why it never gets out.** Not because the clock is too fast, and not
+because Hyper-V drops the request - it asks for an interrupt window on
+43.2% of entries and takes 380,620 window exits polling for a priority
+that never comes down. It is that **Windows is running at 7.6% of the
+machine**:
+
+```
+duty                        0.771     <- share of wall inside this VMM
+guest hypervisor (L1)      15.4% of wall
+Windows          (L2)       7.6% of wall
+```
+
+A guest with 7.6% of a processor cannot finish a clock interrupt and its
+deferred-procedure queue inside a period that keeps arriving at wall
+speed. So it stays at `CLOCK_LEVEL`, the dispatch interrupt stays masked,
+no deferred work runs, and the boot does not advance. **The hang and the
+cost are the same fact.**
+
+**Where the 77% goes, and it is one thing.** 181,138 cycles an exit, and
+the split by reason tracks VMCS accesses almost exactly:
+
+```
+vmresume    1,744,495  170,958cyc  41.2%   25.7rd 15.7wr  4,121/acc
+wrmsr       1,265,700  183,015cyc  32.0%   38.3rd  8.2wr  3,936/acc
+vmcall         90,700  816,345cyc  10.2%  444.8rd  9.8wr  1,796/acc
+int-window    380,620  184,834cyc   9.7%   38.0rd  9.0wr  3,931/acc
+```
+
+**~4,100 cycles per VMCS access, ~110 accesses a round trip, 416,679
+handler cycles a round trip.** Multiply the first two and you get the
+third. There is no software cost worth attacking here - a VMREAD is an
+exit to KVM underneath, and that is the entire bill.
+
+**So the lever is the enlightened VMCS**, which turns every one of those
+accesses into a memory write to a page KVM already reads. It is the only
+change that attacks the whole 77% rather than a slice, and the arithmetic
+above says roughly what it is worth. `ZPP_EVMCS_TO_KVM` exists and is off
+because it resets the guest after one round trip; that is now the single
+highest-value defect in this file.
+
+**This supersedes the four failed timing interventions** recorded above.
+Every one of them tried to change what the guest was told about time. The
+guest was told the truth and given 7.6% of a processor.
+
+
 ## Withholding the interrupt window until the priority drops: tried, harmful
 
 **2026-08-23.** The measured poll - 3,055,183 interrupt-window requests
