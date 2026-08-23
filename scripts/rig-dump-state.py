@@ -3095,6 +3095,9 @@ def main():
                     print(f"    0x{0x40000000 + i:08x} {nm:<9} "
                           f"writes {n:>6}  last 0x{v:016x}")
 
+    # Which call sites take the VMCS reads. The field census says *what*
+    # is read; this says *who* reads it, which is the only one of the two
+    # that can be acted on. Empty unless ZPP_VMCS_CENSUS was on.
     # The kernel image bounds, used by both the thread and stack sections
     # below to turn an address into an offset that survives KASLR.
     kbase = read("guest_kernel_base") or 0

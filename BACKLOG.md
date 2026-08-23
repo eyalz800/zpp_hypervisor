@@ -1,5 +1,41 @@
 # Known defects
 
+## There is no hot VMCS call site left - the reads are diffuse
+
+**2026-08-24.** With our per-exit cost down to 10,227 cycles and the
+guest still on 7.7%, the last lever inside this VMM would be the fixed
+read set: a `vmread` reflected from the guest hypervisor takes **17.5
+VMCS reads** to service, where a handful would do. The caller census
+exists for exactly this question and nothing had ever read it.
+
+Wired up and read - **406,241,431 reads over 48 sites**, and the top site
+is 13.7%:
+
+```
+  13.7%  guest_rip                      6.6%  guest_cr0
+   9.7%  guest_rflags                   6.3%  guest_cs_selector
+   8.1%  vm_entry_controls              5.7%  vm_exit_instruction_information
+   5.4%  exit_reason / on_vm_exit / guest_activity_state ...
+```
+
+`__builtin_return_address(0)` inside `read()` names the accessor, so the
+census resolves to the field wrappers rather than the logical caller -
+worth knowing before anyone wires it up again expecting function names.
+Two real callers do surface: `exit_dispatch.cpp:398` (`on_vm_exit`, the
+IDT-vectoring capture, on every exit) and `resume.cpp:517`.
+
+**The shape is the finding.** There is no single site to remove, no
+accidental repeat, nothing analogous to the 134-case switch that gave 19%
+earlier. The read set is what an exit genuinely needs, spread thin. So
+the remaining cost inside this VMM is not recoverable by removing a
+mistake, and the 7.7% the guest gets is not waiting on one more fix in
+here.
+
+That closes the last lever on our side and leaves the conclusion in the
+entry above standing: the tax is conserved, three ways out are shut by
+KVM and the hardware, and the next experiment is a bare-metal boot.
+
+
 ## The stall is one instruction, and the tax that causes it is conserved
 
 **2026-08-24.** The Phase 1 stall is now located to a single instruction,
