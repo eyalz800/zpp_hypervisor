@@ -1,5 +1,59 @@
 # Known defects
 
+## The enlightened VMCS needs a QEMU flag, and its absence is silent
+
+**2026-08-23.** `evmk=1` read back correctly from the binary's own
+manifest, the build was deployed and verified from a fresh mount, and the
+run came out indistinguishable from a build with the switch off: duty
+0.771 against 0.770, the same exit profile to within noise, not one
+`vmread` exit where the enlightened configuration produces 52% of them.
+
+The hypervisor had said so, in its log, in one line:
+
+```
+underneath: cpuid 0x40000000 max 0x40000001 signature "KVMKVMKVM"
+cpu 0x0 enlightened vmcs asked for and not offered
+```
+
+`boot-zpp.sh` passes `-cpu host,kvm=on,topoext` and no `hv-` flag, so
+QEMU exposes plain KVM and there is no enlightenment to take. The earlier
+run that *did* measure it saw `Microsoft Hv` at that leaf, and nothing
+recorded which launcher produced that. `CLAUDE.md` already warns that
+`boot.sh` and `boot-zpp.sh` differ in their `-cpu` line; this is the same
+trap from the other side, and the build manifest - the thing added
+precisely so a switch could be trusted - was **right and insufficient**.
+It says what was compiled. It cannot say what the machine underneath
+agreed to.
+
+`rig-boot.sh` now derives the flags from the deployed binary, so the two
+cannot disagree. QEMU refuses `hv-evmcs` without `hv-vapic`.
+
+**The guest hypervisor is told none of it.** Every leaf in
+0x40000000-0x4fffffff is answered by our own CPUID handler, so what QEMU
+exposes reaches this VMM and stops there.
+
+### With it on, the measurement, and it is the argument for mixed mode
+
+431 s, one processor, against the shadowing build in the entry above:
+
+| | shadowing only | enlightened only |
+|---|---|---|
+| this VMM's duty | 0.771 | **0.371** |
+| guest hypervisor (L1) | 15.4% | **55.4%** |
+| Windows (L2) | **7.6%** | **7.6%** |
+| vector 0x2f delivered | 0.5% | **1.8%** |
+| exits | 4.6 M | 19.4 M (81% `vmread`/`vmwrite`) |
+
+Each configuration frees one side's VMCS accesses and pays the other's,
+and **Windows gets 7.6% of the machine either way**. Shadowing makes the
+guest hypervisor's accesses free and leaves ours exiting; the
+enlightenment makes ours free and leaves its 15.7 million exiting.
+
+That is the case for mixed mode stated as a measurement rather than an
+estimate: it is the only configuration in which *neither* side pays, and
+it is the only one that can move the 7.6%.
+
+
 ## The hang is a starvation, and the starvation is VMCS accesses to KVM
 
 **2026-08-23, one 455-second single-processor run, all figures from it.**

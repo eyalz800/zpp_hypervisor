@@ -68,6 +68,41 @@ CPUS=${ZPP_CPUS:-}
 # Leading comma included by the caller, since it joins an existing list.
 CPU_EXTRA=${ZPP_CPU_EXTRA:-}
 
+# A build that uses the enlightened VMCS toward KVM needs QEMU to offer
+# it one, and nothing used to say so.
+#
+# **This cost a whole measurement.** `evmk=1` read back correctly from
+# the binary's own manifest, the build was deployed and verified, and the
+# run came out byte-for-byte like a build with the switch off - duty
+# 0.771 against 0.770, not one `vmread` exit. The hypervisor said exactly
+# what was wrong, in its log, in one line - `enlightened vmcs asked for
+# and not offered` - and the exit profile is the thing anybody looks at
+# first. QEMU had exposed plain `KVMKVMKVM` at CPUID 0x40000000, because
+# `boot-zpp.sh` passes no `hv-` flag at all; the earlier run that did
+# measure it saw `Microsoft Hv` and nobody recorded which launcher it
+# used. `CLAUDE.md` already warns that `boot.sh` and `boot-zpp.sh` differ
+# in their `-cpu` line - this is the same trap from the other side.
+#
+# So the flags are derived from the binary rather than remembered. QEMU
+# refuses `hv-evmcs` without `hv-vapic`, so both go on together.
+#
+# The guest hypervisor is told none of this: every leaf in
+# 0x40000000-0x4fffffff is answered by our own CPUID handler, so what
+# QEMU exposes here reaches this VMM and stops. See `CLAUDE.md`, "What
+# the guest is told".
+if [ -f "$(dirname "$0")/../.rig-deployed-hypervisor.elf" ] &&
+   strings "$(dirname "$0")/../.rig-deployed-hypervisor.elf" 2>/dev/null |
+       grep -q 'zpp switches:.*evmk=1'; then
+    case "$CPU_EXTRA" in
+        *hv-evmcs*) ;;
+        *)
+            CPU_EXTRA="$CPU_EXTRA,hv-vapic,hv-evmcs"
+            echo "note: build says evmk=1, so adding -cpu ...,hv-vapic,hv-evmcs" \
+                 "- without it KVM offers no enlightened VMCS and the switch is inert"
+            ;;
+    esac
+fi
+
 SSH_OPTS="-o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o ConnectTimeout=10 -o ServerAliveInterval=5 -o ServerAliveCountMax=3 -o BatchMode=yes"
 
 # shellcheck disable=SC2086
