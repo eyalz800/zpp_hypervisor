@@ -1,5 +1,42 @@
 # Known defects
 
+## The dispatch interrupt *is* delivered - the guest livelocks in the scheduler
+
+**2026-08-23.** The single-processor run, at its stall, with the stalled
+thread symbolized:
+
+```
+thread start: KeSwapProcessOrStack          the kernel swapper
+  KiCommitRescheduleContextEntry +0x561
+  KiDpcInterrupt                 +0x390
+  KiInterruptDispatchNoLockNoEtw +0x49
+  HalPerformEndOfInterrupt       +0x1a
+  HvlEndSystemInterrupt          +0x1e
+```
+
+**The guest is inside `KiDpcInterrupt`.** The dispatch interrupt is being
+delivered and handled, and the scheduler is committing reschedule contexts
+and taking end-of-interrupt.
+
+**So "vector `0x2f` is delivered on 0.3% of requests and that is the
+blocker" is withdrawn.** That count measures injections through vmcs12's
+entry-interruption field, which is one delivery path; the stack shows the
+interrupt arriving by some other route and being serviced. A count of one
+mechanism was read as a count of the outcome - the same shape as every
+other misreading in this file, and it had been load-bearing for several
+rounds of work.
+
+What is left, and it is a different thing entirely: the guest loops
+**dispatch interrupt -> commit reschedule -> end of interrupt -> dispatch
+interrupt**, making no hypercalls and no progress. A livelock in the
+reschedule path rather than a missing interrupt or a starved processor.
+
+That also fits the earlier stack on the same run - `KiDeferredReadySingleThread`
+into `HalpInterruptSendIpi` - as the same loop seen one frame further out:
+the scheduler readies a thread, asks for a dispatch interrupt, takes it,
+commits the reschedule, and is back where it started.
+
+
 ## It is the *second* processor, not the count
 
 **2026-08-23.** Two virtual processors fail exactly as eight do:
