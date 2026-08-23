@@ -22,20 +22,35 @@ parked or waiting for a start-up IPI. This is not an application
 processor that failed to start; it is one that started, ran, made a
 handful of trust-level calls, and stopped.
 
-**Two readings, and they are not yet separated.** Either VTL1 genuinely
-never runs on VP1 - in which case its secure-kernel startup never
-completes and the spin is it waiting - or **our detection of VTL1 does
-not work on VP1**, and `vtl1_any_entry_count` reads zero for a processor
-where it is in fact running. The second is entirely possible: a
-`VtlReturn` from VP1 implies VTL1 *had* run there, which contradicts a
-literal reading of the zero.
+**Separated by reading the site, and it is the second reading: the
+counter is blind, not the processor idle.**
 
-`vtl_half_mark_kind[cpu]` is what feeds that counter, and whether it is
-maintained per processor or only for whichever processor armed it is the
-thing to check first - and it is checkable by reading, without a boot.
-**That is the shape of two bugs already found this session**: a counter
-whose label promised more than its site delivered, and per-processor
-state that was not.
+`mark_vtl_half` is properly per processor - `vtl_half_mark_kind[cpu]` -
+so that was not it. What it is: **the mark is only ever set from an
+observed `HvCallVtlCall` or `HvCallVtlReturn`**, and
+`vtl1_any_entry_count` counts entries while the mark says VTL1. An
+application processor does not *enter* VTL1 by calling `HvCallVtlCall` -
+it starts there, by the start-up path - so the first trust-level
+hypercall this VMM ever sees from VP1 is the `HvCallVtlReturn` that
+*leaves* VTL1. The mark is set to VTL0 by that call and has never been
+VTL1, so the counter reads zero for a processor where VTL1 demonstrably
+ran.
+
+**VP1's own `VtlReturn` is the proof it ran.** You cannot return from a
+trust level you were never in.
+
+So the zero is an artefact, and it is a real instrumentation defect
+rather than a mis-reading: **`vtl1_any_entry_count` cannot see VTL1 on
+any application processor**, by construction, and every conclusion drawn
+from it about a processor other than the boot one is worthless. The fix
+is to seed the mark from the start-up path rather than only from the
+hypercalls.
+
+What survives, and it is still the sharpest fact about the failure: VP1
+makes twenty-one hypercalls, the last of them a `VtlReturn`, and then
+spins for ever at one instruction. Since that `VtlReturn` dropped it to
+VTL0, **the spin is VTL0 code** - and it is in no loaded module, which is
+the next thing to explain rather than assume.
 
 Worth stating plainly: this is the first measurement that distinguishes
 the two processors by *what they are doing* rather than by how far they
