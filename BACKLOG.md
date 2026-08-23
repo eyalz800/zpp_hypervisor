@@ -1,5 +1,37 @@
 # Known defects
 
+## The EPT-acknowledgement fix turns the two-processor crash into a stalled VP
+
+**2026-08-23.** With `wait_for_ept_acknowledgement` no longer stamping
+another processor's invalidation mark, the two-processor run **stops
+crashing**:
+
+| | before | after |
+|---|---|---|
+| status at ~9 min | `paused (shutdown)`, `HYPERVISOR_ERROR` | **running** |
+| cpu 0 exits | 1.8 M | **52.6 M** |
+| cpu 0 second-level entries | 131,983 | **4,460,199** |
+
+Thirty-four times the second-level work and no bugcheck, on a run that
+previously died every time. Note `unresponsive_processors` reads **0** on
+this run, so the guard did not fire here - the fix removed a hazard
+rather than a firing fault, and the improvement is not yet attributed.
+**Do not record it as proven until a run shows the counter rising and
+still surviving.**
+
+**What remains is the second processor, and it is a different failure.**
+cpu 1 stops at **10,824 exits and 849 second-level entries** and does not
+move again, while cpu 0 runs on. Boot reaches only 77 modules
+(`CLASSPNP.SYS`) against the 105 a single-processor run reaches, so a
+wedged VP is *worse* than no second VP at all - which is what a guest
+that waits on all its processors would do.
+
+So the single-processor configuration remains the best path to a login
+screen, and "why does VP1 stop after a few hundred second-level entries"
+is now the whole of the multi-processor question. It is no longer
+entangled with a crash.
+
+
 ## RETRACTED: `0x8800002` is not an empty root, it is not identity-mapped
 
 **2026-08-23.** Two entries above build on "processor 0's second-level
