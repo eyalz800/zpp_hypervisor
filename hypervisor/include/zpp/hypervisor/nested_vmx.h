@@ -1939,6 +1939,43 @@ inline constexpr arch::x86_64::vmx::vmcs_fields::vmcs_field
  */
 inline constexpr bool evmcs_to_kvm = (0 != ZPP_EVMCS_TO_KVM);
 
+#ifndef ZPP_EVMCS_MIXED
+#define ZPP_EVMCS_MIXED 0
+#endif
+
+/**
+ * Enlighten **only** the second-level VMCS, and keep offering the guest
+ * hypervisor VMCS shadowing.
+ *
+ * The two savings look mutually exclusive and are not. Shadowing needs
+ * the VMREAD and VMWRITE bitmap pointers, which the enlightened layout
+ * has no home for - but only *vmcs01* carries those, because shadowing
+ * is a control on the VMCS that runs the guest hypervisor. vmcs02 can
+ * live in an enlightened page while vmcs01 stays a real region.
+ *
+ * **The measurement that says it is worth it**, one processor, 431 s
+ * each, against the same guest:
+ *
+ * | | shadowing only | enlightened only |
+ * |---|---|---|
+ * | this VMM's duty | 0.771 | 0.371 |
+ * | guest hypervisor | 15.4% | 55.4% |
+ * | Windows | 7.6% | 7.6% |
+ *
+ * Each frees one side's VMCS accesses and pays the other's, and the
+ * guest gets 7.6% of the machine either way - which is what pins it at
+ * `CLOCK_LEVEL` and stops the boot. Mixed mode is the only configuration
+ * in which neither side pays.
+ *
+ * **Off by default**: five earlier attempts each reached exactly one
+ * second-level entry. What they were missing is recorded on
+ * `evmcs_own_flushed` - the layer below discards its cached vmcs01
+ * un-flushed on every enlightened entry, so the state loss outlives any
+ * fix aimed at the launch state alone.
+ */
+inline constexpr bool evmcs_mixed =
+    evmcs_to_kvm && (0 != ZPP_EVMCS_MIXED);
+
 #ifndef ZPP_WINDOW_ON_TPR
 #define ZPP_WINDOW_ON_TPR 0
 #endif

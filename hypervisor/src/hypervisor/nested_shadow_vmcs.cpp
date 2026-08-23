@@ -315,10 +315,88 @@ void hypervisor::detect_underlying_hypervisor()
  */
 bool hypervisor::point_at_vmcs(std::size_t cpu, bool second_level)
 {
-    if constexpr (nested_vmx::evmcs_to_kvm) {
-        if ((cpu < max_cpus) && this->evmcs_active[cpu]) {
-            constexpr std::size_t current_nested_vmcs_offset = 48;
+    constexpr std::size_t current_nested_vmcs_offset = 48;
+    constexpr std::size_t enlighten_vmentry_offset = 40;
 
+    if constexpr (nested_vmx::evmcs_mixed) {
+        if ((cpu < max_cpus) && this->evmcs_active[cpu]) {
+            auto * assist = this->vp_assist[cpu];
+
+            if (second_level) {
+                // **Flush this VMM's own VMCS before the enlightened
+                // entry, because the layer below will otherwise throw
+                // it away.** `nested_vmx_handle_enlightened_vmptrld`
+                // assigns `current_vmptr = INVALID_GPA` directly
+                // (`nested.c:2102`) and never calls
+                // `nested_release_vmcs12`, which is the only thing that
+                // writes the cached copy back (`nested.c:5417`). A
+                // VMCLEAR reaches that flush through `handle_vmclear`
+                // (`nested.c:5479`).
+                //
+                // The price is the launch state, which the same path
+                // zeroes in memory - so the entry back into vmcs01 is a
+                // VMLAUNCH, and `evmcs_entered_since_own` says so. That
+                // mark is *set here*: it was read and cleared in
+                // `resume_guest` and written nowhere, which is why
+                // `evmcs_mark_absent` climbed while `set` stayed at one
+                // and the fix built on it could not take.
+                if (auto own = own_vmcs_region_physical(cpu); 0 != own) {
+                    arch::x86_64::vmx::vmclear(&own);
+                    this->evmcs_own_flushed[cpu] += 1;
+                }
+
+                *reinterpret_cast<volatile std::uint64_t *>(
+                    assist + current_nested_vmcs_offset) =
+                    this->evmcs_physical[cpu];
+
+                // After the pointer, never before: the layer below reads
+                // both out of this page and treats the flag as the thing
+                // that makes the pointer mean anything
+                // (`vmx/hyperv.c:16`).
+                *reinterpret_cast<volatile std::uint8_t *>(
+                    assist + enlighten_vmentry_offset) = 1;
+
+                arch::x86_64::vmx::vmcs_cache_select_enlightened(
+                    reinterpret_cast<std::uint64_t>(this->evmcs[cpu]),
+                    cpu);
+
+                this->evmcs_entered_since_own[cpu] = true;
+                this->evmcs_mark_set[cpu] += 1;
+
+                return false;
+            }
+
+            // Going back to a real vmcs01, which the layer below refuses
+            // while an enlightened pointer is live - and refuses with a
+            // bare `return 1` (`nested.c:5759`), no VMfail and no
+            // instruction skip, so the VMPTRLD re-executes for ever.
+            //
+            // The VMCLEAR must happen while the assist page **still**
+            // names the page and still carries the flag:
+            // `nested_evmcs_handle_vmclear` returns without releasing
+            // anything unless `nested_get_evmptr` is valid, and that
+            // helper reads the flag first (`nested.c:249`,
+            // `vmx/hyperv.c:16`). Clearing the flag first is therefore
+            // the one ordering that releases nothing, and it is the one
+            // an earlier attempt used.
+            auto page = this->evmcs_physical[cpu];
+
+            if (0 != arch::x86_64::vmx::vmclear(&page)) {
+                this->evmcs_release_failed[cpu] += 1;
+            } else {
+                this->evmcs_released[cpu] += 1;
+            }
+
+            // Only now. Left set, the next ordinary entry would be taken
+            // by the layer below as an enlightened one against the page
+            // just released.
+            *reinterpret_cast<volatile std::uint8_t *>(
+                assist + enlighten_vmentry_offset) = 0;
+
+            // Fall through to the ordinary VMPTRLD below.
+        }
+    } else if constexpr (nested_vmx::evmcs_to_kvm) {
+        if ((cpu < max_cpus) && this->evmcs_active[cpu]) {
             auto * page =
                 second_level ? this->evmcs[cpu] : this->evmcs_own[cpu];
             auto physical = second_level ? this->evmcs_physical[cpu]
@@ -397,7 +475,20 @@ void hypervisor::initialize_vmcs_shadowing()
         // its own, which are far more numerous: measured, the guest
         // hypervisor takes about four thousand VMREAD exits across a
         // whole boot, against tens of millions of VMCS accesses here.
-        if constexpr (nested_vmx::evmcs_to_kvm) {
+        //
+        // **The count that justified giving it up was the wrong one.**
+        // "About four thousand VMREAD exits across a whole boot" is what
+        // the guest hypervisor takes *with shadowing on* - it is the
+        // count of the reads that escape the shadow. Measured with
+        // shadowing given up, over 431 s on one processor, it takes
+        // **10,114,279 VMREAD and 5,604,750 VMWRITE exits**, 81% of
+        // every exit this VMM sees. The comparison was a shadowed figure
+        // against an unshadowed one, and it decided the design.
+        //
+        // `evmcs_mixed` is the way out, and it is not a compromise: only
+        // vmcs01 needs the bitmaps, so vmcs02 can be enlightened while
+        // vmcs01 stays a real region and keeps shadowing.
+        if constexpr (nested_vmx::evmcs_to_kvm && !nested_vmx::evmcs_mixed) {
             if (this->underlying_offers_evmcs) {
                 this->vmcs_shadowing_enabled = false;
                 log("vmcs shadowing given up: the enlightened vmcs has "

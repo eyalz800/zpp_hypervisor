@@ -8657,6 +8657,44 @@ private:
      * did not work" is not a fact and these are.
      * @{
      */
+    /**
+     * Mixed mode's two extra region instructions, counted separately so
+     * a run that does neither is distinguishable from one that does both
+     * and still fails.
+     *
+     * `evmcs_own_flushed` is the VMCLEAR of *this VMM's own* VMCS taken
+     * before every enlightened entry, and it exists because of a defect
+     * in the layer below that costs more than the launch state everyone
+     * looked at. `nested_vmx_handle_enlightened_vmptrld` sets
+     * `current_vmptr = INVALID_GPA` **directly**
+     * (`.references/kvm/nested.c:2102`), bypassing
+     * `nested_release_vmcs12` - which is the only thing that writes the
+     * cached copy back to memory (`nested.c:5417`). So an enlightened
+     * entry discards that layer's cached vmcs01 *un-flushed*, and the
+     * ordinary VMPTRLD afterwards reloads vmcs01 from stale memory.
+     *
+     * The lost launch state is the visible half of that and was fixed on
+     * its own twice without taking. **Every VMWRITE made to vmcs01 since
+     * its last flush is lost too**, which no amount of relaunching
+     * repairs. A VMCLEAR reaches `nested_release_vmcs12` through
+     * `handle_vmclear` (`nested.c:5479`) and flushes it, at the price of
+     * zeroing the launch state in memory - which is why the entry after
+     * a switch is always a VMLAUNCH, deterministically rather than by
+     * inference.
+     *
+     * `evmcs_released` is the VMCLEAR of the enlightened page, which is
+     * the only way to make that layer permit an ordinary VMPTRLD again:
+     * `handle_vmptrld` refuses with a bare `return 1` while the pointer
+     * is live (`nested.c:5759`) - no VMfail, no skip, so the instruction
+     * re-executes for ever and the processor parks. That is the observed
+     * "parks in vmptrld_raw" and it is not a hang in this VMM.
+     * @{
+     */
+    std::uint64_t evmcs_own_flushed[max_cpus]{};
+    std::uint64_t evmcs_released[max_cpus]{};
+    std::uint64_t evmcs_release_failed[max_cpus]{};
+    /** @} */
+
     std::uint64_t evmcs_mark_set[max_cpus]{};
     std::uint64_t evmcs_mark_seen[max_cpus]{};
     std::uint64_t evmcs_mark_absent[max_cpus]{};

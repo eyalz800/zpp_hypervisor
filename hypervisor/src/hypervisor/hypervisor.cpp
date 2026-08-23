@@ -5622,8 +5622,15 @@ void hypervisor::setup_vmcs(std::size_t cpu,
             // does that, by naming the page.
             constexpr std::size_t enlighten_vmentry_offset = 40;
 
-            *reinterpret_cast<volatile std::uint8_t *>(
-                assist + enlighten_vmentry_offset) = 1;
+            // **Not in mixed mode**, where vmcs01 is a real region and
+            // the flag is what selects between the two. `point_at_vmcs`
+            // raises it for a second-level entry and lowers it again on
+            // the way back, and it must start lowered so the first
+            // ordinary VMPTRLD below is permitted.
+            if constexpr (!nested_vmx::evmcs_mixed) {
+                *reinterpret_cast<volatile std::uint8_t *>(
+                    assist + enlighten_vmentry_offset) = 1;
+            }
 
             this->evmcs_active[cpu] = true;
 
