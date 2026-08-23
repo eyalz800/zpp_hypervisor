@@ -2949,7 +2949,25 @@ def main():
         0xc0000102: "KERNEL_GS_BASE",
     }
     HV_CALLS = {
-        0x0008: "HvCallSendSyntheticClusterIpi",
+        # Corrected against Linux's include/asm-generic/hyperv-tlfs.h.
+        # The previous table put SendSyntheticClusterIpi here and
+        # Get/SetVpRegisters at 0x005b/0x005c, and both were wrong -
+        # 0x0008 is the call a guest makes when it has been spinning too
+        # long, which is exactly the signal a livelock investigation
+        # wants, and it was being printed under another name.
+        0x0008: "HvCallNotifyLongSpinWait",
+        0x000b: "HvCallSendSyntheticClusterIpi",
+        0x0046: "HvCallGetPartitionId",
+        0x0048: "HvCallDepositMemory",
+        0x004e: "HvCallCreateVp",
+        0x0050: "HvCallGetVpRegisters",
+        0x0051: "HvCallSetVpRegisters",
+        0x005c: "HvCallPostMessage",
+        0x005d: "HvCallSignalEvent",
+        0x0099: "HvCallStartVirtualProcessor",
+        0x009a: "HvCallGetVpIndexFromApicId",
+        0x00af: "HvCallFlushGuestPhysicalAddressSpace",
+        0x00b0: "HvCallFlushGuestPhysicalAddressList",
         0x000c: "HvCallModifyVtlProtectionMask",
         0x000d: "HvCallEnablePartitionVtl",
         0x000f: "HvCallEnableVpVtl",
@@ -2958,10 +2976,6 @@ def main():
         0x0013: "HvCallFlushVirtualAddressSpaceEx",
         0x0014: "HvCallFlushVirtualAddressListEx",
         0x0015: "HvCallSendSyntheticClusterIpiEx",
-        0x005b: "HvCallGetVpRegisters",
-        0x005c: "HvCallSetVpRegisters",
-        0x0099: "HvCallStartVirtualProcessor",
-        0x009a: "HvCallGetVpIndexFromApicId",
     }
     for label, codes, counts in (
             ("first level (Hyper-V)", "hypercall_codes",

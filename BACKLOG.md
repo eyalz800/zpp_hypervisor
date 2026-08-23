@@ -1,5 +1,52 @@
 # Known defects
 
+## `0x0050` is `HvCallGetVpRegisters`, and our name table was wrong
+
+**2026-08-24, settled from Linux's `include/asm-generic/hyperv-tlfs.h`
+rather than from memory.**
+
+```
+#define HVCALL_NOTIFY_LONG_SPIN_WAIT  0x0008
+#define HVCALL_GET_VP_REGISTERS       0x0050
+#define HVCALL_SET_VP_REGISTERS       0x0051
+#define HVCALL_POST_MESSAGE           0x005c
+```
+
+So the call VP1 spins on **is** `HvCallGetVpRegisters` - and the table in
+`rig-dump-state.py` had it at `0x005b`, which is why the census printed
+`0x0050` and `0x0051` bare while a name sat unused two rows below.
+
+**Two entries were wrong and one of them matters a great deal.** The
+table called `0x0008` `HvCallSendSyntheticClusterIpi`. It is
+**`HvCallNotifyLongSpinWait`** - the call a guest makes *when it has been
+spinning too long*, which is precisely the signal a livelock
+investigation wants, printed under another name for this entire
+investigation. `SendSyntheticClusterIpi` is `0x000b`, which the table did
+not list at all, and `0x005c` is `PostMessage`, not `SetVpRegisters`.
+
+Corrected, and eleven codes added from the same header.
+
+### What VP1 is actually doing
+
+It polls **`HvCallGetVpRegisters`** in a tight loop - reading virtual
+processor registers, forever, while the level above reads
+`HV_X64_MSR_TIME_REF_COUNT` once per pass. That is one processor waiting
+for another's state to change, with a timeout it keeps re-checking.
+
+**So the second processor is not wedged in its own code. It is waiting on
+a register value that never becomes what it expects.** That is a much
+more tractable question than "VP1 stops": the next step is which register
+- the call's input names it - and `last_hypercall_rdx` / `_r8` already
+record the arguments, behind `ZPP_TRACE_VTL`.
+
+**And the general lesson is the one this file keeps paying for.** A name
+table is an instrument. This one was written from memory, never checked
+against the specification, and quietly mislabelled the single most
+diagnostic call in the interface. Every hypercall census in this document
+predating this entry should be re-read with the corrected table before
+being trusted.
+
+
 ## VP1's spin is a repeated fast hypercall `0x0050`, and nobody knows what that is
 
 **2026-08-24.** VP1's loop, read off the exit ring:
