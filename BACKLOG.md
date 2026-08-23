@@ -1,5 +1,104 @@
 # Known defects
 
+## RETRACTED: `0x8800002` is not an empty root, it is not identity-mapped
+
+**2026-08-23.** Two entries above build on "processor 0's second-level
+page-table root is an all-zero page". **Withdrawn.** With the deferral
+genuinely switched off - see the entry below, the switch did not work
+before - the value appears on **both** processors at once:
+
+```
+l2_exit_cr3 = [0x8800002, 0x8800002]     guest_state_materialises = [0, 0]
+```
+
+A root that is corrupt on one processor and fine on the other is a bug. A
+root that is the same on both is an address space, and the reason reading
+it gives zeros is the alternative already flagged: **a second-level root
+is an L2-physical address**, which reaches host memory through the level
+above's extended page tables and then ours, and identity is measured for
+some frames rather than established for all. `0x1ae000` happens to be
+identity-mapped and `0x8800000` does not.
+
+Third conclusion this session from a real number answering a question
+nobody asked, and the second where the control was the thing that killed
+it. **Build the control before the conclusion, not after.**
+
+## The `ZPP_DEFER_GUEST_STATE` switch did not switch the deferral off
+
+Found by audit, then confirmed: the switch gated only the read-skip in
+`save_l2_state`. The block setting `guest_state_deferred` ran
+unconditionally, and neither `materialise_l2_guest_state` nor
+`materialise_l2_guest_state_for` tested it at all - they tested only
+`guest_state_deferred`. So with the switch "off", every flush of vmcs12
+and every intercepted VMREAD still borrowed vmcs02 under a VMPTRLD and
+rewrote 44 of vmcs12's guest-state fields.
+
+**A two-processor failure was tested with it on and off, reproduced both
+times, and that was recorded as exonerating the deferral. It exonerated
+nothing.** Now gated: with it off, `guest_state_defers` and
+`guest_state_materialises` both read **0**, which is what a control
+reading zero should look like.
+
+## Audit against KVM: what it found
+
+**2026-08-23.** Two independent read-only audits against
+`.references/kvm` at v6.12. The findings worth carrying, each cited on
+both sides in the audit output:
+
+**Fixed here:** `wait_for_ept_acknowledgement` wrote
+`ept_generation_seen[cpu] = target` for a processor that did not answer
+its probe - and that is the exact variable that processor's own exit path
+reads to decide whether to `invalidate_ept_locally`. Being declared
+unresponsive **cancelled its invalidation**. The inference it rested on -
+silence means not running, and a parked processor holds no translations -
+has a hole: a processor inside its own VM exit takes the probe through
+the host IDT, where `on_host_exception` counts it and returns without
+stamping, and its own comment says so. Under nesting that is ordinary,
+not exotic: a shadow-EPT rebuild is measured in hundreds of microseconds.
+KVM does not have the choice - `kvm_flush_remote_tlbs` waits for every
+vCPU to leave guest mode and a pending flush is cleared only by its
+owner. **Multiprocessor only, which is the shape of the failure being
+chased.**
+
+**Not fixed, recorded, ranked:**
+
+- **A guest hypervisor's MSR-load area executes unvalidated `WRMSR` in
+  root operation.** Five MSRs on the handled list `#GP` on a non-canonical
+  value (SDM 4.5.3), a `#GP` in root operation reaches
+  `on_host_exception` with no recovery point, and that processor is gone
+  for the boot. The comment at the site states this invariant and the
+  index allowlist does not achieve it. KVM validates each value first and
+  turns a failure into a VM-entry failure.
+- **`load_l1_host_state` writes vmcs12's `host_ia32_pat`/`host_ia32_efer`
+  with no host-state validation at all.** Same halt on a reserved PAT
+  type. KVM has `nested_vmx_check_host_state`.
+- **`vm_entry_controls` is write-elided against a cache hardware
+  overwrites.** With IA32_VMX_MISC[5] set - it is here - every VM exit
+  stores EFER.LMA into the IA-32e-mode-guest control. The same file
+  already knows this and propagates that store into vmcs12; the elision
+  list's comment claims the processor never writes an entry control.
+- **VMFUNC is emulated without consulting vmcs12's VM-function
+  controls**, so an L1 that enables VMFUNC to *intercept* it gets its
+  second-level EPT pointer switched silently instead.
+- **The L2-to-L1 translation cache uses `0` as its empty tag** and `0` is
+  a valid page number, so guest-physical page 0 is a false hit after
+  every INVEPT - and INVEPT is measured at 4,162 a window.
+- **`vmcs_shadowing_enabled` is a runtime global gating per-processor
+  hardware state**: standing shadowing down clears the control on one
+  processor and silences the sync on all of them. Latent - it has never
+  fired - but the threshold is a cross-processor sum while the tolerance
+  it was sized against is per-processor.
+- **`save IA32_PAT` and `save IA32_EFER` are advertised and the save is
+  an identity round-trip**, because vmcs02's exit controls are vmcs01's
+  and vmcs01 carries neither bit. Same class: `clear IA32_BNDCFGS`
+  advertised and honoured nowhere, and `guest_intr_status` loaded into
+  vmcs02 with a comment claiming a matching save that does not exist.
+
+**What the audits could not cover**, and should be re-run: exit-reflection
+decisions and MSR-bitmap merging, and event injection with IDT-vectoring
+re-injection. Treat those as unexamined rather than clean.
+
+
 ## The empty root is not the deferral, and it may not be a root at all
 
 **2026-08-23, two facts and a caveat on the entry above.**

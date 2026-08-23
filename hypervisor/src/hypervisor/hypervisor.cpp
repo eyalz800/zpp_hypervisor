@@ -1275,7 +1275,35 @@ bool hypervisor::wait_for_ept_acknowledgement(std::uint64_t budget,
                     ((probed - budget) > probe_patience)) {
                     this->wake_requested[cpu].store(
                         false, std::memory_order_release);
-                    this->ept_generation_seen[cpu] = target;
+
+                    // **Give up without stamping.** This used to write
+                    // `ept_generation_seen[cpu] = target` here, which is
+                    // the very variable that processor's own exit path
+                    // reads to decide whether to invalidate - so being
+                    // declared unresponsive *cancelled its invalidation*
+                    // and it resumed its guest against translations this
+                    // one had just changed.
+                    //
+                    // The inference the stamp rested on - "silence
+                    // outliving the probe means not running, and a
+                    // processor that is not running holds no translation
+                    // it can use" - has a hole. A processor inside its
+                    // own VM exit takes the probe through the host IDT,
+                    // where `on_host_exception` counts it and returns
+                    // without stamping or clearing `wake_requested`; the
+                    // comment there says so. Under nesting that is the
+                    // ordinary case, not an exotic one: a shadow-EPT
+                    // rebuild is measured in hundreds of microseconds.
+                    //
+                    // Leaving the mark alone costs nothing and is
+                    // correct either way. A parked processor holds no
+                    // translations, so an invalidation it never performs
+                    // was never needed; a busy one performs it at its
+                    // next exit, before it re-enters. KVM does not have
+                    // the choice to make - `kvm_flush_remote_tlbs` waits
+                    // for every vCPU to leave guest mode
+                    // (`.references/kvm/mmu.c:2642`) and a pending flush
+                    // is only ever cleared by the processor that owns it.
                     ++this->unresponsive_processors;
                     outstanding = false;
                     continue;
