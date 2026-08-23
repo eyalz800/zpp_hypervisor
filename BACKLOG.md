@@ -27,12 +27,34 @@ SkpPrepareForReturnToNormalMode 23
 So the same code runs, and on more than one processor it takes twice as
 long on the interrupted path and the guest never leaves the loop.
 
-**That is a far smaller search space than "the multi-processor bug".** The
-question is what the second virtual processor changes for a guest that
-otherwise executes identical instructions - and the candidates are things
-that only exist above one VP: cross-processor flushes, spin locks that
-send interrupts, and whatever the operating system does before it starts
-its application processors.
+**And the call stack says what it changes.** On two processors the
+stalled thread is `Phase1Initialization`, and it is here:
+
+```
+KiComputeThreadQos
+ -> KiPopulateTrivialProcessorSelectionResult
+ -> KiAddThreadToReadyQueue
+ -> HalpInterruptSendIpi
+ -> HalpApicRequestInterrupt
+```
+
+The operating system is making a thread runnable, **choosing a processor
+for it**, and sending that processor an interrupt. With one virtual
+processor the only choice is itself, so the dispatch eventually happens.
+With two, the choice can be **VP 1 - which is parked at 17 second-level
+entries and never runs** - and the thread is queued to a processor that
+will never execute it.
+
+**So the parked application processor is the cause, not a consequence.**
+This file said the opposite two entries ago, on the reasoning that the
+operating system had not reached the point of starting them; the stack
+shows it scheduling to them regardless.
+
+That makes the question concrete and singular: **why does the second
+virtual processor stop after exactly 17 second-level entries?** Identical
+across two processors and eight, which is the signature of a sequence that
+completes rather than a race - so it is something the seventeenth entry
+does, or something that never arrives after it.
 
 
 ## Eight processors against one: the difference is in the interrupted path
