@@ -990,8 +990,33 @@ void hypervisor::resume_guest(std::uint64_t cpuid,
     // the 5 was read - is only called from the plain `vmresume` stub,
     // which is this entry. Three fixes were aimed at the wrong VM entry
     // because two reporters were assumed to be one.
+    // Whether this processor is about to enter the *second-level* guest
+    // rather than its own VMCS, which the mark below must not be spent
+    // on. Computed here because the branch that acts on it is further
+    // down and the mark is consumed above it.
+    auto entering_l2 = false;
+
+    if constexpr (nested_vmx::enabled) {
+        if (auto slot = (cpuid + 1); (0 != slot) && (slot <= max_cpus)) {
+            entering_l2 = this->running_l2[slot - 1];
+        }
+    }
+
     if constexpr (nested_vmx::evmcs_to_kvm) {
-        if (cpuid < max_cpus) {
+        // **Not on a second-level entry.** The mark says "this VMM's own
+        // VMCS must be launched, not resumed"; a second-level entry goes
+        // through the nested stubs and picks its instruction from
+        // vmcs02's own launch state, so consuming the mark there throws
+        // it away and the vmcs01 entry that follows resumes a VMCS the
+        // layer below considers unlaunched.
+        //
+        // Measured, and it is why the counters read as a contradiction:
+        // `evmcs_mark_set` 1 and `evmcs_mark_seen` 1 - the mark was made
+        // and consumed - beside `vm_instruction_error` **5**, "VMRESUME
+        // with non-launched VMCS". Both were true. The resume that saw
+        // the mark was the one entering the second level, which ignored
+        // it, and the entry that needed it never saw one.
+        if (cpuid < max_cpus && !entering_l2) {
             // **Two counters that can disagree.** `set` is incremented
             // where the mark is made, `seen` where it is consumed. If
             // they diverge the mark is being lost between them; if `seen`
@@ -1012,8 +1037,8 @@ void hypervisor::resume_guest(std::uint64_t cpuid,
                           : arch::x86_64::vmx::vmresume;
 
     if constexpr (nested_vmx::enabled) {
-        if (auto slot = (cpuid + 1); (0 != slot) && (slot <= max_cpus) &&
-                                     this->running_l2[slot - 1]) {
+        if (auto slot = (cpuid + 1);
+            (0 != slot) && (slot <= max_cpus) && entering_l2) {
             entry = this->vmcs02_launched[slot - 1]
                         ? arch::x86_64::vmx::nested_vmresume
                         : arch::x86_64::vmx::nested_vmlaunch;
