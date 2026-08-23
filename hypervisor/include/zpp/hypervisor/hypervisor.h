@@ -9937,6 +9937,28 @@ private:
     std::uint64_t msr_write_last_value[msr_write_slots]{};
 
     /**
+     * The same census taken at the **reflection decision** rather than
+     * in the dispatcher, and the reason there are two of them.
+     *
+     * `msr_write_codes` above read **all zeroes** on a run whose exit
+     * profile was 33% `wrmsr`. That is not a contradiction, it is the
+     * answer: a second-level MSR write the guest hypervisor's own
+     * bitmap intercepts is reflected upward in `on_l2_exit` and never
+     * reaches the dispatcher's `wrmsr` case at all. One census could
+     * only have reported "no MSR writes" against an exit profile
+     * dominated by MSR writes, and left it looking like a broken
+     * counter.
+     *
+     * `l2_msr_write_reflected` counts the subset handed to the level
+     * above, so the two fields disagree exactly when this VMM answers
+     * a write itself.
+     */
+    std::uint64_t l2_msr_write_codes[msr_write_slots]{};
+    std::uint64_t l2_msr_write_counts[msr_write_slots]{};
+    std::uint64_t l2_msr_write_last_value[msr_write_slots]{};
+    std::uint64_t l2_msr_write_reflected[msr_write_slots]{};
+
+    /**
      * The same census for the **second-level** guest's hypercalls, which
      * nothing has ever taken.
      *

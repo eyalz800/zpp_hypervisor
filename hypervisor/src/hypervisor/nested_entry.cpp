@@ -3570,10 +3570,44 @@ bool hypervisor::l1_wants_l2_exit(std::size_t cpu,
 
     case basic_reason::rdmsr:
     case basic_reason::wrmsr: {
+        // Censused here rather than only in the dispatcher, because a
+        // write the level above intercepts is reflected from this
+        // function and never reaches the dispatcher's `wrmsr` case.
+        // See `l2_msr_write_codes` - one census read zero against an
+        // exit profile that was a third MSR writes.
+        auto census = [&](bool reflected) {
+            if (basic_reason::wrmsr != reason.basic()) {
+                return reflected;
+            }
+
+            auto code = static_cast<std::uint64_t>(
+                static_cast<std::uint32_t>(context.rcx));
+
+            for (std::size_t slot{}; slot < msr_write_slots; ++slot) {
+                if (0 == this->l2_msr_write_counts[slot]) {
+                    this->l2_msr_write_codes[slot] = code;
+                }
+
+                if (this->l2_msr_write_codes[slot] == code) {
+                    this->l2_msr_write_counts[slot] += 1;
+                    this->l2_msr_write_last_value[slot] =
+                        (context.rax & 0xffffffff) |
+                        ((context.rdx & 0xffffffff) << 32);
+
+                    if (reflected) {
+                        this->l2_msr_write_reflected[slot] += 1;
+                    }
+                    break;
+                }
+            }
+
+            return reflected;
+        };
+
         if (!primary_set(primary_msr_bitmaps)) {
             // No bitmap means every MSR access exits, which is what the
             // guest hypervisor asked for.
-            return true;
+            return census(true);
         }
 
         auto index = static_cast<std::uint32_t>(context.rcx);
@@ -3592,7 +3626,7 @@ bool hypervisor::l1_wants_l2_exit(std::size_t cpu,
             // Outside both ranges the bitmap is not consulted and the
             // access exits unconditionally, so it is the guest
             // hypervisor's. SDM 28.1.3.
-            return true;
+            return census(true);
         }
 
         std::uint8_t byte{};
@@ -3600,7 +3634,7 @@ bool hypervisor::l1_wants_l2_exit(std::size_t cpu,
             shadow.read(field::msr_bitmap) + base + (bit / 8),
             std::span(reinterpret_cast<std::byte *>(&byte), 1));
 
-        return !read || (0 != (byte & (1u << (bit % 8))));
+        return census(!read || (0 != (byte & (1u << (bit % 8)))));
     }
 
     default:

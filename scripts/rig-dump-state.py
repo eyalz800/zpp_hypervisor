@@ -2331,6 +2331,8 @@ def main():
                "hypercall_codes", "hypercall_code_counts",
                "msr_write_codes", "msr_write_counts",
                "msr_write_last_value",
+               "l2_msr_write_codes", "l2_msr_write_counts",
+               "l2_msr_write_last_value", "l2_msr_write_reflected",
                "evmcs_reads", "evmcs_writes", "evmcs_recommended",
                "hot_state_writes_skipped", "hot_state_writes_done",
                "l2_run_cycles", "l1_run_cycles", "handler_cycles",
@@ -2430,6 +2432,8 @@ def main():
                "hypercall_codes", "hypercall_code_counts",
                "msr_write_codes", "msr_write_counts",
                "msr_write_last_value",
+               "l2_msr_write_codes", "l2_msr_write_counts",
+               "l2_msr_write_last_value", "l2_msr_write_reflected",
                "l2_hypercall_codes", "l2_hypercall_code_counts",
                # What the guest hypervisor asked vmcs02 for against what
                # it was given. A bit it asked for and did not get changes
@@ -2680,7 +2684,9 @@ def main():
 
     hypercall_slots = 16
     for _name in ("msr_write_codes", "msr_write_counts",
-                  "msr_write_last_value"):
+                  "msr_write_last_value", "l2_msr_write_codes",
+                  "l2_msr_write_counts", "l2_msr_write_last_value",
+                  "l2_msr_write_reflected"):
         if _name in off:
             monitor.queue(instance + off[_name], 24)
 
@@ -2946,20 +2952,29 @@ def main():
     # instrument - see `msr_write_codes`. The value is printed beside the
     # count so a deadline being advanced can be told from one rewritten
     # unchanged, which the count alone cannot do.
-    if "msr_write_codes" in off:
+    for label, pfx in (("handled here", "msr_write"),
+                       ("SECOND level, at the reflect decision",
+                        "l2_msr_write")):
+        if pfx + "_codes" not in off:
+            continue
         rows = []
         for i in range(24):
-            c = words.get(instance + off["msr_write_codes"] + 8 * i, 0)
-            n = words.get(instance + off["msr_write_counts"] + 8 * i, 0)
-            v = words.get(instance + off["msr_write_last_value"] + 8 * i, 0)
+            c = words.get(instance + off[pfx + "_codes"] + 8 * i, 0)
+            n = words.get(instance + off[pfx + "_counts"] + 8 * i, 0)
+            v = words.get(instance + off[pfx + "_last_value"] + 8 * i, 0)
+            r = words.get(instance + off.get(pfx + "_reflected", 0)
+                          + 8 * i, 0) if pfx + "_reflected" in off else 0
             if n:
-                rows.append((n, c, v))
-        if rows:
-            total = sum(r[0] for r in rows)
-            print(f"\ncpu 0 wrmsr exits by MSR ({total:,} censused)")
-            for n, c, v in sorted(rows, reverse=True):
-                print(f"    0x{c:08x}  {n:>12,}  {100.0*n/total:5.1f}%  "
-                      f"last 0x{v:016x}  {MSR_NAMES.get(c, '')}")
+                rows.append((n, c, v, r))
+        if not rows:
+            print(f"\ncpu 0 wrmsr by MSR ({label}): none censused")
+            continue
+        total = sum(r[0] for r in rows)
+        print(f"\ncpu 0 wrmsr by MSR ({label}, {total:,} censused)")
+        for n, c, v, r in sorted(rows, reverse=True):
+            up = f"  up {r:>10,}" if (pfx + "_reflected") in off else ""
+            print(f"    0x{c:08x}  {n:>12,}  {100.0*n/total:5.1f}%{up}  "
+                  f"last 0x{v:016x}  {MSR_NAMES.get(c, '')}")
 
     # The kernel image bounds, used by both the thread and stack sections
     # below to turn an address into an offset that survives KASLR.
