@@ -2432,6 +2432,8 @@ def main():
                "guest_stack_trace", "guest_stack_count",
                "guest_stack_pointer", "guest_stack_rip",
                "guest_kernel_base", "guest_kernel_size", "l2_exit_cr3",
+               "interrupted_rip", "interrupted_hits",
+               "interrupted_samples", "interrupted_overflow",
                "guest_interrupted_trace", "guest_interrupted_count",
                "guest_interrupted_rsp", "guest_interrupted_rip",
                # Which thread the guest is running. Sampled for sessions
@@ -2732,6 +2734,8 @@ def main():
     for name in ("profile_code_physical", "profile_code_virtual",
                  "guest_stack_count", "guest_stack_pointer",
                  "guest_stack_rip", "guest_kernel_base", "guest_kernel_size", "l2_exit_cr3",
+               "interrupted_rip", "interrupted_hits",
+               "interrupted_samples", "interrupted_overflow",
                  "guest_interrupted_count", "guest_interrupted_rsp",
                  "guest_interrupted_rip"):
         if name in off:
@@ -3006,6 +3010,39 @@ def main():
                 print(f"    NO SLOT: {lost:,} writes uncounted, "
                       f"one of them MSR 0x{code:08x} - the table "
                       f"saturated and this census is incomplete")
+
+    # Where the guest was when an interrupt landed on it - the only
+    # unbiased sample of the guest's own code in this tool. See
+    # `interrupted_rip`.
+    if "interrupted_rip" in off:
+        kbase0 = read("guest_kernel_base") or 0
+        ksize0 = read("guest_kernel_size") or 0
+        for _n in ("interrupted_rip", "interrupted_hits"):
+            monitor.queue(instance + off[_n], 64)
+        for _n in ("interrupted_samples", "interrupted_overflow"):
+            monitor.queue(instance + off[_n], 1)
+        more = monitor.run()
+        words.update(more)
+        rows = []
+        for i in range(64):
+            r = words.get(instance + off["interrupted_rip"] + 8 * i, 0)
+            h = words.get(instance + off["interrupted_hits"] + 8 * i, 0)
+            if h:
+                rows.append((h, r))
+        tot = words.get(instance + off["interrupted_samples"], 0)
+        lost = words.get(instance + off["interrupted_overflow"], 0)
+        if rows:
+            print(f"\ncpu 0 where the guest was when an interrupt landed "
+                  f"({tot:,} samples, {len(rows)} distinct)")
+            for h, r in sorted(rows, reverse=True)[:20]:
+                rel = ""
+                if kbase0 and kbase0 <= r < kbase0 + (ksize0 or 0):
+                    rel = f"  ntoskrnl+0x{r - kbase0:x}"
+                print(f"  0x{r:016x}  {h:>10}  "
+                      f"{100.0 * h / (tot or 1):5.1f}%{rel}")
+            if lost:
+                print(f"  NO SLOT: {lost:,} samples uncounted - the table "
+                      f"saturated, so this hot set is not the whole story")
 
     # The kernel image bounds, used by both the thread and stack sections
     # below to turn an address into an offset that survives KASLR.

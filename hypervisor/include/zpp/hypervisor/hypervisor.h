@@ -5108,6 +5108,34 @@ private:
      * is which they are, not the order.
      * @{
      */
+    /**
+     * Where the second-level guest was when an interrupt was injected
+     * into it, as a histogram.
+     *
+     * **The sampler that works on this rig.** `profile_l2` is the right
+     * instrument and cannot run here: KVM does not offer the
+     * VMX-preemption timer, so its clock never ticks and it reads zero
+     * samples on a build that has it switched on. This needs no timer.
+     *
+     * Why it is sound: the guest's clock interrupt is asynchronous to
+     * the guest's own code, so the RIP it interrupts is an unbiased
+     * sample of where that code is - which is exactly what a profiler
+     * buys and exactly what every other instrument here lacks. The exit
+     * rings all sample at *exits*, and a guest spinning on memory takes
+     * none, so all of them land in the interrupt handler - the one place
+     * the guest is not stuck. Eight distinct entry RIPs, all in the
+     * clock path, is that artefact and not a finding.
+     *
+     * Taken where the event is staged, with vmcs02 current, so the RIP
+     * is the guest's own and not the level above's.
+     */
+    static constexpr std::size_t interrupted_capacity = 64;
+
+    std::uint64_t interrupted_rip[interrupted_capacity]{};
+    std::uint64_t interrupted_hits[interrupted_capacity]{};
+    std::uint64_t interrupted_samples{};
+    std::uint64_t interrupted_overflow{};
+
     static constexpr std::size_t profile_capacity = 64;
 
     std::uint64_t profile_rip[profile_capacity]{};

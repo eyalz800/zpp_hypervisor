@@ -7711,6 +7711,35 @@ void hypervisor::record_l2_entry_event(std::size_t cpu)
 
     if (0 != (given & valid)) {
         this->l2_given_vector[cpu][given & vector_mask] += 1;
+
+        // Where the guest was when this landed. See `interrupted_rip`:
+        // the interrupt is asynchronous to the guest's own code, so this
+        // is an unbiased sample of it - the only one in the tree, since
+        // every other instrument samples at an exit and a guest spinning
+        // on memory takes none.
+        auto where = this->vmcs.guest_rip();
+        auto placed = false;
+
+        this->interrupted_samples += 1;
+
+        for (std::size_t i{}; i < interrupted_capacity; ++i) {
+            if (0 == this->interrupted_hits[i]) {
+                this->interrupted_rip[i] = where;
+            }
+
+            if (this->interrupted_rip[i] == where) {
+                this->interrupted_hits[i] += 1;
+                placed = true;
+                break;
+            }
+        }
+
+        // Never dropped in silence - a saturated table reads exactly
+        // like a narrow hot set, which is the conclusion being drawn.
+        if (!placed) {
+            this->interrupted_overflow += 1;
+        }
+
         return;
     }
 
