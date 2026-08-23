@@ -1,5 +1,45 @@
 # Known defects
 
+## The guest reboots, and the "plateaus" were fresh boots
+
+**2026-08-23.** Watched an uninterrupted single-processor run climb well
+past every previous high - `HvCallModifyVtlProtectionMask` 40,525 ->
+41,798 -> 42,823 -> **44,077**, `HvCallVtlReturn` 25,304 -> 34,545,
+`0x0003` 399 -> 1,266 - and then, on the next sample, read **39,328 and
+22,189**.
+
+Counters do not go backwards. **The virtual machine reset and started
+over**, which `serial.out` confirms: `allocate_rwx done` appears four
+times, and its tail is `chainloading bootmgfw.efi` again.
+
+**So the repeated "plateau at 39,3xx" this file has recorded several times
+was never one plateau.** It is where a *fresh* boot arrives within a few
+minutes. The guest gets to roughly 44,000, resets, and comes back to
+39,3xx - and sampling that at intervals looks exactly like a counter that
+climbs a little and stops.
+
+That is a blocker rather than throughput, which is what the objective
+asked for and what several sessions of performance work were not.
+
+**How it was missed:** every reading was a single number compared against
+*its own previous value* on the assumption that the thing underneath was
+continuous. Nothing checked that assumption, and the one thing that would
+have - the loader's own boot count on serial, which was there the whole
+time - was never read. Eighth reading in this session that was real and
+about something else.
+
+Armed `-no-reboot -no-shutdown` to catch the reset with the guest's memory
+intact, per the recipe already in `CLAUDE.md`. On that run the guest
+instead **stalled at 41,798** without resetting, still on its first boot,
+so the two failures may be the same one taking different exits.
+
+**Next, and it is now a short list:** hold the reset with
+`-no-reboot -no-shutdown`, then read `KiBugCheckData` - five words, the
+stop code and its four parameters - by walking the guest's page tables
+with `xp`, which `CLAUDE.md` documents and which has already settled one
+bugcheck on this rig.
+
+
 ## The dispatch interrupt is not a delivery fault here - it never reaches the level above
 
 **2026-08-23.** The two-counter instrument answers it, and the answer is
