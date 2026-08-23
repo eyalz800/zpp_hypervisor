@@ -55,10 +55,34 @@ std::optional<std::uint64_t> hypervisor::filter_local_apic_write(
     // through 150 seconds and sixteen start-up IPIs. The filter is the
     // callback that sees every write.
     if constexpr (nested_vmx::disarm_apic_watch) {
+        // **The quiet period is measured from the last start-up IPI, or
+        // from the first write if there has never been one.**
+        //
+        // Requiring `ipi_start_up_seen != 0` made the disarm unreachable
+        // on a guest with a single processor, because a guest with no
+        // application processors to start never sends a start-up IPI. The
+        // watch then stayed armed for the life of the boot and every
+        // access to the page was emulated: measured on the rig at
+        // **5,082,333 emulated writes, 27.6% of all exits**, with the
+        // guest looping end-of-interrupt inside `KiDpcInterrupt` and
+        // making no progress. The condition that decides when bring-up is
+        // over cannot be one that only bring-up can satisfy.
+        //
+        // `apic_watch_first_write_tsc` is that fallback clock. It is set
+        // on the first write this filter ever sees, so the quiet period
+        // is measured from the moment the page became interesting rather
+        // than from a boot event that may not occur.
+        if (0 == self.apic_watch_first_write_tsc) {
+            self.apic_watch_first_write_tsc = arch::x86_64::rdtsc();
+        }
+
+        auto since = (0 != self.last_start_up_ipi_tsc)
+                         ? self.last_start_up_ipi_tsc
+                         : self.apic_watch_first_write_tsc;
+
         if (!self.all_processors_started.load(std::memory_order_relaxed) &&
-            (0 != self.ipi_start_up_seen) &&
-            (0 != self.last_start_up_ipi_tsc) &&
-            ((arch::x86_64::rdtsc() - self.last_start_up_ipi_tsc) >
+            (0 != since) &&
+            ((arch::x86_64::rdtsc() - since) >
              nested_vmx::apic_watch_quiet_ticks)) {
             self.all_processors_started.store(true,
                                               std::memory_order_relaxed);

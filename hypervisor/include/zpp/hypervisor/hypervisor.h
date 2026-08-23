@@ -6477,6 +6477,16 @@ private:
     volatile std::uint64_t last_start_up_ipi_tsc{};
 
     /**
+     * When this VMM first saw a write to the local APIC page, used as the
+     * quiet-period clock when no start-up IPI ever arrives.
+     *
+     * A single-processor guest sends none, so a disarm gated on having
+     * seen one can never fire - and the watch then emulates every access
+     * to the page for the life of the boot.
+     */
+    std::uint64_t apic_watch_first_write_tsc{};
+
+    /**
      * The memory the loader reserved below one megabyte, or zero when it
      * supplied none. Zero means this VMM cannot start a processor itself,
      * which is the normal state on the platforms where the loader launches
