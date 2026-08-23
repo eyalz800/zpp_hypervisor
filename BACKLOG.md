@@ -1,5 +1,93 @@
 # Known defects
 
+## The hang is `VBoxSup.sys`, in `ExSetTimerResolution`, and the boot is otherwise fine
+
+**2026-08-23. This is the blocker, named.** Everything above about
+starvation, VMCS accesses and throughput is background to it.
+
+**Windows gets much further than any previous reading suggested.** The
+loaded-module list, walked from `PsLoadedModuleList` through the guest's
+own memory, has **80 modules**:
+
+```
+ntoskrnl.exe hal.dll ... ACPI.sys pci.sys partmgr.sys volmgr.sys
+mountmgr.sys stornvme.sys storport.sys Ntfs.sys fvevol.sys volsnap.sys
+disk.sys CLASSPNP.SYS crashdmp.sys dump_storport.sys dump_stornvme.sys
+dump_dumpfve.sys cdrom.sys
+```
+
+**The storage stack is up and the boot volume is mounted.** `stornvme`,
+`storport`, `Ntfs`, `volmgr` are all loaded, and the crash-dump stack
+(`dump_stornvme.sys`) only loads *after* the boot volume works. The 600
+`vfio-msix[1]` interrupts on the host were those driver loads. So "the
+disk does nothing" is true *now* and was never true of the boot - the
+disk did its job and stopped because nothing is asking it for anything.
+
+**What it is stuck on.** `UNICODE_STRING`s on the stuck thread's stack,
+identical two minutes apart:
+
+```
+\SystemRoot\system32\DRIVERS\VBoxSup.sys
+\Driver\VBoxSup
+\Device\VBoxDrvErrorInfo
+VBoxSup    KeGetProcessorNumberFromIndex    DependOnGroup
+```
+
+**VirtualBox's kernel support driver.** And the call chain under it, from
+the stack the clock interrupted:
+
+```
+ExSetTimerResolution+0x0      <- exact export match
+ExSetTimerResolution+0x1d0
+ExSetTimerResolution+0x40c
+KeSetTimer  x3
+```
+
+**`VBoxSup` asks Windows to raise the system timer resolution, and that
+call never returns.** VirtualBox's support driver does this at load time,
+around its Global Info Page setup and its TSC calibration - which is
+exactly the code that cares most about a clock behaving consistently, and
+the clock is the thing this file already has four failed interventions
+about.
+
+### How it was established, and why nothing earlier could have
+
+The stack is invariant: **25 frames identical across five samples over
+eight minutes**, and the five INIT-section frames -
+`0xc1c9f4 0xc64cc2 0xc69e62 0xc6bac0 0xc6bc10` - are byte-identical in
+every sample taken. Phase 1 has not advanced. That is a livelock, not
+slowness, and it is what the exit profile could never show: the guest's
+ordinary code does not exit, so *every* instrument in this tree was
+sampling only the clock path around a thread that had stopped.
+
+The other reading that had to be retired to get here: **zero `hlt` exits
+in 26.6 million**. It was read here first as "the guest is busy so it is
+not starved". The truer statement is that the machine never idles because
+one thread never yields.
+
+Naming it needed the guest's own kernel image, which is on the
+passed-through NVMe and unreadable from the host - so it was read out of
+guest RAM instead. See `scripts/guest-symbolize-live.py`.
+
+### What follows
+
+The goal - Windows to the login screen with Hyper-V above us - is blocked
+by a **third-party hypervisor's driver on the rig's Windows install**,
+not by anything about Hyper-V nesting. Two directions, and the first is
+not ours to take:
+
+- **Removing or disabling `VBoxSup`** would very likely reach the login
+  screen, and is forbidden: the standing rule is that the rig's Windows
+  installation is never modified. It is the user's call, not this file's.
+- **Making `ExSetTimerResolution` complete** is the real fix and is ours.
+  It is a clock question with, for the first time, a specific trigger and
+  a specific symptom instead of "the guest is slow" - which is what every
+  previous timer intervention was aimed at and why all four missed.
+
+**Do not go back to throughput work on the strength of the 7.6% figure.**
+It is real and it is not what stops the boot.
+
+
 ## The guest never halts, and that retires the starvation reading
 
 **2026-08-23.** The entry above frames the failure as starvation -
