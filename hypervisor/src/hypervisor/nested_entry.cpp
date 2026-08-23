@@ -3777,12 +3777,28 @@ void hypervisor::save_l2_state(std::size_t cpu)
         }
         if (cpu < max_cpus) {
             this->guest_state_fresh[cpu] = true;
-            this->guest_state_deferred[cpu] = true;
-            this->guest_state_deferred_vmcs[cpu] =
-                this->guest_current_vmcs[cpu];
-            this->guest_state_dirty[cpu] = 0;
-            this->guest_state_defers[cpu] =
-                this->guest_state_defers[cpu] + 1;
+
+            // **Gated, so the switch is a control.** This block used to
+            // run whatever `ZPP_DEFER_GUEST_STATE` said, and only the
+            // read-skip above was conditional - so with the switch off,
+            // `guest_state_deferred` was still set, and
+            // `materialise_l2_guest_state` still borrowed vmcs02 and
+            // rewrote 44 of vmcs12's guest-state fields on every flush
+            // and every intercepted VMREAD.
+            //
+            // That made "it reproduces with the deferral off" mean far
+            // less than it appeared to: the one function that reads
+            // vmcs02 under a borrowed pointer and writes vmcs12 ran
+            // identically in both configurations. A switch that does not
+            // switch the mechanism off cannot exonerate it.
+            if constexpr (nested_vmx::defer_guest_state) {
+                this->guest_state_deferred[cpu] = true;
+                this->guest_state_deferred_vmcs[cpu] =
+                    this->guest_current_vmcs[cpu];
+                this->guest_state_dirty[cpu] = 0;
+                this->guest_state_defers[cpu] =
+                    this->guest_state_defers[cpu] + 1;
+            }
         }
     }
 
@@ -7482,6 +7498,13 @@ void hypervisor::materialise_l2_guest_state_for(std::size_t cpu,
 
 void hypervisor::materialise_l2_guest_state(std::size_t cpu)
 {
+    // The switch first: with the deferral off nothing is ever deferred,
+    // so there is nothing to repair and no reason to borrow vmcs02.
+    // See the gate in `save_l2_state`.
+    if constexpr (!nested_vmx::defer_guest_state) {
+        return;
+    }
+
     if ((cpu >= max_cpus) || !this->guest_state_deferred[cpu]) {
         return;
     }
