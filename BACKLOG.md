@@ -1,5 +1,61 @@
 # Known defects
 
+## SETTLED: this processor has no VMCS shadowing at all, and it is free to check
+
+**2026-08-24.** The caveat above is resolved, by one command and no boot.
+Linux publishes the VMX sub-features in `/proc/cpuinfo`:
+
+```
+vmx flags : vnmi preemption_timer invvpid ept_x_only ept_ad ept_1gb
+            flexpriority tsc_offset vtpr mtf vapic ept vpid
+            unrestricted_guest ple pml ept_violation_ve
+            ept_mode_based_exec
+```
+
+**There is no `shadow_vmcs` in that list.** So `cpu_has_vmx_shadow_vmcs()`
+fails on its *second* condition - the processor does not offer
+`SECONDARY_EXEC_SHADOW_VMCS` - and not on the MISC bit this file asserted
+twice as fact. That attribution is withdrawn.
+
+**Three things follow, and the last one matters most.**
+
+**The shadowing we offer the guest hypervisor has always been KVM's
+software emulation.** `nested.c:7068` says it outright - *"We can emulate
+VMCS shadowing, even if the hardware doesn't support it"* - and this
+processor is the case that comment exists for. Every measurement in this
+file that credits "shadowing" is crediting emulation.
+
+**It explains why the tax is conserved.** With shadowing on, the guest
+hypervisor's VMREADs do not reach us - but they still reach *KVM*, which
+answers them from the shadow page. The exit happens either way. That is
+why 7.6% of the machine reaches Windows in both configurations, and why
+cutting our own per-exit cost from 17,041 to 10,227 cycles moved nothing.
+
+**And the bare-metal prediction needs restating, not withdrawing.** The
+entry above predicted the guest hypervisor's 65.4% would collapse because
+its accesses would be absorbed by real shadowing hardware. **They would
+not - there is no such hardware here**, so on bare metal every one of its
+VMREADs would exit to us exactly as it does now.
+
+The win is elsewhere, and it is larger. On bare metal an exit is an exit:
+a few hundred to a couple of thousand cycles. Under KVM each one is a
+round trip through the layer below at roughly **25,000 cycles**, and
+there are 12.24 of them per second-level round trip. Removing that factor
+is worth an order of magnitude on its own, and it removes our own 26.9%
+as well, because our VMCS accesses stop being exits and become register
+operations.
+
+**So the bare-metal experiment is still the right one, and the prediction
+to check is now the exit *cost*, not the exit count.** If a round trip
+falls from 233 microseconds to something in the tens, the guest gets its
+tick back. If exits stay expensive, the whole reading is wrong.
+
+**Note also `preemption_timer` is present in the processor's flags** -
+so the L2 profiler is refused by KVM's nested capability set, not by the
+hardware, and it would work on bare metal. `mtf` is present too, which
+bears on the audit finding about injected monitor-trap-flag exits.
+
+
 ## CAVEAT on the bare-metal prediction: we never checked which condition fails
 
 **2026-08-24.** Two entries above assert "KVM cannot shadow for us - the
