@@ -1,5 +1,54 @@
 # Known defects
 
+## CORRECTION: the boot is not hung, it is crawling - and it reaches VBoxSup
+
+**2026-08-23.** The entry above calls `VBoxSup.sys` in
+`ExSetTimerResolution` "the blocker, named", on the strength of a stack
+that was byte-identical across five samples over eight minutes. **Eight
+minutes was not long enough to distinguish stuck from slow, and it was
+slow.**
+
+Walked from `PsLoadedModuleList` through guest memory, the driver count
+moves:
+
+```
+  19:44  87   BasicRender.sys
+  19:48  94   afunix.sys
+  19:52  97   vwififlt.sys
+  19:55 101   netbios.sys
+  19:57 103   winhvr.sys
+  20:00 105   VBoxSup.sys
+```
+
+About **2.4 drivers a minute**, and they are the late PnP and networking
+drivers. `winhvr.sys` - the Hyper-V root driver - loads. **`VBoxSup.sys`
+loads.** The boot is advancing the whole time.
+
+**The right progress meter was the module list, and it took the whole
+session to reach for it.** An invariant stack says a thread has not moved;
+it does not say the machine has not. Every instrument used before it -
+exit rings, entry RIPs, stack scans - samples one thread at one moment,
+and all of them agreed with each other because they were all measuring
+the same thing.
+
+What is true: after `VBoxSup.sys` appears the count stops at 105 for
+fifteen minutes and more. A module is listed when it is *mapped*, before
+its `DriverEntry` runs, so that is consistent with VirtualBox's support
+driver being slow in its own initialisation - it calibrates against wall
+time, and wall time here buys about a twelfth of the work it would on
+real hardware.
+
+**So the question is no longer "what is it stuck on".** It is whether the
+remaining work finishes in a time anyone will wait for, and that is
+throughput after all - which the guest's own profile has been saying:
+82% of its execution is three instructions, all of them the synthetic
+MSR quartet of its clock handler.
+
+**Completion has a detector now**: `l2_cpl_seen[3]`. The guest is at ring
+0 on every one of 8.7 million samples so far; user mode means the session
+manager runs, and that means the boot has left kernel initialisation.
+
+
 ## RETRACTED: "the control is flat" - the table had lost 93% of its samples
 
 **2026-08-23.** The entry above concluded, from two RIP histograms, that
