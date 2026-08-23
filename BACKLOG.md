@@ -1,5 +1,34 @@
 # Known defects
 
+## The lazy tick makes this VMM four times cheaper and the guest four times worse
+
+**2026-08-23.** `ZPP_LAZY_TICK` had never been tried in the configuration
+that exists now - single processor, enlightened VMCS, after the
+instruction-length halt was fixed - and every earlier trial of it predates
+that fix. Tried at 10,000 microseconds, measured over 423 s against the
+same build with it off:
+
+| | lazy off | lazy=10000 |
+|---|---|---|
+| this VMM's duty | 0.406 | **0.111** |
+| guest hypervisor's share | 50.5% | **86.8%** |
+| **Windows' share** | **9.0%** | **2.2%** |
+
+**A near four-fold reduction in this VMM's own cost, and the guest ends up
+with a quarter of the time it had.** The guest hypervisor absorbed all of
+it.
+
+That is the third measurement in this session with the same shape - the
+enlightened VMCS, the trust-level trace, and now this - and together they
+are worth more than any of them alone: **on this machine, work taken away
+from this VMM goes to the guest hypervisor, not to the guest.** Anything
+that only makes this VMM cheaper should be expected to do nothing for the
+boot, and the two that were measured carefully both did.
+
+Rejected and switched back off, so it is not proposed again on the
+reasoning that a cheaper VMM must be a faster guest. It is not.
+
+
 ## The synthetic interrupt controller works, and re-reading is what showed it
 
 **2026-08-23.** The message page is enabled - `SIMP` at `0x117a30000` -
