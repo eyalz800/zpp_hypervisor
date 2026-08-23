@@ -1,5 +1,50 @@
 # Known defects
 
+## After the APIC fix: three million interrupt-window polls, and no HLT
+
+**2026-08-23.** With the APIC watch livelock gone the exit profile is
+finally legible, and what is left is one shape:
+
+```
+vmresume     12,525,235   48.9%
+wrmsr         9,417,706   36.7%
+int-window    2,960,061   11.5%
+ept-violation   465,815    1.8%   (was 27.6%)
+```
+
+**There is no `hlt` exit at all.** The guest never idles; it spins in the
+scheduler - `Phase1Initialization` into
+`KiSearchForNewThreadsForRescheduleContext` into `HalpInterruptSendIpi`,
+searching for a thread, asking for a dispatch interrupt, taking it,
+committing the reschedule, and searching again.
+
+And the level above is polling:
+
+```
+int_window_asked     = 3,055,183
+int_window_stale     = 0
+nested_tpr_threshold = 0
+```
+
+**`stale` is zero, so this VMM is not leaving the control set** - the
+guest hypervisor genuinely asks three million times. Interrupt-window
+exiting fires on `RFLAGS.IF` and ignores the task priority, so a
+hypervisor holding an interrupt the guest's priority blocks will ask,
+fail to deliver, and ask again for as long as the priority stays up.
+
+The mechanism that exists to avoid exactly this is the **TPR threshold**,
+which tells the processor to exit when the priority *drops*. The guest
+hypervisor leaves it at **0** - measured earlier at 7,810,736 of 7,815,163
+- so it never gets that wakeup. The other mechanism is virtual-interrupt
+delivery, and this processor does not have it (`enable_apicv=N`).
+
+So the remaining loop is: guest spins at a priority that blocks the
+vector, the level above polls with interrupt windows, and neither side
+uses the mechanism that would break it. **That is the blocker after the
+APIC fix**, and it is a different one - the APIC fix moved the guest from
+a hard stall at 39,317 to 41,775 with the secure kernel still working.
+
+
 ## The APIC watch could never disarm on a single-processor guest
 
 **2026-08-23.** A real defect, found by following the state dump's own
