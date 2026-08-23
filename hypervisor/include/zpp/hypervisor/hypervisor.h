@@ -5962,6 +5962,16 @@ private:
      * beside them has been read as evidence for both.
      * @{
      */
+    /**
+     * Whether the interrupt window withheld while the task priority was
+     * up is now due, and how many times it was withheld.
+     * See `nested_vmx::window_on_tpr`.
+     * @{
+     */
+    bool window_armed_on_drop[max_cpus]{};
+    std::uint64_t window_deferred_count[max_cpus]{};
+    /** @} */
+
     std::uint64_t l2_no_event_window_asked[max_cpus]{};
     std::uint64_t l2_no_event_window_idle[max_cpus]{};
     /** @} */

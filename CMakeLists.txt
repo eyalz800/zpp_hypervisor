@@ -234,6 +234,10 @@ option(ZPP_SAMPLE_L1
     "Sample the first-level guest's instruction pointer on the VMX-preemption timer, armed at VMCS setup. See cmake/hypervisor/CMakeLists.txt."
     OFF)
 
+option(ZPP_WINDOW_ON_TPR
+    "Arm the guest hypervisor's interrupt window on a task-priority drop instead of on every interruptible moment. See cmake/hypervisor/CMakeLists.txt."
+    OFF)
+
 option(ZPP_VMCS_CENSUS
     "Census every VMCS access by field and by caller. See cmake/hypervisor/CMakeLists.txt."
     ON)
@@ -356,6 +360,7 @@ ExternalProject_Add(hypervisor
         -DZPP_PROFILE_L2=${ZPP_PROFILE_L2}
         -DZPP_CENSUS_EXITS=${ZPP_CENSUS_EXITS}
         -DZPP_SAMPLE_L1=${ZPP_SAMPLE_L1}
+        -DZPP_WINDOW_ON_TPR=${ZPP_WINDOW_ON_TPR}
         -DZPP_VMCS_CENSUS=${ZPP_VMCS_CENSUS}
         -DZPP_EVMCS_TO_KVM=${ZPP_EVMCS_TO_KVM}
         -DZPP_TRACE_VTL=${ZPP_TRACE_VTL}
@@ -459,6 +464,7 @@ ExternalProject_Add(uefi_loader
         -DZPP_PROFILE_L2=${ZPP_PROFILE_L2}
         -DZPP_CENSUS_EXITS=${ZPP_CENSUS_EXITS}
         -DZPP_SAMPLE_L1=${ZPP_SAMPLE_L1}
+        -DZPP_WINDOW_ON_TPR=${ZPP_WINDOW_ON_TPR}
         -DZPP_VMCS_CENSUS=${ZPP_VMCS_CENSUS}
         -DZPP_EVMCS_TO_KVM=${ZPP_EVMCS_TO_KVM}
         -DZPP_TRACE_VTL=${ZPP_TRACE_VTL}

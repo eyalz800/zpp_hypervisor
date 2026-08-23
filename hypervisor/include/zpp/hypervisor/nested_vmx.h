@@ -1939,6 +1939,38 @@ inline constexpr arch::x86_64::vmx::vmcs_fields::vmcs_field
  */
 inline constexpr bool evmcs_to_kvm = (0 != ZPP_EVMCS_TO_KVM);
 
+#ifndef ZPP_WINDOW_ON_TPR
+#define ZPP_WINDOW_ON_TPR 0
+#endif
+
+/**
+ * Arm the guest hypervisor's interrupt window on a task-priority drop
+ * rather than on every interruptible moment.
+ *
+ * Interrupt-window exiting fires whenever the guest could take *an*
+ * interrupt - RFLAGS.IF set, no blocking - and says nothing about the
+ * task priority. A hypervisor holding a vector the guest's priority
+ * blocks therefore gets woken constantly and can deliver nothing, which
+ * is what this VMM measures: **3,055,183 window requests** with
+ * `int_window_stale` at zero, so the requests are genuine, while the
+ * guest sits at a priority that blocks the dispatch vector 75% of the
+ * time.
+ *
+ * Worse than wasteful: the wakeup it gets is uncorrelated with the event
+ * it needs, so the moment the priority *does* drop is only noticed if an
+ * interruptible moment happens to coincide.
+ *
+ * On, the window is withheld while the priority blocks the vector and the
+ * TPR threshold is armed instead, so the processor reports the drop
+ * itself and the window is given at exactly that moment.
+ *
+ * **Off by default, because it is a behaviour change and not an
+ * optimisation.** A vector whose priority the guest would have admitted
+ * is delayed until the next drop, and only the level above knows which
+ * vector it holds.
+ */
+inline constexpr bool window_on_tpr = (0 != ZPP_WINDOW_ON_TPR);
+
 inline constexpr bool trace_vtl = (0 != ZPP_TRACE_VTL);
 
 inline constexpr bool watch_vtl_block = (0 != ZPP_WATCH_VTL_BLOCK);

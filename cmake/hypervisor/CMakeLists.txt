@@ -88,6 +88,10 @@ option(ZPP_SAMPLE_L1
     "Sample the FIRST-level guest's instruction pointer on the VMX-preemption timer, armed at VMCS setup rather than from the exit path. The application processors burn a whole host core each and take no exits, so every exit-driven instrument here is blind to them, and reading their state through the monitor is not passive - QEMU must signal them out of guest mode to do it. Costs one exit per period per processor, for ever."
     OFF)
 
+option(ZPP_WINDOW_ON_TPR
+    "Arm the guest hypervisor's interrupt window on a task-priority drop rather than on every interruptible moment. Interrupt-window exiting fires on RFLAGS.IF and ignores the task priority, so a hypervisor holding an interrupt the guest's priority blocks polls forever - measured at 3,055,183 requests. This defers the window until the priority actually drops, using the TPR threshold as the trigger. Off by default: it delays an interrupt whose priority the guest would have admitted, which is a behaviour change and not merely an optimisation."
+    OFF)
+
 option(ZPP_VMCS_CENSUS
     "Census every VMCS access by field and by caller. Free when an access is an exit to the layer below at about 4,600 cycles; the dominant cost once the enlightened VMCS makes an access a load or a store, measured at 1,606 cycles an access against roughly ten for the access itself. Off makes the field and caller tables read zero."
     ON)
@@ -257,6 +261,7 @@ target_compile_options(zpp_hypervisor PRIVATE
     -DZPP_PROFILE_L2=$<BOOL:${ZPP_PROFILE_L2}>
     -DZPP_CENSUS_EXITS=$<BOOL:${ZPP_CENSUS_EXITS}>
     -DZPP_SAMPLE_L1=$<BOOL:${ZPP_SAMPLE_L1}>
+    -DZPP_WINDOW_ON_TPR=$<BOOL:${ZPP_WINDOW_ON_TPR}>
     -DZPP_VMCS_CENSUS=$<BOOL:${ZPP_VMCS_CENSUS}>
     -DZPP_EVMCS_TO_KVM=$<BOOL:${ZPP_EVMCS_TO_KVM}>
     -DZPP_TRACE_VTL=$<BOOL:${ZPP_TRACE_VTL}>
