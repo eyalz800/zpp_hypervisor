@@ -1,5 +1,47 @@
 # Known defects
 
+## Offering the enlightened VMCS upward makes Hyper-V stand down
+
+**2026-08-23, one boot, and it closes the option for a better reason than
+the contract.** `ZPP_EVMCS=ON` was the largest remaining throughput lever:
+the guest hypervisor makes about ten VMCS accesses per exit this VMM
+reflects to it, every one of them an exit, and an enlightened VMCS would
+turn them into stores to a shared page.
+
+It never gets that far. The run produced **12,082 exits, 95.4% of them
+CPUID, and not one second-level entry** - `vp-assist-writes`,
+`evmcs-reads` and `evmcs-writes` all zero. The log says what happened:
+
+```
+hv cpuid leaf 0x40000001 [times=3]
+hv cpuid leaf 0x40000004
+...
+guest apic write, register 0x320, value 0x10000   (LVT masked)
+guest apic write, register 0x330..0x370, 0x10000  (all of them)
+```
+
+The guest read the hypervisor interface signature and the implementation
+recommendations, masked every local-APIC entry and stopped. **Offering
+the enlightenment announces a hypervisor** - `announce_hypervisor` is
+defined as `evmcs_offered`, and the two cannot be separated because a
+guest hypervisor registers no assist page until it sees the
+advertisement - and a Hyper-V that finds a hypervisor underneath it does
+not nest, it stands down. `CLAUDE.md` already records that behaviour for
+the VMX case; this is the same behaviour through a different leaf.
+
+**So the constraint "make Hyper-V think it is bare metal" is not a
+preference, it is load-bearing.** Announcing anything removes the guest
+hypervisor that the whole exercise exists to run. The lever cannot be
+pulled from this side at all, and no flag arrangement changes that.
+
+That leaves the nesting tax irreducible on this hardware: KVM cannot
+shadow for us (the processor lacks VMWRITE to read-only fields), we
+cannot mix the enlightenment with shadowing (KVM filters the capability
+on the CPUID bit), and we cannot move the guest hypervisor off VMREAD
+without announcing ourselves to it. Three independent closures, each
+measured or cited.
+
+
 ## CORRECTION: the boot is not hung, it is crawling - and it reaches VBoxSup
 
 **2026-08-23.** The entry above calls `VBoxSup.sys` in
