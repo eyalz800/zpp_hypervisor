@@ -1,5 +1,36 @@
 # Known defects
 
+## The synthetic interrupt controller works, and re-reading is what showed it
+
+**2026-08-23.** The message page is enabled - `SIMP` at `0x117a30000` -
+and a single read found slot 3 holding type `0x80000010`,
+`HVMSG_TIMER_EXPIRED`: a synthetic timer message the guest had not
+consumed. That is a whole blocker on its own, and a tidy explanation for a
+stalled guest, since the level above will not post another message into a
+full slot.
+
+**It was wrong.** Read twice more, twenty seconds apart, the type word is
+zero: the guest consumed it. The first read caught a message *in flight*,
+which is what a working synthetic interrupt controller looks like when you
+sample it once.
+
+So the SynIC path is fine, and that removes the last delivery hypothesis
+this file had.
+
+**Ninth reading in this session that would have been wrong, and the first
+one caught before it was written down as a finding** - by the cheapest
+check there is, doing it again. The eight before it were each a single
+sample believed on sight.
+
+What remains true after all of it, and is now well supported rather than
+inferred: the guest is **alive** (`HvlEndSystemInterrupt`, nothing in the
+bugcheck path), its requests **are reflected**, the SynIC **delivers**, the
+virtual-APIC IRR is **empty**, and it makes progress at roughly eighty
+`HvCallVtlReturn` a minute while getting about a tenth of one core. It is
+not blocked on any mechanism this tree can currently name; it is slow, and
+it sometimes resets.
+
+
 ## The dispatch request reaches the level above and vanishes
 
 **2026-08-23.** Three things established in one pass, and the last one
