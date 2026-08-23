@@ -53,9 +53,21 @@ copies out of "the current VMCS" now comes from the enlightened page and
 must still arrive in vmcs12, and anything that still reads it by VMREAD
 reads a VMCS that is not the one that ran.
 
-That is checkable without a boot by reading what `reflect_l2_exit` copies
-and where from, and it is the first candidate in this whole sequence that
-explains the *shape* of the failure rather than just its error code.
+**Checked, and wrong.** `reflect_l2_exit` does `save_l2_state` at 4665,
+copies the exit information into vmcs12 through 4673 onwards, and only
+then switches with `point_at_vmcs(cpu, false)` at 4769. So every field is
+read from the enlightened page *before* the VMCS changes, which is the
+correct order and leaves nothing for the guest hypervisor to misread.
+
+So the shape is explained and the cause is not. What is known: the
+second-level entry succeeds, the exit is reflected with its information
+read from the right place, and the guest hypervisor then spends 91.8% of
+its exits on CPUID and never launches its guest again.
+
+**Recording the disproof rather than the guess**, for the fifth time in
+this sequence. Four fixes were aimed at an event that does not happen and
+two candidates have now been checked and discarded before being acted on -
+which is the only part of this that improved.
 
 
 ## Mixed mode fails on *this VMM's own* VM entry, not the second-level one
