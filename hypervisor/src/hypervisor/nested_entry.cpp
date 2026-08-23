@@ -3656,6 +3656,13 @@ bool hypervisor::l1_wants_l2_exit(std::size_t cpu,
 
 void hypervisor::save_l2_state(std::size_t cpu)
 {
+    // The key to reading the guest's own kernel image from outside.
+    // See `l2_exit_cr3`; vmcs02 is current here, so this is Windows'
+    // page-table root and not the level above's.
+    if (cpu < max_cpus) {
+        this->l2_exit_cr3[cpu] = this->vmcs.guest_cr3();
+    }
+
     // Two histograms, sampled on every second-level exit, because the
     // whole investigation so far has read one value at one instruction
     // and generalised from it.

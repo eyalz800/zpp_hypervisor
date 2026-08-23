@@ -5285,6 +5285,28 @@ private:
                                std::uint64_t base,
                                std::uint64_t headers);
 
+    /**
+     * The second-level guest's page-table root, recorded on every exit
+     * it takes.
+     *
+     * **Not a diagnostic of the guest - a key to reading it.** Windows'
+     * loaded kernel image lives in guest memory and can be read from
+     * outside with the monitor, which is the only way to name what the
+     * guest is executing when the machine has no disk to fetch symbols
+     * from: the NVMe holding `ntoskrnl.exe` is passed through, so the
+     * host cannot read it while the guest is running, and the guest's
+     * own copy of the image is the only one reachable.
+     *
+     * Reading it needs a page-table walk, and a walk needs this. The
+     * value is otherwise only recorded behind `ZPP_TRACE_VTL`, which is
+     * off in any build configured for throughput - so the one thing
+     * needed to symbolise a slow run was missing from exactly the runs
+     * worth symbolising.
+     *
+     * One store on a path that already reads the field.
+     */
+    std::uint64_t l2_exit_cr3[max_cpus]{};
+
     std::uint64_t guest_kernel_base{};
     /**
      * @}

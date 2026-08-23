@@ -2391,7 +2391,7 @@ def main():
                "vmcs_field_write_encoding", "vmcs_field_write_count",
                "vmcs_field_use_overflow",
                "external_interrupt_vector_counts",
-               "l2_injected_vector",
+               "l2_injected_vector", "l2_external_vector",
                "phase_cycles", "phase_calls",
                "guest_state_writes_skipped", "guest_state_writes_done",
                "control_writes_skipped", "control_writes_done",
@@ -2420,7 +2420,7 @@ def main():
                # been answered from exit histograms every time.
                "guest_stack_trace", "guest_stack_count",
                "guest_stack_pointer", "guest_stack_rip",
-               "guest_kernel_base", "guest_kernel_size",
+               "guest_kernel_base", "guest_kernel_size", "l2_exit_cr3",
                "guest_interrupted_trace", "guest_interrupted_count",
                "guest_interrupted_rsp", "guest_interrupted_rip",
                # Which thread the guest is running. Sampled for sessions
@@ -2720,7 +2720,7 @@ def main():
     # processor only, which is why these are queued with a count of one.
     for name in ("profile_code_physical", "profile_code_virtual",
                  "guest_stack_count", "guest_stack_pointer",
-                 "guest_stack_rip", "guest_kernel_base", "guest_kernel_size",
+                 "guest_stack_rip", "guest_kernel_base", "guest_kernel_size", "l2_exit_cr3",
                  "guest_interrupted_count", "guest_interrupted_rsp",
                  "guest_interrupted_rip"):
         if name in off:
@@ -3987,7 +3987,16 @@ def main():
                 ("external_interrupt_vector_counts",
                  "interrupt vectors acknowledged"),
                 ("l2_injected_vector",
-                 "vectors injected into the second level")):
+                 "vectors injected into the second level"),
+                # What the *processor* reported for each external
+                # interrupt reflected upward. This is the one census
+                # that separates "device interrupts never arrive" from
+                # "they arrive and are mis-dispatched" - see the
+                # declaration. A run whose vectors are all timer and
+                # inter-processor and none belongs to a device says the
+                # devices are silent, which is a different fault.
+                ("l2_external_vector",
+                 "external interrupt vectors reflected upward")):
             vectors = monitor_vector_counts(monitor, instance, off, cpu,
                                             member)
             if not vectors:
