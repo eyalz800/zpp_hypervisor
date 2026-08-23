@@ -19,19 +19,26 @@ Two fixes were tried and neither reached the instruction:
 - **Clearing `vmcs02_launched` at the release** is undone by
   `on_l2_exit`, which sets it again at the top of handling the very next
   exit - after the release, before the next entry.
-- **Forcing the launch path in `resume.cpp`** changed nothing, and the
-  reason is almost certainly that the forcing sits *inside*
-  `if ((0 != slot) && (slot <= max_cpus) && this->running_l2[slot - 1])`.
-  With `running_l2` false at that moment the whole block is skipped and
-  `entry` keeps its outer value, `relaunch ? vmlaunch : vmresume` - a
-  **VMRESUME**, which is exactly the error observed.
+- **Forcing the launch path in `resume.cpp`** changed nothing. The obvious
+  explanation - that the forcing sits inside a condition on `running_l2`
+  which is false at that moment - **was checked and is wrong**:
+  `reflect_l2_exit` clears `running_l2` on the way back to the guest
+  hypervisor, but `on_guest_vmlaunch` sets it again when that hypervisor
+  asks to run its guest, which is before `resume.cpp` chooses. So the
+  block is entered.
 
-**So the next check is one line: whether `running_l2` is set at the point
-`resume.cpp` chooses the entry instruction.** If it is not, the choice for
-a second-level entry is being made by the outer expression that knows
-nothing about vmcs02, and that is a defect independent of the enlightened
-VMCS - it would pick VMRESUME for a freshly cleared vmcs02 in any
-configuration.
+**Where that leaves it, honestly: the error is known and the mechanism is
+not.** A VMRESUME executes although the only site that selects the entry
+instruction was made to select VMLAUNCH whenever the enlightened VMCS is
+active. Either there is a second site, or `evmcs_active` is false there,
+or the entry is reached by a path that does not consult `entry` at all.
+
+**The next step is an instrument, not another guess** - record which of
+the two stubs was selected, beside the failure, so the next run says
+whether the choice or the execution is wrong. Three fixes have now been
+aimed at this error from inspection and all three missed, which is the
+same pattern as the ten misreadings above: acting on a mechanism that was
+inferred rather than measured.
 
 Everything else about mixed mode is settled: the release is clean
 (`evmcs_release_clean` 2, `clobbered` 0), the page is intact, and the
