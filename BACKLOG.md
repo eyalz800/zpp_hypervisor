@@ -1,5 +1,39 @@
 # Known defects
 
+## The L2 profiler cannot run on this rig: KVM does not offer the preemption timer
+
+**2026-08-23.** `ZPP_PROFILE_L2` is the one instrument in this tree that
+can see a guest spinning on memory - it exits on the VMX-preemption
+timer, a clock the guest cannot influence - and it is exactly what the
+`VBoxSup` stall needs. It does not work here, and the reason is one field:
+
+```
+0x48d  TRUE_PINBASED_CTLS   0x0000003f00000016
+```
+
+The allowed-1 half is `0x3f`, bits 0-5. **Bit 6 is
+`PIN_BASED_VMX_PREEMPTION_TIMER` and it is clear**, so `adjust_msr`
+strips it from vmcs02 and no timer exit ever happens. The profile reads
+`no samples` on a build whose manifest correctly says `profile=1` - the
+switch is on, the control is refused.
+
+**And arming it costs the boot.** The run produced 11,809 exits, 95.9% of
+them CPUID, and **no second-level entry at all** - the guest hypervisor
+never launched. So this is not a quiet no-op to leave enabled.
+
+`preemption_timer` reads `Y` on the host's `kvm_intel`, which is what
+makes this worth writing down: **the module parameter is about KVM using
+the timer for itself, not about offering it to a nested guest.** Reading
+that `Y` as "available to us" is the same class of mistake as reading
+`enable_shadow_vmcs` and the build manifest - a real value answering a
+question nobody asked.
+
+**What to use instead.** The clock interrupt is asynchronous to the
+guest's own code, so the guest RIP at the moment vector `0xd1` is
+injected is a sound sampling point and needs no timer this rig will not
+give. That is a sampler this tree does not have and should.
+
+
 ## The hang is `VBoxSup.sys`, in `ExSetTimerResolution`, and the boot is otherwise fine
 
 **2026-08-23. This is the blocker, named.** Everything above about
