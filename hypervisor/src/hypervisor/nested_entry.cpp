@@ -4144,7 +4144,16 @@ void hypervisor::load_l1_host_state(std::size_t cpu)
     auto host_cr4_12 = shadow.read(field::host_cr4);
 
     host_write(cpu, field::guest_cr0, host_cr0_12);
-    host_write(cpu, field::guest_cr3, shadow.read(field::host_cr3));
+    // The control for `l2_exit_cr3`. See `l1_own_cr3`: one value decides
+    // whether the two-processor crash is an empty second-level root or
+    // the level above's own root read from the wrong place.
+    auto host_cr3_12 = shadow.read(field::host_cr3);
+
+    if (cpu < max_cpus) {
+        this->l1_own_cr3[cpu] = host_cr3_12;
+    }
+
+    host_write(cpu, field::guest_cr3, host_cr3_12);
     host_write(cpu, field::guest_cr4, host_cr4_12 | cr4_vmxe);
 
     // The read shadows have to follow, or the guest hypervisor reads back

@@ -5470,6 +5470,31 @@ private:
      */
     std::uint64_t l2_exit_cr3[max_cpus]{};
 
+    /**
+     * The guest hypervisor's **own** page-table root, taken from
+     * vmcs12's `host_cr3` where `load_l1_host_state` hands the processor
+     * back to it.
+     *
+     * **A control for `l2_exit_cr3`, and the reason is a live doubt.**
+     * The two-processor crash record carries a root of `0x8800000` that
+     * matches `l2_exit_cr3` and reads as an all-zero page, which was
+     * written up as "a second-level root that is empty". It has a second
+     * reading that is just as consistent: that the value is the level
+     * above's own root, either because a crash record naming it is
+     * ordinary or because our recorder read it from the wrong VMCS.
+     *
+     * One value settles it. If this equals `l2_exit_cr3`, the "empty
+     * second-level root" reading is wrong and the finding is that the
+     * two are being confused; if it differs, the second-level root
+     * really is a page nothing has filled in.
+     *
+     * Recorded unconditionally rather than behind the trust-level trace,
+     * because the run worth diagnosing is a throughput build and that
+     * trace is off in every one of them - which is how the hypercall
+     * recorder came to be dark on exactly the run that needed it.
+     */
+    std::uint64_t l1_own_cr3[max_cpus]{};
+
     std::uint64_t guest_kernel_base{};
     /**
      * @}

@@ -2432,6 +2432,7 @@ def main():
                "guest_stack_trace", "guest_stack_count",
                "guest_stack_pointer", "guest_stack_rip",
                "guest_kernel_base", "guest_kernel_size", "l2_exit_cr3",
+               "l1_own_cr3",
                "synthetic_msr_writes", "synthetic_msr_last_value",
                "interrupted_rip", "interrupted_hits",
                "interrupted_samples", "interrupted_overflow",
