@@ -5171,6 +5171,26 @@ private:
     std::uint64_t stall_withheld_total[max_cpus]{};
     std::uint64_t stall_forced_total[max_cpus]{};
 
+    /**
+     * The event a withhold is holding, so withholding defers instead of
+     * dropping.
+     *
+     * **The first version had no such thing and it wedged the machine
+     * on the first withhold.** Clearing the valid bit in vmcs02 was
+     * assumed to defer the interrupt, on the reasoning that the source
+     * is level-asserted and the level above would re-assert. It does
+     * not: the level above wrote the event into vmcs12 and considers it
+     * delivered, so the interrupt is gone. Measured - one withhold, and
+     * the guest never took another exit: 1,168,110 exits, unchanged ten
+     * minutes later.
+     *
+     * `suppress_vina` gets away with the same mechanism because the
+     * notification it drops is advisory and says so; a timer interrupt
+     * is not.
+     */
+    std::uint64_t stall_held_event[max_cpus]{};
+    std::uint64_t stall_restaged_total[max_cpus]{};
+
     static constexpr std::size_t profile_capacity = 64;
 
     std::uint64_t profile_rip[profile_capacity]{};

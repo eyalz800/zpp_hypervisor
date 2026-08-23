@@ -7684,6 +7684,19 @@ void hypervisor::record_l2_entry_event(std::size_t cpu)
     // `nested_vmx::stall_breaker` for the two histograms that motivate
     // this and for why withholding defers rather than drops.
     if constexpr (nested_vmx::stall_breaker) {
+        // A held event comes back the moment the entry would otherwise
+        // carry nothing. This is what makes a withhold a deferral: the
+        // guest ran one instruction without it, and now it lands.
+        if ((cpu < max_cpus) && (0 == (given & valid)) &&
+            (0 != this->stall_held_event[cpu])) {
+            given = this->stall_held_event[cpu];
+            this->stall_held_event[cpu] = 0;
+            this->stall_restaged_total[cpu] += 1;
+
+            this->vmcs.write(field::vm_entry_interruption_information_field,
+                             given);
+        }
+
         if ((cpu < max_cpus) && (0 != (given & valid))) {
             auto rip = this->vmcs.guest_rip();
             auto vector = given & vector_mask;
@@ -7696,6 +7709,8 @@ void hypervisor::record_l2_entry_event(std::size_t cpu)
                         field::vm_entry_interruption_information_field,
                         given & ~valid);
 
+                    // **Held, not dropped.** See `stall_held_event`.
+                    this->stall_held_event[cpu] = given;
                     this->stall_withheld_run[cpu] += 1;
                     this->stall_withheld_total[cpu] += 1;
                     given = given & ~valid;
