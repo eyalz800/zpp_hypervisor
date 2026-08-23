@@ -9042,6 +9042,33 @@ hypervisor::on_l2_exit(std::size_t cpu,
             (basic_reason::vmcall == reason.basic())) {
             auto code = context.rcx & hypercall_code_mask;
 
+            // **The last hypercall, with when it was made.**
+            //
+            // The census says which codes were called and how often, and
+            // on a stuck guest every one of its counters is frozen - but
+            // a frozen counter cannot distinguish "no longer called" from
+            // "called once and never returned", and on multiple
+            // processors those are the two candidate explanations and
+            // they want opposite fixes.
+            //
+            // The timestamp settles it. If the last recorded call is
+            // seconds old while the machine is still taking exits, the
+            // guest is sitting inside that call; if it is recent, the
+            // calls are simply finishing and something else has stopped.
+            //
+            // Parameters too, because for a flush the interesting part is
+            // *which* processors it names, and that is the difference
+            // between a flush waiting on a parked processor and a flush
+            // that never targeted one.
+            if (cpu < max_cpus) {
+                this->last_hypercall_code[cpu] = code;
+                this->last_hypercall_rcx[cpu] = context.rcx;
+                this->last_hypercall_rdx[cpu] = context.rdx;
+                this->last_hypercall_r8[cpu] = context.r8;
+                this->last_hypercall_tsc[cpu] = arch::x86_64::rdtsc();
+                this->last_hypercall_count[cpu] += 1;
+            }
+
             // Censused before the decode, so a code with no case here is
             // counted rather than invisible. See `l2_hypercall_codes`:
             // two of the 3.46 vmcalls a round trip are the trust-level

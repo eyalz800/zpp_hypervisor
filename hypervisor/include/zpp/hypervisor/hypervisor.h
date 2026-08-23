@@ -5930,6 +5930,24 @@ private:
      */
     std::uint32_t l2_given_vector[max_cpus][256]{};
     std::uint32_t l2_entry_ppr[max_cpus][256]{};
+    /**
+     * The last hypercall this processor's second-level guest made, with
+     * its parameters and the time it was made.
+     *
+     * A frozen census counter cannot tell "no longer called" from "called
+     * once and never returned", and on multiple processors those are the
+     * two explanations for the guest stopping. A timestamp that is
+     * seconds old while exits continue says it is the second.
+     * @{
+     */
+    std::uint64_t last_hypercall_code[max_cpus]{};
+    std::uint64_t last_hypercall_rcx[max_cpus]{};
+    std::uint64_t last_hypercall_rdx[max_cpus]{};
+    std::uint64_t last_hypercall_r8[max_cpus]{};
+    std::uint64_t last_hypercall_tsc[max_cpus]{};
+    std::uint64_t last_hypercall_count[max_cpus]{};
+    /** @} */
+
     std::uint64_t l2_low_priority_no_event[max_cpus]{};
 
     /**
