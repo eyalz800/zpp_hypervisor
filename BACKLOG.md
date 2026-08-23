@@ -1,5 +1,54 @@
 # Known defects
 
+## CAVEAT on the bare-metal prediction: we never checked which condition fails
+
+**2026-08-24.** Two entries above assert "KVM cannot shadow for us - the
+processor lacks VMWRITE to read-only fields". **That attributes the
+failure to a condition nobody verified.** `cpu_has_vmx_shadow_vmcs()`
+has two:
+
+```c
+/* capabilities.h:223 */
+if (!(vmcs_config.misc & VMX_MISC_VMWRITE_SHADOW_RO_FIELDS))
+        return false;                                  /* (1) MISC bit 29 */
+return vmcs_config.cpu_based_2nd_exec_ctrl &
+        SECONDARY_EXEC_SHADOW_VMCS;                    /* (2) the control */
+```
+
+All that is established is `enable_shadow_vmcs` reads **N**, which means
+one of them failed. The entries pick (1) and say so as fact.
+
+**It cannot be settled from inside the guest.** What this VMM reads is
+KVM's *emulated* capability, and KVM advertises shadowing to its guest
+whatever the hardware does - `nested.c:7068` says so in a comment: *"We
+can emulate VMCS shadowing, even if the hardware doesn't support it."*
+So our own "vmcs shadowing available" log line is evidence about KVM, not
+about the processor. Reading `IA32_VMX_MISC` on the host needs the `msr`
+module, which this rig does not have.
+
+### Why it matters more than a citation
+
+**If the failing condition is (2), a bare-metal boot does not help.** Our
+own offer of shadowing to the guest hypervisor would fail on real
+hardware for the same reason, its VMREADs would reflect to us exactly as
+they do now, and the 65.4% would still be there with no KVM underneath to
+blame for it. The prediction written above assumes the hardware has the
+control and only KVM's *use* of it is disabled - and that assumption is
+untested.
+
+**Settle it before anyone walks to the machine.** Cheapest first:
+
+- `rdmsr 0x485` on the host, bit 29, and `rdmsr 0x48b` high half, bit 14.
+  Needs `msr-tools` or a one-line kernel module - a smaller change than
+  a bare-metal boot and it answers the question outright.
+- Failing that, any Linux box with the same processor answers it, since
+  this is a property of the part and not of the installation.
+
+Recorded because a wrong attribution here costs a trip to the machine and
+a wasted boot, and because it is the fifth claim this session that read
+as a fact and was an inference.
+
+
 ## The bare-metal experiment, written down before it is run
 
 **2026-08-24.** Everything measured on this rig is taken with this VMM
