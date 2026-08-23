@@ -7653,6 +7653,19 @@ void hypervisor::record_l2_entry_event(std::size_t cpu)
     if (this->l2_entry_priority[cpu] < dispatch_class) {
         this->l2_low_priority_no_event[cpu] += 1;
 
+        // Split by whether the level above has anything pending at all.
+        // The bare count cannot tell a delivery fault here from the guest
+        // hypervisor declining, and those want opposite fixes. A
+        // hypervisor holding an interrupt it cannot yet deliver asks for
+        // an interrupt window, so that is the discriminator.
+        if (0 != (this->guest_vmcs12[cpu].read(
+                      field::primary_processor_based_vm_execution_controls) &
+                  primary_interrupt_window)) {
+            this->l2_no_event_window_asked[cpu] += 1;
+        } else {
+            this->l2_no_event_window_idle[cpu] += 1;
+        }
+
         // And whether it could legally have been delivered at all,
         // which the priority alone does not say. SDM 27.6.1 refuses an
         // external interrupt while RFLAGS.IF is clear; 27.6.2 refuses
