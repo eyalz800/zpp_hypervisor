@@ -1,5 +1,50 @@
 # Known defects
 
+## Window-on-TPR, second attempt: the mechanism works, the resume path faults
+
+**2026-08-24.** The first attempt deadlocked because it sampled the task
+priority only at exits, so a guest that lowered its priority and then ran
+was never seen to have done so. That diagnosis was right and the fix
+works: arming a TPR threshold at the dispatch class makes the processor
+report the drop, and the counters close the loop -
+
+```
+  window_deferred_count   3
+  window_granted_on_drop  1
+```
+
+deferrals followed by grants, no runaway. **The mechanism is sound.**
+
+**What it breaks is the resume.** The guest wedges at 243,118 exits and
+this VMM takes a **host page fault**:
+
+```
+host exception: vector 14 error 0x0 rip 0x671e3b9b cs 0x8 cr2 0x129
+                  -> nested_vmlaunch, asm.h:329
+```
+
+`cr2 = 0x129` is a near-null dereference inside the second-level entry
+stub, which restores the guest's registers through a context pointer -
+so that pointer is wrong on the path this change added. Returning
+`l2_exit_outcome::handled` for the TPR-below exit resumes the second
+level directly, and something that path needs is not set up by an exit
+that arrives *there* rather than through the routes that already return
+`handled`.
+
+**Not pursued further, and the arithmetic is why.** Interrupt-window
+exits are 2,081,443 of 7,775,229 round trips - 26.8%. Removing all of
+them scales the overhead down by about a quarter, which moves Windows
+from 7.7% of the machine to something near 10%. The tick needs roughly
+30%. **A correct version of this would not reach the goal**, so the
+remaining risk of chasing a fault in the entry stub is not worth taking
+against that return.
+
+Left in the tree behind `ZPP_WINDOW_ON_TPR`, still off, with the working
+half recorded: the threshold-arming mechanism is the right one and is
+now implemented, and only the resume path is wrong. Anyone picking it up
+starts from a fault address rather than from the deadlock.
+
+
 ## SETTLED: this processor has no VMCS shadowing at all, and it is free to check
 
 **2026-08-24.** The caveat above is resolved, by one command and no boot.
