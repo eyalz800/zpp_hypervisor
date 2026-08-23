@@ -5191,6 +5191,14 @@ private:
     std::uint64_t stall_held_event[max_cpus]{};
     std::uint64_t stall_restaged_total[max_cpus]{};
 
+    /**
+     * Re-stages declined because the processor would have refused the
+     * entry. See the SDM citation at the site: an external interrupt
+     * cannot be injected while blocking by STI or MOV SS is in effect,
+     * and doing it anyway fails the entry with 0x80000021.
+     */
+    std::uint64_t stall_restage_blocked[max_cpus]{};
+
     static constexpr std::size_t profile_capacity = 64;
 
     std::uint64_t profile_rip[profile_capacity]{};

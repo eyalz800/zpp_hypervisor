@@ -7689,12 +7689,38 @@ void hypervisor::record_l2_entry_event(std::size_t cpu)
         // guest ran one instruction without it, and now it lands.
         if ((cpu < max_cpus) && (0 == (given & valid)) &&
             (0 != this->stall_held_event[cpu])) {
-            given = this->stall_held_event[cpu];
-            this->stall_held_event[cpu] = 0;
-            this->stall_restaged_total[cpu] += 1;
+            // **Only where the processor will accept it.** SDM 27.2.1.1,
+            // guest-state checks: "Bit 0 (blocking by STI) and bit 1
+            // (blocking by MOV-SS) must both be 0 if the valid bit ... in
+            // the injected-event identification field is 1 and the event
+            // type ... has value 0, indicating external interrupt".
+            //
+            // Staging into an entry the level above did not choose means
+            // choosing the moment, and this is the constraint on it.
+            // Measured without the check: VM entry failed with
+            // **0x80000021**, invalid guest state, and the guest
+            // hypervisor answered by executing VMXOFF - it gave up
+            // virtualisation entirely and the machine stopped.
+            //
+            // The interrupt is not lost by waiting: the hold persists,
+            // and the blocking clears after one instruction by
+            // definition.
+            constexpr std::uint64_t blocking_by_sti_or_mov_ss = 0x3;
 
-            this->vmcs.write(field::vm_entry_interruption_information_field,
-                             given);
+            auto blocked =
+                0 != (this->vmcs.read(field::guest_interruptibility_state) &
+                      blocking_by_sti_or_mov_ss);
+
+            if (!blocked) {
+                given = this->stall_held_event[cpu];
+                this->stall_held_event[cpu] = 0;
+                this->stall_restaged_total[cpu] += 1;
+
+                this->vmcs.write(
+                    field::vm_entry_interruption_information_field, given);
+            } else {
+                this->stall_restage_blocked[cpu] += 1;
+            }
         }
 
         if ((cpu < max_cpus) && (0 != (given & valid))) {

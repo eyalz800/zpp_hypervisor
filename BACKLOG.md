@@ -1,5 +1,69 @@
 # Known defects
 
+## Withholding an injection the level above staged is fatal, twice over
+
+**2026-08-23.** `ZPP_STALL_BREAKER` was built on the instruction-level
+finding above - 84% of injections landing on two instructions, the first
+being the one after a `sti` - with the rule "deliver when the guest's
+instruction pointer has moved, withhold while it has not". It does not
+work, and the two failures are worth more than the idea.
+
+**First attempt: clearing the valid bit drops the event.** The reasoning
+was that the source is level-asserted - the timer message really does sit
+unconsumed in the guest's message page, read directly as `0x80000010`,
+`HvMessageTimerExpired` - so the level above would re-assert. It does
+not. It wrote the event into vmcs12 and considers it delivered.
+
+Measured, and unambiguous: **one withhold, and the guest never took
+another exit.** 1,168,110 exits, byte-identical ten minutes later.
+
+`suppress_vina` uses exactly this mechanism and is fine, because the
+notification it drops is advisory and says so in its own name. Carrying
+that reasoning to a timer interrupt was the whole error.
+
+**Second attempt: hold the event and re-stage it, and the entry fails.**
+The log names it in one line:
+
+```
+second level entry failed after loading guest state, reason 0x80000021
+cpu 0x0 guest vmxoff
+```
+
+`0x80000021` is invalid guest state, and **the guest hypervisor answered
+by executing VMXOFF** - it gave up virtualisation entirely. The cause is
+a guest-state check, SDM 27.2.1.1: "Bit 0 (blocking by STI) and bit 1
+(blocking by MOV-SS) must both be 0 if the valid bit ... is 1 and the
+event type ... has value 0, indicating external interrupt". Staging into
+an entry the level above did not choose means choosing the moment, and
+that is the constraint on it.
+
+**Third attempt: honour the check, and it still dies at the first
+withhold.** `stall_withheld_total` 1, `stall_restaged_total` 1,
+`stall_restage_blocked` **0** - the check never even fired - and the
+machine wedges at 240,518 exits, which is during the guest hypervisor's
+own start-up, long before Windows.
+
+**So the withhold itself is fatal, not the re-stage.** An event the level
+above staged is part of a sequence it is tracking, and removing one from
+that sequence breaks it even when the event is given back on the next
+entry. Whatever the guest hypervisor is doing with the interrupt it
+staged, it is not simply "deliver this vector".
+
+### What this leaves standing
+
+The **diagnosis** is unaffected and is the durable part: the guest is
+livelocked because it cannot retire the instruction after a `sti`, and
+the two RIP histograms prove it against a flat control. What is refuted
+is one particular *remedy* - that this VMM can fix it by choosing which
+of the level above's injections to deliver. It cannot. Any fix has to
+change what the level above decides, not what this VMM does with the
+decision.
+
+`ZPP_STALL_BREAKER` stays off. It is left in the tree because the three
+failures are each a fact about the interface that is not written down
+anywhere else.
+
+
 ## The livelock, in instructions: every injection lands on the `sti`
 
 **2026-08-23.** The guest is not stuck anywhere. Two histograms of the
