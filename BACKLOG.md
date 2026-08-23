@@ -1,5 +1,105 @@
 # Known defects
 
+## The guest never halts, and that retires the starvation reading
+
+**2026-08-23.** The entry above frames the failure as starvation -
+Windows on 7.6% of the machine, unable to finish a clock interrupt inside
+its own period. **One number retires it:**
+
+```
+cpu 0 exit reasons (total 26,665,558)
+   ... no `hlt` at all, on any line
+```
+
+**Zero HLT exits in 26.6 million.** Neither the guest hypervisor nor
+Windows ever idles. A machine short of *time* still idles when it runs
+out of work; one that never idles always has work. So the guest is
+**busy**, not merely slow, and "give it more cycles" was never the whole
+answer. Both can be true at once - it is busy *and* on 8.6% of the
+machine - but the busy half is the one that was invisible, and it is the
+half that decides whether more cycles would finish the boot.
+
+**Devices are silent, and that is measured on both sides.** Of 1,173,651
+external interrupts reflected upward, `0xef` - the level above's own APIC
+timer - is **1,173,360 of them**. Every device interrupt in the whole run
+is the remaining **291**. From the host, over a sixty-second window on a
+running guest, `/proc/interrupts` does not move at all:
+
+```
+vfio-intx(00:14.3, 00:1f.3, 00:02.0)   25,682 -> 25,682
+vfio-msix[0](02:00.0 NVMe)                 73 ->     73
+vfio-msix[1](02:00.0 NVMe)                720 ->    720
+```
+
+Nothing is submitted to any device. This is not an interrupt-delivery
+fault - there is nothing to deliver.
+
+**And the screen says the same.** Read out of the passed-through GPU's
+framebuffer with `pmemsave` (the display cannot be screendumped - QEMU
+answers "there is no console"), it still holds *our loader's* trace, last
+line `chainloading \EFI\Microsoft\Boot\bootmgfw.efi`, over the
+NanoCore firmware splash. Nothing after our loader has painted it.
+
+### Where the guest actually is
+
+Symbolised against the guest's own kernel image, read out of its memory -
+see `scripts/guest-symbolize-live.py`, and note the nearest-export label
+is decoration; the exception directory gives the exact bounds.
+
+The three hot second-level functions are the synthetic MSR quartet, in
+instructions rather than by inference:
+
+```
+0x6a7670..0x6a7692  34 B   mov ecx,0x40000070 ; wrmsr   (EOI, behind an EOI-assist btr)
+0x4288f0..0x42890f  31 B   mov ecx,0x40000071 ; wrmsr   (self-IPI)
+0x3a5780..0x3a580d 141 B   mov ecx,0x400000b0 / 0xb1 ; wrmsr  (synthetic timer arm)
+```
+
+And the request pattern is **normal, not pathological**: the guest asks
+for vector `0x2f` 464,448 times and its task priority when it asks is
+`0xd0` on 99.9% of them. That is a clock interrupt handler queueing
+deferred work and asking for the dispatch interrupt, once a tick, exactly
+as it should. The 1.7% delivery rate is not evidence of a fault by
+itself - at `0xd0` that vector is masked architecturally.
+
+The stack is the informative part:
+
+```
+ntoskrnl+0xc1c9f4  [INIT]   Phase 1 initialisation
+ntoskrnl+0x9b710e  [PAGE]   ~RtlWriteRegistryValue
+ntoskrnl+0xa1226f  [PAGE]   ~PsQueryCurrentApiSetSchema
+ntoskrnl+0x990028  [PAGE]   ~MmCreateSection
+ntoskrnl+0x9c516f  [PAGE]   ~NtLockFile
+ntoskrnl+0x9923a9  [PAGE]   ~FsRtlReleaseFile
+ntoskrnl+0x93d23f  [PAGE]   ~MmPrefetchPages
+ntoskrnl+0x25db6e  [.text]  ~IoPropagateIrpExtensionEx
+ntoskrnl+0x237c7f  [.text]  ~MmProbeAndLockPages
+```
+
+**Windows is in Phase 1, mapping a file, going down the IRP path towards
+a disk that is doing nothing.** It is a stack scan rather than an unwind
+- the `.data` entries are stale words, not return addresses - so read the
+*set* of functions, not the order.
+
+### What is established and what is not
+
+Established: the guest never idles; devices are silent on both sides of
+the boundary; the guest executes and schedules (the stack differs between
+samples and the running thread changes); it is in Phase 1 in the file and
+paging path; its dispatch-interrupt requests are normal.
+
+**Not established: whether Phase 1 is advancing or repeating.** That is
+now the question, and it is one sampling can answer - the deepest INIT
+frame over a long window says which. Do not answer it from the exit
+profile again; four separate readings of this failure have come from
+counters that were real and about something else.
+
+One instrument already points at a live fault and should be read as a
+delta before anything else: `l2_low_priority_no_event` at **24,110** -
+second-level entries where the guest's priority would have admitted the
+deferred call and the level above staged nothing.
+
+
 ## KVM cannot shadow for us, the hardware forbids it, and our shadowing was always emulated
 
 **2026-08-23.** `enable_shadow_vmcs` reads **N** on the rig, the parameter
