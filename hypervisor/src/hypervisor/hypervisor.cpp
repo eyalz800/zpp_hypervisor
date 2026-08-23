@@ -5360,8 +5360,15 @@ void hypervisor::record_entry_failure(std::uint64_t flags)
 
     // vpid is readable only if a VMCS is current, which carry says it is
     // not - so fall back to a slot of zero rather than reading garbage.
-    constexpr std::uint64_t carry = 1;
-    auto slot = (flags & carry) ? std::uint64_t{} : this->vmcs.vpid();
+    // **The processor index from GS, not `vpid` from the VMCS.**
+    // `vpid` needs a current VMCS to read, and with an enlightened VMCS
+    // the read is a load out of a page the layer below may not have
+    // written - so on the path that matters most it picks slot zero and
+    // records nothing, which is how a failure with a perfectly good error
+    // code came to read as "flags 0, error 0". GS is this VMM's own in
+    // root mode and is right whatever the VMCS is doing.
+    auto row = arch::x86_64::vmx::vmcs_cache_row_index();
+    auto slot = (row < max_cpus) ? (row + 1) : std::uint64_t{};
 
     if ((0 != slot) && (slot <= max_cpus)) {
         this->entry_failure_flags[slot - 1] = flags;
