@@ -1,5 +1,65 @@
 # Known defects
 
+## The bare-metal experiment, written down before it is run
+
+**2026-08-24.** Everything measured on this rig is taken with this VMM
+running as a KVM guest, and the accounting closes exactly:
+
+```
+  this VMM   26.9%      guest hypervisor  65.4%      Windows  7.7%
+```
+
+There is **no idle time**. So Windows' share can only grow by shrinking
+one of the other two, and both are dominated by the same thing: 12.24
+exits per second-level round trip, of which about eleven are the guest
+hypervisor's own VMREAD and VMWRITE, each a round trip through KVM at
+roughly 25,000 cycles.
+
+**Every one of those costs is an artifact of the level below.** On bare
+metal a VMCS access is a register operation of tens of cycles, not an
+exit; and the guest hypervisor's accesses are absorbed by real shadowing
+hardware rather than reflected to us. Neither number survives the move.
+
+### What to predict, so the result means something
+
+If the tax is the KVM artifact this file claims:
+
+- `duty` should fall from 0.269 to something small - our handler is 110
+  VMCS accesses a round trip that stop being exits.
+- The guest hypervisor's share should collapse from 65.4%, because its
+  VMREADs stop reaching us at all once `enable_shadow_vmcs` is a real
+  hardware shadow rather than KVM's emulation.
+- Windows should get the remainder, and the ISR should stop costing a
+  whole tick period.
+- **`l2_cpl_seen[3]` should become non-zero.** That is the completion
+  detector: ring 3 means the session manager runs, which means kernel
+  initialisation finished.
+
+If instead Windows still gets single-digit percent, the tax is *not* the
+nesting artifact and this whole line of reasoning is wrong - which is
+worth knowing and is exactly why the predictions are written first.
+
+### The safety gate is already mechanical
+
+`scripts/check-bootable.sh` refuses a loader carrying
+`ZPP_VERIFY_HYPERVISOR`, which parks every application processor in real
+mode and never reaches an operating system - the failure that cost a full
+day. The current build passes it, and prints its own switch manifest:
+
+```
+ok: launches the hypervisor and carries no destructive self check
+  nested=1 evmcs=0 shadowvmcs=1 ... defer=1 ... evmk=1 evmix=0 stall=0
+```
+
+Note `evmk=1` is a **KVM-only** optimisation: it needs QEMU to offer the
+enlightenment, and on bare metal there is nothing to offer it. It should
+be **off** for a bare-metal boot, and with it off shadowing comes back on
+by itself - which is the configuration the prediction above assumes.
+
+**This is the one experiment in this project that cannot be run from
+here**, because it needs someone at the machine if it does not come back.
+
+
 ## There is no hot VMCS call site left - the reads are diffuse
 
 **2026-08-24.** With our per-exit cost down to 10,227 cycles and the
