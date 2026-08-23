@@ -5217,6 +5217,8 @@ void hypervisor::record_exit(std::size_t cpu,
     // produces the exit-reason total the census is being compared
     // against, so the two cannot disagree about which exits exist.
     if (wrmsr == basic) {
+        auto counted = false;
+
         for (std::size_t slot{}; slot < msr_write_slots; ++slot) {
             if (0 == this->msr_write_counts[slot]) {
                 this->msr_write_codes[slot] = recorded.detail;
@@ -5225,8 +5227,15 @@ void hypervisor::record_exit(std::size_t cpu,
             if (this->msr_write_codes[slot] == recorded.detail) {
                 this->msr_write_counts[slot] += 1;
                 this->msr_write_last_value[slot] = recorded.detail_value;
+                counted = true;
                 break;
             }
+        }
+
+        // Never dropped in silence. See `msr_write_uncounted`.
+        if (!counted) {
+            this->msr_write_uncounted += 1;
+            this->msr_write_uncounted_code = recorded.detail;
         }
     }
 

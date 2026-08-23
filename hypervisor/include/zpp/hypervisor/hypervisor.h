@@ -9931,7 +9931,7 @@ private:
      * moves. Recording one costs a store on a path that is already
      * taking a VM exit.
      */
-    static constexpr std::size_t msr_write_slots = 24;
+    static constexpr std::size_t msr_write_slots = 96;
     std::uint64_t msr_write_codes[msr_write_slots]{};
     std::uint64_t msr_write_counts[msr_write_slots]{};
     std::uint64_t msr_write_last_value[msr_write_slots]{};
@@ -9957,6 +9957,27 @@ private:
     std::uint64_t l2_msr_write_counts[msr_write_slots]{};
     std::uint64_t l2_msr_write_last_value[msr_write_slots]{};
     std::uint64_t l2_msr_write_reflected[msr_write_slots]{};
+
+    /**
+     * Writes the census had no slot for, and one code from among them.
+     *
+     * **The third placement of this census still measured a fraction of
+     * the truth, and this is why.** Sited where the exit total itself is
+     * produced, it read 10,572 against 1,410,005 `wrmsr` exits - a
+     * hundred and thirty fold disagreement with a counter incremented
+     * three lines above it. The table held twenty-four slots, every one
+     * of them taken by an MSR written once or twice during boot, and the
+     * hot one arrived twenty-fifth and was dropped by a loop that fell
+     * out of its `for` without counting anything.
+     *
+     * The bound was mine, not the machine's, and a saturated table is
+     * indistinguishable from a quiet one: both print small numbers
+     * beside plausible names. Nothing in the output said "and the rest".
+     * `BACKLOG.md` states the general rule as *no silent caps*; this is
+     * the instrument that proved it applies to instruments too.
+     */
+    std::uint64_t msr_write_uncounted{};
+    std::uint64_t msr_write_uncounted_code{};
 
     /**
      * The same census for the **second-level** guest's hypercalls, which
