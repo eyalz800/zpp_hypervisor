@@ -22,14 +22,35 @@ asks for **2081 ms**. So the page does not merely change what the guest
 *gets*; it changes what the guest *asks for*, which means the guest's
 own arithmetic is being fed a bad rate.
 
-The size of the error is about **1,193x** on the period asked and 952x on
-the interval delivered - the same order, and both close to 1000. The
+**The 952x figure is inflated and must not be quoted.** The instrument
+pairs the *latest* `STIMER0_CONFIG` with *all* recorded counts, and a
+periodic count is a period while a one-shot count is an absolute
+deadline - so a run that changes mode mixes two units in one ratio. The
+`reftsc=1` run ended periodic and the `reftsc=0` run ended one-shot,
+which is exactly the mixture that produces a spurious three-orders-of-
+magnitude answer.
+
+**The honest measurement is the delivered clock rate**, which needs no
+mode assumption - injections of vector `0xd1` over elapsed time:
+
+```
+  reftsc=1   3,466,875 over 3,375.4 s  =  1,027 Hz
+  reftsc=0      94,636 over   306.4 s  =    309 Hz
+  Windows' own KeQuantumEndTimerIncrement =  574 Hz
+```
+
+**3.3x, not 952x.** Publishing the page pushes the guest to 1.8x its own
+nominal tick; withholding it drops to 0.54x. Neither is right, and the
+page is worth about a factor of three - real, and an order of magnitude
+short of what the first reading claimed.
+
+The
 published scale is self-consistent: it implies 10,000,010 Hz against a
 fitted 9,999,980 Hz with a collinearity error of zero. So the page agrees
 with itself and with our own reading of it. What it does not agree with
 is what the guest computes from it.
 
-**This is the mechanism behind the whole clock story in this file.** The
+**It is *a* mechanism in the clock story, not the whole of it.** The
 "guest never leaves the clock handler" reading, the 82% of guest
 execution spent in three synthetic-MSR instructions, the interrupt
 waiting at every `sti`, the four failed interventions that tried to
