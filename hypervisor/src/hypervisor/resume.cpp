@@ -936,9 +936,20 @@ void hypervisor::resume_guest(std::uint64_t cpuid,
         // held by enter_or_park_l2 and recorded in `l2_activity_state`,
         // which is the record start_up_processor asks alongside this one.
         //
-        // RIP and CS are not gated, deliberately: nothing consumes them,
-        // they exist to be read from a debugger, and the address a
-        // second-level guest is at is the more useful of the two answers.
+        // RIP and CS are not gated, deliberately: they exist to be read
+        // from a debugger, and the address a second-level guest is at is
+        // the more useful of the two answers.
+        //
+        // **"Nothing consumes them" is what this comment used to say, and
+        // it is false.** `tests/resume_guest` asserts the segment - "and
+        // in which segment", expecting `0x28` - so gating the CS read
+        // behind a diagnostic switch fails the suite. It was gated on
+        // exactly that reasoning, for the 0.8% of wall the read costs at
+        // 95 million resumes a run, and the test caught it in one build.
+        //
+        // Left ungated. A saving that small is not worth weakening a test
+        // for, and the comment is corrected so the next person does not
+        // repeat the trade.
         auto in_l2 = false;
         if constexpr (nested_vmx::enabled) {
             in_l2 = this->running_l2[slot - 1];
