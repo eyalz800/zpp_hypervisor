@@ -986,6 +986,24 @@ void hypervisor::resume_guest(std::uint64_t cpuid,
                         ? arch::x86_64::vmx::nested_vmresume
                         : arch::x86_64::vmx::nested_vmlaunch;
 
+            // **An enlightened VMCS is always launched, never resumed.**
+            // The launch state lives in `vmcs12->launch_state`, and the
+            // enlightened layout has no field for it - so it cannot
+            // survive the copy the layer below makes out of the page on
+            // every entry, and that layer asks for a VMLAUNCH each time.
+            //
+            // Measured rather than reasoned: mixed mode reached exactly
+            // one second-level entry, four times, and the failure is
+            // `vm_instruction_error` **5**, "VMRESUME with non-launched
+            // VMCS". Clearing the launch state at the release was not
+            // enough, because `on_l2_exit` sets it again at the top of
+            // handling the very next exit.
+            if constexpr (nested_vmx::evmcs_to_kvm) {
+                if (this->evmcs_active[slot - 1]) {
+                    entry = arch::x86_64::vmx::nested_vmlaunch;
+                }
+            }
+
             // What the entry actually carries, read here because here
             // is the last instant it can still change. See
             // `l2_entry_vector`: the guest hypervisor is injecting and
