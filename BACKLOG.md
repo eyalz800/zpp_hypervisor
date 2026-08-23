@@ -27,12 +27,35 @@ instruction is chosen correctly, and the second-level entry itself
 succeeds. The four fixes aimed at "the second entry fails" were aimed at
 an event that does not occur.
 
-**What to ask next:** why the guest hypervisor stops launching its guest
-after one round trip. Its `VMLAUNCH`/`VMRESUME` is an exit this VMM
-handles - `on_guest_vmlaunch` - so counting arrivals there against
-`l2-entries` says whether it stopped asking or whether this VMM stopped
-carrying the request through. Two counters again, and the same shape that
-has now settled three of these.
+**Answered, and for free - the exit census already had it:**
+
+```
+cpuid      5,727   91.8%
+vmlaunch       1
+vmresume       0
+```
+
+**The guest hypervisor launches its guest once and never asks again. It
+spends 91.8% of its exits on CPUID.** That is not a hypervisor waiting; it
+is one that has been handed something it cannot make sense of and has gone
+into an error or identification loop. On the enlightened build that works,
+`vmresume` dominates and `cpuid` is a rounding error.
+
+**So the failure is downstream of the second-level exit, not of the
+entry.** The entry succeeds, this VMM reflects the exit, and the guest
+hypervisor is broken by what it is given.
+
+**The candidate, and it is specific:** with vmcs02 enlightened, the exit
+information is written by the layer below into *our page*. The guest
+hypervisor does not read that page - it reads **vmcs12**, through the
+shadowing this mode deliberately keeps. So every field the reflection
+copies out of "the current VMCS" now comes from the enlightened page and
+must still arrive in vmcs12, and anything that still reads it by VMREAD
+reads a VMCS that is not the one that ran.
+
+That is checkable without a boot by reading what `reflect_l2_exit` copies
+and where from, and it is the first candidate in this whole sequence that
+explains the *shape* of the failure rather than just its error code.
 
 
 ## Mixed mode fails on *this VMM's own* VM entry, not the second-level one
