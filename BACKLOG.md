@@ -1,5 +1,65 @@
 # Known defects
 
+## VTL1 is enabled on every processor, and the roster is intact - two audits refuted
+
+**2026-08-25**, three processors, `vtltrc=1` verified in the deployed
+manifest. Two separate reviews proposed multiprocessor causes that a
+single reading each disposes of.
+
+### "The platform roster is empty, so application processors are handed
+### to the guest unvirtualized" - NO
+
+```
+  number_of_platform_processors    3
+  number_of_known_processors       3
+  ipi_refused_shorthand            0
+  ipi_refused_logical              0
+  processor_virtualized            0x10101   (all three)
+```
+
+No `no roster to resolve it against` line, no `not adopted` line. The
+roster is populated, nothing was passed through to hardware, and this VMM
+owns all three processors.
+
+### "`HvCallEnableVpVtl` was called once, so only the boot processor ever
+### had VTL1" - NO, and the census is healthy
+
+With `ZPP_TRACE_VTL=ON` - a switch **not in the manifest**, and which had
+never been on for a run that mattered:
+
+```
+  0x000c  39,323  HvCallModifyVtlProtectionMask
+  0x0012  23,500  HvCallVtlReturn
+  0x0011  23,500  HvCallVtlCall
+  0x0051      99  HvCallSetVpRegisters
+  0x0050      23  HvCallGetVpRegisters
+  0x000f       2  HvCallEnableVpVtl
+  0x0046       1  HvCallGetPartitionId
+  0x000d       1  HvCallEnablePartitionVtl
+```
+
+**One `EnablePartitionVtl` plus one `EnableVpVtl` per application
+processor is exactly correct for three processors.** VTL1 is enabled
+everywhere, and 23,500 VtlCall/VtlReturn pairs say the secure kernel is
+running, not stillborn.
+
+The saturation worry raised against this census does not apply either -
+eight distinct codes against sixteen slots. (The slot table *is* partition
+wide and unsynchronised, and that remains worth fixing before it is ever
+trusted at scale; it simply did not bite here.)
+
+`HvCallStartVirtualProcessor` (0x0099) is genuinely absent, and that is
+correct rather than a gap: Hyper-V starts its processors with INIT/SIPI
+on this platform, which is the path `start_up.cpp` already handles, and
+those never appear as hypercalls at all.
+
+### What this leaves
+
+The secure kernel is enabled on every processor, switching trust levels
+tens of thousands of times, and *then* fail-fasts. So the fault is not in
+bringing VTL1 up. It is in something VTL1 checks while running.
+
+
 ## The secure kernel FAIL-FASTS: `SkeBugCheckStatus = 0xC0000409`
 
 **2026-08-25.** Read out of the running three-processor guest, from the
