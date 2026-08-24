@@ -894,12 +894,18 @@ std::expected<void, zpp::error> hypervisor::initialize_ept()
             // 51. That is 562 of the 1024 tables the pool holds. VCNT is
             // 10 on the machine this was written for, where one region is
             // mixed: the first, holding the legacy 0xa0000 aperture.
-            if (this->next_ept_table >= std::size(this->ept)) {
+            if (this->next_ept_table.load(std::memory_order_relaxed) >=
+                std::size(this->ept)) {
                 return std::unexpected(
                     zpp::error{error::out_of_ept_entries});
             }
 
-            auto & ept = this->ept[this->next_ept_table++];
+            // Relaxed: `initialize_ept` runs on the boot processor
+            // before any application processor exists, so there is no
+            // second claimant here. The ordering that matters is in
+            // `epte_for`, which does have one.
+            auto & ept = this->ept[this->next_ept_table.fetch_add(
+                1, std::memory_order_relaxed)];
             for (std::size_t k{}; k < entries_per_table; ++k) {
                 auto & epte = ept[k];
                 epte = rwx_pte;
@@ -927,7 +933,8 @@ std::expected<void, zpp::error> hypervisor::initialize_ept()
     // pointers into tables that were never finished.
     this->ept_initialized = true;
 
-    log("ept built, {} mixed regions split to 4 kb", this->next_ept_table);
+    log("ept built, {} mixed regions split to 4 kb",
+        this->next_ept_table.load(std::memory_order_relaxed));
     return {};
 }
 
@@ -1090,11 +1097,47 @@ hypervisor::epte_for(std::uint64_t physical_address)
     // one, not a fix - but it has to be a check before use now,
     // because initialize_ept has already consumed part of the pool and
     // the index no longer starts at zero.
-    if (this->next_ept_table >= ept_count) {
+    // **Claimed atomically, because this runs on the exit path of every
+    // processor.** `this->ept[this->next_ept_table++]` is a
+    // read-modify-write on a plain member, and two processors reaching
+    // it together fail in two ways, both silent:
+    //
+    // - *Same index.* Both fill `ept[N]` with different frames and point
+    //   different `epde`s at the same table physical address, so one 2 MB
+    //   region of guest memory ends up describing another's frames.
+    // - *Same address.* Both see `large()`, both allocate, and the loser
+    //   returns a pointer into a table nothing references - so a watch
+    //   armed through it **never fires**, and neither an APIC write nor a
+    //   start-up IPI through that page is ever intercepted. Nothing logs
+    //   it.
+    //
+    // Only reachable with more than one processor, and Windows probes
+    // physical memory from every processor during boot, which is exactly
+    // what drives concurrent splits.
+    auto claimed =
+        this->next_ept_table.fetch_add(1, std::memory_order_acq_rel);
+
+    if (claimed >= ept_count) {
         return std::unexpected(zpp::error{error::out_of_ept_entries});
     }
 
-    auto & ept = this->ept[this->next_ept_table++];
+    // Re-tested after the claim, because another processor can have
+    // split this same entry between the test above and here. The claimed
+    // table is then leaked for the life of the boot, which is the right
+    // trade: the pool is fixed and splits are bounded, and the
+    // alternative - a free list - would need its own mutual exclusion on
+    // the same path this exists to keep cheap.
+    if (!epde.large()) {
+        auto ept_physical_address = epde.page_number() << 12;
+
+        auto existing = reinterpret_cast<arch::x86_64::vmx::epte *>(
+            this->module_physical_to_virtual.find(ept_physical_address)
+                ->second);
+
+        return &existing[(physical_address >> 12) & 0x1ff];
+    }
+
+    auto & ept = this->ept[claimed];
     auto memory_type = epde.type();
     auto page_number = (epde.large_page_number() << (21 - 12));
     for (std::size_t j{}; j < 512; ++j) {

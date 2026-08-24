@@ -8698,7 +8698,19 @@ private:
      * 2 MB page holding part of this module. Both draw from the same pool,
      * so the index cannot be local to either.
      */
-    std::size_t next_ept_table{};
+    /**
+     * The next free table in the extended-page-table pool.
+     *
+     * **Atomic because `epte_for` runs on the exit path of every
+     * processor**, and `ept[next_ept_table++]` is a read-modify-write.
+     * Two processors reaching it together either take the same index -
+     * two page-directory entries then name one table - or split the same
+     * entry and leave one table orphaned, through which an armed watch
+     * never fires. Both are silent; nothing faults and nothing logs.
+     *
+     * Not a problem on one processor, ever, which is why it survived.
+     */
+    std::atomic<std::size_t> next_ept_table{};
 
     /**
      * Whether initialize_ept has finished.
