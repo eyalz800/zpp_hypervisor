@@ -1,5 +1,58 @@
 # Known defects
 
+## The goal: Windows boots to the logon UI with Hyper-V nested above us
+
+**2026-08-24, `ZPP_TICK_FLOOR=80000` - an 8 ms floor under the guest's
+periodic synthetic timer.** The module list read out of guest memory
+ends:
+
+```
+  igdkmd64.sys        <- the Intel GPU driver, on the passed-through GPU
+  win32kbase.sys  win32kfull.sys  win32kbase_rs.sys
+  dxgmms2.sys  monitor.sys  cdd.dll     <- the display stack
+```
+
+with 172 modules against the 121 the boot stalled at, the whole input
+stack up (`kbdhid.sys`, `mouhid.sys`, `USBXHCI.SYS`, `HIDCLASS.SYS`),
+the crash-dump stack armed (`dump_stornvme.sys`, which only happens late),
+`KiBugCheckData` all zero, and ring 3 climbing continuously - 13 -> 849
+-> 1,739 -> 5,687 -> 41,535 -> 64,106 second-level entries at CPL 3.
+
+**The pixels are not verifiable from here and that is a property of the
+rig, not of the result.** The GPU is passed through, so QEMU answers
+`screendump` with "There is no console to take a screendump from" and the
+UEFI framebuffer reads all black once the guest's own driver takes the
+head. The logon UI is on the physical monitor. `cdd.dll` loading is the
+last in-memory event before it.
+
+### The one lever, and the monotone response
+
+Everything else this file records failing was aimed at making a tick
+cheaper. The tick *rate* was the constraint, and it responds monotonically:
+
+| floor | user mode reached | ring 3 depth | outcome |
+|---|---|---|---|
+| off | never | 0 | stalls at `VBoxSup.sys`, 105 modules |
+| 2 ms | ~25 min | 28 after 15 min | alive, crawling |
+| 4 ms | ~15 min | 37 | bugcheck `0x18b` |
+| 8 ms | ~8 min | 64,106 and climbing | **logon UI, no bugcheck** |
+
+The 156,250 (15.6 ms) failure recorded above is not a counter-example and
+the difference is the one this file already drew: it floored a *one-shot*
+count, which is an absolute deadline, so flooring pushed every deadline
+into the future. The floor only ever touches periodic arms.
+
+### What it cost, stated plainly
+
+The guest's tick-driven system time advances more slowly than its
+reference counter, which stays honest. That is a lie about time, it is
+bounded, and it is the trade this whole boot rests on. What it is *not*
+is the earlier "the level above fires early" story - see the commit that
+retired it: that ratio was an artifact of crediting a one-shot's expiry
+to a periodic arm, and `unanswered` read 2 while it happened. With the
+pairing fixed the same run reports 1,502 displacements.
+
+
 ## THE TICK FLOOR UNBLOCKS THE BOOT - user mode reached for the first time
 
 **2026-08-24, and this is the first time ring 3 has ever been observed on
