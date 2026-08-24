@@ -1,5 +1,52 @@
 # Known defects
 
+## RETRACTED: the VM entry is never refused. All four refusal counters read zero.
+
+**2026-08-25.** The reading that an application processor is lost because
+this VMM keeps refusing the guest hypervisor's VMRESUME is **wrong**, and
+one counter settles it. Three processors, the abandonment pattern present
+on cpu2 as usual:
+
+```
+  cpu0  no_current_vmcs=0 launch_not_clear=0 resume_not_launched=0 control_or_host_state=0
+  cpu1  no_current_vmcs=0 launch_not_clear=0 resume_not_launched=0 control_or_host_state=0
+  cpu2  no_current_vmcs=0 launch_not_clear=0 resume_not_launched=0 control_or_host_state=0
+```
+
+`on_guest_vmlaunch` has four refusal paths and **not one of them ever
+fires**. So the retry loop is not a refused entry.
+
+### What the loop actually is
+
+`vmcall` and `vmresume` **alternate** in the exit ring at that site,
+which the earlier reading passed over. The consistent account is the
+ordinary one: the VMRESUME *succeeds*, the second-level guest runs and
+exits, and the reflection returns the guest hypervisor to its own host
+RIP - which lies inside that loop. So this is the guest hypervisor's
+normal exit-handling path, retrying something that keeps failing **at the
+second level**, and the countdown is its budget for that.
+
+That does not make the disassembly wrong - the loop, the `mov $0x10,%rax`
+and the `VMCLEAR` at the end are all real, and the `vmcall` inside it is
+still a report rather than a request. What was wrong is the inference
+that the thing being retried is the entry, and therefore that we are the
+ones refusing it.
+
+**The lesson is the one this file keeps paying for**, in a new place: a
+disassembly tells you what the code *does*, not which of its paths was
+taken. The loop was read correctly and then walked in the wrong
+direction, and the counter that would have said so cost twenty lines.
+
+### And the launch-state write is now unattributed
+
+The fix that writes `launched` through to the vmcs12 region was committed
+on the strength of this reading. It remains correct on its own terms -
+`on_guest_vmclear` persists `clear` and explains why the state must live
+in the region - but **the reboot-loop it produced is not evidence for or
+against it**, and it should not be described as addressing the
+abandonment.
+
+
 ## The launch-state fix changes the failure mode and does not fix the boot
 
 **2026-08-25.** With `launched` written through to the vmcs12 region as
