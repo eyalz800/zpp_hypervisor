@@ -1,5 +1,58 @@
 # Known defects
 
+## The parked VTL1 instruction is `SkeCrashDumpNmi` - the secure kernel bugchecks
+
+**2026-08-25.** Named, and by `.pdata` bounds rather than the nearest
+symbol: RVA `0xb043e` lies inside `0xb0294`-`0xb0464`, which is
+**`SkeCrashDumpNmi`** - the secure kernel's crash-dump NMI handler.
+
+### How to reach securekernel's symbols at all, since nothing here had
+
+VTL1's image cannot be found by walking VTL0's page tables, and a virtual
+scan under VTL1's own CR3 fails too - that address space is sparse, so
+almost every candidate is unmapped and the scan skips it. **Scan physical
+memory instead.** The stopped instruction pointer translates under the
+processor's own CR3 to a physical address, and stepping down from there
+a page at a time finds the header:
+
+```
+  phys base 0x18ba000   SizeOfImage 0x169000   offset 0xb043e   <- contains it
+```
+
+Then `scripts/guest-symbols.sh /tmp/securekernel.exe` fetches
+`securekernel.pdb` (`624A32CC5C6FB9AB012F6A639A4F78231`) and
+`llvm-symbolizer --relative-address` names it. The file comes off the
+volume with `ntfscat` exactly as `ntoskrnl.exe` did.
+
+### What it means, and what it rules out
+
+`SkeCrashDumpNmi` is the handler a processor runs when it is **NMI'd as
+part of a crash dump**. So cpu0 is not the processor that failed - it is
+a bystander, frozen. Windows freezes the other processors with an NMI
+when it bugchecks, and the secure kernel does the same for its own crash.
+
+Put beside the rest, the sequence is: the secure kernel bugchecks on one
+processor, NMIs the others into `SkeCrashDumpNmi`, and VTL0 runs
+`HvlSkCrashdumpCallbackRoutine` to capture the dump. Every processor then
+dead-ends in `pause; jmp .-2`. **VTL0's `KiBugCheckData` stays zero
+throughout because VTL0 never bugchecked**, which is why that field
+looked inconsistent with everything else.
+
+**It is probably not our NMI.** `send_wake_nmi` has one caller,
+`wait_for_ept_acknowledgement`, and on the wedged run `ack_target` and
+`ack_launched_mask` both read **0** - both are set on entry to that
+function, so it had never been called. The symbols survive
+`--gc-sections` in the deployed binary, so this is "did not run", not
+"cannot run", and it is worth re-checking on any run where those two
+fields are non-zero.
+
+### What is still not known
+
+Why the secure kernel bugchecked. The next reading is its own crash
+record - the secure kernel keeps one, and `securekernel.pdb` is now on
+disk to find it with.
+
+
 ## The secure kernel's own instruction, read at last - both processors are parked
 
 **2026-08-25.** `BACKLOG.md` records that every previous attempt to trace
