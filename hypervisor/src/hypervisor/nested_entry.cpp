@@ -10626,11 +10626,11 @@ hypervisor::on_l2_exit(std::size_t cpu,
         // the future. `l2_stimer_config`'s periodic bit is checked as
         // well, so the test is the interface's own answer and not only
         // the magnitude.
-#ifndef ZPP_TICK_FLOOR
-#define ZPP_TICK_FLOOR 0
-#endif
-        if constexpr (0 != ZPP_TICK_FLOOR) {
-            constexpr std::uint64_t floor_value = ZPP_TICK_FLOOR;
+        // The constant lives in `nested_vmx.h` so `build_switches.cpp`
+        // can print it. See it there for why that matters.
+        if constexpr (0 != nested_vmx::tick_floor_units) {
+            constexpr std::uint64_t floor_value =
+                nested_vmx::tick_floor_units;
             constexpr std::uint64_t period_limit = 10000000;
             constexpr std::uint64_t config_periodic = 1ull << 1;
 

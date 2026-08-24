@@ -123,6 +123,28 @@ extern "C" [[gnu::used, gnu::retain]] constinit const char
         digit(static_cast<unsigned>(
             nested_vmx::lazy_tick_microseconds / 10)),
         digit(static_cast<unsigned>(nested_vmx::lazy_tick_microseconds)),
+        // Seven digits, because the site that consumes this refuses any
+        // value at or above 10,000,000 as an absolute deadline rather
+        // than a period, so every legal setting fits and none can be
+        // truncated into a different legal one.
+        //
+        // **This is the switch that most needed printing and was the one
+        // the manifest could not say.** It took the boot from stalling at
+        // `VBoxSup.sys` to reaching ring 3, so which value was compiled
+        // now decides what every measurement means - and it was invisible
+        // to `strings` for exactly the reason the array exists. It stayed
+        // invisible because it is a *value* and everything here was a
+        // boolean, which is a gap in the manifest and not in the switch.
+        ' ', 'f', 'l', 'o', 'o', 'r', '=',
+        digit(static_cast<unsigned>(nested_vmx::tick_floor_units /
+                                    1000000)),
+        digit(static_cast<unsigned>(nested_vmx::tick_floor_units /
+                                    100000)),
+        digit(static_cast<unsigned>(nested_vmx::tick_floor_units / 10000)),
+        digit(static_cast<unsigned>(nested_vmx::tick_floor_units / 1000)),
+        digit(static_cast<unsigned>(nested_vmx::tick_floor_units / 100)),
+        digit(static_cast<unsigned>(nested_vmx::tick_floor_units / 10)),
+        digit(static_cast<unsigned>(nested_vmx::tick_floor_units)),
         // Two digits for both multipliers, where every switch above
         // needs one. They are free-form `CACHE STRING`s rather than
         // booleans - `BACKLOG.md` records the stretch run at 1, 2 and 8,

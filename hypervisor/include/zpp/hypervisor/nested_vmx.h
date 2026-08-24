@@ -1187,6 +1187,26 @@ inline constexpr bool disarm_apic_watch = (0 != ZPP_DISARM_APIC_WATCH);
 inline constexpr std::uint64_t lazy_tick_microseconds = ZPP_LAZY_TICK;
 
 /**
+ * A floor under the second-level guest's periodic synthetic timer, in
+ * 100 ns units. Zero is off. See the site in `nested_entry.cpp` for what
+ * it does and what it costs; this is here rather than beside that site
+ * so `build_switches.cpp` can print it.
+ *
+ * **It has to be printable.** It is the switch that took this boot from
+ * stalling at `VBoxSup.sys` to reaching ring 3, so every measurement now
+ * depends on which value was compiled - and the manifest could not say.
+ * That is the exact shape of the `ZPP_PUBLISH_REFERENCE_TSC` failure the
+ * manifest exists to prevent, and it survived in the one switch that
+ * mattered most because the switch is a *value* and the manifest only
+ * had digits for booleans.
+ */
+#ifndef ZPP_TICK_FLOOR
+#define ZPP_TICK_FLOOR 0
+#endif
+
+inline constexpr std::uint64_t tick_floor_units = ZPP_TICK_FLOOR;
+
+/**
  * Time-stamp ticks in a microsecond on the part this runs on, measured
  * at the wall as 1,992,000,000 Hz and agreeing with CPUID.15H's 24 MHz
  * crystal times 83. Not derived from a leaf that reads zero here.
