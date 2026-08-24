@@ -1,5 +1,71 @@
 # Known defects
 
+## The secure kernel's own instruction, read at last - both processors are parked
+
+**2026-08-25.** `BACKLOG.md` records that every previous attempt to trace
+VTL1 was reading `ntoskrnl` by mistake, so the secure kernel's execution
+had never actually been observed. It has now, and it took no new
+instrumentation - only the right CR3.
+
+**VTL1 memory is unreachable through VTL0's page tables, which is the
+entire point of VBS.** A walk with the System process's CR3
+(`0x1ae000`) returns UNMAPPED for the secure kernel's instruction
+pointer, and scanning 900 MB below it finds three unrelated images and
+never the right one. The processor's *own* CR3 - `0x8800000`, which this
+file already noted as "an address space that is not identity-mapped" -
+translates it immediately. **That address space is VTL1's.**
+
+The bytes at both stopped instruction pointers:
+
+```
+  cpu0  securekernel   0f 11 40 40 | f3 90 | eb fc
+  cpu1  ntoskrnl       ...      cc | f3 90 | eb fc
+                                     pause    jmp .-2
+```
+
+`f3 90 / eb fc` is `pause; jmp` onto itself - Windows' deliberate
+dead-end, "park this processor for ever". cpu1's is preceded by `cc`,
+the fail-fast breakpoint, and sits at the **end** of
+`HvlSkCrashdumpCallbackRoutine` (`0x587790`-`0x58782d`), which is a
+callback that never returns because there is nothing to return to.
+
+### What this settles
+
+**The secure kernel crashes, and VTL0's callback records it and parks.**
+An earlier review argued the opposite - that `HvlSkCrashdumpCallbackRoutine`
+is reached through `KeBugCheckEx`'s callback list, so VTL0 must have
+bugchecked first and the "secure kernel crashed" reading was inverted.
+The instruction bytes decide it the other way:
+
+- VTL0's `KiBugCheckData` is **all zero**, with the reader proven (the
+  kernel's PE header reads `MZ` through the same CR3). VTL0 did not
+  bugcheck.
+- Yet a processor is parked at a dead end inside the *secure kernel's
+  own* crashdump callback, and the other is parked inside the secure
+  kernel itself.
+
+Both are true only if the failure began in VTL1. `Sk` is the secure
+kernel, and the callback exists so VTL0 can capture *its* crash.
+
+### And it is a park, not a livelock
+
+Every reading that called this a wedge, a spin or a hang was describing
+`pause; jmp .-2`. The processors are not making progress and never will;
+100% host CPU burn is what a `pause` loop costs. **`KiBugCheckData` being
+zero does not mean "no failure" here** - it means the failure was not
+VTL0's.
+
+### What is still not known
+
+Why the secure kernel died. That needs `securekernel.exe` and its public
+symbols, pulled off the volume the same way `ntoskrnl.exe` was
+(`scripts/guest-symbols.sh`, guest stopped, `ntfscat` - and note the
+case-sensitivity trap already recorded for `ci.dll`). The image base is
+readable from a live guest by scanning down from the stopped instruction
+pointer **under that processor's own CR3**, which is the step this entry
+exists to record.
+
+
 ## `0x1DB` is `IPI_WATCHDOG_TIMEOUT`, and the header was in this repo all along
 
 **2026-08-24.** The bugcheck was carried for hours as an unresolved
