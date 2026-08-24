@@ -1,5 +1,79 @@
 # Known defects
 
+## Booting this VMM on the metal - ready to run
+
+Everything measured on the rig so far has this VMM running as a KVM
+guest, and the accounting closes with nothing spare: 26.9% us, 65.4% the
+guest hypervisor, 7.7% Windows. Those two large numbers are both the same
+quantity - about 12 exits per second-level round trip, each a round trip
+through KVM at roughly 25,000 cycles - and neither survives the move to
+real hardware. This is the experiment that says whether that is the whole
+story.
+
+**It is the one thing in this project that cannot be run remotely.** If
+the machine does not come back, someone has to be standing next to it.
+
+### Build
+
+```sh
+cmake --preset debug -DZPP_NESTED_VMX=ON \
+                     -DZPP_EVMCS_TO_KVM=OFF \
+                     -DZPP_TRACE_VTL=OFF \
+                     -DZPP_VMCS_CENSUS=OFF
+cmake --build --preset debug
+```
+
+`ZPP_EVMCS_TO_KVM` **must be off**. It is a contract with KVM - it needs
+QEMU to expose `hv-evmcs`, and on the metal there is nothing to expose
+it. With it off, VMCS shadowing comes back on by itself, which is the
+configuration the predictions below assume.
+
+### Gate, before the bytes go anywhere
+
+```sh
+./scripts/check-bootable.sh out/debug/x86_64/zpp_loader.efi
+```
+
+It refuses a loader carrying `ZPP_VERIFY_HYPERVISOR`, which parks every
+application processor in real mode and never reaches an operating system
+- the failure that cost a full day. It also prints the switch manifest;
+read `evmk=0` back from it rather than trusting the cache.
+
+### Predictions, written before the run
+
+State these first so the result means something.
+
+| | under KVM | expected on the metal |
+|---|---|---|
+| this VMM's duty | 0.269 | well below - our VMCS accesses stop being exits |
+| guest hypervisor | 65.4% | falls, but **not** to zero |
+| Windows | 7.7% | the remainder |
+| `l2_cpl_seen[3]` | 0 | **non-zero** |
+
+**The guest hypervisor's share will not collapse for the reason first
+written down.** This processor has no `shadow_vmcs` at all - it is absent
+from `/proc/cpuinfo`'s `vmx flags` - so its VMREADs will still exit to
+us. What changes is their *cost*: an exit on the metal is hundreds to a
+couple of thousand cycles, against roughly 25,000 through KVM. **Measure
+the exit cost, not the exit count.**
+
+`l2_cpl_seen[3]` going non-zero is the completion detector: ring 3 means
+the session manager runs, which means kernel initialisation finished.
+
+**If Windows still gets single-digit percent, the nesting-tax reading is
+wrong** and this whole line of reasoning needs rethinking - which is
+worth knowing, and is why the numbers are committed in advance.
+
+### What will still be in the way
+
+`VBoxSup.sys` is proven not to complete its `DriverEntry` here: about 110
+minutes across three runs with the module count frozen at 105 while the
+guest executed 4,300 second-level entries a second. If the tax is the KVM
+artifact, more speed may carry it through. If it does not, that driver is
+the next thing to remove and it is a decision about the installation, not
+about this VMM.
+
+
 ## SETTLED: the boot is stalled at `VBoxSup`, not slow - measured over 110 minutes
 
 **2026-08-24.** "Stalled or merely slow" has been open since the module
