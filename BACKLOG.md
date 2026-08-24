@@ -1,5 +1,38 @@
 # Known defects
 
+## `ZPP_NESTED_VMX=OFF` is not a bisect of the multicore failure
+
+Tried on 2026-08-24 as "is this failure nested at all", and it answers a
+question nobody asked. **With VMX hidden, Hyper-V does not run - it
+stands down cleanly, which is the whole point of hiding it.** So the boot
+that results is Windows with no VBS and no second level, and whether it
+survives three processors says nothing about the configuration that
+fails.
+
+`deploy-to-rig.sh` refuses such a build, correctly, and its refusal text
+offers `ZPP_ALLOW_NO_NESTED=1` for exactly this question. The override
+works; the question is still the wrong one.
+
+**What can be varied while keeping Hyper-V alive** is the list to work
+from instead: processor count and topology, and the build switches in
+`build_switches.cpp` - `evmk`, `shadowvmcs`, `tpr`, `reftsc`, `defer`,
+`apic`, `vcache` and the rest. Those keep VMX visible, so Hyper-V still
+launches and VBS still runs.
+
+### And a deploy that did not deploy
+
+The same attempt ran `deploy-to-rig.sh 2>&1 | grep -E "^OK:"`, which
+printed nothing and was read as success. The deploy had been *refused*,
+the rig kept the previous binary, and a dump was then taken and reasoned
+about - `l2-entries` non-zero on a build that cannot have a second level
+is what gave it away.
+
+**Filtering a script's output to the success line turns a failure into
+silence.** `.rig-deployed-hypervisor.elf` carries the manifest of what is
+actually on the rig, and its timestamp was 24 minutes older than the
+build. Check that, not the grep.
+
+
 ## Correction: `shadow_ept_pointer_for` is not an application-processor problem
 
 The entry above promoted it on "52,757 cycles a call on VP1 against 6,835
