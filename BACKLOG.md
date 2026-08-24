@@ -1,5 +1,54 @@
 # Known defects
 
+## The launch-state fix changes the failure mode and does not fix the boot
+
+**2026-08-25.** With `launched` written through to the vmcs12 region as
+well as the cache, three processors **reboot-loop**: the chainload count
+climbs 42, 44, 48 over three minutes, several boots a minute, where the
+same build previously wedged or fail-fasted and stayed there.
+
+A changed failure mode is evidence the write reaches something. It is not
+a fix, and it is not yet attributable - the guest also reboots once
+legitimately when the processor count changes, so a loop has to be
+distinguished from that by the count climbing, which is how it was read
+here.
+
+**The defect itself stands on its own merits and is kept.** The
+asymmetry is real and provable from the source alone:
+`on_guest_vmclear` writes `clear` through to `launch_state_offset` and
+explains in its own comment why the state must live in the region;
+`shadow.state(launched)` wrote only the per-processor cache. A region
+that is only ever told `clear` is wrong however the boot behaves.
+
+### What the disassembly established, which stands regardless
+
+The guest hypervisor's retry loop, read from its own code at the repeated
+exit rather than inferred from any field:
+
+```
+      mov  $0x10, %rax
+  loop:
+      vmresume
+      xor  %rcx, %rcx
+      vmcall
+      dec  %rax
+      jne  loop
+```
+
+Sixteen attempts, then `xsetbv` and `VMCLEAR`, and the virtual processor
+is abandoned. The countdown in the exit ring's `detail` field - `0xd`
+down to `0x1` - is that `%rax`, and the `vmcall` inside the loop is a
+failure report, **not a request**. That retires the reading of those
+thirteen calls as "the level above asks us for something and we refuse
+it", which three separate field decodes had failed to settle and which
+had been carried for several entries.
+
+So the mechanism of abandonment is now known exactly: **a VM entry the
+guest hypervisor keeps being refused.** Which refusal is not yet
+established - `on_guest_vmlaunch` has four, and only one of them was
+addressed here.
+
+
 ## `context.rip` is not the guest instruction pointer at an exit
 
 **2026-08-25.** Four instruments in a row gave nonsense about the same
