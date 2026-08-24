@@ -1,5 +1,67 @@
 # Known defects
 
+## `0xC0000409` names no invariant, and the VTL1 multiprocessor code never fail-fasts
+
+**2026-08-25, from static analysis of `securekernel.exe` with its PDB.**
+Two results, both of which narrow the hunt by removing things.
+
+### The status cannot identify the check
+
+`0xC0000409` is what **every** `int 0x29` produces, whatever FAST_FAIL
+code is in ECX. `SkeBugCheckEx` reads `SkeBugCheckStatus` after the fact.
+So the reading recorded above - that VTL1 "checked an invariant, found it
+violated" - is right, and the hope of naming *which* invariant from the
+status is not. There are 232 sites.
+
+### And none of them is in the multiprocessor path
+
+Every `int 0x29` was mapped to its enclosing function through the
+`.pdata` exception directory - not by nearest symbol, which mislabels
+here - and the VP, IPI, VTL and intercept functions contain **none**:
+`SkeStartProcessor`, `SkiStartProcessor`, `ShvlStartVirtualProcessor`,
+`SkeInitializeProcessor`, `ShvlEnableVpVtl`, `ShvlpInitializeVpAssistPage`,
+`ShvlpInitializeReferenceTsc`, `ShvlpInitializeSynic`,
+`SkiValidateVtl0VpContext`, `SkiHandleIpi`, `SkeGenericIpiCall`,
+`KiIpiInterrupt`, `KiNmiInterrupt`, `SkeCrashDumpNmi`. All of them report
+errors by branching to `SkeBugCheckEx`, never by fail-fasting.
+
+**So the fail-fast is a generic integrity guard tripped by state that was
+already corrupt**, not a check on a value this VMM supplied. The code
+histogram says the same: `CORRUPT_LIST_ENTRY` 95, `INVALID_PFN` 80,
+`INVALID_REFERENCE_COUNT` about 39 counting the interlocked
+`lock xadd; cmp; lea ecx,[r+0xd]; int 0x29` idiom. Those name a
+trampled structure, not who trampled it.
+
+The practical consequence: **stop trying to identify the invariant, and
+find what gets corrupted when a second processor exists.** Expect it to
+surface as one of those two codes.
+
+### The one concrete per-VP validator
+
+`SkiValidateVtl0VpContext` (RVA `0x8acf8`) is the only function that
+checks a *hypervisor-supplied per-processor context* field by field, and
+it returns `STATUS_INVALID_PARAMETER` rather than fail-fasting: TSS
+descriptor limit `0x67` and type byte `0x1b`, CS selector `0x10`, CS
+access rights with `(ar & 0x2090) == 0x2090` and `(ar & 0x60) == 0`, a
+`0xFFF` limit field, page alignment of the structure, several segment
+bases required zero, and the GDT base equal to a known global.
+
+That is a checkable list against what this VMM hands an application
+processor, and it is the next thing to read.
+
+### The L1 `vmcall` census did not identify the call - negative result
+
+The unconditional census added for this landed and says nothing useful:
+121 calls on the abandoned processor with **62 of them overflowing** a
+16-slot table, `rcx = 0` on the last one, and a code histogram of
+`0x8ec0` x25, `0x8e90` x9, `0x0020` x5, `0x4000` x4 - **not Hyper-V
+hypercall codes.** So `rcx & 0xffff` is the wrong reading for these
+exits, exactly as the `detail` field was. Recorded as a negative result
+so the next person does not re-derive a call code from it; what is needed
+is to establish what these `vmcall`s *are* before decoding any register
+as a code.
+
+
 ## An application processor is ABANDONED: Hyper-V retries, then VMCLEARs it
 
 **2026-08-25, three processors.** The clearest picture yet of what
