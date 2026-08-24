@@ -1,5 +1,60 @@
 # Known defects
 
+## Two processors: the guest is IDLE, not spinning and not starved
+
+**2026-08-24, and this overturns the reading in the entry below.** With
+the reboot allowed, the two-processor boot sits at 8 processes and never
+enters ring 3. The interrupted-instruction histogram is the most
+concentrated this tree has ever recorded - 99.8% at a single address -
+which reads as a tight spin loop and is not one:
+
+```
+  ntoskrnl+0x6a6f8f   3,454,120   99.8%   HalProcessorIdle
+    PpmIdleDefaultExecute
+    PpmWakeClockOwnerIfNeeded
+    PoIdle
+    SwapContext
+    KiInitialThread
+    KiIdleLoop
+```
+
+**That is the idle loop.** The second histogram agrees - `HalpHvTimerArm`
+48.6% and `HvlEndSystemInterrupt` 47.3% - which is a machine that wakes
+for its clock tick and goes straight back to sleep. VP1 is halted by the
+level above (`hlt` at an L1 instruction pointer). So both processors are
+idle and the guest is **waiting for an event that never arrives**, having
+spent 3.4 million clock ticks doing nothing.
+
+Everything that made this look like a performance problem is measured and
+still true, and none of it is the cause: 7,033,036 `wrmsr` exits at 15.7%
+of handler time, 3,455,613 `STIMER0_COUNT` writes and 3,363,041 `EOI`
+writes. That is the *cost of being idle* at 121 Hz, not work.
+
+### What this rules out
+
+- **Not the tick floor.** The delivered period is 8.255 ms here against
+  8.559 ms on the single-processor run that reaches the logon UI. Same
+  binary, same floor, same rate.
+- **Not IPI delivery to VP1.** VP1 receives 6,256 injected vectors,
+  98.7% of them the clock at 0x2f, so interrupts do reach it.
+- **Not a deadlock between the processors.** A spin would not be inside
+  `PoIdle`.
+
+### The lesson, which is the reusable part
+
+**A histogram concentrated at one address is not evidence of a spin.**
+99.8% at one instruction is exactly what an idle machine looks like,
+because idle *is* a loop - and it is the single most convincing-looking
+wrong answer available. It took a symbol to tell them apart, and the
+symbol took pulling `ntoskrnl.exe` off the volume with the guest stopped.
+Do that first next time; every reading before it was a guess with a
+percentage attached.
+
+`/tmp/ntoskrnl.exe` and its PDB (`ntkrnlmp.pdb`,
+`C8A7F11B37FE28227B6B11412E3A05191`) are what named it, via
+`llvm-symbolizer --obj=... --relative-address`.
+
+
 ## Retraction: the two-processor reset was normal, and `-no-reboot` made it fatal
 
 **The entry below - "Two processors: the guest resets the partition on
