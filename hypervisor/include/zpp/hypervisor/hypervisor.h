@@ -7508,6 +7508,44 @@ private:
     std::uint64_t ept_violation_unclaimed[max_cpus]{};
 
     /**
+     * Which VM entry the guest hypervisor asked for was refused, and how
+     * often, per processor.
+     *
+     * `on_guest_vmlaunch` refuses in four distinct ways and until this
+     * existed they were indistinguishable from outside, because every
+     * one of them ends in the same `vmx_fail`. That mattered once the
+     * guest hypervisor's own code was disassembled at the repeated exit
+     * and turned out to be a retry loop around VMRESUME -
+     * `mov $0x10,%rax; vmresume; xor %rcx,%rcx; vmcall; dec %rax; jne` -
+     * which gives up after sixteen attempts, executes VMCLEAR, and
+     * abandons that virtual processor. So a refusal is the mechanism by
+     * which an application processor is lost, and *which* refusal is the
+     * remaining question.
+     */
+    enum class entry_refusal : std::size_t
+    {
+        no_current_vmcs,
+        launch_not_clear,
+        resume_not_launched,
+        control_or_host_state,
+        count,
+    };
+
+    std::uint64_t entry_refusals[max_cpus][static_cast<std::size_t>(
+        entry_refusal::count)]{};
+
+    void note_entry_refusal(std::size_t cpu, entry_refusal which)
+    {
+        auto index = static_cast<std::size_t>(which);
+
+        if ((cpu < max_cpus) &&
+            (index < static_cast<std::size_t>(entry_refusal::count))) {
+            this->entry_refusals[cpu][index] =
+                this->entry_refusals[cpu][index] + 1;
+        }
+    }
+
+    /**
      * What the guest hypervisor asks *this* VMM, per processor.
      *
      * The only path by which the level above calls down is `VMCALL`, and

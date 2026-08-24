@@ -1882,6 +1882,7 @@ bool hypervisor::on_guest_vmlaunch(std::size_t cpu,
     // first-level hypervisor's own error handling is written around. SDM
     // 33.3, VMLAUNCH/VMRESUME.
     if (!enlightened && (no_current_vmcs == this->guest_current_vmcs[cpu])) {
+        note_entry_refusal(cpu, entry_refusal::no_current_vmcs);
         vmx_fail_invalid();
         return true;
     }
@@ -1903,12 +1904,14 @@ bool hypervisor::on_guest_vmlaunch(std::size_t cpu,
 
     if ((basic_reason::vmlaunch == reason) &&
         (vmcs12::launch_state::clear != shadow.state())) {
+        note_entry_refusal(cpu, entry_refusal::launch_not_clear);
         vmx_fail(cpu, instruction_error::vmlaunch_with_non_clear_vmcs);
         return true;
     }
 
     if ((basic_reason::vmresume == reason) &&
         (vmcs12::launch_state::launched != shadow.state())) {
+        note_entry_refusal(cpu, entry_refusal::resume_not_launched);
         vmx_fail(cpu, instruction_error::vmresume_with_non_launched_vmcs);
         return true;
     }
@@ -1946,6 +1949,7 @@ bool hypervisor::on_guest_vmlaunch(std::size_t cpu,
             cpu,
             refusal);
 
+        note_entry_refusal(cpu, entry_refusal::control_or_host_state);
         vmx_fail(cpu,
                  (0 != refusal)
                      ? static_cast<instruction_error>(refusal)
@@ -1991,6 +1995,7 @@ bool hypervisor::on_guest_vmlaunch(std::size_t cpu,
             (basic_reason::vmlaunch == reason) ? "vmlaunch" : "vmresume",
             built.error().code());
 
+        note_entry_refusal(cpu, entry_refusal::control_or_host_state);
         vmx_fail(
             cpu,
             (zpp::error{error::nested_host_state_unsupported}.code() ==
