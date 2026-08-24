@@ -1,5 +1,68 @@
 # Known defects
 
+## RETRACTED: nobody is stuck in the constructor. The module base was stale.
+
+**The entry below - "A processor is stuck inside the singleton's
+CONSTRUCTOR" - is wrong in every particular, and the cause is a mistake
+this file already documents.** The module base was taken from an earlier
+boot's serial line (`0x6717b000`) instead of being read for the run in
+hand. The real base is `0x67176000`, which `module_base` reports and
+which is provable: `0x67176000 + 0x14c2000` is `0x68638000`, exactly the
+singleton address the state dump prints.
+
+Everything downstream of the wrong base was wrong by `0x5000`:
+
+| | with the stale base | with the real base |
+|---|---|---|
+| cpu0's RVA | `0x30511` | `0x35511` |
+| symbol | `hypervisor::hypervisor()` | **`arch::x86_64::halt()`** |
+| guard byte | `0x0` "not constructed" | **`0x1` constructed** |
+
+There is **no constructor race**, the singleton is constructed exactly
+once, and the disassembly that "confirmed" a `cmpq`/`jne` initialisation
+loop was of an address nothing was executing. The retracted entry even
+cites `CLAUDE.md`'s warning about this class - *"The module base moves
+when the binary's size changes. Read it per run"* - which is precisely
+what was not done.
+
+**Read `module_base` out of the singleton, not `allocate_rwx done at` off
+a serial log that may be from another boot.** The one-line proof that the
+base is right is that `base + 0x14c2000` equals the dumped singleton
+address.
+
+## The real finding: an unhandled EPT VIOLATION halts the processor
+
+With the base corrected, cpu0 is in `halt()` - this VMM stopped it
+deliberately - and the record says why:
+
+```
+  occurred              1
+  reason                0x30   = 48, EPT violation
+  qualification         0x2b
+  guest_linear_address  0xfffff85633c00310
+  guest_rip             0xfffff80ac5a57a7a
+  guest_cs_selector     0x10
+```
+
+Qualification `0x2b` is `0b101011`: the access was a **write** (bit 1) to
+a page that is readable (bit 3) and executable (bit 5) and **not
+writable** (bit 4).
+
+**That is the signature of a VTL protection.** `HvCallModifyVtlProtectionMask`
+- 39,323 calls on a three-processor boot - is VTL1 removing VTL0's write
+access, and a subsequent VTL0 write is exactly what it is for. The
+violation belongs to the guest hypervisor, which owns those protections
+and decides what to do about them. Instead it reaches this VMM's
+unhandled path and stops the processor.
+
+`vm_entry_failure` and `host_exception` are both all zero, so nothing
+else went wrong first.
+
+This is also why the shape looked so unstable: the secure kernel
+fail-fasts, *and* a processor is halted by us, and which one is observed
+depends on timing.
+
+
 ## A processor is stuck inside the singleton's CONSTRUCTOR, 1.4 million exits in
 
 **2026-08-25, three processors, `invall=1`.** The most concrete
