@@ -1,5 +1,44 @@
 # Known defects
 
+## SETTLED: the boot is stalled at `VBoxSup`, not slow - measured over 110 minutes
+
+**2026-08-24.** "Stalled or merely slow" has been open since the module
+list first stopped moving, and it mattered: the whole session's framing
+turned on whether more time would finish the boot. It would not.
+
+**Three independent runs, one of them uninterrupted for forty minutes:**
+
+```
+  03:34  105 modules  VBoxSup.sys   cpl0  8,285,436
+  03:42  105 modules  VBoxSup.sys   cpl0 10,218,663
+  03:50  105 modules  VBoxSup.sys   cpl0 12,332,644
+  03:58  105 modules  VBoxSup.sys   cpl0 14,446,914
+  04:06  105 modules  VBoxSup.sys   cpl0 16,591,214
+  04:14  105 modules  VBoxSup.sys   cpl0 18,707,019
+```
+
+plus two earlier runs of thirty-five minutes each at the same point.
+**About 110 minutes in total with the module count frozen at 105.**
+
+**And the guest is running the whole time.** `cpl0` climbs by roughly
+700,000 samples every 2.7 minutes - about 4,300 second-level entries a
+second - so this is not a halted machine or a lost processor. It is a
+machine executing steadily and completing nothing.
+
+**Against the rate it took to get there**, that is decisive: 105 modules
+in about sixty minutes, then nothing in the next forty at a rate that
+would have loaded another seventy. `VBoxSup`'s `DriverEntry` does not
+complete, and no amount of waiting will finish it.
+
+**What this closes.** Every "it may just need longer" hedge in the
+entries above is withdrawn, including the one that framed the whole
+throughput argument as *a guest that cannot finish a tick's work inside a
+tick*. That framing is still the best account of *why* it cannot
+progress, but "give it more time" is no longer an alternative to it -
+the two are not competing explanations, and only one of them is testable
+from here. It was, and it failed.
+
+
 ## Both processors are inside the level above, not inside this VMM
 
 **2026-08-24.** The question left by the variance finding was why VP1 does
