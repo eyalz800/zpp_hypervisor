@@ -1,5 +1,41 @@
 # Known defects
 
+## Correction: `shadow_ept_pointer_for` is not an application-processor problem
+
+The entry above promoted it on "52,757 cycles a call on VP1 against 6,835
+on cpu0". **Those two numbers came from different runs**, which is the
+mistake this file has already retired twice under another name. Read from
+a single three-processor run:
+
+```
+  cpu   shadow_ept_pointer_for   calls/RT   cycles/call   share of VMM
+   0       375,568 calls           3.67        28,378        28.6%
+   1         7,607 calls           1.01         1,243         0.6%
+   2           604 calls           1.13         5,504         2.1%
+```
+
+It is expensive on the **boot** processor and cheap on the application
+processors - the opposite of the claim. The rebuild counters agree and
+kill the mechanism that was proposed for it: cpu0 rebuilds 16,127 times
+against 359,441 cache hits (4.3%), cpu1 **13** against 7,594 (0.17%).
+VP1 rebuilds an order of magnitude *less*, not more.
+
+### What the same run does show
+
+Round trips cost **100-180 microseconds** - 363,648, 199,333 and 296,653
+cycles at 1.992 GHz - with `build_vmcs02` at 78 microseconds and **68.2
+guest memory reads per round trip** on cpu0. That is the real cost and it
+is not processor specific.
+
+### And the timeout reading is an inference, not a fact
+
+`P1 = 0x989680` is ten million, which *is* one second in the 100 ns units
+this interface counts in. It is also just a round number. Nothing here
+looked 0x1DB up in a reference, so "the secure kernel missed a deadline"
+is a reading of one parameter and should not be built on until something
+independent agrees with it.
+
+
 ## Multicore: bugcheck 0x1DB, and its first parameter is one second
 
 **2026-08-24.** Frozen with `-no-reboot -no-shutdown` at the second reset,
