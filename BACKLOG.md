@@ -1,5 +1,42 @@
 # Known defects
 
+## The control landed: bare Windows reaches the DESKTOP on two processors
+
+**2026-08-24. Confirmed by looking at the physical monitor**, which is
+the one instrument this rig has that no script can replace - the GPU is
+passed through, so `screendump` fails and the UEFI framebuffer reads
+black once the guest's driver takes the head.
+
+Same launcher, same RAM, same QEMU flags, two processors, NVRAM restored
+from `.orig` so the firmware boots Windows Boot Manager directly. That is
+a single-variable control against every two-processor run above: the only
+difference is whether this VMM is underneath.
+
+**It reaches the desktop.** So:
+
+- **The two-processor hang is ours.** Not the rig, not the firmware, not
+  nested VBS, not QEMU. Everything in the entries above that stops in
+  `Phase1Initialization` with both processors idle is caused by this VMM.
+- **The autologon stall is ours too**, and this was free. Reaching the
+  *desktop* rather than a logon prompt proves the machine auto-logs in
+  with no password, so the single-processor run that sits at `LogonUI.exe`
+  with `winlogon` fully blocked is not Windows waiting for input. That
+  retires the one explanation for it that was not our fault.
+
+Note what the control also proves about the reader: both processors were
+executing inside a 4 MB image (`SizeOfImage=0x415000`, no other PE within
+2.4 GB below it) which is `securekernel.exe`, so **VBS really is running
+in the control**. A comparison against a control with VBS off would have
+proved nothing about the configuration being chased.
+
+### Restoring the rig
+
+`RELEASEX64_OVMF_VARS.fd` was saved to `.zppsave` before the control and
+`rig-one-boot-option.sh` rebuilds our sole boot option from `.pristine`.
+Never leave `.orig` in place - a later run would silently boot Windows
+bare and look like a pass, which is the trap recorded above.
+
+
 ## Two processors: where the boot actually stops, and one real defect on VP1
 
 **2026-08-24, with symbols.** Three readings, in order of how much they
