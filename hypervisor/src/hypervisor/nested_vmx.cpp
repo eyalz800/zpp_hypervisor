@@ -1408,8 +1408,31 @@ bool hypervisor::on_guest_vmread(std::size_t cpu,
     // The memory form. The operand's size is decided by the mode, not by
     // the field: SDM 27.11.2 makes the effective operand size "always 32
     // bits outside IA-32e mode ... and 64 bits in 64-bit mode".
+    // Both failures below return false, and the caller answers a false
+    // with `#UD`. **That is the wrong fault for a memory access that did
+    // not work**, and it is not a theoretical complaint: on a
+    // multi-processor boot exactly one of these fires, on the second
+    // processor, and the hypervisor log ends two entries later with the
+    // secure kernel dead in `HvlSkCrashdumpCallbackRoutine`. An
+    // invalid-opcode tells the guest hypervisor the instruction does not
+    // exist, which is a lie about VMREAD - the one thing this file says
+    // never to do.
+    //
+    // Which of the two fires is not yet known, and the fix differs by
+    // which: an operand address that will not decode is a different
+    // defect from a guest page this VMM cannot reach. So this logs
+    // rather than guesses, and **deliberately does not change the
+    // injected exception yet** - changing behaviour and instrumenting it
+    // in the same build would leave neither measured.
     auto linear = vmx_operand_linear_address(context);
     if (!linear) {
+        this->vmread_memory_form_failures[cpu] =
+            this->vmread_memory_form_failures[cpu] + 1;
+        log("cpu {} vmread memory form: operand address would not "
+            "decode, field {}, rip {}",
+            cpu,
+            static_cast<std::uint64_t>(encoding.value()),
+            context.rip);
         return false;
     }
 
@@ -1423,6 +1446,15 @@ bool hypervisor::on_guest_vmread(std::size_t cpu,
         *linear,
         std::span(reinterpret_cast<const std::byte *>(&value), size));
     if (!written) {
+        this->vmread_memory_form_failures[cpu] =
+            this->vmread_memory_form_failures[cpu] + 1;
+        log("cpu {} vmread memory form: guest write failed at {}, "
+            "field {}, size {}, rip {}",
+            cpu,
+            *linear,
+            static_cast<std::uint64_t>(encoding.value()),
+            static_cast<std::uint64_t>(size),
+            context.rip);
         return false;
     }
 

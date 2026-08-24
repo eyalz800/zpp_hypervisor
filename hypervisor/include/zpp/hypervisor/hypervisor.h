@@ -7468,6 +7468,24 @@ private:
      */
     bool vmx_instruction_logged[max_cpus]{};
     std::uint64_t vmx_instructions_refused[max_cpus]{};
+
+    /**
+     * Memory-form VMREADs this VMM could not complete, per processor.
+     *
+     * Both failure paths in `on_guest_vmread`'s memory form return
+     * false, and the caller answers false with an invalid-opcode
+     * exception - which tells the guest hypervisor that VMREAD does not
+     * exist. That is the lie this tree is otherwise careful never to
+     * tell, and a memory access that did not work is not an unknown
+     * instruction.
+     *
+     * It matters because of when it fires. On a multi-processor boot
+     * exactly one is counted, on the second processor, and the log ends
+     * two entries later with the secure kernel in
+     * `HvlSkCrashdumpCallbackRoutine`. A single-processor boot reaches
+     * the logon UI and counts none.
+     */
+    std::uint64_t vmread_memory_form_failures[max_cpus]{};
     /**
      * @}
      */
