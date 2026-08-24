@@ -2312,6 +2312,63 @@ void hypervisor::on_vm_exit(std::uint64_t cpuid,
     case basic_reason::invvpid:
     case basic_reason::vmfunc:
     case basic_reason::vmcall: {
+        // **What the level above asks this VMM, counted unconditionally.**
+        //
+        // This is the only path by which the guest hypervisor calls
+        // *down*, and nothing has ever recorded it: the census that
+        // counts `hypercalls_seen` and answers `invalid_hypercall_code`
+        // is inside `if constexpr (nested_vmx::evmcs_offered)`, and
+        // `evmcs=0` in every shipped manifest, so it is compiled out of
+        // every build that has ever run on the rig.
+        //
+        // It is worth a few unconditional stores because of what was
+        // measured: an application processor issues the same `vmcall`
+        // thirteen times at one instruction pointer, then the guest
+        // hypervisor executes `VMCLEAR` and abandons that virtual
+        // processor - which is why the application processors take tens
+        // of second-level entries against the boot processor's tens of
+        // thousands. Which call it is decides the fix, and the exit
+        // ring's `detail` field cannot say: its low 32 bits are the
+        // instruction pointer's, so it is not a clean capture of `rcx`.
+        //
+        // Registers rather than a decode, deliberately. A decode here
+        // would embed an assumption about which interface is in use;
+        // three raw registers embed none and can be read against any.
+        if (auto slot = cpuid; slot < max_cpus) {
+            auto from_above = !this->running_l2[slot];
+
+            if (from_above) {
+                this->l1_vmcall_count[slot] =
+                    this->l1_vmcall_count[slot] + 1;
+                this->l1_vmcall_rcx[slot] = context.rcx;
+                this->l1_vmcall_rdx[slot] = context.rdx;
+                this->l1_vmcall_rax[slot] = context.rax;
+                this->l1_vmcall_rip[slot] = context.rip;
+
+                auto code = context.rcx & 0xffff;
+                auto placed = false;
+
+                for (std::size_t i{}; i < l1_vmcall_code_slots; ++i) {
+                    if ((0 == this->l1_vmcall_code_counts[slot][i]) ||
+                        (this->l1_vmcall_codes[slot][i] == code)) {
+                        this->l1_vmcall_codes[slot][i] = code;
+                        this->l1_vmcall_code_counts[slot][i] =
+                            this->l1_vmcall_code_counts[slot][i] + 1;
+                        placed = true;
+                        break;
+                    }
+                }
+
+                // Saturation said out loud rather than dropped, which
+                // is the failure a sibling census in this tree already
+                // suffered silently.
+                if (!placed) {
+                    this->l1_vmcall_code_other[slot] =
+                        this->l1_vmcall_code_other[slot] + 1;
+                }
+            }
+        }
+
         // Every instruction VMX added, and one exit reason each. They
         // all exit unconditionally in VMX non-root operation - SDM
         // 28.1.2 lists INVEPT, INVVPID, VMCALL, VMCLEAR, VMLAUNCH,

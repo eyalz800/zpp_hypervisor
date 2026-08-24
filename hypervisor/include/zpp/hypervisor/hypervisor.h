@@ -7506,6 +7506,33 @@ private:
      * machine with one processor in `halt()` and nothing to read.
      */
     std::uint64_t ept_violation_unclaimed[max_cpus]{};
+
+    /**
+     * What the guest hypervisor asks *this* VMM, per processor.
+     *
+     * The only path by which the level above calls down is `VMCALL`, and
+     * until these existed nothing recorded it: the other census of it
+     * lives inside `if constexpr (nested_vmx::evmcs_offered)`, which is
+     * off in every shipped manifest.
+     *
+     * Measured cause for adding them: an application processor issues
+     * the same `vmcall` thirteen times at one instruction pointer and
+     * the guest hypervisor then `VMCLEAR`s that virtual processor and
+     * abandons it. The exit ring's `detail` cannot identify the call -
+     * its low 32 bits are the instruction pointer's - so the registers
+     * are kept raw and undecoded, which also avoids assuming which
+     * interface is in use.
+     */
+    static constexpr std::size_t l1_vmcall_code_slots = 16;
+
+    std::uint64_t l1_vmcall_count[max_cpus]{};
+    std::uint64_t l1_vmcall_rcx[max_cpus]{};
+    std::uint64_t l1_vmcall_rdx[max_cpus]{};
+    std::uint64_t l1_vmcall_rax[max_cpus]{};
+    std::uint64_t l1_vmcall_rip[max_cpus]{};
+    std::uint64_t l1_vmcall_codes[max_cpus][l1_vmcall_code_slots]{};
+    std::uint64_t l1_vmcall_code_counts[max_cpus][l1_vmcall_code_slots]{};
+    std::uint64_t l1_vmcall_code_other[max_cpus]{};
     /**
      * @}
      */
