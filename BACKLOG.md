@@ -1,5 +1,47 @@
 # Known defects
 
+## The application processor is SPINNING ON CPUID - 97.3% of its exits
+
+**2026-08-25, three processors.** The sharpest fact yet about what an
+application processor is actually doing, and it was one line of the exit
+reason census that nothing had looked at per processor:
+
+```
+  cpu 2 exit reasons (total 8,632)      cpu 0 exit reasons (total 1,371,097)
+    cpuid          8400   97.3%           vmread      595517  43.4%
+    vmwrite         100    1.2%           ept-violation 363797 26.5%
+    rdmsr            61    0.7%           vmwrite     149982  10.9%
+    ept-violation    27    0.3%           vmresume     91277   6.7%
+    vmcall           17    0.2%           vmcall       85949   6.3%
+    vmresume         16    0.2%
+```
+
+**Eight thousand four hundred CPUID exits on a processor whose guest gets
+seventeen entries.** The boot processor takes essentially none. So the
+application processor is not idle, not blocked inside the second-level
+guest, and not waiting on us: **the guest hypervisor is spinning on it.**
+
+The leaves are ordinary - `0x0`, `0x1`, `0xb`, `0x80000000` - and the
+census says **zero in the hypervisor range**, so this is not a poll of a
+synthetic interface. CPUID here is doing what CPUID does in a spin loop:
+serialising. Something the guest hypervisor waits for on that processor
+never arrives, it spins, and after its retry budget it executes VMCLEAR
+and abandons the virtual processor.
+
+That is consistent with every surviving fact and replaces the earlier
+readings of the same processor as "idle" (which was `HalProcessorIdle`
+seen from the second level, a different thing) and as "refused an entry"
+(retracted - all four refusal counters read zero).
+
+**What it does not say** is what is being waited for. The census that
+would name it is capped and partition-wide - 28,412 entries recorded
+against 512 accounted across four leaves - so it cannot attribute a leaf
+to a processor. A per-processor CPUID leaf census is the next
+instrument, and unlike the last three attempts it has an obvious
+sanity check: the counts must add up to the 8,400 in the exit reason
+table for that processor.
+
+
 ## RETRACTED: the VM entry is never refused. All four refusal counters read zero.
 
 **2026-08-25.** The reading that an application processor is lost because
