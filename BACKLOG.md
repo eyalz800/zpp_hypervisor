@@ -1,5 +1,70 @@
 # Known defects
 
+## A processor is stuck inside the singleton's CONSTRUCTOR, 1.4 million exits in
+
+**2026-08-25, three processors, `invall=1`.** The most concrete
+multiprocessor finding this file has, and it was found by symbolizing an
+instruction pointer against **our own** binary rather than the guest's:
+
+```
+  cpu0 RIP 0x671ab511  CR3 0x6963a000   <- our module, our host page table
+  cpu1 RIP 0xfffff8059135b1e1  CR3 0x1ae000
+  cpu2 RIP 0xfffff80ac5ba6b5e  CR3 0x114fad000
+```
+
+Module base is `0x6717b000`, so cpu0 is at **module + 0x30511**, which
+`llvm-symbolizer` against `.rig-deployed-hypervisor.elf` resolves to
+`zpp::hypervisor::hypervisor::hypervisor()`. The disassembly confirms it
+is not a folded or nearby symbol - the enclosing function is
+`_ZN3zpp10hypervisor10hypervisorC2Ev` and `0x30511` is the `cmpq` of an
+initialisation loop:
+
+```
+  30511: cmpq %rcx, %rax
+  30514: movq %rax, -0x23c8(%rbp)
+  3051b: jne  0x304e5 <...C2Ev+0xa485>
+```
+
+**Verified stopped, not sampled running.** `info registers` on a running
+vCPU returns last-synced state, which this file has already been caught
+by. With `stop`, three seconds of execution, and `stop` again, the
+instruction pointer is identical. cpu0 is genuinely parked there.
+
+### Why this is serious
+
+`hypervisor::instance()` is a function-local static and every build
+carries `-fno-threadsafe-statics`, so there is **no guard call** - the
+compiler emits a plain `cmpb`/`movb` on a guard byte. `CLAUDE.md` states
+the consequence outright: *"The first call must therefore not race"*, and
+names the thing that would break it as *"a fourth caller reachable before
+`main` has armed those two"*.
+
+A processor executing that constructor at 1.4 million exits into the boot
+is re-initialising - or failing to finish initialising - every member of
+the singleton, **while the other two processors are running the guest
+against it**. Its own exit counter is frozen at 1,394,280 because it
+takes no more exits.
+
+### What is not yet established
+
+*Why* it is there. The three known callers are `zpp_hypervisor_main`,
+`zpp_x86_64_exception` and `zpp_ap_start_up_main`, and the last is the
+application-processor path, which is reached mid-boot when the guest's
+start-up IPI is adopted - the only one of the three that can fire late.
+Whether this is a second construction, a first construction by a late
+processor, or a corrupted control transfer that merely lands in that code
+is **not** decided by the evidence above, and each has a different fix.
+
+### And `ZPP_INVEPT_ALL_PROCESSORS=ON` does not prevent the fail-fast
+
+Same run: `SkeBugCheckStatus` still reads `0xC0000409`. Propagating a
+guest INVEPT to every processor - the fix for a VTL1 revocation not
+binding on another processor's shadow - **does not stop the secure kernel
+fail-fasting.** So stale shadow permissions are not the mechanism, or not
+the only one. The switch is a real correctness improvement and is kept,
+off by default; it is not the cause.
+
+
 ## VTL1 is enabled on every processor, and the roster is intact - two audits refuted
 
 **2026-08-25**, three processors, `vtltrc=1` verified in the deployed
