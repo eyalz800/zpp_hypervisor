@@ -1,5 +1,62 @@
 # Known defects
 
+## The secure kernel FAIL-FASTS: `SkeBugCheckStatus = 0xC0000409`
+
+**2026-08-25.** Read out of the running three-processor guest, from the
+secure kernel's own global:
+
+```
+  SkeBugCheckStatus        0x00000000c0000409
+  SkiBugCheckOwner         0x0000000000000000
+```
+
+`0xC0000409` is `STATUS_STACK_BUFFER_OVERRUN`, verified in this repo's
+own vendored header
+(`build/debug/_deps/windows-sdk-src/.../shared/ntstatus.h:9007`) rather
+than from memory. In modern Windows that status is **not** a stack
+overrun - it is the status `__fastfail` reports. **The secure kernel
+detected a violated invariant and deliberately terminated itself.**
+
+That is a different class of failure from everything assumed before it.
+It is not a hang, not a livelock, not a timeout, and not a fault: VTL1
+checked something, found it impossible, and shot itself. Whatever this
+VMM does wrong, it is something VTL1 can *detect*, which is a much
+narrower target than "the boot stops".
+
+### How the globals were reached, since VTL1 has no symbols in this tree
+
+The recipe, now twice used and worth keeping:
+
+1. Take the parked instruction pointer and translate it under **that
+   processor's own CR3** - VTL0's CR3 cannot see VTL1 at all.
+2. From the resulting *physical* address, step down a page at a time
+   looking for `MZ` + a `PE\0\0` at `e_lfanew` and the right
+   `SizeOfImage`. A *virtual* scan fails because VTL1's address space is
+   sparse. Base came out `0x18ba000`, `SizeOfImage 0x169000`.
+3. `scripts/guest-symbols.sh /tmp/securekernel.exe` for the PDB.
+4. Public symbols are `segment:offset` with **segment 1-based into the PE
+   section table and offset in decimal**. `SkeBugCheckStatus` is
+   `0009:74720`, section 9 is `.data` at `0x10C000`, so RVA
+   `0x10C000 + 74720 = 0x11E3E0`.
+
+### Three processors, and two of them are bystanders
+
+```
+  cpu0 RIP 0x...79c6143e  CR3 0x8800000   SkeCrashDumpNmi   (VTL1)
+  cpu2 RIP 0x...79c6143e  CR3 0x8800000   SkeCrashDumpNmi   (VTL1, same instruction)
+  cpu1 RIP 0x...e578781d  CR3 0x1ae000    HvlSkCrashdumpCallbackRoutine (VTL0)
+```
+
+cpu0 and cpu2 are at the *same* instruction - both NMI'd into the freeze
+handler. Only cpu1 is doing the dump. **Nothing is parked at the
+fail-fast site**, so the fail-fast *code* - which would name the
+invariant - is not recoverable this way.
+
+`IumCrashCpuContext` was tried for it and reads `0xAF` throughout, which
+is uninitialised-memory fill, so either that RVA is wrong or the
+structure is not used on this path. Recorded so it is not tried twice.
+
+
 ## The parked VTL1 instruction is `SkeCrashDumpNmi` - the secure kernel bugchecks
 
 **2026-08-25.** Named, and by `.pdata` bounds rather than the nearest
