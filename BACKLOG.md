@@ -1,5 +1,35 @@
 # Known defects
 
+## The APIC-watch race is real, intermittent, and NOT the multicore blocker
+
+**2026-08-25.** With the resume-instead-of-halt fix deployed, three
+processors, the boot wedges anyway:
+
+```
+  ept_violation_unclaimed   [0, 0, 0]
+  unhandled_exit.occurred    0
+  cpu0 1,265,938 exits / 88,902 entries, byte-identical over ten minutes
+```
+
+**Nothing of ours faulted on this run at all**, so the unclaimed EPT
+violation that stopped a processor on the previous run did not even
+occur. It is intermittent - which is consistent with it being a race on
+the disarm window - and it is not what stops the boot. The machine still
+wedges, by the other route: the secure kernel's own fail-fast.
+
+Two things follow, and the second is the more useful:
+
+- The fix is kept. Stopping a processor because a watch was disarmed
+  underneath an in-flight fault turned a benign race into a dead machine
+  with nothing readable, and `ept_violation_unclaimed` now distinguishes
+  that race from a protection genuinely stuck.
+- **The failure has at least two independent modes**, which is why the
+  observed shape kept changing between runs and why single readings kept
+  contradicting each other. Any future measurement has to say which mode
+  it caught: `unhandled_exit.occurred` non-zero is ours, and
+  `SkeBugCheckStatus = 0xC0000409` with `occurred` zero is the guest's.
+
+
 ## RETRACTED: nobody is stuck in the constructor. The module base was stale.
 
 **The entry below - "A processor is stuck inside the singleton's
