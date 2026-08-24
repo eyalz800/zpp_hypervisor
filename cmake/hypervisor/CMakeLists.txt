@@ -108,6 +108,8 @@ option(ZPP_STALL_BREAKER
     "Refuse to deliver the same vector twice at the same guest instruction, so the guest retires at least one between deliveries. Measured: two histograms of the guest's instruction pointer, one where the entry stages an event and one where it stages nothing, disagree completely - the control is flat across 192 addresses while 84% of injections land on two instructions, the first being the instruction immediately after a sti. The guest enables interrupts, takes one, returns to the same instruction and takes another, for ever. Withholding defers rather than drops, because the source is level-asserted: the timer message sits unconsumed in the guest's own message page. Off by default."
     OFF)
 
+option(ZPP_INVEPT_ALL_PROCESSORS "propagate guest INVEPT to every processor" OFF)
+
 option(ZPP_TRACE_VTL
     "Record Hyper-V virtual trust level switches - the VTL call and return hypercalls, the registers either side of them, and the guest stack above the caller. Purely observational: it reads guest state and writes only this VMM's own members, and folds to nothing when off. Off by default because it is specific to one guest hypervisor's interface, and this VMM is not specific to any guest. Costs several VMCS reads and a guest page walk per trust-level switch."
     OFF)
@@ -275,6 +277,7 @@ target_compile_options(zpp_hypervisor PRIVATE
     -DZPP_EVMCS_MIXED=$<BOOL:${ZPP_EVMCS_MIXED}>
     -DZPP_STALL_BREAKER=$<BOOL:${ZPP_STALL_BREAKER}>
     -DZPP_TRACE_VTL=$<BOOL:${ZPP_TRACE_VTL}>
+    -DZPP_INVEPT_ALL_PROCESSORS=$<BOOL:${ZPP_INVEPT_ALL_PROCESSORS}>
     -DZPP_WATCH_VTL_BLOCK=$<BOOL:${ZPP_WATCH_VTL_BLOCK}>
     -DZPP_ANNOUNCE_HYPERVISOR_BIT=$<BOOL:${ZPP_ANNOUNCE_HYPERVISOR_BIT}>
     # **Three switches added in one session never reached the compiler

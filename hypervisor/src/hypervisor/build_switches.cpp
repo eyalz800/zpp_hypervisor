@@ -189,6 +189,11 @@ extern "C" [[gnu::used, gnu::retain]] constinit const char
         digit(nested_vmx::evmcs_mixed),
         ' ', 's', 't', 'a', 'l', 'l', '=',
         digit(nested_vmx::stall_breaker),
+        // Correctness, not tuning: off, a permission the guest
+        // hypervisor revoked can still be served by another
+        // processor's shadow.
+        ' ', 'i', 'n', 'v', 'a', 'l', 'l', '=',
+        digit(nested_vmx::invept_all_processors),
         ' ', 'v', 't', 'l', 't', 'r', 'c', '=',
         digit(nested_vmx::trace_vtl),
         ' ', 'b', 'l', 'k', 'w', '=',

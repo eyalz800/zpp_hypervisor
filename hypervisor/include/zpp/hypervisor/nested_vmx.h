@@ -2086,6 +2086,35 @@ inline constexpr bool window_on_tpr = (0 != ZPP_WINDOW_ON_TPR);
 
 inline constexpr bool trace_vtl = (0 != ZPP_TRACE_VTL);
 
+/**
+ * Whether a guest INVEPT discards the shadow on **every** processor.
+ *
+ * The shadow of the guest hypervisor's extended page tables is kept per
+ * processor, and `on_guest_invept` discards only the slot belonging to
+ * the processor that executed the instruction. INVEPT is not a
+ * broadcast, so that is what the instruction itself does - but the guest
+ * hypervisor is entitled to assume its own shootdown IPI carries the
+ * rest, and our shadow is invisible to that IPI.
+ *
+ * Why it matters here: VTL1 revokes a page from VTL0 with
+ * `HvCallModifyVtlProtectionMask` - measured at 39,323 calls on one boot
+ * - and then invalidates. If another processor's shadow still grants
+ * what was revoked, VTL0 can touch a page the secure kernel believes it
+ * cannot, which is exactly the class of thing a secure kernel checks and
+ * fail-fasts on. **Impossible with one processor**, which is the shape of
+ * the failure being chased.
+ *
+ * Off by default because it is not free: propagation is a bump of the
+ * global generation, so every processor discards every shadow root at its
+ * next entry, and a rebuild is measured at about 374 microseconds.
+ */
+#ifndef ZPP_INVEPT_ALL_PROCESSORS
+#define ZPP_INVEPT_ALL_PROCESSORS 0
+#endif
+
+inline constexpr bool invept_all_processors =
+    (0 != ZPP_INVEPT_ALL_PROCESSORS);
+
 inline constexpr bool watch_vtl_block = (0 != ZPP_WATCH_VTL_BLOCK);
 
 } // namespace zpp::hypervisor::nested_vmx

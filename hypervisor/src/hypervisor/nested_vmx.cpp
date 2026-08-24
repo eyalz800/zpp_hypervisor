@@ -1745,6 +1745,26 @@ bool hypervisor::on_guest_invept(std::size_t cpu,
         discard_shadow_ept(cpu);
     }
 
+    // Propagated to every processor, when asked for.
+    //
+    // The discards above touch this processor's slots only. INVEPT is
+    // not a broadcast and the instruction's own semantics are therefore
+    // satisfied - but our *shadow* of the guest hypervisor's tables is
+    // per processor and invisible to the shootdown IPI the guest
+    // hypervisor sends to cover the rest. So a permission it has just
+    // revoked can still be served by another processor's shadow.
+    //
+    // The generation is the propagation mechanism this VMM already has
+    // for its own edits: bumping it makes every processor discard every
+    // stale shadow root at its next entry, through
+    // `discard_stale_shadow_ept`. Reused rather than duplicated.
+    //
+    // See `nested_vmx::invept_all_processors` for why this is the shape
+    // of the multiprocessor failure and what it costs.
+    if constexpr (nested_vmx::invept_all_processors) {
+        this->ept_generation.fetch_add(1, std::memory_order_release);
+    }
+
     vmx_succeed();
     return true;
 }

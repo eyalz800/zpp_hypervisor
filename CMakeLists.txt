@@ -254,6 +254,10 @@ option(ZPP_STALL_BREAKER
     "Refuse to deliver the same vector twice at the same guest instruction. See cmake/hypervisor/CMakeLists.txt."
     OFF)
 
+option(ZPP_INVEPT_ALL_PROCESSORS
+    "Propagate a guest INVEPT to every processor, not only the one that executed it. The guest hypervisor revokes a page from its own guest with HvCallModifyVtlProtectionMask and then invalidates; our shadow of that table is per processor and only the executing one discards, so another processor can keep serving the permission that was just revoked. Only possible above one processor."
+    OFF)
+
 option(ZPP_TRACE_VTL
     "Record Hyper-V virtual trust level switches. See cmake/hypervisor/CMakeLists.txt."
     OFF)
@@ -374,6 +378,7 @@ ExternalProject_Add(hypervisor
         -DZPP_EVMCS_MIXED=${ZPP_EVMCS_MIXED}
         -DZPP_STALL_BREAKER=${ZPP_STALL_BREAKER}
         -DZPP_TRACE_VTL=${ZPP_TRACE_VTL}
+        -DZPP_INVEPT_ALL_PROCESSORS=${ZPP_INVEPT_ALL_PROCESSORS}
         -DZPP_WATCH_VTL_BLOCK=${ZPP_WATCH_VTL_BLOCK}
         -DZPP_ANNOUNCE_HYPERVISOR_BIT=${ZPP_ANNOUNCE_HYPERVISOR_BIT}
         -DZPP_STEP_VTL=${ZPP_STEP_VTL}
@@ -480,6 +485,7 @@ ExternalProject_Add(uefi_loader
         -DZPP_EVMCS_MIXED=${ZPP_EVMCS_MIXED}
         -DZPP_STALL_BREAKER=${ZPP_STALL_BREAKER}
         -DZPP_TRACE_VTL=${ZPP_TRACE_VTL}
+        -DZPP_INVEPT_ALL_PROCESSORS=${ZPP_INVEPT_ALL_PROCESSORS}
         -DZPP_WATCH_VTL_BLOCK=${ZPP_WATCH_VTL_BLOCK}
         -DZPP_ANNOUNCE_HYPERVISOR_BIT=${ZPP_ANNOUNCE_HYPERVISOR_BIT}
         -DZPP_STEP_VTL=${ZPP_STEP_VTL}
