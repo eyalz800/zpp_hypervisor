@@ -1,5 +1,64 @@
 # Known defects
 
+## THE TICK FLOOR UNBLOCKS THE BOOT - user mode reached for the first time
+
+**2026-08-24, and this is the first time ring 3 has ever been observed on
+this rig.** `ZPP_TICK_FLOOR=40000` - refuse a synthetic timer period
+shorter than 4 ms - and the boot goes straight past the wall it has sat
+at all session:
+
+```
+  10:35  103 modules  winhvr.sys   cpl3 0
+  10:37  111 modules  dfsc.sys     cpl3 0
+  10:39  121 modules  CAD.sys      cpl3 1     <- USER MODE
+  10:40  121 modules  CAD.sys      cpl3 5
+  10:42  121 modules  CAD.sys      cpl3 11
+  10:44  121 modules  CAD.sys      cpl3 37
+```
+
+**105 -> 121 modules, past `VBoxSup.sys`, and `l2_cpl_seen[3]` non-zero
+and climbing.** That counter is the completion detector this file has
+been carrying for a day: ring 3 means the session manager runs, which
+means kernel initialisation finished. It also reached 103 modules in
+**eight minutes** where the same build previously took about twenty-seven.
+
+`guest_tick_floored` reads 7,188, so the mechanism fired, and it fired on
+the *periodic* arms - which is why it works now and did not before. The
+recorded earlier failure used a floor of 156,250 against a **one-shot**
+timer, where the count is an absolute deadline and flooring it pushes the
+deadline into the future; here the guest is periodic (`STIMER0_CONFIG`
+`0x3000a`) and the count is a period, which is the case the guard was
+written for.
+
+### What it confirms about the diagnosis
+
+The livelock reading was right, and the measurement that settled it was
+the pair of RIP histograms over a 26,000-second window:
+
+```
+  interrupted   ntoskrnl+0x30d475   11,514,397   37.5%   (mov cr8, rbp)
+  quiet         0x30d475            absent
+```
+
+Eleven and a half million injections at the instruction that lowers IRQL,
+and the guest essentially never resumed there without one. Fewer ticks,
+and it retires the instruction.
+
+**It also settles the throughput argument, against what this file
+concluded.** The entries above argue the guest cannot finish a tick's
+work inside a tick and that no lever left could move it. The lever was
+the tick itself, and the guest reaches user mode at 6.8% of the machine.
+
+### It is not finished
+
+The run then bugchecks - `KiBugCheckData[0]` reads **`0x18b`** with
+`P1 = 0x139` - and QEMU pauses at shutdown. The floor is a lie about
+time by its own comment, and Windows checks its clocks against each
+other, so the lie is the first suspect. **The next question is how small
+the lie can be and still clear the wall**: the guest asks for about 1 ms
+and 4 ms carried it through, so the interval between is where to look.
+
+
 ## Booting this VMM on the metal - ready to run
 
 Everything measured on the rig so far has this VMM running as a KVM
