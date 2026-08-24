@@ -4823,6 +4823,47 @@ void hypervisor::reflect_l2_exit(std::size_t cpu,
         // condition in `prepare_vmcs12`.
         shadow.state(vmcs12::launch_state::launched);
 
+        // **And into the region, not only the cache.**
+        //
+        // `on_guest_vmclear` writes the *clear* state through to
+        // `launch_state_offset` and says why in its own comment: the
+        // launch state "lives in the region rather than beside the
+        // cache" so that a VMCLEAR of a VMCS this processor has never
+        // loaded still reaches it. The launched transition did not
+        // honour that, so the region only ever learned `clear`.
+        //
+        // The asymmetry is invisible on one processor, because the cache
+        // is never lost there. With more than one it is fatal and
+        // measured: the guest hypervisor re-reads the region for a
+        // vmcs12 whose cache lives on another processor, gets `clear`,
+        // and its next VMRESUME fails
+        // `vmresume_with_non_launched_vmcs`. Its own code retries
+        // sixteen times - `mov $0x10,%rax; vmresume; xor %rcx,%rcx;
+        // vmcall; dec %rax; jne` - and then executes VMCLEAR and
+        // abandons that virtual processor for good. That is why
+        // application processors take tens of second-level entries
+        // against the boot processor's tens of thousands, and it is the
+        // missing half of `IPI_WATCHDOG_TIMEOUT`: an all-processor
+        // rendezvous cannot complete when a processor has been dropped.
+        //
+        // The comment at the VMPTRLD guard already described this exact
+        // end state - "the next VMRESUME then fails
+        // vmresume_with_non_launched_vmcs, and that virtual processor
+        // can never be entered again" - as the consequence of a *stale
+        // region*. It was reached by the other road: a region that is
+        // never told.
+        if (auto pointer = this->guest_current_vmcs[cpu];
+            nested_vmx::no_current_vmcs != pointer) {
+            auto launched_state =
+                static_cast<std::uint32_t>(vmcs12::launch_state::launched);
+
+            static_cast<void>(write_guest_physical(
+                pointer + vmcs12::launch_state_offset,
+                std::span(
+                    reinterpret_cast<const std::byte *>(&launched_state),
+                    sizeof(launched_state))));
+        }
+
         // SDM 30.2: the rest of the exit-information fields are written
         // only for an ordinary exit. On an entry failure the architecture
         // updates the reason and the qualification and leaves the others
