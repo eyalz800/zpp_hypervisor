@@ -7486,6 +7486,26 @@ private:
      * the logon UI and counts none.
      */
     std::uint64_t vmread_memory_form_failures[max_cpus]{};
+
+    /**
+     * EPT violations that arrived with nothing watching the page.
+     *
+     * Not a fault by itself. The local APIC page's watch is disarmed
+     * partition-wide the moment no processor is *observed* in xAPIC
+     * mode, and a processor already in flight on a violation for that
+     * page arrives after the disarm. The protection it faulted on has
+     * been lifted by then, so the right answer is to resume and let the
+     * instruction retry - which is what happens.
+     *
+     * It is counted because the same path would be reached by a
+     * protection that is genuinely stuck, and that one faults without
+     * limit. A large and growing value here means the page really is
+     * unwritable with no owner; a small one is the disarm race.
+     *
+     * This used to stop the processor, which turned a benign race into a
+     * machine with one processor in `halt()` and nothing to read.
+     */
+    std::uint64_t ept_violation_unclaimed[max_cpus]{};
     /**
      * @}
      */

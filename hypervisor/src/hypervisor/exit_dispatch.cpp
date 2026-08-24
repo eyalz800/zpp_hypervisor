@@ -2189,12 +2189,45 @@ void hypervisor::on_vm_exit(std::uint64_t cpuid,
         // is to let it run for itself rather than emulate it.
         if (!on_ept_violation(
                 cpuid, context, vmcs.guest_physical_address())) {
-            // Nothing had that page watched, so the protection was
-            // put there by something that is not going to handle the
-            // fault - which is a bug here rather than a guest error,
-            // and resuming would fault identically forever.
+            // Nothing has that page watched *now*, which is not the
+            // same as nobody having watched it when the fault was
+            // taken. **Measured on a three-processor boot**: the fault
+            // is on the local APIC page at `0xfee00000`, and the
+            // qualification is a write to a page still readable and
+            // executable but no longer writable - a watch's own
+            // protection, outliving the watch by the width of this
+            // window.
+            //
+            // The race is between processors and cannot happen on one.
+            // `watched_apic_page` is a single partition-wide variable,
+            // and `note_apic_mode` disarms the watch the moment no
+            // processor is *observed* in xAPIC mode
+            // (`watch_local_apic(intercept_apic && any_xapic)`). A
+            // processor already in flight on a violation for that page
+            // arrives here after the disarm, finds nothing watching,
+            // and used to be stopped for it. `apic_mode_lock` is held
+            // across the disarm but the faulting processor never takes
+            // it, so holding it closes nothing.
+            //
+            // **Resuming is correct here, and the old comment's reason
+            // for not resuming does not hold.** It said "resuming would
+            // fault identically forever", which is true of a protection
+            // that is still in place and false of one that has just
+            // been lifted - and lifted is exactly this case, because
+            // `unwatch_guest_page` restores write permission before the
+            // watch record goes. The instruction is retried, the page
+            // now permits it, and the guest continues.
+            //
+            // Counted rather than trusted: a protection that really is
+            // stuck will fault here without limit, and the counter says
+            // so instead of the machine dying with one processor in
+            // `halt()` and nothing to read.
+            if (cpuid < max_cpus) {
+                this->ept_violation_unclaimed[cpuid] =
+                    this->ept_violation_unclaimed[cpuid] + 1;
+            }
+
             record_exit(cpuid, full_reason, context);
-            on_unhandled_exit(full_reason);
         }
         advance_rip = false;
         break;
