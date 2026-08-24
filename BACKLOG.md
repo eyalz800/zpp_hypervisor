@@ -1,5 +1,58 @@
 # Known defects
 
+## Two processors: the guest resets the partition on purpose, early
+
+**2026-08-24.** `ZPP_CPUS=2` does not reach the logon UI and does not
+hang either - the guest asks for a reset and Hyper-V stands down cleanly.
+The last exits, identical on both processors at the same instruction
+pointer:
+
+```
+  cpu 1  [85233] wrmsr detail=0x40000003 value=0x1   <- HV_X64_MSR_RESET
+         [85238] vmoff rip=0xfffff8559a22406d
+         [85239] cr-access
+         [85240] ept-violation phys=0xfee00000 x8
+  cpu 0  [1357800] vmoff rip=0xfffff8559a22406d      <- the same RIP
+```
+
+`0x40000003` is `HV_X64_MSR_RESET` and writing 1 resets the partition, so
+this is the guest's own decision carried out correctly by everything
+below it. **Nothing of ours faulted**: no unhandled exit, no entry
+failure, and both processors tore down through Hyper-V's own path. Under
+`-no-reboot -no-shutdown` the machine is left `paused (shutdown)` with
+memory intact, which is how it was read.
+
+Every counter was byte-identical across two dumps seven minutes apart -
+`exits 1,357,803` both times. **A frozen counter here means stopped, not
+slow**, and the tell that separates them is `VM status`, which said
+`paused (shutdown)` while `l2-activity` still read `active`. That field
+describes the last thing the processor was told, not whether it is
+running; do not read it as liveness.
+
+### The control, because there were two variables
+
+`rig-one-boot-option.sh` had to be run immediately before this boot - the
+successful single-processor run had **completed**, and Windows writes its
+own boot option to the front of `BootOrder` every time it does, so the
+firmware had gone back to booting Windows bare. Which means the failing
+run differed from the working one in *two* ways, not one, and the NVRAM
+reset was the likelier suspect of the two.
+
+It is not. Same reset, same everything, only the processor count changed:
+
+| | 2 processors | 1 processor |
+|---|---|---|
+| `VM status` | `paused (shutdown)` | `running` |
+| second-level entries | 98,310 | 2,092,242 |
+| exits | 1,357,803, frozen | 26,514,259 |
+
+**Note the shape of the trap and not only the answer.** Reaching the
+logon UI is what re-armed the NVRAM trap, so the first two-processor run
+after any success will boot bare Windows and look like a *pass*. The
+serial line to check is `BdsDxe: starting Boot0004 "Windows Boot
+Manager"` - that is the firmware, not us.
+
+
 ## The goal: Windows boots to the logon UI with Hyper-V nested above us
 
 **2026-08-24, `ZPP_TICK_FLOOR=80000` - an 8 ms floor under the guest's
