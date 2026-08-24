@@ -1,5 +1,67 @@
 # Known defects
 
+## Two processors: where the boot actually stops, and one real defect on VP1
+
+**2026-08-24, with symbols.** Three readings, in order of how much they
+are worth.
+
+### 1. It stops in kernel phase 1, far earlier than "8 processes" suggested
+
+The process list is `System`, `Registry`, `Secure System` and five
+entries whose name field does not read. **There is no `smss.exe`**, so
+the session manager never starts and ring 3 is never entered on either
+processor - `cpl seen` has no `3=` row at all. Every earlier note that
+described this as a late-boot or scheduling problem was describing a
+machine still inside `Phase1Initialization`.
+
+All 71 threads in `System` are Waiting - 42 Executive, 20 WrQueue, 4
+WrFreePage - with none Ready and none Running. `cpu 0` samples one
+thread 330 times and it is `KiIdleLoop`. `cpu 1` runs `ExpWorkerThread`
+at IRQL 0. So the kernel is blocked, both processors are idle, and the
+clock is the only thing waking them.
+
+### 2. Dropped dispatch interrupts are NOT the cause - the control says so
+
+`0x2f` is the dispatch vector, `0xd1` the clock. Two processors: asked
+5,237, injected 277, **5.3%**. That looks damning until the single
+processor run that *reaches the logon UI* is read the same way: asked
+558,248, injected 14,833, **2.7%** - a worse ratio on the configuration
+that works. **The ratio is not the defect.** What differs is upstream:
+the two-processor guest asks only 5,237 times in 1.4M entries where the
+single-processor one asks 558,248 in 2.6M. It has nothing to dispatch
+because it is idle, not because delivery fails.
+
+### 3. `shadow_ept_pointer_for` costs 7.5x more on the second processor
+
+This one *is* ours, and it is measured rather than inferred:
+
+| | calls/round trip | cycles/call | share of VMM |
+|---|---|---|---|
+| 1 processor | 1.57 | 7,045 | 7.2% |
+| 2 processors, cpu0 | 1.22 | 6,835 | 6.1% |
+| **2 processors, cpu1** | **2.12** | **52,757** | **26.7%** |
+
+VP1 also issues 53.84 guest reads per round trip against cpu0's 22.00,
+and its whole round trip costs 418,605 cycles against 137,427. So the
+second processor's entries are three times the price and a quarter of
+that is one function.
+
+**State plainly what this does not show.** VP1 takes 9,452 entries in
+about ten minutes - roughly two seconds of work - so it is idle 99.7% of
+the time and the extra cost cannot be what stops the boot. This is a real
+defect on the multi-processor path and it is *not yet* the one being
+looked for. Fixing it would not obviously move the hang, and saying so
+now is cheaper than discovering it after the fix.
+
+### What is still unknown, and the control that would settle it
+
+Both processors idle inside phase 1 means the kernel waits on something
+that never completes. Nothing measured so far names it. The missing
+control is **plain KVM with two processors and VBS, without this VMM**:
+if that boots, the fault is ours; if it hangs too, it is the rig. That is
+one boot and it has not been run.
+
+
 ## Two processors: the guest is IDLE, not spinning and not starved
 
 **2026-08-24, and this overturns the reading in the entry below.** With
