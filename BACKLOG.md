@@ -1,5 +1,47 @@
 # Known defects
 
+## `context.rip` is not the guest instruction pointer at an exit
+
+**2026-08-25.** Four instruments in a row gave nonsense about the same
+`vmcall` path, and this is the cause of at least one of them - found by
+disassembling the addresses instead of trusting them.
+
+The L1 `vmcall` census recorded `context.rip`. Translating those
+addresses in the guest hypervisor's own address space and reading the
+bytes:
+
+```
+  cpu2  48 0d 01 08 00 00 | 48 8b d0 | 48 c1 ea 20 | 0f 30   WRMSR
+  cpu0  74 08             | 0f 01 c3                          VMRESUME
+```
+
+Neither is `0f 01 c1`, which is what a `VMCALL` site must contain. **The
+recorded addresses were never the call sites.** `context` is the guest's
+general-purpose registers as the exit stub saved them; its `rip` member
+is not the guest instruction pointer at the exit. The exit ring reads
+`vmcs.guest_rip()` and has been coherent throughout, which is exactly why
+its addresses disassembled sensibly in every earlier entry and these did
+not.
+
+Fixed to read `vmcs.guest_rip()`.
+
+### What it does and does not explain
+
+It does **not** explain the nonsense *codes* - `0x8ec0`, `0x8e90`,
+`0x0020` - because those came from `rcx`, which the stub does save. The
+better explanation for those is the one the counts now support: cpu0
+issues **886,593** L1 `vmcall`s in a boot that works. A path taken nearly
+a million times without harm is a normal, high-frequency path, not a
+refused request - so "the guest hypervisor asks us for something and we
+refuse it" is weakened as a reading of the thirteen retries, and should
+not be carried forward as if it were established.
+
+**The general lesson, which is the fourth of its kind in this file:
+disassemble the address.** A pointer that resolves, translates and reads
+back plausible bytes can still be the wrong pointer, and the only check
+that catches it is whether the bytes are the instruction they must be.
+
+
 ## `0xC0000409` names no invariant, and the VTL1 multiprocessor code never fail-fasts
 
 **2026-08-25, from static analysis of `securekernel.exe` with its PDB.**

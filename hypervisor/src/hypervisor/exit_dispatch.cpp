@@ -2343,7 +2343,15 @@ void hypervisor::on_vm_exit(std::uint64_t cpuid,
                 this->l1_vmcall_rcx[slot] = context.rcx;
                 this->l1_vmcall_rdx[slot] = context.rdx;
                 this->l1_vmcall_rax[slot] = context.rax;
-                this->l1_vmcall_rip[slot] = context.rip;
+                // **`vmcs.guest_rip()`, not `context.rip`.** The
+                // context is the guest's general-purpose registers as
+                // the exit stub saved them; its `rip` is not the guest
+                // instruction pointer at the exit, and using it recorded
+                // addresses whose bytes disassembled to `WRMSR` and
+                // `VMRESUME` rather than the `0f 01 c1` of a VMCALL.
+                // The exit ring reads the field and was coherent
+                // throughout; this did not and was not.
+                this->l1_vmcall_rip[slot] = vmcs.guest_rip();
 
                 auto code = context.rcx & 0xffff;
                 auto placed = false;
