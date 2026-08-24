@@ -1,5 +1,59 @@
 # Known defects
 
+## Retraction: the two-processor reset was normal, and `-no-reboot` made it fatal
+
+**The entry below - "Two processors: the guest resets the partition on
+purpose, early" - is wrong about what it found, and this is the
+correction.** The reset is real and the reading of `HV_X64_MSR_RESET` is
+right; what is wrong is calling it the failure.
+
+Going from one processor to two is a **hardware change**, and Windows
+reboots to reconfigure for it. That reboot is routine. Every run in that
+entry carried `ZPP_QEMU_EXTRA='-no-reboot -no-shutdown'`, which converts
+a routine reboot into `paused (shutdown)` - a dead stop that is
+indistinguishable from a crash, and was read as one. The evidence that
+looked most damning, *both processors tearing down at the same
+instruction pointer*, is exactly what an orderly reboot looks like.
+
+Two things should have caught it sooner, and neither was checked:
+
+- **No crash was recorded.** `0x40000100`-`0x40000105`, the Hyper-V crash
+  parameter MSRs, are captured by the synthetic-MSR census - capacity is
+  320, so they are in range - and **not one was ever written**. A guest
+  that resets without filling those in did not crash; it chose to reset.
+  That distinction was available in the dump already taken.
+- **The flag was in the command line and not in the comparison.** The
+  1-processor control was run with the same flag, so the flag cancelled
+  and the *count* looked causal. It is not a single-variable control when
+  a shared variable can turn a normal event into a fatal one.
+
+With the reboot allowed, two processors gets **12x further**: 1,188,605
+second-level entries against 98,310, `VM status: running`, and the
+machine carries on past the point that entry called the failure.
+
+### The real two-processor bug, measured
+
+It still does not boot, and the shape is different from anything above:
+
+```
+  cpu0   41,042 exits/s   3,525 second-level entries/s
+  cpu1        51 exits/s       4 second-level entries/s
+  ring 3                       0 entries, ever
+  8 processes, unchanged over nine minutes, and NOT reboot-looping
+  (chainload count stable at 4 across three samples)
+```
+
+**VP1 gets about a thousandth of the work**, and its exit ring says why
+rather than merely that: `vmresume` into the second-level guest, then
+`hlt` **at an L1 instruction pointer** - the level above halts VP1
+because its guest has nothing to run. VP1 is *idle*, not blocked, so the
+question is why Windows schedules nothing onto it, and the boot stalls at
+8 processes having never entered ring 3.
+
+Note the single-processor run reaches the logon UI from the same binary,
+so this is specific to the second processor and not the tick floor.
+
+
 ## Two processors: the guest resets the partition on purpose, early
 
 **2026-08-24.** `ZPP_CPUS=2` does not reach the logon UI and does not
