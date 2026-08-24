@@ -1,5 +1,44 @@
 # Known defects
 
+## Both processors are inside the level above, not inside this VMM
+
+**2026-08-24.** The question left by the variance finding was why VP1 does
+so little second-level work. One obvious candidate was a spin in *our*
+code - `zpp::spin_lock` is the only lock here and is documented as
+non-recursive, and a second processor waiting on one held by the first
+would explain both the starvation and the boot-to-boot variance.
+
+**It is not that.** `info threads` on the stalled two-processor guest,
+with symbols loaded at the module base:
+
+```
+* 1  Thread 1.1 (CPU#0 [running])  0xfffff82756624179
+  2  Thread 1.2 (CPU#1 [running])  0xfffff82756623fef
+```
+
+Both **running**, both at addresses in the level above's image, 0x18a
+bytes apart - plausibly the same function. The module base for this run
+was `0x6717b000`, so **neither processor is in this VMM's code at all**.
+
+That eliminates the whole class: no spin-lock deadlock here, no processor
+parked in our start-up path, nothing waiting on
+`wait_for_ept_acknowledgement`. It also confirms VP1 is scheduled and
+executing - it is not starved of the physical processor, it is executing
+the level above's code and rarely entering the second level.
+
+**So the remaining multi-processor question is inside the guest
+hypervisor**, whose image is not in the loaded-module list and which
+cannot be symbolised with anything in this tree. That is a real boundary,
+not a gap in effort: the two addresses above are all the detail available
+from here.
+
+Worth recording as the cheapest instrument in the whole investigation -
+one `info threads`, no rebuild, no boot beyond the one already running,
+and it retires a hypothesis that would otherwise have cost a day of
+reading lock paths. `CLAUDE.md` already says to reach for it first; this
+is the second time it has paid.
+
+
 ## CORRECTION: the `GetVpRegisters` poll is the BOOT processor's, not VP1's
 
 **2026-08-24.** The entry above says VP1 "polls `HvCallGetVpRegisters` in
