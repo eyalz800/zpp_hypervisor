@@ -1,5 +1,62 @@
 # Known defects
 
+## Multicore: the SECURE KERNEL crashes, and the machine wedges in its crash path
+
+**2026-08-24.** Named at last, with symbols and the gdb stub rather than
+inference. Three processors, `cores=3,threads=1`, `floor=0080000`:
+
+```
+  Id  Target Id                     Frame
+  1   Thread 1.1 (CPU#0 [running])  0xfffff8008875143e
+  2   Thread 1.2 (CPU#1 [running])  0xfffff8008875143e   <- identical to CPU#0
+  3   Thread 1.3 (CPU#2 [running])  0xfffff800f0d8781d
+```
+
+`0xf0d8781d` against the kernel base `0xfffff800f0800000` is RVA
+`0x58781d`, which is **`HvlSkCrashdumpCallbackRoutine`** - the
+secure-kernel crash dump callback. Checked for the nearest-symbol trap
+this file has already paid for twice: the function spans `0x587800` to
+`0x5878ff` with `HvlpGetEncryptedDataFromHypervisor` next at `0x587900`,
+so the hit is inside a real function and not the nearest name to a gap.
+
+CPU#0 and CPU#1 share one identical instruction pointer in a *different*
+image, far below the kernel base - the secure kernel's own.
+
+**So VBS's secure kernel dies during phase 1 and the crash path never
+completes.** That accounts for every symptom at once and retires the
+separate explanations offered for each: ring 3 is never entered because
+the kernel never gets there; there are no exits because the spin is guest
+code that does not exit; the processors burn 100% because a crash path
+spins; and `HalProcessorIdle` at 98% in the floored build is what the
+*other* processors do while one is dying.
+
+### It is ours, and the shape is not what was assumed
+
+The bare control reached the desktop on two processors with VBS running,
+so this is caused by this VMM. Three configurations were tried and the
+processor count is the only thing that matters:
+
+| configuration | outcome |
+|---|---|
+| 2 processors, SMT pair, `floor=80000` | phase 1, processors idle |
+| 2 processors, SMT pair, `floor=0` | wedge, 100% on both |
+| 3 processors, no SMT, `floor=80000` | wedge, 100% on all three |
+
+**Neither SMT nor the tick floor is the cause.** `cores=1,threads=2` was
+suspected because Hyper-V's core scheduler treats SMT siblings specially;
+an odd `ZPP_CPUS` is expressible as `threads=1` on this launcher and
+three real cores fail the same way. The floor only selects *which* way it
+fails.
+
+### What to read next
+
+The secure kernel crashing is a much narrower question than "the boot
+hangs". `HvlSkCrashdumpCallbackRoutine` is reached through the hypervisor
+library, so the fault is something VTL1 asked of the layer below and got
+a wrong answer to, on a path only exercised with more than one
+processor.
+
+
 ## The control landed: bare Windows reaches the DESKTOP on two processors
 
 **2026-08-24. Confirmed by looking at the physical monitor**, which is
