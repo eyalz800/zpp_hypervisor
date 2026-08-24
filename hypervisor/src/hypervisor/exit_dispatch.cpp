@@ -671,6 +671,27 @@ void hypervisor::on_vm_exit(std::uint64_t cpuid,
         // of it and real CPUID ignores it.
         auto leaf = static_cast<std::uint32_t>(context.rax);
 
+        // **Per processor, because the partition-wide ring cannot
+        // answer the question that matters.** Measured: an application
+        // processor takes 8,400 CPUID exits out of 8,632 - 97.3% - while
+        // its second-level guest gets seventeen entries, and the boot
+        // processor takes essentially none across 1.37 million. So the
+        // guest hypervisor is spinning on that processor, and which leaf
+        // it spins on is the next thing to know.
+        //
+        // The existing `cpuid_trace` ring is partition-wide and read 512
+        // deep, so it blends processors and truncates - it reported 512
+        // accounted against 28,412 recorded. This is a fixed table per
+        // processor with an overflow counter, and a total.
+        //
+        // **The total is the point.** Five instruments in this
+        // investigation have reported plausible nonsense, so this one
+        // carries its own check: `cpuid_total[cpu]` must equal the CPUID
+        // row of that processor's exit-reason table, and the slot counts
+        // plus `cpuid_leaf_other[cpu]` must equal it too. A reading that
+        // fails either is not to be used.
+        note_cpuid_leaf(cpuid, leaf);
+
         // Recorded before the answer is edited, so the pair below is
         // what the guest asked and what it was told, in order. Frozen
         // when full: the leaves that decide anything are asked during

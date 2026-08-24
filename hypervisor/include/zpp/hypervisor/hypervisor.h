@@ -7508,6 +7508,54 @@ private:
     std::uint64_t ept_violation_unclaimed[max_cpus]{};
 
     /**
+     * Which CPUID leaves each processor is asked for, and how many.
+     *
+     * The partition-wide `cpuid_trace` ring cannot answer the question
+     * that matters, because it blends processors and is read 512 deep:
+     * it reported 512 entries accounted against 28,412 recorded.
+     *
+     * The question is this. An application processor takes **8,400 CPUID
+     * exits out of 8,632** while its second-level guest gets seventeen
+     * entries, and the boot processor takes essentially none across 1.37
+     * million exits. The guest hypervisor is spinning on that processor
+     * and then abandoning it, and the leaf it spins on names what it is
+     * waiting for.
+     *
+     * `cpuid_total` exists so the reading can fail rather than merely
+     * print: it must equal the CPUID row of that processor's exit-reason
+     * table, and the slot counts plus `cpuid_leaf_other` must equal it.
+     */
+    static constexpr std::size_t cpuid_leaf_slots = 24;
+
+    std::uint64_t cpuid_leaf_codes[max_cpus][cpuid_leaf_slots]{};
+    std::uint64_t cpuid_leaf_counts[max_cpus][cpuid_leaf_slots]{};
+    std::uint64_t cpuid_leaf_other[max_cpus]{};
+    std::uint64_t cpuid_total[max_cpus]{};
+
+    void note_cpuid_leaf(std::size_t cpu, std::uint32_t leaf)
+    {
+        if (cpu >= max_cpus) {
+            return;
+        }
+
+        this->cpuid_total[cpu] = this->cpuid_total[cpu] + 1;
+
+        for (std::size_t i{}; i < cpuid_leaf_slots; ++i) {
+            if (0 == this->cpuid_leaf_counts[cpu][i]) {
+                this->cpuid_leaf_codes[cpu][i] = leaf;
+            }
+
+            if (this->cpuid_leaf_codes[cpu][i] == leaf) {
+                this->cpuid_leaf_counts[cpu][i] =
+                    this->cpuid_leaf_counts[cpu][i] + 1;
+                return;
+            }
+        }
+
+        this->cpuid_leaf_other[cpu] = this->cpuid_leaf_other[cpu] + 1;
+    }
+
+    /**
      * Which VM entry the guest hypervisor asked for was refused, and how
      * often, per processor.
      *
