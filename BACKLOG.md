@@ -1,5 +1,77 @@
 # Known defects
 
+## `0x1DB` is `IPI_WATCHDOG_TIMEOUT`, and the header was in this repo all along
+
+**2026-08-24.** The bugcheck was carried for hours as an unresolved
+number with a theory built on its parameters. It is named in a header
+this project already vendors:
+
+```sh
+grep -n "0x000001DB" build/debug/_deps/windows-sdk-src/c/Include/*/shared/bugcodes.h
+#define IPI_WATCHDOG_TIMEOUT             ((ULONG)0x000001DBL)
+```
+
+Neighbours are `0x1DA HAL_BLOCKED_PROCESSOR_INTERNAL_ERROR` and `0x1DF
+PROCESSOR_START_TIMEOUT`. **The whole family is multiprocessor**, and the
+only caller is `KiIpiGenericCallTarget`, the target side of
+`KeIpiGenericCall` - Windows' all-processor rendezvous, which *cannot run
+on a uniprocessor*. That, and nothing subtler, is why one processor
+survives.
+
+**This retires the reading of P1.** `P1 = 0x989680` is `QpcFrequency`, a
+constant this kernel hardcodes, not a one-second deadline. The budget is
+`Baseline + QpcFrequency * 300` - **300 seconds**. And `P2 =
+0xfffffffff803a23f` is **negative**: -133,979,585, about -13.4 seconds.
+The watchdog's compare is unsigned, so a negative performance counter
+trips it on the first spin, always. The miss is nine orders of magnitude,
+not the threefold one that was inferred.
+
+**The rule this breaks is one this file already states for the SDM.** An
+unverified section number is worse than none, because it stops the next
+person checking. A bugcheck code is the same thing, and it was applied to
+one and not the other. **Resolve the number before theorising on its
+parameters.**
+
+### `KiBugCheckData` is at RVA `0xf229c0`, and now that is derived
+
+`guest-bugcheck.py` finds it by scanning `.data` for a five-qword run,
+which is a heuristic that has never been checked. From the PDB it is
+`addr = 0026:1190336` - segment **decimal** 26, offset **decimal**
+1,190,336 - and section 26 is `.data` at `0xe00000`, giving
+`0xe00000 + 1190336 = 0xf229c0`. **The heuristic was right**, and every
+bugcheck read in this file stands.
+
+### `ZPP_PUBLISH_REFERENCE_TSC=OFF` removes the bugcheck and not the failure
+
+Two processors, `reftsc=0` verified in the deployed manifest:
+
+- `KiBugCheckData` reads **all zero** - no bugcheck at all, where
+  `reftsc=1` gives `0x1DB`.
+- The machine is dead anyway. cpu1 is stopped at `ntoskrnl+0x58781d`,
+  unmoved across samples taken seconds apart, and cpu0 is outside
+  `ntoskrnl` in the secure kernel's image.
+
+The read is proven rather than assumed: the kernel's own PE header reads
+`MZ` through the same CR3 (`0x1ae000`, the System process), so the zeros
+are the field's value and not an unmapped page.
+
+**So the reference TSC page is not the cause.** It changes what happens
+*after* the secure kernel dies - bugcheck versus hang - and nothing about
+whether it dies.
+
+### And the function is what it looked like, by its `.pdata` bounds
+
+`0x58781d` lies inside RVA `0x587790`-`0x58782d`, and the symbol resolves
+to `HvlSkCrashdumpCallbackRoutine` across the whole span, so this is not
+the nearest-public-symbol trap. **The span recorded earlier in this file
+as `0x587800`-`0x5878ff` was wrong** and is corrected here.
+
+`Sk` is the secure kernel. VTL0 registers this so the *secure kernel's*
+crash can be captured, which is why a processor sits in it while VTL0's
+own `KiBugCheckData` is still zero: the secure kernel died and VTL0 has
+not bugchecked. It is not evidence that VTL0 crashed first.
+
+
 ## `ZPP_NESTED_VMX=OFF` is not a bisect of the multicore failure
 
 Tried on 2026-08-24 as "is this failure nested at all", and it answers a
