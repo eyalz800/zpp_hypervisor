@@ -10906,6 +10906,42 @@ hypervisor::on_l2_exit(std::size_t cpu,
                 // absolute deadline cannot slip in on size alone.
                 constexpr std::uint64_t config_periodic_bit = 1ull << 1;
 
+                // A one-shot arm displaces a pending periodic one, and
+                // saying so is the whole difference between this being
+                // an account and being a coincidence.
+                //
+                // The pairing below assumes the next clock vector
+                // answers the periodic arm still pending. The guest
+                // breaks that assumption itself: it toggles the periodic
+                // bit every tick - `0x3000a` alternating with `0x30008`,
+                // the ring at the top of this file caught 4096 slots of
+                // exactly that - so it arms a long *period*, converts
+                // the timer to one-shot, and arms a short *deadline*
+                // before the period could elapse. The vector that
+                // arrives is the one-shot's, and crediting it to the
+                // period reports the period as having expired early by
+                // whatever ratio the two happen to stand in.
+                //
+                // Measured before this: "asked 6.887 ms, given 2.469 ms,
+                // EARLY by 2.790x" over 39,027 arms, with `unanswered`
+                // reading 2 - so the failure was invisible from the one
+                // place built to reveal it. It cannot be seen there
+                // because a one-shot arm never set `pending`, and only
+                // something that sets it can displace it.
+                //
+                // Rejected: gating `given` on the periodic bit at the
+                // vector instead. The bit is already back to one-shot by
+                // then, so that discards the honest pairings too and
+                // leaves the account empty.
+                if ((1 == tag) && (cpu < max_cpus) &&
+                    (0 == (this->l2_stimer_config[cpu] &
+                           config_periodic_bit)) &&
+                    (0 != this->stimer_arm_pending_tsc[cpu])) {
+                    this->stimer_unanswered[cpu] =
+                        this->stimer_unanswered[cpu] + 1;
+                    this->stimer_arm_pending_tsc[cpu] = 0;
+                }
+
                 if ((1 == tag) && (cpu < max_cpus) &&
                     (0 != (this->l2_stimer_config[cpu] &
                            config_periodic_bit))) {
