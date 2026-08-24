@@ -1,5 +1,65 @@
 # Known defects
 
+## Multicore: bugcheck 0x1DB, and its first parameter is one second
+
+**2026-08-24.** Frozen with `-no-reboot -no-shutdown` at the second reset,
+`KiBugCheckData` read through the guest page tables:
+
+```
+  code  0x1db
+  P1    0x989680    = 10,000,000  -> one second in 100 ns units
+  P2    0xfffffffff803a23f
+  P3    0x0f3889d0
+  P4    0
+```
+
+**P1 is a timeout, not a pointer.** Ten million in 100 ns units is
+exactly one second, and the units are the ones this whole interface
+counts in. So the secure kernel is failing a *deadline* rather than
+tripping over a corrupt structure - which is a different class of bug
+from everything assumed above, and it points somewhere already measured.
+
+*(The name behind 0x1DB is not asserted here. It was not looked up in any
+reference available to this tree, and an unverified bugcheck name is the
+same mistake as an unverified SDM section - see the header of this file.)*
+
+### It promotes a finding that was parked as harmless
+
+An earlier entry records `shadow_ept_pointer_for` costing **52,757 cycles
+a call on VP1 against 6,835 on cpu0 and 7,045 on a single processor**, at
+2.12 calls a round trip, with VP1's whole round trip at 418,605 cycles
+against 137,427. That entry says plainly that it "cannot be what stops
+the boot" because VP1 is idle 99.7% of the time.
+
+**That reasoning was about throughput, and the failure is about latency.**
+A processor that is idle almost always can still miss a one-second
+deadline on the one rendezvous that matters, and being three times the
+price per entry is exactly how. The two facts were never in conflict;
+the wrong question was asked of the first one.
+
+### Retraction: the faulted VMREAD was one occurrence and did not reproduce
+
+The previous entry made a memory-form VMREAD answered with `#UD` the
+prime suspect, on the strength of `vmx_instructions_refused` reading 1 on
+the second processor with the log ending two entries later. Two further
+three-processor boots with the instrumentation in place read
+`vmread_memory_form_failures = [0,0,0,0]` and logged nothing, and the
+guest still died.
+
+**So it fired once in one run and is not the mechanism.** It remains a
+real defect - `#UD` is the wrong answer for a memory access that did not
+complete, and that stays worth fixing - but it is not this. One
+occurrence next to a failure is a coincidence with a timestamp, and it
+was promoted to a cause on nothing more than adjacency.
+
+### Also seen: the failure mode is not stable across runs
+
+Same binary, same processor count: one run wedges with every processor at
+100%, another reboot-loops (chainload count reached 20), another stops
+after two resets. The bugcheck is the stable fact; the shape it leaves
+behind is not. **Read `KiBugCheckData`, not the shape.**
+
+
 ## Multicore: the SECURE KERNEL crashes, and the machine wedges in its crash path
 
 **2026-08-24.** Named at last, with symbols and the gdb stub rather than
