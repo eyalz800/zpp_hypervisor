@@ -1,5 +1,63 @@
 # Known defects
 
+## An application processor is ABANDONED: Hyper-V retries, then VMCLEARs it
+
+**2026-08-25, three processors.** The clearest picture yet of what
+happens to an application processor, straight out of its exit ring. cpu2
+takes 292 exits in the whole boot and ends like this:
+
+```
+  [278] vmcall   rip=0xfffff84808da769b  detail=0x408da769b  [l1-rip]
+  [280] vmcall   rip=0xfffff84808da769b  detail=0x308da769b  [l1-rip]
+  [282] vmcall   rip=0xfffff84808da769b  detail=0x208da769b  [l1-rip]
+  [284] vmcall   rip=0xfffff84808da769b  detail=0x108da769b  [l1-rip]
+  [285] xsetbv
+  [286] vmclear                                              <- teardown
+  [287..291] ept-violation phys=0xfee00000
+```
+
+The same `vmcall`, at the same instruction pointer, **thirteen times**
+with a value counting down `0xd, 0xc, ... 0x1`, each followed by a
+`vmresume`. When the countdown reaches one, the guest hypervisor executes
+`xsetbv` and then **`VMCLEAR`** - it tears down the VMCS for that virtual
+processor. cpu2 does nothing afterwards.
+
+**That is the guest hypervisor giving up on a virtual processor**, and it
+is why the application processors take 33 and 17 second-level entries
+against the boot processor's 88,902. It also supplies the missing half of
+`IPI_WATCHDOG_TIMEOUT`: a rendezvous across all processors cannot
+complete when one has been abandoned.
+
+### What we answer, and the honest limit of this
+
+Those `vmcall`s are tagged `[l1-rip]`, so they come from the guest
+hypervisor to *us*. `on_vmx_instruction` answers every one with
+`vmx_fail(instruction_error::vmcall_in_vmx_root_operation)` - SDM Table
+33-1 error 1 - on the stated grounds that *"This VMM implements no
+hypercall interface, which the hypervisor CPUID range already says by
+answering zero for the interface and feature leaves."*
+
+Note also that the **entire L1 hypercall handler is compiled out**: the
+block that counts `hypercalls_seen` and answers `invalid_hypercall_code`
+sits inside `if constexpr (nested_vmx::evmcs_offered)`, and `evmcs=0` in
+every shipped manifest. So there is no census of what the level above
+asks us, on the one path where it demonstrably asks.
+
+**What is NOT established**, and must not be assumed: *which* call this
+is. The `detail` field reads `0x?08da769b`, whose low 32 bits are exactly
+the low 32 bits of the instruction pointer beside it, so it is not a
+clean capture of `rcx` and the low 16 bits are **not** a hypercall code -
+`0x769b` is not one. Reading a call code out of that field would be the
+same mistake as every retracted entry above. The countdown is real; its
+meaning is not yet read.
+
+### The next reading
+
+An unconditional census of L1 `vmcall` `rcx`/`rdx`/`rax`, not gated on
+`evmcs_offered`. It is a few lines, it is the only path by which the
+level above asks this VMM for anything, and nothing has ever recorded it.
+
+
 ## The APIC-watch race is real, intermittent, and NOT the multicore blocker
 
 **2026-08-25.** With the resume-instead-of-halt fix deployed, three
