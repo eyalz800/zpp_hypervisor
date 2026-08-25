@@ -1,5 +1,41 @@
 # Known defects
 
+## Caveat on "the application processor never issues VtlCall or VtlReturn"
+
+**2026-08-25.** The entry above says the application processor issues
+hypercall codes `0x50`, `0x51` and `0x03` but never `0x11` or `0x12`.
+**That half of it is weaker than it reads**, and the weakness is worth
+recording before it is built on.
+
+Five of the application processor's ten `vmcall` exits carry
+`phys=0xfffff82d393a769b` in the ring - a RIP-shaped value, not a
+hypercall code. The `phys` column is a different exit-record field that a
+`vmcall` does not define, so those five calls are simply **unidentified**,
+not identified as something else. Any of them could have been a
+trust-level call.
+
+The boot processor's census shows the same shape from the other side:
+beside 22,244 each of `HvCallVtlCall` and `HvCallVtlReturn` it carries
+`0x769b` 32 times, `0x0000` twice and `0x8001` once - implausible codes,
+0.05% of about 62,000 calls. The decode itself is right by the
+specification (`exit_dispatch.cpp`: `code = context.rcx & 0xffff`, which
+is the TLFS convention), so this is a small real anomaly rather than a
+broken reader, but it is not zero.
+
+**The conclusion survives, on two other legs that do not depend on the
+hypercall census at all:**
+
+- the dump prints a `HvCallVtlCall`/`HvCallVtlReturn` section per
+  processor that performs one, and the application processor **has no
+  such section**, so `vtl_switches` never counted one for it;
+- **0 of 38** of its second-level exit RIPs fall inside ntoskrnl's
+  extent, so it never executed VTL0 code whatever hypercalls it made.
+
+So "it never reaches VTL0" is measured twice over and stands. "It never
+issues 0x11 or 0x12" should be read as "no trust-level switch was ever
+counted for it", which is the claim the evidence actually supports.
+
+
 ## The application processor never leaves VTL1, and that is why Windows never counts it
 
 **2026-08-25.** Two measurements on a two-processor boot, and together
