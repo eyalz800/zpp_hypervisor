@@ -1,5 +1,54 @@
 # Known defects
 
+## The rendezvous read, in the right phase - and a correction to the branch reading
+
+**2026-08-25.** With `-no-reboot -no-shutdown` now the default, a
+three-processor run stayed in the failed state long enough to be read
+*while the application processors were spinning* - `cpuid_total` reading
+`[8819, 7124, 6977]`, and all three processors independently deriving the
+same image base `0xfffff81dc0000000`, which is a three-way validation the
+earlier single-source derivations did not have.
+
+```
+  rendezvous @hvix64+0xd6ba8 = 0x0
+  companion  @hvix64+0xd6a38 = 0x0
+  flags      @hvix64+0xaf158 = 0x40fb2011000002   bit3=0  bit27=0
+```
+
+### The "contradiction" was my own misreading
+
+The previous entry called `bit27 = 0` a contradiction, on the grounds
+that `testq $0x8000000 ; je 0x255aa4` would take an "early exit" and
+never reach the spin at `0x255b4e`. **`0x255aa4` is not an exit.** The
+function spans `0x25599c`-`0x255c20`, so that branch jumps *forward,
+within the function, onto the path that contains the spin.* The flags are
+consistent with the measurement and always were.
+
+Recorded because the shape is now familiar: a branch target read as
+"leaves the function" without checking it against the function's own
+bounds, when `.pdata` gives those bounds for free.
+
+### And the spin is the designed path, not an anomaly
+
+The wait opens with `movq <0xd6ba8>, %rcx ; testq %rcx, %rcx ; je`, so a
+**zero** rendezvous variable is what sends it down the spinning path; a
+non-zero one takes a different branch that calls out. And scanning the
+image for writers of that variable finds **exactly one**:
+
+```
+  0x236457  andq $0x0, <0xd6ba8>   - the boot processor zeroing it
+```
+
+No direct store ever sets it non-zero. (The scan covered `mov [mem],reg`,
+`and [mem],imm8` and `mov [mem],imm32`; a write through a register-held
+pointer would not be caught, so this is strong but not absolute.)
+
+**So the application processors spinning is the intended behaviour for
+that value being zero.** The thing to explain is not why they enter the
+spin - it is what the spin is polling for, which is on the path at
+`0x255aa4` and has not been read.
+
+
 ## Measurement stability is now the binding constraint, not diagnosis
 
 **2026-08-25.** A phase-gated read - poll until an application processor
