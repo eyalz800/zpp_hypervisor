@@ -3531,18 +3531,33 @@ def main():
     # not move at all.
     # The roots themselves. See the queue above for why one distinct value
     # would be a finding rather than a detail.
-    roots = [read('shadow_ept_recall_root', 0 * 4 + i) or 0
-             for i in range(4)]
-    distinct = sorted({r for r in roots if r})
-    print(f"\ncpu 0 shadow EPT roots held (slot "
-          f"{read('shadow_ept_current_slot', 0)} current)")
-    for i, r in enumerate(roots):
-        print(f"  slot {i}  0x{r:012x}" + ("  <- current" if
-              i == read('shadow_ept_current_slot', 0) else ""))
-    print(f"  {len(distinct)} distinct non-zero root(s)")
-    if len(distinct) == 1:
-        print("  ONE ROOT <- both trust levels would be sharing an "
-              "extended page table, which VSM requires them not to")
+    # **Every processor, not just the boot one.** This read was
+    # `0 * 4 + i` and printed "cpu 0" - so an application processor's
+    # roots could not be seen at all, and the absence of a section for it
+    # read exactly like a processor that holds none. That matters
+    # directly: the failure being chased is an application processor that
+    # never performs a trust-level transition, and whether it holds one
+    # root, two, or none is the first thing to compare against the boot
+    # processor, which does switch.
+    for cpu in range(args.cpus):
+        roots = [read('shadow_ept_recall_root', cpu * 4 + i) or 0
+                 for i in range(4)]
+        current = read('shadow_ept_current_slot', cpu)
+        distinct = sorted({r for r in roots if r})
+
+        if not distinct and not current:
+            print(f"\ncpu {cpu} shadow EPT roots held: none")
+            continue
+
+        print(f"\ncpu {cpu} shadow EPT roots held (slot "
+              f"{current} current)")
+        for i, r in enumerate(roots):
+            print(f"  slot {i}  0x{r:012x}" +
+                  ("  <- current" if i == current else ""))
+        print(f"  {len(distinct)} distinct non-zero root(s)")
+        if len(distinct) == 1:
+            print("  ONE ROOT <- both trust levels would be sharing an "
+                  "extended page table, which VSM requires them not to")
 
     # **What fraction of wall time this VMM occupies.** Every account of
     # the cost of this hang so far has been a rate multiplied by an
