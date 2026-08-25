@@ -50602,3 +50602,41 @@ What remains is exactly what the disassembly says: a live loop that calls
 into VTL1, is told `4`, does nothing with it, and calls again - by choice,
 not by blocking. The question is not what failed to arrive. **It is what
 would make the secure kernel answer with something other than `4`.**
+
+## Retracted: "our own EPT handler removes the GDT mapping"
+
+Recorded one boot ago from a single log line - `ept handler changed
+gdt reach: 0x1 -> 0x0 at exit 0xcc`, beside an emulated APIC write of
+`0x0`. It does **not** reproduce. The next boot, with the faulting
+physical address added to that same line so it would say *which* page,
+emitted the line **zero times** while the leaf entry still went
+`0x8000000114f4d163 -> 0` at exit 0xcd. The transition therefore
+happens in the guest's own execution between two exits, not inside our
+handler.
+
+Two things also argue against the mechanism that was proposed:
+
+- The emulated write's destination is `page_base | (linear & 0xfff)`
+  (`watched_page.cpp`), where `page_base` is the watched page's own
+  base. A violation on the local APIC page cannot write a guest page
+  table through that path - the value can be wrong, the page cannot.
+- The `l2_physical_to_l1` step added to `guest_linear_to_physical` was
+  suspected of coupling the walker to shadow-EPT state the handler
+  mutates. It does not: it returns its argument unchanged when
+  `running_l2[cpu]` is false, and the application processor has zero
+  L2 entries. The walker change is inert here.
+
+The general fault, and it is the same one this session has now made
+several times: **a single log line from a single boot was written up as
+a finding.** The bracket probe is a per-exit sampler on a machine where
+the interesting window is fifteen exits wide; one firing of it is an
+observation, and it took a second boot - which cost thirteen minutes -
+to find out this one was not repeatable. Requiring two boots before
+recording anything would have caught this, the null `injected_count`
+and the `0x2121` leaf entry alike.
+
+What is stable across every boot, and is the thing worth attacking
+next: the application processor reaches **117 exits and zero
+second-level entries**. It never runs L2 at all, so nothing about
+nested entry, shadow EPT or reflection is implicated yet - it dies in
+first-level guest code, during VTL1's own start-up path.

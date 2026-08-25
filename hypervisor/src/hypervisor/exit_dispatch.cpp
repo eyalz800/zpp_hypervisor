@@ -2860,12 +2860,20 @@ void hypervisor::on_vm_exit(std::uint64_t cpuid,
 
                 if (gdt_on_entry != after) {
                     this->ept_gdt_probe_done[cpuid] = true;
+                    // With the page that faulted, because "the
+                    // handler changed it" is only actionable if the
+                    // page is known - the emulation writes to the
+                    // watched page's own base, so a violation on the
+                    // local APIC cannot write a page table, and one on
+                    // some other page might.
                     log("cpu {} ept handler changed gdt reach: {} -> {} "
-                        "at exit {}",
+                        "at exit {}, faulting phys {}, qualification {}",
                         cpuid,
                         gdt_on_entry,
                         after,
-                        this->exit_total[cpuid]);
+                        this->exit_total[cpuid],
+                        vmcs.guest_physical_address(),
+                        vmcs.exit_qualification());
                 }
             }
         }};
