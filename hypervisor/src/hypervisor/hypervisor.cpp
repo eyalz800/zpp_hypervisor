@@ -5365,6 +5365,8 @@ void hypervisor::inject_general_protection_fault(std::uint64_t error_code)
     // A fault, so the guest resumes at the instruction that caused it
     // rather than past it - which is why the exit handler must not advance
     // RIP when this is used.
+    note_injection(general_protection_vector);
+
     this->vmcs.vm_entry_interruption_information_field(
         general_protection_vector |
         arch::x86_64::vmx::vm_entry_interruption::hardware_exception |
@@ -5376,6 +5378,25 @@ void hypervisor::inject_general_protection_fault(std::uint64_t error_code)
     // caller that passes something: a #GP raised by a task switch carries
     // the selector it could not switch to.
     this->vmcs.vm_entry_exception_error_code(error_code);
+}
+
+void hypervisor::note_injection(std::uint64_t information)
+{
+    // **Counted where it is written, not where it is read.** This used
+    // to be sampled at the top of `on_vm_exit`, and SDM 25.8.3 says
+    // "the valid bit in this field is cleared on every VM exit" - so
+    // that sample could only ever read zero, and it did, and the reading
+    // was used to eliminate the whole class of "this VMM delivered the
+    // event that killed the application processor". A VMM injecting on
+    // every single entry would have printed exactly the same line.
+    //
+    // Here the value is the one being installed, so a zero count means
+    // nothing was injected.
+    if (auto here = this_processor(); here < max_cpus) {
+        this->injected_count[here] = this->injected_count[here] + 1;
+        this->injected_last[here] = information;
+        this->injected_last_exit[here] = this->exit_total[here];
+    }
 }
 
 void hypervisor::inject_page_fault(std::uint64_t linear,
@@ -5390,6 +5411,8 @@ void hypervisor::inject_page_fault(std::uint64_t linear,
 
     // A fault, so RIP stays on the instruction and it re-executes once
     // the guest has made the page good. Callers must not advance RIP.
+    note_injection(page_fault_vector);
+
     this->vmcs.vm_entry_interruption_information_field(
         page_fault_vector |
         arch::x86_64::vmx::vm_entry_interruption::hardware_exception |
@@ -5412,6 +5435,8 @@ void hypervisor::inject_invalid_opcode_exception()
     // and #AC - and requires it to be 0 for vectors in the ranges 0-7, 9,
     // 15, 16 and 18-31. Vector 6 is in the first of those, so setting it
     // would fail VM entry rather than deliver anything.
+    note_injection(invalid_opcode_vector);
+
     this->vmcs.vm_entry_interruption_information_field(
         invalid_opcode_vector |
         arch::x86_64::vmx::vm_entry_interruption::hardware_exception |

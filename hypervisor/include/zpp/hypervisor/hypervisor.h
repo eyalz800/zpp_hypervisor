@@ -2807,6 +2807,13 @@ private:
     void inject_page_fault(std::uint64_t linear, std::uint64_t error_code);
 
     /**
+     * Records an injection at the point it is written. See the
+     * definition: sampling the field at exit reads zero always, because
+     * the processor clears its valid bit on every VM exit.
+     */
+    void note_injection(std::uint64_t information);
+
+    /**
      * Record an exit nothing here knows how to handle, and stop this CPU.
      *
      * Does not return. Resuming from an unhandled exit is not a neutral
@@ -7646,6 +7653,23 @@ private:
      * @}
      */
     std::uint64_t cr3_seen_count[max_cpus]{};
+
+    /**
+     * Distinct page tables seen past the eight this processor records.
+     * Without it, "no page table maps that address" and "the one that
+     * did was the ninth" print identically.
+     */
+    std::uint64_t cr3_seen_overflow[max_cpus]{};
+
+    /**
+     * How often the reachability walker could not translate the very
+     * instruction pointer the processor just executed from.
+     *
+     * The positive control: the fetch demonstrably succeeded, so any
+     * non-zero value means the walker is wrong and every reachability
+     * number taken beside it is worthless.
+     */
+    std::uint64_t gdt_walk_rip_unreachable[max_cpus]{};
 
     bool l2_entry_failure_logged[max_cpus]{};
 

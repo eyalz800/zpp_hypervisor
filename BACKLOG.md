@@ -1,5 +1,78 @@
 # Known defects
 
+## Instrument audit: two of the last twenty entries' facts were null readings
+
+**2026-08-25.** Two reviews were commissioned - one of the method, one
+against KVM - and between them they invalidate a substantial part of the
+recent record. Recorded in full because the failures are more useful than
+the conclusions were.
+
+### The worst one: `injected_count` could only ever read zero
+
+It sampled `vm_entry_interruption_information_field` at the **top of
+`on_vm_exit`**, and SDM 25.8.3 says *"the valid bit in this field is
+cleared on every VM exit"*. So the count was structurally zero, and a VMM
+injecting on **every** entry would have printed the identical line -
+`count 0 last 0 at exit 0`, character for character what a build with no
+instrument at all prints.
+
+**So "this VMM injects nothing into that processor" is withdrawn**, and
+with it the elimination of the whole candidate list it was used to
+retire: injected exception, reflected interrupt, a late start-up IPI
+delivered as an event. That list is **live again**.
+
+Fixed by counting at the **write** sites - `note_injection` is called
+from the three injectors - so a zero now means nothing was injected.
+
+### The reachability walker was wrong in the configuration under test
+
+`guest_linear_to_physical` answers a **paged-off** guest with the linear
+address, which is right for a memory access and meaningless as a
+reachability answer. An application processor spends its whole early life
+paged off, so every one of those exits reported the descriptor table
+*mapped* without reading a byte - **which is what earned the bracket's
+"ever reachable" half**, and with it the claim that the table was
+reachable and became unreachable.
+
+Refusing in the walker was tried and is **wrong**: `read_guest_linear`
+and `write_guest_linear` need that identity, and `tests/guest_memory`
+fails without it. The test caught it immediately, which is the suite
+doing exactly its job. The instruments check `CR0.PG` themselves instead.
+
+Also fixed, from the same audit:
+
+- **a positive control**: the walker now walks `context.rip` beside the
+  base every time. The processor demonstrably just fetched from there, so
+  a non-zero `rip unreachable` count means the walker is broken - a check
+  every previous reachability number was taken without;
+- **`gdt_walk_last` reset on a descriptor-table change**, which the
+  per-value fix had left out, so the edge log could still report an edge
+  between two different tables - the very defect that fix claimed to
+  remove;
+- **an overflow counter on the CR3 history**, which silently truncated at
+  eight, making *"no page table maps that address"* indistinguishable
+  from *"the one that did was the ninth"*.
+
+### And a plain misreading of an instruction
+
+`BACKLOG.md`'s account of the fault said the prologue *"already reads and
+writes `[rbp+0x1750]` and `[rsp+0x50]`, so part of the stack region is
+reachable"*. **`lea rcx, [rsp+0x50]` computes an address and accesses no
+memory.** There is no evidence any stack address was reachable; the
+`call`'s push may be the first stack access in that frame. The
+"partially-populated mapping" and "region being built forwards" readings
+go with it.
+
+### What survives
+
+The `call` and its stack push, from disassembly. The leaf entry read as
+zero **by QEMU**, which shares no code with this VMM and settles it in
+guest memory below both walkers. And the region stopping at page `0x283`.
+Everything else in the GDT thread is now single-sourced through an
+instrument that has been shown wrong in this exact configuration, and
+should be re-taken before it is used.
+
+
 ## The INVEPT broadcast is already on, so it is not the missing invalidation
 
 **2026-08-25.** The previous entry named `ZPP_INVEPT_ALL_PROCESSORS` as

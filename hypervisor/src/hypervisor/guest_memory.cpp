@@ -243,6 +243,18 @@ hypervisor::guest_linear_to_physical(std::uint64_t linear)
     // unrestricted guest control exists for.
     constexpr std::uint64_t cr0_pg = 1ull << 31;
     if (0 == (this->vmcs.guest_cr0() & cr0_pg)) {
+        // **Right for a caller asking "where does this land", wrong
+        // for one asking "is this mapped".** The reachability
+        // instruments ask the second, and an application processor
+        // spends its whole early life paged off - `apply_start_up`
+        // leaves CR0.PG clear - so those exits reported the descriptor
+        // table "mapped" without reading a byte of guest memory. That is
+        // what earned the bracket's "ever reachable" half.
+        //
+        // Refusing here was tried and is wrong: `read_guest_linear` and
+        // `write_guest_linear` need this identity, and
+        // `tests/guest_memory` fails without it. The instruments check
+        // CR0.PG themselves instead.
         return linear;
     }
 

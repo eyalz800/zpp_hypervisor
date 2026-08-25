@@ -209,24 +209,6 @@ void hypervisor::on_vm_exit(std::uint64_t cpuid,
             this->gs_processor_index_disagreements + 1;
     }
 
-    // What was injected into this processor on the entry that just
-    // ended. See `injected_count`: the application processor dies parked
-    // in a quiesce spin, and only an event can make a parked processor
-    // fault, so what this VMM put in that field is the first thing to
-    // account for.
-    if (cpuid < max_cpus) {
-        constexpr std::uint64_t injection_valid = 1ull << 31;
-
-        if (auto information = vmcs.read(
-                arch::x86_64::vmx::vmcs::field::
-                    vm_entry_interruption_information_field);
-            0 != (information & injection_valid)) {
-            this->injected_count[cpuid] = this->injected_count[cpuid] + 1;
-            this->injected_last[cpuid] = information;
-            this->injected_last_exit[cpuid] = this->exit_total[cpuid];
-        }
-    }
-
     // Bracket the moment this processor's global descriptor table
     // stopped being reachable. See `gdt_last_reachable`: the fault says
     // it is unmapped now and the loaded segment selectors say it was
@@ -234,7 +216,17 @@ void hypervisor::on_vm_exit(std::uint64_t cpuid,
     // only early, because it is a page walk per exit.
     if ((0 != cpuid) && (cpuid < max_cpus) &&
         (this->exit_total[cpuid] < 512)) {
-        if (auto base = vmcs.guest_gdtr_base(); 0 != base) {
+        // **Only while paging is on**, because
+        // `guest_linear_to_physical` answers a paged-off guest with the
+        // linear address - correct for a memory access, meaningless as a
+        // reachability answer, and the source of the bracket's "ever
+        // reachable" half. An application processor spends its whole
+        // early life paged off.
+        constexpr std::uint64_t cr0_paging = 1ull << 31;
+        auto paging_on = 0 != (vmcs.guest_cr0() & cr0_paging);
+
+        if (auto base = vmcs.guest_gdtr_base();
+            (0 != base) && paging_on) {
             // **Per descriptor-table value, not per processor.** This
             // bracket used to accumulate across every `GDTR` the
             // processor ever held, so "ever reachable" could be true
@@ -250,6 +242,15 @@ void hypervisor::on_vm_exit(std::uint64_t cpuid,
                 this->gdt_last_reachable[cpuid] = 0;
                 this->gdt_first_unreachable[cpuid] = 0;
                 this->gdt_reachable_seen[cpuid] = 0;
+
+                // **And the edge log's state, which was left out.** The
+                // bracket was made per descriptor-table value and this
+                // was not, so the "gdt mapped/UNMAPPED at exit N" line -
+                // the one the transition table was built from - could
+                // still report an edge between two *different* tables.
+                // That is the exact defect the per-value change claimed
+                // to remove, left in place in the other half.
+                this->gdt_walk_last[cpuid] = 0;
             }
 
             // Twice, back to back. See `gdt_walk_disagreements`: this is
@@ -272,6 +273,17 @@ void hypervisor::on_vm_exit(std::uint64_t cpuid,
                 if (guest_linear_to_physical(base)) {
                     ++mapped;
                 }
+            }
+
+            // **The positive control this lacked.** The processor
+            // demonstrably just fetched an instruction from `rip`, so a
+            // walker that cannot reach `rip` is broken - and every
+            // reachability number here was taken without ever asking
+            // that. It costs one walk in a block that already does
+            // eight.
+            if (!guest_linear_to_physical(context.rip)) {
+                this->gdt_walk_rip_unreachable[cpuid] =
+                    this->gdt_walk_rip_unreachable[cpuid] + 1;
             }
 
             if (8 == mapped) {
@@ -339,6 +351,13 @@ void hypervisor::on_vm_exit(std::uint64_t cpuid,
             this->cr3_seen[cpuid][count] = current;
             this->gdtr_seen[cpuid][count] = vmcs.guest_gdtr_base();
             count = count + 1;
+        } else if (!known) {
+            // Silently truncating made "none of the page tables maps it"
+            // indistinguishable from "the one that did was the ninth".
+            // Every other census here carries an overflow field; this
+            // one did not.
+            this->cr3_seen_overflow[cpuid] =
+                this->cr3_seen_overflow[cpuid] + 1;
         }
     }
 
@@ -2197,6 +2216,12 @@ void hypervisor::on_vm_exit(std::uint64_t cpuid,
                     this->injected_count[cpuid],
                     this->injected_last[cpuid],
                     this->injected_last_exit[cpuid]);
+
+                log("cpu {} walker control: rip unreachable {} of {} "
+                    "exits (non-zero means the walker is broken)",
+                    (cpuid + 1),
+                    this->gdt_walk_rip_unreachable[cpuid],
+                    this->exit_total[cpuid]);
 
                 log("cpu {} gdt eight-walk: all-mapped {} all-unmapped "
                     "{} mixed {}",
