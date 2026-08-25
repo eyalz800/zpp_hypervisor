@@ -1,5 +1,66 @@
 # Known defects
 
+## The triple fault, explained: the application processor's GDT and stack are not mapped
+
+**2026-08-25.** The triple-fault handler now records the descriptor
+state, and it identifies the mechanism exactly.
+
+```
+  cpu 1 guest triple faulted, rip 0xfffff87770e3455b cs 0x10
+  idtr 0xfffff87770c22000/0xfff   gdtr 0xffffe800002b0b00/0x3f   tr 0x30
+  cr0 0x80010021  cr3 0x114f5e000  cr4 0x22e0  efer 0x0
+  rsp 0xffffe800002b4f60  ss 0x20
+```
+
+Every descriptor is **well formed**: an interrupt table of 256 entries, a
+global table of 8 with `TR 0x30` landing exactly on its last two slots,
+paging on, a canonical 64-bit stack pointer. Nothing here looks wrong.
+
+Translating those four addresses under the very `CR3` the processor is
+running on is what tells the story:
+
+```
+  IDTR base  0xfffff87770c22000 -> 0x100422000   mapped
+  RIP        0xfffff87770e3455b -> 0x10063455b   mapped
+  GDTR base  0xffffe800002b0b00 -> UNMAPPED
+  RSP        0xffffe800002b4f60 -> UNMAPPED
+```
+
+**The global descriptor table and the stack are not mapped.** That is a
+triple fault's mechanism written out: an exception fires, the processor
+goes to deliver it, needs the handler's code and stack descriptors from
+the **global** table - unmapped - so it escalates to a double fault,
+which needs the **stack** - unmapped - and the third fault is the end.
+The interrupt table and the code being mapped is precisely why it got far
+enough to fault rather than dying at the first instruction.
+
+Note the two unmapped addresses share a range - `0xffffe800002b____` -
+that the mapped ones do not, so it is one region missing rather than
+scattered damage.
+
+### What this makes the question
+
+**Why is the processor running on a `CR3` that does not map its own
+global descriptor table and stack?** Either this VMM handed it that
+`CR3`, or the guest switched to a table it had not finished populating
+and this VMM let the switch land. `apply_start_up` puts a started
+processor in real mode at `vector << 12` and the guest builds everything
+from there, so the `CR3` in force at the fault is one the guest loaded -
+which makes "did this VMM lose or mistime the switch" the first thing to
+check, not "is the guest wrong".
+
+### Caveat kept deliberately
+
+These translations were taken *after* the fault, through page tables the
+boot processor is still running on and still editing. The application
+processor is stopped, so its `CR3` value is stable, but the tables it
+points at are not necessarily what they were at the instant of the fault.
+A second reading at a different time, or a walk recorded inside the
+triple-fault handler itself, would close that - and given how many
+readings in this file have been wrong for exactly this reason, it should
+be closed before anything is built on it.
+
+
 ## The application processor TRIPLE FAULTS
 
 **2026-08-25.** With the start-up vector fix in, the application

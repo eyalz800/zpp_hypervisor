@@ -1925,6 +1925,40 @@ void hypervisor::on_vm_exit(std::uint64_t cpuid,
             context.rip,
             vmcs.guest_cs_selector());
 
+        // **The descriptor state, because a triple fault is a statement
+        // about it.** The processor got here by faulting on the way into
+        // its own double-fault handler, so the interrupt descriptor
+        // table, the stack that handler switches to, or the paging that
+        // reaches either is unusable - and which of those it is cannot be
+        // told from a RIP.
+        //
+        // Recorded on an application processor's first-level guest this
+        // is the state this VMM handed it: `apply_start_up` puts a
+        // started processor in real mode at `vector << 12` and the guest
+        // installs its own tables from there, so a bad IDTR here is
+        // either what the guest built or what it inherited.
+        //
+        // Two lines because the ring truncates a long one, and a
+        // truncated field is indistinguishable from a zero one - a trap
+        // this file has already recorded.
+        log("cpu {} triple fault state: idtr {}/{} gdtr {}/{} tr {}",
+            (cpuid + 1),
+            vmcs.guest_idtr_base(),
+            vmcs.guest_idtr_limit(),
+            vmcs.guest_gdtr_base(),
+            vmcs.guest_gdtr_limit(),
+            vmcs.guest_tr_selector());
+
+        log("cpu {} triple fault state: cr0 {} cr3 {} cr4 {} efer {} "
+            "rsp {} ss {}",
+            (cpuid + 1),
+            vmcs.guest_cr0(),
+            vmcs.guest_cr3(),
+            vmcs.guest_cr4(),
+            vmcs.read(arch::x86_64::vmx::vmcs::field::guest_ia32_efer),
+            vmcs.guest_rsp(),
+            vmcs.guest_ss_selector());
+
         // Stopped through the same path, and the log line above is
         // what tells the two apart. A record of its own was
         // considered and not added: `unhandled_exit` is read by a
