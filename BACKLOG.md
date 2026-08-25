@@ -1,5 +1,60 @@
 # Known defects
 
+## RETRACTION: every `qual`, `cs` and activity state read from the exit ring this session was unfilled
+
+**2026-08-25.** Before reading the extended-page-table violations'
+qualification - which the previous entry said to confirm first - the
+recorder was checked. It is not filled:
+
+```cpp
+  if constexpr (nested_vmx::census_exits) {
+      recorded.qualification  = vmcs.exit_qualification();
+      recorded.activity_state = vmcs.guest_activity_state();
+      recorded.cs_selector    = vmcs.guest_cs_selector();
+  }
+```
+
+and the build manifest says **`census=0`**. The comment directly above
+that block states the hazard exactly: *"Off, they read zero, and zero is
+a legal value for all three - so nothing in the ring says the switch was
+off."*
+
+**So every `qual=`, `cs=` and activity state printed from the exit ring
+in this investigation is an unwritten field, not a measurement.**
+
+### What that retracts
+
+- **"`cs=0x0000`, a null code selector"** - reasoned about explicitly
+  when identifying the firmware park loop, and puzzled over as "64-bit
+  code with a null CS". There was no selector; the field was never
+  written.
+- **Every extended-page-table violation's `qual=0x0`**, including the
+  four immediately before the triple fault. Nothing has been measured
+  about whether any of them is a paging-structure access, and the
+  previous entry's caution - that a qualification of exactly zero looked
+  wrong - was right for the wrong reason.
+- **Every `active` activity state** in the ring, including the ones read
+  while reasoning about wait-for-SIPI.
+
+What is *not* affected: the exit reasons, the RIPs, the guest-physical
+addresses and the `detail` values, which are written unconditionally, and
+every counter and log line outside the ring. The findings that rest on
+those - the triple fault itself, the descriptor state logged in the
+handler, the eight-walk, the injection census, the CR3 history - stand.
+
+### The rule, which this file already contains twice
+
+`check-bootable.sh` prints the manifest on every deploy precisely so that
+a switch's state is known before a run is believed, and CLAUDE.md records
+the `ZPP_PUBLISH_REFERENCE_TSC` episode where two sessions of
+measurements were taken of a configuration nobody had built. **This is
+the same failure**: a field read for two days without once asking whether
+anything writes it.
+
+To read a qualification, build with `-DZPP_CENSUS_EXITS=ON` and confirm
+`census=1` in the manifest first.
+
+
 ## An EPT violation can be the processor walking the guest's own page tables
 
 **2026-08-25.** From `watched_page.cpp`, beside the emulate-versus-step
