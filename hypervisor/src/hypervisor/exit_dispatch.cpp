@@ -2000,6 +2000,30 @@ void hypervisor::on_vm_exit(std::uint64_t cpuid,
                     this->gdtr_seen[cpuid][i]);
             }
 
+            // **Both walkers, because one of them cannot tell you it
+            // is the wrong instrument.** `guest_linear_to_physical`
+            // walks the guest's tables directly;
+            // `translate_guest_linear` walks them through the guest
+            // hypervisor's extended tables. If they disagree about the
+            // global descriptor table, the "unreachable" reading is this
+            // VMM's and not the processor's - which is the difference
+            // between a guest that lost a mapping and a reader that
+            // cannot follow one.
+            {
+                auto direct = guest_linear_to_physical(
+                    vmcs.guest_gdtr_base());
+                auto through = translate_guest_linear(
+                    cpuid, vmcs.guest_gdtr_base());
+
+                log("cpu {} gdt by two walkers: direct {} -> {} "
+                    "through-ept {} -> {}",
+                    (cpuid + 1),
+                    static_cast<std::uint64_t>(direct.has_value()),
+                    direct ? *direct : std::uint64_t{},
+                    static_cast<std::uint64_t>(through.has_value()),
+                    through ? *through : std::uint64_t{});
+            }
+
             log("cpu {} triple fault reach: idt {} gdt {} rsp {} rip {}",
                 (cpuid + 1),
                 mapped(vmcs.guest_idtr_base()),

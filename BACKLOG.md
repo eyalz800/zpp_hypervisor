@@ -1,5 +1,51 @@
 # Known defects
 
+## Two walkers agree: the GDT really is unmapped, and it was mapped earlier
+
+**2026-08-25.** The previous entry left one ambiguity - whether "gdt
+unreachable" was the processor's state or this VMM's reader. Closed by
+asking both walkers this tree has, at the fault:
+
+```
+  cpu 1 gdt by two walkers: direct 0x0 -> 0x0   through-ept 0x0 -> 0x0
+```
+
+`guest_linear_to_physical` walks the guest's tables directly;
+`translate_guest_linear` walks them through the guest hypervisor's
+extended tables. **They agree.** So this is not one reader failing, and
+the earlier caution - warranted, given how much of this file has been
+reader artefacts - is discharged: the global descriptor table at
+`0xffffe800002b0b00` is genuinely not mapped under CR3 `0x114f5f000`.
+
+### Which makes the sequence contradictory, and that is the point
+
+- The processor holds `CS 0x10`, `SS 0x20`, `TR 0x30`. Every one of those
+  was loaded by reading a descriptor **out of that table**.
+- The paired history shows the GDTR first appearing *together with* CR3
+  `0x114f5f000`, so those loads happened under this same page table.
+- At the fault, that table is unmapped under that same page table.
+
+So the mapping **existed and was removed while the processor was
+running**. A guest does not unmap its own descriptor table underneath
+itself; something else did, or the page table the processor is on is not
+the one it should still be on.
+
+### The candidate that fits, stated as a candidate
+
+CR3 `0x114f5f000` is the guest hypervisor's, and it was read from the
+**boot** processor in an earlier session. If the guest hypervisor gives
+each virtual processor its own page table and this application processor
+is running on the boot processor's, then any edit the boot processor
+makes - unmapping a bring-up structure once it is done with it, which is
+exactly the kind of thing that region looks like - pulls the table out
+from under the application processor.
+
+That is a hypothesis, not a finding. What would settle it is comparing
+the CR3 this VMM has for the application processor against the boot
+processor's at the same moment - both are in `cr3_seen` now, one row per
+processor, and the comparison has not been made.
+
+
 ## The paired CR3/GDTR history: the guest installed a consistent pair, and it stopped being reachable
 
 **2026-08-25.** Recording the guest GDTR beside each distinct CR3, and
