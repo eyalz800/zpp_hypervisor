@@ -1,5 +1,60 @@
 # Known defects
 
+## The application processor TRIPLE FAULTS
+
+**2026-08-25.** With the start-up vector fix in, the application
+processor's exit ring finally shows what happens to it, and it is not a
+wait of any kind:
+
+```
+  [107] init          rip=0x0 x2
+  [108] cr-access     rip=0xfffff81dfdda66d3
+  [109] cpuid         rip=0xfffff81dfdd2360b
+  [110] cpuid         rip=0xfffff81dfdd23638
+  [111] rdmsr         rip=0xfffff81dfdc5a5cc  0x1b -> 0xfee00800
+  [112] ept-violation rip=0xfffff81dfdc5a467  phys=0xfee00000
+  [113] ept-violation rip=0xfffff81dfdc5a47f  phys=0xfee00000
+  [114] ept-violation rip=0xfffff81dfdc5a4ac  phys=0xfee00000
+  [115] ept-violation rip=0xfffff81dfdc57efe  phys=0xfee00000
+  [116] triple-fault  rip=0xfffff81dfdc3dfb2
+```
+
+It takes the INIT, comes up in **64-bit code** - `cr-access`, `cpuid`,
+`rdmsr` of `IA32_APIC_BASE`, four extended-page-table violations on the
+local APIC page at `0xfee00000` - and then **triple faults**.
+
+A triple fault is a fault during the handling of a double fault, which
+means the interrupt descriptor table, its stack, or the code the handler
+sits on is not usable. So this is the "state this VMM hands an
+application processor" question answered directly, with an exit reason
+rather than an inference.
+
+**And it explains the signature that has misled this investigation from
+the beginning.** After the triple fault the processor takes no further
+exits and burns 100% of a core - which reads exactly like a memory spin,
+and was read that way for many hours across the VTL, barrier, rendezvous
+and secure-kernel theories. It is not a spin. It is a dead processor.
+
+The faulting RIP `0xfffff81dfdc3dfb2` is not in the second-level kernel
+image (`0xfffff806db800000` this boot), so it is in the guest hypervisor's
+own range - which is consistent with the processor having been handed to
+Hyper-V and dying inside it.
+
+### What this makes actionable
+
+- The exit ring records the fault, so the state at the point of death is
+  reachable: the interrupt descriptor table, global descriptor table,
+  `CR3`, stack and access rights this VMM composes for a started
+  processor can each be read against what the boot processor carries.
+- `apply_start_up` puts a processor into real mode at `vector << 12` with
+  the eight segment fields overwritten. Something after that - the mode
+  switch, the tables the guest installs, or what this VMM allows it to
+  reach - leaves it unable to take a fault.
+- The four extended-page-table violations on `0xfee00000` immediately
+  before the fault are the closest thing to a cause on the record, and
+  the local APIC page is one this VMM watches and emulates.
+
+
 ## The multicore unwedge is reproducible, and the guest is now alive rather than stuck
 
 **2026-08-25.** Two consecutive two-processor boots with the start-up
