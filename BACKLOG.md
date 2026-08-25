@@ -1,5 +1,45 @@
 # Known defects
 
+## The zero deadline base is NORMAL - the clock-check lead is dead
+
+**2026-08-25.** The comparison named in the entry above as the deciding
+one, run:
+
+```
+  1 processor (reaches the logon UI)   deadline base @hvix64+0xa9c30 = 0x0
+  3 processors (fails)                 deadline base @hvix64+0xa9c30 = 0x0
+```
+
+**Identical.** So a deadline formed from a zero base is what this
+hypervisor does on a machine that boots, and the reading that it "would
+make the wait expire immediately, for ever" is wrong.
+
+Both readings validated the same way before being used: the base was
+accepted only when the frequency field came back as exactly `0x989680`,
+the constant the code compares it against, which a wrong pointer would
+not produce. On the single-processor side the base came out of a
+*different* leaf-0 site - RVA `0x25c26f`, the feature-enumeration one -
+and still validated, which is a second independent check.
+
+**The test was stated before the run and it decided against the
+hypothesis.** That is the whole value of stating it: this is the eighth
+idea in this investigation to die on a check written down in advance,
+and none of them cost more than the run that killed it.
+
+### What survives of the clock thread
+
+The routine is still what it was measured to be - a one-second timed
+clock check on the application processors, at `hvix64+0x25599c`, whose
+budget constant matches the bugcheck's `P1`. What is not true is that its
+*inputs* are visibly wrong. `freq`, `scale`, `mul` and the deadline base
+all read the same on a booting machine as on a failing one.
+
+So the difference, if it is here at all, is in what the second clock -
+read through the function pointer at `0x70(%rbx)`, `hvix64+0x256490` -
+*returns*, not in the constants around it. That function has not been
+disassembled.
+
+
 ## The clock check's inputs, read on a failing run - and its deadline base is ZERO
 
 **2026-08-25.** The inputs to the one-second clock check at
