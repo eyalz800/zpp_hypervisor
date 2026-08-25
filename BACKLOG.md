@@ -1,5 +1,48 @@
 # Known defects
 
+## The multicore unwedge is reproducible, and the guest is now alive rather than stuck
+
+**2026-08-25.** Two consecutive two-processor boots with the start-up
+vector fix, and the failure being nondeterministic is exactly why one
+boot was not enough:
+
+| | boot 1 | boot 2 |
+|---|---|---|
+| cpu 0 exits | 26,428,817 | 23,828,047 -> 51,489,250 |
+| cpu 0 second-level entries | 2,141,250 | 1,923,655 -> 4,192,950 |
+| processes | 6 | 9, then 6 |
+| `Secure System` | present | present |
+| `smss.exe` | present | present |
+
+**Reproducible.** And cpu 0 is not merely past its old wall, it is
+*working*: 48.6 million to 51.5 million exits over forty seconds, about
+71,000 exits a second, with second-level entries climbing with them. That
+is a busy guest, not a wedged one - every earlier multicore boot sat at
+about 90,000 second-level entries and stopped.
+
+### Two cautions recorded with it
+
+- **The process reader is not stable across runs.** It derives
+  `ActiveProcessLinks` per run and picked `0x418` on one attempt and
+  `0x540` on the next, and on one attempt the ring did **not** close and
+  it reported 512 processes - the loop cap. A run where the ring does not
+  close is garbage and must be re-run; the reader says so itself, which
+  is the only reason it was caught.
+- **The trampoline contents were read long after the fact.** Physical
+  `0x2000` holds a `jmp` and physical `0x87000` reads as zeros *now* -
+  but that is minutes after those start-up IPIs were sent, and an
+  operating system is free to free and zero its trampoline once the
+  processor is up. It says nothing about what was there at the time, and
+  no conclusion about which vector was "the real one" is drawn from it.
+
+### What is still wrong
+
+`KeNumberProcessorsGroup0` reads 1 and cpu 1 stays at 117 exits, so the
+application processor is still not online - Windows is booting as a
+uniprocessor on a two-processor machine. The guest reaches `smss.exe` and
+keeps working there rather than reaching the logon UI.
+
+
 ## The start-up vector was applied on the wrong path, and fixing it unwedges the multicore boot
 
 **2026-08-25.** The log said it plainly once the right question was being
