@@ -1,5 +1,49 @@
 # Known defects
 
+## The region is not partially damaged - it stops at a page boundary
+
+**2026-08-25.** Walking every page of `0xffffe80000200000` to
+`0xffffe80000300000` under the application processor's own CR3
+`0x114f5f000`:
+
+```
+  present: 130 pages     runs 200-273, 276-283
+  absent : 126 pages     runs 274-275, 284-2ff
+  gdt page 2b0  ABSENT
+  rsp page 2b5  ABSENT
+```
+
+**The mapping stops at page `0x283`.** Everything from `0x284` upward is
+absent, in one run, and both the descriptor table and the stack are above
+that line. This is not scattered corruption and it is not one entry
+cleared - it is a **cliff**.
+
+That reads as a page table that was **populated to a point and no
+further**: something mapped this region as far as `0x283` and the
+processor is using addresses past where it got to.
+
+### Which changes what to look for
+
+The previous entries were looking for a *removal* - who zeroed an entry,
+when it flapped, what raced. A boundary is not a removal. Nothing has to
+have unmapped anything; the mapping may simply never have been made, and
+every "it was mapped and then it was not" reading needs re-examining
+against that, including the flapping bracket - a mapping being built
+forwards would also show "unreachable then reachable".
+
+**What it does not explain, and this has to be said:** the processor
+loaded `CS`, `SS` and `TR` from a table at `0x2b0`, above the cliff. A
+descriptor load reads memory. So either that table was reachable when the
+selectors were loaded and the cliff moved, or the selectors were loaded
+under a different page table entirely - which the CR3 history cannot rule
+out, because it only samples at exits.
+
+So the two candidates are now: **a region being built forwards that the
+processor is running ahead of**, or **a processor on a page table from
+before the region was extended**. Both are about *when this VMM lets the
+processor run*, which is where the previous consolidation already pointed.
+
+
 ## The faulting instruction is a `call`, and it is the stack push that faults
 
 **2026-08-25.** Disassembling guest memory at the application
