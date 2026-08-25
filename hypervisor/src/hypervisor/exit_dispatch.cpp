@@ -455,11 +455,26 @@ void hypervisor::on_vm_exit(std::uint64_t cpuid,
                     // being torn down, and watching its page table too
                     // would take write permission from a page the
                     // whole guest writes constantly.
+                    // Only the kernel-range descriptor table, and
+                    // re-armed when the entry moves. Armed once on the
+                    // first entry ever resolved, it watched the
+                    // processor's early low-memory table - index 2 of
+                    // a page nothing writes - and reported nothing,
+                    // which reads exactly like "no one wrote it".
+                    constexpr std::uint64_t kernel_half =
+                        0xffff800000000000ull;
+                    auto want = this->gdt_pt_page[cpuid] & ~0xfffull;
+
                     if constexpr (nested_vmx::watch_ap_page_table) {
-                        if ((0 != cpuid) && !this->ap_pt_watch_armed) {
+                        if ((0 != cpuid) && (base >= kernel_half) &&
+                            (want != this->ap_pt_watch_page)) {
+                            if (this->ap_pt_watch_armed) {
+                                unwatch_guest_page(
+                                    this->ap_pt_watch_page);
+                            }
+
                             this->ap_pt_watch_armed = true;
-                            this->ap_pt_watch_page =
-                                this->gdt_pt_page[cpuid] & ~0xfffull;
+                            this->ap_pt_watch_page = want;
 
                             auto armed = watch_guest_page_writes(
                                 this->ap_pt_watch_page,
