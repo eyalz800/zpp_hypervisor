@@ -7601,6 +7601,12 @@ private:
     std::uint64_t gdt_walk_all_mapped[max_cpus]{};
     std::uint64_t gdt_walk_all_unmapped[max_cpus]{};
     std::uint64_t gdt_walk_mixed[max_cpus]{};
+
+    /**
+     * The last unanimous verdict, so a change can be noticed and logged
+     * once rather than every exit. Zero until the first sample.
+     */
+    std::uint64_t gdt_walk_last[max_cpus]{};
     /**
      * @}
      */

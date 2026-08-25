@@ -1,5 +1,54 @@
 # Known defects
 
+## The unmapping happens while the processor spins on CPUID - a quiesce it never leaves
+
+**2026-08-25.** Logging each change of the global descriptor table's
+reachability, with the exit reason carried across the edge:
+
+```
+  cpu 1 gdt mapped    exit 0x00  reason 0x0a CPUID      rip 0x7f39f0c6
+  cpu 1 gdt UNMAPPED  exit 0xc6  reason 0x03 INIT       rip 0x7fb6b030
+  cpu 1 gdt mapped    exit 0xc8  reason 0x1c CR-access  rip 0xfffff85e1bda66cf
+  cpu 1 gdt mixed     exit 0xd8  reason 0x0a CPUID      rip 0xfffff85e1bd23e6f
+  cpu 1 gdt UNMAPPED  exit 0xd9  reason 0x0a CPUID      rip 0xfffff85e1bd23e6f
+```
+
+**The first unmapping is the INIT** - expected and harmless, the
+processor is mid-reset and `apply_start_up` is about to rebuild it. It
+comes back two exits later on a control-register write, which is the
+guest installing its 64-bit context.
+
+**The fatal one is different.** It happens while the processor sits at
+**one RIP executing `CPUID` over and over** - `0xfffff85e1bd23e6f` at
+both the mixed exit and the unmapped one. A `CPUID` loop is a serialising
+spin, and the thing a processor spins on `CPUID` for is to be *released*:
+it is what a quiesce looks like from inside.
+
+So the sequence is: the processor is parked in a quiesce spin, the page
+tables underneath it are edited - which is exactly what a quiesce exists
+to make safe - and it dies there.
+
+### Which reframes the question usefully
+
+A processor that is correctly parked does not care that its descriptor
+table is unmapped, because it is not going to take an exception - it is
+spinning. This one **did** take one. So the question is no longer "who
+unmapped the table", which now looks like the guest doing something
+entirely legitimate, but:
+
+**what delivered an event to a processor that was supposed to be parked?**
+
+Candidates this VMM controls, all of which it has been shown this session
+to get wrong for application processors: an injected exception, a
+reflected interrupt, a start-up IPI applied late, or an
+interrupt-window/NMI-window exit forcing entry when the guest expected
+none.
+
+That is a much better question than any asked in this file for two days,
+and the instrument for it already exists - the exit ring covers those
+exits, and the injection fields are read at every one of them.
+
+
 ## Settled: the GDT's page-table entry really is written while the processor runs
 
 **2026-08-25.** Eight walks of the same address at every exit,

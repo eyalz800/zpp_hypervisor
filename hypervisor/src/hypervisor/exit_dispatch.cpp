@@ -250,6 +250,28 @@ void hypervisor::on_vm_exit(std::uint64_t cpuid,
                     this->gdt_walk_mixed[cpuid] + 1;
             }
 
+            // Say it once per change rather than once per exit. The
+            // window is five exits out of two hundred, so the two edges
+            // are what matter - and the exit reason carried across each
+            // edge is what the "the guest quiesced a processor this VMM
+            // did not stop" hypothesis predicts something about: an
+            // interrupt or hypercall aimed at this processor should sit
+            // next to the edge.
+            if (auto verdict = (8 == mapped) ? std::uint64_t{2}
+                                             : (0 == mapped)
+                                                   ? std::uint64_t{1}
+                                                   : std::uint64_t{3};
+                verdict != this->gdt_walk_last[cpuid]) {
+                this->gdt_walk_last[cpuid] = verdict;
+
+                log("cpu {} gdt now {} at exit {}, reason {} rip {}",
+                    cpuid,
+                    verdict,
+                    this->exit_total[cpuid],
+                    vmcs.exit_reason(),
+                    vmcs.guest_rip());
+            }
+
             if (first) {
                 this->gdt_last_reachable[cpuid] = this->exit_total[cpuid];
                 this->gdt_reachable_seen[cpuid] = 1;
