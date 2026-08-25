@@ -3623,6 +3623,34 @@ void hypervisor::on_vm_exit(std::uint64_t cpuid,
     }
     }
 
+    // The same leaf entry, read again after the whole handler has run
+    // and before the guest is resumed. The sampler at the top of this
+    // function brackets *guest* execution; this brackets *ours*. The
+    // application processor's descriptor table stops being mapped
+    // because that entry is zeroed, and "the guest zeroed it" and "we
+    // zeroed it" want opposite fixes and are indistinguishable at
+    // per-exit resolution. An earlier bracket around only the EPT
+    // violation path reported a change once and did not reproduce; this
+    // one covers every path, so a silent run is evidence rather than a
+    // gap.
+    if ((cpuid < max_cpus) && (0 != this->gdt_pt_page[cpuid])) {
+        std::uint64_t entry{};
+        if (read_guest_physical(
+                this->gdt_pt_page[cpuid],
+                std::span(reinterpret_cast<std::byte *>(&entry),
+                          sizeof(entry))) &&
+            (entry != this->gdt_pt_entry[cpuid])) {
+            log("cpu {} handler changed gdt leaf entry {} -> {} at exit "
+                "{}, reason {}",
+                cpuid,
+                this->gdt_pt_entry[cpuid],
+                entry,
+                this->exit_total[cpuid],
+                vmcs.exit_reason());
+            this->gdt_pt_entry[cpuid] = entry;
+        }
+    }
+
     resume_guest(cpuid, context, full_reason, advance_rip);
 }
 
