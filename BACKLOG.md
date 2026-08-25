@@ -1,5 +1,59 @@
 # Known defects
 
+## The application processor dies inside KiSaveProcessorControlState, on the first debug-register read
+
+**2026-08-25.** cpu 1's second-level exits are **all** in the
+`0xfffff8057...` range, which the module walk puts in no VTL0 module - so
+its second-level guest is **VTL1, the secure kernel**, not Windows. The
+sequence is a textbook virtual-processor bring-up: the Hyper-V synthetic
+MSRs `0x40000091`, `0x40000083`, `0x40000040`, then `STAR`, `LSTAR` and
+`SFMASK`, then `CPUID`, and then it stops.
+
+Its last exit is a `mov from dr0`, and reading the code there - through
+CR3 `0x8800002`, which is the secure kernel's, since VTL0's does not map
+it - identifies the routine exactly:
+
+```
+  ...bfc0:  mov    [rcx+0xa0], eax
+  ...bfc6:  stmxcsr [rcx+0x74]
+  ...bfca:  mov    rax, dr0        <- the last exit this processor takes
+  ...bfcd:  mov    rdx, dr1
+            mov    [rcx+0x20], rax ; mov [rcx+0x28], rdx
+            mov    rax, dr2       ; mov rdx, dr3
+            mov    [rcx+0x30], rax ; mov [rcx+0x38], rdx
+            mov    rax, dr6       ; mov rdx, dr7
+            mov    [rcx+0x40], rax ; mov [rcx+0x48], rdx
+            xor    eax, eax       ; mov dr7, rax
+            ret
+```
+
+That is `KiSaveProcessorControlState`'s tail: save DR0-DR3, DR6 and DR7
+into a context block, clear DR7, return.
+
+**Six more debug-register accesses follow the one that exited, and not
+one of them produces an exit.** The processor then spins at 100% of a
+core - measured from `/proc/<pid>/task/*/schedstat`, ~5.006 s of runtime
+per 5 s of wall clock on every vCPU thread - taking no exits at all,
+first level or second.
+
+So it is not halted and it is not looping on the faulting instruction:
+either would show in a counter. It is executing, and polling memory.
+
+### Why this is the sharpest thing found so far
+
+It is a *single instruction* boundary. Everything before `mov rax, dr0`
+exits normally and is handled; nothing after it ever exits again. That
+is a much narrower target than "the application processors do not start",
+and it names the exact guest routine and the exact instruction.
+
+What has **not** been established, and must not be assumed: whether the
+MOV-DR exit is mishandled here, whether the guest hypervisor's own
+handling of the reflected exit is what spins, or whether the processor
+proceeds correctly and blocks a few instructions later on something
+unrelated. All three are consistent with the evidence so far, and the
+counters cannot separate them because none of them produces an exit.
+
+
 ## Observed, not inferred: Windows loads 78 drivers, sees one processor, and never starts smss
 
 **2026-08-25.** Six mechanisms had been proposed and killed in a row, each
