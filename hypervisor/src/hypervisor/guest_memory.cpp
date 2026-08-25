@@ -295,10 +295,34 @@ hypervisor::guest_linear_to_physical(std::uint64_t linear)
         0xfff,
     };
 
+    // Which processor's second-level guest this is, if any. See the
+    // step below.
+    auto here = this_processor();
+
     for (std::size_t level{}; level < std::size(indices); ++level) {
         arch::x86_64::pte entry;
 
-        auto at = table + (indices[level] * sizeof(entry));
+        // **Through the guest hypervisor's extended tables, which this
+        // walk did not do.** Its sibling `translate_guest_linear` takes
+        // this step once per level and says why: the addresses in a
+        // second-level guest's page tables are physical in *its*
+        // hypervisor's address space, not in this VMM's. Without it the
+        // two walkers agree only when nesting is off - everywhere except
+        // the configuration being debugged.
+        //
+        // Measured before this: the positive control found the walker
+        // unable to translate `context.rip` on 10 of 208 exits, on
+        // addresses the processor had just fetched from. The control
+        // grades the fix - that count must go to zero.
+        auto reachable = (here < max_cpus)
+                             ? l2_physical_to_l1(here, table)
+                             : std::expected<std::uint64_t, zpp::error>(
+                                   table);
+        if (!reachable) {
+            return std::unexpected(reachable.error());
+        }
+
+        auto at = *reachable + (indices[level] * sizeof(entry));
         auto read = read_guest_physical(
             at,
             std::span(reinterpret_cast<std::byte *>(&entry),

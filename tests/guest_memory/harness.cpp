@@ -166,6 +166,22 @@ void * hypervisor::map_window_at(std::size_t,
 
     return &g_memory[physical_address];
 }
+/**
+ * The guest hypervisor's extended-page-table step, which
+ * `guest_linear_to_physical` now takes once per level so its answers
+ * match its sibling's in a nested guest.
+ *
+ * **Identity here, not a refusal.** This harness has no second-level
+ * guest and no extended tables, so a guest-physical address is a host
+ * one - which is exactly what the walk assumed before the step existed.
+ * Refusing would make every walk in this suite fail.
+ */
+std::expected<std::uint64_t, zpp::error>
+hypervisor::l2_physical_to_l1(std::size_t, std::uint64_t physical)
+{
+    return physical;
+}
+
 } // namespace zpp::hypervisor
 
 namespace

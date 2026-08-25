@@ -1,5 +1,64 @@
 # Known defects
 
+## The positive control cannot tell "walker broken" from "processor on stale translations"
+
+**2026-08-25.** Adding the `l2_physical_to_l1` step the walker was
+missing changed nothing:
+
+```
+  before: walker control: rip unreachable 10 of 208
+  after:  walker control: rip unreachable 10 of 208
+```
+
+Consistent - the application processor has **zero** second-level entries,
+so that step is the identity for it. The audit's diagnosis was right in
+general and inert here. (Kept anyway: the two walkers must not disagree,
+and `tests/guest_memory` needed an identity stub, which is the harness
+being honest about having no second level.)
+
+### And the control's own inference does not hold
+
+It was added on the reasoning: *the processor demonstrably fetched an
+instruction from `rip`, so the translation exists, so a walker that
+cannot find it is broken.* **That is only valid if the fetch went through
+a current page-table walk.**
+
+A processor running on a **cached** translation - a TLB or
+paging-structure-cache entry for a mapping the guest has since removed -
+fetches successfully from an address whose page tables no longer describe
+it. The walker reads memory and correctly answers "not mapped"; the
+processor keeps executing. Both are right.
+
+**Which is exactly the hypothesis under investigation.** So `rip
+unreachable = 10` is not evidence that the walker is broken. It is
+equally evidence that this processor is executing on translations the
+guest has already torn down - and the descriptor table and stack going
+unreachable is then the *same phenomenon*, not a separate defect: the
+processor survives until it touches something no cached entry covers.
+
+That reading also fits what nothing else has explained - why the
+processor runs **204 exits** apparently fine and then dies: cached
+translations cover it until an access misses them.
+
+### So the previous entry over-corrected
+
+It withdrew the reachability chain on the grounds that the instrument's
+error exceeded the signal. The arithmetic was right and the conclusion
+was too strong: the two candidate explanations for `rip unreachable` are
+"the walker is wrong" and "the guest removed the mapping and the
+processor has not noticed", and the second is the thing being looked for.
+
+**What separates them, and neither has been done:** compare the walker
+against QEMU on the *same* `rip` at the same moment - QEMU shares no code
+with this VMM, so agreement means the mapping is genuinely gone and the
+processor is on a stale translation. Or invalidate on the faulting
+processor and see whether the fetch then faults.
+
+Until one of those, both the "walker is broken" and the "mapping was
+removed" readings stay open, and no entry should be written as though
+either were settled.
+
+
 ## The positive control fires: the walker is broken, and the signal is smaller than its error
 
 **2026-08-25.** First run with the repaired instruments:
