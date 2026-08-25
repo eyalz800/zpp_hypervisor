@@ -1,5 +1,47 @@
 # Known defects
 
+## Retraction: the application processor does not stop at the debug-register read
+
+**2026-08-25.** An entry above called the `mov rax, dr0` at the head of
+`KiSaveProcessorControlState` "a single instruction boundary" - everything
+before it exits and is handled, nothing after it ever exits again - and
+called that the sharpest thing found. **The ring itself refutes it, four
+entries later:**
+
+```
+  [987] dr-access   L1 rip 0xfffff841fc5a843d   <- Hyper-V's handler
+  [988] vmread
+  [989] vmread
+  [990] vmwrite                                 <- Hyper-V writes a vmcs12 field
+  [991] vmresume    l2-rip 0xfffff8057740bfca   <- resumes AT the same dr0
+  [992] wrmsr       0x40000071 = 0x400          <- synthetic ICR, an NMI IPI
+```
+
+Hyper-V handles the reflected exit, writes a control field, and resumes
+**at the same instruction**. That is the ordinary "take the first debug
+register access, turn off MOV-DR exiting, let the guest run" move - KVM
+does the same thing with `KVM_DEBUGREG_WONT_EXIT`. So the instruction
+re-executes without exiting, the remaining six debug-register accesses
+run natively, and the routine returns.
+
+**The silence after `dr0` is explained by the control being cleared, not
+by the processor stopping.** The processor demonstrably goes on: entry
+992 is that same processor writing the synthetic interrupt command
+register, and 995-998 are it touching the local APIC page.
+
+The mistake was reading "no more exits of this kind" as "no more
+execution". A control that was just switched off produces exactly the
+same silence as a processor that stopped, and the two were not
+distinguished before the conclusion was drawn - the same one-field
+reading this file has now recorded three times in two days.
+
+So the last *identifiable* thing an application processor does is write
+the synthetic interrupt command register with `0x400` - delivery mode 4,
+NMI - and touch the local APIC page. Where it goes after that is
+unknown, and the useful question is no longer "why does it stop at a
+debug register" but "what happens to that NMI".
+
+
 ## The step trace cannot reach an application processor, and turning it up reboot-loops the guest
 
 **2026-08-25.** The one instrument that can get an instruction pointer
