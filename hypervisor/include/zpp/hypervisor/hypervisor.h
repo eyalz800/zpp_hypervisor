@@ -7517,6 +7517,23 @@ private:
      * with the guest hypervisor tearing itself down, so a repeat would
      * only evict the sequence that led there.
      */
+    /**
+     * The distinct guest CR3 values this processor has been seen with,
+     * oldest first, and how many have been recorded.
+     *
+     * CR3 loads do not exit - nothing sets CR3-load exiting here - so
+     * there is no history of what a processor loaded, only its value at
+     * whatever exit is being looked at. That is exactly what is missing
+     * when an application processor triple faults with its own global
+     * descriptor table unreachable: the value at the fault does not say
+     * whether the table was ever reachable under an earlier one.
+     *
+     * Sampling at each exit cannot see a table the guest loaded and left
+     * before the next exit, so this is a lower bound on what it used.
+     */
+    std::uint64_t cr3_seen[max_cpus][8]{};
+    std::uint64_t cr3_seen_count[max_cpus]{};
+
     bool l2_entry_failure_logged[max_cpus]{};
 
     /**

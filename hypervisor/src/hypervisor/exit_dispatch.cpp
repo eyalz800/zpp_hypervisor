@@ -209,6 +209,30 @@ void hypervisor::on_vm_exit(std::uint64_t cpuid,
             this->gs_processor_index_disagreements + 1;
     }
 
+    // The distinct page tables this processor has run under. See
+    // `cr3_seen`: CR3 loads do not exit, so without this the only page
+    // table ever known is the one in force at the exit being read - and
+    // when an application processor triple faults with its global
+    // descriptor table unreachable, the question is whether that table
+    // was reachable under a table it held *earlier*.
+    if (cpuid < max_cpus) {
+        auto current = vmcs.guest_cr3();
+        auto & count = this->cr3_seen_count[cpuid];
+        auto known = false;
+
+        for (std::size_t i{}; (i < count) && (i < 8); ++i) {
+            if (this->cr3_seen[cpuid][i] == current) {
+                known = true;
+                break;
+            }
+        }
+
+        if (!known && (count < 8)) {
+            this->cr3_seen[cpuid][count] = current;
+            count = count + 1;
+        }
+    }
+
     // The clock for `handler_cycles`. See its declaration: this is the
     // measurement that decides whether the fix is fewer instructions per
     // exit or fewer exits, and it is taken here because here is the
@@ -1964,6 +1988,13 @@ void hypervisor::on_vm_exit(std::uint64_t cpuid,
                            ? std::uint64_t{1}
                            : std::uint64_t{};
             };
+
+            log("cpu {} triple fault cr3 history: {} {} {} {}",
+                (cpuid + 1),
+                this->cr3_seen[cpuid][0],
+                this->cr3_seen[cpuid][1],
+                this->cr3_seen[cpuid][2],
+                this->cr3_seen[cpuid][3]);
 
             log("cpu {} triple fault reach: idt {} gdt {} rsp {} rip {}",
                 (cpuid + 1),

@@ -1,5 +1,54 @@
 # Known defects
 
+## The CR3 history: the application processor faults on the guest hypervisor's own page table
+
+**2026-08-25.** CR3 loads do not exit here, so the only page table ever
+visible was the one in force at whatever exit was being read. Recording
+the distinct values seen at each exit, per processor, and printing them
+at the triple fault:
+
+```
+  cpu 1 triple fault cr3 history: 0x7fc01000 0x7fb6a000 0x0 0x27a000
+  cpu 1 triple fault state: ... cr3 0x114f5f000 ...
+                            gdtr 0xffffe800002b0b00/0x3f
+  cpu 1 triple fault reach: idt 1  gdt 0  rsp 0  rip 1
+```
+
+The sequence reads as a bring-up: two firmware page tables, then **`0`**
+- which is CR3 after INIT, SDM Table 12-1 - then `0x27a000`, an early
+low table. And at the fault it is on **`0x114f5f000`**.
+
+**That value is identifiable.** Earlier in this same investigation
+`0x114f5f000` was read from `info registers -a` as a processor's CR3 and
+used to translate `hvix64` addresses successfully - it is **the guest
+hypervisor's own page table**. (`0x114f5e000` and `0x114fad000`, from
+other boots, sit in the same range and were used the same way.)
+
+So the shape is: the application processor is started, walks out of
+firmware, is handed to the guest hypervisor, ends up on **the guest
+hypervisor's page table**, and triple faults there with a global
+descriptor table and stack that page table does not map.
+
+### What is now solid, and what is not
+
+Solid: the processor is on the guest hypervisor's page table at the
+fault, the interrupt table and its code are reachable through it, and the
+global descriptor table and stack are not.
+
+Not solid: **why the GDTR holds `0xffffe800002b0b00` at that moment.**
+`LGDT` does not exit, so that value is whatever the guest last loaded,
+and this VMM neither set it nor could have lost it. Either the guest
+loaded a table it then stopped mapping, or the processor is on a page
+table the guest did not intend it to be on when that GDTR was current.
+The second is the one that would be this VMM's fault, and the CR3 history
+does not distinguish them - it shows where the processor went, not
+whether it was supposed to go there.
+
+The next thing that would: record the GDTR *alongside* each CR3 in the
+same history, so the pair can be seen changing together or apart. That is
+the same instrument extended by one field.
+
+
 ## The unreachable GDT is unreachable everywhere, and the INIT path is not the culprit
 
 **2026-08-25.** Two checks against the previous entry's hypothesis - that
