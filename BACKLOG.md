@@ -1,5 +1,77 @@
 # Known defects
 
+## The refused entry, named exactly - and two hypotheses killed
+
+**2026-08-25.** The vmcs02 capture fired, with vmcs12 printed beside it,
+on the second processor of a three-processor boot:
+
+```
+  vmcs12 asked:   entry_ctls 0x11ff cs 0x209b efer 0x0 cr0 0x80050033
+                  rip 0xfffff807a18a6fd0
+  vmcs02 refused: entry_ctls 0x11ff cs 0x209b efer 0x0 cr0 0x80050033
+                  rip 0xfffff807a18a6fd0
+  vmcs02 refused: rflags 0x2 activity 0x0 interruptibility 0x8
+                  link 0xffffffffffffffff pending_dbg 0x0
+                  entry_intr 0x80000302 ss 0x4093 tr 0x8b
+```
+
+**Identical in every field.** So `build_vmcs02` copies vmcs12 faithfully
+and introduces nothing. Whatever is wrong is wrong in vmcs12.
+
+### Which check fails, looked up rather than recalled
+
+**A claim made earlier in this investigation was wrong and is
+withdrawn:** that `CS.L = 1` with the IA-32e-mode-guest control clear is
+itself an entry failure. SDM 29.3.1.2 has no such rule. The only L-bit
+rule there is on D/B - "For CS, D/B must be 0 if the guest will be IA-32e
+mode and the L bit is 1" - and `cs 0x209b` has D/B clear, so it passes.
+
+The check that does fail is on RIP, SDM 29.3.1.4:
+
+> Bits 63:32 must be 0 if the "IA-32e mode guest" VM-entry control is 0
+> or if the L bit (bit 13) in the access-rights field for CS is 0.
+
+`rip 0xfffff807a18a6fd0` has `0xfffff807` in bits 63:32 and the
+IA-32e-mode-guest control is clear. That is the violation, and it needs no
+race to explain it.
+
+So the question is narrow: **why is bit 9 of vmcs12's entry controls zero
+when CR0.PG is set and the RIP is a 64-bit kernel address?**
+
+### Two hypotheses killed by measurement
+
+- **Guest-state deferral handing a freshly-started processor a mixture of
+  its old long-mode state and its new reset state.** A boot with
+  `-DZPP_DEFER_GUEST_STATE=OFF`, manifest verified `defer=0` in the
+  deployed binary, fails identically. Not the cause.
+- **The control cache eliding the write of `vm_entry_controls`.** That
+  field is in `control_fields[]`, and SDM 30.2 has the processor store
+  `IA32_EFER.LMA` into its bit 9 on *every* VM exit - our own capability
+  dump answers MISC as `0x165`, so bit 5 is set and the store happens.
+  Eliding writes to a field somebody else rewrites is unsound, and it is
+  now removed. **It changed nothing**: the same boot still ends with the
+  same `0x11ff`. Not the cause either. The removal is kept on its own
+  merits and the comment says plainly that it did not fix this.
+
+### What is still open
+
+`save_l2_state` copies vmcs02's bit 9 into vmcs12 on every exit, which is
+what SDM 30.2 and KVM's `sync_vmcs02_to_vmcs12` (`nested.c:4575-4577`,
+the identical expression) both require. So if vmcs02's bit 9 is ever zero
+while the second-level guest is in long mode, that zero is written into
+vmcs12 and every later build copies it forward - a latch that cannot
+recover, because KVM derives the guest EFER from that same control when
+`load IA32_EFER` is clear (`nested.c:2244`), so the guest can never get
+back to long mode to set LMA again.
+
+**What has not been measured is whether bit 9 in our vmcs02 is ever set
+at all.** That is the next instrument: log vmcs02's entry controls on
+ordinary second-level exits for an application processor, not only on the
+failing one, and see whether bit 9 is ever 1. If it never is, the latch
+never started - it was never unlatched - and the question moves to who
+first cleared it.
+
+
 ## The multicore blocker is a reflected vmcs02 entry failure, and three fixes on the way to it
 
 **2026-08-25.** Four fixed-variable boots at three processors, each read

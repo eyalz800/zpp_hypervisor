@@ -552,7 +552,38 @@ constexpr field guest_state_fields[] = {
 constexpr field control_fields[] = {
     field::secondary_processor_based_vm_execution_controls,
     field::vm_exit_controls,
-    field::vm_entry_controls,
+
+    // **`vm_entry_controls` is deliberately absent, for the second
+    // property this list's note demands and does not check.** SDM 30.2:
+    // "If bit 5 of the IA32_VMX_MISC MSR is read as 1 ... the value of
+    // IA32_EFER.LMA is stored into the 'IA-32e mode guest' VM-entry
+    // control." Bit 5 reads 1 here - the capability dump answers MISC as
+    // 0x165 - so **the processor rewrites bit 9 of this field on every
+    // single VM exit.** It is the one entry the list ever had that
+    // somebody else moves constantly, which is exactly the hazard the
+    // note above describes and the reason the primary controls were
+    // taken out.
+    //
+    // The unsoundness is structural: the cache records what we wrote,
+    // hardware then rewrites bit 9 underneath it, and a later build that
+    // finds vmcs12's value equal to the recorded one skips the write and
+    // leaves vmcs02 holding hardware's bit rather than the one vmcs12
+    // asked for.
+    //
+    // **Removing it did not fix the boot this was found chasing, and the
+    // record says so.** With the elision gone, a three-processor boot
+    // still ends with vmcs12 and vmcs02 agreeing exactly on
+    // `entry_ctls 0x11ff`, bit 9 clear, beside `cr0 0x80050033` (PG set)
+    // and a 64-bit `rip` - which fails SDM 29.3.1.4's requirement that
+    // RIP bits 63:32 be 0 when the IA-32e-mode-guest control is 0, and
+    // is where every three-processor boot still ends. So the zero in
+    // vmcs12 arrives by some route other than this one, and the entry
+    // failure is not explained yet.
+    //
+    // Kept regardless, because eliding a write to a field the processor
+    // rewrites on every exit is wrong on its own terms and cannot be
+    // reasoned about correctly the next time somebody reads this list.
+
     field::exception_bitmap,
     field::page_fault_error_code_mask,
     field::page_fault_error_code_match,
