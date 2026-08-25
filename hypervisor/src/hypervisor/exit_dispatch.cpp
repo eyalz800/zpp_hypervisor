@@ -209,6 +209,24 @@ void hypervisor::on_vm_exit(std::uint64_t cpuid,
             this->gs_processor_index_disagreements + 1;
     }
 
+    // Bracket the moment this processor's global descriptor table
+    // stopped being reachable. See `gdt_last_reachable`: the fault says
+    // it is unmapped now and the loaded segment selectors say it was
+    // mapped once, and neither says when. Non-boot processors only, and
+    // only early, because it is a page walk per exit.
+    if ((0 != cpuid) && (cpuid < max_cpus) &&
+        (this->exit_total[cpuid] < 512)) {
+        if (auto base = vmcs.guest_gdtr_base(); 0 != base) {
+            if (guest_linear_to_physical(base)) {
+                this->gdt_last_reachable[cpuid] = this->exit_total[cpuid];
+                this->gdt_reachable_seen[cpuid] = 1;
+            } else if (0 == this->gdt_first_unreachable[cpuid]) {
+                this->gdt_first_unreachable[cpuid] =
+                    this->exit_total[cpuid];
+            }
+        }
+    }
+
     // The distinct page tables this processor has run under. See
     // `cr3_seen`: CR3 loads do not exit, so without this the only page
     // table ever known is the one in force at the exit being read - and
@@ -2042,6 +2060,14 @@ void hypervisor::on_vm_exit(std::uint64_t cpuid,
                 // A missing leaf means one page. They are different
                 // defects and the error code alone cannot tell them
                 // apart, which is why `walk_refusal_level` exists.
+                log("cpu {} gdt bracket: ever reachable {} last {} "
+                    "first unreachable {} of {} exits",
+                    (cpuid + 1),
+                    this->gdt_reachable_seen[cpuid],
+                    this->gdt_last_reachable[cpuid],
+                    this->gdt_first_unreachable[cpuid],
+                    this->exit_total[cpuid]);
+
                 log("cpu {} gdt walk refused at level {} entry {} "
                     "table {}",
                     (cpuid + 1),

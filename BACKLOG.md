@@ -1,5 +1,56 @@
 # Known defects
 
+## The GDT mapping FLAPS - it is a race, not an unmap
+
+**2026-08-25.** Walking the application processor's global descriptor
+table at every one of its exits, and bracketing the result:
+
+```
+  cpu 1 gdt bracket: ever reachable 1
+                     first unreachable 0xc6 (198)
+                     last reachable    0xce (206)
+                     of 0xd0 (208) exits
+  cpu 1 gdt walk refused at level 3 entry 0 table 0x101ab7000
+```
+
+Read the two middle numbers in order. **The table is unreachable at exit
+198 and reachable again at exit 206**, and the processor triple faults two
+exits after that. It does not disappear once - it **comes and goes**.
+
+`ever reachable 1` also settles, independently of the segment-selector
+argument, that the mapping is real: this VMM's own walker saw it.
+
+### What that changes
+
+Every reading before this one described a mapping that was removed. It is
+not removed; the leaf entry describing it is **being written while the
+processor runs on it** - zero at one exit, valid at a later one, and zero
+again at the fault. A page-table entry that oscillates is being edited
+concurrently.
+
+Two candidates, and they are distinguishable:
+
+1. **The guest is editing that entry** - the boot processor building or
+   revising the application processor's address space while the
+   application processor is already running on it. On real hardware this
+   is a race the guest presumably wins by being fast; under this VMM the
+   application processor's exits are thousands of times slower, so a
+   window that never opens on metal is open for a long time here.
+2. **This VMM's walker is intermittently wrong.** The two walkers share
+   `read_guest_physical`, and the previous entry already recorded that
+   their agreement therefore proves less than it looked like. A mapping
+   window repointed by another processor between the levels of a walk
+   would produce exactly this flapping.
+
+**Candidate 2 must be eliminated first**, and it is cheap: walk the same
+address twice in a row at the same exit and compare. Two disagreeing
+answers a microsecond apart are the walker; two agreeing answers that
+differ from the *previous* exit's are the guest.
+
+That is a smaller and better-posed question than anything else left here,
+and it does not need a boot to design.
+
+
 ## One leaf entry, zero: the GDT's page is unmapped and nothing else is
 
 **2026-08-25.** The walk-refusal level, wired into the triple-fault

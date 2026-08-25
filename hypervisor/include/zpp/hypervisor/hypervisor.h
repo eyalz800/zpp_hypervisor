@@ -7546,6 +7546,30 @@ private:
      * descriptors were when it went there.
      */
     std::uint64_t gdtr_seen[max_cpus][8]{};
+
+    /**
+     * When this processor's global descriptor table was last seen
+     * reachable, and when it was first seen unreachable, counted in
+     * exits.
+     *
+     * The triple fault says the table is unmapped *now*; the hardware
+     * having loaded `CS`, `SS` and `TR` out of it says it was mapped
+     * *then*. Neither says when it changed, and the leaf entry being
+     * exactly zero says something wrote that zero. These two bracket the
+     * write to a pair of adjacent exits.
+     *
+     * Sampled only on processors other than the boot one, and only for
+     * the first few hundred exits, because it costs a page walk per exit
+     * and the processor being watched takes about a hundred and twenty
+     * before it dies.
+     * @{
+     */
+    std::uint64_t gdt_last_reachable[max_cpus]{};
+    std::uint64_t gdt_first_unreachable[max_cpus]{};
+    std::uint64_t gdt_reachable_seen[max_cpus]{};
+    /**
+     * @}
+     */
     std::uint64_t cr3_seen_count[max_cpus]{};
 
     bool l2_entry_failure_logged[max_cpus]{};
