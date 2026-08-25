@@ -1,5 +1,54 @@
 # Known defects
 
+## The second clock is the ACPI PM TIMER, and the arithmetic proves it
+
+**2026-08-25.** The function the one-second check calls through
+`0x70(%rbx)` - `hvix64+0x256490` - is now read, and it is not a generic
+clock read:
+
+```
+  andl  $0xffffff, %r8d          ; a 24-BIT counter
+  andq  $-0x1000000, %rdx        ; the high bits kept beside it
+  cmovaeq / addq                 ; wraparound carry
+  lock cmpxchgq %r9, <0xa9c10>   ; extend to 64 bits, atomically
+  movabsq $0xB2CB2E2FB3EF1BE4 ; mulq %r9 ; shrdq $0x3e
+```
+
+A 24-bit counter extended to 64 bits with carry detection and published
+under a `lock cmpxchg`, then scaled by a magic multiply. **The magic
+decodes exactly:**
+
+```
+  0xB2CB2E2FB3EF1BE4 / 2^62 = 2.793651
+  10^7 / 3,579,545          = 2.793651
+```
+
+Six decimal places. 3.579545 MHz and 24 bits **is the ACPI power
+management timer**, and the scale converts its ticks to 100 ns units.
+
+**So the guest hypervisor's one-second check on the application
+processors validates a TSC-based spin against the ACPI PM timer.** That
+is a clock wholly outside the TSC, reached through a port read, and
+nothing in this tree touches it - `grep` for `pm_timer`, `pmtmr` or
+`0x408` finds nothing, though the I/O bitmaps that could intercept it do
+exist.
+
+### Why this is the right place for the next person to start
+
+Every clock this investigation has examined was a TSC derivative - the
+reference TSC page, the synthetic timer, the tick floor. **This one is
+not**, and it is the one the guest hypervisor uses to check the others on
+the processors that fail. Whether it advances correctly under this VMM,
+and whether it advances *identically on every processor*, are both
+unasked questions with a cheap answer: read it from two processors and
+compare, on a run of each configuration.
+
+Note what this does **not** say. The tick floor lies about the synthetic
+timer, not about the TSC or the PM timer, so it is not obviously
+implicated - and "obviously" has been wrong eight times here. It is
+listed as a question, not a suspicion.
+
+
 ## The zero deadline base is NORMAL - the clock-check lead is dead
 
 **2026-08-25.** The comparison named in the entry above as the deciding
