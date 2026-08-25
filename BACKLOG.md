@@ -1,5 +1,77 @@
 # Known defects
 
+## Settled: VTL1 fail-fasts with 0xC0000409 the moment a second processor exists
+
+**2026-08-25.** Two reads out of the secure kernel, on a wedged
+two-processor guest, settle what the application processor is doing and
+why Windows never counts it.
+
+The application processor's last exit is `dr-access` at
+`rip=0xfffff8007db0bfca`. That byte pattern - `stmxcsr [rcx+0x74]` then
+`mov rax,dr0`, `mov rdx,dr1` - occurs exactly once in `securekernel.exe`,
+at RVA `0xdafca` inside `SkiSaveProcessorControlState`, which fixes this
+run's securekernel base at `0xfffff8007da31000`. Reading two globals
+there, under the secure kernel's own CR3:
+
+```
+  barrier            securekernel+0x14d000  = 0x0
+  SkeBugCheckStatus  securekernel+0x11E3E0  = 0xC0000409
+```
+
+**`0xC0000409` is `STATUS_STACK_BUFFER_OVERRUN`, which is what
+`__fastfail` reports. The secure kernel has bugchecked.**
+
+And the barrier reads **zero**, which matters twice over: the application
+processor's resume path spins `cmpq $0, [0x14d000]; pause; jne` until
+that word is zero, so it is *not* held there - and `SkeBugCheckEx` clears
+that same word atomically (`xchg`), so zero is the crash's own
+fingerprint rather than a coincidence.
+
+### The chain, complete and measured end to end
+
+1. The application processor is started and enters VTL1.
+2. The secure kernel's virtual-processor resume runs - `ShvlProcessorResume`
+   writing synthetic MSRs `0x40000090`, `0x40000091`, `0x40000083`,
+   `0x40000040` in that order, then `STAR`, `LSTAR`, `SFMASK`. The order
+   identifies the *resume* path rather than cold init.
+3. Something fails fast. `SkeBugCheckEx` runs, sets
+   `SkeBugCheckStatus = 0xC0000409`, clears the barrier, and calls its two
+   adjacent helpers: `SkiSaveProcessorControlState` - the `mov rax, dr0`
+   exit - and `SkeFreezeExecution`, which walks the processor array and
+   NMIs every other processor through `HV_X64_MSR_ICR`. That is exactly
+   the `wrmsr 0x40000071 = 0x400` observed, delivery mode 4 with
+   destination 0.
+4. The processors park. No VTL return ever happens, so VTL0 never gets
+   the processor, `KeStartAllProcessors` never completes,
+   `KeNumberProcessorsGroup0` stays 1, and `smss.exe` is never created.
+
+**So the `dr0` read and the NMI were never bring-up. They are crash
+machinery**, and every reading of them as "the application processor is
+waiting for something" - this file has several - was wrong.
+
+### What this retires
+
+- "The application processor is stuck at a debug-register read" - no, it
+  is executing `SkeBugCheckEx`.
+- "It is waiting on a rendezvous / the boot processor / a barrier" - the
+  barrier is clear and it is past it.
+- Anything about making exits cheaper: the boot processor's handler duty
+  is 0.063 and Windows gets 91.7% of wall time.
+
+### The one question left
+
+**Why does the secure kernel fail fast when a second processor exists?**
+`0xC0000409` is a generic `__fastfail` on already-corrupt state, so the
+target is what this VMM hands an application processor that it does not
+hand the boot processor. The cheapest next step needs no boot at all:
+compare what `start_up.cpp` builds for an adopted processor against the
+field list `SkiValidateVtl0VpContext` checks - TSS limit `0x67` and type
+`0x1b`, `CS` selector `0x10`, `CS` access rights with
+`(ar & 0x2090) == 0x2090` and `(ar & 0x60) == 0`, a `0xFFF` limit, page
+alignment, several zero segment bases, and a GDT base equal to a known
+global.
+
+
 ## Caveat on "the application processor never issues VtlCall or VtlReturn"
 
 **2026-08-25.** The entry above says the application processor issues
