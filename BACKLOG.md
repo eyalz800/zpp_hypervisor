@@ -1,5 +1,63 @@
 # Known defects
 
+## The multicore failure is NOT about VSM. The application processor never leaves firmware.
+
+**2026-08-25.** `check-bootable.sh` offers this experiment in its own
+refusal text - "asking 'is this failure nested at all' is a fair
+question, and one boot answers it: `ZPP_ALLOW_NO_NESTED=1`". It had never
+been run at two processors. It answers the question, and the answer
+retires most of this file's recent work.
+
+`ZPP_NESTED_VMX=OFF`, manifest verified `nested=0` in the deployed
+binary, two processors. Hyper-V stands down, so there is **no VBS, no
+VTL0/VTL1, no secure kernel** - Windows is this VMM's direct guest:
+
+```
+  cpu 0   248,389 exits   0 second-level entries   <- advancing
+  cpu 1       110 exits   0 second-level entries   <- frozen
+```
+
+Windows boots: cpu 0's exit ring is full of **user-mode** RIPs
+(`0x7ffeab798579`), so it is far past the point the VBS configuration
+ever reaches.
+
+**And cpu 1 is in exactly the same firmware park loop as always:**
+
+```
+  rdmsr  rip=0x7ef50775  0x1b -> 0xfee00800   (IA32_APIC_BASE, BSP bit clear)
+  cpuid  rip=0x7ef5fbd7  x3
+  ept-violation rip=0x7ef52fb2 phys=0xfee00000
+  ... repeating, 110 exits, frozen
+```
+
+Byte-for-byte the same addresses, the same MSR, the same APIC page fault
+as the VBS runs.
+
+### What this retires
+
+**The application processor never becomes a working Windows processor,
+and VSM has nothing to do with it.** Every entry above that reasoned
+about VTL transitions, `SkpVtl1ResumeApEntry`, the secure kernel's
+barrier, `SkeBugCheckStatus`, `SkiBugCheckOwner` or the shadow
+extended-page-table roots was describing what happens *downstream* of
+that, on the runs where the processor does eventually get adopted into
+VTL1. None of it is the defect.
+
+The defect is that **Windows' INIT/SIPI to an application processor does
+not result in that processor running Windows' start-up code.** It stays
+where the firmware parked it. That is true with VBS and without it, at
+two processors and at three, and it is the same loop every time.
+
+### Why this was not found for so long
+
+Every measurement was taken on the configuration being *chased* - VBS on,
+nested on - where the extra machinery gave a stream of plausible things
+to look at. The one-variable control that removes all of it existed, was
+documented in the tree, was cheap, and was not run. `1 CPU works, 2 does
+not` was known from the start; `2 CPUs without VBS also does not work`
+is the measurement that localises it, and it is one boot.
+
+
 ## RETRACTION: `SkeBugCheckStatus = 0xC0000409` is a static initialiser, not a crash
 
 **2026-08-25. This retracts the two entries below it that concluded VTL1
