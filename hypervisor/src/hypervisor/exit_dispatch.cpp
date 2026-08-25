@@ -1949,6 +1949,30 @@ void hypervisor::on_vm_exit(std::uint64_t cpuid,
             vmcs.guest_gdtr_limit(),
             vmcs.guest_tr_selector());
 
+        // **Walked here, at the fault, not afterwards.** Translating
+        // these from outside reads page tables another processor is
+        // still editing, so a reading taken minutes later says what is
+        // mapped *now*. The first time this was done that way it showed
+        // the global descriptor table and the stack unmapped while the
+        // interrupt table and the code were mapped - which is exactly a
+        // triple fault's mechanism, and exactly the kind of claim this
+        // file has repeatedly had to retract for being read at the wrong
+        // moment. One walk in the handler settles it.
+        {
+            auto mapped = [&](std::uint64_t linear) {
+                return guest_linear_to_physical(linear)
+                           ? std::uint64_t{1}
+                           : std::uint64_t{};
+            };
+
+            log("cpu {} triple fault reach: idt {} gdt {} rsp {} rip {}",
+                (cpuid + 1),
+                mapped(vmcs.guest_idtr_base()),
+                mapped(vmcs.guest_gdtr_base()),
+                mapped(vmcs.guest_rsp()),
+                mapped(context.rip));
+        }
+
         log("cpu {} triple fault state: cr0 {} cr3 {} cr4 {} efer {} "
             "rsp {} ss {}",
             (cpuid + 1),

@@ -1,5 +1,55 @@
 # Known defects
 
+## Confirmed in the handler: GDT and stack unreachable, IDT and code reachable
+
+**2026-08-25.** The previous entry's caveat is closed. The walk is now
+done **inside the triple-fault handler**, through the tables in force at
+that instant rather than minutes later:
+
+```
+  cpu 1 triple fault reach: idt 0x1  gdt 0x0  rsp 0x0  rip 0x1
+  cpu 1 triple fault state: idtr 0xfffff86fdb222000/0xfff
+                            gdtr 0xffffe800002b0b00/0x3f  tr 0x30
+                            cr0 0x80010021 cr3 0x114f5e000 cr4 0x22e0
+                            rsp 0xffffe800002b5680 ss 0x20
+```
+
+Interrupt table and code **reachable**; global descriptor table and stack
+**not**. Same answer as the reading taken from outside, so that one was
+right - but it is now right for a reason rather than by luck.
+
+### The detail that points somewhere
+
+**`gdtr` is `0xffffe800002b0b00` on two different boots, byte for byte**,
+while every other address in this investigation moves with KASLR - the
+kernel base, the secure kernel base, the guest hypervisor base, the
+faulting RIP. A fixed address across boots is a structure at a fixed
+location, not something allocated.
+
+And the two halves live in different neighbourhoods:
+
+- reachable: `idtr 0xfffff86fdb222000`, `rip 0xfffff86fdb523e95` - the
+  same `0xfffff86f____` range as the module the processor is executing;
+- unreachable: `gdtr 0xffffe800002b0b00`, `rsp 0xffffe800002b5680` - a
+  `0xffffe8__` range, which is where this investigation has seen
+  *Windows kernel* addresses;
+
+while `cr3 0x114f5e000` sits in the range this file has repeatedly
+recorded for the **guest hypervisor's** own CR3s (`0x114f5f000`,
+`0x114fad000`, `0x114fce000`).
+
+So the shape of it is a processor running with **one context's page table
+and another context's descriptors** - and that is a statement about what
+this VMM resumed it with, not about anything the guest did wrong.
+
+**Not yet established**, and it should not be assumed: which context each
+of those actually belongs to. The ranges are suggestive and this file has
+been wrong before on exactly that kind of inference. What settles it is
+comparing this `CR3` against the boot processor's at the same moment, and
+against the `CR3` recorded for the second-level guest - all values this
+VMM already keeps.
+
+
 ## The triple fault, explained: the application processor's GDT and stack are not mapped
 
 **2026-08-25.** The triple-fault handler now records the descriptor
