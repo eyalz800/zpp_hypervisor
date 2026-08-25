@@ -1,5 +1,56 @@
 # Known defects
 
+## An EPT violation can be the processor walking the guest's own page tables
+
+**2026-08-25.** From `watched_page.cpp`, beside the emulate-versus-step
+decision:
+
+> Only a violation caused by the instruction's own operand may be
+> emulated. **Bit 8 of the exit qualification clear means the access was
+> to a paging-structure entry - the processor walking the guest's
+> tables** - and there is no store in the instruction to carry out for
+> that. SDM Table 28-7.
+
+That is worth pulling out of that file, because it bears directly on the
+application processor's death and nothing above has used it.
+
+**The two walks are not the same walk.** This VMM's walker reads guest
+page-table entries through `read_guest_physical` - its own mapping
+window, its own host page table. The *processor's* walk of those same
+entries goes through the **extended page tables**. So a guest page-table
+page that this VMM can read and the extended tables deny gives exactly
+what has been measured all along:
+
+- the software walker says the descriptor table is reachable (203 exits
+  of eight unanimous samples said so);
+- the hardware cannot reach it, and the processor triple faults trying.
+
+The two are not in conflict. They are answering different questions, and
+this file has spent a long time treating the software answer as though it
+were the hardware's.
+
+### What that makes worth checking, and it is cheap
+
+The application processor takes **thirteen extended-page-table violations
+in the fifteen exits it lives after start-up**. If any of them carry the
+qualification bit that marks a paging-structure access, then the
+processor is being denied its own page tables by this VMM's extended
+tables - which is a defect here, not in the guest, and would explain the
+triple fault completely.
+
+The exit ring already records the qualification for those violations; it
+has never been read for this. That is a grep away on the next boot, not a
+new instrument.
+
+**Caution, because this file has been burned by it repeatedly:** the
+qualification printed for the application processor's violations reads
+`0x0` in the captures taken so far, and a qualification of exactly zero
+for an extended-page-table violation is not obviously a real value - bits
+0 to 2 should carry the access type. Before concluding anything from bit
+8 being clear, confirm the recorder actually fills that field for this
+exit reason.
+
+
 ## The application processor's whole life after start-up is about fifteen exits
 
 **2026-08-25.** Its exit profile, which nobody had looked at as a whole:
