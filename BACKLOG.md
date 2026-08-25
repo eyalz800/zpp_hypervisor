@@ -1,5 +1,79 @@
 # Known defects
 
+## Where the multicore investigation stands
+
+**2026-08-25.** Consolidating, because the last several entries have each
+been one measurement and the thread is easy to lose.
+
+### What was fixed, and what it bought
+
+The boot **moved**, once, and for a reason that is understood: a start-up
+IPI arriving before its target reached its INIT exit was being discarded,
+and the code that was supposed to hold it both cleared it at the wrong
+moment and only ever ran on a path adopted processors do not take. With
+that fixed:
+
+| | before | after |
+|---|---|---|
+| cpu 0 exits | ~1,200,000 | ~26,000,000 |
+| second-level entries | ~90,000 | ~2,100,000 |
+| guest processes | 1 (`System`) | 6 - incl. `Secure System`, `smss.exe` |
+
+`Secure System` present means VTL1 is healthy; `smss.exe` means user mode
+was reached. Neither had ever happened above one processor. Reproduced
+across boots.
+
+Also fixed on the way, each with its own entry: the reference TSC page
+being rewritten every 18 microseconds, memory-form `VMREAD` and `VMWRITE`
+answering a failed operand access with `#UD` instead of `#PF`, a
+`vmcs_cache_epoch` that was a non-atomic read-modify-write, host
+exception recovery being one shared slot for all processors, and a
+sampler that could leave an unbootable loader on the ESP.
+
+### What still fails
+
+`KeNumberProcessorsGroup0` reads 1. The application processor is started,
+runs about **fifteen exits** of real 64-bit kernel code, and **triple
+faults** - its interrupt table and code reachable, its global descriptor
+table and stack not. Windows therefore stays uniprocessor and never
+finishes user-mode initialisation.
+
+### What is known about that fault, with the evidence
+
+- the descriptor state is well formed - 256 interrupt entries, 8 global
+  entries, `TR` landing exactly on the last two slots;
+- the processor **could** read that table earlier: it holds `CS`, `SS`
+  and `TR`, each loaded from it;
+- eight walks per exit, `mixed` zero, say the mapping is genuinely absent
+  at the fault and genuinely present before it - 203 exits mapped, 5 not;
+- this VMM injects **nothing** into that processor - `injected_count` is
+  zero for its whole life;
+- its extended-page-table violations are ordinary read-only APIC-page
+  writes (`qual=0x2b`), not paging-structure denials;
+- both start-up vectors are applied, `0x87` then `0x02`, the second
+  overwriting the first, and after it the processor runs kernel code
+  rather than firmware.
+
+### What was believed and is not true
+
+Recorded because several of these were acted on: the secure kernel
+bugchecking (`SkeBugCheckStatus` is a static initialiser), the processor
+never leaving VTL1 (it does, on some boots), a rendezvous or barrier wait
+(it is a triple fault, not a wait), a quiesce spin (it is the firmware's
+park loop, before start-up), the boot processor's page table being shared
+(it is not), and every `qual`, `cs` and activity state read from the exit
+ring before `census=1` (unwritten fields).
+
+### The next question
+
+Something makes the global descriptor table's mapping go away between
+`0xffffe800002b0b00` being loaded and the processor faulting on it, and
+it is not this VMM injecting, not the APIC watch, and not the boot
+processor's tables. The remaining owner is **when this VMM lets that
+processor run** - it is the one thing here that has been wrong in every
+other respect for application processors all session.
+
+
 ## With the census on: the APIC violations are ordinary, and both start-up vectors are applied
 
 **2026-08-25.** Rebuilt with `-DZPP_CENSUS_EXITS=ON`, manifest confirmed
