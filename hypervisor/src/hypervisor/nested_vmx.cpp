@@ -1448,13 +1448,18 @@ bool hypervisor::on_guest_vmread(std::size_t cpu,
     if (!written) {
         this->vmread_memory_form_failures[cpu] =
             this->vmread_memory_form_failures[cpu] + 1;
-        log("cpu {} vmread memory form: guest write failed at {}, "
-            "field {}, size {}, rip {}",
+        // Both halves - see the matching note on the VMWRITE path.
+        auto translated = guest_linear_to_physical(*linear);
+
+        log("cpu {} vmread mem form: at {} field {} rip {} "
+            "phys {} err {} l2 {}",
             cpu,
             *linear,
             static_cast<std::uint64_t>(encoding.value()),
-            static_cast<std::uint64_t>(size),
-            context.rip);
+            context.rip,
+            translated ? *translated : std::uint64_t{},
+            static_cast<std::uint64_t>(written.error().code()),
+            static_cast<std::uint64_t>(this->running_l2[cpu]));
 
         // **This is the branch that fires, and it is now measured
         // rather than guessed.** The comment above used to say the fix
@@ -1485,7 +1490,7 @@ bool hypervisor::on_guest_vmread(std::size_t cpu,
         constexpr std::uint64_t fault_write = 1ull << 1;
 
         auto error_code = fault_write;
-        if (guest_linear_to_physical(*linear)) {
+        if (translated) {
             error_code |= fault_present;
         }
 
@@ -1536,17 +1541,37 @@ bool hypervisor::on_guest_vmwrite(std::size_t cpu,
         auto size =
             in_ia32e_mode ? sizeof(std::uint64_t) : sizeof(std::uint32_t);
 
+        // Captured before the access, so it can be compared with the
+        // same field read after it. The walk that failed and the walk
+        // that then succeeded took the same argument, so something they
+        // both read changed between them, and CR3 is the first
+        // candidate: it comes through the VMCS cache.
+        auto cr3_before = this->vmcs.guest_cr3();
+
         auto read = read_guest_linear(
             *linear,
             std::span(reinterpret_cast<std::byte *>(&value), size));
         if (!read) {
-            log("cpu {} vmwrite memory form: guest read failed at {}, "
-                "field {}, size {}, rip {}",
+            // Both halves, because one of them cannot tell you it is the
+            // wrong half. `translated` says the page walk produced a
+            // physical address, so a failure with it set means this VMM
+            // could not *reach* a page the guest does have, and a
+            // failure with it clear means the walk itself refused. The
+            // fault delivered is right either way; which defect to chase
+            // is not the same question, and a single field would have
+            // answered neither.
+            auto translated = guest_linear_to_physical(*linear);
+
+            log("cpu {} vmwrite mem form: at {} rip {} phys {} err {} "
+                "cr3 {} -> {} l2 {}",
                 cpu,
                 *linear,
-                static_cast<std::uint64_t>(encoding.value()),
-                static_cast<std::uint64_t>(size),
-                context.rip);
+                context.rip,
+                translated ? *translated : std::uint64_t{},
+                static_cast<std::uint64_t>(read.error().code()),
+                cr3_before,
+                this->vmcs.guest_cr3(),
+                static_cast<std::uint64_t>(this->running_l2[cpu]));
 
             // The same defect as the memory-form VMREAD above, mirrored,
             // and found the same way: with that one fixed the boot got
@@ -1561,7 +1586,7 @@ bool hypervisor::on_guest_vmwrite(std::size_t cpu,
             constexpr std::uint64_t fault_present = 1ull << 0;
 
             std::uint64_t error_code{};
-            if (guest_linear_to_physical(*linear)) {
+            if (translated) {
                 error_code |= fault_present;
             }
 

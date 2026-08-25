@@ -1,5 +1,99 @@
 # Known defects
 
+## The multicore blocker is a reflected vmcs02 entry failure, and three fixes on the way to it
+
+**2026-08-25.** Four fixed-variable boots at three processors, each read
+with `info status` first. Every one ends the same way, and the last line
+before the machine goes is always the same:
+
+```
+  cpu 0x1 second level entry failed after loading guest state,
+          reason 0x80000021 qualification 0x0
+  cpu 0x1 guest vmxoff
+  cpu 0x0 guest vmxoff
+  guest apic write, register 0x320..0x370, value 0x10000   (every LVT masked)
+```
+
+`0x80000021` is bit 31 plus basic reason 33 - **VM-entry failure due to
+invalid guest state**. So Hyper-V is not hanging and not crashing: it
+tries to enter its own guest on the second processor, the entry is
+refused, we reflect the refusal as SDM 29.8 requires, and Hyper-V then
+tears itself down deliberately - `vmxoff` on every processor, then every
+local-APIC LVT masked. Windows reports that as **HYPERVISOR_ERROR**,
+which is what the machine's own screen said.
+
+**Three things this corrects about how the failure was being described.**
+
+- It is not a hang. Every earlier reading called it one. With
+  `-no-reboot -no-shutdown` now the default the machine stops in
+  `paused (shutdown)` instead of resetting, and the teardown is visible.
+- "The application processors are spinning" was read off
+  `cpuid_leaf0_rip`, which is a *last recorded* value, not a live one.
+  Sampled twice it does not move - but so does nothing else, because the
+  VM is stopped. **Check `info status` before believing any counter**,
+  and note a stopped VM freezes every instrument at once, which reads
+  exactly like a wedged guest.
+- The reference clock was never shown not to advance. That test was run
+  against a paused VM and is void.
+
+### The three defects found and fixed on the way here
+
+Each was real, each is committed with its own measurement, and **none of
+them fixes the boot** - the entry failure survives all three.
+
+1. **The reference TSC page was rewritten every ~18 microseconds.** The
+   republish guard compared the fitted scale for exact equality, and a fit
+   is a measurement, so it never matched: 0.085 ppm of jitter between
+   adjacent publishes was enough to rewrite the page 370 times in one log
+   ring. Every rewrite steps the sequence a reader must see unchanged
+   across its read. Now compared with a 100 ppm tolerance; the same boot
+   publishes **once**.
+2. **A memory-form VMREAD that cannot write its operand answered `#UD`.**
+   The comment on that path had deliberately deferred the fix until it was
+   known which of its two failures fired; a three-processor boot answered
+   it. Now `#PF`, with an error code built from whether the translation
+   existed.
+3. **The same defect mirrored on VMWRITE**, found by fixing VMREAD and
+   watching the next boot die one instruction further along - exit reason
+   `0x19` where it had been `0x17`, same processor, same operand address.
+
+### What the operand failure turned out to be, which is a lead of its own
+
+Instrumented to record both halves rather than one, the failing access
+reports `err 0x10` - `guest_address_not_mapped`, so the **page walk**
+refused - while a retry of the identical walk taken microseconds later in
+the same handler **succeeds**, returning a physical address:
+
+```
+  cpu 0x1 vmwrite mem form: at 0xffffe70000205da0 field 0x681e
+          rip ... phys 0x114fcfda0 err 0x10 l2 0x0
+```
+
+The same translation fails and then succeeds, on the second processor,
+multiprocessor only. Something both walks read changed between them. The
+operand address is `0xffffe70000205da0` on **every** run despite KASLR
+moving Hyper-V's base each boot, so it is a fixed structure, and the field
+is always `0x681e`, `GUEST_RIP`.
+
+And it is intermittent: the most recent boot produced **no** memory-form
+failure at all and still ended in the same entry failure. So this is a
+genuine second defect, not the blocker.
+
+### What to do next, and why it is probably KVM's check
+
+We run under KVM, so the entry that fails is one **KVM** emulates, and
+`0x80000021` is most likely `nested_vmx_check_guest_state` refusing our
+vmcs02 rather than silicon. CLAUDE.md already records that exact reason
+code from this exact cause - the single-step episode, where TF set with
+pending-debug-exceptions BS clear failed KVM's nested check.
+
+So the question is narrow and answerable offline: **which of KVM's
+guest-state checks does our vmcs02 fail, on the second processor only?**
+That wants the vmcs02 guest fields captured at the first entry failure
+and compared field by field against `nested_vmx_check_guest_state` and
+its callees.
+
+
 ## The application-processor spin is a TSC calibration, not a rendezvous
 
 **2026-08-25. This retracts the whole "rendezvous wait" framing**, including
