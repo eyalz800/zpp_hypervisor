@@ -8207,7 +8207,23 @@ void hypervisor::arm_vtl_step(std::size_t cpu, std::size_t kind)
 
     auto count = free_running ? this->l2_entries[cpu]
                               : this->vtl_switches[cpu][kind];
-    auto period = free_running ? vtl_step_free_period : vtl_step_rearm;
+
+    // **The free-running period is a boot-processor number, and it can
+    // never arm on an application processor.** The boot processor makes
+    // tens of thousands of second-level entries; an application
+    // processor makes a few dozen and then stops taking exits at all -
+    // measured at 36 and 17 on a three-processor boot - so
+    // `count < period` refuses every time and the one processor whose
+    // instruction stream is wanted is the one that never gets traced.
+    //
+    // A short period for the application processors only. It cannot
+    // flood the shared per-kind ring, because those processors stop
+    // long before they could.
+    constexpr std::uint64_t application_free_period = 4;
+
+    auto free_period = (0 == cpu) ? vtl_step_free_period
+                                  : application_free_period;
+    auto period = free_running ? free_period : vtl_step_rearm;
 
     // Every period, overwriting, and the two trust-level sides half a
     // period apart. See `vtl_step_rearm` for both: why a threshold

@@ -1,5 +1,47 @@
 # Known defects
 
+## The step trace cannot reach an application processor, and turning it up reboot-loops the guest
+
+**2026-08-25.** The one instrument that can get an instruction pointer
+out of a processor spinning with no exits is the monitor trap flag, and
+this rig has it - `IA32_VMX_TRUE_PROCBASED_CTLS` allowed-one is
+`0xfff9fffe`, bit 27 set - while the VMX-preemption timer it would
+otherwise use is absent. So `ZPP_STEP_VTL` is the only route.
+
+**It cannot arm on the processor that needs it.** `arm_vtl_step` gates
+the free-running kind on `count < period` with
+`vtl_step_free_period = 60000` second-level entries. That is a
+boot-processor number: the boot processor makes tens of thousands, an
+application processor makes **36 and 17** and then stops taking exits at
+all. The gate refuses every time, so the one processor whose instruction
+stream is wanted is the only one that is never traced. That is why an
+earlier boot with `ZPP_STEP_VTL=ON` produced nothing for the application
+processors and was misread as the switch not helping.
+
+Narrowed to a period of 4 for application processors only - it cannot
+flood the shared per-kind ring, because those processors stop long before
+they could.
+
+**And that boot never reached the question.** With stepping on, the guest
+**reboot-loops**: cpu 0's counters were seen falling from 535,887 to
+428,356, climbing to 1,241,445, then falling again to 390,783 - three
+resets - and the application processors stayed at 107 exits and zero
+second-level entries throughout, because Windows never got far enough to
+start them.
+
+That is the switch's own warning coming true rather than a surprise: its
+comment records that boots taken with it "stayed in an extended-page-table
+fill regime ... and never got there", and asks that it not be used for
+comparison. Here it does not merely shift the regime, it prevents the
+boot.
+
+So the narrowing is kept - it is correct, and the next person to reach
+for this will otherwise hit the same silent refusal - but **the monitor
+trap flag is not a usable instrument for this failure on this rig**, and
+that closes the last approach that was available without new machinery.
+Reverted to `stepvtl=0`.
+
+
 ## `rip=0x0` in the exit ring is a recording artifact, not a guest at address zero
 
 **2026-08-25.** cpu 1's first-level exit ring ends like this, and it is
