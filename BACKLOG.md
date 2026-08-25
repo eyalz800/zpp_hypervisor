@@ -1,5 +1,66 @@
 # Known defects
 
+## RETRACTION: `SkeBugCheckStatus = 0xC0000409` is a static initialiser, not a crash
+
+**2026-08-25. This retracts the two entries below it that concluded VTL1
+fail-fasts**, and it was caught by one offline read that should have been
+the first thing done.
+
+Reading the values **out of `securekernel.exe` on disk**, at the file
+offsets its own section table gives:
+
+```
+  SkeBugCheckStatus  rva 0x11e3e0  in .data     file value 0xC0000409
+  barrier            rva 0x14d000  in MIRRDATA  file value 0x0
+  SkiBugCheckOwner   rva 0x128cf0  in no raw section (.bss)
+```
+
+**`0xC0000409` is what the image ships with.** Reading it back out of
+guest memory says only that nothing has overwritten it. It is not
+evidence of a bugcheck, and "the secure kernel has bugchecked with
+STATUS_STACK_BUFFER_OVERRUN" was wrong.
+
+**The barrier reading zero is worth just as little** - zero is its file
+value too, so it was never evidence that `SkeBugCheckEx` had cleared it,
+and the argument that "zero is the crash's own fingerprint" was
+circular.
+
+### What survives, and why
+
+`SkiBugCheckOwner` is in **no raw section**, so it is zero-filled at load
+and any non-zero value in it was written at runtime. On one two-processor
+boot it read `0xffffcb8071a67000` and matched entry 1 of the secure
+kernel's processor array - the application processor's own block. **That
+reading stands**: something set it, and it named the application
+processor.
+
+On a later two-processor boot it read **zero** while the status still
+read `0xC0000409`. Under the corrected reading those two facts are
+consistent and unremarkable: no bugcheck had happened on that boot at
+all.
+
+So the honest position is narrower than the retracted one:
+
+- VTL1 **does** crash on some boots - `SkiBugCheckOwner` non-zero, naming
+  the application processor.
+- It does **not** crash on every boot, and the runs differ: one boot had
+  the application processor reach 411 second-level entries, execute
+  ntoskrnl code, and issue `HvCallVtlReturn` (hypercall `0x12`) - so
+  **"the application processor never leaves VTL1" is also not universal**,
+  and that entry needs the same qualification.
+- The failure is **not deterministic**, which no entry above had
+  established and several implicitly assumed.
+
+### The rule this breaks, again
+
+`.data` holds initialised values. A global read out of a running guest
+means nothing until it has been compared against what the image ships,
+and that comparison is free - it needs no boot, no monitor and no guest.
+This is the same class as every other one-field reading in this file, and
+it is the most expensive instance so far: two entries, several boots and
+a confident causal chain, all resting on a constant.
+
+
 ## The shadow EPT roots, per processor at last - and what the numbers do and do not say
 
 **2026-08-25.** With the dumper reading every processor rather than only
