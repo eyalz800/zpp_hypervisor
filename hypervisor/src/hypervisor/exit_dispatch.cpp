@@ -337,6 +337,31 @@ void hypervisor::on_vm_exit(std::uint64_t cpuid,
                 }
             }
 
+            // **Watching this page table was tried and wedges the
+            // guest.** The store that clears the entry is the one event
+            // never observed, and this VMM has a write watch, so
+            // pointing it at the leaf page-table page looked like the
+            // obvious next instrument. It is not usable here.
+            //
+            // Measured: armed on the page (logged), the guest ran a
+            // while and then stopped taking exits on **both**
+            // processors, with the monitor still reporting `running`.
+            // No entry-cleared event was ever reported.
+            //
+            // The reason is structural rather than a bug to fix. The
+            // watch works by removing write permission from the page in
+            // the extended tables. A page *table* is walked by the
+            // processor itself, so protecting it makes every page walk
+            // that touches it take an extended-page-table violation -
+            // and servicing that violation requires walks. `nested_vmx.h`
+            // records the identical outcome for the VP assist page watch:
+            // "Off, because it wedged the guest."
+            //
+            // So the actor that clears the entry cannot be caught this
+            // way, and a different mechanism is needed - the most
+            // plausible being to compare the entry before and after each
+            // exit rather than to trap the write.
+
             if (8 == mapped) {
                 this->gdt_walk_all_mapped[cpuid] =
                     this->gdt_walk_all_mapped[cpuid] + 1;

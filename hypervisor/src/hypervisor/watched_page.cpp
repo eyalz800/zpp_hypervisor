@@ -881,6 +881,22 @@ bool hypervisor::on_monitor_trap_flag(std::size_t cpu,
     return true;
 }
 
+void hypervisor::note_page_table_write(
+    const guest_write * write)
+{
+    // One line per distinct entry cleared, and only for a write that
+    // makes an entry not-present - which is the event the whole
+    // descriptor-table thread has been reading the aftermath of.
+    if ((nullptr == write) || (0 != (write->value & 1))) {
+        return;
+    }
+
+    log("page table entry cleared: address {} value {} by rip {}",
+        write->address,
+        write->value,
+        this->vmcs.guest_rip());
+}
+
 std::expected<void, zpp::error> hypervisor::watch_guest_page_writes(
     std::uint64_t guest_physical,
     page_watch::handler on_write,

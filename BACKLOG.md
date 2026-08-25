@@ -1,5 +1,45 @@
 # Known defects
 
+## Watching the page table wedges the guest, so the store cannot be trapped
+
+**2026-08-25.** The previous entry said the next move had to come from a
+different direction, and named the one thing never instrumented: seeing
+the **store** that clears the entry rather than its aftermath. This VMM
+has a write watch, so it was pointed at the leaf page-table page that
+maps the application processor's descriptor table.
+
+It arms - `cpu 1 watching the page table that maps the descriptor table:
+0x119602000` - and then the guest **wedges**: both processors stop taking
+exits, every counter frozen, the monitor still reporting `running`. No
+entry-cleared event was ever reported, and the triple fault never
+happened either, because the guest never got that far.
+
+**The reason is structural.** The watch removes write permission from the
+page in the extended tables. A page *table* is walked by the processor
+itself, so protecting it makes every page walk that touches it take an
+extended-page-table violation - and servicing that violation requires
+walks. `nested_vmx.h` already records the same outcome for the VP assist
+page: *"Off, because it wedged the guest."*
+
+So the write watch cannot be used on anything the processor's own paging
+hardware reads, which rules it out for this question permanently. Worth
+recording as a property of the instrument rather than a failed
+experiment: it is the second page for which this is now known, and the
+first was not generalised at the time.
+
+### What would still work
+
+Comparing the entry **before and after** each exit rather than trapping
+the write. The eight-walk already reads the translation every exit on
+that processor; reading the leaf entry itself and remembering it costs
+one more read and no protection change, and it would narrow the store to
+the window between two exits with the exit reason attached - which is as
+close as this VMM can get without trapping.
+
+That is the same shape as the bracket that already works, applied one
+level lower, and it is the next thing to build.
+
+
 ## The open window is measured at zero, so the APIC watch is cleared properly
 
 **2026-08-25.** The previous entry noted that `ept_violation_unclaimed`

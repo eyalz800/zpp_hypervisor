@@ -9514,6 +9514,26 @@ private:
      */
     std::uint64_t exits_while_page_open[max_cpus]{};
 
+    /**
+     * The write watch on the page table that maps a processor's
+     * descriptor table: whether it is armed, and which page.
+     *
+     * Everything measured so far has read the aftermath - the entry is
+     * zero, the region stops at a boundary. This sees the store.
+     * @{
+     */
+    bool gdt_pt_watch_armed[max_cpus]{};
+    std::uint64_t gdt_pt_page[max_cpus]{};
+    /**
+     * @}
+     */
+
+    /**
+     * Reports a write to that page table, with the instruction pointer
+     * that made it.
+     */
+    void note_page_table_write(const guest_write * write);
+
     bool stepping_watch[max_cpus]{};
     std::uint64_t stepping_page[max_cpus]{};
 
