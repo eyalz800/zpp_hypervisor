@@ -1,5 +1,62 @@
 # Known defects
 
+## Settled: the GDT's page-table entry really is written while the processor runs
+
+**2026-08-25.** Eight walks of the same address at every exit,
+classified:
+
+```
+  cpu 1 gdt eight-walk: all-mapped 203  all-unmapped 5  mixed 0
+  cpu 1 gdt walk disagreements: 0
+```
+
+**`mixed` is zero.** Not one exit where the eight samples disagreed
+among themselves, and no back-to-back disagreement either. So the reader
+is consistent, the single disagreement seen on the previous boot was a
+one-off, and the caution recorded then can be lifted **for this
+measurement** - it was still the right check to run first.
+
+And the measurement stands: **203 exits where the mapping is unanimously
+present, 5 where it is unanimously absent.** A reader that was wrong 2%
+of the time would produce mixed exits; there are none. The page-table
+entry is genuinely being written while the application processor runs on
+it.
+
+### The mechanism, end to end
+
+1. Hyper-V starts the application processor, which comes up on its own
+   page table with its own 64-bit descriptors.
+2. Something - on the evidence, the boot processor - **transiently zeroes
+   the leaf page-table entry** for the page holding that processor's
+   global descriptor table. Five windows out of 208 exits.
+3. The application processor takes an exception inside one of those
+   windows. Delivering it needs a descriptor from that table, which is
+   momentarily unmapped, so the fault escalates to a double fault, whose
+   handler needs the same table, and the third fault ends the processor.
+4. It never reports in, Windows leaves `KeNumberProcessorsGroup0` at 1,
+   and the guest runs uniprocessor.
+
+### Why this would not happen on real hardware, which is the useful part
+
+An operating system that edits a page-table entry another processor is
+using quiesces that processor first - an interrupt, then a handshake,
+then the edit, then a shootdown. That protocol is exactly what this VMM
+has been shown to interfere with all session: the application processor's
+start-up IPI was being applied with the wrong vector until today, its
+INIT is only forwarded, and its activity record lags what the processor
+is really doing.
+
+So the leading candidate is **not "the guest has a race"** but "the guest
+quiesced a processor that this VMM did not actually stop, or asked for a
+handshake this VMM never delivered" - and the window it then edits in is
+one the application processor is still running inside.
+
+That is a hypothesis. What it predicts, and what would test it: an
+interrupt or hypercall directed at the application processor shortly
+before each of those five windows. The exit ring covers the window and
+the log covers the IPIs; nobody has looked at the two together.
+
+
 ## The walker disagrees with itself, once in 239 - so the flapping is partly, not wholly, instrument
 
 **2026-08-25.** Two walks of the same address, back to back at the same

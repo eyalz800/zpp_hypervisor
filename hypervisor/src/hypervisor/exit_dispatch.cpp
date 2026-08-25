@@ -229,6 +229,27 @@ void hypervisor::on_vm_exit(std::uint64_t cpuid,
                     this->gdt_walk_disagreements[cpuid] + 1;
             }
 
+            // Eight, classified. See `gdt_walk_mixed`: unanimous exits
+            // that differ from each other are a mapping being written;
+            // exits that disagree with themselves are this VMM's reader.
+            std::size_t mapped{};
+            for (std::size_t i{}; i < 8; ++i) {
+                if (guest_linear_to_physical(base)) {
+                    ++mapped;
+                }
+            }
+
+            if (8 == mapped) {
+                this->gdt_walk_all_mapped[cpuid] =
+                    this->gdt_walk_all_mapped[cpuid] + 1;
+            } else if (0 == mapped) {
+                this->gdt_walk_all_unmapped[cpuid] =
+                    this->gdt_walk_all_unmapped[cpuid] + 1;
+            } else {
+                this->gdt_walk_mixed[cpuid] =
+                    this->gdt_walk_mixed[cpuid] + 1;
+            }
+
             if (first) {
                 this->gdt_last_reachable[cpuid] = this->exit_total[cpuid];
                 this->gdt_reachable_seen[cpuid] = 1;
@@ -2072,6 +2093,13 @@ void hypervisor::on_vm_exit(std::uint64_t cpuid,
                 // A missing leaf means one page. They are different
                 // defects and the error code alone cannot tell them
                 // apart, which is why `walk_refusal_level` exists.
+                log("cpu {} gdt eight-walk: all-mapped {} all-unmapped "
+                    "{} mixed {}",
+                    (cpuid + 1),
+                    this->gdt_walk_all_mapped[cpuid],
+                    this->gdt_walk_all_unmapped[cpuid],
+                    this->gdt_walk_mixed[cpuid]);
+
                 log("cpu {} gdt walk disagreements: {}",
                     (cpuid + 1),
                     this->gdt_walk_disagreements[cpuid]);

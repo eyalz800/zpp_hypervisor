@@ -7582,6 +7582,28 @@ private:
      * disagreement here is the instrument.
      */
     std::uint64_t gdt_walk_disagreements[max_cpus]{};
+
+    /**
+     * Eight walks of the same address at each exit, classified.
+     *
+     * This is what separates a page-table entry genuinely being written
+     * from a reader that is occasionally wrong, and the two look
+     * identical in any single sample. A mapping being written gives
+     * **unanimous** exits - all eight agree - with the answer changing
+     * between exits. An unreliable reader gives **mixed** exits, where
+     * the eight samples disagree among themselves within a few thousand
+     * cycles.
+     *
+     * `mixed` is therefore the instrument's own error signal, and
+     * `all_mapped` against `all_unmapped` is the measurement.
+     * @{
+     */
+    std::uint64_t gdt_walk_all_mapped[max_cpus]{};
+    std::uint64_t gdt_walk_all_unmapped[max_cpus]{};
+    std::uint64_t gdt_walk_mixed[max_cpus]{};
+    /**
+     * @}
+     */
     /**
      * @}
      */
