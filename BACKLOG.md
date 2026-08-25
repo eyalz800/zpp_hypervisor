@@ -1,5 +1,45 @@
 # Known defects
 
+## `ZPP_SAMPLE_L1=ON` does not boot, and a failed launch boots Windows bare
+
+**2026-08-25.** Turning on the first-level instruction-pointer sampler -
+the preemption-timer probe that looked like the right instrument for a
+processor spinning with no exits - **fails to launch**:
+
+```
+  zpp: ZPP_HYPERVISOR_FAILED zpp_load_elf failed, code 0x0000000000060600
+  BdsDxe: failed to start Boot0000 "zpp hypervisor" ... Load Error
+  BdsDxe: starting Boot0002 "UEFI WDC PC SN520 ..."
+```
+
+Not a usable arm, exactly like `ZPP_VMCS_CACHE=OFF` already recorded
+above. Reverted immediately and the ESP re-verified to chainload, because
+a non-booting loader must never be left there.
+
+### The trap, which is worse than the switch
+
+**When our loader fails, the firmware falls through to the next boot
+option and starts Windows off the NVMe with no hypervisor under it.** The
+machine then looks *healthy*: `VM status: running`, three vCPU threads
+each burning a full core, Windows booting normally. And
+`rig-dump-state.py` reports **every counter as zero**, with the module
+base and the singleton address both resolving correctly, because the
+module really was loaded - the loader mapped it and then refused to
+launch it.
+
+That reads exactly like the "an address that moved is not a guest that
+never started" failure recorded above, and it is the opposite: the reader
+is fine and there is genuinely nothing to read. Two different diagnoses
+with one symptom.
+
+**The tell is on serial and nowhere else**: `ZPP_HYPERVISOR_FAILED`, and
+`BdsDxe: starting Boot0002`. So when every counter reads zero, grep
+serial for that *before* suspecting the reader - and note that this is
+the same hazard the memory about never resetting guest NVRAM from
+`.orig` describes, reached by a different route: a run that silently
+measures bare Windows.
+
+
 ## Where the three processors actually are, from counter arithmetic
 
 **2026-08-25.** On the surviving three-processor guest - Hyper-V
