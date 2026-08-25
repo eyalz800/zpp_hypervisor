@@ -1,5 +1,48 @@
 # Known defects
 
+## The wait is a RENDEZVOUS, and its variables are named
+
+**2026-08-25.** The call sites of the one-second wait, disassembled:
+
+```
+        andq  $0x0, <VmxBootInfo+0x27858>   ; the boot processor zeroes
+        andq  $0x0, <VmxBootInfo+0x279c8>   ; ...two globals
+        callq 0x25599c                       ; caller 1 - the wait
+  ...
+        movl  %gs:0x8, %r8d                  ; this processor's index
+        cmpl  <VmxBootInfo+0x279f4>, %r8d
+        je    ret                            ; the boot processor returns here
+        testb $0x8, <0xaf158> ; jne ret      ; a flag gate
+        callq 0x25599c                       ; caller 2 - APPLICATION PROCESSORS ONLY
+        ret
+```
+
+And the wait's own head reads **the same `VmxBootInfo+0x279c8`**
+(`movq <...279c8>, %rcx ; testq %rcx, %rcx ; je`), so:
+
+**The boot processor zeroes the variable; the application processors wait
+on it, and the wait is the last thing they do in that function.** That is
+a rendezvous, and the application-processor side is gated on the
+processor-index comparison plus bit 3 of the flags at `hvix64+0xaf158`.
+
+### The exact reads that would settle what they are waiting for
+
+All three are globals at known offsets, readable with the recipe recorded
+above, and none has been read:
+
+| what | where | why it matters |
+|---|---|---|
+| the rendezvous variable | `hvix64 + 0xd6ba8` (`VmxBootInfo+0x279c8`) | zero means the wait exits early; non-zero is what the applicaton processors block on |
+| the companion global | `hvix64 + 0xd6a38` (`VmxBootInfo+0x27858`) | zeroed beside it by the boot processor |
+| the flag word | `hvix64 + 0xaf158` | bit 3 gates the application-processor call; bit 27 gates the wait's own body |
+
+**Read all three on a failing three-processor run and on a working
+single-processor run and compare.** That is two boots and six reads, and
+it either names what the application processors are blocked on or shows
+the rendezvous is fine and the problem is elsewhere. It is the most
+specific question this investigation has reached.
+
+
 ## The ACPI PM timer advances correctly on the failing configuration too
 
 **2026-08-25.** The two questions the previous entry left - does it
