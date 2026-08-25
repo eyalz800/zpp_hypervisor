@@ -7671,6 +7671,18 @@ private:
      */
     std::uint64_t gdt_walk_rip_unreachable[max_cpus]{};
 
+    /**
+     * The first instruction pointer this VMM's walker could not
+     * translate, and the page table it was walked under - kept so an
+     * independent reader can be aimed at the same address.
+     * @{
+     */
+    std::uint64_t rip_unreachable_first[max_cpus]{};
+    std::uint64_t rip_unreachable_cr3[max_cpus]{};
+    /**
+     * @}
+     */
+
     bool l2_entry_failure_logged[max_cpus]{};
 
     /**

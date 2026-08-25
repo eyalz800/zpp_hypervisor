@@ -284,6 +284,19 @@ void hypervisor::on_vm_exit(std::uint64_t cpuid,
             if (!guest_linear_to_physical(context.rip)) {
                 this->gdt_walk_rip_unreachable[cpuid] =
                     this->gdt_walk_rip_unreachable[cpuid] + 1;
+
+                // Keep the first one, with the page table it was walked
+                // under, so an **independent** reader can be pointed at
+                // exactly this address. QEMU shares no code with this
+                // VMM: if it also finds the address unmapped, the
+                // mapping is genuinely gone and this processor fetched
+                // through a cached translation - which is the whole
+                // question. If QEMU finds it mapped, this walker is
+                // wrong and every reachability number here with it.
+                if (0 == this->rip_unreachable_first[cpuid]) {
+                    this->rip_unreachable_first[cpuid] = context.rip;
+                    this->rip_unreachable_cr3[cpuid] = vmcs.guest_cr3();
+                }
             }
 
             if (8 == mapped) {
@@ -2216,6 +2229,11 @@ void hypervisor::on_vm_exit(std::uint64_t cpuid,
                     this->injected_count[cpuid],
                     this->injected_last[cpuid],
                     this->injected_last_exit[cpuid]);
+
+                log("cpu {} walker control first miss: rip {} cr3 {}",
+                    (cpuid + 1),
+                    this->rip_unreachable_first[cpuid],
+                    this->rip_unreachable_cr3[cpuid]);
 
                 log("cpu {} walker control: rip unreachable {} of {} "
                     "exits (non-zero means the walker is broken)",

@@ -1,5 +1,63 @@
 # Known defects
 
+## QEMU confirms the walker: the processor executes from an address its own page table does not map
+
+**2026-08-25.** The walker's first miss was recorded with the page table
+it was walked under, so an independent reader could be aimed at it:
+
+```
+  cpu 1 walker control first miss: rip 0x67168825 cr3 0x7fb6a000
+```
+
+QEMU, which shares no code with this VMM, walked the same address under
+the same table:
+
+```
+  L0 idx 0x000  entry 0x000000007fb69027   present
+  L1 idx 0x001  entry 0x000000007fb68027   present
+  L2 idx 0x138  entry 0x0000000000000000   NOT PRESENT
+  -> UNMAPPED
+```
+
+**The walker is right.** Two independent readers agree, and the page
+directory entry is plainly zero with its parents intact.
+
+So the retraction two entries ago - *"the walker is broken and every
+reachability number with it"* - is **withdrawn**. It over-corrected, and
+said so at the time as a possibility; this settles it.
+
+### What the agreement actually establishes
+
+At that exit the processor's `RIP` was `0x67168825` and its `CR3` was
+`0x7fb6a000` - both from the same VMCS snapshot, so they describe one
+moment - and that instruction pointer is **not mapped under that page
+table**.
+
+**A processor cannot execute at an address absent from its current page
+table unless it is using a cached translation.** So this processor is
+running on translations its page tables no longer describe. That is not a
+deduction about the descriptor table or the stack; it is the direct
+reading of an instruction pointer.
+
+And it makes the descriptor table and the stack the *same phenomenon*
+rather than three separate mysteries: the processor survives on cached
+translations until it touches something no cached entry covers, which is
+why it runs 204 exits and then dies on a `call` that pushes.
+
+### Where it happens is a surprise worth noting
+
+`0x7fb6a000` is one of the two **firmware** page tables in this
+processor's CR3 history, and `0x67168825` is a low address, not a kernel
+one. So the first miss is in the **firmware phase**, long before Windows'
+bring-up - which means whatever removes mappings under this processor
+starts doing so much earlier than the fifteen-exit window everything has
+been focused on.
+
+That widens the question rather than narrowing it, and it is the first
+evidence in this file that the problem predates the guest's own
+processor bring-up entirely.
+
+
 ## The positive control cannot tell "walker broken" from "processor on stale translations"
 
 **2026-08-25.** Adding the `l2_physical_to_l1` step the walker was
