@@ -1,5 +1,47 @@
 # Known defects
 
+## The rendezvous globals read, but too early to conclude - and the flags say so
+
+**2026-08-25.** The three reads named in the previous entry, taken on a
+three-processor run:
+
+```
+  rendezvous @hvix64+0xd6ba8 = 0x0
+  companion  @hvix64+0xd6a38 = 0x0
+  flags      @hvix64+0xaf158 = 0x40fb2011000002
+  skipidx    @hvix64+0xd6bd4 = 0x0
+```
+
+The reads work and the base validated. Decoding the flags against the two
+gates in the code:
+
+- **bit 3 clear** -> `testb $0x8 ; jne` is not taken, so the
+  application-processor path *does* call the wait. Consistent with
+  everything measured.
+- **bit 27 clear** -> `testq $0x8000000 ; je` **is** taken, so the wait
+  takes its early exit and never reaches the spin at `0x255b4e`.
+
+**The second contradicts the measurement.** Eight thousand CPUIDs were
+counted at exactly that spin site on the application processors, which
+cannot happen if the early exit is always taken. So the flag word must
+change later in the boot, and this sample - taken while the application
+processors were still at zero second-level entries - is from before the
+phase that matters.
+
+**Recorded as inconclusive rather than as a finding**, because the
+alternative was to report "bit 27 is clear, so the wait exits early",
+which is what the data says and is contradicted by data already in this
+file. Two readings that disagree mean the sample is wrong, not that one
+of them wins.
+
+**What to do differently**: these globals must be sampled *when the
+application processors are spinning*, not at a fixed delay after boot.
+The cheap version is to sample repeatedly and keep the last value where
+`cpuid_total` on an application processor is already in the thousands -
+the same "wait for the phase, then read" discipline that finally made the
+processor-index reading work.
+
+
 ## The wait is a RENDEZVOUS, and its variables are named
 
 **2026-08-25.** The call sites of the one-second wait, disassembled:
