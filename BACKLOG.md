@@ -1,5 +1,43 @@
 # Known defects
 
+## Correction: leaf 0 is not that routine's leaf, and the two were conflated
+
+**2026-08-25.** Recording the leaf-0 site per processor gives RVAs around
+`0x55b4e` and `0x5c26f` - **not** `0x23606f`, the routine that was
+disassembled and reasoned about at length.
+
+Re-reading that disassembly settles it: the routine loads `movl $0x1,
+%ebp` and later `mov %ebp, %eax` before its CPUID, so it asks **leaf 1**.
+The dominant leaf across the whole processor is 0, and it comes from
+other sites entirely.
+
+**Two different things were treated as one**: "the leaf this processor
+mostly asks for" and "the leaf the routine at the captured instruction
+pointer asks for". The captured `cpuid_last_rip` landed on `0x23606f`
+in an earlier run, which made them look like the same thing, and they are
+not.
+
+What survives:
+
+- The routine at `hvix64+0x235ee4`-`0x23609a` is real, its `.pdata`
+  bounds are real, its two callers are real, and the bring-up sequence
+  at `hvix64+0x3a6690` above it - CD, WBINVD, CR3 reload, IA32_PAT - is
+  unmistakable from its instructions.
+- Its body runs 257 times, from Hyper-V's own counter.
+- The processor index is correct everywhere (0, 1, 2).
+
+What does not survive is any inference that tied the **leaf 0 count** to
+**that routine's** call count. They are different sites and the counts
+cannot be compared. The "8,230 calls to a bring-up routine" reading in
+the entries above rests on that comparison and should be treated as
+unproven until the leaf-1 site is counted separately.
+
+**The lesson**: two counters that happen to agree once are not measuring
+the same thing. This is the same error as the cross-run comparison
+retracted earlier, in a form that survived several entries because one
+sample made the identification look confirmed.
+
+
 ## The processor index is CORRECT, and the routine is not application-processor-only
 
 **2026-08-25.** Two corrections, both to claims made in the entries above,
