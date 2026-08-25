@@ -7589,6 +7589,18 @@ private:
     std::uint32_t cpuid_leaf0_raw[max_cpus]{};
 
     /**
+     * Where leaf 0 was asked from, per processor.
+     *
+     * Kept apart from `cpuid_last_rip` because that one records the last
+     * CPUID from any site, and the guest hypervisor's image base is
+     * derived by subtracting a known offset from *this* site. Deriving
+     * it from the other field worked until the other field was made more
+     * general, at which point it silently stopped - so the two are
+     * separate on purpose.
+     */
+    std::uint64_t cpuid_leaf0_rip[max_cpus]{};
+
+    /**
      * The guest hypervisor's own processor index, and the GS base it
      * came from.
      *

@@ -718,6 +718,14 @@ void hypervisor::on_vm_exit(std::uint64_t cpuid,
         // that comes out of the hardware.
         if ((0 == leaf) && (cpuid < max_cpus)) {
             this->cpuid_leaf0_raw[cpuid] = cpuid_result[0];
+
+            // The leaf-0 site specifically, which is the guest
+            // hypervisor's bring-up routine's own CPUID and is therefore
+            // stable. `cpuid_last_rip` records the last CPUID from *any*
+            // site, and once that was so, the image base could no longer
+            // be derived from it - an instrument improvement that
+            // silently broke a derivation depending on it.
+            this->cpuid_leaf0_rip[cpuid] = vmcs.guest_rip();
         }
 
         // **The guest hypervisor's own idea of which processor it is.**
