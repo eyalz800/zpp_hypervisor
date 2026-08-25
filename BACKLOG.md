@@ -1,5 +1,34 @@
 # Known defects
 
+## `ZPP_VMCS_CACHE=OFF` does not boot at all - it is not a usable bisect arm
+
+**2026-08-25.** Tried as an empirical test of the one multiprocessor
+defect a static audit found in the VMCS field cache: `vmcs_cache_suspended`
+is a plain non-atomic global incremented `x = x + 1` from every
+processor, and it gates whether the cache is bypassed, so a lost update
+can leave one processor caching fields read from another's shadow VMCS.
+
+`vcache=0` verified in the deployed manifest. Result: **the hypervisor
+never finishes its own startup.** Serial stops at
+
+```
+  ZPP_TRACE allocate_rwx done at 0x671b1000
+  ZPP_TRACE start up memory at 0x9c000
+```
+
+with no `chainloading` line at all, and every per-processor counter reads
+zero because no exit is ever taken. So the switch cannot be used to test
+the defect - the comparison has no working arm.
+
+**The defect is still real and still unfixed.** It should be fixed
+directly - make the counter atomic - rather than bisected around, and
+whatever makes `OFF` fail to boot is a second, separate bug in a
+configuration nobody has exercised. Both are worth a note precisely
+because the switch *looks* like a safe one-flag experiment and is not.
+
+A working build was restored to the rig immediately.
+
+
 ## Correction: leaf 0 is not that routine's leaf, and the two were conflated
 
 **2026-08-25.** Recording the leaf-0 site per processor gives RVAs around
