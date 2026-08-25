@@ -1,5 +1,51 @@
 # Known defects
 
+## We start each application processor ONCE. The bring-up restarts itself.
+
+**2026-08-25**, three processors, the counters added for exactly this
+question:
+
+```
+  cpu0  start_up_applied=0  init_emulated=0
+  cpu1  start_up_applied=1  init_emulated=0
+  cpu2  start_up_applied=1  init_emulated=0
+```
+
+**One start-up applied per application processor, and not one INIT
+emulated.** So the first of the two readings is dead: nothing in this VMM
+is restarting those processors.
+
+**The second is therefore the live one - the guest hypervisor's own
+bring-up faults partway and begins again**, thousands of times, before it
+gives up and VMCLEARs the processor. This was predicted before the run
+and recorded in the commit that added the counters, so a small value here
+is a result rather than a null.
+
+### What it localises the fault to
+
+`hvix64+0x3a6690`, 604 bytes, entered indirectly. Its significant
+instructions are all things this VMM can intercept or shadow:
+
+```
+  mov  $0xc0010021, %cr0           ; CD set - CR0 write
+  wbinvd
+  mov  %cr3, %rax ; mov %rax, %cr3 ; CR3 reload
+  mov  $0x277, %ecx ; wrmsr        ; IA32_PAT
+  wbinvd
+  mov  %cr3, %rax ; mov %rax, %cr3
+  and  $0xbfffffff, %r8d           ; CD cleared
+  ... CR4 written earlier, with $0x2e0 / $0x260
+```
+
+CR0, CR4, CR3 and `IA32_PAT` on an application processor, in a sequence
+that must complete for that processor to come up. The application
+processor's exit census shows `cr-access` **3** in a whole boot, which is
+the thing to explain next: a sequence that writes CR0 twice and CR4 once
+per attempt, run thousands of times, should produce far more than three
+control-register exits unless those writes are **not** exiting - or the
+sequence is dying before it reaches them.
+
+
 ## The repeated routine is Hyper-V's PROCESSOR BRING-UP, run thousands of times
 
 **2026-08-25.** The call chain behind the 8,230 CPUIDs is now traced to
