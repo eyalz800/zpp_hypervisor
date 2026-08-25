@@ -1,5 +1,59 @@
 # Known defects
 
+## RETRACTED AND REVERSED: this VMM's own handler clears the mapping
+
+**2026-08-26.** With the walker repaired and the reachability probe
+running across the extended-page-table handler, the log reads:
+
+```
+  [113] guest apic write, register 0xd0, value 0x0
+  [114] cpu 1 ept handler changed gdt reach: 0x1 -> 0x0 at exit 0xcc
+  [115] cpu 1 gdt leaf entry 0x8000000114f4e163 -> 0x0 at exit 0xcd
+```
+
+**Line 114 is this VMM's own probe**, taken at the top and bottom of its
+extended-page-table handler. It fires. **The handler takes the mapping
+away.**
+
+That reverses the entry titled *"This VMM's extended-page-table handler
+does not remove the mapping"*, which reported the same probe at **zero**
+occurrences. It was zero because the walker then counted a paged-off
+guest as "mapped", so the before and after readings were both a constant
+and could never differ. The instrument was repaired afterwards; this is
+the first run where the probe could report anything at all.
+
+**And it reverses the entry naming Hyper-V as the writer.** The boot
+processor's VMREAD is a coincidence of timing, not a cause. The clear
+happens inside this VMM, on the application processor's own exit.
+
+### The shape of it, and it is alarming
+
+The handler is emulating a write of **`0x0`** to local-APIC register
+`0xd0`, and the page-table entry becomes exactly **`0`**. A write
+emulation that computed the wrong destination - guest page table instead
+of the APIC page - would produce precisely this: the right value at the
+wrong address.
+
+That is a hypothesis, not yet a finding. What makes it worth taking
+seriously rather than filing: the value matches, the timing matches to
+the exit, and the emulation path is the one piece of this VMM that writes
+to a guest-physical address it computes itself.
+
+### The methodological point, which is the same one four times over
+
+Every reversal in this thread has the same cause: **an instrument that
+could only return one answer.** `injected_count` could only be zero, the
+ring's `qual` could only be zero, the reachability walker could only say
+"mapped" while paging was off, and this probe could only say "no change"
+for the same reason. Each was believed, each retired a candidate, and
+each was wrong.
+
+The one that caught it every time was a **positive control** - a reading
+whose expected value is known and non-trivial. There was none here until
+`rip unreachable` was added, and the moment there was, four entries fell
+over within an hour.
+
+
 ## The writer is Hyper-V, on the boot processor, while the application processor runs
 
 **2026-08-26.** With the leaf entry sampled every exit, the boot
