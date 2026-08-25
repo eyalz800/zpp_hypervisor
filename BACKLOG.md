@@ -50640,3 +50640,71 @@ next: the application processor reaches **117 exits and zero
 second-level entries**. It never runs L2 at all, so nothing about
 nested entry, shadow EPT or reflection is implicated yet - it dies in
 first-level guest code, during VTL1's own start-up path.
+
+## The application processor reaches second-level execution
+
+First time in this tree. `ZPP_DROP_WATCH_ON_START_UP=ON` drops the local
+APIC page watch when a start-up is applied instead of after
+`apic_watch_quiet_ticks` - about two minutes at the rig's clock, so
+always still armed when it mattered.
+
+Measured, two boots, identical to the digit:
+
+| | exits | l2-entries | ends in |
+|---|---|---|---|
+| off | 117-208 | **0** | triple fault |
+| on | **977** | **37** | no fault at all |
+
+The triple fault is gone, not moved: no `unhandled_exit`, no entry
+failure, nothing in the log. The processor runs a correct nested loop -
+CPUID in the guest hypervisor, the VMREAD/VMWRITE sequence, `vmresume`
+into its guest, back out - thirty-seven times.
+
+How it was found, since the chain is what generalises:
+
+- The exit ring, not another page-table probe. Zero l2-entries meant it
+  was dying in *first-level* code, which retired nested entry, shadow
+  EPT and reflection in one reading.
+- It dies four exits after its descriptor table is mapped, and those
+  four exits are APIC writes - logical destination, destination format,
+  spurious vector. **Not one of them can carry a start-up IPI**, so we
+  were charging it an exit each for nothing.
+- A bracket around the whole handler, on every path, never fired, so
+  this VMM never wrote the entry that was zeroed. That is what made
+  "the watch is making it too slow" the remaining explanation rather
+  than one of several.
+
+Two instruments that failed, worth recording because both looked fine:
+
+- A watch on the page-table page itself, to name the writer. It armed
+  on the *first* entry ever resolved - the processor's early
+  low-memory table, index 2 of a page nothing writes - and reported
+  nothing, which reads exactly like proof that nobody wrote it. Fixed
+  to follow the entry and watch only the kernel half; then it slowed
+  the guest 16x and the fault stopped happening at all. An instrument
+  that suppresses what it measures is not one.
+- `ZPP_INTERCEPT_APIC=OFF`, to remove the watch entirely: the
+  processor takes **zero** exits and is never adopted. Under UEFI the
+  boot processor is launched alone and the rest are adopted from the
+  guest's own start-up IPIs, so the watch is the adoption mechanism.
+  It cannot be switched off, only dropped once it has done its work.
+
+### Where it stops now, and it is a different problem
+
+Deterministic - 977/37/36 on both boots. The last exit is `vmresume`
+with **l2-rip `0x2`**, and the one before it a `wrmsr` of
+`0x40000071`, Hyper-V's synthetic ICR. A second-level processor
+resumed at an address that is not code and then never exiting again is
+one parked in wait-for-SIPI: Windows has not started its second
+processor yet.
+
+That also explains the boot processor crawling - ~12 exits/s against
+5,319/s - since it is waiting for a processor whose start-up never
+arrives. So the next target is the guest's *own* start-up IPI reaching
+the second-level processor, which is a nested interrupt delivery
+question and not a start-up one.
+
+Left off by default: it removes a triple fault and introduces a stall,
+so neither setting reaches the login screen yet and a run with it on is
+not comparable with one without.
+
