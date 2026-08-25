@@ -7572,6 +7572,22 @@ private:
      * so a *small* value here is the informative outcome, not a null
      * result.
      */
+    /**
+     * What CPUID leaf 0 answered on each processor - the maximum
+     * supported leaf, in EAX, as the hardware gave it.
+     *
+     * The narrowest open question in the multiprocessor investigation.
+     * The guest hypervisor's bring-up runs thousands of times on an
+     * application processor and exits to this VMM essentially only for
+     * CPUID, so this answer is the one thing it observes through us on
+     * every attempt - and it stores it to `+0x6f8` of its per-processor
+     * block before starting over.
+     *
+     * Per processor so that "the application processors are told
+     * something different" is a comparison and not an assumption.
+     */
+    std::uint32_t cpuid_leaf0_raw[max_cpus]{};
+
     std::uint64_t start_up_applied[max_cpus]{};
     std::uint64_t init_emulated[max_cpus]{};
 

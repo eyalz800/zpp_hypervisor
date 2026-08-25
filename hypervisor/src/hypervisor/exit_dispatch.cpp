@@ -699,6 +699,27 @@ void hypervisor::on_vm_exit(std::uint64_t cpuid,
             this->cpuid_last_rip[cpuid] = vmcs.guest_rip();
         }
 
+        // **What leaf 0 is actually told, per processor.**
+        //
+        // The guest hypervisor's processor bring-up runs thousands of
+        // times on an application processor and never on the boot
+        // processor, and it exits to this VMM essentially only for
+        // CPUID - 8,378 of them against `cr-access` 3, `rdmsr` 61 and no
+        // WBINVD at all. So the one thing it observes through us on
+        // every attempt is this answer, and its leaf is 0, whose EAX is
+        // the maximum supported leaf. It stores that to `+0x6f8` of its
+        // per-processor block and then starts over.
+        //
+        // Recorded raw and per processor, so that "the application
+        // processors are told something different from the boot
+        // processor" is a comparison rather than an assumption. Taken
+        // before the edits below, and again after, because a difference
+        // introduced by our own editing is a different defect from one
+        // that comes out of the hardware.
+        if ((0 == leaf) && (cpuid < max_cpus)) {
+            this->cpuid_leaf0_raw[cpuid] = cpuid_result[0];
+        }
+
         // Recorded before the answer is edited, so the pair below is
         // what the guest asked and what it was told, in order. Frozen
         // when full: the leaves that decide anything are asked during

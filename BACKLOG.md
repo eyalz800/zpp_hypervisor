@@ -1,5 +1,51 @@
 # Known defects
 
+## CPUID leaf 0 answers identically on every processor - refuted
+
+**2026-08-25.** Recorded per processor, raw, as the hardware gave it:
+
+```
+  cpu0  leaf0_eax = 0x16 (22)
+  cpu1  leaf0_eax = 0x16 (22)
+  cpu2  leaf0_eax = 0x16 (22)
+```
+
+**The same maximum-leaf on all three.** So the one thing the guest
+hypervisor's bring-up observes through this VMM on every attempt is *not*
+different on an application processor, and the narrowest open question in
+the investigation closes negative.
+
+That is worth having. It removes the last cheap explanation for why a
+sequence that exits to us essentially only for CPUID would behave
+differently on one processor than another: **it is not what we tell it.**
+
+### Where that leaves the multiprocessor failure
+
+Everything below is measured and still standing:
+
+- Hyper-V re-runs **its own** processor bring-up (`hvix64+0x3a6690` -
+  CD, WBINVD, CR3 reload, IA32_PAT, CD cleared) thousands of times on
+  each application processor and never on the boot processor, then
+  VMCLEARs and abandons it.
+- **We start each application processor exactly once**
+  (`start_up_applied = 1`, `init_emulated = 0`), so nothing here is
+  restarting it.
+- Per attempt it produces about **one** counted exit and it is the
+  CPUID; `cr-access` 3, `rdmsr` 61, WBINVD 0 across a whole boot.
+- No path in this VMM refuses or parks its entries - seven counters, all
+  zero.
+- The answer it gets from the one thing it does ask us is identical
+  everywhere.
+
+**So the bring-up fails on something it does not ask us about.** The
+remaining candidates are state it reads rather than instructions it
+executes: memory it shares with the boot processor, its per-processor
+block reached through `gs`, or the bitmap the feature routine indexes by
+processor. All three are readable from underneath it with the technique
+recorded above - `hvix64`'s base is derivable offline from any captured
+instruction pointer - and none has been read.
+
+
 ## Zero WBINVD exits means the short path is taken, not that bring-up dies early
 
 **2026-08-25.** `wbinvd_exiting` **is** set in vmcs01
