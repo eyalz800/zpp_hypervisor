@@ -1,5 +1,41 @@
 # Known defects
 
+## The INVEPT broadcast is already on, so it is not the missing invalidation
+
+**2026-08-25.** The previous entry named `ZPP_INVEPT_ALL_PROCESSORS` as
+the next test, because its own description matches this failure almost
+word for word - *"our shadow of that table is per processor and only the
+executing one discards, so another processor can keep serving the
+permission that was just revoked. Only possible above one processor."*
+
+The manifest of the binary that produces the failure says:
+
+```
+  invall=1
+```
+
+**It is already on.** So the broadcast is being done and the failure
+happens anyway. That candidate is eliminated with no boot at all - by
+reading the manifest, which is the check this file has had to learn three
+separate times.
+
+Two things follow:
+
+- the missing invalidation, if there is one, is **not** the shadow
+  extended-page-table discard that switch covers;
+- and it is worth checking whether the switch does what its description
+  says, since a switch that reads ON and is inert is a failure this tree
+  has recorded before (`ZPP_PUBLISH_REFERENCE_TSC`, and the option that
+  was declared and forwarded but never added to the compiler's list).
+
+The remaining invalidation surfaces are the ones that are **not** behind
+that switch: `INVVPID` scope, and the VPID this tree shares between
+vmcs01 and vmcs02 where KVM allocates a separate `vpid02`. A shared VPID
+lets translations from one address space be used in another, which is the
+exact shape of "the processor ran 204 exits on a mapping and then the
+mapping was not there".
+
+
 ## This VMM's extended-page-table handler does not remove the mapping
 
 **2026-08-25.** The previous entry reduced the thread to one question:
