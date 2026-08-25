@@ -1,5 +1,53 @@
 # Known defects
 
+## Measurement stability is now the binding constraint, not diagnosis
+
+**2026-08-25.** A phase-gated read - poll until an application processor
+is actually spinning, then sample - was written to fix the "sampled too
+early" error recorded above. Six attempts over five minutes:
+
+```
+  attempt 0: cpuid_total=[8687, 143, 143]   phase not reached
+  attempt 1: cpuid_total=[8258, 143, 143]
+  attempt 2: cpuid_total=[8376, 143, 143]
+  attempt 3: cpuid_total=[8377, 143, 143]
+  attempt 4: cpuid_total=[8257, 143, 143]
+  attempt 5: cpuid_total=[8014, 143, 143]
+```
+
+**The boot processor's count goes down.** A counter only decreases when
+the singleton is reinitialised, so this run is **reboot-looping**, and
+the application processors never leave 143 - they never reach the
+spinning phase at all.
+
+Earlier runs did reach it (8,203 and 8,347 on the two application
+processors), so the phase is real and intermittent. **That is the
+obstacle now.** Three of the last several runs rebooted mid-measurement,
+and a reading taken across a reset is not a reading of anything.
+
+### What this means for the next attempt
+
+The remaining questions are all of the form "read global X while the
+application processors are spinning". Every one of them is cheap *if the
+run cooperates*, and none is answerable while the guest restarts
+underneath the sample. So the first thing worth fixing is **not** another
+hypothesis - it is getting a three-processor run that stays up long
+enough to be measured.
+
+Two concrete handles, neither tried:
+
+- `-no-reboot -no-shutdown` freezes the machine at the first reset with
+  memory intact, which is exactly the state these reads want. It was
+  avoided earlier for good reason - it once turned a routine
+  reconfiguration reboot into a fake crash - but *for reading globals
+  after the failure* it is the right tool, and the earlier hazard was
+  about interpreting the stop, not about the reads.
+- The counter decreasing is itself a reliable reset detector. Any
+  measurement script should compare against the previous sample and
+  discard a reading whose counters went backwards, rather than reporting
+  it.
+
+
 ## The rendezvous globals read, but too early to conclude - and the flags say so
 
 **2026-08-25.** The three reads named in the previous entry, taken on a
