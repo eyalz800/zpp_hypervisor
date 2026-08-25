@@ -1,5 +1,35 @@
 # Known defects
 
+## Two processors fails exactly like three, so it is the first one that does not come up
+
+**2026-08-25.** Only 1 and 3 had ever been tried. 2 separates "the
+defect scales with processor count" from "the first application
+processor never comes up", and it had not been measured.
+
+| processors | AP exits / L2 entries | `KeNumberProcessorsGroup0` | processes |
+|---|---|---|---|
+| 1 | - | - | reaches the logon UI |
+| 2 | 3,119 / 168 | **1** | 1 (`System`) |
+| 3 | 1,009 / 36 | **1** | 1 (`System`) |
+
+**Two fails the same way three does.** Windows counts one processor in
+both, and holds one process in both. So this is not a scaling problem,
+not a contention problem between two application processors, and not
+anything that needs more than one of them to appear: **one application
+processor is enough to reproduce it, and it is enough to prevent the
+boot.**
+
+That is worth having because it removes a whole class of candidate
+causes - anything whose mechanism requires two application processors
+racing, sharing, or waiting on each other. The remaining defect is in
+bringing up *a* processor.
+
+The one difference between the two runs is how far the application
+processor gets: 168 second-level entries at two processors against 36 at
+three, 4.7 times as far, and still never counted by Windows. So the
+distance it travels is not what decides the outcome either.
+
+
 ## Retraction: the application processor does not stop at the debug-register read
 
 **2026-08-25.** An entry above called the `mov rax, dr0` at the head of
