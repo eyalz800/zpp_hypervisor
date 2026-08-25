@@ -362,6 +362,86 @@ void hypervisor::on_vm_exit(std::uint64_t cpuid,
             // plausible being to compare the entry before and after each
             // exit rather than to trap the write.
 
+            // **Read the leaf entry itself, every exit, and remember
+            // it.** Trapping the store is impossible - protecting a page
+            // table makes the processor's own walks fault on it, which
+            // wedges the guest - so the store is caught by its effect
+            // instead, narrowed to the window between two exits with the
+            // exit reason attached.
+            //
+            // One extra read, no protection change. The address of the
+            // leaf and the index within it are found once, by walking
+            // the three levels above by hand, because
+            // `guest_linear_to_physical` returns the translation and not
+            // the table it came from.
+            // **Recomputed whenever the page table or the descriptor
+            // table moves.** Computing it once was wrong and the
+            // instrument said so itself: it reported the entry going
+            // `0x0 -> 0x2121` at a control-register exit, and `0x2121`
+            // is not a page-table entry - no physical address, flags
+            // that mean nothing. The CR3 had changed, so the address
+            // computed under the old one pointed at unrelated memory.
+            //
+            // The value being obviously impossible is the only reason
+            // this was caught, which is an argument for printing values
+            // rather than verdicts.
+            if ((vmcs.guest_cr3() != this->gdt_pt_cr3[cpuid]) ||
+                (base != this->gdt_pt_base[cpuid])) {
+                this->gdt_pt_cr3[cpuid] = vmcs.guest_cr3();
+                this->gdt_pt_base[cpuid] = base;
+                this->gdt_pt_page[cpuid] = 0;
+                this->gdt_pt_entry[cpuid] = 0;
+            }
+
+            if (0 == this->gdt_pt_page[cpuid]) {
+                auto table = vmcs.guest_cr3() & 0x000ffffffffff000ull;
+                auto ok = true;
+
+                for (auto shift : {39, 30, 21}) {
+                    arch::x86_64::pte entry;
+
+                    if (!read_guest_physical(
+                            table + ((base >> shift) & 0x1ff) *
+                                        sizeof(entry),
+                            std::span(
+                                reinterpret_cast<std::byte *>(&entry),
+                                sizeof(entry))) ||
+                        !entry.present() || entry.large()) {
+                        ok = false;
+                        break;
+                    }
+
+                    table = entry.page_number() << 12;
+                }
+
+                if (ok) {
+                    this->gdt_pt_page[cpuid] =
+                        table + ((base >> 12) & 0x1ff) * 8;
+                }
+            }
+
+            if (0 != this->gdt_pt_page[cpuid]) {
+                std::uint64_t entry{};
+
+                if (read_guest_physical(
+                        this->gdt_pt_page[cpuid],
+                        std::span(reinterpret_cast<std::byte *>(&entry),
+                                  sizeof(entry)))) {
+                    if (entry != this->gdt_pt_entry[cpuid]) {
+                        log("cpu {} gdt leaf entry {} -> {} at exit {}, "
+                            "reason {} guest rip {}",
+                            cpuid,
+                            this->gdt_pt_entry[cpuid],
+                            entry,
+                            this->exit_total[cpuid],
+                            vmcs.exit_reason(),
+                            guest_rip);
+
+                        this->gdt_pt_entry[cpuid] = entry;
+                    }
+                }
+            }
+
             if (8 == mapped) {
                 this->gdt_walk_all_mapped[cpuid] =
                     this->gdt_walk_all_mapped[cpuid] + 1;

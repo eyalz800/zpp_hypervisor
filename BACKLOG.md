@@ -1,5 +1,60 @@
 # Known defects
 
+## Caught by value: the guest maps the descriptor-table page, then clears the entry four exits later
+
+**2026-08-26.** Sampling the leaf page-table entry itself at every exit -
+recomputing its address whenever CR3 or the descriptor-table base moves,
+which the first attempt did not - catches the event:
+
+```
+  cpu 1 gdt leaf entry 0x0 -> 0x2121               exit 200  reason 0x1c
+  cpu 1 gdt leaf entry 0x0 -> 0x8000000114f4d163   exit 201  reason 0x0a
+  cpu 1 gdt leaf entry 0x8000000114f4d163 -> 0x0   exit 205  reason 0x30
+  cpu 1 gdt bracket: last reachable 204, first unreachable 205
+```
+
+`0x8000000114f4d163` is a **real** page-table entry - no-execute set,
+physical `0x114f4d000`, flags `0x163`: present, writable, accessed,
+dirty, global. Its plausibility is what says the instrument is finally
+aimed correctly, and the `0x2121` line above it is the stale-address
+artefact being corrected in flight.
+
+**So the guest maps this processor's descriptor-table page at exit 201
+and clears that entry at exit 205** - four exits later, while the
+processor is running on it. The bracket agrees exactly.
+
+### Two things this settles
+
+- **It is a clear, not a never-mapped region.** The entry holds a valid
+  translation and is then written to zero. Every reading that hedged
+  between "removed" and "never built" is resolved.
+- **The window is four exits wide**, and those four exits are on the
+  record: the intercepted local-APIC writes. The exit at which the clear
+  is first seen carries guest RIP `0xfffff84ee805a479`, in the same APIC
+  helper as the others.
+
+### And two traps recorded on the way
+
+- **Computing the leaf address once was wrong**, and the instrument
+  itself exposed it: it reported the entry becoming `0x2121`, which is
+  not a page-table entry at all - no physical address, meaningless flags.
+  The CR3 had changed underneath. **Printing the value rather than a
+  verdict is the only reason that was caught**, and it is an argument for
+  never reducing an instrument to a boolean.
+- **The first run of the fix measured the old binary.** The log showed
+  the same line number and the same values, and the deployed hash
+  differed from the built one - the boot had raced a deploy in a
+  timed-out invocation. `CLAUDE.md` prescribes exactly this check and it
+  is the third time in this investigation it has mattered.
+
+### What is left
+
+Who writes the zero. The store is on some processor at some instruction,
+and the four-exit window is now narrow enough that the boot processor's
+own exit ring over the same window should show what it was doing - which
+is the next read, and needs no new instrument.
+
+
 ## Watching the page table wedges the guest, so the store cannot be trapped
 
 **2026-08-25.** The previous entry said the next move had to come from a

@@ -9522,6 +9522,27 @@ private:
      * zero, the region stops at a boundary. This sees the store.
      * @{
      */
+    /**
+     * The last value seen in the leaf page-table entry that maps this
+     * processor's descriptor table, so a change can be reported with the
+     * exit it was noticed at. The store itself cannot be trapped -
+     * protecting a page table wedges the guest - so this catches it by
+     * its effect.
+     */
+    std::uint64_t gdt_pt_entry[max_cpus]{};
+
+    /**
+     * The page table and descriptor-table base the leaf address above
+     * was computed under, so it is recomputed when either moves. Held
+     * across a CR3 change it addresses unrelated memory.
+     * @{
+     */
+    std::uint64_t gdt_pt_cr3[max_cpus]{};
+    std::uint64_t gdt_pt_base[max_cpus]{};
+    /**
+     * @}
+     */
+
     bool gdt_pt_watch_armed[max_cpus]{};
     std::uint64_t gdt_pt_page[max_cpus]{};
     /**
