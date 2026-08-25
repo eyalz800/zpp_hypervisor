@@ -5370,6 +5370,27 @@ void hypervisor::inject_general_protection_fault(std::uint64_t error_code)
     this->vmcs.vm_entry_exception_error_code(error_code);
 }
 
+void hypervisor::inject_page_fault(std::uint64_t linear,
+                                   std::uint64_t error_code)
+{
+    constexpr std::uint64_t page_fault_vector = 14;
+
+    // CR2 first. VMX does not save or restore it - SDM 25.4 and 25.5 list
+    // the host and guest state areas and CR2 is in neither - so the value
+    // written here is what the guest's handler reads.
+    arch::x86_64::write_cr2(linear);
+
+    // A fault, so RIP stays on the instruction and it re-executes once
+    // the guest has made the page good. Callers must not advance RIP.
+    this->vmcs.vm_entry_interruption_information_field(
+        page_fault_vector |
+        arch::x86_64::vmx::vm_entry_interruption::hardware_exception |
+        arch::x86_64::vmx::vm_entry_interruption::deliver_error_code |
+        arch::x86_64::vmx::vm_entry_interruption::valid);
+
+    this->vmcs.vm_entry_exception_error_code(error_code);
+}
+
 void hypervisor::inject_invalid_opcode_exception()
 {
     constexpr std::uint64_t invalid_opcode_vector = 6;

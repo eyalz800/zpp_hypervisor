@@ -26,6 +26,22 @@ inline std::uint64_t __attribute__((naked)) cr2()
     )!!");
 }
 
+/**
+ * Sets CR2, the linear address a page fault reports. VMX neither saves
+ * nor restores CR2 across a transition - SDM 25.4 and 25.5 list the host
+ * and guest state areas, and CR2 is in neither - so the register a host
+ * writes here is the one the guest sees on entry. That is what makes
+ * injecting a page fault possible at all.
+ */
+inline void __attribute__((naked)) write_cr2(std::uint64_t)
+{
+    asm(R"!!(
+        .intel_syntax noprefix
+        mov cr2, rdi
+        ret
+    )!!");
+}
+
 inline std::uint64_t __attribute__((naked)) cr3()
 {
     asm(R"!!(

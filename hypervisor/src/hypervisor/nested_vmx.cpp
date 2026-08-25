@@ -1455,6 +1455,45 @@ bool hypervisor::on_guest_vmread(std::size_t cpu,
             static_cast<std::uint64_t>(encoding.value()),
             static_cast<std::uint64_t>(size),
             context.rip);
+
+        // **This is the branch that fires, and it is now measured
+        // rather than guessed.** The comment above used to say the fix
+        // differed by which of the two failures happened and so
+        // deliberately changed nothing. A three-processor boot answered
+        // it: the log ends with this line - never the decode one - on
+        // the second processor, writing `GUEST_RIP` (field 0x681e) to a
+        // kernel stack address, and four entries later the guest
+        // hypervisor executes `vmxoff` on every processor and Windows
+        // bugchecks HYPERVISOR_ERROR.
+        //
+        // So the operand decoded and the guest page was not writable
+        // through this VMM's walk. SDM 27.11.2 says faults from the
+        // memory operand are delivered as they would be by any other
+        // access, which means #PF - and `#UD` says instead that VMREAD
+        // does not exist, a lie about an instruction the guest
+        // hypervisor is in the middle of using. A guest told #PF pages
+        // the target in and re-executes; a guest told #UD has nowhere
+        // to go.
+        //
+        // The error code is built rather than assumed, since the two
+        // cases differ: SDM 4.7 bit 0 is set only when a translation
+        // existed and refused the access, and clear when there was
+        // none. Bit 1 is set because this is a write. Bit 2 is clear
+        // because VMREAD outside CPL 0 has already taken #GP long
+        // before here, so there is no user-mode case to encode.
+        constexpr std::uint64_t fault_present = 1ull << 0;
+        constexpr std::uint64_t fault_write = 1ull << 1;
+
+        auto error_code = fault_write;
+        if (guest_linear_to_physical(*linear)) {
+            error_code |= fault_present;
+        }
+
+        inject_page_fault(*linear, error_code);
+
+        // False still, so the caller keeps RIP on the instruction. It
+        // will not overwrite this injection: it re-injects only when
+        // the interruption-information field says nothing is pending.
         return false;
     }
 

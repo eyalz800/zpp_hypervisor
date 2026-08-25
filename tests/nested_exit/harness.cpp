@@ -378,6 +378,13 @@ void hypervisor::inject_invalid_opcode_exception()
 {
 }
 
+// The memory-form VMREAD path injects #PF when it cannot write the
+// operand. This harness does not exercise that path, but it links the
+// translation unit that contains it.
+void hypervisor::inject_page_fault(std::uint64_t, std::uint64_t)
+{
+}
+
 // The shadow-root recall lives in nested_ept.cpp, which this harness does
 // not compile - it has no guest memory to walk and no extended page
 // tables to compose against. `on_l2_ept_fault` notes each page it

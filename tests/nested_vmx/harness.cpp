@@ -53,6 +53,17 @@ struct observations
 {
     std::uint64_t gp_faults{};
     std::uint64_t ud_faults{};
+
+    /**
+     * The page faults the memory-form VMREAD path injects when it cannot
+     * write the operand, with the address and error code it built. Kept
+     * separately from `ud_faults` because the whole defect these
+     * describe was answering that case with the *wrong* fault, and a
+     * counter that merged them could not have caught it.
+     */
+    std::uint64_t pf_faults{};
+    std::uint64_t last_pf_address{};
+    std::uint64_t last_pf_error{};
     std::uint64_t ept_discards{};
     std::uint64_t ept_discards_for{};
     std::uint64_t last_discard_root{};
@@ -154,6 +165,14 @@ void hypervisor::store_enlightened_vmcs(std::size_t)
 void hypervisor::inject_invalid_opcode_exception()
 {
     g_observed.ud_faults = g_observed.ud_faults + 1;
+}
+
+void hypervisor::inject_page_fault(std::uint64_t linear,
+                                   std::uint64_t error_code)
+{
+    g_observed.pf_faults = g_observed.pf_faults + 1;
+    g_observed.last_pf_address = linear;
+    g_observed.last_pf_error = error_code;
 }
 
 std::expected<std::uint64_t, zpp::error>
@@ -1178,6 +1197,55 @@ static void test_memory_operands()
             &stored, page.data() + (operand_slot & 0xfff), sizeof(stored));
         check(stored == 0x1122334455667788ull,
               "VMREAD to memory stored the wrong value");
+    }
+
+    // A memory-form VMREAD whose operand page cannot be written must
+    // take #PF, not #UD.
+    //
+    // This is a regression test for a defect measured on a
+    // three-processor Windows boot: the second processor executed
+    // `VMREAD GUEST_RIP` to a kernel stack address this VMM could not
+    // write, was told the instruction did not exist, and four log
+    // entries later the guest hypervisor executed `vmxoff` on every
+    // processor and Windows bugchecked HYPERVISOR_ERROR. #UD is a lie
+    // about VMREAD; SDM 27.11.2 delivers memory-operand faults as any
+    // other access would, and a guest given #PF pages the target in and
+    // re-executes.
+    {
+        auto absent = 0xdead0000ull;
+        check(!g_pages.count(absent), "the test's absent page exists");
+
+        auto faulted = g_observed.pf_faults;
+        auto refused = g_observed.ud_faults;
+
+        g_page_present_only = true;
+
+        zpp::arch::x86_64::context regs{};
+        regs.rcx = fields::guest_rip;
+        auto r = run(basic_reason::vmread,
+                     regs,
+                     memory_operand_information(1 /*reg2 = rcx*/),
+                     absent);
+
+        g_page_present_only = false;
+
+        // The handler still returns false, so RIP stays on the
+        // instruction - `outcome::ud` names that return value, not the
+        // fault that was delivered.
+        check(outcome::ud == r.what,
+              "VMREAD to an unwritable operand did not leave RIP put");
+        check(g_observed.pf_faults == (faulted + 1),
+              "VMREAD to an unwritable operand injected no page fault");
+        check(g_observed.ud_faults == refused,
+              "VMREAD to an unwritable operand injected #UD as well");
+        check(g_observed.last_pf_address == absent,
+              "the injected page fault named the wrong address");
+
+        // Write, and not-present: there is no translation for this page,
+        // so SDM 4.7 bit 0 stays clear. Bit 2 is clear because VMREAD
+        // outside CPL 0 has already taken #GP.
+        check(g_observed.last_pf_error == 0x2,
+              "the injected page fault carried the wrong error code");
     }
 
     // VMWRITE from memory.

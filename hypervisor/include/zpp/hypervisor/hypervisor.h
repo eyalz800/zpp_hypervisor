@@ -2799,6 +2799,14 @@ private:
     void inject_invalid_opcode_exception();
 
     /**
+     * Injects a page fault for `linear`, with `error_code` in the form
+     * SDM 4.7 describes. Sets CR2, which VMX does not transition, so the
+     * guest's handler reads the address that faulted. A fault, so the
+     * caller must not advance RIP.
+     */
+    void inject_page_fault(std::uint64_t linear, std::uint64_t error_code);
+
+    /**
      * Record an exit nothing here knows how to handle, and stop this CPU.
      *
      * Does not return. Resuming from an unhandled exit is not a neutral
