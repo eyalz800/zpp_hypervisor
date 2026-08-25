@@ -43,6 +43,30 @@ GDB_PORT=${GDB_PORT:-1234}
 # it.
 EXTRA=${ZPP_QEMU_EXTRA:-}
 
+# `-no-reboot -no-shutdown` by default, because a guest that resets takes
+# its memory with it and every reading afterwards is of nothing.
+#
+# Measured cost of not having it: several three-processor runs rebooted
+# *mid-measurement*, which is visible as the boot processor's counters
+# going backwards (8,687 then 8,258 then 8,014 across one poll), and a
+# reading taken across a reset is a reading of two different machines.
+# With these, the machine stops at the first reset in `paused (shutdown)`
+# with memory intact, which is exactly the state a post-failure read
+# wants.
+#
+# The one trap, already paid for once: this turns a *routine* reboot into
+# a dead stop, and going from one processor to two is a hardware change
+# Windows reboots for. So a stop is not evidence of a crash - read
+# `KiBugCheckData` and the counters before calling it one. Set
+# ZPP_ALLOW_REBOOT=1 to opt out when a run genuinely needs to reboot
+# through that.
+if [ -z "${ZPP_ALLOW_REBOOT:-}" ]; then
+    case "$EXTRA" in
+        *-no-reboot*) ;;
+        *) EXTRA="-no-reboot -no-shutdown $EXTRA" ;;
+    esac
+fi
+
 # How many processors the guest gets, passed through to the launcher.
 #
 # **Empty means eight, not one.** The launcher's own default is the host's
