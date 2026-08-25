@@ -1,5 +1,46 @@
 # Known defects
 
+## The single-processor control, which confirms the VTL1 crash is multiprocessor-specific
+
+**2026-08-25.** Every claim above about VTL1 crashing rests on readings
+taken from a *failing* configuration. The control had never been run.
+
+One processor, same binary, same everything else:
+
+```
+  processes: 6
+    Idle, Registry, Secure System, smss.exe, System, ?
+  cpu 0: 24,023,878 exits, 1,914,120 second-level entries
+```
+
+**`Secure System` is the secure kernel's own process, and it is present.**
+So VTL1 is healthy on one processor. `smss.exe` is present too, so
+Windows reached user mode - the transition that never happens above one
+processor.
+
+Against the failing configuration, which holds **one** process, `System`,
+with no `Secure System` at all, and about 90,000 second-level entries
+rather than 1.9 million.
+
+The exit ring agrees from the other side: on one processor every
+second-level RIP in the ring is inside ntoskrnl's extent or the hypercall
+page - no VTL1 code at all in the recent window - whereas the failing
+application processor's exits were *entirely* VTL1 and never once
+ntoskrnl.
+
+So the chain is now closed at both ends:
+
+- one processor: VTL1 healthy, `Secure System` running, user mode reached;
+- two or three: the application processor enters VTL1, fail-fasts with
+  `SkeBugCheckStatus = 0xC0000409`, owns the bugcheck itself, NMIs the
+  boot processor, and `Secure System` never appears.
+
+**That is the strongest form of the finding**: not "the guest is slow" or
+"the application processors stop", but a secure-kernel crash that happens
+only when a second processor exists, on the processor being added, in a
+processor block the secure kernel built from what this VMM handed it.
+
+
 ## The crashing processor is the application processor itself
 
 **2026-08-25.** `SkiBugCheckOwner` reads `0xffffcb8071a67000`, which is a
