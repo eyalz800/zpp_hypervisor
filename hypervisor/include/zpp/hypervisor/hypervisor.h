@@ -7548,6 +7548,33 @@ private:
      */
     std::uint64_t cpuid_last_rip[max_cpus]{};
 
+    /**
+     * How often this VMM has applied a start-up, and emulated an INIT,
+     * to each processor.
+     *
+     * The guest hypervisor re-runs its **own** processor bring-up
+     * thousands of times on an application processor - traced through
+     * its binary to `hvix64+0x3a6690`, which sets CD, does WBINVD,
+     * reloads CR3, writes IA32_PAT and clears CD, the SDM's cache and
+     * PAT reconfiguration for a processor being brought up - and then
+     * VMCLEARs and abandons it.
+     *
+     * These two counters separate the only two readings that fit:
+     *
+     * - **Something keeps starting it.** Then one of these tracks the
+     *   8,230 bring-ups.
+     * - **Bring-up restarts itself.** Then both stay small, and the
+     *   fault is inside the sequence, whose writes to CR0, CR4, CR3 and
+     *   IA32_PAT are all things this VMM can intercept.
+     *
+     * The application processor's own exit census argues for the second
+     * - `cr-access` 3, `rdmsr` 61, `vmwrite` 100 against 8,378 CPUIDs -
+     * so a *small* value here is the informative outcome, not a null
+     * result.
+     */
+    std::uint64_t start_up_applied[max_cpus]{};
+    std::uint64_t init_emulated[max_cpus]{};
+
     void note_cpuid_leaf(std::size_t cpu, std::uint32_t leaf)
     {
         if (cpu >= max_cpus) {

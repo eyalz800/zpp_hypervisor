@@ -140,6 +140,15 @@ void hypervisor::apply_start_up(arch::x86_64::context & context,
 {
     auto & vmcs = this->vmcs;
 
+    // Counted per processor. See the declaration: the guest hypervisor
+    // is re-running its own processor bring-up thousands of times on an
+    // application processor, and this says whether it is because
+    // something here keeps starting it.
+    if (auto here = this->vmcs.vpid(); (0 != here) && (here <= max_cpus)) {
+        this->start_up_applied[here - 1] =
+            this->start_up_applied[here - 1] + 1;
+    }
+
     using segment_descriptor = arch::x86_64::segment_descriptor;
 
     // A second start-up IPI for a processor already started is ignored.
@@ -817,6 +826,13 @@ std::uint64_t hypervisor::local_apic_id()
 void hypervisor::emulate_init_signal(arch::x86_64::context & context)
 {
     auto & vmcs = this->vmcs;
+
+    // Counted per processor, beside `start_up_applied`. The pair
+    // distinguishes "something keeps sending this processor INIT" from
+    // "the guest hypervisor's bring-up restarts itself".
+    if (auto here = this->vmcs.vpid(); (0 != here) && (here <= max_cpus)) {
+        this->init_emulated[here - 1] = this->init_emulated[here - 1] + 1;
+    }
 
     // This handler must do as little as possible, and that is not a style
     // preference - it is the difference between working and not.
