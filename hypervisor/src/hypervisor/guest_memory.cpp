@@ -296,6 +296,24 @@ hypervisor::guest_linear_to_physical(std::uint64_t linear)
         }
 
         if (!entry.present()) {
+            // Which level refused, and what it read there. One error
+            // code covers all four levels, which makes it a
+            // single-field instrument aimed at four different
+            // failures - a not-present PML4 entry means the wrong CR3
+            // or an address in no address space, and a not-present
+            // leaf means an ordinary unmapped page. Those are opposite
+            // diagnoses and the code cannot tell them apart.
+            //
+            // Recorded rather than logged: this is on the walk, which
+            // runs constantly and refuses harmlessly all the time. The
+            // callers that care print it.
+            if (auto here = this_processor(); here < max_cpus) {
+                this->walk_refusal_level[here] = level;
+                this->walk_refusal_entry[here] = entry;
+                this->walk_refusal_table[here] = table;
+                this->walk_refusal_linear[here] = linear;
+            }
+
             return std::unexpected(
                 zpp::error{error::guest_address_not_mapped});
         }

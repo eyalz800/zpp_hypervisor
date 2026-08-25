@@ -49,6 +49,15 @@ constexpr std::uint64_t rflags_virtual_8086 = 1ull << 17;
 constexpr std::uint64_t cr4_vmxe = 1ull << 13;
 
 /**
+ * How many times a VMX instruction's memory operand access is retried
+ * before the fault is delivered. The refusal it exists for is a
+ * page-table entry caught mid-composition, so it clears within a few
+ * instructions or not at all - a small bound answers it, and an
+ * unbounded one would spin inside an exit handler.
+ */
+constexpr std::size_t operand_retries = 8;
+
+/**
  * IA32_FEATURE_CONTROL's lock bit and its permission for VMXON outside
  * SMX, which VMXON raises #GP without. SDM 33.3, VMXON: "#GP(0) ... if
  * ... (bit 0 (lock bit) of IA32_FEATURE_CONTROL MSR is clear) or (outside
@@ -1445,6 +1454,35 @@ bool hypervisor::on_guest_vmread(std::size_t cpu,
     auto written = write_guest_linear(
         *linear,
         std::span(reinterpret_cast<const std::byte *>(&value), size));
+
+    // **Retried, because the refusal is transient and permanent damage
+    // is what it otherwise causes.** Measured on a three-processor boot:
+    // the walk refuses at level 0 - the PML4 - reading entry `0x2`, a
+    // value with the write bit set and the present bit clear, which is
+    // what a page-table entry looks like while software is part-way
+    // through composing it. A second walk of the *same* table in the
+    // same handler then succeeds.
+    //
+    // A real processor would not see this at all: it resolves the
+    // operand through its own TLB, which holds the translation from
+    // before the edit. This VMM walks the tables in memory instead, so
+    // it sees an intermediate state hardware hides.
+    //
+    // Giving up leaves the guest hypervisor's VMCS **half updated** -
+    // SDM 30.3 has a failed memory operand mean the VMWRITE does not
+    // happen, so vmcs12 keeps its old field while its owner believes it
+    // stored a new one. That is what put a stale 64-bit `GUEST_RIP`
+    // beside a freshly cleared IA-32e-mode-guest control and failed
+    // every three-processor entry with reason 0x80000021.
+    for (std::size_t attempt{}; (!written) && (attempt < operand_retries);
+         ++attempt) {
+        this->operand_retry_count[cpu] =
+            this->operand_retry_count[cpu] + 1;
+        written = write_guest_linear(
+            *linear,
+            std::span(reinterpret_cast<const std::byte *>(&value), size));
+    }
+
     if (!written) {
         this->vmread_memory_form_failures[cpu] =
             this->vmread_memory_form_failures[cpu] + 1;
@@ -1460,6 +1498,13 @@ bool hypervisor::on_guest_vmread(std::size_t cpu,
             translated ? *translated : std::uint64_t{},
             static_cast<std::uint64_t>(written.error().code()),
             static_cast<std::uint64_t>(this->running_l2[cpu]));
+
+        log("cpu {} walk refused at level {} entry {} table {} linear {}",
+            cpu,
+            this->walk_refusal_level[cpu],
+            this->walk_refusal_entry[cpu],
+            this->walk_refusal_table[cpu],
+            this->walk_refusal_linear[cpu]);
 
         // **This is the branch that fires, and it is now measured
         // rather than guessed.** The comment above used to say the fix
@@ -1551,6 +1596,18 @@ bool hypervisor::on_guest_vmwrite(std::size_t cpu,
         auto read = read_guest_linear(
             *linear,
             std::span(reinterpret_cast<std::byte *>(&value), size));
+
+        // Retried for the reason the VMREAD path above spells out.
+        for (std::size_t attempt{};
+             (!read) && (attempt < operand_retries);
+             ++attempt) {
+            this->operand_retry_count[cpu] =
+                this->operand_retry_count[cpu] + 1;
+            read = read_guest_linear(
+                *linear,
+                std::span(reinterpret_cast<std::byte *>(&value), size));
+        }
+
         if (!read) {
             // Both halves, because one of them cannot tell you it is the
             // wrong half. `translated` says the page walk produced a
@@ -1563,15 +1620,22 @@ bool hypervisor::on_guest_vmwrite(std::size_t cpu,
             auto translated = guest_linear_to_physical(*linear);
 
             log("cpu {} vmwrite mem form: at {} rip {} phys {} err {} "
-                "cr3 {} -> {} l2 {}",
+                "cr3 {} l2 {}",
                 cpu,
                 *linear,
                 context.rip,
                 translated ? *translated : std::uint64_t{},
                 static_cast<std::uint64_t>(read.error().code()),
                 cr3_before,
-                this->vmcs.guest_cr3(),
                 static_cast<std::uint64_t>(this->running_l2[cpu]));
+
+            log("cpu {} walk refused at level {} entry {} table {} "
+                "linear {}",
+                cpu,
+                this->walk_refusal_level[cpu],
+                this->walk_refusal_entry[cpu],
+                this->walk_refusal_table[cpu],
+                this->walk_refusal_linear[cpu]);
 
             // The same defect as the memory-form VMREAD above, mirrored,
             // and found the same way: with that one fixed the boot got

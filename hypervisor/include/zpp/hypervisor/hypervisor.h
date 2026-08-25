@@ -7491,6 +7491,34 @@ private:
      * set" are different defects with the same symptom at the failure.
      * @{
      */
+    /**
+     * Where the guest page-table walk last refused, per processor: the
+     * level (0 is the PML4), the entry it read there, the table it read
+     * it from, and the linear address being walked.
+     *
+     * Four fields rather than one error code, because a not-present
+     * PML4 entry and a not-present leaf are opposite diagnoses - the
+     * first says the walk is in the wrong address space, the second says
+     * an ordinary page is absent - and `guest_address_not_mapped`
+     * cannot distinguish them.
+     * @{
+     */
+    std::uint64_t walk_refusal_level[max_cpus]{};
+    std::uint64_t walk_refusal_entry[max_cpus]{};
+    std::uint64_t walk_refusal_table[max_cpus]{};
+    std::uint64_t walk_refusal_linear[max_cpus]{};
+    /**
+     * @}
+     */
+
+    /**
+     * How many times a VMX instruction's memory operand access had to be
+     * retried on this processor. Non-zero means the transient the retry
+     * exists for is real and is being caught; zero on a boot that still
+     * fails means it is not.
+     */
+    std::uint64_t operand_retry_count[max_cpus]{};
+
     bool ia32e_set_seen[max_cpus]{};
     bool ia32e_clear_seen[max_cpus]{};
     /**

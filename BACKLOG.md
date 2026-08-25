@@ -1,5 +1,77 @@
 # Known defects
 
+## The operand transient is real and fixed; the half-update theory it suggested is wrong
+
+**2026-08-25.** Splitting the walk's single error code by level named the
+refusal exactly:
+
+```
+  cpu 0x1 walk refused at level 0x0 entry 0x2 table 0x114f5f000
+          linear 0xffffe70000205da0
+```
+
+**Level 0 is the PML4**, and the entry read there is `0x2` - write bit
+set, present bit clear, no address. That is not a page-table entry, it is
+one caught **part-way through being composed**. A second walk of the same
+table in the same handler succeeds and returns a physical address.
+
+A real processor never sees this: it resolves a VMX instruction's memory
+operand through its own TLB, which holds the translation from before the
+edit. This VMM walks the tables in memory and sees an intermediate state
+hardware hides. That is a general hazard for every software walk here,
+not a property of this one address.
+
+**Fixed** by retrying the operand access up to 8 times before delivering
+the fault. Measured over one three-processor boot:
+
+- memory-form VMREAD/VMWRITE failures: **1 per boot -> 0**
+- `operand_retry_count` per processor: **[0, 1, 0]**
+
+One retry, on the second processor, and it succeeded. The bound is small
+on purpose: an entry caught mid-composition clears within a few
+instructions or not at all, and an unbounded retry would spin inside an
+exit handler.
+
+### And that disproves the theory it was found under
+
+The entry above argued the operand failure was the **cause** of the
+refused entry: a `VMWRITE` whose operand cannot be read does not happen,
+so vmcs12 would keep a stale `GUEST_RIP` beside a freshly cleared
+IA-32e-mode-guest control. It was a good theory and it is **wrong**. With
+the operand access now succeeding, the same boot still ends with:
+
+```
+  vmcs12 asked: entry_ctls 0x11ff cs 0x209b efer 0x0 cr0 0x80050033
+                rip 0xfffff8058aca6fd0
+```
+
+Bit 9 clear, RIP still 64-bit. So the pair is not a half update.
+
+`0x11ff` is worth reading precisely against the capability MSR this VMM
+answers: `TRUE_ENTRY_CTLS 0x0001d3ff000011fb` makes the allowed-zero set
+`0x11fb`, so **`0x11ff` is exactly the required bits plus load-debug-
+controls and nothing else**, and bit 9 is permitted by the allowed-one
+half. Hyper-V could set it and did not.
+
+### The lead that remains
+
+Everything now points at the second-level guest's **INIT/SIPI** handling.
+`save_l2_state` copies vmcs02's `guest_rip` into vmcs12 on every exit, so
+vmcs12 accumulates the running guest's 64-bit RIP. When Hyper-V then
+restarts that virtual processor it writes real-mode entry controls and
+expects the architectural reset to have put the guest at the SIPI vector.
+If this VMM's INIT emulation does not reset the *second-level* guest's
+state in vmcs12 the way it resets a first-level one, vmcs12 keeps the
+long-mode RIP beside the real-mode controls - which is precisely the
+observed pair, and is application-processor-only because only a processor
+being started takes INIT/SIPI at all.
+
+CLAUDE.md already records one bug of exactly this family, found the same
+way: "our INIT emulation never reset the guest's general purpose
+registers, which both references agree it must." The question is whether
+the nested path has the same gap.
+
+
 ## The chain closes: a failed VMWRITE operand read leaves vmcs12 half-updated
 
 **2026-08-25.** Instrumented `save_l2_state` to report, once per
