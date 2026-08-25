@@ -1,5 +1,57 @@
 # Known defects
 
+## Hyper-V's own binary can be read, and located without a boot
+
+**2026-08-25.** `hvix64.exe` comes off the guest volume the same way
+`ntoskrnl.exe` and `securekernel.exe` did - `ntfscat`, guest stopped -
+and it is 2,057,704 bytes on this install. **Microsoft does not publish
+its symbols**: `guest-symbols.sh` resolves the right URL and the symbol
+server answers 404. So the export table is all there is, and it is
+enough to be useful (`VmxBootInfo` and friends appear in a disassembly).
+
+**The load base does not need a running guest.** The bytes at a captured
+instruction pointer identify the site uniquely:
+
+```sh
+  # the sequence around the CPUID this VMM recorded on an application processor
+  8b c5 33 c9 0f a2 89 87 f8 06 00 00
+  #  -> exactly ONE match in the whole image, at file 0x6106b = RVA 0x23606f
+```
+
+The observed pointer was `0xfffff83146e3606f`, whose low bits are
+`0x23606f`, so the base is `0xfffff83146c00000` - derived offline, with
+no boot and no scan. **This is strictly better than the physical-memory
+scan** used for the secure kernel, and it should be the first thing tried
+next time: a captured instruction pointer plus the bytes at it locate any
+image uniquely.
+
+### What the routine is
+
+`.pdata` puts it at RVA `0x235ee4`-`0x23609a`, 438 bytes, with exactly
+**two** direct callers (`0x248111`, `0x248477`). Its head:
+
+```
+  movq %gs:0x0, %rdi                  ; per-processor block
+  cmpl $0x2, <global>                 ; a mode check
+  movl %gs:0x8, %eax                  ; this processor's index
+  cmpl <VmxBootInfo+0x279f4>, %eax
+  je   skip                           ; equal -> skip the whole body
+  addl %ebp, <global>                 ; a counter, +1 per call
+  ...  edx = index >> 6 ; r8d = index & 0x3f    ; 64-bit bitmap addressing
+```
+
+It compares this processor's index against a stored one and **skips when
+they match**, so the body is **application-processor only**, and it
+indexes a bitmap by processor. That fits being called 8,230 times on an
+application processor and never on the boot processor, and it is why the
+CPUID at its tail - a `/GS` epilogue, not a spin - dominates that
+processor's exits.
+
+**Not yet known** is what the bitmap is or why the routine repeats. But
+the routine is now identified, bounded, and readable, and its two callers
+are the next thing to disassemble.
+
+
 ## CORRECTION: the dropped start-up IPIs are probably the normal second SIPI
 
 **The entry below claims the chain "joins up end to end" from a dropped
