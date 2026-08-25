@@ -1,5 +1,52 @@
 # Known defects
 
+## The crashing processor is the application processor itself
+
+**2026-08-25.** `SkiBugCheckOwner` reads `0xffffcb8071a67000`, which is a
+pointer to a processor block rather than an index. The secure kernel's
+processor array - the one `SkeFreezeExecution` walks, at securekernel
+RVA `0x143ac0` - resolves it:
+
+```
+  [0] 0xfffff80149fbff80   <- inside securekernel's own image: the boot processor
+  [1] 0xffffcb8071a67000   <- heap allocated, and == SkiBugCheckOwner
+  [2..7] zero
+```
+
+**The bugcheck owner is entry 1: the application processor.** It is not a
+bystander frozen by someone else's crash - it fail-fasts on *itself*,
+then NMIs the boot processor to freeze it for the dump, which is the
+`wrmsr 0x40000071 = 0x400` already measured.
+
+Reproduced on a second boot: `SkeBugCheckStatus = 0xC0000409`, barrier
+`0`, owner = array entry 1.
+
+That is the sharpest statement of the failure this investigation has
+reached, and it is the one that matters for fixing it: **the defect is in
+the state this VMM gives an application processor, not in anything the
+boot processor does to it and not in any interaction between them.** It
+is consistent with two processors failing exactly like three, since one
+application processor is all it takes.
+
+Note also that entry 0 lives inside the image and entry 1 is heap
+allocated - the boot processor's block is static and an application
+processor's is created during bring-up. So the block the secure kernel
+crashes on is one it built for this processor from what it was handed.
+
+### What is still not known
+
+`0xC0000409` is `STATUS_STACK_BUFFER_OVERRUN`, which modern Windows
+raises for **every** `__fastfail`, with the specific `FAST_FAIL_*` code
+in `ECX` at the point of the `int 0x29`. That register is not recoverable
+after the fact from any global read so far, so *which* integrity check
+fired is still open - a stack cookie mismatch and a list-entry corruption
+report produce the identical status.
+
+The next step remains the static one, and it is now better aimed: compare
+what `start_up.cpp` hands an adopted processor against what the secure
+kernel validates before it builds that block.
+
+
 ## Settled: VTL1 fail-fasts with 0xC0000409 the moment a second processor exists
 
 **2026-08-25.** Two reads out of the secure kernel, on a wedged
