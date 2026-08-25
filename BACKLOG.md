@@ -1,5 +1,48 @@
 # Known defects
 
+## The mapping goes at an APIC-write exit, two exits before the fault
+
+**2026-08-25.** The transition log, now that the bracket is per
+descriptor-table value:
+
+```
+  cpu 1 gdt mapped    exit 0x00  reason 0x0a CPUID          rip 0x7f39f0c6
+  cpu 1 gdt UNMAPPED  exit 0xc6  reason 0x03 INIT           rip 0x7fb6b030
+  cpu 1 gdt mapped    exit 0xc8  reason 0x1c CR-access      rip 0xfffff8306cfa66cf
+  cpu 1 gdt UNMAPPED  exit 0xce  reason 0x30 EPT-violation  rip 0xfffff8306ce5a4a6
+```
+
+The fatal transition is at **exit 206, an extended-page-table violation**
+- one of the local-APIC page writes this VMM intercepts, at a RIP in the
+same helper as the others (`...a467`, `...a47f`, `...a4ac`).
+
+So the descriptor table's mapping disappears **while the processor is
+writing its own local APIC**, and this VMM sees it gone at the next exit
+it takes.
+
+### Two readings, and they are not equally likely
+
+- **The mapping was already gone**, and exit 206 is simply the next
+  sample. This VMM only walks at exits, so the removal happened somewhere
+  in the instructions between exit 205 and exit 206 - which is a handful
+  of instructions inside an APIC-write helper.
+- **This VMM's handling of that violation removes it.** The watch
+  protects the page, takes the violation, and either emulates the write
+  or opens the page and steps - and the second path changes protections
+  partition-wide.
+
+The first is the plain reading and the second is the one worth ruling
+out, because it is the only one this VMM could fix.
+
+**What separates them, and it is cheap:** walk the descriptor table at
+the *top* of the extended-page-table handler and again at the bottom. If
+it is reachable on entry and not on exit, this VMM did it. If it is
+already gone on entry, it did not.
+
+That is a two-line addition to a handler that already runs on exactly
+these exits, and it is the last question this thread has been reduced to.
+
+
 ## Corrected instrument: one clean transition, mapped to unmapped, three exits before the fault
 
 **2026-08-25.** The reachability bracket had a flaw that invalidated what
